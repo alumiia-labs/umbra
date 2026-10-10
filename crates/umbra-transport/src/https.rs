@@ -1,8 +1,8 @@
 //! The smallest HTTPS of the push path of Part 8: a `POST` client and the
 //! reader of one request. The OHTTP relay posts to the NDR, and the NDR
-//! posts to a UnifiedPush endpoint. Neither needs more than one request
-//! with a body of a plain length on one connection, thus no HTTP library
-//! enters register R3 (Part 14 §14.2.3).
+//! posts to the FCM endpoints of its provider. Neither needs more than one
+//! request with a body of a plain length on one connection. Thus no HTTP
+//! library enters register R3 (Part 14 §14.2.3).
 
 use std::{sync::Arc, time::Duration};
 
@@ -111,7 +111,9 @@ async fn post_now(
     let mut inbound = Vec::with_capacity(1_024);
     let mut chunk = vec![0u8; 16_384];
     loop {
-        // A server that closes with no TLS close is at its end too.
+        // A server that closes with no TLS close is at its end too. The
+        // framing of the answer then proves that the body is whole. The
+        // code below refuses a body that the close alone ends.
         let n = stream.read(&mut chunk).await.unwrap_or(0);
         if n == 0 {
             break;
@@ -146,6 +148,12 @@ async fn connect_any(url: &Url) -> Result<TcpStream, NativeError> {
     Err(last.map_or_else(|| Error::Refused.into(), NativeError::from))
 }
 
+/// Reads the status and the body of an answer. The body must prove its
+/// own end, by a `Content-Length` that equals what came or by the last
+/// chunk. The read above takes a cut connection as the end of the stream.
+/// Thus a body that the close alone delimits can be a body cut short, and
+/// the call refuses it. A `204` and a `304` hold no body and need no
+/// framing.
 fn read_response(inbound: &[u8]) -> Result<(u16, Vec<u8>), NativeError> {
     let head_end = inbound
         .windows(4)
@@ -171,13 +179,17 @@ fn read_response(inbound: &[u8]) -> Result<(u16, Vec<u8>), NativeError> {
             }
             return Ok((status, dechunk(body)?));
         }
-        if name.eq_ignore_ascii_case("Content-Length")
-            && value.trim().parse::<usize>().ok() != Some(body.len())
-        {
-            return Err(Error::Refused.into());
+        if name.eq_ignore_ascii_case("Content-Length") {
+            if value.trim().parse::<usize>().ok() != Some(body.len()) {
+                return Err(Error::Refused.into());
+            }
+            return Ok((status, body.to_vec()));
         }
     }
-    Ok((status, body.to_vec()))
+    if matches!(status, 204 | 304) && body.is_empty() {
+        return Ok((status, Vec::new()));
+    }
+    Err(Error::Refused.into())
 }
 
 /// The body of a chunked answer: each chunk after its size in hex, up to
@@ -295,7 +307,10 @@ pub async fn respond<S: AsyncWrite + Unpin>(
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
+        403 => "Forbidden",
         404 => "Not Found",
+        429 => "Too Many Requests",
+        503 => "Service Unavailable",
         _ => "Bad Gateway",
     };
     let head = format!(
@@ -371,5 +386,21 @@ mod tests {
         assert!(read_response(other).is_err());
         let short = b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\nok";
         assert!(read_response(short).is_err());
+    }
+
+    #[test]
+    fn a_body_that_the_close_alone_ends_is_refused() {
+        // A cut connection gives the same bytes as a whole answer here.
+        let open = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"a\":1}";
+        assert!(read_response(open).is_err());
+        let empty = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n";
+        assert!(read_response(empty).is_err());
+        // A status with no body needs no framing.
+        let none = b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n";
+        assert_eq!(read_response(none).unwrap(), (204, Vec::new()));
+        let filled = b"HTTP/1.1 204 No Content\r\n\r\nok";
+        assert!(read_response(filled).is_err());
+        let zero = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+        assert_eq!(read_response(zero).unwrap(), (200, Vec::new()));
     }
 }

@@ -108,6 +108,11 @@ pub const AUTHOR_USER: u8 = 0x00;
 /// The author of a synced record: the other party of the conversation.
 pub const AUTHOR_PEER: u8 = 0x01;
 
+/// Item 0 is no row of the mutable-state table, which counts from 1. A
+/// `MutableItem` of it stands in the place of a counted record whose body
+/// the source holds no more (`DEV-069`). A device takes its counter and
+/// applies nothing.
+pub const ITEM_VOID: u8 = 0;
 /// The item of the contact name in the mutable-state table (§7.5.3).
 pub const ITEM_CONTACT_NAME: u8 = 3;
 /// The item of the delivery state and the read state of one message

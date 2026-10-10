@@ -7,12 +7,14 @@ import android.os.Handler
 import android.os.Looper
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.OptIn
 import androidx.camera.camera2.Camera2Config
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.CameraXConfig
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ExperimentalCameraProviderConfiguration
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
@@ -143,7 +145,7 @@ fun Scanner(onText: (String) -> Unit) {
     ) {
         if (isAllowed) {
             CameraFrames(onText)
-            // The dashed square of the mockup, above the picture of the camera.
+            // The dashed square shows where the code goes.
             Box(
                 Modifier.fillMaxSize().padding(48.dp).drawBehind {
                     drawRoundRect(
@@ -236,6 +238,7 @@ private var isCameraConfigured = false
  * alone, thus the start of CameraX looks for no other one. A device with no
  * front camera otherwise waits for several tries of that search.
  */
+@OptIn(ExperimentalCameraProviderConfiguration::class)
 private fun backCameraProvider(context: Context): ListenableFuture<ProcessCameraProvider> {
     if (!isCameraConfigured) {
         isCameraConfigured = true

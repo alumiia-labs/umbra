@@ -529,12 +529,15 @@ fn two_apps_meet_and_talk_through_the_exported_surface() {
     assert_eq!(bob.safety_number(bob_conversation.clone()).unwrap(), number);
     assert!(!bob.summaries().unwrap()[0].verified);
 
-    // Alice starts a ceremony, and the two devices show one code. The code
-    // alone verifies nothing (`IDN-148`). Bob confirms, and his store holds
-    // the state. Alice did not confirm, and her store holds none.
+    // Alice starts a ceremony and Bob starts his, and the two devices show
+    // one code: a client answers no start before its user acts
+    // (`IDN-170`). The code alone verifies nothing (`IDN-148`). Bob
+    // confirms, and his store holds the state. Alice did not confirm, and
+    // her store holds none.
     alice
         .start_verification(alice_conversation.clone())
         .unwrap();
+    bob.start_verification(bob_conversation.clone()).unwrap();
     let code = |event| match event {
         FfiEvent::VerificationCode { code, .. } => Some(code),
         _ => None,
@@ -1320,6 +1323,17 @@ fn two_apps_take_their_network_from_a_signed_manifest() {
         Some(CA.into()),
     );
     assert_eq!(refused.err(), Some(FfiError::Unverified));
+    // REL-147: a carrier that serves a part of the signed set as the set.
+    // Each entry that is left still proves under the root. The key set is
+    // the right one, thus the error is not the one that asks for a key
+    // chain.
+    let mut part = RelayManifest::parse(&manifest).unwrap();
+    part.entries.remove(0);
+    let part = part.encode().unwrap();
+    assert_eq!(
+        network_of(&alice, &part, 0).err(),
+        Some(FfiError::Malformed)
+    );
 
     let verified = network_of(&alice, &manifest, 0).unwrap();
     assert_eq!(verified.epoch, epoch);
@@ -3907,7 +3921,11 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
     alice.set_profile_name("Alice".into()).unwrap();
     alice.set_welcome("Say where we met.".into()).unwrap();
     // DIS-176: the picture is a JPEG, and other bytes are refused.
-    let picture = vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3, 0xFF, 0xD9];
+    // The frame header names one component of 16 by 16 pixels.
+    let picture = vec![
+        0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x10, 0x00, 0x10, 0x01, 0x01, 0x11, 0x00,
+        0xFF, 0xD9,
+    ];
     assert_eq!(
         alice.set_profile_picture(b"GIF89a".to_vec()).err(),
         Some(FfiError::Malformed)
@@ -3925,7 +3943,10 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
         (name.as_str(), welcome.as_str()),
         ("Alice", "Say where we met.")
     );
-    let carol_picture = vec![0xFF, 0xD8, 0xFF, 0xE0, 9, 9, 0xFF, 0xD9];
+    let carol_picture = vec![
+        0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x20, 0x00, 0x20, 0x01, 0x01, 0x11, 0x00,
+        0xFF, 0xD9,
+    ];
     carol.set_profile_picture(carol_picture.clone()).unwrap();
     request_until_listed(&carol, &handle);
     wait_for_requests(&alice, 1);

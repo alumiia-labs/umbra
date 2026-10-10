@@ -4,8 +4,8 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
-import android.security.keystore.StrongBoxUnavailableException
 import java.security.KeyStore
+import java.security.ProviderException
 import javax.crypto.KeyGenerator
 import javax.crypto.Mac
 import javax.crypto.SecretKey
@@ -26,6 +26,8 @@ class KeystoreElement(private val context: Context) : SecureElementCallback {
             mac.init(key())
             mac.doFinal(input)
         } catch (fault: Exception) {
+            // IMP-125: a debug build names the fault of the keystore.
+            if (BuildConfig.DEBUG) android.util.Log.w("umbra-keystore", "the keyed function failed", fault)
             // The Rust side reads an empty result as a keystore failure.
             ByteArray(0)
         } finally {
@@ -41,8 +43,11 @@ class KeystoreElement(private val context: Context) : SecureElementCallback {
         if (hasStrongBox) {
             try {
                 return generate(inStrongBox = true)
-            } catch (unavailable: StrongBoxUnavailableException) {
-                // The TEE is the fallback that the specification names.
+            } catch (unavailable: ProviderException) {
+                // The TEE is the fallback that the specification names. A
+                // StrongBox that holds no HMAC key throws its own
+                // `StrongBoxUnavailableException` on one device and the
+                // plain `ProviderException` above it on another.
             }
         }
         return generate(inStrongBox = false)

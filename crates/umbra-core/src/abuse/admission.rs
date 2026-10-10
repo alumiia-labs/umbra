@@ -1,5 +1,7 @@
-//! The admission gate of Part 13 §13.2 at a relay and at an addressee:
-//! what an `Admission` trailer must carry, and how each kind is checked.
+//! The admission gate of Part 13 §13.2 at a relay. The gate states what an
+//! `Admission` trailer must carry, and how the relay checks each kind. The
+//! addressee of a hello checks its admission where it holds its replay set
+//! (`ABU-084`).
 
 use umbra_queue::Reject;
 use umbra_wire::admission::{Admission, AdmissionKind};
@@ -8,7 +10,7 @@ use alloc::{collections::BTreeMap, vec::Vec};
 
 use super::{
     epoch_number,
-    pow::{self, PowSolution, Verifier},
+    pow::{PowSolution, Verifier},
     spend::SpendSet,
     token::{self, FirstPartyIssuer, Token, TokenChallenge, TYPE_CROSS_RELAY, TYPE_FIRST_PARTY},
     POW_CHUNK_ALLOWANCE, POW_CHUNK_FLOOR,
@@ -65,7 +67,9 @@ pub struct RelayGate {
     pub pow: Verifier,
     /// The spend set of §13.7.
     pub spent: SpendSet,
-    /// The admissions of the period that runs, the backlog of `ABU-060`.
+    /// The accepted admissions of the period that runs, the backlog of
+    /// `ABU-060`. A refused admission does not count, thus a flood of bad
+    /// trailers does not raise the effort of the next challenge.
     admissions: u32,
     /// The registrations that each accepted chunk solution may still admit,
     /// by its seed and its nonce, with its Equi-X bytes (`ABU-107`).
@@ -96,8 +100,8 @@ impl RelayGate {
         core::mem::take(&mut self.fresh)
     }
 
-    /// The admissions since the last call, which the next challenge takes
-    /// as its backlog (`ABU-060`, `ABU-092`).
+    /// The accepted admissions since the last call, which the next
+    /// challenge takes as its backlog (`ABU-060`, `ABU-092`).
     pub fn take_backlog(&mut self) -> u32 {
         core::mem::take(&mut self.admissions)
     }
@@ -127,8 +131,7 @@ impl RelayGate {
         accepts: &Accepts<'_>,
         now: u64,
     ) -> Result<Admitted, Reject> {
-        self.admissions = self.admissions.saturating_add(1);
-        match admission.kind {
+        let admitted = match admission.kind {
             AdmissionKind::None => {
                 if self.pow.effort() == 0 {
                     Ok(Admitted::Free)
@@ -156,7 +159,11 @@ impl RelayGate {
                 self.pow.accept(&solution).map_err(|_| Reject::Admission)?;
                 Ok(Admitted::Pow)
             }
-        }
+        }?;
+        // ABU-060: the backlog counts what the relay accepted. A refusal
+        // costs its sender nothing, thus it must not raise the effort.
+        self.admissions = self.admissions.saturating_add(1);
+        Ok(admitted)
     }
 }
 
@@ -199,8 +206,8 @@ impl RelayGate {
                 if solution.effort < POW_CHUNK_FLOOR {
                     return Err(Reject::Admission);
                 }
-                self.admissions = self.admissions.saturating_add(1);
                 self.pow.accept(&solution).map_err(|_| Reject::Admission)?;
+                self.admissions = self.admissions.saturating_add(1);
                 self.chunk_uses.insert(
                     key,
                     (solution.solution, POW_CHUNK_ALLOWANCE.saturating_sub(1)),
@@ -214,50 +221,6 @@ impl RelayGate {
 /// The holder of an upload quota, from what admitted the upload.
 fn holder(kind: &[u8], value: &[u8]) -> [u8; 32] {
     umbra_crypto::hash::sha3_256(&[umbra_crypto::labels::QUOTA_HOLDER, kind, value])
-}
-
-/// Admits a hello at the addressee (`ABU-012`, `ABU-078` to `ABU-085`):
-/// a cross-relay token under a listed issuer key of the current or the
-/// previous epoch, spent once at this Profile, or a solution to the
-/// derived challenge. `issuer_key_of` gives the listed key of an epoch.
-pub fn admit_hello(
-    admission: &Admission<'_>,
-    entry_pk: &[u8],
-    now: u64,
-    spent: &mut SpendSet,
-    issuer_key_of: &dyn Fn(u32) -> Option<umbra_crypto::rsabssa::PublicKey2048>,
-) -> Result<Admitted, Error> {
-    let epoch = epoch_number(now);
-    match admission.kind {
-        AdmissionKind::None => Err(Error::Unverified),
-        AdmissionKind::Token => {
-            let token = Token::parse(admission.body)?;
-            if token.token_type != TYPE_CROSS_RELAY {
-                return Err(Error::Unverified);
-            }
-            for candidate in [epoch, epoch.wrapping_sub(1)] {
-                let expected = TokenChallenge {
-                    token_type: TYPE_CROSS_RELAY,
-                    epoch: candidate,
-                    redemption_context: [0; 32],
-                }
-                .digest();
-                if expected != token.challenge_digest {
-                    continue;
-                }
-                let key = issuer_key_of(candidate).ok_or(Error::Unverified)?;
-                token::verify_cross_relay(&key, &token)?;
-                spent.spend(epoch, candidate, token.nonce)?;
-                return Ok(Admitted::Token { epoch: candidate });
-            }
-            Err(Error::Unverified)
-        }
-        AdmissionKind::Pow => {
-            let solution = PowSolution::parse(admission.body)?;
-            pow::verify_hello(entry_pk, epoch, &solution)?;
-            Ok(Admitted::Pow)
-        }
-    }
 }
 
 #[cfg(test)]
@@ -380,30 +343,56 @@ mod tests {
     }
 
     #[test]
-    fn a_hello_needs_a_cross_relay_token_or_a_solution() {
-        let mut spent = SpendSet::default();
-        let entry_pk = [5u8; 1_216];
-        let now = 40 * EPOCH_SECONDS + 1;
-        let no_key = |_: u32| None;
-        assert!(admit_hello(&Admission::NONE, &entry_pk, now, &mut spent, &no_key).is_err());
-        let solution = pow::solve_hello(&entry_pk, 40, &mut Rng(1)).unwrap();
+    fn the_backlog_counts_the_accepted_admissions_alone() {
+        let issuer =
+            FirstPartyIssuer::new(ServerKey::derive(&Secret::new([1; 32]), b"fp").unwrap());
+        let accepts = Accepts::FirstParty(&issuer);
+        let mut gate = RelayGate::new([9; 32]);
+        let now = 10 * EPOCH_SECONDS + 5;
+        // The relay refuses a token that does not parse and a solution that
+        // does not parse. It refuses a chunk command with no credential too.
+        // None of them counts.
+        let bad_token = Admission {
+            kind: AdmissionKind::Token,
+            body: &[0; 7],
+        };
+        let bad_pow = Admission {
+            kind: AdmissionKind::Pow,
+            body: &[0; 69],
+        };
+        for _ in 0..200 {
+            assert!(gate.admit(&bad_token, &accepts, now).is_err());
+            assert!(gate.admit(&bad_pow, &accepts, now).is_err());
+            assert!(gate.admit_chunk(&bad_pow, &accepts, now).is_err());
+            assert!(gate.admit_chunk(&Admission::NONE, &accepts, now).is_err());
+        }
+        assert_eq!(gate.take_backlog(), 0);
+        // A free command and a token count once each, and the repeat of the
+        // token does not.
+        gate.admit(&Admission::NONE, &accepts, now).unwrap();
+        let body = first_party_token(&issuer, 10, 1);
+        let token = Admission {
+            kind: AdmissionKind::Token,
+            body: &body,
+        };
+        gate.admit(&token, &accepts, now).unwrap();
+        assert!(gate.admit(&token, &accepts, now).is_err());
+        assert_eq!(gate.take_backlog(), 2);
+        // Under load the relay refuses a command of kind `0x00`, and that
+        // command does not count. One chunk solution counts at its first use
+        // alone.
+        let challenge = gate.pow.issue(64, now, &mut Rng(4)).unwrap();
+        assert!(gate.admit(&Admission::NONE, &accepts, now).is_err());
+        let solution =
+            PowSolution::solve(&[9; 32], &challenge.seed, POW_CHUNK_FLOOR, &mut Rng(5)).unwrap();
         let mut body = [0u8; 69];
         solution.encode(&mut body).unwrap();
-        let pow_adm = Admission {
+        let pow = Admission {
             kind: AdmissionKind::Pow,
             body: &body,
         };
-        assert_eq!(
-            admit_hello(&pow_adm, &entry_pk, now, &mut spent, &no_key).unwrap(),
-            Admitted::Pow
-        );
-        let issuer =
-            FirstPartyIssuer::new(ServerKey::derive(&Secret::new([1; 32]), b"fp").unwrap());
-        let fp = first_party_token(&issuer, 40, 2);
-        let fp_adm = Admission {
-            kind: AdmissionKind::Token,
-            body: &fp,
-        };
-        assert!(admit_hello(&fp_adm, &entry_pk, now, &mut spent, &no_key).is_err());
+        gate.admit_chunk(&pow, &accepts, now).unwrap();
+        gate.admit_chunk(&pow, &accepts, now).unwrap();
+        assert_eq!(gate.take_backlog(), 1);
     }
 }

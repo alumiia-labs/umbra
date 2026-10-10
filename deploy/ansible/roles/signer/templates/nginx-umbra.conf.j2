@@ -1,5 +1,8 @@
 # Written by Ansible (deploy/ansible/roles/signer). The HTTPS carrier of
-# Part 3 §3.10: the manifest alone, with no log of who fetched it.
+# Part 3 §3.10: the manifest alone, with no log of who fetched it. Before
+# the first rotation of the key set no key chain exists, and each request
+# for it gets 404 (Part 10 REL-199). The error log would then hold the
+# address of each app and each relay that asked, thus it is off too.
 server {
     listen 443 ssl;
     listen [::]:443 ssl;
@@ -10,6 +13,8 @@ server {
     ssl_protocols TLSv1.3;
 
     access_log off;
+    error_log /dev/null crit;
+    log_not_found off;
     root /var/www/umbra;
 
     location = /.well-known/umbra/manifest {

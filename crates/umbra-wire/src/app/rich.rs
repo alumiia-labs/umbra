@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use umbra_crypto::{hash::sha3_256, labels};
 
 use crate::{
-    app::{strictly_increasing, AppKind, Channel},
+    app::{check_body, strictly_increasing, AppKind, Channel},
     codec::{Reader, Writer},
     Error,
 };
@@ -63,7 +63,9 @@ impl<'a> RichRecord<'a> {
         if self.thread_root != zero && self.reply_target == zero {
             return Err(Error::Malformed);
         }
-        Ok(())
+        // WIR-259 and WIR-362: the inner body holds the rules of its kind,
+        // as the body of a message of that kind does.
+        check_body(self.inner_kind, self.inner_body, channel)
     }
 
     /// Writes the record.
@@ -237,5 +239,41 @@ mod tests {
             mention_id(&[1; 32], &[2; 32]),
             mention_id(&[3; 32], &[2; 32])
         );
+    }
+
+    #[test]
+    fn an_inner_body_holds_the_rules_of_its_kind() {
+        let mut out = [0u8; 400];
+        // WIR-259: an inner text that is not UTF-8, from a sender and from
+        // a peer.
+        let bad_text = RichRecord {
+            inner_body: &[0xFF],
+            ..plain()
+        };
+        assert!(bad_text.encode(Channel::Group, &mut out).is_err());
+        let n = plain().encode(Channel::Group, &mut out).unwrap();
+        out[n - 1] = 0xFF;
+        assert!(RichRecord::parse(&out[..n], Channel::Group).is_err());
+        assert!(RichRecord::parse(&out[..n], Channel::Pairwise).is_err());
+        // WIR-362: an inner verification commit of a wrong length.
+        let short_commit = RichRecord {
+            inner_kind: AppKind::VerifyCommit,
+            inner_body: &[0; 63],
+            ..plain()
+        };
+        assert!(short_commit.encode(Channel::Pairwise, &mut out).is_err());
+        // A queue address is a record of a pairwise channel alone.
+        let address = RichRecord {
+            inner_kind: AppKind::QueueAddress,
+            inner_body: &[0; crate::address::LEN],
+            ..plain()
+        };
+        assert!(address.encode(Channel::Group, &mut out).is_err());
+        // WIR-163: a wrapper carries no control record.
+        let control = RichRecord {
+            inner_kind: AppKind::GroupControl,
+            ..plain()
+        };
+        assert!(control.encode(Channel::Group, &mut out).is_err());
     }
 }

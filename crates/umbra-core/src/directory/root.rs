@@ -174,6 +174,12 @@ impl<'a> DirectoryKeySet<'a> {
         if next.keyset_epoch <= self.keyset_epoch {
             return Err(Error::Stale);
         }
+        // REL-037: `keyset_epoch` counts the rotations, thus the successor
+        // is one above. A set that names a far epoch would stand above each
+        // honest set after it.
+        if next.keyset_epoch != self.keyset_epoch.saturating_add(1) {
+            return Err(Error::Unverified);
+        }
         let mut r = Reader::new(signed.get(used..).ok_or(Error::Malformed)?);
         let sigs = read_sigs(&mut r)?;
         r.finish()?;
@@ -649,5 +655,24 @@ pub(crate) mod tests {
         assert_eq!(consensus.keyset().keyset_epoch, 2);
         // The same rotation again is stale (REL-037).
         assert_eq!(consensus.rotate_keys(&signed[..total]), Err(Error::Stale));
+    }
+
+    #[test]
+    fn a_key_set_that_skips_an_epoch_is_no_successor() {
+        // REL-037: five valid signatures of the set before it, and an epoch
+        // that is not the next one.
+        let keys = authorities(10);
+        let (pks, _) = keyset_of(&keys, 1);
+        let set = keyset(&pks, 1);
+        let next_keys = authorities(50);
+        let (next_pks, _) = keyset_of(&next_keys, 2);
+        for (epoch, taken) in [(2u64, true), (3, false), (u64::MAX, false)] {
+            let next = keyset(&next_pks, epoch);
+            let mut canonical = alloc::vec![0u8; next.len()];
+            next.encode(&mut canonical).unwrap();
+            let signed =
+                crate::directory::keychain::sign_keyset(&keys, &canonical, &mut Rng(1)).unwrap();
+            assert_eq!(set.rotate(&signed).is_ok(), taken, "epoch {epoch}");
+        }
     }
 }

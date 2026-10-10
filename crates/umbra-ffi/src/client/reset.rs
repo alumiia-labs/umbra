@@ -27,8 +27,12 @@ use crate::{ConversationId, Delivery, Error, Event, MsgRef};
 /// with no reset holds none, and its storage seed is its identity root.
 pub(super) const IDENTITY_ROOT_KEY: &[u8] = b"identity-root";
 /// The key-change notices that wait for their delay: the conversation, the
-/// time at which the notice goes, and the record.
+/// time at which the notice goes, and the record. A row stays until a relay
+/// took its notice (`IDN-063`). The row of a notice on the send path holds
+/// [`IN_FLIGHT`], and a notice that failed takes a new delay.
 pub(super) const RESET_NOTICES: TableId = TableId(0x3E);
+/// The time of a notice that the send path holds.
+const IN_FLIGHT: u64 = u64::MAX;
 
 /// What a reset started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,10 +120,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let due = now.saturating_add(sweep_delay(rng.next_u64()));
             notices.push((conversation, due, app));
         }
+        // DEV-306, DIS-093: the directory holds the key of the root before
+        // the reset for each entry that this device publishes. The device
+        // keeps that root for those entries alone, in the commit of the new
+        // root. Thus it still takes a hello, renews, rotates, and retires
+        // each one, and it strands no handle and no link.
+        let earlier_roots = self.roots_for_published()?;
         let open = self.open_mut()?;
         let identity_row = open
             .store
             .row_id(TableId::LOCAL_IDENTITY, IDENTITY_ROOT_KEY);
+        let earlier_row = open
+            .store
+            .row_id(TableId::LOCAL_IDENTITY, super::discovery::EARLIER_ROOTS_KEY);
         let mut batch = open.store.begin();
         batch.put(
             TableId::LOCAL_IDENTITY,
@@ -128,6 +141,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             seed.as_ref(),
             rng,
         )?;
+        if let Some(earlier_roots) = &earlier_roots {
+            batch.put(
+                TableId::LOCAL_IDENTITY,
+                earlier_row,
+                None,
+                earlier_roots,
+                rng,
+            )?;
+        }
         for (conversation, due, app) in &notices {
             let value =
                 Zeroizing::new([conversation.0.as_slice(), &due.to_be_bytes(), app].concat());
@@ -151,9 +173,29 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         })
     }
 
+    /// Whether the record `app` of a conversation waits for the send path.
+    fn is_waiting_record(&self, conversation: ConversationId, app: &[u8]) -> Result<bool, Error> {
+        let Ok(parsed) = AppMessage::parse(app, umbra_wire::app::Channel::Pairwise) else {
+            return Ok(false);
+        };
+        let open = self.open_ref()?;
+        let reference = msg_ref(&open.device_set_key, &parsed.msg_id);
+        let natural = [conversation.0.as_slice(), &reference].concat();
+        let row = open.store.row_id(TableId::MESSAGE, &natural);
+        Ok(open.store.get(OUTBOX, &row)?.is_some())
+    }
+
+    /// The key-change notices that no relay took yet, for the view of the
+    /// identity: the reset is complete for a contact when its notice left.
+    pub fn notices_waiting(&self) -> Result<usize, Error> {
+        Ok(self.open_ref()?.store.list(RESET_NOTICES, None)?.len())
+    }
+
     /// Hands each notice whose delay passed at `now` to the send path. The
     /// record goes on the pairwise session that exists (`IDN-055`), and no
-    /// view shows it. The result counts the notices that went.
+    /// view shows it. The row stays until a relay took the notice, thus a
+    /// notice that reached no relay goes again. The result counts the
+    /// notices that went.
     pub fn send_due_notices<R: CryptoRng + ?Sized>(
         &mut self,
         now: u64,
@@ -166,13 +208,25 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .get(16..24)
                 .and_then(|b| b.try_into().ok())
                 .ok_or(Error::Integrity)?;
-            if u64::from_be_bytes(at) <= now {
-                let app = value.get(24..).ok_or(Error::Integrity)?.to_vec();
-                due.push((ConversationId(row), app));
+            let app = value.get(24..).ok_or(Error::Integrity)?;
+            // A notice that the send path lost, as a row that left the
+            // store under it, is due again.
+            let is_lost = u64::from_be_bytes(at) == IN_FLIGHT
+                && !self.is_waiting_record(ConversationId(row), app)?;
+            if u64::from_be_bytes(at) <= now || is_lost {
+                due.push((ConversationId(row), app.to_vec()));
             }
         }
         for (conversation, app) in &due {
-            let parsed = AppMessage::parse(app, umbra_wire::app::Channel::Pairwise)?;
+            // A notice that does not read is one drop, and it stops no
+            // other notice.
+            let Ok(parsed) = AppMessage::parse(app, umbra_wire::app::Channel::Pairwise) else {
+                let open = self.open_mut()?;
+                let mut batch = open.store.begin();
+                batch.delete(RESET_NOTICES, conversation.0);
+                batch.commit()?;
+                continue;
+            };
             let open = self.open_mut()?;
             let reference = msg_ref(&open.device_set_key, &parsed.msg_id);
             let natural = [conversation.0.as_slice(), &reference].concat();
@@ -187,7 +241,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let mut batch = open.store.begin();
             batch.put(TableId::MESSAGE, row, Some(conversation.0), &stored, rng)?;
             batch.put(OUTBOX, row, None, &outbox_row(), rng)?;
-            batch.delete(RESET_NOTICES, conversation.0);
+            let held =
+                Zeroizing::new([conversation.0.as_slice(), &IN_FLIGHT.to_be_bytes(), app].concat());
+            batch.put(
+                RESET_NOTICES,
+                conversation.0,
+                Some(conversation.0),
+                &held,
+                rng,
+            )?;
             batch.commit()?;
             self.outgoing.push_back(Outgoing {
                 message: MsgRef(row),

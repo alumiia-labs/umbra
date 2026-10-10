@@ -7,7 +7,7 @@
 //!
 //! [`relay`] holds what a relay keeps for a pairwise queue, a group queue,
 //! and a transport session. [`client`] holds the acknowledgment cursor, the
-//! ARQ, the receipt hold, and the rotation schedule of a client.
+//! ARQ, and the receipt hold of a client.
 #![forbid(unsafe_code)]
 #![no_std]
 

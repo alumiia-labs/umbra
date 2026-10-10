@@ -199,8 +199,13 @@ pub fn parse_request(bytes: &[u8]) -> Result<Option<(Request, usize)>, crate::Er
 }
 
 /// Parses a response at the client against the key it sent. Returns the
-/// bytes it took. A response that negotiated an extension, or that does
-/// not name the subprotocol, is refused.
+/// bytes it took. The response must be the answer of `NET-281`. That answer
+/// holds the status `101` as one token, `Upgrade: websocket`, and the
+/// accept token of the key. Its `Connection` header holds the token
+/// `Upgrade`. RFC 6455 §4.2.2 gives that header a list of tokens, and a
+/// proxy in front of a relay can send `keep-alive, Upgrade`. The call
+/// refuses a response that negotiated an extension, or that does not name
+/// the subprotocol.
 pub fn parse_response(bytes: &[u8], key: &[u8; 16]) -> Result<Option<usize>, crate::Error> {
     let Some((head, used)) = split_head(bytes) else {
         return Ok(None);
@@ -208,11 +213,17 @@ pub fn parse_response(bytes: &[u8], key: &[u8; 16]) -> Result<Option<usize>, cra
     let text = core::str::from_utf8(head).map_err(|_| crate::Error::Malformed)?;
     let mut lines = text.split("\r\n");
     let start = lines.next().ok_or(crate::Error::Malformed)?;
-    if !start.starts_with("HTTP/1.1 101") {
+    let mut status = start.splitn(3, ' ');
+    if (status.next(), status.next()) != (Some("HTTP/1.1"), Some("101")) {
         return Err(crate::Error::Refused);
     }
     let lines: Vec<&str> = lines.collect();
-    if header(&lines, "Sec-WebSocket-Accept") != Some(accept_value(&base64(key)).as_str())
+    let exact = |name: &str, token: &str| {
+        header(&lines, name).is_some_and(|value| value.eq_ignore_ascii_case(token))
+    };
+    if !exact("Upgrade", "websocket")
+        || !token_present(header(&lines, "Connection"), "Upgrade")
+        || header(&lines, "Sec-WebSocket-Accept") != Some(accept_value(&base64(key)).as_str())
         || !token_present(header(&lines, "Sec-WebSocket-Protocol"), SUBPROTOCOL)
         || header(&lines, "Sec-WebSocket-Extensions").is_some()
     {
@@ -270,6 +281,53 @@ mod tests {
                 0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e, 0x25, 0x71, 0x78, 0x50,
                 0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d
             ]
+        );
+    }
+
+    #[test]
+    fn a_response_that_is_not_the_exact_answer_is_refused() {
+        let key = [7u8; 16];
+        let resp = response(&base64(&key));
+        assert_eq!(
+            parse_response(resp.as_bytes(), &key).unwrap(),
+            Some(resp.len())
+        );
+        // NET-281: the status is one token, the `Upgrade` header is exact,
+        // and the `Connection` header holds its token.
+        for (from, to) in [
+            ("HTTP/1.1 101 ", "HTTP/1.1 1015 "),
+            ("HTTP/1.1 101 ", "HTTP/1.1 101"),
+            ("HTTP/1.1 101 ", "HTTP/1.0 101 "),
+            ("Upgrade: websocket\r\n", ""),
+            ("Upgrade: websocket\r\n", "Upgrade: h2c\r\n"),
+            ("Upgrade: websocket\r\n", "Upgrade: websocket, h2c\r\n"),
+            ("Connection: Upgrade\r\n", ""),
+            ("Connection: Upgrade\r\n", "Connection: close\r\n"),
+            (
+                "Connection: Upgrade\r\n",
+                "Connection: keep-alive, Upgraded\r\n",
+            ),
+        ] {
+            let loose = resp.replacen(from, to, 1);
+            assert_ne!(loose, resp);
+            assert_eq!(
+                parse_response(loose.as_bytes(), &key),
+                Err(crate::Error::Refused),
+                "{to}"
+            );
+        }
+        // The token of the `Connection` header can stand in a list, as a
+        // proxy in front of a relay sends it.
+        let listed = resp.replace("Connection: Upgrade", "Connection: keep-alive, upgrade");
+        assert_eq!(
+            parse_response(listed.as_bytes(), &key).unwrap(),
+            Some(listed.len())
+        );
+        // The reason phrase is free text, and a relay may send none.
+        let bare = resp.replace("101 Switching Protocols", "101");
+        assert_eq!(
+            parse_response(bare.as_bytes(), &key).unwrap(),
+            Some(bare.len())
         );
     }
 }

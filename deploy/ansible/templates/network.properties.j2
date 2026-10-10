@@ -10,9 +10,14 @@
 {% set carriers = ns.entries + groups['signer'] %}
 carriers={% for host in carriers %}{{ host }}.{{ umbra_domain }},{{ hostvars[host]['ansible_host'] }}{{ ';' if not loop.last else '' }}{% endfor %}
 
-{% set route = ns.entries[0] %}
+{# NTF-002: the OHTTP relay sees the address of the app, and the gateway
+   sees what the app sends. The two sit on two servers, thus one who breaks
+   into one server links no address to a push registration. The same holds
+   for the directory. roles/common fails the run with no such server. #}
+{% set ndr_route = (ns.entries | difference(groups['ndr']))[0] %}
+{% set directory_route = (ns.entries | difference(groups['directory']))[0] %}
 # NTF-127 and DIS-163: the app reaches the two gateways through the OHTTP
-# relay of an entry relay.
-ndr_relay=https://{{ route }}.{{ umbra_domain }}/ohttp,{{ hostvars[route]['ansible_host'] }}
-directory_relay=https://{{ route }}.{{ umbra_domain }}/directory,{{ hostvars[route]['ansible_host'] }}
-invitation_host=invite.{{ umbra_domain }}
+# relay of an entry relay on another server than the gateway (NTF-002).
+ndr_relay=https://{{ ndr_route }}.{{ umbra_domain }}/ohttp,{{ hostvars[ndr_route]['ansible_host'] }}
+directory_relay=https://{{ directory_route }}.{{ umbra_domain }}/directory,{{ hostvars[directory_route]['ansible_host'] }}
+invitation_host={{ umbra_invitation_host | default(umbra_domain) }}

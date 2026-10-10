@@ -22,7 +22,7 @@ use umbra_wire::codec::{Reader, Writer};
 use super::{
     entry::DirectoryEntry,
     head::AcceptedHead,
-    logtree::{epoch_leaf, prove_consistency, prove_newest, verify_newest, LogFrontier},
+    logtree::{epoch_leaf, verify_newest, LogFrontier, LogNodes},
     prefix::{PrefixProof, PrefixTree},
 };
 use crate::{directory::tree::Step, Error};
@@ -461,8 +461,14 @@ pub struct LogOperator {
     stored: BTreeMap<(Vec<u8>, u32), Stored>,
     staged: BTreeMap<Vec<u8>, Stored>,
     epochs: Vec<([u8; 32], [u8; 32])>,
-    log_leaves: Vec<[u8; 32]>,
+    /// The leaves of the log tree and the root of each full subtree, for
+    /// the consistency proof of a `Head` request.
+    log_nodes: LogNodes,
     log_frontier: LogFrontier,
+    /// The inclusion proof of the newest log leaf, made one time at the
+    /// close of its epoch. A lookup needs no admission, thus it must not
+    /// cost a pass over each leaf of the log.
+    newest_path: Vec<Step>,
     used_nonces: BTreeSet<[u8; 32]>,
 }
 
@@ -476,8 +482,9 @@ impl LogOperator {
             stored: BTreeMap::new(),
             staged: BTreeMap::new(),
             epochs: Vec::new(),
-            log_leaves: Vec::new(),
+            log_nodes: LogNodes::default(),
             log_frontier: LogFrontier::default(),
+            newest_path: Vec::new(),
             used_nonces: BTreeSet::new(),
         }
     }
@@ -554,11 +561,11 @@ impl LogOperator {
         let prefix_root = self.tree.seal(&nonce);
         self.epochs.push((nonce, prefix_root));
         let leaf_hash = epoch_leaf(&nonce, &prefix_root);
-        self.log_leaves.push(leaf_hash);
-        self.log_frontier.push(leaf_hash);
+        self.log_nodes.push(leaf_hash);
+        self.newest_path = self.log_frontier.push_proving(leaf_hash);
         let log_root = self.log_frontier.root().ok_or(Error::NoPath)?;
         Ok(EpochUpdate {
-            tree_size: self.log_leaves.len() as u64,
+            tree_size: self.log_nodes.len() as u64,
             nonce,
             added,
             log_root,
@@ -583,10 +590,10 @@ impl LogOperator {
             .and_then(|version| self.stored.get(&(search_key.to_vec(), version)))
             .map(|stored| (stored.opening, stored.entry.clone()));
         Ok(LookupProof {
-            tree_size: self.log_leaves.len() as u64,
+            tree_size: self.log_nodes.len() as u64,
             nonce,
             prefix_root,
-            log_path: prove_newest(&self.log_leaves).ok_or(Error::NoPath)?,
+            log_path: self.newest_path.clone(),
             newest,
             steps,
             opened,
@@ -604,10 +611,10 @@ impl LogOperator {
         let vrf_proof = self.vrf.prove(&vrf_input(search_key, version))?;
         let index = index_of(&vrf::proof_to_hash(&vrf_proof)?);
         Ok(VersionProof {
-            tree_size: self.log_leaves.len() as u64,
+            tree_size: self.log_nodes.len() as u64,
             nonce,
             prefix_root,
-            log_path: prove_newest(&self.log_leaves).ok_or(Error::NoPath)?,
+            log_path: self.newest_path.clone(),
             version,
             step: LadderStep {
                 vrf_proof,
@@ -621,7 +628,7 @@ impl LogOperator {
     /// The consistency proof from the log of `first` epochs to the newest
     /// log, for a client or an auditor that holds the older head.
     pub fn consistency(&self, first: u64) -> Option<Vec<[u8; 32]>> {
-        prove_consistency(&self.log_leaves, usize::try_from(first).ok()?)
+        self.log_nodes.consistency(usize::try_from(first).ok()?)
     }
 }
 

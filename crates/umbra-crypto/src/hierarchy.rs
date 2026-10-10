@@ -38,12 +38,13 @@ impl RootIdentity {
     fn hybrid(&self, info: &[&[u8]]) -> KeyPair {
         let mut t = Secret::<96>::zeroed();
         self.expand(info, t.expose_mut());
-        let b = t.expose();
-        let mut x = [0u8; 32];
-        let mut dz = [0u8; 64];
-        x.copy_from_slice(&b[..32]);
-        dz.copy_from_slice(&b[32..]);
-        KeyPair::from_seeds(Secret::new(x), Secret::new(dz))
+        // Each seed goes straight into a buffer that wipes itself.
+        let (x_part, dz_part) = t.expose().split_at(32);
+        let mut x = Secret::<32>::zeroed();
+        let mut dz = Secret::<64>::zeroed();
+        x.expose_mut().copy_from_slice(x_part);
+        dz.expose_mut().copy_from_slice(dz_part);
+        KeyPair::from_seeds(x, dz)
     }
 
     /// `K_rng_harden`, the RFC 8937 hardening secret.

@@ -41,16 +41,16 @@ import java.security.SecureRandom
  * moves. Off drains when the user opens the app. The mode is a setting of
  * this device.
  */
-enum class NotifyMode(val label: String, private val words: String?) {
-    // NTF-009: the trade of the default mode, in one honest line.
-    Instant("Instant", null),
-    Private("Private", "A message arrives on a fixed clock of about 30 minutes. Google learns nothing about arrivals."),
-    Off("Off", "A message arrives when you open UMBRA."),
+enum class NotifyMode(val label: String, private val words: Int) {
+    // NTF-009: the trade of each mode, in one honest line.
+    Instant("Instant", R.string.umbra_ui_ntf_009),
+    Private("Private", R.string.umbra_ui_ntf_009_private),
+    Off("Off", R.string.umbra_ui_ntf_009_off),
     ;
 
     /** The trade of the mode in one line. */
     val trade: String
-        get() = words ?: UiText.get(R.string.umbra_ui_ntf_009)
+        get() = UiText.get(words)
 }
 
 object Modes {
@@ -87,6 +87,8 @@ object Modes {
     /** Puts the carriers of the mode in place: the token, the poll, the clock. */
     fun apply(context: Context) {
         val app = context.applicationContext
+        // The carrier and the run with no view follow the mode.
+        Core.modeIs(app, mode(app))
         when (mode(app)) {
             NotifyMode.Instant -> {
                 cancelClock(app)
@@ -97,6 +99,7 @@ object Modes {
             NotifyMode.Private -> {
                 // NTF-039: no token, thus no push of high priority.
                 Core.clearPushToken()
+                Push.closed(app)
                 // NTF-137: no push, thus no wake table.
                 WakeStore.delete(app)
                 Work.getInstance(app).cancelUniqueWork(Poll.NAME)
@@ -105,6 +108,7 @@ object Modes {
             }
             NotifyMode.Off -> {
                 Core.clearPushToken()
+                Push.closed(app)
                 WakeStore.delete(app)
                 Work.getInstance(app).cancelUniqueWork(Poll.NAME)
                 cancelClock(app)
@@ -120,6 +124,14 @@ object Modes {
     fun drawPhase(context: Context) {
         val phase = (SecureRandom().nextDouble() * PRIVATE_PERIOD_MS).toLong()
         preferences(context).edit().putLong(PHASE, phase).apply()
+    }
+
+    /** NTF-053: a new ingress relay pair draws a new phase for Private mode. */
+    fun ingressChanged(context: Context) {
+        val app = context.applicationContext
+        if (mode(app) != NotifyMode.Private) return
+        drawPhase(app)
+        scheduleClock(app)
     }
 
     private fun clockIntent(context: Context): PendingIntent = PendingIntent.getBroadcast(

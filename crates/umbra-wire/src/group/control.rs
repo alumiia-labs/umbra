@@ -1,10 +1,9 @@
 //! The group control record of Part 6 §6.6.3 and its nine objects.
 //!
-//! Four objects, the plain epoch, the granting epoch, the moderation epoch,
-//! and the presence record, have their fields in Part 11 §11.9 and no byte
-//! layout in any part. The layouts below follow the signature preimages of
-//! Part 11, field for field, and the specification amendment that records
-//! them names this module.
+//! Four objects have their fields in Part 11 §11.9 and their byte layout in
+//! §6.6.3 (`WIR-489` to `WIR-492`). They are the plain epoch, the granting
+//! epoch, the moderation epoch, and the presence record. The layouts follow
+//! the signature preimages of Part 11, field for field.
 
 use alloc::{boxed::Box, vec::Vec};
 
@@ -19,8 +18,8 @@ use crate::{
     Error,
 };
 
-/// `GROUP_REPLICAS`.
-pub const REPLICAS: usize = 2;
+/// `GROUP_REPLICAS`, as a count. `record::REPLICAS` holds the one value.
+pub const REPLICAS: usize = super::record::REPLICAS as usize;
 /// `MOD_ACTION_MAX`.
 pub const MOD_ACTION_MAX: usize = 20;
 /// The length of a `JoinRecord`.

@@ -18,14 +18,14 @@ use tokio::{
     sync::mpsc::{self, UnboundedReceiver},
     time::timeout,
 };
-use umbra_core::session::node::{ClientNode, ContactId};
+use umbra_core::session::node::{ClientNode, ContactId, StateChange};
 use umbra_crypto::{
     handshake::nk::RelayStatic,
     hierarchy::RootIdentity,
     secret::Secret,
     x25519::{PublicKey as XPublic, StaticSecret},
 };
-use umbra_ffi::runtime::{run_client, Command, NoStore, Update};
+use umbra_ffi::runtime::{run_client, Command, Persist, Update};
 use umbra_relay::{
     node::{Config, RelayNode},
     server::{run_relay, tls_acceptor, Carried},
@@ -33,6 +33,7 @@ use umbra_relay::{
 };
 use umbra_transport::{native, Dial};
 use umbra_wire::app::{AppKind, AppMessage, Channel};
+use zeroize::Zeroizing;
 
 /// The mean of the pacing clock in this test. The value of a deployment is
 /// one second, which would make each flight of the test wait that long.
@@ -71,16 +72,30 @@ fn localhost(port: u16) -> Dial {
     }
 }
 
-fn text(tag: u8, words: &str) -> Vec<u8> {
+fn text(tag: u8, words: &str) -> Zeroizing<Vec<u8>> {
     let message = AppMessage {
         kind: AppKind::Text,
         msg_id: [tag; 16],
         sent_at: 0,
         body: words.as_bytes(),
     };
-    let mut out = vec![0u8; message.len()];
+    let mut out = Zeroizing::new(vec![0u8; message.len()]);
     message.encode(&mut out).unwrap();
     out
+}
+
+/// The store of a test: it takes each batch, and it gives each record of a
+/// batch to the test. The update of a record carries no plaintext, thus the
+/// store is the one place that holds it.
+struct Kept(mpsc::UnboundedSender<(ContactId, Vec<u8>)>);
+
+impl Persist for Kept {
+    fn commit(&mut self, _: Vec<StateChange>, received: &[(ContactId, Vec<u8>)]) -> bool {
+        for record in received {
+            let _ = self.0.send(record.clone());
+        }
+        true
+    }
 }
 
 /// Waits for the first update that `pick` takes, and drops each other one.
@@ -112,12 +127,20 @@ async fn wait_for_contact(updates: &mut UnboundedReceiver<Update>) -> ContactId 
     .await
 }
 
-async fn wait_for_message(updates: &mut UnboundedReceiver<Update>) -> (ContactId, Vec<u8>) {
-    wait_for(updates, |update| match update {
-        Update::Message { contact, app } => Some((contact, app)),
+/// Waits for the update of one record, and takes the record from the store:
+/// the commit of a record comes before its update (`IMP-132`).
+async fn wait_for_message(
+    updates: &mut UnboundedReceiver<Update>,
+    kept: &mut UnboundedReceiver<(ContactId, Vec<u8>)>,
+) -> (ContactId, Vec<u8>) {
+    let from = wait_for(updates, |update| match update {
+        Update::Message { contact } => Some(contact),
         _ => None,
     })
-    .await
+    .await;
+    let (contact, app) = kept.try_recv().expect("the store took no record");
+    assert_eq!(contact, from);
+    (contact, app)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -168,18 +191,19 @@ async fn two_clients_meet_and_talk_over_real_sockets() {
         let node = ClientNode::new(path, RootIdentity::new(Secret::new([0x40 + index; 32])));
         let (commands, runtime_commands) = mpsc::unbounded_channel();
         let (runtime_updates, updates) = mpsc::unbounded_channel();
+        let (keeps, kept) = mpsc::unbounded_channel();
         tokio::spawn(run_client(
             node,
             localhost(ports[0]),
             client_tls.clone(),
             runtime_commands,
             runtime_updates,
-            Box::new(NoStore),
+            Box::new(Kept(keeps)),
         ));
-        clients.push((commands, updates));
+        clients.push((commands, updates, kept));
     }
-    let (bob, mut bob_updates) = clients.pop().unwrap();
-    let (alice, mut alice_updates) = clients.pop().unwrap();
+    let (bob, mut bob_updates, mut bob_kept) = clients.pop().unwrap();
+    let (alice, mut alice_updates, mut alice_kept) = clients.pop().unwrap();
 
     // The commands go before the circuits are ready, and the runtime holds
     // them.
@@ -200,7 +224,7 @@ async fn two_clients_meet_and_talk_over_real_sockets() {
         tag: 71,
     };
     bob.send(send).unwrap();
-    let (from, app) = wait_for_message(&mut alice_updates).await;
+    let (from, app) = wait_for_message(&mut alice_updates, &mut alice_kept).await;
     assert_eq!(from, alice_contact);
     let parsed = AppMessage::parse(&app, Channel::Pairwise).unwrap();
     assert_eq!(parsed.body, b"hello alice");
@@ -209,6 +233,38 @@ async fn two_clients_meet_and_talk_over_real_sockets() {
     })
     .await;
 
+    // A record whose plaintext is no `AppMessage`, as a kind of a later
+    // build, ends no run of its reader (`WIR-023`, `IMP-132`). The relay
+    // takes it, the store decides what shows, and the next record arrives.
+    let mut unknown = text(4, "of a later build");
+    unknown[1] = 0xEE;
+    assert!(AppMessage::parse(&unknown, Channel::Pairwise).is_err());
+    let send = Command::Send {
+        contact: bob_contact,
+        app: unknown,
+        tag: 74,
+    };
+    bob.send(send).unwrap();
+    wait_for(&mut bob_updates, |update| {
+        (update == Update::Sent(74)).then_some(())
+    })
+    .await;
+    let send = Command::Send {
+        contact: bob_contact,
+        app: text(5, "after it"),
+        tag: 75,
+    };
+    bob.send(send).unwrap();
+    let app = loop {
+        let (from, app) = wait_for_message(&mut alice_updates, &mut alice_kept).await;
+        assert_eq!(from, alice_contact);
+        if AppMessage::parse(&app, Channel::Pairwise).is_ok() {
+            break app;
+        }
+    };
+    let parsed = AppMessage::parse(&app, Channel::Pairwise).unwrap();
+    assert_eq!(parsed.body, b"after it");
+
     // And back.
     let send = Command::Send {
         contact: alice_contact,
@@ -216,7 +272,7 @@ async fn two_clients_meet_and_talk_over_real_sockets() {
         tag: 72,
     };
     alice.send(send).unwrap();
-    let (from, app) = wait_for_message(&mut bob_updates).await;
+    let (from, app) = wait_for_message(&mut bob_updates, &mut bob_kept).await;
     assert_eq!(from, bob_contact);
     let parsed = AppMessage::parse(&app, Channel::Pairwise).unwrap();
     assert_eq!(parsed.body, b"hello bob");

@@ -168,6 +168,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         self.files.downloads.retain(|job| job.message != message);
         let reactions = self.reaction_rows(&message, conversation)?;
         let votes = self.vote_rows(&message, conversation)?;
+        // ATT-161: a moderator deletion sends no `CDEL`, thus the copy of
+        // the chunk credentials that waits for one leaves with the file.
+        let erase = self.erase_rows(&message)?;
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         batch.put(
@@ -177,6 +180,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             &placeholder,
             rng,
         )?;
+        for row in erase {
+            batch.delete(super::files::ERASE_DUE, row);
+        }
         for row in reactions {
             batch.delete(REACTION, row);
         }

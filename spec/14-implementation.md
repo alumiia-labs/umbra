@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 14: Implementation Requirements and Assurance
 
 **Status:** Draft
-**Version:** 0.11.0-draft
-**Date:** 2026-10-02
+**Version:** 0.12.0
+**Date:** 2026-10-09
 
 ---
 
@@ -15,7 +15,7 @@ umbra/
 │   ├── umbra-wire/       fixed-layout codecs, padding, buckets       → umbra-crypto
 │   ├── umbra-onion/      cell construction, per-hop UIV+, replay     → umbra-wire
 │   ├── umbra-queue/      queue commands, subscriptions, ARQ          → umbra-wire
-│   ├── umbra-transport/  TLS/QUIC, session layer, pluggable wire     → umbra-wire
+│   ├── umbra-transport/  TLS (QUIC deferred), session layer, wire    → umbra-wire
 │   ├── umbra-core/       orchestration, state machine, storage       → all above
 │   ├── umbra-ffi/        UniFFI surface, coarse-grained only         → umbra-core
 │   ├── umbra-web/        wasm-bindgen surface, browser socket, store → umbra-core
@@ -29,13 +29,9 @@ umbra/
 The dependency direction is strictly downward. A cycle is a build failure.
 
 Two crates of the layout do not exist in the reference implementation today.
-`umbra-web` waits for the web client, which is on hold, and `umbra-simd` waits
+`umbra-web` waits for the web client, which is deferred (Part 1 §1.1), and `umbra-simd` waits
 for a SIMD path, which no crate needs yet. Thus each crate of the workspace
 forbids `unsafe` today, and the exception below has no crate to apply to.
-
-> *Cause.* An earlier draft held an `umbra-nse` crate for the notification
-> extension of a platform that this revision defers, and §14.6.3 records what
-> an iOS revision revisits.
 
 ## 14.2 Dependency policy
 
@@ -85,7 +81,7 @@ of §14.2.4 writes.
 
 Part 5 §5.1 registers nine auxiliary primitives. The table below gives the
 likely pure-Rust crate for each one. **Each count in the last column is an
-estimate. No party has measured these numbers.** A count is the number of
+estimate.** `DEPENDENCIES.md` holds the measured counts. A count is the number of
 crates that the row adds above the R1 graph. A crate that two rows share counts
 one time.
 
@@ -200,7 +196,7 @@ its removal.
 
 | Candidate | Saving (estimate) | The cost of the removal |
 | --- | --- | --- |
-| **AUX-1** blind RSA-2048 | 14–18 crates | This is the largest saving, and it is the most expensive one. Part 13 §13.3.1 gives a third-party relay offline verification with the public key of the nonprofit alone. Without AUX-1, that relay verifies the first-party token of §13.3.2. That token is privately verifiable, thus the relay needs a shared secret with the issuer. A self-hosted operator then has to trust the issuer, and the self-hosting position of Part 13 fails |
+| **AUX-1** blind RSA-2048 | 14–18 crates | This is the largest saving, and it is the most expensive one. Part 13 §13.3.1 gives a third-party relay offline verification with the public key of the project alone. Without AUX-1, that relay verifies the first-party token of §13.3.2. That token is privately verifiable, thus the relay needs a shared secret with the issuer. A self-hosted operator then has to trust the issuer, and the self-hosting position of Part 13 fails |
 | **AUX-8** Equi-X | 4–6 crates | Part 13 §13.8 loses the surge valve at a relay under queue pressure. Argon2id (AUX-4) holds the puzzle in place of Equi-X. But Argon2id gives no asymmetry against an ASIC and against a GPU. It also costs more RAM on the slowest supported phone |
 | **AUX-4** Argon2id | 3–5 crates | §14.6.4 loses the memory-hard step of the at-rest construction. The secure-element entanglement stays, thus a brute force attack still runs on the seized device. But the cost for each try falls from about 3 s to the cost of one secure-element operation. Of the three primitive removals with a real saving, this one costs the most protection |
 | **AUX-3** ECVRF | 0–1 crate | Part 9 §9.12 vendors the module already, thus the saving is close to zero. The removal costs the blind directory index of Part 9 §9.5. This candidate gives no saving that pays for its cost |
@@ -220,8 +216,8 @@ examine a primitive removal after them.
 - **`liboqs-rust`** — the maintainers state that it is not for production use.
   Its only public audit excluded the algorithm implementations deliberately.
 - **`ring`** as the rustls provider — it gives no `X25519MLKEM768` key share
-  and no ECH, thus it cannot send the ClientHello of Part 3 §3.8. An earlier
-  draft called the crate unmaintained under RUSTSEC-2025-0007. That advisory
+  and no ECH, thus it cannot send the ClientHello of Part 3 §3.8. The
+  advisory RUSTSEC-2025-0007 called the crate unmaintained. That advisory
   is withdrawn, and the cause above stands alone.
 - **`boring` and `boring2`** — BoringSSL shapes a ClientHello as Chrome, and
   Part 3 §3.8 does not need that shape. The cost is a C++ toolchain in the
@@ -241,13 +237,12 @@ examine a primitive removal after them.
   carries a separate allowlist. Thus a new transitive crate **fails the
   build**, and a duplicate version is a dated debt and not a silent one.
 - The repository holds `Cargo.lock`.
-- A CI job makes an OSV and RustSec query for each crate and version. `cargo
-  audit` alone is not sufficient.
+- `cargo-deny` checks each crate and version against the RustSec advisory
+  database.
 - A CI job generates `DEPENDENCIES.md` again, and compares it against the
   committed file. A difference **fails the build**.
 - **A cooling-off window of 14 to 30 days** for an update that is not a security
-  update. The release builds are network-isolated, from a committed `cargo
-  vendor` tree.
+  update.
 
 > In August 2026 the `arrayref`, `internment`, and `append-only-vec` compromise
 > injected a typosquatted `proc-macro1`. The `build.rs` of that crate executed a
@@ -288,13 +283,12 @@ The count of this table is an estimate until §14.2.4 measures it, and
 requirement selects the `fips` feature of the same provider crate, and the
 client build does not.
 
-> *Cause.* An earlier draft rejected `aws-lc-rs` because its advantage was
-> FIPS validation, which UMBRA does not need. That statement inverted the
-> advantage. The crate is the default provider of `rustls`, and it is the
-> provider that holds the post-quantum key share and the HPKE of ECH. The C
-> toolchain is the cost, and that cost buys the L1 flight of Part 3 §3.8. With
-> both providers rejected, no client could open a connection, and Part 3
-> §3.12 priced a handshake that no stack sent.
+> *Cause.* The advantage of `aws-lc-rs` is not its FIPS validation, which
+> UMBRA does not need. The crate is the default provider of `rustls`, and it
+> is the provider that holds the post-quantum key share and the HPKE of ECH.
+> The C toolchain is the cost, and that cost buys the L1 flight of Part 3
+> §3.8. With both providers rejected, no client opens a connection, and no
+> stack sends the handshake that Part 3 §3.12 prices.
 
 ## 14.3 Unsafe and panic policy
 
@@ -335,51 +329,31 @@ client build does not.
 
 ### 14.5.1 Constant time — three layers
 
-No one tool is sufficient. Trail of Bits measured that Valgrind detects
-Clangover but **does not detect** KyberSlash. Trail of Bits also measured that
-the `dudect` results were not reproducible across machines.
+The control of v1 is at the source. A function that touches key material uses
+no `/`, no `%`, and no secret-indexed access. This ban finds the KyberSlash
+class, which is a variable-time instruction.
 
-1. **Valgrind and ctgrind secret-tainting against the release binary**, for each
-   target triple, at each commit. This layer finds the Clangover class, which is
-   a branch that the compiler inserts.
-2. **A source-level ban** on `/`, on `%`, and on a secret-indexed access, in a
-   function that touches key material. This layer finds the KyberSlash class,
-   which is a variable-time instruction that layer 1 provably does not find.
-3. **`dudect-bencher` each night. It is a signal, and it is not a gate.**
-
-The web client of §14.7 runs code that the browser compiles, thus layer 1 and
-layer 3 measure the native binary only, and layer 2 is the one layer that
-binds the web client. Part 15 §15.3 holds the row.
+The ban does not find a branch that the compiler inserts. LLVM has defeated
+hand-written constant-time Rust in shipped code two times. The first case was
+the `jns` branch on a mask in `curve25519-dalek` (RUSTSEC-2024-0344 and
+CVE-2024-58262). The second case was Clangover. In the two cases the source did
+not change. v1 runs no test against the release binary for that class.
 
 **The toolchain is part of the cryptographic TCB.** Pin the exact `rustc`
 version, the target triples, the opt-level, and the codegen-units for the
-release builds. Run layer 1 again at each change to one of these.
-
-LLVM has defeated hand-written constant-time Rust in shipped code two times. The
-first case was the `jns` branch on a mask in `curve25519-dalek`
-(RUSTSEC-2024-0344 and CVE-2024-58262). The second case was Clangover. In the
-two cases the source did not change.
+release builds.
 
 ### 14.5.2 Test vectors and differential testing
 
-- **[IMP-034]** The repository MUST vendor the NIST ACVP and CAVP corpora and the C2SP
-  `testvectors_v1` corpus at `tests/vectors/`. **[IMP-035]** The repository MUST hold a
+- **[IMP-034]** The repository MUST vendor the NIST ACVP corpora of ML-KEM
+  and ML-DSA, the C2SP CCTV vectors of ML-KEM, and the RFC 9180 and RFC 9474
+  vectors at `tests/vectors/`. **[IMP-035]** The repository MUST hold a
   `tests/vectors/PROVENANCE.md` file that records the upstream commit of each
   corpus. **[IMP-036]** A test MUST NOT fetch a vector at test time.
-
-  **The repository holds part of that set today.** `tests/vectors/` holds the
-  NIST ACVP files of ML-KEM and ML-DSA, the C2SP CCTV vectors of ML-KEM, the
-  RFC 9180 and RFC 9474 vectors, and the vectors of UMBRA itself. The CAVP
-  corpus and `testvectors_v1` are not vendored yet, thus `IMP-034` stays open
-  for them.
-- A test cross-tests each primitive against one independent implementation, **on
-  the two endiannesses**.
-- **Cross-backend byte-equality is a CI invariant.** **[IMP-019]** The portable build, the
-  AVX2 build, and the NEON build MUST serialize each cryptographic object
-  identically, at each commit.
 - A canonical re-encode check runs on each parsed signature and on each parsed
   ciphertext.
 - Prefer a one-shot ML-KEM API over an incremental or stateful API.
+- The rule number `IMP-019` is retired, and no rule uses it.
 
 > Four of the thirteen reported vulnerabilities in libcrux were errors in the
 > specification or in the proof. Formal verification structurally cannot find
@@ -389,34 +363,16 @@ two cases the source did not change.
 
 ### 14.5.3 Fuzzing and bounded model checking
 
-- `cargo-fuzz` with a structured input from `arbitrary`, for each wire parser.
-  Prefer the `fuzz_mutator!` mutation method over pure `Arbitrary` generation.
-- `proptest` for the algebraic round-trip properties. Those properties are
-  encode and decode, encrypt and decrypt, and ratchet advance and recover.
-- **Kani** for panic-freedom and overflow-freedom. The scope is the wire
-  parsers, the sequence and counter arithmetic, and the ratchet state
-  transitions.
-
-Fuzzing and bounded model checking are complements and not substitutes. Kani
-found an encoding-boundary bug in s2n-quic in **20 seconds**. 16.7 M fuzzing
-iterations did not find that bug.
+v1 runs no fuzzer and no bounded model checker.
 
 ### 14.5.4 Formal verification — scope it honestly
-
-**Kani is the only formal-methods investment of UMBRA for v1.** The budget is 2
-to 6 engineer-weeks. s2n-quic runs 102 harnesses in 23 minutes of CI.
 
 UMBRA **rejects Verus, Creusot, Prusti, and hax for v1**. Verus measures about 5
 proof-lines for each implementation-line. At that rate, the verification of a
 protocol core is a commitment of multiple engineer-years. libcrux spent that
 effort and reached only 58.4 % checked coverage.
 
-**[IMP-020]** **An implementation MUST hold a `SOUNDNESS.md` file.** The build system
-generates that file, and no person maintains it by hand. For each property and
-each target triple, it states that the property is PROVED, TESTED, or ASSUMED.
-For PROVED it names the tool and the exact coverage. For TESTED it names the
-vectors. This practice is the cheapest method to separate credible assurance
-from an unsupported claim, and the users of libcrux paid for its absence.
+The rule number `IMP-020` is retired, and no rule uses it.
 
 ## 14.6 Platform delivery
 
@@ -470,6 +426,19 @@ exception of §14.4.
 a passphrase as a Kotlin `ByteArray` or a Kotlin `String`. §14.4 rule `IMP-017`
 gives that rule, and this section gives the surface that obeys it.
 
+**The stated exceptions.** The values below cross the surface as a Kotlin
+`String` or as bytes, and no other value of the three classes does. Each one
+has a cause, and Part 15 §15.3 holds one row for the set.
+
+| The value | The cause |
+| --- | --- |
+| A name that a user typed to be shown: the name of a group, the name of a file, the name and the note of a contact request, the names of an introduction, and the name and the welcome text of a profile | A view of the platform draws it as text, thus the platform holds it in each design |
+| The verification code of Part 4 §4.5.2, and the ticket and the short code of a device link of Part 7 §7.4 | Each one exists for a person to read or for a camera to scan |
+| The bundle of an invitation, as the paragraph below states | The platform shows it as a link or as a QR code |
+| The question and the options of a poll | **This one is a limit and not a design.** A poll is message text, and in v1 it crosses as a string in each direction. A later version moves it behind a `Draft` and a `TextSink`, and it removes this row |
+| The wake table of Part 8 rule `NTF-135`, as bytes | The platform seals it under a keystore key that needs no unlock, and the core cannot reach that key |
+| The bytes of a file and of a preview, under `IMP-166` | The decoder and the player of the platform read bytes |
+
 **[IMP-165]** The file of a draft MUST cross the surface as a path that the
 core reads, and not as its bytes. On Android the path names an open descriptor
 of the process, `/proc/self/fd/<n>`, which the platform got from the content
@@ -486,6 +455,11 @@ copy after the call. A media player reads a video in ranges, thus the core
 MAY hold one copy of the file in its memory for the time that the player is
 open, and give each range that the player asks for. The core MUST overwrite
 that copy when the player closes, and MUST refuse each range after a lock.
+A picture that a peer made is a profile picture of Part 9 rule `DIS-176` or a
+picture of a contact request. The platform MUST decode such a picture to at
+most 1 024 pixels on each side. It MUST read the size of the picture
+before it decodes one pixel. A JPEG of a few kilobytes can name a very large
+canvas, and a decode of that canvas ends the process.
 The preview of Part 6 rule `WIR-533` MAY cross the surface as bytes in both
 directions, under the same terms: it is a picture, as the file is. The platform MUST overwrite the array when the decode
 ends, MUST NOT write the bytes to a file or to a platform cache, and MUST drop
@@ -521,7 +495,9 @@ that draft is dropped, and it MUST do that whether the send succeeded or failed.
 
 - **[IMP-127]** A lock MUST stop the network runtime, and the runtime MUST
   drop its state at that stop. That state holds ratchet keys, queue keys, and
-  circuit keys, and a locked client holds no key in RAM.
+  circuit keys, and a locked client holds no key in RAM. The hardening
+  secret `K_rng_harden` of `IMP-093` is a key of the store too, and it
+  leaves RAM at the lock with each other key.
 - **[IMP-128]** A client MUST order a conversation view by the time of its own
   store of each message. It MUST NOT order the view by `sent_at`, because that
   value comes from the peer, and a peer could thus put a message before an
@@ -544,9 +520,12 @@ that draft is dropped, and it MUST do that whether the send succeeded or failed.
 - **[IMP-146]** A client MUST hold a receipt in table `0x0B` from the commit
   of the message that it reports, or from the move of the read marker of
   `IMP-139`, to the slot that carries it (`NET-053`). It MUST erase the rows
-  of a batch after the slot carried that batch, and not at the moment it
-  made the batch: a slot that an acknowledgment took leaves the batch in the
-  store. A kind that the user turns off MUST erase each held receipt of that
+  of a batch after a relay answered the record of the slot that carried
+  that batch, and not at the moment it made the batch or wrote its cell. A slot
+  that an acknowledgment took, and a run that ends before the `QUOTA`
+  of that record, leave the batch in the store. A relay that refuses the
+  record with `REJECTED` or `VERSION` ends the batch too, because that
+  record goes no more (`NET-217`). A kind that the user turns off MUST erase each held receipt of that
   kind for that contact. The move of the read marker is the one source of a
   read receipt, thus a notification gives none (`NET-043`).
 - **[IMP-147]** A receipt is no message of a conversation, and a client MUST
@@ -644,9 +623,9 @@ that draft is dropped, and it MUST do that whether the send succeeded or failed.
   and it can send to that queue. The ratchet of Part 5 protects each record
   under that layer.
 
-> *Cause.* An earlier draft of this section gave `send(handle, conv, bytes)`.
+> *Cause.* The alternative is a signature `send(handle, conv, bytes)`.
 > UniFFI maps a `bytes` parameter onto a Kotlin `ByteArray`, thus that one
-> signature broke `IMP-017` at the one point where each message passes. A
+> signature breaks `IMP-017` at the one point where each message passes. A
 > `ByteArray` on the JVM heap moves under a compacting collector, thus no party
 > overwrites each copy of it.
 >
@@ -678,14 +657,15 @@ release. Run a full Kotlin regression after an increment. UniFFI is before 1.0, 
 
 ### 14.6.3 Deferred platforms
 
-iOS and a native desktop shell are outside the v1 scope. Android and the web
-client of §14.7 are the v1 client platforms, and the web client serves the
-desktop in v1. The core keeps the UniFFI annotations and holds no platform
+iOS, the web client of §14.7, and a native desktop shell are outside the v1
+scope. Android is the v1 client platform (Part 1 §1.1), and v1 has no
+desktop client. §14.7 stays in this part as the design of the web client. Each
+rule of it binds that client when it ships and binds no v1
+conformance claim. The core keeps the UniFFI annotations and holds no platform
 assumption, thus a later platform adds a shell and no core change. An iOS
-revision has to revisit four items: the notification extension of Part 8, the
+version has to revisit four items: the notification extension of Part 8, the
 secure-element entanglement of §14.6.4, the file protection and the backup
-exclusion of §14.6.6, and the reproducible-build attestation of a static
-library under §14.8. A native desktop shell reuses the extension bundle of
+exclusion of §14.6.6, and the reproducible build of a static library. A native desktop shell reuses the extension bundle of
 §14.7 in a thin native window, with a code signature of its platform.
 
 ### 14.6.4 Storage and keys
@@ -703,8 +683,9 @@ record layer below encrypts each record on its own.
 - The result wraps the storage master key `K_store` of Part 5 §5.2.
 - The client holds `K_store` in RAM after the unlock. Thus the client pays the
   3-second cost at each unlock, and not at each launch.
-- The client wipes `K_store` from RAM at a lock. The auto-lock default is 15 to
-  30 minutes of idle time.
+- The client wipes `K_store` from RAM at a lock. The auto-lock default is 15
+  minutes of idle time, and the user can set it up to 30 minutes
+  (`IMP-119`).
 
 **The entanglement.** StrongBox holds an HMAC-SHA256 key. The platform adapter
 computes the secure-element step, and the core reads one 32-byte secret `S`.
@@ -761,7 +742,18 @@ WrapHeader {                      // 97 bytes
   `salt_pw` and a new `nonce_w`. It MUST NOT change `K_store`, because each
   record key derives from it.
 - **[IMP-119]** A client MUST NOT let the user set an auto-lock above 30
-  minutes of idle time, and the default MUST be 15 minutes.
+  minutes of idle time, and the default MUST be 15 minutes. The idle time
+  is a duration of Part 1 rule `SCP-018`. A client MUST count it from the
+  last action of the user on a monotonic source that counts the sleep of the
+  device. The device clock MUST have no part in it. A change of the device
+  clock neither shortens nor lengthens the idle time. A client MUST NOT lock
+  because the device clock moved. Thus no step of the
+  device clock keeps a store open above its limit. No such step asks the user
+  for the passphrase in the middle of use. The reference client reads the
+  time since boot, which counts the sleep, at the last action and at each
+  tick. On a platform where it cannot read that time it counts on a
+  monotonic source that stops in a sleep. The client then locks late by the
+  length of each sleep, and never early.
   **[IMP-140]** A client MUST keep that setting in the store, under the record
   encryption of this section. A client MAY offer a lock at the moment the
   application leaves the screen, and it MUST then keep an idle limit too, for
@@ -770,10 +762,6 @@ WrapHeader {                      // 97 bytes
   passphrase change. It MUST write the new header beside the database before
   it uses that header, because a client that holds a header which the file
   does not hold locks the user out at the next launch.
-
-> *Cause.* An earlier draft gave this block a second branch for the secure
-> element of a platform that this revision defers, and §14.6.3 records that an
-> iOS revision revisits this step.
 
 **The database** uses `rusqlite` with the `bundled` feature, which is plain
 SQLite. The application adds XChaCha20-Poly1305 for each record, with a key for
@@ -803,9 +791,20 @@ row_id  <- HMAC-SHA3-256( K_row, table_id || natural_key )[0..16]
   §5.11 holds the label.
 - **[IMP-121]** A row MAY carry one more indexed column, which is the `row_id`
   of the row that owns it, such as the conversation of a message. A client
-  MUST NOT index on another value. The owner column sits outside the
-  associated data, thus the plaintext of a row MUST name its owner, and a
-  client MUST reject a row whose plaintext names another owner.
+  MUST NOT index on another value. From record version `0x02` on, the
+  associated data of a record holds the owner column, as the block below
+  gives it. A client MUST open each record under the owner that its column
+  names. A read of the rows of one owner MUST open each row under that
+  owner. Thus a row that a party with the file moved to another owner does not
+  open. No caller of the store reads it as a row of that owner. The
+  row tag of Part 4 `IDN-033` reads the owner column too, thus the scan of
+  `IDN-162` finds a row that a party hid from each owner. A row whose
+  plaintext holds no owner, such as a row of table `0x15`, has its owner
+  from this binding alone. The owner column of record version `0x01` sat
+  outside the associated data. Thus the plaintext of a row that names its
+  owner MUST still name it. A client MUST reject a row whose plaintext names
+  another owner. That check is the one that covers a row which a
+  party moved before the pass of `IMP-130`.
 
 ```
 record_salt <- 16 bytes from the CSPRNG, stored beside the record
@@ -813,23 +812,39 @@ K_rec       <- HKDF-SHA3-256( salt = record_salt, ikm = K_store,
                               info = "umbra/v1/record-key" || table_id || row_id,
                               L = 32 )
 nonce       <- 24 bytes from the CSPRNG, stored beside the record
-ct || tag   <- XChaCha20-Poly1305( K_rec, nonce, plaintext,
-                                   ad = table_id || row_id )
+ad          <- 0x02 || table_id || row_id || owner_flag || owner
+ct || tag   <- XChaCha20-Poly1305( K_rec, nonce, plaintext, ad )
 ```
+
+The first byte of `ad` is the record version. `owner_flag` is `0x01` and
+`owner` is the 16 bytes of the owner column of `IMP-121`, or `owner_flag` is
+`0x00` and `owner` is empty for a row with no owner. The flag fixes each
+length, thus `ad` parses in one way. Record version `0x01` had
+`ad = table_id || row_id`, which is 17 bytes, and no form of version `0x02`
+has that length. The stored record is `record_salt || nonce || ct || tag`
+in the two versions, and `K_rec` is the same.
 
 - **[IMP-023]** A client MUST derive the record key with the input set of the
   block above, and with no other input. Part 5 §5.11 holds the label.
   **[IMP-040]** A client MUST make a fresh `record_salt` and a fresh `nonce`
   from the CSPRNG at each write of a record.
-- Part 4 rule `IDN-029` puts `table_id` and `row_id` in the associated data.
-  Thus a party cannot move a record from one row into another row. Part 4 §4.6
-  states the table MAC that rests on this binding.
+- Part 4 rule `IDN-029` puts the version, `table_id`, `row_id`, and the owner
+  in the associated data. Thus a party cannot move a record from one row into
+  another row, or a row from one owner to another. Part 4 §4.6 states the
+  table MAC that rests on this binding. In a store of record version `0x02`
+  the row tag of that MAC reads the owner column. In such a store the set MAC
+  of Part 4 `IDN-193` reads the first 16 bytes of the MAC of each table. Thus
+  one table that a party puts back to an earlier state fails at the unlock.
 - **[IMP-041]** A client that discards a record key under Part 7 MUST overwrite
   `record_salt` with zero bytes. Rules `DEV-099` and `DEV-210` of Part 7
   discard that key. Thus no party derives the key again from `K_store`.
   **[IMP-122]** A client MUST NOT open a record whose `record_salt` is zero
-  bytes. The record tag stays in the row, thus the table MAC of Part 4 §4.6
-  does not change at a discard.
+  bytes. The record tag stays in the row. The table MAC of Part 4 §4.6 reads
+  that tag with each bit inverted for a record with a zero salt. Thus the MAC
+  changes at a discard, and the client writes it in the deletion batch
+  of the discard. A zero salt that the client did not write then fails the scan
+  of `IDN-162`. Without the inversion a party with the file would hide
+  a row from each view with no change of a MAC.
 - **[IMP-123]** A client MUST write the rows of a commit batch and the table
   MAC of each table that the batch changed in one transaction of the
   database. A crash between the two would leave a table that fails its MAC
@@ -840,10 +855,10 @@ ct || tag   <- XChaCha20-Poly1305( K_rec, nonce, plaintext,
   client applies a deletion batch, it MUST run `PRAGMA wal_checkpoint(TRUNCATE)`.
   Part 6 §6.8 rule `WIR-356` gives the test that checks the raw file.
 
-> *Cause.* An earlier draft derived the record key from `K_store`, the table
-> identifier, and the row identifier only. Part 7 rule `DEV-099` told a device
-> to discard that key. A key that a client derives again from a master key that
-> it still holds is not discarded. The random salt beside the record makes the
+> *Cause.* Part 7 rule `DEV-099` tells a device to discard the record key. A
+> record key from `K_store`, the table identifier, and the row identifier
+> only does not permit that. A key that a client derives again from a master
+> key that it still holds is not discarded. The random salt beside the record makes the
 > key of one record a value that an overwrite destroys. `secure_delete`
 > overwrites a freed page with zero bytes. The checkpoint moves each frame out
 > of the write-ahead log and truncates that log. Without the two, a deleted
@@ -902,14 +917,14 @@ read flight 1 already drops the copy (Part 6 `WIR-503`).
 | `0x03` | Contacts | One contact: the `RecipientId` of its inbound queue, and the stored channel |
 | `0x04` | Queues | Reserved for the queues of the path selection of Part 3 §3.4.6 |
 | `0x05` | Verifications | One verification of Part 4 §4.5 |
-| `0x06` | Local identity | The root seed, the Recovery Code, the seed of each group, and the mark of `IDN-193`. Part 4 calls these rows, the pairwise salts of the rows of `0x03`, and the rotation counters of the rows of `0x28` together the local identity table |
+| `0x06` | Local identity | The root seed, the Recovery Code, the seed of each group, and the mark of `IDN-193`. The row `discovery-roots` holds each identity root from before a reset that still gives the key of a published entry. For each root it holds its seed, a count, and the name of each entry that the root serves. A name leaves the row when the log shows a later rotation of its entry or when its entry goes. A root leaves the row with its last name (`DEV-306`). Part 4 calls these rows, the pairwise salts of the rows of `0x03`, and the rotation counters of the rows of `0x28` together the local identity table |
 | `0x07` | Send queue | One record that waits for the send path (`IMP-126`) |
-| `0x08` | Invitations | One invitation that waits: the `RecipientId` of its queue, the fragment of its link or its bundle, the queue end, and the prekey seed. A handshake between two flights has its row here too, with its state (`IMP-169`) |
+| `0x08` | Invitations | One invitation that waits: the `RecipientId` of its queue, the fragment of its link or its bundle, the queue end, and the prekey seed. A handshake between two flights has its row here too, with its state (`IMP-169`). A queue end that owes its `DEL` has its row here too, in the form `0x08`. Such a queue is one that a rotation, a renewal, or an ended invitation left. The client keeps it until that `DEL` left under Part 3 rule `NET-178`. The form of a queue that a rotation replaced ends with the identifier of its contact. The client reads that queue under the ratchet of that contact until the `DEL` (Part 3 rule `NET-177`). A form with no such tail names a queue that the client reads no more |
 | `0x09` | Conversations | What this device alone knows of one conversation: the time up to which the user saw its messages, and the name that the user gave the contact |
-| `0x0A` | Settings | One setting of this device under its name, such as the idle time of the auto-lock, the receipts of one conversation, the highest directory epoch (`IMP-159`), or the ingress pins (`REL-153`) |
+| `0x0A` | Settings | One setting of this device under its name, such as the idle time of the auto-lock, the receipts of one conversation, the highest directory epoch (`IMP-159`), or the ingress pins (`REL-153`). Six names hold protocol state. `unanswered/<conversation>` holds the time, in milliseconds, of the first relay acknowledgment of that conversation that no record of the peer followed yet (Part 3 §3.2.6). A record of the peer erases it. `rotation-owed` holds the conversation of each contact whose queue rotation a revocation still owes (Part 7 §7.7 step 2c). `leaving-channels` holds the sync channel and the `device_id` of each revoked device that still waits for the notice of `DEV-313`. `revocation-notice/<device_id>` holds the time of that revocation, in seconds, and the epoch that revokes the device. `key-served/<conversation>` holds the start of the 24 hours and the count of the key requests of that peer that this device answered (`WIR-338`). `held/<message>` holds the wait of one record that a full queue refused (`IMP-082`). It holds the time from which `HOLD_RETRY` counts to its next send and the time of its first `LIMIT`, both in seconds. It also holds the count of its `LIMIT` answers. A relay that takes the record erases it, and the failure of the record at a bound erases it too |
 | `0x0B` | Held receipts | One receipt that waits for a slot: the conversation, the kind, the `msg_id` of its target, and the time that it reports (Part 3 §3.5.4) |
-| `0x0C` | Pending references | One deletion or one edit of a contact whose target did not arrive yet: the conversation, the `msg_ref` of the target, the time of the record, and the new text of an edit. An entry with no text is a deletion (Part 7 §7.5.6) |
-| `0x0D` | Revisions | How many times the sender of a message changed its text, under the row of that message. A message with no row here shows no edited mark |
+| `0x0C` | Pending references | One deletion or one edit whose target did not arrive yet: the conversation, the `msg_ref` of the target, the time of the record, and the new text of an edit. An entry with no text is a deletion (Part 7 §7.5.6). The key of a row is the conversation, the target, and the direction of the record that waits (`DEV-093`). A row of an earlier build has a key with no direction, and it came from the contact |
+| `0x0D` | Revisions | How many times the sender of a message changed its text, under the row of that message, in one byte. After a revision that a sync channel gave, the source device and its causal counter follow. They are the high-water mark of `DEV-034` for the copies of that source. A message with no row here shows no edited mark |
 | `0x0E` | Reactions | One reaction: the conversation, the `msg_ref` of its target, the direction, and the emoji. One party holds one row for one emoji on one message (Part 6 §6.6.9) |
 | `0x0F` | File states | The file of one message, under the row of that message: whether this device uploads it, wants it, holds it, or failed at its transfer, and the media fields of its descriptor (Part 12 §12.3) |
 | `0x10` | Files | The plaintext of the file of one message, under the row of that message |
@@ -918,19 +933,19 @@ read flight 1 already drops the copy (Part 6 `WIR-503`).
 | `0x13` | Group Queue | The group queues that a creator asked for and that no relay named yet. A row holds the `group_id`, the replica index, and the relay. |
 | `0x14` | Group Join | The offers that this device got and that the user did not answer, and the join records that an admin of this device did not act on. A row holds the `group_id` and then the `JoinRecord`, or nothing for an offer. The owner column names the pairwise conversation. |
 | `0x15` | Group Member | The contact behind a member index, for each member that an admin of this device brought in. The roster names no contact, thus a member that another admin added has no row here and the view shows its index alone. A row holds the pairwise conversation, and its owner column names the group. |
-| `0x16` | Group Presence | The activity clocks of §11.9.7: for each member that an admin of this device watches, the time of its last record or presence record, and for each group, the time of the last record of this device. A row holds a `BE64` of seconds, and its owner column names the group. |
-| `0x17` | Group Owners | For each group, the member indices that held the owner credentials of this device when it last took or drew them (`GRP-401`). A member that leaves that set leaves with credentials that the relay still takes, thus its departure calls for new ones. The owner column names the group. |
+| `0x16` | Group Presence | The activity clocks of §11.9.7: for each member that an admin of this device watches, the time of its last record or presence record, and for each group, the time of the last record of this device. The row `watch` of a group holds the time up to which an admin of this device watched that group. A gap of 10 minutes or more in it moves the clock of each member forward by that gap (`GRP-396`). A row holds a `BE64` of seconds, and its owner column names the group. |
+| `0x17` | Group Owners | For each group, the member indices that held the owner credentials of this device when it last took or drew them (`GRP-401`). A member that leaves that set leaves with credentials that the relay still takes, thus its departure calls for new ones. The row `gkey` of a group holds what this device knows of its `GKEY` commands, after a version byte: for each replica the `write_pk` of the epoch whose `GKEY` arrived there, and each owner credential that the current one replaced and whose `GKEY` did not arrive yet, the oldest first (`GRP-361`, `GRP-363`, `GRP-401`). The owner column names the group. |
 | `0x18` | Group Grants | The granting epochs on the authority path to a current role (`GRP-068`). A row holds one `GroupControl`, under the group and the `epoch_index` of the grant, and its owner column names the group. A grant on no path leaves when the next snapshot is built (`GRP-069`). |
 | `0x19` | Notify Relay | The root of each queue relay: `relay_id`, `k_ntf_root`, `relay_idx`. |
 | `0x1A` | Notify Group | Each handle group: `handle`, `relay_id`, `k_tok`, the removal secret, the registration state, and the count of its queues. |
 | `0x1B` | Notify Queue | Each queue with a binding: `recipient_id`, `handle`, `queue_alias`, and whether its `NBIND` left. |
 | `0x1C` | Group Notify | The notify queue of each group of Part 8 §8.5.2: its `RecipientId`, its encoded `QueueAddress`, the time of the last `GNREG` at each of the two replicas, the time the queue was made, and the queue that it replaces until that one leaves (`NTF-105`). |
 | `0x1D` | Notify State | The stored form of each notify queue of Part 8 §8.5.2, under its `RecipientId`. |
-| `0x1E` | Dead Channel | The dead-channel state of each contact, by conversation. |
+| `0x1E` | Dead Channel | The dead-channel state of each contact, by conversation: whether the channel is dead and since when, the address of the new queue of this device, the week, the credential and the relays of the blob that this device wrote, and the week and the time of the next fetch. A row MAY end with a tail of one byte `0x01` and one `QueueAddress`. That address is the candidate address of the peer of Part 3 rule `NET-190`. Behind the candidate the tail holds one byte that says whether the record of `NET-191` left for it. Then come the time in seconds at which the client first held it, and the week of the blob that gave it. A row with no candidate, and a row of an earlier build, hold no tail. A row of an earlier build that holds a candidate ends behind its `QueueAddress`. It reads as a candidate that took no record, and its time starts at the next check. |
 | `0x1F` | Backup Index | The hash of each row that the last backup object carried, by the table and the surrogate identifier of the row: a delta holds the rows whose hash moved and the rows that left (`IDN-179`). |
 | `0x20` | Backup State | The state of the backup of this device: the schedule and the entries of the root with the credentials of their chunks. A backup carries neither. |
 | `0x21` | Device Self | The identity of this device, with the flag of its channels. |
-| `0x22` | Device Roster | The current roster epoch of the set. |
+| `0x22` | Device Roster | The current roster epoch of the set, and under its index each of the 8 epochs before it that Part 7 `DEV-229` keeps for a peer that missed one. |
 | `0x23` | Device Peers | The sync channel of each other device, by its conversation. |
 | `0x24` | Sync State | The stored form of the sync engine. |
 | `0x25` | Sync Sent | The body of each published record, by its counter, until each peer acknowledged it. |
@@ -958,13 +973,13 @@ read flight 1 already drops the copy (Part 6 `WIR-503`).
 | `0x3B` | Group Sender | The member index that sent each message of a group that arrived, under the row of the message: the conversation and the index. |
 | `0x3C` | Roster Notes | One row for each change of a roster that this device applied: the conversation, the time, the kind, the member index, and the role. |
 | `0x3D` | Key Changes | The notice that waits for the answer of the user in each conversation, under the row of the conversation: the conversation, the new X25519 key, the new ML-KEM key, and the time of its arrival. |
-| `0x3E` | Reset Notices | The key-change notices that wait for their delay: the conversation, the time at which the notice goes, and the record. |
+| `0x3E` | Reset Notices | The key-change notices that no relay took yet: the conversation, the time at which the notice goes, and the record. A row stays until a relay accepted its notice. The row of a notice on the send path holds the time `2^64 - 1`. A notice that reached no relay takes a new delay of `IDN-064` in the commit of its failure. |
 | `0x3F` | Shares Held | The last share that each contact gave to this user, under the row of the conversation: the conversation, the time, and the `RecoveryShare` body. |
 | `0x40` | Shares Given | The share of the current split that each holder took, under the row of the conversation: the conversation, the time, and the index, the threshold, and the count. |
 | `0x41` | Group Unsent | Each record of this device that no replica accepted yet, as it was sealed, with its credentials, its message, and its place in the order of the posts. The next session sends the same bytes (`GRP-392`). A roster object moves the group of this device at its seal, thus a lost one splits the group. A presence is no such record. |
 | `0x42` | Intros | One row for each introduction that waits: the kind, the conversation of the other party of the record, the third conversation of a request of this device, the two names, and the invitation of an offer. |
 | `0x43` | Send Index | The message of this device that each `send_index` of a conversation named, under the row of the conversation and the index. The index wraps at 65 536, and a later record takes the place of an earlier one. |
-| `0x44` | Key Asked | Each key request of this device that waits for its supply, and the time of each request to a peer for its rate (`WIR-337`, `WIR-347`). |
+| `0x44` | Key Asked | Each key request of this device, under the conversation and the index, with the time of the request for its rate (`WIR-337`, `WIR-347`), and a mark of one byte beside it when its supply came. A request older than 24 hours names another record, since the index wraps. |
 | `0x45` | Roster Hashes | The SHA3-256 of each roster epoch that this device applied, by its index (`DEV-228`). |
 | `0x46` | Roster Parent | The `Parent` of the head, in one row. |
 | `0x47` | Roster Forks | Each fork that the view shows, by its index, its signer and its kind. |
@@ -976,14 +991,65 @@ read flight 1 already drops the copy (Part 6 `WIR-503`).
 | `0x4D` | Held Deletions | Each message that a deletion of another device names after a restore, by its row, with its conversation. It waits for the user (`DEV-118`). |
 | `0x4E` | Rekey Held | The re-key items of `DEV-301` that did not apply yet, under the subject of the group: the time of arrival in seconds, the subject, then the item. The group can come later on the chunk path, and the roster epoch before the re-key on the sync channel. |
 | `0x4F` | Failure | The cause of each failed message of this device, under the row of the message: a relay refused it, no path took it, its file did not upload, no replica of the group took it, or the queue of the contact was full (`IMP-074`) |
-| `0x50` | Publish Pending | The copy of each record of a contact that goes to the other devices of the set, written in the commit of the record: the conversation, then the record (`DEV-293`). The publish drops it, and one that a crash left goes with the next commit. |
+| `0x50` | Publish Pending | The copy of each record of a contact that goes to the other devices of the set, written in the commit of the record: its place, as the time of the commit in milliseconds and its index in the batch, the conversation, then the record (`DEV-293`). The publish sends the copies in the order of their places and drops each one. A copy that a crash left goes with the next commit. A row of an earlier build holds no place, and it goes first. |
 | `0x51` | Pairwise Held | Each synced record of a conversation whose identity entry did not come yet, under a random row: the subject, the order of its arrival, its deadline or 0, whether the user wrote it, then the record (`DEV-294`). The entry replays them. |
 | `0x52` | Sync Inbox | Each record that the sync engine took and the store did not take yet, written in the commit of the engine (`DEV-013`). |
 | `0x53` | Add Seq | The add of each joiner whose admit waits, under the row of the kept record of the add: the row of the join, the joiner, the group, the index, the replicas that returned a `GSEQ` and the `seq` at each, then the descriptor of the snapshot once it uploaded (`GRP-311`, `GRP-424`). |
+| `0x55` | Erase Due | The erase of each object that this device put on the chunk path, until each relay answered its `CDEL` or `CHUNK_LIFE_MAX` of Part 12 passed (`ATT-160`, `ATT-161`). A row of kind `0x01` holds the chunks of one uploaded file, under the row of its message. It holds the kind, the time of the upload in seconds, then the credentials as a row of `0x11` holds them. A second row of one byte `0x00` beside it is its hold. The upload writes the two, and the deletion of the message takes the hold away in the batch that takes the row of `0x11`. Thus the first row is due from then on (`IMP-164`). A message leaves with no erase of its chunks at the end of the history period, at a removal by a moderator, or with its conversation. Such a message takes the two rows along. A hold with no row of `0x11` is such a message, and the client deletes the two rows at the next start with no `CDEL`. A row of kind `0x02` holds one object of a device link of Part 7 `DEV-003`, under its `chunk_id`. It holds the kind, the time of the write, then the credential. It has no hold, and it is due when its link runs no more. No row names a conversation in its owner column. A backup of Part 4 §4.7.2 does not carry this table. The identifier `0x54` names no table. |
 
 The stored form of a row is local to one device, and no peer reads it. This
 part gives it no byte layout. **[IMP-130]** A stored object MUST start with a
 version byte, and a client MUST reject a row whose version it does not read.
+
+The record layer has a version of its own, which is the first byte of the
+associated data above. The store holds one record version. The present
+version is `0x02`. A new store starts at it. A store of version `0x01` is
+one whose set MAC verifies in the first form of Part 4 `IDN-033`, or one
+with a table and no set MAC. Under `IMP-130` a client MUST move such a
+store to version `0x02` in one pass, in the unlocked session that first
+writes a record, before that write:
+
+1. For each table, the client opens each record of version `0x01` and seals
+   it again under version `0x02`. The new seal uses a fresh `record_salt`, a
+   fresh `nonce` (`IMP-040`), and the owner that the column of the record
+   names. It leaves a
+   record that is of version `0x02` already, and a record with a zero salt.
+   It commits the records of one table in one batch or more, each with the
+   table MAC of the first form (`IMP-123`). Thus a pass that a platform ends
+   leaves a store of version `0x01` that verifies at the unlock, with some
+   records of version `0x02`. The next pass takes the rest. The client
+   MUST read one row at a time. It MUST NOT hold a table in RAM, because one
+   row of table `0x10` is a whole file. A batch holds at most 4 MiB of
+   sealed records and at most 256 records. A record above 4 MiB is a
+   batch of its own. The client holds one record in the clear for the time
+   of its seal, and it overwrites that plaintext when the seal ends.
+2. In one last transaction the client writes the MAC of each table and the
+   set MAC in the second form of Part 4 `IDN-033` and `IDN-193`. That
+   transaction is the mark of version `0x02`.
+
+Before the mark a client MUST read a record of each of the two versions. After
+the mark a client MUST NOT open a record of version `0x01`. Such a record
+is a fault of the file, and the client reports it in the manner of Part 4
+`IDN-039`. No path leads back. A set MAC of the first form does not verify the
+table MACs of the second form. A table MAC of the first form does
+not cover a record that the pass sealed again. A table that did not match
+its `accum` before the pass MUST NOT match it after. The client carries the
+difference into the `accum` of the second form. Thus the scan of `IDN-162`
+reports after the pass what it would have reported before. The pass reads
+each row, thus it sees that difference itself. A client that runs the pass
+at the unlock MUST report a table that did not match in the manner of
+`IDN-039` when the pass ends, and not only at the later scan. A party can put
+back the MACs of the first form, to pass a record of version `0x01` with a
+changed owner column through the pass. That party shows in this way, unless it
+puts back the full file. Part 4 §4.6 states that one residual, which is a
+full file of version `0x01` that a party puts back.
+
+A pass that a fault of the storage ends, such as a full disk, is no sign of a
+party with the file. The client MUST NOT report it in the manner of
+`IDN-039`. The client MUST NOT run the pass a second time in that unlocked
+session. Each write of the session fails with the fault of the pass, and
+the next unlock runs the pass again. The commit counter of a table goes up
+through each batch of the pass and through the mark (`IDN-068`).
 
 - **[IMP-158]** The stored form of a contact and of an invitation MUST name
   the relay that holds its inbound queue, because a new run builds a circuit
@@ -1052,7 +1118,14 @@ version byte, and a client MUST reject a row whose version it does not read.
 - **[IMP-164]** A deletion of a message MUST erase its rows in the tables
   `0x0F`, `0x10` and `0x11` in the batch that takes the message, and for a
   file that this device uploaded it MUST then send the `CDEL` of `ATT-161`
-  for each chunk to each relay of that chunk.
+  for each chunk to each relay of that chunk. The credentials of those
+  chunks outlive the message for that purpose alone. The copy in table `0x55`
+  stays after the batch, across each lock and each new start. It stays until
+  each relay answered the `CDEL` or until `CHUNK_LIFE_MAX` of Part 12
+  passed since the upload, and the client then erases it. That copy holds
+  `chunk_id`, `cred_sk` and the relays of each chunk, and neither the file
+  key nor a name of the conversation. A `CDEL` whose answer a lock or a new
+  start lost goes again in the next run.
 - **[IMP-159]** A client MUST keep the highest epoch of a `DirectoryRoot`
   that it verified in the settings table, and it MUST give the larger of
   that value and the shipped epoch of `REL-045` to the consensus at each
@@ -1070,7 +1143,9 @@ version byte, and a client MUST reject a row whose version it does not read.
   and it MUST NOT keep an earlier state of a channel. An earlier state holds
   chain keys that the forward secrecy of Part 5 §5.5 erased. The
   `secure_delete` setting and the truncation of the write-ahead log of this
-  section apply to that row.
+  section apply to that row. The truncation follows a commit that replaced
+  the row of a channel, once for the commit whatever the count of its rows.
+  The first row of a channel replaces no state, and it asks for none.
 - **[IMP-134]** At the start of a run a client MUST send a `SUB` for each
   stored queue. It MUST then send an `ACK` at the last sequence number that
   it acknowledged, when that number is above zero. The `ACK` of the last run
@@ -1096,7 +1171,7 @@ version byte, and a client MUST reject a row whose version it does not read.
   that `msg_id`.
 
 The high-water mark of `DEV-089` rests on the sender-chain position of a
-record. The node of 0.2.0-draft gives the store a record and no position,
+record. The v1 node gives the store a record and no position,
 thus the store applies each edit in the order of its arrival. Each queue
 delivers in order, and the one device that reads a pairwise queue publishes
 each edit on the sync channels in the order that it took it, thus the order
@@ -1107,10 +1182,10 @@ in the store, thus a run that ends inside that window loses no handshake.
 
 ### 14.6.5 No hardware attestation for anti-abuse
 
-**[IMP-029]** Relay reputation MUST come from measured behavior only. That behavior is the
-uptime probes that a client observes, the latency percentiles, the acknowledged
-message deliveries, and the sustained bandwidth. A client signs those
-observations as attestations. **[IMP-030]** Relay reputation MUST NOT come from device
+**[IMP-029]** Relay reputation MUST come from the mechanisms of Part 10 §10.3
+and Part 10 §10.4 only. Those sections give the class tests of the
+authorities and the negative link reputation, and Part 10 rule `REL-077`
+keeps a client from signing a report. **[IMP-030]** Relay reputation MUST NOT come from device
 attestation. **[IMP-031]** Relay reputation MUST NOT come from a "genuine device"
 proof.
 
@@ -1174,7 +1249,14 @@ removes one. Part 2 rule `THR-013` names those actions as its one exception.
 - **[IMP-056]** An Android client MUST mark a copied message as sensitive with
   `ClipDescription.EXTRA_IS_SENSITIVE`.
 - **[IMP-057]** An Android client MUST set `IME_FLAG_NO_PERSONALIZED_LEARNING`
-  on each composer and on the passphrase field.
+  on each composer and on the passphrase field. It MUST also keep each
+  passphrase field, and each view under it, out of the autofill of the
+  platform and out of its content capture
+  (`IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS` and
+  `IMPORTANT_FOR_CONTENT_CAPTURE_NO_EXCLUDE_DESCENDANTS`). An autofill
+  service that saves the passphrase holds it outside the device, and a
+  content-capture service reads each text of a view. The reference client
+  sets the two on the root view, thus on each view of the application.
 
 **The screenshot and the accessibility tree.**
 
@@ -1199,7 +1281,10 @@ removes one. Part 2 rule `THR-013` names those actions as its one exception.
 
 ## 14.7 The web client
 
-The web client is the second v1 client platform (Part 1 §1.1). It is the same
+**The web client is deferred.** Part 1 §1.1 puts it outside v1, as it puts
+iOS, and no v1 build holds it. This section keeps the design,
+and each rule of it binds the web client when it ships. The web client is
+the same
 Rust core, compiled to `wasm32-unknown-unknown`, in a browser extension. This
 section gives its form, its role in the device set, its transport, its
 storage, its randomness and notifications, and its build. Each rule of this
@@ -1210,8 +1295,7 @@ encapsulation takes 29 µs natively.
 
 ### 14.7.1 The form: an extension, and not a hosted page
 
-Three properties of the browser shape the web client. An earlier draft named
-them as the causes that kept the browser out of v1, and this revision gives
+Three properties of the browser shape the web client. This section gives
 each one a form that holds, or it states the residual.
 
 1. **Code delivery.** A browser fetches a hosted page again at each load, thus
@@ -1237,12 +1321,10 @@ each vendor is a gatekeeper of the web client, and Part 15 §15.2.11 records
 that. A user without the extension has no web client, and a link in a message
 does not give one.
 
-> *Cause.* An earlier draft ruled the browser out of v1 on the three causes
-> above, and it named an extension as the form for a later revision. The owner
-> put the web in the v1 scope. The core builds for `wasm32` under §14.2.4
-> already, the extension form holds trust assumption 4, and the linked-device
-> role removes the identity from the evictable store. The third cause stays as
-> a property of the transport, and §14.7.3 states it.
+> *Cause.* The core builds for `wasm32` under §14.2.4, the extension form
+> holds trust assumption 4, and the linked-device role removes the identity
+> from the evictable store. The third property stays as a property of the
+> transport, and §14.7.3 states it.
 
 ### 14.7.2 The role: a linked device
 
@@ -1345,37 +1427,20 @@ the record construction of §14.6.4.
   the `wasm-unstable-single-threaded` feature of UniFFI stays off.
   **[IMP-113]** The `umbra-web` crate MUST NOT add more transitive crates than
   its row in §14.2.3.
-- **[IMP-114]** The extension bundle MUST be reproducible under §14.8, and
-  Part 15 rule `SEC-005` names it. **[IMP-115]** The web client MUST verify
-  the inclusion proof of Part 15 rule `SEC-006` for its own bundle at each
-  start, and it MUST refuse to unlock the store while that proof is absent.
-  The browser applies an extension update before the client runs, thus the
-  check at start is the one point where the client sees the new bundle.
-- **Constant time.** The browser compiles the WebAssembly binary, thus layer 1
-  of §14.5.1 does not run against the code that executes, and layer 2 is the
-  one layer under the control of the project. Part 15 §15.3 holds the row.
+- The rule numbers `IMP-114` and `IMP-115` are retired, and no rule uses them.
+- **Constant time.** The browser compiles the WebAssembly binary, thus the
+  source-level ban of §14.5.1 is the one control of the project. Part 15 §15.3
+  holds the row.
 
 ## 14.8 Build reproducibility and binary transparency
 
 Trust assumption 4 of Part 2 §2.6 says that *the client binary that the user
-runs is the binary that the auditor examined*. Without this section, no party
-can check that assumption. If that assumption fails, each other guarantee
-becomes void.
+runs is the binary that the auditor examined*. v1 gives no method to check
+that assumption. The release build pins its toolchain (§14.5.1) and holds
+`Cargo.lock`. No independent party rebuilds a release, and the project runs
+no binary transparency log. Part 15 §15.5 states the result.
 
-- The Rust core, the Android application binary, and the web extension
-  bundle use reproducible builds. **[IMP-032]** Two independent builds of the
-  Rust core, of the Android application, and of the extension bundle MUST
-  give the same hash. §14.6.3 records that a platform with a
-  signed and encrypted bundle needs a rule for the static library, and this
-  revision defers that platform.
-- The project runs a binary transparency log with Sigstore support. The
-  application holds a verification path.
-- **Two or more independent rebuilders** rebuild each release from the source.
-  Those rebuilders publish signed attestations that their bytes match the
-  published artifact. **[IMP-033]** A minimum of one rebuilder MUST be outside the control of
-  the nonprofit. A reproducible build that no independent party reproduces
-  proves nothing.
-- The release builds are network-isolated, from a committed `cargo vendor` tree.
+The rule numbers `IMP-032` and `IMP-033` are retired, and no rule uses them.
 
 ## 14.9 Degraded states and the interface
 
@@ -1393,7 +1458,7 @@ closed. Part 7 §7.5.3 converges the state across the device set.
 | --- | --- | --- |
 | `queued` | The client holds the record, and no relay acknowledged the `SEND` | One mark for a queued record |
 | `accepted` | A relay acknowledged the `SEND` under Part 3 §3.7 | One mark for an accepted record |
-| `delivered` | A delivery receipt of Part 6 §6.6.9 arrived. Part 3 rule `NET-059` keeps receipts off by default, thus this state is reachable only when the peer sends them | One mark for a delivered record |
+| `delivered` | A delivery receipt of Part 6 §6.6.9 arrived. Part 3 rule `NET-059` keeps receipts off by default and `NET-041` makes a client emit one only with the setting on. Thus this state is reachable only when the peer turned them on. No rule of Part 3 needs this state: a silent channel of Part 3 §3.2.6 rests on `accepted` and on the records of the peer | One mark for a delivered record |
 | `read` | A read receipt arrived, under the same default | One mark for a read record |
 | `failed` | Part 3 §3.7 stopped the ARQ, at a permanent rejection, at `SEND_MAX_ATTEMPTS`, or at `SEND_GIVE_UP` | The record, the cause in words, and a resend affordance |
 
@@ -1422,6 +1487,28 @@ its condition, its end, and the one line that the client shows.
 | `corrected clock` | The clock state of Part 10 §10.5.2 is `corrected` (`REL-116`) | A root gives a correction at or below `CLOCK_SKEW`, or a clock movement discards the correction | "The clock of this device differs from the network time by more than one hour." |
 | `clock` | `NTF_FAIL_MAX` consecutive notification blobs failed to open inside the window of Part 8 rule `NTF-075`, or a held group record names a slot above the window of Part 11 rule `GRP-229` | One blob opens after a fresh `k_ntf_root`, or no held group record names such a slot | "The device clock may be wrong. Notifications show no preview until it is checked." |
 
+**The route view.** Part 3 rules `NET-201`, `NET-343` and `NET-350` require a
+display of each circuit, and this paragraph gives it. The client holds a
+connection view that the user reaches from the settings. The view lists the
+pinned ingress relay and the standby relay, each with its host and its country.
+It then lists one row for each circuit that the client holds. The row
+of a circuit names the country code of each hop in the order of the chain,
+as "DE → NL → SE". A row gains one of the two strings below after the
+countries, with a separator.
+
+| Rule | Identifier | The string | The condition |
+| --- | --- | --- | --- |
+| `NET-343` | `umbra.ui.net-343` | "one operator" | Two hops of the circuit share an operator or a family |
+| `NET-201` | `umbra.ui.net-201` | "one jurisdiction" | Two hops of the circuit share a jurisdiction bloc, under `NET-200` or under `NET-350`, and the row does not already carry the string of `NET-343` |
+
+The line of the `provisional directory` state above names the state. The string
+of `NET-343` on each row names what it means for a circuit: one
+operator runs two ends of it. A circuit of one autonomous system, one prefix
+or one server under `NET-350` and `NET-351` exists only in a provisional
+network. There the row carries "one operator" already. The route view shows
+no relay identity beyond the host of the two pins, and it is a display and
+no control.
+
 - **[IMP-077]** A client MUST show each current degraded state in one line at
   the top of the message list. **[IMP-078]** A client MUST NOT show a degraded
   state as a security failure. **[IMP-079]** A client MUST NOT block the
@@ -1431,11 +1518,20 @@ its condition, its end, and the one line that the client shows.
   the table without a row in Part 2 §2.4.
 - **[IMP-082]** In the `recipient queue full` state, a client MUST keep the
   record `queued`. The relay holds `QUEUE_QUOTA` records of Part 3 §3.2.4, and
-  the sender holds the rest.
+  the sender holds the rest. The record goes again after `HOLD_RETRY` of 15
+  minutes, and each later wait is twice the wait before it. The bounds of
+  Part 3 rules `NET-219` and `NET-220` apply. At the bound the record
+  goes to `failed` with the full queue as its cause, and the state of this
+  rule ends for it. A `QUOTA` that names room ends the state, and each held
+  record goes at once. The full state of a conversation is the memory of
+  one run. The wait of a held record and the two counts of its bounds are
+  in the store (table `0x0A`). Thus a new run, an unlock, and a new process
+  send no held record before its time. Part 3 §3.7 states the v1
+  limits beside `NET-222`.
 
-> *Cause.* An earlier draft named a degraded read in Part 9, a provisional
-> directory in Part 10, a missing carrier in Part 8, and a progress indicator
-> in Part 13. No section listed the states, thus two implementations showed two
+> *Cause.* Part 9 names a degraded read, Part 10 names a provisional
+> directory, Part 8 names a missing carrier, and Part 13 names a progress
+> indicator. Without one list of the states, two implementations show two
 > different sets. A user that sees "connecting" for an hour deletes the
 > application, and a user that sees a red banner for a provisional directory
 > reads it as a compromise. The one line for each state and the rule against a
@@ -1445,8 +1541,8 @@ its condition, its end, and the one line that the client shows.
 
 Rules of this specification require the interface to show a string. Examples
 are `NTF-009`, `ABU-040`, `IMP-050`, and the lines of the table
-above. A translation that drops such a string breaks the rule in that locale,
-and no test caught that before this section.
+above. A translation that drops such a string breaks the rule in that locale.
+The test of `IMP-086` finds that fault.
 
 - **[IMP-083]** Each string that a rule of this specification requires the
   interface to show MUST carry a stable message identifier. **[IMP-084]** That
@@ -1478,4 +1574,9 @@ the platform half.
 - **[IMP-093]** A client MUST apply the hardening of Part 5 §5.9 to each value
   that the platform source gives. The hardening secret `K_rng_harden` of Part 5
   §5.2 lives in the encrypted store of §14.6.4. Thus a platform generator that
-  fails after the first launch shows no raw output on the wire.
+  fails after the first launch shows no raw output on the wire. A client
+  holds `K_rng_harden` in RAM from the unlock to the lock and at no other
+  time (`IMP-127`). Thus a locked client, and a client before its first
+  unlock, draws each value from the platform source alone. A locked client
+  runs no network runtime, thus it makes no key of a session and no
+  identifier of a queue in that state.

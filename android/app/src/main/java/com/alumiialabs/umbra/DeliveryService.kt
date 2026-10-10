@@ -21,11 +21,24 @@ class DeliveryService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(
-            Notifier.CARRIER_ID,
-            Notifier.carrier(this),
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
-        )
+        try {
+            startForeground(
+                Notifier.CARRIER_ID,
+                Notifier.carrier(this),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
+            )
+        } catch (refused: IllegalStateException) {
+            // The platform permits no foreground service at this moment.
+            // The next view on the screen starts the carrier again.
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        // A lock or a change to Off that came before this start ends the
+        // service here: a stop before `startForeground` ends the process.
+        if (!Core.wantsCarrier()) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
         Core.carrierRuns(this, true)
         // A process that the platform starts again holds a locked client,
         // and a locked client takes no record. Thus no restart is asked for.
@@ -38,8 +51,17 @@ class DeliveryService : Service() {
     }
 
     companion object {
-        fun start(context: Context) {
+        /**
+         * Asks the platform for the service. Since Android 12 the platform
+         * refuses the start of an app with no view on the screen, with a
+         * `ForegroundServiceStartNotAllowedException`. The result is whether
+         * the platform took the start.
+         */
+        fun start(context: Context): Boolean = try {
             context.startForegroundService(Intent(context, DeliveryService::class.java))
+            true
+        } catch (refused: IllegalStateException) {
+            false
         }
 
         fun stop(context: Context) {

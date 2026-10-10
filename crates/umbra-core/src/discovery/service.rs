@@ -9,7 +9,7 @@
 //! a deployment runs each one at its own operator, with its own key.
 
 use alloc::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     string::String,
     vec,
     vec::Vec,
@@ -210,6 +210,11 @@ const RENEW: u8 = 0x01;
 const WRITE: u8 = 0x02;
 const BLOB: u8 = 0x03;
 
+/// The blind signatures of the cross-relay issuer that the directory holds
+/// for a second request. Each one is 256 bytes, thus the set stays near
+/// one mebibyte.
+const SIGNED_HELD_MAX: usize = 4_096;
+
 /// The directory and the issuer.
 pub struct Directory {
     voprf: ServerKey,
@@ -228,6 +233,15 @@ pub struct Directory {
     issuers: BTreeMap<u32, FirstPartyIssuer>,
     cross_relay: Option<CrossRelayKeys>,
     cross_relay_keys: BTreeMap<u32, SecretKey2048>,
+    /// The blind signature of each blinded message that the cross-relay
+    /// issuer signed. The key is the epoch and the hash of the message, and
+    /// `signed_order` holds the order in which they came. A second request
+    /// for a message takes its signature from here, in whatever batch it
+    /// comes, and costs no signature more.
+    signed: BTreeMap<(u32, [u8; 32]), Vec<u8>>,
+    signed_order: VecDeque<(u32, [u8; 32])>,
+    /// The epoch below which the directory holds no such signature.
+    signed_from: u32,
     /// Each issuer key in the log: its token type and its epoch.
     published_issuers: BTreeSet<(u16, u32)>,
     profile: fn(&str) -> Option<String>,
@@ -290,6 +304,9 @@ impl Directory {
             issuer_seed: keys.issuer_seed,
             cross_relay: keys.cross_relay,
             cross_relay_keys: BTreeMap::new(),
+            signed: BTreeMap::new(),
+            signed_order: VecDeque::new(),
+            signed_from: 0,
             issuers: BTreeMap::new(),
             published_issuers: BTreeSet::new(),
             profile,
@@ -498,8 +515,16 @@ impl Directory {
             let Some(version) = record.label.tombstone_if_lapsed(now) else {
                 continue;
             };
-            let entry = tombstone_entry(&record.input, version)?;
-            self.stage(&search_key, entry, rng)?;
+            // A label whose tombstone does not build or does not stage
+            // keeps its state, and the next epoch tries it again. The
+            // epoch closes without it: one label with a fault must not
+            // hold each other label and each head of the log.
+            let Ok(entry) = tombstone_entry(&record.input, version) else {
+                continue;
+            };
+            if self.stage(&search_key, entry, rng).is_err() {
+                continue;
+            }
             self.keep_label(&search_key, record);
         }
         // ABU-098: each key of this epoch and of the next one goes into the
@@ -737,8 +762,16 @@ impl Directory {
     }
 
     /// The key of the entry that a label input names, after the entry
-    /// checks against it (`DIS-169`, `DIS-170`).
-    fn check_entry(&self, input: &[u8], entry: &[u8], version: u32) -> Result<[u8; 1_216], Status> {
+    /// checks against it (`DIS-169`, `DIS-170`). `is_held` says that the
+    /// label holds a version already and its holder writes the next one, as
+    /// `Handle::parse_held` reads it. A registration takes no such name.
+    fn check_entry(
+        &self,
+        input: &[u8],
+        entry: &[u8],
+        version: u32,
+        is_held: bool,
+    ) -> Result<[u8; 1_216], Status> {
         if let Some(address) = input.strip_prefix(labels::ADDRESS_INDEX) {
             let parsed = AddressEntry::parse(entry).map_err(|_| Status::Malformed)?;
             if parsed.address.as_slice() != address || parsed.version != version {
@@ -749,7 +782,12 @@ impl Directory {
         }
         let text = core::str::from_utf8(input).map_err(|_| Status::Malformed)?;
         // DIS-091: the name holds under the profile.
-        let handle = Handle::parse(text, &self.profile).map_err(|_| Status::Refused)?;
+        let handle = if is_held {
+            Handle::parse_held(text, &self.profile)
+        } else {
+            Handle::parse(text, &self.profile)
+        }
+        .map_err(|_| Status::Refused)?;
         if handle.label_input() != input {
             return Err(Status::Refused);
         }
@@ -796,7 +834,7 @@ impl Directory {
         if self.operator.is_staged(&search_key) {
             return Err(Status::Busy);
         }
-        let key = self.check_entry(&input, &entry, version)?;
+        let key = self.check_entry(&input, &entry, version, false)?;
         if key == [0; 1_216] {
             return Err(Status::Refused);
         }
@@ -961,7 +999,7 @@ impl Directory {
         else {
             return Err(Status::Stale);
         };
-        let key = self.check_entry(&input, &entry, version_new)?;
+        let key = self.check_entry(&input, &entry, version_new, true)?;
         // DIS-076: the label takes the change before the log does, thus a
         // change that the label refuses stages no entry, and the label and
         // the log never part.
@@ -991,15 +1029,19 @@ impl Directory {
         Ok(Vec::new())
     }
 
-    /// Signs a batch of blinded cross-relay tokens (Part 13 §13.3.1): each
+    /// Signs a batch of blinded cross-relay tokens (Part 13 §13.3.1). Each
     /// item is a blinded message of the modulus width and one proof of work
     /// at `POW_EFFORT_MAX` (`ABU-076`, `ABU-109`). The answer is the count
     /// and the blind signatures. The signature of one message is one value,
-    /// thus a second request for it gives the same token.
+    /// thus a second request for it gives the same token. The directory
+    /// keeps that value for the life of its epoch. A request that comes
+    /// again costs the proofs of work alone and no signature. This applies
+    /// in the same batch, in another order, and to a part of the batch.
     fn issue_cross_relay(
         &mut self,
         r: &mut Reader<'_>,
         epoch: u32,
+        current: u32,
         count: usize,
     ) -> Result<Vec<u8>, Status> {
         let modulus = self.cross_relay_public(epoch).ok_or(Status::NotFound)?;
@@ -1026,12 +1068,45 @@ impl Directory {
             blinded.push(message.to_vec());
         }
         r.finish().map_err(|_| Status::Malformed)?;
-        let key = self.cross_relay_key(epoch).ok_or(Status::NotFound)?;
-        let signed =
-            crate::abuse::token::issue_cross_relay(key, &blinded).map_err(|_| Status::Malformed)?;
+        // ABU-110: no request names an epoch before this one, thus the
+        // signatures of an epoch that ended go.
+        if self.signed_from < current {
+            self.signed.retain(|(held, _), _| *held >= current);
+            self.signed_order.retain(|(held, _)| *held >= current);
+            self.signed_from = current;
+        }
+        let names: Vec<(u32, [u8; 32])> = blinded
+            .iter()
+            .map(|message| (epoch, sha3_256(&[message])))
+            .collect();
+        // Each message that no earlier request held, one time.
+        let mut fresh: Vec<Vec<u8>> = Vec::new();
+        let mut fresh_names = Vec::new();
+        for (name, message) in names.iter().zip(&blinded) {
+            if !self.signed.contains_key(name) && !fresh_names.contains(name) {
+                fresh_names.push(*name);
+                fresh.push(message.clone());
+            }
+        }
+        if !fresh.is_empty() {
+            let key = self.cross_relay_key(epoch).ok_or(Status::NotFound)?;
+            let signatures = crate::abuse::token::issue_cross_relay(key, &fresh)
+                .map_err(|_| Status::Malformed)?;
+            for (name, signature) in fresh_names.into_iter().zip(signatures) {
+                self.signed.insert(name, signature);
+                self.signed_order.push_back(name);
+            }
+        }
         let mut out = vec![u8::try_from(count).map_err(|_| Status::Malformed)?];
-        for signature in signed {
-            out.extend_from_slice(&signature);
+        for name in &names {
+            out.extend_from_slice(self.signed.get(name).ok_or(Status::Busy)?);
+        }
+        // The oldest signatures go at the bound, after this answer took
+        // its own.
+        while self.signed_order.len() > SIGNED_HELD_MAX {
+            if let Some(oldest) = self.signed_order.pop_front() {
+                self.signed.remove(&oldest);
+            }
         }
         Ok(out)
     }
@@ -1086,7 +1161,7 @@ impl Directory {
             return Err(Status::Stale);
         }
         if token_type == TYPE_CROSS_RELAY {
-            return self.issue_cross_relay(&mut r, epoch, count);
+            return self.issue_cross_relay(&mut r, epoch, current, count);
         }
         let issuer_pk = *self.issuer(epoch).map_err(|_| Status::Busy)?.public();
         let verifier = issue_verifier(&issuer_pk);
@@ -1283,6 +1358,48 @@ mod tests {
         // The signature of one blinded message is one value.
         let again = call(&mut dir, Kind::Issue, &body, now, &mut rng).unwrap();
         assert_eq!(again, answer);
+        // The directory holds each signature. Thus the same messages in
+        // another order, and one of them alone, take what it holds. It
+        // signs nothing more.
+        assert_eq!(dir.signed.len(), 2);
+        let (head, items) = body.split_at(7);
+        let (first, second) = items.split_at(items.len() / 2);
+        let (first_sig, second_sig) = answer[1..].split_at(256);
+        let turned = [head, second, first].concat();
+        assert_eq!(
+            call(&mut dir, Kind::Issue, &turned, now, &mut rng).unwrap(),
+            [&[2u8][..], second_sig, first_sig].concat()
+        );
+        let mut one = [head, second].concat();
+        one[6] = 1;
+        assert_eq!(
+            call(&mut dir, Kind::Issue, &one, now, &mut rng).unwrap(),
+            [&[1u8][..], second_sig].concat()
+        );
+        // One message two times in one batch is one signature.
+        let twice = [head, first, first].concat();
+        assert_eq!(
+            call(&mut dir, Kind::Issue, &twice, now, &mut rng).unwrap(),
+            [&[2u8][..], first_sig, first_sig].concat()
+        );
+        assert_eq!(dir.signed.len(), 2);
+        assert_eq!(dir.signed_order.len(), 2);
+        // A message whose proof of work does not verify takes no signature
+        // that the directory holds.
+        let mut bare = one.clone();
+        let last = bare.len() - 1;
+        bare[last] ^= 1;
+        assert!(call(&mut dir, Kind::Issue, &bare, now, &mut rng).is_err());
+        // The signatures of an epoch go when it ends.
+        let next = now + crate::abuse::EPOCH_SECONDS;
+        assert_eq!(epoch_number(next), epoch + 1);
+        let next_pk =
+            PublicKey2048::from_modulus(&dir.cross_relay_public(epoch + 1).unwrap()).unwrap();
+        let (_, next_body) =
+            dirclient::cross_relay_issue_request(epoch + 1, &next_pk, 1, &mut rng).unwrap();
+        call(&mut dir, Kind::Issue, &next_body, next, &mut rng).unwrap();
+        assert_eq!(dir.signed.len(), 1);
+        assert!(dir.signed.keys().all(|(held, _)| *held == epoch + 1));
 
         // ABU-110: an epoch two ahead holds no key yet.
         let far = epoch + 2;
@@ -1518,6 +1635,78 @@ mod tests {
     }
 
     #[test]
+    fn a_held_handle_with_a_mark_still_writes_and_retires_and_none_registers() {
+        // The profile of RFC 8265 passes the four marks of `DIS-089`.
+        fn passing(name: &str) -> Option<String> {
+            Some(name.to_ascii_lowercase())
+        }
+        let mut rng = Rng(21);
+        let (keys, keyset) = keys();
+        let mut dir = Directory::new(keys, DIRECTORY_EPOCH, passing).unwrap();
+        dir.tick(T0, &mut rng).unwrap();
+        let root = RootIdentity::new(Secret::new([7; 32]));
+        let hk = root.handle_key(0, 0);
+        for input in [&b"@a%23b#12"[..], b"@a#b#12", b"@a@b#12", b"@a/b#12"] {
+            let at = dir.last_close.unwrap();
+            // A registration takes no such name.
+            let spent = tokens(&mut dir, epoch_number(at), 1, at, &mut rng);
+            let register =
+                dirclient::register_body(&spent[0], input, &handle_entry(input, &hk, 0), None)
+                    .unwrap();
+            assert_eq!(
+                call(&mut dir, Kind::Register, &register, at, &mut rng),
+                Err(DirError::Status(Status::Refused))
+            );
+            // A directory of an earlier build holds the label.
+            let search_key = dir.voprf.evaluate_direct(input).to_vec();
+            dir.stage(&search_key, handle_entry(input, &hk, 0), &mut rng)
+                .unwrap();
+            dir.keep_label(
+                &search_key,
+                LabelRecord {
+                    input: input.to_vec(),
+                    label: Label::register(hk.public().to_bytes(), at),
+                    blob: None,
+                },
+            );
+            let now = at + DIRECTORY_EPOCH;
+            dir.tick(now, &mut rng).unwrap();
+            assert_eq!(
+                read(&mut dir, &keyset, input, now, &mut rng).unwrap(),
+                handle_entry(input, &hk, 0)
+            );
+            // The holder renews it, and moves it to its next key.
+            let (bytes, purpose) = challenge(&mut dir, true, input, now, &mut rng).unwrap();
+            let ans = answer(purpose, &hk, input, &bytes, None).unwrap();
+            let renew = dirclient::renew_body(input, &ans).unwrap();
+            call(&mut dir, Kind::Renew, &renew, now, &mut rng).unwrap();
+            let next = root.handle_key(0, 1);
+            let entry = handle_entry(input, &next, 1);
+            let (bytes, purpose) = challenge(&mut dir, false, input, now, &mut rng).unwrap();
+            let ans = answer(purpose, &hk, input, &bytes, Some(&entry)).unwrap();
+            let write = dirclient::write_body(input, &ans, &entry).unwrap();
+            call(&mut dir, Kind::Write, &write, now, &mut rng).unwrap();
+            let now = now + DIRECTORY_EPOCH;
+            dir.tick(now, &mut rng).unwrap();
+            // DIS-171: the holder retires it.
+            let tomb = DirectoryEntry::tombstone(input.to_vec(), 2);
+            let mut bytes_of = vec![0u8; tomb.len()];
+            let used = tomb.encode(&mut bytes_of).unwrap();
+            bytes_of.truncate(used);
+            let (bytes, purpose) = challenge(&mut dir, false, input, now, &mut rng).unwrap();
+            let ans = answer(purpose, &next, input, &bytes, Some(&bytes_of)).unwrap();
+            let write = dirclient::write_body(input, &ans, &bytes_of).unwrap();
+            call(&mut dir, Kind::Write, &write, now, &mut rng).unwrap();
+            let now = now + DIRECTORY_EPOCH;
+            dir.tick(now, &mut rng).unwrap();
+            let shown =
+                DirectoryEntry::parse(&read(&mut dir, &keyset, input, now, &mut rng).unwrap())
+                    .unwrap();
+            assert!(shown.is_tombstone());
+        }
+    }
+
+    #[test]
     fn an_address_retires_early_and_a_lapsed_lease_tombstones() {
         let mut rng = Rng(6);
         let (mut dir, keyset) = directory();
@@ -1592,6 +1781,48 @@ mod tests {
                 .unwrap();
         assert!(entry.is_tombstone());
         assert_eq!(entry.version, 1);
+    }
+
+    #[test]
+    fn a_label_whose_tombstone_does_not_build_holds_no_epoch_and_no_other_label() {
+        let mut rng = Rng(8);
+        let (mut dir, keyset) = directory();
+        dir.tick(T0, &mut rng).unwrap();
+        let root = RootIdentity::new(Secret::new([8; 32]));
+        let hk = root.handle_key(0, 0);
+        let handle = b"@carol#42";
+        let spent = tokens(&mut dir, epoch_number(T0), 1, T0, &mut rng);
+        let register =
+            dirclient::register_body(&spent[0], handle, &handle_entry(handle, &hk, 0), None)
+                .unwrap();
+        call(&mut dir, Kind::Register, &register, T0, &mut rng).unwrap();
+        // A stored label with a fault: an address input of a wrong length,
+        // whose tombstone entry does not build.
+        let held = dir
+            .labels
+            .get(dir.voprf.evaluate_direct(handle).as_slice())
+            .unwrap()
+            .clone();
+        let faulty = alloc::vec![0xEEu8; 32];
+        dir.labels.insert(
+            faulty.clone(),
+            LabelRecord {
+                input: [labels::ADDRESS_INDEX, b"short"].concat(),
+                ..held
+            },
+        );
+        // DIS-073: the leases lapse. The epoch closes, the handle takes
+        // its tombstone, and the label with the fault keeps its state.
+        let lapse = T0 + HANDLE_LEASE + DIRECTORY_EPOCH;
+        dir.tick(lapse, &mut rng).unwrap();
+        let lapse = lapse + DIRECTORY_EPOCH;
+        dir.tick(lapse, &mut rng).unwrap();
+        assert_eq!(dir.last_close, Some(lapse));
+        let entry =
+            DirectoryEntry::parse(&read(&mut dir, &keyset, handle, lapse, &mut rng).unwrap())
+                .unwrap();
+        assert!(entry.is_tombstone());
+        assert!(!dir.labels[&faulty].label.is_tombstoned());
     }
 
     /// The sealed profile blob that a lookup of `input` carries.

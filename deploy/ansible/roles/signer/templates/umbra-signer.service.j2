@@ -1,11 +1,21 @@
 [Unit]
 Description=UMBRA directory signer: one manifest (Part 10)
-After=network-online.target
+After=network-online.target time-sync.target
+Wants=time-sync.target
+# A run that fails leaves the old manifest in its place, and a root lives
+# three hours. The operator must learn of the failure before that.
+OnFailure=umbra-alert@%N.service
 
 [Service]
 Type=oneshot
 User=umbra-signer
 Group=umbra-signer
+# A manifest under a wrong clock has a wrong epoch. Thus a run after a
+# start of the server waits up to a minute for a clock within half a second
+# of the network time. The `+` runs chronyc outside the sandbox, which
+# holds no network. The `-` lets the run go on when chronyc gives no
+# answer, since a late manifest costs more than an hour without one.
+ExecStartPre=-+/usr/bin/chronyc waitsync 30 0.5 0 2
 ExecStart=/usr/local/bin/umbra-signer sign /etc/umbra-signer/sign.conf
 NoNewPrivileges=true
 ProtectSystem=strict
@@ -33,5 +43,7 @@ CapabilityBoundingSet=
 # nginx reads the manifest that it writes.
 UMask=0022
 LimitCORE=0
+MemoryHigh={{ umbra_signer_memory_high }}
+MemoryMax={{ umbra_signer_memory_max }}
 ReadWritePaths=/var/www/umbra/.well-known/umbra
 ReadOnlyPaths=/var/lib/umbra-signer

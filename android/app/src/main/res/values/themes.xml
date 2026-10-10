@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <style name="Theme.Umbra" parent="android:Theme.Material.Light.NoActionBar">
-        <!-- The ground of `design/mockups/light`, before the first frame. -->
+        <!-- The ground of the app, before the first frame. -->
         <item name="android:windowBackground">@color/surface</item>
         <!-- The app draws its own colours on each phone. -->
         <item name="android:forceDarkAllowed">false</item>

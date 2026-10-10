@@ -11,7 +11,7 @@ use ml_kem::{array::Array, DecapsulationKey, EncapsulationKey, KeyExport, MlKem7
 use rand_core::CryptoRng;
 use sha3::{Digest, Sha3_256};
 use x25519_dalek::{PublicKey as XPublic, StaticSecret};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::{contributory, suite, AddressType, State, Trace, VersionRange, TAG_LEN};
 use crate::{kem::KeyPair, labels, secret::Secret, Error};
@@ -20,7 +20,6 @@ const NAME: &[u8] = b"UMBRA-XKhfs/v1";
 /// The one handshake mode of v1.
 pub const MODE: u8 = 0x01;
 /// Size of an ML-KEM-768 encapsulation key.
-/// The length of an ML-KEM-768 encapsulation key.
 pub const EK_LEN: usize = 1184;
 /// Size of an ML-KEM-768 ciphertext.
 const CT_LEN: usize = 1088;
@@ -63,7 +62,7 @@ impl OneTimePrekey {
 
     /// Makes a prekey from the seeds `d || z`.
     pub fn from_seed(seed: Secret<64>) -> Self {
-        let dk = DecapsulationKey::<MlKem768>::from_seed(Seed::from(*seed.expose()));
+        let dk = decapsulation_key(&seed);
         let ek: [u8; EK_LEN] = dk.encapsulation_key().to_bytes().into();
         Self {
             id: prekey_id(&ek),
@@ -88,6 +87,15 @@ impl OneTimePrekey {
     pub fn id(&self) -> &[u8; PID_LEN] {
         &self.id
     }
+}
+
+/// The ML-KEM-768 key of the seeds `d || z`. The call wipes its copy of
+/// the seeds.
+fn decapsulation_key(seed: &Secret<64>) -> DecapsulationKey<MlKem768> {
+    let mut dz = Seed::from(*seed.expose());
+    let dk = DecapsulationKey::<MlKem768>::from_seed(dz);
+    dz.zeroize();
+    dk
 }
 
 /// `pid = SHA3-256("umbra/v1/prekey-id" || s1)[0..16]`.
@@ -263,7 +271,7 @@ impl Initiator {
         // 3. e1
         let mut seed = Secret::<64>::zeroed();
         rng.fill_bytes(seed.expose_mut());
-        let e1_dk = DecapsulationKey::<MlKem768>::from_seed(Seed::from(*seed.expose()));
+        let e1_dk = decapsulation_key(&seed);
         let (e1_out, rest) = rest.split_at_mut(EK_LEN);
         e1_out.copy_from_slice(&e1_dk.encapsulation_key().to_bytes());
         st.mix_hash(e1_out);
@@ -271,11 +279,12 @@ impl Initiator {
         // 4. skem1
         let s1 = EncapsulationKey::<MlKem768>::new(&Array::from(*invitation.s1))
             .map_err(|_| Error::Key)?;
-        let (skem1, ss1) = s1.encapsulate_with_rng(rng);
+        let (skem1, mut ss1) = s1.encapsulate_with_rng(rng);
         let (skem1_out, rest) = rest.split_at_mut(CT_LEN);
         skem1_out.copy_from_slice(&skem1);
         st.mix_hash(skem1_out);
         st.mix_key(&ss1);
+        ss1.zeroize();
         st.trace(trace, "1.4 skem1");
         // 5. tag1
         let (tag1_out, rest) = rest.split_at_mut(TAG_LEN);
@@ -330,7 +339,7 @@ impl Initiator {
         let e1_seed = Secret::new(reader.array::<64>()?);
         let n_hs = reader.array()?;
         reader.end()?;
-        let e1_dk = DecapsulationKey::<MlKem768>::from_seed(Seed::from(*e1_seed.expose()));
+        let e1_dk = decapsulation_key(&e1_seed);
         Ok(Self {
             st,
             e_sk,
@@ -341,6 +350,9 @@ impl Initiator {
     }
 
     /// Reads flight 2 and writes `app_2` into `app_out`. Returns its length.
+    ///
+    /// The state moves when the flight verifies and not before, thus a
+    /// flight 2 that fails leaves the initiator for the true one.
     pub fn read_flight2<T: Trace>(
         &mut self,
         flight: &[u8],
@@ -358,7 +370,8 @@ impl Initiator {
         let (er, rest) = flight.split_at(32);
         let (ekem1, rest) = rest.split_at(CT_LEN);
         let (tag2, payload) = rest.split_at(TAG_LEN);
-        let st = &mut self.st;
+        let mut read = self.st.copy();
+        let st = &mut read;
         // 1. er
         let er: [u8; 32] = er.try_into().map_err(|_| Error::Length)?;
         st.mix_hash(&er);
@@ -370,9 +383,10 @@ impl Initiator {
         st.trace(trace, "2.2 ee");
         // 3. ekem1
         let ct: ml_kem::Ciphertext<MlKem768> = Array::try_from(ekem1).map_err(|_| Error::Length)?;
-        let ss2 = self.e1_dk.decapsulate(&ct);
+        let mut ss2 = self.e1_dk.decapsulate(&ct);
         st.mix_hash(ekem1);
         st.mix_key(&ss2);
+        ss2.zeroize();
         st.trace(trace, "2.3 ekem1");
         // 4. tag2
         st.open(&mut [], tag2)?;
@@ -389,6 +403,7 @@ impl Initiator {
             return Err(Error::Handshake);
         }
         app_out.copy_from_slice(app_in);
+        self.st = read;
         Ok(app_len)
     }
 
@@ -512,9 +527,10 @@ impl Responder {
         st.mix_hash(&e1);
         st.trace(trace, "1.3 e1");
         let ct: ml_kem::Ciphertext<MlKem768> = Array::try_from(skem1).map_err(|_| Error::Length)?;
-        let ss1 = prekey.dk.decapsulate(&ct);
+        let mut ss1 = prekey.dk.decapsulate(&ct);
         st.mix_hash(skem1);
         st.mix_key(&ss1);
+        ss1.zeroize();
         st.trace(trace, "1.4 skem1");
         st.open(&mut [], tag1)?;
         st.trace(trace, "1.5 tag1");
@@ -571,11 +587,12 @@ impl Responder {
         // 3. ekem1
         let e1 =
             EncapsulationKey::<MlKem768>::new(&Array::from(self.e1)).map_err(|_| Error::Key)?;
-        let (ekem1, ss2) = e1.encapsulate_with_rng(rng);
+        let (ekem1, mut ss2) = e1.encapsulate_with_rng(rng);
         let (ekem1_out, rest) = rest.split_at_mut(CT_LEN);
         ekem1_out.copy_from_slice(&ekem1);
         st.mix_hash(ekem1_out);
         st.mix_key(&ss2);
+        ss2.zeroize();
         st.trace(trace, "2.3 ekem1");
         // 4. tag2
         let (tag2, rest) = rest.split_at_mut(TAG_LEN);
@@ -632,13 +649,18 @@ impl Responder {
 
     /// Reads flight 3, writes `app_3` into `app_out`, and returns the
     /// session keys, the initiator's static X25519 key, and the length.
+    ///
+    /// The call reads the flight on a copy of the state. Thus a flight 3
+    /// that does not verify leaves the responder for the true one. A second
+    /// holder of the invitation can write such a flight to the queue. The
+    /// caller drops the responder after the flight that verifies.
     pub fn read_flight3<T: Trace>(
-        mut self,
+        &self,
         flight: &[u8],
         app_out: &mut [u8],
         trace: &mut T,
     ) -> Result<(SessionKeys, [u8; 32], usize), Error> {
-        let er_sk = self.er_sk.take().ok_or(Error::Handshake)?;
+        let er_sk = self.er_sk.as_ref().ok_or(Error::Handshake)?;
         let payload_len = flight
             .len()
             .checked_sub(FLIGHT3_FIXED)
@@ -647,7 +669,8 @@ impl Responder {
             .checked_sub(PAYLOAD_OVERHEAD)
             .ok_or(Error::Length)?;
         let app_out = app_out.get_mut(..app_len).ok_or(Error::Length)?;
-        let st = &mut self.st;
+        let mut read = self.st.copy();
+        let st = &mut read;
         let (s_ct, rest) = flight.split_at(32 + TAG_LEN);
         let (tag3, payload) = rest.split_at(TAG_LEN);
         // 1. s_ct
@@ -670,7 +693,7 @@ impl Responder {
         st.open(app_out, tag)?;
         st.trace(trace, "3.4 payload3");
         // 5. split
-        let keys = split(st, InitialDh::Own(er_sk));
+        let keys = split(st, InitialDh::Own(er_sk.clone()));
         st.trace(trace, "3.5 split");
         Ok((keys, s_i, app_len))
     }

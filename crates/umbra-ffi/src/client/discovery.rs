@@ -60,6 +60,60 @@ const PICTURE_SETTING: &[u8] = b"profile-picture";
 /// The longest name of a Profile (Part 4 §4.2.5).
 pub const PROFILE_NAME_MAX: usize = 32;
 
+/// The identity roots from before a reset that still give the key of a
+/// published entry, in the local identity table (`DEV-306`). Each root
+/// holds its seed, a count, and the name of each entry that it serves. The
+/// directory holds the key of the earlier root for such an entry. Thus the
+/// device needs that root to answer a hello, to renew, to rotate, and to
+/// retire the entry. A name leaves the row with its entry, or when the log
+/// shows a later rotation of its entry. A root leaves the row with its last
+/// name. No write of the store alone takes a name out.
+pub(super) const EARLIER_ROOTS_KEY: &[u8] = b"discovery-roots";
+/// The name of an entry in that row: the kind, the index, the rotation.
+const ENTRY_NAME_LEN: usize = 1 + 4 + 4;
+
+type EntryName = [u8; ENTRY_NAME_LEN];
+type EarlierRoot = (Zeroizing<[u8; 32]>, Vec<EntryName>);
+
+fn entry_name(kind: EntryKind, index: u32, rotation: u32) -> EntryName {
+    let mut name = [0u8; ENTRY_NAME_LEN];
+    name[0] = match kind {
+        EntryKind::Address => 1,
+        EntryKind::Handle => 2,
+    };
+    name[1..5].copy_from_slice(&index.to_be_bytes());
+    name[5..].copy_from_slice(&rotation.to_be_bytes());
+    name
+}
+
+fn parse_earlier_roots(bytes: &[u8]) -> Result<Vec<EarlierRoot>, Error> {
+    let mut r = Cursor(bytes);
+    let mut roots = Vec::new();
+    while !r.0.is_empty() {
+        let seed = Zeroizing::new(r.array::<32>()?);
+        let count = usize::from(u16::from_be_bytes(r.array()?));
+        let mut names = Vec::with_capacity(count);
+        for _ in 0..count {
+            names.push(r.array::<ENTRY_NAME_LEN>()?);
+        }
+        roots.push((seed, names));
+    }
+    Ok(roots)
+}
+
+fn encode_earlier_roots(roots: &[EarlierRoot]) -> Result<Zeroizing<Vec<u8>>, Error> {
+    let mut out = Zeroizing::new(Vec::new());
+    for (seed, names) in roots {
+        out.extend_from_slice(seed.as_slice());
+        let count = u16::try_from(names.len()).map_err(|_| Error::TooLong)?;
+        out.extend_from_slice(&count.to_be_bytes());
+        for name in names {
+            out.extend_from_slice(name);
+        }
+    }
+    Ok(out)
+}
+
 /// The form of an entry with no rotation of its queue yet.
 const PUBLISHED_V1: u8 = 0x01;
 /// The form with the time of the queue and the queue before it.
@@ -351,7 +405,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(out)
     }
 
-    /// Keeps an entry.
+    /// Keeps an entry. The row of the earlier roots stays as it is
+    /// (`DEV-306`). The store takes a version before the directory does,
+    /// thus a write here is no proof that the directory holds its key. A
+    /// write that the directory refused puts the version before it back.
     pub fn put_published<R: CryptoRng + ?Sized>(
         &mut self,
         entry: &Published,
@@ -361,14 +418,151 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         self.put_row(PUBLISHED, &entry.id, &plain, rng)
     }
 
-    /// Drops an entry and each request that it brought.
-    pub fn drop_published(&mut self, id: &[u8; 16]) -> Result<(), Error> {
-        for request in self.contact_requests()? {
-            if request.via == *id {
-                self.delete_row(REQUESTS, &request.id)?;
-            }
+    /// Takes each name of an earlier root that the entry `id` holds no more
+    /// (`DEV-306`). The caller runs it after the log showed the held
+    /// version of that entry under its key. The directory holds the key of
+    /// the held rotation from then, thus no write and no renewal needs the
+    /// key before it. An earlier root leaves the store with its last name.
+    pub fn confirm_published<R: CryptoRng + ?Sized>(
+        &mut self,
+        id: &[u8; 16],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let published = self.published()?;
+        let Some(kept) = self.used_earlier_roots(&published, Some(id))? else {
+            return Ok(());
+        };
+        if kept.is_empty() {
+            self.delete_row(TableId::LOCAL_IDENTITY, EARLIER_ROOTS_KEY)
+        } else {
+            let value = encode_earlier_roots(&kept)?;
+            self.put_row(TableId::LOCAL_IDENTITY, EARLIER_ROOTS_KEY, &value, rng)
         }
-        self.delete_row(PUBLISHED, id)
+    }
+
+    /// Drops an entry and each request that it brought. DEV-306: the names
+    /// of the entry leave the earlier roots in the same commit, and a root
+    /// with no name goes. Thus a later entry at the same index takes the
+    /// key of the current root.
+    pub fn drop_published<R: CryptoRng + ?Sized>(
+        &mut self,
+        id: &[u8; 16],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let requests: Vec<[u8; 16]> = self
+            .contact_requests()?
+            .into_iter()
+            .filter(|request| request.via == *id)
+            .map(|request| request.id)
+            .collect();
+        let mut published = self.published()?;
+        published.retain(|entry| entry.id != *id);
+        let roots = match self.used_earlier_roots(&published, None)? {
+            Some(kept) if kept.is_empty() => Some(None),
+            Some(kept) => Some(Some(encode_earlier_roots(&kept)?)),
+            None => None,
+        };
+        let open = self.open_mut()?;
+        let roots_row = open
+            .store
+            .row_id(TableId::LOCAL_IDENTITY, EARLIER_ROOTS_KEY);
+        let entry_row = open.store.row_id(PUBLISHED, id);
+        let request_rows: Vec<RowId> = requests
+            .iter()
+            .map(|request| open.store.row_id(REQUESTS, request))
+            .collect();
+        let mut batch = open.store.begin();
+        for row in request_rows {
+            batch.delete(REQUESTS, row);
+        }
+        batch.delete(PUBLISHED, entry_row);
+        match &roots {
+            Some(Some(value)) => {
+                batch.put(TableId::LOCAL_IDENTITY, roots_row, None, value, rng)?;
+            }
+            Some(None) => batch.delete(TableId::LOCAL_IDENTITY, roots_row),
+            None => {}
+        }
+        Ok(batch.commit()?)
+    }
+
+    /// The identity roots from before a reset that still serve an entry.
+    fn earlier_roots(&self) -> Result<Vec<EarlierRoot>, Error> {
+        match self.get_row(TableId::LOCAL_IDENTITY, EARLIER_ROOTS_KEY)? {
+            Some(bytes) => parse_earlier_roots(&bytes),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// The stored row of the earlier roots, for a test.
+    #[cfg(test)]
+    pub(super) fn earlier_roots_row(&self) -> Result<Option<Zeroizing<Vec<u8>>>, Error> {
+        self.get_row(TableId::LOCAL_IDENTITY, EARLIER_ROOTS_KEY)
+    }
+
+    /// The row of the earlier roots after a reset at this moment. It holds
+    /// each root that the row holds now, and the current root for each
+    /// published entry that no earlier root serves. None when this device
+    /// publishes no entry. The reset writes it in the commit of the new
+    /// root.
+    pub(super) fn roots_for_published(&self) -> Result<Option<Zeroizing<Vec<u8>>>, Error> {
+        let mut roots = self.earlier_roots()?;
+        let served: Vec<EntryName> = roots
+            .iter()
+            .flat_map(|(_, names)| names.iter().copied())
+            .collect();
+        let names: Vec<EntryName> = self
+            .published()?
+            .iter()
+            .map(|entry| entry_name(entry.kind, entry.index, entry.rotation))
+            .filter(|name| !served.contains(name))
+            .collect();
+        if !names.is_empty() {
+            roots.push((self.root_seed()?, names));
+        }
+        if roots.is_empty() {
+            return Ok(None);
+        }
+        encode_earlier_roots(&roots).map(Some)
+    }
+
+    /// The earlier roots with each name that an entry of `published` can
+    /// still need, and no root with no name. None when the row holds
+    /// exactly that already. An entry needs each name of its kind and its
+    /// index. The name of its rotation gives its key. The name of the
+    /// rotation before it signs the write of a rotation that the directory
+    /// did not take yet. The entry `confirmed`, whose held version the log
+    /// showed under its key, needs the name of its rotation alone.
+    fn used_earlier_roots(
+        &self,
+        published: &[Published],
+        confirmed: Option<&[u8; 16]>,
+    ) -> Result<Option<Vec<EarlierRoot>>, Error> {
+        let roots = self.earlier_roots()?;
+        if roots.is_empty() {
+            return Ok(None);
+        }
+        let is_needed = |name: &EntryName| {
+            published.iter().any(|entry| {
+                let own = entry_name(entry.kind, entry.index, entry.rotation);
+                own[..5] == name[..5] && (own == *name || confirmed != Some(&entry.id))
+            })
+        };
+        let kept: Vec<EarlierRoot> = roots
+            .iter()
+            .map(|(seed, names)| {
+                let names: Vec<EntryName> = names
+                    .iter()
+                    .filter(|name| is_needed(name))
+                    .copied()
+                    .collect();
+                (seed.clone(), names)
+            })
+            .filter(|(_, names)| !names.is_empty())
+            .collect();
+        let is_same = kept.len() == roots.len()
+            && kept.iter().zip(&roots).all(|(a, b)| a.1.len() == b.1.len());
+        Ok((!is_same).then_some(kept))
     }
 
     /// Takes the next Public Address index (`IDN-006`).
@@ -389,9 +583,23 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(index)
     }
 
-    /// The key of an entry: `PublicAddressKey_j` or `HandleKey_{j,r}`.
+    /// The key of an entry: `PublicAddressKey_j` or `HandleKey_{j,r}`. An
+    /// entry that this device published before a reset of the identity
+    /// keeps the key of the root of that time (`DEV-306`). The directory
+    /// holds that key until the device retires the entry or rotates its
+    /// key.
     pub fn entry_key(&self, kind: EntryKind, index: u32, rotation: u32) -> Result<KeyPair, Error> {
-        let root = self.root_identity()?;
+        let name = entry_name(kind, index, rotation);
+        let earlier = self
+            .earlier_roots()?
+            .into_iter()
+            .find(|(_, names)| names.contains(&name));
+        let root = match earlier {
+            Some((seed, _)) => {
+                umbra_crypto::hierarchy::RootIdentity::new(umbra_crypto::secret::Secret::new(*seed))
+            }
+            None => self.root_identity()?,
+        };
         Ok(match kind {
             EntryKind::Address => root.public_address_key(index),
             EntryKind::Handle => root.handle_key(index, rotation),

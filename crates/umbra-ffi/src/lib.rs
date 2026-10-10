@@ -565,7 +565,7 @@ mod tests {
             .unwrap();
         assert!(client.is_group(conversation).unwrap());
         assert_eq!(client.conversations().unwrap().len(), contacts + 1);
-        let name_of = |client: &Client<MemoryBackend, Element>| {
+        let name_of = |client: &mut Client<MemoryBackend, Element>| {
             client
                 .summaries()
                 .unwrap()
@@ -573,7 +573,7 @@ mod tests {
                 .find(|summary| summary.conversation == conversation)
                 .map(|summary| summary.name)
         };
-        assert_eq!(name_of(&client).as_deref(), Some("Hiking"));
+        assert_eq!(name_of(&mut client).as_deref(), Some("Hiking"));
 
         // The creator is the owner at index 0, and the group is not ready
         // before the two relays named their queues (`GRP-191`).
@@ -667,7 +667,7 @@ mod tests {
         let info = client.group_info(conversation).unwrap();
         assert!(info.is_ready);
         assert_eq!(info.epoch, 1);
-        assert_eq!(name_of(&client).as_deref(), Some("Hiking"));
+        assert_eq!(name_of(&mut client).as_deref(), Some("Hiking"));
     }
 
     /// A group control object as the `AppMessage` of a group post.
@@ -2328,8 +2328,20 @@ mod tests {
             .unwrap()
             .is_empty());
 
-        // NET-186, NET-193: a record with no receipt for seven days makes the
-        // channel silent, and it goes to the send path again.
+        // NET-190: a candidate address needs a channel that is dead or
+        // silent, and a channel that lives holds none.
+        assert!(!client.channel_was_down(conversation).unwrap());
+        assert_eq!(
+            client
+                .hold_candidate(conversation, &real, &mut rng)
+                .unwrap(),
+            None
+        );
+        assert!(client.held_candidates().unwrap().is_empty());
+
+        // NET-186, NET-193: a relay acknowledged the record, and no record
+        // of the peer followed for seven days. The channel is then silent,
+        // and the record goes to the send path again. No receipt enters.
         let mut draft = client.new_draft(conversation);
         draft.set_text(&units("are you there")).unwrap();
         let message = client
@@ -2352,6 +2364,67 @@ mod tests {
         let again = client.take_outgoing().unwrap();
         assert_eq!(again.message, message);
         assert!(client.take_outgoing().is_none());
+
+        // NET-190: the blob of the peer of a silent channel gives a
+        // candidate. The row keeps it for the next run, and the channel is
+        // not dead.
+        client
+            .dead_channel_work(now + 16 * 86_400, epoch + 336, &[conversation], &mut rng)
+            .unwrap();
+        assert!(client.channel_was_down(conversation).unwrap());
+        assert_eq!(
+            client
+                .hold_candidate(conversation, &real, &mut rng)
+                .unwrap(),
+            Some(false)
+        );
+        let held = client.held_candidates().unwrap();
+        assert_eq!(held.len(), 1);
+        assert_eq!(
+            (held[0].0, held[0].1, held[0].3),
+            (conversation, contact.0, false)
+        );
+        assert_eq!(*held[0].2, real);
+
+        // Part 3 §3.2.6: a record that opens under the ratchet of the
+        // contact is a sign of the peer. The silence ends, and a later
+        // acknowledgment of a relay starts it again.
+        let hello = umbra_wire::app::AppMessage {
+            kind: umbra_wire::app::AppKind::Text,
+            msg_id: [0x71; 16],
+            sent_at: later_ms,
+            body: b"here",
+        };
+        let mut app = vec![0u8; hello.len()];
+        hello.encode(&mut app).unwrap();
+        client
+            .commit_network(&[], &[(contact, app)], later_ms, &mut rng)
+            .unwrap();
+        assert!(client
+            .silent_conversations(later_ms + 30 * 86_400 * 1_000)
+            .unwrap()
+            .is_empty());
+        // The condition ended: the row goes, and its candidate with it.
+        client
+            .dead_channel_work(now + 17 * 86_400, epoch + 336, &[], &mut rng)
+            .unwrap();
+        assert!(!client.channel_was_down(conversation).unwrap());
+        assert!(client.held_candidates().unwrap().is_empty());
+        let mut draft = client.new_draft(conversation);
+        draft.set_text(&units("and now")).unwrap();
+        let second = client
+            .send_draft(draft, later_ms + 1_000, &mut rng)
+            .unwrap();
+        while client.take_outgoing().is_some() {}
+        client
+            .set_delivery(&second, Delivery::Accepted, &mut rng)
+            .unwrap();
+        assert_eq!(
+            client
+                .silent_conversations(later_ms + 1_000 + 7 * 86_400 * 1_000)
+                .unwrap(),
+            [conversation]
+        );
     }
 
     #[test]
@@ -4240,6 +4313,41 @@ mod tests {
         }));
         assert!(!alice.resend_held(3_000 + HOLD_RETRY).unwrap());
         assert!(alice.take_outgoing().is_none());
+
+        // NET-219, NET-221: a record that a full queue refuses at each send
+        // goes `SEND_MAX_ATTEMPTS` times and then fails. Each wait is twice
+        // the one before, thus the sends are no burst.
+        let mut draft = alice.new_draft(conversation);
+        draft.set_text(&units("never fits")).unwrap();
+        let held = alice.send_draft(draft, 1_003_000, &mut rng).unwrap();
+        assert_eq!(alice.take_outgoing().unwrap().message, held);
+        let mut now = 10_000;
+        alice.hold_for_room(&held, now, &mut rng).unwrap();
+        assert!(alice.resend_held(now + HOLD_RETRY).unwrap());
+        assert_eq!(alice.take_outgoing().unwrap().message, held);
+        now += HOLD_RETRY;
+        alice.hold_for_room(&held, now, &mut rng).unwrap();
+        assert!(!alice.resend_held(now + 2 * HOLD_RETRY - 1).unwrap());
+        assert!(alice.resend_held(now + 2 * HOLD_RETRY).unwrap());
+        assert_eq!(alice.take_outgoing().unwrap().message, held);
+        for _ in 2..umbra_queue::params::SEND_MAX_ATTEMPTS {
+            assert_eq!(alice.info(&held).unwrap().delivery, Delivery::Queued);
+            alice.hold_for_room(&held, now, &mut rng).unwrap();
+        }
+        assert_eq!(alice.info(&held).unwrap().delivery, Delivery::Failed);
+
+        // NET-220: a record whose first refusal is `SEND_GIVE_UP` old
+        // fails at the next one.
+        let mut draft = alice.new_draft(conversation);
+        draft.set_text(&units("waits a week")).unwrap();
+        let old = alice.send_draft(draft, 1_004_000, &mut rng).unwrap();
+        assert_eq!(alice.take_outgoing().unwrap().message, old);
+        alice.hold_for_room(&old, 20_000, &mut rng).unwrap();
+        assert_eq!(alice.info(&old).unwrap().delivery, Delivery::Queued);
+        alice
+            .hold_for_room(&old, 20_000 + umbra_queue::params::SEND_GIVE_UP, &mut rng)
+            .unwrap();
+        assert_eq!(alice.info(&old).unwrap().delivery, Delivery::Failed);
     }
 
     #[test]
@@ -4540,6 +4648,160 @@ mod tests {
     }
 
     #[test]
+    fn the_kept_epochs_go_before_a_removal_and_a_rival_that_removes_this_device_shows() {
+        use umbra_core::devset::{
+            link::{sign_roster, DeviceIdentity, LinkHello},
+            roster::Roster,
+        };
+        use umbra_wire::app::{
+            devset::{ControlType, DeviceSetBody},
+            AppMessage, Channel,
+        };
+
+        let mut rng = Rng(121);
+        let mut phone = new_client(&mut rng);
+        phone.ensure_device_set("Phone", &mut rng).unwrap();
+        let own = phone.device_identity().unwrap().unwrap();
+        let e0 = phone.roster_bytes().unwrap().unwrap();
+        let hello = |identity: &DeviceIdentity| LinkHello {
+            device_id: identity.device_id,
+            device_pk: identity.device_key().public().clone(),
+            roster_pk: identity.roster_key().verifying_key().to_bytes().to_vec(),
+            label: identity.label,
+            ct: umbra_crypto::kem::Ciphertext::from_bytes(&[0; umbra_crypto::kem::CIPHERTEXT_LEN])
+                .unwrap(),
+        };
+        let laptop = DeviceIdentity::generate("Laptop", &mut rng);
+        let tablet = DeviceIdentity::generate("Tablet", &mut rng);
+        let e1 = phone.sign_linked_device(&hello(&laptop), &mut rng).unwrap();
+        phone.commit_roster(&e1, &mut rng).unwrap();
+        // DEV-224: a second device with the identifier of the laptop.
+        assert!(phone.sign_linked_device(&hello(&laptop), &mut rng).is_err());
+        let laptop_channel = phone.conversation_for(&[0x7D; 32]).unwrap();
+        phone
+            .set_pending_peer(laptop.device_id, &laptop.label, &mut rng)
+            .unwrap();
+        phone.mark_device_peer(laptop_channel, &mut rng).unwrap();
+
+        // DEV-180, DEV-181: the laptop signs an epoch 2 that revokes the
+        // phone, and the phone signed its own epoch 2 first. The phone
+        // takes no such rival, and it shows that the laptop removed it.
+        let e2 = phone.sign_linked_device(&hello(&tablet), &mut rng).unwrap();
+        phone.commit_roster(&e2, &mut rng).unwrap();
+        let parent = Roster::parse(&e1).unwrap();
+        let rival = Roster {
+            epoch: 2,
+            devices: parent
+                .devices
+                .iter()
+                .filter(|entry| entry.device_id != own.device_id)
+                .cloned()
+                .collect(),
+            revoked: vec![own.device_id],
+            claims: Vec::new(),
+            prev_hash: Roster::hash(&e1),
+            signer_id: laptop.device_id,
+            sig: parent.sig,
+        };
+        let rival = sign_roster(&rival, &laptop.roster_key(), &mut rng).unwrap();
+        assert!(!phone.removed_from_set().unwrap());
+        assert!(!phone.apply_roster(&rival, &mut rng).unwrap());
+        assert!(phone.removed_from_set().unwrap());
+        assert_eq!(phone.roster_bytes().unwrap().unwrap(), e2);
+
+        let epochs_of = |sends: Vec<crate::client::SyncSend>| -> Vec<Vec<u8>> {
+            sends
+                .into_iter()
+                .filter(|send| send.peer == laptop_channel)
+                .filter_map(|send| {
+                    let record = AppMessage::parse(&send.app, Channel::Pairwise).ok()?;
+                    match DeviceSetBody::parse(record.body).ok()? {
+                        DeviceSetBody::Control {
+                            control_type: ControlType::RosterEpoch,
+                            payload,
+                        } => Some(payload.to_vec()),
+                        _ => None,
+                    }
+                })
+                .collect()
+        };
+        // DEV-229: the laptop sends its head, epoch 1. The phone answers
+        // with the epoch after it, one time for one head in a run. A copy
+        // of that epoch gets no second answer, thus no chain echoes between
+        // two devices.
+        while phone.take_sync_send().is_some() {}
+        let head_of_laptop = |msg_id: u8| {
+            let body = DeviceSetBody::Control {
+                control_type: ControlType::RosterEpoch,
+                payload: &e1,
+            };
+            let mut encoded = vec![0u8; e1.len() + 16];
+            let used = body.encode(&mut encoded).unwrap();
+            record(
+                umbra_wire::app::AppKind::DeviceSet,
+                [msg_id; 16],
+                &encoded[..used],
+            )
+        };
+        let from_laptop = ContactId([0x7D; 32]);
+        deliver(
+            &mut phone,
+            &from_laptop,
+            &head_of_laptop(0x73),
+            2_000_000,
+            &mut rng,
+        );
+        let answer = epochs_of(core::iter::from_fn(|| phone.take_sync_send()).collect());
+        assert_eq!(answer, core::slice::from_ref(&e2));
+        deliver(
+            &mut phone,
+            &from_laptop,
+            &head_of_laptop(0x74),
+            2_000_000,
+            &mut rng,
+        );
+        let answer = epochs_of(core::iter::from_fn(|| phone.take_sync_send()).collect());
+        assert!(answer.is_empty());
+        // A new run answers again: the queue of the last one is gone.
+        phone.start_sync_resend(&mut rng).unwrap();
+        while phone.take_sync_send().is_some() {}
+        deliver(
+            &mut phone,
+            &from_laptop,
+            &head_of_laptop(0x75),
+            2_000_000,
+            &mut rng,
+        );
+        let answer = epochs_of(core::iter::from_fn(|| phone.take_sync_send()).collect());
+        assert_eq!(answer, core::slice::from_ref(&e2));
+
+        // DEV-229, DEV-313: the laptop missed epoch 2. The epochs that the
+        // phone kept go on its channel before the epoch that revokes it,
+        // in order, thus it verifies that epoch.
+        while phone.take_sync_send().is_some() {}
+        let e3 = phone.revoke_device(laptop.device_id, &mut rng).unwrap();
+        let sent = epochs_of(core::iter::from_fn(|| phone.take_sync_send()).collect());
+        assert_eq!(sent, [e0.clone(), e1.clone(), e2.clone(), e3.clone()]);
+
+        // No relay took the notice, and a lock or a new start emptied the
+        // queue of the channel. The phone signed one more epoch since. The
+        // next run sends the notice again with the kept epochs that lead
+        // to it, and with no epoch above it (DEV-313).
+        let third = DeviceIdentity::generate("Third", &mut rng);
+        let e4 = phone.sign_linked_device(&hello(&third), &mut rng).unwrap();
+        phone.commit_roster(&e4, &mut rng).unwrap();
+        while phone.take_sync_send().is_some() {}
+        phone.end_revoked_channels(&mut rng).unwrap();
+        let again = epochs_of(core::iter::from_fn(|| phone.take_sync_send()).collect());
+        assert_eq!(again, [e0, e1, e2, e3]);
+        // One notice waits at a time, and its chain goes once with it.
+        phone.end_revoked_channels(&mut rng).unwrap();
+        phone.end_revoked_channels(&mut rng).unwrap();
+        let once = epochs_of(core::iter::from_fn(|| phone.take_sync_send()).collect());
+        assert_eq!(once.len(), 4);
+    }
+
+    #[test]
     fn a_rival_roster_takes_the_order_and_a_fork_shows_and_names_its_signer() {
         use crate::client::{FORK_ONE_SIGNER, FORK_PEER, FORK_REVOKED};
         use umbra_core::devset::{
@@ -4808,6 +5070,312 @@ mod tests {
         // A channel that names no peer starts nothing.
         let stranger = phone.conversation_for(&[0x7B; 32]).unwrap();
         phone.sync_send_lost(stranger, &mut rng).unwrap();
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn a_store_of_an_earlier_build_in_a_sqlite_file_moves_at_the_unlock_and_keeps_each_message() {
+        use crate::sqlite::SqliteBackend;
+        use umbra_core::{
+            identity::table::{TableKey, TableState},
+            session::node::StateChange,
+            store::{
+                engine::{Backend, Batch, Store, StoredRow, StoredTable, Write},
+                record::{SealedRecord, TableId},
+            },
+        };
+        use umbra_crypto::{aead, hkdf::Hkdf, secret::Secret, sha3::Sha3_256};
+        use umbra_wire::app::AppKind;
+
+        let directory = std::env::temp_dir().join(format!("umbra-ffi-move-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("store.db").to_str().unwrap().to_owned();
+        let mut rng = Rng(131);
+        let element = Element([1; 32]);
+        let passphrase = units("correct horse");
+
+        // A store of this build in a file: a contact and two messages.
+        let mut client = Client::create(
+            SqliteBackend::open(&path).unwrap(),
+            element.clone(),
+            &passphrase,
+            CHEAP,
+            1_000,
+            &mut rng,
+        )
+        .unwrap();
+        let header = *client.header();
+        let contact = ContactId([0x91; 32]);
+        let change = StateChange::Contact {
+            contact,
+            state: zeroize::Zeroizing::new(vec![1, 2, 3]),
+        };
+        let first = record(AppKind::Text, [1; 16], b"first");
+        client
+            .commit_network(&[change], &[(contact, first)], 2_000_000, &mut rng)
+            .unwrap();
+        let second = record(AppKind::Text, [2; 16], b"second");
+        client
+            .commit_network(&[], &[(contact, second)], 2_001_000, &mut rng)
+            .unwrap();
+        let conversation = client.conversation_for(&contact.0).unwrap();
+        let texts = |client: &Client<SqliteBackend, Element>| -> Vec<Vec<u16>> {
+            client
+                .messages(conversation)
+                .unwrap()
+                .iter()
+                .map(|message| {
+                    let mut view = View::default();
+                    client.render(message, &mut view).unwrap();
+                    view.0
+                })
+                .collect()
+        };
+        assert_eq!(texts(&client), [units("first"), units("second")]);
+        client.lock();
+        drop(client);
+
+        // The same file as a build of record version 0x01 held it. The test
+        // seals each record again by hand under the associated data of that
+        // version, `table_id || row_id`. Each MAC has the first form.
+        let store_key = || header.unwrap(b"correct horse", &element).unwrap();
+        let table_key = TableKey::derive(&store_key());
+        let mut backend = SqliteBackend::open(&path).unwrap();
+        let mut writes = Vec::new();
+        let mut earlier = Vec::new();
+        let mut set = TableState::new();
+        let stored = |state: &TableState, mac: [u8; 32]| {
+            let (accum, row_count, commit_counter) = state.fields();
+            StoredTable {
+                accum,
+                row_count,
+                commit_counter,
+                mac,
+            }
+        };
+        for (table, _) in backend.tables().unwrap() {
+            if table == TableId::SET {
+                continue;
+            }
+            let mut state = TableState::new();
+            for row in backend.rows(table, None).unwrap() {
+                let sealed = SealedRecord::from_bytes(row.sealed).unwrap();
+                let plain = zeroize::Zeroizing::new(
+                    sealed
+                        .open(&store_key(), table, &row.row_id, row.owner.as_ref())
+                        .unwrap(),
+                );
+                let salt = [0xA5u8; 16];
+                let nonce = [0xB6u8; aead::NONCE_LEN];
+                let ad = [&[table.0][..], &row.row_id].concat();
+                let mut key = Secret::<32>::zeroed();
+                Hkdf::<Sha3_256>::new(Some(&salt), store_key().expose())
+                    .expand(
+                        &[&b"umbra/v1/record-key"[..], &ad].concat(),
+                        key.expose_mut(),
+                    )
+                    .unwrap();
+                let mut body = plain.to_vec();
+                let tag = aead::seal(&key, &nonce, &ad, &mut body).unwrap();
+                let old = [&salt[..], &nonce, &body, &tag].concat();
+                state.insert(&table_key.row_tag(&[table.0], &row.row_id, &tag));
+                earlier.push((table, row.row_id, old.clone()));
+                writes.push(Write::Put(
+                    table,
+                    StoredRow {
+                        row_id: row.row_id,
+                        owner: row.owner,
+                        sealed: old,
+                    },
+                ));
+            }
+            let mac = state.commit(&table_key, &[table.0]);
+            writes.push(Write::Table(table, stored(&state, mac)));
+            set.insert(&table_key.row_tag(&[TableId::SET.0], &[table.0], &[0; 16]));
+        }
+        assert!(earlier.len() > 4);
+        let mac = set.commit(&table_key, &[TableId::SET.0]);
+        writes.push(Write::Table(TableId::SET, stored(&set, mac)));
+        backend
+            .apply(&Batch {
+                writes,
+                deletion: false,
+            })
+            .unwrap();
+        drop(backend);
+
+        // The unlock reads the store of the earlier form, and the pass of
+        // the unlock moves it with no fault (IMP-130).
+        let mut client = Client::open(
+            SqliteBackend::open(&path).unwrap(),
+            element.clone(),
+            header,
+            3_000,
+        );
+        client.unlock(&passphrase, 3_000).unwrap();
+        assert_eq!(texts(&client), [units("first"), units("second")]);
+        client.migrate_store(&mut rng).unwrap();
+        assert_eq!(texts(&client), [units("first"), units("second")]);
+        client.audit().unwrap();
+        // The moved store takes a record as each store does.
+        let third = record(AppKind::Text, [3; 16], b"third");
+        client
+            .commit_network(&[], &[(contact, third)], 3_001_000, &mut rng)
+            .unwrap();
+        let mut faults = 0;
+        while let Some(event) = client.next_event() {
+            faults += usize::from(event == Event::IntegrityFault);
+        }
+        assert_eq!(faults, 0);
+        client.lock();
+        drop(client);
+
+        // The file holds no record of version 0x01, and it is a store of
+        // the current version at each later unlock.
+        let backend = SqliteBackend::open(&path).unwrap();
+        for (table, row_id, old) in &earlier {
+            let held = backend.read(*table, row_id).unwrap().unwrap();
+            assert_ne!(&held.sealed, old);
+        }
+        let store = Store::unlock(backend, store_key()).unwrap();
+        assert!(!store.migration_due());
+        for table in store.table_ids() {
+            store.audit(table).unwrap();
+        }
+        drop(store);
+        let mut client = Client::open(
+            SqliteBackend::open(&path).unwrap(),
+            element.clone(),
+            header,
+            4_000,
+        );
+        client.unlock(&passphrase, 4_000).unwrap();
+        client.migrate_store(&mut rng).unwrap();
+        assert_eq!(
+            texts(&client),
+            [units("first"), units("second"), units("third")]
+        );
+        drop(client);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_relayed_timed_record_that_this_device_does_not_hold_yet_goes_again_as_a_record() {
+        use umbra_core::devset::{
+            engine::{SyncEngine, Taken},
+            link::{DeviceIdentity, LinkHello},
+            sync::{Origin, AUTHOR_PEER, SCOPE_PAIRWISE},
+        };
+        use umbra_core::session::node::StateChange;
+        use umbra_wire::app::{AppKind, AppMessage, Channel};
+
+        let mut rng = Rng(122);
+        let mut phone = new_client(&mut rng);
+        phone.ensure_device_set("Phone", &mut rng).unwrap();
+        let own = phone.device_identity().unwrap().unwrap();
+        // The phone owns the channels, and it links a laptop and a tablet.
+        let mut link = |phone: &mut Client<MemoryBackend, Element>, name: &str, at: u8| {
+            let device = DeviceIdentity::generate(name, &mut rng);
+            let hello = LinkHello {
+                device_id: device.device_id,
+                device_pk: device.device_key().public().clone(),
+                roster_pk: device.roster_key().verifying_key().to_bytes().to_vec(),
+                label: device.label,
+                ct: umbra_crypto::kem::Ciphertext::from_bytes(
+                    &[0; umbra_crypto::kem::CIPHERTEXT_LEN],
+                )
+                .unwrap(),
+            };
+            let roster = phone.sign_linked_device(&hello, &mut rng).unwrap();
+            phone.commit_roster(&roster, &mut rng).unwrap();
+            let channel = ContactId([at; 32]);
+            let change = StateChange::Contact {
+                contact: channel,
+                state: zeroize::Zeroizing::new(vec![1, 2, 3]),
+            };
+            phone
+                .commit_network(&[change], &[], 1_000_000, &mut rng)
+                .unwrap();
+            let conversation = phone.conversation_for(&channel.0).unwrap();
+            phone
+                .set_pending_peer(device.device_id, &device.label, &mut rng)
+                .unwrap();
+            phone.mark_device_peer(conversation, &mut rng).unwrap();
+            (device, channel, conversation)
+        };
+        let (laptop, laptop_channel, _) = link(&mut phone, "Laptop", 0x61);
+        let (tablet, _, tablet_conversation) = link(&mut phone, "Tablet", 0x62);
+        let mut rng = Rng(123);
+        while phone.take_sync_send().is_some() {}
+
+        // The laptop publishes a timed record of a conversation whose
+        // identity entry the phone did not apply yet (DEV-294). The phone
+        // holds it, and relays it to the tablet (DEV-308).
+        let mut engine = SyncEngine::new(laptop.device_id, &[own.device_id]).unwrap();
+        let origin = Origin {
+            scope: SCOPE_PAIRWISE,
+            subject: [0x42; 32],
+            author: AUTHOR_PEER,
+        };
+        let inner = record(AppKind::Text, [9; 16], b"for one hour");
+        let published = engine
+            .publish(&inner, origin, [9; 16], 3_600, 2_000)
+            .unwrap();
+        let carried = record(AppKind::DeviceSet, [0x72; 16], &published.body);
+        deliver(&mut phone, &laptop_channel, &carried, 2_000_000, &mut rng);
+        while phone.take_sync_send().is_some() {}
+
+        // The tablet took nothing, and the resend starts. The record goes
+        // again as a record, with the period that remains, and as no void.
+        // A void would take the counter at the tablet, and the record would
+        // be a duplicate there for good.
+        let mut tablet_engine = SyncEngine::new(tablet.device_id, &[own.device_id]).unwrap();
+        let resent = |phone: &mut Client<MemoryBackend, Element>, now: u64, rng: &mut Rng| {
+            phone.sync_send_lost(tablet_conversation, rng).unwrap();
+            let mut bodies = Vec::new();
+            while phone.resend_one(now, rng).unwrap() {
+                while let Some(send) = phone.take_sync_send() {
+                    if send.peer == tablet_conversation {
+                        let app = AppMessage::parse(&send.app, Channel::Pairwise).unwrap();
+                        bodies.push(app.body.to_vec());
+                    }
+                }
+            }
+            bodies
+        };
+        let bodies = resent(&mut phone, 2_600, &mut rng);
+        let taken: Vec<Taken> = bodies
+            .iter()
+            .map(|body| {
+                tablet_engine
+                    .clone()
+                    .receive(&own.device_id, body, 2_600)
+                    .unwrap()
+            })
+            .collect();
+        let period = taken.iter().find_map(|taken| match taken {
+            Taken::Record {
+                inner: held,
+                expires_in,
+                ..
+            } if *held == inner => Some(*expires_in),
+            _ => None,
+        });
+        assert_eq!(period, Some(3_000));
+        assert!(!taken.contains(&Taken::Void));
+
+        // DEV-069: after the end of the period the body is gone for good,
+        // and the counter goes as a void.
+        let bodies = resent(&mut phone, 2_000 + 3_600, &mut rng);
+        let taken: Vec<Taken> = bodies
+            .iter()
+            .map(|body| tablet_engine.receive(&own.device_id, body, 5_600).unwrap())
+            .collect();
+        assert!(taken.contains(&Taken::Void));
+        assert!(!taken
+            .iter()
+            .any(|taken| matches!(taken, Taken::Record { inner: held, .. } if *held == inner)));
     }
 
     #[test]
@@ -5732,7 +6300,7 @@ mod tests {
         let outgoing = alice.take_outgoing().unwrap();
         let record = AppMessage::parse(&outgoing.app, Channel::Pairwise).unwrap();
         let body = AttachmentBody::parse(record.body).unwrap();
-        assert_eq!(body.name, Some("Minutes 2026-09.pdf"));
+        assert_eq!(body.name.as_deref(), Some("Minutes 2026-09.pdf"));
 
         // Bob sees the name and the padded size, and the exact size once
         // the file is there.
@@ -6601,5 +7169,263 @@ mod tests {
             elsewhere.unlock(&units("correct horse"), 1),
             Err(Error::WrongPassphrase)
         );
+    }
+
+    #[test]
+    fn a_record_that_does_not_parse_commits_and_shows_nothing_and_the_next_one_arrives() {
+        use umbra_core::session::node::StateChange;
+        use umbra_wire::app::{AppKind, AppMessage, Channel};
+
+        let mut rng = Rng(91);
+        let (mut client, contact, conversation) = client_with_contact(92);
+        while client.next_event().is_some() {}
+        let state = |step: u8| StateChange::Contact {
+            contact,
+            state: zeroize::Zeroizing::new(vec![step; 3]),
+        };
+        let stored = |client: &Client<MemoryBackend, Element>| -> Vec<u8> {
+            let network = client.stored_network().unwrap();
+            let (_, state) = network
+                .contacts
+                .iter()
+                .find(|(held, _)| *held == conversation)
+                .unwrap();
+            state.to_vec()
+        };
+
+        // WIR-023: a text that is no UTF-8, a kind of a later build, and
+        // bytes that are no record. A contact with another build seals each
+        // one under a ratchet key that opens.
+        let bad_text = record(AppKind::Text, [1; 16], &[0xFF, 0xFE]);
+        let mut unknown_kind = record(AppKind::Text, [2; 16], b"of a later build");
+        unknown_kind[1] = 0xEE;
+        let no_record = vec![0xA5; 7];
+        for (step, app) in [(4u8, bad_text), (5, unknown_kind), (6, no_record)] {
+            assert!(AppMessage::parse(&app, Channel::Pairwise).is_err());
+            // IMP-132: the batch of the record commits with the state that
+            // opened it. Thus the `ACK` of the run covers the record, and
+            // no relay gives it to the next run again.
+            client
+                .commit_network(&[state(step)], &[(contact, app)], 2_000_000, &mut rng)
+                .unwrap();
+            assert_eq!(stored(&client), vec![step; 3]);
+            // The record shows nothing: no message, and no event.
+            assert!(client.messages(conversation).unwrap().is_empty());
+            assert_eq!(client.next_event(), None);
+        }
+
+        // The conversation lives: the next record of the contact arrives.
+        client
+            .commit_network(
+                &[state(7)],
+                &[(contact, record(AppKind::Text, [3; 16], b"still here"))],
+                2_000_100,
+                &mut rng,
+            )
+            .unwrap();
+        assert_eq!(stored(&client), vec![7; 3]);
+        let messages = client.messages(conversation).unwrap();
+        assert_eq!(messages.len(), 1);
+        let mut view = View::default();
+        client.render(&messages[0], &mut view).unwrap();
+        assert_eq!(view.0, units("still here"));
+        client.audit().unwrap();
+    }
+
+    #[test]
+    fn the_erasure_of_a_link_object_lives_in_the_store_until_each_relay_answered() {
+        use umbra_crypto::secret::Secret;
+        let mut rng = Rng(171);
+        let mut alice = new_client(&mut rng);
+        // DEV-003: the store keeps the erasure from the write of the object.
+        alice
+            .keep_erasure(
+                &[0x51; 32],
+                &Secret::new([0x52; 32]),
+                &[[0x53; 32]],
+                &mut rng,
+            )
+            .unwrap();
+        // The row is no file of a message: the start of a run takes none of
+        // it, because its link can still run.
+        alice.requeue_transfers().unwrap();
+        assert!(alice.take_erasure().is_none());
+        // A lock takes the memory of the link, and the store gives the
+        // erasure to a caller that runs no link.
+        alice.lock();
+        alice.unlock(&units("correct horse"), 5_000).unwrap();
+        let kept = alice.kept_erasures().unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].chunk_id, [0x51; 32]);
+        assert_eq!(kept[0].cred.expose(), &[0x52; 32]);
+        assert_eq!(kept[0].relays, [[0x53; 32]]);
+        // ATT-161: each relay answered, and the row leaves.
+        alice.chunk_erased(&[0x51; 32]).unwrap();
+        assert!(alice.kept_erasures().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_sync_channel_that_opens_with_no_pending_device_ends() {
+        use umbra_core::session::node::{ContactId, StateChange};
+        let mut rng = Rng(172);
+        let mut client = new_client(&mut rng);
+        let contact = ContactId([9; 32]);
+        let state = [&[0x02u8][..], &[5u8; 16], &[6u8; 32], &[0; 8]].concat();
+        let change = StateChange::Contact {
+            contact,
+            state: zeroize::Zeroizing::new(state),
+        };
+        client
+            .commit_network(&[change], &[], 1_000_000, &mut rng)
+            .unwrap();
+        let conversation = client.conversation_for(&contact.0).unwrap();
+        // DEV-290: no device waits for a sync channel, thus the channel
+        // names none. It ends, and no view shows it.
+        assert!(!client.holds_pending_peer().unwrap());
+        client
+            .refuse_device_channel(conversation, &mut rng)
+            .unwrap();
+        assert!(client.is_ended_channel(conversation).unwrap());
+        assert!(client.conversations().unwrap().is_empty());
+        assert!(client.device_peers().unwrap().is_empty());
+        // A link that the user confirmed names its device.
+        client
+            .set_pending_peer([7; 16], &[0; umbra_core::devset::link::LABEL_LEN], &mut rng)
+            .unwrap();
+        assert!(client.holds_pending_peer().unwrap());
+    }
+
+    #[test]
+    fn the_erase_of_a_deleted_file_lives_through_a_lock_until_each_relay_answered() {
+        use umbra_core::attach::transfer::Shape;
+
+        let mut rng = Rng(93);
+        let (mut alice, _, conversation) = client_with_contact(94);
+        let shape = Shape {
+            mime_class: 1,
+            pixel_w: 640,
+            pixel_h: 480,
+            media_seconds: 0,
+        };
+        let send = |alice: &mut Client<MemoryBackend, Element>, rng: &mut Rng, seed: u8| {
+            let mut draft = alice.new_draft(conversation);
+            draft
+                .attach(zeroize::Zeroizing::new(vec![seed; 9_000]), shape)
+                .unwrap();
+            let sent = alice.send_draft(draft, 1_000_000, rng).unwrap();
+            assert_eq!(alice.take_upload().unwrap().message, sent);
+            alice.upload_done(&sent, &uploaded_file(seed), rng).unwrap();
+            sent
+        };
+        let first = send(&mut alice, &mut rng, 0x41);
+        let second = send(&mut alice, &mut rng, 0x42);
+
+        // ATT-160: a file that the user did not delete erases nothing, at
+        // no start of a run.
+        alice.requeue_transfers().unwrap();
+        assert!(alice.take_erasure().is_none());
+
+        // ATT-161, IMP-164: the deletion takes each row of the file, and
+        // the chunk is due at its relays.
+        alice.delete_for_me(&first).unwrap();
+        assert_eq!(alice.file_bytes(&first), Err(Error::NotFound));
+        let erase = alice.take_erasure().unwrap();
+        assert_eq!(erase.chunk_id, [0x41; 32]);
+        assert!(alice.take_erasure().is_none());
+
+        // The `CDEL` did not leave: a lock took the job out of the memory.
+        // The run after the unlock erases the chunk again, under the same
+        // credential.
+        alice.lock();
+        assert!(alice.take_erasure().is_none());
+        alice.unlock(&units("correct horse"), 5_000).unwrap();
+        let erase = alice.take_erasure().unwrap();
+        assert_eq!(erase.chunk_id, [0x41; 32]);
+        assert_eq!(erase.cred.expose(), &[0x36; 32]);
+        assert_eq!(erase.relays.len(), 3);
+        // The start of a run puts no chunk into the list twice.
+        alice.requeue_transfers().unwrap();
+        alice.requeue_transfers().unwrap();
+        assert_eq!(alice.take_erasure().unwrap().chunk_id, [0x41; 32]);
+        assert!(alice.take_erasure().is_none());
+        // The file that stays is no part of it.
+        assert_eq!(*alice.file_bytes(&second).unwrap(), vec![0x42; 9_000]);
+
+        // A chunk that no deletion named changes nothing.
+        alice.chunk_erased(&[0x42; 32]).unwrap();
+        alice.chunk_erased(&[0x99; 32]).unwrap();
+        alice.requeue_transfers().unwrap();
+        assert_eq!(alice.take_erasure().unwrap().chunk_id, [0x41; 32]);
+
+        // Each relay answered: the store keeps the credential no more, and
+        // no later run erases the chunk again.
+        alice.chunk_erased(&[0x41; 32]).unwrap();
+        alice.requeue_transfers().unwrap();
+        assert!(alice.take_erasure().is_none());
+        alice.lock();
+        alice.unlock(&units("correct horse"), 6_000).unwrap();
+        assert!(alice.take_erasure().is_none());
+
+        // CHUNK_LIFE_MAX after the upload ends the erase too: no relay
+        // holds the chunk (`ATT-160`).
+        alice.touch(7_000);
+        alice.tick(7_000);
+        let third = send(&mut alice, &mut rng, 0x43);
+        alice.delete_for_me(&third).unwrap();
+        assert_eq!(alice.take_erasure().unwrap().chunk_id, [0x43; 32]);
+        alice.touch(7_000 + umbra_core::attach::CHUNK_LIFE_MAX);
+        alice.tick(7_000 + umbra_core::attach::CHUNK_LIFE_MAX);
+        assert!(alice.is_unlocked());
+        alice.requeue_transfers().unwrap();
+        assert!(alice.take_erasure().is_none());
+        alice.audit().unwrap();
+    }
+
+    #[cfg(feature = "runtime")]
+    #[test]
+    fn a_record_stays_queued_when_the_run_ended_under_the_bridge() {
+        use crate::{
+            bridge::Bridge,
+            runtime::{Command, OsRng},
+        };
+
+        let mut rng = Rng(95);
+        let (mut client, contact, conversation) = client_with_contact(96);
+        let contacts: std::collections::BTreeMap<_, _> = [(conversation, contact)].into();
+        let write = |client: &mut Client<MemoryBackend, Element>, rng: &mut Rng, text: &str| {
+            let mut draft = client.new_draft(conversation);
+            draft.set_text(&units(text)).unwrap();
+            client.send_draft(draft, 1_000_000, rng).unwrap()
+        };
+
+        // The run ended, and its update did not reach the handle yet: the
+        // bridge is there, and no task reads its commands.
+        let (commands, receiver) = tokio::sync::mpsc::unbounded_channel::<Command>();
+        drop(receiver);
+        let mut ended = Bridge::new(commands, contacts.clone());
+        let waiting = write(&mut client, &mut rng, "it waits for a connection");
+        ended.flush(&mut client, &mut OsRng).unwrap();
+        // IMP-076: a queued record is no failure.
+        assert_eq!(client.info(&waiting).unwrap().delivery, Delivery::Queued);
+        assert_eq!(client.take_outgoing().unwrap().message, waiting);
+
+        // The next run takes it from the store.
+        client.requeue_waiting().unwrap();
+        let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel::<Command>();
+        let mut running = Bridge::new(commands, contacts);
+        running.flush(&mut client, &mut OsRng).unwrap();
+        let Ok(Command::Send { contact: to, .. }) = receiver.try_recv() else {
+            panic!("no send");
+        };
+        assert_eq!(to, contact);
+        assert_eq!(client.info(&waiting).unwrap().delivery, Delivery::Queued);
+
+        // IMP-074: a record for a conversation with no contact in the run
+        // has no path, and it fails with that cause.
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel::<Command>();
+        let mut alone = Bridge::new(commands, std::collections::BTreeMap::new());
+        let lost = write(&mut client, &mut rng, "it has no path");
+        alone.flush(&mut client, &mut OsRng).unwrap();
+        assert_eq!(client.info(&lost).unwrap().delivery, Delivery::Failed);
     }
 }

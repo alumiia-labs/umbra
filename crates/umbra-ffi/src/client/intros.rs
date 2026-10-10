@@ -33,6 +33,8 @@ const OFFER_IN: u8 = 3;
 
 /// The longest petname that a record carries, in bytes.
 const NAME_MAX: usize = 255;
+/// The requests and the offers of one contact that wait for the user.
+const INTROS_WAITING_MAX: usize = 16;
 
 /// An introduction that waits for the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,6 +215,24 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Ok(share) = ContactShare::parse(body) else {
             return Ok(());
         };
+        // A limit of this client: one contact holds `INTROS_WAITING_MAX`
+        // requests and offers that wait for the user, and one above that
+        // count goes. Thus a contact grows no table and makes no flood of
+        // events.
+        if !matches!(share.share_type, ShareType::Grant) {
+            let waiting = self
+                .open_ref()?
+                .store
+                .list(INTROS, Some(&from.0))?
+                .into_iter()
+                .filter(|(_, value)| {
+                    read_row(&Zeroizing::new(value.clone())).is_ok_and(|row| row.kind != ASKED)
+                })
+                .count();
+            if waiting >= INTROS_WAITING_MAX {
+                return Ok(());
+            }
+        }
         match share.share_type {
             // WIR-196: a request waits for the user.
             ShareType::Request => {

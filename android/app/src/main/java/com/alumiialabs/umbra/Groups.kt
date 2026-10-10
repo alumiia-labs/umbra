@@ -37,7 +37,7 @@ import uniffi.umbra_ffi.FfiRole
 private const val GROUP_NAME_MAX = 64
 
 /**
- * Mockup 048: the name of a new private group. The group takes two relays
+ * The name of a new private group. The group takes two relays
  * of its own at the creation, thus it needs a connection.
  */
 @Composable
@@ -77,8 +77,7 @@ fun NewGroupScreen(onBack: () -> Unit, onMade: (Conversation) -> Unit) {
 }
 
 /**
- * Mockup 052: what this device holds of a group. The rows of the mockup
- * that Part 11 does not carry yet are not here.
+ * What this device holds of a group.
  */
 @Composable
 fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
@@ -117,7 +116,7 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             FactRow("user-group", "Members", chat.members.toString())
             FactRow("file-lines", "Group identifier", chat.conversation.label)
             Spacer(Modifier.height(8.dp))
-            // Mockup 052: the members, an invitation, and the way out.
+            // The members, an invitation, and the way out.
             EntryRow(
                 RowEntry("user-group", "Members and roles") {
                     push(Screen.GroupMembers(chat.conversation))
@@ -229,7 +228,7 @@ private fun JoinerRow(joiner: FfiGroupOffer) {
     }
 }
 
-/** The label of a role, as mockup 053 writes it. */
+/** The label of a role. */
 private fun roleLabel(role: FfiRole): String = when (role) {
     FfiRole.OWNER -> "Owner"
     FfiRole.ADMIN -> "Admin"
@@ -250,7 +249,7 @@ private fun memberName(member: FfiGroupMember): String {
 }
 
 /**
- * Mockup 053: each member of the group with its role. An admin opens the
+ * Each member of the group with its role. An admin opens the
  * removal of a member below it.
  */
 @Composable
@@ -327,7 +326,7 @@ private fun MemberRow(member: FfiGroupMember, removable: Boolean, onRemove: () -
     }
 }
 
-/** The roles an admin gives, with the words of mockup 054. */
+/** The roles an admin gives. */
 private val RoleChoices = listOf(
     FfiRole.MEMBER to "Can send messages",
     FfiRole.MODERATOR to "Can moderate content",
@@ -338,7 +337,7 @@ private val RoleChoices = listOf(
 private val OwnerChoice = FfiRole.OWNER to "Can manage admins and owners"
 
 /**
- * Mockup 054: the role of one member, and the way to its removal. A
+ * The role of one member, and the way to its removal. A
  * removal reaches a member below `moderator` (`GRP-382`).
  */
 @Composable
@@ -406,7 +405,7 @@ fun MemberRoleScreen(
 }
 
 /**
- * Mockup 055: the removal of one member. The group starts a new epoch in
+ * The removal of one member. The group starts a new epoch in
  * the same action, thus the member reads no later record (`GRP-264`).
  */
 @Composable
@@ -437,7 +436,7 @@ fun RemoveMemberScreen(
 }
 
 /**
- * Mockup 060: the way out of a group. An owner leaves only after it gave
+ * The way out of a group. An owner leaves only after it gave
  * the role to another member (`GRP-051`).
  */
 @Composable
@@ -474,7 +473,7 @@ fun LeaveGroupScreen(chat: Chat, onBack: () -> Unit, onLeft: () -> Unit) {
 }
 
 /**
- * Mockup 049 in its first form: the contacts of this device, one of which
+ * The contacts of this device, one of which
  * takes an offer of the group.
  */
 @Composable
@@ -559,7 +558,7 @@ fun IntroductionPrompt() {
     }
 }
 
-/** The offers of a group that wait for the user (mockup 050). */
+/** The offers of a group that wait for the user. */
 @Composable
 fun GroupOfferPrompt() {
     // GRP-328: an admission whose roster did not verify shows as failed.
@@ -603,7 +602,7 @@ fun GroupOfferPrompt() {
     }
 }
 
-/** The line under the name of a group, as mockup 051 gives it. */
+/** The line under the name of a group. */
 fun groupSubtitle(chat: Chat): String {
     val members = if (chat.members == 1) "1 member" else "${chat.members} members"
     return "Private group · $members"

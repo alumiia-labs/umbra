@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 
 use crate::{
-    app::{strictly_increasing, Channel},
+    app::strictly_increasing,
     codec::{Reader, Writer},
     Error,
 };
@@ -60,7 +60,9 @@ impl<'a> EditBody<'a> {
     }
 }
 
-/// The scope of a deletion.
+/// The scope of a deletion. The client holds the check of the scope
+/// against the channel (`WIR-084`). This crate does not tell the sync
+/// channel of a device set from the channel of a contact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum DeleteScope {
@@ -68,16 +70,6 @@ pub enum DeleteScope {
     OwnDevices = 0x01,
     /// The other party.
     OtherParty = 0x02,
-}
-
-impl DeleteScope {
-    /// Whether the scope matches the channel that carried it (`WIR-084`).
-    pub const fn matches(self, channel: Channel) -> bool {
-        match self {
-            DeleteScope::OwnDevices => matches!(channel, Channel::Pairwise),
-            DeleteScope::OtherParty => true,
-        }
-    }
 }
 
 /// A tombstone over one or more targets.
@@ -200,8 +192,5 @@ mod tests {
             targets: (0..10u8).map(|i| [i; 16]).collect(),
         };
         assert!(big.encode(&mut out).is_err());
-        assert!(DeleteScope::OwnDevices.matches(Channel::Pairwise));
-        assert!(!DeleteScope::OwnDevices.matches(Channel::Group));
-        assert!(DeleteScope::OtherParty.matches(Channel::Group));
     }
 }

@@ -3,8 +3,8 @@
 //!
 //! Each party runs one strand of epochs. An epoch carries the party's new
 //! encapsulation key and a ciphertext against a key of the peer, coded into
-//! chunks that ride one per record. The two strands interlock under four
-//! rules that the specification leaves open:
+//! chunks that ride one per record. The two strands interlock under the four
+//! rules of Part 5 §5.5.5:
 //!
 //! 1. **Targets are implicit.** The initiator's epoch `e` encapsulates to the
 //!    responder's key of epoch `e − 1`; the responder's epoch `e` encapsulates
@@ -29,7 +29,7 @@ use alloc::vec::Vec;
 use kem::{Decapsulate, Encapsulate};
 use ml_kem::{array::Array, DecapsulationKey, EncapsulationKey, KeyExport, MlKem768, Seed};
 use rand_core::CryptoRng;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::{
     codeword::{Collector, Kind, Material, Width},
@@ -87,7 +87,8 @@ pub struct Opened {
     pub header: Header,
     /// The plaintext length written into the caller's buffer.
     pub len: usize,
-    /// The peer's epoch as the record named it, if it carried a frame.
+    /// The peer's epoch as the record named it, if it carried a frame with
+    /// no fault.
     pub peer_epoch: Option<u32>,
 }
 
@@ -122,7 +123,9 @@ impl Braid {
     ) -> Result<(), Error> {
         let mut seed = Secret::<64>::zeroed();
         rng.fill_bytes(seed.expose_mut());
-        let dk = DecapsulationKey::<MlKem768>::from_seed(Seed::from(*seed.expose()));
+        let mut dz = Seed::from(*seed.expose());
+        let dk = DecapsulationKey::<MlKem768>::from_seed(dz);
+        dz.zeroize();
         let ek: [u8; 1184] = dk.encapsulation_key().to_bytes().into();
 
         let mut ct = [0u8; 1088];
@@ -133,9 +136,12 @@ impl Braid {
             }
             let peer_ek = EncapsulationKey::<MlKem768>::new(&Array::from(*peer_ek))
                 .map_err(|_| Error::Key)?;
-            let (ciphertext, shared) = peer_ek.encapsulate_with_rng(rng);
+            let (ciphertext, mut shared) = peer_ek.encapsulate_with_rng(rng);
             ct.copy_from_slice(&ciphertext);
-            self.peer_secret = Some((target, Secret::new(shared.into())));
+            let mut secret = Secret::<32>::zeroed();
+            secret.expose_mut().copy_from_slice(&shared);
+            shared.zeroize();
+            self.peer_secret = Some((target, secret));
         }
 
         self.epoch = epoch;
@@ -234,8 +240,11 @@ impl Braid {
             if ct.iter().any(|b| *b != 0) && is_target_of(self.role, self.epoch, epoch) {
                 let dk = self.own_dk.as_ref().ok_or(Error::Ratchet)?;
                 let ct: ml_kem::Ciphertext<MlKem768> = Array::from(ct);
-                let shared = dk.decapsulate(&ct);
-                self.own_secret = Some(Secret::new(shared.into()));
+                let mut shared = dk.decapsulate(&ct);
+                let mut secret = Secret::<32>::zeroed();
+                secret.expose_mut().copy_from_slice(&shared);
+                shared.zeroize();
+                self.own_secret = Some(secret);
                 self.complete = true;
             }
         }
@@ -286,6 +295,43 @@ impl<R: CryptoRng + ?Sized> StepHooks for Hooks<'_, R> {
         let secret = self.braid.own_secret.take();
         secret.map(|s| (completed, s))
     }
+}
+
+/// Holds the skipped keys of all `ratchets` together at `bound` keys or
+/// below, which is the device limit `MAX_STORED_DEVICE` of §5.5.4. The
+/// oldest keys go first, whatever session holds them, thus one peer that
+/// fills its session costs no other session a new key. The result names
+/// each ratchet that lost a key, by its place in `ratchets`; a client then
+/// stores those.
+pub fn bound_skipped(ratchets: &mut [&mut Ratchet], bound: usize) -> Vec<usize> {
+    let total = ratchets.iter().fold(0usize, |sum, ratchet| {
+        sum.saturating_add(ratchet.skipped_len())
+    });
+    let excess = total.saturating_sub(bound);
+    if excess == 0 {
+        return Vec::new();
+    }
+    // The age of each key with the place of its ratchet. The sort puts the
+    // oldest first, and two keys of one age go in the order of the places.
+    let mut ages: Vec<(u64, usize)> = Vec::with_capacity(total);
+    for (place, ratchet) in ratchets.iter().enumerate() {
+        ages.extend(ratchet.session.skipped_ages().map(|age| (age, place)));
+    }
+    ages.sort_unstable();
+    let mut drops: Vec<usize> = alloc::vec![0; ratchets.len()];
+    for (_, place) in ages.iter().take(excess) {
+        if let Some(count) = drops.get_mut(*place) {
+            *count = count.saturating_add(1);
+        }
+    }
+    let mut changed = Vec::new();
+    for (place, (ratchet, count)) in ratchets.iter_mut().zip(drops).enumerate() {
+        if count > 0 {
+            ratchet.session.evict_oldest(count);
+            changed.push(place);
+        }
+    }
+    changed
 }
 
 /// The version byte of a stored ratchet.
@@ -433,6 +479,19 @@ impl Ratchet {
         self.session.can_send()
     }
 
+    /// Takes a clock movement of the device at `now`. The age of each
+    /// skipped key starts again, thus a jump of the device clock deletes no
+    /// key before its record arrives (Part 1 `SCP-019`, `SCP-021`). The
+    /// result says whether the state changed; a client then stores it.
+    pub fn clock_moved(&mut self, now: u64) -> bool {
+        self.session.clock_moved(now)
+    }
+
+    /// The count of skipped keys that the session holds.
+    pub fn skipped_len(&self) -> usize {
+        self.session.skipped_len()
+    }
+
     /// The own epoch, zero before the first.
     pub fn epoch(&self) -> u32 {
         self.braid.epoch
@@ -491,8 +550,9 @@ impl Ratchet {
     }
 
     /// Decrypts `record` into `out`. A record that does not open leaves
-    /// both ratchets as they were: a header that opens under a body that
-    /// does not moves no chain and takes no step.
+    /// both ratchets as they were. A header that opens under a body that
+    /// does not moves no chain and takes no step. The call delivers a
+    /// record that opens with a braid frame that has a fault (`CRY-092`).
     pub fn receive<R: CryptoRng + ?Sized>(
         &mut self,
         record: &[u8],
@@ -527,10 +587,14 @@ impl Ratchet {
             };
             self.session.receive_with(record, now, out, &mut hooks)?
         };
-        let peer_epoch = match received.pq_frame {
-            Some(frame) => Some(self.braid.absorb(frame)?),
-            None => None,
-        };
+        // CRY-092: a frame with a fault costs the braid epoch and not the
+        // record. The body opened, thus the message is authentic, and the
+        // peer alone wrote the frame. The collector takes no chunk of such
+        // a frame. An epoch whose material does not verify gives no key,
+        // thus no secret of it enters the root key.
+        let peer_epoch = received
+            .pq_frame
+            .and_then(|frame| self.braid.absorb(frame).ok());
         Ok(Opened {
             header: received.header,
             len: received.len,
@@ -678,6 +742,94 @@ mod tests {
             assert!(recv(&mut b, &mut rng, record, 3).is_ok());
         }
         assert_eq!(recv(&mut b, &mut rng, &second, 4).unwrap(), b"second");
+    }
+
+    #[test]
+    fn a_frame_with_a_fault_costs_the_epoch_and_not_the_record() {
+        let (mut a, mut b, mut rng) = pair(b"frame fault", Width::W64);
+        // A frame of the epoch of the sender whose kind names no chunk.
+        let mut frame = [0u8; FRAME_FIXED + 64];
+        frame[..4].copy_from_slice(&a.epoch().to_be_bytes());
+        frame[4] = 0xFF;
+        let mut record = vec![0u8; a.overhead_with_frame() + 5];
+        let n = a
+            .session
+            .send(b"first", Some(&frame), &mut rng, &mut record)
+            .unwrap();
+        let mut out = vec![0u8; n];
+        let opened = b.receive(&record[..n], 0, &mut rng, &mut out).unwrap();
+        assert_eq!(&out[..opened.len], b"first");
+        assert_eq!(opened.peer_epoch, None);
+        assert_eq!(b.peer_epoch(), 0);
+        // The session continues, and the braid heals on the frames that
+        // follow.
+        let mut now = 1u64;
+        converse(&mut a, &mut b, &mut rng, 6, 45, &mut now);
+        assert!(b.peer_epoch() >= 1);
+        assert!(a.epoch() >= 2, "initiator epoch {}", a.epoch());
+        assert!(a.mixed() >= 1);
+    }
+
+    #[test]
+    fn a_clock_movement_keeps_the_skipped_keys_of_a_ratchet() {
+        let (mut a, mut b, mut rng) = pair(b"clock", Width::W64);
+        let late = send(&mut a, &mut rng, b"late", 0);
+        let first = send(&mut a, &mut rng, b"first", 1);
+        assert_eq!(recv(&mut b, &mut rng, &first, 1).unwrap(), b"first");
+        // The clock jumps past the life of a skipped key. The ratchet takes
+        // the movement, and the stored form holds the new age.
+        let jumped = 1 + 2 * crate::ratchet::dr::SKIP_TTL;
+        assert!(b.clock_moved(jumped));
+        let mut b = stored_and_read_again(&b);
+        // The next skip drops each key past its age, and this one stays.
+        let _ = send(&mut a, &mut rng, b"lost", jumped);
+        let next = send(&mut a, &mut rng, b"next", jumped);
+        assert_eq!(recv(&mut b, &mut rng, &next, jumped).unwrap(), b"next");
+        assert_eq!(recv(&mut b, &mut rng, &late, jumped).unwrap(), b"late");
+    }
+
+    #[test]
+    fn the_device_bound_drops_the_oldest_skipped_keys_of_all_sessions() {
+        let (mut a1, mut b1, mut rng) = pair(b"device one", Width::W64);
+        let (mut a2, mut b2, _) = pair(b"device two", Width::W64);
+        // The first session skips two keys at time 10 and a third key at
+        // time 30. The second session skips two keys at time 20.
+        let old = [
+            send(&mut a1, &mut rng, b"old 0", 0),
+            send(&mut a1, &mut rng, b"old 1", 0),
+        ];
+        let m = send(&mut a1, &mut rng, b"m", 0);
+        assert_eq!(recv(&mut b1, &mut rng, &m, 10).unwrap(), b"m");
+        let middle = [
+            send(&mut a2, &mut rng, b"middle 0", 0),
+            send(&mut a2, &mut rng, b"middle 1", 0),
+        ];
+        let m = send(&mut a2, &mut rng, b"m", 0);
+        assert_eq!(recv(&mut b2, &mut rng, &m, 20).unwrap(), b"m");
+        let new = send(&mut a1, &mut rng, b"new", 0);
+        let m = send(&mut a1, &mut rng, b"m", 0);
+        assert_eq!(recv(&mut b1, &mut rng, &m, 30).unwrap(), b"m");
+        assert_eq!((b1.skipped_len(), b2.skipped_len()), (3, 2));
+        // A bound that the device keeps changes nothing.
+        assert!(bound_skipped(&mut [&mut b1, &mut b2], 5).is_empty());
+        // A bound of two keeps the two newest keys. The two keys of time 10
+        // go and one key of time 20. The result names each session.
+        assert_eq!(bound_skipped(&mut [&mut b1, &mut b2], 2), [0, 1]);
+        assert_eq!((b1.skipped_len(), b2.skipped_len()), (1, 1));
+        assert!(recv(&mut b1, &mut rng, &old[0], 40).is_err());
+        assert!(recv(&mut b1, &mut rng, &old[1], 40).is_err());
+        assert!(recv(&mut b2, &mut rng, &middle[0], 40).is_err());
+        assert_eq!(
+            recv(&mut b2, &mut rng, &middle[1], 40).unwrap(),
+            b"middle 1"
+        );
+        assert_eq!(recv(&mut b1, &mut rng, &new, 40).unwrap(), b"new");
+        // The result does not name a session that lost no key.
+        let lost = send(&mut a2, &mut rng, b"lost", 0);
+        let m = send(&mut a2, &mut rng, b"m", 0);
+        assert_eq!(recv(&mut b2, &mut rng, &m, 50).unwrap(), b"m");
+        assert_eq!(bound_skipped(&mut [&mut b1, &mut b2], 0), [1]);
+        assert!(recv(&mut b2, &mut rng, &lost, 60).is_err());
     }
 
     #[test]

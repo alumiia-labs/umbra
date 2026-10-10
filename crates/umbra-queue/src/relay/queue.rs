@@ -187,6 +187,16 @@ impl Queue {
         self.records.iter().filter(move |r| r.seq > self.last_ack)
     }
 
+    /// The records above `after_seq` that no `ACK` covers, in sequence
+    /// order. The records are in the order of their sequence, thus a
+    /// search finds the first one. A relay copies none to step through a
+    /// backlog (`NET-349`).
+    pub fn pending_after(&self, after_seq: u32) -> impl Iterator<Item = &Stored> {
+        let after = after_seq.max(self.last_ack);
+        let first = self.records.partition_point(|r| r.seq <= after);
+        self.records.iter().skip(first)
+    }
+
     /// The sequence that the next record takes.
     pub const fn next_seq(&self) -> u32 {
         self.next_seq
@@ -296,6 +306,26 @@ mod tests {
         q.ack(1);
         assert_eq!(q.len(), 1);
         assert_eq!(q.send(b"d", 1_003).unwrap(), 4);
+    }
+
+    #[test]
+    fn the_records_above_a_sequence_come_with_no_record_that_an_ack_covers() {
+        let mut q = queue();
+        for i in 0..6u8 {
+            q.send(&[i], 1_000).unwrap();
+        }
+        let seqs =
+            |q: &Queue, after: u32| -> Vec<u32> { q.pending_after(after).map(|r| r.seq).collect() };
+        // NET-349: a relay steps through a backlog from the last record
+        // that left.
+        assert_eq!(seqs(&q, 0), [1, 2, 3, 4, 5, 6]);
+        assert_eq!(seqs(&q, 4), [5, 6]);
+        assert!(seqs(&q, 6).is_empty());
+        assert!(seqs(&q, u32::MAX).is_empty());
+        // An `ACK` above the place of a drain takes its records out of it.
+        q.ack(3);
+        assert_eq!(seqs(&q, 1), [4, 5, 6]);
+        assert_eq!(seqs(&q, 5), [6]);
     }
 
     #[test]

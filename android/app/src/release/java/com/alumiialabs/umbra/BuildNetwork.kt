@@ -30,6 +30,9 @@ object BuildNetwork {
     private const val HELD_KEYSET = "umbra-keyset-held.bin"
     private const val CARRIER_PORT: UShort = 443u
 
+    /** The key of the network file that holds the epoch of `REL-045`. */
+    private const val SHIPPED_EPOCH = "shipped_epoch"
+
     /** Whether the time of the last manifest differs from the device clock. */
     var isClockCorrected = false
         private set
@@ -46,6 +49,7 @@ object BuildNetwork {
         val ndrRelay: Pair<String, ByteArray>,
         val directoryRelay: Pair<String, ByteArray>,
         val invitationHost: String,
+        val shippedEpoch: ULong,
     )
 
     private fun ipv4(text: String): ByteArray? {
@@ -75,6 +79,12 @@ object BuildNetwork {
             ndrRelay = endpoint(properties.getProperty("ndr_relay")) ?: return null,
             directoryRelay = endpoint(properties.getProperty("directory_relay")) ?: return null,
             invitationHost = properties.getProperty("invitation_host")?.trim() ?: return null,
+            // REL-045, REL-046: the epoch at the time of the build is the
+            // floor of a device with no verified epoch. A build with none
+            // has no network: zero would take each old manifest. The Gradle
+            // build refuses a network file with no `shipped_epoch` first.
+            shippedEpoch = properties.getProperty(SHIPPED_EPOCH)?.trim()?.toULongOrNull()
+                ?.takeIf { it > 0uL } ?: return null,
         )
     } catch (absent: java.io.IOException) {
         // No deployment gave this build its assets yet.
@@ -101,7 +111,7 @@ object BuildNetwork {
             }
             if (next.contentEquals(held)) continue
             val verified = try {
-                client.networkOfManifest(manifest, next, 0uL, pins.invitationHost, null)
+                client.networkOfManifest(manifest, next, pins.shippedEpoch, pins.invitationHost, null)
             } catch (refused: FfiException) {
                 continue
             }
@@ -120,6 +130,12 @@ object BuildNetwork {
         }
     }
 
+    /**
+     * The network of the newest manifest that verifies, or null. One call
+     * runs at a time. The call writes the kept manifest and the held key
+     * set, and the network thread and the restore thread both come here.
+     */
+    @Synchronized
     fun network(context: Context, client: Handle): Network? {
         val pins = pinned(context) ?: return null
         val kept = File(context.filesDir, MANIFEST)
@@ -130,25 +146,33 @@ object BuildNetwork {
         val keyset = newestKeySet(heldFile.takeIf { it.exists() }?.readBytes(), pins.keyset)
         // NET-318: one carrier after the other, and the web roots vouch for
         // each; the manifest carries its own signatures, thus a carrier needs
-        // no trust.
-        val fresh = pins.carriers.firstNotNullOfOrNull { (host, address) ->
+        // no trust. A carrier whose manifest does not verify gives its turn
+        // to the next one, and the kept manifest comes last.
+        val fresh = pins.carriers.asSequence().mapNotNull { (host, address) ->
             try {
                 fetchManifest(host, address, CARRIER_PORT, null)
             } catch (unreachable: FfiException) {
                 null
             }
         }
-        for (manifest in listOfNotNull(fresh, kept.takeIf { it.exists() }?.readBytes())) {
+        val held = sequence { kept.takeIf { it.exists() }?.readBytes()?.let { yield(it) } }
+        for ((manifest, isFresh) in fresh.map { it to true } + held.map { it to false }) {
             val verified = try {
-                client.networkOfManifest(manifest, keyset, 0uL, pins.invitationHost, null)
-            } catch (refused: FfiException) {
+                client.networkOfManifest(manifest, keyset, pins.shippedEpoch, pins.invitationHost, null)
+            } catch (unverified: FfiException.Unverified) {
                 // A manifest under a later key set: the chain moves the
-                // held set to it, and the device keeps the new one.
+                // held set to it, and the device keeps the new one. A stale
+                // manifest asks no carrier for a chain.
                 val (next, retried) = advanced(pins, keyset, manifest, client) ?: continue
                 writeWhole(heldFile, next)
                 retried
+            } catch (locked: FfiException.Locked) {
+                // A locked client reads no manifest, thus the call asks no carrier.
+                return null
+            } catch (refused: FfiException) {
+                continue
             }
-            if (manifest === fresh) writeWhole(kept, manifest)
+            if (isFresh) writeWhole(kept, manifest)
             isClockCorrected = verified.isClockCorrected
             isProvisional = verified.isProvisional
             return verified.network.copy(

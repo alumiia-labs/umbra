@@ -25,6 +25,21 @@
     mode: "0644"
   when: hostvars[groups['signer'][0]].umbra_signed | default(false)
 
+# The memory limit of an exit relay, and the files of the other relays of
+# this server, which this relay does not see.
+- name: "The directory of the unit settings of {{ relay.name }} is there"
+  ansible.builtin.file:
+    path: "/etc/systemd/system/umbra-relay@{{ relay.name }}.service.d"
+    state: directory
+    mode: "0755"
+
+- name: "The unit settings of {{ relay.name }} are there"
+  ansible.builtin.template:
+    src: relay-dropin.conf.j2
+    dest: "/etc/systemd/system/umbra-relay@{{ relay.name }}.service.d/10-umbra.conf"
+    mode: "0644"
+  notify: Restart umbra-relay
+
 - name: "The relay {{ relay.name }} runs"
   ansible.builtin.systemd:
     name: "umbra-relay@{{ relay.name }}"

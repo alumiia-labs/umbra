@@ -1,7 +1,9 @@
 [Unit]
 Description=UMBRA directory and issuer (Parts 9 and 13)
-After=network-online.target
-Wants=network-online.target
+# A root is valid for three hours, and a wrong clock rejects it (Part 10
+# §10.5.2). Thus the service starts after chrony sets the clock.
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
 
 [Service]
 User=umbra-directory
@@ -36,6 +38,9 @@ LimitCORE=0
 CapabilityBoundingSet=
 ReadWritePaths=/var/lib/umbra-directory
 LimitNOFILE=65536
+# One service never takes the memory of the others on this server.
+MemoryHigh={{ umbra_service_memory_high }}
+MemoryMax={{ umbra_service_memory_max }}
 
 [Install]
 WantedBy=multi-user.target

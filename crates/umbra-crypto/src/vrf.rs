@@ -155,13 +155,22 @@ impl SecretKey {
         k_hash.update(self.nonce_seed);
         k_hash.update(h_string.as_bytes());
         let mut k_bytes: [u8; 64] = k_hash.finalize().into();
-        let k = Scalar::from_bytes_mod_order_wide(&k_bytes);
+        let mut k = Scalar::from_bytes_mod_order_wide(&k_bytes);
         k_bytes.zeroize();
         let u = k * B;
         let v = k * h_point;
-        let y = point_from_bytes(&self.public)?;
+        let y = match point_from_bytes(&self.public) {
+            Ok(y) => y,
+            Err(fault) => {
+                k.zeroize();
+                return Err(fault);
+            }
+        };
         let c = challenge([&y, &h_point, &gamma, &u, &v]);
         let s = k + c * self.x;
+        // The nonce with the public proof gives the secret key, thus it
+        // goes before the proof leaves.
+        k.zeroize();
         let mut pi = [0u8; PROOF_LEN];
         if let Some(part) = pi.get_mut(..32) {
             part.copy_from_slice(gamma.compress().as_bytes());

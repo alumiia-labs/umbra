@@ -36,13 +36,43 @@
 # a copy of /var/lib/umbra-signer/keys offline: without it no new manifest
 # verifies under the key set that the app ships.
 # The first key set alone; a later one comes from `rotate` (README), and
-# the signer refuses keys that the key chain does not reach.
+# the signer refuses keys that the key chain does not reach. A signer that
+# holds a key chain, a key set in any directory, or a published key set is
+# past its first run. This task then makes no key. Thus a mistyped
+# umbra_signer_keys, or an old key directory that moved offline, never
+# gives the network a second, unrelated key set.
+- name: The signs of an earlier run of the signer
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      if [ -e /var/lib/umbra-signer/keychain ] \
+          || [ -e /var/www/umbra/.well-known/umbra/keyset.bin ] \
+          || [ -n "$(find /var/lib/umbra-signer -maxdepth 2 -name keyset.bin -print -quit)" ]; then
+          echo earlier
+      fi
+  register: umbra_signer_state
+  changed_when: false
+
 - name: The authority keys are made one time
   become: true
   become_user: umbra-signer
   ansible.builtin.command:
-    cmd: /usr/local/bin/umbra-signer keygen /var/lib/umbra-signer/keys
-    creates: /var/lib/umbra-signer/keys/keyset.bin
+    cmd: "/usr/local/bin/umbra-signer keygen {{ umbra_signer_keys }}"
+    creates: "{{ umbra_signer_keys }}/keyset.bin"
+  when: "'earlier' not in umbra_signer_state.stdout"
+
+- name: The key directory of umbra_signer_keys
+  ansible.builtin.stat:
+    path: "{{ umbra_signer_keys }}/keyset.bin"
+  register: umbra_signer_keyset
+
+- name: The signer holds the key set that umbra_signer_keys names
+  ansible.builtin.assert:
+    that: umbra_signer_keyset.stat.exists
+    fail_msg: >-
+      {{ umbra_signer_keys }} holds no key set, and this signer made its keys
+      in an earlier run. Check umbra_signer_keys in group_vars/all.yml, or
+      bring the key directory back from the backup. The run makes no new keys.
 
 - name: The descriptor of each relay is there
   ansible.builtin.copy:
@@ -76,10 +106,36 @@
     state: started
     daemon_reload: true
 
-- name: A manifest is signed now, with each relay of this run
-  ansible.builtin.systemd:
-    name: umbra-signer.service
-    state: started
+# An hour takes one manifest (Part 10 `REL-160`). The signer leaves the
+# manifest of this hour in its place. It prints `kept=same` when that one
+# holds the relays of this run already, and `kept=other` when it does not.
+- name: The signer signs a manifest now, unless this hour has one
+  become: true
+  become_user: umbra-signer
+  ansible.builtin.shell:
+    # nginx reads the files that this run writes, thus the mask.
+    cmd: |
+      set -eu
+      umask 022
+      /usr/local/bin/umbra-signer sign {{ '--force' if umbra_sign_force | bool else '' }} /etc/umbra-signer/sign.conf
+  register: umbra_sign
+  changed_when: "'kept=' not in umbra_sign.stdout"
+
+# The relays of phase 2 need a manifest that lists each relay of this run.
+# Thus the run waits here for the next hour, 60 minutes at most, and signs
+# then. The timer of the signer does the same two minutes later.
+- name: Changed settings wait for the next hour, which has no manifest yet
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      umask 022
+      sleep $(( 3600 - $(date +%s) % 3600 + 5 ))
+      /usr/sbin/runuser -u umbra-signer -- /usr/local/bin/umbra-signer sign /etc/umbra-signer/sign.conf
+  when: "'kept=other' in umbra_sign.stdout"
+  async: 3900
+  poll: 15
+  register: umbra_sign_late
+  failed_when: umbra_sign_late.rc != 0 or 'kept=other' in umbra_sign_late.stdout
 
 - name: This run holds a fresh manifest for the relays
   ansible.builtin.set_fact:

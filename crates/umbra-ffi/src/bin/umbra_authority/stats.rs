@@ -54,8 +54,10 @@ async fn noised_share(
     index: u8,
     epoch: u64,
 ) -> Option<u64> {
+    // REL-192: the query names the relay, thus it reads no share elsewhere.
     let query = StatQuery {
         authority_index: index,
+        relay_id: relay.candidate.relay_id,
         epoch,
     };
     let body = query

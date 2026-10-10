@@ -44,6 +44,19 @@ impl LogFrontier {
 
     /// Appends one leaf hash. Two full subtrees of one height join.
     pub fn push(&mut self, leaf_hash: [u8; 32]) {
+        let _ = self.push_proving(leaf_hash);
+    }
+
+    /// As [`LogFrontier::push`], and gives the inclusion proof of the new
+    /// leaf under the new root, as [`prove_newest`] gives it over each
+    /// leaf. Each subtree that joins is one step, and then each subtree on
+    /// the left is one, thus the proof costs no pass over the leaves.
+    pub fn push_proving(&mut self, leaf_hash: [u8; 32]) -> Vec<Step> {
+        let left = |sibling: [u8; 32]| Step {
+            sibling,
+            sibling_right: false,
+        };
+        let mut steps = Vec::new();
         let mut height = 0u32;
         let mut hash = leaf_hash;
         while let Some((last_height, last_hash)) = self.subtrees.last().copied() {
@@ -51,11 +64,14 @@ impl LogFrontier {
                 break;
             }
             self.subtrees.pop();
+            steps.push(left(last_hash));
             hash = node(&last_hash, &hash);
             height = height.saturating_add(1);
         }
+        steps.extend(self.subtrees.iter().rev().map(|(_, root)| left(*root)));
         self.subtrees.push((height, hash));
         self.size = self.size.saturating_add(1);
+        steps
     }
 
     /// The root, as [`log_root`] gives it over the same leaves.
@@ -133,6 +149,105 @@ pub fn prove_consistency(leaves: &[[u8; 32]], first: usize) -> Option<Vec<[u8; 3
     let mut out = Vec::new();
     subproof(first, leaves, true, &mut out);
     Some(out)
+}
+
+/// The root of each full subtree of a log, at each height. Level 0 holds
+/// the leaf hashes. Level `h` holds the roots of the subtrees of 2^h
+/// leaves, in the order of the log. A consistency proof reads a few of
+/// these roots, thus a request for one costs no pass over the leaves. A log
+/// of one year holds about 53 000 leaves and twice that many roots.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LogNodes {
+    levels: Vec<Vec<[u8; 32]>>,
+}
+
+impl LogNodes {
+    /// The number of leaves.
+    pub fn len(&self) -> usize {
+        self.levels.first().map_or(0, Vec::len)
+    }
+
+    /// Whether the log holds no leaf.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Appends one leaf hash, and the root of each subtree that it fills.
+    pub fn push(&mut self, leaf_hash: [u8; 32]) {
+        let mut hash = leaf_hash;
+        let mut height = 0usize;
+        loop {
+            if self.levels.len() <= height {
+                self.levels.push(Vec::new());
+            }
+            let Some(level) = self.levels.get_mut(height) else {
+                return;
+            };
+            level.push(hash);
+            // An even count fills the subtree one level up.
+            let filled = match level.as_slice() {
+                [.., left, right] if level.len().is_multiple_of(2) => node(left, right),
+                _ => return,
+            };
+            hash = filled;
+            height = height.saturating_add(1);
+        }
+    }
+
+    /// The root over the `count` leaves from `start`, as [`root`] gives it
+    /// over that slice. Each range that a proof asks for starts at a
+    /// multiple of its split points, thus the levels hold its full
+    /// subtrees.
+    fn range_root(&self, start: usize, count: usize) -> Option<[u8; 32]> {
+        if count == 0 {
+            return None;
+        }
+        if count.is_power_of_two() && start.is_multiple_of(count) {
+            let height = usize::try_from(count.trailing_zeros()).ok()?;
+            return self.levels.get(height)?.get(start / count).copied();
+        }
+        let k = split_point(count);
+        let left = self.range_root(start, k)?;
+        let right = self.range_root(start.checked_add(k)?, count.checked_sub(k)?)?;
+        Some(node(&left, &right))
+    }
+
+    fn subproof(
+        &self,
+        first: usize,
+        start: usize,
+        count: usize,
+        whole: bool,
+        out: &mut Vec<[u8; 32]>,
+    ) {
+        if first == count {
+            if !whole {
+                out.extend(self.range_root(start, count));
+            }
+            return;
+        }
+        let k = split_point(count).min(count);
+        let after = start.saturating_add(k);
+        let rest = count.saturating_sub(k);
+        if first <= k {
+            self.subproof(first, start, k, whole, out);
+            out.extend(self.range_root(after, rest));
+        } else {
+            self.subproof(first.saturating_sub(k), after, rest, false, out);
+            out.extend(self.range_root(start, k));
+        }
+    }
+
+    /// The consistency proof from the tree of the first `first` leaves to
+    /// the tree of each leaf, as [`prove_consistency`] gives it.
+    pub fn consistency(&self, first: usize) -> Option<Vec<[u8; 32]>> {
+        if first == 0 || first > self.len() {
+            return None;
+        }
+        let mut out = Vec::new();
+        self.subproof(first, 0, self.len(), true, &mut out);
+        Some(out)
+    }
 }
 
 /// Verifies that the tree of `second` leaves under `second_root` extends
@@ -250,6 +365,38 @@ mod tests {
             frontier.push(*leaf_hash);
             assert_eq!(frontier.size(), count as u64 + 1);
             assert_eq!(frontier.root(), log_root(&all[..=count]));
+        }
+    }
+
+    #[test]
+    fn the_held_subtree_roots_give_each_consistency_proof() {
+        let all = leaves(70);
+        let mut nodes = LogNodes::default();
+        assert!(nodes.is_empty() && nodes.consistency(1).is_none());
+        for (count, leaf_hash) in all.iter().enumerate() {
+            nodes.push(*leaf_hash);
+            let size = count + 1;
+            assert_eq!(nodes.len(), size);
+            for first in 1..=size {
+                assert_eq!(
+                    nodes.consistency(first),
+                    prove_consistency(&all[..size], first),
+                    "{first} of {size}"
+                );
+            }
+            assert!(nodes.consistency(0).is_none());
+            assert!(nodes.consistency(size + 1).is_none());
+        }
+    }
+
+    #[test]
+    fn the_frontier_gives_the_proof_of_each_newest_leaf() {
+        let all = leaves(70);
+        let mut frontier = LogFrontier::default();
+        for (count, leaf_hash) in all.iter().enumerate() {
+            let proof = frontier.push_proving(*leaf_hash);
+            assert_eq!(Some(&proof), prove_newest(&all[..=count]).as_ref());
+            verify_newest(leaf_hash, &proof, &frontier.root().unwrap()).unwrap();
         }
     }
 

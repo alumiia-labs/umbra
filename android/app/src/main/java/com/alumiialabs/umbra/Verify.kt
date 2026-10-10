@@ -263,7 +263,7 @@ fun VerifyCodeScreen(chat: Chat, starts: Boolean, onBack: () -> Unit) {
 
     val code = Core.verifyCode?.takeIf { it.first == conversation }?.second
     val isDone = Core.verifiedNow == conversation
-    val failure = Core.verifyFault
+    val failure = Core.verifyFault?.takeIf { it.first == conversation }?.second
     Column(Modifier.fillMaxSize()) {
         BackBar("Verify ${chat.title}", onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
@@ -362,8 +362,10 @@ fun SafetyNumberScreen(chat: Chat, onBack: () -> Unit) {
 }
 
 /**
- * A contact started a ceremony, and this device holds its code. The line
- * leads to the comparison.
+ * This device holds the code of a ceremony, and no view shows it. A start of
+ * a contact alone makes no code (`IDN-170`). The code is here after the user
+ * started too, thus this line shows for a ceremony of the user alone. The
+ * line leads to the comparison.
  */
 @Composable
 fun VerifyPrompt(push: (Screen) -> Unit) {

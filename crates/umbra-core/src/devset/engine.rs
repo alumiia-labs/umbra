@@ -25,9 +25,9 @@ use umbra_crypto::stored;
 use super::{
     sync::{
         bounded, AckBatch, CausalContext, InteractiveBucket, MutableItem, Origin, RetainedLog,
-        SyncedRecord, Watermarks,
+        SyncedRecord, Watermarks, ITEM_VOID, SCOPE_GROUP,
     },
-    DeviceId, MAX_DEVICES,
+    DeviceId, MAX_DEVICES, SYNC_AHEAD_MAX, SYNC_LAMPORT_LEAD,
 };
 use crate::Error;
 
@@ -94,6 +94,10 @@ pub enum Taken {
     /// A record at or below the watermark of its source (`DEV-037`). The
     /// device acknowledges it, thus the peer stops the resend.
     Declined,
+    /// The place of a record whose body the source holds no more
+    /// (`DEV-069`). The device takes the counter and stores nothing, thus
+    /// its acknowledgment point passes that counter.
+    Void,
     /// A sync acknowledgment of the peer. A resend starts (`DEV-071`).
     Acknowledged,
     /// A control record that another module applies: a roster epoch, an
@@ -124,15 +128,27 @@ pub struct SyncEngine {
     /// The delivery items of `mutable`, thus an insert under the bound of
     /// `DEV-310` reads no other item.
     deliveries: usize,
+    /// The device that owns the channels of the set, when it is a peer of
+    /// this device (`DEV-308`). The stored form holds none: the caller
+    /// names it at each load ([`SyncEngine::set_owner`]).
+    owner: Option<DeviceId>,
 }
 
-fn class_of(inner: &[u8]) -> Result<Class, Error> {
-    let message = AppMessage::parse(inner, Channel::Pairwise)?;
+/// The class of a synced record of the conversation that `scope` names. The
+/// scope gives the channel that carried the record (`DEV-292`, `DEV-296`),
+/// and the body holds the rules of that channel. A kind that a pairwise
+/// channel alone carries syncs for a pairwise conversation. The fields that
+/// a group alone carries sync for a group.
+fn class_of(inner: &[u8], scope: u8) -> Result<Class, Error> {
+    let channel = if scope == SCOPE_GROUP {
+        Channel::Group
+    } else {
+        Channel::Pairwise
+    };
+    let message = AppMessage::parse(inner, channel)?;
     // DEV-174: a wrapper takes the class of its inner kind.
     Ok(match message.kind.class() {
-        Class::Inner => RichRecord::parse(message.body, Channel::Group)?
-            .inner_kind
-            .class(),
+        Class::Inner => RichRecord::parse(message.body, channel)?.inner_kind.class(),
         class => class,
     })
 }
@@ -151,7 +167,15 @@ impl SyncEngine {
             watermarks: Watermarks::default(),
             mutable: BTreeMap::new(),
             deliveries: 0,
+            owner: None,
         })
+    }
+
+    /// Names the peer that owns the channels of the set, or none on the
+    /// device that owns them itself. The Lamport counter of this device
+    /// then follows that peer with no bound (`DEV-275`).
+    pub fn set_owner(&mut self, owner: Option<DeviceId>) {
+        self.owner = owner;
     }
 
     /// The causal counter of this device.
@@ -202,10 +226,36 @@ impl SyncEngine {
         self.peers.remove(peer);
     }
 
-    fn context(&mut self, expires_in: u32) -> CausalContext {
-        self.lamport = self.lamport.saturating_add(1);
+    /// DEV-275: one more than the Lamport counter held. A counter at its
+    /// last value is a fault of the engine, and no record goes: a counter
+    /// that stays would order no later write.
+    fn context(&mut self, expires_in: u32) -> Result<CausalContext, Error> {
+        self.lamport = self.lamport.checked_add(1).ok_or(Error::Stale)?;
         let lamport = self.lamport;
-        self.context_at(lamport, expires_in)
+        Ok(self.context_at(lamport, expires_in))
+    }
+
+    /// DEV-275: takes the Lamport counter of a counted record of a peer. A
+    /// value more than `SYNC_LAMPORT_LEAD` above the own one is no count of
+    /// the writes of a set, and the device rejects its record. One such
+    /// value would else be the counter of each later write of each device,
+    /// and no write would win over another.
+    ///
+    /// The bound is relative to this device. A device that the owner of the
+    /// channels linked late starts at zero, and a device that was behind
+    /// stays behind. Thus a value that the owner took in two steps can be
+    /// more than one bound above such a device. Each record of the set
+    /// reaches such a device through the owner (`DEV-308`), which applied
+    /// the bound to each write that it took. Thus the device takes a record
+    /// of the owner at any value, and its Lamport counter starts again from
+    /// that value. Without that, the device would reject each record of the
+    /// owner permanently.
+    fn take_lamport(&self, source: &DeviceId, lamport: u64) -> Result<u64, Error> {
+        let is_far = lamport.saturating_sub(self.lamport) > SYNC_LAMPORT_LEAD;
+        if is_far && self.owner != Some(*source) {
+            return Err(Error::Unverified);
+        }
+        Ok(self.lamport.max(lamport))
     }
 
     /// A context of the next counter under `lamport`, which a relay keeps
@@ -245,11 +295,14 @@ impl SyncEngine {
         expires_in: u32,
         now: u64,
     ) -> Result<Published, Error> {
-        if matches!(class_of(inner)?, Class::PeerSignal | Class::Ephemeral) {
+        if matches!(
+            class_of(inner, origin.scope)?,
+            Class::PeerSignal | Class::Ephemeral
+        ) {
             return Err(Error::Malformed);
         }
         let record = SyncedRecord {
-            context: self.context(expires_in),
+            context: self.context(expires_in)?,
             origin,
             inner,
         };
@@ -275,7 +328,7 @@ impl SyncEngine {
         now: u64,
     ) -> Result<Published, Error> {
         let mutable = MutableItem {
-            context: self.context(0),
+            context: self.context(0)?,
             writer: self.own,
             item,
             key,
@@ -325,6 +378,41 @@ impl SyncEngine {
         })
     }
 
+    /// The body that goes in the place of the record at `counter` when its
+    /// body is gone (`DEV-069`). A timed record whose period ended is such a
+    /// record. The body is a `MutableItem` of item 0, which is no row of the
+    /// table. It has no key and no value, and it goes under the counter of
+    /// that record. It takes no new counter and no new Lamport value. A peer
+    /// takes the counter and applies nothing. Thus its acknowledgment point
+    /// passes the counter, and the resend of the later records ends.
+    pub fn void(&self, counter: u64) -> Result<Vec<u8>, Error> {
+        if counter == 0 || counter > self.counter {
+            return Err(Error::Malformed);
+        }
+        let mut vector: Vec<(DeviceId, u64)> = self
+            .peers
+            .iter()
+            .map(|(device, peer)| (*device, peer.contiguous))
+            .collect();
+        vector.push((self.own, counter));
+        vector.sort_unstable();
+        let void = MutableItem {
+            context: CausalContext {
+                lamport: self.lamport,
+                vector,
+                expires_in: 0,
+            },
+            writer: self.own,
+            item: ITEM_VOID,
+            key: &[],
+            value: &[],
+        };
+        let mut body = alloc::vec![0u8; 256];
+        let used = void.encode(&mut body)?;
+        body.truncate(used);
+        Ok(body)
+    }
+
     /// Whether an interactive record to `peer` goes at once. With an empty
     /// bucket the record waits for the pacing clock, and the interface
     /// says so (`DEV-195`, `DEV-241`).
@@ -335,12 +423,19 @@ impl SyncEngine {
     }
 
     /// Takes the counter of a record of `source` into the acknowledgment
-    /// state. Returns false for a counter that the device holds.
+    /// state. Returns false for a counter that the device holds. The device
+    /// refuses a counter above a hole while it holds `SYNC_AHEAD_MAX` of
+    /// them. The source retains that record and sends it again, and the
+    /// stored engine keeps its bound.
     fn take_counter(&mut self, source: &DeviceId, counter: u64, now: u64) -> Result<bool, Error> {
         let peer = self.peers.get_mut(source).ok_or(Error::Unverified)?;
-        if counter <= peer.contiguous || !peer.ahead.insert(counter) {
+        if counter <= peer.contiguous || peer.ahead.contains(&counter) {
             return Ok(false);
         }
+        if counter != peer.contiguous.saturating_add(1) && peer.ahead.len() >= SYNC_AHEAD_MAX {
+            return Err(Error::NoPath);
+        }
+        peer.ahead.insert(counter);
         while peer.ahead.remove(&peer.contiguous.saturating_add(1)) {
             peer.contiguous = peer.contiguous.saturating_add(1);
         }
@@ -362,18 +457,19 @@ impl SyncEngine {
                 let record = SyncedRecord::parse(body)?;
                 let counter = record.context.counter_of(source).ok_or(Error::Malformed)?;
                 if matches!(
-                    class_of(record.inner)?,
+                    class_of(record.inner, record.origin.scope)?,
                     Class::PeerSignal | Class::Ephemeral
                 ) {
                     return Err(Error::Malformed);
                 }
-                self.lamport = self.lamport.max(record.context.lamport);
+                let lamport = self.take_lamport(source, record.context.lamport)?;
                 // A record below the watermark is one that the device
                 // pruned or declined. It needs no resend.
                 let declined = !self.watermarks.accepts(source, counter);
                 if !self.take_counter(source, counter, now)? {
                     return Ok(Taken::Duplicate);
                 }
+                self.lamport = lamport;
                 if declined {
                     return Ok(Taken::Declined);
                 }
@@ -387,9 +483,15 @@ impl SyncEngine {
             DeviceSetBody::MutableState(_) => {
                 let item = MutableItem::parse(body)?;
                 let counter = item.context.counter_of(source).ok_or(Error::Malformed)?;
-                self.lamport = self.lamport.max(item.context.lamport);
+                let lamport = self.take_lamport(source, item.context.lamport)?;
                 if !self.take_counter(source, counter, now)? {
                     return Ok(Taken::Duplicate);
+                }
+                self.lamport = lamport;
+                // DEV-069: the place of a record that the source holds no
+                // more. The device takes the counter, and no item applies.
+                if item.item == ITEM_VOID {
+                    return Ok(Taken::Void);
                 }
                 let slot = (item.item, item.key.to_vec());
                 let offered = (item.context.lamport, item.writer);
@@ -695,6 +797,7 @@ impl SyncEngine {
             watermarks,
             mutable,
             deliveries,
+            owner: None,
         })
     }
 }
@@ -987,6 +1090,190 @@ mod tests {
     }
 
     #[test]
+    fn a_void_lets_the_acknowledgment_point_pass_a_record_whose_body_is_gone() {
+        // DEV-055, DEV-069: the second record of the phone is a timed one
+        // whose period ended before it reached the laptop.
+        let (mut phone, mut laptop) = pair();
+        let mut bodies = Vec::new();
+        for tag in 1..=3 {
+            let text = message(AppKind::Text, tag);
+            bodies.push(phone.publish(&text, ORIGIN, [tag; 16], 0, 10).unwrap());
+        }
+        laptop.receive(&PHONE, &bodies[0].body, 11).unwrap();
+        laptop.receive(&PHONE, &bodies[2].body, 11).unwrap();
+        assert_eq!(laptop.missing(&PHONE), Some((2, 2)));
+        let lamport = phone.lamport;
+        let void = phone.void(2).unwrap();
+        // The void takes no counter and no Lamport value of its own.
+        assert_eq!((phone.counter(), phone.lamport), (3, lamport));
+        assert_eq!(laptop.receive(&PHONE, &void, 12).unwrap(), Taken::Void);
+        assert_eq!(laptop.missing(&PHONE), None);
+        assert!(!laptop.holds_mutable(ITEM_VOID, &[]));
+        let acks = laptop.acknowledgments(12 + SYNC_ACK_MAX_DELAY).unwrap();
+        assert_eq!(
+            DeviceSetBody::parse(&acks[0].1).unwrap().sync_ack(),
+            Some(3)
+        );
+        phone.receive(&LAPTOP, &acks[0].1, 13).unwrap();
+        assert_eq!(phone.next_resend(&LAPTOP), None);
+        // A second copy is a duplicate, and a void names a sent counter.
+        assert_eq!(laptop.receive(&PHONE, &void, 14).unwrap(), Taken::Duplicate);
+        assert!(phone.void(0).is_err());
+        assert!(phone.void(4).is_err());
+    }
+
+    #[test]
+    fn a_lamport_counter_far_above_the_own_one_is_rejected() {
+        // DEV-275: a device of the set writes one item at the last value.
+        let (mut phone, mut laptop) = pair();
+        phone.lamport = u64::MAX - 1;
+        let poison = phone
+            .publish_mutable(1, b"conversation", b"x", [7; 16], 10)
+            .unwrap();
+        assert_eq!(
+            laptop.receive(&PHONE, &poison.body, 11),
+            Err(Error::Unverified)
+        );
+        assert_eq!(laptop.lamport, 0);
+        assert!(!laptop.holds_mutable(1, b"conversation"));
+        // The device did not take the counter, thus no acknowledgment covers
+        // it.
+        assert!(laptop.acknowledgments(u64::MAX).unwrap().is_empty());
+        // The same holds for a conversation record.
+        let record = phone
+            .publish(&message(AppKind::Text, 1), ORIGIN, [1; 16], 0, 10)
+            .unwrap_err();
+        assert_eq!(
+            record,
+            Error::Stale,
+            "the counter of the writer is at its end"
+        );
+        let mut far = SyncEngine::new(PHONE, &[LAPTOP, TABLET]).unwrap();
+        far.lamport = SYNC_LAMPORT_LEAD + 1;
+        let record = far
+            .publish(&message(AppKind::Text, 1), ORIGIN, [1; 16], 0, 10)
+            .unwrap();
+        assert_eq!(
+            laptop.receive(&PHONE, &record.body, 11),
+            Err(Error::Unverified)
+        );
+        // A value at the bound is a count of writes, and the device takes
+        // it.
+        let mut near = SyncEngine::new(PHONE, &[LAPTOP, TABLET]).unwrap();
+        near.lamport = SYNC_LAMPORT_LEAD - 1;
+        let record = near
+            .publish(&message(AppKind::Text, 2), ORIGIN, [2; 16], 0, 10)
+            .unwrap();
+        assert!(matches!(
+            laptop.receive(&PHONE, &record.body, 11).unwrap(),
+            Taken::Record { .. }
+        ));
+        assert_eq!(laptop.lamport, SYNC_LAMPORT_LEAD);
+        // A write of the laptop then wins over the item of each device.
+        let later = laptop
+            .publish_mutable(1, b"conversation", b"y", [7; 16], 12)
+            .unwrap();
+        assert!(matches!(
+            near.receive(&LAPTOP, &later.body, 13).unwrap(),
+            Taken::Mutable { .. }
+        ));
+    }
+
+    #[test]
+    fn a_device_takes_the_lamport_counter_of_the_owner_of_the_channels_at_any_value() {
+        // The phone owns the channels. The laptop writes two records, each
+        // one at the bound above the phone, and the phone takes both.
+        let mut phone = SyncEngine::new(PHONE, &[LAPTOP, TABLET]).unwrap();
+        let mut laptop = SyncEngine::new(LAPTOP, &[PHONE]).unwrap();
+        for step in 1..=2u64 {
+            laptop.lamport = phone.lamport + SYNC_LAMPORT_LEAD - 1;
+            let record = laptop
+                .publish(
+                    &message(AppKind::Text, step as u8),
+                    ORIGIN,
+                    [step as u8; 16],
+                    0,
+                    10,
+                )
+                .unwrap();
+            assert!(matches!(
+                phone.receive(&LAPTOP, &record.body, 11).unwrap(),
+                Taken::Record { .. }
+            ));
+        }
+        assert_eq!(phone.lamport, 2 * SYNC_LAMPORT_LEAD);
+        // The phone still rejects a value above the bound from a device
+        // that owns no channel.
+        laptop.lamport = phone.lamport + SYNC_LAMPORT_LEAD;
+        let far = laptop
+            .publish(&message(AppKind::Text, 3), ORIGIN, [3; 16], 0, 12)
+            .unwrap();
+        assert_eq!(
+            phone.receive(&LAPTOP, &far.body, 13),
+            Err(Error::Unverified)
+        );
+
+        // A tablet that the phone links after that starts at zero. With no
+        // owner named, the bound rejects each record of the phone
+        // permanently.
+        let relayed = phone
+            .publish(&message(AppKind::Text, 4), ORIGIN, [4; 16], 0, 14)
+            .unwrap();
+        let mut tablet = SyncEngine::new(TABLET, &[PHONE]).unwrap();
+        assert_eq!(
+            tablet.receive(&PHONE, &relayed.body, 15),
+            Err(Error::Unverified)
+        );
+        // DEV-275: the phone owns the channels, and its record seeds the
+        // Lamport counter of the tablet.
+        tablet.set_owner(Some(PHONE));
+        assert!(matches!(
+            tablet.receive(&PHONE, &relayed.body, 15).unwrap(),
+            Taken::Record { .. }
+        ));
+        assert_eq!(tablet.lamport, phone.lamport);
+        // A void of the phone carries its Lamport counter too.
+        let mut behind = SyncEngine::new(TABLET, &[PHONE]).unwrap();
+        behind.set_owner(Some(PHONE));
+        let void = phone.void(relayed.counter).unwrap();
+        assert_eq!(behind.receive(&PHONE, &void, 16).unwrap(), Taken::Void);
+        assert_eq!(behind.lamport, phone.lamport);
+        // A write of the tablet then wins on the phone, inside the bound.
+        let later = tablet
+            .publish_mutable(1, b"conversation", b"y", [7; 16], 17)
+            .unwrap();
+        assert!(matches!(
+            phone.receive(&TABLET, &later.body, 18).unwrap(),
+            Taken::Mutable { .. }
+        ));
+        // The stored form holds no owner, and the caller names it again.
+        let mut again = SyncEngine::restore(&tablet.export().unwrap()).unwrap();
+        assert_eq!(again.owner, None);
+        again.set_owner(Some(PHONE));
+        assert_eq!(again, tablet);
+    }
+
+    #[test]
+    fn the_counters_above_a_hole_hold_a_bound() {
+        let (_, mut laptop) = pair();
+        let peer = laptop.peers.get_mut(&PHONE).unwrap();
+        peer.ahead = (2..2 + SYNC_AHEAD_MAX as u64).collect();
+        // A record above the hole waits for its resend.
+        assert_eq!(
+            laptop.take_counter(&PHONE, 1_000_000, 5),
+            Err(Error::NoPath)
+        );
+        assert!(laptop.take_counter(&PHONE, 2, 5).is_ok_and(|taken| !taken));
+        // The device takes the record that fills the hole, and the stored
+        // engine opens again.
+        assert!(laptop.take_counter(&PHONE, 1, 5).unwrap());
+        assert_eq!(laptop.missing(&PHONE), None);
+        assert!(laptop.take_counter(&PHONE, 1_000_000, 5).unwrap());
+        let back = SyncEngine::restore(&laptop.export().unwrap()).unwrap();
+        assert_eq!(back, laptop);
+    }
+
+    #[test]
     fn a_watermark_declines_history_and_still_acknowledges_it() {
         let (mut phone, mut laptop) = pair();
         let old = phone
@@ -1010,6 +1297,62 @@ mod tests {
             DeviceSetBody::parse(&acks[0].1).unwrap().sync_ack(),
             Some(2)
         );
+    }
+
+    /// A rich record of `channel` around `inner_kind` with `mentions`, as
+    /// an `AppMessage`.
+    fn wrapped(
+        inner_kind: AppKind,
+        inner_body: &[u8],
+        mentions: &[[u8; 16]],
+        channel: Channel,
+    ) -> Vec<u8> {
+        let rich = RichRecord {
+            reply_target: [0; 16],
+            thread_root: [0; 16],
+            forward_depth: 0,
+            mentions: mentions.to_vec(),
+            inner_kind,
+            inner_body,
+        };
+        let mut body = alloc::vec![0u8; rich.len()];
+        rich.encode(channel, &mut body).unwrap();
+        let app = AppMessage {
+            kind: AppKind::Rich,
+            msg_id: [9; 16],
+            sent_at: 0,
+            body: &body,
+        };
+        let mut out = alloc::vec![0u8; app.len()];
+        app.encode(&mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn a_wrapper_holds_the_rules_of_the_channel_of_its_conversation() {
+        use crate::devset::sync::{SCOPE_GROUP, SCOPE_PAIRWISE};
+        // A kind that a pairwise channel alone carries, in a wrapper: it
+        // syncs for a pairwise conversation, and for no group.
+        let address = [0u8; umbra_wire::address::LEN];
+        let pairwise_only = wrapped(AppKind::QueueAddress, &address, &[], Channel::Pairwise);
+        assert!(class_of(&pairwise_only, SCOPE_PAIRWISE).is_ok());
+        assert!(class_of(&pairwise_only, SCOPE_GROUP).is_err());
+        // A mention is a field of a group alone.
+        let mention = wrapped(AppKind::Text, b"hello", &[[5; 16]], Channel::Group);
+        assert!(class_of(&mention, SCOPE_GROUP).is_ok());
+        assert!(class_of(&mention, SCOPE_PAIRWISE).is_err());
+        // The engine takes each one under the origin of its record.
+        let (mut phone, mut laptop) = pair();
+        let group = Origin {
+            scope: SCOPE_GROUP,
+            ..ORIGIN
+        };
+        let synced = phone.publish(&mention, group, [1; 16], 0, 5).unwrap();
+        assert!(matches!(
+            laptop.receive(&PHONE, &synced.body, 6).unwrap(),
+            Taken::Record { .. }
+        ));
+        assert!(phone.publish(&mention, ORIGIN, [2; 16], 0, 5).is_err());
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //! The table takes no socket. Each call returns the cells to send and the
 //! bodies to serve, and the node moves them.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use umbra_crypto::{
     handshake::nk::RelayStatic, rand_core::CryptoRng, secret::Secret, x25519::StaticSecret,
@@ -17,7 +17,7 @@ use umbra_onion::{
         REPLY_LEN,
     },
     circuit::{Position, RelayHop},
-    CIRCUIT_MAX_AGE, CIRCUIT_MAX_CELLS,
+    CIRCUIT_BUILD_TIMEOUT, CIRCUIT_MAX_AGE, CIRCUIT_MAX_CELLS,
 };
 use umbra_wire::{
     bucket::Bucket,
@@ -37,20 +37,72 @@ pub const LINK_BUILD_BURST: u32 = 64;
 /// second after its burst (`NET-332`).
 pub const LINK_BUILD_RATE: u32 = 1;
 
-/// What one client link spent of its circuits and its builds.
+/// `RELAY_LINK_BUILD_BURST`: the builds that one link of a relay of the
+/// layer before may send at once (`NET-332`). Such a link carries the
+/// circuits of many clients.
+pub const RELAY_LINK_BUILD_BURST: u32 = 8_192;
+/// `RELAY_LINK_BUILD_RATE`: the builds that one such link gets back each
+/// second after its burst (`NET-332`).
+pub const RELAY_LINK_BUILD_RATE: u32 = 1_024;
+/// `RELAY_CIRCUITS_MAX`: the circuits that one relay holds at once
+/// (`NET-331`).
+pub const RELAY_CIRCUITS_MAX: usize = 1 << 19;
+
+/// Who holds the circuits of a link, for the share of the table that one
+/// party takes (`NET-331`). The links of one holder count together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Holder {
+    /// The address of a client at an ingress relay, as the runtime gives
+    /// it. It is an IPv4 address, or the first 64 bits of an IPv6 address.
+    /// The table holds it for the life of the link and writes it nowhere.
+    Source([u8; 16]),
+    /// A relay of the layer before, by the `relay_id` of its hello.
+    Relay([u8; 32]),
+    /// A link whose peer the relay cannot name, as in a test network.
+    Link(LinkId),
+}
+
+/// Who sends the build cells of a link (`NET-331`, `NET-332`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// A client, or a peer that named no relay: the link holds
+    /// `LINK_CIRCUITS_MAX` circuits and builds at `LINK_BUILD_RATE`.
+    Client,
+    /// A relay of the layer before, whose link carries the circuits of
+    /// many clients: it builds at `RELAY_LINK_BUILD_RATE`.
+    Relay,
+    /// A link that builds no circuit here. This relay dialed it, or it
+    /// named no relay of the layer before at a relay of layer 2 or 3.
+    Barred,
+}
+
+/// What one link spent of its circuits and its builds.
 #[derive(Debug, Clone, Copy)]
 struct LinkBudget {
     circuits: u32,
     builds: u32,
     refilled_at: u64,
+    /// The circuits, the burst, and the rate of the origin of the link.
+    circuits_max: u32,
+    burst: u32,
+    rate: u32,
 }
 
 impl LinkBudget {
-    const fn new(now: u64) -> Self {
+    const fn new(origin: Origin, now: u64) -> Self {
+        let (circuits_max, burst, rate) = match origin {
+            Origin::Relay => (u32::MAX, RELAY_LINK_BUILD_BURST, RELAY_LINK_BUILD_RATE),
+            Origin::Client | Origin::Barred => {
+                (LINK_CIRCUITS_MAX, LINK_BUILD_BURST, LINK_BUILD_RATE)
+            }
+        };
         LinkBudget {
             circuits: 0,
-            builds: LINK_BUILD_BURST,
+            builds: burst,
             refilled_at: now,
+            circuits_max,
+            burst,
+            rate,
         }
     }
 
@@ -59,10 +111,10 @@ impl LinkBudget {
         let seconds = now.saturating_sub(self.refilled_at);
         let refill = u32::try_from(seconds)
             .unwrap_or(u32::MAX)
-            .saturating_mul(LINK_BUILD_RATE);
-        self.builds = self.builds.saturating_add(refill).min(LINK_BUILD_BURST);
+            .saturating_mul(self.rate);
+        self.builds = self.builds.saturating_add(refill).min(self.burst);
         self.refilled_at = now;
-        if self.circuits >= LINK_CIRCUITS_MAX || self.builds == 0 {
+        if self.circuits >= self.circuits_max || self.builds == 0 {
             return false;
         }
         self.builds -= 1;
@@ -157,6 +209,8 @@ struct Held {
     next: Option<CircuitKey>,
     /// The next hop did not answer the `EXTEND` yet.
     extending: bool,
+    /// The time at which the `EXTEND` went to the next hop.
+    extended_at: u64,
     /// `RelaySession_sk` at a relay of layer 3 (`NET-285`).
     session_secret: Option<StaticSecret>,
     created_at: u64,
@@ -171,6 +225,11 @@ struct Held {
     ending: bool,
     /// The delayed actions of the circuit that the node holds.
     delayed_out: u32,
+    /// The holder of the link of the circuit at its build.
+    holder: Holder,
+    /// The place of the circuit among those of its holder, by the time of
+    /// its last forward cell.
+    seat: u64,
 }
 
 impl Held {
@@ -200,10 +259,24 @@ pub struct CircuitTable {
     /// The held circuit behind each circuit that this relay opened to a
     /// next hop.
     back: BTreeMap<CircuitKey, CircuitKey>,
-    /// The budget of each client link at an ingress relay (`NET-331`,
-    /// `NET-332`). A link of a relay of another layer carries the circuits
-    /// of many clients, thus it has none.
+    /// The budget of each link that built a circuit here (`NET-331`,
+    /// `NET-332`).
     budgets: BTreeMap<LinkId, LinkBudget>,
+    /// The holder of each link that the node named one for.
+    holders: BTreeMap<LinkId, Holder>,
+    /// The circuits of each holder, and the same counts in their order.
+    /// The table thus finds the holder of the most circuits with no scan.
+    counts: BTreeMap<Holder, u32>,
+    ranked: BTreeSet<(u32, Holder)>,
+    /// The circuits of each holder, the one whose last forward cell is the
+    /// oldest first. A build that finds no room ends the first one of a
+    /// holder (`NET-331`). Before this, the table ended the oldest circuit
+    /// that took no cell after its build. A few addresses that sent one
+    /// cell on each circuit then held each place for `CIRCUIT_MAX_AGE`.
+    seats: BTreeSet<(Holder, u64, CircuitKey)>,
+    seat_seq: u64,
+    /// The circuits that the table holds at most.
+    held_max: usize,
     /// The chains that this relay opened as one hop since the last take
     /// (`REL-189`).
     builds: u64,
@@ -226,6 +299,12 @@ impl CircuitTable {
             held: BTreeMap::new(),
             back: BTreeMap::new(),
             budgets: BTreeMap::new(),
+            holders: BTreeMap::new(),
+            counts: BTreeMap::new(),
+            ranked: BTreeSet::new(),
+            seats: BTreeSet::new(),
+            seat_seq: 0,
+            held_max: RELAY_CIRCUITS_MAX,
             builds: 0,
             clock_ms: 0,
         }
@@ -234,6 +313,107 @@ impl CircuitTable {
     /// Sets the clock of the per-hop delay before a call.
     pub fn set_clock_ms(&mut self, now_ms: u64) {
         self.clock_ms = now_ms;
+    }
+
+    /// Sets the circuits that the table holds at most, for a test.
+    #[doc(hidden)]
+    pub fn set_held_max(&mut self, held_max: usize) {
+        self.held_max = held_max;
+    }
+
+    /// Names the holder of `link`: the address of a client, or the relay
+    /// of a hello that verified. A link that holds a circuit keeps the
+    /// holder of its first build.
+    pub fn set_holder(&mut self, link: LinkId, holder: Holder) {
+        if self.circuits_on(link) == 0 {
+            self.holders.insert(link, holder);
+        }
+    }
+
+    /// The holder of `link`.
+    fn holder_of(&self, link: LinkId) -> Holder {
+        self.holders
+            .get(&link)
+            .copied()
+            .unwrap_or(Holder::Link(link))
+    }
+
+    /// The circuits that one holder has in a table at its count: an equal
+    /// part of the table. The count of the holders includes `joining`. A
+    /// holder that builds at its share then ends one of its own circuits,
+    /// thus no set of holders takes the places of another one.
+    fn share(&self, joining: &Holder) -> usize {
+        let holders = self
+            .counts
+            .len()
+            .saturating_add(usize::from(!self.counts.contains_key(joining)));
+        (self.held_max / holders.max(1)).max(1)
+    }
+
+    /// Moves the count of the circuits of `holder` by one.
+    fn count(&mut self, holder: Holder, up: bool) {
+        let before = self.counts.get(&holder).copied().unwrap_or(0);
+        let after = if up {
+            before.saturating_add(1)
+        } else {
+            before.saturating_sub(1)
+        };
+        self.ranked.remove(&(before, holder));
+        if after == 0 {
+            self.counts.remove(&holder);
+        } else {
+            self.counts.insert(holder, after);
+            self.ranked.insert((after, holder));
+        }
+    }
+
+    /// The circuit of `holder` whose last forward cell is the oldest.
+    fn stalest(&self, holder: Holder) -> Option<CircuitKey> {
+        let first = (
+            holder,
+            0,
+            CircuitKey {
+                link: 0,
+                circ_id: [0; 16],
+            },
+        );
+        self.seats
+            .range(first..)
+            .next()
+            .filter(|(held, _, _)| *held == holder)
+            .map(|(_, _, key)| *key)
+    }
+
+    /// Makes room for one build of `holder` in a table at its count
+    /// (`NET-331`). A holder at its share ends its own stalest circuit. A
+    /// holder below it ends the stalest circuit of the holder of the most
+    /// circuits. A table below its count ends no circuit. Each step is a
+    /// search in an ordered set.
+    fn make_room(&mut self, holder: Holder) -> Vec<Action> {
+        if self.held.len() < self.held_max {
+            return Vec::new();
+        }
+        let own = self.counts.get(&holder).copied().unwrap_or(0);
+        let from = if usize::try_from(own).unwrap_or(usize::MAX) >= self.share(&holder) {
+            Some(holder)
+        } else {
+            self.ranked.last().map(|(_, most)| *most)
+        };
+        match from.and_then(|from| self.stalest(from)) {
+            Some(stalest) => self.end_now(stalest, None),
+            None => Vec::new(),
+        }
+    }
+
+    /// Whether the table holds a circuit of `circ_id` on `link`, on the
+    /// side of the client or on the side of the next hop.
+    pub fn holds(&self, link: LinkId, circ_id: [u8; 16]) -> bool {
+        !self.is_free(&CircuitKey { link, circ_id })
+    }
+
+    /// The circuits that `link` built here and that the table still holds.
+    pub fn circuits_on(&self, link: LinkId) -> u32 {
+        self.budgets.get(&link).map_or(0, |budget| budget.circuits)
     }
 
     /// The count of the held circuits.
@@ -256,11 +436,12 @@ impl CircuitTable {
         !self.held.contains_key(key) && !self.back.contains_key(key)
     }
 
-    /// Takes one cell from a link.
+    /// Takes one cell from a link. `origin` says who builds on that link.
     pub fn on_cell<R: CryptoRng + ?Sized>(
         &mut self,
         link: LinkId,
         cell: &[u8],
+        origin: Origin,
         now: u64,
         rng: &mut R,
     ) -> Vec<Action> {
@@ -279,7 +460,7 @@ impl CircuitTable {
             let actions = self.forward(key, bucket, parsed.tag, &mut body);
             return self.delay(key, actions, rng);
         }
-        self.build(key, parsed.tag, &body, now, rng)
+        self.build(key, parsed.tag, &body, origin, now, rng)
     }
 
     /// A cell on a circuit identifier that the relay does not hold is a
@@ -289,26 +470,37 @@ impl CircuitTable {
         key: CircuitKey,
         tag: &[u8; 16],
         body: &[u8],
+        origin: Origin,
         now: u64,
         rng: &mut R,
     ) -> Vec<Action> {
-        if *tag != [0u8; 16] {
+        // NET-332: a link that builds no circuit here gets no answer.
+        if *tag != [0u8; 16] || origin == Origin::Barred {
             return Vec::new();
         }
         let Ok((CellCommand::Extend, hello)) = read_cell_body(body) else {
             return Vec::new();
         };
-        // NET-331, NET-332: a client link above its circuits or its rate of
-        // builds gets no answer, before the handshake costs this relay a
-        // key agreement.
-        if self.layer == 1 {
-            let budget = self
-                .budgets
-                .entry(key.link)
-                .or_insert_with(|| LinkBudget::new(now));
-            if !budget.take(now) {
-                return Vec::new();
-            }
+        // NET-153: a hello for another relay gets no answer. The relay reads
+        // the name before the budget, thus such a hello costs its link no
+        // build and this relay no key agreement. NET-337: a hello with no
+        // known mode does not parse.
+        let Ok(named) = HopHello::parse(hello) else {
+            return Vec::new();
+        };
+        if named.relay_id != self.relay.relay_id {
+            return Vec::new();
+        }
+        let delay_mean_ms = named.delay_class.mean_ms();
+        // NET-331, NET-332: a link above its circuits or its rate of builds
+        // gets no answer, before the handshake costs this relay a key
+        // agreement.
+        let budget = self
+            .budgets
+            .entry(key.link)
+            .or_insert_with(|| LinkBudget::new(origin, now));
+        if !budget.take(now) {
+            return Vec::new();
         }
         let mut reply = [0u8; REPLY_LEN];
         let answered: Result<(Secret<32>, Option<StaticSecret>), _> = if self.layer == 3 {
@@ -317,24 +509,31 @@ impl CircuitTable {
         } else {
             answer(&self.relay, &self.static_secret, hello, rng, &mut reply).map(|ss| (ss, None))
         };
-        // NET-153: a hello for another relay gets no answer.
+        // A handshake that fails gets no answer. It cost a key agreement,
+        // thus it keeps the build that it took of the budget.
         let Ok((ss_hop, session_secret)) = answered else {
             self.release(key.link);
             return Vec::new();
         };
+        // NET-331: the room for the circuit, after the answer: a build that
+        // gets no answer ends no circuit.
+        let holder = self.holder_of(key.link);
+        let mut actions = self.make_room(holder);
         let position = if self.layer == 3 {
             Position::Endpoint
         } else {
             Position::Middle
         };
-        // NET-337: a hello with no known mode failed its parse above.
-        let delay_mean_ms = HopHello::parse(hello).map_or(0, |held| held.delay_class.mean_ms());
+        self.seat_seq = self.seat_seq.wrapping_add(1);
+        self.seats.insert((holder, self.seat_seq, key));
+        self.count(holder, true);
         self.held.insert(
             key,
             Held {
                 hop: RelayHop::new(&ss_hop, u32::from(self.layer), position),
                 next: None,
                 extending: false,
+                extended_at: 0,
                 session_secret,
                 created_at: now,
                 cells: (1, 1),
@@ -342,17 +541,20 @@ impl CircuitTable {
                 released_at_ms: 0,
                 ending: false,
                 delayed_out: 0,
+                holder,
+                seat: self.seat_seq,
             },
         );
         self.builds = self.builds.saturating_add(1);
         let mut out = vec![0u8; BUILD_BUCKET.body_len()];
         if build_cell_body(CellCommand::Extended, &reply, &mut out).is_err() {
-            return Vec::new();
+            return actions;
         }
-        vec![Action::Send {
+        actions.push(Action::Send {
             link: key.link,
             cell: cell_bytes(&key.circ_id, &[0u8; 16], &out),
-        }]
+        });
+        actions
     }
 
     /// Holds the actions of a forward cell for the per-hop delay of its
@@ -405,6 +607,12 @@ impl CircuitTable {
         if !held.count(true) {
             return self.close(key);
         }
+        // NET-331: a forward cell moves the circuit behind each other one of
+        // its holder. A build thus ends a circuit that carries cells last.
+        self.seat_seq = self.seat_seq.wrapping_add(1);
+        self.seats.remove(&(held.holder, held.seat, key));
+        held.seat = self.seat_seq;
+        self.seats.insert((held.holder, held.seat, key));
         if let Some(next) = held.next {
             // NET-129: a relay in the middle makes no check.
             return match held.hop.forward(tag, body) {
@@ -453,7 +661,13 @@ impl CircuitTable {
     /// Binds a new circuit to the next hop behind a held circuit, and
     /// gives the build cell to send on it (`NET-198`, `NET-163`). The node
     /// drew `next.circ_id` from its CSPRNG (`NET-154`).
-    pub fn bind_next(&mut self, from: CircuitKey, next: CircuitKey, body: &[u8]) -> Vec<Action> {
+    pub fn bind_next(
+        &mut self,
+        from: CircuitKey,
+        next: CircuitKey,
+        body: &[u8],
+        now: u64,
+    ) -> Vec<Action> {
         let free = self.is_free(&next);
         let Some(held) = self.held.get_mut(&from) else {
             return Vec::new();
@@ -464,6 +678,7 @@ impl CircuitTable {
         }
         held.next = Some(next);
         held.extending = true;
+        held.extended_at = now;
         self.back.insert(next, from);
         vec![Action::Send {
             link: next.link,
@@ -565,6 +780,8 @@ impl CircuitTable {
         let Some(held) = self.held.remove(&key) else {
             return Vec::new();
         };
+        self.seats.remove(&(held.holder, held.seat, key));
+        self.count(held.holder, false);
         self.release(key.link);
         let mut actions = Vec::new();
         if let Some(next) = held.next {
@@ -599,7 +816,21 @@ impl CircuitTable {
         }
     }
 
-    /// Gives one circuit of a client link back to its budget.
+    /// Ends the circuit of `circ_id` on `link`, whose cell found no room in
+    /// the backlog of that link, and tells each neighbor (`NET-349`). The
+    /// link and each other circuit on it stay.
+    pub fn shed(&mut self, link: LinkId, circ_id: [u8; 16]) -> Vec<Action> {
+        let key = CircuitKey { link, circ_id };
+        if self.held.contains_key(&key) {
+            return self.end(key, None);
+        }
+        match self.back.get(&key).copied() {
+            Some(client_side) => self.end(client_side, None),
+            None => Vec::new(),
+        }
+    }
+
+    /// Gives one circuit of a link back to its budget.
     fn release(&mut self, link: LinkId) {
         if let Some(budget) = self.budgets.get_mut(&link) {
             budget.circuits = budget.circuits.saturating_sub(1);
@@ -608,16 +839,23 @@ impl CircuitTable {
 
     /// A link closed: each circuit on it ends.
     pub fn link_closed(&mut self, link: LinkId) -> Vec<Action> {
+        // The circuits of one link are neighbors in each map, thus the end
+        // of a link reads no circuit of another one.
+        let of_link = CircuitKey {
+            link,
+            circ_id: [0; 16],
+        }..=CircuitKey {
+            link,
+            circ_id: [0xFF; 16],
+        };
         let on_link: Vec<CircuitKey> = self
             .held
-            .keys()
-            .filter(|key| key.link == link)
-            .copied()
+            .range(of_link.clone())
+            .map(|(key, _)| *key)
             .collect();
         let behind: Vec<CircuitKey> = self
             .back
-            .iter()
-            .filter(|(next, _)| next.link == link)
+            .range(of_link)
             .map(|(_, client_side)| *client_side)
             .collect();
         let actions = on_link
@@ -626,17 +864,25 @@ impl CircuitTable {
             .flat_map(|key| self.end(key, Some(link)))
             .collect();
         self.budgets.remove(&link);
+        self.holders.remove(&link);
         actions
     }
 
     /// Ends each circuit past `CIRCUIT_MAX_AGE` or past `CIRCUIT_MAX_CELLS`
-    /// in one direction (`NET-320`, `NET-321`).
+    /// in one direction (`NET-320`, `NET-321`), and each circuit whose next
+    /// hop gave no `EXTENDED` in `CIRCUIT_BUILD_TIMEOUT`. The client ended
+    /// that build (`NET-169`), and its `DESTROY` is one more layer down.
+    /// This relay moves it on as a cell of the middle and cannot read it.
+    /// Before this, a next hop that never took the `EXTEND` left the circuit
+    /// here until `CIRCUIT_MAX_AGE`.
     pub fn expire(&mut self, now: u64) -> Vec<Action> {
         let aged: Vec<CircuitKey> = self
             .held
             .iter()
             .filter(|(_, held)| {
                 now.saturating_sub(held.created_at) >= CIRCUIT_MAX_AGE
+                    || (held.extending
+                        && now.saturating_sub(held.extended_at) >= CIRCUIT_BUILD_TIMEOUT)
                     || held.cells.0 > CIRCUIT_MAX_CELLS
                     || held.cells.1 > CIRCUIT_MAX_CELLS
             })
@@ -653,7 +899,7 @@ mod tests {
 
     #[test]
     fn a_client_link_builds_its_burst_then_one_each_second() {
-        let mut budget = LinkBudget::new(100);
+        let mut budget = LinkBudget::new(Origin::Client, 100);
         // NET-332: the burst passes, and the build after it does not.
         for _ in 0..LINK_BUILD_BURST {
             assert!(budget.take(100));
@@ -667,8 +913,61 @@ mod tests {
     }
 
     #[test]
+    fn a_relay_link_builds_its_own_burst_and_holds_no_count_of_circuits() {
+        let mut budget = LinkBudget::new(Origin::Relay, 100);
+        // NET-332: the link of a relay carries the circuits of many
+        // clients, and its builds have a bound all the same.
+        for _ in 0..RELAY_LINK_BUILD_BURST {
+            assert!(budget.take(100));
+        }
+        assert!(!budget.take(100));
+        for _ in 0..RELAY_LINK_BUILD_RATE {
+            assert!(budget.take(101));
+        }
+        assert!(!budget.take(101));
+        assert!(budget.circuits > LINK_CIRCUITS_MAX);
+    }
+
+    #[test]
+    fn each_holder_has_an_equal_part_of_the_table() {
+        let secret = StaticSecret::from([7; 32]);
+        let relay = RelayStatic {
+            s: [0; 32],
+            relay_id: [1; 32],
+        };
+        let mut table = CircuitTable::new(relay, secret, 1);
+        table.set_held_max(12);
+        let (one, other) = (Holder::Source([1; 16]), Holder::Source([2; 16]));
+        // NET-331: one holder alone has the whole table, and each further
+        // one makes the part of each smaller. A table with more holders
+        // than places still gives each one a circuit.
+        assert_eq!(table.share(&one), 12);
+        table.count(one, true);
+        assert_eq!(table.share(&one), 12);
+        assert_eq!(table.share(&other), 6);
+        table.count(other, true);
+        table.count(other, true);
+        assert_eq!(table.share(&Holder::Link(9)), 4);
+        assert_eq!(table.ranked.last(), Some(&(2, other)));
+        table.count(other, false);
+        table.count(other, false);
+        assert_eq!(table.share(&one), 12);
+        assert_eq!(table.counts.len(), 1);
+        table.set_held_max(0);
+        assert_eq!(table.share(&other), 1);
+        // The links of one address count together, and a link that the
+        // node named no holder for counts alone.
+        table.set_holder(4, one);
+        table.set_holder(6, one);
+        assert_eq!(table.holder_of(4), table.holder_of(6));
+        assert_eq!(table.holder_of(8), Holder::Link(8));
+        table.link_closed(4);
+        assert_eq!(table.holder_of(4), Holder::Link(4));
+    }
+
+    #[test]
     fn a_client_link_holds_at_most_its_circuits() {
-        let mut budget = LinkBudget::new(0);
+        let mut budget = LinkBudget::new(Origin::Client, 0);
         let mut now = 0;
         while budget.circuits < LINK_CIRCUITS_MAX {
             now += 1;

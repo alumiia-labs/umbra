@@ -46,6 +46,13 @@ class MainActivity : ComponentActivity() {
         // The cover is a platform view and no composable, because the
         // platform takes the snapshot before a recomposition can run.
         val root = FrameLayout(this)
+        // No autofill service reads a view of the app. A service that sees
+        // the passphrase field offers to keep the passphrase in an account
+        // outside the device. No content capture service reads message text.
+        root.importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            root.importantForContentCapture = View.IMPORTANT_FOR_CONTENT_CAPTURE_NO_EXCLUDE_DESCENDANTS
+        }
         root.addView(content, MATCH_PARENT, MATCH_PARENT)
         root.addView(cover, MATCH_PARENT, MATCH_PARENT)
         setContentView(root)
@@ -59,7 +66,9 @@ class MainActivity : ComponentActivity() {
 
     /**
      * An invitation link from a tap or from a share goes to the view of the
-     * link. That view opens it only at a tap of the user.
+     * link. That view opens it only at a tap of the user. Each app of the
+     * device can send this intent, thus the link alone starts no lookup and
+     * no request.
      */
     private fun takeInvitation(intent: Intent?) {
         val text = when (intent?.action) {
@@ -67,8 +76,11 @@ class MainActivity : ComponentActivity() {
             Intent.ACTION_SEND -> intent.getStringExtra(Intent.EXTRA_TEXT)
             else -> null
         } ?: return
-        (INVITATION_LINK.find(text) ?: REUSABLE_LINK.find(text) ?: PROFILE_LINK.find(text))
-            ?.let { Core.linkedInvitation = it.value }
+        if (text.length > LINK_TEXT_MAX) return
+        val link = INVITATION_LINK.find(text)?.value
+            ?: REUSABLE_LINK.find(text)?.value
+            ?: PROFILE_LINK.find(text)?.takeIf { isHandleName(it.groupValues[1]) }?.value
+        link?.let { Core.linkedInvitation = it }
     }
 
     companion object {
@@ -80,8 +92,33 @@ class MainActivity : ComponentActivity() {
         // Part 4 §4.3.2: the address in the Crockford alphabet.
         private val REUSABLE_LINK = Regex("""umbra://p/[0-9A-Za-z]{32}""")
 
-        // Part 9 §9.3.1: the handle, then the fragment of its profile.
-        private val PROFILE_LINK = Regex("""umbra://h/[^\s#]+(%23|#)[0-9]+#[0-9A-Za-z]{26}""")
+        // Part 9 §9.3.1 and `DIS-179`: the name, a discriminator of 2 to 9
+        // digits, then the fragment of the profile.
+        private val PROFILE_LINK = Regex("""umbra://h/([^\s#%/?@]{1,32})(?:%23|#)[0-9]{2,9}#[0-9A-Za-z]{26}""")
+
+        /** The longest text of an intent that the app reads for a link. */
+        private const val LINK_TEXT_MAX = 4_096
+
+        /**
+         * Whether the `name` part of a handle from outside the app can show
+         * in a view. The name holds at most 32 bytes (`DIS-090`), and letters,
+         * digits, marks, and punctuation alone. A control character, a format
+         * character such as a change of the text direction, and a code point
+         * with no letter never show. The core applies the whole profile of
+         * `DIS-088` at the lookup.
+         */
+        private fun isHandleName(name: String): Boolean {
+            if (name.toByteArray(Charsets.UTF_8).size > 32) return false
+            return name.codePoints().allMatch { point ->
+                when (Character.getType(point).toByte()) {
+                    Character.CONTROL, Character.FORMAT, Character.SURROGATE, Character.PRIVATE_USE,
+                    Character.UNASSIGNED, Character.LINE_SEPARATOR, Character.PARAGRAPH_SEPARATOR,
+                    Character.SPACE_SEPARATOR,
+                    -> false
+                    else -> true
+                }
+            }
+        }
     }
 
     override fun onUserInteraction() {

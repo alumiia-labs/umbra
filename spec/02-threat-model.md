@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 2: Threat Model and Security Goals
 
 **Status:** Draft
-**Version:** 0.11.0-draft
-**Date:** 2026-10-02
+**Version:** 0.12.0
+**Date:** 2026-10-09
 
 ---
 
@@ -56,7 +56,7 @@ UMBRA does not give guaranteed availability, and §2.5 states that limit.
 **What A2 can do:** A2 operates one or more relays. A2 sees all the data that
 those relays see. A2 keeps logs, and the policy does not prevent this. A2 gives
 false statements about its own behavior and its own measurements. A2 can be the
-nonprofit itself, or a state that seized a relay. A2 also changes a cell, drops
+project itself, or a state that seized a relay. A2 also changes a cell, drops
 a cell, delays a cell, and injects a cell at each relay that A2 holds.
 
 **In scope, and the primary design driver.** **[THR-003]** UMBRA MUST give a relay
@@ -92,6 +92,18 @@ different organizations in different jurisdictions. The selection algorithm
 applies weights, thus no operator can increase its share of the paths at a low
 cost.
 
+**The bootstrap exception.** `THR-007` has two exceptions, and Part 3 §3.4.6
+holds both. Rule `NET-200` lets hop 2 share a jurisdiction bloc with one
+end of the chain when the relay set holds fewer than three blocs. Rules
+`NET-340`, `NET-350` and `NET-351` let a client build a chain of one
+operator, in one bloc, and at one provider, while the signed directory is
+provisional. That is the state of a network that one operator starts. In
+that state A2 and A3 are one party. The operator of the network runs each
+hop, and it joins the address of a client to the queues of that client.
+The client shows the state and each such circuit to the user. The exception
+ends at the first key set at the authority floor. The trade table of
+§2.4 and Part 15 §15.3 each hold its row.
+
 UMBRA does **not** claim security against an adversary that controls the
 majority of the relay capacity. Part 15 quantifies that residual risk.
 
@@ -110,7 +122,7 @@ conform to this specification.
 
 ### A5 — Legal-process adversary
 
-**What A5 can do:** A5 compels a relay operator, the nonprofit, a push provider,
+**What A5 can do:** A5 compels a relay operator, the project, a push provider,
 an app store, or a hosting provider. A5 can compel such a party to give records,
 to keep records in the future, or to change software.
 
@@ -134,8 +146,8 @@ security lets the channel heal when the attacker loses access. At-rest
 encryption with hardware-backed key wrapping (Part 14) makes forensic extraction
 from a powered-off device more difficult.
 
-> **Note on multi-device operation.** The owner selected multi-device operation
-> *with* history sync. This is a deliberate and informed decision. If a party
+> **Note on multi-device operation.** UMBRA gives multi-device operation
+> *with* history sync. This is a deliberate design decision. If a party
 > seizes one device in a Device Set, that party gets the synced history of that
 > device. Part 7 gives the mitigations, which are per-device sync scoping,
 > retention limits, and revocation. Part 15 states the residual exposure again.
@@ -150,16 +162,17 @@ and the task snapshot service. A7 reads each byte that the client gives to a
 platform interface. A7 cannot open the encrypted store of Part 14 §14.6.4, and
 A7 cannot decrypt a record in transit.
 
-Android and the web are the v1 platforms (Part 1 §1.1). On the web client of
-Part 14 §14.7, A7 is the browser, the browser profile and its sync to the
+Android is the v1 platform, and Part 1 §1.1 defers the web client. On
+the web client of Part 14 §14.7, when it ships, A7 is the browser, the browser profile and its sync to the
 account of the user at the browser vendor, each other extension that the user
 installed, and the download location. This section keeps the abstract term
 *the platform*, because the rule below binds each platform, and each platform
-that a later revision adds.
+that a later version adds.
 
 **[THR-015]** A web client MUST NOT run as a page that a host serves, because
 trust assumption 4 of §2.6 fails for such a page at each load. Part 14 §14.7
-gives the form that holds that assumption.
+gives the form that holds that assumption. The rule binds each version: it
+forbids a hosted page now, and it binds the web client when one ships.
 
 **In scope, and partially mitigated.** **[THR-013]** A client MUST NOT write a
 plaintext record, a key, or a decrypted attachment to a platform store. Part 14
@@ -173,12 +186,12 @@ does not control. A6 holds the device against the user, and A7 serves the user.
 That difference is the cause that A7 gets a rule about where data goes, and A6
 gets a mitigation only.
 
-> *Cause.* An earlier draft modeled six adversaries, and no class owned the
-> platform of an honest device. A client that decrypted a video into the
-> platform media store was conformant. That file reached a platform cloud
-> service at the next sync. The at-rest protection of Part 14 §14.6.4 ended at
-> the disk write. The platform backup of the application container reached a
-> party that Part 15 §15.1 did not list, against G13.
+> *Cause.* A model with no class A7 gives the platform of an honest device no
+> owner. A client that decrypts a video into the platform media store is then
+> conformant. That file reaches a platform cloud service at the next sync. The
+> at-rest protection of Part 14 §14.6.4 then ends at the disk write. The
+> platform backup of the application container then reaches a party outside
+> the list of Part 15 §15.1, against G13.
 
 ## 2.3 Security goals
 
@@ -213,10 +226,10 @@ realizes the goal.
 > residual. No protocol removes that address from the party that carries the
 > packet.
 
-> **Note on the goal numbers.** This table has no G12. An earlier draft gave G12
-> as censorship resistance. This specification withdraws that goal, and §2.5
-> gives the cause. The numbers of the other goals do not change, because Parts
-> 3, 13, and 15 refer to G13.
+> **Note on the goal numbers.** This table has no G12. The number G12 is
+> reserved, and no goal uses it. Censorship resistance is not a goal, and §2.5
+> gives the cause. The numbers of the other goals stay, because Parts 3, 13,
+> and 15 refer to G13.
 
 ## 2.4 Usability goals
 
@@ -229,12 +242,12 @@ implementation to them in the same manner.
 | # | Goal | Target |
 | --- | --- | --- |
 | U1 | **Time to first message** — from the first launch to the first message that a relay accepts, on a mid-tier Android device on 4G. The channel comes from an invitation that the same session scanned | p50 ≤ 90 s, p95 ≤ 180 s, ≤ 6 taps, and **no security decision before the inbox is reachable**. No account screen, no phone number, no email address, and no server picker. |
-| U2 | Message delivery latency, Balanced mode, the two parties online, and the sender holds the ratchet ownership of Part 7 §7.5.4 | **p50 ≤ 2.0 s, p95 ≤ 4.5 s.** Part 3 §3.12 models 1.6 s and 3.9 s against a measured propagation budget, thus the margin is 0.4 s and 0.6 s. **A send from a device that does not own the ratchet** adds the wake latency of the owner device (Part 8 §8.3). The target for that path is p50 ≤ 6 s and p95 ≤ 20 s in Instant mode |
-| U3 | **Notification latency, Instant notifications and Balanced mode** — from the moment the sender taps send to the moment a locked and idle device shows the notification | p50 ≤ 3 s, p95 ≤ 15 s, p99 ≤ 60 s. **Hard invariant:** no message stays invisible for more than 15 min while the device has network. **Private notifications:** the fixed cadence of Part 8 §8.3 gives the latency. That latency is a maximum of 20 min at the 20 min cadence, and a maximum of 30 min at the 30 min cadence |
-| U4 | Idle background data consumption, Balanced mode with Instant notifications, on the model day of Part 3 §3.12 | ≤ 100 MB/month. Part 3 §3.12 models 77.95 MB |
-| U4b | Idle background data consumption, Balanced mode with Private notifications | **No target in this draft.** Part 3 §3.12 models 148.96 MB at the 30 min cadence and 196.42 MB at the 20 min cadence of Part 8 §8.3. That section states the cause |
+| U2 | Message delivery latency, Balanced mode, the two parties online, and the sender holds the ratchet ownership of Part 7 §7.5.4 | **p50 ≤ 2.0 s, p95 ≤ 4.5 s.** Part 3 §3.12 models 1.6 s and 3.9 s against a measured propagation budget, thus the margin is 0.4 s and 0.6 s. **A send from a device that does not own the ratchet** adds the wake latency of the owner device (Part 8 §8.3). The target for that path is p50 ≤ 6 s and p95 ≤ 20 s in Instant mode, **while the owner device is unlocked**. A locked owner sends nothing, and the note below gives that case, which has no target |
+| U3 | **Notification latency, Instant notifications and Balanced mode** — from the moment the sender taps send to the moment a locked and idle device shows the notification | p50 ≤ 3 s, p95 ≤ 15 s, p99 ≤ 60 s. **Hard invariant:** no message stays invisible for more than 15 min while the device has network. The device of this row is locked by the platform, and the client on it is unlocked or holds the wake table of Part 8 rule `NTF-135`. **Private notifications:** the fixed cadence of Part 8 §8.3 gives the latency while the client is unlocked. That latency is 20 min at the 20 min cadence and 30 min at the 30 min cadence, and more when the platform defers the timer. A locked client in Private mode shows nothing until the unlock |
+| U4 | Idle background data consumption, Balanced mode with Instant notifications, on the model day of Part 3 §3.12 | ≤ 100 MB/month. Part 3 §3.12 models 77.99 MB with the session resume of Part 6 §6.2.3. v1 defers the resume, and the note below gives what follows |
+| U4b | Idle background data consumption, Balanced mode with Private notifications | **No target in v1.** Part 3 §3.12 models 149.22 MB at the 30 min cadence and 196.68 MB at the 20 min cadence of Part 8 §8.3. That section states the cause |
 | U5 | Idle battery, Instant notifications on, application in the background | **Two terms.** With no background arrival, ≤ 2 % of a 4000 mAh battery in 24 h (≈ 80 mAh/day). The measured 1 % of Signal over 18 h 59 min is about 1.3 % in 24 h. Thus this target is about 1.6 times that figure. For each background arrival, ≤ 10 mWh. Part 3 §3.12 models 0 % and 9.1 mWh, which is 10.9 % on its model day of 184 arrivals. **Conformance test: a 24 h idle run with no arrival, and a run with a scripted arrival count, each on stock Android *and* on GrapheneOS.** |
-| U6 | Delivery reliability, the recipient returns in the retention window | ≥ 99.9 % delivered in 60 s after the recipient comes online. **No message is permanently undeliverable** in the window |
+| U6 | Delivery reliability, the recipient returns in the retention window | ≥ 99.9 % delivered in 60 s after the recipient comes online. **No message is permanently undeliverable** in the window. The window of a message is `MSG_TTL`. The file of an attachment has a shorter window, `CHUNK_TTL` of Part 12 §12.7.1, and the trade table gives that row |
 | U7 | Addition of a second device | ≤ 60 s, one QR scan, and **no contact does the verification again** |
 | U8 | Cold start to a rendered inbox, the store unlocked | ≤ 1.5 s on a 2021-class mid-range Android device |
 | U8b | Unlock to a rendered inbox, after the auto-lock of Part 14 §14.6.4 | ≤ 4.5 s from the passphrase confirmation, on the same device. The Argon2id step of about 3 s is inside that figure |
@@ -267,38 +280,60 @@ implementation to them in the same manner.
 > notifications and Balanced mode, and U5 uses the same method. Private mode
 > keeps a stated latency, and the U3 row gives it.
 >
-> **U4 counts each push wake, and a wake is a transport handshake.** An earlier
-> draft asserted 30 push wakes each day and priced a wake as a circuit build of
-> 7 104 bytes. Part 3 §3.12 now derives the wake count from the 184 background
-> arrivals of its model day. It prices a wake as a TLS handshake, a session
-> resubscription, and a drain. Part 3 §3.4.3 raises `CIRCUIT_MAX_AGE` to 4
-> hours, thus most wakes pay no build. The handshake row is the largest row,
-> because rule NET-023 of Part 3 §3.2.5 gives each queue relay its own session.
-> The idle background is 77.95 MB each month, and U4 moves to 100 MB.
+> **U4 counts each push wake, and a wake is a transport handshake.** Part 3
+> §3.12 derives the wake count from the 184 background arrivals of its model
+> day. It prices a wake as a TLS handshake, a session resubscription, and a
+> drain. Part 3 §3.4.3 sets `CIRCUIT_MAX_AGE` to 4 hours, thus most wakes pay
+> no build. The handshake row is the largest row, because rule NET-023 of
+> Part 3 §3.2.5 gives each queue relay its own session. The idle background
+> is 77.99 MB each month, and the U4 target is 100 MB.
 >
-> **U4b names no target in this draft.** A Private wake of Part 8 §8.3 opens
+> **U4 rests on the session resume, and v1 defers it.** Part 3
+> §3.8 defers the resume of Part 6 §6.2.3, thus a circuit of a v1 client
+> ends with its connection. A client that closes its connection after each
+> wake then pays a circuit build for each session of each wake. Part 3
+> §3.12 puts that client at about 183 MB each month. A client that holds
+> one connection open pays no such build. Thus v1 does not show U4 for each
+> client. The test of §2.4.1 measures the figure that a build reaches. The
+> resume returns before a version claims U4 without that condition.
+>
+> **U2 and U3 with a locked client.** Part 14 rule `IMP-119` locks the client
+> after 15 minutes with no action of the user, and a locked client holds no
+> key (Part 14 rule `IMP-127`). The owner device of Part 7 §7.5.4 then sends
+> no record for a linked device, reads no pairwise queue, and carries no
+> sync record to another device of the set. A linked device that composes
+> waits for the unlock of the owner. The ownership claim of Part 7 §7.3.1
+> is the designed bound: a device claims after `OWNER_TIMEOUT` of 90 s, at
+> most `OWNER_CLAIM_RATE` times each day. The v1 client builds no claim
+> (Part 7 rule `DEV-287`), thus in v1 the wait has no bound but the
+> unlock. The second clause of U2 thus covers an unlocked
+> owner alone. In Instant mode a locked client still shows which
+> conversation waits, under Part 8 rule `NTF-136`, and U3 measures that
+> alert. Part 15 §15.3 holds the row.
+>
+> **U4b names no target in v1.** A Private wake of Part 8 §8.3 opens
 > each queue-relay session of the model day, because the client cannot know
-> which queue holds a message. Part 3 §3.12 derives 148.96 MB and 196.42 MB
+> which queue holds a message. Part 3 §3.12 derives 149.22 MB and 196.68 MB
 > each month from that. A target above those figures binds nothing, and a
 > target below them fails under rule THR-008 with no rule that lets a client
-> meet it. The cause is the session model of rule NET-023, and a revision of
+> meet it. The cause is the session model of rule NET-023, and a change of
 > that rule sets the target. Part 3 §3.12 states the figures, thus a reader
 > sees the cost.
 >
 > **U8 covers an unlocked store, and U8b covers the unlock.** Part 14 §14.6.4
 > pays about 3 s of Argon2id at each unlock. Thus a start after the auto-lock
-> cannot render an inbox in 1.5 s. An earlier draft stated one figure for the
-> two paths.
+> cannot render an inbox in 1.5 s. Thus each of the two paths has its own
+> figure.
 >
-> **U9 is a device-local ratio.** An earlier draft added a population target of
-> 0.1 % of the monthly active users. That target needs a report from each user,
-> and Part 15 §15.6 permits no telemetry. A client shows the ratio in its
-> diagnostics screen, and it sends the ratio to no party.
+> **U9 is a device-local ratio.** A target for the population of the users
+> needs a report from each user, and Part 15 §15.6 permits no telemetry. A
+> client shows the ratio in its diagnostics screen, and it sends the ratio to
+> no party.
 >
 > **U10 covers a user that completed the setup.** Part 4 §4.7.6 lets a user
 > dismiss the recovery prompt two times. A user with no recovery code, no
-> backup, and no guardians recovers nothing. An earlier draft measured that user
-> against the 99 % target. U10b measures the setup path instead, because a
+> backup, and no guardians recovers nothing. Thus the 99 % target does not
+> measure that user. U10b measures the setup path instead, because a
 > published completion rate needs the telemetry that Part 15 §15.6 forbids.
 
 If a usability goal conflicts with a security goal, this specification states
@@ -321,7 +356,7 @@ adds a trade MUST add a row to this table.
 | A member keeps `K_e` for the life of the current group epoch, thus a seized device opens the retained records of that epoch from its start, at most `GROUP_EPOCH_MAX_AGE` | Part 11 §11.3.2 |
 | A granting epoch is a signed and transferable statement, thus G10 does not cover the group administration | Part 11 §11.9.5 |
 | A moderator removal in a private group destroys a record on the device of each member | Part 11 §11.9.6 |
-| Each queue relay holds its own session, thus each push wake pays one transport handshake for each queue relay. That row is 42 % of the idle background, and U4 moves from 25 MB to 100 MB each month | Part 3 §3.12 |
+| Each queue relay holds its own session, thus each push wake pays one transport handshake for each queue relay. That row is 42 % of the idle background, and the U4 target is 100 MB each month | Part 3 §3.12 |
 | A circuit and its session live 4 hours and not 10 minutes. A seized hop 1 or hop 2 key set then opens 4 hours of recorded cells, and one session links the wakes of 4 hours | Part 3 §3.4.3, Part 6 §6.2.3 |
 | Each background arrival wakes the device one time, thus the battery cost of Instant mode grows with the arrival count. U5 states that cost as a term for each arrival | Part 3 §3.12 |
 | Private mode holds a message for its fixed cadence, thus U3 covers Instant notifications and Balanced mode only | Part 8 §8.3 |
@@ -331,9 +366,13 @@ adds a trade MUST add a row to this table.
 | A skipped-message key lives 45 days, thus a seized device gives a wider key set | Part 5 §5.5.4 |
 | A group-queue relay holds `GROUP_RETENTION` of the ciphertext of a group and the time and the bucket of each record, thus two replica operators see the activity of a group | Part 11 §11.5 |
 | An accepted key-change notice ends the post-compromise healing for that contact | Part 4 §4.5.1 |
-| A backup write costs about 492 KB each day on the chunk path, and the earlier draft counted it as free | Part 3 §3.12 |
+| A backup write costs about 492 KB each day on the chunk path, and U4 counts that cost | Part 3 §3.12 |
 | A send from a device that does not own the ratchet waits for the next wake of the owner device | Part 7 §7.5.4 |
-| U2 moves from 1.5 s to 2.0 s, because the earlier propagation model was optimistic and `PACING_MEAN` holds at 1 s | Part 3 §3.12 |
+| The client locks after 15 minutes and a locked client holds no key. Thus a locked owner device sends nothing for a linked device, reads no queue, and carries no sync record, until the unlock. v1 builds no ownership claim, thus the unlock is the one bound | Part 7 §7.5.4, Part 8 §8.4.1, Part 14 §14.6.4 |
+| A provisional network runs on the relays of one operator. A client then builds a chain of one operator, and that operator joins the address of the client to its queues. Thus G6, G7 and G8 do not hold against that operator until the directory reaches the authority floor | Part 3 §3.4.6 |
+| The file of an attachment lives `CHUNK_TTL` of 14 days at a relay, and a message lives `MSG_TTL` of 45 days. Thus a recipient that returns after 14 days gets the message and not its file, and the uploader pays less storage | Part 12 §12.7.1 |
+| v1 ships the session without its resume and TLS over TCP alone. Thus a lost connection costs each circuit again, and U4 holds only for a client that keeps its connection. Thus a network with no TCP/443 carries no client | Part 3 §3.8, Part 3 §3.12 |
+| The U2 p50 target is 2.0 s, because Part 3 §3.12 models 1.6 s against a measured propagation budget and `PACING_MEAN` holds at 1 s | Part 3 §3.12 |
 | A link preview is a statement by the sender, because the receiver MUST NOT fetch the URL | Part 3 §3.3.2 |
 | A disappearing message does not enter a backup, thus a restore does not recover it | Part 4 §4.7.2 |
 | A blocked contact gets an ordinary delivery acknowledgment, thus the block costs the queue and the bytes of a live contact | Part 13 §13.12 |
@@ -349,16 +388,16 @@ adds a trade MUST add a row to this table.
 | A save to the media store and a screenshot stay as user actions, thus one tap moves a plaintext out of the encrypted store | Part 14 §14.6.6 |
 | The accessibility tree stays whole, thus an enabled accessibility service reads each rendered message | Part 14 §14.6.6 |
 | The ClientHello is the ClientHello of the rustls stack and not of a browser, thus a classifier tells an UMBRA client from a browser on the first flight | Part 3 §3.8.1 |
-| A web client sends the ClientHello of its browser, thus a classifier tells a web client from a native client on the first flight | Part 3 §3.8.1 |
-| A web client receives a message while its browser runs, and the phone of the user carries each notification at another time | Part 8 §8.6 |
-| The web client is a browser extension, thus each browser vendor is a gatekeeper of that client, and a user without the extension has no web client | Part 14 §14.7 |
+| When the deferred web client ships: a web client sends the ClientHello of its browser, thus a classifier tells a web client from a native client on the first flight | Part 3 §3.8.1 |
+| When the deferred web client ships: a web client receives a message while its browser runs, and the phone of the user carries each notification at another time | Part 8 §8.6 |
+| When the deferred web client ships: the web client is a browser extension, thus each browser vendor is a gatekeeper of that client, and a user without the extension has no web client | Part 14 §14.7 |
 | A published rendezvous queue rotates each 30 days, thus one relay holds the hello count of one period and the holder pays one queue and one write in each period | Part 9 §9.9 |
 | A record that no relay accepts in `SEND_GIVE_UP` fails, and the user resends it, thus no retransmission runs for the life of a session | Part 3 §3.7 |
 | A 1:1 conversation and a group at or below `GROUP_ALL_NOTIFY_MAX` default to a notification for each record. Thus a small conversation alerts on each record, and a large one alerts on a mention only | Part 7 §7.5.9 |
 | The manual verification is a six-digit code, thus an active adversary at the first contact passes one ceremony in 10⁶ | Part 4 §4.5.2 |
 | A delivery receipt and a read receipt are off by default. Thus a sender does not learn that a record arrived unless the peer opts in | Part 3 §3.5.4 |
 | A typing indicator is off by default, thus a peer does not learn that a user composes unless that user opts in | Part 6 §6.6.9 |
-| A message push lives 24 hours at the provider, thus a seizure there exposes one day of 69-byte blobs in place of one hour | Part 8 §8.4.3 |
+| Each push lives 24 hours at the provider, a digest push too. Thus a seizure there exposes one day of 69-byte blobs in place of one hour. Thus the provider cannot tell a group wake from a pairwise wake by the expiry | Part 8 §8.4.3 |
 | A device that fails three consecutive blob opens shows a clock state. Thus a wrong clock is visible, and a preview stops until the root is fresh | Part 8 §8.2.3, Part 14 §14.9.2 |
 | A client takes its time from the signed directory root. Thus a device clock that is wrong by more than one hour stops nothing, and the client shows one line for it | Part 10 §10.5.2, Part 14 §14.9.2 |
 | A sender re-encodes each media object and removes its metadata fields. Thus a recipient gets a smaller file with no location, and the original needs one selection for each send | Part 12 §12.3 |
@@ -368,9 +407,9 @@ adds a trade MUST add a row to this table.
 | A bulk circuit runs in the mode of its conversation, thus a Private-mode upload of 250 MiB takes about 80 minutes | Part 12 §12.7.2 |
 | A holder reads its own label at each tree head, thus a compelled insertion under that label raises the takeover warning at the holder, and each published label costs one metered lookup for each head | Part 9 §9.5.2 |
 | The invitation link names one invitation host, thus that host learns each browser open of a link by a party without the client | Part 4 §4.3.1 |
-| Private notifications wake the device on a fixed clock and open each queue-relay session. The idle background then rises to 148.96 MB or 196.42 MB each month. U4b names no target in this draft | Part 3 §3.12 |
+| Private notifications wake the device on a fixed clock and open each queue-relay session. The idle background then rises to 149.22 MB or 196.68 MB each month. U4b names no target in v1. A locked client in Private mode receives nothing until the unlock | Part 3 §3.12, Part 8 §8.3 |
 | A published Public Address sits in a second directory index, thus a party that holds its 20-byte hash reaches its rendezvous queue | Part 9 §9.3.3 |
-| The addressee verifies the token or the proof of work of a hello, thus no relay limits a contact request. No limit for each sender exists at a Public Address, because the token is unlinkable | Part 13 §13.4 |
+| The addressee verifies the token or the proof of work of a hello, thus no relay limits a contact request. No limit for each sender exists at a Public Address, because the token is unlinkable. Any party can thus fill a published rendezvous queue to its quota with records that pass no check. The relay then refuses an honest hello until the addressee drains that queue | Part 13 §13.4, Part 9 §9.6 |
 | A rendezvous queue in Instant mode registers with the Notification Delivery Relay. That relay then learns that a push token belongs to a published handle or address | Part 8 §8.2.6 |
 
 ### 2.4.1 Where each usability goal is realized
@@ -386,7 +425,7 @@ those rules has to check the goal again.
 | U2 | Part 3 §3.9 modes, Part 3 §3.5.2 pacing, Part 7 §7.5.1 `DEV-193`, Part 7 §7.5.4 | A two-party send, from the ratchet owner and from a peer device |
 | U3 | Part 8 §8.3 modes, Part 8 §8.4.1, Part 8 §8.4.3 | A locked and idle device, in Instant mode and in Private mode |
 | U4 | Part 3 §3.12 idle table, Part 3 §3.6.2 tier C, Part 3 §3.12 `NET-096` and `NET-097` and `NET-099` and `NET-100`, Part 4 §4.7.2 `IDN-080`, Part 6 §6.2.3 `WIR-361`, Part 8 §8.5 `WAKE_COALESCE_WINDOW` | A 24 h idle capture of the background bytes, in Instant mode, with the arrival count of the model day |
-| U4b | Part 3 §3.12 idle table and its Private notifications paragraph, Part 8 §8.3 modes | No target in this draft. A 24 h idle capture of the background bytes at each cadence of Private mode reports the figure |
+| U4b | Part 3 §3.12 idle table and its Private notifications paragraph, Part 8 §8.3 modes | No target in v1. A 24 h idle capture of the background bytes at each cadence of Private mode reports the figure |
 | U5 | Part 3 §3.12 battery, Part 8 §8.4.1, Part 8 §8.8 | A 24 h idle run with no arrival, and a run with a scripted arrival count, on stock Android **and** GrapheneOS, with a power monitor |
 | U6 | Part 3 §3.2.4 `MSG_TTL`, Part 3 §3.7 ARQ and `SEND_GIVE_UP`, Part 12 §12.4 replicas, Part 12 §12.7.1, Part 14 §14.9 | A recipient that returns inside the retention window |
 | U7 | Part 7 §7.4, Part 7 §7.6 `DEV-131` | A second device link, timed, with a contact that verified before it |
@@ -405,10 +444,10 @@ a row to this table.
 again.
 
 > *Cause.* Part 14 gives the assurance program of the cryptography and it gives
-> no test plan for a usability goal. U5 was the one goal with a named test. Two
-> defects that this revision corrects came from that gap. Part 4 §4.7.2 gave the
-> backup no bandwidth row against U4, and Part 7 §7.5.4 gave a peer-device send
-> a 20-second pacing wait against U2.
+> no test plan for a usability goal. Without this table, a rule in one part
+> can break a goal and no test shows it. A backup with no bandwidth row
+> breaks U4, and a peer-device send with a pacing wait of 20 seconds breaks
+> U2.
 
 ### 2.4.2 Sociality goals
 
@@ -427,13 +466,12 @@ consent of the contact that the introduction names.
 **[THR-014]** A conformant implementation MUST meet each goal of the table
 above. §2.4.1 names the rules that carry each goal and the test of each goal.
 
-> *Cause.* An earlier draft gave the social tier no goal. Part 9 defined a
-> handle lookup, and no rule let a stranger reach a Public Address from the
-> string of Part 4 §4.2.3. Part 6 §6.6.7 defined the offer record, and no
-> rule made a client show it. A goal with no mechanism is not measurable, thus
-> the mechanisms above arrive in the revision that states the goals. Part 9
-> §9.3.3 gives the address index, and Part 6 rule `WIR-358` gives the offer
-> its interface rule.
+> *Cause.* A goal with no mechanism is not measurable, thus each goal above
+> has a mechanism. A handle lookup alone does not let a stranger reach a
+> Public Address from the string of Part 4 §4.2.3. Part 9 §9.3.3 gives the
+> address index for that string. The offer record of Part 6 §6.6.7 alone does
+> not make a client show the offer. Part 6 rule `WIR-358` gives the offer its
+> interface rule.
 
 ## 2.5 Non-goals
 
@@ -457,16 +495,17 @@ UMBRA does not give the properties below.
 - **Legal protection.** To use UMBRA is not a defense in a jurisdiction. In some
   jurisdictions, to use UMBRA is itself a risk. Refer to Part 15.
 
-**Two omissions of this draft.** The two items below are not non-goals. They
-are decisions that the owner has not made. This draft states each one as an
-omission, thus a reader does not read silence as a position.
+**Two omissions of v1.** The two items below are not non-goals. v1 makes no
+decision on them. This section states each one as an omission, thus a reader
+does not read silence as a position.
 
-- **Real-time media.** This draft gives no call profile and no media session.
-  A revision that adds one states its latency target in §2.4, its metadata
-  cost in the trade table of §2.4, and its residual in Part 15 §15.3.
-- **The ecosystem position.** This draft states no position on federation, on
-  a bridge to another network, or on a local automation surface. A revision
-  that takes a position states the metadata cause in this section.
+- **Real-time media.** v1 gives no call profile and no media session. A
+  later version that adds one states its latency target in §2.4, its
+  metadata cost in the trade table of §2.4, and its residual in Part 15
+  §15.3.
+- **The ecosystem position.** v1 states no position on federation, on a
+  bridge to another network, or on a local automation surface. A later
+  version that takes a position states the metadata cause in this section.
 
 ## 2.6 Trust assumptions
 
@@ -482,12 +521,15 @@ lists them, thus a reader can check them and does not have to find them.
    source.
 3. **A minimum of one relay in each chain is honest** and keeps no logs. The
    path selection in Part 10 makes this condition probable, but not certain.
+   In a provisional network of Part 3 rule `NET-340` one operator runs each
+   relay of a chain. This assumption then reads: that one operator is
+   honest and keeps no logs.
 4. **The client binary that the user runs is the binary that the auditor
-   examined.** Part 14 gives reproducible builds and binary transparency.
-   Without these two controls, no party can check this assumption, and all the
-   other guarantees become void. A web page that a host serves fails this
-   assumption at each load, and Part 14 §14.7 gives the web client a form
-   that holds it.
+   examined.** v1 gives no method to check this assumption (Part 14 §14.8,
+   Part 15 §15.5). If the assumption fails, all the other guarantees become
+   void. A web page that a host serves fails this
+   assumption at each load, and Part 14 §14.7 gives the deferred web client
+   a form that holds it.
 5. **The user verifies a contact out-of-band a minimum of one time** for a
    conversation with serious consequences after a compromise. Part 4 §4.5.2
    makes the ceremony one QR scan or one six-digit code, and UMBRA cannot make
@@ -495,12 +537,29 @@ lists them, thus a reader can check them and does not have to find them.
 6. **An adversary does not hold five or more of the seven directory signing
    keys.** Part 10 gives 5-of-7 multi-signing, the in-band digest gossip of
    `REL-008`, and the independence rules of Part 10 §10.5.1. These controls
-   limit the damage if an adversary holds fewer keys than five.
+   limit the damage if an adversary holds fewer keys than five. A
+   provisional directory of Part 10 rule `REL-126` stands under fewer than
+   `AUTHORITY_FLOOR` independent controls, and one party can hold each of
+   its keys. This assumption then reads: that party is honest. The client
+   shows the state under Part 14 §14.9.2.
+7. **An adversary does not hold two or more of the three log signing keys**
+   of Part 9 §9.5.2. The signers of the handle log are the anchor of each
+   handle key and each address key of Part 9, and of each issuer key of
+   Part 13 rule `ABU-002`. The self-monitoring of Part 9 §9.5.2 and the
+   gossip of Part 9 §9.5.3 limit the damage of a forged head, and they do
+   not prevent it.
+8. **The pins of the client build are sound.** A build pins the directory
+   key set of Part 10, the log key set of Part 9 §9.5.2, the route and the
+   key configuration of the Notification Delivery Relay (Part 8 rule
+   `NTF-127`), and the OHTTP key configuration of the directory service
+   (Part 9 rule `DIS-163`). No signature from outside the build covers the
+   last two, thus assumption 4 carries them: a party that changes a pin
+   changes the binary.
 
 ## 2.7 What each party learns — summary
 
 This table is the compact form of the analysis in Parts 3, 8, 10, and 15. This
-document repeats the analysis here, because a reviewer needs it first.
+document repeats the analysis here, because a reader needs it first.
 
 **Part 3 §3.11 is the normative table, and this one is a summary.** The two
 tables use the role names of Part 3 §3.1. A change to what a party learns goes
@@ -509,14 +568,14 @@ drops a leak is the failure mode that this note prevents.
 
 | Party | Learns | Does not learn |
 | --- | --- | --- |
-| **Ingress Relay** | The client IP address, the connection time, the cell counts, the cell sizes, that this client is an UMBRA client, and whether it is a web client or a native client (Part 3 §3.8.1). In tier C it also reads the send times, because a backgrounded client makes no cover cell (Part 3 §3.6.2) | The destination queue, the recipient, the content, and how many conversations the client has |
+| **Ingress Relay** | The client IP address, the connection time, the cell counts, the cell sizes, that this client is an UMBRA client, and the count of the circuits of the client, which bounds the count of the groups that the user reads from above (Part 3 §3.11). When the deferred web client ships, it also learns whether a client is a web client or a native client (Part 3 §3.8.1). In tier C it also reads the send times, because a backgrounded client makes no cover cell (Part 3 §3.6.2). In a provisional network the operator of the ingress relay is also the operator of the queue relay. The row of the two colluding relays below is its row | The destination queue, the recipient, the content, which queues the client holds, and how many pairwise conversations the client has |
 | **Chain Relay** | Two adjacent relay addresses, the time, and the cell size | The client IP address, the destination queue, the recipient, and the content |
 | **Queue Relay** | The queue identifiers, the delivery time, the cell size, and the ciphertext at rest. For a maximum of 8 queues at a time, that those queues share one transport session (Part 3 §3.2.5) | The client IP address, the sender identity, the recipient identity, the content, and which person owns the queue |
 | **Group-queue relay** | That a group queue exists, the count of its reader sessions and its writer sessions, the arrival time and the bucket of each record, the exact member count at each rotation from the slot count of the epoch-key record, the count of notify registrations, and the `relay_id` of each registered notify queue. It holds `GROUP_RETENTION` of ciphertext (Part 3 §3.2.7, Part 3 §3.11) | The identity of any member, the pairwise queue of any member, the sender of a record, the content, and the membership list |
 | **Two colluding relays (ingress and queue)** | That a client at IP address X delivered to queue Q at time T | The recipient identity and the content. But this condition is a real deanonymization risk. Refer to the path constraints in Part 10 |
 | **Notification Relay (NDR)** | An opaque and rotating push registration. That *some* queue that it monitors had activity. The platform push token | Which queue, which user, the content, and the contact graph |
-| **Google (FCM), or no platform party under UnifiedPush** | The device push token, the application identity, and the wakeup time | The content, the queue, the contact, and the sender |
-| **The nonprofit** | The data that its own relays learn (above), and aggregate directory statistics | No more data than another operator gets. It holds no user database, because no user database exists |
+| **Google (FCM), in Instant mode on a device with FCM. No platform party in Private mode, in Off mode, and on a device with no FCM** | The device push token, the application identity, and the wakeup time and count. Each push has one form and one expiry, thus not which wake is a group message | The content, the queue, the contact, and the sender |
+| **The project** | The data that its own relays learn (above), and aggregate directory statistics | No more data than another operator gets. It holds no user database, because no user database exists |
 | **Directory Authority** | Relay descriptors and measurements | Nothing about users. Clients get the full directory, or they use a privacy-preserving mechanism (Part 10) |
 | **A contact** | All the data that you send to that contact, and that you are you | Your other contacts, your Pairwise Addresses with them, and your Public Address if you do not share it |
 | **Legal process against one party** | Only the column of that party above | All other data. This limit is the objective of G13 |

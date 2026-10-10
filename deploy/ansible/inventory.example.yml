@@ -34,6 +34,11 @@ all:
           relays:
             - { name: entry-west, role: entry, port: 443, class: 1 }
             - { name: exit-2, role: exit, port: 9443, class: 1 }
+    # The app reaches the notification server through the entry relay of
+    # another server, and the directory likewise (Part 8 NTF-002). east-1
+    # holds the notification server, thus entry-west is its OHTTP relay.
+    # entry-east is the one of the directory on west-1. The run fails when
+    # no entry relay sits on another server than one of the two.
     ndr:
       hosts:
         east-1:
@@ -42,5 +47,5 @@ all:
         west-1:
     signer:
       hosts:
-        signer-west:
+        signer-west-1:
           ansible_host: 203.0.113.21   # Hillsboro, Oregon; signs the relay list each hour

@@ -148,7 +148,9 @@ pub fn encode_response(status: Status, body: &[u8]) -> Result<Vec<u8>, Error> {
     Ok(out)
 }
 
-/// Reads a response: its status and its body.
+/// Reads a response: its status and its body. A response in a size above
+/// the smallest that holds its body is not the one encoding of that body
+/// (`WIR-001`). The size would be a signal that the directory chose.
 pub fn parse_response(bytes: &[u8]) -> Result<(Status, &[u8]), Error> {
     if !DIR_RESPONSE_SIZES.contains(&bytes.len()) {
         return Err(Error::Malformed);
@@ -161,6 +163,11 @@ pub fn parse_response(bytes: &[u8]) -> Result<(Status, &[u8]), Error> {
     let len = usize::try_from(r.u32()?).map_err(|_| Error::Malformed)?;
     let body = r.take(len)?;
     r.finish_zero()?;
+    let need = len.saturating_add(RESPONSE_HEAD);
+    let smallest = DIR_RESPONSE_SIZES.into_iter().find(|size| need <= *size);
+    if smallest != Some(bytes.len()) {
+        return Err(Error::Malformed);
+    }
     Ok((status, body))
 }
 
@@ -210,5 +217,23 @@ mod tests {
             (Status::Stale, &[][..])
         );
         assert!(encode_response(Status::Done, &vec![0; 98_304]).is_err());
+    }
+
+    #[test]
+    fn a_response_above_the_smallest_size_that_holds_it_is_rejected() {
+        let small = encode_response(Status::Done, &[1; 100]).unwrap();
+        for size in [32_768, 98_304] {
+            let mut wide = small.clone();
+            wide.resize(size, 0);
+            assert!(parse_response(&wide).is_err());
+        }
+        // The largest body of the first size, and the first body of the
+        // second size.
+        let edge = encode_response(Status::Done, &vec![3; 4_090]).unwrap();
+        assert_eq!(edge.len(), 4_096);
+        assert_eq!(parse_response(&edge).unwrap().1.len(), 4_090);
+        let next = encode_response(Status::Done, &vec![3; 4_091]).unwrap();
+        assert_eq!(next.len(), 32_768);
+        assert_eq!(parse_response(&next).unwrap().1.len(), 4_091);
     }
 }

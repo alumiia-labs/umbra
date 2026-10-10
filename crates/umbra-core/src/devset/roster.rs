@@ -155,6 +155,21 @@ impl<'a> Roster<'a> {
         {
             return Err(Error::Malformed);
         }
+        // DEV-224, DEV-157: a `device_id` names one device. An epoch that
+        // names one identifier two times gives two devices one sync channel.
+        // An epoch that names a revoked identifier as a device puts back a
+        // device that a tombstone removed.
+        for (i, a) in self.devices.iter().enumerate() {
+            if self
+                .devices
+                .iter()
+                .skip(i.saturating_add(1))
+                .any(|b| b.device_id == a.device_id)
+                || self.revoked.contains(&a.device_id)
+            {
+                return Err(Error::Malformed);
+            }
+        }
         // DEV-162: no subject twice in one epoch.
         for (i, a) in self.claims.iter().enumerate() {
             if self
@@ -298,6 +313,13 @@ impl<'a> Roster<'a> {
         let sig = Signature::from_bytes(self.sig)?;
         key.verify(&self.preimage()?, &sig)?;
         Ok(())
+    }
+
+    /// Verifies the signature of the epoch under one `DeviceRosterKey`,
+    /// for a caller that holds the key of the signer from another epoch.
+    /// It checks no chain and no authority (`DEV-150` to `DEV-153`).
+    pub fn verify_signature(&self, mldsa_pk: &[u8]) -> Result<(), Error> {
+        self.verify_with(mldsa_pk)
     }
 
     /// Verifies epoch 0, the trust anchor, against its own device list
@@ -597,6 +619,51 @@ pub(crate) mod tests {
             OwnerClaim::subject(&Secret::new([1; 32]), ClaimScope::GroupSender, &[0; 32]).len(),
             32
         );
+    }
+
+    #[test]
+    fn an_epoch_names_one_device_id_one_time_and_no_revoked_one() {
+        let k1 = key(1);
+        let pk1 = k1.verifying_key().to_bytes();
+        let kem = [9u8; 1_184];
+        let sig = [0u8; SIGNATURE_LEN];
+        let base = Roster {
+            epoch: 1,
+            devices: alloc::vec![entry(1, &pk1, &kem), entry(2, &pk1, &kem)],
+            revoked: alloc::vec![[3; 16]],
+            claims: Vec::new(),
+            prev_hash: [5; 32],
+            signer_id: [1; 16],
+            sig: &sig,
+        };
+        let mut out = alloc::vec![0u8; base.len() + ENTRY_LEN];
+        base.encode(&mut out).unwrap();
+        // DEV-224: two entries with one identifier.
+        let twice = Roster {
+            devices: alloc::vec![entry(1, &pk1, &kem), entry(1, &pk1, &kem)],
+            ..base.clone()
+        };
+        assert_eq!(twice.encode(&mut out), Err(Error::Malformed));
+        // DEV-157: a tombstone is permanent, thus no entry holds its id.
+        let back = Roster {
+            devices: alloc::vec![entry(1, &pk1, &kem), entry(3, &pk1, &kem)],
+            ..base.clone()
+        };
+        assert_eq!(back.encode(&mut out), Err(Error::Malformed));
+        // A parser rejects the same bytes: the second entry takes the
+        // identifier of the first one.
+        let used = base.encode(&mut out).unwrap();
+        out[1 + 8 + 1 + ENTRY_LEN..][..16].copy_from_slice(&[1; 16]);
+        assert_eq!(Roster::parse(&out[..used]).err(), Some(Error::Malformed));
+        // The signature check alone reads no chain.
+        let mut signed = base.clone();
+        let mut made = [0u8; SIGNATURE_LEN];
+        sign(&mut signed, &k1, &mut made);
+        signed.sig = &made;
+        signed.verify_signature(&pk1).unwrap();
+        assert!(signed
+            .verify_signature(&key(2).verifying_key().to_bytes())
+            .is_err());
     }
 
     #[test]

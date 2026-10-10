@@ -10,6 +10,7 @@ import android.text.InputType
 import android.text.TextUtils
 import android.text.method.PasswordTransformationMethod
 import android.util.TypedValue
+import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
@@ -55,11 +56,12 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
@@ -85,6 +87,8 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * The holder of a text field of the platform. A composable field holds its
@@ -121,8 +125,10 @@ class PlatformFieldState {
      * stays a password, thus the keyboard still learns nothing (IMP-057);
      * only the dots go.
      */
-    fun toggleShown() {
-        val shown = !isShown
+    fun toggleShown() = show(!isShown)
+
+    private fun show(shown: Boolean) {
+        if (isShown == shown) return
         isShown = shown
         val field = view ?: return
         val (start, end) = field.selectionStart to field.selectionEnd
@@ -130,10 +136,32 @@ class PlatformFieldState {
         if (start >= 0) field.setSelection(start, end)
     }
 
-    /** Makes the field empty. */
+    /** Makes the field empty. A passphrase field hides the next text again. */
     fun clear() {
-        view?.editableText?.clear()
+        view?.editableText?.let(::wipe)
+        show(false)
     }
+
+    /**
+     * Makes the buffer of a field empty. A clear alone moves the gap of the
+     * buffer and leaves each character in its array. Thus zeros of the same
+     * length take their place first (`IMP-017`).
+     */
+    private fun wipe(editable: android.text.Editable) {
+        if (editable.isEmpty()) return
+        // The zeros are no text of the user, thus no party learns of them.
+        isWiping = true
+        try {
+            editable.replace(0, editable.length, CharBuffer.wrap(CharArray(editable.length)))
+        } finally {
+            isWiping = false
+        }
+        editable.clear()
+    }
+
+    /** Whether [wipe] writes its zeros at this moment. */
+    internal var isWiping = false
+        private set
 
     /** Puts the cursor into the field and opens the keyboard. */
     fun focus() {
@@ -157,7 +185,9 @@ class PlatformFieldState {
         if (editable.isEmpty()) return null
         val chars = CharArray(editable.length)
         TextUtils.getChars(editable, 0, editable.length, chars, 0)
-        editable.clear()
+        wipe(editable)
+        // The next passphrase of a field that stays shows as dots again.
+        show(false)
         return chars
     }
 }
@@ -190,8 +220,12 @@ fun PlatformInput(
                 // IMP-057: the input method learns nothing from this field.
                 imeOptions = EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING or
                     EditorInfo.IME_FLAG_NO_EXTRACT_UI
+                // No autofill service reads this field, and none offers to
+                // keep a passphrase in an account outside the device.
+                importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
                 inputType = if (isPassphrase) {
-                    InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                    InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD or
+                        InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
                 } else {
                     InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or
                         InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
@@ -206,6 +240,7 @@ fun PlatformInput(
                     override fun onTextChanged(text: CharSequence?, start: Int, before: Int, count: Int) = Unit
 
                     override fun afterTextChanged(text: android.text.Editable?) {
+                        if (state.isWiping) return
                         state.isEmpty = text.isNullOrEmpty()
                         state.onChange?.invoke()
                         // IMP-119: the keyboard reaches the field through its
@@ -222,7 +257,7 @@ fun PlatformInput(
 
 /**
  * A view of the platform in the look of the app on each phone: the font of
- * the app, and a cursor, handles, and a selection in its colours, in the
+ * the app, and a cursor, handles, and a selection in its colors, in the
  * place of those of the maker of the phone.
  */
 fun styleAsApp(view: TextView, mono: Boolean = false) {
@@ -249,7 +284,7 @@ fun styleAsApp(view: TextView, mono: Boolean = false) {
     }
 }
 
-/** A field of the platform inside the outlined frame of the mockups. */
+/** A field of the platform inside an outlined frame. */
 @Composable
 fun FramedPlatformField(state: PlatformFieldState, label: String, isPassphrase: Boolean) {
     Row(
@@ -446,8 +481,7 @@ fun SecondaryButton(label: String, enabled: Boolean = true, onClick: () -> Unit)
         onClick = onClick,
         enabled = enabled,
         modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-        // The mockups give this button the green of an action and a line
-        // that the eye finds on the warm ground.
+        // The default outline is too faint on the warm ground.
         colors = ButtonDefaults.outlinedButtonColors(contentColor = Palette.Action),
         border = BorderStroke(1.dp, Palette.Outline),
     ) { Text(label, fontWeight = FontWeight.SemiBold) }
@@ -519,7 +553,7 @@ fun HeroIcon(name: String) {
     }
 }
 
-/** The mark of the logo (brand/), in the action colour. */
+/** The mark of the logo (brand/), in the action color. */
 @Composable
 fun BrandMark(size: Dp) {
     Icon(
@@ -555,20 +589,35 @@ fun Avatar(chat: Chat, size: Int = 44) {
  */
 @Composable
 fun ProfilePicture(picture: ByteArray?, name: String, size: Int) {
-    val image = remember(picture) {
-        picture?.takeIf { it.isNotEmpty() }?.let {
-            android.graphics.BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap()
+    // DIS-176: the picture of a peer is bytes of a stranger. The decode has
+    // a bound and a thread of its own, and a picture that does not decode
+    // shows the generated one.
+    // A new read of a list gives new arrays of the same bytes. The key
+    // compares the bytes, thus such a read starts no decode and shows no
+    // letter for the time of one.
+    val image by produceState<ImageBitmap?>(null, PictureKey(picture)) {
+        // The picture of one profile never shows under the name of the next.
+        value = null
+        value = picture?.takeIf { it.isNotEmpty() }?.let {
+            withContext(Dispatchers.Default) { Photos.profileImage(it) }
         }
     }
-    if (image == null) {
+    val shown = image
+    if (shown == null) {
         LetterAvatar(name, name.hashCode(), size)
         return
     }
     androidx.compose.foundation.Image(
-        image,
+        shown,
         contentDescription = null,
         modifier = Modifier.size(size.dp).clip(CircleShape),
     )
+}
+
+/** The bytes of a picture as a key: two arrays of the same bytes are one key. */
+private class PictureKey(private val bytes: ByteArray?) {
+    override fun equals(other: Any?) = other is PictureKey && bytes.contentEquals(other.bytes)
+    override fun hashCode() = bytes.contentHashCode()
 }
 
 /** The same circle from a name that names no conversation of the store. */
@@ -697,7 +746,7 @@ class RowEntry(
 
 /**
  * A sheet from the bottom with a handle, a title, and one row for each
- * entry, as `design/mockups/light` has it. The mockups use no popup menu.
+ * entry. The app uses no popup menu.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

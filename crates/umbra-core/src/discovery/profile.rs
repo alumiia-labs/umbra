@@ -17,6 +17,8 @@ pub const PROFILE_NAME_MAX: usize = 32;
 pub const WELCOME_MAX: usize = 280;
 /// `PICTURE_MAX`, in bytes: a JPEG after the re-encode of `DIS-001`.
 pub const PICTURE_MAX: usize = 6_144;
+/// The longest side of a picture, in pixels (`DIS-176`).
+pub const PICTURE_SIDE_MAX: u16 = 1_024;
 /// The longest plaintext.
 pub const PROFILE_PLAIN_MAX: usize = 1 + 1 + PROFILE_NAME_MAX + 2 + WELCOME_MAX + 2 + PICTURE_MAX;
 /// `PROFILE_BLOB_MAX`, in bytes: the longest sealed blob, which is the
@@ -34,12 +36,62 @@ pub struct ProfilePlain<'a> {
     pub picture: &'a [u8],
 }
 
+/// The height and the width that the frame header of a JPEG names, from a
+/// walk over its segments up to the first scan. The walk decodes no byte
+/// of the picture. A baseline, an extended, or a progressive frame gives a
+/// size; a picture with another frame, or with no frame before its scan,
+/// gives none.
+fn frame_size(bytes: &[u8]) -> Option<(u16, u16)> {
+    // The start marker takes two bytes. Each turn then takes one byte at
+    // least, thus the length of the picture bounds the walk.
+    let mut rest = bytes.get(2..)?;
+    loop {
+        let [0xFF, marker, after @ ..] = rest else {
+            return None;
+        };
+        match *marker {
+            // A fill byte before a marker.
+            0xFF => rest = rest.get(1..)?,
+            // A marker with no segment.
+            0x01 | 0xD0..=0xD7 => rest = after,
+            // No marker, a second start, the end, or a scan: the frame
+            // header did not come first.
+            0x00 | 0xD8 | 0xD9 | 0xDA => return None,
+            // A lossless, a differential, or an arithmetic frame.
+            0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF => return None,
+            _ => {
+                let [high, low, ..] = after else {
+                    return None;
+                };
+                // The length counts its own two bytes.
+                let len = usize::from(u16::from_be_bytes([*high, *low]));
+                let segment = after.get(2..len)?;
+                if matches!(*marker, 0xC0..=0xC2) {
+                    // The sample precision, the height, and the width.
+                    let [_, h0, h1, w0, w1, ..] = segment else {
+                        return None;
+                    };
+                    return Some((
+                        u16::from_be_bytes([*h0, *h1]),
+                        u16::from_be_bytes([*w0, *w1]),
+                    ));
+                }
+                rest = after.get(len..)?;
+            }
+        }
+    }
+}
+
 /// Whether bytes are a picture that `DIS-176` takes: a JPEG of at most
-/// `PICTURE_MAX` bytes.
+/// `PICTURE_MAX` bytes whose frame header names a side of 1 to
+/// `PICTURE_SIDE_MAX` pixels each way. `PICTURE_MAX` bounds the bytes and
+/// not the canvas, thus this check reads the size here, before any decoder.
 fn is_picture(bytes: &[u8]) -> bool {
+    let side = |side: u16| (1..=PICTURE_SIDE_MAX).contains(&side);
     bytes.len() <= PICTURE_MAX
         && bytes.starts_with(&[0xFF, 0xD8, 0xFF])
         && bytes.ends_with(&[0xFF, 0xD9])
+        && frame_size(bytes).is_some_and(|(height, width)| side(height) && side(width))
 }
 
 impl<'a> ProfilePlain<'a> {
@@ -96,6 +148,54 @@ impl<'a> ProfilePlain<'a> {
 mod tests {
     use super::*;
 
+    /// A JPEG of one application segment, a frame header of `marker` with
+    /// the two sides, and no scan.
+    fn jpeg(marker: u8, height: u16, width: u16) -> Vec<u8> {
+        let mut bytes = alloc::vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x04, 0x4A, 0x46];
+        bytes.extend([0xFF, marker, 0x00, 0x0B, 0x08]);
+        bytes.extend(height.to_be_bytes());
+        bytes.extend(width.to_be_bytes());
+        bytes.extend([0x01, 0x01, 0x11, 0x00, 0xFF, 0xD9]);
+        bytes
+    }
+
+    #[test]
+    fn a_picture_names_its_size_in_a_frame_header_and_no_side_is_above_the_bound() {
+        // DIS-176: a baseline and a progressive frame at the bound.
+        assert_eq!(frame_size(&jpeg(0xC0, 480, 640)), Some((480, 640)));
+        assert!(is_picture(&jpeg(0xC0, PICTURE_SIDE_MAX, PICTURE_SIDE_MAX)));
+        assert!(is_picture(&jpeg(0xC2, 1, 1)));
+        // A side above the bound, and a side of zero.
+        assert!(!is_picture(&jpeg(0xC0, PICTURE_SIDE_MAX + 1, 16)));
+        assert!(!is_picture(&jpeg(0xC2, 16, PICTURE_SIDE_MAX + 1)));
+        assert!(!is_picture(&jpeg(0xC0, 0xFFFF, 0xFFFF)));
+        assert!(!is_picture(&jpeg(0xC0, 0, 16)));
+        assert!(!is_picture(&jpeg(0xC0, 16, 0)));
+        // A lossless frame, and no frame header at all.
+        assert!(!is_picture(&jpeg(0xC3, 16, 16)));
+        assert!(!is_picture(&[0xFF, 0xD8, 0xFF, 0xE0, 0xFF, 0xD9]));
+        assert!(!is_picture(&[0xFF, 0xD8, 0xFF, 0xD9]));
+        // A frame header after the scan started is none.
+        let mut late = alloc::vec![0xFF, 0xD8, 0xFF, 0xDA, 0x00, 0x02];
+        late.extend(&jpeg(0xC0, 16, 16)[8..]);
+        assert!(!is_picture(&late));
+        // A segment that names more bytes than the picture holds, a length
+        // below its own two bytes, and a frame header cut short.
+        assert!(!is_picture(&[
+            0xFF, 0xD8, 0xFF, 0xE0, 0xFF, 0xFF, 0xFF, 0xD9
+        ]));
+        assert!(!is_picture(&[
+            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x01, 0xFF, 0xD9
+        ]));
+        assert!(!is_picture(&[
+            0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x04, 0x08, 0x00, 0xFF, 0xD9
+        ]));
+        // Fill bytes before a marker change nothing.
+        let mut filled = alloc::vec![0xFF, 0xD8, 0xFF, 0xFF, 0xFF];
+        filled.extend(&jpeg(0xC0, 16, 16)[8..]);
+        assert_eq!(frame_size(&filled), Some((16, 16)));
+    }
+
     #[test]
     fn a_profile_reads_back_and_its_limits_hold() {
         let plain = ProfilePlain {
@@ -127,7 +227,7 @@ mod tests {
         }
         .encode()
         .is_err());
-        let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 0xFF, 0xD9];
+        let jpeg = jpeg(0xC0, 96, 96);
         let with_picture = ProfilePlain {
             name: "",
             welcome: "",

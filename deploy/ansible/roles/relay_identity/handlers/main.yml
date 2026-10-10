@@ -1,4 +1,14 @@
-# A relay that phase 2 did not start yet has nothing to restart.
+# A relay that phase 2 did not start yet has nothing to restart. The relays
+# of this server restart one at a time. The run stops at a relay that
+# does not come back, before it reaches the next server.
 - name: Restart umbra-relay
   ansible.builtin.shell:
-    cmd: systemctl daemon-reload; systemctl try-restart 'umbra-relay@*.service' || true
+    cmd: |
+      set -eu
+      systemctl daemon-reload
+      for unit in $(systemctl list-units --type=service --state=active --plain --no-legend 'umbra-relay@*' | awk '{print $1}'); do
+          systemctl restart "$unit"
+          sleep 10
+          systemctl is-active --quiet "$unit"
+      done
+  changed_when: true

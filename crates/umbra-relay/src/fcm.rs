@@ -16,6 +16,7 @@ use std::{
 
 use aws_lc_rs::{rand::SystemRandom, signature::RsaKeyPair};
 use tokio::sync::Mutex;
+use umbra_crypto::zeroize::Zeroizing;
 use umbra_transport::https::{self, Url};
 
 /// The scope of a token that sends FCM messages.
@@ -28,6 +29,45 @@ const ASSERTION_LIFE: u64 = 3_600;
 const TOKEN_MARGIN: u64 = 60;
 /// The wait for the token endpoint and for FCM.
 const WAIT: Duration = Duration::from_secs(10);
+/// The time after a fetch of the access token that failed in which no
+/// second fetch goes, in seconds. The NDR refuses a push inside it at once.
+/// A token endpoint that is down thus holds no connection for `WAIT`.
+const TOKEN_RETRY: u64 = 5;
+/// The error code of FCM for a registration token that is gone.
+const UNREGISTERED: &str = "UNREGISTERED";
+
+/// What FCM did with one push.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sent {
+    /// FCM took the push.
+    Taken,
+    /// FCM named the registration token gone (`NTF-125`).
+    Gone,
+    /// The push did not go, and the token stays.
+    Refused,
+}
+
+/// Reads the answer of FCM to one send. FCM gives the status 404 for a
+/// token that is gone, and for other faults too, as a project that does
+/// not exist. Thus the token is gone only when the error body names
+/// `UNREGISTERED`, and a fault of the settings drops no registration
+/// (`NTF-130`).
+pub fn sent_of(status: u16, body: &[u8]) -> Sent {
+    match status {
+        200..=299 => Sent::Taken,
+        404 => {
+            let code = core::str::from_utf8(body)
+                .ok()
+                .and_then(|body| json_string(body, "errorCode"));
+            if code.as_deref() == Some(UNREGISTERED) {
+                Sent::Gone
+            } else {
+                Sent::Refused
+            }
+        }
+        _ => Sent::Refused,
+    }
+}
 
 /// Reads the string of `key` in a flat JSON object, with the escapes that a
 /// service account file holds.
@@ -184,12 +224,20 @@ impl ServiceAccount {
     }
 }
 
+/// The access token that serves now with its end, and the time of the
+/// last fetch that failed.
+#[derive(Default)]
+struct Access {
+    token: Option<(String, u64)>,
+    failed_at: Option<u64>,
+}
+
 /// The FCM sender: the account, the API, and the token that serves now.
 pub struct Fcm {
     account: ServiceAccount,
     send: Url,
     tls: Arc<rustls::ClientConfig>,
-    token: Mutex<Option<(String, u64)>>,
+    access: Mutex<Access>,
 }
 
 fn unix_now() -> u64 {
@@ -210,19 +258,40 @@ impl Fcm {
             account,
             send,
             tls,
-            token: Mutex::new(None),
+            access: Mutex::new(Access::default()),
         })
     }
 
-    /// The access token, fetched again near its end.
+    /// The access token, fetched again near its end. One fetch runs at a
+    /// time. A fetch that fails refuses each push that waited for it, and
+    /// no second fetch goes inside `TOKEN_RETRY`.
     async fn access_token(&self) -> Option<String> {
-        let mut held = self.token.lock().await;
+        let mut held = self.access.lock().await;
         let now = unix_now();
-        if let Some((token, until)) = held.as_ref() {
+        if let Some((token, until)) = held.token.as_ref() {
             if now.saturating_add(TOKEN_MARGIN) < *until {
                 return Some(token.clone());
             }
         }
+        if held
+            .failed_at
+            .is_some_and(|at| now.saturating_sub(at) < TOKEN_RETRY)
+        {
+            return None;
+        }
+        let fetched = self.fetch_token(now).await;
+        match &fetched {
+            Some((token, until)) => {
+                held.token = Some((token.clone(), *until));
+                held.failed_at = None;
+            }
+            None => held.failed_at = Some(unix_now()),
+        }
+        fetched.map(|(token, _)| token)
+    }
+
+    /// One fetch of the access token at the token endpoint, with its end.
+    async fn fetch_token(&self, now: u64) -> Option<(String, u64)> {
         let assertion = self.account.assertion(now)?;
         let body = format!(
             "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion={assertion}"
@@ -244,23 +313,20 @@ impl Fcm {
         let answer = core::str::from_utf8(&answer).ok()?;
         let token = json_string(answer, "access_token")?;
         let life = json_number(answer, "expires_in").unwrap_or(3_600);
-        *held = Some((token.clone(), now.saturating_add(life)));
-        Some(token)
+        Some((token, now.saturating_add(life)))
     }
 
     /// Sends one data message of high priority to `token` with the blob in
     /// base64url and the expiry of the push (`NTF-065`), with no collapse
-    /// key (`NTF-088`). Gives the status of FCM: 404 names a token that is
-    /// gone (`NTF-125`).
-    pub async fn send(&self, token: &str, blob: &[u8], ttl: u32) -> Option<u16> {
-        let access = self.access_token().await?;
-        let message = format!(
-            "{{\"message\":{{\"token\":{},\"data\":{{\"b\":{}}},\"android\":{{\"priority\":\"HIGH\",\"ttl\":\"{ttl}s\"}}}}}}",
-            json_quote(token),
-            json_quote(&base64url(blob)),
-        );
+    /// key (`NTF-088`). Gives what FCM did with it ([`sent_of`]). The body
+    /// holds the push token, thus the send wipes it at its end (§8.2.1).
+    pub async fn send(&self, token: &str, blob: &[u8], ttl: u32) -> Sent {
+        let Some(access) = self.access_token().await else {
+            return Sent::Refused;
+        };
+        let message = message_of(token, blob, ttl);
         let authorization = format!("Bearer {access}");
-        https::post(
+        let answer = https::post(
             &self.send,
             "application/json",
             &[("Authorization", &authorization)],
@@ -269,10 +335,27 @@ impl Fcm {
             16_384,
             WAIT,
         )
-        .await
-        .ok()
-        .map(|(status, _)| status)
+        .await;
+        match answer {
+            Ok((status, body)) => sent_of(status, &body),
+            Err(_) => Sent::Refused,
+        }
     }
+}
+
+/// The body of one send (`NTF-130`). It takes its full length at the start,
+/// thus no shorter copy of the push token stays in freed memory.
+fn message_of(token: &str, blob: &[u8], ttl: u32) -> Zeroizing<String> {
+    let quoted = Zeroizing::new(json_quote(token));
+    let mut message = Zeroizing::new(String::with_capacity(quoted.len().saturating_add(256)));
+    message.push_str("{\"message\":{\"token\":");
+    message.push_str(&quoted);
+    message.push_str(",\"data\":{\"b\":");
+    message.push_str(&json_quote(&base64url(blob)));
+    message.push_str("},\"android\":{\"priority\":\"HIGH\",\"ttl\":\"");
+    message.push_str(&ttl.to_string());
+    message.push_str("s\"}}}");
+    message
 }
 
 #[cfg(test)]
@@ -295,5 +378,29 @@ mod tests {
         assert_eq!(base64url(&[0xFB, 0xFF]), "-_8");
         assert_eq!(base64_decode("Zm9vYmE=").unwrap(), b"fooba");
         assert_eq!(base64_decode("Zm9v\nYmFy").unwrap(), b"foobar");
+    }
+
+    #[test]
+    fn a_token_is_gone_only_when_the_error_body_names_it_unregistered() {
+        // NTF-130: the body of FCM for a registration token that is gone.
+        let gone = br#"{"error":{"code":404,"message":"Requested entity was not found.","status":"NOT_FOUND","details":[{"@type":"type.googleapis.com/google.firebase.fcm.v1.FcmError","errorCode":"UNREGISTERED"}]}}"#;
+        assert_eq!(sent_of(404, gone), Sent::Gone);
+        // A project that does not exist gives 404 too, and it names no
+        // token: the registration stays.
+        let other = br#"{"error":{"code":404,"message":"Requested entity was not found.","status":"NOT_FOUND"}}"#;
+        assert_eq!(sent_of(404, other), Sent::Refused);
+        assert_eq!(sent_of(404, b"<html>not found</html>"), Sent::Refused);
+        assert_eq!(sent_of(200, b"{}"), Sent::Taken);
+        assert_eq!(sent_of(400, gone), Sent::Refused);
+        assert_eq!(sent_of(503, b""), Sent::Refused);
+    }
+
+    #[test]
+    fn the_body_of_a_send_is_a_data_message_of_high_priority() {
+        // NTF-130: one data field, no `notification` field.
+        assert_eq!(
+            message_of("tok\"en", b"foo", 3_600).as_str(),
+            r#"{"message":{"token":"tok\"en","data":{"b":"Zm9v"},"android":{"priority":"HIGH","ttl":"3600s"}}}"#
+        );
     }
 }

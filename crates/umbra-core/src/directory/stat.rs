@@ -15,7 +15,7 @@ use super::root::DirectoryKeySet;
 use crate::Error;
 
 /// The encoded width of a `StatQuery`.
-pub const STAT_QUERY_LEN: usize = 1 + 1 + 8 + SIGNATURE_LEN;
+pub const STAT_QUERY_LEN: usize = 1 + 1 + 32 + 8 + SIGNATURE_LEN;
 /// The encoded width of a `StatAnswer`.
 pub const STAT_ANSWER_LEN: usize = 1 + 1 + 8;
 /// The aggregators: the authorities at index 0 and index 1 of the key set
@@ -48,11 +48,15 @@ pub fn add_noise(share: u64, noise: i64) -> u64 {
     share.wrapping_add(noise.cast_unsigned())
 }
 
-/// The query of an aggregator for its share of one epoch.
+/// The query of an aggregator to one relay for its share of one epoch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StatQuery {
     /// The index of the aggregator in the key set.
     pub authority_index: u8,
+    /// The relay that the query asks. The signature covers it (`REL-192`).
+    /// A query that verified at each relay let a relay that took the two
+    /// queries of one epoch read both shares of another relay.
+    pub relay_id: [u8; 32],
     /// The consensus epoch of the count.
     pub epoch: u64,
 }
@@ -62,8 +66,15 @@ impl StatQuery {
         let mut out = Vec::with_capacity(STAT_QUERY_LEN);
         out.push(0x01);
         out.push(self.authority_index);
+        out.extend_from_slice(&self.relay_id);
         out.extend_from_slice(&self.epoch.to_be_bytes());
         out
+    }
+
+    /// Whether the query asks the relay `own`. A relay gives no share to
+    /// another query (`REL-192`).
+    pub fn asks(&self, own: &[u8; 32]) -> bool {
+        self.relay_id == *own
     }
 
     /// Signs the query with the key of its aggregator.
@@ -78,7 +89,9 @@ impl StatQuery {
     }
 
     /// Reads a query and verifies it under `keyset`. A query of an
-    /// authority that is no aggregator does not verify (`REL-192`).
+    /// authority that is no aggregator does not verify (`REL-192`). The
+    /// relay that took it then tests `relay_id` against its own with
+    /// [`StatQuery::asks`].
     pub fn verify(bytes: &[u8], keyset: &DirectoryKeySet<'_>) -> Result<Self, Error> {
         let mut r = Reader::new(bytes);
         if r.u8()? != 0x01 {
@@ -86,6 +99,7 @@ impl StatQuery {
         }
         let query = StatQuery {
             authority_index: r.u8()?,
+            relay_id: r.array()?,
             epoch: u64::from_be_bytes(r.array()?),
         };
         let sig = r.take(SIGNATURE_LEN)?;
@@ -167,15 +181,22 @@ mod tests {
         };
         let query = StatQuery {
             authority_index: 1,
+            relay_id: [6; 32],
             epoch: 77,
         };
         let signed = query.sign(&keys[1], &mut rng).unwrap();
         assert_eq!(signed.len(), STAT_QUERY_LEN);
         assert_eq!(StatQuery::verify(&signed, &keyset).unwrap(), query);
+        // REL-192: the query asks one relay, and the name of another relay
+        // in its bytes ends the signature.
+        assert!(query.asks(&[6; 32]) && !query.asks(&[7; 32]));
+        let mut moved = signed.clone();
+        moved[2] ^= 1;
+        assert!(StatQuery::verify(&moved, &keyset).is_err());
         // REL-192: authority 2 is no aggregator.
         let other = StatQuery {
             authority_index: 2,
-            epoch: 77,
+            ..query
         };
         let signed = other.sign(&keys[2], &mut rng).unwrap();
         assert!(StatQuery::verify(&signed, &keyset).is_err());

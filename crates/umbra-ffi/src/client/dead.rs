@@ -6,6 +6,13 @@
 //! A row exists while the channel is dead or silent, and while a blob of
 //! this device waits for its `CDEL`. The store keeps it across runs: the
 //! state of a week outlives a run.
+//!
+//! A channel is silent when a relay acknowledged a record of this device
+//! and no record of the peer followed in `DEAD_CHANNEL_SILENCE`. A setting
+//! of the conversation holds the time of the first such acknowledgment
+//! that no record of the peer followed yet. A record of the peer ends it.
+//! The two receipts are off by default (`NET-059`), thus the signal reads
+//! none of them.
 
 use umbra_core::{
     attach::CHUNK_SIZE,
@@ -23,7 +30,7 @@ use umbra_crypto::{
 };
 use umbra_wire::address::LEN as ADDRESS_LEN;
 
-use super::{info_of, Client, ConversationId, Outgoing, MESSAGE_PREFIX, QUEUE_ID_LEN};
+use super::{info_of, Client, ConversationId, Outgoing, MESSAGE_PREFIX, QUEUE_ID_LEN, SETTINGS};
 use crate::{Delivery, Error, MsgRef};
 
 /// The dead-channel state of each contact, by conversation.
@@ -38,10 +45,27 @@ const NO_WEEK: u32 = u32::MAX;
 /// The relays of one blob (`BACKUP_REPLICAS`).
 const BLOB_RELAYS: usize = umbra_core::attach::BACKUP_REPLICAS;
 
+/// The name of the setting that holds the unanswered time of a
+/// conversation, before the identifier of the conversation (Part 3 §3.2.6).
+/// That time is the first relay acknowledgment that no record of the peer
+/// followed yet, in milliseconds. A conversation with no such
+/// acknowledgment holds none.
+const UNANSWERED_SETTING: &[u8] = b"unanswered/";
+
 /// The row: the flag of a dead channel, the time it died, the address of
 /// the new queue, the week, the credential and the relays of the blob of
 /// this device, and the week and the time of the next fetch.
 const ROW_LEN: usize = 1 + 8 + 1 + ADDRESS_LEN + 4 + 32 + 1 + 32 * BLOB_RELAYS + 4 + 8;
+/// The tail of a row that holds a candidate address of the peer
+/// (`NET-190`): one byte and the address. A row of an earlier build, and a
+/// row with no candidate, end before it.
+const CANDIDATE_TAIL: usize = 1 + ADDRESS_LEN;
+/// The tail behind a candidate address. It says whether the record of
+/// `NET-191` left for the address. It holds the time this device first held
+/// it, and the week of the blob that gave it. A row of an earlier build
+/// ends before it: its candidate took no record, and its time starts at the
+/// next check.
+const SENT_TAIL: usize = 1 + 8 + 4;
 
 struct DeadRow {
     dead: bool,
@@ -52,6 +76,19 @@ struct DeadRow {
     written_relays: Vec<[u8; 32]>,
     fetch_week: u32,
     fetch_at: u64,
+    /// The address that the blob of the peer gave (`NET-190`). It is the
+    /// address of no record of the user.
+    candidate: Option<Zeroizing<Vec<u8>>>,
+    /// Whether the address of this device went to the candidate, or a
+    /// relay answered the bundle of a renewal that went there (`NET-191`,
+    /// `NET-330`). A later run then sends nothing more to it.
+    candidate_sent: bool,
+    /// The time this device first held the candidate, in seconds, from
+    /// which `DEAD_CHANNEL_SILENCE` counts to its end. Zero is the row of
+    /// an earlier build, and the next check starts it.
+    candidate_since: u64,
+    /// The week of the blob that gave the candidate, or [`NO_WEEK`].
+    candidate_week: u32,
 }
 
 impl DeadRow {
@@ -65,7 +102,19 @@ impl DeadRow {
             written_relays: Vec::new(),
             fetch_week: NO_WEEK,
             fetch_at: 0,
+            candidate: None,
+            candidate_sent: false,
+            candidate_since: 0,
+            candidate_week: NO_WEEK,
         }
+    }
+
+    /// Ends the candidate, with each fact of it.
+    fn end_candidate(&mut self) {
+        self.candidate = None;
+        self.candidate_sent = false;
+        self.candidate_since = 0;
+        self.candidate_week = NO_WEEK;
     }
 
     fn encode(&self) -> Zeroizing<Vec<u8>> {
@@ -91,11 +140,19 @@ impl DeadRow {
         }
         out.extend_from_slice(&self.fetch_week.to_be_bytes());
         out.extend_from_slice(&self.fetch_at.to_be_bytes());
+        if let Some(candidate) = self.candidate.as_ref().filter(|c| c.len() == ADDRESS_LEN) {
+            out.push(1);
+            out.extend_from_slice(candidate);
+            out.push(u8::from(self.candidate_sent));
+            out.extend_from_slice(&self.candidate_since.to_be_bytes());
+            out.extend_from_slice(&self.candidate_week.to_be_bytes());
+        }
         out
     }
 
     fn parse(bytes: &[u8]) -> Result<Self, Error> {
-        if bytes.len() != ROW_LEN {
+        let with_candidate = ROW_LEN + CANDIDATE_TAIL;
+        if ![ROW_LEN, with_candidate, with_candidate + SENT_TAIL].contains(&bytes.len()) {
             return Err(Error::Integrity);
         }
         let mut at = 0usize;
@@ -129,6 +186,25 @@ impl DeadRow {
         }
         let fetch_week = week(take(4)?)?;
         let fetch_at = u64::from_be_bytes(array(take(8)?)?);
+        let candidate = if bytes.len() == ROW_LEN {
+            None
+        } else {
+            if take(1)? != [1] {
+                return Err(Error::Integrity);
+            }
+            Some(Zeroizing::new(take(ADDRESS_LEN)?.to_vec()))
+        };
+        let (candidate_sent, candidate_since, candidate_week) =
+            if bytes.len() == with_candidate + SENT_TAIL {
+                let sent = match take(1)? {
+                    [0] => false,
+                    [1] => true,
+                    _ => return Err(Error::Integrity),
+                };
+                (sent, u64::from_be_bytes(array(take(8)?)?), week(take(4)?)?)
+            } else {
+                (false, 0, NO_WEEK)
+            };
         Ok(DeadRow {
             dead,
             dead_since,
@@ -138,6 +214,10 @@ impl DeadRow {
             written_relays,
             fetch_week,
             fetch_at,
+            candidate,
+            candidate_sent,
+            candidate_since,
+            candidate_week,
         })
     }
 }
@@ -169,6 +249,8 @@ pub enum DeadWork {
     Read {
         /// The conversation.
         conversation: ConversationId,
+        /// The week of the blob.
+        week: u32,
         /// The `chunk_id`.
         handle: [u8; 32],
         /// `read_sk` of the chunk.
@@ -258,24 +340,154 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         address: &[u8],
         rng: &mut R,
     ) -> Result<(), Error> {
+        // Part 7 §7.7 step 2c: the new queue is the rotation that a
+        // revocation owed this contact.
+        self.rotation_done(conversation, rng)?;
         let Some(mut row) = self.dead_row(conversation)? else {
             return Ok(());
         };
-        if !row.dead || address.len() != ADDRESS_LEN {
+        if address.len() != ADDRESS_LEN {
             return Ok(());
         }
-        row.address = Some(Zeroizing::new(address.to_vec()));
+        // NET-191: a candidate that took the address of the queue before
+        // takes the new one, one time.
+        let sends_again = row.candidate.is_some() && row.candidate_sent;
+        if !row.dead && !sends_again {
+            return Ok(());
+        }
+        row.candidate_sent = false;
+        if row.dead {
+            row.address = Some(Zeroizing::new(address.to_vec()));
+        }
         self.put_dead_row(conversation, Some(&row), rng)
     }
 
-    /// The peer moved, on the channel or by its blob: the channel lives,
-    /// and the blob of this device goes (`NET-190`). The result is the
-    /// erase of that blob, when one was written.
+    /// Whether the channel of a conversation is dead or silent, or was at
+    /// the last check of the dead-channel work: its row is there.
+    /// `NET-193` sends the records of such a channel again at a new
+    /// address of the peer, and the ones of no other channel.
+    pub fn channel_was_down(&self, conversation: ConversationId) -> Result<bool, Error> {
+        Ok(self.dead_row(conversation)?.is_some())
+    }
+
+    /// The blob of the peer gave `address` (`NET-190`): a candidate
+    /// address, which the row keeps for the next run. The channel holds
+    /// the address that it held before, and no record of the user goes to
+    /// the candidate. The result says whether the channel is dead. It is
+    /// none when the channel is neither dead nor silent any more: the
+    /// candidate of such a channel ends.
+    pub fn hold_candidate<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        address: &[u8],
+        rng: &mut R,
+    ) -> Result<Option<bool>, Error> {
+        let held = self.hold_candidate_of(conversation, address, NO_WEEK, rng)?;
+        Ok(held.map(|(dead, _)| dead))
+    }
+
+    /// As [`Client::hold_candidate`], for the blob of `week`. The two
+    /// blobs of one fetch arrive apart, and the one of the later week names
+    /// the candidate (`NET-190`). An address of an earlier week than the
+    /// one that the row holds changes nothing, and the result is none. The
+    /// result says whether the channel is dead, and whether the candidate
+    /// took its record of `NET-191` already. An address that the row holds
+    /// keeps that fact and its time, and another address starts both again.
+    pub fn hold_candidate_of<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        address: &[u8],
+        week: u32,
+        rng: &mut R,
+    ) -> Result<Option<(bool, bool)>, Error> {
+        let Some(mut row) = self.dead_row(conversation)? else {
+            return Ok(None);
+        };
+        if address.len() != ADDRESS_LEN {
+            return Ok(None);
+        }
+        let names_week = week != NO_WEEK && row.candidate_week != NO_WEEK;
+        let is_held = row
+            .candidate
+            .as_ref()
+            .is_some_and(|held| held.as_slice() == address);
+        if is_held {
+            if week != NO_WEEK && (!names_week || week > row.candidate_week) {
+                row.candidate_week = week;
+            }
+        } else {
+            if row.candidate.is_some() && names_week && week < row.candidate_week {
+                return Ok(None);
+            }
+            row.candidate = Some(Zeroizing::new(address.to_vec()));
+            row.candidate_sent = false;
+            row.candidate_since = self.known_now_ms()? / 1_000;
+            row.candidate_week = week;
+        }
+        self.put_dead_row(conversation, Some(&row), rng)?;
+        Ok(Some((row.dead, row.candidate_sent)))
+    }
+
+    /// The address of this device left for the candidate of a
+    /// conversation (`NET-191`), or a relay answered the bundle of a
+    /// renewal that went there. The row keeps that, thus no later run
+    /// sends to the candidate again.
+    pub fn candidate_sent<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let Some(mut row) = self.dead_row(conversation)? else {
+            return Ok(());
+        };
+        if row.candidate.is_none() || row.candidate_sent {
+            return Ok(());
+        }
+        row.candidate_sent = true;
+        self.put_dead_row(conversation, Some(&row), rng)
+    }
+
+    /// Each candidate address that the store holds, with its contact,
+    /// whether the channel is dead, and whether the candidate took its
+    /// record already. A run that starts gives them to its node, which
+    /// holds none of an earlier run.
+    #[allow(clippy::type_complexity)]
+    pub fn held_candidates(
+        &self,
+    ) -> Result<Vec<(ConversationId, [u8; 32], Zeroizing<Vec<u8>>, bool, bool)>, Error> {
+        let store = &self.open_ref()?.store;
+        let mut out = Vec::new();
+        for (row, plain) in store.list(TableId::CONTACT, None)? {
+            drop(Zeroizing::new(plain));
+            let conversation = ConversationId(row);
+            let Some(held) = self.dead_row(conversation)? else {
+                continue;
+            };
+            if let Some(candidate) = held.candidate {
+                out.push((
+                    conversation,
+                    self.contact_id_of(conversation)?,
+                    candidate,
+                    held.dead,
+                    held.candidate_sent,
+                ));
+            }
+        }
+        Ok(out)
+    }
+
+    /// The peer gave its address in a record of kind `0x33` under the
+    /// ratchet, or a renewal replaced the channel. The channel lives, and
+    /// the blob of this device goes with its row and its candidate
+    /// (`NET-190`). The result is the erase of that blob, when this device
+    /// wrote one.
     pub fn dead_channel_ended<R: CryptoRng + ?Sized>(
         &mut self,
         conversation: ConversationId,
         rng: &mut R,
     ) -> Result<Option<DeadWork>, Error> {
+        // The record that moved the peer is a sign of it.
+        self.peer_heard(conversation)?;
         let Some(row) = self.dead_row(conversation)? else {
             return Ok(None);
         };
@@ -339,29 +551,77 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(erase)
     }
 
-    /// Each pairwise conversation whose oldest record with no delivery
-    /// receipt is older than `DEAD_CHANNEL_SILENCE` (`NET-186`).
+    /// The newest time that this device knows with no call of the
+    /// platform, in milliseconds. It comes from the insertion stamp, which
+    /// follows the clock of each commit, and the last tick.
+    fn known_now_ms(&self) -> Result<u64, Error> {
+        Ok(self
+            .open_ref()?
+            .stamp
+            .last
+            .max(self.clock.saturating_mul(1_000)))
+    }
+
+    /// A relay acknowledged the record of `message`. When no earlier
+    /// acknowledgment of its conversation waits for a record of the peer,
+    /// `DEAD_CHANNEL_SILENCE` counts from this one (Part 3 §3.2.6). A
+    /// record of a group, and one of no contact, starts nothing.
+    pub(super) fn relay_accepted<R: CryptoRng + ?Sized>(
+        &mut self,
+        message: &MsgRef,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let now_ms = self.known_now_ms()?;
+        let open = self.open_mut()?;
+        let Some(plain) = open.store.get(TableId::MESSAGE, &message.0)? else {
+            return Ok(());
+        };
+        let conversation = super::conversation_of(&Zeroizing::new(plain))?;
+        let Some(contact) = open.store.get(TableId::CONTACT, &conversation.0)? else {
+            return Ok(());
+        };
+        drop(Zeroizing::new(contact));
+        let name = [UNANSWERED_SETTING, conversation.0.as_slice()].concat();
+        let row = open.store.row_id(SETTINGS, &name);
+        if open.store.get(SETTINGS, &row)?.is_some() {
+            return Ok(());
+        }
+        let mut batch = open.store.begin();
+        batch.put(SETTINGS, row, None, &now_ms.to_be_bytes(), rng)?;
+        Ok(batch.commit()?)
+    }
+
+    /// A record that opened under the ratchet of the contact arrived: a
+    /// sign of the peer (Part 3 §3.2.6). The silence of the channel ends,
+    /// and the next acknowledgment of a relay starts it again.
+    pub(super) fn peer_heard(&mut self, conversation: ConversationId) -> Result<(), Error> {
+        let open = self.open_mut()?;
+        let name = [UNANSWERED_SETTING, conversation.0.as_slice()].concat();
+        let row = open.store.row_id(SETTINGS, &name);
+        if open.store.get(SETTINGS, &row)?.is_none() {
+            return Ok(());
+        }
+        let mut batch = open.store.begin();
+        batch.delete(SETTINGS, row);
+        Ok(batch.commit()?)
+    }
+
+    /// Each pairwise conversation in which a relay acknowledged a record
+    /// of this device `DEAD_CHANNEL_SILENCE` ago or earlier (`NET-186`). No
+    /// record of the peer arrived since. No receipt enters the signal,
+    /// because the two receipts are off by default (`NET-059`).
     pub fn silent_conversations(&self, now_ms: u64) -> Result<Vec<ConversationId>, Error> {
         let store = &self.open_ref()?.store;
         let mut out = Vec::new();
         for (row, plain) in store.list(TableId::CONTACT, None)? {
             drop(Zeroizing::new(plain));
             let conversation = ConversationId(row);
-            let mut is_silent = false;
-            for (_, message) in store.list(TableId::MESSAGE, Some(&conversation.0))? {
-                let message = Zeroizing::new(message);
-                let Ok(info) = info_of(&message) else {
-                    continue;
-                };
-                if info.outgoing
-                    && info.delivery == Delivery::Accepted
-                    && now_ms.saturating_sub(info.stored_at_ms) >= DEAD_CHANNEL_SILENCE_MS
-                {
-                    is_silent = true;
-                    break;
-                }
-            }
-            if is_silent {
+            let name = [UNANSWERED_SETTING, conversation.0.as_slice()].concat();
+            let since = store
+                .get(SETTINGS, &store.row_id(SETTINGS, &name))?
+                .and_then(|bytes| bytes.as_slice().try_into().ok())
+                .map(u64::from_be_bytes);
+            if since.is_some_and(|since| now_ms.saturating_sub(since) >= DEAD_CHANNEL_SILENCE_MS) {
                 out.push(conversation);
             }
         }
@@ -371,22 +631,52 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// NET-193: each record of a conversation that a relay took and that
     /// holds no delivery receipt goes to the send path again. The receiver
     /// drops a copy that it holds by its `msg_id`.
+    ///
+    /// The set has two bounds. A relay holds a record for `MSG_TTL` at
+    /// most, thus an older record left its queue to the contact or to
+    /// nothing. The queue that died took none of it. A receipt of the
+    /// contact proves that it read its queue up to the record that the
+    /// receipt names. Thus each record that this device stored before the
+    /// newest receipted one arrived too. With the receipts off the first
+    /// bound alone holds. A placeholder is no record of the wire.
     pub fn resend_unreceipted(&mut self, conversation: ConversationId) -> Result<(), Error> {
+        let now_ms = self.known_now_ms()?;
         let store = &self.open_ref()?.store;
-        let mut records = Vec::new();
-        for (row, message) in store.list(TableId::MESSAGE, Some(&conversation.0))? {
+        let ttl_ms = umbra_queue::params::MSG_TTL.saturating_mul(1_000);
+        let mut receipted = 0u64;
+        for (_, message) in store.list(TableId::MESSAGE, Some(&conversation.0))? {
             let message = Zeroizing::new(message);
             let Ok(info) = info_of(&message) else {
                 continue;
             };
-            if info.outgoing && info.delivery == Delivery::Accepted {
+            if info.outgoing && matches!(info.delivery, Delivery::Delivered | Delivery::Read) {
+                receipted = receipted.max(info.stored_at_ms);
+            }
+        }
+        let mut records = Vec::new();
+        for (row, message) in store.list(TableId::MESSAGE, Some(&conversation.0))? {
+            let message = Zeroizing::new(message);
+            // IMP-121: the plaintext names its owner. A record of another
+            // conversation never goes to this contact.
+            if super::conversation_of(&message)? != conversation {
+                return Err(Error::Integrity);
+            }
+            let Ok(info) = info_of(&message) else {
+                continue;
+            };
+            let is_bound = info.stored_at_ms > receipted
+                && now_ms.saturating_sub(info.stored_at_ms) < ttl_ms
+                && !info.deleted;
+            if info.outgoing && info.delivery == Delivery::Accepted && is_bound {
                 let app = message.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
                 records.push((
                     info.stored_at_ms,
                     Outgoing {
                         message: MsgRef(row),
                         conversation,
-                        app: app.to_vec(),
+                        // WIR-071: the wire carries the raw target of a
+                        // reply, and the row holds its reference.
+                        app: self.with_raw_targets(conversation, app)?,
                     },
                 ));
             }
@@ -445,6 +735,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 self.put_dead_row(conversation, None, rng)?;
                 continue;
             }
+            // NET-190: a candidate that gave no address of the peer in
+            // `DEAD_CHANNEL_SILENCE` ends, and the row holds it no more. A
+            // blob of a later fetch that names it gives a new candidate.
+            if row.candidate.is_some() {
+                let age = now.saturating_sub(row.candidate_since);
+                if row.candidate_since == 0 {
+                    row.candidate_since = now;
+                } else if age >= DEAD_CHANNEL_SILENCE_MS / 1_000 {
+                    row.end_candidate();
+                }
+            }
             let (secret, own_pk, peer_pk) = self.dead_channel_of(conversation)?;
             if row.dead {
                 match &row.address {
@@ -481,6 +782,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     for at_week in [week, week.saturating_sub(1)] {
                         work.push(DeadWork::Read {
                             conversation,
+                            week: at_week,
                             handle: secret.handle(&peer_pk, at_week),
                             read: secret.read_secret(&peer_pk, at_week),
                             blob_key: secret.blob_key(&peer_pk, at_week),
@@ -497,7 +799,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use umbra_crypto::{secret::Secret, zeroize::Zeroizing};
     use umbra_wire::address::LEN;
@@ -515,6 +817,7 @@ mod tests {
             written_relays: vec![[1; 32], [2; 32]],
             fetch_week: NO_WEEK,
             fetch_at: 44,
+            ..DeadRow::empty()
         };
         let bytes = row.encode();
         assert_eq!(bytes.len(), ROW_LEN);
@@ -530,5 +833,158 @@ mod tests {
             DeadRow::parse(&DeadRow::empty().encode()).unwrap().address,
             None
         );
+        // NET-190: a row with a candidate address holds it in a tail, and a
+        // row of an earlier build, which ends before it, holds none.
+        assert_eq!(back.candidate, None);
+        let with = DeadRow {
+            candidate: Some(Zeroizing::new(vec![8; LEN])),
+            ..back
+        };
+        let bytes = with.encode();
+        let earlier = ROW_LEN + super::CANDIDATE_TAIL;
+        assert_eq!(bytes.len(), earlier + super::SENT_TAIL);
+        let again = DeadRow::parse(&bytes).unwrap();
+        assert_eq!(again.candidate.as_deref(), Some(&vec![8; LEN]));
+        assert_eq!(again.address.as_deref(), Some(&vec![7; LEN]));
+        assert!(DeadRow::parse(bytes.split_last().unwrap().1).is_err());
+        // NET-191: the row says whether the candidate took its record,
+        // since when this device holds it, and the week of its blob.
+        assert_eq!(
+            (
+                again.candidate_sent,
+                again.candidate_since,
+                again.candidate_week
+            ),
+            (false, 0, NO_WEEK)
+        );
+        let sent = DeadRow {
+            candidate_sent: true,
+            candidate_since: 1_800_000_500,
+            candidate_week: 3_001,
+            ..again
+        };
+        let told = DeadRow::parse(&sent.encode()).unwrap();
+        assert_eq!(
+            (
+                told.candidate_sent,
+                told.candidate_since,
+                told.candidate_week
+            ),
+            (true, 1_800_000_500, 3_001)
+        );
+        // A row of an earlier build holds the candidate alone: it took no
+        // record, and its time starts at the next check.
+        let old = DeadRow::parse(&sent.encode()[..earlier]).unwrap();
+        assert_eq!(old.candidate.as_deref(), Some(&vec![8; LEN]));
+        assert_eq!(
+            (old.candidate_sent, old.candidate_since, old.candidate_week),
+            (false, 0, NO_WEEK)
+        );
+    }
+
+    #[cfg(feature = "runtime")]
+    #[test]
+    fn a_candidate_keeps_its_one_send_across_runs_and_ends_after_a_week() {
+        use umbra_core::{
+            session::node::{ContactId, StateChange},
+            store::{
+                engine::MemoryBackend,
+                wrap::{Cost, SecureElement},
+            },
+        };
+
+        use crate::{client::Client, runtime::OsRng};
+
+        struct Element;
+
+        impl SecureElement for Element {
+            fn keyed(&self, input: &[u8]) -> Result<[u8; 32], umbra_core::Error> {
+                Ok(umbra_crypto::hash::sha3_256(&[input]))
+            }
+        }
+
+        let mut rng = OsRng;
+        let passphrase: Vec<u16> = "correct horse".encode_utf16().collect();
+        let cost = Cost { m_kib: 64, t: 1 };
+        let mut client = Client::create(
+            MemoryBackend::default(),
+            Element,
+            &passphrase,
+            cost,
+            1_000,
+            &mut rng,
+        )
+        .unwrap();
+        let peer = ContactId([0x57; 32]);
+        let peer_static = super::read_pk(&Secret::new([7; 32]));
+        let contact = StateChange::Contact {
+            contact: peer,
+            state: Zeroizing::new([&[0x01][..], &[5; 16], &peer_static, &[0; 8]].concat()),
+        };
+        client
+            .commit_network(&[contact], &[], 1_000_000, &mut rng)
+            .unwrap();
+        let conversation = client.conversation_for(&peer.0).unwrap();
+        client.channel_dead(conversation, 1_000, &mut rng).unwrap();
+        // The clock of the platform, from which the time of a candidate
+        // counts.
+        client.touch(2_000);
+        client.tick(2_000);
+        let (first, second) = (vec![7u8; LEN], vec![8u8; LEN]);
+        let held = |client: &Client<MemoryBackend, Element>| {
+            let held = client.held_candidates().unwrap();
+            assert_eq!(held.len(), 1);
+            (held[0].2.to_vec(), held[0].3, held[0].4)
+        };
+
+        // NET-190: the two blobs of one fetch arrive apart, and the one of
+        // the later week names the candidate, whichever answers last.
+        let took = client.hold_candidate_of(conversation, &first, 3_001, &mut rng);
+        assert_eq!(took.unwrap(), Some((true, false)));
+        let took = client.hold_candidate_of(conversation, &second, 3_000, &mut rng);
+        assert_eq!(took.unwrap(), None);
+        assert_eq!(held(&client), (first.clone(), true, false));
+
+        // NET-191: the row keeps the one send, thus the next run gets the
+        // candidate as one that took its record. A blob of a later week
+        // that names the same address changes nothing.
+        client.candidate_sent(conversation, &mut rng).unwrap();
+        assert_eq!(held(&client), (first.clone(), true, true));
+        let took = client.hold_candidate_of(conversation, &first, 3_002, &mut rng);
+        assert_eq!(took.unwrap(), Some((true, true)));
+        // One more record goes after a rotation of the own queue.
+        let mut own = vec![0u8; LEN];
+        umbra_wire::address::QueueAddress {
+            relay_id: [1; 32],
+            sender_id: [2; 32],
+            qs_auth_sk: Secret::new([3; 32]),
+            qe: Secret::new([4; 32]),
+        }
+        .encode(&mut own)
+        .unwrap();
+        client
+            .dead_queue_rotated(conversation, &own, &mut rng)
+            .unwrap();
+        assert_eq!(held(&client), (first.clone(), true, false));
+        // Another address of a later week is a new candidate.
+        client.candidate_sent(conversation, &mut rng).unwrap();
+        let took = client.hold_candidate_of(conversation, &second, 3_003, &mut rng);
+        assert_eq!(took.unwrap(), Some((true, false)));
+        assert_eq!(held(&client), (second, true, false));
+
+        // NET-190: a candidate that gave no address of the peer in
+        // `DEAD_CHANNEL_SILENCE` ends, and the store holds it no more.
+        let epoch = 3_003 * 168;
+        let since = client.dead_row(conversation).unwrap().unwrap();
+        let since = since.candidate_since;
+        assert_eq!(since, 2_000);
+        let end = since + super::DEAD_CHANNEL_SILENCE_MS / 1_000;
+        client
+            .dead_channel_work(end - 1, epoch, &[], &mut rng)
+            .unwrap();
+        assert_eq!(client.held_candidates().unwrap().len(), 1);
+        client.dead_channel_work(end, epoch, &[], &mut rng).unwrap();
+        assert!(client.held_candidates().unwrap().is_empty());
+        assert!(client.channel_was_down(conversation).unwrap());
     }
 }

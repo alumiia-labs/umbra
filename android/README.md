@@ -23,6 +23,27 @@ cd android && ./gradlew :app:assembleDebug
 `app/src/main/kotlin-generated`. Git ignores the two, because a build makes
 them again. Run the script again after each change of `umbra-ffi`.
 
+## Release build
+
+A release takes its network from the deployment (`deploy/ansible`). Run
+`bash scripts/release-network.sh` from the repo root first. It writes four
+files to `app/src/release/assets`: the key set of the directory, the key of
+the notification server, the pins of the directory, and
+`umbra-network.properties`. The release build reads two values of that last
+file:
+
+- `invitation_host`, the host of the App Link of an invitation (`IDN-123`);
+- `shipped_epoch`, the epoch that the build ships (Part 10 `REL-045`). The
+  app refuses each manifest of an epoch before it.
+
+The release build fails when the file is absent, or when the epoch is absent
+or zero. It also fails when the host is no host name or is the host of the
+devnet. Run the script again before each release, thus the epoch is a recent
+one.
+
+A release ships the `arm64-v8a` library alone. The `x86_64` library is for
+the emulator, and the debug build alone holds it.
+
 ## Icons
 
 The app reads its icons at run time from SVG files of Font Awesome. The
@@ -31,9 +52,8 @@ icon of `app/src/main/assets/fa-pro` wins over the same name in the Free set.
 Git ignores that folder, because a Pro file must not sit in a public
 repository.
 
-The mockups of `design/mockups/light` use a line look, which is the `light`
-style of Pro. For a new icon, copy `svgs/light/<name>.svg` of the Pro package
-into `fa-pro`, and copy the Free file of that name into `fa`. A Free file
+The app uses the `light` style of Pro when that folder holds it. For a new
+icon, copy `svgs/light/<name>.svg` of the Pro package into `fa-pro`, and copy the Free file of that name into `fa`. A Free file
 names "Font Awesome Free" in its first comment. An icon that the Free set does
 not hold takes the Free file of a near icon under its name, as `shield-check`
 takes `shield-halved`.
@@ -50,8 +70,8 @@ adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 The debug build trusts the test authority of `tests/fixtures/tls` and dials
 10.0.2.2, which is the machine of the developer as an emulator sees it. The
 secrets of that network are in the repository, thus it protects nothing. The
-release build holds no network until the client reads the relay directory of
-Part 10.
+release build holds the network of `scripts/release-network.sh` alone
+("Release build" above).
 
 Two emulators make one conversation: the first one invites and copies the
 link, and the second one pastes it and accepts. The clipboard of an
@@ -72,33 +92,14 @@ firewall of the machine must let the phone in on the ports 7441 and 7446,
 the two ingress relays. The other relays take connections from the relays
 alone.
 
-## Open items of the shell
+## Limits of the shell
 
-- The app carries its wakes over the persistent socket of Part 8 §8.4.1: a
-  `specialUse` foreground service holds the one connection while the client
-  is unlocked, and a message alert shows no content. FCM and UnifiedPush need
-  the Notification Delivery Relay and the OHTTP hop, which are not built.
 - A locked client takes no record. The auto-lock comes 15 minutes after the
-  last action of the user, thus delivery in the background lasts that long.
-  Part 8 §8.4.1 states the two remedies, and the owner picks one.
+  last action of the user by default, thus delivery in the background lasts
+  that long (Part 8 §8.4.1).
 - Doze can suspend the network of a foreground service on a device that does
-  not move. The app asks for no exemption from the battery optimization yet.
-- Each circuit takes the one path of the build configuration. The client
-  builds one more circuit for each 8 queues (`NET-022`), and the relay chains
-  that differ (`NET-023`) need the path selection of Part 3 §3.4.6 over the
-  relay directory.
+  not move. The app asks for no exemption from the battery optimization.
 - A handshake between its flight 1 and its flight 3 has no stored form. A run
   that ends inside those seconds loses that one handshake.
-- The invitation is a link of 91 characters after `#`, which works one time.
-  The app shows it as a QR code, shares it through the share sheet, and copies
-  it as sensitive text. The scan of a QR code, and the App Link of `IDN-123`
-  with its invitation host, are open.
-- The interface follows `design/mockups/light` for the flows that exist:
-  unlock, chats, contacts, add contact, invitation, use invitation, name a
-  contact, conversation, settings. It has three tabs. Profiles, devices,
-  and recovery have no view yet.
 - The wrapping key of the keystore asks for no biometric and no device
-  credential at each use. That step needs a `BiometricPrompt` around the
-  keyed function.
-- The per-conversation screenshot block (`IMP-058`), the one-time note before
-  an export (`IMP-046`), push notifications, attachments, and groups.
+  credential at each use.

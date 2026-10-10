@@ -4,7 +4,10 @@ listen=0.0.0.0:{{ relay.port }}
 cert=/etc/umbra/tls/cert.pem
 key=/etc/umbra/tls/key.pem
 store=/var/lib/umbra-relay/{{ relay.name }}/relay.db
+{% if relay.role == 'exit' %}
+# Part 10 REL-127: a relay with the attachment role alone holds chunks.
 chunk_capacity={{ umbra_chunk_capacity }}
+{% endif %}
 public={{ umbra_fqdn }},{{ ansible_host }},{{ relay.port }}
 operator={{ umbra_operator }}
 country={{ umbra_country }}
@@ -21,22 +24,31 @@ manifest_from={{ signer }}.{{ umbra_domain }},{{ hostvars[signer]['ansible_host'
 {% set ndr_host = groups['ndr'][0] %}
 {% set directory_host = groups['directory'][0] %}
 # Part 8 §8.2 and Part 9 §9.12: this entry relay forwards the OHTTP
-# requests of its clients to the two gateways.
+# requests of its clients to a gateway on another server. It is no OHTTP
+# relay for a gateway of its own server. One server would then see the
+# address of a client and what that client sends (NTF-002).
+{% if inventory_hostname != ndr_host %}
 ohttp_gateway=https://{{ ndr_host }}.{{ umbra_domain }}:{{ umbra_service_port }}/gateway
+{% endif %}
+{% if inventory_hostname != directory_host %}
 directory_gateway=https://{{ directory_host }}.{{ umbra_domain }}:{{ umbra_service_port }}/gateway
 {% endif %}
+{% endif %}
 {% if relay.role == 'exit' %}
-{% set ns = namespace(route=none) %}
+{% set ns = namespace(entries=[]) %}
 {% for host in groups['relays'] %}
-{% if ns.route is none and hostvars[host]['relays'] | selectattr('role', 'equalto', 'entry') | list %}
-{% set ns.route = host %}
+{% if hostvars[host]['relays'] | selectattr('role', 'equalto', 'entry') | list %}
+{% set ns.entries = ns.entries + [host] %}
 {% endif %}
 {% endfor %}
+{% set ndr_route = (ns.entries | difference(groups['ndr']))[0] %}
+{% set directory_route = (ns.entries | difference(groups['directory']))[0] %}
 # NTF-127: a queue relay pushes through the OHTTP relay of an entry relay,
-# and it takes the issuer keys through the same route (Part 13 §13.5). The
-# entry relay answers on port 443.
-ndr_route=https://{{ ns.route }}.{{ umbra_domain }}/ohttp
+# and it takes the issuer keys through such a relay too (Part 13 §13.5).
+# Each of the two entry relays sits on another server than the gateway
+# that it forwards to. The entry relay answers on port 443.
+ndr_route=https://{{ ndr_route }}.{{ umbra_domain }}/ohttp
 ndr_key_config={{ lookup('file', umbra_out + '/ndr-key-config.hex') | trim }}
-directory_route=https://{{ ns.route }}.{{ umbra_domain }}/directory
+directory_route=https://{{ directory_route }}.{{ umbra_domain }}/directory
 directory_pins={{ lookup('file', umbra_out + '/directory-pins.hex') | trim }}
 {% endif %}

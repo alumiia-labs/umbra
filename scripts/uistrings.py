@@ -3,10 +3,12 @@
 Each rule that requires the Android interface to show a string has a
 resource named after it: `umbra.ui.idn-024` is `umbra_ui_idn_024`, because a
 resource name holds no dot and no hyphen (IMP-084). A rule with more than one
-string names each one with a suffix, as `umbra_ui_dev_126_edit`. This check
-fails when a rule below has no such string, when a string of a shipped
-locale is empty (IMP-086, IMP-087), when no source file reads it, and when a
-string of the family names no rule below or no source reads it.
+string names each one with a suffix, as `umbra_ui_dev_126_edit`, beside the
+string of the plain name. A rule of `SUFFIX_ONLY` holds suffixed strings
+alone, as `umbra_ui_imp_077_offline`. This check fails when a rule below has
+no such string, and when a string of a rule is absent or empty in a shipped
+locale (IMP-086, IMP-087). It also fails when no source file reads a string,
+and when a string of the family names no rule below.
 
     python scripts/uistrings.py
 """
@@ -29,7 +31,12 @@ RULES = [
     "GRP-050", "GRP-087", "GRP-090", "GRP-199", "GRP-229", "GRP-374",
     "ATT-157", "ABU-040", "ABU-041", "IMP-047", "IMP-050",
     "REL-116", "REL-126", "IMP-082", "NET-343", "DEV-114", "IMP-074",
+    "NET-201", "IMP-077",
 ]
+
+# The rules that hold no string of the plain name: each of their strings has
+# a suffix. Each other rule needs the string of its plain name.
+SUFFIX_ONLY = {"IMP-077"}
 
 
 def resource_name(rule: str) -> str:
@@ -53,26 +60,35 @@ def main() -> int:
     for path in glob.glob(os.path.join(SOURCES, "**", "*.kt"), recursive=True):
         with open(path, encoding="utf-8") as handle:
             source += handle.read()
-    for folder in locales:
-        found = strings_of(folder)
-        locale = os.path.basename(folder)
-        for rule in RULES:
-            name = resource_name(rule)
-            if not found.get(name):
-                problems.append(f"{locale}: no string for umbra.ui.{rule.lower()} ({name})")
-    for rule in RULES:
-        name = resource_name(rule)
-        if not re.search(r"R\.string\." + name + r"\b", source):
-            problems.append(f"no source reads {name}")
     names = [resource_name(rule) for rule in RULES]
+    # The strings of each rule: the name of the rule, and each name with a
+    # suffix, over all the locales.
+    family = {name: set() for name in names}
     for folder in locales:
         for name in strings_of(folder):
             if not name.startswith("umbra_ui_"):
                 continue
-            if not any(name == known or name.startswith(known + "_") for known in names):
+            known = [base for base in names if name == base or name.startswith(base + "_")]
+            if not known:
                 problems.append(f"{os.path.basename(folder)}: {name} names no rule")
+            for base in known:
+                family[base].add(name)
+    for rule, base in zip(RULES, names):
+        if rule in SUFFIX_ONLY:
+            if not family[base]:
+                problems.append(f"no string for umbra.ui.{rule.lower()} ({base}_*)")
+            if base in family[base]:
+                problems.append(f"{base} has no suffix, and {rule} is in SUFFIX_ONLY")
+        elif base not in family[base]:
+            problems.append(f"no string for umbra.ui.{rule.lower()} ({base})")
+        for name in sorted(family[base]):
+            for folder in locales:
+                if not strings_of(folder).get(name):
+                    problems.append(f"{os.path.basename(folder)}: no string for {name}")
             if not re.search(r"R\.string\." + name + r"\b", source):
                 problems.append(f"no source reads {name}")
+    for rule in sorted(SUFFIX_ONLY - set(RULES)):
+        problems.append(f"SUFFIX_ONLY names {rule}, which RULES does not hold")
     for problem in problems:
         print(problem)
     print(f"rules: {len(RULES)}  locales: {len(locales)}  problems: {len(problems)}")

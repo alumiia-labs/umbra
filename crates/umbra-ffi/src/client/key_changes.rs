@@ -49,6 +49,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Ok(notice) = KeyChangeNotice::parse(body) else {
             return Ok(());
         };
+        // DEV-294: this device holds the salt alone of a contact whose
+        // channel another device owns. It holds no key of the peer to
+        // change. Thus the notice waits at the device that owns the
+        // channel, and no notice blocks the conversation here.
+        if self.is_shadow_contact(conversation)? {
+            return Ok(());
+        }
         let value = Zeroizing::new(
             [
                 conversation.0.as_slice(),
@@ -100,6 +107,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some((key, at_ms)) = self.held_key_change(conversation)? else {
             return Ok(None);
         };
+        // A notice that an earlier build kept for a shadow contact blocks
+        // nothing: the device that owns the channel asks the user.
+        if self.is_shadow_contact(conversation)? {
+            return Ok(None);
+        }
         let store = &self.open_ref()?.store;
         let plain = Zeroizing::new(
             store

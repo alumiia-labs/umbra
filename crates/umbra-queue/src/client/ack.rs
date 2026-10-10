@@ -90,11 +90,22 @@ impl AckCursor {
     /// Records a `MSG` at `seq`, committed to the store. A record that
     /// cannot be decrypted counts as received (`WIR-114`). Returns false
     /// for a sequence the cursor already covers.
+    ///
+    /// `IN_FLIGHT_WINDOW` bounds the count of the records above the cursor
+    /// and not their distance from it. A record far above the cursor is a
+    /// record above a hole: the relay let the numbers below it expire, or
+    /// it holds them back. The cursor takes that record, thus the hole
+    /// rules apply to it. The `ACK` crosses the hole with a shown gap
+    /// after `ACK_HOLE_TIMEOUT` (`WIR-116`, `WIR-117`). The cursor refuses
+    /// a record only while it holds a full window. The relay emits
+    /// that record again at the next `SUB`, as each record that no `ACK`
+    /// covers (`WIR-110`).
     pub fn receive(&mut self, seq: u32, now: u64) -> bool {
         if seq <= self.acked || self.received.contains_key(&seq) {
             return false;
         }
-        if seq > self.acked.saturating_add(IN_FLIGHT_WINDOW) {
+        let held = u32::try_from(self.received.len()).unwrap_or(u32::MAX);
+        if held >= IN_FLIGHT_WINDOW {
             return false;
         }
         self.received.insert(seq, now);
@@ -280,8 +291,44 @@ mod tests {
         c.acknowledged(p);
         assert!(c.gap_shown());
         assert!(!c.receive(11, 2_000));
-        assert!(!c.receive(10 + IN_FLIGHT_WINDOW + 5, 2_000));
         assert!(AckCursor::drains(61));
         assert!(!AckCursor::drains(60));
+    }
+
+    #[test]
+    fn a_record_far_above_the_cursor_is_a_hole_and_not_a_duplicate() {
+        // The relay let more than a window of numbers expire.
+        let far = 10 + IN_FLIGHT_WINDOW + 5;
+        let mut c = AckCursor::new(10);
+        assert!(c.receive(far, 1_000));
+        assert!(c.receive(far + 1, 1_001));
+        assert!(!c.receive(far, 1_002));
+        assert_eq!(c.hole(), Some(11));
+        // WIR-113: the point stays below the hole until the timeout.
+        assert_eq!(c.ack_point(1_000 + ACK_HOLE_TIMEOUT - 1), None);
+        // WIR-116, WIR-117: it then crosses the hole and shows the gap.
+        let p = c.ack_point(1_001 + ACK_HOLE_TIMEOUT).unwrap();
+        assert_eq!((p.seq, p.crosses_hole), (far + 1, true));
+        c.acknowledged(p);
+        assert_eq!(c.acked(), far + 1);
+        assert!(c.gap_shown());
+    }
+
+    #[test]
+    fn a_full_window_refuses_a_record_until_an_ack_frees_it() {
+        let mut c = AckCursor::new(0);
+        for seq in 1..=IN_FLIGHT_WINDOW {
+            assert!(c.receive(seq, 100));
+        }
+        // The count bounds the cursor, thus the stored form reads back.
+        assert!(!c.receive(IN_FLIGHT_WINDOW + 1, 100));
+        let mut writer = Writer::new();
+        c.export(&mut writer).unwrap();
+        let stored = writer.finish();
+        let mut c = AckCursor::restore(&mut Reader::new(&stored)).unwrap();
+        let p = c.ack_point(100 + RECEIPT_MIN_DELAY).unwrap();
+        assert_eq!((p.seq, p.crosses_hole), (IN_FLIGHT_WINDOW, false));
+        c.acknowledged(p);
+        assert!(c.receive(IN_FLIGHT_WINDOW + 1, 200));
     }
 }

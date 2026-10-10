@@ -12,6 +12,7 @@ use curve25519_dalek::{
     constants::RISTRETTO_BASEPOINT_POINT as G,
     ristretto::{CompressedRistretto, RistrettoPoint},
     scalar::Scalar,
+    traits::Identity,
 };
 use rand_core::TryCryptoRng;
 use sha2::{Digest, Sha512};
@@ -72,10 +73,15 @@ fn scalar_from_bytes(bytes: &[u8; 32]) -> Result<Scalar, Error> {
 }
 
 fn element_from_bytes(bytes: &[u8; 32]) -> Result<RistrettoPoint, Error> {
-    CompressedRistretto::from_slice(bytes)
+    let point = CompressedRistretto::from_slice(bytes)
         .map_err(|_| Error::Key)?
         .decompress()
-        .ok_or(Error::Key)
+        .ok_or(Error::Key)?;
+    // RFC 9497 §2.1: `DeserializeElement` fails on the identity element.
+    if point == RistrettoPoint::identity() {
+        return Err(Error::Key);
+    }
+    Ok(point)
 }
 
 fn len_prefix(part: &[u8]) -> [u8; 2] {
@@ -216,9 +222,11 @@ impl ServerKey {
     ) -> Result<Evaluation, Error> {
         let mut wide = [0u8; 64];
         rng.try_fill_bytes(&mut wide).map_err(|_| Error::Rng)?;
-        let r = Scalar::from_bytes_mod_order_wide(&wide);
+        let mut r = Scalar::from_bytes_mod_order_wide(&wide);
         wide.zeroize();
-        self.evaluate_with(blinded, r)
+        let evaluation = self.evaluate_with(blinded, r);
+        r.zeroize();
+        evaluation
     }
 
     /// `BlindEvaluate` with a given proof scalar, for the known-answer
@@ -226,9 +234,11 @@ impl ServerKey {
     pub fn evaluate_with(
         &self,
         blinded: &[u8; ELEMENT_LEN],
-        r: Scalar,
+        mut r: Scalar,
     ) -> Result<Evaluation, Error> {
-        let batch = self.evaluate_batch_with(core::slice::from_ref(blinded), r)?;
+        let batch = self.evaluate_batch_with(core::slice::from_ref(blinded), r);
+        r.zeroize();
+        let batch = batch?;
         let element = batch.elements.first().copied().ok_or(Error::Length)?;
         Ok(Evaluation {
             element,
@@ -245,24 +255,34 @@ impl ServerKey {
     ) -> Result<BatchEvaluation, Error> {
         let mut wide = [0u8; 64];
         rng.try_fill_bytes(&mut wide).map_err(|_| Error::Rng)?;
-        let r = Scalar::from_bytes_mod_order_wide(&wide);
+        let mut r = Scalar::from_bytes_mod_order_wide(&wide);
         wide.zeroize();
-        self.evaluate_batch_with(blinded, r)
+        let batch = self.evaluate_batch_with(blinded, r);
+        r.zeroize();
+        batch
     }
 
     /// `BlindEvaluate` over a batch with a given proof scalar.
     pub fn evaluate_batch_with(
         &self,
         blinded: &[[u8; ELEMENT_LEN]],
-        r: Scalar,
+        mut r: Scalar,
     ) -> Result<BatchEvaluation, Error> {
         if blinded.is_empty() {
+            r.zeroize();
             return Err(Error::Length);
         }
         let blinded_points = blinded
             .iter()
             .map(element_from_bytes)
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>();
+        let blinded_points = match blinded_points {
+            Ok(points) => points,
+            Err(fault) => {
+                r.zeroize();
+                return Err(fault);
+            }
+        };
         let elements: Vec<[u8; 32]> = blinded_points
             .iter()
             .map(|p| (self.secret * p).compress().to_bytes())
@@ -277,6 +297,9 @@ impl ServerKey {
         let t3 = r * m;
         let c = challenge(&self.public, &m, &z, &t2, &t3);
         let s = r - c * self.secret;
+        // The proof scalar with the public proof gives the server key
+        // (`s = r − c·k`), thus it goes before the proof leaves.
+        r.zeroize();
         let mut proof = [0u8; PROOF_LEN];
         if let Some(head) = proof.get_mut(..32) {
             head.copy_from_slice(&c.to_bytes());

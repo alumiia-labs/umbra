@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 3: Network Architecture
 
 **Status:** Draft
-**Version:** 0.11.0-draft
-**Date:** 2026-10-02
+**Version:** 0.12.0
+**Date:** 2026-10-09
 
 ---
 
@@ -41,10 +41,10 @@ Thus UMBRA spends seconds and does not spend gigabytes.
 
 | Role | Operated by | Sees | Does not see |
 | --- | --- | --- | --- |
-| **Queue Relay** | Nonprofit or third party | Queue IDs, ciphertext, delivery time. For a group queue (§3.2.7): that the queue exists, the count of reader sessions and of writer sessions, the arrival time and the bucket of each record, the member count at each rotation from the slot count of the epoch-key record, and the notifier count | Client IP address (when chained), identities, content. For a group queue: the membership list, the identity or the pairwise queue of any member, the sender of a record, and the content of a record |
-| **Chain Relay** | Nonprofit or third party | Adjacent hop addresses, cell time | Queue IDs, content, endpoints |
-| **Ingress Relay** | Nonprofit or third party | Client IP address, cell time, cell sizes, and the client class of §3.8.1, which is web or native | Destination queue, content, contact graph |
-| **Notification Relay (NDR)** | Nonprofit only (refer to Part 8) | Push handles, blinded tokens in transit | Queue-to-token binding, content |
+| **Queue Relay** | The project or a third party | Queue IDs, ciphertext, delivery time. For a group queue (§3.2.7): that the queue exists, the count of reader sessions and of writer sessions, the arrival time and the bucket of each record, the member count at each rotation from the slot count of the epoch-key record, and the notifier count | Client IP address (when chained), identities, content. For a group queue: the membership list, the identity or the pairwise queue of any member, the sender of a record, and the content of a record |
+| **Chain Relay** | The project or a third party | Adjacent hop addresses, cell time | Queue IDs, content, endpoints |
+| **Ingress Relay** | The project or a third party | Client IP address, cell time, cell sizes, and the count of the circuits of the client. v1 holds one client class, the native client, and the web class of §3.8.1 comes with the deferred web client | Destination queue, content, contact graph |
+| **Notification Relay (NDR)** | The project only (refer to Part 8) | Push handles, blinded tokens in transit | Queue-to-token binding, content |
 | **Directory Authority** | Seven legal persons under separate control (Part 10 §10.5.1) | Relay descriptors, measurements | Nothing about users |
 
 **[NET-001]** One physical server MAY implement more than one role. **[NET-002]** But a relay MUST NOT
@@ -78,9 +78,9 @@ store a value that links the two identifiers outside of the one queue record.
 
 > *Cause of NET-117.* The queue address of Part 6 §6.6.10 carries `SenderId`,
 > `QS_auth_sk`, and `QE`, and it carries no `RecipientId`. Part 6 §6.4.2 rule 1 therefore derives
-> `K_QE` from `SenderId` alone. An earlier draft put `RecipientId` in that
-> derivation. A sender has to compute `K_QE` to seal a `SEND`, thus that draft
-> made the sender hold a value that this section keeps at the queue owner.
+> `K_QE` from `SenderId` alone. A sender has to compute `K_QE` to seal a `SEND`.
+> Thus a derivation from `RecipientId` makes the sender hold a value that this
+> section keeps at the queue owner.
 
 > *Rationale.* This construction is the SMP construction of SimpleX, which uses
 > two unrelated 24-byte IDs. UMBRA increases the width to 32 bytes, for
@@ -162,12 +162,12 @@ hop one fresh X25519 key, and both ends hold it.
 - **[NET-288]** A client MUST reject an `IDS` whose `relay_session_pk` differs
   from the `er` of the circuit that carried it.
 
-> *Cause.* An earlier draft gave `RelaySession_pk` to a recipient in the `IDS`
-> of Part 6 §6.4, and it gave it to no other party. A sender holds a
-> `QueueAddress` and no `IDS`, and a recipient in a later session holds the key
-> of an earlier one. Thus no sender could compute `auth`. The flight-2
-> ephemeral is fresh for each circuit, both ends hold it, and the client
-> verified it inside the handshake transcript. It adds no byte to the wire.
+> *Cause.* A key that only the `IDS` of Part 6 §6.4 carries reaches a
+> recipient and no other party. A sender holds a `QueueAddress` and no `IDS`,
+> and a recipient in a later session holds the key of an earlier one. Thus no
+> sender can compute `auth` from such a key. The flight-2 ephemeral is fresh
+> for each circuit, both ends hold it, and the client verifies it inside the
+> handshake transcript. It adds no byte to the wire.
 
 **[NET-121]** A relay MUST reject a command whose `auth` does not verify.
 **[NET-122]** A relay MUST reject a command whose `corr_id` that relay accepted
@@ -273,10 +273,9 @@ of a client brings one back. Thus the queues of a relay outlive its process.
   not parse, whose record sits at or below its last `ACK`, or whose record
   sits at or above its next sequence number. It MUST serve each other queue.
 
-> *Cause.* An earlier draft gave a relay no storage rule, and the reference
-> relay held each queue in RAM. The reference client stores its ratchets
-> since 0.2.0-draft, thus a restart of a client cost nothing and a restart of
-> a relay cost each contact. `NET-302` repeats the erase duty for the
+> *Cause.* A client stores its ratchets, thus a restart of a client costs
+> nothing. A relay that holds each queue in RAM loses each contact at a
+> restart. `NET-302` repeats the erase duty for the
 > storage engine, because a deleted row of a database stays in its free pages
 > and in its write-ahead log until the engine overwrites them. The reference
 > relay runs SQLite under `secure_delete`, and it truncates the log after
@@ -324,8 +323,8 @@ command for that queue reaches it through a circuit that ends at that relay.
   client MUST build one with no required last relay, thus the user can make
   a queue for a new contact.
 
-The reference client of 0.2.0-draft takes its relay set from a relay manifest
-of Part 10 §10.5.5, and it verifies that manifest under the key set of its
+The reference client takes its relay set from a relay manifest
+of Part 10 §10.5.5. It verifies that manifest under the key set of its
 build. The HTTPS form of §3.10 carries it. A build for a deployed test network
 reads the descriptor below in the place of a manifest. It meets `NET-022`,
 `NET-023`, and the invariants of §3.4.6 over that descriptor, and it does not
@@ -351,7 +350,7 @@ first two bytes of its address.
   become a default, because a default would let two relays of one operator
   look like two operators.
 - **[NET-313]** A client MUST take the first relay of layer 1 as its pinned
-  ingress of `NET-022`. It dials no relay of the descriptor but its pins:
+  ingress of `NET-086` and of invariant 4 of §3.4.6. It dials no relay of the descriptor but its pins:
   a network from a signed manifest pins two relays under Part 10 `REL-154`,
   and a dial that fails goes to the second one.
 - **[NET-314]** A client MUST read a descriptor with the first line
@@ -385,7 +384,7 @@ The address travels on four carriers.
 | Parameter | Value |
 | --- | --- |
 | `ROTATE_GRACE` | 7 days. The queue owner measures it from the send of the new address |
-| `DEAD_CHANNEL_SILENCE` | 7 days. The sender measures it from the send of a record that holds no delivery receipt |
+| `DEAD_CHANNEL_SILENCE` | 7 days. The sender measures it from the relay acknowledgment of a record that no sign of the peer followed |
 | `DEAD_CHANNEL_PROBE` | 4 relays for each handle |
 
 **The first two queues.**
@@ -398,10 +397,18 @@ The address travels on four carriers.
    the invitation bundle of Part 5 §5.4.1. **[NET-173]** An initiator MUST put
    the `QueueAddress` of its first queue in `app_1` of flight 1.
 3. **[NET-174]** A responder MUST send flight 2 to the queue that `app_1`
-   names. **[NET-175]** A responder MUST NOT store that queue as the outbound
+   names. It MUST store flight 2 with its responder state in the batch that
+   spends the one-time prekey. It MUST send that flight again at the start of
+   each run until a relay acknowledges it. A run that ends before
+   the flight leaves has spent the invitation already. An initiator MUST
+   keep flight 1 and flight 3 in the same way, each until a relay
+   acknowledges it. After a `LIMIT` or a `BUSY` a flight goes again in a
+   slot of the cover clock under `NET-071`, and after a `REJECTED` it goes
+   no more. **[NET-175]** A responder MUST NOT store that queue as the outbound
    queue of the contact before flight 3 verifies. A replayed flight 1 fails at
-   Part 5 rule `CRY-055`, thus a responder sends flight 2 to a replayed address
-   at most one time.
+   Part 5 rule `CRY-055`. Thus a responder sends flight 2 to a replayed address
+   at most one time. Each later send carries the same bytes to the same
+   queue.
 
 **The first ratchet record.** Part 5 §5.5.1 makes the flight-2 ephemeral of
 the responder its first ratchet key, and the initiator takes a ratchet step
@@ -412,19 +419,22 @@ gives it the ratchet key of the initiator.
 - **[NET-292]** After flight 3, an initiator MUST send a record of kind `0x33`
   as its first ratchet record, with the `QueueAddress` that `app_1` carried.
   The record opens the sending chain of the responder, and it gives that
-  address again under the complete session.
+  address again under the complete session. The initiator MUST send such a
+  record again behind each send of flight 3 under `NET-174`, until a relay
+  acknowledges one that it sent after the relay acknowledged flight 3. A record
+  that reaches the responder before flight 3 opens no chain.
 - **[NET-293]** A responder MUST hold a record of its user that comes before
   that first record, and it MUST send it when the chain opens. It MUST NOT
   show that record as failed.
 - **[NET-294]** A client MUST NOT show a record of kind `0x33` in a
   conversation.
 
-> *Cause.* An earlier draft gave the responder no way to write first. The user
-> that made the invitation is the responder, and that user often writes first.
-> A reference client showed such a record as failed. A ratchet key of the
+> *Cause.* The user that made the invitation is the responder, and that user
+> often writes first. Without these rules the responder holds no sending
+> chain, and its first record fails. A ratchet key of the
 > initiator inside the handshake would open the two chains at once, and it
-> would change the key schedule of Part 5 §5.4.8. One record of a kind that
-> Part 6 holds already costs one `B0` cell and changes no schedule.
+> would change the key schedule of Part 5 §5.4.8. One record of kind `0x33`,
+> which Part 6 holds already, costs one `B0` cell and changes no schedule.
 
 **A rotation.** §3.2.4 gives the schedule.
 
@@ -434,8 +444,36 @@ gives it the ratchet key of the initiator.
    of the contact has arrived on the new queue, the owner MUST send that
    record again at the start of each run and after each `ADDRESS_RESEND` of 6
    hours: a run that ends before the record leaves loses it. **[NET-177]** The owner MUST hold the old queue until a record
-   arrives on the new queue, or until `ROTATE_GRACE` ends. **[NET-178]** The
-   owner MUST then send the `DEL` of `NET-020`.
+   arrives on the new queue, or until `ROTATE_GRACE` ends. Only a record
+   that opens under the ratchet of the contact ends that hold: the relay of
+   the new queue can write any other record. A clock movement of Part 1
+   rule `SCP-019` starts `ROTATE_GRACE` again, and the age of each queue
+   that the movement made due. The first record on the new queue shows that
+   the contact took the address. It does not show that the old queue is empty.
+   A record that the contact wrote before it took the address can
+   sit in the old queue, or travel to it. Thus the end of that hold ends
+   the rotation and not the reading. The owner MUST keep its subscription to
+   the old queue in each run, until the `DEL` of `NET-178` leaves. Until then,
+   it MUST open each record of that queue under the ratchet of the contact. It
+   MUST also acknowledge each such record.
+   **[NET-178]** The
+   owner MUST then send the `DEL` of `NET-020`, after the delay of Part 6
+   rule `WIR-044` and never with the first record on the new queue. The
+   reference draw of that delay is uniform from the CSPRNG over
+   `ROTATE_JITTER` of `ROTATE_GRACE`. The `DEL` erases each record that the
+   queue still holds. Thus the owner MUST send it only in a run that meets one
+   condition. The subscription of that run to the old queue gave no record for
+   `DRAIN_QUIET` of 120 seconds, at or after the end of that delay. A relay
+   paces about one cell
+   each second toward a client, thus a queue that holds a record gives it
+   inside that time. The owner MUST keep the old queue end
+   in its store until that `DEL` left. Thus a run that ends first, or one
+   that sent its one `DEL` of Part 6 rule `WIR-045` already, loses none.
+   The stored queue end names its contact, thus a later run reads the queue
+   under the same ratchet. A relay that answers the `SUB` of the old queue
+   with `REJECTED` holds no such queue, and the owner then drops the queue
+   end with no `DEL`. The push binding of the old queue goes at the end of
+   the rotation, and not at the `DEL`.
 5. **[NET-179]** A sender MUST use the newest `QueueAddress` that it accepted
    for a contact for each later `SEND` to that contact. Part 7 §7.5.3 gives the
    order of two records, which is the sender-chain position.
@@ -450,23 +488,56 @@ gives it the ratchet key of the initiator.
 two conditions holds. The first condition is a `NACK` with reason `REJECTED`
 (Part 6 §6.4.4) for a `SEND` under the newest address of that contact. The
 second condition is a stale queue state at a restore, under Part 7 rule
-`DEV-135`. A channel is **silent** when a record that the client sent holds no
-delivery receipt `DEAD_CHANNEL_SILENCE` after the send. Part 3 §3.5.4 rule
-`NET-041` makes a delivery receipt mandatory. Thus a silent channel shows a
-peer that is offline, or a peer that cannot read the queue.
+`DEV-135`. A channel is **silent** when two conditions hold. A relay
+acknowledged a record that the client sent, with the `QUOTA` of Part 6
+rule `WIR-496`. No **sign of the peer** followed in the `DEAD_CHANNEL_SILENCE`
+after that acknowledgment.
+A sign of the peer is a record that opens under the ratchet of that contact
+and that arrived after the send. A delivery receipt and a read receipt are
+such records, and each other record of the peer is one too. §3.5.4 rule
+`NET-059` keeps the two receipts off by default, thus the definition does
+not need them. The client holds one time for each contact: the time of the
+first relay acknowledgment that no record of the peer has followed. A later
+acknowledgment does not move that time, and each record of the peer that
+opens under the ratchet clears it. The channel is silent when that time is
+`DEAD_CHANNEL_SILENCE` old or older. The delivery state of a record does not
+enter the test, thus a missing receipt makes no channel silent. A silent
+channel shows a peer that is offline, a peer that
+cannot read the queue, or a peer that reads and does not answer. The client
+cannot tell the three apart, and rule 8 treats them as one case.
+
+> *Cause.* A missing delivery receipt cannot define a silent channel.
+> `NET-059` turns the receipt off for a new contact. Each contact then becomes
+> silent 7 days after each send. The signal above exists in the default
+> configuration. It still counts a contact that reads and never writes as
+> silent. The note at the end of this section states what a relay sees because
+> of that.
 
 **[NET-324]** A client whose `SUB` of the current inbound queue of a contact
 gets a `NACK` with reason `REJECTED` MUST make a new queue for that contact,
 as at a rotation. The relay holds no such queue, thus no record of the peer
 reaches the client there. The address of the new queue goes to the peer in
 a record of kind `0x33`, and the blob of rule 7 carries it when that record
-does not arrive.
+does not arrive. The new queue of this rule and of `NET-182` goes to a
+relay of another operator when the relay set holds one. If not, it goes to
+another relay. With no other relay it goes to the relay of the lost queue,
+because a contact that no record reaches is the worse result. A client that
+starts one
+rotation at a time MUST start the new queue of this rule and of `NET-182`
+before a rotation of §3.2.4. A contact for which no relay can take a
+queue at that moment MUST NOT hold back the rotation of another contact.
+
+A `NACK` with reason `LIMIT` or `BUSY` for a `SUB` leaves no subscription
+at the relay, thus the queue gives no record in that run. The client MUST
+send that `SUB` again, with the `ACK` at its cursor, after a wait of 2
+seconds. Each such refusal of the same queue doubles the wait, up to
+30 seconds. The client sends one `SUB` again at most 8 times in a run.
 
 > *Cause of `NET-324`.* Two contacts that lapse past `QUEUE_IDLE_TTL` lose
 > both queues. Each finds its channel dead at its next `SEND`, and each
 > reads the blob of the other. Rule 9 then has each send "its own current
-> `QueueAddress`", and that address named the queue that the relay dropped.
-> The two channels stayed dead. A `SUB` is the first command that shows the
+> `QueueAddress`". Without this rule that address names the queue that the
+> relay dropped, and the two channels stay dead. A `SUB` is the first command that shows the
 > loss, thus it starts the new queue.
 
 The two parties hold the pairwise identities of Part 4 §4.2.2, and a restore
@@ -516,15 +587,83 @@ the derivation.
    fetch from a uniform distribution over 24 hours. The 24 hours start at the
    start of the condition, or at the start of the week. **[NET-189]** A client MUST NOT fetch a
    dead-channel handle of a contact whose channel is neither dead nor silent.
-9. **[NET-190]** A client that opens a `DeadChannelBlob` of a peer MUST take
-   its `QueueAddress` as the newest address of that peer. **[NET-191]** That
+9. **[NET-190]** A client that opens a `DeadChannelBlob` of a peer MUST hold
+   its `QueueAddress` as a **candidate** address of that peer. It MUST keep the
+   address that it held before beside the candidate. A client MUST
+   NOT send a record of the user to a candidate address. A candidate MUST
+   NOT become the address that the client writes to. No record of the peer
+   confirms it. A client MUST NOT take a candidate as an address because a
+   record that opens under the ratchet of that contact arrived. That rule holds
+   on a dead channel as on a silent one, and before the send of `NET-191` as
+   after it. A
+   candidate has one use, which `NET-191` gives. The address of a peer
+   changes in two ways and in no other. The first way is a record of kind
+   `0x33` of that peer that opens under the ratchet, under `NET-179`. The
+   second way, on a **stale** channel of `NET-325`, is the end of the
+   renewal handshake of `NET-326` to `NET-329` with the pairwise key of
+   that peer. Until one of the two, each record of the user goes to the
+   address that the client held before. On a dead channel the relay of that
+   address refuses the record with `REJECTED`, and the record fails under
+   `NET-217`. v1 holds no record of the user for a candidate. On
+   a channel that is silent and not dead, a record that opens under the
+   ratchet of that contact ends the candidate. The channel is no longer silent,
+   and a peer that moved says so in a record of kind `0x33`. A candidate also
+   ends in three cases. A blob of a later week names another address. The
+   channel is no longer dead or silent. `DEAD_CHANNEL_SILENCE` passed since the
+   client first held it. The client then erases it, and a blob of
+   a later fetch that names the same address is a new candidate. Inside
+   that time, a blob of a later week that names the same address changes
+   nothing, and it causes no second record of `NET-191`. Of the two blobs
+   of one fetch, the one of the later week names the candidate. The client
+   keeps the candidate in its store, with whether the record of `NET-191`
+   left for it, thus the next run holds both. **[NET-191]** That
    client MUST then send its own current `QueueAddress` as a record of kind
-   `0x33` on that channel. **[NET-192]** A client MUST treat a
+   `0x33` on that channel, to the candidate address, one time for each
+   candidate and one more time after each later rotation of its own queue.
+   The count holds across runs. A run that starts MUST NOT send that record
+   again to a candidate that took it. A client that holds no address of its
+   own first makes a new queue as under `NET-182`. That record is no record of
+   the user, and the client seals it under the ratchet. A refusal of a relay
+   sends it no second time. A peer that reads the candidate queue opens
+   that record and takes the address under `NET-179`. It then answers. A client
+   that takes, as the first record of one of its inbound queues, a
+   record of kind `0x33` that names another queue than the one that it
+   writes to MUST send its own current `QueueAddress` to that queue as a
+   record of kind `0x33` under the ratchet. It MUST send that record again at
+   the start of each run until a relay acknowledges it. That
+   answer gives the first client the address of the peer under `NET-179`,
+   and the two channels live again. The first queue of a contact starts
+   with the flights of its handshake. Thus only the queue of a rotation starts
+   with a record of the ratchet. An ordinary rotation whose
+   address the contact wrote to before causes no answer. A record of kind
+   `0x33` that names the queue that the client writes to already changes
+   nothing. A client with a stale channel seals nothing on that
+   ratchet (`NET-325`). It sends the bundle of its renewal to the candidate
+   under `NET-330` in place of that record, until a relay answers it there.
+   A client whose channel is not
+   stale MUST NOT send a renewal bundle to a candidate address. **[NET-192]** A
+   client MUST treat a
    `DeadChannelBlob` whose `sealed` field does not open under `blob_key` as an
    empty handle.
-10. **[NET-193]** After a client accepts a `QueueAddress` of a contact, it MUST
-    send again each record that holds no delivery receipt. §3.7 gives the
-    schedule of a retransmission.
+10. **[NET-193]** After a client accepts a `QueueAddress` of a contact whose
+    channel was dead or silent, in a record of kind `0x33` under `NET-179`,
+    it MUST send again each record of that contact that a relay acknowledged
+    and that no receipt of the peer names. The set has two bounds. The
+    client sends again only a record that is younger than `MSG_TTL` of
+    §3.2.4, because a relay holds no older record. The client also sends again
+    only a record that it stored after the newest record that a receipt of the
+    peer names. That receipt shows that the peer read
+    its queue up to that record. With the receipts off, the first bound
+    alone holds. The receiver drops a copy that it holds by its `msg_id`
+    under Part 6 rule `WIR-065`. A `QueueAddress` of a rotation of a channel
+    that is neither dead nor silent causes no such send. `NET-177` keeps the
+    old queue until the peer wrote to the new one. Thus the send
+    happens in three cases and in no other. In the first case the client held
+    the dead-channel state of rule 7 or rule 8 for that contact when the
+    address arrived. In the second case the channel was silent at that moment.
+    In the third case a renewal replaced the channel under `NET-329`. §3.7
+    gives the schedule of a
+    retransmission.
 11. **[NET-194]** A client MUST NOT write a `DeadChannelBlob` for a contact
     that the user blocked under Part 13 §13.12. **[NET-197]** A client MUST
     NOT fetch the dead-channel handle of a blocked contact.
@@ -539,6 +678,48 @@ the derivation.
 > attacker that holds a seized device loses the handle at that reset. A
 > restore of a backup from before such a reset restores the old keys, and that
 > pair recovers no channel. The user abandoned that identity on purpose.
+>
+> *Cause of the candidate address.* An ordinary revocation of Part 7 §7.7
+> rotates the ratchets and the queues, and it keeps the pairwise identities.
+> Thus a revoked device still derives each handle and each `blob_key` of the
+> user. Assume that a client takes the address of a blob as the newest address
+> at once. A revoked device then writes a blob with a queue of its own. Each
+> contact with a dead or silent channel sends its records there. The device
+> reads no plaintext, because the ratchet holds, but the user gets nothing and
+> the contact sees `accepted`. A revoked device holds no ratchet of the
+> contact. Thus it cannot open the record of `NET-191`, and it cannot write
+> the record of kind `0x33` that changes an address. It can
+> still take the handle first under Part 12 rule `ATT-058` and keep the
+> honest blob out for a week. It also learns the time of the one `0x33`
+> record, one time for each candidate and not one time in each run. Part 15
+> §15.3 records that residual.
+>
+> *Cause of the rule against a confirmation.* A record of the peer that
+> opens under the ratchet shows that the peer lives. That is also true on a
+> dead channel after the send of `NET-191`. Such a record does not
+> show that the peer reads the candidate queue. A peer whose queue was lost
+> at its relay, and that does not know it yet, still sends its ordinary
+> records. If such a record confirmed a candidate, the first one would confirm
+> the blob of an attacker. Each later record of the client would then go to
+> the queue of the attacker and show `accepted`. The address that the peer
+> gives later would send none of them again. Only the peer can say where it reads, and it says so in a record
+> of kind `0x33` under the ratchet. The honest peer of a candidate reads
+> the candidate queue, thus it gets the record of `NET-191` and answers
+> with its own. A party that holds the pairwise identity alone can do
+> neither. A silent channel loses nothing by the rule, because its address
+> still stands. A dead channel waits for the answer of the peer, which is
+> one record.
+>
+> *Cause of the stale-channel condition.* The handshake of a renewal runs
+> under the pairwise identities alone, and a revoked device holds the
+> pairwise identity of its user. A healthy channel that offered a renewal
+> bundle to a candidate would thus give a revoked device a handshake that it
+> can answer. The end of that handshake would replace a ratchet that
+> the device cannot read. A stale channel has no ratchet to protect, and no
+> other way back. Thus it alone offers the bundle and takes the address of
+> the peer from the end of that handshake. A revoked device can still
+> answer the bundle of a stale channel, and Part 15 §15.3 records that
+> residual.
 >
 > A fetch of a missing chunk costs one `B0` command and one `B0` `NACK`. Thus
 > the weekly fetch of `NET-187` costs about 1.1 KB for each silent contact.
@@ -560,12 +741,20 @@ make a new session over the pairwise identities, which a restore keeps.
   that contact, with a fresh one-time prekey. It MUST send the bundle to the
   newest queue of the peer as an L6 record of kind `0x06` of Part 6 §6.4.2.
   It MUST keep the bundle and its prekey until the handshake ends, across a
-  restart, as it keeps an invitation.
+  restart, as it keeps an invitation. It MUST send the bundle again at the
+  start of each run until a relay acknowledges it. A run that finds the bundle
+  in its store MUST NOT hold back a later offer for it. If the
+  handshake does not end within `INVITE_TTL` of the offer, or a relay
+  answers the bundle with `REJECTED`, the client MUST treat the channel as dead
+  under rule 8. The client MUST then show that to the user. In that case, at
+  `INVITE_TTL` the client MUST also end that offer and make a new one.
 - **[NET-327]** A client that gets such a record MUST drop it unless
   `responder_static_x25519` equals the pairwise key of the peer that the
   contact holds. Otherwise it MUST run the handshake of Part 5 §5.4 as the
   initiator under its own pairwise identity of that contact, from a new
   queue. It MUST NOT run a second one for the same contact while one runs.
+  One runs from the `NEW` of its queue on, thus a second bundle that comes
+  before the `IDS` starts none.
 - **[NET-328]** If the channels of both parties are stale, the party whose
   pairwise X25519 key is the lower as a big-endian integer MUST answer the
   bundle of the other, and the other MUST drop the bundle that it gets.
@@ -574,31 +763,39 @@ make a new session over the pairwise identities, which a restore keeps.
   contact only if the static key of the peer in it equals the pairwise key
   of the peer that the contact holds. The client then MUST take the new
   session and queues as the channel, MUST send the `DEL` of `NET-020` for
-  each queue of the old channel, MUST end each other renewal of that
-  contact, and MUST send again each record with no delivery receipt under
-  `NET-193`. The contact keeps its conversation, its verification state,
+  each queue of the old channel under the delay and the store rule of
+  `NET-178`. The client MUST then end each other renewal of that contact. It
+  MUST then send again the records that `NET-193` names, inside its
+  two bounds. The contact keeps its conversation, its verification state,
   and its identifier in the store.
 
-> *Cause of `NET-325` to `NET-329`.* An earlier draft put "the pairwise queue
-> state" in the backup and said nothing of the ratchet. A restore then either
-> reused message keys, which breaks the confidentiality of the two records
-> that share a key, or broke each conversation for good. The pairwise
+> *Cause of `NET-325` to `NET-329`.* A restore that seals on the ratchet of
+> the backup uses message keys again, which breaks the confidentiality of the
+> two records that share a key. A restore that drops the ratchet with no
+> renewal breaks each conversation for good. The pairwise
 > identities outlive the ratchet, and the handshake of Part 5 §5.4 already
 > authenticates them, thus a renewal reuses that handshake with no new
 > cryptography. The bundle travels under the queue end-to-end layer of the
 > peer, whose key only the contact holds, and the static check of `NET-327`
 > refuses a bundle of any other party.
 
-- **[NET-330]** A client with a stale channel that takes a new address of
-  the peer under rule 9 MUST send its bundle again to that address.
+- **[NET-330]** A client with a stale channel that holds a candidate
+  address of the peer under rule 9 MUST send its bundle again to that
+  address, until a relay answers it there and not again in a later run.
 
 > *Residual.* A stale party whose peer lost its queue sends its bundle into
 > a queue that no relay holds. The two meet again when the peer takes a new
 > queue under `NET-324` and its blob of rule 7 reaches the stale party. A
-> blob that carries a bundle would close that wait, and this revision does
-> not define one.
-> Rule `NET-189` keeps the fetch off a live contact, thus a relay sees a
-> dead-channel handle only when a pair has lost its channel.
+> blob that carries a bundle would close that wait, and v1 does not define
+> one.
+> Rule `NET-189` keeps the fetch off a contact whose channel is neither dead
+> nor silent. A relay thus sees a fetch of a dead-channel handle for a pair
+> that lost its channel. It also sees one for a pair where one party sent a
+> record
+> and got no record back in `DEAD_CHANNEL_SILENCE`. The second case holds a
+> contact that reads and never writes. The handle names no party, and it
+> changes each week. The fetch travels on a chain as each chunk fetch does.
+> Thus the relay learns that some pair is quiet and not which pair.
 
 ### 3.2.7 Group queues
 
@@ -694,7 +891,7 @@ relay MUST NOT retain an identifier of a deleted group queue.
 | `GROUP_READ_GRACE` | 30 days | `NET-242` keeps the previous `read_pk` for this period |
 | `GROUP_WRITE_GRACE` | 24 h | `NET-242` keeps the previous `write_pk` for this period |
 | `GROUP_IDLE_TTL` | 60 days without an accepted `GPOST` or a `GSUB` | **[NET-249]** A relay MUST delete a group queue with no activity for this period. **[NET-250]** A relay MUST count an accepted `GPOST` and a `GSUB` as activity. **[NET-251]** A relay MUST NOT count a `COVER` as activity |
-| `GROUP_NOTIFIER_MAX` | 4 096 notifiers for each group queue | **[NET-252]** A relay MUST reject a `GNREG` that would exceed this count. Part 8 §8.5.2 gives the notifier |
+| `GROUP_NOTIFIER_MAX` | 4 096 notifiers for each group queue | **[NET-252]** A relay MUST reject a `GNREG` that would exceed this count. Part 8 §8.5.2 gives the notifier. The relay also takes at most 4 new registrations for one group queue from one circuit, thus a party that fills the set builds one circuit for each 4 of them, and it hands out at most 512 digests in each second over all its group queues, under Part 8 §8.5.2 |
 
 A member that was offline for longer than `GROUP_RETENTION` has missed records,
 and Part 11 §11.8 makes the client show that gap.
@@ -742,15 +939,15 @@ and Part 11 §11.8 makes the client show that gap.
 > it to learn. One group queue for each session keeps the two apart, and the
 > two replicas of one group sit on two chains for the same cause.
 
-> *Cause of the group queue.* An earlier draft gave a group of up to 500
-> members a pairwise fan-out, thus a member of six 25-member groups held 144
-> inbound group queues over 18 sessions, and one text to a 500-member group
-> cost 499 `B1` cells of uplink. The ingress relay then read the recipient
-> count of a group from the size of the burst. This draft gives the group one
-> relay-held record for each message. The group-queue relay reads the member
-> count from the slot count of an epoch-key record in the place of that burst,
-> and §3.11 states that trade. The transport session count of the model user
-> of §3.12 falls from 20 to 9.
+> *Cause of the group queue.* A pairwise fan-out for a group of up to 500
+> members makes a member of six 25-member groups hold 144 inbound group queues
+> over 18 sessions. One text to a 500-member group then costs 499 `B1` cells
+> of uplink, and the ingress relay reads the recipient count of a group from
+> the size of the burst. The group queue gives the group one relay-held record
+> for each message. The group-queue relay reads the member count from the slot
+> count of an epoch-key record in the place of that burst, and §3.11 states
+> that trade. The transport session count of the model user of §3.12 is 9,
+> and a pairwise fan-out makes it 20.
 
 ## 3.3 The cell — fixed-size units on the wire
 
@@ -760,8 +957,8 @@ sizes:
 | Bucket | Size | Carries |
 | --- | --- | --- |
 | `B0` | 512 B | Text up to 155 B, receipts, control, ratchet headers, cover, loops |
-| `B1` | 2 KiB | Text above 155 B, PQ ratchet chunks, handshake flights, small media metadata, group records of a group up to about 120 members (Part 11 §11.3.3) |
-| `B2` | 8 KiB | Thumbnails, link previews, small attachments, group records of a group above about 120 members |
+| `B1` | 2 KiB | Text above 155 B, PQ ratchet chunks, flight 2 of the handshake, small media metadata, group records of a group up to about 120 members (Part 11 §11.3.3) |
+| `B2` | 8 KiB | Flight 1 of the handshake (Part 6 rule `WIR-502`), thumbnails, link previews, small attachments, group records of a group above about 120 members |
 | `B3` | 32 KiB | Attachment chunks (the only attachment size), inline epoch-key records (Part 11 §11.4.2) |
 
 Part 6 §6.9 gives bucket `B0` a text capacity of 155 bytes. A text above that
@@ -862,8 +1059,8 @@ predicts the root before the authorities sign it.
 `HOPS = 3` for all traffic, all privacy modes, and all message types. The hop
 count is not configurable, it is not negotiable, and the UI does not show it.
 
-> **Deviation note.** An earlier draft gave a 2-hop "Fast" mode. This document
-> withdraws that mode. A variable hop count increases the packet size. A
+> **Cause.** UMBRA has no 2-hop "Fast" mode. A variable hop count increases
+> the packet size. A
 > variable hop count also divides the anonymity set into populations that an
 > adversary can tell apart.
 >
@@ -966,7 +1163,12 @@ forward cell on that circuit. §3.4.4 rule `NET-114` gives it the check.
    the relay of `relay_id` MUST open one and hold the body until it opens,
    and one dial MUST serve each body that waits for that relay. It MUST drop
    a body that waited `CIRCUIT_BUILD_TIMEOUT`, because the client ended that
-   build under `NET-169`.
+   build under `NET-169`. A dial that fails MUST NOT hold the next one back.
+   While a body waits, the relay MUST dial again 1 s after a dial that
+   failed, and 15 s after a dial that gave no result. A relay MUST end a
+   circuit whose next hop gave no `EXTENDED` in `CIRCUIT_BUILD_TIMEOUT`. The
+   `DESTROY` of the client is a cell of the middle at that relay,
+   which it cannot read.
 7. **[NET-164]** A relay that receives an `EXTENDED` cell on a circuit of
    `NET-198` MUST send that body on the held circuit. **[NET-199]** That relay
    MUST send that body under its backward layer, with `X_L` of 16 zero bytes.
@@ -981,25 +1183,32 @@ forward cell on that circuit. §3.4.4 rule `NET-114` gives it the check.
      relay and put each circuit on it. It holds no resend window there: a
      lost link ends its circuits, and each client builds again.
 
-> *Cause of `NET-319`.* An earlier implementation dialed the next relay and
-> dropped the body. A relay opens its links to the next layer at the first
-> need, thus after each start the first build over each pair of relays
-> waited for an `EXTENDED` that never came. A client showed "Connecting"
-> with no circuit, and a group went silent, until the user asked for a new
-> connection.
+> *Cause of `NET-319`.* A relay opens its links to the next layer at the first
+> need. A relay that dials the next relay and drops the body makes the first
+> build over each pair of relays wait for an `EXTENDED` that never comes,
+> after each start. A client then shows "Connecting" with no circuit, and a
+> group is silent, until the user asks for a new connection. A relay that
+> starts a dial only when no body waits lets one dial that fails leave each
+> later body behind the one before it. A relay that comes back after its
+> restart then gets no link while a build arrives each 5 s.
 8. **[NET-165]** A relay MUST drop an `EXTEND` cell at the endpoint of a
    circuit that holds a next hop already. **[NET-166]** A relay in layer 3 MUST
    drop an `EXTEND` cell at the endpoint of a circuit. **[NET-167]** A relay
    MUST drop an `EXTEND` cell whose `relay_id` names a relay outside the layer
-   after its own. §3.4.1 gives the layers, and §3.4.2 fixes the hop count.
+   after its own. §3.4.1 gives the layers, and §3.4.2 fixes the hop count. A
+   relay that takes a newer manifest while it runs MUST take the layers of
+   that manifest for this rule at once. A client selects its chain
+   from the manifest that the relay serves.
 9. **[NET-168]** Before the `EXTENDED` cell of hop 3 arrives, a client MUST
    NOT send a cell other than `EXTEND` or `DESTROY`. The rule applies to the
    circuit under build, and not to another circuit of the client.
 10. **[NET-169]** If no `EXTENDED` cell arrives in `CIRCUIT_BUILD_TIMEOUT`, the
     client MUST send a `DESTROY` cell and discard the circuit. **[NET-347]**
-    While a record waits for a circuit to that exit, the client MUST start a
-    new build to it on a fresh chain, and it MUST NOT hold the record for its
-    next run.
+    While a record waits for a circuit to that queue relay, or an inbound queue
+    of
+    the client lives at it, the client MUST start a
+    new build to it on a fresh chain, and it MUST NOT hold the record or the
+    `SUB` of the queue for its next run.
 
 > *Cause.* In each design, a relay learns that it is a hop of a new circuit.
 > Thus the build cell hides nothing from it that steady state would hide. Rule
@@ -1037,8 +1246,8 @@ causes does not occur.
 | `CIRCUIT_BUILD_TIMEOUT` | 5 s from the first `EXTEND` cell. Three round trips over a 200 ms path take about 0.6 s, thus the value has a wide margin |
 | Preemptive build | keep 2 spare circuits in the foreground, thus a rotation does not block a send. §3.12 forbids a spare circuit in a push-wake session |
 
-> *Cause of the 4 hours.* An earlier draft set `CIRCUIT_MAX_AGE` to 10 minutes,
-> and each push wake then paid a fresh build. §3.12 puts the background
+> *Cause of the 4 hours.* At a `CIRCUIT_MAX_AGE` of 10 minutes, each push wake
+> pays a fresh build. §3.12 puts the background
 > arrivals at one group-queue relay about 48 minutes apart and at one pairwise
 > queue relay about 21 minutes apart, thus a circuit of 4 hours serves almost
 > all of them. Part 6 §6.2.3 sets `SESSION_RESUME_WINDOW` to the same
@@ -1067,17 +1276,17 @@ causes does not occur.
   that circuit and tell the neighbor on the other side. A client that gets
   one from its guard MUST take the circuit as lost and build again.
 
-> *Cause of `NET-322`.* A relay ended a circuit at a closed link and told
-> no neighbor. A client whose link to the guard dropped left its circuit at
-> the relays of layers 2 and 3 until `CIRCUIT_MAX_AGE`, and the queue relay
-> kept its subscription. That relay then took each arrival as delivered and
-> sent no push under Part 8 rule `NTF-128`, for up to 4 hours. A client whose
-> chain lost a link between two relays learned nothing either, and it sent
-> into a circuit that no exit held.
+> *Cause of `NET-322`.* Assume that a relay ends a circuit at a closed link
+> and tells no neighbor. A client whose link to the guard drops then leaves
+> its circuit at the relays of layers 2 and 3 until `CIRCUIT_MAX_AGE`, and the
+> queue relay keeps its subscription. That relay then takes each arrival as
+> delivered and sends no push under Part 8 rule `NTF-128`, for up to 4 hours.
+> A client whose chain loses a link between two relays learns nothing either,
+> and it sends into a circuit that no exit holds.
 
-> *Cause of `NET-320`.* The relay ended an aged circuit with no cell and the
-> client held no age. The link to the guard stayed up, thus the client sent
-> into a circuit that no relay held and read no record, and nothing showed
+> *Cause of `NET-320`.* The relay ends an aged circuit with no cell, and the
+> link to the guard stays up. A client that holds no age then sends into a
+> circuit that no relay holds and reads no record, and nothing shows
 > it. The reference client ends its run at the margin and starts a new one at
 > once, and each unsent record goes again from its store. A preemptive build
 > with a spare circuit would avoid the gap of one build.
@@ -1087,43 +1296,125 @@ causes does not occur.
 A build cell costs a relay a key agreement, and a connection costs it a TLS
 handshake. Neither needs a credential, thus a relay bounds both. The limits
 below are relay-local, and a client of ordinary use stays far under each one.
+The heading names the ingress relay. Each relay of each layer applies these
+limits, as the rules below state.
 
 | Parameter | Value |
 | --- | --- |
 | `LINK_CIRCUITS_MAX` | 256 circuits on one client link at an ingress relay |
 | `LINK_BUILD_BURST` | 64 build cells on one client link at once |
 | `LINK_BUILD_RATE` | 1 build cell each second on one client link after its burst |
+| `RELAY_LINK_BUILD_BURST` | 8 192 build cells at once on one link of a relay of the layer before |
+| `RELAY_LINK_BUILD_RATE` | 1 024 build cells each second on one such link after its burst |
+| `RELAY_CIRCUITS_MAX` | 524 288 circuits at one relay at once |
 | `RELAY_CONN_MAX` | 20 000 connections at once, and an operator can set another value |
-| `RELAY_CONN_PER_IP` | 32 connections of one address at once at an ingress relay, and an operator can set another value |
+| `RELAY_CONN_PER_IP` | 32 connections of one address at once, and an operator can set another value |
 | `RELAY_HANDSHAKES_MAX` | 512 TLS handshakes at once |
+| `RELAY_HANDSHAKES_PER_IP` | 4 TLS handshakes of one address at once |
+| `RELAY_HANDSHAKES_PER_NET` | 16 TLS handshakes of one network at once: the first 24 bits of an IPv4 address, or the first 48 bits of an IPv6 address |
+| `RELAY_PEER_PART` | 4: the address of a relay of the relay set holds this many times `RELAY_CONN_PER_IP` and `RELAY_HANDSHAKES_PER_IP` |
+| `RELAY_FIRST_BYTES_TIMEOUT` | 3 s from the accept to the whole `ClientHello` of the TLS handshake |
+| `RELAY_HANDSHAKE_END_TIMEOUT` | 3 s from the whole `ClientHello` to the end of the TLS handshake |
 | `RELAY_HANDSHAKE_TIMEOUT` | 10 s from the accept to the WebSocket upgrade |
+| `LINK_OPEN_TIMEOUT` | 10 s from the upgrade to the `Open` of the session, and at a relay of layer 2 or 3 to the `RelayHello` |
+| `LINK_IDLE_TIMEOUT` | 10 minutes for which a client link holds no circuit at an ingress relay |
 
 - **[NET-331]** An ingress relay MUST NOT hold more than `LINK_CIRCUITS_MAX`
   circuits on one client link. It MUST give a build cell above that count no
-  answer.
+  answer. A relay of each layer MUST NOT hold more than `RELAY_CIRCUITS_MAX`
+  circuits. It MUST count the circuits of each holder. At an ingress
+  relay the links of one address are one holder. An address is an IPv4 address
+  or the first 64 bits of an IPv6 address. At a relay of layer
+  2 or 3 the links of one relay of the layer before are one holder. The
+  share of a holder is `RELAY_CIRCUITS_MAX` divided by the count of the
+  holders that hold a circuit. A relay MUST answer a build first, and a
+  build that gets no answer ends no circuit. A relay at
+  `RELAY_CIRCUITS_MAX` MUST then end one circuit for the build. For a holder at
+  its share, the relay ends the circuit of that holder whose last forward cell
+  is the oldest. For a holder below its share, the relay ends that circuit of
+  the holder of the most circuits. A relay below `RELAY_CIRCUITS_MAX` ends no
+  circuit for a build. A rule that ends the oldest circuit that took no
+  cell after its build cell is not sufficient. A circuit leaves that set at
+  its first cell. Thus a few addresses that send one cell on each circuit
+  hold each place for `CIRCUIT_MAX_AGE`. Each new build then ends the fresh
+  circuit of another client. A party that holds many addresses still takes the share of
+  each of them. The share of each other holder falls with the count
+  of the holders.
 - **[NET-332]** An ingress relay MUST give a build cell on one client link no
   answer when that link spent `LINK_BUILD_BURST` builds and got none back at
   `LINK_BUILD_RATE`. The relay MUST check this before the key agreement of
-  the build. A relay of layer 2 or 3 applies neither limit, because one link
-  of a relay carries the circuits of many clients.
+  the build. A relay of layer 2 or 3 MUST answer a build cell only on a link
+  whose `RelayHello` verified (Part 10 rule `REL-174`) and names a relay of
+  the layer before its own in the relay set that it holds. One such link
+  carries the circuits of many clients. Thus the relay MUST give a build cell
+  on it no answer when the link spent `RELAY_LINK_BUILD_BURST` builds
+  and got none back at `RELAY_LINK_BUILD_RATE`. `LINK_CIRCUITS_MAX` does not
+  apply to that link. A relay MUST give no answer to a build cell on a link
+  that it dialed. A relay that holds no relay set, as in a test network,
+  cannot tell a relay link from another link. It gives each link the
+  limits of a relay link.
 - **[NET-333]** A relay MUST close a new connection at once when it holds
-  `RELAY_CONN_MAX` connections.
-- **[NET-334]** An ingress relay MUST close a new connection at once when its
-  address holds `RELAY_CONN_PER_IP` connections. A loopback address is
-  exempt, because a test network on one machine shares it. A relay of
-  layer 2 or 3 applies no such cap: another relay opens a connection there
-  for each chunk copy and each digest deposit that it pushes.
+  `RELAY_CONN_MAX` connections. An accept that fails MUST NOT end the relay.
+  The relay accepts again after a short wait, and it writes no line for it.
+- **[NET-334]** A relay MUST close a new connection at once when its
+  address holds `RELAY_CONN_PER_IP` connections. An address is an IPv4
+  address or the first 64 bits of an IPv6 address. A loopback address is
+  exempt, because a test network on one machine shares it. The address of
+  each relay of the relay set holds `RELAY_PEER_PART` times that count, in a
+  count of its own. Another relay opens connections for the chunk copies
+  and the digest deposits that it pushes. That count holds a connection
+  until `LINK_OPEN_TIMEOUT` after the deadline of its handshake, and a push
+  ends before it. A connection of such an address that lives on MUST then
+  take a place of its address as each other connection does. The relay MUST
+  close it when the address holds `RELAY_CONN_PER_IP`. A link of a
+  relay of the layer before lives on so, and one address holds few of them.
+  If the relay counted no connection of such an address, each host at the
+  address of a listed relay would hold connections with no
+  bound. A relay that holds no relay set applies the cap as an ingress
+  relay alone.
 - **[NET-335]** A relay MUST run at most `RELAY_HANDSHAKES_MAX` TLS
   handshakes at once, and it MUST close a connection that holds no upgrade
-  request of Part 6 §6.2.1 at `RELAY_HANDSHAKE_TIMEOUT` from its accept.
+  request of Part 6 §6.2.1 at `RELAY_HANDSHAKE_TIMEOUT` from its accept. A
+  connection takes a place among the handshakes when the relay holds its
+  whole `ClientHello` and not before. The relay reads the `ClientHello`
+  with no key operation, and it MUST close a connection that sent no whole
+  one at `RELAY_FIRST_BYTES_TIMEOUT`. From that place the handshake MUST
+  end inside `RELAY_HANDSHAKE_END_TIMEOUT`, which is one flight of each
+  side. One address MUST NOT run more than `RELAY_HANDSHAKES_PER_IP`
+  handshakes at once. One network MUST NOT run more than
+  `RELAY_HANDSHAKES_PER_NET`. A loopback address is exempt from both
+  bounds. The address of a relay of the relay set runs `RELAY_PEER_PART`
+  times `RELAY_HANDSHAKES_PER_IP`, and the bound of its network does not
+  count it. A connection above `RELAY_HANDSHAKES_MAX` waits for a place
+  until its deadline. A place that a connection takes at its
+  first byte and holds until `RELAY_HANDSHAKE_TIMEOUT`, with 16 places for
+  one address, lets 32 addresses that send one byte each hold each
+  place. A party with 128 addresses in 32 networks still holds each place,
+  for `RELAY_HANDSHAKE_END_TIMEOUT` each. Each one costs the relay one key
+  agreement. After the upgrade, a relay MUST close a link that
+  sent no `Open` in `LINK_OPEN_TIMEOUT`. A relay of layer 2 or 3 that holds a
+  relay set MUST also close a link with no `RelayHello` of `NET-332` in that
+  time. Each other connection there is one push that ends at
+  once. An ingress relay MUST close a client link that held no circuit for
+  `LINK_IDLE_TIMEOUT`.
 
-> *Cause.* An earlier draft gated the creation of queues and storage (Part 13
-> §13.2) and bounded nothing below it. Each accepted connection took a task
-> and a TLS handshake, and each build cell took a key agreement, with no
-> bound on either. One host could hold an ingress relay with connections or
-> with builds and stop each client of it. The client of Part 3 opens one
+> *Cause.* The gate of Part 13 §13.2 covers the creation of queues and
+> storage, and it bounds nothing below it. Each accepted connection takes a
+> task and a TLS handshake, and each build cell takes a key agreement. With no
+> bound on either, one host holds an ingress relay with connections or
+> with builds and stops each client of it. The client of Part 3 opens one
 > circuit for each relay that it reaches, thus 256 circuits cover a device
-> with contacts at that many queue relays.
+> with contacts at that many queue relays. A bound on the builds at an ingress
+> relay alone is not sufficient. It assumes that a link to a relay of layer 2
+> or 3 comes from a relay, and a relay has to check that. The address and the
+> static key of each relay are in the manifest. Thus one host can dial a queue
+> relay itself and send build cells with no bound. Each one costs a key
+> agreement and leaves a circuit for `CIRCUIT_MAX_AGE`. A relay also has to
+> close a silent connection after its upgrade, and a relay of each layer has
+> to apply the cap of one address. If not, one host holds each place of a
+> relay of layer 2 or 3 with connections that send nothing after the upgrade.
+> A place among the handshakes that a socket takes before its `ClientHello`
+> lets 512 sockets that send no byte hold each place.
 
 **[NET-028]** A client MUST NOT use one circuit for more than one privacy mode. **[NET-029]** A client MUST
 NOT carry interactive traffic and bulk traffic on the same circuit (§3.8).
@@ -1186,6 +1477,12 @@ Y_R  = X_R XOR AES-256-CTR( K_str, counter = S )
 Y_L  = S XOR POLYVAL( K_hash, Y_R )
 ```
 
+`AES-256-CTR( K, counter = S )` takes the 16 bytes of `S` as its first
+counter block. For each next block of 16 bytes of key stream it adds 1 to
+that block as one 128-bit big-endian integer, modulo 2^128. No part of the
+block is a fixed nonce, and the receiver of `NET-113` counts in the same
+way.
+
 **[NET-113]** A receiver MUST decipher one layer with the inverse steps:
 
 ```
@@ -1197,11 +1494,11 @@ X_L  = AES-256-Dec( K_prp, S ) XOR C XOR T
 **[NET-279]** A party MUST take `T` from the derivation of `NET-106`, and it
 MUST NOT take `T` from `circ_id`. The key update below keeps `T`.
 
-> *Cause.* An earlier draft made `T` the `circ_id` of the cell. `NET-109`
+> *Cause.* The `circ_id` of the cell cannot be `T`. `NET-109`
 > makes each hop rewrite that value, and `NET-154` makes the relay before hop
-> *n* draw the value on its link to hop *n*. Thus the client never held the
-> `circ_id` of the links to hop 2 and hop 3, and it could not compute those
-> two layers. A tweak from the hop derivation is a value that both parties of
+> *n* draw the value on its link to hop *n*. Thus the client never holds the
+> `circ_id` of the links to hop 2 and hop 3, and it cannot compute those
+> two layers from it. A tweak from the hop derivation is a value that both parties of
 > the hop hold, and it differs for each hop and each circuit, which is what
 > the tweak of the construction of `NET-030` needs.
 
@@ -1275,9 +1572,9 @@ hop 2.
 > ciphertext of the next layer, and not a payload. Thus a seized key set of hop
 > 1 or hop 2 opens no cell beyond what that relay saw in transit. Part 15 §15.1 records what each relay holds. A key update at
 > each middle hop costs one HKDF at each relay for each cell, and it buys no
-> payload confidentiality. An earlier draft chained the value `C` and
-> replaced no key. Under that draft a queue relay that an adversary seized
-> after a session opened each recorded cell of the live circuits.
+> payload confidentiality. A hop 3 layer that chains the value `C` and
+> replaces no key lets a queue relay that an adversary seizes
+> after a session open each recorded cell of the live circuits.
 > `CIRCUIT_MAX_AGE` bounds that window at 4 hours only.
 
 **[NET-131]** A party MUST process the cells of one circuit in the order that it
@@ -1299,11 +1596,11 @@ retransmission below the cell layer.
 > because `C` never repeats inside one circuit. `K_str` is a separate key from
 > `K_prp`, thus the block cipher and the stream never share a key.
 
-> **Deviation note.** An earlier draft made `X_L` the chaining value itself and
-> made each hop compare it. Under that text the left block carried no data.
-> A relay that removed its layer then held `L` bytes only, and it held no value
-> for the `tag` field of the next hop. Thus the cell had to lose 16 bytes at
-> each hop, or it had to carry one tag for each hop. The first result shows the
+> **Cause.** `X_L` is not the chaining value itself, and a middle hop does not
+> compare it. If it were, the left block would carry no data. A relay that
+> removes its layer would then hold `L` bytes only, and it would hold no value
+> for the `tag` field of the next hop. Thus the cell would lose 16 bytes at
+> each hop, or it would carry one tag for each hop. The first result shows the
 > circuit position, and §3.4.2 gives that result as the cause to fix the hop
 > count. The second result breaks the 32-byte overhead that §3.4.3, Part 5 §5.6,
 > and Part 6 §6.9 each quote. The text above puts the tag of the layer below in
@@ -1313,7 +1610,7 @@ retransmission below the cell layer.
 > **[NET-110]** A maintainer MUST get a `/crypto-review` of this construction
 > against the Counter Galois Onion paper (eprint 2025/583) before a release tag.
 > This specification writes the construction, and the paper is the reference
-> that a reviewer checks it against. **[NET-111]** Before a release tag, an implementation MUST add a
+> for that check. **[NET-111]** Before a release tag, an implementation MUST add a
 > known-answer test for four cells. The four cells are a forward cell, a
 > backward cell, a cell after one chaining step, and a cell after one key
 > update.
@@ -1390,16 +1687,29 @@ and invariant 1 then holds no chain.
   `NET-200`. **[NET-341]** A client MUST NOT relax invariant 1 while
   `independent_count` is `AUTHORITY_FLOOR` or above.
 - **[NET-342]** A client MUST select a chain that satisfies invariant 1 when one
-  exists, with or without the relaxation of `NET-200`. Under the bootstrap
-  relaxation, invariant 4 still holds, and so do invariant 3 and the bound
-  of `NET-202` on invariant 2 unless `NET-350` applies.
+  exists, with or without the relaxations of `NET-200` and `NET-350`. A chain
+  of one operator is the choice only when no chain of different operators
+  and families stands under each other relaxation that this state permits.
+  Under the bootstrap relaxation, invariant 4 still holds, and so do
+  invariant 3 and the bound of `NET-202` on invariant 2 unless `NET-350`
+  applies.
 - **[NET-350]** Under the same state, a client MAY put hop 1 and hop 3 in one
   bloc, and after that it MAY put two hops in one autonomous system or one
   prefix, each only when no chain holds without it, in that order. A network
   that starts in one country and at one provider then carries traffic. The
-  three hops stay three relays. The route view names the country of each
-  hop, and the note of `NET-343` names the one operator, thus the user sees
-  the relaxation under `NET-201`.
+  three hops stay three relays. The route view of Part 14 §14.9.2 names the
+  country of each hop of each circuit. It marks a circuit of `NET-343` and a
+  circuit of `NET-201` with the string that the section gives. Thus the user
+  sees each relaxation.
+- Each relaxation frees its own invariant and no other one. A client orders
+  the chains that stand by what each one needs, in this order: one server at
+  hop 1 and hop 3 (`NET-351`), one operator or family at two hops
+  (`NET-340`), one autonomous system or prefix at two hops, one bloc at hop
+  1 and hop 3, and the bloc of hop 2 (`NET-200`). A chain that needs an item
+  of that list comes after each chain that stands without it. The later items
+  of the two chains do not change that order. Among the chains that need the
+  same
+  items, the draw of Part 10 `REL-196` decides.
 - Under the same state, one server can run several relays, each on a port of
   its own. **[NET-351]** A client MUST NOT put hop 1 and hop 3 on one IPv4
   address while a chain holds without it, after each relaxation of `NET-350`.
@@ -1410,13 +1720,36 @@ and invariant 1 then holds no chain.
   relays of one operator or of one family. That display makes the path visible
   under `NET-034`.
 - **[NET-344]** The same relaxation, under the same state, applies to each
-  placement that needs different operators or families: the group replicas of
+  placement that needs different operators or families: the new queue of a
+  rotation of §3.2.4, the group replicas of
   Part 11 rule `GRP-191`, the chunk relays of Part 12 rule `ATT-017`, the
   backup relays of Part 4 rule `IDN-076`, and the two ingress pins of Part 10
-  rule `REL-154`. A client that relaxes one of them counts each relay as its
+  rule `REL-154`. The new queue of a rotation takes a relay of another
+  operator first, then another relay at another address, then another
+  relay. A client that relaxes one of them counts each relay as its
   own operator and its own family. **[NET-345]** A client MUST end a pin that
   shares an operator or a family with the other pin when the relaxation ends,
-  and it fills the place under `REL-154`.
+  and it fills the place under `REL-154`. The same rule covers each other
+  placement of `NET-344` that can move. When the relaxation ends, a client
+  MUST treat each pairwise queue that it made under the relaxation, at a
+  relay that the invariants would not have given it, as due for the
+  rotation of §3.2.4. It moves each one under `NET-180` and `NET-181`. Thus the
+  queues of a user do not move in one burst. The old queue serves
+  under `NET-177` until the new one carries a record. The test that a
+  client runs is this one. At each rotation check, when the directory is not
+  provisional, the current inbound queue of a contact is due if two conditions
+  hold. Its relay is not the pinned ingress relay. Its relay shares the
+  operator or the family of the pinned ingress relay. The client keeps no mark
+  of the state under which it made a
+  queue. For each such queue that has no rotation in progress, the client draws
+  one time of `NET-181` and stores it. The rotation starts at the
+  first check at or after that time. A stale channel of `NET-325` makes no
+  rotation, and its renewal moves its queue. A backup and a chunk
+  move at their next write. A group queue cannot move: its `GroupQueueId` is
+  relay-made, and no command of Part 6 §6.4.5 moves a queue. Thus the two
+  replicas of a group that a creator placed at one operator under the
+  relaxation stay there for the life of the group. Only a new group places them
+  again. Part 15 §15.3 records that residual.
 
 > *Cause.* The authorities of a provisional directory stand under fewer than
 > `AUTHORITY_FLOOR` controls, and those controls already decide the relay set.
@@ -1424,25 +1757,42 @@ and invariant 1 then holds no chain.
 > network that one operator starts. Invariants 2 and 3 still bind the hosting
 > providers and the states: one order to one provider or to one bloc reaches
 > one hop. The signed key set sets the state, thus no party on the path turns
-> the relaxation on, and it ends at the first key set at the floor. The rule
-> for a chain prefers a relay of another operator from its first listing. A
+> the relaxation on, and it ends at the first key set at the floor. Part 10
+> rule `REL-142` lets the authorities raise the count to the floor only when
+> the relay set holds a conformant chain from each ingress. Thus the end of the
+> relaxation does not make each client fail closed under `NET-033`. The
+> rule
+> for a chain prefers a relay of another operator from its first listing.
+>
+> While the relaxation holds, the one operator of a provisional network runs
+> hop 1 and hop 3 of a chain. It sees the address of the client at hop 1 and
+> the queue at hop 3. Thus G6, G7 and G8 of Part 2 do not hold against that
+> operator. Part 2 §2.4 states the trade and Part 15 §15.3 holds the row. A
 > backup written under the relaxation may lose its second place when the
 > relaxation ends, and the writes of `IDN-078` place it again.
+>
+> A list of levels does not give that order. In such a list each level
+> permits what the level before it permits and one item more. The
+> level that frees the bloc of hop 1 and hop 3 thus also permits one
+> operator. In a network of three operators in one country, a chain with two
+> relays of one operator then passes at that level. It passes before a chain of
+> the three operators, against `NET-342`. The order above ranks each chain by
+> what it needs, thus no item passes because a later one does.
 
-> **Deviation note.** An earlier draft gave invariant 3 an IPv4 /24 here and an
-> IPv4 /16 in Part 10 §10.6. It also gave invariant 2 a jurisdiction code here
-> and a jurisdiction bloc in Part 10 §10.6. Two client implementations that read
-> the two parts built different chains, and NET-033 makes that difference
-> visible as a failure. This document takes the wider rule in each pair. These
+> **Cause.** Invariant 3 uses an IPv4 /16 and invariant 2 uses a jurisdiction
+> bloc, as Part 10 §10.6 does. Two client implementations that apply different
+> widths build different chains, and NET-033 makes that difference
+> visible as a failure. Each invariant takes the wider rule: a /16 and not a
+> /24, and a bloc and not a jurisdiction code. These
 > two invariants exist against A3 and against A5, and a wider rule is the rule
 > that those two adversaries have to defeat. The cost is a smaller conformant
 > chain set, and Part 10 §10.6 holds the family and ASN ceilings that keep that
 > set large. Part 10 §10.3 keeps the /24 for the measurement cluster, because
 > that rule detects co-residency and a wider prefix over-clusters it.
 >
-> A later draft failed closed at the first relay set that satisfied no chain,
-> and the bloc list of Part 10 §10.6.3 then held no content. A launch network
-> in two blocs failed closed on each client. `NET-200` relaxes the one pair
+> Without `NET-200`, a client fails closed at the first relay set that
+> satisfies no chain. A launch network
+> in two blocs then fails closed on each client. `NET-200` relaxes the one pair
 > that does not join the two ends of the chain. §3.11 names the two colluding
 > relays at the ends of the chain as the pair that a bloc order joins. Hop 1
 > with hop 3 is that pair. The user sees the relaxation under `NET-201`,
@@ -1480,9 +1830,41 @@ item 4. **[NET-037]** If that batched peek finds more than `DRAIN_THRESHOLD` mes
 relay MUST answer it unpaced, and not on the clock of `NET-035`.
 `DRAIN_THRESHOLD` is 60 messages. **[NET-349]** The relay MUST send such a
 drain in steps of at most 256 KiB for each circuit at each tick of its own
-fixed clock, and it MUST hold at most 40 MiB of drains for one circuit: one
-drain then fills no link that the circuits of other clients share, and the
-steps follow no arrival.
+fixed clock. One drain then fills no link that the circuits of other clients
+share, and the steps follow no arrival. A drain MUST hold a place in its
+queue and no copy of a record. The relay reads the records of one step from the
+queue at that step. Thus a drain that waits holds no memory, and the
+drains of one link hold at most the steps that its backlog takes. The
+records that the drains of one circuit name MUST NOT pass 40 MiB together. One
+circuit MUST NOT ask for more than 16 drains in one minute, the
+refused ones among them. A relay MUST read both bounds before it copies a
+record, the first one from the lengths of the records. A relay MUST take a
+drain whole or not at all. It MUST answer the `SUB` or the `GSUB` of a drain
+above one of the two bounds with a `NACK` of the reason `LIMIT`. It MUST NOT
+drop a part of a drain with no answer. A `SUB` or a `GSUB` that a relay
+refuses so MUST leave no subscription of its circuit to that queue. A record
+that arrives later is then an arrival that no subscription took (Part 8
+rule `NTF-128`). No live record goes above a backlog that did not leave. A
+second drain of one queue on one circuit takes the place of the first one.
+A relay that copies each record of a drain before it reads the bound pays
+that copy each time a circuit asks again for a full queue. A subscription
+that stays after a refused `SUB` gives the client the later records above a
+hole. A drain MUST take
+no step while the backlog of its link holds more than one quarter of its bound.
+Thus the drains of some circuits together fill no link either. The drains of
+one link MUST take their steps in turns. A relay MUST NOT
+close a link because its backlog is full. One eighth of the bound of a link
+stays free for the cells of the circuits that did not fill it. For a cell that
+reaches into that part a relay MUST end, under `NET-322`, the circuit
+that holds the most bytes of the backlog of that link, when that circuit
+holds one part in 256 of the bound or more. When that circuit is another one
+than the circuit of the cell, the cell goes. A cell that finds no room under
+the bound ends its own circuit. The relay keeps each other circuit of that
+link. A rule that ends the circuit of each cell that finds no room lets
+one circuit that fills a link end the circuits of each other client
+on it. A party that fills a link with many circuits, each below one part in
+256 of the bound, is not told from the others. A link whose peer reads
+nothing ends at the timeout of its write.
 
 **A group-queue session is a held session.** The `GSUB` of Part 6 §6.4.5 is
 the subscription of that session, and the relay pushes each new record on it.
@@ -1573,8 +1955,11 @@ a median of 1 480 ms (NDSS 2021).
 > revision MUST derive this value again if the bucket ladder or the default
 > chunk width changes.
 
-**Trigger.** **[NET-041]** A client MUST emit a delivery receipt when that client holds the
-message. **[NET-042]** A client MUST emit a read receipt only after the user opens the
+**Trigger.** **[NET-041]** A client whose user turned delivery receipts on for a contact
+MUST emit a delivery receipt when that client holds a message of that contact,
+and a client MUST NOT emit one for a contact with delivery receipts off.
+`NET-059` gives the default. No rule of this specification needs a receipt:
+§3.2.6 defines a silent channel without one. **[NET-042]** A client MUST emit a read receipt only after the user opens the
 conversation. **[NET-043]** **A client MUST NOT emit a read receipt because it rendered a
 notification.**
 
@@ -1631,21 +2016,16 @@ record that every reader of the group queue downloads, thus the aggregate cost
 is quadratic in the member count. Thus a receipt goes to one peer, and this
 section needs no fan-out rule.
 
-> *Cause.* An earlier draft made a client apply the fan-out jitter of the
-> group tier to a receipt that went to more than one peer. That draft gave a
-> group a receipt to the sender only. This draft removes the group receipt and
-> the fan-out, thus the rule has no case.
-
 **Defaults.** **[NET-059]** Delivery receipts and read receipts MUST be off by default for a
 new contact.
 
-> **Deviation note.** An earlier draft required an acknowledgment to leave in a
-> different transport session from the arrival. This document withdraws that
-> requirement. §3.2.5 permits 8 queues on one transport session, thus the rule
-> cannot prevent the queue linkage that it names. A session rotation for each
+> **Cause.** No rule makes an acknowledgment leave in a different transport
+> session from the arrival. §3.2.5 permits 8 queues on one transport session,
+> thus such a rule cannot prevent the queue linkage that it aims at. A session
+> rotation for each
 > acknowledgment also defeats the connection-independent session of §3.8 L2,
 > which is not negotiable. The rotation pattern also names the acknowledgment.
-> `RECEIPT_MIN_DELAY` and the two-place rule replace it.
+> `RECEIPT_MIN_DELAY` and the two-place rule do that work.
 
 ## 3.6 Cover traffic
 
@@ -1679,7 +2059,7 @@ cell count.
 **[NET-304]** Each other cover cell of a client MUST carry one `COVER` command
 of Part 6 §6.3 to the queue relay of the circuit, in the shape of a `B0`
 `SEND`. `NET-060` names the cover cell that measures a path and `NET-063`
-gives its share. An earlier draft gave the other cells no shape.
+gives its share.
 
 **[NET-305]** A client MUST draw the time to the next slot from an exponential
 distribution with the mean of the tier, and it MUST draw it again at each
@@ -1718,10 +2098,10 @@ order below.
 gives the cause. A backup object is much larger than a `B0` cell, thus a cover
 slot cannot carry it.
 
-**Tier B is deleted, and the causes are stated.** At the derived cost of about
-9.1 mWh for each radio promotion, the earlier tier B spent 188 promotions in an
-idle day. With the hourly directory refresh and the push wakes, an idle day cost
-242 promotions. That cost is 2.20 Wh, which is 14.3 % of the 15.4 Wh battery
+**There is no tier B, and the causes follow.** A tier B is a cover clock for
+the background. At the derived cost of about 9.1 mWh for each radio promotion,
+such a tier spends 188 promotions in an idle day. With an hourly directory
+refresh and the push wakes, an idle day costs 242 promotions. That cost is 2.20 Wh, which is 14.3 % of the 15.4 Wh battery
 that U5 names.
 
 The fixed term of U5 permits 0.308 Wh with no arrival, which is 34 promotions.
@@ -1733,7 +2113,7 @@ on a current Android device.
 cause. **[NET-067]** A client MUST NOT open a session for the only purpose of a directory
 diff.
 
-With these two changes an idle day with no arrival spends no radio promotion
+With these two rules and no tier B, an idle day with no arrival spends no radio promotion
 in Instant mode. Each background arrival then costs one promotion, which is
 9.1 mWh against the 10 mWh that U5 permits. §3.12 gives the promotion count of
 each mode.
@@ -1741,7 +2121,7 @@ each mode.
 monitor before a release.**
 The duty-cycle model is derived, and no party measured it on 2026 hardware.
 
-> **What the deletion of tier B costs, stated.** In the background a client
+> **What the absence of tier B costs.** In the background a client
 > makes no cover cell. Thus a background outbound cell is always a real event,
 > and an ingress relay reads the send times of a backgrounded user. §3.11 states
 > that loss and Part 15 §15.3 records it. The loop sampling of §3.6.1 becomes a
@@ -1750,7 +2130,7 @@ The duty-cycle model is derived, and no party measured it on 2026 hardware.
 
 ### 3.6.3 Relay-side cover carries the load
 
-The core relays of the nonprofit operate on mains power with flat-rate
+The core relays of the project operate on mains power with flat-rate
 bandwidth. **[NET-069]** These relays MUST make loop cover at or above
 `RELAY_LOOP_RATE`. **[NET-070]** These relays MUST also make the inbound pacing
 cover of §3.5.2.
@@ -1772,8 +2152,10 @@ UMBRA becomes better.
 Deployed relay-chained networks lose packets. Nym Mainnet measures a
 retransmission rate of about 5 %. Thus UMBRA specifies an explicit ARQ:
 
-1. Acknowledgments travel on single-use reply blocks, thus an acknowledgment
-   does not name the recipient.
+1. The relay acknowledgment of a record is the `QUOTA` that the queue relay
+   returns for its `SEND` (Part 6 rule `WIR-496`). For a group record it is the
+   `GSEQ` of §3.2.7. It travels back on the circuit of the send, thus it
+   names no recipient. No reply block exists in this design.
 2. In tier A the **cover clock** schedules a retransmission (§3.6.2). **[NET-071]** A client
    MUST NOT send a retransmission at a timeout, because a retransmission burst
    at the timeout is a signature. In tier C the client holds no cover slot. **[NET-072]** A
@@ -1785,7 +2167,12 @@ retransmission rate of about 5 %. Thus UMBRA specifies an explicit ARQ:
    completes, or it fails without an observable signal.
 4. Resubscription after a reconnect uses one batched peek on the server. The
    client keeps the last acknowledged sequence number for each queue as its
-   cursor, with an in-flight window of 1 000. There is **no response timeout for
+   cursor, with an in-flight window of 1 000. The window counts the records
+   that the client holds above the cursor, and not the distance of a sequence
+   number from the cursor. A record far above the cursor is a
+   record above a hole, and the hole rules of Part 6 §6.4.3 apply to it. A
+   client that holds a full window takes no further record of that queue
+   until an `ACK` moves the cursor. There is **no response timeout for
    each subscription**, because the connection carries the liveness.
 
 > *Rationale for item 4.* SimpleX measured **more than one hour** to resubscribe
@@ -1793,8 +2180,7 @@ retransmission rate of about 5 %. Thus UMBRA specifies an explicit ARQ:
 > 1.1 M subscriptions. The cause was the dispatch of about 2 200 batches at the
 > same time, thus each response timer started at the same moment. This behavior
 > is a self-inflicted DDoS at reconnect. It makes a messenger unusable for an
-> ordinary user after a subway ride, and UMBRA includes the correction from the
-> first commit.
+> ordinary user after a subway ride, and UMBRA includes the correction.
 
 **The end of the ARQ.** A retransmission that never ends is a signature, and a
 record that no relay accepts needs a user and not a timer.
@@ -1808,7 +2194,10 @@ record that no relay accepts needs a user and not a timer.
   `REJECTED` or `VERSION`. Part 6 §6.4.4 gives the two reasons, and rule
   `WIR-324` forbids the same bytes again. **[NET-218]** A client MUST continue
   the ARQ after a `LIMIT`, a `BUSY`, or an `ADMISSION`, under the rules of
-  that section.
+  that section. The rule covers each record that the client makes for itself as
+  well. Those records are a flight of §3.2.6, the bundle of a renewal, the
+  first
+  record of `NET-292`, and the address of a rotation.
 - **[NET-219]** A client MUST NOT send one record more than
   `SEND_MAX_ATTEMPTS` times. **[NET-220]** If a record holds no relay
   acknowledgment `SEND_GIVE_UP` after its first send, the client MUST stop the
@@ -1817,11 +2206,72 @@ record that no relay accepts needs a user and not a timer.
   in the `failed` state of Part 14 §14.9. **[NET-222]** A client MUST NOT send
   a `failed` record again without a user action.
 
+**What a refusal does to a record of the user.** The three reasons of
+`NET-218` take two paths.
+
+- A record that a relay refuses with `BUSY` or `ADMISSION` goes again in a
+  slot of the cover clock (`NET-071`), the oldest refusal first. Its first
+  retransmission takes the slot before each other item (`NET-065`, item 1).
+  A later retransmission takes a slot only when the client holds no
+  acknowledgment for it (item 3). The record fails under `NET-221` when a
+  relay refuses its sixteenth send (`SEND_MAX_ATTEMPTS`), or 7 days after
+  its first send (`SEND_GIVE_UP`), whichever comes first.
+- A record that a relay refuses with `LIMIT` holds a full queue of the peer
+  (§3.2.4, `NET-016`). It stays `queued` under Part 14 rule `IMP-082`, and it
+  goes again after a wait. The first wait is `HOLD_RETRY` of 15 minutes from
+  the refusal, and each later wait is twice the wait before it. The waits are
+  15 minutes, 30 minutes, 1 hour, and then longer in the same ratio. A `QUOTA`
+  that names room in that queue
+  ends each wait for that contact, and the held records go at once. The
+  record fails at its sixteenth `LIMIT`, or at a `LIMIT` that comes 7 days
+  or more after its first one. The interface names the full queue as the
+  cause. A record that waits MUST NOT go before the end of its wait because a
+  new run started. The full queue would refuse it again, and each such
+  `LIMIT` would count. The client keeps the time of the next send, the time
+  of the first `LIMIT`, and the count in its store. Thus a new connection,
+  an unlock, and a new process send no held record early, and the two
+  bounds count across them. An edit and a deletion request of Part 7 rules
+  `DEV-113` and `DEV-114` take no such wait: each fails at its first
+  `LIMIT`.
+
+> *Cause of the growing wait.* A queue stays full while its reader is away.
+> A fixed wait of 15 minutes spends 16 sends in four hours, and the record
+> then fails while `IMP-082` keeps it `queued`. With the growth the sends
+> reach to `SEND_GIVE_UP`, which ends them first.
+>
+> **Limits of the v1 reference client.** The reference client does not meet
+> the rules above in four places, and this note states each one.
+>
+> 1. The retry after a `LIMIT` leaves at the minute check of the run that
+> follows the end of its wait. It does not leave in a slot of the cover clock.
+>    Thus `NET-071` does not hold for it: an ingress relay sees a send on a
+>    minute boundary of the run. The waits differ for each record and each
+>    refusal, thus the sends of many records make no single burst.
+> 2. The counts of `NET-219` and `NET-220` after a `BUSY` or an `ADMISSION`
+>    are the memory of one run. A new run counts each such record from
+>    zero, and it measures `SEND_GIVE_UP` from the first send of that run.
+>    The count after a `LIMIT` and the time of the first `LIMIT` are in the
+>    store, and they hold across runs. The two counts are two counts, and
+>    the first one starts again at each `LIMIT`. Thus a record that takes
+>    both reasons can leave more than `SEND_MAX_ATTEMPTS` times in one run.
+> 3. A record whose send took no answer in a run, neither a `QUOTA` nor a
+> `NACK`, goes again at the start of the next run. The cause is that the store
+>    holds it as `queued`. Inside the run nothing sends it again.
+> 4. A later retransmission of a record of the user also waits behind a
+>    link-fault report that is due, which `NET-065` puts after it.
+>
+> A later version moves the `LIMIT` retry into the cover clock and keeps
+> the count after a `BUSY` or an `ADMISSION` in the store too.
+
 A `failed` record is a record that no relay accepted. U6 of Part 2 §2.4 counts a
 record from the moment a relay accepts it, thus a `failed` record is outside U6.
-The interface rule of Part 14 §14.9 shows it to the user. `SEND_GIVE_UP` equals
-`DEAD_CHANNEL_SILENCE` of §3.2.6, because a channel that accepts nothing for 7
-days is a channel that the dead-channel probe examines.
+The interface rule of Part 14 §14.9 shows it to the user. `SEND_GIVE_UP` and
+`DEAD_CHANNEL_SILENCE` of §3.2.6 hold one value and measure two things.
+`SEND_GIVE_UP` counts from the first send of a record that no relay
+acknowledged. `DEAD_CHANNEL_SILENCE` counts from the relay acknowledgment of a
+record that no sign of the peer followed. A record that a relay refuses with
+`REJECTED` makes the channel dead at once under §3.2.6, and neither period
+runs for it.
 
 **A post to a group queue.** A `GPOST` of §3.2.7 travels to two replicas, and
 the rules above apply to each replica.
@@ -1834,10 +2284,10 @@ the rules above apply to each replica.
   one replica accepted is `accepted` under `NET-257`, and `NET-259` reports
   the other replica.
 
-> *Cause.* An earlier draft gave the ARQ no end. A record to a deleted queue
-> got a `REJECTED`, and the client sent it again at the next cover slot for
-> the life of the session. Each try was a real outbound cell, and §3.11 counts
-> it. A user saw one mark for a record that no relay held, and U6 read as met.
+> *Cause.* With an ARQ that has no end, a record to a deleted queue gets a
+> `REJECTED`, and the client sends it again at each cover slot for the life of
+> the session. Each try is a real outbound cell, and §3.11 counts it. A user
+> then sees one mark for a record that no relay holds, and U6 reads as met.
 
 ## 3.8 Transport
 
@@ -1846,8 +2296,8 @@ independently:
 
 | Layer | Content |
 | --- | --- |
-| **L1 Wire** | TLS 1.3 over TCP/443 by default. The ClientHello is the ClientHello of the rustls stack that Part 14 §14.2.8 names, with an `X25519MLKEM768` (RFC 10024) key share first and GREASE ECH. Each client sends the same ClientHello. The frame is an HTTP/1.1 Upgrade to a WebSocket-shaped stream, co-tenant with a real website behind a reverse proxy. The stream carries RFC 9297 capsules, used identically over TCP and QUIC, thus one parser serves the two transports (Part 6 §6.2.1). The web client of Part 14 §14.7 sends the same stream through the WebSocket API of its browser, and §3.8.1 states what that changes |
-| **L2 Session** | Connection-independent session (64-bit session ID, monotonic sequence, and resend window). A TCP RST, a middlebox timeout, a QUIC migration, or a Wi-Fi-to-cellular handover rotates the connection **without a drop of the session**. Part 6 §6.2.3 gives the open, the resume, and the close |
+| **L1 Wire** | TLS 1.3 over TCP/443 by default. The ClientHello is the ClientHello of the rustls stack that Part 14 §14.2.8 names, with an `X25519MLKEM768` (RFC 10024) key share first and GREASE ECH. Each client sends the same ClientHello. The frame is an HTTP/1.1 Upgrade to a WebSocket-shaped stream, co-tenant with a real website behind a reverse proxy. The stream carries RFC 9297 capsules, used identically over TCP and QUIC, thus one parser serves the two transports (Part 6 §6.2.1). **TLS over TCP is the one transport of v1, and QUIC is deferred.** The deferred web client of Part 14 §14.7 sends the same stream through the WebSocket API of its browser, and §3.8.1 states what that changes |
+| **L2 Session** | A session with a 64-bit session ID and a monotonic sequence. The design makes it independent of the connection. A TCP RST, a middlebox timeout, or a Wi-Fi-to-cellular handover rotates the connection without a drop of the session. **v1 defers the resume**: after a lost connection a v1 client opens a new session and builds its circuits again. Part 6 §6.2.3 gives the open, the close, and the wire form of the resume |
 | **L3 Cell** | Fixed-size cells (§3.3) over the 3-hop chain into queues |
 
 Part 6 §6.2 numbers the same three layers L1 to L3 and continues the count to
@@ -1863,33 +2313,48 @@ also uses.
 > G9). Port 443 and the HTTP/1.1 Upgrade framing pass an ordinary proxy and
 > an ordinary carrier middlebox, which U1 and U6 need.
 
-> *Cause of the named stack.* An earlier draft shaped the ClientHello as
-> Chrome on Android, in the manner of uTLS. No Rust TLS stack shapes a
-> ClientHello in that manner, and Part 14 §14.2.6 then rejected both providers
-> of rustls. Thus no client could send the L1 flight. Part 14 §14.2.8 now
+> *Cause of the named stack.* A ClientHello in the shape of Chrome on
+> Android, in the manner of uTLS, is not available. No Rust TLS stack shapes a
+> ClientHello in that manner. Part 14 §14.2.8
 > names the stack, and the ClientHello is the one that the stack sends. Part 2
-> §2.5 already gives undetectable use as a non-goal, thus the change removes a
-> claim that the design did not make.
+> §2.5 gives undetectable use as a non-goal, thus the design loses no claim.
 
-L2 is not negotiable. It has the highest value for robustness on unstable mobile
-networks.
+L2 has the highest value for robustness on unstable mobile networks, and the
+design keeps it. v1 ships the session without its resume.
+
+- A v1 client that loses its connection opens a new session with a
+  `SessionOpen` on a new connection, and it builds each circuit again. It
+  keeps no cell for a resume, and the ARQ of §3.7 sends again each record
+  that held no relay acknowledgment.
+- A v1 relay closes a connection whose first capsule is a `SessionResume`,
+  and it holds no session state after the connection of that session closed.
+  Part 6 §6.2.3 holds those two rules beside the wire form, which stays.
+- §3.12 models the resume, and it states what a client without it pays.
 
 **Transport requirements:**
 
-- Race TCP/443 against QUIC/443, and give TCP a head start of about 250 ms.
-  Cache the winner for each network, keyed by SSID or PLMN, with a TTL of 24 h.
-  Some networks do not carry UDP/443. On other networks QUIC completes the
-  handshake more reliably than TCP. A hard-coded
-  choice loses users on one network type or on the other (U1, U6).
+- **TCP alone in v1.** A v1 client dials TLS over TCP/443 and no other
+  transport, and a v1 relay serves no QUIC listener. The design races
+  TCP/443 against QUIC/443 with a head start of about 250 ms for TCP. It caches
+  the winner for each network for 24 h. The cause is that some networks do not
+  carry UDP/443, and on other networks QUIC completes the handshake more
+  reliably than TCP. That race is deferred with QUIC. Each rule of this part
+  and of Part 6 that names QUIC binds the version that ships it, and it
+  binds no v1 conformance claim. A v1 client thus loses the users of a
+  network that carries no TCP/443 (U1, U6).
 - **The key share.** **[NET-214]** A client MUST offer `X25519MLKEM768` as the
   first key share of the ClientHello. **[NET-215]** A client MUST NOT offer a
   group other than `X25519MLKEM768` and `X25519`. **[NET-216]** A relay
   operator MUST terminate TLS with a stack that accepts `X25519MLKEM768`. The
   reverse proxy of the co-tenant site is that stack, thus the operator selects
   a proxy build that holds the group. The second group keeps a client
-  connected to a relay whose proxy fails that rule. The inner layer of Part 6
-  §6.2.3 carries G2 in that case.
-- **The web client.** **[NET-275]** A web client MUST send the L1 stream
+  connected to a relay whose proxy fails that rule. The circuit handshake of
+  Part 5 §5.4.9 carries G2 in that case. It is hybrid at each hop, and it
+  does not depend on the key share of the TLS layer. The session records of
+  Part 6 §6.2.3 hold no encryption of their own.
+- **The web client.** The three rules below bind a web client when one
+  ships (Part 1 §1.1), except `NET-276`, which binds each relay now.
+  **[NET-275]** A web client MUST send the L1 stream
   through the WebSocket API of its browser, over TLS to port 443, and it MUST
   NOT use WebTransport in v1. The browser owns the ClientHello, thus `NET-214`
   and `NET-215` bind the native client only, and the second group of `NET-216`
@@ -1949,7 +2414,8 @@ The ClientHello of §3.8 is the ClientHello of the rustls stack, and not the
 ClientHello of a browser. A classifier tells an UMBRA client from a browser on
 that flight alone, and this document accepts that under the same trade.
 
-The web client of Part 14 §14.7 sends the ClientHello of its browser. Thus a
+The web client of Part 14 §14.7 is deferred (Part 1 §1.1), and v1 holds the
+native class alone. When it ships, it sends the ClientHello of its browser. Thus a
 classifier tells a web client from a native client on that flight, and it
 tells a web client from a page load of the co-tenant site by the WebSocket
 upgrade and by the cell sizes. The two classes send the same cells above L1,
@@ -1993,8 +2459,8 @@ that circuit from the `delay_class` of its own `HopHello` (§3.4.3).
 - The delay of the third hop is the delay of `NET-039`. The backward
   direction takes the inbound pacing of §3.5.2 and no per-hop delay.
 
-> *Cause.* An earlier draft named a per-hop delay for each mode and no field
-> that told a relay the mode. The field rides in the build cell of each hop,
+> *Cause.* A relay applies the per-hop delay of a mode, thus a field has to
+> tell the relay the mode. The field rides in the build cell of each hop,
 > which the relay of that hop reads, and which reaches it under the layers
 > of the hops before it (§3.4.3). A relay on the circuit learns the mode of
 > that circuit, as it learns the timing of its cells. No cell of the steady
@@ -2030,21 +2496,19 @@ does not learn the mode, and this rule needs no mode knowledge.
 All three modes are in the measured usability band. The mean added delay is
 1.0 s in Fast mode, 1.45 s in Balanced mode, and 3.1 s in Private mode.
 
-> **Deviation note.** An earlier draft gave Private mode a send that waits for a
-> cover slot. This document withdraws that mechanism. It forced a cover rate
+> **Cause.** A Private-mode send does not wait for a cover slot. Such a wait
+> forces a cover rate
 > that differs by mode, and §3.9.1 forbids a mode that is visible in the cell
-> count. The property that a Private-mode send hides inside a cover slot is
-> gone. Part 15 §15.3 records that residual.
+> count. Thus a Private-mode send does not hide inside a cover slot.
+> Part 15 §15.3 records that residual.
 
-> **Deviation note.** An earlier draft also gave Fast mode and Balanced mode a
-> pacing mean of 2 s. It gave Private mode a constant-rate clock. This document
-> withdraws both. A pacing shape that differs by mode puts the mode in the
+> **Cause.** Each mode has the same pacing shape. A pacing shape that differs
+> by mode, such as a constant-rate clock for Private mode, puts the mode in the
 > inbound cell count, and §3.9.1 forbids that result. Private mode gives up the
 > tighter delivery tail of a constant-rate clock, and Part 15 §15.3 records that
 > residual.
 
-> **Deviation note.** An earlier draft gave three p50 delivery figures with no
-> pacing term, on a propagation model of 220 ms for the two legs. §3.12 now
+> **Cause.** §3.12
 > models 210 ms of propagation in each direction, and the table above counts
 > the pacing term. Part 2 §2.4 sets U2 at a p50 of 2.0 s and a p95 of 4.5 s
 > from that model, and rule `NET-139` keeps the two in step.
@@ -2115,7 +2579,7 @@ the manifest as one HTTP object.
   ingress relay learns the same from the link of §3.8. Thus the pinned
   ingress of a client is the carrier that adds no party.
 
-The reference client of 0.2.0-draft builds the HTTPS form alone. Its debug
+The v1 reference client builds the HTTPS form alone. Its debug
 build asks the ingress relay of its test network, and a relay of that
 network answers the path itself.
 
@@ -2145,11 +2609,11 @@ collection signal (§3.2.4).
 Thus a relay keeps its identity across a move, and an address does not name a
 relay (G7).
 
-> **Deviation note.** An earlier draft gave a second and unpublished relay tier.
-> This document withdraws that tier, and there are four causes. First, the tier
-> put a cheap relay at the ingress position. Part 10 §10.6.1 sets a class C1
+> **Cause.** UMBRA has no second, unpublished relay tier, and there are four
+> causes. First, such a tier
+> puts a cheap relay at the ingress position. Part 10 §10.6.1 sets a class C1
 > floor at that position. A cheap Sybil attack at the one position that sees a
-> client IP address has to stay too expensive. Second, the tier bypassed the
+> client IP address has to stay too expensive. Second, such a tier bypasses the
 > staging of Part 10 §10.7.1, the operator dossier of §10.6, and the measurement
 > of §10.3.
 >
@@ -2157,8 +2621,8 @@ relay (G7).
 > §15.1.1 shows that a compelled operator collects from the moment of the order.
 > A client that replaces an ingress relay 30 times each year meets 30 operators
 > each year. Each one of those operators can hold that order (G7, G9, A5).
-> Fourth, the cause for a fast cadence was censorship resistance, and Part 2
-> §2.5 withdraws that goal.
+> Fourth, the cause for a fast cadence is censorship resistance, and Part 2
+> §2.5 gives that as a non-goal.
 
 ## 3.11 What each party actually learns
 
@@ -2167,7 +2631,14 @@ This section is the normative answer to G6, G7, G8, and G13 of Part 2.
 **One Ingress Relay** learns the client IP address, the connection time, the
 cell counts, and that the client runs UMBRA. It does **not** learn the
 destination queue, because the innermost layer blocks it. It also does not learn
-the recipient, the content, or how many conversations the client has.
+the recipient, the content, which queues the client holds, or how many
+pairwise conversations the client has. It does learn the count of the
+circuits of the client, because it ends the link and each circuit carries
+its own `circ_id`. `NET-023` gives a client one circuit for each queue relay
+that it reaches, and `NET-266` gives each group queue a circuit of its own.
+Thus over the hours that a client stays at one ingress, the circuit count
+bounds the count of the groups that the user reads from above. The circuit
+count also grows with the spread of the pairwise queues over relays.
 
 **One Ingress Relay also reads the send times of a backgrounded user.** In tier
 C the client makes no cover cell (§3.6.2), thus each background outbound cell is
@@ -2194,9 +2665,9 @@ THR-002 covers the **count of conversations**, and it does not cover the
 **size of one conversation**. UMBRA accepts this loss, and Part 15 §15.3
 records it.
 
-> *Cause.* An earlier draft let the ingress relay read the recipient count of
-> a group from the burst of a pairwise fan-out, and no measure of that draft
-> concealed the count. This draft moves that leak from the ingress relay to
+> *Cause.* A pairwise fan-out lets the ingress relay read the recipient count
+> of a group from the burst, and no measure conceals that count. The group
+> queue puts that leak at
 > the group-queue relay, which reads a count and no address. Part 11 §11.2
 > replicates the queue on two relays under different operators, and a reader
 > alternates replicas under `NET-261`, thus one relay holds half of the
@@ -2210,7 +2681,7 @@ deanonymization risk, and it is the cause of the path invariants in §3.4.6.
 UMBRA does not claim security against an adversary that controls the majority of
 the relay capacity.
 
-**The nonprofit** learns from its own relays the same data that another operator
+**The project** learns from its own relays the same data that another operator
 learns, and it also gets aggregate directory statistics. It holds **no user
 database, because no user database exists**. There is no account, no
 registration, no phone number, no email address, and no global identifier.
@@ -2281,9 +2752,9 @@ model spreads the 9 sessions over 9 relays: 2 queue relays hold the pairwise
 queues, 6 group-queue relays each hold the replica that the user reads, and 1
 queue relay holds the notify queues. The recipients of the day sit on 22 other
 relays, which are the 16 queue relays of the direct contacts and the 6 relays
-that hold the second replica of each group. An earlier draft gave a member one
-pairwise queue with each other member, thus the user held 160 queues over 20
-sessions.
+that hold the second replica of each group. A pairwise fan-out gives a member one
+pairwise queue with each other member, thus the user then holds 160 queues
+over 20 sessions.
 
 **Those relay counts are a model and not a measurement.** **[NET-212]** An
 implementation MUST measure the queue-relay spread of a real deployment before a
@@ -2307,8 +2778,7 @@ group receives. The model spreads those arrivals as a Poisson process with a
 mean gap of 274 s, which is 50 400 s / 184. In Instant mode each arrival wakes
 the device one time. `WAKE_COALESCE_WINDOW` of Part 8 §8.5 is 10 s, and about
 4 % of the gaps are shorter than that window. The table uses the ceiling of
-184 wakes, and it takes no credit for that window. An earlier draft asserted
-30 wakes each day, and no arithmetic supported that count.
+184 wakes, and it takes no credit for that window.
 
 **A wake in Instant mode costs one transport handshake.** The push names the
 session that holds the queue. The client opens one connection to the ingress of
@@ -2339,6 +2809,21 @@ acknowledgment for the queue that it drained, and it closes the connection
 under rule `WIR-360`. A group queue takes no reader acknowledgment under
 `NET-235`. NET-100 below caps each session at 6 s.
 
+> **What the deferred resume costs.** The paragraphs above and the table
+> below model the session resume of Part 6 §6.2.3, and §3.8 defers it. In
+> v1 a circuit ends with its connection. A v1 client that closes
+> the connection at the end of each wake under `WIR-360` builds a circuit
+> for each session of the next wake. The build row of the Instant column is
+> then 289 × 12 576 = 3 634 464 bytes in the place of 125 760. The Instant day
+> is 2 599 785 − 125 760 + 3 634 464 = 6 108 489 bytes with no
+> other row changed. That is about **183.25 MB each month**, which is 1.8
+> times the U4 limit. A client that holds one connection open across its
+> arrivals pays no such build. It pays the pacing cover of a held
+> session in the place of it. **Thus v1 does not show U4 for a
+> client that closes its connection between wakes**, and Part 2 §2.4 says
+> so beside U4. The table below is the budget of the version that ships
+> the resume.
+
 **A circuit lives from one wake to the next.** §3.4.3 sets `CIRCUIT_MAX_AGE` to
 4 hours, and Part 6 §6.2.3 sets `SESSION_RESUME_WINDOW` to the same value. Each
 of the 2 pairwise queue relays takes 79 / 2 = 39.5 background arrivals each
@@ -2350,16 +2835,17 @@ takes 105 / 6 = 17.5 arrivals each day, which is 1.25 arrivals each hour. The
 chance that one gap exceeds 4 hours is e^(−5.0) = 0.0067. Thus each one pays
 one build at the first arrival and 17.5 × 0.0067 = 0.12 more at a lapsed
 circuit, and the 6 pay 6.7. The background pays 2 + 1 + 6.7 = 9.7 builds each
-day, and the table uses 10. An earlier draft set `CIRCUIT_MAX_AGE` to 10
-minutes, and each wake then paid a build.
+day, and the table uses 10. At a `CIRCUIT_MAX_AGE` of 10 minutes, each wake
+pays a build.
 
 A build is 3 `EXTEND` cells and 3 `EXTENDED` cells under NET-150 and NET-151.
 Each cell is a `B1` cell, thus a build costs 6 × 2 096 = 12 576 bytes on the
-wire. That is 6 288 bytes in each direction. An earlier draft priced a build at
-7 104 bytes of handshake material, and it did not count the cells.
+wire. That is 6 288 bytes in each direction. The 7 104 bytes of handshake material
+of §3.4.3 do not count the cells.
 
-**A build fetches relay entries.** Part 10 §10.5.3 gives a `RelayEntry` 5 498
-bytes and its proof 384 bytes, which is 5 882 bytes. A build selects a fresh hop
+**A build fetches relay entries.** Part 10 §10.5.3 gives a `RelayEntry`
+5 498 bytes. Part 10 §10.5.5 gives its proof 397 bytes at 3 000 relays, which
+is one count byte and 12 steps of 33 bytes. One proven entry is 5 895 bytes. A build selects a fresh hop
 2, thus it fetches that entry. Hop 3 needs a fresh entry when the accepted
 `DirectoryRoot` is newer than the entry that the client holds.
 `CONSENSUS_VALIDITY` is 3 hours, thus that fetch occurs at most one time for
@@ -2398,8 +2884,8 @@ costs **32 860 B**. Each row below uses those four figures.
 > *The derivation of the group rows.* A group post is one `GPOST` of the same
 > record to each of the 2 replicas under `NET-256`. A 25-member group carries
 > a 300-byte tag vector (Part 11 §11.3.3), thus a 350-byte text stays in
-> bucket `B1`. The 8 posts are 16 cells and 16 × 2 096 = 33 536 bytes. An
-> earlier draft sent one cell to each of the 24 recipients, which was 192
+> bucket `B1`. The 8 posts are 16 cells and 16 × 2 096 = 33 536 bytes. A
+> pairwise fan-out sends one cell to each of the 24 recipients, which is 192
 > cells and 402 432 bytes.
 >
 > The 120 group receives arrive on the 6 group-queue sessions as `GMSG` cells
@@ -2534,8 +3020,8 @@ below rests on the same unverified figure, and it carries the same mark.
 > The `CID` responses and the `CPRF` responses add 20 and 16 `B0` cells, which
 > is 20 160 bytes on the downlink.
 >
-> An earlier draft made the client write each of the 3 replicas. That row was
-> 2 558 166 bytes, which is 2.9 times the row above.
+> A client that writes each of the 3 replicas pays 2 558 166 bytes for that
+> row, which is 2.9 times the row above.
 >
 > *The derivation of the two sync rows.* The mix holds 278 records each day.
 > That count is the 60 direct sends and the 8 group sends, which is 68. It also
@@ -2616,7 +3102,7 @@ below rests on the same unverified figure, and it carries the same mark.
 > The phone sends 4 claims on each of its 7 channels, which is 28 × 8 240 =
 > 230 720 bytes, and it takes 4 from each of its 7 peers for the same figure.
 > The uplink total is then about 7.19 MB, and the downlink total is about
-> 8.79 MB.
+> 8.80 MB.
 
 | Downlink | |
 | --- | --- |
@@ -2632,11 +3118,11 @@ below rests on the same unverified figure, and it carries the same mark.
 | Relay-paced inbound cover (7 752 `B0` cells) | 4 341 KB |
 | Circuit builds, the `EXTENDED` cells (43 builds × 3 `B1` cells) | 270 KB |
 | Transport handshakes, the relay half (217 × 3 600 B) | 781 KB |
-| Relay entries with proofs (86 × 5 818 B) | 500 KB |
+| Relay entries with proofs (86 × 5 895 B) | 507 KB |
 | Directory (8 `DirectoryRoot` objects and 8 `RelaySetDiff` objects) | 142 KB |
 | Notifier rotation, the relay half (Part 8 §8.2.5) | 2 KB |
 | Family certificates (Part 10 rule `REL-138`) | 0 KB |
-| **Total down** | **≈ 8.55 MB** |
+| **Total down** | **≈ 8.56 MB** |
 
 > *The derivation of the two cover rows.* §3.6.2 makes about 20 % of the 360
 > tier A cover cells loops. That count is 72 cells, which is 40 320 B.
@@ -2660,7 +3146,7 @@ below rests on the same unverified figure, and it carries the same mark.
 > for each build in Instant mode. The 10 background builds fetch 20 entries. The
 > 33 foreground builds fetch 66 entries. Each foreground circuit selects a fresh
 > hop 2, and it reaches a hop 3 whose entry the client verifies against the root
-> of that period. The day holds 86 entries, which is 86 × 5 818 = 500 348
+> of that period. The day holds 86 entries, which is 86 × 5 895 = 506 970
 > bytes. Part 10 rule `REL-059` names this row.
 
 > *The derivation of the directory row.* Part 10 §10.11 gives the consensus a
@@ -2668,23 +3154,22 @@ below rests on the same unverified figure, and it carries the same mark.
 > day. Part 10 §10.5.2 gives a `DirectoryRoot` 16 665 bytes at the 5-signature
 > minimum. The 8 fetches are 133 320 bytes. Part 10 §10.5.3 gives a
 > `RelaySetDiff` 1 029 bytes at 3 000 relays and 8 changes, thus the 8 diffs add
-> 8 232 bytes. The row is 141 552 bytes. An earlier draft added an amortized
-> weekly manifest of about 21 KB each day. Part 10 §10.5 carries the manifest on
-> a bootstrap carrier and not on this row. The entry fetches sit in their own
+> 8 232 bytes. The row is 141 552 bytes. Part 10 §10.5 carries the manifest on
+> a bootstrap carrier, thus this row holds no manifest. The entry fetches sit in their own
 > row above. **[NET-105]** A revision that changes the signature count, the
 > validity, or the diff width MUST derive this row again.
 
-**The grand total is about 12.05 MB each day and about 362 MB each month. For
+**The grand total is about 12.06 MB each day and about 362 MB each month. For
 text only, the total is about 9.44 MB each day and about 283 MB each month.**
-The grand total is 3.50 MB up and 8.55 MB down. The text-only total removes the
+The grand total is 3.50 MB up and 8.56 MB down. The text-only total removes the
 885 KB of attachment upload, the 1 709 KB of attachment download, and the 20 KB
-of attachment responses. An earlier draft gave 12.64 MB each day. The group
-queue of §3.2.7 removes the 402 KB fan-out row and 11 of the 20 sessions, and
-it adds the digest row, the rotation row, and the presence row. The day falls
-by about 0.6 MB.
+of attachment responses. A pairwise fan-out costs 12.64 MB each day in the
+same model. The group queue of §3.2.7 removes a 402 KB fan-out row and 11 of
+20 sessions, and it adds the digest row, the rotation row, and the presence
+row. The day is about 0.6 MB lower.
 
-At `MAX_DEVICES` of 8 the grand total is about 15.98 MB each day and about
-479 MB each month. **A device set at `MAX_DEVICES` is not affordable on a
+At `MAX_DEVICES` of 8 the grand total is about 15.99 MB each day and about
+480 MB each month. **A device set at `MAX_DEVICES` is not affordable on a
 metered mobile plan, and this section states that plainly.** The sync record row
 alone is 4.08 MB each day. That row is about 1.6 times the 2.62 MB text-only
 uplink of the 2-device day. No usability goal of Part 2 §2.4 caps a monthly
@@ -2731,7 +3216,7 @@ renews each of the 8 circuits at each `CIRCUIT_MAX_AGE` of 4 hours, which is
 | Transport handshakes (6 000 B each) | 184 × 6 000 = 1 104 000 | 384 × 6 000 = 2 304 000 | 576 × 6 000 = 3 456 000 |
 | Session resubscriptions (`B0`) | 289 × 560 = 161 840 | 384 × 560 = 215 040 | 576 × 560 = 322 560 |
 | Circuit builds (6 `B1` cells each, §3.4.3) | 10 × 12 576 = 125 760 | 48 × 12 576 = 603 648 | 48 × 12 576 = 603 648 |
-| Relay entries with proofs (Part 10 §10.5.3) | 20 × 5 818 = 116 360 | 112 × 5 818 = 651 616 | 112 × 5 818 = 651 616 |
+| Relay entries with proofs (Part 10 §10.5.5) | 20 × 5 895 = 117 900 | 112 × 5 895 = 660 240 | 112 × 5 895 = 660 240 |
 | Push-wake drains (`B1`) | 184 × 2 096 = 385 664 | 184 × 2 096 = 385 664 | 184 × 2 096 = 385 664 |
 | Group notify digests (`B0`, Part 8 §8.5.2) | 105 × 560 = 58 800 | 0 | 0 |
 | Pacing cover in the wake sessions (`B0`) | 578 × 560 = 323 680 | 968 × 560 = 542 080 | 1 544 × 560 = 864 640 |
@@ -2741,19 +3226,17 @@ renews each of the 8 circuits at each `CIRCUIT_MAX_AGE` of 4 hours, which is
 | Directory, 8 roots and 8 diffs (Part 10 §10.5) | 141 552 | 141 552 | 141 552 |
 | Notifier rotation (Part 8 §8.2.5) | 4 909 | 4 909 | 4 909 |
 | Family certificates (Part 10 rule `REL-138`) | 0 | 0 | 0 |
-| **Total each day** | **2 598 245** | **4 965 389** | **6 547 469** |
-| **Total each month** | **77.95 MB** | **148.96 MB** | **196.42 MB** |
+| **Total each day** | **2 599 785** | **4 974 013** | **6 556 093** |
+| **Total each month** | **77.99 MB** | **149.22 MB** | **196.68 MB** |
 
-The Instant month is 2 598 245 × 30 = 77 947 350 bytes, which is about
-**77.95 MB**. That figure is inside the U4 limit of 100 MB each month, and the
+The Instant month is 2 599 785 × 30 = 77 993 550 bytes, which is about
+**77.99 MB**. That figure is inside the U4 limit of 100 MB each month, and the
 margin is about 22 percent. The transport handshake row is 42 percent of the
 Instant day, and the seven wake rows together are 88 percent of it. **The
 per-relay session of NET-023 and NET-266 is the cause of that limit of 100 MB,
-and Part 2 §2.4 states the trade.** An earlier draft of this table modeled
-88.30 MB over 20 sessions, and the group queue of §3.2.7 removes 11 of them. A
-draft before that modeled 22.88 MB against a limit of 25 MB. That draft
-asserted 30 wakes, priced a build at 7 104 bytes, and held no handshake row
-and no entry row.
+and Part 2 §2.4 states the trade.** A pairwise fan-out over 20 sessions costs
+88.30 MB in the same model, and the group queue of §3.2.7 removes 11 of those
+sessions.
 
 **[NET-096]** A revision that changes one of the inputs below MUST derive this
 table again. The model inputs are the background arrival count, the queue-relay
@@ -2764,14 +3247,14 @@ constant inputs are `WAKE_COALESCE_WINDOW`, `CIRCUIT_MAX_AGE`,
 the signature count of a `DirectoryRoot`, the `RelayEntry` width, and
 `OWNER_CLAIM_RATE`.
 
-**Private notifications.** The two Private columns are about **148.96 MB** at
-30 min and about **196.42 MB** at 20 min. Goal U4b of Part 2 §2.4 sets no target
-for that mode in this draft, and it states those two figures. The cause is the
+**Private notifications.** The two Private columns are about **149.22 MB** at
+30 min and about **196.68 MB** at 20 min. Goal U4b of Part 2 §2.4 sets no target
+for that mode in v1, and it states those two figures. The cause is the
 session model of NET-023 and NET-266. A fixed-clock push names no queue, thus a
 Private wake opens each of the 8 sessions. The handshake row alone is then
-2.30 MB or 3.46 MB each day. An earlier draft of this table gave 350.31 MB and
-468.96 MB over 20 sessions. A revision that lets one wake reach each queue of
-the client over one session changes that row, and that revision sets the U4b
+2.30 MB or 3.46 MB each day. A pairwise fan-out over 20 sessions costs 350.31 MB and
+468.96 MB in the same model. A version that lets one wake reach each queue of
+the client over one session changes that row, and that version sets the U4b
 target. Part 8 §8.2.6 adds a rendezvous drain for a published handle, and that
 drain is outside this table.
 
@@ -2797,15 +3280,15 @@ session, and `REL-107` bounds it to one.
 The arithmetic below gives the loss that the rule prevents. Of the 210 daily
 receives, 184 arrive in the push wakes. If a client carried those records at 2
 devices, they cost 184 × 1 × 2 096 = 385 664 bytes each day. The idle background
-then reaches 2 598 245 + 385 664 = 2 983 909 bytes each day. That is about
-**89.52 MB each month**, which leaves a margin of 10.5 percent. At 3 devices
-the records cost 771 328 bytes each day, and the month is about **101.09 MB**,
+then reaches 2 599 785 + 385 664 = 2 985 449 bytes each day. That is about
+**89.56 MB each month**, which leaves a margin of 10.4 percent. At 3 devices
+the records cost 771 328 bytes each day, and the month is about **101.13 MB**,
 which is 1.01 times the U4 limit. **Thus a client that syncs in the background
 fails U4 at 3 devices, and it holds U4 at 2 devices with half of its margin.**
 
 At `MAX_DEVICES` of 8 the same records cost 184 × 7 × 2 096 = 2 699 648 bytes
-each day. The idle background then reaches 2 598 245 + 2 699 648 = 5 297 893
-bytes each day. That is about **158.94 MB each month**, which is 1.6 times the
+each day. The idle background then reaches 2 599 785 + 2 699 648 = 5 299 433
+bytes each day. That is about **158.98 MB each month**, which is 1.6 times the
 U4 limit. **U4 keeps its margin at each device count only because the rule above
 keeps the sync records in the foreground.**
 
@@ -2821,10 +3304,10 @@ rotation. Thus one circuit is sufficient for a wake.
 
 The arithmetic below gives the cost that this rule prevents. With 2 spares at
 each build the circuit-build row is 30 × 12 576 = 377 280 bytes each day. The
-entry row is 60 × 5 818 = 349 080 bytes. The idle background then reaches
-3 082 485 bytes each day and about **92.47 MB each month**, which leaves U4 a
-margin of 7.5 percent in the place of 22 percent. Under the earlier table of
-20 sessions the same spares took the month to 136.24 MB, which failed U4. The
+entry row is 60 × 5 895 = 353 700 bytes. The idle background then reaches
+3 087 105 bytes each day and about **92.61 MB each month**. That leaves U4 a
+margin of 7.4 percent in the place of 22 percent. Over the 20 sessions of a
+pairwise fan-out the same spares take the month to 136.24 MB, which fails U4. The
 group queue of §3.2.7 lowers the build count, and the rule stays, because a
 spare circuit buys a wake nothing.
 
@@ -2835,19 +3318,18 @@ because U4 then fails.** U4 permits 100 000 000 bytes each month, which is about
 delivery, and each other tick carries a `B0` cover cell.
 
 Twelve rows of the Instant column do not change with *W*. Those rows are each
-row above except the pacing cover, and their total is 2 274 565 bytes each
+row above except the pacing cover, and their total is 2 276 105 bytes each
 day:
 
 ```
-2 274 565 + (W − 1) × 289 × 560 ≤ 3 333 333     gives   W ≤ 7.54 s
+2 276 105 + (W − 1) × 289 × 560 ≤ 3 333 333     gives   W ≤ 7.53 s
 
-W = 6 s → 1 445 cover cells → 3 083 765 bytes each day →  92.51 MB each month   holds
-W = 7 s → 1 734 cover cells → 3 245 605 bytes each day →  97.37 MB each month   holds
-W = 8 s → 2 023 cover cells → 3 407 445 bytes each day → 102.22 MB each month   fails
+W = 6 s → 1 445 cover cells → 3 085 305 bytes each day →  92.56 MB each month   holds
+W = 7 s → 1 734 cover cells → 3 247 145 bytes each day →  97.41 MB each month   holds
+W = 8 s → 2 023 cover cells → 3 408 985 bytes each day → 102.27 MB each month   fails
 ```
 
-The rule keeps the 6 s of the earlier table, which derived a bound of 6.78 s
-over 20 sessions. The session-open count of a wake is an unverified input
+The rule sets 6 s against the bound of 7.53 s. The session-open count of a wake is an unverified input
 under `NET-096` and `NET-273`, and the 1.5 s between the rule and the bound is
 the margin that such an input needs. Part 8 §8.4.1 gives the same 6 s for the
 Android service. A group wake holds its two sessions on one connection, and
@@ -2903,9 +3385,7 @@ these:
 The total is about **210 ms of propagation** in each direction, and **420 ms**
 for the send leg and the delivery leg together.
 
-> **Deviation note.** An earlier draft gave the three legs 30 ms, 40 ms, and
-> 40 ms, which is 220 ms for the two legs. No measurement supports that model.
-> §3.4.6 makes a chain cross three operators, three jurisdiction blocs, three
+> **Cause.** §3.4.6 makes a chain cross three operators, three jurisdiction blocs, three
 > autonomous systems, and three IPv4 /16 prefixes. Those four invariants force a
 > geographic spread, thus a conformant chain is longer than a shortest path. The
 > figures above are a model and not a measurement. **[NET-137]** An
@@ -2959,9 +3439,9 @@ costs one `B0` cell at 560 bytes (Part 6 §6.9).
   of Part 2 §2.3. NET-035 and NET-036 make the delivery schedule independent of
   the arrival times, and the mean is the strength of that measure.
 
-> *Cause.* An earlier draft set `PACING_MEAN` in §3.9, gave the latency table in
-> this section, and gave the cover row in the downlink table above. No sentence
-> said that one constant moves the three. NET-079 already caps the mean at
+> *Cause.* `PACING_MEAN` is in §3.9, the latency table is in this section, and
+> the cover row is in the downlink table above. One constant moves the three,
+> and these rules state that link. NET-079 caps the mean at
 > 1.9 s against the usability band, and the row above gives the data cost of
 > that cap.
 
@@ -2992,9 +3472,7 @@ The Instant arithmetic is 184 × 9.1 mWh = 1.67 Wh, and 1.67 / 15.4 = 10.9 %.
 **U5 has two terms, and Instant mode meets both.** Part 2 §2.4 permits 2 % with
 no arrival and 10 mWh for each background arrival. Instant mode spends 0 % with
 no arrival and 9.1 mWh for each arrival. Part 2 §2.4 scopes U5 to Instant
-notifications, thus U5 does not measure the two Private rows. An earlier draft
-gave Instant mode 30 promotions and 1.8 %, and it stated that Private mode
-costs more battery than Instant mode. This draft withdraws that statement.
+notifications, thus U5 does not measure the two Private rows.
 
 **The cheaper mode depends on the arrival count.** Instant mode pays one
 promotion for each arrival, and Private mode pays one for each interval. Thus

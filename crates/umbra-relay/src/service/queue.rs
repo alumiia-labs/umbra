@@ -2,7 +2,7 @@
 //! `SEND`, `SUB`, `UNSUB`, `ACK`, `NKEY`, and `DEL`, with the answer of
 //! each one and the push of a `MSG` to the circuit that subscribed.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use umbra_core::{
     abuse::admission::{Accepts, RelayGate},
@@ -10,7 +10,7 @@ use umbra_core::{
         binding::Binding,
         blob, epoch_of,
         push::{Push, PushScheduler},
-        HANDLE_LEN,
+        HANDLE_LEN, PUSH_TTL_MESSAGE,
     },
 };
 use umbra_crypto::{
@@ -20,9 +20,12 @@ use umbra_crypto::{
     secret::Secret,
     stored::{Reader, Writer},
     x25519::StaticSecret,
+    zeroize::Zeroize,
 };
 use umbra_queue::{
-    params::{store_grace_time, store_time, INVITE_RESERVE_TTL, INVITE_TTL, MSG_TTL},
+    params::{
+        store_grace_time, store_time, DRAIN_THRESHOLD, INVITE_RESERVE_TTL, INVITE_TTL, MSG_TTL,
+    },
     relay::{
         queue::{Queue, QueueKeys},
         session::Session,
@@ -40,7 +43,7 @@ use umbra_wire::{
     queue::msg_from_send,
 };
 
-use super::{answer, Outbound, Reply};
+use super::{answer, Drain, Drains, Outbound, Reply};
 use crate::{
     circuits::CircuitKey,
     store::{Loaded, StoreChange, StoredInvitation as Invitation},
@@ -63,8 +66,11 @@ pub struct QueueService {
     /// The notification state of a queue relay (Part 8 §8.2.3).
     notify: Option<Notify>,
     /// The `corr_id` of each recent deposit, which a second copy repeats
-    /// (`WIR-527`).
+    /// (`WIR-527`), in the order of its arrival.
     deposited: VecDeque<[u8; 16]>,
+    /// The same values in a set, thus a capsule costs no scan of the list
+    /// before its auth verifies.
+    deposited_set: BTreeSet<[u8; 16]>,
 }
 
 /// The deposits whose `corr_id` a queue relay holds (`WIR-527`).
@@ -77,6 +83,14 @@ pub struct NdrPush {
     pub handle: [u8; HANDLE_LEN],
     /// The request.
     pub request: Box<[u8; NDR_REQUEST_LEN]>,
+}
+
+/// The request holds `k_tok`, thus this drop wipes it when the push leaves
+/// memory (Part 8 §8.2.1).
+impl Drop for NdrPush {
+    fn drop(&mut self) {
+        self.request.as_mut().zeroize();
+    }
 }
 
 /// The request holds `k_tok`, thus no debug form shows it.
@@ -94,6 +108,8 @@ struct Notify {
     /// The queue of the last arrival of each handle, whose alias the next
     /// blob of that handle carries.
     latest: BTreeMap<[u8; HANDLE_LEN], [u8; 32]>,
+    /// The pushes that the scheduler gave and that wait for their blob.
+    due: Vec<Push>,
     pushes: Vec<NdrPush>,
 }
 
@@ -145,6 +161,7 @@ impl QueueService {
             pair,
             scheduler: PushScheduler::default(),
             latest: BTreeMap::new(),
+            due: Vec::new(),
             pushes: Vec::new(),
         });
     }
@@ -165,13 +182,14 @@ impl QueueService {
     /// The pushes due at `now`: the end of a coalescing window and each
     /// re-push (`NTF-049`, `NTF-066`).
     pub fn push_tick<R: CryptoRng + ?Sized>(&mut self, now: u64, rng: &mut R) {
-        let due = match self.notify.as_mut() {
-            Some(notify) => notify.scheduler.tick(now),
+        match self.notify.as_mut() {
+            Some(notify) => {
+                let due = notify.scheduler.tick(now);
+                notify.due.extend(due);
+            }
             None => return,
-        };
-        for push in due {
-            self.queue_push(push, now, rng);
         }
+        self.seal_due(now, rng);
         // WIR-041: a handle that no push waits for names no queue here, and
         // a queue that a DEL ended leaves no identifier in memory.
         if let Some(notify) = self.notify.as_mut() {
@@ -201,8 +219,10 @@ impl QueueService {
     }
 
     /// An arrival at a queue with a binding, which no live subscription
-    /// took (`NTF-128`).
-    fn on_arrival<R: CryptoRng + ?Sized>(&mut self, recipient_id: [u8; 32], now: u64, rng: &mut R) {
+    /// took (`NTF-128`). A `digest` arrival is the deposit of a group
+    /// relay, and its push takes the flag of a digest inside its blob
+    /// (`NTF-086`). The push waits for [`QueueService::seal_due`].
+    fn on_arrival(&mut self, recipient_id: [u8; 32], digest: bool, now: u64) {
         let Some(handle) = self.queues.get(&recipient_id).and_then(handle_of) else {
             return;
         };
@@ -210,7 +230,18 @@ impl QueueService {
             return;
         };
         notify.latest.insert(handle, recipient_id);
-        if let Some(push) = notify.scheduler.on_arrival(handle, false, now) {
+        if let Some(push) = notify.scheduler.on_arrival(handle, digest, now) {
+            notify.due.push(push);
+        }
+    }
+
+    /// Seals the blob of each push that waits.
+    fn seal_due<R: CryptoRng + ?Sized>(&mut self, now: u64, rng: &mut R) {
+        let due = match self.notify.as_mut() {
+            Some(notify) => core::mem::take(&mut notify.due),
+            None => return,
+        };
+        for push in due {
             self.queue_push(push, now, rng);
         }
     }
@@ -259,7 +290,9 @@ impl QueueService {
         let encoded = NdrRequest::Push {
             handle: binding.handle,
             k_tok: Secret::new(*binding.k_tok.expose()),
-            ttl: u32::try_from(push.ttl).unwrap_or(u32::MAX),
+            // NTF-086: each push takes one expiry. The kind of a push
+            // shows in no field outside the blob.
+            ttl: u32::try_from(PUSH_TTL_MESSAGE).unwrap_or(u32::MAX),
             blob: sealed,
         }
         .encode(&mut request);
@@ -273,11 +306,13 @@ impl QueueService {
 
     /// Stores one record that a sender authorized, and gives the capacity
     /// left and the `MSG` of a live subscription. A record that no live
-    /// subscription takes goes to the push scheduler (`NTF-128`).
+    /// subscription takes goes to the push scheduler (`NTF-128`), as a
+    /// digest when `digest` is set (`NTF-086`).
     fn store_record<R: CryptoRng + ?Sized>(
         &mut self,
         recipient_id: [u8; 32],
         record: &[u8],
+        digest: bool,
         now: u64,
         rng: &mut R,
     ) -> Result<(u32, Option<Reply>), Reject> {
@@ -300,7 +335,8 @@ impl QueueService {
             })
         });
         if live.is_none() {
-            self.on_arrival(recipient_id, now, rng);
+            self.on_arrival(recipient_id, digest, now);
+            self.seal_due(now, rng);
         }
         Ok((remaining, live))
     }
@@ -317,7 +353,7 @@ impl QueueService {
         now: u64,
         rng: &mut R,
     ) -> Option<Reply> {
-        if command.cmd != Cmd::Send || self.deposited.contains(&command.corr_id) {
+        if command.cmd != Cmd::Send || self.deposited_set.contains(&command.corr_id) {
             return None;
         }
         let recipient_id = *self.by_sender.get(&command.queue_id)?;
@@ -325,10 +361,14 @@ impl QueueService {
         let key = CommandAuthKey::derive(relay_static, &qs_auth_pk).ok()?;
         command.verify(&key, b"").ok()?;
         if self.deposited.len() >= DEPOSIT_SEEN {
-            self.deposited.pop_front();
+            if let Some(oldest) = self.deposited.pop_front() {
+                self.deposited_set.remove(&oldest);
+            }
         }
         self.deposited.push_back(command.corr_id);
-        self.store_record(recipient_id, command.payload, now, rng)
+        self.deposited_set.insert(command.corr_id);
+        // NTF-086: a deposit is a digest, and the blob of its push says so.
+        self.store_record(recipient_id, command.payload, true, now, rng)
             .ok()
             .and_then(|(_, live)| live)
     }
@@ -430,12 +470,16 @@ impl QueueService {
         self.queues.is_empty()
     }
 
-    /// Handles one command of the queue range on `circuit`.
+    /// Handles one command of the queue range on `circuit`. A `SUB` with a
+    /// backlog above `DRAIN_THRESHOLD` gives no `MSG`. It leaves a drain in
+    /// `drains`, and the node asks for its records in steps
+    /// ([`QueueService::drain_step`]).
     #[allow(clippy::too_many_arguments)]
     pub fn handle<R: CryptoRng + ?Sized>(
         &mut self,
         circuit: CircuitKey,
         session: &mut Session,
+        drains: &mut Drains,
         gate: &mut RelayGate,
         accepts: &Accepts<'_>,
         command: &Command<'_>,
@@ -477,7 +521,7 @@ impl QueueService {
                 let queue = self.queues.get(&recipient_id).ok_or(Reject::Rejected)?;
                 session.accept(command, &queue.keys().qs_auth_pk)?;
                 let (remaining, live) =
-                    self.store_record(recipient_id, command.payload, now, rng)?;
+                    self.store_record(recipient_id, command.payload, false, now, rng)?;
                 // WIR-496: the QUOTA is the relay acknowledgment.
                 let mut replies = vec![answer(
                     circuit,
@@ -527,7 +571,7 @@ impl QueueService {
             | Cmd::Nkey
             | Cmd::Nbind
             | Cmd::Ires
-            | Cmd::Iput => self.recipient_command(circuit, session, command, now, rng),
+            | Cmd::Iput => self.recipient_command(circuit, session, drains, command, now, rng),
             // A cover command of a client names no queue. It gets no answer,
             // and it is no activity of a queue (`NET-196`).
             Cmd::Cover => Ok(Vec::new()),
@@ -539,6 +583,7 @@ impl QueueService {
         &mut self,
         circuit: CircuitKey,
         session: &mut Session,
+        drains: &mut Drains,
         command: &Command<'_>,
         now: u64,
         rng: &mut R,
@@ -546,7 +591,7 @@ impl QueueService {
         let recipient_id = command.queue_id;
         let queue = self.queues.get_mut(&recipient_id).ok_or(Reject::Rejected)?;
         session.accept(command, &queue.keys().qr_auth_pk)?;
-        let replies = self.owner_command(circuit, session, command, now, rng)?;
+        let replies = self.owner_command(circuit, session, drains, command, now, rng)?;
         // A subscription and an acknowledgment drain the queue.
         if matches!(command.cmd, Cmd::Sub | Cmd::Ack) {
             self.on_drain(&recipient_id);
@@ -562,6 +607,7 @@ impl QueueService {
         &mut self,
         circuit: CircuitKey,
         session: &mut Session,
+        drains: &mut Drains,
         command: &Command<'_>,
         now: u64,
         rng: &mut R,
@@ -570,19 +616,64 @@ impl QueueService {
         let queue = self.queues.get_mut(&recipient_id).ok_or(Reject::Rejected)?;
         match command.cmd {
             Cmd::Sub => {
+                // NET-037, NET-349: a backlog above the threshold is a
+                // drain. The relay reads the bound from the lengths of the
+                // records before it copies one of them.
+                let is_drain = queue.pending().nth(DRAIN_THRESHOLD).is_some();
+                let named = if is_drain {
+                    let lengths = queue.pending().map(|stored| stored.bytes.len());
+                    match drains.admit(&recipient_id, lengths, now) {
+                        Ok(bytes) => Some(bytes),
+                        Err(reject) => {
+                            // A refused `SUB` leaves no subscription. With
+                            // one, each later record would go as a live
+                            // `MSG` above a backlog that never left. The
+                            // client would see a hole, and its `ACK` past
+                            // that hole would erase the backlog. With none,
+                            // each later record is an arrival that no
+                            // subscription took, and it takes its push
+                            // (`NTF-128`).
+                            if self.subscribers.get(&recipient_id) == Some(&circuit) {
+                                self.subscribers.remove(&recipient_id);
+                                queue.subscribe(false, now);
+                            }
+                            drains.end(&recipient_id);
+                            return Err(reject);
+                        }
+                    }
+                } else {
+                    None
+                };
                 session.bind_queue(recipient_id)?;
                 queue.subscribe(true, now);
                 self.subscribers.insert(recipient_id, circuit);
-                // WIR-110: each record that no ACK covers goes out.
-                Ok(queue
-                    .pending()
-                    .filter_map(|stored| msg_of(recipient_id, stored.seq, &stored.bytes, rng))
-                    .map(|outbound| Reply { circuit, outbound })
-                    .collect())
+                match named {
+                    Some(left) => {
+                        drains.hold(Drain {
+                            queue_id: recipient_id,
+                            after: queue.last_ack(),
+                            end: queue.next_seq(),
+                            left,
+                        });
+                        Ok(Vec::new())
+                    }
+                    None => {
+                        drains.end(&recipient_id);
+                        // WIR-110: each record that no ACK covers goes out.
+                        Ok(queue
+                            .pending()
+                            .filter_map(|stored| {
+                                msg_of(recipient_id, stored.seq, &stored.bytes, rng)
+                            })
+                            .map(|outbound| Reply { circuit, outbound })
+                            .collect())
+                    }
+                }
             }
             Cmd::Unsub => {
                 queue.subscribe(false, now);
                 self.subscribers.remove(&recipient_id);
+                drains.end(&recipient_id);
                 Ok(Vec::new())
             }
             Cmd::Ack => {
@@ -666,13 +757,58 @@ impl QueueService {
                 self.changes
                     .push(StoreChange::QueueDeleted { recipient_id });
                 self.subscribers.remove(&recipient_id);
+                drains.end(&recipient_id);
                 Ok(Vec::new())
             }
             _ => Err(Reject::Rejected),
         }
     }
 
-    /// A circuit ended, thus its subscriptions end.
+    /// The next records of `drain` for `circuit`, as `MSG` commands of
+    /// about `room` bytes together, and whether the drain ended. The step
+    /// stops after the record that reaches `room`, thus each step moves the
+    /// drain. A drain ends at its last record, and when the queue left or
+    /// its subscription went to another circuit.
+    pub fn drain_step<R: CryptoRng + ?Sized>(
+        &self,
+        circuit: &CircuitKey,
+        drain: &mut Drain,
+        room: usize,
+        rng: &mut R,
+    ) -> (Vec<Outbound>, bool) {
+        let live = self.subscribers.get(&drain.queue_id) == Some(circuit);
+        let Some(queue) = self.queues.get(&drain.queue_id).filter(|_| live) else {
+            return (Vec::new(), true);
+        };
+        let mut out = Vec::new();
+        let mut sent = 0usize;
+        for stored in queue.pending_after(drain.after) {
+            if stored.seq >= drain.end {
+                break;
+            }
+            if sent >= room {
+                return (out, false);
+            }
+            drain.after = stored.seq;
+            drain.left = drain.left.saturating_sub(stored.bytes.len());
+            if let Some(outbound) = msg_of(drain.queue_id, stored.seq, &stored.bytes, rng) {
+                sent = sent.saturating_add(outbound.encoded.len());
+                out.push(outbound);
+            }
+        }
+        (out, true)
+    }
+
+    /// A circuit ended, thus its subscriptions end. A record that a
+    /// subscription took and that no `ACK` covers gets no push here. A
+    /// client holds each `ACK` for `RECEIPT_MIN_DELAY` and it does not send
+    /// one because it leaves (`NET-048`, `NET-050`). An orderly end soon
+    /// after an arrival thus leaves a record with no `ACK`. This relay
+    /// cannot tell that end from a lost link: the end of a circuit carries
+    /// no cause. A push at each such end would wake a device for a record
+    /// that it holds. A wake session ends before the floor of the `ACK`,
+    /// thus it would give the next push. The record stays in the queue,
+    /// and the next subscription takes it again.
     pub fn circuit_closed(&mut self, circuit: &CircuitKey, now: u64) {
         let ended: Vec<[u8; 32]> = self
             .subscribers
@@ -808,6 +944,7 @@ mod tests {
     struct Bench {
         service: QueueService,
         session: Session,
+        drains: Drains,
         gate: RelayGate,
         issuer: std::collections::BTreeMap<u32, PublicKey2048>,
         rng: Rng,
@@ -821,6 +958,7 @@ mod tests {
             Bench {
                 service,
                 session: Session::for_circuit(&[7; 16], StaticSecret::from([9; 32])),
+                drains: Drains::default(),
                 gate: RelayGate::new([1; 32]),
                 issuer: std::collections::BTreeMap::new(),
                 rng: Rng(0),
@@ -849,6 +987,7 @@ mod tests {
             self.service.handle(
                 CIRCUIT,
                 &mut self.session,
+                &mut self.drains,
                 &mut self.gate,
                 &accepts,
                 &command,
@@ -959,5 +1098,282 @@ mod tests {
         // NTF-125: the answer `gone` drops the binding.
         restored.ndr_gone(&[0x22; 16]);
         assert!(restored.queues[&ids.recipient_id].binding().is_none());
+    }
+
+    /// A queue with a binding under the handle `[0x22; 16]`, with the keys
+    /// of its recipient and of its sender.
+    fn bound_queue(bench: &mut Bench) -> (IdsPayload, StaticSecret, StaticSecret) {
+        let qr = StaticSecret::from([4; 32]);
+        let qs = StaticSecret::from([5; 32]);
+        let new = NewPayload {
+            qr_auth_pk: *XPublic::from(&qr).as_bytes(),
+            qs_auth_pk: *XPublic::from(&qs).as_bytes(),
+            admission: Admission::NONE,
+        };
+        let mut out = [0u8; 128];
+        let n = new.encode(&mut out).unwrap();
+        let ids = bench.send(Cmd::New, [0; 32], &out[..n], &qr).unwrap();
+        let ids = IdsPayload::parse(&payloads(&ids)[0].1).unwrap();
+        let answers = bench
+            .send(Cmd::Nkey, ids.recipient_id, &[6; 32], &qr)
+            .unwrap();
+        let relay_ntf = umbra_crypto::kem::PublicKey::from_bytes(&payloads(&answers)[0].1).unwrap();
+        let binding = Binding {
+            root: Secret::new([0x21; 32]),
+            handle: [0x22; 16],
+            k_tok: Secret::new([0x23; 32]),
+            queue_alias: [0x24; 16],
+            relay_idx: 3,
+        };
+        let sealed = binding
+            .seal(&relay_ntf, &ids.recipient_id, &mut bench.rng)
+            .unwrap();
+        bench
+            .send(Cmd::Nbind, ids.recipient_id, &sealed, &qr)
+            .unwrap();
+        (ids, qr, qs)
+    }
+
+    /// The expiry and the flags of one push, as the device reads them.
+    fn ttl_and_flags(push: &NdrPush, now: u64) -> (u64, u8) {
+        let NdrRequest::Push { ttl, blob, .. } = NdrRequest::parse(&push.request[..]).unwrap()
+        else {
+            panic!("not a push");
+        };
+        let plain = Receiver::new(Secret::new([0x21; 32]))
+            .open(&blob, now)
+            .unwrap();
+        (u64::from(ttl), plain.flags)
+    }
+
+    #[test]
+    fn a_deposit_and_a_send_push_with_one_expiry_and_the_blob_alone_names_a_digest() {
+        let mut bench = Bench::new();
+        let (ids, _qr, qs) = bound_queue(&mut bench);
+        let relay_static = StaticSecret::from([8; 32]);
+        let record = vec![0x55; Bucket::B0.l6_record()];
+        let deposit = |corr: u8| {
+            let key = CommandAuthKey::derive(&qs, XPublic::from(&relay_static).as_bytes()).unwrap();
+            let mut command = Command {
+                cmd: Cmd::Send,
+                corr_id: [corr; 16],
+                queue_id: ids.sender_id,
+                auth: [0; 32],
+                payload: &record,
+            };
+            command.sign(&key, b"").unwrap();
+            let mut encoded = vec![0u8; command.len()];
+            command.encode(&mut encoded).unwrap();
+            encoded
+        };
+
+        // NTF-086: the push of a deposit carries the digest flag inside
+        // its blob, and the expiry of a message push.
+        let encoded = deposit(0xA1);
+        let (command, _) = Command::parse(&encoded, Bucket::B0).unwrap();
+        let live = bench
+            .service
+            .deposit(&command, &relay_static, NOW, &mut bench.rng);
+        assert!(live.is_none());
+        let pushes = bench.service.take_ndr_pushes();
+        assert_eq!(pushes.len(), 1);
+        assert_eq!(
+            ttl_and_flags(&pushes[0], NOW),
+            (umbra_core::notify::PUSH_TTL_MESSAGE, blob::FLAG_DIGEST)
+        );
+        // WIR-527: the same deposit again stores nothing and pushes nothing.
+        let waiting = bench.service.queues[&ids.recipient_id].waiting();
+        assert!(bench
+            .service
+            .deposit(&command, &relay_static, NOW + 60, &mut bench.rng)
+            .is_none());
+        assert_eq!(bench.service.queues[&ids.recipient_id].waiting(), waiting);
+        assert!(bench.service.take_ndr_pushes().is_empty());
+
+        // NTF-065: a `SEND` after the window pushes as a message, with
+        // the same expiry.
+        let later = NOW + 60;
+        let mut command = Command {
+            cmd: Cmd::Send,
+            corr_id: [0xB1; 16],
+            queue_id: ids.sender_id,
+            auth: [0; 32],
+            payload: &record,
+        };
+        let key = CommandAuthKey::derive(&qs, &bench.session.relay_session_pk()).unwrap();
+        command.sign(&key, b"").unwrap();
+        let accepts = Accepts::CrossRelay(&bench.issuer);
+        bench
+            .service
+            .handle(
+                CIRCUIT,
+                &mut bench.session,
+                &mut bench.drains,
+                &mut bench.gate,
+                &accepts,
+                &command,
+                later,
+                &mut bench.rng,
+            )
+            .unwrap();
+        let pushes = bench.service.take_ndr_pushes();
+        assert_eq!(pushes.len(), 1);
+        assert_eq!(
+            ttl_and_flags(&pushes[0], later),
+            (umbra_core::notify::PUSH_TTL_MESSAGE, 0)
+        );
+    }
+
+    /// The sequence of each `MSG` among `records`.
+    fn seqs(records: &[Outbound]) -> Vec<u32> {
+        records
+            .iter()
+            .map(|outbound| {
+                let (command, _) = Command::parse(&outbound.encoded, outbound.bucket).unwrap();
+                assert_eq!(command.cmd, Cmd::Msg);
+                u32::from_be_bytes(command.payload[..4].try_into().unwrap())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_sub_of_a_long_backlog_leaves_a_drain_that_steps_through_the_queue() {
+        let mut bench = Bench::new();
+        let (ids, qr, qs) = bound_queue(&mut bench);
+        let record = vec![0x55; Bucket::B0.l6_record()];
+        let count = u32::try_from(DRAIN_THRESHOLD).unwrap() + 5;
+        for _ in 0..count {
+            bench.send(Cmd::Send, ids.sender_id, &record, &qs).unwrap();
+        }
+        // NET-037, NET-349: the `SUB` gives no `MSG` and copies no record.
+        // It leaves a drain that names each record that no `ACK` covers.
+        let replies = bench.send(Cmd::Sub, ids.recipient_id, &[], &qr).unwrap();
+        assert!(replies.is_empty());
+        let held = bench.drains.of(&ids.recipient_id).unwrap().clone();
+        let first = bench.service.queues[&ids.recipient_id].last_ack() + 1;
+        assert_eq!((held.after, held.end), (first - 1, first + count));
+        assert_eq!(held.left, record.len() * DRAIN_THRESHOLD + record.len() * 5);
+        // A record that arrives now goes as a live `MSG`, and the drain
+        // does not name it.
+        let replies = bench.send(Cmd::Send, ids.sender_id, &record, &qs).unwrap();
+        assert_eq!(replies.len(), 2);
+
+        // Each step gives the next records, about the room that it has.
+        let mut drain = held;
+        let room = 3 * record.len();
+        let mut taken = Vec::new();
+        let mut steps = 0;
+        loop {
+            let (records, ended) =
+                bench
+                    .service
+                    .drain_step(&CIRCUIT, &mut drain, room, &mut bench.rng);
+            steps += 1;
+            taken.extend(seqs(&records));
+            if ended {
+                break;
+            }
+            assert_eq!(records.len(), 3);
+        }
+        assert!(steps > 20);
+        assert_eq!(taken, (first..first + count).collect::<Vec<u32>>());
+        assert_eq!(drain.left, 0);
+
+        // An `ACK` in the middle of a drain takes its records out of it.
+        let mut drain = bench.drains.of(&ids.recipient_id).unwrap().clone();
+        let acked = first + 9;
+        bench
+            .send(Cmd::Ack, ids.recipient_id, &acked.to_be_bytes(), &qr)
+            .unwrap();
+        let (records, _) =
+            bench
+                .service
+                .drain_step(&CIRCUIT, &mut drain, usize::MAX, &mut bench.rng);
+        assert_eq!(
+            seqs(&records),
+            (acked + 1..first + count).collect::<Vec<u32>>()
+        );
+        // A drain of a queue whose subscription went to another circuit
+        // ends, and so does the drain of an `UNSUB`.
+        let other = CircuitKey {
+            link: 9,
+            circ_id: [1; 16],
+        };
+        let mut drain = bench.drains.of(&ids.recipient_id).unwrap().clone();
+        assert_eq!(
+            bench
+                .service
+                .drain_step(&other, &mut drain, usize::MAX, &mut bench.rng),
+            (Vec::new(), true)
+        );
+        bench.send(Cmd::Unsub, ids.recipient_id, &[], &qr).unwrap();
+        assert!(bench.drains.is_empty());
+    }
+
+    #[test]
+    fn a_refused_sub_leaves_no_subscription_and_its_arrivals_take_their_push() {
+        let mut bench = Bench::new();
+        let (ids, qr, qs) = bound_queue(&mut bench);
+        let record = vec![0x55; Bucket::B0.l6_record()];
+        for _ in 0..=DRAIN_THRESHOLD {
+            bench.send(Cmd::Send, ids.sender_id, &record, &qs).unwrap();
+        }
+        // The circuit asks for its drains of one minute. Each one takes the
+        // place of the one before it.
+        for _ in 0..crate::service::DRAINS_PER_MINUTE {
+            assert!(bench
+                .send(Cmd::Sub, ids.recipient_id, &[], &qr)
+                .unwrap()
+                .is_empty());
+        }
+        assert!(bench.service.subscribers.contains_key(&ids.recipient_id));
+        bench.service.push_tick(NOW + 20, &mut Rng(8));
+        drop(bench.service.take_ndr_pushes());
+        // NET-349: one more gets `LIMIT`. It leaves no subscription and no
+        // drain. Before this, the relay kept the subscription of a refused
+        // `SUB`. Each later record then went as a live `MSG` above a backlog
+        // that never left.
+        assert_eq!(
+            bench.send(Cmd::Sub, ids.recipient_id, &[], &qr),
+            Err(Reject::Limit)
+        );
+        assert!(!bench.service.subscribers.contains_key(&ids.recipient_id));
+        assert!(!bench.service.queues[&ids.recipient_id].subscribed());
+        assert!(bench.drains.is_empty());
+        // NTF-128: the next record is an arrival that no subscription took:
+        // it gives the `QUOTA` alone, and it takes its push.
+        let replies = bench.send(Cmd::Send, ids.sender_id, &record, &qs).unwrap();
+        assert_eq!(replies.len(), 1);
+        bench.service.push_tick(NOW + 40, &mut Rng(9));
+        assert_eq!(bench.service.take_ndr_pushes().len(), 1);
+    }
+
+    #[test]
+    fn a_subscription_that_ends_before_the_ack_gives_no_push() {
+        let mut bench = Bench::new();
+        let (ids, qr, qs) = bound_queue(&mut bench);
+        let record = vec![0x55; Bucket::B0.l6_record()];
+
+        // NET-050: a client holds its `ACK` for `RECEIPT_MIN_DELAY`, thus
+        // a circuit that ends soon after an arrival leaves the record
+        // with no `ACK`. The device holds it, and no push goes.
+        bench.send(Cmd::Sub, ids.recipient_id, &[], &qr).unwrap();
+        let replies = bench.send(Cmd::Send, ids.sender_id, &record, &qs).unwrap();
+        assert_eq!(replies.len(), 2);
+        bench.service.circuit_closed(&CIRCUIT, NOW + 2);
+        bench.service.push_tick(NOW + 3, &mut Rng(10));
+        assert!(bench.service.take_ndr_pushes().is_empty());
+
+        // The same holds for an `UNSUB`.
+        bench.send(Cmd::Sub, ids.recipient_id, &[], &qr).unwrap();
+        bench.send(Cmd::Send, ids.sender_id, &record, &qs).unwrap();
+        bench.send(Cmd::Unsub, ids.recipient_id, &[], &qr).unwrap();
+        bench.service.push_tick(NOW + 4, &mut Rng(11));
+        assert!(bench.service.take_ndr_pushes().is_empty());
+
+        // A record that arrives with no subscription takes its push.
+        bench.send(Cmd::Send, ids.sender_id, &record, &qs).unwrap();
+        bench.service.push_tick(NOW + 5, &mut Rng(12));
+        assert_eq!(bench.service.take_ndr_pushes().len(), 1);
     }
 }

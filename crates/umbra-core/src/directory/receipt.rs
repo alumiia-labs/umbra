@@ -23,7 +23,7 @@ pub const RECEIPT_LEN: usize = 1 + 32 + 32 + 8 + 4 + 4 + 32 + SIGNATURE_LEN;
 /// The encoded width of a `RelayHello`.
 pub const RELAY_HELLO_LEN: usize = 1 + 32 + SIGNATURE_LEN;
 /// The encoded width of a `ReceiptQuery`.
-pub const RECEIPT_QUERY_LEN: usize = 1 + 1 + 8 + 16 + SIGNATURE_LEN;
+pub const RECEIPT_QUERY_LEN: usize = 1 + 1 + 32 + 8 + 16 + SIGNATURE_LEN;
 /// `RECEIPT_WINDOW`: the cells of one receipt.
 pub const RECEIPT_WINDOW: u32 = 1_024;
 /// `RECEIPT_RETENTION`, in seconds.
@@ -125,23 +125,40 @@ impl LinkReceipt {
     }
 }
 
-/// The `RelayHello` of a relay that dialed a link with the session
-/// `session_id` (`REL-173`).
+/// What the signature of a `RelayHello` covers: the relay that dialed, the
+/// relay that it dialed, and the session of the link. The dialer chooses
+/// the session, thus the session alone binds no link. The relay that took a
+/// hello could show it to a third relay under the same session.
+fn hello_preimage(relay_id: &[u8; 32], to_relay: &[u8; 32], session_id: &[u8; 8]) -> Vec<u8> {
+    [
+        labels::RELAY_HELLO,
+        relay_id.as_slice(),
+        to_relay.as_slice(),
+        session_id,
+    ]
+    .concat()
+}
+
+/// The `RelayHello` of a relay that dialed the relay `to_relay` on a link
+/// with the session `session_id` (`REL-173`).
 pub fn relay_hello<R: CryptoRng + ?Sized>(
     relay_id: &[u8; 32],
+    to_relay: &[u8; 32],
     session_id: &[u8; 8],
     key: &SigningKey,
     rng: &mut R,
 ) -> Result<Vec<u8>, Error> {
-    let preimage = [labels::RELAY_HELLO, relay_id.as_slice(), session_id].concat();
-    let sig = key.sign(&preimage, rng)?;
+    let sig = key.sign(&hello_preimage(relay_id, to_relay, session_id), rng)?;
     Ok([&[0x01][..], relay_id, &sig.to_bytes()].concat())
 }
 
 /// The relay that a `RelayHello` names, after its signature verified under
-/// the identity key that `identity_of` gives for it (`REL-174`).
+/// the identity key that `identity_of` gives for it (`REL-174`). `own` is
+/// the relay that took the hello. A hello for another relay does not
+/// verify.
 pub fn verify_relay_hello(
     bytes: &[u8],
+    own: &[u8; 32],
     session_id: &[u8; 8],
     identity_of: impl Fn(&[u8; 32]) -> Option<Vec<u8>>,
 ) -> Result<[u8; 32], Error> {
@@ -152,17 +169,28 @@ pub fn verify_relay_hello(
     let relay_id: [u8; 32] = r.array()?;
     let sig = r.take(SIGNATURE_LEN)?;
     r.finish()?;
+    // A relay does not dial itself.
+    if relay_id == *own {
+        return Err(Error::Unverified);
+    }
     let identity_pk = identity_of(&relay_id).ok_or(Error::Unverified)?;
-    let preimage = [labels::RELAY_HELLO, relay_id.as_slice(), session_id].concat();
-    verify_under(&identity_pk, &preimage, sig)?;
+    verify_under(
+        &identity_pk,
+        &hello_preimage(&relay_id, own, session_id),
+        sig,
+    )?;
     Ok(relay_id)
 }
 
-/// A query of an authority for the receipt of one cell (`REL-081`).
+/// A query of an authority to one relay for the receipt of one cell
+/// (`REL-081`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReceiptQuery {
     /// The index of the authority in the key set.
     pub authority_index: u8,
+    /// The relay that the query asks. The signature covers it, thus the
+    /// query of one relay is no query at another (`REL-179`).
+    pub relay_id: [u8; 32],
     /// The consensus epoch of the probe.
     pub epoch: u64,
     /// The tag of the cell as one link carried it.
@@ -174,6 +202,7 @@ impl ReceiptQuery {
         let mut out = Vec::with_capacity(RECEIPT_QUERY_LEN);
         out.push(0x01);
         out.push(self.authority_index);
+        out.extend_from_slice(&self.relay_id);
         out.extend_from_slice(&self.epoch.to_be_bytes());
         out.extend_from_slice(&self.tag);
         out
@@ -190,7 +219,9 @@ impl ReceiptQuery {
         Ok([body.as_slice(), &sig.to_bytes()].concat())
     }
 
-    /// Reads a query and verifies it under `keyset` (`REL-179`).
+    /// Reads a query and verifies it under `keyset` (`REL-179`). The relay
+    /// that took it then tests `relay_id` against its own with
+    /// [`ReceiptQuery::asks`].
     pub fn verify(bytes: &[u8], keyset: &DirectoryKeySet<'_>) -> Result<Self, Error> {
         let mut r = Reader::new(bytes);
         if r.u8()? != 0x01 {
@@ -198,6 +229,7 @@ impl ReceiptQuery {
         }
         let query = ReceiptQuery {
             authority_index: r.u8()?,
+            relay_id: r.array()?,
             epoch: u64::from_be_bytes(r.array()?),
             tag: r.array()?,
         };
@@ -208,10 +240,39 @@ impl ReceiptQuery {
         Ok(query)
     }
 
+    /// Whether the query asks the relay `own`. A relay answers no other
+    /// query (`REL-179`).
+    pub fn asks(&self, own: &[u8; 32]) -> bool {
+        self.relay_id == *own
+    }
+
     /// The leaf of the cell that the query names.
     pub fn leaf(&self) -> [u8; 32] {
         cell_leaf(&self.tag)
     }
+}
+
+/// Whether `proof` has the shape of the proof of the leaf at `index` in a
+/// tree of `count` leaves (§10.5.3). That shape is one step at each level
+/// where the node has a sibling, on the side that the index gives.
+fn proof_fits(proof: &[Step], index: u32, count: u32) -> bool {
+    if index >= count {
+        return false;
+    }
+    let (mut at, mut width) = (index, count);
+    let mut steps = proof.iter();
+    while width > 1 {
+        let sibling = at ^ 1;
+        if sibling < width {
+            match steps.next() {
+                Some(step) if step.sibling_right == (sibling > at) => {}
+                _ => return false,
+            }
+        }
+        at /= 2;
+        width = width.div_ceil(2);
+    }
+    steps.next().is_none()
 }
 
 /// Which receipt an answer holds.
@@ -312,7 +373,8 @@ impl ReceiptAnswer {
     }
 
     /// Whether the receipt verifies under the identity key of its
-    /// `to_relay` and the proof puts the cell of `query` under its root.
+    /// `to_relay` and the proof puts the cell of `query` under its root, at
+    /// `leaf_index` among the `cell_count` cells of the receipt.
     pub fn covers(
         &self,
         query: &ReceiptQuery,
@@ -320,6 +382,9 @@ impl ReceiptAnswer {
     ) -> Result<LinkReceipt, Error> {
         let receipt = LinkReceipt::verify(&self.receipt, to_identity_pk)?;
         if receipt.epoch != query.epoch {
+            return Err(Error::Unverified);
+        }
+        if !proof_fits(&self.proof, self.leaf_index, receipt.cell_count) {
             return Err(Error::Unverified);
         }
         tree::verify(&query.tag, &self.proof, &receipt.batch_root)?;
@@ -353,6 +418,12 @@ pub enum LinkVerdict {
 /// took), `to_answer` the answer of `to` (a receipt that it issued), and
 /// `None` a relay that gave no answer. A receipt counts when it verifies
 /// under `to_identity_pk`, names the link, and covers the cell.
+///
+/// A contradiction needs the denial itself (`REL-083`). `to` answered that
+/// it holds no receipt of a cell, and `from` holds that receipt under the
+/// signature of `to`. A relay that gave no answer denied nothing, and a
+/// relay before it can cause that silence. Thus no answer removes the link
+/// and names no relay (`REL-084`).
 pub fn judge_link(
     from: [u8; 32],
     to: [u8; 32],
@@ -367,9 +438,10 @@ pub fn judge_link(
             .and_then(|answer| answer.covers(query, to_identity_pk).ok())
             .is_some_and(|receipt| receipt.from_relay == from && receipt.to_relay == to)
     };
+    let denied = to_answer.is_some_and(|answer| answer.found == Found::None);
     if covers(to_answer, Found::Issued) {
         LinkVerdict::Held
-    } else if covers(from_answer, Found::Taken) {
+    } else if denied && covers(from_answer, Found::Taken) {
         LinkVerdict::Contradiction { relay: to }
     } else {
         LinkVerdict::LinkFault { from, to }
@@ -412,6 +484,7 @@ mod tests {
         };
         let query = ReceiptQuery {
             authority_index: 3,
+            relay_id: [2; 32],
             epoch: 9,
             tag: tags[17],
         };
@@ -419,6 +492,12 @@ mod tests {
         assert_eq!(asked.len(), RECEIPT_QUERY_LEN);
         assert_eq!(ReceiptQuery::verify(&asked, &keyset).unwrap(), query);
         assert!(ReceiptQuery::verify(&query.sign(&keys[4], &mut rng).unwrap(), &keyset).is_err());
+        // REL-179: the query asks one relay, and the name of another relay
+        // in its bytes ends the signature.
+        assert!(query.asks(&[2; 32]) && !query.asks(&[1; 32]));
+        let mut moved = asked.clone();
+        moved[2] ^= 1;
+        assert!(ReceiptQuery::verify(&moved, &keyset).is_err());
         let answer = ReceiptAnswer {
             found: Found::Issued,
             receipt: signed.clone(),
@@ -430,10 +509,19 @@ mod tests {
         assert_eq!(read.covers(&query, &pk).unwrap(), receipt);
         // The proof of another cell does not cover this one.
         let other = ReceiptAnswer {
+            leaf_index: 18,
             proof: tree::prove(&leaves, 18).unwrap(),
             ..answer
         };
         assert!(other.covers(&query, &pk).is_err());
+        // An index that the proof does not lead to, and one past the cells.
+        for leaf_index in [16, 40] {
+            let elsewhere = ReceiptAnswer {
+                leaf_index,
+                ..read.clone()
+            };
+            assert!(elsewhere.covers(&query, &pk).is_err());
+        }
         assert_eq!(
             ReceiptAnswer::parse(&ReceiptAnswer::none().encode().unwrap()).unwrap(),
             ReceiptAnswer::none()
@@ -461,6 +549,7 @@ mod tests {
         .unwrap();
         let query = ReceiptQuery {
             authority_index: 0,
+            relay_id: to,
             epoch: 3,
             tag: tags[5],
         };
@@ -485,11 +574,13 @@ mod tests {
             judge(Some(&taken), Some(&none)),
             LinkVerdict::Contradiction { relay: to }
         );
+        // REL-084: neither side shows the cell, or a side gives no answer.
+        // A relay that gave no answer denied nothing. Thus the verdict does
+        // not name it, whatever the relay before it shows.
         assert_eq!(
             judge(Some(&taken), None),
-            LinkVerdict::Contradiction { relay: to }
+            LinkVerdict::LinkFault { from, to }
         );
-        // REL-084: neither side shows the cell, or a side gives no answer.
         assert_eq!(
             judge(Some(&none), Some(&none)),
             LinkVerdict::LinkFault { from, to }
@@ -512,11 +603,28 @@ mod tests {
         let mut rng = Rng(6);
         let keys = authorities(70);
         let pk = keys[0].verifying_key().to_bytes().to_vec();
-        let hello = relay_hello(&[4; 32], &[9; 8], &keys[0], &mut rng).unwrap();
+        let hello = relay_hello(&[4; 32], &[5; 32], &[9; 8], &keys[0], &mut rng).unwrap();
         assert_eq!(hello.len(), RELAY_HELLO_LEN);
         let known = |id: &[u8; 32]| (*id == [4; 32]).then(|| pk.clone());
-        assert_eq!(verify_relay_hello(&hello, &[9; 8], known).unwrap(), [4; 32]);
-        assert!(verify_relay_hello(&hello, &[8; 8], known).is_err());
-        assert!(verify_relay_hello(&hello, &[9; 8], |_| None).is_err());
+        let verify =
+            |own: &[u8; 32], session: &[u8; 8]| verify_relay_hello(&hello, own, session, known);
+        assert_eq!(verify(&[5; 32], &[9; 8]).unwrap(), [4; 32]);
+        assert!(verify(&[5; 32], &[8; 8]).is_err());
+        assert!(verify_relay_hello(&hello, &[5; 32], &[9; 8], |_| None).is_err());
+    }
+
+    #[test]
+    fn a_hello_for_one_relay_names_no_one_at_another() {
+        let mut rng = Rng(8);
+        let keys = authorities(70);
+        let pk = keys[0].verifying_key().to_bytes().to_vec();
+        let known = |_: &[u8; 32]| Some(pk.clone());
+        // REL-174: relay 5 took the hello of relay 4, and it shows that
+        // hello to relay 6 under the same session.
+        let hello = relay_hello(&[4; 32], &[5; 32], &[9; 8], &keys[0], &mut rng).unwrap();
+        assert!(verify_relay_hello(&hello, &[6; 32], &[9; 8], known).is_err());
+        // A hello that names the relay that took it names no dialer.
+        let own = relay_hello(&[6; 32], &[6; 32], &[9; 8], &keys[0], &mut rng).unwrap();
+        assert!(verify_relay_hello(&own, &[6; 32], &[9; 8], known).is_err());
     }
 }

@@ -203,6 +203,24 @@ pub struct Chain {
     pub one_host: bool,
 }
 
+impl Chain {
+    /// The place of the chain among the chains of one selection. A chain of
+    /// a lower value comes first, and 0 is a chain that satisfies each
+    /// invariant. Each relaxation is one bit. Thus a chain that needs a
+    /// relaxation comes after each chain that stands without it, whatever
+    /// the lower relaxations of the two are. The highest bit is one server
+    /// at both ends, the last resort (`NET-351`). Below it is one operator
+    /// (`NET-342`). Then come one network and one bloc at hop 1 and hop 3
+    /// (`NET-350`), and last the bloc of hop 2 (`NET-200`).
+    fn rank(&self) -> u8 {
+        u8::from(self.one_host) << 4
+            | u8::from(self.one_operator) << 3
+            | u8::from(self.one_network) << 2
+            | u8::from(self.one_bloc) << 1
+            | u8::from(self.relaxed)
+    }
+}
+
 /// The relaxations that one selection pass permits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Relax {
@@ -227,6 +245,21 @@ impl Relax {
         bloc: false,
         network: false,
         host: false,
+    };
+    /// The one relaxation outside a provisional directory (`NET-200`,
+    /// `NET-202`).
+    pub const HOP2: Relax = Relax {
+        hop2: true,
+        ..Relax::NONE
+    };
+    /// Each relaxation of a provisional directory (`NET-340`, `NET-350`,
+    /// `NET-351`).
+    pub const BOOTSTRAP: Relax = Relax {
+        hop2: true,
+        operator: true,
+        bloc: true,
+        network: true,
+        host: true,
     };
 }
 
@@ -297,15 +330,21 @@ pub fn check(
 /// Selects a chain: the pinned ingress, then the first pair of candidates
 /// in the order given that satisfies every invariant, then the first pair
 /// under the relaxation, then failure (`NET-033`). The caller gives the
-/// candidates in a consensus-random order (`REL-015`).
+/// candidates in the order of a draw that weighs each relay by its class
+/// (`REL-196`), and by no measure of its own (`REL-015`).
 pub fn select(ingress: &Candidate, candidates: &[Candidate]) -> Result<Chain, Error> {
     select_avoiding(ingress, candidates, &[], false)
 }
 
 /// As [`select`], and no two adjacent relays of the chain form a link of
 /// `removed` (Part 10 `REL-185`). `bootstrap` says that the directory is
-/// provisional, and a chain of one operator then follows each chain that
-/// satisfies invariant 1 (`NET-340` to `NET-342`).
+/// provisional. Each relaxation of that state then applies only when no
+/// chain stands without it, in the order of [`Chain::rank`] (`NET-340` to
+/// `NET-342`, `NET-350`, `NET-351`). A chain of one operator follows each
+/// chain of different operators with hop 1 and hop 3 on two servers,
+/// whatever else that chain relaxes. A chain with hop 1 and hop 3 on one
+/// server is the last resort. It comes behind a chain of one operator on
+/// two servers too.
 pub fn select_avoiding(
     ingress: &Candidate,
     candidates: &[Candidate],
@@ -317,52 +356,38 @@ pub fn select_avoiding(
             .iter()
             .any(|link| link.names(&one.relay_id, &other.relay_id))
     };
-    // NET-342, NET-350: the relaxations of a provisional directory come
-    // last, one at a time: the operator, the bloc of hop 1 and hop 3, and
-    // the network.
-    let strict = Relax::NONE;
-    let hop2 = Relax {
-        hop2: true,
-        ..strict
-    };
-    let operator = Relax {
-        operator: true,
-        ..strict
-    };
-    let both = Relax {
-        operator: true,
-        ..hop2
-    };
-    let bloc = Relax { bloc: true, ..both };
-    let network = Relax {
-        network: true,
-        ..bloc
-    };
-    let host = Relax {
-        host: true,
-        ..network
-    };
-    let levels: &[Relax] = if bootstrap {
-        &[strict, hop2, operator, both, bloc, network, host]
+    // The selection tests each pair one time under each relaxation that the
+    // state permits. It keeps the chain that relaxes the least: the first
+    // one of its rank in the order given. Levels that permit more at each
+    // step would let a chain of one operator pass at the level that frees
+    // the bloc. That chain would come before a chain of three operators in
+    // that bloc (NET-342).
+    let permitted = if bootstrap {
+        Relax::BOOTSTRAP
     } else {
-        &[strict, hop2]
+        Relax::HOP2
     };
-    for &relax in levels {
-        for hop2 in candidates
+    let mut best: Option<Chain> = None;
+    for hop2 in candidates
+        .iter()
+        .filter(|c| c.layer == 2 && !is_removed(ingress, c))
+    {
+        for hop3 in candidates
             .iter()
-            .filter(|c| c.layer == 2 && !is_removed(ingress, c))
+            .filter(|c| c.is_exit() && !is_removed(hop2, c))
         {
-            for hop3 in candidates
-                .iter()
-                .filter(|c| c.is_exit() && !is_removed(hop2, c))
-            {
-                if let Ok(chain) = check(ingress, hop2, hop3, relax) {
-                    return Ok(chain);
-                }
+            let Ok(chain) = check(ingress, hop2, hop3, permitted) else {
+                continue;
+            };
+            if chain.rank() == 0 {
+                return Ok(chain);
+            }
+            if best.is_none_or(|held| chain.rank() < held.rank()) {
+                best = Some(chain);
             }
         }
     }
-    Err(Error::NoPath)
+    best.ok_or(Error::NoPath)
 }
 
 /// One pinned ingress relay (Part 10 §10.6.1).
@@ -619,6 +644,50 @@ mod tests {
         assert!(last.one_host);
         assert_eq!(
             select_avoiding(&ingress, &[hop2, beside], &[], false),
+            Err(Error::NoPath)
+        );
+    }
+
+    #[test]
+    fn a_chain_of_three_operators_in_one_country_comes_before_one_operator() {
+        // NET-342: three operators, each relay in the United States, under
+        // a provisional directory. Each level of NET-350 frees its own
+        // invariant alone, thus invariant 1 holds while a chain satisfies it.
+        let us = BlocList::v1().bloc_of(b"US");
+        let ingress = cand(1, us, 0, true);
+        let mut own2 = cand(2, us, 2, false);
+        own2.operator_id = ingress.operator_id;
+        let other2 = cand(4, us, 2, false);
+        let other3 = cand(5, us, 3, false);
+        let mut own3 = cand(6, us, 3, false);
+        own3.operator_id = ingress.operator_id;
+        // The relays of the operator of the ingress lead the order.
+        let order = [own2, own3, other2, other3];
+        let chain = select_avoiding(&ingress, &order, &[], true).unwrap();
+        assert_eq!(chain.hops, [[1; 32], [4; 32], [5; 32]]);
+        assert!(!chain.one_operator && chain.one_bloc);
+        // The same holds when the chain of three operators shares a
+        // provider, and when it is the only chain on two servers.
+        let mut near3 = other3;
+        near3.asn = other2.asn;
+        let chain = select_avoiding(&ingress, &[own2, own3, other2, near3], &[], true).unwrap();
+        assert_eq!(chain.hops, [[1; 32], [4; 32], [5; 32]]);
+        assert!(!chain.one_operator && chain.one_network);
+        // With no relay of another operator at hop 3, one operator at two
+        // hops is what stands, and the first chain of the order leads.
+        let chain = select_avoiding(&ingress, &[own2, own3, other2], &[], true).unwrap();
+        assert!(chain.one_operator);
+        assert_eq!(chain.hops[2], [6; 32]);
+        // NET-350: a chain that needs the bloc of hop 2 alone comes first,
+        // although it is later in the order. A chain that needs the bloc of
+        // hop 1 and hop 3 follows it.
+        let abroad = cand(7, BlocList::v1().bloc_of(b"CH"), 3, false);
+        let chain = select_avoiding(&ingress, &[other2, other3, abroad], &[], true).unwrap();
+        assert_eq!(chain.hops[2], [7; 32]);
+        assert!(chain.relaxed && !chain.one_bloc);
+        // NET-341: none of this stands outside the provisional directory.
+        assert_eq!(
+            select_avoiding(&ingress, &order, &[], false),
             Err(Error::NoPath)
         );
     }

@@ -29,6 +29,7 @@ use umbra_core::{
         lifecycle::{assess, Takeover, Version},
         profile::ProfilePlain,
         reader::{self, HeldHead, LogChannel, ReadError},
+        service::DIRECTORY_EPOCH,
         translog::LookupProof,
         HANDLE_HISTORY_MAX, HANDLE_LEASE, LEASE_MIN,
     },
@@ -343,14 +344,43 @@ impl DirectoryLink {
         version: u32,
         entry: &[u8],
     ) -> Result<(), FfiError> {
-        let body = dirclient::challenge_body(false, input).map_err(|_| FfiError::Malformed)?;
-        let challenge = self.send(Kind::Challenge, &body)?;
-        let (challenge, purpose) =
-            dirclient::parse_challenge(&challenge, version).map_err(|_| FfiError::Malformed)?;
-        let ans = answer(purpose, key, name, &challenge, Some(entry))
-            .map_err(|_| FfiError::Unverified)?;
-        let body = dirclient::write_body(input, &ans, entry).map_err(|_| FfiError::Malformed)?;
-        self.send(Kind::Write, &body).map(|_| ())
+        self.write_staged(input, name, key, version, entry)
+            .map_err(|(_, error)| error)
+    }
+
+    /// The write of [`DirectoryLink::write`], with what a fault left at the
+    /// directory.
+    fn write_staged(
+        &self,
+        input: &[u8],
+        name: &[u8],
+        key: &KeyPair,
+        version: u32,
+        entry: &[u8],
+    ) -> Result<(), (WriteFault, FfiError)> {
+        // A fault before the write request left sends no version.
+        let body = (|| {
+            let body = dirclient::challenge_body(false, input).map_err(|_| FfiError::Malformed)?;
+            let challenge = self.send(Kind::Challenge, &body)?;
+            let (challenge, purpose) =
+                dirclient::parse_challenge(&challenge, version).map_err(|_| FfiError::Malformed)?;
+            let ans = answer(purpose, key, name, &challenge, Some(entry))
+                .map_err(|_| FfiError::Unverified)?;
+            dirclient::write_body(input, &ans, entry).map_err(|_| FfiError::Malformed)
+        })()
+        .map_err(|error| (WriteFault::Refused, error))?;
+        match self.send(Kind::Write, &body) {
+            Ok(_) => Ok(()),
+            // The directory answered, and its answer names a refusal.
+            Err(
+                error @ (FfiError::Busy
+                | FfiError::Stale
+                | FfiError::NotFound
+                | FfiError::Unverified),
+            ) => Err((WriteFault::Refused, error)),
+            // A link that ended, or an answer that does not parse.
+            Err(error) => Err((WriteFault::Unknown, error)),
+        }
     }
 
     /// The key of the cross-relay issuer of `epoch` from the log: version
@@ -451,6 +481,103 @@ pub struct ContactRequestInfo {
     pub note: String,
     /// The JPEG picture of the sender, or an empty one.
     pub picture: Vec<u8>,
+}
+
+/// What a write that failed left at the directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteFault {
+    /// The directory holds no new version for certain.
+    Refused,
+    /// The write left, and no answer says whether the directory took it.
+    Unknown,
+}
+
+/// How the newest version that the log shows stands to the entry that this
+/// device holds (`DIS-137`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Standing {
+    /// The log shows the version of this device, with its key and its queue.
+    Own,
+    /// The log shows a version below the one of this device. The write of
+    /// this device waits for the next epoch (`DIS-166`), or it did not
+    /// reach the directory.
+    Staged,
+    /// The log shows a version that this device did not write (`DIS-138`).
+    Foreign,
+}
+
+/// The standing of an entry at version `held` when the log shows `shown`.
+/// The store takes a new version before the directory does. Thus a version
+/// of the log above the held one is never a write of this device.
+fn standing(held: u32, shown: u32, is_same_key: bool, is_same_queue: bool) -> Standing {
+    match shown.cmp(&held) {
+        core::cmp::Ordering::Less => Standing::Staged,
+        core::cmp::Ordering::Greater => Standing::Foreign,
+        core::cmp::Ordering::Equal if is_same_key && is_same_queue => Standing::Own,
+        core::cmp::Ordering::Equal => Standing::Foreign,
+    }
+}
+
+/// Which key of this device signs the write of the held version again, when
+/// the log shows the version before it under `shown`. After a move of the
+/// queue, the key of the held rotation signs. After a rotation of the
+/// handle key, the key before it signs. No key of the two means a version
+/// that this device does not write over (`DIS-139`).
+fn signer_of<'a>(
+    shown: &[u8; ENTRY_PK_LEN],
+    held: &'a KeyPair,
+    before: Option<&'a KeyPair>,
+) -> Option<&'a KeyPair> {
+    if held.public().to_bytes() == *shown {
+        return Some(held);
+    }
+    before.filter(|key| key.public().to_bytes() == *shown)
+}
+
+/// The time after which a version that the log does not show did not reach
+/// the directory. A staged write shows at the first head after it
+/// (`DIS-166`), and an epoch closes at each `DIRECTORY_EPOCH`.
+const WRITE_SETTLE: u64 = 2 * DIRECTORY_EPOCH;
+
+/// The version of the log that the upkeep read for an entry.
+struct Shown {
+    version: u32,
+    key: [u8; ENTRY_PK_LEN],
+}
+
+/// The bytes of the version of an entry that the store holds, under `key`.
+fn entry_bytes(entry: &Published, key: &KeyPair) -> Result<Vec<u8>, FfiError> {
+    let rendezvous = QueueAddress::parse(&entry.rendezvous).map_err(|_| FfiError::Integrity)?;
+    Ok(match entry.kind {
+        EntryKind::Address => {
+            let mut out = vec![0u8; ADDRESS_ENTRY_LEN];
+            AddressEntry {
+                address: entry
+                    .name
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| FfiError::Integrity)?,
+                address_pk: key.public().to_bytes(),
+                rendezvous: Some(rendezvous),
+                version: entry.version,
+            }
+            .encode(&mut out)
+            .map_err(|_| FfiError::Malformed)?;
+            out
+        }
+        EntryKind::Handle => {
+            let next = DirectoryEntry {
+                handle: entry.name.clone(),
+                hk_pub: key.public().to_bytes(),
+                rendezvous: Some(rendezvous),
+                version: entry.version,
+            };
+            let mut out = vec![0u8; next.len()];
+            let used = next.encode(&mut out).map_err(|_| FfiError::Malformed)?;
+            out.truncate(used);
+            out
+        }
+    })
 }
 
 /// The tokens below which the upkeep asks the issuer for a batch.
@@ -800,7 +927,7 @@ impl Handle {
         if let Some((previous, _)) = entry.previous {
             let _ = inner.client.unbind_queue(&previous, &mut OsRng);
         }
-        inner.client.drop_published(&entry.id)?;
+        inner.client.drop_published(&entry.id, &mut OsRng)?;
         Ok(())
     }
 
@@ -813,62 +940,125 @@ impl Handle {
         entry: &Published,
         now: u64,
     ) -> Result<(), FfiError> {
+        let version = entry.version.checked_add(1).ok_or(FfiError::TooLong)?;
+        let key = locked(&self.inner)
+            .client
+            .entry_key(entry.kind, entry.index, entry.rotation)?;
         let (queue, rendezvous) = self.new_rendezvous()?;
-        let written = (|| {
-            let key =
-                locked(&self.inner)
-                    .client
-                    .entry_key(entry.kind, entry.index, entry.rotation)?;
-            let address = QueueAddress::parse(&rendezvous).map_err(|_| FfiError::Malformed)?;
-            let version = entry.version.checked_add(1).ok_or(FfiError::TooLong)?;
-            let bytes = match entry.kind {
-                EntryKind::Address => {
-                    let mut out = vec![0u8; ADDRESS_ENTRY_LEN];
-                    AddressEntry {
-                        address: entry
-                            .name
-                            .as_slice()
-                            .try_into()
-                            .map_err(|_| FfiError::Integrity)?,
-                        address_pk: key.public().to_bytes(),
-                        rendezvous: Some(address),
-                        version,
-                    }
-                    .encode(&mut out)
-                    .map_err(|_| FfiError::Malformed)?;
-                    out
-                }
-                EntryKind::Handle => {
-                    let next = DirectoryEntry {
-                        handle: entry.name.clone(),
-                        hk_pub: key.public().to_bytes(),
-                        rendezvous: Some(address),
-                        version,
-                    };
-                    let mut out = vec![0u8; next.len()];
-                    let used = next.encode(&mut out).map_err(|_| FfiError::Malformed)?;
-                    out.truncate(used);
-                    out
-                }
-            };
-            link.write(&entry.label, &entry.name, &key, entry.version, &bytes)
-        })();
-        if let Err(error) = written {
-            self.end_rendezvous(queue);
-            return Err(error);
-        }
         let rotated = Published {
-            version: entry.version.saturating_add(1),
+            version,
             queue,
             rendezvous,
             queue_since: now,
             previous: Some((entry.queue, now.saturating_add(ROTATE_GRACE))),
             ..entry.clone()
         };
-        locked(&self.inner)
-            .client
-            .put_published(&rotated, &mut OsRng)?;
-        Ok(())
+        self.write_version(link, entry, &rotated, &key, &key, entry.version)
+    }
+
+    /// Moves an entry from `before` to `after`, its next version on a new
+    /// queue. The store takes `after` first, and the write under `signer`
+    /// over the version `over` of the log follows. A lock or the end of the
+    /// process between the two leaves the store one version above the log.
+    /// The upkeep reads that as a write that waits, and it sends again
+    /// (`Handle::write_again`). The other order would leave the log above
+    /// the store. The device would then call its own version a takeover
+    /// (`DIS-138`). The next start would end the new queue, since no entry
+    /// of the store names it.
+    ///
+    /// Neither write of the store touches an earlier identity root
+    /// (`DEV-306`). The key of `before` signs this write, and it signs the
+    /// write again after a fault. Thus its root stays until the log shows
+    /// `after` (`Client::confirm_published`). A refusal thus puts back the
+    /// exact state before the call.
+    fn write_version(
+        &self,
+        link: &DirectoryLink,
+        before: &Published,
+        after: &Published,
+        signer: &KeyPair,
+        key: &KeyPair,
+        over: u32,
+    ) -> Result<(), FfiError> {
+        let kept = entry_bytes(after, key).and_then(|bytes| {
+            locked(&self.inner)
+                .client
+                .put_published(after, &mut OsRng)?;
+            Ok(bytes)
+        });
+        let bytes = match kept {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.end_rendezvous(after.queue);
+                return Err(error);
+            }
+        };
+        match link.write_staged(&before.label, &before.name, signer, over, &bytes) {
+            Ok(()) => Ok(()),
+            // The log holds the version before for certain, thus the store
+            // goes back to it. A store that does not go back, at a lock,
+            // holds a write that waits, and the upkeep sends it again.
+            Err((WriteFault::Refused, error)) => {
+                let is_back = locked(&self.inner)
+                    .client
+                    .put_published(before, &mut OsRng)
+                    .is_ok();
+                if is_back {
+                    self.end_rendezvous(after.queue);
+                }
+                Err(error)
+            }
+            // The directory may hold the version: the store keeps it, and
+            // the upkeep reads the log.
+            Err((WriteFault::Unknown, error)) => Err(error),
+        }
+    }
+
+    /// Sends the write of the held version of an entry again, when the log
+    /// still shows the version before it after `WRITE_SETTLE`. The write
+    /// did not reach the directory. A lock, a fault of the link, or the end
+    /// of the process came first. The key of the shown version signs, and a
+    /// version under no key of this device takes no write (`DIS-139`).
+    fn write_again(
+        &self,
+        link: &DirectoryLink,
+        entry: &mut Published,
+        shown: &Shown,
+        now: u64,
+    ) -> Result<(), FfiError> {
+        if shown.version.checked_add(1) != Some(entry.version) {
+            return Ok(());
+        }
+        let (key, before) = {
+            let inner = locked(&self.inner);
+            let key = inner
+                .client
+                .entry_key(entry.kind, entry.index, entry.rotation)?;
+            let before = match (entry.kind, entry.rotation.checked_sub(1)) {
+                (EntryKind::Handle, Some(rotation)) => {
+                    Some(inner.client.entry_key(entry.kind, entry.index, rotation)?)
+                }
+                _ => None,
+            };
+            (key, before)
+        };
+        let Some(signer) = signer_of(&shown.key, &key, before.as_ref()) else {
+            return Ok(());
+        };
+        let bytes = entry_bytes(entry, &key)?;
+        match link.write_staged(&entry.label, &entry.name, signer, shown.version, &bytes) {
+            // The next look waits for the epoch of this write.
+            Ok(()) | Err((WriteFault::Unknown, _)) => {
+                entry.queue_since = now;
+                locked(&self.inner)
+                    .client
+                    .put_published(entry, &mut OsRng)?;
+                Ok(())
+            }
+            // A write of this epoch waits already, or the log moved: the
+            // next upkeep reads it.
+            Err((WriteFault::Refused, error)) => Err(error),
+        }
     }
 
     /// Finds the key of a handle that a restore holds at a stale rotation
@@ -926,33 +1116,22 @@ impl Handle {
         };
         let next_version = version.checked_add(1).ok_or(FfiError::TooLong)?;
         let (queue, rendezvous) = self.new_rendezvous()?;
-        let written = (|| {
-            let next = DirectoryEntry {
-                handle: entry.name.clone(),
-                hk_pub: key.public().to_bytes(),
-                rendezvous: Some(
-                    QueueAddress::parse(&rendezvous).map_err(|_| FfiError::Integrity)?,
-                ),
-                version: next_version,
-            };
-            let mut out = vec![0u8; next.len()];
-            let used = next.encode(&mut out).map_err(|_| FfiError::Malformed)?;
-            out.truncate(used);
-            link.write(&entry.label, &entry.name, &key, version, &out)
-        })();
-        if let Err(error) = written {
-            self.end_rendezvous(queue);
-            return Err(error);
-        }
-        entry.rotation = rotation;
-        entry.version = next_version;
-        entry.queue = queue;
-        entry.rendezvous = rendezvous;
-        entry.queue_since = now;
+        let found = Published {
+            rotation,
+            version: next_version,
+            queue,
+            rendezvous,
+            queue_since: now,
+            previous: None,
+            ..entry.clone()
+        };
+        self.write_version(link, entry, &found, &key, &key, version)?;
+        entry.rotation = found.rotation;
+        entry.version = found.version;
+        entry.queue = found.queue;
+        entry.rendezvous = found.rendezvous;
+        entry.queue_since = found.queue_since;
         entry.previous = None;
-        locked(&self.inner)
-            .client
-            .put_published(entry, &mut OsRng)?;
         done(self);
         Ok(true)
     }
@@ -987,41 +1166,46 @@ impl Handle {
         Ok(inner.client.mark_resync(&mut OsRng)?)
     }
 
-    /// Whether the directory shows the entry as this device wrote it
-    /// (`DIS-137`): the newest version is its version, with its key and its
-    /// queue. A version below it is a write of this device that waits for
-    /// the next epoch.
-    fn is_own_entry(&self, link: &DirectoryLink, entry: &Published) -> Result<bool, FfiError> {
+    /// How the directory shows the entry (`DIS-137`). It shows the entry as
+    /// this device wrote it when the newest version is its version, with
+    /// its key and its queue. It shows a write of this device that the log
+    /// does not show yet, with the version that the log shows. Else it
+    /// shows a version of another writer.
+    fn entry_standing(
+        &self,
+        link: &DirectoryLink,
+        entry: &Published,
+    ) -> Result<(Standing, Option<Shown>), FfiError> {
         let found = link.find(&entry.label)?;
         let (Some(bytes), Some(version)) = (found.entry, found.version) else {
-            return Ok(false);
+            return Ok((Standing::Foreign, None));
         };
-        if version < entry.version {
-            return Ok(true);
+        let shown = match entry.kind {
+            EntryKind::Address => AddressEntry::parse(&bytes)
+                .map(|shown| (shown.address_pk, shown.rendezvous))
+                .map_err(|_| FfiError::Unverified),
+            EntryKind::Handle => DirectoryEntry::parse(&bytes)
+                .map(|shown| (shown.hk_pub, shown.rendezvous))
+                .map_err(|_| FfiError::Unverified),
+        };
+        if version != entry.version {
+            let shown = shown.ok().map(|(key, _)| Shown { version, key });
+            return Ok((standing(entry.version, version, false, false), shown));
         }
-        if version > entry.version {
-            return Ok(false);
-        }
+        let (shown_key, shown_queue) = shown?;
         let key = locked(&self.inner)
             .client
             .entry_key(entry.kind, entry.index, entry.rotation)?
             .public()
             .to_bytes();
         let rendezvous = QueueAddress::parse(&entry.rendezvous).map_err(|_| FfiError::Integrity)?;
-        let (shown_key, shown_queue) = match entry.kind {
-            EntryKind::Address => {
-                let shown = AddressEntry::parse(&bytes).map_err(|_| FfiError::Unverified)?;
-                (shown.address_pk, shown.rendezvous)
-            }
-            EntryKind::Handle => {
-                let shown = DirectoryEntry::parse(&bytes).map_err(|_| FfiError::Unverified)?;
-                (shown.hk_pub, shown.rendezvous)
-            }
-        };
         let same_queue = shown_queue.is_some_and(|queue| {
             queue.relay_id == rendezvous.relay_id && queue.sender_id == rendezvous.sender_id
         });
-        Ok(shown_key == key && same_queue)
+        Ok((
+            standing(entry.version, version, shown_key == key, same_queue),
+            None,
+        ))
     }
 
     /// The upkeep of the entries at `now`; [`Handle::maintain_directory`]
@@ -1048,13 +1232,34 @@ impl Handle {
             // DIS-137, DIS-138: the holder reads its own entry. IDN-109:
             // a restored handle finds its current key before it shows as
             // held by another party.
-            if let Ok(own) = self.is_own_entry(&link, &entry) {
-                let own = if own {
+            let mut is_staged = false;
+            if let Ok((standing, shown)) = self.entry_standing(&link, &entry) {
+                is_staged = standing == Standing::Staged;
+                // DEV-306: the log shows the held version under its key,
+                // thus the directory holds the key of the held rotation. An
+                // earlier identity root that served the rotation before it
+                // has no more use. Only this proof erases one: a write that
+                // the store took, and one that the directory refused, erase
+                // none.
+                if standing == Standing::Own {
+                    let _ = locked(&self.inner)
+                        .client
+                        .confirm_published(&entry.id, &mut OsRng);
+                }
+                let own = if standing != Standing::Foreign {
                     // The entry is this device's own, thus a look of a
                     // restore for it has no more to find.
                     let _ = locked(&self.inner)
                         .client
                         .resync_done(&entry.id, &mut OsRng);
+                    // A write that the log does not show after its epoch
+                    // did not reach the directory, and it goes again. A
+                    // fault here leaves it for the next upkeep.
+                    if let Some(shown) = shown.filter(|_| {
+                        is_staged && now.saturating_sub(entry.queue_since) >= WRITE_SETTLE
+                    }) {
+                        let _ = self.write_again(&link, &mut entry, &shown, now);
+                    }
                     Some(true)
                 } else if entry.kind == EntryKind::Handle {
                     // A fault of the network changes no state of the entry.
@@ -1077,7 +1282,9 @@ impl Handle {
                 continue;
             }
             // DIS-134: the grace of the queue before the last rotation ends.
-            if let Some((previous, until)) = entry.previous {
+            // The log names that queue while the write of the rotation
+            // waits, thus it ends no queue then.
+            if let Some((previous, until)) = entry.previous.filter(|_| !is_staged) {
                 if now >= until {
                     self.end_rendezvous(previous);
                     let mut inner = locked(&self.inner);
@@ -1089,6 +1296,7 @@ impl Handle {
             // DIS-133: a queue of `RENDEZVOUS_ROTATE` takes its successor. A
             // queue in its grace waits for the end of that grace.
             if entry.previous.is_none()
+                && !is_staged
                 && now.saturating_sub(entry.queue_since) >= RENDEZVOUS_ROTATE
             {
                 let _ = self.rotate_queue(&link, &entry, now);
@@ -1380,31 +1588,6 @@ impl Handle {
         };
         let version = entry.version.checked_add(1).ok_or(FfiError::TooLong)?;
         let (queue, rendezvous) = self.new_rendezvous()?;
-        let written = (|| {
-            let next = DirectoryEntry {
-                handle: entry.name.clone(),
-                hk_pub: new.public().to_bytes(),
-                rendezvous: Some(
-                    QueueAddress::parse(&rendezvous).map_err(|_| FfiError::Integrity)?,
-                ),
-                version,
-            };
-            let mut bytes = vec![0u8; next.len()];
-            let used = next.encode(&mut bytes).map_err(|_| FfiError::Malformed)?;
-            bytes.truncate(used);
-            link.write(&entry.label, &entry.name, &old, entry.version, &bytes)
-        })();
-        if let Err(error) = written {
-            self.end_rendezvous(queue);
-            return Err(error);
-        }
-        // A queue still in its grace ends now: one queue waits at a time.
-        if let Some((previous, _)) = entry.previous {
-            self.end_rendezvous(previous);
-            let _ = locked(&self.inner)
-                .client
-                .unbind_queue(&previous, &mut OsRng);
-        }
         let now = unix_now();
         let rotated = Published {
             version,
@@ -1413,11 +1596,16 @@ impl Handle {
             rendezvous,
             queue_since: now,
             previous: Some((entry.queue, now.saturating_add(ROTATE_GRACE))),
-            ..entry
+            ..entry.clone()
         };
-        locked(&self.inner)
-            .client
-            .put_published(&rotated, &mut OsRng)?;
+        self.write_version(&link, &entry, &rotated, &old, &new, entry.version)?;
+        // A queue still in its grace ends now: one queue waits at a time.
+        if let Some((previous, _)) = entry.previous {
+            self.end_rendezvous(previous);
+            let _ = locked(&self.inner)
+                .client
+                .unbind_queue(&previous, &mut OsRng);
+        }
         Ok(())
     }
 
@@ -1521,10 +1709,13 @@ impl Handle {
         drop(inner);
         // DIS-132: a cross-relay token of this epoch, when the device holds
         // one, and else a proof of work.
-        let token = locked(&self.inner)
-            .client
-            .take_token(epoch_number(unix_now()))?;
         let mut inner = locked(&self.inner);
+        // ABU-076: a token leaves the store only for a hello that a run
+        // takes, thus a client with no run spends none.
+        if inner.bridge.is_none() {
+            return Err(FfiError::Offline);
+        }
+        let token = inner.client.take_token(epoch_number(unix_now()))?;
         let bridge = inner.bridge.as_ref().ok_or(FfiError::Offline)?;
         bridge.hello(entry_pk.to_vec(), encoded, profile, token)?;
         if let Some((input, resolved)) = to_hold {
@@ -1681,5 +1872,50 @@ impl Handle {
     /// calls it from a worker thread after the client is online.
     pub fn maintain_directory(&self) -> Result<(), FfiError> {
         self.maintain_directory_at(unix_now())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_version_of_the_log_stands_as_own_staged_or_foreign() {
+        // DIS-137: the version of this device, with its key and its queue.
+        assert_eq!(standing(3, 3, true, true), Standing::Own);
+        // DIS-138: the same version under another key or on another queue.
+        assert_eq!(standing(3, 3, false, true), Standing::Foreign);
+        assert_eq!(standing(3, 3, true, false), Standing::Foreign);
+        // DIS-166: the store took a version that the log does not show yet,
+        // whatever the version of the log holds. A rotation that a lock or
+        // the end of the process cut after the store is such a case, and it
+        // is no takeover.
+        assert_eq!(standing(3, 2, false, false), Standing::Staged);
+        assert_eq!(standing(3, 0, true, true), Standing::Staged);
+        // The store takes a version before the directory does, thus a
+        // version above the held one is of another writer.
+        assert_eq!(standing(3, 4, true, true), Standing::Foreign);
+    }
+
+    #[test]
+    fn the_write_of_a_cut_rotation_goes_again_under_the_key_of_the_log() {
+        let held = KeyPair::generate(&mut OsRng);
+        let before = KeyPair::generate(&mut OsRng);
+        let other = KeyPair::generate(&mut OsRng);
+        let same = |found: Option<&KeyPair>, key: &KeyPair| {
+            found.map(|found| found.public().to_bytes()) == Some(key.public().to_bytes())
+        };
+        // A move of the queue: the log shows the held key, and it signs.
+        let shown = held.public().to_bytes();
+        assert!(same(signer_of(&shown, &held, Some(&before)), &held));
+        assert!(same(signer_of(&shown, &held, None), &held));
+        // A rotation of the handle key: the log shows the key before, which
+        // answers the challenge of the new version (`DIS-093`).
+        let shown = before.public().to_bytes();
+        assert!(same(signer_of(&shown, &held, Some(&before)), &before));
+        assert!(signer_of(&shown, &held, None).is_none());
+        // DIS-139: a version under no key of this device takes no write.
+        let shown = other.public().to_bytes();
+        assert!(signer_of(&shown, &held, Some(&before)).is_none());
     }
 }

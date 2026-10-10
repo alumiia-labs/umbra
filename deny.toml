@@ -1,7 +1,7 @@
 # Dependency policy of Part 14 §14.2.7.
 # Each allow entry names its register. A transitive crate that is not on the
 # list fails the build. A skip entry carries a date and a cause, and a review
-# removes one older than 90 days; the skip list is empty today.
+# removes one older than 90 days.
 
 [graph]
 all-features = false
@@ -46,7 +46,20 @@ exceptions = [
 multiple-versions = "warn"
 wildcards = "deny"
 allow-wildcard-paths = false
-skip = []
+# Each entry is an old version that the graph links beside the one that the
+# workspace pins. Its reason starts with the date of the entry; scripts/deps.py
+# fails the check on an entry older than 90 days. The first five come from
+# hashx 0.3.4 (under equix, AUX-8), which still builds on blake2 0.10 and
+# rand_core 0.9. They go when hashx moves to the digest 0.11 line. The last
+# one is of the build register: no binary links it.
+skip = [
+  { crate = "blake2@0.10.6", reason = "2026-10-09: hashx 0.3.4 pulls blake2 0.10" },
+  { crate = "digest@0.10.7", reason = "2026-10-09: blake2 0.10.6, under hashx 0.3.4, pulls digest 0.10" },
+  { crate = "block-buffer@0.10.4", reason = "2026-10-09: digest 0.10.7, under hashx 0.3.4, pulls block-buffer 0.10" },
+  { crate = "crypto-common@0.1.7", reason = "2026-10-09: digest 0.10.7, under hashx 0.3.4, pulls crypto-common 0.1" },
+  { crate = "rand_core@0.9.5", reason = "2026-10-09: hashx 0.3.4 pulls rand_core 0.9" },
+  { crate = "syn@2.0.119", reason = "2026-10-09: the proc-macros curve25519-dalek-derive 0.1.1, visibility 0.1.1 and zeroize_derive 1.5.0 pull syn 2" },
+]
 # The allow list closes the graph. Register R1 is the message core of Part 5
 # §5.1. An entry marked `build` is a proc-macro, a build script, or a crate
 # that only those reach; no binary links it, thus it charges no register cap

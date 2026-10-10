@@ -20,6 +20,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 
@@ -41,6 +42,7 @@ fun alertLabel(value: UByte): String = when (value) {
  */
 @Composable
 fun AlertsScreen(chat: Chat, onBack: () -> Unit) {
+    val context = LocalContext.current
     var chosen by remember { mutableStateOf<UByte?>(null) }
     LaunchedEffect(chat.conversation) { Core.alertSetting(chat.conversation) { chosen = it } }
     val choices = if (chat.isGroup) listOf(ALERT_ALL, ALERT_MENTIONS, ALERT_NONE) else listOf(ALERT_ALL, ALERT_NONE)
@@ -56,7 +58,7 @@ fun AlertsScreen(chat: Chat, onBack: () -> Unit) {
                             .pressShadeInColumn()
                             .press(role = Role.RadioButton) {
                                 chosen = value
-                                Core.setAlert(chat.conversation, value)
+                                Core.setAlert(context, chat.conversation, value)
                             }
                             .padding(horizontal = PressInset, vertical = 14.dp),
                         verticalAlignment = Alignment.CenterVertically,

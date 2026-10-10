@@ -71,13 +71,20 @@ impl<'a> RatchetRecord<'a> {
             None
         } else {
             let epoch = r.u32()?;
-            let kind = Kind::from_byte(r.u8()?)?;
+            // WIR-032: a frame that the crypto crate does not take is
+            // malformed, as each other rejection of this parser is.
+            let kind = Kind::from_byte(r.u8()?).map_err(|_| Error::Malformed)?;
             let index = r.u16()?;
             let width =
-                Width::from_frame_len(u8::try_from(frame_len).map_err(|_| Error::Malformed)?)?;
+                Width::from_frame_len(u8::try_from(frame_len).map_err(|_| Error::Malformed)?)
+                    .map_err(|_| Error::Malformed)?;
             // WIR-258 and CRY-082: the index is inside the codeword, and the
             // kind is the one that position holds.
-            if width.kind_at(usize::from(index))? != kind {
+            if width
+                .kind_at(usize::from(index))
+                .map_err(|_| Error::Malformed)?
+                != kind
+            {
                 return Err(Error::Malformed);
             }
             Some(PqFrame {
@@ -223,5 +230,24 @@ mod tests {
         bad[78] = 0x07;
         assert!(RatchetRecord::parse(&bad[..n]).is_err());
         assert!(RatchetRecord::parse(&out[..n - 5]).is_err());
+    }
+
+    #[test]
+    fn each_rejection_of_a_frame_is_the_one_error() {
+        let mut out = vec![0u8; 300];
+        let frame = PqFrame {
+            epoch: 1,
+            kind: Kind::Header,
+            index: 0,
+            chunk: &[7; 64],
+        };
+        let n = record(Some(frame)).encode(&mut out).unwrap();
+        // WIR-032: a kind that the braid does not hold, an index outside
+        // the codeword, and a kind that the index does not hold.
+        for (offset, value) in [(78usize, 0x05u8), (80, 41), (78, 0x06)] {
+            let mut bad = out.clone();
+            bad[offset] = value;
+            assert_eq!(RatchetRecord::parse(&bad[..n]), Err(Error::Malformed));
+        }
     }
 }

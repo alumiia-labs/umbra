@@ -272,8 +272,17 @@ impl GroupQueue {
 
     /// The retained records above `from_seq`, in `seq` order, which a
     /// `GSUB` emits (`WIR-387`).
+    /// The records are in the order of their sequence, thus a search finds
+    /// the first one. A relay that steps through a backlog reads no record
+    /// below its cursor again (`NET-349`).
     pub fn since(&self, from_seq: u32) -> impl Iterator<Item = &Stored> {
-        self.records.iter().filter(move |r| r.seq > from_seq)
+        let first = self.records.partition_point(|r| r.seq <= from_seq);
+        self.records.range(first..)
+    }
+
+    /// The sequence that the next record takes.
+    pub const fn next_seq(&self) -> u32 {
+        self.next_seq
     }
 
     /// Records a `GSUB` as activity (`NET-250`).

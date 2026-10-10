@@ -107,7 +107,13 @@ impl HandleWrite {
         job: ChunkJob,
         rng: &mut R,
     ) -> Result<(), Error> {
-        let handle = node.chunk(relay, self.handle, job, rng)?;
+        // ABU-108: the solution of a registration serves this handle
+        // alone, thus the handle names the upload.
+        let upload = self
+            .handle
+            .first_chunk::<8>()
+            .map_or(0, |prefix| u64::from_be_bytes(*prefix));
+        let handle = node.chunk_of(upload, relay, self.handle, job, rng)?;
         self.waiting.push((handle, relay, self.ticks));
         Ok(())
     }

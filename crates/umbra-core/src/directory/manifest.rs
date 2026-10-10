@@ -1,6 +1,13 @@
 //! The relay manifest of Part 10 §10.5.5: a signed root, and relay entries
-//! with their inclusion proofs. A bootstrap carrier of Part 3 §3.10 moves it,
-//! and no carrier needs trust, because each byte of it is under the root.
+//! with their inclusion proofs. A bootstrap carrier of Part 3 §3.10 moves
+//! it. Each entry is under the root, and a client computes the root again
+//! over the entries that it took. Thus a carrier adds no relay, changes
+//! none, and hides none of a manifest that passes for the whole set.
+//!
+//! The report queues and the removed links are outside the root. Each one
+//! carries its own signatures, thus a carrier makes none. A carrier can
+//! leave one out, and `RelaySet::accept` bounds what a repeat or an older
+//! one does.
 
 use alloc::vec::Vec;
 
@@ -10,7 +17,7 @@ use super::{
     bloc::BlocList,
     descriptor::{roles, RelayEntry, ENTRY_LEN},
     path::Candidate,
-    removal::LinkRemoval,
+    removal::{LinkRemoval, LINK_REMOVALS_MAX},
     report::{ReportQueue, REPORT_QUEUES_MAX, REPORT_QUEUE_LEN},
     root::{Consensus, DirectoryRoot},
     tree::{self, Step},
@@ -109,6 +116,9 @@ impl<'a> RelayManifest<'a> {
             }
         }
         if !self.removals.is_empty() {
+            if self.removals.len() > LINK_REMOVALS_MAX {
+                return Err(Error::Malformed);
+            }
             w.u16(u16::try_from(self.removals.len()).map_err(|_| Error::Malformed)?)?;
             for removal in &self.removals {
                 if LinkRemoval::len_of(removal)? != removal.len() {
@@ -167,6 +177,11 @@ impl<'a> RelayManifest<'a> {
         let mut removals = Vec::new();
         if r.remaining() > 0 {
             let count = usize::from(r.u16()?);
+            // Each removal costs a client five to seven verifications, thus
+            // a carrier must not add them without a bound.
+            if count > LINK_REMOVALS_MAX {
+                return Err(Error::Malformed);
+            }
             let mut rest = r.rest();
             for _ in 0..count {
                 let (removal, after) = rest
@@ -227,17 +242,25 @@ pub struct RelaySet {
     pub digest: [u8; 32],
     /// The relays, in ascending order of `relay_id`.
     pub relays: Vec<ListedRelay>,
-    /// The report queues that verified under the key set (`REL-168`).
+    /// Whether the entries of the manifest are each leaf of the tree: the
+    /// root over them is the signed root (`REL-147`). A part of the set
+    /// passes each proof too. Thus a client that takes its relay set or its
+    /// pins from a manifest tests this first.
+    pub is_whole: bool,
+    /// The report queues that verified under the key set, the newest one of
+    /// each authority (`REL-168`).
     pub report_queues: Vec<ReportQueue>,
-    /// The removed links that verified under the key set (`REL-184`).
+    /// The removed links that verified under the key set, each link one
+    /// time (`REL-184`).
     pub removed_links: Vec<LinkRemoval>,
 }
 
 impl RelaySet {
     /// Accepts the root of a manifest under `consensus`, and then verifies
     /// each entry under that root. One entry that fails rejects the whole
-    /// manifest, because a carrier that changed one byte gets no part of its
-    /// choice through.
+    /// manifest, because a carrier that changed one byte gets no part of
+    /// its choice through. A manifest that holds a part of the set passes
+    /// with `is_whole` false, and the caller decides what a part may do.
     pub fn accept<'a>(
         consensus: &mut Consensus<'a>,
         manifest: &RelayManifest<'a>,
@@ -256,18 +279,21 @@ impl RelaySet {
         // The consensus takes the root after the last entry, because a
         // manifest with a bad entry must leave the consensus as it was.
         let mut relays: Vec<ListedRelay> = Vec::with_capacity(manifest.entries.len());
+        let mut leaves: Vec<[u8; 32]> = Vec::with_capacity(manifest.entries.len());
+        let mut last_id: Option<[u8; 32]> = None;
         for proven in &manifest.entries {
             tree::verify(proven.entry, &proven.proof, &merkle_root)?;
+            leaves.push(tree::leaf(proven.entry));
             let entry = RelayEntry::parse(proven.entry)?;
             let descriptor = &entry.descriptor;
-            if descriptor.valid_after > epoch {
-                return Err(Error::Unverified);
-            }
-            let is_after_last = relays
-                .last()
-                .is_none_or(|last| last.candidate.relay_id < descriptor.relay_id);
-            if !is_after_last {
+            if last_id.is_some_and(|last| last >= descriptor.relay_id) {
                 return Err(Error::Malformed);
+            }
+            last_id = Some(descriptor.relay_id);
+            // REL-148: an entry that starts after the epoch of the root
+            // goes, and the manifest stays.
+            if descriptor.valid_after > epoch {
+                continue;
             }
             relays.push(ListedRelay {
                 candidate: Candidate::from_entry(&entry, blocs),
@@ -282,24 +308,53 @@ impl RelaySet {
                 class: entry.class,
             });
         }
-        // REL-168: a queue that fails goes, and the manifest stays.
-        let report_queues = manifest
-            .queues
-            .iter()
-            .filter_map(|bytes| ReportQueue::verify(bytes, consensus.keyset(), epoch).ok())
-            .collect();
-        // REL-184: a removal that fails or ended goes, and the manifest stays.
-        let removed_links = manifest
-            .removals
-            .iter()
-            .filter_map(|bytes| LinkRemoval::verify(bytes, consensus.keyset(), epoch).ok())
-            .collect();
+        // The proofs say that each entry is a leaf. The root over the
+        // entries in their order says that no leaf is absent. A leaf and a
+        // node hash under two prefixes (`REL-053`), thus no other list of
+        // leaves gives the signed root.
+        let is_whole = tree::root(&leaves) == Some(merkle_root);
+        // REL-168: a queue that fails goes, and the manifest stays. No root
+        // covers a queue, thus a carrier can repeat one or show an older
+        // one of the same authority. Each authority counts one time, with
+        // the queue of its highest epoch.
+        let mut report_queues: Vec<ReportQueue> = Vec::new();
+        for bytes in &manifest.queues {
+            let Ok(queue) = ReportQueue::verify(bytes, consensus.keyset(), epoch) else {
+                continue;
+            };
+            let held = report_queues
+                .iter_mut()
+                .find(|held| held.authority_index == queue.authority_index);
+            match held {
+                Some(held) if held.epoch < queue.epoch => *held = queue,
+                Some(_) => {}
+                None => report_queues.push(queue),
+            }
+        }
+        // REL-184: a removal that fails or ended goes, and the manifest
+        // stays. A link that the list holds already costs no second
+        // verification.
+        let mut removed_links: Vec<LinkRemoval> = Vec::new();
+        for bytes in &manifest.removals {
+            let is_held = LinkRemoval::link_of(bytes).is_some_and(|(relay_a, relay_b)| {
+                removed_links
+                    .iter()
+                    .any(|held| held.relay_a == relay_a && held.relay_b == relay_b)
+            });
+            if is_held {
+                continue;
+            }
+            if let Ok(removal) = LinkRemoval::verify(bytes, consensus.keyset(), epoch) {
+                removed_links.push(removal);
+            }
+        }
         consensus.commit(root, device_clock);
         Ok(RelaySet {
             epoch,
             root: merkle_root,
             digest,
             relays,
+            is_whole,
             report_queues,
             removed_links,
         })
@@ -316,12 +371,14 @@ impl RelaySet {
 mod tests {
     use super::*;
     use crate::directory::{
-        descriptor::tests::entry_bytes,
+        descriptor::tests::{entry_bytes, Rng},
+        report::QUEUE_ADDRESS_LEN,
         root::{
             tests::{authorities, keyset_of, signed_root},
             DirectoryKeySet,
         },
     };
+    use umbra_crypto::sign::SigningKey;
 
     /// Entries in the order of the tree, and their leaves.
     fn sorted_entries(seeds: &[u8]) -> Vec<Vec<u8>> {
@@ -409,6 +466,9 @@ mod tests {
             let mut consensus = Consensus::new(keyset(), 100).unwrap();
             let set = RelaySet::accept(&mut consensus, &read, &blocs, 200 * 3_600).unwrap();
             assert_eq!(set.relays.len(), listed.len());
+            // REL-147: a part of the set verifies, and `is_whole` shows
+            // that it is a part.
+            assert_eq!(set.is_whole, listed.len() == entries.len());
             assert_eq!(set.epoch, 200);
             assert!(set.relays.iter().all(|relay| relay.host == "relay.example"));
             for layer in 1..=3u8 {
@@ -448,11 +508,13 @@ mod tests {
         // A root under four signatures.
         let weak = signed_root(&keys, &[0, 1, 2, 3], 200, keyset_hash, merkle_root);
         assert!(refused(&manifest_of(&weak, &entries, &[0])));
-        // A descriptor that starts after the epoch of the root.
+        // REL-148: a descriptor that starts after the epoch of the root is
+        // no relay of the set, and the manifest stays whole with it.
         let early = signed_root(&keys, &[0, 1, 2, 3, 4], 0, keyset_hash, merkle_root);
         let mut consensus = Consensus::new(keyset(), 0).unwrap();
-        let manifest = manifest_of(&early, &entries, &[0]);
-        assert!(RelaySet::accept(&mut consensus, &manifest, &blocs, 0).is_err());
+        let manifest = manifest_of(&early, &entries, &[0, 1, 2, 3, 4, 5]);
+        let set = RelaySet::accept(&mut consensus, &manifest, &blocs, 0).unwrap();
+        assert!(set.relays.is_empty() && set.is_whole);
 
         // Bytes that stop early, a version that is not known, a side that is
         // no side, and a count that the bytes cannot hold.
@@ -467,5 +529,139 @@ mod tests {
         let mut wrong = bytes;
         wrong[1 + 2 + root.len()] = 0xFF;
         assert!(RelayManifest::parse(&wrong).is_err());
+    }
+
+    #[test]
+    fn a_set_with_an_entry_left_out_is_not_whole() {
+        let keys = authorities(40);
+        let (pks, _) = keyset_of(&keys, 1);
+        let keyset = || DirectoryKeySet {
+            keyset_epoch: 1,
+            independent_count: 7,
+            keys: pks.iter().map(|key| &key[..]).collect(),
+        };
+        let entries = sorted_entries(&[1, 2, 3, 4, 5]);
+        let leaves: Vec<[u8; 32]> = entries.iter().map(|entry| tree::leaf(entry)).collect();
+        let merkle_root = tree::root(&leaves).unwrap();
+        let root = signed_root(
+            &keys,
+            &[0, 1, 2, 3, 4],
+            200,
+            keyset().hash().unwrap(),
+            merkle_root,
+        );
+        let blocs = BlocList::v1();
+        let whole = |listed: &[usize]| {
+            let manifest = manifest_of(&root, &entries, listed);
+            let mut consensus = Consensus::new(keyset(), 100).unwrap();
+            RelaySet::accept(&mut consensus, &manifest, &blocs, 200 * 3_600)
+                .unwrap()
+                .is_whole
+        };
+        assert!(whole(&[0, 1, 2, 3, 4]));
+        // The first, the last, one of the middle, and the odd leaf alone.
+        for part in [&[1usize, 2, 3, 4][..], &[0, 1, 2, 3], &[0, 1, 3, 4], &[4]] {
+            assert!(!whole(part), "{part:?}");
+        }
+        assert!(!whole(&[]));
+    }
+
+    #[test]
+    fn each_authority_counts_one_queue_and_each_link_one_removal() {
+        let mut rng = Rng(11);
+        let keys = authorities(40);
+        let (pks, _) = keyset_of(&keys, 1);
+        let keyset = || DirectoryKeySet {
+            keyset_epoch: 1,
+            independent_count: 7,
+            keys: pks.iter().map(|key| &key[..]).collect(),
+        };
+        let entries = sorted_entries(&[1, 2, 3]);
+        let leaves: Vec<[u8; 32]> = entries.iter().map(|entry| tree::leaf(entry)).collect();
+        let root = signed_root(
+            &keys,
+            &[0, 1, 2, 3, 4],
+            200,
+            keyset().hash().unwrap(),
+            tree::root(&leaves).unwrap(),
+        );
+        let mut queue = |index: u8, epoch: u64, mark: u8| {
+            ReportQueue {
+                authority_index: index,
+                epoch,
+                address: [mark; QUEUE_ADDRESS_LEN],
+                report_pk: [mark; 32],
+            }
+            .sign(&keys[usize::from(index)], &mut rng)
+            .unwrap()
+        };
+        // Authority 2 with three queues, the newest in the middle, and
+        // authority 5 with one.
+        let queues = [
+            queue(2, 150, 1),
+            queue(2, 190, 2),
+            queue(2, 170, 3),
+            queue(5, 100, 4),
+        ];
+        let five: Vec<(u8, &SigningKey)> = (0..5u8).map(|i| (i, &keys[usize::from(i)])).collect();
+        let mut rng = Rng(12);
+        let removals = [
+            LinkRemoval::of(190, [1; 32], [2; 32])
+                .sign(&five, &mut rng)
+                .unwrap(),
+            LinkRemoval::of(195, [2; 32], [1; 32])
+                .sign(&five, &mut rng)
+                .unwrap(),
+            LinkRemoval::of(195, [2; 32], [3; 32])
+                .sign(&five, &mut rng)
+                .unwrap(),
+        ];
+        let manifest = RelayManifest {
+            queues: queues.iter().map(Vec::as_slice).collect(),
+            removals: removals.iter().map(Vec::as_slice).collect(),
+            ..manifest_of(&root, &entries, &[0, 1, 2])
+        };
+        let mut consensus = Consensus::new(keyset(), 100).unwrap();
+        let set =
+            RelaySet::accept(&mut consensus, &manifest, &BlocList::v1(), 200 * 3_600).unwrap();
+        let held: Vec<(u8, u64, u8)> = set
+            .report_queues
+            .iter()
+            .map(|queue| (queue.authority_index, queue.epoch, queue.report_pk[0]))
+            .collect();
+        assert_eq!(held, [(2, 190, 2), (5, 100, 4)]);
+        assert_eq!(
+            set.removed_links,
+            [
+                LinkRemoval::of(190, [1; 32], [2; 32]),
+                LinkRemoval::of(195, [2; 32], [3; 32])
+            ]
+        );
+
+        // A count of removals above the bound does not parse, and it does
+        // not encode.
+        let many: Vec<&[u8]> = (0..=LINK_REMOVALS_MAX)
+            .map(|_| removals[0].as_slice())
+            .collect();
+        let over = RelayManifest {
+            removals: many,
+            ..manifest_of(&root, &entries, &[0])
+        };
+        assert!(over.encode().is_err());
+        let at_bound = RelayManifest {
+            removals: over.removals[1..].to_vec(),
+            ..over.clone()
+        };
+        let mut bytes = at_bound.encode().unwrap();
+        assert!(RelayManifest::parse(&bytes).is_ok());
+        let count_at = 1 + 2 + root.len() + 2 + ENTRY_LEN + 1 + entries_proof_len(&at_bound) + 1;
+        let over_count = u16::try_from(LINK_REMOVALS_MAX + 1).unwrap().to_be_bytes();
+        bytes[count_at..count_at + 2].copy_from_slice(&over_count);
+        assert!(RelayManifest::parse(&bytes).is_err());
+    }
+
+    /// The width of the proof steps of the first entry of `manifest`.
+    fn entries_proof_len(manifest: &RelayManifest<'_>) -> usize {
+        manifest.entries[0].proof.len() * STEP_LEN
     }
 }

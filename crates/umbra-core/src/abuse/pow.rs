@@ -414,22 +414,30 @@ fn is_live(issued_at: u64, now: u64) -> bool {
 }
 
 /// The solutions of a client for the chunk commands of each relay
-/// (`ABU-106`, `ABU-107`): one solution at `POW_CHUNK_FLOOR` or above
-/// admits `POW_CHUNK_ALLOWANCE` registrations at its relay, thus an upload
-/// solves one puzzle for about each 2 MiB. The caller gives the time,
+/// (`ABU-106`, `ABU-107`). One solution at `POW_CHUNK_FLOOR` or above admits
+/// `POW_CHUNK_ALLOWANCE` registrations at its relay. Thus an upload solves
+/// one puzzle for about each 2 MiB at one relay. A solution serves one
+/// upload alone (`ABU-108`). A relay reads the same solution on each
+/// registration that it admits. Thus a solution that served two files would
+/// join them to one uploader (Part 12 `ATT-005`). The caller gives the time,
 /// because the node that holds this reads no clock.
 #[derive(Debug, Clone, Default)]
 pub struct ChunkAdmissions {
     book: ChallengeBook,
     now: u64,
-    held: BTreeMap<[u8; 32], (PowSolution, u16)>,
+    /// The local time of the fetch that gave the book (`ABU-069`).
+    fetched_at: u64,
+    /// The solution of each upload at each relay, with the registrations
+    /// that it still admits.
+    held: BTreeMap<(u64, [u8; 32]), (PowSolution, u16)>,
 }
 
 impl ChunkAdmissions {
-    /// Takes the challenges of a new fetch.
+    /// Takes the challenges of a new fetch, which `now` is the time of.
     pub fn set_book(&mut self, book: ChallengeBook, now: u64) {
         self.book = book;
         self.now = now;
+        self.fetched_at = now;
     }
 
     /// Moves the clock of the liveness of the challenges.
@@ -437,25 +445,43 @@ impl ChunkAdmissions {
         self.now = now;
     }
 
-    /// The solution for the next registration at `relay`: the held one
-    /// while its allowance lasts and its challenge is the newest, or a new
-    /// solve. None when this device holds no live challenge of the relay.
+    /// The solution for the next registration of `upload` at `relay`. It is
+    /// the one that this upload holds while its allowance lasts and its
+    /// challenge is the newest. If not, it is a new solve. No solution of
+    /// another upload serves (`ABU-108`). The result is none when this
+    /// device holds no live challenge of the relay. It is also none when a
+    /// new solve is due and the fetch of the challenge is
+    /// `POW_CHALLENGE_PERIOD` old (`ABU-069`).
     pub fn next<R: TryCryptoRng + ?Sized>(
         &mut self,
+        upload: u64,
         relay: &[u8; 32],
         rng: &mut R,
     ) -> Option<PowSolution> {
+        // A solution to a challenge that is not the newest serves no more,
+        // thus the state holds the uploads of the live challenges alone.
+        let (book, now) = (&self.book, self.now);
+        self.held.retain(|(_, relay), (solution, _)| {
+            book.get(relay, now)
+                .is_some_and(|challenge| challenge.seed == solution.seed)
+        });
         let challenge = self.book.get(relay, self.now)?;
-        if let Some((solution, left)) = self.held.get_mut(relay) {
-            if *left > 0 && solution.seed == challenge.seed {
+        if let Some((solution, left)) = self.held.get_mut(&(upload, *relay)) {
+            if *left > 0 {
                 *left -= 1;
                 return Some(*solution);
             }
         }
+        // ABU-069: no new solve past one period from the fetch.
+        if self.now.saturating_sub(self.fetched_at) >= POW_CHALLENGE_PERIOD {
+            return None;
+        }
         let effort = challenge.effort.clamp(POW_CHUNK_FLOOR, POW_EFFORT_MAX);
         let solution = PowSolution::solve(relay, &challenge.seed, effort, rng).ok()?;
-        self.held
-            .insert(*relay, (solution, POW_CHUNK_ALLOWANCE.saturating_sub(1)));
+        self.held.insert(
+            (upload, *relay),
+            (solution, POW_CHUNK_ALLOWANCE.saturating_sub(1)),
+        );
         Some(solution)
     }
 
@@ -465,10 +491,10 @@ impl ChunkAdmissions {
         self.book.get(relay, self.now)
     }
 
-    /// Drops the solution of a relay that refused it, thus the next
-    /// registration solves again.
-    pub fn forget(&mut self, relay: &[u8; 32]) {
-        self.held.remove(relay);
+    /// Drops the solution of `upload` at a relay that refused it, thus the
+    /// next registration solves again.
+    pub fn forget(&mut self, upload: u64, relay: &[u8; 32]) {
+        self.held.remove(&(upload, *relay));
     }
 }
 
@@ -701,5 +727,71 @@ mod tests {
         verify_hello(&entry_pk, 41, &hello).unwrap();
         assert!(verify_hello(&entry_pk, 42, &hello).is_err());
         assert!(verify_hello(&[6; 1_216], 40, &hello).is_err());
+    }
+
+    fn book_of(verifier: u8, seed: u8, issued_at: u64, now: u64) -> ChallengeBook {
+        let key = SigningKey::from_seed(Secret::new([1; 32]));
+        let mut challenge = PowChallenge {
+            verifier_id: [verifier; 32],
+            seed: [seed; 32],
+            effort: 0,
+            issued_at,
+            signature: Vec::new(),
+        };
+        challenge.sign(&key, &mut Rng(9)).unwrap();
+        let mut book = ChallengeBook::default();
+        book.take(challenge, &key.verifying_key(), now).unwrap();
+        book
+    }
+
+    #[test]
+    fn a_chunk_solution_serves_one_upload_at_one_relay() {
+        let relay = [5u8; 32];
+        let mut held = ChunkAdmissions::default();
+        // With no challenge of the relay, no solution comes.
+        assert!(held.next(1, &relay, &mut Rng(1)).is_none());
+        held.set_book(book_of(5, 3, 1_000, 1_000), 1_000);
+        let first = held.next(1, &relay, &mut Rng(2)).unwrap();
+        assert_eq!(first.effort, POW_CHUNK_FLOOR);
+        // ABU-108: the next registration of the upload takes the same
+        // solution, and another upload solves for itself.
+        assert_eq!(held.next(1, &relay, &mut Rng(3)), Some(first));
+        let other = held.next(2, &relay, &mut Rng(4)).unwrap();
+        assert_ne!(other.nonce, first.nonce);
+        assert_eq!(held.next(2, &relay, &mut Rng(5)), Some(other));
+        // ABU-107: past the allowance the upload solves again.
+        for _ in 2..POW_CHUNK_ALLOWANCE {
+            assert_eq!(held.next(1, &relay, &mut Rng(6)), Some(first));
+        }
+        let second = held.next(1, &relay, &mut Rng(7)).unwrap();
+        assert_ne!(second.nonce, first.nonce);
+        // A relay that refused a solution gets a new one.
+        held.forget(1, &relay);
+        assert_ne!(held.next(1, &relay, &mut Rng(8)), Some(second));
+        // A new challenge ends each solution to the old one.
+        held.set_book(book_of(5, 4, 1_100, 1_100), 1_100);
+        let newer = held.next(2, &relay, &mut Rng(9)).unwrap();
+        assert_eq!(newer.seed, [4; 32]);
+        assert_eq!(held.held.len(), 1);
+    }
+
+    #[test]
+    fn no_chunk_solve_starts_one_period_after_the_fetch() {
+        let relay = [5u8; 32];
+        let mut held = ChunkAdmissions::default();
+        held.set_book(book_of(5, 3, 1_000, 1_000), 1_000);
+        let first = held.next(1, &relay, &mut Rng(1)).unwrap();
+        // ABU-069: the challenge is live for one more period at its relay,
+        // and the solution that the upload holds serves. A new solve does
+        // not start.
+        held.set_now(1_000 + POW_CHALLENGE_PERIOD);
+        assert_eq!(held.next(1, &relay, &mut Rng(2)), Some(first));
+        assert!(held.next(2, &relay, &mut Rng(3)).is_none());
+        // A new fetch starts the period again.
+        held.set_book(
+            book_of(5, 3, 1_000, 1_000 + POW_CHALLENGE_PERIOD),
+            1_000 + POW_CHALLENGE_PERIOD,
+        );
+        assert!(held.next(2, &relay, &mut Rng(4)).is_some());
     }
 }

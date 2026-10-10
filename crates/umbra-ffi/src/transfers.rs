@@ -16,7 +16,7 @@ use umbra_core::{
         place::{AttachmentRelay, HoldOffs},
         transfer::{ChunkFetch, Class, Download, Progress, Shape, Upload, Uploaded},
     },
-    session::node::{ChunkJob, ClientEvent, ClientNode},
+    session::node::{ChunkJob, ChunkOutcome, ClientEvent, ClientNode},
 };
 use umbra_crypto::{rand_core::TryRng, x25519::StaticSecret};
 use umbra_transport::{
@@ -64,7 +64,7 @@ pub enum TransferCommand {
         shape: Shape,
     },
     /// Erase one chunk that this device uploaded, at each relay that holds
-    /// a copy (`ATT-161`). No update follows.
+    /// a copy (`ATT-161`). An `Erased` follows when each relay answered.
     Erase {
         /// The chunk.
         chunk_id: [u8; 32],
@@ -198,6 +198,14 @@ pub enum TransferUpdate {
     /// A chunk relay failed its proof, and the report of its chain goes
     /// in the next run of the queues (`ATT-119`).
     Faults(Box<umbra_core::session::faults::LinkFaults>),
+    /// Each relay of one chunk answered its `CDEL`: it erased the chunk, or
+    /// it holds none under that credential (`ATT-161`). The caller keeps
+    /// the credential until this update, and an erase with none goes again
+    /// in a later run.
+    Erased {
+        /// The chunk.
+        chunk_id: [u8; 32],
+    },
 }
 
 enum Active {
@@ -238,14 +246,20 @@ pub async fn run_transfers(
     // call into it.
     let mut classes: BTreeMap<u64, umbra_core::session::node::DelayClass> = BTreeMap::new();
     let mut early: Vec<TransferCommand> = Vec::new();
+    // ATT-161: the chunk of each `CDEL` with no answer yet, by the handle
+    // of the command. For each chunk: the answers that it waits for, and
+    // whether each answer so far says that the relay holds it no more.
+    let mut erasing: BTreeMap<u64, [u8; 32]> = BTreeMap::new();
+    let mut erase_left: BTreeMap<[u8; 32], (usize, bool)> = BTreeMap::new();
     // A run that ends ends no transfer: each one goes again in the next run.
     let fail_each = |active: &BTreeMap<u64, Active>, early: &[TransferCommand]| {
         for tag in active.keys() {
             let _ = updates.send(TransferUpdate::Interrupted { tag: *tag });
         }
         for command in early {
-            // An erase that did not leave is lost with this run. The relays
-            // erase the chunk at the end of its life (`ATT-046`).
+            // An erase that did not leave, or that has no answer, gives no
+            // update. The store of the caller keeps its credential, and the
+            // next run sends the `CDEL` again (`ATT-161`).
             if let TransferCommand::Upload { tag, .. }
             | TransferCommand::Download { tag, .. }
             | TransferCommand::FetchChunk { tag, .. }
@@ -375,6 +389,25 @@ pub async fn run_transfers(
                     break 'run;
                 }
                 ClientEvent::Chunk { handle, outcome } => {
+                    // ATT-161: the answer of a `CDEL`. A relay that erased
+                    // the chunk and a relay that holds none under the
+                    // credential are both done (`WIR-317`). A relay under
+                    // load is not, and the erase goes again in a later run.
+                    if let Some(chunk_id) = erasing.remove(&handle) {
+                        let is_gone = matches!(
+                            outcome,
+                            ChunkOutcome::Erased
+                                | ChunkOutcome::Refused(umbra_queue::Reject::Rejected)
+                        );
+                        let (left, each) = erase_left.remove(&chunk_id).unwrap_or((1, true));
+                        let each = each && is_gone;
+                        if left > 1 {
+                            erase_left.insert(chunk_id, (left.saturating_sub(1), each));
+                        } else if each {
+                            let _ = updates.send(TransferUpdate::Erased { chunk_id });
+                        }
+                        continue;
+                    }
                     let owner = active.iter().find_map(|(tag, transfer)| {
                         let owns = match transfer {
                             Active::One(fetch) => fetch.owns(handle),
@@ -537,13 +570,27 @@ pub async fn run_transfers(
                     // ATT-167: each start takes a mode of its own, not the mode
                     // of the transfer before it.
                     node.set_chunk_class(umbra_core::session::node::DelayClass::default());
+                    // No transfer owns the handles, thus the task counts
+                    // the answers itself. A command that did not leave
+                    // counts as an answer that is not done.
+                    let mut left = 0usize;
+                    let mut each = !relays.is_empty();
                     for relay in relays {
                         let job = ChunkJob::Erase {
                             cred: StaticSecret::from(*cred.expose()),
                         };
-                        // No transfer owns the handle, thus the answer goes
-                        // nowhere.
-                        let _ = node.chunk(relay, chunk_id, job, &mut rng);
+                        match node.chunk(relay, chunk_id, job, &mut rng) {
+                            Ok(handle) => {
+                                erasing.insert(handle, chunk_id);
+                                left = left.saturating_add(1);
+                            }
+                            Err(_) => each = false,
+                        }
+                    }
+                    if left > 0 {
+                        // A second erase of one chunk adds to the first.
+                        let waits = erase_left.entry(chunk_id).or_insert((0, true));
+                        *waits = (waits.0.saturating_add(left), waits.1 && each);
                     }
                     idle_since = tokio::time::Instant::now();
                 }

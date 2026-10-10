@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 4: Identity
 
 **Status:** Draft
-**Version:** 0.11.0-draft
-**Date:** 2026-10-02
+**Version:** 0.12.0
+**Date:** 2026-10-09
 
 ---
 
@@ -66,12 +66,11 @@ local identity table. The encrypted backup of §4.7.2 holds the `RootIdentity`
 and that table. Thus the Recovery Code recovers the full account, and the root
 seed alone recovers the `RootIdentity` only. Refer to §4.7.
 
-> *Cause of `IDN-003`.* An earlier draft gave the seed as a 24-word BIP-39
-> phrase. §4.7.7 then took each other secret of the user from words to
-> digits, on the cause of the transcription error rate, and `IDN-150` forbids
-> a word list for those secrets. One word list beside three digit strings
-> gave the user two forms and two error rates. The seed now takes the form of
-> the other secrets, with its type and its check.
+> *Cause of `IDN-003`.* §4.7.7 gives each other secret of the user as digits,
+> on the cause of the transcription error rate, and `IDN-150` forbids a word
+> list for those secrets. A word list for the seed beside three digit strings
+> gives the user two forms and two error rates. Thus the seed takes the form
+> of the other secrets, with its type and its check.
 
 ### 4.2.2 Pairwise Identity — the default
 
@@ -132,11 +131,11 @@ and with the spare low bits of the last character at zero. **[IDN-158]** A
 client that reads an address MUST fold upper case to lower case, and it MUST
 read `o` as `0` and `i` and `l` as `1`, as that alphabet permits.
 
-> *Cause.* An earlier draft wrote "base32" and named no alphabet, and its
-> example held the digits 1, 8, and 9, which the alphabet of RFC 4648 lacks.
-> Two implementations then read one string as two addresses. The Crockford
-> alphabet holds the example, and its folding rules absorb the transcription
-> errors of a string that a user reads aloud.
+> *Cause.* The word "base32" alone names no alphabet. Two implementations
+> that select two alphabets read one string as two addresses. The example
+> holds the digits 1, 8, and 9, which the alphabet of RFC 4648 lacks. The
+> Crockford alphabet holds the example, and its folding rules absorb the
+> transcription errors of a string that a user reads aloud.
 
 #### The unlinkability property in full
 
@@ -167,9 +166,7 @@ requirements:
    > That key selects a swarm of 5 to 7 nodes deterministically. A swarm
    > changes at a node churn only, and the user does not control that event.
    > Thus a small number of operators get the full lifetime arrival and poll
-   > telemetry for that identity. This document has not verified the swarm
-   > detail against the current Session code. UMBRA does not repeat this
-   > design.
+   > telemetry for that identity. UMBRA does not repeat this design.
 
 2. **A one-way door out of the public layer.** A contact request arrives at a
    Public Address. After the user accepts the request, the client **moves the
@@ -191,8 +188,7 @@ requirements:
 
 A handle resolves to the handle key and to the rendezvous queue of Part 9
 §9.3. It does not resolve to the Public Address string of §4.2.3, and Part 9
-§9.3.3 indexes that string under its own label. An earlier draft drew the arrow
-toward `umbra:pub:`, and no directory field held that value.
+§9.3.3 indexes that string under its own label.
 
 Handles help usability only. They are not authoritative. **[IDN-014]** The client MUST tell
 the user to verify a handle out of band before a security-relevant decision.
@@ -239,9 +235,9 @@ current `r` against its own directory entry.
 Part 9 §9.9.2 reserves a tombstoned label for the restored client, and it
 gives the takeover warning that a lost handle causes.
 
-> *Cause.* An earlier draft named `HK_pub` in Part 9 §9.3 and derived it
-> nowhere. A client that lost each device then held no private half, and it
-> could not answer the renewal challenge of Part 9 §9.9.1. The derivation from
+> *Cause.* Without a derivation of `HK_pub`, a client that lost each device
+> holds no private half. That client cannot answer the renewal challenge of
+> Part 9 §9.9.1. The derivation from
 > the root identity with a rotation counter recovers the key from a stale
 > backup. The separate label keeps `HK_pub` unlinkable to `PublicAddressKey_j`.
 > Thus a crawl of the directory does not link a handle to a Public Address
@@ -380,8 +376,10 @@ https://<invitation-host>/i#<fragment>
               || RelayRef of the relay that holds the blob (Part 12 §12.3.2)
 ```
 
-The **invitation host** is one host that the nonprofit operates, and the
-client package names it. The **invitation landing document** is the document
+The **invitation host** is one host that the project operates, and the
+client package names it. It needs no host name of its own: it MAY be the
+domain of the network itself, and a link is then
+`https://<domain>/i#<fragment>`. The **invitation landing document** is the document
 that the host serves at `/i`. That document tells a party without the client
 where to get the client. A browser does not send a fragment, thus the host
 learns the open and not the invitation.
@@ -429,10 +427,10 @@ ID fails to open. **[IDN-161]** A client MUST reject a blob whose `version` is
 not `0x01` or whose `sealed` field does not open under the key of the
 fragment.
 
-> *Cause.* An earlier draft put the relay host in the link. An App Link needs
-> a host list that the client package states in advance, and a relay set
-> changes. Thus the link opened a browser on each device, and
-> the relay served a page that UMBRA did not specify. One host with a static
+> *Cause.* The alternative is a link that holds the relay host. An App Link
+> needs a host list that the client package states in advance, and a relay set
+> changes. Thus such a link opens a browser on each device, and
+> the relay serves a page that UMBRA does not specify. One host with a static
 > document gives the platform a list of one. The `RelayRef` in the fragment
 > names the relay to the client, and no host sees it. A hostile invitation host
 > serves a different document, and Part 15 §15.3 records that residual. The
@@ -545,6 +543,23 @@ a 60-digit decimal form of `SHA3-256` over the pairwise identity public keys of
 the two parties in canonical order. The client shows the number in groups of
 five digits. The client also gives a QR encoding that a device can scan.
 
+**The pairwise identity public key is 32 bytes.** In this section, in §4.5.1,
+in §4.5.2, and in Part 7 rule `DEV-226`, the pairwise identity public key of
+a party is its 32-byte pairwise X25519 public key. That key is the static key
+`s` of the handshake of Part 5 §5.4. The ML-KEM-768 half of a
+`PairwiseIdentity_c` enters none of them: no flight of the handshake and no
+invitation carries it, thus the peer never holds it.
+
+```
+pk_lo, pk_hi  = the two 32-byte keys, the lower first as byte strings
+digest        = SHA3-256( pk_lo || pk_hi )          // 64 bytes of input, no label
+safety number = the last 60 decimal digits of digest as one big-endian
+                integer, with leading zeros to 60 digits
+```
+
+The canonical order compares the two keys byte by byte from the first byte,
+and the two parties thus hash one string.
+
 Requirements:
 
 - **[IDN-025]** A key change MUST cause a **blocking notice in the conversation**. A passive
@@ -573,7 +588,10 @@ or after a deliberate replacement. The client tells each contact with a
 **key-change notice**.
 
 A `PairwiseIdentity_c` holds an X25519 keypair and an ML-KEM-768 keypair
-(§4.2.2). **Neither keypair signs data.** Thus a key-change notice carries no
+(§4.2.2). The X25519 public key is the key that a contact holds and
+verifies (§4.5). The ML-KEM-768 half is derived and reserved. No handshake
+of v1 uses a static ML-KEM key, and Part 5 §5.4.4 states that the
+authentication of the handshake is classical. **Neither keypair signs data.** Thus a key-change notice carries no
 signature, and the ratchet of the session that carries it gives the
 authentication. Part 5 §5.7 keeps the deniability of the channel for that
 reason.
@@ -587,7 +605,13 @@ KeyChangeNotice {
 ```
 
 The notice is the body of an `AppMessage` of kind `0x30` (Part 6 §6.6). The body
-is 1 217 bytes, thus the record uses bucket `B1`.
+is 1 217 bytes, thus the record uses bucket `B1`. `new_x25519_pk` is the new
+pairwise identity public key. `new_mlkem_pk` is the ML-KEM-768 half of the
+new `PairwiseIdentity_c`. It is the first value of that half that a peer
+receives, and a receiver keeps it with the pending notice. No rule of v1
+uses it: the safety number, the short code, and the handshake take
+the X25519 key alone. The field keeps its place for a later version that
+gives the handshake a static KEM.
 
 1. **[IDN-055]** A client MUST send a key-change notice inside the established pairwise
    ratchet session with that contact. **[IDN-056]** A client MUST NOT send it on a new
@@ -597,10 +621,13 @@ is 1 217 bytes, thus the record uses bucket `B1`.
 3. **[IDN-059]** A receiver MUST accept a key-change notice only from the receiving chain of
    that session. The ratchet direction gives that authorization, and Part 6
    §6.6.1 uses the same basis for an edit.
-4. **[IDN-060]** A receiver MUST bind the two new public keys into the next handshake
-   transcript with that contact. Part 5 §5.11 requires the full transcript
-   binding, thus a substituted key gives a handshake failure and not a silent
-   loss.
+4. **[IDN-060]** A receiver that accepts a notice MUST take `new_x25519_pk` as
+   the pairwise identity public key of that contact. It MUST check the
+   static key of the peer in each later handshake with that contact against
+   that key, as Part 3 rules `NET-327` and `NET-329` give for a renewal. The
+   transcript of Part 5 §5.4.8 binds that static key, thus a substituted key
+   gives a handshake failure and not a silent loss. The transcript has no
+   field for a static ML-KEM key, thus `new_mlkem_pk` enters no transcript.
 5. **[IDN-061]** A receiver MUST show the blocking notice of §4.5, and IDN-025 states that
    rule. **[IDN-062]** A receiver MUST NOT apply the new keys before the user answers that
    prompt.
@@ -632,9 +659,8 @@ is 1 217 bytes, thus the record uses bucket `B1`.
    **[IDN-092]** The interface MUST NOT let a user accept the notice for more
    than one contact in one action.
 
-> *Cause.* An earlier draft said that "the outgoing pairwise key signs the
-> replacement key". A pairwise identity holds no signing keypair, thus no
-> implementation could obey that sentence. The ratchet already authenticates
+> *Cause.* A pairwise identity holds no signing keypair, thus the outgoing
+> pairwise key cannot sign the replacement key. The ratchet already authenticates
 > each record on the channel, and a signature would also break the offline
 > deniability of Part 5 §5.7.
 
@@ -664,7 +690,8 @@ VerifyReveal {                    // kind 0x37, Part 6 §6.6
     nonce     [32]u8              // from the device CSPRNG
 }
 
-pk_lo, pk_hi     = the two pairwise identity public keys, in canonical order
+pk_lo, pk_hi     = the two pairwise identity public keys of §4.5, 32 bytes
+                   each, in the canonical order of §4.5
 nonce_lo         = the nonce of the party that holds pk_lo
 code             = BE32( SHA3-256("umbra/v1/sas" || pk_lo || pk_hi
                                   || nonce_lo || nonce_hi)[0..4] ) mod 10^6
@@ -683,7 +710,28 @@ value needs one. Part 5 §5.11 holds the two labels.
 - **The pairing of two commits.** A commit with a zero `answers` field is a
   **start**, and each other commit is an **answer**. **[IDN-170]** A client
   that gets a start MUST end the ceremony that it holds, draw a fresh nonce,
-  and send an answer that names that start. **[IDN-171]** A client MUST take
+  and send an answer that names that start. A client MUST send that answer,
+  and the reveal after it, only for an action of its own user. One such
+  action is a start of that user that waits for its answer under `IDN-172`.
+  The other is that the user starts or accepts a ceremony with that contact
+  after the start arrived. A start
+  that arrives with no such action MUST wait for the user. The client
+  MUST NOT answer that start. The client MUST NOT reveal a nonce for that
+  start. A later start of
+  the peer replaces the one that waits. A start that waits for the user
+  lapses 10 minutes after its arrival, and with the run of the client
+  (`IDN-174`). An action of the user after that time starts a ceremony of
+  its own and answers no start. Two persons compare a code while they talk,
+  thus a start of an earlier day belongs to no comparison. Its answer
+  would leave the user with a view that waits for a code that no peer
+  completes. One action of the user gives one
+  answer or one start, and one ceremony takes one commit of the peer. A
+  client whose ceremony holds a commit of the peer MUST NOT answer a later
+  start from that ceremony. It MUST end that ceremony at such a start. It
+  MUST tell the user that the ceremony ended. It MUST NOT take a
+  confirmation of `IDN-147` for its code. It MUST hold the new start for the
+  next action of the user. Thus a peer gets one reveal, and one guess at the code, for each
+  action of the user, and it gets none without one. **[IDN-171]** A client MUST take
   an answer only while it holds a start of its own with no commit of the
   peer, and only when `answers` is equal to the commit of that start. It MUST
   drop each other answer. **[IDN-172]** A client that gets a start while its
@@ -704,9 +752,9 @@ value needs one. Part 5 §5.11 holds the two labels.
   that state from the exchange alone. The exchange gives two clients one
   number, and the comparison between two persons is the verification.
 
-> *Cause of the `answers` field.* An earlier draft held the commit alone.
-> A user that starts two times in a row then gets the answer to the first
-> start while the second start waits. The client cannot tell that answer from
+> *Cause of the `answers` field.* A `VerifyCommit` that holds the commit
+> alone gives an exchange with no end. A user that starts two times in a row
+> gets the answer to the first start while the second start waits. The client cannot tell that answer from
 > a new start of the peer, and each of the two clients starts again at each
 > commit of the other one, without an end. The field names the start, thus a
 > late answer pairs with nothing and the client drops it.
@@ -719,6 +767,15 @@ value needs one. Part 5 §5.11 holds the two labels.
 > Part 15 §15.3 states that residual. Without the commit, an adversary that
 > reveals last selects its nonce against the known code, and the short code
 > gives nothing.
+>
+> *Cause of the user action in `IDN-170`.* The alternative is a client that
+> answers each start at once. An adversary in the middle then sends start
+> after start to one party, takes a fresh reveal for each, and computes each
+> code before it reveals a nonce of its own. That party shows nothing
+> until a code matches the one of the other party. Thus the one in 10⁶ holds
+> for each start and not for each ceremony. A reveal that only an action of
+> the user releases bounds the guesses by the times that a person starts a
+> comparison.
 
 ## 4.6 Local database integrity
 
@@ -730,7 +787,11 @@ Thus five rules apply, and they apply to each table.
 
 1. **[IDN-029]** The associated data of each record MUST hold the table identifier and the
    surrogate row identifier. Thus a party cannot move a record from one row into
-   another row.
+   another row. From record version `0x02` on, the associated data MUST also
+   hold that version and the owner column of the row, in the layout of Part 14
+   §14.6.4. Thus a party cannot move a row from one owner to another, and a
+   record of version `0x01` does not open as one of version `0x02`. Part 14
+   rule `IMP-130` gives the one pass that moves a store of version `0x01`.
 2. **[IDN-030]** A `row_id` MUST be unique inside its table. **[IDN-031]** A client MUST reject a table that
    holds two live rows with one `row_id`. **[IDN-032]** A client MUST report that condition in
    the same manner as a MAC mismatch.
@@ -748,8 +809,30 @@ Thus five rules apply, and they apply to each table.
    ```
 
    The value `record_tag_i` is the 16-byte XChaCha20-Poly1305 tag of that
-   record. Part 14 §14.6.4 gives that tag. The value `commit_counter` is
-   monotone for each table. `K_store` is the at-rest master key of Part 5
+   record. Part 14 §14.6.4 gives that tag. For a record whose key the client
+   discarded under Part 14 rule `IMP-041`, `record_tag_i` is that tag with
+   each bit inverted. Thus a salt that a party sets to zero bytes changes
+   `accum`. The value `commit_counter` is monotone for each table.
+
+   The block above is the form of a store of record version `0x01`. In a
+   store of record version `0x02` the two MACs read the version and the
+   owner column too:
+
+   ```
+   row_tag_i = HMAC-SHA3-256( K_tab, 0x01 || table_id || 0x02 || row_id_i ||
+                              owner_flag_i || owner_i || record_tag_i )
+   table_mac = HMAC-SHA3-256( K_tab, 0x02 || table_id || 0x02 || row_count ||
+                              commit_counter || accum )
+   ```
+
+   `owner_flag_i` is `0x01` and `owner_i` is the 16 bytes of the owner
+   column, or `owner_flag_i` is `0x00` and `owner_i` is empty for a row with
+   no owner. Thus the scan of `IDN-162` finds a row whose owner column a
+   party changed or emptied. A table MAC of one version does not verify
+   as one of the other version. A client MUST use the form of the record
+   version of its store for each table. Part 14 rule `IMP-130` gives the
+   one batch that moves each MAC of a store from the first form to the
+   second. `K_store` is the at-rest master key of Part 5
    §5.2, and Part 14 §14.6.4 wraps it. **[IDN-034]** A client MUST derive
    `K_tab` from `K_store` under the label `"umbra/v1/table-mac"`. **[IDN-035]**
    A client MUST NOT write `K_tab` to storage. Part 5 §5.11 holds the label.
@@ -763,11 +846,11 @@ Thus five rules apply, and they apply to each table.
      HMAC uses take different input, thus they need different domain
      separation.
 
-   > *Cause.* An earlier draft covered `table_id`, `row_count`, and
-   > `commit_counter` only. Under that MAC an attacker replaced the ciphertext
+   > *Cause.* The alternative is a MAC that covers `table_id`, `row_count`, and
+   > `commit_counter` only. Under that MAC an attacker replaces the ciphertext
    > of one row with an earlier valid ciphertext of that same row, and the MAC
-   > still verified. The row count did not change, and IDN-029 binds the
-   > ciphertext to the row but the table MAC did not read that binding. The
+   > still verifies. The row count does not change. IDN-029 binds the
+   > ciphertext to the row, but such a MAC does not read that binding. The
    > accumulator above reads the record tag of each live row, thus a
    > substitution and a per-row rollback each change `table_mac`.
    >
@@ -777,15 +860,15 @@ Thus five rules apply, and they apply to each table.
    > an attacker without the unlocked store cannot compute a `row_tag`, and it
    > cannot cancel one term against another.
    >
-   > *Cause of the derivation.* An earlier draft held `K_tab` in the platform
-   > keystore as an HMAC-SHA256 key with no user authentication, and it
-   > entangled `K_tab` with a secure-element key; the keystore of every v1
+   > *Cause of the derivation.* The alternative holds `K_tab` in the platform
+   > keystore as an HMAC-SHA256 key with no user authentication, entangled
+   > with a secure-element key. The keystore of every v1
    > platform does not hold an HMAC key that the table needs without a
-   > platform limit, thus the key moved into software. A client changes a
+   > platform limit, thus the key is in software. A client changes a
    > table only while it holds `K_store`, because each record key derives from
    > `K_store`.
    > Thus a key that derives from `K_store` gives the same detection against
-   > a party without the unlocked store. The MAC moves to HMAC-SHA3-256, which
+   > a party without the unlocked store. The MAC is HMAC-SHA3-256, which
    > is the MAC of Part 5, because a software key has no keystore limit on the
    > hash.
 4. **[IDN-036]** A client MUST update the table MAC at each commit batch. **[IDN-037]** A client MUST NOT
@@ -799,7 +882,18 @@ Thus five rules apply, and they apply to each table.
    read. A store of an earlier build holds no set MAC, and the client writes
    it at its next commit together with a mark in the local identity table. A
    client that holds that mark and finds no set MAC MUST treat the store as
-   a MAC mismatch under `IDN-039`.
+   a MAC mismatch under `IDN-039`. In a store of record version `0x02` the
+   set MAC takes the second form of rule 3. Its `table_id` is
+   `0x00 || 0x02`, it has no owner, and the `record_tag` of each table is
+   the first 16 bytes of the `table_mac` of that table. The client MUST write that set
+   MAC in each commit batch that changes a table, in the transaction of that
+   batch. Thus one table that a party puts back to an earlier state, with
+   its rows and its MAC row, fails at the unlock. Its `table_mac` is not the
+   one that the set MAC read. The form of the set MAC is also the mark of
+   the record version of the store (Part 14 `IMP-130`). A client finds the
+   version by the form under which the set MAC verifies, and it verifies
+   each table MAC under the form of that version alone. A store with a table
+   and no set MAC is a store of version `0x01`.
 
    > *Cause.* Each table MAC covers the rows of its own table. A party with
    > the file that deleted the MAC row of a table and each row of it left
@@ -840,7 +934,22 @@ because an enumeration omits the next table.
 > The MAC does **not** detect a rollback of the full database file. That
 > rollback restores a consistent `commit_counter` and a consistent `accum`
 > together. The platforms give no monotonic counter that survives a device
-> restore.
+> restore. The client compares `commit_counter` with no value outside the
+> file, thus the counter alone detects nothing. In a store of record version
+> `0x02` the set MAC of `IDN-193` reads the MAC of each table. Thus a
+> rollback of one table, or of each table but one, fails at the unlock. The
+> rollback that stays undetected is the one of each table together. A
+> store of record version `0x01` has no such binding, and one table of it
+> goes back with no detection until the pass of Part 14 `IMP-130` ends.
+>
+> A full file of record version `0x01` is a valid store to a build that
+> reads that version, and the owner column of that version is outside each
+> MAC. Thus the store does not detect a party that puts back a full file
+> from before the pass, with owner columns that it changed. The pass
+> then binds each row to the owner that the file names. Part 14 rule
+> `IMP-121` keeps the check of the owner in the plaintext for that case. A
+> party that puts back single rows or single MAC rows of version `0x01` in
+> a store of version `0x02` fails the unlock or the scan of `IDN-162`.
 >
 > The MAC detects a change by a party that cannot run code on the device. It
 > does not detect a change by a party that holds code execution while the
@@ -856,9 +965,8 @@ uncomfortable.
 The metadata-private group of messengers is Threema, Session, and SimpleX.
 Session restores an Account ID from a recovery phrase, and it restores no
 message history. Threema and SimpleX give self-custody only. A user of those
-two that did not export a backup in advance recovers nothing. This document
-found no published recovery rate for any of the three, and that absence is
-unverified. UMBRA does better and does not make an escrow.
+two that did not export a backup in advance recovers nothing. UMBRA gives a
+recovery path and does not make an escrow.
 
 ### 4.7.1 The Recovery Code
 
@@ -881,9 +989,9 @@ half.
 bytes `"umbra/v1/backup-salt"`, with `m` of exactly 64 MiB, with `t` of
 exactly 3, and with a parallelism of 1. Part 5 §5.11 holds the label.
 
-> *Cause of `IDN-177`.* An earlier draft named a salt and floors for `m` and
-> `t`, and it gave no value for any of them. A restore holds the code and
-> nothing else, thus each input of the KDF must be a constant. A fixed salt
+> *Cause of `IDN-177`.* A restore holds the code and nothing else, thus each
+> input of the KDF must be a constant. A floor for `m` or for `t` is not
+> sufficient. A fixed salt
 > gives an attacker no table across users, because the code carries 256
 > random bits and no dictionary covers it.
 
@@ -891,7 +999,8 @@ Recovery is a rare operation, and it can accept 365 ms or more. Thus the KDF is
 deliberately expensive.
 
 The client does **not** escrow the Recovery Code silently by default. The client
-makes the code locally and seals it under the platform keystore for use on the
+makes the code locally and keeps it in the local identity table of the
+encrypted store, under `K_store` of Part 14 §14.6.4, for use on the
 current device. The client exports the code on demand as the `RecoveryDigits`
 of §4.7.7, in grouped decimal digits. **[IDN-041]** The client MUST NOT
 export the code as 64 hexadecimal characters. That format has the worst
@@ -1001,8 +1110,8 @@ that table.
   client MUST reject a root whose `sealed` field does not open, and it MUST
   treat that epoch as empty.
 
-  > *Cause.* An earlier draft derived a handle and a write credential and gave
-  > the backup no read credential, no content key, no structure, and no relay.
+  > *Cause.* A handle and a write credential alone give
+  > a backup no read credential, no content key, no structure, and no relay.
   > A relay stores an opaque chunk under a chunk identifier, thus a backup
   > needs the shape of a chunk. The root is one chunk, and `BACKUP_ROOT_ENTRIES`
   > of 31 holds one full object and the 30 daily deltas of one
@@ -1063,10 +1172,11 @@ that table.
   that value to 180 days. **[IDN-074]** A revision MUST hold `BACKUP_LOOKBACK`
   weeks at or above `BACKUP_TTL`.
 
-  > *Cause.* An earlier draft set `BACKUP_LOOKBACK` to 8 weekly epochs and gave
-  > a backup object no retention value at all. A user that lost a device and
-  > restored 10 weeks later then computed no handle that names a stored object,
-  > and no rule made the relay hold that object. U10 needs 99 % of users to
+  > *Cause.* A short `BACKUP_LOOKBACK`, or a backup object with no retention
+  > value, fails a late restore. With 8 weekly epochs, a user that loses a
+  > device and restores 10 weeks later computes no handle that names a stored
+  > object. Without a retention value, no rule makes the relay hold that
+  > object. U10 needs 99 % of users to
   > recover the identity, the contacts, and the queue state. The two values
   > above give a user 180 days, and IDN-074 keeps them in agreement.
 
@@ -1078,7 +1188,7 @@ that table.
   relaxes that bound in a provisional directory. **[IDN-077]** A client
   MUST send a backup chunk on the separate connection of Part 12 §12.8.
 
-  > *Cause.* An earlier draft put a backup write in a scheduled `B0` cover slot.
+  > *Cause.* The alternative is a backup write in a scheduled `B0` cover slot.
   > Part 3 §3.6.2 gives a 2 h foreground day about 360 such slots, and Part 6
   > §6.9 gives a `B0` slot 390 bytes at L6. That ceiling is about 140 KB each
   > day, and the acknowledgments and the receipts of Part 3 §3.5.4 take part of
@@ -1114,7 +1224,7 @@ that table.
 - **[IDN-082]** A client MUST hold a full backup object no longer than
   `BACKUP_HISTORY_DAYS` of history. §4.8 sets that value to 45 days, which is
   the `MSG_TTL` of Part 3 §3.2.4 and the U10 target of §4.7.4.
-- The relay holds ciphertext under a key that the nonprofit has not held and
+- The relay holds ciphertext under a key that the project has not held and
   cannot derive. Legal process can compel the ciphertext blob and its random
   handle, but legal process cannot compel the Recovery Code.
 
@@ -1129,18 +1239,17 @@ of 3-of-5, and delivers the shares over **existing pairwise queues**.
 share. **[IDN-085]** A client MUST NOT put a value from which a party derives
 `C_user` in a share.
 
-> *Cause, and the goal that it protects.* An earlier draft split the full
-> Recovery Code. §4.7.1 derives `BackupRootKey` from that code, and §4.7.2
+> *Cause, and the goal that it protects.* The alternative is a split of the
+> full Recovery Code. §4.7.1 derives `BackupRootKey` from that code, and §4.7.2
 > derives `backup_handle_epoch` from `BackupRootKey`. Thus three share holders
-> reconstructed the code, computed the handle, fetched the object from the
-> relay, and opened it. That object holds the `RootIdentity`, the local identity
+> reconstruct the code, compute the handle, fetch the object from the
+> relay, and open it. That object holds the `RootIdentity`, the local identity
 > table, and the history. §5.2 of Part 5 states that the local identity table is
 > the one object that links the pairwise salts and the group roster seeds of a
 > user. Goal G9 of Part 2 §2.3 holds against
 > **colluding contacts**, thus three contacts that take an account defeat a
-> stated goal. The earlier text called the method graceful because the share
-> holders are authenticated contacts. That is a usability statement and it is
-> not a security argument.
+> stated goal. The share holders are authenticated contacts. That is a
+> usability statement and it is not a security argument.
 >
 > With the split, three share holders hold `C_social` and 128 bits of unknown
 > `C_user`. A recovery needs the two halves together.
@@ -1189,8 +1298,7 @@ The body is **36 bytes**. The `share` field is the payload of the
   new `set_id`, and the interface MUST show the holders of the current split
   alone.
 
-> *Cause.* An earlier draft said that the shares go over pairwise queues and
-> gave them no layout, thus no holder could tell a share from a message. The
+> *Cause.* Without a layout, no holder can tell a share from a message. The
 > return path is the screen of the holder, because the device of the owner is
 > the thing that was lost.
 
@@ -1245,8 +1353,8 @@ again.
 
 A user holds four secrets as digits. The root seed of `IDN-003`, the Recovery Code of §4.7.1, the user
 half `C_user` of §4.7.3, and a share of `C_social` of §4.7.3 are each a string
-of decimal digits. An earlier draft let two of them take a word list, and no
-value told a screen which secret the user typed. The encoding below tags each
+of decimal digits. Without a tag, no value tells a screen which secret the
+user typed. The encoding below tags each
 one, and a checksum catches a transcription error before a 3-second KDF runs.
 
 ```
@@ -1308,7 +1416,7 @@ decodes `type`, and knows the width.
 | `PALETTE_SIZE` | 12 (§4.2.5) |
 | `INVITE_TTL` | 14 days, measured by the relay from the store of the blob, and by the client from the issue (§4.3.1) |
 | `INVITE_RESERVE_TTL` | 600 s, the time that a relay holds a link identifier with no blob (Part 6 rule `WIR-508`) |
-| Invitation host | One host that the nonprofit operates, named at the release tag of the client (§4.3.1) |
+| Invitation host | One host that the project operates, named at the release tag of the client (§4.3.1) |
 
 > *The cause of `BACKUP_REPLICAS` of 2.* Part 12 §12.4 sets `REPLICAS` to 3 for
 > an attachment, because one relay outage then breaks a transfer that no party
@@ -1322,7 +1430,7 @@ decodes `type`, and knows the width.
 | Alternative | Cause of the rejection |
 | --- | --- |
 | **Phone-number identity** | This is the worst available decision. A phone number is a state-issued identifier with universal cross-reference. It forces a contact-discovery service that leaks the social graph. Researchers have shown enumeration attacks against such services many times. |
-| **No global identifier at all (pure SimpleX model)** | This model is stronger. But it removes the social layer that the owner needs, and it makes reconnection after the loss of a device almost impossible. UMBRA keeps this model as the *default* and adds the opt-in layer above it. |
+| **No global identifier at all (pure SimpleX model)** | This model is stronger. But it removes the discoverability of §4.1, and it makes reconnection after the loss of a device almost impossible. UMBRA keeps this model as the *default* and adds the opt-in layer above it. |
 | **One global account key (Session model)** | This model has the simplest UX. But the address becomes a permanent correlator across each contact and each relay. The address also selects deterministically which relays hold your inbox. |
-| **Blockchain naming** | The 2026 public-names answer of SimpleX needs a fork of the Ethereum Name Service on an Ethereum network, a wallet, and a self-hosted node stack. This document has not verified the RAM figure of about 32 GB for each operator. This design disobeys the KISS constraint and the no-token-economics rule. Part 9 gives a signed-record directory with a transparency log in place of it. |
+| **Blockchain naming** | The 2026 public-names answer of SimpleX needs a fork of the Ethereum Name Service on an Ethereum network, a wallet, and a self-hosted node stack. This design disobeys the KISS constraint and the no-token-economics rule. Part 9 gives a signed-record directory with a transparency log in place of it. |
 | **Provider-held key escrow or PIN recovery** | This design makes an account provider, a rate limiter, and a compellable recovery oracle. The relay-stored backup of UMBRA is different. The server holds only ciphertext under a Recovery Code that the user holds, and the handles rotate and stay unlinkable. |

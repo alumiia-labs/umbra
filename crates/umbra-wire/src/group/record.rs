@@ -226,7 +226,13 @@ impl<'a> ContentPlain<'a> {
                 Tags::Dense(r.take(usize::from(tag_count).saturating_mul(TAG_LEN))?)
             }
             0x02 => {
-                let mut entries = Vec::with_capacity(usize::from(tag_count));
+                // The remaining length bounds the count before any allocation
+                // (`WIR-006`).
+                let count = usize::from(tag_count);
+                if count.saturating_mul(2 + TAG_LEN) > r.remaining() {
+                    return Err(Error::Malformed);
+                }
+                let mut entries = Vec::with_capacity(count);
                 let mut last: Option<u16> = None;
                 for _ in 0..tag_count {
                     let index = r.u16()?;
@@ -406,7 +412,13 @@ impl<'a> EpochKeyBody<'a> {
         let slot_count = r.u16()?;
         let carrier = match carrier_byte {
             0x01 => {
-                let mut slots = Vec::with_capacity(usize::from(slot_count));
+                // The remaining length bounds the count before any allocation
+                // (`WIR-006`): no slot is shorter than the slot of a member.
+                let count = usize::from(slot_count);
+                if count.saturating_mul(slot_len(0)) > r.remaining() {
+                    return Err(Error::Malformed);
+                }
+                let mut slots = Vec::with_capacity(count);
                 let mut last: Option<u16> = None;
                 for _ in 0..slot_count {
                     let index = r.u16()?;
@@ -593,6 +605,22 @@ mod tests {
         assert!(ContentPlain::parse(&buf, |_| None).is_err());
         buf[10] = 0x03;
         assert!(ContentPlain::parse(&buf, |_| None).is_err());
+    }
+
+    #[test]
+    fn a_count_above_the_bytes_that_remain_is_rejected_before_an_allocation() {
+        // A sparse vector that names 65 535 entries in a B0 plaintext.
+        let mut buf = vec![0u8; Bucket::B0.content_plain()];
+        buf[10] = 0x02;
+        buf[11] = 0xFF;
+        buf[12] = 0xFF;
+        assert!(ContentPlain::parse(&buf, |_| None).is_err());
+        // An inline carrier that names 65 535 slots in a B0 body.
+        let mut buf = vec![0u8; Bucket::B0.group_body()];
+        buf[4] = 0x01;
+        buf[5] = 0xFF;
+        buf[6] = 0xFF;
+        assert!(EpochKeyBody::parse(&buf, |_| Some(0)).is_err());
     }
 
     #[test]

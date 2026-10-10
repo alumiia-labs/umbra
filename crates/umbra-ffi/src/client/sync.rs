@@ -208,6 +208,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for device in others {
             engine.add_peer(device)?;
         }
+        // DEV-275: a device that owns no channel has one peer, the device
+        // that owns them (`DEV-308`), and its Lamport counter follows that
+        // peer. A device that the owner links starts at zero, and the
+        // first record of the owner seeds it.
+        if !self.owns_channels()? {
+            let peers: Vec<DeviceId> = engine.peers().copied().collect();
+            if let [owner] = peers.as_slice() {
+                engine.set_owner(Some(*owner));
+            }
+        }
         // DEV-311: a new device takes the records of its link from the
         // snapshot, and the counter of the existing device starts there.
         if is_fresh {
@@ -836,9 +846,47 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         self.synced_out.remove(message)
     }
 
-    /// The next record for a sync channel.
+    /// The next record for a sync channel. A timed record that waited in
+    /// the queue goes with the period that remains now, and not with the
+    /// period of its publish (`DEV-243`). A push-wake session holds such a
+    /// record (`NET-097`).
     pub fn take_sync_send(&mut self) -> Option<SyncSend> {
-        self.sync_out.pop_front()
+        let mut send = self.sync_out.pop_front()?;
+        if let Ok(Some(app)) = self.timed_send_now(&send.app) {
+            zeroize::Zeroize::zeroize(&mut send.app);
+            send.app = app;
+        }
+        Some(send)
+    }
+
+    /// A queued send again under the period that remains now, when it is
+    /// a timed record whose deadline this device holds. The result is none
+    /// for each other record, as one that the owner of the channels relays
+    /// before its own store took the message.
+    fn timed_send_now(&mut self, app: &[u8]) -> Result<Option<Vec<u8>>, Error> {
+        let Ok(queued) = AppMessage::parse(app, umbra_wire::app::Channel::Pairwise) else {
+            return Ok(None);
+        };
+        let is_timed = queued.kind == AppKind::DeviceSet
+            && matches!(
+                SyncedRecord::parse(queued.body),
+                Ok(record) if record.context.expires_in > 0
+            );
+        if !is_timed {
+            return Ok(None);
+        }
+        let Some(body) = self.restamped(queued.body.to_vec(), unix_now())? else {
+            return Ok(None);
+        };
+        let record = AppMessage {
+            kind: AppKind::DeviceSet,
+            msg_id: queued.msg_id,
+            sent_at: queued.sent_at,
+            body: &body,
+        };
+        let mut out = vec![0u8; record.len()];
+        record.encode(&mut out)?;
+        Ok(Some(out))
     }
 
     /// Each sync acknowledgment that is due at `now` (`DEV-056`, `DEV-057`).
@@ -873,6 +921,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         };
         let channels: Vec<ConversationId> = self.peer_channels()?.into_values().collect();
         for channel in channels {
+            // DEV-313: the channel of a revoked device carries the epoch
+            // that revokes it, and no later one.
+            if self.is_leaving_channel(channel)? {
+                continue;
+            }
             self.queue_roster(channel, &roster, rng)?;
         }
         Ok(())
@@ -900,6 +953,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// peer takes a record once (`DEV-025`). The roster goes again too, since
     /// a control record takes no resend of its own.
     pub fn start_sync_resend<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<(), Error> {
+        // A new run can send the kept epochs to each channel again: the
+        // queue of the last run did not live through its end.
+        self.roster_chain_sent.clear();
         self.publish_roster(rng)?;
         let Some(mut engine) = self.sync_engine()? else {
             return Ok(());
@@ -930,6 +986,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         else {
             return Ok(());
         };
+        // The link can lose a kept epoch that went with the lost record.
+        // Thus the channel takes the kept epochs again at the next head of
+        // its peer.
+        self.roster_chain_sent.remove(&channel);
         if !engine.peers().any(|held| *held == peer) {
             return Ok(());
         }
@@ -966,11 +1026,22 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .map(|value| value.get(8..).map(<[u8]>::to_vec))
                 .unwrap_or_default();
             self.put_engine(&engine, None, rng)?;
-            if let Some(body) = body {
-                if let Some(body) = self.restamped(body, now)? {
-                    self.queue_sync(channel, &body, None, rng)?;
-                }
-            }
+            let body = match body {
+                Some(body) => self.restamped(body, now)?,
+                None => None,
+            };
+            // DEV-069: a counter whose body is gone for good, as that of a
+            // timed record whose period ended, goes as a void. The peer
+            // takes the counter, thus its acknowledgment point passes it
+            // and the later records wait for no second resend. A record
+            // that this device relays and does not hold itself yet is no
+            // such counter. A void in its place would take a live record
+            // from each other device.
+            let body = match body {
+                Some(body) => body,
+                None => engine.void(counter)?,
+            };
+            self.queue_sync(channel, &body, None, rng)?;
             return Ok(true);
         }
         self.put_engine(&engine, None, rng)?;
@@ -1067,8 +1138,49 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 Ok(Taken::Control {
                     control_type: ControlType::RosterEpoch,
                     payload,
-                }) if self.apply_roster(&payload, rng).unwrap_or(false) => {
-                    self.events.push_back(Event::Conversations);
+                }) => {
+                    if self
+                        .apply_roster_from(Some(*source), &payload, rng)
+                        .unwrap_or(false)
+                    {
+                        self.events.push_back(Event::Conversations);
+                        // DEV-257: a device that the epoch revokes gives
+                        // nothing more, the later bodies of this batch too.
+                        let revoked: Vec<DeviceId> = Roster::parse(&payload)?
+                            .revoked
+                            .iter()
+                            .filter(|device| engine.peers().any(|peer| peer == *device))
+                            .copied()
+                            .collect();
+                        for device in revoked {
+                            engine.remove_peer(&device);
+                        }
+                    } else {
+                        // DEV-229: the head of a peer that missed an epoch
+                        // is below the head here. That peer verifies the
+                        // head only through the epochs between. The channel
+                        // takes them once in a run for one head. Each epoch
+                        // of a chain that comes a second time is below the
+                        // head of its receiver too. An answer to each one
+                        // would start an answer to each epoch of that
+                        // answer, until the chain ends.
+                        let chain = self.roster_chain_after(&payload).unwrap_or_default();
+                        let head = chain
+                            .last()
+                            .and_then(|head| Roster::parse(head).ok())
+                            .map(|head| head.epoch);
+                        let is_sent = head.is_some_and(|head| {
+                            self.roster_chain_sent
+                                .get(&channel)
+                                .is_some_and(|sent| *sent >= head)
+                        });
+                        if let (Some(head), false) = (head, is_sent) {
+                            for epoch in chain {
+                                self.queue_roster(channel, &epoch, rng)?;
+                            }
+                            self.roster_chain_sent.insert(channel, head);
+                        }
+                    }
                 }
                 // DEV-238: the object of a peer waits for its fetch.
                 Ok(Taken::Control {
@@ -1185,6 +1297,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// A body for a resend at `now`: a timed record carries the period that
     /// remains then (`DEV-243`), and one whose period ended goes nowhere.
+    ///
+    /// The result is none only for a period that ended. The device that
+    /// owns the channels relays a record of a conversation that it does not
+    /// hold yet (`DEV-294`). It also relays a record that its own store did
+    /// not take yet. Such a record is live. It goes with the period of the
+    /// deadline that the device keeps for it, or as the store holds it when
+    /// the device keeps none. The peer then counts the period from the
+    /// resend, which is late by the wait and loses no record.
     pub(super) fn restamped(
         &mut self,
         mut body: Vec<u8>,
@@ -1196,15 +1316,39 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
             _ => return Ok(Some(body)),
         };
-        let Some(conversation) = self.conversation_of_subject(&subject)? else {
-            return Ok(None);
+        let deadline = match self.conversation_of_subject(&subject)? {
+            Some(conversation) => match self.expires_in_of(conversation, &inner, now)? {
+                0 => None,
+                expires_in => Some(expires_in),
+            },
+            // DEV-294: the record waits for its identity entry, with its
+            // deadline. A period that ended there is one that ended.
+            None => match self.held_pairwise_deadline(&subject, &inner)? {
+                Some(at) if at <= now => return Ok(None),
+                Some(at) => Some(u32::try_from(at.saturating_sub(now)).unwrap_or(u32::MAX)),
+                None => None,
+            },
         };
-        let expires_in = self.expires_in_of(conversation, &inner, now)?;
-        if expires_in == 0 {
-            return Ok(None);
+        if let Some(expires_in) = deadline {
+            restamp_expires_in(&mut body, expires_in)?;
         }
-        restamp_expires_in(&mut body, expires_in)?;
         Ok(Some(body))
+    }
+
+    /// The deadline of a timed record that waits for the identity entry of
+    /// its conversation, or none for a record that does not wait there.
+    fn held_pairwise_deadline(&self, subject: &[u8; 32], app: &[u8]) -> Result<Option<u64>, Error> {
+        let store = &self.open_ref()?.store;
+        let digest = umbra_crypto::hash::sha3_256(&[subject.as_slice(), app]);
+        let row = store.row_id(PAIRWISE_HELD, &digest);
+        Ok(store
+            .get(PAIRWISE_HELD, &row)?
+            .map(Zeroizing::new)
+            .and_then(|plain| {
+                let at: [u8; 8] = plain.get(40..48)?.try_into().ok()?;
+                Some(u64::from_be_bytes(at))
+            })
+            .filter(|at| *at != 0))
     }
 
     /// Drops the body of each timed record whose period ended, thus no
@@ -1216,29 +1360,32 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut gone = Vec::new();
         for (row, value) in self.open_ref()?.store.list(SYNC_SENT, None)? {
             let value = Zeroizing::new(value);
-            let Some(Ok(record)) = value.get(8..).map(SyncedRecord::parse) else {
+            let Some(body) = value.get(8..) else {
                 continue;
             };
-            if record.context.expires_in == 0 {
-                continue;
-            }
-            let Some(conversation) = self.conversation_of_subject(&record.origin.subject)? else {
-                continue;
-            };
-            let channel = if record.origin.scope == SCOPE_GROUP {
-                umbra_wire::app::Channel::Group
-            } else {
-                umbra_wire::app::Channel::Pairwise
-            };
-            let Ok(parsed) = AppMessage::parse(record.inner, channel) else {
-                continue;
-            };
-            let open = self.open_ref()?;
-            let reference = super::msg_ref(&open.device_set_key, &parsed.msg_id);
-            let natural = [conversation.0.as_slice(), &reference].concat();
-            let message = MsgRef(open.store.row_id(TableId::MESSAGE, &natural));
-            if due.contains(&(conversation, message)) {
+            if self
+                .timed_message_of(body)?
+                .is_some_and(|message| due.contains(&message))
+            {
                 gone.push(row);
+            }
+        }
+        // DEV-243: a copy that still waits for its send goes nowhere after
+        // the period, as one that a push-wake session held. The peer would
+        // keep it for the full period again.
+        for mut send in core::mem::take(&mut self.sync_out) {
+            let ended = match AppMessage::parse(&send.app, umbra_wire::app::Channel::Pairwise) {
+                Ok(queued) if queued.kind == AppKind::DeviceSet => self
+                    .timed_message_of(queued.body)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|message| due.contains(&message)),
+                _ => false,
+            };
+            if ended {
+                zeroize::Zeroize::zeroize(&mut send.app);
+            } else {
+                self.sync_out.push_back(send);
             }
         }
         let open = self.open_mut()?;
@@ -1247,6 +1394,33 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             batch.delete(SYNC_SENT, row);
         }
         Ok(batch.commit()?)
+    }
+
+    /// The conversation and the message of a sync body, when the body is a
+    /// timed record of a conversation that this device holds.
+    fn timed_message_of(&mut self, body: &[u8]) -> Result<Option<(ConversationId, MsgRef)>, Error> {
+        let Ok(record) = SyncedRecord::parse(body) else {
+            return Ok(None);
+        };
+        if record.context.expires_in == 0 {
+            return Ok(None);
+        }
+        let Some(conversation) = self.conversation_of_subject(&record.origin.subject)? else {
+            return Ok(None);
+        };
+        let channel = if record.origin.scope == SCOPE_GROUP {
+            umbra_wire::app::Channel::Group
+        } else {
+            umbra_wire::app::Channel::Pairwise
+        };
+        let Ok(parsed) = AppMessage::parse(record.inner, channel) else {
+            return Ok(None);
+        };
+        let open = self.open_ref()?;
+        let reference = super::msg_ref(&open.device_set_key, &parsed.msg_id);
+        let natural = [conversation.0.as_slice(), &reference].concat();
+        let message = MsgRef(open.store.row_id(TableId::MESSAGE, &natural));
+        Ok(Some((conversation, message)))
     }
 
     /// Drops the body of each record that each peer acknowledged.

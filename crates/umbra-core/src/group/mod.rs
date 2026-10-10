@@ -59,6 +59,16 @@ pub const GROUP_EPOCH_RATE: u32 = 6;
 pub const GRANT_RATE_INTERVAL: u64 = 300;
 /// `GRANT_RATE`, the long bound: this many granting epochs in one day.
 pub const GRANT_RATE_DAY: u32 = 4;
+/// The epochs of one member in one slot: `ROSTER_RATE_LIMIT` over
+/// `GROUP_SLOT` (`GRP-076`).
+pub const ROSTER_SLOT_RATE: u32 = 60;
+/// The epochs of one group in one slot: `GROUP_EPOCH_RATE` over
+/// `GROUP_SLOT` (`GRP-076`).
+pub const GROUP_SLOT_RATE: u32 = 360;
+/// The slots of one day, over which `GRANT_RATE` and `REKEY_RATE` count.
+pub const RATE_DAY_SLOTS: u32 = 24;
+/// `REKEY_RATE`: this many re-keys of one member in one day.
+pub const REKEY_RATE_DAY: u32 = 4;
 /// `KEY_REQUEST_RATE`, epoch requests for one group in one day.
 pub const KEY_REQUEST_RATE: u32 = 8;
 /// `POLL_GROUP_MAX`.

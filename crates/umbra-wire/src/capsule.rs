@@ -73,6 +73,39 @@ impl CapsuleType {
     }
 }
 
+/// The two ends of a link, for the capsules that one kind of link carries
+/// alone (`WIR-538`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Link {
+    /// A client at one end: the link as its relay sees it, and as the
+    /// client sees it.
+    Client,
+    /// A relay at each end.
+    Relays,
+}
+
+impl CapsuleType {
+    /// Whether a link of this kind carries the capsule. An `UMBRA_RECEIPT`
+    /// and an `UMBRA_RELAY_HELLO` pass between two relays, and no client
+    /// sends one or takes one (`WIR-538`).
+    pub const fn passes_on(self, link: Link) -> bool {
+        !matches!(
+            (self, link),
+            (CapsuleType::Receipt | CapsuleType::RelayHello, Link::Client)
+        )
+    }
+}
+
+/// As [`parse`], for a party that knows the two ends of its link: it rejects
+/// a capsule that the link does not carry (`WIR-538`).
+pub fn parse_on(bytes: &[u8], link: Link) -> Result<(CapsuleType, &[u8], usize), Error> {
+    let (kind, value, used) = parse(bytes)?;
+    if !kind.passes_on(link) {
+        return Err(Error::Malformed);
+    }
+    Ok((kind, value, used))
+}
+
 /// Writes one capsule and returns its length.
 pub fn encode(kind: CapsuleType, value: &[u8], out: &mut [u8]) -> Result<usize, Error> {
     check_value_len(kind, value.len())?;
@@ -185,10 +218,36 @@ mod tests {
         let frame = vec![5u8; 524];
         let mut out = vec![0u8; 530];
         encode(CapsuleType::Cell, &frame, &mut out).unwrap();
-        // A type of 0x0B54.
+        // A type of 0x0B59, the first value that WIR-218 does not allocate.
         let mut bad = out.clone();
-        bad[1] = 0x54;
+        bad[1] = 0x59;
         assert!(parse(&bad).is_err());
+        // 0x0B54 to 0x0B58 are allocated: each one parses at its length.
+        for (kind, len) in [
+            (CapsuleType::Replica, REPLICA_LEN),
+            (CapsuleType::Deposit, DEPOSIT_LEN),
+            (CapsuleType::Challenge, CHALLENGE_LEN),
+            (CapsuleType::Receipt, RECEIPT_LEN),
+            (CapsuleType::RelayHello, RELAY_HELLO_LEN),
+        ] {
+            let mut held = vec![0u8; HEADER_LEN + len];
+            encode(kind, &vec![0u8; len], &mut held).unwrap();
+            assert_eq!(parse(&held).unwrap().0, kind);
+        }
+        // WIR-538: a receipt and a relay hello, each of its correct length,
+        // at a relay on a client link and at a client. The same two pass on
+        // a link between two relays.
+        for (kind, len) in [
+            (CapsuleType::Receipt, RECEIPT_LEN),
+            (CapsuleType::RelayHello, RELAY_HELLO_LEN),
+        ] {
+            let mut held = vec![0u8; HEADER_LEN + len];
+            encode(kind, &vec![0u8; len], &mut held).unwrap();
+            assert!(parse_on(&held, Link::Client).is_err());
+            assert_eq!(parse_on(&held, Link::Relays).unwrap().0, kind);
+        }
+        // Each other capsule passes on a client link.
+        assert_eq!(parse_on(&out, Link::Client).unwrap().0, CapsuleType::Cell);
         // A type in the 4-byte form.
         let mut bad = vec![0x80, 0x00, 0x0B, 0x52];
         bad.extend_from_slice(&out[2..]);

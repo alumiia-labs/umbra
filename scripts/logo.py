@@ -9,8 +9,8 @@ from the bubble. Each number of that construction is a constant below, and
 each file in brand/ and each Android drawable of the logo comes from them,
 thus a change is made here and never in an output file.
 
-The mark is one colour. It is one <path> with two subpaths, the bubble and
-the rim, thus `currentColor` colours all of it.
+The mark is one color. It is one <path> with two subpaths, the bubble and
+the rim, thus `currentColor` colors all of it.
 
 The wordmark is UMBRA in Jost (SIL Open Font License 1.1) at weight 500,
 turned into outlines, thus no output file needs the font. The script fetches
@@ -42,7 +42,7 @@ FONT_URL = ("https://raw.githubusercontent.com/google/fonts/"
 FONT_SHA256 = "6343b70971000b04c5d401c96ae08ce371086135e999d5e1e1413039c0213076"
 FONT_CACHE = ROOT / "target/brand/Jost.ttf"
 
-# The colours of Theme.kt (light), and the dark ground of the mockups.
+# The colors of Theme.kt (light), and the dark ground.
 GREEN, SURFACE, INK = "#285C43", "#F7F8F2", "#202B25"
 MINT, CHARCOAL, SOFT = "#B5DDC4", "#121715", "#E4EAE5"
 
@@ -122,13 +122,13 @@ class Mark:
         xs, ys = [p[0] for p in pts], [p[1] for p in pts]
         return min(xs), min(ys), max(xs), max(ys)
 
-    def centre(self):
+    def center(self):
         x0, y0, x1, y1 = self.box()
         return (x0 + x1) / 2, (y0 + y1) / 2
 
     def reach(self):
-        """The distance from the centre of the box to the farthest edge point."""
-        c = self.centre()
+        """The distance from the center of the box to the farthest edge point."""
+        c = self.center()
         return max(math.dist(c, p) for p in self.outline())
 
     def path(self, offset=(0.0, 0.0), scale=1.0):
@@ -156,10 +156,10 @@ class Mark:
         return bubble + rim
 
     def placed(self, size, extent):
-        """The path with the box centred in `size` and its larger side `extent` long."""
+        """The path with the box centerd in `size` and its larger side `extent` long."""
         x0, y0, x1, y1 = self.box()
         s = extent / max(x1 - x0, y1 - y0)
-        c = self.centre()
+        c = self.center()
         return self.path((size / 2 - s * c[0], size / 2 - s * c[1]), s)
 
 
@@ -203,6 +203,83 @@ def svg(view_box, body, css=None):
             f'role="img" aria-label="UMBRA"><title>UMBRA</title>{style}{body}</svg>\n')
 
 
+def no_arcs(d):
+    """The path `d` with each arc as cubic curves.
+
+    SVG Tiny 1.2 has no arc command. The paths of the mark hold `M`, `A`,
+    `H`, and `Z` alone, in absolute coordinates, and each arc is a part of a
+    circle. One curve covers a quarter turn at most, thus the error is below
+    0.03 % of the radius.
+    """
+    import re
+    tokens = re.findall(r"[MAHZ]|-?[0-9]*[.]?[0-9]+", d)
+    out, at, i = [], (0.0, 0.0), 0
+    while i < len(tokens):
+        cmd = tokens[i]
+        i += 1
+        if cmd == "M":
+            at = (float(tokens[i]), float(tokens[i + 1]))
+            i += 2
+            out.append(f"M{num(at[0])} {num(at[1])}")
+        elif cmd == "H":
+            at = (float(tokens[i]), at[1])
+            i += 1
+            out.append(f"H{num(at[0])}")
+        elif cmd == "Z":
+            out.append("Z")
+        elif cmd == "A":
+            rx, ry, _turn, large, sweep, x, y = (float(t) for t in tokens[i:i + 7])
+            i += 7
+            if abs(rx - ry) > 1e-9:
+                raise ValueError("an arc of the mark is a part of a circle")
+            # The center, from the two ends (SVG 1.1 appendix F.6.5).
+            (x0, y0), r = at, rx
+            mx, my = (x0 - x) / 2, (y0 - y) / 2
+            reach = math.hypot(mx, my)
+            r = max(r, reach)
+            h = math.sqrt(max(r * r - reach * reach, 0.0)) / reach
+            side = -1.0 if large == sweep else 1.0
+            cx = (x0 + x) / 2 + side * h * my
+            cy = (y0 + y) / 2 - side * h * mx
+            a0 = math.atan2(y0 - cy, x0 - cx)
+            a1 = math.atan2(y - cy, x - cx)
+            turn = a1 - a0
+            if sweep and turn < 0:
+                turn += 2 * math.pi
+            if not sweep and turn > 0:
+                turn -= 2 * math.pi
+            parts = max(1, math.ceil(abs(turn) / (math.pi / 2) - 1e-9))
+            step = turn / parts
+            k = 4 / 3 * math.tan(step / 4)
+            for n in range(parts):
+                b0, b1 = a0 + n * step, a0 + (n + 1) * step
+                p1 = (cx + r * (math.cos(b0) - k * math.sin(b0)),
+                      cy + r * (math.sin(b0) + k * math.cos(b0)))
+                p2 = (cx + r * (math.cos(b1) + k * math.sin(b1)),
+                      cy + r * (math.sin(b1) - k * math.cos(b1)))
+                end = (x, y) if n == parts - 1 else (cx + r * math.cos(b1),
+                                                     cy + r * math.sin(b1))
+                out.append("C" + " ".join(num(v) for v in (*p1, *p2, *end)))
+            at = (x, y)
+        else:
+            raise ValueError(f"a number with no command in a path: {cmd}")
+    return "".join(out)
+
+
+def svg_tiny_ps(view_box, body):
+    """SVG Tiny Portable/Secure, the profile that BIMI takes for a mail logo.
+
+    The profile wants the version and the base profile on the root, a title,
+    and a square canvas with a solid ground. It permits no script, style sheet,
+    outside reference, or attribute outside SVG Tiny 1.2 (thus no `role`). A
+    path of the body holds no arc: `no_arcs` gives the curves.
+    """
+    return ('<?xml version="1.0" encoding="UTF-8"?>\n'
+            f'<svg xmlns="http://www.w3.org/2000/svg" version="1.2" '
+            f'baseProfile="tiny-ps" viewBox="{view_box}">'
+            f'<title>UMBRA</title>{body}</svg>\n')
+
+
 RES = "android/app/src/main/res"
 
 
@@ -231,7 +308,7 @@ def adaptive():
 
 
 def auto_css(mark, word=None):
-    """Colours that follow the colour scheme of the page that shows the file."""
+    """Colors that follow the color scheme of the page that shows the file."""
     light = f".mark{{fill:{mark[0]}}}" + (f".word{{fill:{word[0]}}}" if word else "")
     dark = f".mark{{fill:{mark[1]}}}" + (f".word{{fill:{word[1]}}}" if word else "")
     return f"{light}@media (prefers-color-scheme:dark){{{dark}}}"
@@ -241,7 +318,7 @@ def outputs():
     files = {}
     mark = Mark()
 
-    # The mark alone: its box centred in a 100-unit square, 90 units on
+    # The mark alone: its box centerd in a 100-unit square, 90 units on
     # its larger side.
     d = mark.placed(100, 90)
     files["brand/umbra-mark.svg"] = svg("0 0 100 100", f'<path fill="currentColor" d="{d}"/>')
@@ -250,12 +327,12 @@ def outputs():
     files["brand/umbra-mark-auto.svg"] = svg(
         "0 0 100 100", f'<path class="mark" d="{d}"/>', auto_css((GREEN, MINT)))
 
-    # The small mark, for 24 px and less, with colours that follow the page.
+    # The small mark, for 24 px and less, with colors that follow the page.
     small = Mark(**SMALL).placed(100, 94)
     files["brand/umbra-favicon.svg"] = svg(
         "0 0 100 100", f'<path class="mark" d="{small}"/>', auto_css((GREEN, MINT)))
 
-    # The lockup. The mark is 1.5 cap heights tall, the centre of its box
+    # The lockup. The mark is 1.5 cap heights tall, the center of its box
     # sits on the middle of the caps, and 0.6 cap heights separate it from
     # the U.
     cap = 30.0
@@ -283,7 +360,7 @@ def outputs():
         f"{num(wl)} 0 {num(wr - wl)} {num(cap)}", f'<path fill="currentColor" d="{wd}"/>')
 
     # The app icon on the 108-unit canvas of an Android adaptive icon. No
-    # point of the mark lies farther than 31 units from the centre, inside
+    # point of the mark lies farther than 31 units from the center, inside
     # the 33-unit safe zone, thus no launcher mask cuts it.
     x0, y0, x1, y1 = mark.box()
     extent = 31 / mark.reach() * max(x1 - x0, y1 - y0)
@@ -295,10 +372,21 @@ def outputs():
         files[f"brand/{name}"] = svg(
             "0 0 108 108",
             f'<rect width="108" height="108"{corner} fill="{bg}"/><path fill="{fg}" d="{icon}"/>')
+    # The mail logo of BIMI: the square tile, which a mail client crops to a
+    # circle. The mark lies inside the safe zone, thus the crop cuts none.
+    files["brand/umbra-app-icon-tiny-ps.svg"] = svg_tiny_ps(
+        "0 0 108 108",
+        f'<rect width="108" height="108" fill="{GREEN}"/>'
+        f'<path fill="{SURFACE}" d="{no_arcs(icon)}"/>')
+
+    # The web site of the domain (site/README.md) serves two of the files
+    # above: the mail logo, and the mark on the tile of each page.
+    files["site/public/bimi/logo.svg"] = files["brand/umbra-app-icon-tiny-ps.svg"]
+    files["site/public/mark.svg"] = files["brand/umbra-mark-light.svg"]
 
     # The Android app. A launcher shows about 72 of the 108 units and masks
     # them to its own shape, and the mark at the edge of the safe zone then
-    # fills that shape. The launcher layers reach 24 units from the centre,
+    # fills that shape. The launcher layers reach 24 units from the center,
     # the size of the content of an icon of the platform. The splash icon
     # of Android 12 sits on a 288-unit canvas in a circle of 192 units, and
     # its mark reaches 64 units for the same margin. The notification icon

@@ -29,6 +29,11 @@ const HASH_LEN: usize = 48;
 pub const SALT_LEN: usize = 48;
 /// The public exponent, which is fixed at 65 537.
 const EXPONENT: u32 = 65_537;
+/// The bit length of the public exponent.
+const EXPONENT_BITS: u32 = 17;
+/// The draws of a blind before the generator counts as failed. Each draw
+/// fails with a probability below one half.
+const BLIND_DRAWS: usize = 128;
 /// The limbs of the UMBRA modulus.
 pub const LIMBS_2048: usize = U2048::LIMBS;
 /// The modulus and signature length of the UMBRA key, in bytes.
@@ -81,8 +86,10 @@ impl<const LIMBS: usize> PublicKey<LIMBS> {
 
     /// `RSAVP1`: `x^e mod n`.
     fn public_op(&self, x: &Uint<LIMBS>) -> Uint<LIMBS> {
+        // The exponent is public and 17 bits long, thus the ladder runs over
+        // 17 bits and not over the width of the modulus.
         self.form(x)
-            .pow(&Uint::<LIMBS>::from_u32(EXPONENT))
+            .pow_bounded_exp(&Uint::<LIMBS>::from_u32(EXPONENT), EXPONENT_BITS)
             .retrieve()
     }
 
@@ -156,6 +163,8 @@ mod keygen {
     use rand_core::{TryCryptoRng, TryRng};
     use sha3::Sha3_256;
 
+    use zeroize::Zeroize;
+
     use super::{Error, NonZero, SecretKey, Uint, EXPONENT, LIMBS_2048, U2048};
     use crate::{labels, secret::Secret};
 
@@ -209,31 +218,43 @@ mod keygen {
                 .map_err(|_| Error::Key)?;
             outer.update(labels::ISSUER_RSA);
             outer.update(context);
-            let key = outer.finalize().into_bytes();
-            let mac = <Hmac<Sha3_256> as KeyInit>::new_from_slice(&key).map_err(|_| Error::Key)?;
+            let mut key = outer.finalize().into_bytes();
+            let mac = <Hmac<Sha3_256> as KeyInit>::new_from_slice(&key);
+            key.zeroize();
+            let mac = mac.map_err(|_| Error::Key)?;
             let mut stream = SeedStream { mac, counter: 0 };
             let e = U2048::from_u32(EXPONENT);
             loop {
-                let p: U1024 = random_prime(&mut stream, Flavor::Any, 1_024);
-                let q: U1024 = random_prime(&mut stream, Flavor::Any, 1_024);
-                if p == q {
-                    continue;
-                }
+                let mut p: U1024 = random_prime(&mut stream, Flavor::Any, 1_024);
+                let mut q: U1024 = random_prime(&mut stream, Flavor::Any, 1_024);
                 let n: U2048 = p.concatenating_mul(&q);
-                if n.bits() != 2_048 {
-                    continue;
-                }
-                let phi: U2048 = p
+                let mut phi: U2048 = p
                     .wrapping_sub(&U1024::ONE)
                     .concatenating_mul(&q.wrapping_sub(&U1024::ONE));
-                let Some(phi) = Option::<NonZero<Uint<LIMBS_2048>>>::from(NonZero::new(phi)) else {
+                let distinct = p != q;
+                // The primes and the order go at each turn of the loop,
+                // the turn that returns among them.
+                p.zeroize();
+                q.zeroize();
+                let order = Option::<NonZero<Uint<LIMBS_2048>>>::from(NonZero::new(phi));
+                phi.zeroize();
+                if !distinct || n.bits() != 2_048 {
+                    continue;
+                }
+                let Some(mut order) = order else {
                     continue;
                 };
                 // 65 537 must have an inverse modulo the order.
-                let Some(d) = Option::<U2048>::from(e.invert_mod(&phi)) else {
+                let inverse = Option::<U2048>::from(e.invert_mod(&order));
+                order.zeroize();
+                let Some(mut d) = inverse else {
                     continue;
                 };
-                return Self::from_parts(n.to_be_bytes().as_ref(), d.to_be_bytes().as_ref());
+                let mut d_bytes = d.to_be_bytes();
+                d.zeroize();
+                let key = Self::from_parts(n.to_be_bytes().as_ref(), d_bytes.as_ref());
+                d_bytes.as_mut().zeroize();
+                return key;
             }
         }
     }
@@ -338,6 +359,11 @@ pub fn blind_with<const LIMBS: usize>(
 ) -> Result<(Vec<u8>, BlindInverse<LIMBS>), Error> {
     let em = pss_encode(msg, salt, PublicKey::<LIMBS>::MODULUS_LEN);
     let m = pk.os2ip(&em)?;
+    // RFC 9474 §4.2 step 4: the encoded message is coprime to `n`. A value
+    // that is not would give a factor of `n`.
+    if !bool::from(m.invert_mod(&pk.n).is_some()) {
+        return Err(Error::Signature);
+    }
     let inverse = Option::from(r.invert_mod(&pk.n)).ok_or(Error::Rng)?;
     let x = pk.public_op(r);
     let z = (pk.form(&m) * pk.form(&x)).retrieve();
@@ -353,12 +379,16 @@ pub fn blind<const LIMBS: usize, R: TryCryptoRng + ?Sized>(
 ) -> Result<(Vec<u8>, BlindInverse<LIMBS>), Error> {
     let mut salt = [0u8; SALT_LEN];
     rng.try_fill_bytes(&mut salt).map_err(|_| Error::Rng)?;
-    for _ in 0..8 {
+    // `random_integer_uniform(1, n)` by rejection. A reduction modulo `n`
+    // would favor the low values, and the issuer could then tell a true
+    // blind from a false one. The top bit of `n` is set, thus a draw passes
+    // with a probability above one half.
+    for _ in 0..BLIND_DRAWS {
         let mut bytes = alloc::vec![0u8; PublicKey::<LIMBS>::MODULUS_LEN];
         rng.try_fill_bytes(&mut bytes).map_err(|_| Error::Rng)?;
-        let mut r = Uint::<LIMBS>::from_be_slice(&bytes).rem(&pk.n);
+        let mut r = Uint::<LIMBS>::from_be_slice(&bytes);
         bytes.zeroize();
-        if bool::from(r.is_nonzero()) {
+        if pk.below_modulus(&r) && bool::from(r.is_nonzero()) {
             if let Ok(out) = blind_with(pk, msg, &salt, &r) {
                 r.zeroize();
                 return Ok(out);
@@ -383,7 +413,7 @@ pub fn finalize<const LIMBS: usize>(
     Ok(sig)
 }
 
-/// `RSASSA-PSS-VERIFY` with a zero-length salt.
+/// `RSASSA-PSS-VERIFY` with the 48-byte salt of the variant.
 pub fn verify<const LIMBS: usize>(
     pk: &PublicKey<LIMBS>,
     msg: &[u8],

@@ -66,13 +66,24 @@
     mode: "0640"
   notify: Restart umbra-relay
 
-- name: "The descriptor of {{ relay.name }} is signed"
-  ansible.builtin.command:
-    cmd: >-
-      /usr/local/bin/umbra-relay sign-descriptor
-      /etc/umbra/relays/{{ relay.name }}/relay.conf
-      /var/lib/umbra-relay/{{ relay.name }}/relay.desc
-  changed_when: false
+# Each signature differs, and a manifest with another descriptor has another
+# root. An hour takes one root (Part 10 `REL-160`). Thus the relay signs
+# only when it has no descriptor, or when its settings file is newer than
+# the descriptor.
+- name: "The relay {{ relay.name }} signs its descriptor when its settings changed"
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      conf=/etc/umbra/relays/{{ relay.name }}/relay.conf
+      desc=/var/lib/umbra-relay/{{ relay.name }}/relay.desc
+      if [ -s "$desc" ] && [ ! "$conf" -nt "$desc" ]; then
+          exit 0
+      fi
+      /usr/local/bin/umbra-relay sign-descriptor "$conf" "$desc.part"
+      mv "$desc.part" "$desc"
+      echo signed
+  register: umbra_descriptor
+  changed_when: "'signed' in umbra_descriptor.stdout"
 
 - name: "The descriptor of {{ relay.name }} goes to this machine, for the signer"
   ansible.builtin.fetch:

@@ -1,0 +1,17 @@
+{
+  // The web site of the domain: static files alone, and no Worker script.
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "umbrachat-app-site",
+  "compatibility_date": "2026-10-09",
+  "assets": {
+    "directory": "./public",
+    // `/i` serves `i.html`, and `/i.html` moves to `/i`.
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "404-page"
+  },
+  "routes": [
+    { "pattern": "umbrachat.app", "custom_domain": true }
+  ],
+  // The site holds no visitor data, and it writes none.
+  "observability": { "enabled": false }
+}

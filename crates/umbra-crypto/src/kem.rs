@@ -16,7 +16,14 @@ use rand_core::CryptoRng;
 use sha3::{Digest, Sha3_256};
 use x25519_dalek::{EphemeralSecret, StaticSecret};
 
+use zeroize::Zeroize;
+
 use crate::{labels, secret::Secret, Error};
+
+/// A public scalar for the low-order test of a decoded `pk_X`. Its value has
+/// no weight: the clamp clears the cofactor, thus a point of low order gives
+/// zero under each scalar.
+const LOW_ORDER_PROBE: [u8; 32] = [0x42; 32];
 
 /// Size of an encoded public key: `pk_X || pk_M`.
 pub const PUBLIC_KEY_LEN: usize = 32 + 1184;
@@ -54,10 +61,17 @@ impl PublicKey {
         let x: [u8; 32] = x.try_into().map_err(|_| Error::Length)?;
         let m: Key<EncapsulationKey<MlKem768>> = Array::try_from(m).map_err(|_| Error::Length)?;
         let m = EncapsulationKey::<MlKem768>::new(&m).map_err(|_| Error::Key)?;
-        Ok(Self {
-            x: x25519_dalek::PublicKey::from(x),
-            m,
-        })
+        let x = x25519_dalek::PublicKey::from(x);
+        // A point of low order gives the all-zero output under each clamped
+        // scalar. The hybrid would then rest on ML-KEM alone with no error
+        // at the encapsulation (`CRY-014`). The key fails here.
+        if !StaticSecret::from(LOW_ORDER_PROBE)
+            .diffie_hellman(&x)
+            .was_contributory()
+        {
+            return Err(Error::Key);
+        }
+        Ok(Self { x, m })
     }
 }
 
@@ -78,7 +92,10 @@ impl KeyPair {
         let mut dz = [0u8; 64];
         rng.fill_bytes(&mut dz);
         let kp = Self::from_seeds(Secret::new(x), Secret::new(dz));
-        Self::wipe(x, dz);
+        // The arrays are `Copy`, thus the wipe is of these two and not of
+        // an argument.
+        x.zeroize();
+        dz.zeroize();
         kp
     }
 
@@ -86,8 +103,10 @@ impl KeyPair {
     /// `d || z`, as the key hierarchy of Part 5 §5.2 does. `x` is clamped
     /// here, before its first use (`CRY-120`).
     pub fn from_seeds(x: Secret<32>, dz: Secret<64>) -> Self {
-        let x_sk = StaticSecret::from(clamp(*x.expose()));
-        let m_dk = DecapsulationKey::<MlKem768>::from_seed(Seed::from(*dz.expose()));
+        let x_sk = scalar_of(x.expose());
+        let mut seed = Seed::from(*dz.expose());
+        let m_dk = DecapsulationKey::<MlKem768>::from_seed(seed);
+        seed.zeroize();
         let pk = PublicKey {
             x: x25519_dalek::PublicKey::from(&x_sk),
             m: m_dk.encapsulation_key().clone(),
@@ -126,14 +145,10 @@ impl KeyPair {
             return Err(Error::Kem);
         }
         let ct_m: MlCiphertext<MlKem768> = Array::try_from(ct_m).map_err(|_| Error::Kem)?;
-        let ss_m = self.m_dk.decapsulate(&ct_m);
-        Ok(combine(&ss_m, ss_x.as_bytes(), &ct_m, &pub_x, &self.pk))
-    }
-
-    fn wipe(mut x: [u8; 32], mut dz: [u8; 64]) {
-        use zeroize::Zeroize;
-        x.zeroize();
-        dz.zeroize();
+        let mut ss_m = self.m_dk.decapsulate(&ct_m);
+        let ss = combine(&ss_m, ss_x.as_bytes(), &ct_m, &pub_x, &self.pk);
+        ss_m.zeroize();
+        Ok(ss)
     }
 }
 
@@ -171,8 +186,10 @@ pub fn encapsulate<R: CryptoRng + ?Sized>(
     let ek_x = EphemeralSecret::random_from_rng(rng);
     let pub_x = x25519_dalek::PublicKey::from(&ek_x);
     let ss_x = ek_x.diffie_hellman(&pk.x);
-    let (ct_m, ss_m) = pk.m.encapsulate_with_rng(rng);
-    finish(pk, pub_x, ss_x.as_bytes(), ct_m, &ss_m)
+    let (ct_m, mut ss_m) = pk.m.encapsulate_with_rng(rng);
+    let out = finish(pk, pub_x, ss_x.as_bytes(), ct_m, &ss_m);
+    ss_m.zeroize();
+    out
 }
 
 /// Encapsulates with the X25519 scalar `ek_x` and the ML-KEM message `m`
@@ -182,11 +199,13 @@ pub fn encapsulate_deterministic(
     ek_x: Secret<32>,
     m: Secret<32>,
 ) -> (Ciphertext, SharedSecret) {
-    let ek_x = StaticSecret::from(clamp(*ek_x.expose()));
+    let ek_x = scalar_of(ek_x.expose());
     let pub_x = x25519_dalek::PublicKey::from(&ek_x);
     let ss_x = ek_x.diffie_hellman(&pk.x);
-    let (ct_m, ss_m) = pk.m.encapsulate_deterministic(&B32::from(*m.expose()));
-    finish(pk, pub_x, ss_x.as_bytes(), ct_m, &ss_m)
+    let (ct_m, mut ss_m) = pk.m.encapsulate_deterministic(&B32::from(*m.expose()));
+    let out = finish(pk, pub_x, ss_x.as_bytes(), ct_m, &ss_m);
+    ss_m.zeroize();
+    out
 }
 
 fn finish(
@@ -222,6 +241,16 @@ fn combine(
     h.update(pk.m.to_bytes());
     h.update(pk.x.as_bytes());
     Secret::new(h.finalize().into())
+}
+
+/// The X25519 secret of the scalar bytes `k`, clamped as RFC 7748 §5
+/// states (`CRY-120`). The call wipes its clamped copy. The secret holds
+/// the clamped bytes, thus it exports them.
+pub(crate) fn scalar_of(k: &[u8; 32]) -> StaticSecret {
+    let mut clamped = clamp(*k);
+    let secret = StaticSecret::from(clamped);
+    clamped.zeroize();
+    secret
 }
 
 /// Clamps an X25519 scalar as RFC 7748 §5 states.

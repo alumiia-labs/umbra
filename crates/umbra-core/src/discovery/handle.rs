@@ -24,7 +24,10 @@ pub const PROFILE_LINK_PREFIX: &str = "umbra://h/";
 
 /// Reads `umbra://h/<name>%23<discriminator>#<fragment>`: the handle, and
 /// the fragment in the base32 of Part 4 (`DIS-179`). A `#` in place of the
-/// `%23` reads too, because the last `#` starts the fragment.
+/// `%23` reads too, because the last `#` starts the fragment. The parser
+/// reads the one `%23` before the discriminator as `#`, and no other one. A
+/// name holds no `%` (`DIS-089`), thus a second `%23` is no part of a
+/// handle.
 pub fn parse_profile_link(
     text: &str,
     profile: Profile<'_>,
@@ -34,7 +37,11 @@ pub fn parse_profile_link(
         .strip_prefix(PROFILE_LINK_PREFIX)
         .ok_or(Error::Malformed)?;
     let (handle, fragment) = rest.rsplit_once('#').ok_or(Error::Malformed)?;
-    let handle = Handle::parse(&alloc::format!("@{}", handle.replace("%23", "#")), profile)?;
+    let handle = match handle.rsplit_once("%23") {
+        Some((name, discriminator)) => alloc::format!("@{name}#{discriminator}"),
+        None => alloc::format!("@{handle}"),
+    };
+    let handle = Handle::parse(&handle, profile)?;
     let mut out = [0u8; FRAGMENT_LEN];
     crate::identity::address::base32_decode(fragment, &mut out)?;
     Ok((handle, out))
@@ -53,6 +60,24 @@ pub fn username_case_mapped(name: &str) -> Option<String> {
         .map(|cow| cow.into_owned())
 }
 
+/// The marks that no `name` part holds (`DIS-089`): `#` starts the
+/// discriminator, `@` starts a handle, and `%` and `/` have a meaning in the
+/// link of `DIS-179`. The `IdentifierClass` of RFC 8264 passes each of them.
+const NAME_MARKS: [char; 4] = ['#', '%', '@', '/'];
+
+/// Whether the output of the profile is a `name` part: not empty, within
+/// the limit of `DIS-090`, and with none of the marks.
+fn is_name(mapped: &str) -> bool {
+    is_held_name(mapped) && !mapped.contains(NAME_MARKS)
+}
+
+/// Whether the output of the profile is the `name` part of a handle that a
+/// directory holds already. A registration before `DIS-089` named the marks
+/// could hold one.
+fn is_held_name(mapped: &str) -> bool {
+    !mapped.is_empty() && mapped.len() <= NAME_MAX
+}
+
 /// A handle in its canonical form.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Handle {
@@ -64,6 +89,24 @@ impl Handle {
     /// Parses `@name#dddd` and applies the profile to the `name` part
     /// (`DIS-088` to `DIS-092`).
     pub fn parse(raw: &str, profile: Profile<'_>) -> Result<Self, Error> {
+        Self::parse_with(raw, profile, is_name)
+    }
+
+    /// Parses the handle of a label that a directory holds already, for a
+    /// write of its holder (`DIS-171`). Such a write is a new queue, a new
+    /// key, or the tombstone. A handle that its holder registered before
+    /// `DIS-089` named the four marks can hold one. Its holder still writes
+    /// and retires it. No registration and no lookup reads a handle this
+    /// way.
+    pub fn parse_held(raw: &str, profile: Profile<'_>) -> Result<Self, Error> {
+        Self::parse_with(raw, profile, is_held_name)
+    }
+
+    fn parse_with(
+        raw: &str,
+        profile: Profile<'_>,
+        is_name: fn(&str) -> bool,
+    ) -> Result<Self, Error> {
         let body = raw.strip_prefix('@').ok_or(Error::Malformed)?;
         let (name, discriminator) = body.rsplit_once('#').ok_or(Error::Malformed)?;
         let digits = discriminator.len();
@@ -76,7 +119,7 @@ impl Handle {
             return Err(Error::Malformed);
         }
         let mapped = profile(name).ok_or(Error::Malformed)?;
-        if mapped.is_empty() || mapped.len() > NAME_MAX {
+        if !is_name(&mapped) {
             return Err(Error::Malformed);
         }
         Ok(Handle {
@@ -86,9 +129,9 @@ impl Handle {
     }
 
     /// Whether a registration `name` part is already canonical
-    /// (`DIS-091`): the profile changes nothing.
+    /// (`DIS-091`): the profile changes nothing, and the result is a name.
     pub fn is_canonical_name(name: &str, profile: Profile<'_>) -> bool {
-        profile(name).is_some_and(|mapped| mapped == name)
+        profile(name).is_some_and(|mapped| mapped == name && is_name(&mapped))
     }
 
     /// The `name` part after the profile.
@@ -257,6 +300,10 @@ mod tests {
             "@bob#42"
         );
         assert!(parse_profile_link("umbra://h/bob%2342", &ascii_profile).is_err());
+        // DIS-179: the parser reads one `%23`, thus a second one is no `#`
+        // of a name.
+        let twice = link.replace("bob", "a%23b");
+        assert!(parse_profile_link(&twice, &ascii_profile).is_err());
         assert!(parse_profile_link("umbra://p/bob%2342#00", &ascii_profile).is_err());
     }
 
@@ -269,6 +316,37 @@ mod tests {
         let other = Handle::parse("@bob#43", &ascii_profile).unwrap();
         assert!(other.open_blob(&[3; 16], &blob).is_err());
         assert!(h.open_blob(&[3; 16], &blob[..30]).is_err());
+    }
+
+    #[cfg(feature = "precis")]
+    #[test]
+    fn a_name_holds_no_mark_of_the_handle_or_of_its_link() {
+        // The profile of RFC 8265 passes each of these marks, thus the
+        // profile alone does not keep them out of a name (`DIS-089`).
+        for mark in ["#", "%", "@", "/"] {
+            let name = alloc::format!("a{mark}b");
+            assert!(username_case_mapped(&name).is_some(), "{mark}");
+            let handle = alloc::format!("@{name}#12");
+            assert!(Handle::parse(&handle, &username_case_mapped).is_err());
+            assert!(!Handle::is_canonical_name(&name, &username_case_mapped));
+        }
+        // A label that a directory holds already reads with a mark, thus
+        // its holder still writes and retires it.
+        for held in ["@alice#12#34", "@a%23b#12", "@a@b#12", "@a/b#12"] {
+            assert!(Handle::parse(held, &username_case_mapped).is_err());
+            let handle = Handle::parse_held(held, &username_case_mapped).unwrap();
+            assert_eq!(handle.canonical(), held);
+        }
+        assert!(Handle::parse_held("@#12", &username_case_mapped).is_err());
+        assert!(Handle::parse_held("@Alice#12", &username_case_mapped)
+            .is_ok_and(|handle| handle.canonical() == "@alice#12"));
+        // Two discriminators, and a name that reads as another handle
+        // after the `%23` of its link.
+        assert!(Handle::parse("@alice#12#34", &username_case_mapped).is_err());
+        assert!(Handle::parse("@a%23b#12", &username_case_mapped).is_err());
+        // A full-width mark maps to the plain one, and it goes too.
+        assert!(Handle::parse("@a＃b#12", &username_case_mapped).is_err());
+        assert!(Handle::is_canonical_name("alice", &username_case_mapped));
     }
 
     #[cfg(feature = "precis")]

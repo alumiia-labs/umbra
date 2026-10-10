@@ -1,0 +1,29 @@
+# Each response. No page of this site holds a script, a frame, or a form, and
+# none reads a resource of a second host (Part 4 IDN-120, IDN-121).
+# `no-transform` keeps Cloudflare from writing into a page. With Web
+# Analytics on for the zone, it adds a script of a second host to each HTML
+# response. The policy below then only stops a browser from running it.
+/*
+  Cache-Control: public, max-age=0, must-revalidate, no-transform
+  Content-Security-Policy: default-src 'none'; img-src 'self'; font-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+  Referrer-Policy: no-referrer
+  X-Content-Type-Options: nosniff
+  Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
+
+# Android reads the file as JSON, with no redirect (Part 4 IDN-122).
+/.well-known/assetlinks.json
+  Content-Type: application/json
+  ! Cache-Control
+  Cache-Control: public, max-age=3600, no-transform
+
+# The mail logo of BIMI.
+/bimi/logo.svg
+  Content-Type: image/svg+xml
+  ! Cache-Control
+  Cache-Control: public, max-age=86400, no-transform
+
+# The font of the pages, a Latin subset of DM Sans (SIL Open Font License 1.1,
+# in /dm-sans-OFL.txt).
+/dm-sans.woff2
+  ! Cache-Control
+  Cache-Control: public, max-age=31536000, immutable, no-transform

@@ -1,0 +1,21 @@
+# Written by Ansible (deploy/ansible/roles/common). Debian reaches
+# time-sync.target when chrony starts, not when it has set the clock. This
+# unit holds the target back until the clock is within half a second of the
+# network time, for two minutes at most. Each UMBRA service starts after
+# the target. A clock that does not settle fails this unit and holds no
+# service back for longer.
+[Unit]
+Description=UMBRA: the clock follows the network time
+After=chrony.service
+Wants=chrony.service
+Before=time-sync.target
+Wants=time-sync.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/chronyc waitsync 60 0.5 0 2
+TimeoutStartSec=150
+
+[Install]
+WantedBy=time-sync.target

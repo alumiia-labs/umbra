@@ -53,6 +53,9 @@ pub struct SqliteBackend {
     /// A checkpoint of a deletion that did not truncate the log, which the
     /// next batch runs again (`IMP-043`).
     checkpoint_due: bool,
+    /// The checkpoints that ran, which a test reads.
+    #[cfg(test)]
+    checkpoints: u32,
 }
 
 impl SqliteBackend {
@@ -76,6 +79,8 @@ impl SqliteBackend {
         let mut backend = SqliteBackend {
             connection,
             checkpoint_due: true,
+            #[cfg(test)]
+            checkpoints: 0,
         };
         backend.checkpoint();
         Ok(backend)
@@ -113,6 +118,10 @@ impl SqliteBackend {
                 row.get::<_, i64>(0)
             });
         self.checkpoint_due = !matches!(busy, Ok(0));
+        #[cfg(test)]
+        {
+            self.checkpoints = self.checkpoints.saturating_add(1);
+        }
     }
 
     /// The header of the wrap, which holds no secret and sits beside the
@@ -184,6 +193,32 @@ impl Backend for SqliteBackend {
         Ok(out)
     }
 
+    fn row_ids(
+        &self,
+        table: TableId,
+        after: Option<&RowId>,
+        limit: usize,
+    ) -> Result<Vec<RowId>, Error> {
+        // The primary key orders the rows of a table by `row_id`, thus the
+        // read starts in the index at `after` and loads no record. No row
+        // identifier is below the empty one.
+        let mut statement = storage(self.connection.prepare(
+            "SELECT row_id FROM rows
+             WHERE table_id = ?1 AND row_id > ?2
+             ORDER BY row_id LIMIT ?3",
+        ))?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let after = after.map_or(&[][..], |after| after.as_slice());
+        let found = storage(statement.query_map(params![table.0, after, limit], |row| {
+            row.get::<_, Vec<u8>>(0)
+        }))?;
+        let mut out = Vec::new();
+        for row_id in found {
+            out.push(array(storage(row_id)?)?);
+        }
+        Ok(out)
+    }
+
     fn tables(&self) -> Result<Vec<(TableId, StoredTable)>, Error> {
         let mut statement = storage(
             self.connection
@@ -217,6 +252,30 @@ impl Backend for SqliteBackend {
     fn apply(&mut self, batch: &Batch) -> Result<(), Error> {
         // IMP-123: the rows and the table MACs of a batch commit together.
         let transaction = storage(self.connection.transaction())?;
+        // IMP-133: a batch that replaces the row of a channel is no
+        // deletion batch. The state before it holds chain keys that the
+        // forward secrecy erased. Without a checkpoint the file keeps that
+        // state while the log holds the new one. The first row of a channel
+        // replaces none, thus it asks for no checkpoint, and one lookup in
+        // the primary key answers for the batch.
+        let mut replaces_channel = false;
+        for write in &batch.writes {
+            match write {
+                Write::Put(table, row) if *table == TableId::CONTACT && !replaces_channel => {
+                    let held: Option<i64> = storage(
+                        transaction
+                            .query_row(
+                                "SELECT 1 FROM rows WHERE table_id = ?1 AND row_id = ?2",
+                                params![table.0, row.row_id.as_slice()],
+                                |row| row.get(0),
+                            )
+                            .optional(),
+                    )?;
+                    replaces_channel = held.is_some();
+                }
+                _ => {}
+            }
+        }
         for write in &batch.writes {
             match write {
                 Write::Put(table, row) => storage(transaction.execute(
@@ -251,11 +310,12 @@ impl Backend for SqliteBackend {
             };
         }
         storage(transaction.commit())?;
-        if batch.deletion || self.checkpoint_due {
+        if batch.deletion || replaces_channel || self.checkpoint_due {
             // IMP-043: no frame of the deleted record stays in the log. The
             // batch holds with its commit; a checkpoint that a reader kept
             // from its end goes again at the next batch, thus the state of
-            // the tables never parts from the file (IMP-123).
+            // the tables never parts from the file (IMP-123). One
+            // checkpoint serves the whole batch.
             self.checkpoint();
         }
         Ok(())
@@ -366,6 +426,40 @@ mod tests {
         assert_eq!(store.list(TableId::MESSAGE, Some(&owner)).unwrap().len(), 1);
         assert!(store.list(TableId::MESSAGE, Some(&row)).unwrap().is_empty());
         store.audit(TableId::MESSAGE).unwrap();
+        // The walk of a table by its row identifiers, one page at a time.
+        let more: Vec<RowId> = (0..5u8)
+            .map(|index| store.row_id(TableId::MESSAGE, &[index]))
+            .collect();
+        let mut batch = store.begin();
+        for next in &more {
+            batch
+                .put(TableId::MESSAGE, *next, Some(owner), b"another", &mut rng)
+                .unwrap();
+        }
+        batch.commit().unwrap();
+        let mut written = more;
+        written.push(row);
+        written.sort_unstable();
+        let backend = store.lock();
+        let mut walked = Vec::new();
+        let mut after = None;
+        loop {
+            let page = backend
+                .row_ids(TableId::MESSAGE, after.as_ref(), 2)
+                .unwrap();
+            assert!(page.len() <= 2);
+            let Some(last) = page.last().copied() else {
+                break;
+            };
+            after = Some(last);
+            walked.extend(page);
+        }
+        assert_eq!(walked, written);
+        assert!(backend
+            .row_ids(TableId::CONTACT, None, 8)
+            .unwrap()
+            .is_empty());
+        let mut store = Store::unlock(backend, Secret::new([1; 32])).unwrap();
         assert!(Store::unlock(
             SqliteBackend::open(&path_text).unwrap(),
             Secret::new([2; 32])
@@ -382,6 +476,91 @@ mod tests {
 
         let backend = SqliteBackend::open(&path_text).unwrap();
         assert!(backend.header().unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_channel_row_that_a_commit_replaces_leaves_the_file() {
+        let directory = std::env::temp_dir().join(format!("umbra-ffi-c-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("channel.db");
+        let _ = std::fs::remove_file(&path);
+        let path_text = path.to_str().unwrap().to_owned();
+
+        struct Counter(u8);
+        impl umbra_crypto::rand_core::TryRng for Counter {
+            type Error = core::convert::Infallible;
+            fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+                Ok(0)
+            }
+            fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+                Ok(0)
+            }
+            fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+                for byte in dst {
+                    self.0 = self.0.wrapping_add(1);
+                    *byte = self.0;
+                }
+                Ok(())
+            }
+        }
+        impl umbra_crypto::rand_core::TryCryptoRng for Counter {}
+
+        let mut rng = Counter(0);
+        let mut store = Store::unlock(
+            SqliteBackend::open(&path_text).unwrap(),
+            Secret::new([1; 32]),
+        )
+        .unwrap();
+        let row = store.row_id(TableId::CONTACT, b"alice");
+        let other = store.row_id(TableId::CONTACT, b"bob");
+        let mut batch = store.begin();
+        batch
+            .put(TableId::CONTACT, row, None, b"the first state", &mut rng)
+            .unwrap();
+        batch
+            .put(TableId::CONTACT, other, None, b"the first of bob", &mut rng)
+            .unwrap();
+        batch.commit().unwrap();
+        let backend = store.lock();
+        // The first row of a channel replaces no state: the open ran one
+        // checkpoint, and this batch ran none.
+        assert_eq!(backend.checkpoints, 1);
+        let sealed = backend
+            .read(TableId::CONTACT, &row)
+            .unwrap()
+            .unwrap()
+            .sealed;
+        let holds = |needle: &[u8]| {
+            std::fs::read_dir(&directory).unwrap().any(|entry| {
+                let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+                bytes.windows(needle.len()).any(|window| window == needle)
+            })
+        };
+        assert!(holds(&sealed[..24]));
+
+        // IMP-133: the commit of the next state is a put and no delete. The
+        // earlier state is in no file after it: not in the database, and
+        // not in its log.
+        let mut store = Store::unlock(backend, Secret::new([1; 32])).unwrap();
+        let mut batch = store.begin();
+        batch
+            .put(TableId::CONTACT, row, None, b"the next state!", &mut rng)
+            .unwrap();
+        batch
+            .put(TableId::CONTACT, other, None, b"the next of bob!", &mut rng)
+            .unwrap();
+        batch.commit().unwrap();
+        assert!(!holds(&sealed[..24]));
+        // One checkpoint serves the two rows of the batch.
+        let backend = store.lock();
+        assert_eq!(backend.checkpoints, 2);
+        let store = Store::unlock(backend, Secret::new([1; 32])).unwrap();
+        assert_eq!(
+            store.get(TableId::CONTACT, &row).unwrap().unwrap(),
+            b"the next state!"
+        );
+        drop(store);
         let _ = std::fs::remove_dir_all(&directory);
     }
 }

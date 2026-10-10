@@ -19,6 +19,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 
 /**
@@ -58,10 +59,11 @@ fun BlockScreen(
 
 @Composable
 fun BlockContactScreen(chat: Chat, onBack: () -> Unit) {
+    val context = LocalContext.current
     var isBlocked by remember { mutableStateOf<Boolean?>(null) }
     LaunchedEffect(chat.conversation) { Core.isBlocked(chat.conversation) { isBlocked = it } }
     BlockScreen(chat.title, isBlocked, onBack) { blocked ->
-        Core.setBlocked(chat.conversation, blocked)
+        Core.setBlocked(context, chat.conversation, blocked)
         onBack()
     }
 }

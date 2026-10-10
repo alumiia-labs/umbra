@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 9: Discovery, Handles, and Key Transparency
 
 **Status:** Draft
-**Version:** 0.11.0-draft
-**Date:** 2026-10-02
+**Version:** 0.12.0
+**Date:** 2026-10-09
 
 ---
 
@@ -30,8 +30,7 @@ The consequences are measured, and they are not hypothetical:
 - Gegenhuber and others (NDSS 2026) enumerated **3.5 billion WhatsApp accounts
   at 7 000 accounts each second, from one university IP address**. **No party
   blocked them.** They collected X25519 identity keys and 77 million profile
-  photos. This document has not verified those figures against the published
-  version of the paper.
+  photos.
 - Hagen and others (NDSS 2021) showed that a hash of a phone number gives no
   protection. They used 24 GB of custom rainbow tables at 52 ms for each hash.
   The success rate was more than 99.99 % over 118 billion numbers.
@@ -122,24 +121,34 @@ profile directly.
 - **[DIS-175]** The directory MUST keep the sealed blob of a live label beside
   it, and the log MUST NOT commit the blob. The holder writes the blob under a
   blob challenge (purpose `0x03` of §9.10) whose answer binds the blob bytes,
-  and an empty blob drops it. A lookup MUST return the blob of the label that
+  and §9.9.3 gives its derivation. An empty blob drops it. A lookup MUST return the blob of the label that
   it proves, and no blob for a tombstone.
 - **[DIS-176]** The plaintext of the blob MUST be `0x01 || name_len u8 ||
   name || welcome_len u16 || welcome || picture_len u16 || picture`: UTF-8 of
   at most 32 bytes, UTF-8 of at most `WELCOME_MAX` bytes, and a JPEG of at most
-  `PICTURE_MAX` bytes or nothing. **[DIS-177]** A client MUST reject each other
-  form, and a blob that does not open under the fragment shows no profile.
+  `PICTURE_MAX` bytes or nothing. A client MUST read the pixel size of the
+  picture before it decodes it. A client MUST decode the picture to at most
+  1 024 pixels on each side. `PICTURE_MAX` bounds the bytes of a JPEG and not
+  its canvas (Part 14 rule `IMP-166`). A client MUST take the pixel size from
+  the frame header of the JPEG, with no decoder. A client MUST treat each of
+  two pictures as another form. The first is a picture that holds no baseline,
+  extended, or progressive frame header before its first scan. The second is a
+  picture whose frame header names a side of zero or a side above 1 024 pixels.
+  The re-encode of `DIS-001` writes no such picture. **[DIS-177]** A client
+  MUST reject each other form, and a blob that does not open under the fragment
+  shows no profile.
 - **[DIS-178]** A tombstone MUST take the blob with it, whether the holder
   wrote it or the lease lapsed.
 - **[DIS-179]** The link MUST be `umbra://h/<name>%23<discriminator>#<fragment>`,
   with the fragment in the base32 of Part 4 §4.2.3. The `%23` keeps the `#` of
   the handle out of the fragment of the URI. A client MUST also read a `#` in
-  its place, because the last `#` starts the fragment. A client MUST keep one
-  fragment for a handle until the handle goes.
+  its place, because the last `#` starts the fragment. A client MUST read the
+  last `%23` before the fragment as that `#`, and no other one. A client MUST
+  keep one fragment for a handle until the handle goes.
 
-> *Cause.* An earlier draft gave the key and the seal of the blob and no place
-> for it. The directory holds the label already, and it answers each lookup
-> through OHTTP, thus it adds no party. It learns the length of a sealed blob
+> *Cause.* The sealed blob needs a place that a lookup reaches. The directory
+> holds the label already, and it answers each lookup through OHTTP, thus it
+> adds no party. It learns the length of a sealed blob
 > and the time of a write, and it holds no key. The answer binds the blob,
 > thus a replay of an answer writes no other blob.
 
@@ -173,21 +182,29 @@ starts from that form.
   to the `name` part before each use of a handle. That profile applies the
   `IdentifierClass` of RFC 8264, the width mapping, the case mapping, NFC, and
   the bidi rule. **[DIS-089]** A client MUST reject a `name` part that the
-  profile rejects.
+  profile rejects, and a `name` part whose profile output holds `#`, `%`,
+  `@`, or `/`. The `IdentifierClass` passes those four marks. A `#` in a
+  name gives a handle two readings, and a `%23` in a name reads as the `#`
+  of another handle in the link of `DIS-179`.
 - **[DIS-090]** A client MUST measure the 32-byte limit of §9.3 on the output
   of the profile. The discriminator is ASCII digits, and the profile does not
   change it.
 - **[DIS-091]** A directory MUST reject a registration whose `name` part
-  changes under the profile.
+  changes under the profile. The four marks of `DIS-089` bind a
+  registration. A label that a directory registered before that rule can hold
+  one of them. The directory MUST still take three writes for such a label. The
+  first is the write of its holder that moves the label to a new queue or a new
+  key. The second is the tombstone of `DIS-171`. The third is the renewal of
+  its lease. The directory MUST NOT take a registration of such a label again.
+  Without that, the holder of such a handle could not retire it.
 - The **canonical handle** is `@`, the profile output, `#`, and the
   discriminator. **[DIS-092]** A client MUST use the canonical handle at each
   use of `<handle>` in this part. That use includes the VOPRF input of §9.3.1
   and the blob key of §9.3.1.
 
-> *Cause.* An earlier draft gave the handle no normalization, and it ran the
-> VOPRF over the bytes that the user typed. A `name` in NFD and the same
-> `name` in NFC gave two directory indexes, and a lookup of the one missed the
-> other. Signal avoids the problem with an ASCII grammar, and UMBRA keeps a
+> *Cause.* A handle with no normalization gives the VOPRF the bytes that the
+> user typed. A `name` in NFD and the same `name` in NFC then give two
+> directory indexes, and a lookup of the one misses the other. Signal avoids the problem with an ASCII grammar, and UMBRA keeps a
 > Unicode `name`. The profile maps two renderings to one string, and it rejects
 > a control character. A confusable pair stays, because no profile removes it.
 > DIS-016 makes a handle no verified identity, and §9.8 gives the petname that
@@ -237,8 +254,8 @@ thus no address label equals a handle label.
   **[DIS-129]** A directory MUST NOT answer a query that names a prefix of an
   address.
 
-> *Cause.* An earlier draft let a stranger paste `umbra:pub:` in Part 4 §4.3.3,
-> and no index resolved the string. The handle index of §9.3 holds `HK_pub`,
+> *Cause.* Part 4 §4.3.3 lets a stranger paste an `umbra:pub:` string, and an
+> index has to resolve that string. The handle index of §9.3 holds `HK_pub`,
 > which Part 4 rule `IDN-105` keeps apart from `PublicAddressKey_j`, thus that
 > index cannot serve the address. The address is a 160-bit value, thus a crawl
 > that enumerates the handle index finds no address entry. Part 15 §15.2.5
@@ -433,13 +450,33 @@ such a party can make.
 ### 9.5.2 Third-party auditing, three jurisdictions
 
 The log operates in `thirdPartyAuditing` mode, with **three independent signers
-in three jurisdictions**. The signers are the nonprofit and two independent
-auditors. Signer index `0` is the nonprofit, and signer indexes `1` and `2` are
+in three jurisdictions**. The signers are the project and two independent
+auditors. Signer index `0` is the project, and signer indexes `1` and `2` are
 the two auditors. A client accepts a tree head that two of the three signed.
 
 Against adversary A5 this design means that **no one legal order can make a
 split view**. A split view needs two signers, and no one jurisdiction holds two
 of them. The freshness bound below limits an equivocation to one week.
+
+**The bootstrap deployment.** A network starts with one operator, as Part 3
+`NET-340` states for the relays and Part 10 `REL-126` for the relay
+directory. The v1 reference directory is one process that holds
+the three signer keys and runs both auditors. It signs each head under signer
+index `0`. It makes the two auditor signatures itself after it runs the checks
+of `DIS-161` on its own update. Under that deployment the
+paragraph above does not hold. One order to the operator of that process, or
+one break-in at its host, signs a split view under three valid signatures. A
+client cannot tell that head from an honest one. The rules of this
+section stay as they are. A client verifies 2 of 3, and it holds each head
+against the one before it under `DIS-159` and `DIS-160`. The gossip of
+§9.5.3 still compares the heads of two clients. What the deployment lacks is
+the independence of the signers, and no rule of a client gives that. The
+`LogKeySet` carries no count of independent signers, thus a client shows no
+provisional state for the log as it does for the relay directory. The
+deployment ends when two auditors under other control do two things. They run
+the checks of `DIS-049` and `DIS-161` on the update set of the operator. They
+sign with keys that the operator does not hold. The rotation of `DIS-064` then
+moves the key set to their keys.
 
 The `contactMonitoring` mode is untenable in UMBRA. The contacts are mutually
 pseudonymous, thus no party can depend on them to monitor the labels of each
@@ -554,9 +591,9 @@ auditor holds the intent of the holder.
     The token or the proof of work of §9.4.1 pays for it. Part 3 §3.12 does not
     count it, because a published label is an opt-in surface.
 
-    > *Cause.* An earlier draft gave the holder no rule that reads its own
-    > entry. A directory under an order inserted a key under a handle, each
-    > stranger reached the new key, and no alarm fired at the holder. The
+    > *Cause.* Without this check, no holder reads its own entry. A directory
+    > under an order can then insert a key under a handle. Each stranger
+    > reaches the new key, and no alarm fires at the holder. The
     > auditors of §9.5.2 verify the tree and not the intent of a holder, thus
     > the holder is the only monitor of its own label.
 
@@ -569,8 +606,7 @@ auditor holds the intent of the holder.
     that label.
 15. **[DIS-065]** A client MUST reject a `LogKeySet` whose `keyset_epoch` is at
     or below the `keyset_epoch` that the client holds.
-16. **[DIS-066]** A client build MUST ship the genesis `LogKeySet`. Part 15
-    §15.5 puts the build under binary transparency.
+16. **[DIS-066]** A client build MUST ship the genesis `LogKeySet`.
 
 Two signers rotate the third out when an auditor stops, disputes, or receives
 a legal order. Thus the loss of one signer costs one rotation and not the
@@ -591,19 +627,17 @@ a client in that state, because two signers suffice. The loss of two does.
     warning under `DIS-034`. The client holds no accepted head to compare
     against.
 
-> *Cause.* An earlier draft made `DIS-011` a hard rejection of a tree head that
-> the three signers did not co-sign in 7 days. That draft defined no object, no
-> signer index, no preimage, no key set, and no rotation. Under that draft one
-> auditor outage, one dispute, or one legal order stopped each handle lookup
-> after seven days. §9.4.1 says that the directory degrades gracefully and does
+> *Cause.* A rule that accepts only a tree head that all three signers
+> co-signed in 7 days fails closed. One auditor outage, one dispute, or one
+> legal order then stops each handle lookup after seven days. §9.4.1 says that the directory degrades gracefully and does
 > not fail closed. The deployment of Signal runs two auditors in one
 > jurisdiction, which shows how hard three funded auditors in three
 > jurisdictions are to keep. A 2-of-3 acceptance keeps the property that no
 > one legal order makes a split view, and it survives the loss of one signer.
 > The degraded read keeps a lookup available below that threshold, and it
 > removes the two automatic actions that a forged entry would exploit.
-> `DIS-011` now names the object, the field, the measuring party, and the skew
-> tolerance, as §1.9 requires. Its bound of 7 days is unchanged.
+> `DIS-011` names the object, the field, the measuring party, and the skew
+> tolerance, as §1.9 requires.
 
 ### 9.5.3 Gossip the tree head in ordinary ciphertext
 
@@ -640,10 +674,8 @@ thus it makes no new correlator. It is also the only split-view detector that
 survives an adversary that controls the full view of the client of the
 directory.
 
-> *Cause.* An earlier draft said that a client attaches the hash to a fraction of
-> the ordinary messages, and Part 6 gave no field, no application kind, and no
-> capacity row. Part 6 §6.4.2 rule 6 also fills the L6 record to a fixed length,
-> thus no spare byte holds a hash. Part 15 §15.4 names this gossip as the answer
+> *Cause.* Part 6 §6.4.2 rule 6 fills the L6 record to a fixed length, thus no
+> spare byte of an ordinary message holds a hash. Part 15 §15.4 names this gossip as the answer
 > to directory equivocation, and Part 10 rule `REL-008` requires the same
 > mechanism for the consensus root. The record of Part 6 §6.6.4 serves the two.
 
@@ -845,10 +877,11 @@ holds nothing worth a second crawl.
   that period. Thus a stranger that resolved the entry before the write reaches
   the holder, and one queue relay holds the hello count of one period only.
 
-> *Cause.* An earlier draft made each rotation a user action. A published queue
-> address is a public value. The relay that holds it reads the hello count and
-> the hello times of the entry for as long as the address stands. Part 15 §15.3
-> states that residual, and the schedule bounds it to one period. The cost is
+> *Cause.* A published queue address is a public value. The relay that holds
+> it reads the hello count and the hello times of the entry for as long as the
+> address stands. A rotation that waits for a user action does not bound that
+> time. Part 15 §15.3 states that residual, and the schedule bounds it to one
+> period. The cost is
 > one `NEW` and one directory write in each period.
 
 ### 9.9.1 The lease renewal challenge
@@ -883,8 +916,8 @@ holder:      ss  <- UMBRA-KEM.Decap( HK_sk, HK_pub, ct )
 - **[DIS-042]** A directory MUST NOT retain `ss`, `k`, or `ans` after the
   renewal.
 
-> *Cause.* An earlier draft renewed a lease with "a ZK proof of knowledge of the
-> handle key". Part 5 §5.1 closes the primitive register and rule `CRY-005`
+> *Cause.* A zero-knowledge proof of knowledge of the handle key is the
+> alternative. Part 5 §5.1 closes the primitive register and rule `CRY-005`
 > forbids a primitive that the register does not hold. `HK_pub` is X25519 with
 > ML-KEM-768, and neither half signs data, thus no listed primitive gives that
 > proof. A challenge under the KEM proves the same possession, and it is post-
@@ -956,9 +989,9 @@ VersionProof {                    // the answer of a Version request, §9.10
   that version under its newest head. It MUST answer with status 0x03 for a
   version that the log does not hold.
 
-> *Cause.* An earlier draft named the fetch of `DIS-079` and gave no request
-> for it. A lookup opens the newest version alone, thus a client could not
-> read the versions between a held key and a resolved one.
+> *Cause.* A lookup opens the newest version alone. Without the `Version`
+> request, a client cannot read the versions between a held key and a
+> resolved one, and `DIS-079` needs them.
 - **[DIS-081]** If a tombstone version lies between the two, the client MUST
   compare the `HK_pub` before it with the `HK_pub` after it.
   **[DIS-082]** If the two differ, the client MUST show the takeover warning.
@@ -968,10 +1001,10 @@ VersionProof {                    // the answer of a Version request, §9.10
 - **[DIS-085]** Under the takeover warning, a client MUST NOT send the hello
   of §9.6 step 2 without an explicit user confirmation.
 
-> *Cause.* An earlier draft tombstoned a handle with no renewal and stopped
-> there. A second party then registered the label, and the log proved that
-> publication consistent, thus `DIS-020` kept the client silent. A contact that
-> held a pet name for the handle then sent a hello to the second party. The
+> *Cause.* A tombstone with no reservation lets a second party register the
+> label at once. The log proves that publication consistent, thus `DIS-020`
+> keeps the client silent. A contact that holds a pet name for the handle then
+> sends a hello to the second party. The
 > reservation equals `BACKUP_TTL`, because a backup that a relay still holds is
 > a backup that a user can still restore. The zero-byte tombstone gives the
 > client a version to find, and the version scan is bounded because a rotation
@@ -996,6 +1029,23 @@ holder:      ss  <- UMBRA-KEM.Decap( HK_sk, HK_pub_current, ct )
              sends ans || entry_new
 ```
 
+**The blob challenge.** The write of a profile blob under `DIS-175` runs the
+same challenge under a label of its own. The challenge has no version in
+`info`, and the answer holds the hash of the sealed blob. An empty blob hashes
+as the empty string.
+
+```
+holder:      k   <- HKDF-SHA3-256( salt = "umbra/v1/handle-blob", ikm = ss,
+                                   info = handle, L = 32 )
+             ans <- HMAC-SHA3-256( k, nonce || SHA3-256(blob) )
+             sends ans || blob
+```
+
+The directory encapsulates to the `HK_pub` of the current version, and it
+compares `ans` in constant time. It keeps no `ss`, `k`, or `ans` after the
+write. `DIS-094`, `DIS-097` and `DIS-100` give the same for an entry. Part 5
+§5.11 holds the label.
+
 - **[DIS-093]** Before a directory publishes a new version of an existing label,
   it MUST run the challenge above. **[DIS-094]** A directory MUST encapsulate to
   the `HK_pub` of the current version.
@@ -1013,9 +1063,9 @@ holder:      ss  <- UMBRA-KEM.Decap( HK_sk, HK_pub_current, ct )
 - **[DIS-102]** A directory MUST NOT run the challenge for the tombstone of a
   lapsed lease. The directory publishes that version itself.
 
-> *Cause.* An earlier draft gave the directory no rule about who writes a new
-> version. A party that held a registration token published a version of the
-> label of another user. §9.9.2 then showed that user as a takeover. The
+> *Cause.* Without a rule about who writes a new version, a party that holds a
+> registration token can publish a version of the label of another user.
+> §9.9.2 then shows that user as a takeover. The
 > challenge above is the challenge of §9.9.1 under a second label, with the
 > entry hash in the answer. Thus a directory that relays a challenge to the
 > holder cannot swap the entry after the answer. A lapsed lease needs no
@@ -1106,6 +1156,10 @@ the record of the label in any case; only the evaluation of a lookup hides it.
 - **[DIS-172]** A registration MAY end with `lease`, in seconds. The
   directory MUST then end the lease of the label at the time of the
   registration plus `lease`, and no renewal and no write MUST move that end.
+  The end holds through a tombstone. A write under the reserve challenge of
+  `DIS-075` before the end takes a lease that stops at the end. The directory
+  MUST refuse such a write after the end. A registration after `HANDLE_RESERVE`
+  is a new one, and it takes no end from the label before it.
   The label then takes the tombstone of a lapsed lease under `DIS-073`. A
   reusable link of a limited period is an address that registers so, thus it
   ends while its holder is off. **[DIS-173]** A directory MUST refuse a
@@ -1114,14 +1168,13 @@ the record of the label in any case; only the evaluation of a lookup hides it.
   queue of a timed entry after its end, and it MUST end that queue at its
   next upkeep.
 
-> *Cause.* An earlier draft ended a timed link by the tombstone write of its
-> holder alone. A phone that is off at the end left the link open, possibly
-> for days. The directory already writes the tombstone of a lapsed lease, and
+> *Cause.* A timed link that ends by the tombstone write of its holder alone
+> depends on the phone of that holder. A phone that is off at the end leaves
+> the link open, possibly for days. The directory already writes the tombstone of a lapsed lease, and
 > a lease with an end moves that work to it. A requester that read the entry
 > before its end still holds its queue, thus the holder drops such a hello.
 
-> *Cause.* Part 1 §1.8 listed the lookup request, the registration request,
-> and the carrier of the challenges as gaps. The shape follows the Notification
+> *Cause.* The shape follows the Notification
 > Delivery Relay of Part 8 §8.2, which already runs one request type through
 > an ingress relay in OHTTP. The padding hides the kind of a request from the
 > relay. A lookup shows the search key to the directory, which names a

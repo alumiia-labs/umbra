@@ -55,6 +55,16 @@ pub fn app_hash(app: &[u8]) -> [u8; 32] {
     Sha3_256::digest(app).into()
 }
 
+/// Whether `pair_pk` gives a pair key with each member (`GRP-237`). A point
+/// of low order gives the all-zero output under each clamped scalar, thus
+/// one public scalar tests it. The value of that scalar has no weight.
+/// A roster takes no entry whose key fails here.
+pub fn pair_public_is_contributory(pair_pk: &[u8; 32]) -> bool {
+    StaticSecret::from([0x42; 32])
+        .diffie_hellman(&XPublic::from(*pair_pk))
+        .was_contributory()
+}
+
 impl PairKey {
     pub(crate) fn derive(
         own_secret: &StaticSecret,
@@ -169,6 +179,16 @@ mod tests {
             roster_epoch: 2,
             app_hash: hash,
         }
+    }
+
+    #[test]
+    fn a_pair_public_key_of_low_order_is_not_contributory() {
+        let a = MemberKeys::from_seed(&Secret::new([1; 32]));
+        assert!(pair_public_is_contributory(&a.pair_public()));
+        assert!(!pair_public_is_contributory(&[0; 32]));
+        let mut one = [0u8; 32];
+        one[0] = 1;
+        assert!(!pair_public_is_contributory(&one));
     }
 
     #[test]

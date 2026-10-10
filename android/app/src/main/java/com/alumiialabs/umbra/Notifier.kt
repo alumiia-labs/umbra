@@ -25,6 +25,12 @@ object Notifier {
     private const val MESSAGE_CHANNEL = "messages"
     private const val MESSAGE_TAG = "message"
 
+    /**
+     * The conversations that the alert of a push stands for, by their key.
+     * Null stands for a push that named none.
+     */
+    private val pushOwed = HashSet<String?>()
+
     private fun manager(context: Context) =
         context.getSystemService(NotificationManager::class.java)
 
@@ -63,7 +69,10 @@ object Notifier {
     fun carrier(context: Context): Notification =
         Notification.Builder(context, CARRIER_CHANNEL)
             .setSmallIcon(R.drawable.ic_stat_umbra)
-            .setContentTitle("UMBRA holds a connection")
+            // Private mode holds no connection between two wakes of its clock.
+            .setContentTitle(
+                if (Modes.mode(context) == NotifyMode.Private) "UMBRA is unlocked" else "UMBRA holds a connection",
+            )
             .setContentText("Messages arrive until the app locks.")
             .setContentIntent(openApp(context))
             .setOngoing(true)
@@ -104,6 +113,10 @@ object Notifier {
             .setVisibility(Notification.VISIBILITY_PRIVATE)
             .setPublicVersion(lockScreen(context))
             .build()
+        // NTF-018: the alert of the conversation takes the place of the alert
+        // of its push, thus one message shows one alert.
+        synchronized(pushOwed) { pushOwed.clear() }
+        manager(context).cancel(MESSAGE_TAG, PUSH_ID)
         manager(context).notify(MESSAGE_TAG, conversation.hashCode(), alert)
         text?.fill('\u0000')
     }
@@ -111,10 +124,13 @@ object Notifier {
     /**
      * The alert of a push (Part 8 rule `NTF-014`). It names no conversation,
      * and a later push takes its place with no second sound, thus a digest
-     * push and a re-push make no alert of each record (`NTF-018`).
+     * push and a re-push make no alert of each record (`NTF-018`). An open
+     * client gives the conversation of the push when the wake table named
+     * one.
      */
-    fun pushed(context: Context) {
+    fun pushed(context: Context, conversation: Conversation? = null) {
         if (!mayPost(context)) return
+        synchronized(pushOwed) { pushOwed.add(conversation?.key) }
         val alert = Notification.Builder(context, MESSAGE_CHANNEL)
             .setSmallIcon(R.drawable.ic_stat_umbra)
             .setContentTitle("New message")
@@ -125,6 +141,18 @@ object Notifier {
             .setPublicVersion(lockScreen(context))
             .build()
         manager(context).notify(MESSAGE_TAG, PUSH_ID, alert)
+    }
+
+    /**
+     * The record of a push arrived, and the setting of its conversation
+     * shows no alert for it. The alert of the push ends when it stands for
+     * no other push.
+     */
+    fun pushSettled(context: Context, conversation: Conversation) {
+        synchronized(pushOwed) {
+            if (!pushOwed.remove(conversation.key) || pushOwed.isNotEmpty()) return
+        }
+        manager(context).cancel(MESSAGE_TAG, PUSH_ID)
     }
 
     /** A contact request arrived. The line names no sender. */
@@ -159,6 +187,7 @@ object Notifier {
 
     /** The user looks at the app, thus each alert is old. */
     fun clear(context: Context) {
+        synchronized(pushOwed) { pushOwed.clear() }
         val manager = manager(context)
         manager.activeNotifications
             .filter { it.tag == MESSAGE_TAG || it.id == LOCKED_ID }

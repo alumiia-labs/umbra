@@ -284,9 +284,14 @@ object Files {
                 muxer.start()
                 val buffer = ByteBuffer.allocate(largest)
                 val info = MediaCodec.BufferInfo()
+                var copied = 0L
                 while (true) {
                     val size = extractor.readSampleData(buffer, 0)
                     if (size < 0) break
+                    // The copy lives in RAM, thus it ends at the first
+                    // sample above `MAX_FILE_SIZE`, and not after the last.
+                    copied += size
+                    if (copied > MAX_FILE_SIZE) return -1
                     val flags = if (extractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0) {
                         MediaCodec.BUFFER_FLAG_KEY_FRAME
                     } else {
@@ -613,7 +618,14 @@ fun firstFrame(source: MediaSource): ImageBitmap? {
     val retriever = MediaMetadataRetriever()
     return try {
         retriever.setDataSource(CoreDataSource(source))
-        val frame = retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC) ?: return null
+        // The video of a peer names its own size, thus the retriever scales
+        // the frame before it gives a bitmap.
+        val frame = retriever.getScaledFrameAtTime(
+            0,
+            MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+            FRAME_SIDE_MAX,
+            FRAME_SIDE_MAX,
+        ) ?: return null
         val longest = maxOf(frame.width, frame.height)
         val shown = if (longest > FRAME_SIDE_MAX) {
             val scale = FRAME_SIDE_MAX.toFloat() / longest
@@ -623,7 +635,8 @@ fun firstFrame(source: MediaSource): ImageBitmap? {
             frame
         }
         shown.asImageBitmap()
-    } catch (unreadable: Exception) {
+    } catch (unreadable: Throwable) {
+        // A frame with no memory is an `Error`, and it ends no thread.
         null
     } finally {
         retriever.release()

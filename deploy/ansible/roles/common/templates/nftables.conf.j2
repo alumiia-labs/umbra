@@ -1,7 +1,13 @@
 #!/usr/sbin/nft -f
 # Written by Ansible (deploy/ansible/roles/common). Each change here goes
 # away at the next run.
-flush ruleset
+#
+# The file replaces its own table alone. A flush of the whole rule set
+# would also drop the table of fail2ban, and with it each SSH ban. The
+# first line makes the table when it is not there, thus the delete of the
+# second line never fails.
+table inet filter
+delete table inet filter
 
 {% set relay_addresses = groups['relays'] | map('extract', hostvars, 'ansible_host') | list %}
 table inet filter {
@@ -19,8 +25,25 @@ table inet filter {
     iif lo accept
     meta l4proto { icmp, ipv6-icmp } accept
 
+{% set ssh6 = umbra_ssh_from | select('search', ':') | list %}
+{% set ssh4 = umbra_ssh_from | reject('search', ':') | list %}
 {% if umbra_ssh_from %}
-    tcp dport 22 ip saddr { {{ umbra_ssh_from | join(', ') }} } accept
+    # SSH from the addresses of umbra_ssh_from alone. A family with no
+    # address in that list is closed, and the rule says so. The assert of
+    # roles/common/tasks/main.yml stops a run whose list holds no address
+    # of the family that Ansible reaches this server by.
+{% if ssh4 %}
+    tcp dport 22 ip saddr { {{ ssh4 | join(', ') }} } accept
+{% else %}
+    # umbra_ssh_from holds no IPv4 address: SSH is closed to IPv4.
+    meta nfproto ipv4 tcp dport 22 drop
+{% endif %}
+{% if ssh6 %}
+    tcp dport 22 ip6 saddr { {{ ssh6 | join(', ') }} } accept
+{% else %}
+    # umbra_ssh_from holds no IPv6 address: SSH is closed to IPv6.
+    meta nfproto ipv6 tcp dport 22 drop
+{% endif %}
 {% else %}
     tcp dport 22 accept
 {% endif %}

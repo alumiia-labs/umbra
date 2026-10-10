@@ -27,11 +27,15 @@
         android:theme="@style/Theme.Umbra"
         tools:replace="android:allowBackup">
         <!-- A turn or a resize keeps the activity, thus the open views stay,
-             and no view state goes to a bundle outside the store. -->
+             and no view state goes to a bundle outside the store. The empty
+             task affinity keeps the activity of another app out of this
+             task: Android 10 lets such an activity lie above the unlock
+             view. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
+            android:taskAffinity=""
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
@@ -83,6 +87,11 @@
         <receiver
             android:name=".PrivateClock"
             android:exported="false" />
+        <!-- NTF-045: Firebase makes no token by itself. Instant mode turns
+             the token on, and each other mode deletes it (Push.kt). -->
+        <meta-data
+            android:name="firebase_messaging_auto_init_enabled"
+            android:value="false" />
         <!-- Part 8 §8.4.1: the FCM carrier. A build with no Firebase app
              gets no event here. -->
         <service

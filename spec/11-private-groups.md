@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 11: Private Groups (2–500)
 
 **Status:** Draft
-**Version:** 0.11.0-draft
-**Date:** 2026-10-02
+**Version:** 0.12.0
+**Date:** 2026-10-09
 
 ---
 
@@ -60,18 +60,18 @@ each member. A group of 2 to 500 members uses **one relay-held group queue**,
 replicated on two relays. A member uploads one record for each message. No
 relay receives a recipient list.
 
-> *Cause.* Draft 0.1.0 attributed each group record by the pairwise channel
-> that carried it, and that one choice set every group cost. A text to 500
-> members was 499 copies of one `B1` cell, which is 1.05 MB of uplink. A join
-> at 500 members opened 499 pairwise channels. A membership change made each
-> member distribute a sender key again, which is N × (N − 1) sends. A member
-> of six 25-person groups held 144 inbound group queues. The pairwise
-> attribution bought two properties: an insider cannot forge the authorship
-> of a record, and no relay holds a roster. The pairwise tag vector of
-> §11.3.3 keeps the two properties with a different mechanism, and it drops
-> the fan-out. The tiers T1, T2, and T3 of 0.1.0, the sender keys, the lazy
-> rekey, the re-broadcaster, and the fan-out jitter are retired. One
-> mechanism serves every group size.
+> *Cause.* The alternative attributes each group record by the pairwise
+> channel that carries it, and that one choice sets every group cost. A text
+> to 500 members is 499 copies of one `B1` cell, which is 1.05 MB of uplink.
+> A join at 500 members opens 499 pairwise channels. A membership change
+> makes each member distribute a sender key again, which is N × (N − 1)
+> sends. A member of six 25-person groups holds 144 inbound group queues.
+> The pairwise attribution buys two properties: an insider cannot forge the
+> authorship of a record, and no relay holds a roster. The pairwise tag
+> vector of §11.3.3 keeps the two properties with a different mechanism, and
+> it drops the fan-out. Thus UMBRA has no size tiers, no sender keys, no lazy
+> rekey, no re-broadcaster, and no fan-out jitter. One mechanism serves every
+> group size.
 
 ## 11.2 The group queue
 
@@ -100,7 +100,7 @@ CSPRNG, and every member of role `admin` or above holds it.
 
 **What the group queue costs.** The table below counts the wire bytes of Part 6
 §6.9 for one text message of the modal 350 bytes of Part 3 §3.12, and it puts
-the 0.1.0 figure for the same member count beside each one. A record fills to
+the figure of a pairwise fan-out for the same member count beside each one. A record fills to
 the "record on a `GMSG`" row of the group-queue capacity table of Part 6 §6.9.
 That row is the L5 payload of the bucket less the 4-byte `seq` of a `GMSG`,
 which is 390, 1 926, 8 070, and 32 646 bytes at `B0` to `B3`. The dense tag
@@ -111,15 +111,15 @@ The modal text stays in `B1` up to N = 124.
 | Cost | N = 3 | N = 25 | N = 120 | N = 500 |
 | --- | --- | --- | --- | --- |
 | Uplink for each message, this part (one record × `GROUP_REPLICAS`) | 2 × `B1` = 4 192 B | 4 192 B | 4 192 B | 2 × `B2` = 16 480 B |
-| Uplink for each message, 0.1.0 ((N − 1) × `B1`) | 4 192 B | 50 304 B | 249 424 B | 1 045 904 B |
+| Uplink for each message, pairwise fan-out ((N − 1) × `B1`) | 4 192 B | 50 304 B | 249 424 B | 1 045 904 B |
 | Download for each member for each message, this part (one record from one replica) | 2 096 B | 2 096 B | 2 096 B | 8 240 B |
-| Download for each member for each message, 0.1.0 | 2 096 B | 2 096 B | 2 096 B | 2 096 B |
+| Download for each member for each message, pairwise fan-out | 2 096 B | 2 096 B | 2 096 B | 2 096 B |
 | Rotation, each member downloads (§11.4.2) | one `B2` record, 8 240 B | one `B3` record, 32 860 B | one `B3` chunk, 32 860 B | one `B3` chunk, 32 860 B |
 | Rotation, the rotator uploads (§11.4.2) | 2 × `B2` = 16 480 B | 2 × `B3` = 65 720 B | 5 chunks and a `B1` descriptor record, 168 492 B | 19 chunks and a `B2` descriptor record, 640 820 B |
-| A membership change, 0.1.0 (each member sends (N − 1) `B1` and reads (N − 1) `B1`) | 4 192 B up, 4 192 B down | 50 304 B up, 50 304 B down | 249 424 B up, 249 424 B down | 1 045 904 B up, 1 045 904 B down |
+| A membership change, pairwise fan-out (each member sends (N − 1) `B1` and reads (N − 1) `B1`) | 4 192 B up, 4 192 B down | 50 304 B up, 50 304 B down | 249 424 B up, 249 424 B down | 1 045 904 B up, 1 045 904 B down |
 | Join, the joiner downloads (§11.9.1: one `B2` offer, one `B1` or `B2` admit, the snapshot chunks of §11.9.8) | 1 chunk, 73 960 B | 2 chunks, 106 820 B | 5 chunks, 205 400 B | 21 chunks, 731 160 B |
 | Join, each member downloads (one add record of §11.9.2) | `B1`, 2 096 B | `B1`, 2 096 B | `B2`, 8 240 B | `B2`, 8 240 B |
-| Join, 0.1.0 | 2 pairwise channels | 24 pairwise channels | 119 pairwise channels | 499 pairwise channels, a 500-invitation bundle on the chunk path, 499 group requests |
+| Join, pairwise fan-out | 2 pairwise channels | 24 pairwise channels | 119 pairwise channels | 499 pairwise channels, a 500-invitation bundle on the chunk path, 499 group requests |
 
 The rotation rows and the join rows use two admins in the 25-member group and
 in the 500-member group. §11.4.2 and §11.9.8 give each derivation.
@@ -133,9 +133,18 @@ and every member sends each record to the two of them.
 the device CSPRNG at the creation of the group. **[GRP-152]** The creator MUST
 NOT derive `group_id` from a member identity, from `GroupRosterSeed_g`, or from
 an earlier `group_id`. **[GRP-153]** A member MUST reject an invitation to a
-`group_id` that it already holds. `group_id` travels inside the invitation and
-inside the AEAD of each record, and no relay reads it. `GroupQueueId` is the
-relay-side name, and it carries no relation to `group_id`.
+`group_id` that it already holds. A member holds a group while the roster holds
+its own index as active and the member shows the group as open. A membership
+that ended holds nothing: the member left, an admin removed it, a rival took
+its index (`GRP-374`), it lapsed (`GRP-297`), or the group closed at this
+device (`GRP-210`). Such a member MUST take a new invitation to that
+`group_id` as §11.9.1 gives it. The group of that admit MUST take the place of
+the group that the member held, in the same conversation. The messages of that
+conversation stay. Each key, each credential, and each record that the earlier
+membership held and did not send leaves with that membership. `group_id`
+travels inside the invitation and inside the AEAD of each record, and no relay
+reads it. `GroupQueueId` is the relay-side name, and it carries no relation to
+`group_id`.
 
 - **[GRP-188]** The creator MUST make `own_sk` for each replica from the device
   CSPRNG. **[GRP-189]** The creator MUST NOT derive `own_sk` from `group_id`,
@@ -158,7 +167,12 @@ relay-side name, and it carries no relation to `group_id`.
   replica that never accepts as a link fault under Part 10 §10.4.2.
 - **[GRP-198]** A `GPOST` MUST NOT carry an `Admission`. The relay applies
   `GROUP_POST_RATE` of Part 3 §3.2.7 to each group queue, and Part 3 rule
-  `NET-218` continues the ARQ after the `LIMIT` that it answers.
+  `NET-218` continues the ARQ after the `LIMIT` that it answers. A client
+  MUST continue that ARQ inside the session that sent the record. A client MUST
+  NOT wait for a new link. It sends the same bytes again to each replica that
+  returned no `GSEQ`. The wait before a send starts at 30 s, and it doubles
+  with each send up to 12 h. No timer fires for it, and the next traffic of the
+  session after the wait carries the record (Part 3 rule `NET-071`).
 
 **No reachable replica.** **[GRP-199]** If a client reaches no replica of a
 group, it MUST show one line at the top of the message list of that group and
@@ -183,17 +197,30 @@ replicas of one group give two unrelated sequences.
   order across replicas. §11.7 gives the order.
 - **[GRP-202]** A reader device MUST hold one cursor for each replica, as
   mutable state of Part 7 §7.5.3. There is no acknowledgment from a reader,
-  and Part 3 §3.2.7 retains by time and by quota only.
+  and Part 3 §3.2.7 retains by time and by quota only. A reader MUST NOT
+  move a cursor to a `seq` more than 5 184 000 above it. That number is the
+  count of records that `GROUP_POST_RATE` admits in twice `GROUP_RETENTION`.
+  One false `seq` from a replica would else leave the cursor at the top of the
+  range, and each later `GSUB` there would give no record.
 - **[GRP-203]** A reader MUST subscribe to one replica in each session, chosen
   at random. **[GRP-204]** A reader MUST alternate the replicas across its
-  sessions. A `GSUB` from a cursor with a backlog above `DRAIN_THRESHOLD`
-  follows Part 3 rule `NET-037`.
+  sessions. It MUST move the choice in its store when a `GSUB` goes, and at no
+  other time. Thus each `GSUB` takes the other replica than the last one took.
+  A `GSUB` from a cursor with a backlog above `DRAIN_THRESHOLD` follows Part 3
+  rule `NET-037`. A relay that holds no room for that backlog answers `LIMIT`
+  under Part 3 rule `NET-349` and gives no record of it. The reader MUST then
+  send the same `GSUB` again in that session, from the cursor that it named.
+  The reader MUST send it after a wait that starts at 2 s and doubles up to
+  30 s.
 - **[GRP-205]** A reader that observes a gap in the `counter` of one sender
   (§11.3.5) for longer than `GROUP_GAP_TIMEOUT` MUST open a session to the
-  other replica and fetch from its cursor there. §11.10 gives 60 s.
-  **[GRP-206]** A reader MUST discard a record that it already holds by the
-  triple of `GRP-035`, whichever replica carried it. Part 6 rule `WIR-065`
-  gives the same rule for a pairwise duplicate.
+  other replica and fetch from its cursor there. §11.10 gives 60 s. That
+  fetch is a second `GSUB` beside the one of the session. A reader MUST send
+  one at most for a group in one session, after the backlog of its own replica
+  arrived. The loss of it ends no subscription and counts for nothing under
+  `GRP-391`. **[GRP-206]** A reader MUST discard a record that it already holds
+  by the triple of `GRP-035`, whichever replica carried it. Part 6 rule
+  `WIR-065` gives the same rule for a pairwise duplicate.
 - **[GRP-207]** A device MUST hold a cursor at or above the newest epoch-key
   record of the group (§11.4.2) on one replica before it sends a `GPOST`. Thus
   a device never posts under a stale epoch after a rotation that it could have
@@ -222,14 +249,17 @@ replica exists for, thus that end is not the end of the session.
   MUST return to `GROUP_RELINK_FIRST` after a link on which a circuit was
   ready.
 
-> *Cause.* An earlier implementation ended the whole session when one
-> circuit failed, and opened no new link on its own. A group then went silent
-> until a record of a contact woke the client, and one relay that was down
-> made the session of every group fail. The wait of `GRP-394` keeps a client
+> *Cause.* A client that ends the whole session when one circuit fails, and
+> opens no new link on its own, leaves a group silent until a record of a
+> contact wakes the client. One relay that is down then makes the session of
+> every group fail. The wait of `GRP-394` keeps a client
 > whose guard is down from a burst of links, which the guard would see.
 - A reader in Instant mode registers one notify queue for the group with
   `GNREG`, and Part 8 §8.5.2 gives that queue, its handle, and the digest that
-  the relay writes into it.
+  the relay writes into it. A relay that started again holds no registration
+  and tells no reader. Thus a reader MUST send that `GNREG` again with each
+  `GSUB`, at the replica of that `GSUB`. A `GNREG` that the relay holds already
+  changes nothing there.
 
 > *Cause.* A single-reader queue of Part 3 §3.2 holds its cursor at the relay
 > through the acknowledgment. A group queue has N readers, and a relay that
@@ -255,7 +285,30 @@ oldest record first when the retention or the quota bound is reached.
   retention erased. §11.8 gives the history rule.
 - **[GRP-210]** A client that finds the group queue gone at each replica MUST
   show the group as closed. A relay erases a group queue at `GDEL` and after
-  `GROUP_IDLE_TTL` without an accepted `GPOST` or `GSUB`.
+  `GROUP_IDLE_TTL` without an accepted `GPOST` or `GSUB`. A refusal names no
+  cause (Part 6 rule `WIR-317`), and a replica that holds an earlier epoch
+  than the client refuses in the same way. Thus the state is not final. A
+  client MUST keep its `GSUB` of a closed group in each session. A client MUST
+  show the group as open again in each of two cases. In the first, a replica
+  answers a command of it or gives it a record. In the second, the client
+  installs a later epoch. A client MUST show a message that it could not send
+  to a closed group as `failed`. A client MUST NOT leave that message `queued`.
+  The client counts the refusals of one session. A replica that refuses a
+  record of the group with `REJECTED` counts one time. An accepted record at
+  that replica takes its count away, and the end of the session takes away each
+  count. A group closes when each replica counts. A refusal does not count at a
+  replica to which the client still owes the `GKEY` of the current epoch
+  (`GRP-361`). That refusal counts when the client lost a `GSUB` of that group
+  in the same session.
+
+> *Cause of the two exceptions.* A replica that waits for the `GKEY` of a
+> rotation refuses the pair of the new epoch as a replica with no queue does.
+> The rotating client knows that it owes the command, thus that refusal names
+> no queue that is gone. A count of it would close a group at each rotation
+> that one replica takes late. A lost `GSUB` in the same session is evidence from the
+> replica itself, thus the doubt ends there. A refusal of an earlier session
+> says nothing of the present one, because the `GKEY` goes again in each
+> session.
 
 `GROUP_RETENTION` equals `GROUP_SILENT_EVICT` of §11.9.7 deliberately. A member
 silent for 30 days is evicted, thus no member needs a record older than the
@@ -309,11 +362,11 @@ index order with no repeat.
 - **[GRP-219]** A group content record MUST NOT carry a wrapper that names the
   group. The queue names the group, and `group_id` sits in `ad`.
 
-> *Cause.* Draft 0.1.0 wrapped each group content record in a `GroupRecord`
-> of kind `0x12` that carried `group_id`, because a group record travelled on
-> a pairwise queue that carried other conversations. A group record now
-> travels on the group queue only. Part 6 §6.6.2 retires kind `0x12`, and
-> `ad` binds `group_id` so that a replay into a second group fails at the AEAD.
+> *Cause.* A wrapper that carries `group_id` is necessary only where a group
+> record travels on a pairwise queue that carries other conversations. A
+> group record travels on the group queue only. Part 6 §6.6.2 reserves kind
+> `0x12`, and `ad` binds `group_id` so that a replay into a second group fails
+> at the AEAD.
 
 ### 11.3.1 The epoch and the slot chain
 
@@ -431,19 +484,29 @@ action. **[GRP-233]** An admin that turned on `HISTORY_WINDOW` = W MUST hand
 the joiner `K_{e,t_join − W}` in the admit stage of §11.9.1 in the place of
 `K_{e,t_join}`. **[GRP-234]** If that window crosses an epoch boundary, the
 admin MUST hand the slot key at the start of the current epoch and no key of
-an earlier epoch. The joiner then reads the retained records of that window
-from a replica. **[GRP-423]** An admin that joined inside the current epoch,
-and thus holds no `K_e` under `GRP-384`, MUST derive the key of the admit
-from its own slot chain, and it MUST hand no slot key before the oldest slot
-that the chain holds; the window then ends at that slot.
+an earlier epoch. The older slot key opens the group layer of a retained
+record of that window and no more. A record that a member sealed before the add
+carries no tag for the joiner in its tag vector of §11.3.3. `GRP-228` refuses a
+record whose slot is below the slot window. Thus a joiner accepts no record
+from before its add in v1, and the history window gives it none. The
+rules keep their numbers for a later version that gives a joiner a way to
+authenticate such a record. **[GRP-423]** An admin that joined inside the
+current epoch, and thus holds no `K_e` under `GRP-384`, MUST derive the key of
+the admit from its own slot chain, and it MUST hand no slot key before the
+oldest slot that the chain holds; the window then ends at that slot.
 
-> *Cause.* Draft 0.1.0 held three sender-key generations for each member on a
-> device for 7 days, and a seized device opened every record of every member
-> over that period. The slot chain replaces that with one key for each group,
-> and `GROUP_SLOT_WINDOW` bounds the exposure to 24 h without a rotation. A
-> shorter window makes a device that slept through the night miss its morning
-> records. The history window hands the joiner an older slot key and no
-> re-encryption.
+> *Cause.* A design that holds three sender-key generations for each member
+> on a device for 7 days lets a seized device open every record of every
+> member over that period. The slot chain holds one key for each group.
+> `GROUP_SLOT_WINDOW` bounds the exposure to 24 h only at a member that
+> joined inside the epoch and holds the chain alone. A member that holds
+> `K_e` derives each slot key of the epoch again. Thus its exposure is the
+> epoch from `t_e`, at most `GROUP_EPOCH_MAX_AGE` of 30 days, as the paragraph
+> above states. The hourly step of `GRP-227` then bounds what a device holds
+> ready and not what it can derive. A shorter window makes a device that slept
+> through the night miss its morning records. The history window hands the
+> joiner an older slot key and no re-encryption, and the paragraph above states
+> its limit.
 
 ### 11.3.3 The pair key and the tag vector
 
@@ -451,7 +514,7 @@ Each member holds three keys for each group, derived from `GroupRosterSeed_g`
 of §11.9.1 in the local identity table of Part 4 §4.7.2:
 
 ```
-GroupRosterKey_g   ML-DSA-65 keypair from GroupRosterSeed_g, as 0.1.0; pk 1 952 B
+GroupRosterKey_g   ML-DSA-65 keypair from GroupRosterSeed_g; pk 1 952 B
 GroupPairKey_g     X25519:  sk = clamp( HKDF-SHA3-256( salt = "", ikm = GroupRosterSeed_g,
                                                        info = "umbra/v1/group-pair", L = 32 ) )
 GroupKemKey_g      UMBRA-KEM: Hybrid( HKDF-SHA3-256( salt = "", ikm = GroupRosterSeed_g,
@@ -520,9 +583,9 @@ sender and one at the receiver.
 > each member through `UMBRA-KEM` in the epoch-key record of §11.4.2, and Part
 > 5 rule `CRY-024` holds.
 
-> *Cause.* Draft 0.1.0 attributed a record by the L6 QueueE2E key of the
-> pairwise channel that carried it, thus it needed one channel for each pair
-> of members. The tag vector attributes a record by one 12-byte MAC for each
+> *Cause.* An attribution by the L6 QueueE2E key of the pairwise channel
+> that carries a record needs one channel for each pair of members. The tag
+> vector attributes a record by one 12-byte MAC for each
 > receiver under a static Diffie–Hellman between two group-scoped keys. That
 > costs 12N bytes inside the AEAD and no channel. A signature under
 > `GroupRosterKey_g` would cost 3 309 bytes and would make each record
@@ -536,7 +599,9 @@ sender and one at the receiver.
 2. **[GRP-246]** The sender MUST set `t` to `floor(now / 3600)`, derive
    `K_{e,t}` from its stored state, and set `counter` to the last value it sent
    in epoch `e` plus 1. The first record of a member in an epoch carries
-   `counter` = 1.
+   `counter` = 1. While its clock lies below `t_e`, inside the bound of
+   `GRP-383`, the sender MUST set `t` to `t_e`. The chain holds no key of an
+   earlier slot, and `GRP-228` takes a slot of that skew.
 3. Build `ContentPlain` with the newest roster epoch the device holds, compute
    the tags, encrypt, and fill, under the rules of §11.3 and §11.3.3.
 4. `GPOST` the same bytes to each replica under §11.2.1. **[GRP-247]** A
@@ -550,10 +615,10 @@ sender and one at the receiver.
 rule `WIR-060` states the same rule. A group is one conversation, and a
 moderation epoch of §11.9.6 names that value.
 
-> *Cause.* Draft 0.1.0 dispatched each send to N − 1 members with an
-> exponential jitter, because a burst of N − 1 cells at one moment was a
-> membership beacon (the "flurry" attack of arXiv:2305.09799). One record on
-> one queue makes no burst, thus the jitter retires with the fan-out.
+> *Cause.* A dispatch of each send to N − 1 members makes a burst of N − 1
+> cells at one moment, and that burst is a membership beacon (the "flurry"
+> attack of arXiv:2305.09799). Such a design needs a jitter on each dispatch.
+> One record on one queue makes no burst, thus a group send needs no jitter.
 
 ### 11.3.5 Receiving
 
@@ -576,24 +641,35 @@ the steps below for each content record.
    brings its roster to that epoch. **[GRP-253]** A receiver MUST discard a
    held record when `GROUP_ROSTER_WAIT` passes after its arrival.
    **[GRP-254]** A receiver MUST show a gap for a discarded held record, in
-   the manner of §11.2.3. `GROUP_ROSTER_WAIT` is 24 h. **[GRP-255]** A
-   receiver that holds such a record MUST fetch from the other replica under
-   §11.2.2, because the missing roster record is a gap. **[GRP-256]** A
-   receiver MUST discard a record whose `roster_epoch` is below the roster
-   epoch of its own admission. Its sender held no entry for the receiver, and
-   the vector holds no tag for it.
+   the manner of §11.2.3. `GROUP_ROSTER_WAIT` is 24 h. A receiver bounds the
+   count and the bytes of the records that it holds. A record that leaves at
+   that bound is a discarded record of this rule. A record that no key of the
+   receiver opened leaves before one that waits for a roster record.
+   **[GRP-255]** A receiver that holds such a record MUST fetch from the other
+   replica under §11.2.2, because the missing roster record is a gap.
+   **[GRP-256]** A receiver MUST discard a record whose `roster_epoch` is below
+   the roster epoch of its own admission. Its sender held no entry for the
+   receiver, and the vector holds no tag for it.
 5. Locate the receiver's own tag. In dense mode that is its rank among the
    active members of `roster_epoch`, in index order. In sparse mode that is
    its own index. Verify the tag under §11.3.3.
 6. **[GRP-257]** A receiver MUST reject a record whose `sender_index` names no
    member of the receiver's **current** roster. A removed member's in-flight
    records under the old epoch fail here, whatever `roster_epoch` they name.
-   `GRP-407` of §11.12 states the one exception, a rival re-key.
+   `GRP-407` of §11.12 states one exception, a rival re-key. A roster record
+   from the member that made the head of the roster chain, which names the
+   roster epoch before that head, is the other. A head that is a self-removal
+   or a `RekeyRecord` takes its maker out of the active set, and `GRP-070`
+   needs the second successor of that maker.
 7. **[GRP-258]** A receiver MUST identify the record by the triple of
    `GRP-035`. **[GRP-259]** A receiver MUST track `counter` for each (sender,
    epoch) pair, for the gap detection of §11.2.2 and the order of §11.7. A
    repeated or lower `counter` is not a security event; the record is a
-   duplicate or a reorder.
+   duplicate or a reorder. A receiver MUST NOT discard a record for its
+   `counter` alone. `GRP-342` lets two devices of one member give two records
+   one value, and `GRP-206` removes a duplicate by the triple. A `KeyRequest`
+   and a `KeySupply` enter no store, thus a receiver discards one of them under
+   a `counter` that it took already.
 8. Route the `AppMessage` under Part 6 §6.6 and the class rules of Part 7
    §7.5.3.
 
@@ -610,7 +686,12 @@ apply to it.
   together with each content record that names an epoch at or above it.
 - **[GRP-263]** A receiver MUST keep the active-member set of each roster epoch
   from its own admission epoch onward, for `GROUP_RETENTION` after that epoch.
-  A record names a roster epoch inside `GROUP_RETENTION` at most.
+  A record names a roster epoch inside `GROUP_RETENTION` at most. A receiver
+  MUST also keep each set from the `roster_epoch` of the oldest group epoch
+  that it holds. The triggers of `GRP-357` count from that set. A receiver MUST
+  also keep the set before the head of the chain, which `GRP-417` can bring
+  back. It MAY discard each older set. It MAY also discard each record of a
+  successor of `GRP-070` that an epoch below the kept sets made.
 
 > *Cause.* The order of records on one replica is the order in which that
 > replica accepted them, and the roster chain carries its own order in
@@ -619,10 +700,9 @@ apply to it.
 > that sender posts under the roster it holds. They differ when the other
 > replica accepted the roster record first and this replica has not yet
 > received it. A held record costs one bucket of storage for
-> `GROUP_ROSTER_WAIT`, and a discarded one costs a visible gap. An earlier
-> draft of this section rejected such a record at once, and a member that
-> read the slower replica lost each record that followed a join for the
-> length of one session.
+> `GROUP_ROSTER_WAIT`, and a discarded one costs a visible gap. A receiver
+> that rejects such a record at once makes a member that reads the slower
+> replica lose each record that follows a join for the length of one session.
 
 ## 11.4 Rotation
 
@@ -652,7 +732,15 @@ rotate does not, because a rotation needs no secret that a plain member lacks.
   epoch before it. A receiver MUST accept a `roster_epoch` at or above the
   first trigger since that record, and not only one at or above the newest:
   a rotator that answered the first trigger before a second one reached it
-  then installs at each member alike.
+  then installs at each member alike. A member MUST hold an epoch-key record
+  that satisfies four conditions. The record is of an epoch above the current
+  epoch of the member. Its slot opens. Its tag verifies under the pair key with
+  an active member. The record fails `GRP-356` or this rule, or it names a
+  `roster_epoch` above the roster of the member. It MUST try that slot again
+  after each roster record that it applies and after each epoch that it
+  installs. It MUST discard that slot `GROUP_ROSTER_WAIT` after its arrival.
+  The two replicas give no order (§11.2.2), thus an epoch-key record can arrive
+  before the roster record that it answers.
 - **[GRP-422]** A member that holds a trigger since the `roster_epoch` of its
   current epoch, and that the trigger does not exclude, MUST rotate before it
   posts a record other than a roster object. Under `GRP-357` the current
@@ -694,7 +782,22 @@ rotate does not, because a rotation needs no secret that a plain member lacks.
    send `GKEY` to a replica before that replica accepted the epoch-key record.
    **[GRP-363]** A member of role `admin` or above that installs an epoch it
    did not credential MUST send `GKEY` for that epoch to each replica at once.
-   A second `GKEY` with the same keys changes nothing at the relay.
+   A second `GKEY` with the same keys changes nothing at the relay. A `GKEY`
+   has no answer. Thus a member that holds `own_sk` MUST send the `GKEY` of the
+   epoch that it holds again in each session. This rule binds until a `GSEQ` of
+   that replica follows that `GKEY` in one session. That `GSEQ` is for a record
+   that the replica can take under the credentials of that epoch alone. It MUST
+   send it only after the backlog of its `GSUB` arrived. A device that was away
+   can hold an epoch that the group left, and its `GKEY` would move the replica
+   back to it. The same holds for an epoch that a member installs while that
+   backlog arrives. The member MUST NOT send the `GKEY` of that epoch then. It
+   sends the one of the epoch that it holds when the backlog ended. A member
+   that holds `own_sk`, and whose record each replica refuses under the pair of
+   an epoch whose `GKEY` it counted as arrived there, MUST drop that count.
+   Thus that `GKEY` goes again after the backlog of its next session. A `GKEY`
+   of an older epoch can have moved the replica back, and a replica in that
+   state refuses as one with no queue does (`GRP-210`). `GRP-362` holds for
+   each such `GKEY`.
 4. Switch its own sending to `e + 1`.
 
 The relay keeps the previous `read_pk` for `GROUP_READ_GRACE` and the previous
@@ -711,11 +814,12 @@ receiver rejects under §11.3.5. Part 15 §15.3 records that residual.
   `GRP-210`. The relay takes the credentials of an epoch at a `GKEY` alone,
   and a rotator below `admin` sends none.
 
-> *Cause.* An earlier form named no credential for the time between an
-> installation and the `GKEY` of that epoch. A member that installed the new
-> epoch wrote under its pair, the relay refused it, and two refusals closed
+> *Cause.* Between an installation and the `GKEY` of that epoch, the relay
+> holds no credential of the new epoch. A member that installs the new epoch
+> and writes under its pair alone meets a refusal, and two refusals close
 > the group under `GRP-210`. After a rotation by a plain member with no
-> admin online, each member that posted closed the group on its own device.
+> admin online, each member that posts would close the group on its own
+> device.
 > The second command costs one round trip at a switch of epoch. Two
 > rotations inside one `GROUP_EPOCH_GRACE` with no `GKEY` between them leave
 > a member with no pair that the relay holds, and Part 15 §15.3 records that
@@ -725,19 +829,31 @@ receiver rejects under §11.3.5. Part 15 §15.3 records that residual.
 epoch `e + 1` before either reads the other. **[GRP-273]** A member that
 verifies two epoch-key records for one epoch MUST install the secret of the
 record whose rotator has the lower member index, and it MUST keep the other
-secret as an alternate for `GROUP_EPOCH_GRACE`. **[GRP-274]** A receiver MUST
-try the alternate secret of an epoch when the record key of that epoch fails
-to open a record. **[GRP-364]** A rotator that reads an epoch-key record for
-the epoch it posted, from a lower member index, MUST switch to that secret,
-and if it holds `own_sk` it MUST send `GKEY` with the credentials of that
-secret to each replica.
+secret as an alternate for `GROUP_EPOCH_GRACE`. That rule orders two records
+that each hold a slot for every member of their `roster_epoch`. A one-slot
+record of §11.4.3 names the member that made it and not the rotator of its
+secret. Thus a member that holds a secret of the epoch MUST keep the secret of
+a one-slot record as the alternate alone. That member MUST NOT send under the
+secret of the one-slot record. It MUST make that secret the current one when
+one of two conditions holds. Under the first condition, a record of a member
+other than the maker of the one-slot record opens under that secret, and its
+tag verifies. Under the second condition, the record of the rotator of that
+secret arrives, and the index rule selects it. A member can hold, as its one
+secret of the epoch, the secret of a one-slot record. That occurs when no other
+record of that epoch opened before that record. That member MUST make the
+secret of a record that holds a slot for every member the current one when that
+record arrives. That member MUST keep the secret of the one-slot record as the
+alternate under the same two conditions. **[GRP-274]** A receiver MUST try the
+alternate secret of an epoch when the record key of that epoch fails to open a
+record. **[GRP-364]** A rotator that reads an epoch-key record for the epoch it
+posted, from a lower member index, MUST switch to that secret, and if it holds
+`own_sk` it MUST send `GKEY` with the credentials of that secret to each
+replica.
 
-> *Cause.* Draft 0.1.0 rotated a sender key at each membership change, lazily
-> at the next send of each sender. An earlier form of this section let only an
-> admin rotate, because the rotator also sent `GKEY`. That put the exclusion
-> of a leaver, and of a device in hostile hands, behind the presence of one
-> role holder, and a group whose admins sleep kept an excluded party inside
-> for hours. The two acts are separate. Every member holds every KEM key of
+> *Cause.* A rotation that only an admin can make puts the exclusion of a
+> leaver, and of a device in hostile hands, behind the presence of one role
+> holder. A group whose admins sleep then keeps an excluded party inside for
+> hours. The rotation and the `GKEY` are separate acts. Every member holds every KEM key of
 > the roster, thus any member makes the secret that excludes a party. Only the
 > excluded party cannot, because it would know the secret it made, and
 > `GRP-356` keeps it out. `GKEY` needs `own_sk`, and it buys relay hygiene
@@ -813,11 +929,10 @@ read fails or its own slot does not open under it, under the lengths of a
 record whose every `own_count` is 0. No field in the clear names the rotator,
 thus the reader cannot take the rotator's role from the record.
 
-> *Cause.* An earlier form of `GRP-277` made `own_count` follow the roles of
-> the roster alone, and the relay learns the slot lengths from the record.
-> `GRP-355` lets any active member rotate, and a member below `admin` holds
-> no `own_sk`, thus that form asked a plain rotator for a secret it does not
-> have. Naming the rotator in the clear would tell the relay which member
+> *Cause.* The relay learns the slot lengths from the record. `GRP-355` lets
+> any active member rotate, and a member below `admin` holds no `own_sk`.
+> Thus a rule that makes `own_count` follow the roles of the roster alone
+> asks a plain rotator for a secret that it does not have. Naming the rotator in the clear would tell the relay which member
 > rotates, which §11.5 does not grant it, and a per-slot `own_count` byte in
 > the clear would name each admin. The two layouts differ in length alone,
 > thus the reader tries both and loses one parse.
@@ -828,11 +943,111 @@ rotator's role, install `(e + 1, t_{e+1}, K_{e+1,t_{e+1}})`, derive the queue
 credentials of `e + 1`, and keep the state of epoch `e` for
 `GROUP_EPOCH_GRACE`. **[GRP-383]** The `slot` field of the epoch-key record
 header MUST carry `t_{e+1}`, and a member MUST take `t_e` of `GRP-224` from
-that field. **[GRP-287]** A member MUST NOT install an epoch secret
-whose `tag` fails. **[GRP-288]** A member MUST NOT install an epoch secret from
-an epoch-key record whose `epoch` is below its current epoch, or equal to it
-other than under the two-rotator rule of §11.4.1 and the one-slot record of
-§11.4.3.
+that field. A member MUST NOT install an epoch whose `t_e` is above
+`t_now + GROUP_SLOT_SKEW`, or more than `GROUP_EPOCH_MAX_AGE` below `t_now`,
+on its own clock. It MUST hold a slot of the first kind, as `GRP-229` holds a
+record above the window. It MUST install that slot when its clock reaches that
+bound. It MUST discard a slot of the second kind. **[GRP-287]** A member MUST
+NOT install an epoch secret whose `tag` fails. **[GRP-288]** A member MUST NOT
+install an epoch secret from an epoch-key record whose `epoch` is below its
+current epoch, or equal to it other than under the two-rotator rule of §11.4.1
+and the one-slot record of §11.4.3. A member MUST install an epoch above
+`e + 1` under the checks of `e + 1`. The checks are the tag, the rotator of
+`GRP-356`, and the trigger of `GRP-357`, each counted from its current epoch
+`e`. The number of that epoch has a bound. Let `r` and `t_e` be the
+`roster_epoch` and the start slot of the current epoch, and `R` and `t` the
+ones of the record. Take `R − r` as 0 when `R` is below `r`. A member MUST NOT
+install an epoch whose number is more than `2 × (R − r) + 1 + A` above `e`. `A`
+is the count of whole periods of `GROUP_EPOCH_MAX_AGE` less `GROUP_SLOT_SKEW`
+slots between `t_e` and `t`. A member that an admit placed can hold the chain
+of that admit and no `K_e`. Such a member MUST install an epoch for which its
+roster holds no trigger only under the number `e + 1`.
+
+A member MUST keep the *base* of each epoch that it holds. The base is the
+number, the `roster_epoch`, and the start slot of the epoch that it held before
+it. When the two epochs name one `roster_epoch`, the base is the base of that
+earlier epoch. A member MUST install an epoch above `e` for which `GRP-357`
+holds no trigger since `e` when two conditions hold. The tag verifies.
+`GRP-356`, `GRP-357`, and the bound hold from the base of `e` in the place of
+`e`, with `2 × (R − r) + A` as the bound. That epoch keeps the base of `e`.
+Thus of two epoch-key records that answer one trigger under two numbers, each
+member holds the one of the higher number. That holds in each order of arrival.
+A member that took the higher one first refuses the lower one under the first
+sentence of this rule. A member can open its slot of a record whose number lies
+below `e` and above the base of `e`. When that record names the `roster_epoch`
+of `e` and holds the checks from that base, the member MUST count `e` as the
+second epoch of that `roster_epoch`. A member that installed the two in their
+order does the same (`GRP-369`).
+
+> *Cause of the bound on `t_e`.* A chain holds no key below `t_e`, thus an
+> epoch whose `t_e` lies N slots above the clock takes no record for N hours.
+> An epoch at the top of the range takes none ever. No member could post a
+> roster object, thus no trigger and no later rotation would follow. One member
+> would mute the group permanently. An epoch whose `t_e` lies below the bound
+> is aged at its installation, and each member would rotate at once.
+
+> *Cause of the epoch above `e + 1`.* The number of an epoch gives no
+> authority. The secret comes from the rotator, the tag proves that rotator
+> to the member, and `GRP-356` and `GRP-357` bind the record to the roster.
+> A member that may post epoch `e + 2` may post `e + 1` with the same
+> secret, thus the number admits no party that the checks bar. An index that a
+> trigger excludes fails `GRP-356` under each number, and a record with no
+> trigger fails `GRP-357` under each number. A rule that takes `e + 1` alone
+> fails in one case. The order of `GRP-117` can displace the head that carried
+> the trigger of `e + 1`. A member whose chain never held that trigger can
+> then install neither `e + 1` nor any later epoch. That member shows
+> "membership lapsed" at the age of its epoch.
+
+> *Cause of the bound.* The number is no free name: a rotation needs the
+> number above the current one, and no epoch installs below it. Without a
+> bound, one active member can post an epoch-key record under the highest
+> number. Each member installs it, no rotation can follow, and a member that
+> the group removes after it reads the group permanently. An honest epoch
+> lies at most two numbers above the current one for each roster epoch between
+> the two. The cause is that a trigger takes one roster epoch, and the rival of
+> `GRP-369` takes a second epoch of its roster epoch. One more number covers a
+> second epoch of the roster epoch of `e` itself, and `A` covers the rotations
+> of `GRP-360`. Each term comes from the record and from the epoch that the
+> member holds. Thus two members that hold one epoch give one record one
+> verdict, whatever each one read of the roster. A member that a snapshot or an
+> admit placed counts as each other member does. The bound leaves a member that
+> may rotate room to skip numbers, at most two for each roster epoch. Each
+> member takes such a record alike, and the numbers of a group last for 2^31
+> roster epochs.
+
+> *Cause of the base.* The order of `GRP-117` can displace a head that
+> carried a trigger after one member rotated for it. The members whose
+> chain never held that head stay at `e`, and the others hold `e + 1`. At
+> the next trigger one member of each part can rotate, and the two records
+> carry `e + 1` and `e + 2`. Without the base, a member that took the
+> record of `e + 1` refuses the one of `e + 2`, because its roster holds no
+> trigger since `e + 1`. The two parts then read each other inside
+> `GROUP_EPOCH_GRACE` alone, at each later trigger that reaches them in
+> that order. The record of `e + 2` answers the same trigger from the same
+> epoch `e`, thus a member checks it from there. The base stays through
+> each such step and the bound from it has no spare number, thus a chain of
+> such epochs ends. Two members that read the same records hold one base.
+
+> *Cause of the first epoch of a joiner.* A member that an admit placed
+> holds the roster from the epoch of its add on (`GRP-313`). A trigger
+> before that add is no fact that it reads. The rotation that answers the
+> trigger can follow the add at the end of a backoff. The admit carries no
+> pending trigger, thus the joiner cannot count `GRP-357` from the epoch-key
+> record of its epoch. While it holds the chain of its admit and no `K_e`
+> (`GRP-384`), it therefore installs the epoch directly above its own in one
+> case. In that case the record names a `roster_epoch` at or above the one of
+> its add. The joiner installs under the tag and under `GRP-356` from that add
+> on. One epoch answers each trigger before the add, thus a record of a higher
+> number waits for a trigger that the joiner reads. A strict rule would refuse
+> that rotation, and the joiner would show "membership lapsed" when the grace
+> of its epoch ends. A rule with no bound on the number would let one record of
+> the highest number part a joiner from each later epoch. The rule leaves one residual. An
+> active member can post an epoch-key record of `e + 1` with no trigger. A
+> joiner in that state installs it while each other member refuses it. That
+> member gains no key, because it holds each key of the group already. It parts
+> one joiner from the group one time. That state lasts until an epoch of a
+> higher number that each member installs, or until a key supply of §11.4.3.
+> The epoch that the joiner installs holds `K_e`, and the state ends there.
 
 **What a rotation costs.** At 3 members with two owners the record is 24 + 7 +
 2 × 1 249 + 1 185 = 3 714 bytes, in `B2`. At 25 members with two admins it is
@@ -841,8 +1056,8 @@ members it is 592 500 bytes plus 64 bytes for each admin, in 19 chunks. A
 member downloads one `B2` record, one `B3` record, or one `B3` chunk, which is
 at most 32 860 bytes. The rotator uploads the record to two replicas, or the
 chunks once and a descriptor record to two replicas, and the chunk relay pushes
-the replicas of Part 12 §12.4. Draft 0.1.0 made each of N senders upload N − 1
-`B1` cells at a change. The chunk relay learns what Part 12 §12.9 says it
+the replicas of Part 12 §12.4. A pairwise fan-out with sender keys makes each
+of N senders upload N − 1 `B1` cells at a change. The chunk relay learns what Part 12 §12.9 says it
 learns from one chunk, and Part 12 rule `ATT-066` adds a row for this client
 of the chunk path.
 
@@ -877,7 +1092,13 @@ the epoch the member lacks, and `index` is 0.
   when `GRP-404` permits, because no other member read it, and MUST post it
   otherwise as a group record that keeps the `index` of `WIR-523`, thus
   another member answers under the backoff. The supply is sealed to the key
-  of the member that `index` names, thus a false `index` gains nothing.
+  of the member that `index` names, thus a false `index` gains nothing. The
+  one-slot record carries the `roster_epoch` of the rotation of its epoch,
+  which can lie below the first trigger that the receiver holds. A member can
+  hold a content record of that epoch and a trigger of `GRP-357`. That member
+  MUST accept such a record when its `roster_epoch` is at or above the
+  `roster_epoch` of its current epoch. `GRP-422` then makes it rotate before it
+  posts.
 - **[GRP-377]** A member MUST NOT answer a `KeyRequest` from an index that the
   current roster does not hold. **[GRP-404]** A member MUST NOT answer it for
   an index that the active set at the `roster_epoch` of the current epoch
@@ -890,11 +1111,11 @@ the epoch the member lacks, and `index` is 0.
   that shows a group as lapsed and then installs the epoch it lacked MUST
   show the group as open again.
 
-> *Cause of `GRP-404`.* An earlier form answered any index that the roster
-> holds. A member that joined inside the current epoch holds the chain from
-> its join slot, and it lacks nothing that it may hold; `K_e` would give it
-> each slot key from `t_e`, thus each record before its join, which
-> `GRP-385` forbids. The rotation of the epoch included each member that it
+> *Cause of `GRP-404`.* A member that joined inside the current epoch holds
+> the chain from its join slot, and it lacks nothing that it may hold. An
+> answer to any index that the roster holds would give that member `K_e`.
+> `K_e` gives each slot key from `t_e`, thus each record before its join,
+> which `GRP-385` forbids. The rotation of the epoch included each member that it
 > served, and the active set at its `roster_epoch` names them.
 
 The same one-slot record delivers the owner credentials to a newly promoted
@@ -904,7 +1125,10 @@ post a one-slot epoch-key record of the current epoch for that member with
 **[GRP-400]** That record MUST carry `k_e` of 32 zero bytes, and its `tag`
 MUST cover that value. A receiver MUST take `own_sks` from a slot whose
 `k_e` is zero and MUST install no epoch from it, and it MUST reject such a
-slot of an epoch other than its current one or with `own_count` 0.
+slot of an epoch other than its current one or with `own_count` 0. It MUST
+reject such a slot whose rotator is not an active member at `admin` or
+above in its current roster. The `roster_epoch` that the record names does not
+change this rule.
 
 **The owner credentials after an admin leaves them.** `own_sk` is a secret of
 the relay and not of an epoch, thus a rotation of §11.4 leaves it where it was.
@@ -913,7 +1137,13 @@ the relay and not of an epoch, thus a rotation of §11.4 leaves it where it was.
   MUST draw a new `own_sk` for each replica from the device CSPRNG, send a
   `GKEY` that carries the new `own_pk` under the `own_sk` it replaces to
   each replica (`WIR-522`), and post a record of `GRP-400` with the new
-  credentials to each other member at `admin` or above.
+  credentials to each other member at `admin` or above. That admin MUST keep
+  the `own_sk` that it replaced until that `GKEY` arrived at the replica under
+  the evidence of `GRP-363`. It MUST keep that `own_sk` in its store, before
+  the new one takes its place there. It MUST send that `GKEY` again in each
+  session until then. No other party holds the credential that authorizes it. A
+  member that takes owner credentials from a record of `GRP-400` holds none of
+  its own to send. That member MUST discard each `own_sk` that it kept.
 - **[GRP-402]** When a member that held the owner credentials left the roles
   at `admin` or above, or left the group, the active member at `admin` or
   above with the lowest index MUST do the same after the backoff of
@@ -922,10 +1152,10 @@ the relay and not of an epoch, thus a rotation of §11.4 leaves it where it was.
   `ROSTER_RATE_LIMIT`. It MUST NOT act when a record of `GRP-400` reached it
   during that wait.
 
-> *Cause of `GRP-401` and `GRP-402`.* No earlier rule took `own_sk` back. An
-> admin that lost its role or left the group kept it, and `own_pk` never
-> changed at the relay. It could send a `GKEY` of keys that it alone knew and
-> lock every member out of the queue, or a `GDEL`. Two admins that acted on
+> *Cause of `GRP-401` and `GRP-402`.* Without these rules, an admin that
+> loses its role or leaves the group keeps `own_sk`, and `own_pk` never
+> changes at the relay. It could send a `GKEY` of keys that it alone knows and
+> lock every member out of the queue, or a `GDEL`. Two admins that act on
 > one departure would each draw a set, and one set would fail at the relay,
 > thus one admin acts for each departure. Two departures at once can still
 > give two sets, and Part 15 §15.3 records that residual.
@@ -933,16 +1163,18 @@ the relay and not of an epoch, thus a rotation of §11.4 leaves it where it was.
 > *Cause of `GRP-400`.* A promotee may have joined inside the current epoch,
 > and `GRP-385` keeps `K_e` from a joiner, because `K_e` gives each slot key
 > from `t_e` and thus each record before the join. A one-slot record that
-> carried `K_e` gave it that history at a promotion. The owner credentials
+> carries `K_e` would give it that history at a promotion. The owner credentials
 > are all that the record has to deliver.
 **[GRP-379]** A receiver MUST reject a slot whose `own_count` is above 0 when
 the rotator held a role below `admin` at the `roster_epoch` of the record,
-because only an admin holds `own_sk`.
+because only an admin holds `own_sk`. A receiver MUST take the role of a
+rotator from an entry that is active in its current roster alone. The
+record names its `roster_epoch` itself, and the roster keeps the role of an
+entry that left. Thus a member that left the role or the group would name a
+roster epoch at which it was active. That member would hand bytes of its own as
+the owner credentials.
 
-> *Cause.* Draft 0.1.0 answered a key request with the sender key of one
-> member on the pairwise channel of the two parties, and the rate bounded the
-> requests to one peer. A group now has one secret for each epoch, held by
-> every member, thus any member can answer under the backoff of §11.4.1, and
+> *Cause.* A group has one secret for each epoch, held by every member, thus any member can answer under the backoff of §11.4.1, and
 > no repair waits for a role holder. The rate bounds the requests for one
 > group. The one-slot record reuses the epoch-key layout, thus the
 > promotion path and the repair path are one code path.
@@ -969,12 +1201,11 @@ because only an admin holds `own_sk`.
   tag a record to a person without a key of that person. UMBRA hides the
   membership from the *infrastructure*, and not from the participants.
 
-> *Cause.* This list is strictly less than the optional re-broadcaster of
-> draft 0.1.0 learned, which was the queue set of the group, and that party
-> is retired. The list replaces the accepted 0.1.0 residual "the ingress relay
-> reads the recipient count from a fan-out burst" with "the group-queue relay
-> reads the member count from an epoch-key record". Part 15 §15.3 records
-> each residual below.
+> *Cause.* A party that fans each send out for a group would hold the queue
+> set of that group, and this list is strictly less than that. A fan-out also
+> lets the ingress relay read the recipient count from a burst. The group
+> queue has a different residual: the group-queue relay reads the member
+> count from an epoch-key record. Part 15 §15.3 records each residual below.
 
 > **This is a trade, and Part 2 §2.4 requires the text to state it.** The
 > group-queue relay reads the member count of a group at each rotation, from
@@ -1004,10 +1235,14 @@ because only an admin holds `own_sk`.
 > UMBRA accepts this residual.
 
 > **This is a trade, and Part 2 §2.4 requires the text to state it.** A seized
-> device (A6) with the retained ciphertext of a replica opens the last
-> `GROUP_SLOT_WINDOW` hours of records of the current epoch, and the previous
-> epoch inside `GROUP_EPOCH_GRACE`. §11.3.2 gives the one-way chain that
-> bounds it. UMBRA accepts this residual.
+> device (A6) of a member that holds `K_e`, with the retained ciphertext of a
+> replica, opens each retained record of the current epoch from `t_e`. That
+> span is at most `GROUP_EPOCH_MAX_AGE` of 30 days. The device also opens the
+> previous epoch inside `GROUP_EPOCH_GRACE`. Each member that installed the
+> epoch from its epoch-key record holds `K_e`. A seized device of a member that
+> joined inside the epoch opens the records from its join slot alone. At that
+> member the one-way chain of §11.3.2 bounds the exposure. UMBRA accepts this
+> residual.
 
 > **This is a trade, and Part 2 §2.4 requires the text to state it.** An
 > insider that holds a quantum computer forges a tag between two members
@@ -1029,8 +1264,9 @@ because only an admin holds `own_sk`.
 
 ## 11.6 What UMBRA does *not* do
 
-**[GRP-025]** **A client MUST NOT use a peer-to-peer mesh fan-out above about
-20 members.**
+**[GRP-025]** **A client MUST NOT use a peer-to-peer mesh fan-out for a group
+of any size.** §11.1 gives one mechanism for each group size, and Part 6
+rule `WIR-445` keeps a group record off a pairwise channel.
 
 > SimpleX operated a full P2P mesh for four years. That mesh needed N−1
 > connections for each member and **O(N) introduction messages at each join**.
@@ -1051,15 +1287,15 @@ show a `delivered` or a `read` state for a group record; the states of Part 14
 > message, and N² in the aggregate at each member. At `GROUP_MAX` and 10
 > messages each day that is 500 × 500 × 10 × 560 bytes, which is 1.4 GB each
 > day across the group and 2.8 MB each day for each member, against the U4
-> budget of 100 MB each month. Draft 0.1.0 sent a receipt to the sender only
-> on the pairwise channel, and no such channel exists now. WhatsApp reports a
+> budget of 100 MB each month. A receipt to the sender only needs a pairwise
+> channel between the two members, and a group makes no such channel.
+> WhatsApp reports a
 > read receipt in a group from a user that turned receipts off, and that
 > behavior lets a hostile or a compelled administrator collect a
 > device-liveness series for each member. The presence record of §11.9.7 is
-> the one liveness signal, at one interval of 7 days. Draft 0.1.0 also let a
-> large group name an optional party that held its queue set and fanned each
-> send out; the group queue gives one upload for each message to every group,
-> and no party holds a queue set.
+> the one liveness signal, at one interval of 7 days. The group queue gives
+> one upload for each message to every group. Thus a group needs no party
+> that holds its queue set and fans each send out.
 
 **A group does not detect transcript inconsistency.** §11.7 states that limit.
 
@@ -1097,10 +1333,22 @@ show a `delivered` or a `read` state for a group record; the states of Part 14
   Detection needs a consistency protocol, and UMBRA has not accepted the cost
   of that protocol for v1. Part 15 §15.2.4 states this limit. **[GRP-045]** A
   member MAY compare a rolling transcript digest out of band.
+- **UMBRA does not detect key equivocation by a rotator.** An epoch-key
+  record of §11.4.2 seals `k_e` to each member in a slot of its own, and a
+  member verifies its own slot alone. The record holds no commitment to one
+  `K_e`. Thus a member that rotates can give each member, or each half of
+  the group, a different key, and each tag verifies. `GRP-273` installs the
+  record of the rotator with the lower member index, thus a member with a
+  low index wins that race. The members then seal under different keys, and the
+  key supply of §11.4.3 answers with different keys. The group does not
+  converge before the next rotation by an honest member. This is a loss of
+  availability and of consistency, and no loss of confidentiality against a
+  party outside the group. v1 does not close this limit. A later version adds
+  a commitment to `K_e` in the clear part of `EpochKeyBody`. Each slot tag
+  covers that commitment, and each member checks it. Part 15 §15.2.4 and §15.3 hold
+  the limit.
 
-> *Cause.* Draft 0.1.0 took the one-sender order from the pairwise ratchet
-> position in tier T1 and from the sender-key generation in tier T2, and both
-> sources retire with the tiers. The pair (`epoch`, `counter`) is monotone,
+> *Cause.* The pair (`epoch`, `counter`) is monotone,
 > because `counter` starts at 1 in each epoch and `epoch` increases by 1 at
 > each rotation. The pair sits inside the record and not in a receiver state,
 > thus a receiver that repaired a missed epoch under §11.4.3 still holds it.
@@ -1110,7 +1358,8 @@ show a `delivered` or a `read` state for a group record; the states of Part 14
 - **A new joiner receives no history by default.** The slot chain of §11.3.1
   is one-way, thus a joiner that receives `K_{e,t_join}` opens no record
   before its join slot. `GRP-049` lets an admin turn on a history window of
-  at most 7 days, and §11.3.2 gives the joiner the older slot key. No party
+  at most 7 days, and §11.3.2 gives the joiner the older slot key. §11.3.2 also
+  states that the joiner still accepts no record from before its add. No party
   encrypts a backlog again for a joiner.
 - **A member that returns after an absence** reads from its cursor on a
   replica. It derives each slot key forward from its stored state, and it
@@ -1130,9 +1379,9 @@ show a `delivered` or a `read` state for a group record; the states of Part 14
   the other member for silence. The epoch of such a group rotates at
   `GROUP_EPOCH_MAX_AGE` as any other, and each rotation costs two slots.
 
-> *Cause.* Draft 0.1.0 exempted a group of two because tier T1 held no group
-> key. A group of two now holds an epoch secret, and the exemption stays,
-> because a group of two with one member evicted is no group. The 30-day
+> *Cause.* A group of two holds an epoch secret as a larger group does. The
+> exemption holds because a group of two with one member evicted is no group.
+> The 30-day
 > rotation of §11.4.1 bounds the life of that secret as in a larger group.
 
 ## 11.9 Administration
@@ -1152,7 +1401,7 @@ defines eight objects that travel under application kind `0x10`.
 
 | `control_type` | Object | Where |
 | --- | --- | --- |
-| `0x01` | Retired in 0.2.0-draft; the value never returns | — |
+| `0x01` | Reserved; the value never returns | — |
 | `0x02` | `JoinRecord` | §11.9.1 |
 | `0x03` | Plain epoch | §11.9.2 |
 | `0x04` | Granting epoch | §11.9.2 |
@@ -1228,7 +1477,14 @@ other member is needed or created. Part 6 §6.6.3 gives the layouts of
    name, the admin's `roster_pk`, and the creator's `roster_pk`. **[GRP-170]**
    A client MUST show an offer to the user, and it MUST NOT accept an offer
    without a user action. `GRP-153` makes the client reject an offer for a
-   `group_id` that it holds.
+   `group_id` that it holds. A client can show the contact of an offer as a
+   member of the group. That client MUST take the roster key of that admin from
+   the offer of the contact whose admit it accepted, and from no offer of
+   another contact. That client MUST show that contact at an index that the
+   snapshot gives `admin` or above alone. A member that is a contact too would
+   else send an offer that puts its own index under the name of the inviting
+   admin. An offer proves no possession of the key that it names, and that
+   residual stays.
 2. **[GRP-309]** A joiner that accepts MUST make `GroupRosterSeed_g` under
    `GRP-052`, derive the three keys, and send a `JoinRecord` on the same
    channel. That record carries `group_id`, `pair_pk`, `roster_pk_hash`, and
@@ -1262,15 +1518,14 @@ other member is needed or created. Part 6 §6.6.3 gives the layouts of
 > members of one group. The admin holds `K_{e,t_join}` before the joiner does,
 > and it holds it as a member already.
 
-> *Cause.* Draft 0.1.0 opened one pairwise channel between the joiner and
-> each member, through a group request to each member and a bundle of N − 1
-> one-time invitations on the chunk path, because attribution needed a
-> channel. The first-access lock of Part 4 rule `IDN-023` could then fail at
-> the joiner on an invitation that the admin opened itself. The tag vector
-> needs a public key of each member and no channel, and the snapshot carries
-> every key. The group request of Part 6 §6.6.7 for a join, the invitation
-> bundle, its member entries, and the first-access-lock residual of a join
-> are retired.
+> *Cause.* A join by one pairwise channel between the joiner and each member
+> needs a group request to each member and a bundle of N − 1 one-time
+> invitations on the chunk path. The first-access lock of Part 4 rule
+> `IDN-023` can then fail at the joiner on an invitation that the admin
+> opened itself. The tag vector needs a public key of each member and no
+> channel, and the snapshot carries every key. Thus a join uses no group
+> request of Part 6 §6.6.7 and no invitation bundle, and it has no
+> first-access-lock residual.
 
 ### 11.9.2 Two classes of roster epoch
 
@@ -1326,14 +1581,14 @@ a member, or it takes that role away.
   above is neither the creator nor the grantee of that role in the last
   granting epoch of the path that names it.
 
-> *Cause of `GRP-316` in this form.* An earlier form made a grant at
-> `moderator` or above carry the key of the grantee. The roster holds only
-> the hash of the key of a member below `moderator`, thus no admin held the
-> key that such a grant needed, and a promotion could not be built. The key
+> *Cause of `GRP-316`.* The alternative is a grant at `moderator` or above
+> that carries the key of the grantee. The roster holds only the hash of the
+> key of a member below `moderator`. Thus no admin holds the key that such a
+> grant needs, and a promotion cannot be built. The key
 > of the signer is the one that a verifier needs, the signer always holds
 > it, and a grant stays the same size. A moderator that never grants shows
 > its key in its first moderation epoch, which is when a verifier first
-> needs it. `RekeyRecord` carried the key of its signer from the start.
+> needs it. `RekeyRecord` carries the key of its signer in the same way.
 
 A **plain epoch** adds a member, removes a member that holds the `member` or
 the `observer` role, or records a self-removal.
@@ -1350,22 +1605,35 @@ the `observer` role, or records a self-removal.
 - **[GRP-319]** A plain epoch that adds a member MUST carry the `JoinRecord`
   fields of that member and its new `index`. **[GRP-320]** A verifier MUST
   reject an add whose `index` is not the lowest index above every index the
-  roster ever used. **[GRP-381]** A verifier MUST run every check of an
-  epoch before it records that epoch as a successor of its predecessor,
-  thus a rejected epoch never counts as one of the two successors of
-  `GRP-070`.
+  roster ever used. A verifier MUST also reject an add, and a `RekeyRecord`
+  of §11.12, whose `pair_pk` is a point of low order. Such a point gives the
+  all-zero `ss_ij` of `GRP-237` with every member. A verifier MUST also reject
+  each of those two records when its `kem_pk` does not decode as a `UMBRA-KEM`
+  public key of Part 5 §5.3. An admin MUST NOT build an add from a `JoinRecord`
+  that carries such a key. A sender derives a pair key with each entry, and a
+  rotator seals a slot to each one. Thus one entry that fails would stop every
+  send and every rotation of the group. A sender MUST put 12 zero bytes at the
+  position of a member whose pair key fails. A rotator MUST build no slot for a
+  member whose `kem_pk` does not decode or whose pair key fails. Thus an entry
+  that an earlier roster took stops neither. **[GRP-381]** A verifier MUST run
+  every check of an epoch before it records that epoch as a successor of its
+  predecessor, thus a rejected epoch never counts as one of the two successors
+  of `GRP-070`.
 
 **[GRP-067]** A member client MUST offer a self-removal. A self-removal is a
-plain epoch, and the tag vector names the member that leaves.
+plain epoch, and the tag vector names the member that leaves. A client MUST
+NOT post the self-removal of the last owner of a group that holds another
+member. The client MUST refuse the act. The client MUST tell the user to give
+`owner` to another member first. An owner that leaves another owner behind
+leaves, although the group then holds fewer owners than `GRP-051` asks for. The
+floor of `GRP-051` binds the removal of a silent owner under `GRP-168`, and it
+keeps no member in a group against its will.
 
-> *Cause.* Draft 0.1.0 took the authority of a plain epoch from the L6
-> QueueE2E key of the pairwise channel. The tag vector is the attribution of
-> every group record now, and a plain epoch is one such record. The granting
-> epoch and the moderation epoch keep their signatures, because a new joiner
-> verifies the authority path from the snapshot, and it holds no pair key
-> with a granter that left. The group-scoped member identifier of 0.1.0 and
-> its label retire; the index is the name of a member inside the group, and
-> it is 2 bytes in the preimage in place of 16.
+> *Cause.* The tag vector is the attribution of every group record, and a
+> plain epoch is one such record. The granting epoch and the moderation epoch
+> carry signatures, because a new joiner verifies the authority path from the
+> snapshot, and it holds no pair key with a granter that left. The index is
+> the name of a member inside the group, and it is 2 bytes in the preimage.
 
 ### 11.9.3 Retention of the granting chain
 
@@ -1418,15 +1686,23 @@ plain epoch, and the tag vector names the member that leaves.
   `GRP-153`. After its roster moves past the add, the joiner MUST refuse such
   an admit.
 
-> *Cause.* An earlier draft left a joiner whose admit went out for a
-> displaced add on no chain of the group, and that joiner needed a new
-> invitation. The joiner cannot see the displacement: no member builds on its
+> *Cause.* A joiner whose admit went out for a displaced add is on no chain
+> of the group. Without these rules that joiner needs a new invitation. The
+> joiner cannot see the displacement: no member builds on its
 > add. The admin sees it, and while the add is the head a second admit is the
 > one message that reaches the joiner.
 - The roster is hash-chained. **[GRP-070]** If a member sees two different
   successors to one epoch **from one member**, that member MUST show the fork.
   **[GRP-071]** That member MUST NOT select one successor silently. One member
-  that makes two successors equivocated, and that act is evidence.
+  that makes two successors equivocated, and that act is evidence. While
+  `GRP-417` keeps the roster before the head, a member can verify a second
+  successor from the maker of the head. That member MUST keep the successor
+  whose SHA3-256 is lower, as `GRP-369` orders two `RekeyRecord`s. It shows the
+  fork in each case. Thus each member that reads the two successors holds one
+  head, in each order of arrival. `GRP-119` lets a device whose epoch lost
+  publish its change again. A second successor that arrives after the chain
+  moved past the first one changes nothing, as `GRP-417` states for another
+  maker.
 - If the two successors are granting epochs, the signature names the party
   that made the fork. **[GRP-072]** The client MUST name that party.
 - **[GRP-073]** If the two successors are plain epochs, the client MUST show
@@ -1440,8 +1716,30 @@ plain epoch, and the tag vector names the member that leaves.
 - `ROSTER_RATE_LIMIT` is 1 epoch for each member in each 60 s.
   `GROUP_EPOCH_RATE` is 6 epochs for each group in each 60 s. `GRANT_RATE` is
   1 granting epoch for each group in each 300 s **and** 4 granting epochs for
-  each group in each 24 h. **[GRP-076]** A member MUST discard an epoch above
-  one of these limits.
+  each group in each 24 h. `REKEY_RATE` is 4 `RekeyRecord`s for each member
+  in each 24 h. **[GRP-076]** A member MUST discard an epoch above
+  one of these limits. A member MUST count each limit on the `slot` of the
+  record that carried the epoch, and not on its own clock. In one slot the
+  limits are 60 epochs of one member and 360 epochs of the group. In 24 slots
+  the limits are 4 granting epochs that give a role at `moderator` or above and
+  4 `RekeyRecord`s of one member. A slot at or above the end of a window opens
+  the next window, and each other slot counts in the window that stands. The
+  count of the re-keys follows a member to each new index. A member MUST NOT
+  post a roster record that these limits refuse on its own roster. A sender
+  paces its granting epochs to the 300 s part of `GRANT_RATE`, which one slot
+  cannot measure. A member counts a window from the records that it applied.
+  Two rosters did not apply each record of the windows that stand. One is a
+  roster from a snapshot of §11.9.8. The other is a roster that a client kept
+  before it counted these limits. Such a member MUST count each record that it
+  applies. Such a member MUST NOT discard a record for a window that it cannot
+  know. It knows a window that satisfies two conditions. A span is 1 slot or 24
+  slots. First, the window opens at least one span above the highest `slot`
+  that a record before its history can name. That `slot` is the slot of the
+  start of that history and `GROUP_SLOT_SKEW`. Second, the window opens at
+  least two spans less one slot above the start of the window that it counted
+  for that limit before, if it counted one. No record of that limit then lies
+  in the span below the new window. From that window on its count is the count
+  of each member that knows the window.
 
 > *Cause.* Without a limit, one member fills the group queue of a 500-member
 > group, and U6 does not permit that condition. Trail of Bits TOB-DISCE2EE-1
@@ -1450,6 +1748,35 @@ plain epoch, and the tag vector names the member that leaves.
 > download, which is 4.1 MB across the group, thus a rate limit alone is not
 > a bound. `GROUP_POST_RATE` at the relay bounds the queue, and these limits
 > bound what a member applies.
+>
+> *Cause of the slot.* A limit on the roster chain is a rule of the chain:
+> each member must give one epoch one verdict, or the chain forks. A member can
+> read a backlog of one day in one minute. A limit on the clock of the receiver
+> gives that member a different verdict from the members that read it live.
+> That member then holds a chain that no other member builds on. Each member
+> reads the `slot` of a record alike, and the tag covers it. `REKEY_RATE` keeps
+> one member from the use of every index of `GRP-306`. A re-key takes one
+> index, and without a bound the 65 535 indices of a group are gone in hours.
+>
+> *Cause of the window that a member cannot know.* A roster from a snapshot
+> starts with no count, because the snapshot of §11.9.8 carries none, and
+> no layout of v1 carries one. Its first window opens at its first record,
+> inside a window of the group or across the end of one. That count can pass
+> a limit that the count of the group did not pass. A member that discards on
+> that count discards an epoch that each other member applied. That member
+> then holds a chain that no other member builds on. Thus such a member
+> discards nothing for that window. A window with no record of that limit in
+> the span before it opens at each member alike. The counts are one from there
+> on. Two members that know a window hold one count of it. Each of them applied
+> the same records of the chain in the order of the chain. The limits therefore
+> bind in two places: the sender, which `GRP-076` holds to its own count, and
+> each receiver that knows the window. One case stays open. A member can post
+> above a limit deliberately. Each member that knows the window discards that
+> epoch, and a member that does not know the window applies it. That member
+> holds a head that no other member builds on, until the order of `GRP-117`
+> displaces that head or the member takes a snapshot under `GRP-329`. An honest
+> member that does not know a window paces to its own count, which can lie
+> below the count of the group. Part 15 §15.3 records both.
 
 ### 11.9.5 What this costs, stated
 
@@ -1481,7 +1808,14 @@ authorization, and they leave different evidence.
 receiver accepts it only when the verified tag of the record names the member
 that sent the target. There is no role check and no signature, thus the
 deniability of Part 5 §5.7 is untouched. A tombstone is terminal, and it beats
-an edit from the same author at each position.
+an edit from the same author at each position. A re-key of §11.12 moves a
+member to a new index, and the member keeps its messages. A receiver takes a
+deletion or an edit from the index that each re-key of the author since moved
+it to. A receiver takes none from an index whose keys a rival changed under
+`GRP-369`, while its roster holds that fact. The two replicas give no order,
+thus a deletion or an edit can arrive before its target. A receiver MUST then
+keep it as a pending reference of Part 7 rule `DEV-093` under the member that
+sent it. The receiver MUST apply it when the target of that member arrives.
 
 **A moderator action** has two forms.
 
@@ -1541,10 +1875,10 @@ the act.
 
 > **This is a trade, and Part 2 §2.4 requires the text to state it.** A
 > moderation epoch is a signed statement that a named role acted on a named
-> `msg_id`. An earlier draft also signed the author of the target. A
-> moderator then swore to an attribution under a key that the granting chain
-> binds to a person. That statement was transferable evidence against G10.
-> The preimage now names no author, and `GRP-181` bounds what a seized device
+> `msg_id`. A signed author of the target would make a moderator swear to an
+> attribution under a key that the granting chain binds to a person. That
+> statement would be transferable evidence against G10. Thus the preimage
+> names no author, and `GRP-181` bounds what a seized device
 > holds to the current statements. A member that inspects the chain sees the
 > hashes and the current epochs. It does not see each earlier act, and
 > mitigation 3 below keeps the count at each epoch. Part 15 §15.3 records the
@@ -1577,9 +1911,9 @@ Four mitigations bound the damage.
 - At a removal epoch: "A moderator removed N messages. A restore from a backup
   that predates today brings them back."
 
-> *Cause.* Draft 0.1.0 dispatched a moderation epoch with the fan-out jitter
-> and named the actor by the group-scoped member identifier. Both retire: a
-> moderation epoch is one post, and `actor_index` names the actor.
+> *Cause.* A moderation epoch is one post, thus it needs no dispatch jitter.
+> `actor_index` names the actor, thus the epoch needs no other member
+> identifier.
 
 ### 11.9.7 Presence, and the eviction that it drives
 
@@ -1609,19 +1943,31 @@ bytes, thus it fits bucket `B0`.
   **[GRP-396]** An admin MUST measure that silence over the time that it
   watched: for a member whose last record it did not see, the silence starts
   when this admin first holds that member and that role. A member that
-  joins starts its silence at its add.
-  **[GRP-397]** An admin MUST draw the backoff of `GRP-358` before the
-  removal of `GRP-133`, and MUST NOT remove a member whose removal by another
-  admin arrived during that backoff.
-  **[GRP-133]** An admin MUST then remove that member with a plain epoch of
-  §11.9.2. **[GRP-134]** An admin MUST NOT remove a member that it counts as
-  silent for a shorter period. §11.4.1 makes the admin rotate directly after
-  that removal.
+  joins starts its silence at its add. An admin watches a group while its
+  device runs and a `GSUB` of its session read the backlog of its replica. That
+  `GSUB` read the backlog when a record of the current slot arrived, or when no
+  record arrived for 120 s after the `GSUB`. When a watch starts, the admin
+  MUST move the start of each silence forward by the time since its last watch,
+  and never above its clock. An admin that was away for `GROUP_SILENT_EVICT`
+  thus starts each silence again. A clock movement of Part 1 rule `SCP-019`,
+  and a time of more than `CLOCK_SKEW` in which the device did not run, end a
+  watch. A clock movement starts each silence again. A `GSUB` has no answer.
+  Thus an admin MUST NOT remove or demote a member for silence before the
+  replica of its session returned a record or a `GSEQ` in that session. The
+  admin posts one presence record to draw that answer. **[GRP-397]** An admin
+  MUST draw the backoff of `GRP-358` before the removal of `GRP-133`, and MUST
+  NOT remove a member whose removal by another admin arrived during that
+  backoff. **[GRP-133]** An admin MUST then remove that member with a plain
+  epoch of §11.9.2. **[GRP-134]** An admin MUST NOT remove a member that it
+  counts as silent for a shorter period. §11.4.1 makes the admin rotate
+  directly after that removal.
 - **[GRP-166]** If the silent member holds `moderator` or above, the admin
   MUST first remove that role with a granting epoch. §11.9.2 lets a plain
   epoch remove a `member` or an `observer` only. **[GRP-167]** A member MUST
   NOT count a silence demotion against `GRANT_RATE`. A backlog of silent
-  members at `GROUP_MAX` cannot clear under that rate.
+  members at `GROUP_MAX` cannot clear under that rate. A receiver cannot
+  tell a silence demotion from another one, thus it counts no granting
+  epoch that takes a role away against `GRANT_RATE` (`GRP-076`).
 - **[GRP-168]** If the removal leaves fewer than two owners, the admin MUST
   hold the removal. **[GRP-184]** The admin MUST then prompt each surviving
   owner to grant `owner` to another member. §11.9 rule `GRP-051` gives the
@@ -1636,8 +1982,7 @@ member, whatever the administrator count. Every member downloads every presence
 record, which is at most N × 560 bytes each week for each member, and 280 KB
 each week at `GROUP_MAX`.
 
-> *Cause.* Draft 0.1.0 sent one `B0` cell to each administrator on a pairwise
-> channel, with the fan-out jitter. A sparse-tag record on the group queue
+> *Cause.* A sparse-tag record on the group queue
 > reaches every reader, and only an administrator finds a tag in it. A member
 > below `admin` reads that a presence record arrived and reads no more, and
 > §11.5 already gives a member the roster. The rule measures **silence** and
@@ -1646,11 +1991,11 @@ each week at `GROUP_MAX`.
 > emits nothing, and RFC 9420 §16.6 gives the forward-secrecy cause that
 > §11.8 states.
 >
-> *Cause of `GRP-395` to `GRP-397`.* An earlier form let a presence record
-> take the next counter of its sender. A member below `admin` cannot verify
-> it, thus it saw a hole in that counter at each presence record, and
-> `GRP-205` sent it to the other replica for a record that no replica would
-> give it, until the quiet member posted again. A device that became an
+> *Cause of `GRP-395` to `GRP-397`.* A presence record that takes the next
+> counter of its sender makes a hole in that counter for a member below
+> `admin`, which cannot verify the record. `GRP-205` would send that member
+> to the other replica for a record that no replica gives it, until the
+> quiet member posts again. A device that became an
 > admin, or that restored an old store, holds no history of the silence of
 > any member, and it would remove every member at once without `GRP-396`.
 > Two admins that count one silence would each post a removal on one
@@ -1675,26 +2020,47 @@ in chain order.
 - **[GRP-326]** A joiner MUST verify `chain_hash` against the hash of the
   roster epoch that the add record names, verify each granting epoch of the
   path under §11.9.2, and verify each `kem_pk` against the `kem_pk_hash` of
-  its entry. **[GRP-403]** A joiner MUST verify the path in chain order from
-  the creator as `owner`, MUST take the role of a granter from the path at
-  that point, and MUST take the key hash of a granter from its entry or,
-  for a granter that left the group, from the grant of the path that named
-  it. A grant stays valid after its granter lost its role. **[GRP-327]** A joiner MUST reject a snapshot that fails one of
-  those checks. **[GRP-328]** A joiner MUST show a rejected snapshot as a
+  its entry. A joiner MUST verify that the entry at the `index` of its admit
+  holds its own `pair_pk`, `kem_pk_hash`, and `roster_pk_hash`. Under the entry
+  of another member it finds no tag and no slot for itself. **[GRP-403]** A
+  joiner MUST verify the path in chain order from the creator as `owner`, MUST
+  take the role of a granter from the path at that point, and MUST take the key
+  hash of a granter from its entry or, for a granter that left the group, from
+  the grant of the path that named it. A grant stays valid after its granter
+  lost its role. **[GRP-327]** A joiner MUST reject a snapshot that fails one
+  of those checks. **[GRP-328]** A joiner MUST show a rejected snapshot as a
   failed admission.
 - **[GRP-329]** A member that restores from a backup and lacks a `kem_pk`
   MUST fetch the newest snapshot named by any admit it holds, or ask an admin
   with a `KeyRequest` of scope `0x03`. Scope `0x03` means "the roster
   snapshot". **[GRP-330]** An admin that reads a `KeyRequest` of scope `0x03`
   MUST answer with a `SnapshotNotice` (type `0x08`) as a group record that
-  carries a fresh descriptor at the current `roster_epoch`.
+  carries a fresh descriptor at the current `roster_epoch`. A member that
+  takes such a snapshot MUST verify its path from the roster key of an owner
+  that its own roster holds. It MUST verify the path from its own roster key
+  only when it holds index 0, which the creation gave. A snapshot holds the
+  active members alone, thus the highest index that the group ever used can lie
+  above each entry. As an exception to `GRP-320`, that member MUST accept one
+  record. That record is the first later add or `RekeyRecord` whose `index` is
+  above each entry and at or below `roster_epoch + 1` of the snapshot. That
+  member MUST take the next index from that record. Each index took one roster
+  epoch, which gives the bound. Until that record arrives, that member MUST NOT
+  build an add or a `RekeyRecord` for the chain. Each other member takes one
+  index alone under `GRP-320`. A record under the lowest index above the
+  entries would thus stand at its maker and at no other member. Its maker would
+  hold a roster epoch that no member builds on, with keys that no member seals
+  a slot to. A member that owes a `RekeyRecord` under `GRP-345` in that state
+  MUST keep that fact. That member MUST post the record when it knows the
+  index. The device that left the set reads the group until then, and Part 15
+  §15.3 records that time.
 
 **What a snapshot costs.** A snapshot at N members is 77 + 1 317N bytes plus
 the path. At 500 members that is 50 KB of entries and 609 KB of KEM keys, 21
 chunks with two owners on the path, and at most 23 chunks at
 `ROLE_HOLDER_MAX`. The joiner fetches the chunks under Part 12 §12.3.3, which
-is 21 × 32 860 = 690 060 bytes at 500 members, once at its join. Draft 0.1.0
-made the joiner open 499 pairwise channels for the same admission.
+is 21 × 32 860 = 690 060 bytes at 500 members, once at its join. A join by
+pairwise channels makes the joiner open 499 pairwise channels for the same
+admission.
 
 > *Cause.* The authority path at `ROLE_HOLDER_MAX` is 16 granting epochs, and
 > each one carries a 1 952-byte `roster_pk` and a 3 309-byte signature, which
@@ -1728,9 +2094,10 @@ made the joiner open 499 pairwise channels for the same admission.
 | `GROUP_SILENT_EVICT` | 30 days (§11.9.7) |
 | `PRESENCE_INTERVAL` | 7 days (§11.9.7) |
 | `HISTORY_WINDOW` | 0 (off) by default, maximum 7 days (§11.3.2) |
-| `ROSTER_RATE_LIMIT` | 1 epoch for each member in each 60 s |
-| `GROUP_EPOCH_RATE` | 6 epochs for each group in each 60 s |
-| `GRANT_RATE` | 1 for each group in each 300 s, and 4 for each group in each 24 h |
+| `ROSTER_RATE_LIMIT` | 1 epoch for each member in each 60 s; a receiver counts 60 in one slot (§11.9.4) |
+| `GROUP_EPOCH_RATE` | 6 epochs for each group in each 60 s; a receiver counts 360 in one slot (§11.9.4) |
+| `GRANT_RATE` | 1 for each group in each 300 s, and 4 for each group in each 24 h; a receiver counts 4 in 24 slots (§11.9.4) |
+| `REKEY_RATE` | 4 `RekeyRecord`s for each member in each 24 h; a receiver counts 4 in 24 slots (§11.9.4) |
 | `MOD_ACTION_MAX` | 20 actions in one moderation epoch (§11.9.6) |
 | `KEY_REQUEST_RATE` | 8 in each 24 h: epoch requests for one group (§11.4.3), and pairwise requests to one peer (Part 6 §6.6.11 rule `WIR-337`) |
 | `POLL_GROUP_MAX` | 100 members (§11.11) |
@@ -1786,12 +2153,10 @@ GroupQueueRecord( kind 0x01 )  →  ContentPlain.app
   member that the list does not name. Thus a member does not learn who else
   the sender named.
 
-> *Cause.* Draft 0.1.0 computed the mention identifier from the ML-DSA-65
-> roster public key, and every member held that key through the join flow. A
-> member below `moderator` never shows its `roster_pk` now, and every member
-> holds the `pair_pk` of every member in the roster entry. The identifier
-> stays scoped to `group_id`, thus the G9 argument of Part 6 §6.6.5 holds as
-> before. The mention list travels to each member, because one record on the
+> *Cause.* A member below `moderator` never shows its `roster_pk`, thus a
+> mention identifier cannot use that key. Every member holds the `pair_pk` of
+> every member in the roster entry. The identifier is scoped to `group_id`,
+> thus the G9 argument of Part 6 §6.6.5 holds. The mention list travels to each member, because one record on the
 > group queue reaches every reader. A client that rendered the full list
 > would tell each member which other members the sender chose, and that is a
 > social fact that the sender did not state to the group.
@@ -1807,7 +2172,11 @@ each member.** Thus a reply resolves at each member without a new field.
 
 - **[GRP-336]** A member MUST send a `PollVote` of Part 6 §6.6.6 as one group
   record. **[GRP-337]** A member MUST NOT send a vote to the poll author on a
-  pairwise channel. Every member reads the vote, and every member counts.
+  pairwise channel. Every member reads the vote, and every member counts. A
+  re-key of §11.12 moves a member to a higher index and starts its counter
+  again in the epoch that stands. Thus a receiver orders the votes of one
+  member by the index that sent each one, then by the epoch, then by the
+  counter.
 - **[GRP-146]** A client MUST count the votes that it holds. **[GRP-147]** A
   client MUST NOT render a poll count as an agreed count. §11.7 gives a group
   no total order across senders, thus two members can hold two different
@@ -1827,7 +2196,7 @@ above `POLL_GROUP_MAX` members. §11.10 gives that value.
 > poll costs each member 500 × 8 240 = 4.12 MB. U4 of Part 2 §2.4 sets the
 > idle budget at 100 MB each month, and one weekly poll at 500 members would
 > take 16 % of it. The vote uploads once and not *N* − 1 times, thus the bound
-> follows the download and not the fan-out of draft 0.1.0.
+> follows the download and not a fan-out.
 
 ## 11.12 Multi-device: the group sender owner
 
@@ -1874,15 +2243,47 @@ The re-key below is that move, and it needs no admin.
   old index, the old roster public key, the three new public values, the new
   index, and a signature under the old roster key.
 - **[GRP-366]** A receiver MUST verify a `RekeyRecord` under Part 6 rule
-  `WIR-478`, and it MUST reject a `new_index` that breaks `GRP-320`.
-  **[GRP-367]** A receiver MUST then apply the record as a roster record:
-  `old_index` leaves the active set, and `new_index` enters it with the new
-  keys and the role of `old_index`. **[GRP-368]** A `RekeyRecord` is a
+  `WIR-478`. A receiver MUST reject a `new_index` that breaks `GRP-320`, and
+  new keys that fail the key checks of `GRP-320`. One index leaves and one
+  enters, thus a receiver MUST accept a `RekeyRecord` in a group of `GROUP_MAX`
+  members. **[GRP-367]** A receiver MUST then apply the record as a roster
+  record: `old_index` leaves the active set, and `new_index` enters it with the
+  new keys and the role of `old_index`. **[GRP-368]** A `RekeyRecord` is a
   rotation trigger of §11.4.1, and the index it excludes is `old_index`.
 - **[GRP-369]** A member that verifies two `RekeyRecord`s for one `old_index`
   with one `previous_epoch_hash` MUST apply the record whose SHA3-256 is
   lower, and it MUST show the fork under `GRP-070`, because one member made
-  two successors.
+  two successors. The record that takes the place of the first one is a
+  rotation trigger too. It excludes the keys of the record that lost, which
+  hold no index. A member that verifies the second of the two records MUST keep
+  the fact that the `RekeyRecord` of that `roster_epoch` had a rival. That
+  holds whichever of the two records stands. The fact belongs to the two
+  records, and not to the order of their arrival. Each member counts the epochs
+  of that `roster_epoch` that it installed, before that fact and after it. Each
+  member MUST accept two such epochs and no third one. A member can hold one
+  such epoch when the record that takes the place of the first one arrives.
+  That member MUST count that record as a trigger since that epoch, under
+  `GRP-357` and `GRP-422`. A member that keeps the fact and counts fewer than
+  two such epochs MUST NOT answer a `KeyRequest` for `new_index` under
+  `GRP-375`. A member MUST count `REKEY_RATE` for each of the two records on
+  the roster before the first one, on the `slot` of its own record. Thus the
+  count of the record that stands is one at each member, and a record above
+  that rate is no `RekeyRecord` in either order.
+
+  > *Cause.* The second record changes the keys at `new_index` and leaves
+  > the roster epoch as it was. Without a trigger for it, a rotation between
+  > the two records seals the slot of `new_index` to the keys of the first
+  > one. A device in hostile hands wants to lose the hash comparison, which
+  > costs it nothing. It posts first, a member rotates, and the record of the
+  > user takes the index. The device then holds the epoch secret for up to
+  > `GROUP_EPOCH_MAX_AGE` while `GRP-357` refuses each rotation. An epoch-key record names its `roster_epoch` and no chain hash.
+  > Thus a member that applied the second record first cannot tell which keys
+  > the first rotation served. It owes no rotation, and it takes the one that a
+  > member that can tell makes. The count ends that allowance at each member
+  > alike. Each member keeps the fact of the rival, in each order of arrival.
+  > A member that reads the record that stands first, and keeps nothing of
+  > the other one, would refuse the second epoch. It would stay on the first
+  > one, whose slot for `new_index` the device in hostile hands could hold.
 - **[GRP-407]** A receiver MUST take a `RekeyRecord` from the index that the
   re-key at the head of the roster chain excluded, when the record names the
   roster epoch before that head. That index left the active set with the
@@ -1925,23 +2326,42 @@ The re-key below is that move, and it needs no admin.
   MUST verify it under Part 6 rule `WIR-478`. **[GRP-349]** The admin MUST
   discard a record that fails that check, and it MUST NOT act on it. A member
   below `admin` discards the record as well, and so does an admin for a
-  record whose index no rival re-key moved.
+  record whose index no rival re-key moved. The roster shows two re-keys of
+  one index as a fork under that index (`GRP-072`). An admin whose roster holds
+  no such fork for the index of the record MUST discard the record. The index
+  that follows that index then holds the keys of the member itself. An admin
+  MUST discard a record whose keys are the keys that this successor holds.
   **[GRP-371]** The admin MUST then post a plain epoch that removes the index
-  that the rival holds now, which is the successor of the index that the
-  record names, and rotate with it under `GRP-264`. The removal is a rotation
-  trigger of §11.4.1. The admin MUST then offer the member as a joiner with
-  the keys of the record, and the add and the admit of §11.9.1 steps 3 and 4
-  follow on the same pairwise channel when the admin accepts it.
-  **[GRP-351]** The admin MUST NOT reuse the removed index.
-  **[GRP-414]** A member that gets that admit MUST take the group of the
-  admit in place of the group that it held, under the keys that it sent, in
-  the conversation that it held.
+  that the rival holds now, which is the successor of the index that the record
+  names, and rotate with it under `GRP-264`. The removal is a rotation trigger
+  of §11.4.1. When that index holds `moderator` or above, the admin MUST first
+  take the role with a granting epoch. `GRP-166` does the same for a silent
+  member. Where the floor of `GRP-051` bars that epoch, the index stays until
+  the group holds another owner (`GRP-184`). The admin still offers the member
+  as a joiner in that case. The admin MUST then offer the member as a joiner
+  with the keys of the record, and the add and the admit of §11.9.1 steps 3 and
+  4 follow on the same pairwise channel when the admin accepts it.
+  **[GRP-351]** The admin MUST NOT reuse the removed index. **[GRP-414]** A
+  member that gets that admit MUST take the group of the admit in place of the
+  group that it held, under the keys that it sent, in the conversation that it
+  held. Each other device of that member MUST take the group state of Part 7
+  rule `DEV-298` for a group that it holds in each of two cases. In the first,
+  the membership of its own row ended. In the second, the state names a higher
+  index of the member than its own row. An admin gives each admission a higher
+  index (`GRP-305`), thus the state of an earlier admission that arrives late
+  replaces nothing.
 
   > *Cause.* The removal needs no confirmation, because the index it removes
-  > holds keys that the member did not make. The add waits for the admin as a
-  > join does, because the pairwise channel names a contact and the roster
-  > names no contact. An unrelated contact that holds a stolen device of the
-  > member could send the same record.
+  > holds keys that the member did not make. That holds only where a rival
+  > exists. A rule that removes the successor of each index that a record
+  > names lets the holder of a lost device remove the member itself with one
+  > record, at any later time. The fork of `GRP-349` is the evidence of the
+  > rival. The two holders of the old roster key sign alike. Thus an admin
+  > cannot tell which of the two re-keys was the one of the user. That residual
+  > stays. The add waits for the admin as a join does, because the pairwise
+  > channel names a contact and the roster names no contact. An unrelated
+  > contact that holds a stolen device of the member could send the same
+  > record.
 - **[GRP-372]** The member MUST zeroize the old seed and the old three keys
   when an epoch-key record with a slot for its new index arrives. Until then
   the old keys stay, because the member still reads the group with them.
@@ -1974,21 +2394,16 @@ self-removal or the admin's removal is rotated. The attacker must unlock the
 device first, at the cost that Part 14 §14.6.4 gives one passphrase attempt,
 while the user revokes at once. Part 15 §15.3 records the residual.
 
-> *Cause.* Draft 0.1.0 said that a full identity reset does not change a
-> group roster key, and it gave no rule for a group after a revocation. Under
-> the group queue that silence is a hole: the KEM key of a member seals every
-> later epoch to that member, thus a rotation alone excludes nothing that the
-> revoked device holds. An earlier form of this section sent the re-key to an
-> admin over a pairwise channel and let only the admin act, thus the exclusion
-> waited for one role holder. The record now travels on the group queue, any
-> member rotates, and the pairwise path stays for the device that lost the
+> *Cause.* The KEM key of a member seals every later epoch to that member,
+> thus a rotation alone excludes nothing that the revoked device holds. A
+> re-key that goes to an admin over a pairwise channel, where only the admin
+> acts, makes the exclusion wait for one role holder. Thus the record travels
+> on the group queue and any member rotates. The pairwise path stays for the device that lost the
 > race, because that path is the one channel the revocation closed to the
 > attacker's device. The race itself is the race that Part 7 §7.7 already
 > accepts for a device revocation.
 
-> *Cause.* Draft 0.1.0 had no group sender owner, because a group send was
-> N − 1 pairwise sends and each pairwise ratchet already had an owner. The
-> `counter` of §11.3 is one value for each member in each epoch, and two
+> *Cause.* The `counter` of §11.3 is one value for each member in each epoch, and two
 > devices that post at once would give two records one value. One owner
 > keeps the pair (`epoch`, `counter`) monotone in the ordinary case, and the
 > reorder rule covers the race at an ownership change.

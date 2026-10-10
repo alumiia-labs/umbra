@@ -232,6 +232,76 @@ fn xk_a_changed_flight_aborts() {
 }
 
 #[test]
+fn xk_a_flight_3_that_does_not_verify_leaves_the_responder_for_the_true_one() {
+    let mut p = parties(b"junk flight 3");
+    let prekey = OneTimePrekey::generate(&mut p.rng);
+    let s1 = *prekey.encapsulation_key();
+    let inv = Invitation {
+        s: p.s_r.x25519_public(),
+        s1: &s1,
+        range_r: VersionRange::V1,
+    };
+    let mut f1 = [0u8; 4096];
+    let (mut init, n1) = Initiator::flight1(
+        &inv,
+        VersionRange::V1,
+        AddressType::Pairwise,
+        b"",
+        &mut p.rng,
+        &mut f1,
+        &mut NoTrace,
+    )
+    .unwrap();
+    let (mut resp, _) = Responder::read_flight1(
+        &p.s_r,
+        prekey,
+        VersionRange::V1,
+        AddressType::Pairwise,
+        &f1[..n1],
+        &mut [0u8; 64],
+        &mut NoTrace,
+    )
+    .unwrap();
+    let mut f2 = [0u8; 4096];
+    let n2 = resp
+        .flight2(b"", &mut p.rng, &mut f2, &mut NoTrace)
+        .unwrap();
+    // A flight 2 with a changed byte moves no state of the initiator.
+    let mut bad = f2;
+    bad[40] ^= 1;
+    assert_eq!(
+        init.read_flight2(&bad[..n2], &mut [], &mut NoTrace).err(),
+        Some(Error::Handshake)
+    );
+    init.read_flight2(&f2[..n2], &mut [], &mut NoTrace).unwrap();
+    let er = Responder::er_of(&f2[..n2]).unwrap();
+    let mut f3 = [0u8; 4096];
+    let (ki, n3) = init
+        .flight3(&p.s_i, &er, b"", &mut f3, &mut NoTrace)
+        .unwrap();
+    // A second holder of the invitation writes a flight 3 of its own, and
+    // the flight of the initiator arrives with a changed byte.
+    let before = resp.export().unwrap();
+    assert_eq!(
+        resp.read_flight3(&[7u8; xk::FLIGHT3_FIXED + 16], &mut [], &mut NoTrace)
+            .err(),
+        Some(Error::Handshake)
+    );
+    for at in [0, 40, 50, n3 - 1] {
+        let mut bad = f3;
+        bad[at] ^= 1;
+        assert!(resp
+            .read_flight3(&bad[..n3], &mut [], &mut NoTrace)
+            .is_err());
+    }
+    assert_eq!(*resp.export().unwrap(), *before);
+    let (kr, s_i, _) = resp.read_flight3(&f3[..n3], &mut [], &mut NoTrace).unwrap();
+    assert_eq!(ki.rk.expose(), kr.rk.expose());
+    assert_eq!(ki.transcript, kr.transcript);
+    assert_eq!(s_i, p.s_i.x25519_public());
+}
+
+#[test]
 fn xk_a_wrong_address_type_at_one_side_aborts() {
     let mut p = parties(b"addr");
     let prekey = OneTimePrekey::generate(&mut p.rng);
@@ -341,5 +411,31 @@ fn nk_round_trip_and_tamper() {
     assert_eq!(
         client.read_flight2(&f2, &mut NoTrace).err(),
         Some(Error::Handshake)
+    );
+}
+
+#[test]
+fn nk_a_flight_with_a_byte_after_its_tag_is_refused() {
+    let mut rng = TestRng::new(b"nk length");
+    let s_sk = StaticSecret::random_from_rng(&mut rng);
+    let relay = nk::RelayStatic {
+        s: *XPublic::from(&s_sk).as_bytes(),
+        relay_id: [7u8; 32],
+    };
+    let mut f1 = [0u8; nk::FLIGHT1_LEN + 1];
+    let client =
+        nk::Client::flight1(&relay, &mut rng, &mut f1[..nk::FLIGHT1_LEN], &mut NoTrace).unwrap();
+    assert_eq!(
+        nk::Relay::read_flight1(&relay, &s_sk, &f1, &mut NoTrace).err(),
+        Some(Error::Length)
+    );
+    let hop = nk::Relay::read_flight1(&relay, &s_sk, &f1[..nk::FLIGHT1_LEN], &mut NoTrace).unwrap();
+    let mut f2 = [0u8; nk::FLIGHT2_LEN + 1];
+    let _ = hop
+        .flight2(&mut rng, &mut f2[..nk::FLIGHT2_LEN], &mut NoTrace)
+        .unwrap();
+    assert_eq!(
+        client.read_flight2(&f2, &mut NoTrace).err(),
+        Some(Error::Length)
     );
 }

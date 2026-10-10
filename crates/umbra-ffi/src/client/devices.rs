@@ -20,13 +20,14 @@ use umbra_core::{
     },
 };
 use umbra_crypto::rand_core::CryptoRng;
+use umbra_wire::app::devset::{ControlType, DeviceSetBody};
 use zeroize::Zeroizing;
 
 use super::{
     roster_fork::{FORK_PEER, PARENT_KEY, ROSTER_HASHES, ROSTER_PARENT},
     Client, SETTINGS,
 };
-use crate::{ConversationId, Error};
+use crate::{ConversationId, Delivery, Error, MsgRef};
 
 /// The identity of this device, with the flag of its channels.
 pub(super) const DEVICE_SELF: TableId = TableId(0x21);
@@ -42,8 +43,36 @@ pub(super) const ENDED_CHANNELS: TableId = TableId(0x26);
 /// (`DEV-181`), under the settings.
 const REMOVED_FROM_SET: &[u8] = b"removed-from-set";
 
+/// The contacts whose queue rotation a revocation owes (Part 7 §7.7 step
+/// 2c), under the settings: the conversation of each one in turn. A
+/// conversation leaves the row when its queue rotated.
+const ROTATION_OWED: &[u8] = b"rotation-owed";
+/// The sync channel of each revoked device that still waits for the notice
+/// of its revocation (`DEV-313`), under the settings. The value holds the
+/// conversation of the channel and then the device, in turn.
+const LEAVING_CHANNELS: &[u8] = b"leaving-channels";
+const LEAVING_ENTRY: usize = 16 + 16;
+/// The notice of one revoked device, before its `device_id`: the time of
+/// the revocation, in seconds, then the epoch that revokes the device.
+const REVOCATION_NOTICE: &[u8] = b"revocation-notice/";
+/// The time that the channel of a revoked device waits for a relay to take
+/// the notice of `DEV-313`. A device that did not run for that time ends
+/// the channel with no notice.
+pub const REVOCATION_NOTICE_TTL: u64 = umbra_queue::params::MSG_TTL;
+/// The least time between two requests for the owed rotations of one run,
+/// in seconds. The node keeps the time of each rotation that it took.
+const ROTATION_ASK_EVERY: u64 = 60;
+
 const SELF_KEY: &[u8] = b"self";
 const ROSTER_KEY: &[u8] = b"roster";
+/// The epochs below the head that a device keeps for a peer that missed
+/// one (`DEV-229`), each in the roster table under its index.
+const ROSTER_CHAIN_KEPT: u64 = 8;
+const KEPT_EPOCH: &[u8] = b"epoch/";
+
+fn kept_epoch_key(epoch: u64) -> Vec<u8> {
+    [KEPT_EPOCH, epoch.to_be_bytes().as_slice()].concat()
+}
 /// The device whose sync channel waits for its handshake, and the bundle of
 /// that channel at a linked device.
 pub(super) const PENDING_PEER_SETTING: &[u8] = b"device-pending-peer";
@@ -122,9 +151,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         rng: &mut R,
     ) -> Result<(), Error> {
         let epoch = Roster::parse(bytes)?.epoch;
-        let parent = match self.roster_bytes()? {
+        let superseded = match self.roster_bytes()? {
             Some(current) if Roster::parse(&current)?.epoch.saturating_add(1) == epoch => {
-                Some(Parent::of(&current)?.encode()?)
+                Some((Parent::of(&current)?.encode()?, current))
             }
             _ => None,
         };
@@ -132,13 +161,65 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let row = open.store.row_id(DEVICE_ROSTER, ROSTER_KEY);
         let hash_row = open.store.row_id(ROSTER_HASHES, &epoch.to_be_bytes());
         let parent_row = open.store.row_id(ROSTER_PARENT, PARENT_KEY);
+        let below = epoch.saturating_sub(1);
+        let kept_row = open.store.row_id(DEVICE_ROSTER, &kept_epoch_key(below));
+        let old_row = below
+            .checked_sub(ROSTER_CHAIN_KEPT)
+            .map(|old| open.store.row_id(DEVICE_ROSTER, &kept_epoch_key(old)));
         let mut batch = open.store.begin();
         batch.put(DEVICE_ROSTER, row, None, bytes, rng)?;
         batch.put(ROSTER_HASHES, hash_row, None, &Roster::hash(bytes), rng)?;
-        if let Some(parent) = parent {
+        if let Some((parent, current)) = superseded {
             batch.put(ROSTER_PARENT, parent_row, None, &parent, rng)?;
+            // DEV-229: the epoch that the new head follows stays for a peer
+            // that missed it, and the one past the bound leaves.
+            batch.put(DEVICE_ROSTER, kept_row, None, &current, rng)?;
+            if let Some(old_row) = old_row {
+                batch.delete(DEVICE_ROSTER, old_row);
+            }
         }
         Ok(batch.commit()?)
+    }
+
+    /// The epoch below the head that this device kept at `epoch`.
+    fn kept_epoch(&self, epoch: u64) -> Result<Option<Vec<u8>>, Error> {
+        let store = &self.open_ref()?.store;
+        let row = store.row_id(DEVICE_ROSTER, &kept_epoch_key(epoch));
+        Ok(store.get(DEVICE_ROSTER, &row)?)
+    }
+
+    /// The epochs that follow `bytes` up to the head, in order (`DEV-150`,
+    /// `DEV-229`). `bytes` must be an epoch below the head on the chain of
+    /// this device, and the device must hold each epoch between the two. A
+    /// peer that sends such an epoch missed the ones after it, and it
+    /// verifies the head only through them. The result is empty in each
+    /// other case.
+    pub(super) fn roster_chain_after(&self, bytes: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
+        let Some(head) = self.roster_bytes()? else {
+            return Ok(Vec::new());
+        };
+        let from = Roster::parse(bytes)?.epoch;
+        let top = Roster::parse(&head)?.epoch;
+        if from >= top || top.saturating_sub(from) > ROSTER_CHAIN_KEPT.saturating_add(1) {
+            return Ok(Vec::new());
+        }
+        let mut chain = Vec::new();
+        let mut previous = Roster::hash(bytes);
+        for epoch in from.saturating_add(1)..top {
+            let Some(kept) = self.kept_epoch(epoch)? else {
+                return Ok(Vec::new());
+            };
+            if Roster::parse(&kept)?.prev_hash != previous {
+                return Ok(Vec::new());
+            }
+            previous = Roster::hash(&kept);
+            chain.push(kept);
+        }
+        if Roster::parse(&head)?.prev_hash != previous {
+            return Ok(Vec::new());
+        }
+        chain.push(head);
+        Ok(chain)
     }
 
     /// Makes the identity of this device and roster epoch 0 with it alone,
@@ -225,6 +306,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if previous.devices.len() >= umbra_core::devset::MAX_DEVICES {
             return Err(Error::TooLong);
         }
+        // DEV-224: an identifier that the roster holds or revoked names
+        // another device, and two entries with one identifier would share
+        // one sync channel.
+        if previous.entry(&hello.device_id).is_some() || previous.revoked.contains(&hello.device_id)
+        {
+            return Err(Error::Malformed);
+        }
         let added = EntryKeys::of_hello(hello);
         let epoch = previous.epoch.saturating_add(1);
         let mut devices = previous.devices.clone();
@@ -291,14 +379,299 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             sig: previous.sig,
         };
         let bytes = sign_roster(&next, &identity.roster_key(), rng)?;
+        // Step 2c and DEV-313: the store holds what the revocation owes
+        // before it holds the epoch. Thus a run that is not up now, or a
+        // crash after the epoch, loses no rotation and no notice.
+        let channel = self.peer_channels()?.get(&device).copied();
+        self.owe_revocation(device, channel, &bytes, rng)?;
         self.put_roster(&bytes, rng)?;
         // DEV-313: the revoked device learns of it once, on the channel
-        // that ends now, thus it can show it (`DEV-181`).
-        if let Some(channel) = self.peer_channels()?.get(&device).copied() {
-            self.queue_roster(channel, &bytes, rng)?;
+        // that ends when a relay took the notice, thus it can show it
+        // (`DEV-181`). The channel takes no record from here on. A device
+        // that missed an epoch verifies the notice through the epochs
+        // before it (`DEV-150`), thus the kept ones go first.
+        if let Some(channel) = channel {
+            self.queue_revocation_notice(channel, &bytes, rng)?;
         }
-        self.end_sync_channel(device, rng)?;
         Ok(bytes)
+    }
+
+    /// The kept epochs that lead to the epoch `notice`, in order. Each one
+    /// is the parent of the next, and the last one is the parent of the
+    /// notice. The head can be above the notice by now, and the device that
+    /// the notice revokes takes no epoch above it. Thus the chain ends
+    /// below the notice and not at the head.
+    fn roster_chain_below(&self, notice: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
+        let notice = Roster::parse(notice)?;
+        let mut chain = Vec::new();
+        let mut parent = notice.prev_hash;
+        let mut epoch = notice.epoch;
+        while let Some(below) = epoch.checked_sub(1) {
+            if notice.epoch.saturating_sub(below) > ROSTER_CHAIN_KEPT {
+                break;
+            }
+            // The head is the parent of a notice that a crash kept out of
+            // the store, and each other parent is a kept epoch.
+            let held = match self.kept_epoch(below)? {
+                Some(kept) => Some(kept),
+                None => self.roster_bytes()?,
+            };
+            let Some(held) = held.filter(|held| Roster::hash(held) == parent) else {
+                break;
+            };
+            parent = Roster::parse(&held)?.prev_hash;
+            chain.push(held);
+            epoch = below;
+        }
+        chain.reverse();
+        Ok(chain)
+    }
+
+    /// Keeps what the revocation of `device` owes, in one commit. Each
+    /// contact gets a new queue (Part 7 §7.7 step 2c). The revoked device
+    /// gets the notice on its sync channel (`DEV-313`).
+    fn owe_revocation<R: CryptoRng + ?Sized>(
+        &mut self,
+        device: DeviceId,
+        channel: Option<ConversationId>,
+        epoch: &[u8],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let owed = self.rotations_to_owe()?;
+        let mut leaving = self.setting(LEAVING_CHANNELS)?.unwrap_or_default();
+        let notice_key = [REVOCATION_NOTICE, device.as_slice()].concat();
+        let notice = [super::unix_now_seconds().to_be_bytes().as_slice(), epoch].concat();
+        let open = self.open_mut()?;
+        let owed_row = open.store.row_id(SETTINGS, ROTATION_OWED);
+        let leaving_row = open.store.row_id(SETTINGS, LEAVING_CHANNELS);
+        let notice_row = open.store.row_id(SETTINGS, &notice_key);
+        let mut batch = open.store.begin();
+        if !owed.is_empty() {
+            batch.put(SETTINGS, owed_row, None, &owed, rng)?;
+        }
+        if let Some(channel) = channel {
+            leaving.extend_from_slice(&channel.0);
+            leaving.extend_from_slice(&device);
+            batch.put(SETTINGS, leaving_row, None, &leaving, rng)?;
+            batch.put(SETTINGS, notice_row, None, &notice, rng)?;
+        }
+        batch.commit()?;
+        // The run that is up takes the rotations at its next step.
+        self.rotation_asked = 0;
+        Ok(())
+    }
+
+    /// The row of the owed rotations with each contact of this device in
+    /// it: the revoked device knew the queue of each one.
+    fn rotations_to_owe(&self) -> Result<Vec<u8>, Error> {
+        let mut owed = self.setting(ROTATION_OWED)?.unwrap_or_default();
+        let peers = self.device_peers()?;
+        let store = &self.open_ref()?.store;
+        for (row, plain) in store.list(TableId::CONTACT, None)? {
+            drop(Zeroizing::new(plain));
+            let is_held = owed.as_chunks::<16>().0.contains(&row);
+            if !is_held && !peers.contains(&ConversationId(row)) {
+                owed.extend_from_slice(&row);
+            }
+        }
+        Ok(owed)
+    }
+
+    /// The contacts whose queue a revocation still owes a rotation, for a
+    /// run that is up (Part 7 §7.7 step 2c). The identifier of the first
+    /// queue names each one. The run asks the node for each one, and the
+    /// node keeps the time of the rotation across runs (`NET-180`). The
+    /// result is empty inside `ROTATION_ASK_EVERY` of the last one.
+    ///
+    /// Step 2b is not here. The ratchet of this build makes a DH step at a
+    /// record of the peer alone. Until then the new queue cuts the revoked
+    /// device off.
+    pub fn rotation_owed(&mut self, now: u64) -> Result<Vec<[u8; 32]>, Error> {
+        if self.rotation_asked != 0 && now.saturating_sub(self.rotation_asked) < ROTATION_ASK_EVERY
+        {
+            return Ok(Vec::new());
+        }
+        let Some(owed) = self.setting(ROTATION_OWED)? else {
+            return Ok(Vec::new());
+        };
+        // A link snapshot carries the settings of the device that owns the
+        // channels. A linked device owns no queue of a contact (`DEV-287`),
+        // thus it owes none.
+        if !self.owns_channels()? {
+            return Ok(Vec::new());
+        }
+        let mut contacts = Vec::new();
+        for conversation in owed.as_chunks::<16>().0 {
+            // A contact that left the store owes nothing.
+            if let Ok(contact) = self.contact_id_of(ConversationId(*conversation)) {
+                contacts.push(contact);
+            }
+        }
+        if !contacts.is_empty() {
+            self.rotation_asked = now.max(1);
+        }
+        Ok(contacts)
+    }
+
+    /// The queue of a contact rotated: a revocation owes it no rotation.
+    pub(super) fn rotation_done<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let Some(owed) = self.setting(ROTATION_OWED)? else {
+            return Ok(());
+        };
+        let (entries, _) = owed.as_chunks::<16>();
+        if !entries.contains(&conversation.0) {
+            return Ok(());
+        }
+        // A contact that left the store owes nothing either.
+        let store = &self.open_ref()?.store;
+        let mut left = Vec::new();
+        for entry in entries {
+            if *entry != conversation.0 && store.get(TableId::CONTACT, entry)?.is_some() {
+                left.extend_from_slice(entry);
+            }
+        }
+        if left.is_empty() {
+            self.remove_setting(ROTATION_OWED)
+        } else {
+            self.put_setting(ROTATION_OWED, &left, rng)
+        }
+    }
+
+    /// Whether a revocation still owes a rotation to the queue of a
+    /// conversation.
+    pub fn owes_rotation(&self, conversation: ConversationId) -> Result<bool, Error> {
+        Ok(self
+            .setting(ROTATION_OWED)?
+            .is_some_and(|owed| owed.as_chunks::<16>().0.contains(&conversation.0)))
+    }
+
+    /// The sync channel of each revoked device that waits for its notice,
+    /// with the device.
+    fn leaving_channels(&self) -> Result<Vec<(ConversationId, DeviceId)>, Error> {
+        let Some(held) = self.setting(LEAVING_CHANNELS)? else {
+            return Ok(Vec::new());
+        };
+        Ok(held
+            .as_chunks::<LEAVING_ENTRY>()
+            .0
+            .iter()
+            .filter_map(|entry| {
+                let (channel, device) = entry.split_at(16);
+                Some((
+                    ConversationId(channel.try_into().ok()?),
+                    device.try_into().ok()?,
+                ))
+            })
+            .collect())
+    }
+
+    /// Whether a conversation is the sync channel of a revoked device that
+    /// waits for the notice of `DEV-313`. Such a channel sends that notice,
+    /// and it takes no record (`DEV-257`).
+    pub fn is_leaving_channel(&self, conversation: ConversationId) -> Result<bool, Error> {
+        Ok(self
+            .leaving_channels()?
+            .iter()
+            .any(|(channel, _)| *channel == conversation))
+    }
+
+    /// Queues the notice of a revocation on the channel of the revoked
+    /// device. The record carries the channel as its message, thus the send
+    /// path reports whether a relay took it. One notice waits at a time.
+    ///
+    /// DEV-313: the kept epochs that lead to the notice go before it at
+    /// each queue of it. The queue of a channel is RAM, and a lock or a new
+    /// start empties it. A notice that goes again with no chain would not
+    /// verify at a device that missed an epoch. That device would never
+    /// learn of its removal.
+    fn queue_revocation_notice<R: CryptoRng + ?Sized>(
+        &mut self,
+        channel: ConversationId,
+        epoch: &[u8],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let message = MsgRef(channel.0);
+        if self
+            .sync_out
+            .iter()
+            .any(|send| send.message == Some(message))
+        {
+            return Ok(());
+        }
+        for kept in self.roster_chain_below(epoch)? {
+            self.queue_roster(channel, &kept, rng)?;
+        }
+        let body = DeviceSetBody::Control {
+            control_type: ControlType::RosterEpoch,
+            payload: epoch,
+        };
+        let mut encoded = vec![0u8; epoch.len().saturating_add(16)];
+        let used = body.encode(&mut encoded)?;
+        encoded.truncate(used);
+        self.queue_sync(channel, &encoded, Some(message), rng)
+    }
+
+    /// The send path reports the state of a record. The result is whether
+    /// the record is the notice of a revocation. When a relay took it, the
+    /// channel of the revoked device ends (Part 7 §7.7 step 2a). When no
+    /// relay took it, the next run sends it again.
+    pub(super) fn notice_delivery<R: CryptoRng + ?Sized>(
+        &mut self,
+        message: &MsgRef,
+        delivery: Delivery,
+        rng: &mut R,
+    ) -> Result<bool, Error> {
+        let channel = ConversationId(message.0);
+        let Some((_, device)) = self
+            .leaving_channels()?
+            .into_iter()
+            .find(|(held, _)| *held == channel)
+        else {
+            return Ok(false);
+        };
+        if matches!(
+            delivery,
+            Delivery::Accepted | Delivery::Delivered | Delivery::Read
+        ) {
+            self.end_leaving_channel(device, channel, rng)?;
+        }
+        Ok(true)
+    }
+
+    /// Ends the sync channel of a revoked device whose notice left, or
+    /// whose time passed, with the rows of that notice, in one commit.
+    fn end_leaving_channel<R: CryptoRng + ?Sized>(
+        &mut self,
+        device: DeviceId,
+        channel: ConversationId,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let mut left = Vec::new();
+        for (held, other) in self.leaving_channels()? {
+            if held != channel {
+                left.extend_from_slice(&held.0);
+                left.extend_from_slice(&other);
+            }
+        }
+        let notice_key = [REVOCATION_NOTICE, device.as_slice()].concat();
+        let open = self.open_mut()?;
+        let leaving_row = open.store.row_id(SETTINGS, LEAVING_CHANNELS);
+        let notice_row = open.store.row_id(SETTINGS, &notice_key);
+        let mut batch = open.store.begin();
+        batch.delete(DEVICE_PEERS, channel.0);
+        batch.delete(TableId::CONTACT, channel.0);
+        batch.put(ENDED_CHANNELS, channel.0, None, &[1], rng)?;
+        if left.is_empty() {
+            batch.delete(SETTINGS, leaving_row);
+        } else {
+            batch.put(SETTINGS, leaving_row, None, &left, rng)?;
+        }
+        batch.delete(SETTINGS, notice_row);
+        Ok(batch.commit()?)
     }
 
     /// Takes a roster epoch that another device of the set signed, when it
@@ -308,6 +681,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// result is whether the store took it.
     pub fn apply_roster<R: CryptoRng + ?Sized>(
         &mut self,
+        bytes: &[u8],
+        rng: &mut R,
+    ) -> Result<bool, Error> {
+        self.apply_roster_from(None, bytes, rng)
+    }
+
+    /// [`Client::apply_roster`] for an epoch that came on the sync channel
+    /// of `source`.
+    pub(super) fn apply_roster_from<R: CryptoRng + ?Sized>(
+        &mut self,
+        source: Option<DeviceId>,
         bytes: &[u8],
         rng: &mut R,
     ) -> Result<bool, Error> {
@@ -329,8 +713,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .roster_hash_at(next.epoch)?
                 .is_some_and(|held| held != hash)
             {
-                let label = signer(&[&next, &previous]);
-                self.put_roster_fork(next.epoch, next.signer_id, label, FORK_PEER, rng)?;
+                // DEV-182: the view names the signer of an epoch whose
+                // signature verifies. An epoch that does not verify names
+                // the device that sent it, thus a peer cannot put a fork on
+                // another device.
+                if self.earlier_epoch_verifies(&next, &previous)? {
+                    let label = signer(&[&next, &previous]);
+                    self.put_roster_fork(next.epoch, next.signer_id, label, FORK_PEER, rng)?;
+                } else if let Some(source) = source {
+                    let label = previous.entry(&source).map_or([0; 32], |entry| entry.label);
+                    self.put_roster_fork(next.epoch, source, label, FORK_PEER, rng)?;
+                }
             }
             return Ok(false);
         }
@@ -353,13 +746,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         next.verify_successor(&previous, &Roster::hash(&current))?;
         if next.revokes(&identity.device_id) {
-            // DEV-181: the user learns that another device removed this one.
-            let open = self.open_mut()?;
-            let row = open.store.row_id(SETTINGS, REMOVED_FROM_SET);
-            let mut batch = open.store.begin();
-            batch.put(SETTINGS, row, None, &[1], rng)?;
-            batch.commit()?;
-            self.events.push_back(crate::Event::Conversations);
+            self.mark_removed_from_set(rng)?;
             return Ok(false);
         }
         let gone: Vec<DeviceId> = next
@@ -368,11 +755,54 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .filter(|device| !previous.revoked.contains(device))
             .copied()
             .collect();
+        // Step 2c: the device that owns the channels owes each contact a
+        // new queue, whichever device signed the epoch.
+        if !gone.is_empty() && self.owns_channels()? {
+            let owed = self.rotations_to_owe()?;
+            if !owed.is_empty() {
+                self.put_setting(ROTATION_OWED, &owed, rng)?;
+            }
+            self.rotation_asked = 0;
+        }
         self.put_roster(bytes, rng)?;
         for device in gone {
             self.end_sync_channel(device, rng)?;
         }
         Ok(true)
+    }
+
+    /// DEV-181: the user learns that a verified epoch of another device
+    /// removed this one.
+    pub(super) fn mark_removed_from_set<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let open = self.open_mut()?;
+        let row = open.store.row_id(SETTINGS, REMOVED_FROM_SET);
+        let mut batch = open.store.begin();
+        batch.put(SETTINGS, row, None, &[1], rng)?;
+        batch.commit()?;
+        self.events.push_back(crate::Event::Conversations);
+        Ok(())
+    }
+
+    /// Whether the signature of an epoch below the head verifies under the
+    /// key of its signer. The key is the one in the kept epoch before it
+    /// (`DEV-152`), or the one that the head gives that device. A
+    /// `DeviceRosterKey` never changes.
+    fn earlier_epoch_verifies(&self, epoch: &Roster<'_>, head: &Roster<'_>) -> Result<bool, Error> {
+        let kept = match epoch.epoch.checked_sub(1) {
+            Some(below) => self.kept_epoch(below)?,
+            None => None,
+        };
+        if let Some(kept) = kept {
+            if let Some(entry) = Roster::parse(&kept)?.entry(&epoch.signer_id) {
+                return Ok(epoch.verify_signature(entry.mldsa_pk).is_ok());
+            }
+        }
+        Ok(head
+            .entry(&epoch.signer_id)
+            .is_some_and(|entry| epoch.verify_signature(entry.mldsa_pk).is_ok()))
     }
 
     /// Whether a verified epoch of the set revoked this device (`DEV-181`).
@@ -415,7 +845,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// Ends the sync channel of each device that the roster revoked and
     /// that still holds one, at the start of a run: a revocation and the
     /// end of its channel are two commits, and a crash between them leaves
-    /// the channel (`DEV-255` to `DEV-257`).
+    /// the channel (`DEV-255` to `DEV-257`). The channel of a device whose
+    /// notice no relay took yet stays for `REVOCATION_NOTICE_TTL`, and the
+    /// notice goes again in this run (`DEV-313`).
     pub fn end_revoked_channels<R: CryptoRng + ?Sized>(
         &mut self,
         rng: &mut R,
@@ -425,14 +857,62 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         };
         let roster = Roster::parse(&bytes)?;
         let channels = self.peer_channels()?;
+        let leaving = self.leaving_channels()?;
+        let now = super::unix_now_seconds();
         for device in roster
             .revoked
             .iter()
             .filter(|device| channels.contains_key(*device))
         {
-            self.end_sync_channel(*device, rng)?;
+            let Some((channel, _)) = leaving.iter().find(|(_, held)| held == device) else {
+                self.end_sync_channel(*device, rng)?;
+                continue;
+            };
+            let notice = self.setting(&[REVOCATION_NOTICE, device.as_slice()].concat())?;
+            let at = notice
+                .as_deref()
+                .and_then(|held| held.get(..8))
+                .and_then(|bytes| bytes.try_into().ok())
+                .map(u64::from_be_bytes);
+            match (at, notice.as_deref().and_then(|held| held.get(8..))) {
+                (Some(at), Some(epoch)) if now.saturating_sub(at) < REVOCATION_NOTICE_TTL => {
+                    self.queue_revocation_notice(*channel, epoch, rng)?;
+                }
+                _ => self.end_leaving_channel(*device, *channel, rng)?,
+            }
+        }
+        // A notice whose epoch a crash kept out of the store names a device
+        // that the roster still holds. Its channel is a sync channel as
+        // before, and the user removes the device again.
+        for (channel, device) in leaving {
+            if !roster.revoked.contains(&device) {
+                self.forget_notice(device, channel, rng)?;
+            }
         }
         Ok(())
+    }
+
+    /// Drops the rows of a notice whose revocation did not happen. The
+    /// channel stays.
+    fn forget_notice<R: CryptoRng + ?Sized>(
+        &mut self,
+        device: DeviceId,
+        channel: ConversationId,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let mut left = Vec::new();
+        for (held, other) in self.leaving_channels()? {
+            if held != channel {
+                left.extend_from_slice(&held.0);
+                left.extend_from_slice(&other);
+            }
+        }
+        self.remove_setting(&[REVOCATION_NOTICE, device.as_slice()].concat())?;
+        if left.is_empty() {
+            self.remove_setting(LEAVING_CHANNELS)
+        } else {
+            self.put_setting(LEAVING_CHANNELS, &left, rng)
+        }
     }
 
     /// The devices of the current roster.
@@ -481,6 +961,30 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// The link of the pending device ended with no sync channel.
     pub fn drop_pending_peer(&mut self) -> Result<(), Error> {
         self.remove_setting(PENDING_PEER_SETTING)
+    }
+
+    /// Whether the store names the device whose sync channel opens next.
+    pub fn holds_pending_peer(&self) -> Result<bool, Error> {
+        Ok(self
+            .setting(PENDING_PEER_SETTING)?
+            .is_some_and(|pending| pending.len() == 16 + LABEL_LEN))
+    }
+
+    /// Ends a sync channel that opened while no device waited for one
+    /// (`DEV-290`): the link that asked for it ended first. The channel
+    /// ends as the channel of a revoked device does, and it names no
+    /// device of the set.
+    pub fn refuse_device_channel<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let open = self.open_mut()?;
+        let mut batch = open.store.begin();
+        batch.delete(DEVICE_PEERS, conversation.0);
+        batch.delete(TableId::CONTACT, conversation.0);
+        batch.put(ENDED_CHANNELS, conversation.0, None, &[1], rng)?;
+        Ok(batch.commit()?)
     }
 
     /// Marks the conversation of a sync channel that just opened as the

@@ -172,6 +172,11 @@ async fn a_token_registers_a_handle_that_a_lookup_reads_under_a_signed_head() {
     .public();
     let (state, body) = dirclient::issue_request(epoch, &issuer_pk, 1, &mut OsRng).unwrap();
     let issued = client.send(Kind::Issue, &body).await.unwrap();
+    // The same request again takes the answer of the first one, with the
+    // same bytes and the same proof. The issuer signs nothing a second
+    // time, and the token is the same token (ABU-110).
+    let again = client.send(Kind::Issue, &body).await.unwrap();
+    assert_eq!(again, issued);
     let token = dirclient::issue_finish(&state, &issued, &issuer_pk).unwrap();
     let token = dirclient::token_bytes(&token[0]).unwrap();
 

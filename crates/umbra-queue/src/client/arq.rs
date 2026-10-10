@@ -6,7 +6,7 @@
 //! machine says whether a send may happen; the runtime picks the moment.
 
 use crate::{
-    params::{GROUP_REPLICAS, SEND_GIVE_UP, SEND_MAX_ATTEMPTS},
+    params::{SEND_GIVE_UP, SEND_MAX_ATTEMPTS},
     Reject,
 };
 
@@ -85,9 +85,18 @@ impl Arq {
         self.attempts = self.attempts.saturating_add(1);
     }
 
-    /// The relay acknowledged the record.
+    /// The relay acknowledged the record. An acknowledgment can arrive
+    /// after the ARQ stopped at `SEND_MAX_ATTEMPTS` or at `SEND_GIVE_UP`:
+    /// the answer to the last send was late. A relay then holds the record.
+    /// A `failed` record is a record that no relay accepted (Part 3
+    /// §3.7), thus the record leaves `failed`. A permanent `NACK` stays.
     pub fn accepted(&mut self) {
-        if matches!(self.state, Delivery::Queued) {
+        if matches!(
+            self.state,
+            Delivery::Queued
+                | Delivery::Failed(FailCause::Attempts)
+                | Delivery::Failed(FailCause::GiveUp)
+        ) {
             self.state = Delivery::Accepted;
         }
     }
@@ -146,56 +155,6 @@ impl Arq {
     }
 }
 
-/// The ARQ of one `GPOST` to its two replicas (`NET-270` to `NET-272`).
-pub struct GroupArq {
-    replicas: [Arq; GROUP_REPLICAS],
-}
-
-impl Default for GroupArq {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl GroupArq {
-    /// A post that no replica has seen.
-    pub const fn new() -> Self {
-        GroupArq {
-            replicas: [Arq::new(), Arq::new()],
-        }
-    }
-
-    /// The ARQ of one replica.
-    pub fn replica(&mut self, index: usize) -> Option<&mut Arq> {
-        self.replicas.get_mut(index)
-    }
-
-    /// The state of the post: `accepted` when any replica returned a
-    /// `GSEQ` (`NET-257`), `failed` only when every replica failed
-    /// (`NET-272`), and `queued` otherwise.
-    pub fn state(&mut self, now: u64) -> Delivery {
-        let states = [self.replicas[0].tick(now), self.replicas[1].tick(now)];
-        if states.iter().any(|s| matches!(s, Delivery::Accepted)) {
-            return Delivery::Accepted;
-        }
-        if states.iter().all(|s| matches!(s, Delivery::Failed(_))) {
-            return Delivery::Failed(FailCause::GiveUp);
-        }
-        Delivery::Queued
-    }
-
-    /// The replicas that failed after the other accepted, which the client
-    /// reports as a link fault (`NET-259`).
-    pub fn faulted_replicas(&mut self, now: u64) -> [bool; GROUP_REPLICAS] {
-        let accepted = matches!(self.state(now), Delivery::Accepted);
-        let mut out = [false; GROUP_REPLICAS];
-        for (flag, arq) in out.iter_mut().zip(self.replicas.iter_mut()) {
-            *flag = accepted && matches!(arq.tick(now), Delivery::Failed(_));
-        }
-        out
-    }
-}
-
 #[cfg(test)]
 #[allow(
     clippy::expect_used,
@@ -242,19 +201,33 @@ mod tests {
     }
 
     #[test]
-    fn a_group_post_is_accepted_at_the_first_replica() {
-        let mut g = GroupArq::new();
-        g.replica(0).unwrap().sent(0);
-        g.replica(1).unwrap().sent(0);
-        assert_eq!(g.state(1), Delivery::Queued);
-        g.replica(1).unwrap().accepted();
-        assert_eq!(g.state(1), Delivery::Accepted);
-        g.replica(0).unwrap().rejected(Reject::Rejected);
-        assert_eq!(g.faulted_replicas(1), [true, false]);
-        let mut h = GroupArq::new();
-        h.replica(0).unwrap().rejected(Reject::Version);
-        h.replica(1).unwrap().sent(0);
-        assert_eq!(h.state(SEND_GIVE_UP), Delivery::Failed(FailCause::GiveUp));
-        assert!(h.replica(2).is_none());
+    fn a_late_acknowledgment_of_the_last_send_leaves_the_failed_state() {
+        let mut a = Arq::new();
+        for i in 0..SEND_MAX_ATTEMPTS {
+            assert!(a.may_send(u64::from(i)));
+            a.sent(u64::from(i));
+        }
+        // The answer to the 16th send comes one tick after the stop.
+        assert_eq!(a.tick(100), Delivery::Failed(FailCause::Attempts));
+        a.accepted();
+        assert_eq!(a.state(), Delivery::Accepted);
+        assert!(!a.may_send(101));
+
+        let mut b = Arq::new();
+        b.sent(0);
+        assert_eq!(b.tick(SEND_GIVE_UP), Delivery::Failed(FailCause::GiveUp));
+        b.accepted();
+        b.delivered();
+        assert_eq!(b.state(), Delivery::Delivered);
+
+        // NET-217: a permanent refusal is no late answer.
+        let mut c = Arq::new();
+        c.sent(0);
+        c.rejected(Reject::Version);
+        c.accepted();
+        assert_eq!(
+            c.state(),
+            Delivery::Failed(FailCause::Permanent(Reject::Version))
+        );
     }
 }

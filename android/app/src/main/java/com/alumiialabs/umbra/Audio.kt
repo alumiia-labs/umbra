@@ -158,6 +158,11 @@ private class Transcoder(
         channels = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
         // AAC of the platform takes one or two channels.
         require(channels in 1..2) { "channels" }
+        // The encoder reads 16-bit PCM. A decoder that gives another form,
+        // such as float samples of a 32-bit file, would encode noise.
+        if (format.containsKey(MediaFormat.KEY_PCM_ENCODING)) {
+            require(format.getInteger(MediaFormat.KEY_PCM_ENCODING) == android.media.AudioFormat.ENCODING_PCM_16BIT) { "pcm" }
+        }
         encoder = encoderFor(rate, channels)
     }
 

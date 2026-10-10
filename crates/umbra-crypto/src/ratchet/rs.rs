@@ -7,9 +7,9 @@
 //! lost chunk costs one symbol of each codeword.
 //!
 //! **The evaluation points.** Part 5 fixes a Vandermonde matrix in
-//! systematic form and names no points. This code takes `x_i = g^i` for
-//! `i` in `0..n`, with `g` the generator `0x0002`, builds the Vandermonde
-//! matrix `V[i][j] = x_i^j`, and uses `G = V · V[0..k]⁻¹`. Two
+//! systematic form. Rule `CRY-139` names the points: `x_i = g^i` for
+//! `i` in `0..n`, with `g` the generator `0x0002`. This code builds the
+//! Vandermonde matrix `V[i][j] = x_i^j`, and uses `G = V · V[0..k]⁻¹`. Two
 //! implementations that take the same points produce byte-identical chunks
 //! (`CRY-075`).
 

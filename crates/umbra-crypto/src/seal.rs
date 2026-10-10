@@ -12,11 +12,11 @@ use alloc::vec::Vec;
 use hkdf::SimpleHkdf;
 use rand_core::CryptoRng;
 use sha3::Sha3_256;
-use x25519_dalek::{PublicKey, StaticSecret};
+use x25519_dalek::PublicKey;
 
 use crate::{
     aead::{self, TAG_LEN},
-    kem::clamp,
+    kem::scalar_of,
     secret::Secret,
     Error,
 };
@@ -26,7 +26,7 @@ pub const OVERHEAD: usize = 32 + TAG_LEN;
 
 /// The X25519 public key of a secret scalar.
 pub fn public_of(secret: &Secret<32>) -> [u8; 32] {
-    PublicKey::from(&StaticSecret::from(clamp(*secret.expose()))).to_bytes()
+    PublicKey::from(&scalar_of(secret.expose())).to_bytes()
 }
 
 fn key_of(
@@ -41,9 +41,10 @@ fn key_of(
     }
     let salt = [ephemeral.as_slice(), recipient].concat();
     let hkdf = SimpleHkdf::<Sha3_256>::new(Some(&salt), shared);
-    let mut key = [0u8; 32];
-    hkdf.expand(label, &mut key).map_err(|_| Error::Length)?;
-    Ok(Secret::new(key))
+    let mut key = Secret::<32>::zeroed();
+    hkdf.expand(label, key.expose_mut())
+        .map_err(|_| Error::Length)?;
+    Ok(key)
 }
 
 /// Seals `plain` to `recipient` under `label`: the ephemeral public key, then
@@ -54,14 +55,12 @@ pub fn seal<R: CryptoRng + ?Sized>(
     plain: &[u8],
     rng: &mut R,
 ) -> Result<Vec<u8>, Error> {
-    let mut scalar = [0u8; 32];
-    rng.fill_bytes(&mut scalar);
-    let ephemeral = StaticSecret::from(clamp(scalar));
+    let mut scalar = Secret::<32>::zeroed();
+    rng.fill_bytes(scalar.expose_mut());
+    let ephemeral = scalar_of(scalar.expose());
     let ephemeral_pk = PublicKey::from(&ephemeral).to_bytes();
-    let shared = ephemeral
-        .diffie_hellman(&PublicKey::from(*recipient))
-        .to_bytes();
-    let key = key_of(&shared, &ephemeral_pk, recipient, label)?;
+    let shared = ephemeral.diffie_hellman(&PublicKey::from(*recipient));
+    let key = key_of(shared.as_bytes(), &ephemeral_pk, recipient, label)?;
     let mut body = plain.to_vec();
     let tag = aead::seal_ietf(&key, &[0u8; aead::NONCE_LEN_IETF], &[], &mut body)?;
     let mut out = Vec::with_capacity(plain.len().saturating_add(OVERHEAD));
@@ -79,12 +78,10 @@ pub fn open(secret: &Secret<32>, label: &[u8], sealed: &[u8]) -> Result<Vec<u8>,
     let (ephemeral_pk, rest) = sealed.split_at(32);
     let (body, tag) = rest.split_at(rest.len() - TAG_LEN);
     let ephemeral_pk: [u8; 32] = ephemeral_pk.try_into().map_err(|_| Error::Length)?;
-    let own = StaticSecret::from(clamp(*secret.expose()));
+    let own = scalar_of(secret.expose());
     let recipient = PublicKey::from(&own).to_bytes();
-    let shared = own
-        .diffie_hellman(&PublicKey::from(ephemeral_pk))
-        .to_bytes();
-    let key = key_of(&shared, &ephemeral_pk, &recipient, label)?;
+    let shared = own.diffie_hellman(&PublicKey::from(ephemeral_pk));
+    let key = key_of(shared.as_bytes(), &ephemeral_pk, &recipient, label)?;
     let mut plain = body.to_vec();
     aead::open_ietf(&key, &[0u8; aead::NONCE_LEN_IETF], &[], &mut plain, tag)?;
     Ok(plain)

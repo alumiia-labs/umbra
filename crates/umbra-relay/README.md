@@ -6,11 +6,17 @@ Part 12, and the group queues of Part 3 §3.2.7.
 The node is a plain state machine. The binary puts TLS 1.3, the WebSocket
 framing of Part 6 §6.2.1, a pacing clock, and an SQLite store around it.
 
-This revision serves a test network. It has no push path, and the issuer key
-of its settings admits nothing.
-It reads a signed relay manifest of Part 10, and section 7 shows that form.
-No real directory authority exists yet, thus one process holds the seven test
-keys.
+This file shows a test network that an operator sets up by hand. For a real
+network, use the playbooks of `deploy/ansible`. They install each relay, the
+notification server (`umbra-ndr`), the directory (`umbra-directory`), and the
+signer of the relay manifest (`umbra-signer`).
+
+A relay reads a signed relay manifest of Part 10, and section 7 shows that
+form. A queue relay sends its pushes to the notification server over the
+`ndr_route` and `ndr_key_config` lines. It takes the keys of the token
+issuer over the `directory_route` and `directory_pins` lines. The head of
+`src/main.rs` lists each line of the settings file. In the test network of
+this file, one process holds the seven keys of the directory authorities.
 
 ## A test network of three relays
 
@@ -34,9 +40,13 @@ CMake for the TLS library and for SQLite.
 umbra-relay keygen
 ```
 
-It prints a `relay_id` line and a `static_secret` line. The secret shows one
-time. Put the two lines into the settings file of that relay, and keep that
-file readable for the service user alone.
+It prints an `identity_seed` line, a `static_secret` line, and the `relay_id`
+in a comment line. The two secrets show one time. Put the three lines into
+the settings file of that relay. Keep that file readable for the service
+user alone. The identity seed gives the key that signs the descriptor of
+section 7. The `relay_id` is the hash of the public half of that key.
+The relay computes it, thus the settings file needs no `relay_id` line. The
+comment is for the `next` lines of the other relays.
 
 ### 3. A certificate for each relay
 
@@ -50,7 +60,7 @@ its start, thus a renewal needs a restart. The queues outlive that restart.
 ```text
 listen=0.0.0.0:443
 layer=1
-relay_id=<from keygen>
+identity_seed=<from keygen>
 static_secret=<from keygen>
 cert=/etc/letsencrypt/live/relay1.example.org/fullchain.pem
 key=/etc/letsencrypt/live/relay1.example.org/privkey.pem
@@ -149,12 +159,11 @@ The descriptor of section 6 is a text that no party signs. The relay
 directory of Part 10 replaces it: each relay signs a descriptor, and the
 directory authorities sign a manifest over the relay set.
 
-A relay of that form has an identity key, and its `relay_id` is the hash of
-that key. Its settings file holds these lines in the place of `relay_id`,
+A relay of that form signs its descriptor with the key of its
+`identity_seed` line. Its settings file holds these lines in the place of
 `layer` and `next`:
 
 ```text
-identity_seed=<from umbra-relay keygen>
 family=<64 hex characters, one value for each family of relays>
 class=<0 to 3: 100, 250, 500, or 1 000 Mbit/s in both directions>
 roles=<queue,chain for a chain relay; chain,ingress for an ingress relay>
@@ -210,8 +219,13 @@ that deletes, thus an acknowledged record leaves no bytes behind (`NET-302`).
 Do not copy the file of a live relay. Stop the relay, or use the backup
 command of SQLite.
 
-The chunks of Part 12 sit in memory alone. A restart drops them, and each
-client fetches the file again from another replica or asks its sender.
+The chunks of Part 12 sit in the same file, and a restart reads each of them
+back. The relay also holds the bytes of each chunk in memory, and at its
+start it holds them two times for a moment. Thus the `chunk_capacity` line
+is a part of the memory of the server, not of its disk. Give a relay two
+times that value of free memory, beside what its queues take. A relay with
+no `chunk_capacity` line holds no chunk, and one without the attachment
+role declares a store of 0 in its descriptor (`REL-127`).
 
 A file of an earlier version opens here. The schema takes nothing away, thus
 a relay of version 1 keeps each queue it holds and gains the two tables of

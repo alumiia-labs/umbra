@@ -15,7 +15,7 @@ use rand_core::TryCryptoRng;
 use sha3::Sha3_256;
 use x25519_dalek::{PublicKey as XPublic, StaticSecret};
 
-use crate::{labels, secret::Secret, Error};
+use crate::{kem::scalar_of, labels, secret::Secret, Error};
 
 /// The length of the AEAD tag on a content record.
 pub const RECORD_TAG_LEN: usize = 16;
@@ -90,10 +90,12 @@ impl EpochSecret {
         let mut write = Secret::<32>::zeroed();
         let _ = kdf.expand(labels::GROUP_READ, read.expose_mut());
         let _ = kdf.expand(labels::GROUP_WRITE, write.expose_mut());
-        // StaticSecret clamps the scalar as RFC 7748 §5 states.
+        // Part 11 §11.3.1 defines each key as the clamped bytes.
+        // `StaticSecret` clamps at each use and holds the bytes as given,
+        // thus the clamp runs here, and an admit carries the clamped form.
         Credentials {
-            read: StaticSecret::from(*read.expose()),
-            write: StaticSecret::from(*write.expose()),
+            read: scalar_of(read.expose()),
+            write: scalar_of(write.expose()),
         }
     }
 }
@@ -101,10 +103,13 @@ impl EpochSecret {
 impl Credentials {
     /// The credentials that an admit handed a joiner. A joiner holds no
     /// `K_e`, thus it cannot derive them (`GRP-384`).
+    ///
+    /// The clamp changes no public key and no Diffie-Hellman output, thus
+    /// the bytes of a client that sent them unclamped serve as before.
     pub fn from_secrets(read: &Secret<32>, write: &Secret<32>) -> Self {
         Credentials {
-            read: StaticSecret::from(*read.expose()),
-            write: StaticSecret::from(*write.expose()),
+            read: scalar_of(read.expose()),
+            write: scalar_of(write.expose()),
         }
     }
 
@@ -317,6 +322,29 @@ mod tests {
         assert_eq!(one.read_public(), two.read_public());
         assert_ne!(one.read_public(), one.write_public());
         assert_eq!(one.read_public(), *XPublic::from(one.read()).as_bytes());
+    }
+
+    #[test]
+    fn credentials_leave_as_clamped_bytes_with_the_same_public_keys() {
+        let held = secret().credentials();
+        for bytes in [held.read_secret(), held.write_secret()] {
+            assert_eq!(*bytes.expose(), crate::kem::clamp(*bytes.expose()));
+        }
+        // The bytes before the clamp, as an earlier client sent them.
+        let kdf = Hkdf::<Sha3_256>::new(None, secret().expose().expose());
+        let mut read = Secret::<32>::zeroed();
+        let mut write = Secret::<32>::zeroed();
+        kdf.expand(labels::GROUP_READ, read.expose_mut()).unwrap();
+        kdf.expand(labels::GROUP_WRITE, write.expose_mut()).unwrap();
+        assert_eq!(
+            held.read_public(),
+            *XPublic::from(&StaticSecret::from(*read.expose())).as_bytes()
+        );
+        let joined = Credentials::from_secrets(&read, &write);
+        assert_eq!(joined.read_public(), held.read_public());
+        assert_eq!(joined.write_public(), held.write_public());
+        assert_eq!(joined.read_secret().expose(), held.read_secret().expose());
+        assert_eq!(joined.write_secret().expose(), held.write_secret().expose());
     }
 
     #[test]

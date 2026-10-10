@@ -50,6 +50,9 @@ const val CLASS_IMAGE: UByte = 1u
 /** The side of the picture of a profile, in pixels. */
 private const val PROFILE_PICTURE_SIDE = 192
 
+/** The longest side of a picture of a peer that the app decodes, in pixels. */
+private const val PEER_PICTURE_SIDE_MAX = 1_024
+
 /** `PICTURE_MAX` of Part 9 §9.12, in bytes. */
 private const val PICTURE_MAX = 6_144
 
@@ -193,16 +196,55 @@ object Photos {
 
         override fun put(bytes: ByteArray) {
             try {
-                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-                var sample = 1
-                while (maxOf(bounds.outWidth, bounds.outHeight) / sample > SHOWN_SIDE_MAX) sample *= 2
-                val options = BitmapFactory.Options().apply { inSampleSize = sample }
-                image = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)?.asImageBitmap()
+                image = bounded(bytes, SHOWN_SIDE_MAX)
             } finally {
                 bytes.fill(0)
             }
         }
+    }
+
+    /**
+     * Decodes an image of a peer at `sideMax` on its longest side at most.
+     * The header names the size before one pixel has memory, and the decode
+     * takes each second, fourth, or eighth pixel of a larger image. A file
+     * that does not decode, and a decode with no memory, give null: the
+     * bytes of a peer end no thread of the app.
+     */
+    fun bounded(bytes: ByteArray, sideMax: Int): ImageBitmap? = try {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+            null
+        } else {
+            var sample = 1
+            while (maxOf(bounds.outWidth, bounds.outHeight) / sample > sideMax) sample *= 2
+            val options = BitmapFactory.Options().apply { inSampleSize = sample }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+                // A decoder that did not take the sample gives no bitmap
+                // above the bound to a draw.
+                ?.takeIf { maxOf(it.width, it.height) <= sideMax * 2 }
+                ?.asImageBitmap()
+        }
+    } catch (fault: Throwable) {
+        // `OutOfMemoryError` is no `Exception`.
+        null
+    }
+
+    /**
+     * The picture of a profile of a peer (`DIS-176`). An honest client sends
+     * `PROFILE_PICTURE_SIDE` on each side, thus a header that names more
+     * than `PEER_PICTURE_SIDE_MAX` shows no picture.
+     */
+    fun profileImage(bytes: ByteArray): ImageBitmap? {
+        if (bytes.size > PICTURE_MAX) return null
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        try {
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        } catch (fault: Throwable) {
+            return null
+        }
+        if (maxOf(bounds.outWidth, bounds.outHeight) > PEER_PICTURE_SIDE_MAX) return null
+        return bounded(bytes, PEER_PICTURE_SIDE_MAX)
     }
 }
 

@@ -68,6 +68,10 @@ pub fn seal<R: CryptoRng + ?Sized>(
 
 /// Seals `payload` under an encapsulation the caller made. A protocol path
 /// uses [`seal`]; a test vector uses this call with deterministic coins.
+///
+/// The nonce is zero, thus one encapsulation serves one payload: a second
+/// payload under it would repeat the key and the nonce.
+#[doc(hidden)]
 pub fn seal_with(
     ct: &Ciphertext,
     shared: &SharedSecret,

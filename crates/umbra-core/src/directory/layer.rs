@@ -6,8 +6,9 @@
 
 use umbra_crypto::{hash::sha3_256, labels};
 
-/// The layer of a chain relay with the queue role, under the last root
-/// before its admission (`REL-060`).
+/// The layer of a chain relay with the queue role, under the root that
+/// listed the relay as pending (`REL-060`, `REL-156`). That root comes
+/// after the operator chose `relay_id`, thus no operator grinds against it.
 pub fn layer(root: &[u8; 32], epoch: u64, relay_id: &[u8; 32]) -> u8 {
     let digest = sha3_256(&[labels::RELAY_LAYER, root, &epoch.to_be_bytes(), relay_id]);
     2 + (digest.last().copied().unwrap_or(0) & 0x01)

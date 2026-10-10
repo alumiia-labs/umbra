@@ -13,10 +13,21 @@ proc-macro, a build script, and a crate that only those reach form the build
 register, which no binary links and which carries no cap (Part 14 §14.2.3).
 The default graph holds no platform crate, thus R3 there is empty.
 
+A crate is a name and a version (IMP-011 item 2). When the graph links two
+versions of one name, each version is a crate of its own. A version charges
+the register of the most trusted crate that pulls it, and never a register
+above the entry of its name in deny.toml. An old `digest` that only `hashx`
+(R2) pulls charges R2, not the R1 of the `digest` that the message core
+links. Each such version needs an entry in the `skip` list of deny.toml
+with a date at the start of its reason. `--check` fails on an entry
+that is absent or older than 90 days (Part 14 §14.2.7).
+
 The platform builds turn the features on: the Android library and the relay
 server. Their R3 crates charge to the subsystem of Part 14 §14.2.3 whose
 root reaches them. A crate that several roots reach charges to the one it is
-the root of, or else to the first subsystem in `SUBSYSTEMS`.
+the root of, or else to the first subsystem in `SUBSYSTEMS`. A version that
+a default graph charges to R1 or R2 charges no register again. Another version
+of an R1 or R2 name, which only a platform crate pulls, charges R3.
 
 Usage: python scripts/deps.py [--check]
   --check   exit 1 when the generated text differs from the committed file.
@@ -66,28 +77,84 @@ def registers() -> dict[str, str]:
     return out
 
 
-def graph(target: str, edges: str) -> dict[str, str]:
-    """crate name -> version for one target over the named edge kinds."""
-    out = run("cargo", "tree", "--target", target, "-e", edges, "--prefix", "none",
-              "--format", "{p}")
-    crates = {}
+Crate = tuple[str, str]
+ORDER = {"R1": 0, "R2": 1, "R3": 2}
+SKIP_DAYS = 90
+
+
+def skips() -> dict[Crate, dt.date | None]:
+    """(name, version) -> the date of its entry in the skip list of deny.toml."""
+    text = (ROOT / "deny.toml").read_text(encoding="utf-8")
+    block = re.search(r"^skip\s*=\s*\[(.*?)^\]", text, flags=re.M | re.S)
+    out: dict[Crate, dt.date | None] = {}
+    entries = block.group(1) if block else ""
+    for m in re.finditer(r'\{\s*crate\s*=\s*"([^"@]+)@([^"]+)"([^}]*)\}', entries):
+        date = re.search(r'reason\s*=\s*"(\d{4}-\d{2}-\d{2})', m.group(3))
+        out[(m.group(1), m.group(2))] = dt.date.fromisoformat(date.group(1)) if date else None
+    return out
+
+
+def graph(target: str, edges: str) -> dict[Crate, set[Crate | None]]:
+    """(name, version) -> its direct parents, for one target over the named
+    edge kinds. The parent None is a crate of the workspace."""
+    out = run("cargo", "tree", "--target", target, "-e", edges, "--no-dedupe",
+              "--prefix", "depth", "--format", "{p}")
+    crates: dict[Crate, set[Crate | None]] = {}
+    stack: list[tuple[int, Crate | None]] = []
     for line in out.splitlines():
-        line = line.strip()
-        if not line or line.endswith("(*)"):
+        m = re.match(r"^(\d+)(\S+) v(\S+)", line.strip())
+        if not m:
             continue
-        m = re.match(r"^(\S+) v(\S+)", line)
-        if not m or m.group(1) in WORKSPACE:
-            continue
-        crates[m.group(1)] = m.group(2)
+        depth = int(m.group(1))
+        crate = None if m.group(2) in WORKSPACE else (m.group(2), m.group(3))
+        while stack and stack[-1][0] >= depth:
+            stack.pop()
+        if crate is not None:
+            parents = crates.setdefault(crate, set())
+            if stack:
+                parents.add(stack[-1][1])
+        stack.append((depth, crate))
     return crates
 
 
-def platform(reg: dict[str, str], package: str, features: str, target: str) -> dict[str, list]:
-    """subsystem -> R3 crates of one platform build."""
+def duplicates(crates) -> dict[str, list[str]]:
+    """name -> its versions, for each name with two versions or more."""
+    versions: dict[str, set[str]] = {}
+    for name, ver in crates:
+        versions.setdefault(name, set()).add(ver)
+    return {name: sorted(vers) for name, vers in sorted(versions.items()) if len(vers) > 1}
+
+
+def charge(linked: dict[Crate, set[Crate | None]], reg: dict[str, str]) -> dict[Crate, str]:
+    """(name, version) -> the register that it charges."""
+    twice = duplicates(linked)
+    done: dict[Crate, str] = {}
+
+    def of(crate: Crate) -> str:
+        if crate in done:
+            return done[crate]
+        own = reg.get(crate[0], "R3")
+        if own == "build":
+            own = "R3"  # a crate tagged build that the linked graph reaches is misfiled
+        done[crate] = own
+        if crate[0] in twice:
+            # A workspace crate pulls each crate at the register of its name.
+            pulls = ["R1" if parent is None else of(parent) for parent in linked[crate]]
+            best = min(pulls, key=ORDER.__getitem__, default=own)
+            done[crate] = max(own, best, key=ORDER.__getitem__)
+        return done[crate]
+
+    return {crate: of(crate) for crate in linked}
+
+
+def platform(reg: dict[str, str], charged: set[Crate], package: str, features: str,
+             target: str) -> dict[str, list]:
+    """subsystem -> R3 crates of one platform build. `charged` holds each
+    crate that a default graph charges to R1 or R2."""
     out = run("cargo", "tree", "-p", package, "--features", features, "--target", target,
               "-e", "normal,no-proc-macro", "--no-dedupe", "--prefix", "depth", "--format", "{p}")
     stack: list[tuple[int, str]] = []
-    reached: dict[str, tuple[str, set[str]]] = {}
+    reached: dict[Crate, set[str]] = {}
     root_of = {root: name for name, roots, _ in SUBSYSTEMS for root in roots}
     for line in out.splitlines():
         m = re.match(r"^(\d+)(\S+) v(\S+)", line.strip())
@@ -97,13 +164,13 @@ def platform(reg: dict[str, str], package: str, features: str, target: str) -> d
         while stack and stack[-1][0] >= depth:
             stack.pop()
         stack.append((depth, name))
-        if name in WORKSPACE or reg.get(name) in ("R1", "R2"):
+        if name in WORKSPACE or (reg.get(name) in ("R1", "R2") and (name, ver) in charged):
             continue
         subs = {root_of[n] for _, n in stack if n in root_of}
-        reached.setdefault(name, (ver, set()))[1].update(subs)
+        reached.setdefault((name, ver), set()).update(subs)
     order = [name for name, _, _ in SUBSYSTEMS] + ["Other"]
     by_sub: dict[str, list] = {name: [] for name in order}
-    for name, (ver, subs) in sorted(reached.items()):
+    for (name, ver), subs in sorted(reached.items()):
         sub = root_of.get(name) or next((o for o in order if o in subs), "Other")
         by_sub[sub].append((name, ver))
     return by_sub
@@ -126,18 +193,19 @@ def render() -> str:
         f"- Toolchain: `{rustc}`, `{cargo}`",
         "",
     ]
+    charged: set[Crate] = set()
+    twice: dict[Crate, set[str]] = {}
     for target in TARGETS:
         linked = graph(target, "normal,no-proc-macro")
         full = graph(target, "normal,build")
+        charges = charge(linked, reg)
+        charged.update(crate for crate, r in charges.items() if r in ("R1", "R2"))
+        for name, vers in duplicates(full).items():
+            for ver in vers:
+                twice.setdefault((name, ver), set()).add(charges.get((name, ver), "build"))
         by_reg: dict[str, list[tuple[str, str]]] = {"R1": [], "R2": [], "R3": [], "build": []}
-        for name, ver in sorted(full.items()):
-            if name not in linked:
-                by_reg["build"].append((name, ver))
-                continue
-            r = reg.get(name, "R3")
-            if r == "build":
-                r = "R3"  # a crate tagged build that the linked graph reaches is misfiled
-            by_reg[r].append((name, ver))
+        for crate in sorted(full):
+            by_reg[charges.get(crate, "build")].append(crate)
         lines += [f"## `{target}`", ""]
         lines += ["| Register | Count | Cap | Result |", "| --- | --- | --- | --- |"]
         for r in ("R1", "R2", "R3", "build"):
@@ -155,7 +223,10 @@ def render() -> str:
             lines.append("")
     caps = {name: cap for name, _, cap in SUBSYSTEMS}
     for package, features, target, r3_cap in PLATFORM:
-        by_sub = platform(reg, package, features, target)
+        by_sub = platform(reg, charged, package, features, target)
+        for name, vers in duplicates([c for crates in by_sub.values() for c in crates]).items():
+            for ver in vers:
+                twice.setdefault((name, ver), set()).add("R3")
         total = sum(len(v) for v in by_sub.values())
         lines += [f"## Platform build: `{package}` with `{features}`, `{target}`", ""]
         lines += ["| Subsystem | Count | Cap | Result |", "| --- | --- | --- | --- |"]
@@ -174,7 +245,40 @@ def render() -> str:
             lines += [f"### {sub}", ""]
             lines += [f"- `{name}` {ver}" for name, ver in crates]
             lines.append("")
+    # Part 14 §14.2.7: a duplicate version is a dated debt in the skip list.
+    skip = skips()
+    lines += ["## Duplicate versions", ""]
+    if not twice:
+        lines += ["None.", ""]
+    else:
+        lines += ["Each name that a graph links at two versions. One version of a name stays",
+                  "outside the `skip` list of `deny.toml`: the one that the graph keeps.", ""]
+        lines += ["| Crate | Version | Register | Skip entry |", "| --- | --- | --- | --- |"]
+        for (name, ver), regs in sorted(twice.items()):
+            date = skip.get((name, ver))
+            lines.append(f"| `{name}` | {ver} | {', '.join(sorted(regs))} | {date or 'none'} |")
+        lines.append("")
     return "\n".join(lines) + "\n"
+
+
+def skip_faults(text: str) -> list[str]:
+    """Each fault of the skip list of deny.toml against the duplicates in `text`."""
+    listed = {(m.group(1), m.group(2)): m.group(3) for m in re.finditer(
+        r"^\| `([^`]+)` \| (\S+) \| [^|]+ \| (\S+) \|$", text, flags=re.M)}
+    by_name: dict[str, list[str]] = {}
+    for (name, _), date in listed.items():
+        by_name.setdefault(name, []).append(date)
+    faults = [f"{name}: {dates.count('none')} versions have no skip entry in deny.toml"
+              for name, dates in sorted(by_name.items()) if dates.count("none") > 1]
+    today = dt.date.today()
+    for (name, ver), date in sorted(skips().items()):
+        if date is None:
+            faults.append(f"skip entry {name}@{ver} has no date at the start of its reason")
+        elif (today - date).days > SKIP_DAYS:
+            faults.append(f"skip entry {name}@{ver} of {date} is older than {SKIP_DAYS} days")
+        if (name, ver) not in listed:
+            faults.append(f"skip entry {name}@{ver} names no duplicate of the graph")
+    return faults
 
 
 def main(argv: list[str]) -> int:
@@ -190,6 +294,11 @@ def main(argv: list[str]) -> int:
         # IMP-005, IMP-009: a register or a subsystem over its cap fails.
         if "| FAIL |" in text:
             print("a register or a subsystem is over its cap")
+            return 1
+        # Part 14 §14.2.7: each duplicate has a skip entry of 90 days at most.
+        faults = skip_faults(text)
+        if faults:
+            print("\n".join(faults))
             return 1
         print("DEPENDENCIES.md is current")
         return 0

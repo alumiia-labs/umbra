@@ -1,0 +1,52 @@
+# The check set of each commit (Part 14 `IMP-014`, `IMP-015`, §14.2.7).
+# The job holds no secret and writes nothing.
+name: check
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Change this line to take a new version of cargo-deny.
+  CARGO_DENY_VERSION: "0.20.2"
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The compiler is inside the trust boundary (Part 14 §14.5.1). Thus
+      # rustup itself installs the pinned version, and no third-party action.
+      - name: The pinned toolchain and the two cross targets
+        run: |
+          set -euo pipefail
+          channel="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
+          test -n "$channel"
+          rustup toolchain install "$channel" --profile minimal \
+            --component rustfmt --component clippy \
+            --target wasm32-unknown-unknown --target aarch64-linux-android
+          rustup default "$channel"
+          rustc --version
+          cargo --version
+
+      - name: cargo-deny at its pinned version
+        run: cargo install cargo-deny --version "$CARGO_DENY_VERSION" --locked
+
+      - name: The full check set
+        run: bash scripts/check.sh

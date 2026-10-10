@@ -306,6 +306,56 @@ impl AddSeq {
         })
     }
 }
+/// The version of a `GkeyRow` (`IMP-130`).
+const GKEY_ROW_VERSION: u8 = 0x01;
+
+/// What this device knows of the `GKEY` commands of one group, in a row of
+/// `GROUP_OWNERS` beside the admins of that group. A `GKEY` has no answer,
+/// thus the row holds what the device still sends.
+#[derive(Default)]
+struct GkeyRow {
+    /// For each replica, `write_pk` of the epoch whose `GKEY` arrived
+    /// there, or none (`GRP-361`, `GRP-363`).
+    taken: [Option<[u8; 32]>; GROUP_REPLICAS],
+    /// For each replica, each owner credential that the current one
+    /// replaced and whose `GKEY` did not arrive yet, the oldest first. The
+    /// replica holds the `own_pk` of one of them, or of the current one
+    /// (`GRP-401`, `WIR-522`).
+    replaced: [Vec<Secret<32>>; GROUP_REPLICAS],
+}
+
+impl GkeyRow {
+    fn encode(&self) -> Zeroizing<Vec<u8>> {
+        let mut out = Zeroizing::new(vec![GKEY_ROW_VERSION]);
+        for (taken, replaced) in self.taken.iter().zip(&self.replaced) {
+            out.push(u8::from(taken.is_some()));
+            out.extend_from_slice(&taken.unwrap_or_default());
+            out.push(u8::try_from(replaced.len()).unwrap_or(u8::MAX));
+            for before in replaced.iter().take(usize::from(u8::MAX)) {
+                out.extend_from_slice(before.expose());
+            }
+        }
+        out
+    }
+
+    fn parse(bytes: &[u8]) -> Option<Self> {
+        let mut r = umbra_wire::codec::Reader::new(bytes);
+        if r.u8().ok()? != GKEY_ROW_VERSION {
+            return None;
+        }
+        let mut held = GkeyRow::default();
+        for (taken, replaced) in held.taken.iter_mut().zip(&mut held.replaced) {
+            let is_taken = r.u8().ok()? == 1;
+            let write_pk: [u8; 32] = r.take(32).ok()?.try_into().ok()?;
+            *taken = is_taken.then_some(write_pk);
+            for _ in 0..r.u8().ok()? {
+                replaced.push(Secret::new(r.take(32).ok()?.try_into().ok()?));
+            }
+        }
+        Some(held)
+    }
+}
+
 const GROUP_NOTIFY_LEN_V1: usize = 32 + umbra_wire::address::LEN + 16;
 const GROUP_NOTIFY_LEN: usize = GROUP_NOTIFY_LEN_V1 + 8 + 1 + 32 + umbra_wire::address::LEN;
 /// A registration lives 7 days plus `CLOCK_SKEW` at a group-queue relay
@@ -581,9 +631,12 @@ pub(super) struct GroupQueues {
     /// The requests of other members that this device answers, with the
     /// instant after the backoff (`GRP-375`).
     pub key_answers: BTreeMap<(ConversationId, u16), u64>,
-    /// The requests of each group that this device took in, which drop
-    /// above the rate (`GRP-378`).
-    pub key_answers_rate: BTreeMap<ConversationId, KeyRequestRate>,
+    /// The requests that this device took in, which drop above the rate
+    /// (`GRP-378`). The table holds the epoch requests for each member of
+    /// each group, and under no member the snapshot requests of the group.
+    /// The rate of `GRP-295` is the rate of one member, thus one member
+    /// that asks above it spends the answers of no other member.
+    pub key_answers_rate: BTreeMap<(ConversationId, Option<u16>), KeyRequestRate>,
     /// The slot objects of rotations that wait for the chunk path, whose
     /// records follow the upload (`GRP-283`).
     pub epoch_uploads: VecDeque<EpochUpload>,
@@ -603,7 +656,131 @@ pub(super) struct GroupQueues {
     /// The groups for which this admin writes a snapshot for a member
     /// behind the roster, with the roster epoch of that member (`GRP-330`).
     pub snapshot_jobs: VecDeque<(ConversationId, u32)>,
+    /// The replica that the next `GSUB` of each group takes. The choice
+    /// moves to the store when the `GSUB` goes, and not before
+    /// (`GRP-204`).
+    pub picked: BTreeMap<ConversationId, usize>,
+    /// What this device knows of the subscription of each group in this
+    /// session (`GRP-396`). A lock ends each one.
+    pub watch: BTreeMap<ConversationId, Watch>,
+    /// The replicas whose `GNREG` goes again with the `GSUB` of this
+    /// session: a relay that started again holds no registration
+    /// (`NTF-093`).
+    pub notify_again: BTreeSet<(ConversationId, usize)>,
+    /// The time of the last send of each kept record to each replica in
+    /// this run, for the wait before the next one (`GRP-196`).
+    pub resent: BTreeMap<([u8; 16], usize), u64>,
+    /// The time of the last look at the kept records that wait.
+    pub resend_swept: u64,
+    /// The replicas that got a `GKEY` in this session. Each one holds
+    /// `write_pk` of the epoch that the `GKEY` carried, and the kept
+    /// records that left for it after that. The `GSEQ` of such a record
+    /// tells that the `GKEY` before it arrived (`GRP-361`).
+    pub gkey_sent: BTreeMap<(ConversationId, usize), GkeySent>,
+    /// The groups that this session sent to the other replica for a gap
+    /// (`GRP-205`).
+    pub repaired: BTreeSet<ConversationId>,
+    /// Whether the caller took the subscriptions of a pump and asked for no
+    /// other work of it yet. Each read that it names then is a `GSUB` that
+    /// goes.
+    pub offered: bool,
+    /// Whether a run of the group queues asked for the subscriptions of
+    /// this device since the unlock. Such a run holds a session for each
+    /// group that it reads, and silence then counts in a session alone
+    /// (`GRP-396`).
+    pub driven: bool,
 }
+
+/// The `GKEY` commands that one replica of a group got in this session.
+#[derive(Default)]
+pub(super) struct GkeySent {
+    /// `write_pk` of the epoch that they carried.
+    write_pk: [u8; 32],
+    /// The kept records that left for that replica after them.
+    after: BTreeSet<[u8; 16]>,
+}
+
+/// The subscription of one group in one session, as far as this device can
+/// tell: a `GSUB` has no answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Watch {
+    /// The replica of the `GSUB`.
+    which: usize,
+    /// The time of the `GSUB`, in seconds.
+    since: u64,
+    /// The time of the last record of that replica, or of the `GSUB`.
+    last_record: u64,
+    /// Whether that replica answered in this session, with a record or
+    /// with a `GSEQ`.
+    answered: bool,
+    /// Whether a record of the current slot came, thus the backlog ended.
+    live: bool,
+    /// Whether the backlog of the subscription arrived: a record of the
+    /// current slot came, or none came for `WATCH_QUIET`.
+    caught_up: bool,
+    /// The time of the last tick that named this group as read.
+    beat: u64,
+    /// The time up to which the store counts this group as watched.
+    stored: u64,
+    /// Whether this session asked the replica for an answer already.
+    probed: bool,
+}
+
+impl Watch {
+    /// The watch of a `GSUB` that goes to replica `which` at `now`.
+    const fn start(which: usize, now: u64) -> Self {
+        Watch {
+            which,
+            since: now,
+            last_record: now,
+            answered: false,
+            live: false,
+            caught_up: false,
+            beat: now,
+            stored: 0,
+            probed: false,
+        }
+    }
+
+    /// Whether the device did not run between the last tick and `now`: a
+    /// step of more than `CLOCK_SKEW`, or a clock that went back
+    /// (`SCP-019`). The subscription may have ended in that time.
+    const fn has_hole(&self, now: u64) -> bool {
+        now < self.beat || now - self.beat > umbra_core::directory::CLOCK_SKEW
+    }
+
+    /// Starts the watch again at `now` after such a hole: the backlog
+    /// counts as unread, and the replica must answer again.
+    const fn lapse(&mut self, now: u64) {
+        self.since = now;
+        self.last_record = now;
+        self.answered = false;
+        self.live = false;
+        self.caught_up = false;
+        self.probed = false;
+    }
+}
+
+/// The time with no record after which the backlog of a `GSUB` counts as
+/// read. It is above `CIRCUIT_BUILD_TIMEOUT` and above each wait before a
+/// second `GSUB` after a `LIMIT`.
+const WATCH_QUIET: u64 = 120;
+/// The least time between two writes of the watched time of a group. It is
+/// also the least gap in that time that moves the clock of each member.
+const WATCH_STEP: u64 = 600;
+/// The first wait before a kept record goes again to a replica that gave
+/// no `GSEQ`. Each send doubles it, up to `RESEND_MAX`.
+const RESEND_FIRST: u64 = 30;
+/// The longest wait before a kept record goes again: `SEND_MAX_ATTEMPTS`
+/// sends then span about four days of the seven of `SEND_GIVE_UP`.
+const RESEND_MAX: u64 = 12 * 3_600;
+/// The least time between two looks at the kept records that wait.
+const RESEND_SWEEP: u64 = 5;
+/// The rows of the join table that one contact holds at most (`GRP-170`).
+const JOIN_ROWS_MAX: usize = 32;
+/// The owner credentials of one replica that wait for their `GKEY` at
+/// most. A rotation above it drops the oldest one.
+const OWNER_HELD_MAX: usize = 4;
 
 /// The facts of a group before an arrival, which tell what it changed.
 pub(super) struct Before {
@@ -658,6 +835,18 @@ fn recovered_key(conversation: ConversationId, epoch: u32) -> Vec<u8> {
 
 fn sent_key(conversation: ConversationId) -> Vec<u8> {
     [conversation.0.as_slice(), b"sent"].concat()
+}
+
+/// The key of the clock of a re-key of this member that waits for another
+/// try, with the time of the first one. Zero means that none waits.
+fn rekey_key(conversation: ConversationId) -> Vec<u8> {
+    [conversation.0.as_slice(), b"rekeys"].concat()
+}
+
+/// The key of the clock of the time up to which an admin of this device
+/// watched a group (`GRP-396`).
+fn watch_key(conversation: ConversationId) -> Vec<u8> {
+    [conversation.0.as_slice(), b"watch"].concat()
 }
 
 fn queue_row(group_id: &[u8; 32], replica: u8, relay: &[u8; 32]) -> Vec<u8> {
@@ -835,20 +1024,28 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// device of the set was removed (Part 11 §11.12, `GRP-345`,
     /// `GRP-365`). The record goes out under the index that stands, and the
     /// member then takes its new index. A group that sends nothing takes no
-    /// re-key.
+    /// re-key. A group that fails stops no other group: each one holds keys
+    /// that the removed device held, and the answer gives the first fault.
     pub fn rekey_groups<R: CryptoRng + umbra_crypto::rand_core::TryCryptoRng + ?Sized>(
         &mut self,
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        let mut fault = None;
         for conversation in self.group_conversations()? {
-            self.rekey_group(conversation, now_ms, rng)?;
+            if let Err(error) = self.rekey_group(conversation, now_ms, rng) {
+                fault.get_or_insert(error);
+            }
         }
-        Ok(())
+        fault.map_or(Ok(()), Err)
     }
 
     /// Moves the member to new keys in one group. A closed group and a
-    /// group that no longer holds the member take no re-key.
+    /// group that no longer holds the member take no re-key. A rate of the
+    /// roster chain can hold a re-key back (`GRP-076`). A re-key can also
+    /// wait for the index of the group after a snapshot (`GRP-329`). Either
+    /// one gives `Busy`, and [`Client::expire_group_holds`] tries it again.
+    /// Until it goes, the device that left the set holds keys of the group.
     fn rekey_group<R: CryptoRng + umbra_crypto::rand_core::TryCryptoRng + ?Sized>(
         &mut self,
         conversation: ConversationId,
@@ -867,11 +1064,25 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Ok(());
         }
         let fresh = umbra_core::group::join::JoinKeys::make(rng).map_err(|_| Error::Malformed)?;
-        let object = group
-            .rekey_object(&fresh, rng)
-            .map_err(|_| Error::Malformed)?;
+        let object = match group.rekey_object(&fresh, rng) {
+            Ok(object) => object,
+            Err(_) if group.roster().index_is_open() => {
+                self.put_clock(conversation, rekey_key(conversation), now_ms / 1_000, rng)?;
+                return Err(Error::Busy);
+            }
+            Err(_) => return Err(Error::Malformed),
+        };
         drop(group);
-        self.post_group_control(conversation, &object, now_ms, rng)?;
+        match self.post_group_control(conversation, &object, now_ms, rng) {
+            Err(Error::Busy) => {
+                self.put_clock(conversation, rekey_key(conversation), now_ms / 1_000, rng)?;
+                return Err(Error::Busy);
+            }
+            other => other?,
+        }
+        if self.rekey_waits(conversation)? {
+            self.put_clock(conversation, rekey_key(conversation), 0, rng)?;
+        }
         let mut group = self.group_of(conversation)?;
         let group_id = *group.group_id();
         group
@@ -880,6 +1091,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         self.store_rekeyed(conversation, &group, &fresh.seed, rng)?;
         // DEV-300: each other device of the set moves with this one.
         self.publish_group_rekey(&group_id, &fresh.seed, &object, rng)
+    }
+
+    /// Whether a re-key of this member in a group waits for another try.
+    fn rekey_waits(&self, conversation: ConversationId) -> Result<bool, Error> {
+        Ok(self
+            .clock(&rekey_key(conversation))?
+            .is_some_and(|at| at != 0))
     }
 
     /// Posts again a roster object of this device that an epoch of another
@@ -912,7 +1130,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         match control.control_type {
             ControlType::Rekey => {
                 drop(group);
-                self.rekey_group(conversation, now_ms, rng)
+                match self.rekey_group(conversation, now_ms, rng) {
+                    // The sweep tries a re-key that waits again.
+                    Err(Error::Busy) => Ok(()),
+                    other => other,
+                }
             }
             ControlType::PlainEpoch => match PlainEpoch::parse(control.payload)?.op {
                 PlainOp::Remove { index } => {
@@ -1120,16 +1342,62 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             CLOSED
         };
         let row = Self::group_row(&group, state)?;
+        // GRP-363: each replica refused the pair of the epoch that this
+        // device holds, although this device knew of a `GKEY` of it there.
+        // A `GKEY` of an older epoch can have moved a replica back, and a
+        // replica in that state refuses as one with no queue does. The
+        // mark of that `GKEY` goes, thus it goes again after the next
+        // backlog, and a replica that still holds the queue takes it.
+        if state == CLOSED && group.owner(0).is_some() {
+            let mut held = self.gkey_row(conversation)?;
+            if held.taken.iter().any(Option::is_some) {
+                held.taken = [None; GROUP_REPLICAS];
+                self.put_gkey_row(conversation, &held, rng)?;
+            }
+        }
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         batch.put(GROUP, conversation.0, None, &row, rng)?;
         batch.commit()?;
         // Each record that waited for a queue that is gone leaves the
         // work list. The store keeps the message, and the user sees that
-        // it did not go.
+        // it did not go: a message that no replica took fails.
+        let mut waited = Vec::new();
+        for post in &self.groups.posts {
+            if post.conversation != conversation {
+                continue;
+            }
+            let Some(message) = post.message else {
+                continue;
+            };
+            if self.open_ref()?.store.get(OUTBOX, &message.0)?.is_some() {
+                waited.push(message);
+            }
+        }
         self.groups
             .posts
             .retain(|post| post.conversation != conversation);
+        for message in waited {
+            self.fail(&message, crate::FailureCause::Refused, rng)?;
+        }
+        Ok(())
+    }
+
+    /// Shows a group as open again. The epoch that a lapsed member lacked
+    /// arrived (`GRP-405`), or a replica of a group that this device showed
+    /// as closed answered (`GRP-210`).
+    fn reopen_group<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let row = Self::group_row(&self.group_of(conversation)?, OPEN)?;
+        let open = self.open_mut()?;
+        let mut batch = open.store.begin();
+        batch.put(GROUP, conversation.0, None, &row, rng)?;
+        batch.commit()?;
+        self.groups.key_requests.remove(&conversation);
+        self.events.push_back(Event::Conversations);
         Ok(())
     }
 
@@ -1256,6 +1524,21 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .reference(*index)
                 .is_some_and(|held| held.relay_id == *relay)
         }) else {
+            return Ok(());
+        };
+        if reached {
+            // GRP-396: the replica of this session answered.
+            if let Some(watch) = self.groups.watch.get_mut(&conversation) {
+                watch.answered |= watch.which == which;
+            }
+            // GRP-210: a replica that answers under the credentials of this
+            // device holds the group queue. Thus the group is not gone, and
+            // a group that this device showed as closed opens again.
+            if self.group_state(conversation)? == CLOSED {
+                self.reopen_group(conversation, rng)?;
+            }
+        }
+        let Some(replicas) = group.replicas_mut() else {
             return Ok(());
         };
         if replicas.is_reachable(which) == reached {
@@ -1476,9 +1759,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.owns_channels()? {
             return Err(Error::NotFound);
         }
-        // GRP-153: an offer to a group that this device holds is refused.
+        // GRP-153: this device refuses an offer to a group that it is a
+        // member of. A membership that ended takes a new invitation (Part
+        // 11 §11.12, `GRP-297`, `GRP-374`).
         let conversation = self.conversation_of_group(&offer.group_id)?;
-        if self.is_group(conversation)? {
+        if self.holds_membership(conversation)? {
             return Err(Error::Malformed);
         }
         let row = self.join_row(offer.from, &offer.group_id)?;
@@ -1491,10 +1776,33 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         else {
             return Err(Error::Malformed);
         };
+        // The row of a membership that ended still opens under its own
+        // seed. Thus the seed of the new join waits beside it, under the
+        // key of `GRP-370`, until the admit takes the place of the row.
+        let seed_key = if self.is_group(conversation)? {
+            lost_seed_key(&offer.group_id)
+        } else {
+            offer.group_id.to_vec()
+        };
         // GRP-052: the seed comes from the device CSPRNG, and it stays in
-        // the local identity table until the admit arrives.
-        let mut seed = Secret::<32>::zeroed();
-        rng.fill_bytes(seed.expose_mut());
+        // the local identity table until the admit arrives. A join of this
+        // group that waits already keeps its seed, thus the admit of each
+        // contact that this device asked finds the same keys.
+        let waiting = {
+            let store = &self.open_ref()?.store;
+            let seed_row = store.row_id(TableId::LOCAL_IDENTITY, &seed_key);
+            store
+                .get(TableId::LOCAL_IDENTITY, &seed_row)?
+                .map(Zeroizing::new)
+        };
+        let seed = match waiting {
+            Some(bytes) => Secret::new(bytes.as_slice().try_into().map_err(|_| Error::Integrity)?),
+            None => {
+                let mut seed = Secret::<32>::zeroed();
+                rng.fill_bytes(seed.expose_mut());
+                seed
+            }
+        };
         let keys = MemberKeys::from_seed(&seed);
         let kem_pk = keys.kem().public().to_bytes();
         let record = JoinRecord {
@@ -1518,7 +1826,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         self.send_pairwise_control(offer.from, &body, now_ms, rng)?;
 
         let open = self.open_mut()?;
-        let seed_row = open.store.row_id(TableId::LOCAL_IDENTITY, &offer.group_id);
+        let seed_row = open.store.row_id(TableId::LOCAL_IDENTITY, &seed_key);
         let mut entry = vec![WAITING];
         entry.extend_from_slice(&offer.from.0);
         entry.extend_from_slice(&offer.group_id);
@@ -1529,6 +1837,92 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.put(GROUP_JOIN, row, Some(offer.from.0), &entry, rng)?;
         batch.commit()?;
         Ok(())
+    }
+
+    /// Whether this device is a member of a group that it holds, thus an
+    /// invitation to that group is none (`GRP-153`). A membership that
+    /// ended holds nothing. The member left or an admin removed it, a rival
+    /// took its index (`GRP-374`), it lapsed (`GRP-297`), or each replica
+    /// refused the group here (`GRP-210`). A new invitation then takes the
+    /// place of the row, in the conversation that it held (Part 11 §11.12).
+    pub(super) fn holds_membership(&self, conversation: ConversationId) -> Result<bool, Error> {
+        if !self.is_group(conversation)? || self.group_state(conversation)? != OPEN {
+            return Ok(false);
+        }
+        Ok(self.group_of(conversation)?.own_role().is_some())
+    }
+
+    /// Each row that belongs to one membership of a group and to no later
+    /// one. The rows are the owner credentials and their admins, the
+    /// grants, and the roster object with each record that waited. The
+    /// clocks of the members and the epoch keys that waited are such rows
+    /// too. The messages, the notes, the contacts behind the members, and
+    /// the read time of `GRP-208` stay with the conversation.
+    pub(super) fn membership_rows(
+        &self,
+        conversation: ConversationId,
+    ) -> Result<Vec<(TableId, RowId)>, Error> {
+        let store = &self.open_ref()?.store;
+        let read = store.row_id(
+            GROUP_PRESENCE,
+            &[conversation.0.as_slice(), b"read"].concat(),
+        );
+        let mut rows = vec![
+            (OWN_EPOCH, store.row_id(OWN_EPOCH, &conversation.0)),
+            (
+                GROUP_OWNERS,
+                store.row_id(GROUP_OWNERS, &Self::gkey_key(conversation)),
+            ),
+        ];
+        for table in [
+            GROUP_OWNERS,
+            GROUP_GRANTS,
+            GROUP_UNSENT,
+            GROUP_PRESENCE,
+            super::group_sync::EPOCH_HELD,
+        ] {
+            for (row, plain) in store.list(table, Some(&conversation.0))? {
+                drop(Zeroizing::new(plain));
+                if (table, row) != (GROUP_PRESENCE, read) {
+                    rows.push((table, row));
+                }
+            }
+        }
+        Ok(rows)
+    }
+
+    /// Drops the work of one membership of a group that waits in the
+    /// memory of this run.
+    pub(super) fn forget_group_work(&mut self, conversation: ConversationId) {
+        let groups = &mut self.groups;
+        groups
+            .posts
+            .retain(|post| post.conversation != conversation);
+        groups.backoff.remove(&conversation);
+        groups
+            .evictions
+            .retain(|(held, _), _| *held != conversation);
+        groups.owner_backoff.remove(&conversation);
+        groups.key_requests.remove(&conversation);
+        groups
+            .key_answers
+            .retain(|(held, _), _| *held != conversation);
+        groups
+            .key_answers_rate
+            .retain(|(held, _), _| *held != conversation);
+        groups
+            .epoch_uploads
+            .retain(|upload| upload.conversation != conversation);
+        groups
+            .epoch_chunks
+            .retain(|(held, _)| *held != conversation);
+        groups.clock_suspect.remove(&conversation);
+        groups.picked.remove(&conversation);
+        groups.watch.remove(&conversation);
+        groups
+            .gkey_sent
+            .retain(|(held, _), _| *held != conversation);
+        groups.repaired.remove(&conversation);
     }
 
     /// An admit of stage `0x02`. The joiner keeps it until it fetched the
@@ -1609,11 +2003,26 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 else {
                     return self.on_admit(from, &invitation, control.payload, rng);
                 };
-                // GRP-153: an offer to a group that this device holds is
-                // no offer.
+                // GRP-153: an offer to a group that this device is a member
+                // of is no offer. A membership that ended takes one (Part 11
+                // §11.12).
                 let conversation = self.conversation_of_group(&invitation.group_id)?;
-                if self.is_group(conversation)? {
+                if self.holds_membership(conversation)? {
                     return Ok(());
+                }
+                let row = self.join_row(from, &invitation.group_id)?;
+                // GRP-170: a join that runs keeps its row, thus a second
+                // offer ends no wait for an admit. One contact holds no
+                // more than `JOIN_ROWS_MAX` rows here.
+                match self.join_entry(&row)? {
+                    Some(JoinEntry::Waiting { .. } | JoinEntry::Admitted { .. }) => return Ok(()),
+                    Some(_) => {}
+                    None => {
+                        let store = &self.open_ref()?.store;
+                        if store.list(GROUP_JOIN, Some(&from.0))?.len() >= JOIN_ROWS_MAX {
+                            return Ok(());
+                        }
+                    }
                 }
                 let name: String = name.chars().take(GROUP_NAME_MAX).collect();
                 let mut entry = vec![OFFERED];
@@ -1621,14 +2030,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 entry.extend_from_slice(&invitation.group_id);
                 entry.extend_from_slice(creator_roster_pk);
                 entry.extend_from_slice(name.as_bytes());
-                let row = self.join_row(from, &invitation.group_id)?;
                 let open = self.open_mut()?;
                 // The admin that offers is the contact that sent the offer,
                 // thus the group can name it once this device holds the
-                // roster.
+                // roster. The key of that admin stays with its own offer:
+                // an offer of another contact names another admin.
                 let admin_row = open
                     .store
-                    .row_id(GROUP_MEMBER, &Self::admin_key(conversation));
+                    .row_id(GROUP_MEMBER, &Self::offer_key(conversation, from));
                 let mut batch = open.store.begin();
                 batch.put(GROUP_JOIN, row, Some(from.0), &entry, rng)?;
                 batch.put(
@@ -1646,17 +2055,43 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 let Ok(record) = JoinRecord::parse(control.payload) else {
                     return Ok(());
                 };
-                // A join record for a group that this device does not hold
-                // names no group of any admin here.
+                // A join record for a group that this device does not hold,
+                // or holds below `admin`, names no group of any admin here
+                // (`GRP-382`).
                 let conversation = self.conversation_of_group(&record.group_id)?;
-                if !self.is_group(conversation)? {
+                if !self.holds_membership(conversation)? {
                     return Ok(());
                 }
+                let group = self.group_of(conversation)?;
+                if group.own_role().is_none_or(|role| role < Role::Admin) {
+                    return Ok(());
+                }
+                let row = self.join_row(from, &record.group_id)?;
+                // GRP-306: an add that runs keeps its row, and the same
+                // keys again add no second member. A contact that comes
+                // back under new keys asks again.
+                match self.join_entry(&row)? {
+                    Some(JoinEntry::Added { .. }) => return Ok(()),
+                    Some(JoinEntry::Sent { index, .. })
+                        if group.roster().member(index).is_some_and(|member| {
+                            member.active && member.pair_pk == record.keys.pair_pk
+                        }) =>
+                    {
+                        return Ok(());
+                    }
+                    Some(_) => {}
+                    None => {
+                        let store = &self.open_ref()?.store;
+                        if store.list(GROUP_JOIN, Some(&from.0))?.len() >= JOIN_ROWS_MAX {
+                            return Ok(());
+                        }
+                    }
+                }
+                drop(group);
                 let mut entry = vec![ASKED];
                 entry.extend_from_slice(&from.0);
                 entry.extend_from_slice(&record.group_id);
                 entry.extend_from_slice(control.payload);
-                let row = self.join_row(from, &record.group_id)?;
                 let open = self.open_mut()?;
                 let mut batch = open.store.begin();
                 batch.put(GROUP_JOIN, row, Some(from.0), &entry, rng)?;
@@ -1670,11 +2105,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     }
 
     /// A `RekeyRecord` on a pairwise channel from a member whose re-key a
-    /// rival replaced (`GRP-370`). An admin verifies it under the roster key
-    /// of the index that it names (`GRP-348`, `GRP-349`), and removes the
-    /// index that the rival holds now, with a rotation (`GRP-371`). The
-    /// member then waits as a joiner with its new keys, and the admin admits
-    /// it as each joiner (§11.9.1).
+    /// rival replaced (`GRP-370`). An admin verifies it under the roster
+    /// key of the index that it names (`GRP-348`). The admin discards one
+    /// whose index no rival re-key moved (`GRP-349`). The roster shows two
+    /// re-keys of one index as a fork under that index (`GRP-072`). With no
+    /// such fork the index that follows it holds the keys of the member
+    /// itself. The admin first takes a role at `moderator` or above from
+    /// the index that the rival holds now, which no plain epoch removes
+    /// (`GRP-166`). The admin then removes that index with a rotation
+    /// (`GRP-371`). The member waits as a joiner with its new keys, and the
+    /// admin admits it as each joiner (§11.9.1).
     fn on_pairwise_rekey<R: CryptoRng + ?Sized>(
         &mut self,
         from: ConversationId,
@@ -1706,20 +2146,29 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if old.active || record.verify(&old.roster_pk_hash).is_err() {
             return Ok(());
         }
-        let Some(rival) = group.roster().successor_of(record.old_index) else {
+        // GRP-349: a record whose index no rival re-key moved is no record.
+        let has_rival = group
+            .roster()
+            .forks()
+            .iter()
+            .any(|fork| fork.named == Some(record.old_index));
+        let Some(rival) = group
+            .roster()
+            .successor_of(record.old_index)
+            .filter(|_| has_rival)
+        else {
             return Ok(());
         };
-        drop(group);
-        // GRP-351: the removed index is not used again, and GRP-264 rotates
-        // with the removal.
-        if self
-            .group_of(conversation)?
-            .roster()
-            .member(rival)
-            .is_some_and(|member| member.active)
-        {
-            self.remove_from_group(conversation, rival, now_ms, rng)?;
+        let Some(held) = group.roster().member(rival) else {
+            return Ok(());
+        };
+        // The keys of the record are the keys that lost. The member that
+        // holds the index asks for nothing.
+        if held.pair_pk == record.new_keys.pair_pk {
+            return Ok(());
         }
+        let (is_active, role) = (held.active, held.role);
+        drop(group);
         let join = JoinRecord {
             group_id,
             keys: record.new_keys.clone(),
@@ -1737,7 +2186,40 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.put(GROUP_JOIN, row, Some(from.0), &entry, rng)?;
         batch.commit()?;
         self.events.push_back(Event::GroupJoiner { from });
-        Ok(())
+        if !is_active {
+            return Ok(());
+        }
+        // GRP-351: no party uses the removed index again, and GRP-264
+        // rotates with the removal. The joiner waits already, thus a
+        // removal that the roster refuses loses no request. The floor of
+        // `GRP-051` holds an owner, and the group then needs another owner
+        // first (`GRP-184`).
+        let removed = if role >= Role::Moderator {
+            self.set_group_role(conversation, rival, Role::Member, now_ms, rng)
+                .and_then(|()| self.remove_from_group(conversation, rival, now_ms, rng))
+        } else {
+            self.remove_from_group(conversation, rival, now_ms, rng)
+        };
+        match removed {
+            Ok(()) | Err(Error::Malformed | Error::NotFound | Error::Busy) => Ok(()),
+            Err(fault) => Err(fault),
+        }
+    }
+
+    /// Whether the roster of a group takes a roster object of this member
+    /// now. The object goes out before it applies here (`GRP-389`), thus
+    /// one that the roster refuses must not go. Each member would discard
+    /// it, and the act would end with a record that changes nothing.
+    fn roster_takes(
+        &self,
+        conversation: ConversationId,
+        object: &[u8],
+        now_ms: u64,
+    ) -> Result<bool, Error> {
+        let mut scratch = self.group_of(conversation)?;
+        let control = GroupControl::parse(object)?;
+        let own = scratch.own_index();
+        Ok(scratch.apply_control(&control, own, now_ms / 1_000).is_ok())
     }
 
     /// Asks an admin to add this member again, after a rival re-key took
@@ -1899,7 +2381,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             _ => return Err(Error::NotFound),
         };
         let parsed = JoinRecord::parse(&record)?;
-        let add = group.add_object(&parsed).map_err(|_| Error::Malformed)?;
+        // GRP-329: a roster from a snapshot builds no add before an object
+        // of another member gave it the index of the group.
+        let add = group.add_object(&parsed).map_err(|_| {
+            if group.roster().index_is_open() {
+                Error::Busy
+            } else {
+                Error::Malformed
+            }
+        })?;
         // GRP-310, GRP-389: the add goes to each replica first, thus its
         // record names the roster epoch that every member holds.
         let queued = self.groups.posts.len();
@@ -2232,10 +2722,28 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         else {
             return Err(Error::NotFound);
         };
+        // GRP-421: a second admit takes the place of the group only while
+        // the add of this member is the head of its roster. Else an admit
+        // to a group that this device is a member of is no admit
+        // (`GRP-153`). Its row leaves, thus no fetch asks for its snapshot
+        // again.
+        let conversation = self.conversation_of_group(group_id)?;
+        if self.holds_membership(conversation)? {
+            let held = self.group_of(conversation)?;
+            let is_head = held.roster().epoch_index() == held.roster().admission_epoch();
+            if !again || !is_head {
+                let open = self.open_mut()?;
+                let mut batch = open.store.begin();
+                batch.delete(GROUP_JOIN, row);
+                batch.commit()?;
+                return Err(Error::Malformed);
+            }
+        }
         let seed = {
             let store = &self.open_ref()?.store;
             // GRP-370: a member that comes back after a rival re-key joins
-            // under the seed that it sent to the admin.
+            // under the seed that it sent to the admin. So does a member
+            // that takes a new invitation after its membership ended.
             let lost_row = store.row_id(TableId::LOCAL_IDENTITY, &lost_seed_key(group_id));
             let seed_row = store.row_id(TableId::LOCAL_IDENTITY, group_id);
             let seed = Zeroizing::new(match store.get(TableId::LOCAL_IDENTITY, &lost_row)? {
@@ -2255,7 +2763,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .map_err(Error::from)
             .and_then(|snapshot| {
                 let add_hash = Self::add_hash_of(&invitation, &snapshot)?;
+                // The entry at the index of the admit holds the keys of
+                // this device, or the admission fails here.
                 accept_admit(&invitation, &snapshot, &add_hash, &creator_roster_pk, now)
+                    .and_then(|admitted| admitted.for_seed(&seed))
                     .map(|admitted| (admitted, snapshot))
                     .map_err(|_| Error::Integrity)
             });
@@ -2273,10 +2784,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // GRP-290: the contact that brought this device in is a member it
         // can ask on a pairwise channel when the group queue refuses it.
         self.note_contact_in(conversation, b"via", from, rng)?;
-        // That admin shows under the name of the contact.
-        if let Some(index) = self.offering_admin(conversation)? {
+        // That admin shows under the name of the contact. It is the member
+        // whose roster key the offer of this same contact named, when the
+        // snapshot gives it `admin` or above. An offer of another contact
+        // names nobody here (`GRP-244`).
+        if let Some(index) = self.offering_admin(conversation, from)? {
             self.note_contact_in(conversation, &index.to_be_bytes(), from, rng)?;
         }
+        self.end_other_joins(conversation, group_id, row)?;
         // GRP-068: this member may build a snapshot later, thus it keeps
         // the path that admitted it.
         for grant in umbra_core::group::roster::split_path(snapshot.path)? {
@@ -2590,14 +3105,24 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         let group = Group::joined(admitted, seed).map_err(|_| Error::Malformed)?;
         let group_id = *group.group_id();
-        // GRP-153: a second admit to a group that this device holds is no
-        // group. A member whose index a rival took comes back under the
-        // admit, and the new group takes the place of the one it held. So
+        // GRP-153: a second admit to a group that this device is a member
+        // of is no group. A member whose membership ended comes back under
+        // the admit (`GRP-414`, Part 11 §11.12). The new group takes the
+        // place of the one it held, in the conversation that it held. So
         // does the second admit of `GRP-421`.
         let conversation = self.conversation_of_group(&group_id)?;
-        if !replaces && self.is_group(conversation)? && !self.group_of(conversation)?.lost_rekey() {
+        if !replaces && self.holds_membership(conversation)? {
             return Err(Error::Malformed);
         }
+        // The rows of the membership before leave with it. A record that it
+        // sealed, and the owner credentials and the clocks that it held,
+        // belong to an index that the roster holds no more.
+        let stale = if self.is_group(conversation)? {
+            self.forget_group_work(conversation);
+            self.membership_rows(conversation)?
+        } else {
+            Vec::new()
+        };
         let row = Self::group_row(&group, OPEN)?;
         let open = self.open_mut()?;
         let seed_row = open.store.row_id(TableId::LOCAL_IDENTITY, &group_id);
@@ -2608,12 +3133,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .store
             .row_id(TableId::LOCAL_IDENTITY, &previous_seed_key(&group_id));
         let mut batch = open.store.begin();
+        for (table, stale) in stale {
+            batch.delete(table, stale);
+        }
         batch.put(GROUP, conversation.0, None, &row, rng)?;
         batch.put(TableId::LOCAL_IDENTITY, seed_row, None, seed.expose(), rng)?;
         batch.delete(TableId::LOCAL_IDENTITY, lost_row);
         batch.delete(TableId::LOCAL_IDENTITY, previous_row);
         batch.commit()?;
-        self.put_conversation_meta(conversation, 0, name, rng)?;
+        // The conversation keeps its read mark over a new membership.
+        let (read_up_to, _) = self.conversation_meta(conversation)?;
+        self.put_conversation_meta(conversation, read_up_to, name, rng)?;
         Ok(conversation)
     }
 
@@ -2694,19 +3224,32 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
             return Ok(());
         }
-        // GRP-210: a group whose two queues are gone takes no record.
+        // GRP-210: a group whose two queues are gone takes no record, and
+        // the view shows that the message did not go (`IMP-076`). The user
+        // sends it again when the group opens.
         if self.group_closed(conversation)? {
+            if let Some(message) = message {
+                self.fail(&message, crate::FailureCause::Refused, rng)?;
+            }
             return Ok(());
         }
         let mut group = self.group_of(conversation)?;
         // GRP-422: a key that reaches a removed party carries no record but
         // a roster object, thus this device rotates first. A rotation that
         // this device may not make leaves the post under the current key.
+        // A rotation that fails sends nothing under that key: the message
+        // shows that it did not go, as in a closed group.
         if group.withholds()
             && AppMessage::parse(app, umbra_wire::app::Channel::Group)?.kind
                 != AppKind::GroupControl
         {
-            self.rotate_group(conversation, now_ms, rng)?;
+            if let Err(fault) = self.rotate_group(conversation, now_ms, rng) {
+                let Some(message) = message else {
+                    return Err(fault);
+                };
+                self.fail(&message, crate::FailureCause::Refused, rng)?;
+                return Ok(());
+            }
             group = self.group_of(conversation)?;
         }
         let Some(replicas) = group.replicas() else {
@@ -2728,6 +3271,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     .group_queue_id,
             },
         ];
+        // GRP-076: each member discards a roster object above a rate of
+        // the roster chain, thus this device posts none and the act fails.
+        if group.rate_bars(app, now_ms / 1_000) {
+            return Err(Error::Busy);
+        }
         // GRP-246: the counter of this device moves with the record, thus
         // the group goes back to the store before the record leaves.
         let record = match roster_epoch {
@@ -2876,8 +3424,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let is_rekey = GroupControl::parse(parsed.body).is_ok_and(|control| {
                 control.control_type == umbra_wire::group::control::ControlType::Rekey
             });
+            // GRP-076: the rates count on the slot of the record that the
+            // owner of the channels built. They count at the time that its
+            // `AppMessage` names, and not at the time of this arrival.
             if !is_rekey {
-                self.apply_own_roster_object(conversation, parsed.body, now_ms, rng)?;
+                self.apply_roster_object_of(
+                    conversation,
+                    parsed.body,
+                    parsed.sent_at,
+                    now_ms,
+                    rng,
+                )?;
             }
             return Ok(());
         }
@@ -2967,6 +3524,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .group_of(conversation)?
             .remove_object(index)
             .map_err(|_| Error::Malformed)?;
+        if !self.roster_takes(conversation, &object, now_ms)? {
+            return Err(Error::Malformed);
+        }
         self.post_group_control(conversation, &object, now_ms, rng)?;
         self.apply_own_roster_object(conversation, &object, now_ms, rng)?;
         self.rotate_group(conversation, now_ms, rng)
@@ -3011,6 +3571,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let object = group
             .grant(index, role, rng)
             .map_err(|_| Error::Malformed)?;
+        drop(group);
+        // GRP-304, GRP-051: a grant above `ROLE_HOLDER_MAX` or below the
+        // owner floor applies at no member.
+        if !self.roster_takes(conversation, &object, now_ms)? {
+            return Err(Error::Malformed);
+        }
         self.post_group_control(conversation, &object, now_ms, rng)?;
         self.apply_own_roster_object(conversation, &object, now_ms, rng)?;
         if held < Role::Admin && role >= Role::Admin {
@@ -3076,29 +3642,24 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Ok(());
         }
         let mut group = self.group_of(conversation)?;
-        let Some(replicas) = Self::group_replicas_of(&group)? else {
+        if Self::group_replicas_of(&group)?.is_none() {
             return Ok(());
-        };
-        let old = group.replace_owners(rng).map_err(|_| Error::Malformed)?;
-        self.save_group(conversation, &group, rng)?;
-        let credentials = group.credentials().ok_or(Error::Integrity)?;
-        for (which, replica) in replicas.iter().enumerate() {
-            let (Some(own), Some(next)) = (old.get(which), group.owner(which)) else {
-                continue;
-            };
-            let next_own_pk = *umbra_crypto::x25519::PublicKey::from(
-                &umbra_crypto::x25519::StaticSecret::from(*next.expose()),
-            )
-            .as_bytes();
-            self.groups.rekeys.push_back(GroupRekey {
-                relay: replica.relay,
-                group_queue_id: replica.group_queue_id,
-                own: Secret::new(*own.expose()),
-                next_own_pk: Some(next_own_pk),
-                read_pk: credentials.read_public(),
-                write_pk: credentials.write_public(),
-            });
         }
+        let old = group.replace_owners(rng).map_err(|_| Error::Malformed)?;
+        // GRP-401: the credentials that the new ones replace authorize the
+        // `GKEY` that carries the new `own_pk`, and no other party holds
+        // them for this device. They go to the store before the group row
+        // loses them. They stay until that `GKEY` arrived at each replica,
+        // thus a run that ends first sends it again.
+        let mut held = self.gkey_row(conversation)?;
+        for (replaced, before) in held.replaced.iter_mut().zip(&old) {
+            replaced.push(Secret::new(*before.expose()));
+            let excess = replaced.len().saturating_sub(OWNER_HELD_MAX);
+            replaced.drain(..excess);
+        }
+        self.put_gkey_row(conversation, &held, rng)?;
+        self.save_group(conversation, &group, rng)?;
+        self.queue_gkeys(conversation, &group, true)?;
         let admins: Vec<u16> = group
             .roster()
             .active()
@@ -3304,10 +3865,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.owns_channels()? {
             return Err(Error::NotFound);
         }
+        // GRP-067: the last owner of a group that holds another member
+        // gives `owner` to one of them first. This call refuses its
+        // self-removal as it refuses each act that the roles forbid.
         let object = self
             .group_of(conversation)?
             .leave_object()
             .map_err(|_| Error::Malformed)?;
+        if !self.roster_takes(conversation, &object, now_ms)? {
+            return Err(Error::Malformed);
+        }
         self.post_group_control(conversation, &object, now_ms, rng)?;
         self.apply_own_roster_object(conversation, &object, now_ms, rng)?;
         Ok(())
@@ -3322,10 +3889,25 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<Applied, Error> {
+        self.apply_roster_object_of(conversation, object, now_ms, now_ms, rng)
+    }
+
+    /// Applies a roster object of this member whose record a device of the
+    /// set built at `built_ms`. The rates of `GRP-076` count on the slot of
+    /// that record, which each other member reads from its header.
+    fn apply_roster_object_of<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        object: &[u8],
+        built_ms: u64,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<Applied, Error> {
         let mut group = self.group_of(conversation)?;
         let control = GroupControl::parse(object)?;
         let forks = group.roster().forks().len();
-        let applied = group.apply_control(&control, group.own_index(), now_ms / 1_000);
+        let slot = group.slot_of_record(built_ms / 1_000);
+        let applied = group.apply_control_at(&control, group.own_index(), slot, now_ms / 1_000);
         self.note_forks(conversation, &group, forks, now_ms, rng)?;
         let applied = applied.map_err(|_| Error::Malformed)?;
         self.save_group(conversation, &group, rng)?;
@@ -3344,6 +3926,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// Starts the next epoch of a group and queues its epoch-key record
     /// for each replica (§11.4.1). A group with no queue yet, a closed
     /// group, and a group this device may no longer rotate give no record.
+    /// A rotation that fails for another cause leaves a trigger with no
+    /// answer, and the caller hears of it.
     pub fn rotate_group<R: CryptoRng + ?Sized>(
         &mut self,
         conversation: ConversationId,
@@ -3366,8 +3950,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // The relay may not hold the pair of the epoch that ends either,
         // when no admin sent its `GKEY` yet.
         let fallback = group.previous_credentials().map(|held| held.write_secret());
-        let Ok(rotation) = group.rotate(now_ms / 1_000, rng) else {
-            return Ok(());
+        let rotation = match group.rotate(now_ms / 1_000, rng) {
+            Ok(rotation) => rotation,
+            // GRP-356: an index that left the active set rotates nothing.
+            // GRP-422: a rotation waits for the KEM key of each member.
+            Err(_) if group.own_role().is_none() || group.lacks_member_key() => return Ok(()),
+            Err(_) => return Err(Error::Malformed),
         };
         self.save_group(conversation, &group, rng)?;
         match rotation.carrier {
@@ -3401,6 +3989,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// The next slot object that waits for the chunk path.
     pub fn take_epoch_upload(&mut self) -> Option<EpochUpload> {
+        self.groups.offered = false;
         self.groups.epoch_uploads.pop_front()
     }
 
@@ -3456,6 +4045,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// The next chunk of a chunked epoch-key record to fetch.
     pub fn take_epoch_chunk(&mut self) -> Option<(ConversationId, WantedChunk)> {
+        self.groups.offered = false;
         self.groups.epoch_chunks.pop_front()
     }
 
@@ -3508,6 +4098,28 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }))
     }
 
+    /// Whether this device holds the owner credential of the replica at
+    /// `relay` and knows of no `GKEY` of the current epoch that arrived
+    /// there (`GRP-361`, `GRP-363`). Until that `GKEY` arrives the replica
+    /// refuses the pair of the epoch, and that refusal closes no group
+    /// (`GRP-210`).
+    pub fn group_owes_rekey(
+        &self,
+        conversation: ConversationId,
+        relay: &[u8; 32],
+    ) -> Result<bool, Error> {
+        let Some(job) = self.group_rekey_for(conversation, relay)? else {
+            return Ok(false);
+        };
+        let group = self.group_of(conversation)?;
+        let which = Self::group_replicas_of(&group)?
+            .and_then(|replicas| replicas.iter().position(|held| held.relay == *relay));
+        let taken = which
+            .and_then(|which| self.gkey_row(conversation).ok()?.taken.get(which).copied())
+            .flatten();
+        Ok(taken != Some(job.write_pk))
+    }
+
     /// The upload of the snapshot of a join failed. The view reads the
     /// joiner list again and offers the press that sends it again.
     pub fn snapshot_failed(&mut self, from: ConversationId) {
@@ -3542,15 +4154,23 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         key
     }
 
-    fn admin_key(conversation: ConversationId) -> Vec<u8> {
-        [conversation.0.as_slice(), b"offer-admin"].concat()
+    /// The key of the row that holds the hash of the roster key that the
+    /// offer of one contact named as its admin.
+    fn offer_key(conversation: ConversationId, from: ConversationId) -> Vec<u8> {
+        [conversation.0.as_slice(), b"offer-admin", from.0.as_slice()].concat()
     }
 
-    /// The index of the admin whose offer brought this device into a
-    /// group, by the hash of its roster key.
-    fn offering_admin(&self, conversation: ConversationId) -> Result<Option<u16>, Error> {
+    /// The index of the admin whose offer brought this device into a group.
+    /// The hash of the roster key that the offer of `from` carried names
+    /// it. A member below `admin` offers no group, thus such an entry names
+    /// nobody.
+    fn offering_admin(
+        &self,
+        conversation: ConversationId,
+        from: ConversationId,
+    ) -> Result<Option<u16>, Error> {
         let store = &self.open_ref()?.store;
-        let row = store.row_id(GROUP_MEMBER, &Self::admin_key(conversation));
+        let row = store.row_id(GROUP_MEMBER, &Self::offer_key(conversation, from));
         let Some(hash) = store.get(GROUP_MEMBER, &row)? else {
             return Ok(None);
         };
@@ -3558,9 +4178,66 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let index = group
             .roster()
             .active()
-            .find(|member| member.roster_pk_hash.as_slice() == hash.as_slice())
+            .find(|member| {
+                member.role >= Role::Admin
+                    && member.index != group.own_index()
+                    && member.roster_pk_hash.as_slice() == hash.as_slice()
+            })
             .map(|member| member.index);
         Ok(index)
+    }
+
+    /// Ends what the join of a group leaves behind once this device is a
+    /// member. That is the key of the admin of each offer, and each offer
+    /// and each wait of another contact for that group. `GRP-153` would
+    /// refuse such an offer and such a wait.
+    fn end_other_joins(
+        &mut self,
+        conversation: ConversationId,
+        group_id: &[u8; 32],
+        joined: RowId,
+    ) -> Result<(), Error> {
+        let mut gone = Vec::new();
+        for row in self.join_rows()? {
+            if row == joined {
+                continue;
+            }
+            let ended = match self.join_entry(&row) {
+                Ok(Some(JoinEntry::Offer { group_id: held, .. })) => held == *group_id,
+                Ok(Some(JoinEntry::Waiting { .. } | JoinEntry::Admitted { .. })) => {
+                    self.join_group_id(&row)? == Some(*group_id)
+                }
+                _ => false,
+            };
+            if ended {
+                gone.push((GROUP_JOIN, row));
+            }
+        }
+        let store = &self.open_ref()?.store;
+        for (row, value) in store.list(GROUP_MEMBER, Some(&conversation.0))? {
+            // A contact behind a member is 16 bytes, and a key hash is 32.
+            if value.len() == 32 {
+                gone.push((GROUP_MEMBER, row));
+            }
+        }
+        if gone.is_empty() {
+            return Ok(());
+        }
+        let open = self.open_mut()?;
+        let mut batch = open.store.begin();
+        for (table, row) in gone {
+            batch.delete(table, row);
+        }
+        Ok(batch.commit()?)
+    }
+
+    /// The group that a row of the join table names.
+    fn join_group_id(&self, row: &RowId) -> Result<Option<[u8; 32]>, Error> {
+        let store = &self.open_ref()?.store;
+        Ok(store
+            .get(GROUP_JOIN, row)?
+            .map(Zeroizing::new)
+            .and_then(|plain| plain.get(17..49)?.try_into().ok()))
     }
 
     /// Keeps a contact that is a member of a group under a key of its own.
@@ -3619,6 +4296,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// The next `GKEY` that waits for the run of the group queues.
     pub fn take_group_rekey(&mut self) -> Option<GroupRekey> {
+        self.groups.offered = false;
         self.groups.rekeys.pop_front()
     }
 
@@ -3630,7 +4308,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        self.groups.offered = false;
         let now = now_ms / 1_000;
+        // GRP-196: each kept record that a replica did not take goes again
+        // after its wait.
+        self.resend_group_posts(now, rng)?;
         // One sweep a minute: a hold ends at its hour, and the window moves
         // by the slot. A clock check forces one (`clock_check`).
         let swept_at = self.groups.swept_at;
@@ -3670,6 +4352,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     group = stored;
                 }
             }
+            // GRP-345: a re-key that a rate or an open index held back goes
+            // again. A fault of it stops no other group.
+            if self.rekey_waits(conversation).unwrap_or(false)
+                && self.owns_channels().unwrap_or(false)
+            {
+                let _ = self.rekey_group(conversation, now_ms, rng);
+                let Ok(stored) = self.group_of(conversation) else {
+                    continue;
+                };
+                group = stored;
+            }
             // IMP-080: the `clock` line leaves with its condition.
             let suspect = group.holds_clock_suspect(now);
             let changed = if suspect {
@@ -3694,6 +4387,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     pub fn clock_check<R: CryptoRng + ?Sized>(&mut self, now_ms: u64, rng: &mut R) {
         self.groups.swept_at = 0;
         let _ = self.expire_group_holds(now_ms, rng);
+        // GRP-396: no silence counts across the movement.
+        let _ = self.restart_silence(now_ms / 1_000, rng);
     }
 
     /// Each group whose backoff passed and whose trigger no record
@@ -3704,6 +4399,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<Vec<ConversationId>, Error> {
+        self.groups.offered = false;
         let now = now_ms / 1_000;
         let mut due = Vec::new();
         for conversation in self.group_conversations()? {
@@ -3880,7 +4576,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let rate = self
             .groups
             .key_answers_rate
-            .entry(conversation)
+            .entry((conversation, Some(target)))
             .or_default();
         if !rate.allow(now) {
             return;
@@ -3990,15 +4686,24 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Ok(target) = u16::try_from(request.index - 1) else {
             return Ok(());
         };
+        let group = self.group_of(conversation)?;
+        // GRP-377: a request for an index that the roster does not hold
+        // takes no answer, and it counts against no rate.
+        if !group
+            .roster()
+            .member(target)
+            .is_some_and(|member| member.active)
+        {
+            return Ok(());
+        }
         let rate = self
             .groups
             .key_answers_rate
-            .entry(conversation)
+            .entry((conversation, Some(target)))
             .or_default();
         if !rate.allow(now_ms / 1_000) {
             return Ok(());
         }
-        let group = self.group_of(conversation)?;
         if group.may_supply(target, request.epoch) {
             return self.answer_key_request(conversation, target, now_ms, rng);
         }
@@ -4065,16 +4770,26 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         self.post_group_app(conversation, AppKind::KeySupply, body, now_ms, rng)
     }
 
-    /// One `GSUB` for each group that holds its queues. A reader takes
-    /// one replica in each session and alternates across sessions
-    /// (`GRP-203`, `GRP-204`).
+    /// One `GSUB` for each group that holds its queues. A reader takes one
+    /// replica in each session and alternates across sessions (`GRP-203`,
+    /// `GRP-204`). The call changes no group. The caller sends the `GSUB`
+    /// of a group that it does not read yet and tells
+    /// [`Client::group_reads`], which moves the choice to the store. The
+    /// next `GSUB` of that group then takes the other replica. That is in
+    /// the same session after a `GSUB` that found no circuit (`GRP-391`),
+    /// and in the next session else.
     pub fn group_subscriptions<R: CryptoRng + ?Sized>(
         &mut self,
         rng: &mut R,
     ) -> Result<Vec<GroupSubscription>, Error> {
+        self.groups.driven = true;
+        self.groups.offered = true;
         let mut out = Vec::new();
         for conversation in self.group_conversations()? {
-            let mut group = self.group_of(conversation)?;
+            // A group that does not open stops no other group.
+            let Ok(mut group) = self.group_of(conversation) else {
+                continue;
+            };
             let Some(credentials) = group.credentials().map(|held| held.read_secret()) else {
                 continue;
             };
@@ -4082,7 +4797,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Some(replicas) = group.replicas_mut() else {
                 continue;
             };
-            let which = replicas.pick(rng.next_u32() & 1 == 1);
+            // The first `GSUB` of a group takes a random replica, and the
+            // draw stands until that `GSUB` goes.
+            let coin = match self.groups.picked.get(&conversation) {
+                Some(which) => *which == 1,
+                None => rng.next_u32() & 1 == 1,
+            };
+            let which = replicas.pick(coin);
+            self.groups.picked.insert(conversation, which);
             let Some(reference) = replicas.reference(which) else {
                 continue;
             };
@@ -4094,9 +4816,304 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 fallback,
                 from_seq: replicas.cursor(which),
             });
-            self.save_group(conversation, &group, rng)?;
         }
         Ok(out)
+    }
+
+    /// The `GSUB` of a group goes now, at the replica that
+    /// [`Client::group_subscriptions`] gave. The choice moves to the store
+    /// (`GRP-204`), and the watch of this session starts (`GRP-396`). The
+    /// `GNREG` of that replica goes with it (`NTF-093`).
+    pub(super) fn group_read_started<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let mut group = self.group_of(conversation)?;
+        let coin = self.groups.picked.remove(&conversation) == Some(1);
+        let Some(replicas) = group.replicas_mut() else {
+            return Ok(());
+        };
+        let which = replicas.pick(coin);
+        self.save_group(conversation, &group, rng)?;
+        self.groups
+            .watch
+            .insert(conversation, Watch::start(which, now));
+        self.groups.repaired.remove(&conversation);
+        // A relay that started again holds no registration, and a `GNREG`
+        // that it holds already changes nothing and counts for no circuit.
+        if self.group_notify_row(conversation)?.is_some() {
+            self.groups.notify_again.insert((conversation, which));
+        }
+        Ok(())
+    }
+
+    /// One `GSUB` at the other replica for each group that needs a repair
+    /// (`GRP-205`, `GRP-255`). The reader of such a group saw a gap in the
+    /// counter of one sender for `GROUP_GAP_TIMEOUT`. Or it holds a record
+    /// for a roster object that the replica of this session did not give. A
+    /// group takes one in each session, after the backlog of its own
+    /// replica. A record that came ahead of its roster object in one drain
+    /// is no gap. The caller sends each one as a `GroupCommand::Repair`,
+    /// whose loss ends no subscription.
+    pub fn group_gap_repairs(&mut self, now_ms: u64) -> Result<Vec<GroupSubscription>, Error> {
+        let now = now_ms / 1_000;
+        let watched: Vec<(ConversationId, Watch)> = self
+            .groups
+            .watch
+            .iter()
+            .map(|(conversation, watch)| (*conversation, *watch))
+            .collect();
+        let mut out = Vec::new();
+        for (conversation, watch) in watched {
+            let quiet =
+                now.saturating_sub(watch.last_record) >= umbra_core::group::GROUP_GAP_TIMEOUT;
+            if self.groups.repaired.contains(&conversation) || !(watch.live || quiet) {
+                continue;
+            }
+            let Ok(group) = self.group_of(conversation) else {
+                continue;
+            };
+            if !group.needs_other_replica(now) {
+                continue;
+            }
+            let Some(read) = group.credentials().map(|held| held.read_secret()) else {
+                continue;
+            };
+            let Some(replicas) = group.replicas() else {
+                continue;
+            };
+            let other = watch.which.saturating_add(1) % GROUP_REPLICAS;
+            let Some(reference) = replicas.reference(other) else {
+                continue;
+            };
+            out.push(GroupSubscription {
+                conversation,
+                relay: reference.relay_id,
+                group_queue_id: reference.group_queue_id,
+                read,
+                fallback: group.previous_credentials().map(|held| held.read_secret()),
+                from_seq: replicas.cursor(other),
+            });
+            self.groups.repaired.insert(conversation);
+        }
+        Ok(out)
+    }
+
+    /// The subscription of a group ended with no other one in its place.
+    /// Its `GSUB` found no circuit at either replica (`GRP-391`), or its
+    /// session ended. The watch of the group ends with it (`GRP-396`).
+    pub fn group_read_ended(&mut self, conversation: ConversationId) {
+        self.groups.watch.remove(&conversation);
+    }
+
+    /// The groups that a subscription reads at this tick. A watch whose
+    /// group is not among them ended, and each other one takes the tick as
+    /// its sign of life. A watch that saw no tick for more than
+    /// `CLOCK_SKEW` did not run in that time, and it starts again
+    /// (`GRP-396`, `SCP-019`).
+    pub(super) fn group_reads_live(&mut self, conversations: &[ConversationId], now: u64) {
+        self.groups
+            .watch
+            .retain(|conversation, _| conversations.contains(conversation));
+        for watch in self.groups.watch.values_mut() {
+            if watch.has_hole(now) {
+                watch.lapse(now);
+            }
+            watch.beat = now;
+        }
+    }
+
+    /// A record of replica `which` of a group arrived at `now`, in the
+    /// slot `slot` when it opened as a content record. The backlog of a
+    /// `GSUB` ends with a record of the current slot, or with a time of
+    /// `WATCH_QUIET` in which none came.
+    fn watch_record(
+        &mut self,
+        conversation: ConversationId,
+        which: usize,
+        slot: Option<u32>,
+        now: u64,
+    ) {
+        let Some(watch) = self.groups.watch.get_mut(&conversation) else {
+            return;
+        };
+        if watch.which != which {
+            return;
+        }
+        watch.answered = true;
+        watch.last_record = now;
+        let current = umbra_core::group::slot_of(now);
+        if slot.is_some_and(|slot| slot.saturating_add(1) >= current) {
+            watch.live = true;
+        }
+    }
+
+    /// Whether this admin watches a group at `now`, thus the silence of its
+    /// members counts (`GRP-396`). It watches while a subscription of this
+    /// session read its backlog and no tick is missing. This admin did not
+    /// watch the time between two watches. Thus the clock of each member
+    /// moves forward by that time when a watch starts. A member is silent
+    /// only for the time in which this admin read the group. An admin that
+    /// was away for `GROUP_SILENT_EVICT` thus starts each silence again.
+    fn watches<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        group: &Group,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<bool, Error> {
+        // A caller that asked for no subscription holds no session, and
+        // each of its looks counts as watched. The run of the group queues
+        // asks for the subscriptions before each look.
+        if !self.groups.driven {
+            return Ok(true);
+        }
+        let Some(mut watch) = self.groups.watch.get(&conversation).copied() else {
+            return Ok(false);
+        };
+        if watch.has_hole(now) {
+            watch.lapse(now);
+            self.groups.watch.insert(conversation, watch);
+            return Ok(false);
+        }
+        if !watch.caught_up {
+            let quiet = now.saturating_sub(watch.last_record) >= WATCH_QUIET;
+            if !watch.live && !quiet {
+                return Ok(false);
+            }
+            self.resume_watch(conversation, group, now, rng)?;
+            watch.caught_up = true;
+            watch.stored = now;
+            // GRP-361, GRP-401: each `GKEY` that a replica still owes goes
+            // again now, and not before. A device that did not read its
+            // backlog can hold an epoch that the group left. Its `GKEY`
+            // would move a replica back to that epoch.
+            if group.lacks_epoch().is_none() {
+                self.queue_gkeys(conversation, group, false)?;
+            }
+        } else if now.saturating_sub(watch.stored) >= WATCH_STEP {
+            self.put_clock(conversation, watch_key(conversation), now, rng)?;
+            watch.stored = now;
+        }
+        self.groups.watch.insert(conversation, watch);
+        Ok(true)
+    }
+
+    /// Whether the replica of the subscription of a group answered in this
+    /// session, with a record or with a `GSEQ`. Before the first answer
+    /// this admin posts one presence record, once in the session.
+    fn watch_answered<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<bool, Error> {
+        if !self.groups.driven {
+            return Ok(true);
+        }
+        let Some(watch) = self.groups.watch.get_mut(&conversation) else {
+            return Ok(false);
+        };
+        if watch.answered {
+            return Ok(true);
+        }
+        if !watch.probed {
+            watch.probed = true;
+            self.post_presence(conversation, now_ms, rng)?;
+        }
+        Ok(false)
+    }
+
+    /// Starts a watch at `now`: the clock of each member moves forward by
+    /// the time since the last watch, and never above `now`. A group that
+    /// this admin never watched starts each clock here.
+    fn resume_watch<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        group: &Group,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let gap = match self.clock(&watch_key(conversation))? {
+            Some(watched) => now.saturating_sub(watched),
+            None => u64::MAX,
+        };
+        if gap >= WATCH_STEP {
+            self.shift_silence(conversation, group, gap, now, rng)?;
+        }
+        self.put_clock(conversation, watch_key(conversation), now, rng)
+    }
+
+    /// Moves the clock of each member of a group forward by `gap`, up to
+    /// `now` (`GRP-396`). Each backoff of an eviction ends with it.
+    fn shift_silence<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        group: &Group,
+        gap: u64,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        self.groups
+            .evictions
+            .retain(|(held, _), _| *held != conversation);
+        let mut moved = Vec::new();
+        for member in group.roster().active() {
+            let key = Self::member_key(conversation, member.index);
+            if let Some(seen) = self.clock(&key)? {
+                let at = seen.saturating_add(gap).min(now);
+                if at != seen {
+                    moved.push((key, at));
+                }
+            }
+        }
+        if moved.is_empty() {
+            return Ok(());
+        }
+        let open = self.open_mut()?;
+        let moved: Vec<(RowId, u64)> = moved
+            .into_iter()
+            .map(|(key, at)| (open.store.row_id(GROUP_PRESENCE, &key), at))
+            .collect();
+        let mut batch = open.store.begin();
+        for (row, at) in moved {
+            batch.put(
+                GROUP_PRESENCE,
+                row,
+                Some(conversation.0),
+                &at.to_be_bytes(),
+                rng,
+            )?;
+        }
+        Ok(batch.commit()?)
+    }
+
+    /// Starts the silence of each member of each group again at `now`,
+    /// after a movement of the clock (`SCP-019`). A time that this device
+    /// measured across the movement is no time that it watched (`GRP-396`).
+    fn restart_silence<R: CryptoRng + ?Sized>(
+        &mut self,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        self.groups.evictions.clear();
+        for conversation in self.group_conversations()? {
+            let Ok(group) = self.group_of(conversation) else {
+                continue;
+            };
+            if group.own_role().is_none_or(|role| role < Role::Admin) {
+                continue;
+            }
+            self.shift_silence(conversation, &group, u64::MAX, now, rng)?;
+            self.put_clock(conversation, watch_key(conversation), now, rng)?;
+            if let Some(watch) = self.groups.watch.get_mut(&conversation) {
+                watch.beat = now;
+                watch.stored = now;
+            }
+        }
+        Ok(())
     }
 
     /// Each open group that holds no notify queue yet, while the device
@@ -4325,9 +5342,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }))
     }
 
-    /// Each `GNREG` that is due: a notify queue that a replica does not
-    /// hold, or holds for longer than `NOTIFY_REREGISTER` (`NTF-093`,
-    /// `NTF-102`).
+    /// Each `GNREG` that is due (`NTF-093`, `NTF-102`). One is due for a
+    /// notify queue that a replica does not hold, or holds for longer than
+    /// `NOTIFY_REREGISTER`. One is due for the replica that the `GSUB` of
+    /// this session went to. A relay that started again holds no
+    /// registration and tells no reader, thus the registration goes with
+    /// each `GSUB`. A `GNREG` that the relay holds already changes nothing
+    /// there. One circuit carries one for each `GSUB` of a group, which is
+    /// inside the count of new registrations that a relay takes from one
+    /// circuit.
     pub fn notify_registrations_due(&self, now: u64) -> Result<Vec<NotifyRegistration>, Error> {
         let mut out = Vec::new();
         for conversation in self.group_conversations()? {
@@ -4346,7 +5369,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 continue;
             };
             for (which, at) in times.iter().enumerate() {
-                if *at != 0 && now.saturating_sub(*at) < NOTIFY_REREGISTER {
+                let again = self.groups.notify_again.contains(&(conversation, which));
+                if *at != 0 && now.saturating_sub(*at) < NOTIFY_REREGISTER && !again {
                     continue;
                 }
                 let Some(reference) = replicas.reference(which) else {
@@ -4374,6 +5398,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        self.groups.notify_again.remove(&(conversation, which));
         let Some(mut row) = self.group_notify_row(conversation)? else {
             return Ok(());
         };
@@ -4391,6 +5416,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// The next record that waits for the run of the group queues.
     pub fn take_group_post(&mut self) -> Option<GroupPost> {
+        self.groups.offered = false;
         self.groups.posts.pop_front()
     }
 
@@ -4439,9 +5465,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         relay: &[u8; 32],
         rng: &mut R,
     ) -> Result<(), Error> {
-        self.update_unsent(row, relay, rng, |replica| {
+        let place = self.update_unsent(row, relay, rng, |replica| {
             replica.state = REPLICA_ACCEPTED;
-        })
+        })?;
+        if let Some((post, which)) = place {
+            self.groups.resent.remove(&(*row, which));
+            // GRP-361, GRP-401: the `GSEQ` of a record that left after a
+            // `GKEY` tells that the `GKEY` arrived.
+            self.gkey_arrived(post.conversation, which, row, rng)?;
+        }
+        Ok(())
     }
 
     /// One send of a kept record to the replica at `relay`, which counts
@@ -4453,36 +5486,55 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
-        self.update_unsent(row, relay, rng, |replica| {
+        self.groups.offered = false;
+        let place = self.update_unsent(row, relay, rng, |replica| {
             replica.attempts = replica.attempts.saturating_add(1);
             if replica.first == 0 {
                 replica.first = now.max(1);
             }
-        })
+        })?;
+        if let Some((post, which)) = place {
+            self.groups.resent.insert((*row, which), now);
+            // The record tells of the `GKEY` before it when the replica can
+            // take it under the credentials of that `GKEY` alone. The
+            // replica then holds no pair of the epoch before (`GRP-398`),
+            // and its pair is the one that the `GKEY` carried.
+            let write_pk = *umbra_crypto::x25519::PublicKey::from(
+                &umbra_crypto::x25519::StaticSecret::from(*post.write.expose()),
+            )
+            .as_bytes();
+            if let Some(sent) = self.groups.gkey_sent.get_mut(&(post.conversation, which)) {
+                if post.fallback.is_none() && sent.write_pk == write_pk {
+                    sent.after.insert(*row);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Changes the ARQ of one replica of a kept record, and ends the row
-    /// when no replica takes it more.
+    /// when no replica takes it more. The answer holds the record and the
+    /// place of the replica in it.
     fn update_unsent<R: CryptoRng + ?Sized>(
         &mut self,
         row: &[u8; 16],
         relay: &[u8; 32],
         rng: &mut R,
         change: impl FnOnce(&mut ReplicaArq),
-    ) -> Result<(), Error> {
+    ) -> Result<Option<(GroupPost, usize)>, Error> {
         let open = self.open_mut()?;
         let Some(plain) = open.store.get(GROUP_UNSENT, row)? else {
-            return Ok(());
+            return Ok(None);
         };
         let plain = Zeroizing::new(plain);
         let Some((order, post, mut arq)) = read_unsent(&plain, *row) else {
-            return Ok(());
+            return Ok(None);
         };
         let Some(index) = post.replicas.iter().position(|held| held.relay == *relay) else {
-            return Ok(());
+            return Ok(None);
         };
         let Some(replica) = arq.get_mut(index) else {
-            return Ok(());
+            return Ok(None);
         };
         change(replica);
         let mut batch = open.store.begin();
@@ -4492,7 +5544,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let value = unsent_row(order, &post, &arq);
             batch.put(GROUP_UNSENT, *row, Some(post.conversation.0), &value, rng)?;
         }
-        Ok(batch.commit()?)
+        batch.commit()?;
+        Ok(Some((post, index)))
     }
 
     /// One record that a `GMSG` carried. A record of this device, a
@@ -4523,6 +5576,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if let Some((which, replicas)) = which.zip(group.replicas_mut()) {
             let is_epoch_key = matches!(outcome, Ok(Outcome::EpochKey { .. }));
             replicas.arrived(which, seq, is_epoch_key);
+            // GRP-396: a record of the replica of this session is its
+            // answer, and one of the current slot ends its backlog.
+            let slot = match &outcome {
+                Ok(Outcome::Content { slot, .. }) => Some(*slot),
+                _ => None,
+            };
+            self.watch_record(conversation, which, slot, now_ms / 1_000);
         }
         let before = Before::of(&group);
         let outcomes: VecDeque<Outcome> = outcome.into_iter().collect();
@@ -4619,6 +5679,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     app,
                     counter,
                     epoch,
+                    slot,
+                    repeated,
                     ..
                 } => {
                     self.note_seen(conversation, &group, sender, now, rng)?;
@@ -4655,7 +5717,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                                 continue;
                             }
                             let forks = group.roster().forks().len();
-                            let applied = group.apply_control(&control, sender, now);
+                            // GRP-076: the rates of the chain count on the
+                            // slot of the record that carried the object.
+                            let applied = group.apply_control_at(&control, sender, slot, now);
                             // GRP-070, GRP-071: a fork shows, and the member
                             // picks no successor in silence.
                             self.note_forks(conversation, &group, forks, now_ms, rng)?;
@@ -4675,7 +5739,30 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     // ABU-036, ABU-038: a record of a blocked member goes,
                     // and the view counts it.
                     if self.is_member_blocked(conversation, sender)? {
-                        self.count_discarded(conversation, rng)?;
+                        // GRP-206: each replica gives the record, and the
+                        // view counts it once.
+                        if !repeated {
+                            self.count_discarded(conversation, rng)?;
+                        }
+                        continue;
+                    }
+                    // GRP-206, GRP-259: a record under a counter that this
+                    // device took already is a copy. The other replica gave
+                    // it, or a replica kept it. A message drops at its
+                    // `msg_id` in the store. An edit, a deletion and a vote
+                    // enter no row of their own, thus the mark of the
+                    // receiver drops their copy here. An edit that applied
+                    // again would count one more revision, and it would put
+                    // its text over the text of an edit after it. The one
+                    // record that goes with a copy is the second record of
+                    // two devices under one counter (`GRP-342`). The
+                    // counter cannot tell it from a copy.
+                    if repeated
+                        && matches!(
+                            parsed.kind,
+                            AppKind::Edit | AppKind::Delete | AppKind::PollVote
+                        )
+                    {
                         continue;
                     }
                     // An edit and a deletion of an author name a message of
@@ -4685,28 +5772,39 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         continue;
                     }
                     // GRP-336: a vote is one group record, and each member
-                    // counts it in the order of its sender (WIR-190): the
-                    // epoch, then the counter, which starts again in each
-                    // epoch (GRP-246).
+                    // counts it in the order of its sender (WIR-190). The
+                    // order is the index, then the epoch, then the counter,
+                    // which starts again in each epoch (GRP-246). A re-key
+                    // moves a member to a higher index in the epoch that
+                    // stands and starts its counter again. Thus the index
+                    // comes first: the vote after the re-key is the later
+                    // one.
                     if parsed.kind == AppKind::PollVote {
-                        self.take_vote(
-                            conversation,
-                            parsed.body,
-                            sender,
-                            (u64::from(epoch) << 32) | u64::from(counter),
-                            now,
-                            rng,
-                        )?;
+                        // The position holds 16 bits of the epoch. An epoch
+                        // above them takes the highest value, thus the
+                        // order never runs back.
+                        let position = (u64::from(sender) << 48)
+                            | (u64::from(epoch).min(0xFFFF) << 32)
+                            | u64::from(counter);
+                        self.take_vote(conversation, parsed.body, sender, position, now, rng)?;
                         continue;
                     }
                     // A record that does not parse under the layout of a
                     // group goes (WIR-163, WIR-180).
+                    // DEV-174: a rich record takes its class from the kind
+                    // that it goes around. This client goes around a text
+                    // alone, as on a pairwise channel. One around a kind
+                    // that is no message would else enter the conversation
+                    // as one.
                     let is_invalid = match parsed.kind {
                         AppKind::Rich => umbra_wire::app::rich::RichRecord::parse(
                             parsed.body,
                             umbra_wire::app::Channel::Group,
                         )
-                        .is_err(),
+                        .map_or(true, |rich| {
+                            rich.inner_kind != AppKind::Text
+                                || core::str::from_utf8(rich.inner_body).is_err()
+                        }),
                         AppKind::Poll => umbra_wire::app::poll::Poll::parse(parsed.body).is_err(),
                         _ => false,
                     };
@@ -4740,6 +5838,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                                 self.stamp_deadline(conversation, message, parsed.kind, now, rng)?
                             }
                         }
+                        // DEV-093: an edit or a deletion of its author that
+                        // a replica gave first applies now.
+                        self.take_held_group_change(
+                            conversation,
+                            message,
+                            &parsed.msg_id,
+                            sender,
+                            now_ms,
+                            rng,
+                        )?;
                     }
                     first = first.or(stored);
                 }
@@ -4753,11 +5861,26 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         self.events.push_back(Event::Conversations);
                     }
                 }
+                // GRP-357: an epoch whose slot waited for its roster object
+                // installed in the group. The records that waited for its
+                // key follow in the same list.
+                Outcome::EpochInstalled { .. } => installed = true,
                 Outcome::Held | Outcome::Duplicate => {}
             }
         }
         // The counters, the held records and the roster moved.
         self.save_group(conversation, &group, rng)?;
+        // GRP-400: another admin drew the owner credentials that this
+        // device holds now, and that admin moves each replica to them.
+        // What this device knew of its own `GKEY` commands names
+        // credentials that it holds no more.
+        let owners_moved = group.owner(0).map(|held| *held.expose()) != before.owners;
+        if owners_moved && before.owners.is_some() {
+            self.put_gkey_row(conversation, &GkeyRow::default(), rng)?;
+            self.groups
+                .gkey_sent
+                .retain(|(held, _), _| *held != conversation);
+        }
         // GRP-370: a rival re-key took the index of this member.
         if group.lost_rekey() {
             self.ask_to_return(conversation, now_ms, rng)?;
@@ -4769,18 +5892,28 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // GRP-363: an admin that installs an epoch it did not credential
         // moves each replica to it. A delivery of owner credentials alone
         // installs no epoch. GRP-364: a switch to the secret of a lower
-        // rotator of the same epoch moves each replica too.
+        // rotator of the same epoch moves each replica too. A device that
+        // reads the backlog of its `GSUB` installs each epoch that the
+        // group left on its way. A `GKEY` of one would move a replica back
+        // to it (§11.4.1). Thus the `GKEY` waits for the end of the
+        // backlog, where `Client::watches` sends the one of the epoch that
+        // stands.
         if installed && (group.epoch() != before.epoch || group.epoch_rotator() != before.rotator) {
-            self.queue_rekeys(&group)?;
+            let read_backlog = !self.groups.driven
+                || self
+                    .groups
+                    .watch
+                    .get(&conversation)
+                    .is_some_and(|watch| watch.caught_up);
+            if read_backlog && group.lacks_epoch().is_none() {
+                self.queue_gkeys(conversation, &group, false)?;
+            }
             // GRP-405: the epoch that a lapsed member lacked arrived, and
-            // the credentials of it take its records again.
-            if self.group_lapsed(conversation)? {
-                let row = Self::group_row(&group, OPEN)?;
-                let open = self.open_mut()?;
-                let mut batch = open.store.begin();
-                batch.put(GROUP, conversation.0, None, &row, rng)?;
-                batch.commit()?;
-                self.groups.key_requests.remove(&conversation);
+            // the credentials of it take its records again. GRP-210: a
+            // group that each replica refused takes a new epoch, thus its
+            // queue is not gone, and the next command tells again.
+            if self.group_closed(conversation)? {
+                self.reopen_group(conversation, rng)?;
             }
         }
         // GRP-402: owner credentials from another admin answer the call for
@@ -5145,14 +6278,20 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<Vec<(ConversationId, u16, Silence)>, Error> {
+        self.groups.offered = false;
         let now = now_ms / 1_000;
         let mut due = Vec::new();
         for conversation in self.group_conversations()? {
-            if self.group_closed(conversation)? {
-                continue;
-            }
             let group = self.group_of(conversation)?;
             if group.own_role().is_none_or(|role| role < Role::Admin) {
+                continue;
+            }
+            // GRP-396, GRP-134: silence counts while this admin reads the
+            // group with no backlog, and no removal comes before that. A
+            // closed group removes nobody; the `GKEY` that its replicas
+            // owe still goes at the end of its backlog (`GRP-363`).
+            let watches = self.watches(conversation, &group, now, rng)?;
+            if !watches || self.group_closed(conversation)? {
                 continue;
             }
             let roster = group.roster();
@@ -5181,6 +6320,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 };
                 match self.groups.evictions.get(&(conversation, index)) {
                     Some(at) if now >= *at => {
+                        // A `GSUB` has no answer, thus a replica that this
+                        // session heard nothing of may read nothing. One
+                        // presence record asks it for a `GSEQ`, and the
+                        // removal waits for it.
+                        if !self.watch_answered(conversation, now_ms, rng)? {
+                            continue;
+                        }
                         due.push((conversation, index, action));
                         // GRP-076: the removal after a demotion waits for
                         // the rate of one epoch of this admin.
@@ -5200,30 +6346,173 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(due)
     }
 
-    /// Moves each replica to the credentials of the epoch this device
-    /// installed, when this device holds the owner credentials and did
-    /// not make that epoch (`GRP-363`).
-    fn queue_rekeys(&mut self, group: &Group) -> Result<(), Error> {
+    /// Queues each `GKEY` that a replica of a group still owes, when this
+    /// device holds the owner credentials. One carries a new `own_pk` under
+    /// each credential that it replaced (`GRP-401`). One moves the replica
+    /// to the credentials of the epoch that this device holds (`GRP-361`,
+    /// `GRP-363`). A `GKEY` has no answer, thus each one goes again in each
+    /// session of the group, once its backlog arrived. It goes until a
+    /// `GSEQ` of that replica follows it in one session. A second `GKEY`
+    /// with the same keys changes nothing there (§11.4.1). With `drew` this
+    /// device drew the owner credentials just now: no replica holds them
+    /// yet, thus no `GKEY` under them goes.
+    fn queue_gkeys(
+        &mut self,
+        conversation: ConversationId,
+        group: &Group,
+        drew: bool,
+    ) -> Result<(), Error> {
+        // GRP-338: the device that owns the channels sends each command of
+        // the member.
+        if !self.owns_channels()? {
+            return Ok(());
+        }
         let Some(replicas) = Self::group_replicas_of(group)? else {
             return Ok(());
         };
         let Some(credentials) = group.credentials() else {
             return Ok(());
         };
-        for (which, replica) in replicas.iter().enumerate() {
+        let (read_pk, write_pk) = (credentials.read_public(), credentials.write_public());
+        let held = self.gkey_row(conversation)?;
+        // GRP-362: a replica takes no `GKEY` before it accepted the
+        // epoch-key record of this device.
+        let waits = self.rotation_waits(conversation)?;
+        let each = replicas
+            .iter()
+            .zip(held.taken)
+            .zip(held.replaced)
+            .zip(waits);
+        for (which, (((replica, taken), replaced), waits)) in each.enumerate() {
             let Some(own) = group.owner(which) else {
                 continue;
             };
-            self.groups.rekeys.push_back(GroupRekey {
+            if waits {
+                continue;
+            }
+            let job = |own: &Secret<32>, next_own_pk| GroupRekey {
                 relay: replica.relay,
                 group_queue_id: replica.group_queue_id,
                 own: Secret::new(*own.expose()),
-                next_own_pk: None,
-                read_pk: credentials.read_public(),
-                write_pk: credentials.write_public(),
-            });
+                next_own_pk,
+                read_pk,
+                write_pk,
+            };
+            let next = *umbra_crypto::x25519::PublicKey::from(
+                &umbra_crypto::x25519::StaticSecret::from(*own.expose()),
+            )
+            .as_bytes();
+            // A rotation that never reached the group row replaced nothing.
+            let replaced: Vec<&Secret<32>> = replaced
+                .iter()
+                .filter(|before| before.expose() != own.expose())
+                .collect();
+            if replaced.is_empty() && taken == Some(write_pk) {
+                continue;
+            }
+            for before in replaced {
+                self.groups.rekeys.push_back(job(before, Some(next)));
+            }
+            if !drew {
+                self.groups.rekeys.push_back(job(own, None));
+            }
+            let sent = GkeySent {
+                write_pk,
+                after: BTreeSet::new(),
+            };
+            self.groups.gkey_sent.insert((conversation, which), sent);
         }
         Ok(())
+    }
+
+    /// For each replica of a group, whether an epoch-key record of this
+    /// device still waits for its `GSEQ` there (`GRP-362`).
+    fn rotation_waits(
+        &self,
+        conversation: ConversationId,
+    ) -> Result<[bool; GROUP_REPLICAS], Error> {
+        let uploads = &self.groups.epoch_uploads;
+        if uploads.iter().any(|held| held.conversation == conversation) {
+            return Ok([true; GROUP_REPLICAS]);
+        }
+        let mut waits = [false; GROUP_REPLICAS];
+        let store = &self.open_ref()?.store;
+        for (row, plain) in store.list(GROUP_UNSENT, Some(&conversation.0))? {
+            let plain = Zeroizing::new(plain);
+            let Some((_, post, arq)) = read_unsent(&plain, row) else {
+                continue;
+            };
+            if !post.is_rotation {
+                continue;
+            }
+            for (waits, replica) in waits.iter_mut().zip(arq) {
+                *waits |= replica.state == REPLICA_PENDING;
+            }
+        }
+        Ok(waits)
+    }
+
+    fn gkey_key(conversation: ConversationId) -> Vec<u8> {
+        [conversation.0.as_slice(), b"gkey"].concat()
+    }
+
+    /// What the store holds of the `GKEY` commands of a group.
+    fn gkey_row(&self, conversation: ConversationId) -> Result<GkeyRow, Error> {
+        let store = &self.open_ref()?.store;
+        let row = store.row_id(GROUP_OWNERS, &Self::gkey_key(conversation));
+        Ok(store
+            .get(GROUP_OWNERS, &row)?
+            .map(Zeroizing::new)
+            .and_then(|plain| GkeyRow::parse(&plain))
+            .unwrap_or_default())
+    }
+
+    fn put_gkey_row<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        held: &GkeyRow,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let open = self.open_mut()?;
+        let row = open
+            .store
+            .row_id(GROUP_OWNERS, &Self::gkey_key(conversation));
+        let mut batch = open.store.begin();
+        // The row names no owner, thus it stays on this device: a linked
+        // device sends no `GKEY` (`GRP-340`).
+        batch.put(GROUP_OWNERS, row, None, &held.encode(), rng)?;
+        Ok(batch.commit()?)
+    }
+
+    /// A replica returned the `GSEQ` of a kept record that left after the
+    /// `GKEY` commands of this session, on the circuit that carried them.
+    /// Thus those commands arrived. The replica holds the credentials of
+    /// the epoch, and the owner credentials before the current ones leave
+    /// the store (`GRP-401`).
+    fn gkey_arrived<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        which: usize,
+        row: &[u8; 16],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let key = (conversation, which);
+        let Some(sent) = self.groups.gkey_sent.get(&key) else {
+            return Ok(());
+        };
+        if !sent.after.contains(row) {
+            return Ok(());
+        }
+        let write_pk = sent.write_pk;
+        self.groups.gkey_sent.remove(&key);
+        let mut held = self.gkey_row(conversation)?;
+        if let Some(taken) = held.taken.get_mut(which) {
+            *taken = Some(write_pk);
+        }
+        if let Some(replaced) = held.replaced.get_mut(which) {
+            replaced.clear();
+        }
+        self.put_gkey_row(conversation, &held, rng)
     }
 
     /// The conversation of a group queue, or none when this device holds
@@ -5270,10 +6559,116 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(())
     }
 
+    /// Puts each kept record back into the work list for each replica that
+    /// gave no `GSEQ` and whose wait ran out (`GRP-196`, `NET-218`). This
+    /// run sent it there, and a `LIMIT`, a refusal of another kind, or a
+    /// circuit that no build reached left it with no answer. The wait
+    /// doubles with each send, from `RESEND_FIRST` up to `RESEND_MAX`. No
+    /// timer fires for it: the next pump after the wait carries the record
+    /// (`NET-071`). A record that the task still holds goes twice, and the
+    /// relay answers the second one with the `seq` that it holds
+    /// (`NET-239`). The ARQ of a replica ends here as it ends at a new run
+    /// (`NET-271`), and a message that no replica took then fails
+    /// (`NET-272`).
+    fn resend_group_posts<R: CryptoRng + ?Sized>(
+        &mut self,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let swept = self.groups.resend_swept;
+        if self.groups.resent.is_empty()
+            || (swept..swept.saturating_add(RESEND_SWEEP)).contains(&now)
+        {
+            return Ok(());
+        }
+        self.groups.resend_swept = now;
+        let mut held = BTreeSet::new();
+        let mut again = Vec::new();
+        let mut changed = Vec::new();
+        let mut ended = Vec::new();
+        let mut failed = Vec::new();
+        for (row, plain) in self.open_ref()?.store.list(GROUP_UNSENT, None)? {
+            let plain = Zeroizing::new(plain);
+            let Some((order, mut post, mut arq)) = read_unsent(&plain, row) else {
+                continue;
+            };
+            held.insert(row);
+            // A record in the work list goes from there, and a group that
+            // closed takes none.
+            let waits = self
+                .groups
+                .posts
+                .iter()
+                .any(|post| post.unsent == Some(row));
+            if waits || self.group_closed(post.conversation).unwrap_or(true) {
+                continue;
+            }
+            let before = arq;
+            let mut due = [false; GROUP_REPLICAS];
+            for (which, (replica, due)) in arq.iter_mut().zip(&mut due).enumerate() {
+                let Some(sent) = self.groups.resent.get(&(row, which)) else {
+                    continue;
+                };
+                let wait = RESEND_FIRST
+                    .checked_shl(replica.attempts.saturating_sub(1))
+                    .map_or(RESEND_MAX, |wait| wait.min(RESEND_MAX));
+                if replica.state != REPLICA_PENDING || now.saturating_sub(*sent) < wait {
+                    continue;
+                }
+                replica.check(now);
+                *due = replica.state == REPLICA_PENDING;
+            }
+            if arq.iter().all(|replica| replica.state != REPLICA_PENDING) {
+                let accepted = arq.iter().any(|replica| replica.state == REPLICA_ACCEPTED);
+                if let Some(message) = post.message.filter(|_| !accepted) {
+                    failed.push(message);
+                }
+                ended.push(row);
+                continue;
+            }
+            if arq != before {
+                changed.push((row, post.conversation, unsent_row(order, &post, &arq)));
+            }
+            if due.contains(&true) {
+                post.pending = due;
+                again.push((order, post));
+            }
+        }
+        self.groups.resent.retain(|(row, _), _| held.contains(row));
+        if !changed.is_empty() || !ended.is_empty() {
+            let open = self.open_mut()?;
+            let mut batch = open.store.begin();
+            for (row, conversation, value) in changed {
+                batch.put(GROUP_UNSENT, row, Some(conversation.0), &value, rng)?;
+            }
+            for row in ended {
+                batch.delete(GROUP_UNSENT, row);
+            }
+            batch.commit()?;
+        }
+        for message in failed {
+            self.fail(&message, crate::FailureCause::NoReplica, rng)?;
+        }
+        again.sort_by_key(|(order, _)| *order);
+        for (_, post) in again {
+            // The next send sets the time of this replica again.
+            for (which, pending) in post.pending.iter().enumerate() {
+                if *pending {
+                    if let Some(row) = post.unsent {
+                        self.groups.resent.remove(&(row, which));
+                    }
+                }
+            }
+            self.groups.posts.push_back(post);
+        }
+        Ok(())
+    }
+
     /// Puts each record of a group that no replica accepted back into the
     /// work list.
     fn requeue_group_posts<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<(), Error> {
         self.groups.posts.clear();
+        self.groups.resent.clear();
         // GRP-392: each sealed record goes again as it was, in the order of
         // its seal. A group that is gone or closed takes none, and a message
         // that no longer waits in the outbox takes none.
@@ -5546,4 +6941,1165 @@ fn read_unsent(
         },
         arq,
     ))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
+mod tests {
+    use umbra_core::{
+        session::node::ContactId,
+        store::{
+            engine::MemoryBackend,
+            wrap::{Cost, SecureElement},
+        },
+        Error as CoreError,
+    };
+    use umbra_crypto::{
+        hmac::{digest::KeyInit, Hmac, Mac},
+        rand_core::{TryCryptoRng, TryRng},
+        sha2::Sha256,
+    };
+
+    use super::*;
+
+    struct Rng(u64);
+
+    impl TryRng for Rng {
+        type Error = core::convert::Infallible;
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+            Ok(self.try_next_u64()? as u32)
+        }
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            Ok(self.0 >> 11 ^ self.0 << 7)
+        }
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+            for chunk in dst.chunks_mut(8) {
+                let bytes = self.try_next_u64()?.to_le_bytes();
+                chunk.copy_from_slice(&bytes[..chunk.len()]);
+            }
+            Ok(())
+        }
+    }
+
+    impl TryCryptoRng for Rng {}
+
+    #[derive(Clone)]
+    struct Element([u8; 32]);
+
+    impl SecureElement for Element {
+        fn keyed(&self, input: &[u8]) -> Result<[u8; 32], CoreError> {
+            let mut mac =
+                Hmac::<Sha256>::new_from_slice(&self.0).map_err(|_| CoreError::Malformed)?;
+            mac.update(input);
+            Ok(mac.finalize().into_bytes().into())
+        }
+    }
+
+    type Device = Client<MemoryBackend, Element>;
+
+    const CHEAP: Cost = Cost { m_kib: 64, t: 1 };
+    const RELAYS: [[u8; 32]; 2] = [[0xA1; 32], [0xB2; 32]];
+    const QUEUES: [[u8; 32]; 2] = [[0xC3; 32], [0xD4; 32]];
+    const T0: u64 = 1_700_000_000;
+    const DAY: u64 = 86_400;
+
+    fn units(text: &str) -> Vec<u16> {
+        text.encode_utf16().collect()
+    }
+
+    fn new_client(rng: &mut Rng) -> Device {
+        Client::create(
+            MemoryBackend::default(),
+            Element([1; 32]),
+            &units("correct horse"),
+            CHEAP,
+            1_000,
+            rng,
+        )
+        .unwrap()
+    }
+
+    /// A group of `admin` with both of its queues.
+    fn new_group(admin: &mut Device, rng: &mut Rng) -> ConversationId {
+        let group = admin.create_group("Summit", RELAYS, T0, rng).unwrap();
+        let group_id = admin.group_info(group).unwrap().group_id;
+        for (replica, (relay, queue)) in RELAYS.into_iter().zip(QUEUES).enumerate() {
+            admin
+                .group_queue_made(&group_id, replica as u8, relay, queue, rng)
+                .unwrap();
+        }
+        while admin.take_group_creation().is_some() {}
+        group
+    }
+
+    /// Puts one record of a contact into a client, as the network would.
+    fn deliver(client: &mut Device, from: &ContactId, app: &[u8], now_ms: u64, rng: &mut Rng) {
+        client
+            .commit_network(&[], &[(*from, app.to_vec())], now_ms, rng)
+            .unwrap();
+    }
+
+    /// Each waiting post of `from` goes, each replica answers it, and each
+    /// device of `to` reads it from the first replica.
+    fn carry(from: &mut Device, to: &mut [&mut Device], seq: &mut u32, now: u64, rng: &mut Rng) {
+        while let Some(post) = from.take_group_post() {
+            if let Some(row) = post.unsent {
+                for (replica, at) in post.replicas.iter().zip([7, 9]) {
+                    from.group_post_sent(&row, &replica.relay, now, rng)
+                        .unwrap();
+                    from.group_post_accepted(&row, &replica.relay, rng).unwrap();
+                    from.add_answered(&row, &replica.relay, at, now * 1_000, rng)
+                        .unwrap();
+                }
+            }
+            *seq += 1;
+            for reader in to.iter_mut() {
+                reader
+                    .on_group_record(&QUEUES[0], *seq, &post.record, now * 1_000, rng)
+                    .unwrap();
+            }
+        }
+    }
+
+    /// Brings `joiner` into `group` of `admin` with the offer, the join
+    /// record, the add and the admit of §11.9.1. `peers` names the joiner at
+    /// the admin and the admin at the joiner.
+    fn invite(
+        admin: &mut Device,
+        joiner: &mut Device,
+        group: ConversationId,
+        peers: (ContactId, ContactId),
+        now: u64,
+        rng: &mut Rng,
+    ) -> ConversationId {
+        let at_admin = admin.conversation_for(&peers.0 .0).unwrap();
+        let at_joiner = joiner.conversation_for(&peers.1 .0).unwrap();
+        let group_id = admin.group_info(group).unwrap().group_id;
+        admin
+            .offer_group(group, at_admin, now * 1_000, rng)
+            .unwrap();
+        let offer = admin.take_outgoing().unwrap();
+        deliver(joiner, &peers.1, &offer.app, now * 1_000 + 100, rng);
+        let offers = joiner.group_offers().unwrap();
+        let held = offers
+            .iter()
+            .find(|offer| offer.from == at_joiner && offer.group_id == group_id)
+            .unwrap();
+        joiner
+            .accept_group_offer(held, now * 1_000 + 200, rng)
+            .unwrap();
+        let asked = joiner.take_outgoing().unwrap();
+        deliver(admin, &peers.0, &asked.app, now * 1_000 + 300, rng);
+        let joiners = admin.group_joiners().unwrap();
+        let waiting = joiners
+            .iter()
+            .find(|held| held.from == at_admin && held.group_id == group_id)
+            .unwrap();
+        let admission = admin.add_joiner(waiting, now * 1_000 + 400, rng).unwrap();
+        carry(admin, &mut [], &mut 0, now, rng);
+        admin
+            .admit_joiner(
+                waiting,
+                admission.index,
+                b"a descriptor",
+                now * 1_000 + 500,
+                rng,
+            )
+            .unwrap();
+        let admit = admin.take_outgoing().unwrap();
+        deliver(joiner, &peers.1, &admit.app, now * 1_000 + 600, rng);
+        let member = joiner
+            .accept_group_admit(at_joiner, &group_id, &admission.snapshot, now + 1, rng)
+            .unwrap();
+        while admin.next_event().is_some() {}
+        while joiner.next_event().is_some() {}
+        member
+    }
+
+    /// One pump of the run of the group queues at `now`, as the bindings
+    /// make it. The pump makes the subscriptions, the `GSUB` of each group
+    /// that `reading` does not hold, and the look at the silent members.
+    /// The tick that names each group that a subscription reads comes last.
+    fn pump(
+        client: &mut Device,
+        reading: &mut BTreeSet<ConversationId>,
+        now: u64,
+        rng: &mut Rng,
+    ) -> Vec<(ConversationId, u16, Silence)> {
+        for subscription in client.group_subscriptions(rng).unwrap() {
+            if reading.insert(subscription.conversation) {
+                client
+                    .group_reads(&[subscription.conversation], now * 1_000, rng)
+                    .unwrap();
+            }
+        }
+        while client.take_epoch_upload().is_some() {}
+        let silent = client.members_to_evict(now * 1_000, rng).unwrap();
+        let read: Vec<ConversationId> = reading.iter().copied().collect();
+        client.group_reads(&read, now * 1_000, rng).unwrap();
+        silent
+    }
+
+    fn say(
+        client: &mut Device,
+        conversation: ConversationId,
+        text: &str,
+        now: u64,
+        rng: &mut Rng,
+    ) -> MsgRef {
+        let mut draft = client.new_draft(conversation);
+        draft.set_text(&units(text)).unwrap();
+        client.send_draft(draft, now * 1_000, rng).unwrap()
+    }
+
+    const AT_ADMIN: ContactId = ContactId([0x51; 32]);
+    const AT_JOINER: ContactId = ContactId([0x52; 32]);
+
+    #[test]
+    fn a_member_that_left_takes_a_new_invitation_into_the_conversation_it_held() {
+        let mut rng = Rng(301);
+        let mut admin = new_client(&mut rng);
+        let mut joiner = new_client(&mut rng);
+        let group = new_group(&mut admin, &mut rng);
+        let group_id = admin.group_info(group).unwrap().group_id;
+        let peers = (AT_ADMIN, AT_JOINER);
+        let member = invite(&mut admin, &mut joiner, group, peers, T0 + 1, &mut rng);
+        assert_eq!(joiner.group_info(member).unwrap().own_index, 1);
+        let before = joiner.group_state_object(member, T0 + 2).unwrap();
+        let subject = umbra_core::devset::sync::group_subject(
+            &joiner.open_ref().unwrap().device_set_key,
+            &group_id,
+        );
+        let mut seq = 20;
+        say(&mut admin, group, "before", T0 + 10, &mut rng);
+        carry(&mut admin, &mut [&mut joiner], &mut seq, T0 + 10, &mut rng);
+        assert_eq!(joiner.messages(member).unwrap().len(), 1);
+
+        // GRP-153: an offer to a group that this device is a member of is
+        // no offer.
+        let at_admin = admin.conversation_for(&AT_ADMIN.0).unwrap();
+        admin
+            .offer_group(group, at_admin, (T0 + 11) * 1_000, &mut rng)
+            .unwrap();
+        let again = admin.take_outgoing().unwrap();
+        deliver(
+            &mut joiner,
+            &AT_JOINER,
+            &again.app,
+            (T0 + 12) * 1_000,
+            &mut rng,
+        );
+        assert!(joiner.group_offers().unwrap().is_empty());
+
+        // The member leaves, and the row of its membership stays.
+        joiner
+            .leave_group(member, (T0 + 20) * 1_000, &mut rng)
+            .unwrap();
+        carry(&mut joiner, &mut [&mut admin], &mut seq, T0 + 20, &mut rng);
+        assert!(!joiner.group_info(member).unwrap().is_member);
+        assert_eq!(admin.group_info(group).unwrap().members, 1);
+        admin
+            .rotate_group(group, (T0 + 21) * 1_000, &mut rng)
+            .unwrap();
+        carry(&mut admin, &mut [], &mut seq, T0 + 21, &mut rng);
+        assert_eq!(admin.group_info(group).unwrap().epoch, 2);
+
+        // Part 11 §11.12: a membership that ended takes a new invitation.
+        // The group of its admit takes the place of the row, in the
+        // conversation that the device held.
+        let back = invite(&mut admin, &mut joiner, group, peers, T0 + 30, &mut rng);
+        assert_eq!(back, member);
+        let info = joiner.group_info(member).unwrap();
+        assert!(info.is_member && !info.is_closed);
+        assert_eq!((info.own_index, info.members), (2, 2));
+        assert_eq!(joiner.messages(member).unwrap().len(), 1);
+        joiner.lock();
+        joiner.unlock(&units("correct horse"), T0 + 40).unwrap();
+        assert_eq!(joiner.group_info(member).unwrap().own_index, 2);
+        say(&mut admin, group, "after", T0 + 50, &mut rng);
+        carry(&mut admin, &mut [&mut joiner], &mut seq, T0 + 50, &mut rng);
+        assert_eq!(joiner.messages(member).unwrap().len(), 2);
+
+        // GRP-414: the state of an earlier admission that arrives late at
+        // a device of the set replaces nothing.
+        let now = joiner.group_state_object(member, T0 + 60).unwrap();
+        joiner
+            .apply_group_state(&subject, &before, &mut rng)
+            .unwrap();
+        assert_eq!(joiner.group_info(member).unwrap().own_index, 2);
+        // The state of a membership takes the place of a row whose own
+        // membership ended.
+        joiner
+            .leave_group(member, (T0 + 70) * 1_000, &mut rng)
+            .unwrap();
+        while joiner.take_group_post().is_some() {}
+        assert!(!joiner.group_info(member).unwrap().is_member);
+        joiner.apply_group_state(&subject, &now, &mut rng).unwrap();
+        let info = joiner.group_info(member).unwrap();
+        assert!(info.is_member);
+        assert_eq!(info.own_index, 2);
+        assert_eq!(joiner.messages(member).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn the_admin_of_an_offer_is_the_one_that_the_contact_of_the_admit_named() {
+        let mut rng = Rng(302);
+        let mut admin = new_client(&mut rng);
+        let mut insider = new_client(&mut rng);
+        let mut invited = new_client(&mut rng);
+        let group = new_group(&mut admin, &mut rng);
+        let group_id = admin.group_info(group).unwrap().group_id;
+        let inside = invite(
+            &mut admin,
+            &mut insider,
+            group,
+            (AT_ADMIN, AT_JOINER),
+            T0 + 1,
+            &mut rng,
+        );
+
+        // The admin offers the group. A member that is a contact of the
+        // invited device then sends an offer of its own for the same group.
+        // That offer names the roster key of the member as the key of the
+        // admin.
+        let peers = (ContactId([0x61; 32]), ContactId([0x62; 32]));
+        let insider_at_invited = ContactId([0x63; 32]);
+        let at_admin = admin.conversation_for(&peers.0 .0).unwrap();
+        let admin_at_invited = invited.conversation_for(&peers.1 .0).unwrap();
+        admin
+            .offer_group(group, at_admin, (T0 + 10) * 1_000, &mut rng)
+            .unwrap();
+        let offer = admin.take_outgoing().unwrap();
+        deliver(
+            &mut invited,
+            &peers.1,
+            &offer.app,
+            (T0 + 11) * 1_000,
+            &mut rng,
+        );
+        let held = insider.group_of(inside).unwrap();
+        let own_pk = held.own_roster_pk();
+        let creator_pk = held.roster().member(0).unwrap().roster_pk.clone().unwrap();
+        let invitation = GroupInvitation {
+            group_id,
+            stage: InvitationStage::Offer {
+                name: "Summit",
+                admin_roster_pk: &own_pk,
+                creator_roster_pk: &creator_pk,
+            },
+        };
+        let mut payload = vec![0u8; 4_096];
+        let used = invitation.encode(&mut payload).unwrap();
+        let control = GroupControl {
+            control_type: ControlType::Invitation,
+            payload: &payload[..used],
+        };
+        let mut body = vec![0u8; used + 8];
+        let used = control.encode(&mut body).unwrap();
+        let forged = AppMessage {
+            kind: AppKind::GroupControl,
+            msg_id: [0x77; 16],
+            sent_at: (T0 + 12) * 1_000,
+            body: &body[..used],
+        };
+        let mut app = vec![0u8; forged.len()];
+        forged.encode(&mut app).unwrap();
+        deliver(
+            &mut invited,
+            &insider_at_invited,
+            &app,
+            (T0 + 12) * 1_000,
+            &mut rng,
+        );
+        assert_eq!(invited.group_offers().unwrap().len(), 2);
+
+        // The invited device takes the offer of the admin, and the admin
+        // admits it.
+        let offers = invited.group_offers().unwrap();
+        let taken = offers
+            .iter()
+            .find(|offer| offer.from == admin_at_invited)
+            .unwrap();
+        invited
+            .accept_group_offer(taken, (T0 + 13) * 1_000, &mut rng)
+            .unwrap();
+        let asked = invited.take_outgoing().unwrap();
+        deliver(
+            &mut admin,
+            &peers.0,
+            &asked.app,
+            (T0 + 14) * 1_000,
+            &mut rng,
+        );
+        let joiners = admin.group_joiners().unwrap();
+        let admission = admin
+            .add_joiner(&joiners[0], (T0 + 15) * 1_000, &mut rng)
+            .unwrap();
+        carry(&mut admin, &mut [], &mut 0, T0 + 15, &mut rng);
+        admin
+            .admit_joiner(
+                &joiners[0],
+                admission.index,
+                b"a descriptor",
+                (T0 + 16) * 1_000,
+                &mut rng,
+            )
+            .unwrap();
+        let admit = admin.take_outgoing().unwrap();
+        deliver(
+            &mut invited,
+            &peers.1,
+            &admit.app,
+            (T0 + 17) * 1_000,
+            &mut rng,
+        );
+        let member = invited
+            .accept_group_admit(
+                admin_at_invited,
+                &group_id,
+                &admission.snapshot,
+                T0 + 18,
+                &mut rng,
+            )
+            .unwrap();
+
+        // GRP-244: the contact of the admit shows at the index that its own
+        // offer named. It shows at no index that the offer of another
+        // contact named.
+        let members = invited.group_members(member).unwrap();
+        let contact_of = |index: u16| {
+            members
+                .iter()
+                .find(|held| held.index == index)
+                .unwrap()
+                .contact
+        };
+        assert_eq!(contact_of(0), Some(admin_at_invited));
+        assert_eq!(contact_of(1), None);
+        // The offer of the other contact left with the join.
+        assert!(invited.group_offers().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_admin_counts_silence_over_the_time_that_it_read_the_group_alone() {
+        let mut rng = Rng(303);
+        let mut admin = new_client(&mut rng);
+        let mut second = new_client(&mut rng);
+        let mut third = new_client(&mut rng);
+        let group = new_group(&mut admin, &mut rng);
+        invite(
+            &mut admin,
+            &mut second,
+            group,
+            (AT_ADMIN, AT_JOINER),
+            T0 + 1,
+            &mut rng,
+        );
+        invite(
+            &mut admin,
+            &mut third,
+            group,
+            (ContactId([0x53; 32]), ContactId([0x54; 32])),
+            T0 + 2,
+            &mut rng,
+        );
+        let mut reading = BTreeSet::new();
+        let start = T0 + 100;
+
+        // GRP-396: a `GSUB` that just left read no backlog yet, and nobody
+        // is silent before the watch starts.
+        assert!(pump(&mut admin, &mut reading, start, &mut rng).is_empty());
+        let watched = start + WATCH_QUIET;
+        assert!(pump(&mut admin, &mut reading, watched, &mut rng).is_empty());
+        // Each hour a tick names the group as read, for thirty days.
+        let silent = watched + GROUP_SILENT_EVICT;
+        let mut at = watched;
+        while at < silent {
+            at += 3_600;
+            admin.group_reads(&[group], at * 1_000, &mut rng).unwrap();
+        }
+        // GRP-397: the backoff comes first. GRP-134: the replica of this
+        // session gave no answer yet, thus one presence record asks it for
+        // a `GSEQ`. No removal comes before that answer.
+        assert!(pump(&mut admin, &mut reading, silent, &mut rng).is_empty());
+        assert!(pump(&mut admin, &mut reading, silent + 3_600, &mut rng).is_empty());
+        let probe = admin.take_group_post().unwrap();
+        assert!(probe.message.is_none() && probe.unsent.is_none());
+        assert!(pump(&mut admin, &mut reading, silent + 3_601, &mut rng).is_empty());
+        assert!(admin.take_group_post().is_none());
+        for relay in RELAYS {
+            admin
+                .group_replica_reached(group, &relay, true, &mut rng)
+                .unwrap();
+        }
+        assert_eq!(
+            pump(&mut admin, &mut reading, silent + 3_602, &mut rng),
+            vec![(group, 1, Silence::Remove), (group, 2, Silence::Remove)]
+        );
+
+        // The device is off for 31 days. At its return each member is as
+        // silent as before on the clock, and the admin watched none of that
+        // time. No removal comes before the backlog arrived, and none after
+        // it.
+        admin.lock();
+        let back = silent + 31 * DAY;
+        admin.unlock(&units("correct horse"), back).unwrap();
+        reading.clear();
+        assert!(pump(&mut admin, &mut reading, back, &mut rng).is_empty());
+        assert!(pump(&mut admin, &mut reading, back + WATCH_QUIET, &mut rng).is_empty());
+        assert!(pump(
+            &mut admin,
+            &mut reading,
+            back + WATCH_QUIET + 3_600,
+            &mut rng
+        )
+        .is_empty());
+        assert!(pump(
+            &mut admin,
+            &mut reading,
+            back + WATCH_QUIET + 7_200,
+            &mut rng
+        )
+        .is_empty());
+
+        // A tick that is missing for more than `CLOCK_SKEW` ends the watch,
+        // and the time of the hole counts for no silence.
+        let hole = back + 40 * DAY;
+        assert!(pump(&mut admin, &mut reading, hole, &mut rng).is_empty());
+        assert!(pump(&mut admin, &mut reading, hole + WATCH_QUIET, &mut rng).is_empty());
+        assert!(pump(
+            &mut admin,
+            &mut reading,
+            hole + WATCH_QUIET + 3_600,
+            &mut rng
+        )
+        .is_empty());
+
+        // SCP-019: a movement of the clock starts each silence again.
+        let moved = hole + 40 * DAY;
+        admin.clock_check(moved * 1_000, &mut rng);
+        assert!(pump(&mut admin, &mut reading, moved, &mut rng).is_empty());
+        assert!(pump(&mut admin, &mut reading, moved + 3_600, &mut rng).is_empty());
+
+        // A subscription that ended watches nothing.
+        reading.clear();
+        admin
+            .group_reads(&[], (moved + 3_601) * 1_000, &mut rng)
+            .unwrap();
+        let far = moved + 60 * DAY;
+        assert!(admin
+            .members_to_evict(far * 1_000, &mut rng)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn the_gkey_of_new_owner_credentials_goes_again_until_a_gseq_follows_it() {
+        let mut rng = Rng(304);
+        let mut client = new_client(&mut rng);
+        let mut other = new_client(&mut rng);
+        let group = new_group(&mut client, &mut rng);
+        invite(
+            &mut client,
+            &mut other,
+            group,
+            (AT_ADMIN, AT_JOINER),
+            T0 + 1,
+            &mut rng,
+        );
+        let mut seq = 20;
+        let owners = |client: &Device| -> [[u8; 32]; 2] {
+            let held = client.group_of(group).unwrap();
+            [
+                *held.owner(0).unwrap().expose(),
+                *held.owner(1).unwrap().expose(),
+            ]
+        };
+        client
+            .set_group_role(group, 1, Role::Admin, (T0 + 10) * 1_000, &mut rng)
+            .unwrap();
+        carry(&mut client, &mut [&mut other], &mut seq, T0 + 10, &mut rng);
+        while client.take_group_rekey().is_some() {}
+        let old = owners(&client);
+
+        // GRP-401: the demotion draws new owner credentials, and the `GKEY`
+        // of each replica goes under the ones that they replace.
+        client
+            .set_group_role(group, 1, Role::Member, (T0 + 20) * 1_000, &mut rng)
+            .unwrap();
+        let new = owners(&client);
+        assert_ne!(new, old);
+        let first: Vec<GroupRekey> = core::iter::from_fn(|| client.take_group_rekey()).collect();
+        assert_eq!(first.len(), 2);
+        assert!(first.iter().all(|job| job.next_own_pk.is_some()));
+
+        // The run ends before either `GKEY` left. The credentials before
+        // are in the store, and the next session sends each `GKEY` again,
+        // once it read its backlog.
+        client.lock();
+        client.unlock(&units("correct horse"), T0 + 100).unwrap();
+        assert!(client.take_group_rekey().is_none());
+        let mut reading = BTreeSet::new();
+        pump(&mut client, &mut reading, T0 + 100, &mut rng);
+        assert!(client.take_group_rekey().is_none());
+        pump(&mut client, &mut reading, T0 + 100 + WATCH_QUIET, &mut rng);
+        let again: Vec<GroupRekey> = core::iter::from_fn(|| client.take_group_rekey()).collect();
+        for (which, relay) in RELAYS.iter().enumerate() {
+            let carried: Vec<&GroupRekey> = again
+                .iter()
+                .filter(|job| job.relay == *relay && job.next_own_pk.is_some())
+                .collect();
+            assert_eq!(carried.len(), 1);
+            assert_eq!(*carried[0].own.expose(), old[which]);
+            assert!(again.iter().any(|job| job.relay == *relay
+                && job.next_own_pk.is_none()
+                && *job.own.expose() == new[which]));
+        }
+
+        let held = client.gkey_row(group).unwrap();
+        assert!(held.replaced.iter().all(|before| before.len() == 1));
+        // A record that leaves after them takes its `GSEQ` at each replica:
+        // each `GKEY` arrived, and the credentials before leave the store.
+        say(&mut client, group, "after the rotation", T0 + 300, &mut rng);
+        carry(&mut client, &mut [&mut other], &mut seq, T0 + 300, &mut rng);
+        let held = client.gkey_row(group).unwrap();
+        assert!(held.replaced.iter().all(Vec::is_empty));
+        assert!(held.taken.iter().all(Option::is_some));
+        client.lock();
+        client.unlock(&units("correct horse"), T0 + 1_000).unwrap();
+        reading.clear();
+        pump(&mut client, &mut reading, T0 + 1_000, &mut rng);
+        pump(
+            &mut client,
+            &mut reading,
+            T0 + 1_000 + WATCH_QUIET,
+            &mut rng,
+        );
+        assert!(client.take_group_rekey().is_none());
+    }
+
+    #[test]
+    fn a_closed_group_fails_a_message_and_opens_when_a_replica_answers() {
+        let mut rng = Rng(305);
+        let mut client = new_client(&mut rng);
+        let group = new_group(&mut client, &mut rng);
+        client.close_group(group, &mut rng).unwrap();
+        assert!(client.group_info(group).unwrap().is_closed);
+        // GRP-210: the message did not go, and the view shows it.
+        let message = say(&mut client, group, "into a closed group", T0 + 10, &mut rng);
+        assert!(client.take_group_post().is_none());
+        assert_eq!(client.info(&message).unwrap().delivery, Delivery::Failed);
+        while client.next_event().is_some() {}
+        // A replica that answers under the credentials of this device holds
+        // the group queue, thus the group is not gone.
+        client.group_queue_reached(&QUEUES[1], &mut rng).unwrap();
+        assert!(!client.group_info(group).unwrap().is_closed);
+        assert_eq!(client.next_event(), Some(Event::Conversations));
+        client
+            .send_again(&message, (T0 + 20) * 1_000, &mut rng)
+            .unwrap();
+        assert!(client.take_group_post().is_some());
+    }
+
+    #[test]
+    fn a_subscription_moves_the_replica_when_its_gsub_goes_and_not_before() {
+        let mut rng = Rng(306);
+        let mut client = new_client(&mut rng);
+        let group = new_group(&mut client, &mut rng);
+        let relay_of = |client: &mut Device| {
+            let held = client.group_subscriptions(&mut Rng(1)).unwrap();
+            assert_eq!(held.len(), 1);
+            held[0].relay
+        };
+        // GRP-204: a pump that sends no `GSUB` changes nothing.
+        let stored = client.group_of(group).unwrap().export().unwrap();
+        let first = relay_of(&mut client);
+        assert_eq!(relay_of(&mut client), first);
+        assert_eq!(client.group_of(group).unwrap().export().unwrap(), stored);
+        // The `GSUB` goes, and the next one takes the other replica. That
+        // is in the same session after a `GSUB` that found no circuit
+        // (`GRP-391`), and in the next session else.
+        client
+            .group_reads(&[group], (T0 + 10) * 1_000, &mut rng)
+            .unwrap();
+        while client.take_epoch_upload().is_some() {}
+        let second = relay_of(&mut client);
+        assert_ne!(second, first);
+        assert_eq!(relay_of(&mut client), second);
+        client
+            .group_reads(&[group], (T0 + 20) * 1_000, &mut rng)
+            .unwrap();
+        while client.take_epoch_upload().is_some() {}
+        assert_eq!(relay_of(&mut client), first);
+        // A tick that names the group as read sends no `GSUB`.
+        while client.take_epoch_upload().is_some() {}
+        client
+            .group_reads(&[group], (T0 + 21) * 1_000, &mut rng)
+            .unwrap();
+        assert_eq!(relay_of(&mut client), first);
+
+        // NTF-093: the `GNREG` of the replica of a `GSUB` goes with it, and
+        // no other one before its time.
+        while client.take_epoch_upload().is_some() {}
+        client
+            .set_group_notify(
+                group,
+                [9; 32],
+                &[7; umbra_wire::address::LEN],
+                T0 + 30,
+                &mut rng,
+            )
+            .unwrap();
+        for due in client.notify_registrations_due(T0 + 30).unwrap() {
+            client
+                .notify_registered(group, due.which, T0 + 30, &mut rng)
+                .unwrap();
+        }
+        assert!(client.notify_registrations_due(T0 + 31).unwrap().is_empty());
+        let next = relay_of(&mut client);
+        client
+            .group_reads(&[group], (T0 + 40) * 1_000, &mut rng)
+            .unwrap();
+        let due = client.notify_registrations_due(T0 + 40).unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].relay, next);
+        client
+            .notify_registered(group, due[0].which, T0 + 40, &mut rng)
+            .unwrap();
+        assert!(client.notify_registrations_due(T0 + 41).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_record_that_a_replica_did_not_take_goes_again_inside_the_run() {
+        let mut rng = Rng(307);
+        let mut client = new_client(&mut rng);
+        let group = new_group(&mut client, &mut rng);
+        let sent = T0 + 10;
+        say(&mut client, group, "hello", sent, &mut rng);
+        let post = client.take_group_post().unwrap();
+        let row = post.unsent.unwrap();
+        for relay in RELAYS {
+            client
+                .group_post_sent(&row, &relay, sent, &mut rng)
+                .unwrap();
+        }
+        // GRP-196: no replica answered, and no wait ran out yet.
+        client
+            .expire_group_holds((sent + RESEND_FIRST - 1) * 1_000, &mut rng)
+            .unwrap();
+        assert!(client.take_group_post().is_none());
+        // The same bytes go again to each replica after the first wait.
+        let again = sent + RESEND_FIRST + RESEND_SWEEP;
+        client.expire_group_holds(again * 1_000, &mut rng).unwrap();
+        let second = client.take_group_post().unwrap();
+        assert_eq!(second.record, post.record);
+        assert_eq!(second.unsent, Some(row));
+        assert_eq!(second.pending, [true, true]);
+        assert!(client.take_group_post().is_none());
+        // One replica takes it, and the other one alone gets it once more,
+        // after twice the wait.
+        for relay in RELAYS {
+            client
+                .group_post_sent(&row, &relay, again, &mut rng)
+                .unwrap();
+        }
+        client
+            .group_post_accepted(&row, &RELAYS[0], &mut rng)
+            .unwrap();
+        client
+            .expire_group_holds((again + RESEND_FIRST + RESEND_SWEEP) * 1_000, &mut rng)
+            .unwrap();
+        assert!(client.take_group_post().is_none());
+        client
+            .expire_group_holds((again + 2 * RESEND_FIRST + RESEND_SWEEP) * 1_000, &mut rng)
+            .unwrap();
+        let third = client.take_group_post().unwrap();
+        assert_eq!(third.pending, [false, true]);
+    }
+
+    #[test]
+    fn a_deletion_that_came_before_its_target_and_one_after_a_rekey_both_apply() {
+        let mut rng = Rng(308);
+        let mut client = new_client(&mut rng);
+        let mut other = new_client(&mut rng);
+        let group = new_group(&mut client, &mut rng);
+        let member = invite(
+            &mut client,
+            &mut other,
+            group,
+            (AT_ADMIN, AT_JOINER),
+            T0 + 1,
+            &mut rng,
+        );
+        let ms = |seconds: u64| seconds * 1_000;
+
+        // DEV-093: one replica gives the deletion before the message. The
+        // deletion waits, and the message is a tombstone at its arrival.
+        let mine = say(&mut other, member, "a secret", T0 + 10, &mut rng);
+        let message = other.take_group_post().unwrap();
+        other
+            .delete_for_everyone(&mine, ms(T0 + 11), &mut rng)
+            .unwrap();
+        let deletion = other.take_group_post().unwrap();
+        assert!(client
+            .on_group_record(&QUEUES[0], 31, &deletion.record, ms(T0 + 12), &mut rng)
+            .unwrap()
+            .is_none());
+        assert!(client.messages(group).unwrap().is_empty());
+        let held = client
+            .on_group_record(&QUEUES[0], 30, &message.record, ms(T0 + 13), &mut rng)
+            .unwrap()
+            .unwrap();
+        assert!(client.info(&held).unwrap().deleted);
+
+        // An edit waits in the same way.
+        let mine = say(&mut other, member, "meet at 8", T0 + 20, &mut rng);
+        let message = other.take_group_post().unwrap();
+        let mut draft = other.new_draft(member);
+        draft.set_text(&units("meet at 9")).unwrap();
+        other.edit(&mine, draft, ms(T0 + 21), &mut rng).unwrap();
+        let edit = other.take_group_post().unwrap();
+        client
+            .on_group_record(&QUEUES[0], 33, &edit.record, ms(T0 + 22), &mut rng)
+            .unwrap();
+        let held = client
+            .on_group_record(&QUEUES[0], 32, &message.record, ms(T0 + 23), &mut rng)
+            .unwrap()
+            .unwrap();
+        assert_eq!(client.info(&held).unwrap().revisions, 1);
+
+        // Part 11 §11.12: a re-key moves the member to a new index, and it
+        // keeps its messages. Its deletion after the re-key applies to a
+        // message that it sent before.
+        let mut seq = 40;
+        let mine = say(&mut other, member, "from the old index", T0 + 30, &mut rng);
+        let post = other.take_group_post().unwrap();
+        let held = client
+            .on_group_record(&QUEUES[0], 34, &post.record, ms(T0 + 31), &mut rng)
+            .unwrap()
+            .unwrap();
+        assert_eq!(client.info(&held).unwrap().sender, Some(1));
+        other.rekey_groups(ms(T0 + 40), &mut rng).unwrap();
+        carry(&mut other, &mut [&mut client], &mut seq, T0 + 40, &mut rng);
+        assert_eq!(other.group_info(member).unwrap().own_index, 2);
+        other
+            .delete_for_everyone(&mine, ms(T0 + 50), &mut rng)
+            .unwrap();
+        carry(&mut other, &mut [&mut client], &mut seq, T0 + 50, &mut rng);
+        assert!(client.info(&held).unwrap().deleted);
+    }
+
+    #[test]
+    fn a_rich_record_around_no_text_is_no_message_of_a_group() {
+        let mut rng = Rng(309);
+        let mut client = new_client(&mut rng);
+        let mut other = new_client(&mut rng);
+        let group = new_group(&mut client, &mut rng);
+        let member = invite(
+            &mut client,
+            &mut other,
+            group,
+            (AT_ADMIN, AT_JOINER),
+            T0 + 1,
+            &mut rng,
+        );
+        // DEV-174: a rich record takes its class from the kind that it goes
+        // around, and one around a vote is no message.
+        let rich = umbra_wire::app::rich::RichRecord {
+            reply_target: [0; 16],
+            thread_root: [0; 16],
+            forward_depth: 0,
+            mentions: Vec::new(),
+            inner_kind: AppKind::PollVote,
+            inner_body: b"no text at all",
+        };
+        let mut body = vec![0u8; rich.len()];
+        rich.encode(umbra_wire::app::Channel::Group, &mut body)
+            .unwrap();
+        let record = AppMessage {
+            kind: AppKind::Rich,
+            msg_id: [0x42; 16],
+            sent_at: (T0 + 10) * 1_000,
+            body: &body,
+        };
+        let mut app = vec![0u8; record.len()];
+        record.encode(&mut app).unwrap();
+        let sealed = other
+            .group_of(member)
+            .unwrap()
+            .post(&app, T0 + 10, &mut rng)
+            .unwrap();
+        assert!(client
+            .on_group_record(&QUEUES[0], 30, &sealed, (T0 + 11) * 1_000, &mut rng)
+            .unwrap()
+            .is_none());
+        assert!(client.messages(group).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_rekey_record_for_an_index_that_no_rival_moved_removes_nobody() {
+        let mut rng = Rng(310);
+        let mut admin = new_client(&mut rng);
+        let mut joiner = new_client(&mut rng);
+        let group = new_group(&mut admin, &mut rng);
+        let member = invite(
+            &mut admin,
+            &mut joiner,
+            group,
+            (AT_ADMIN, AT_JOINER),
+            T0 + 1,
+            &mut rng,
+        );
+        // The member moves to new keys after it lost a device, and no rival
+        // re-key ever came.
+        let mut stolen = joiner.group_of(member).unwrap();
+        joiner.rekey_groups((T0 + 10) * 1_000, &mut rng).unwrap();
+        let rekey = joiner.take_group_post().unwrap();
+        admin
+            .on_group_record(&QUEUES[0], 21, &rekey.record, (T0 + 11) * 1_000, &mut rng)
+            .unwrap();
+        let moved = admin.group_of(group).unwrap().roster().successor_of(1);
+        assert_eq!(moved, Some(2));
+        while admin.take_group_post().is_some() {}
+        // The lost device reads the same record, and its index left the
+        // roster.
+        let Outcome::Content {
+            app, sender, slot, ..
+        } = stolen.receive(&rekey.record, T0 + 11).unwrap()
+        else {
+            panic!("the lost device read no re-key");
+        };
+        let parsed = AppMessage::parse(&app, umbra_wire::app::Channel::Group).unwrap();
+        stolen
+            .apply_control_at(
+                &GroupControl::parse(parsed.body).unwrap(),
+                sender,
+                slot,
+                T0 + 11,
+            )
+            .unwrap();
+
+        // GRP-349: the holder of the lost device signs a record for the old
+        // index under its roster key, and sends it to the admin. No rival
+        // moved that index, thus the admin discards the record: the index
+        // that follows it holds the keys of the member itself.
+        let fresh = umbra_core::group::join::JoinKeys::make(&mut rng).unwrap();
+        let object = stolen.pairwise_rekey_object(&fresh, &mut rng).unwrap();
+        let forged = AppMessage {
+            kind: AppKind::GroupControl,
+            msg_id: [0x66; 16],
+            sent_at: (T0 + 20) * 1_000,
+            body: &object,
+        };
+        let mut app = vec![0u8; forged.len()];
+        forged.encode(&mut app).unwrap();
+        deliver(&mut admin, &AT_ADMIN, &app, (T0 + 20) * 1_000, &mut rng);
+        let held = admin.group_of(group).unwrap();
+        assert!(held.roster().member(2).unwrap().active);
+        assert!(admin.group_joiners().unwrap().is_empty());
+        assert!(admin.take_group_post().is_none());
+    }
+
+    #[derive(Default)]
+    struct View(Vec<u16>);
+
+    impl crate::Sink for View {
+        fn put(&mut self, code_units: &[u16]) {
+            self.0 = code_units.to_vec();
+        }
+    }
+
+    #[test]
+    fn an_edit_that_each_replica_gives_applies_once_and_its_late_copy_changes_nothing() {
+        let mut rng = Rng(311);
+        let mut client = new_client(&mut rng);
+        let mut other = new_client(&mut rng);
+        let group = new_group(&mut client, &mut rng);
+        let member = invite(
+            &mut client,
+            &mut other,
+            group,
+            (AT_ADMIN, AT_JOINER),
+            T0 + 1,
+            &mut rng,
+        );
+        let ms = |seconds: u64| seconds * 1_000;
+        let text = |client: &Device, message: &MsgRef| {
+            let mut view = View::default();
+            client.render(message, &mut view).unwrap();
+            String::from_utf16(&view.0).unwrap()
+        };
+        let mine = say(&mut other, member, "meet at 8", T0 + 10, &mut rng);
+        let message = other.take_group_post().unwrap();
+        let held = client
+            .on_group_record(&QUEUES[0], 30, &message.record, ms(T0 + 11), &mut rng)
+            .unwrap()
+            .unwrap();
+        let mut edit = |to: &str, at: u64, rng: &mut Rng| {
+            let mut draft = other.new_draft(member);
+            draft.set_text(&units(to)).unwrap();
+            other.edit(&mine, draft, ms(at), rng).unwrap();
+            other.take_group_post().unwrap()
+        };
+
+        // GRP-206: a reader takes each record from each replica in turn.
+        // The second copy of an edit counts no second revision.
+        let first = edit("meet at 9", T0 + 12, &mut rng);
+        for queue in &QUEUES {
+            client
+                .on_group_record(queue, 31, &first.record, ms(T0 + 13), &mut rng)
+                .unwrap();
+        }
+        assert_eq!(client.info(&held).unwrap().revisions, 1);
+        assert_eq!(text(&client, &held), "meet at 9");
+
+        // The second replica never took the second edit. A later session
+        // there gives the first one again, and the newer text stays.
+        let second = edit("meet at 10", T0 + 14, &mut rng);
+        client
+            .on_group_record(&QUEUES[0], 32, &second.record, ms(T0 + 15), &mut rng)
+            .unwrap();
+        assert_eq!(client.info(&held).unwrap().revisions, 2);
+        client
+            .on_group_record(&QUEUES[1], 31, &first.record, ms(T0 + 600), &mut rng)
+            .unwrap();
+        assert_eq!(client.info(&held).unwrap().revisions, 2);
+        assert_eq!(text(&client, &held), "meet at 10");
+        // A copy of the message itself drops at its `msg_id`.
+        assert!(client
+            .on_group_record(&QUEUES[1], 30, &message.record, ms(T0 + 601), &mut rng)
+            .unwrap()
+            .is_none());
+        assert_eq!(client.messages(group).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn an_epoch_of_the_backlog_sends_no_gkey_before_the_backlog_ends() {
+        let mut rng = Rng(312);
+        let mut client = new_client(&mut rng);
+        let mut other = new_client(&mut rng);
+        let group = new_group(&mut client, &mut rng);
+        let member = invite(
+            &mut client,
+            &mut other,
+            group,
+            (AT_ADMIN, AT_JOINER),
+            T0 + 1,
+            &mut rng,
+        );
+        let ms = |seconds: u64| seconds * 1_000;
+        while client.take_group_rekey().is_some() {}
+        // GRP-360: the epoch is aged, and the plain member rotates while
+        // the admin is away.
+        let later = T0 + 31 * DAY;
+        other.rotate_group(member, ms(later), &mut rng).unwrap();
+        let rotation = other.take_group_post().unwrap();
+        assert!(rotation.is_rotation);
+
+        // The admin comes back, and the record of its backlog installs the
+        // epoch. The group can hold a later epoch that this backlog gives
+        // next, thus no `GKEY` goes yet (§11.4.1).
+        let mut reading = BTreeSet::new();
+        pump(&mut client, &mut reading, later + 10, &mut rng);
+        client
+            .on_group_record(&QUEUES[0], 40, &rotation.record, ms(later + 11), &mut rng)
+            .unwrap();
+        assert_eq!(client.group_of(group).unwrap().epoch(), 2);
+        assert!(client.take_group_rekey().is_none());
+        // The backlog ended: the `GKEY` of the epoch that stands goes to
+        // each replica.
+        pump(
+            &mut client,
+            &mut reading,
+            later + 11 + WATCH_QUIET,
+            &mut rng,
+        );
+        let write_pk = client
+            .group_of(group)
+            .unwrap()
+            .credentials()
+            .unwrap()
+            .write_public();
+        let jobs: Vec<GroupRekey> = core::iter::from_fn(|| client.take_group_rekey()).collect();
+        assert_eq!(jobs.len(), GROUP_REPLICAS);
+        assert!(jobs.iter().all(|job| job.write_pk == write_pk));
+
+        // A record that leaves after them, and after the grace of the
+        // epoch before, goes under the pair of the new epoch alone. Its
+        // `GSEQ` tells that each `GKEY` arrived (`GRP-398`).
+        let mut seq = 50;
+        let after = later + 2 * DAY;
+        say(&mut client, group, "under the new epoch", after, &mut rng);
+        carry(&mut client, &mut [], &mut seq, after, &mut rng);
+        assert!(client
+            .gkey_row(group)
+            .unwrap()
+            .taken
+            .iter()
+            .all(|taken| *taken == Some(write_pk)));
+        // GRP-363: each replica then refuses that pair, as after a `GKEY`
+        // of an older epoch moved it back. The mark of the `GKEY` goes. The
+        // next session sends it again after its backlog, to a group that
+        // this device shows as closed too.
+        client.close_group(group, &mut rng).unwrap();
+        assert!(client
+            .gkey_row(group)
+            .unwrap()
+            .taken
+            .iter()
+            .all(Option::is_none));
+        client.lock();
+        client
+            .unlock(&units("correct horse"), after + 1_000)
+            .unwrap();
+        reading.clear();
+        pump(&mut client, &mut reading, after + 1_000, &mut rng);
+        assert!(client.take_group_rekey().is_none());
+        pump(
+            &mut client,
+            &mut reading,
+            after + 1_000 + WATCH_QUIET,
+            &mut rng,
+        );
+        let again: Vec<GroupRekey> = core::iter::from_fn(|| client.take_group_rekey()).collect();
+        assert_eq!(again.len(), GROUP_REPLICAS);
+        assert!(again.iter().all(|job| job.write_pk == write_pk));
+    }
+
+    #[test]
+    fn a_rekey_that_a_rate_holds_back_goes_again_when_the_rate_takes_it() {
+        let mut rng = Rng(313);
+        let mut client = new_client(&mut rng);
+        let group = new_group(&mut client, &mut rng);
+        let ms = |seconds: u64| seconds * 1_000;
+        // GRP-076: four re-keys of one member in a day, and the fifth
+        // waits. The device that left the set holds keys of the group
+        // until it goes.
+        for step in 0..u64::from(umbra_core::group::REKEY_RATE_DAY) {
+            client.rekey_groups(ms(T0 + 10 + step), &mut rng).unwrap();
+        }
+        let index = client.group_info(group).unwrap().own_index;
+        assert_eq!(index, 4);
+        assert!(matches!(
+            client.rekey_groups(ms(T0 + 20), &mut rng),
+            Err(Error::Busy)
+        ));
+        while client.take_group_post().is_some() {}
+        // A sweep inside the day posts nothing, and the re-key still waits.
+        client.expire_group_holds(ms(T0 + 100), &mut rng).unwrap();
+        assert_eq!(client.group_info(group).unwrap().own_index, index);
+        // The rate takes it a day later, and the sweep posts it.
+        let later = T0 + 25 * 3_600;
+        client.expire_group_holds(ms(later), &mut rng).unwrap();
+        assert_eq!(client.group_info(group).unwrap().own_index, index + 1);
+        // It goes once.
+        client
+            .expire_group_holds(ms(later + 120), &mut rng)
+            .unwrap();
+        assert_eq!(client.group_info(group).unwrap().own_index, index + 1);
+    }
 }

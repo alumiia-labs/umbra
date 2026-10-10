@@ -132,10 +132,11 @@ impl IssuerKeys {
             .any(|((t, _), key)| *t == token_type && token_key_id(key) == *key_id)
     }
 
-    /// Drops each key older than the epoch before `epoch`.
+    /// Drops each key older than the epoch before `epoch`. The key of the
+    /// next epoch stays (`ABU-113`).
     pub fn retire(&mut self, epoch: u32) {
-        self.keys
-            .retain(|(_, e), _| *e == epoch || *e == epoch.wrapping_sub(1));
+        let oldest = epoch.saturating_sub(1);
+        self.keys.retain(|(_, e), _| *e >= oldest);
     }
 }
 
@@ -167,9 +168,13 @@ mod tests {
             authenticator: alloc::vec![0; 64],
         };
         assert_eq!(keys.epoch_of(&token), Some(5));
+        // ABU-113: a client holds the key of the next epoch ahead of time,
+        // and a retire at the current epoch keeps it.
+        keys.accept(TYPE_FIRST_PARTY, 8, &[4; 32]).unwrap();
         keys.retire(7);
         assert_eq!(keys.epoch_of(&token), None);
         assert_eq!(keys.key(TYPE_FIRST_PARTY, 6), Some(&[2u8; 32][..]));
+        assert_eq!(keys.key(TYPE_FIRST_PARTY, 8), Some(&[4u8; 32][..]));
     }
 
     #[test]

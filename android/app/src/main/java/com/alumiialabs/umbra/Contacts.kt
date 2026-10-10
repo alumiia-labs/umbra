@@ -86,7 +86,7 @@ fun AddContactScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                 Spacer(Modifier.width(16.dp))
                 Text("Use an invitation instead")
             }
-            // Mockup 012: the group of Part 11 starts beside the contacts.
+            // The group of Part 11 starts beside the contacts.
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -198,9 +198,15 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
     // A reusable link, an `umbra:pub:` string, or a handle starts a request
     // (Part 4 §4.3.3). An invitation link opens as before.
     val isRequest = isRequestTarget(pasted)
-    // A tapped or shared link fills the field, and it waits for Continue.
+    // A link that another app gave, which no tap of the user took yet. Each
+    // app of the device can give one, thus it starts no lookup by itself.
+    var given by remember { mutableStateOf<String?>(null) }
+    // A tapped or shared link fills the field, and it waits for a tap.
     LaunchedEffect(Core.linkedInvitation) {
-        Core.linkedInvitation?.let { pasted = it }
+        Core.linkedInvitation?.let {
+            given = it
+            pasted = it
+        }
         Core.linkedInvitation = null
     }
     val open = { link: String ->
@@ -249,14 +255,23 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                 // Part 9 §9.3.1: a profile link shows the name and the
                 // welcome text of its holder before the request.
                 var preview by remember { mutableStateOf<uniffi.umbra_ffi.ContactPreview?>(null) }
+                val isGiven = given != null && given == pasted.trim()
                 LaunchedEffect(pasted) {
                     preview = null
-                    if (pasted.trim().startsWith("umbra://h/")) {
+                    if (!isGiven && pasted.trim().startsWith("umbra://h/")) {
                         Core.previewContact(pasted.trim()) { preview = it }
                     }
                 }
                 preview?.let { shown ->
                     ProfilePreview(shown)
+                    Spacer(Modifier.height(12.dp))
+                }
+                if (isGiven && pasted.trim().startsWith("umbra://h/")) {
+                    SecondaryButton("Look up", enabled = Core.online) {
+                        val link = pasted.trim()
+                        given = null
+                        Core.previewContact(link) { if (pasted.trim() == link) preview = it }
+                    }
                     Spacer(Modifier.height(12.dp))
                 }
                 OutlinedTextField(
@@ -401,7 +416,7 @@ fun NameContactScreen(conversation: Conversation, onDone: () -> Unit) {
     }
 }
 
-/** The edit view of a contact, after mockup 023: the avatar, the name, a note. */
+/** The edit view of a contact: the avatar, the name, a note. */
 @Composable
 fun RenameContactScreen(chat: Chat, onDone: () -> Unit) {
     var name by remember { mutableStateOf(chat.name) }

@@ -168,10 +168,12 @@ private fun OpenApp() {
     BackHandler(enabled = stack.isNotEmpty(), onBack = pop)
     // The keyboard of one view has no field in the next one.
     HideKeyboardOn(stack.lastOrNull())
-    // A tapped or shared invitation link opens the view of the link.
+    // A tapped or shared invitation link opens the view of the link above
+    // the open views. Another app can send one, and Back leads to the view
+    // that the user left.
     LaunchedEffect(Core.linkedInvitation) {
         if (Core.linkedInvitation != null && stack.lastOrNull() != Screen.UseInvitation) {
-            stack = listOf(Screen.UseInvitation)
+            stack = stack + Screen.UseInvitation
         }
     }
 
@@ -520,7 +522,7 @@ private fun ConnectionNote() {
 @Composable
 private fun ChatsTab(push: (Screen) -> Unit) {
     Column(Modifier.fillMaxSize()) {
-        // Mockup 153: a degraded state has its one line above the title.
+        // A degraded state has its one line above the title.
         ConnectionNote()
         GroupOfferPrompt()
         IntroductionPrompt()
@@ -649,7 +651,7 @@ fun EmptyState(title: String) {
 private fun SettingsTab(push: (Screen) -> Unit) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
         TabTitle("Settings")
-        // Mockup 105: this row leads to the settings of the lock. The lock
+        // This row leads to the settings of the lock. The lock
         // itself is the icon of the bar.
         SettingRow("lock", "App lock", "Passphrase and auto-lock") { push(Screen.AppLock) }
         SettingRow("bell", "Notifications", Modes.mode(LocalContext.current).label) { push(Screen.Notifications) }

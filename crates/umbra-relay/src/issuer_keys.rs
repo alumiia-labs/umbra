@@ -87,24 +87,43 @@ impl LogChannel for IssuerReader {
     }
 }
 
-/// Reads the key of this epoch and of the next one, and hands each new one
-/// to the node. The next key enters the log before its epoch (`ABU-098`).
+/// The epochs whose key a relay holds at `epoch`: the one before it, this
+/// one, and the next one. A verifier still accepts the tokens of the one
+/// before (`ABU-095`). The key of the next one enters the log before its
+/// epoch (`ABU-098`).
+fn wanted_epochs(epoch: u32) -> Vec<u32> {
+    let mut wanted = vec![epoch.saturating_sub(1), epoch, epoch.saturating_add(1)];
+    wanted.dedup();
+    wanted
+}
+
+/// Reads the key of the epoch before, of this epoch, and of the next one,
+/// and hands each new one to the node. A relay that starts inside an epoch
+/// thus accepts a token of the epoch before it (`ABU-095`).
 /// It runs on a thread of its own, since each read blocks.
 pub fn keep_reading(reader: IssuerReader, inputs: mpsc::Sender<Input>) {
     let mut held: Vec<u32> = Vec::new();
+    // The epoch before the first one of a log has no key. One line says
+    // that its key did not come, and the read goes again at the long wait.
+    let mut told_before = None;
     loop {
         let mut failed = false;
         let epoch = epoch_number(unix_now());
         held.retain(|known| *known >= epoch.saturating_sub(1));
-        for wanted in [epoch, epoch.saturating_add(1)] {
+        for wanted in wanted_epochs(epoch) {
             if held.contains(&wanted) {
                 continue;
             }
             let mut rng = crate::server::OsRng;
             let read = reader::cross_relay_key(&reader, wanted, &mut rng);
             if let Err(error) = &read {
-                eprintln!("the issuer key of epoch {wanted} did not come: {error:?}");
-                failed = true;
+                if wanted >= epoch {
+                    eprintln!("the issuer key of epoch {wanted} did not come: {error:?}");
+                    failed = true;
+                } else if told_before != Some(wanted) {
+                    eprintln!("the issuer key of epoch {wanted} did not come: {error:?}");
+                    told_before = Some(wanted);
+                }
             }
             if let Ok(key) = read {
                 if inputs
@@ -121,5 +140,19 @@ pub fn keep_reading(reader: IssuerReader, inputs: mpsc::Sender<Input>) {
             }
         }
         std::thread::sleep(if failed { READ_AGAIN } else { READ_EVERY });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_relay_reads_the_key_of_the_epoch_before_too() {
+        // ABU-095: a token of the epoch before passes, thus the relay holds its key.
+        assert_eq!(wanted_epochs(7), [6, 7, 8]);
+        // The first epoch has none before it, and no epoch reads twice.
+        assert_eq!(wanted_epochs(0), [0, 1]);
+        assert_eq!(wanted_epochs(u32::MAX), [u32::MAX - 1, u32::MAX]);
     }
 }

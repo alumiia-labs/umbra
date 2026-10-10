@@ -119,9 +119,23 @@ impl Bridge {
         self.command(Command::PeerKey { contact, key })
     }
 
-    /// The peer moved to `address` (`NET-190`).
-    pub fn peer_moved(&self, contact: ContactId, address: Zeroizing<Vec<u8>>) -> Result<(), Error> {
-        self.command(Command::PeerMoved { contact, address })
+    /// The dead-channel blob of the peer gave `address`, a candidate
+    /// address (`NET-190`). `dead` says whether the channel is dead, and
+    /// `sent` whether the candidate took its record of `NET-191` in an
+    /// earlier run.
+    pub fn peer_moved(
+        &self,
+        contact: ContactId,
+        address: Zeroizing<Vec<u8>>,
+        dead: bool,
+        sent: bool,
+    ) -> Result<(), Error> {
+        self.command(Command::PeerMoved {
+            contact,
+            address,
+            dead,
+            sent,
+        })
     }
 
     /// Ends a notify queue with a `DEL`.
@@ -187,6 +201,12 @@ impl Bridge {
     /// [`NetEvent::DeviceInvitation`] follows.
     pub fn invite_device(&self) -> Result<(), Error> {
         self.command(Command::InviteDevice)
+    }
+
+    /// Ends each sync invitation that this run made for a device link
+    /// (Part 7 `DEV-290`): the link ended with no sync channel.
+    pub fn end_device_invitation(&self) -> Result<(), Error> {
+        self.command(Command::EndDeviceInvitation)
     }
 
     /// Accepts the sync bundle of a provision. A [`NetEvent::DeviceLinked`]
@@ -258,67 +278,74 @@ impl Bridge {
     }
 
     /// Gives each record that waits in the client to the runtime. A record
-    /// for a conversation with no contact in this session fails.
+    /// for a conversation with no contact in this session fails. A run
+    /// that ended takes no record, and each one stays queued (`IMP-076`).
     pub fn flush<B: Backend, E: SecureElement, R: CryptoRng + ?Sized>(
         &mut self,
         client: &mut Client<B, E>,
         rng: &mut R,
     ) -> Result<(), Error> {
+        // IMP-076: the runtime of this bridge ended, and the update that
+        // says so did not come yet. A record that waits for a connection is
+        // no failure. Each one stays in the client and in its row, and the
+        // next run sends it.
+        if self.commands.is_closed() {
+            return Ok(());
+        }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_secs());
         while let Some(outgoing) = client.take_outgoing() {
+            let (message, conversation) = (outgoing.message, outgoing.conversation);
+            // IMP-126: this copy of the record overwrites itself at each
+            // end of the step, as the copy of the command does.
+            let app = Zeroizing::new(outgoing.app);
             let tag = self.next_tag;
             self.next_tag = self.next_tag.wrapping_add(1);
             // An ephemeral record takes no delivery state and no sync copy.
-            if outgoing.message == crate::client::EPHEMERAL {
-                if let Some(contact) = self.contacts.get(&outgoing.conversation) {
+            if message == crate::client::EPHEMERAL {
+                if let Some(contact) = self.contacts.get(&conversation) {
                     let _ = self.commands.send(Command::Send {
                         contact: *contact,
-                        app: outgoing.app.clone(),
+                        app,
                         tag,
                     });
                 }
                 continue;
             }
-            let taken = self
-                .contacts
-                .get(&outgoing.conversation)
-                .is_some_and(|contact| {
-                    let send = Command::Send {
-                        contact: *contact,
-                        app: outgoing.app.clone(),
-                        tag,
-                    };
-                    self.commands.send(send).is_ok()
-                });
-            if taken {
-                self.sent.insert(tag, outgoing.message);
-                // DEV-268: each record of the user goes to each device of
-                // the set, but one that a peer handed to this device.
-                if !client.was_handed(&outgoing.message) {
-                    client.publish_sync(
-                        outgoing.conversation,
-                        &outgoing.app,
-                        true,
-                        None,
-                        now,
-                        rng,
-                    )?;
+            // IMP-082: a record that waits for the room of a full queue
+            // goes at the end of its wait, and not at each connection. Its
+            // row keeps it, and the wait gives it to this path again.
+            if client.waits_for_room(&message, now)? {
+                continue;
+            }
+            let taken = self.contacts.get(&conversation).map(|contact| {
+                let send = Command::Send {
+                    contact: *contact,
+                    app: app.clone(),
+                    tag,
+                };
+                self.commands.send(send).is_ok()
+            });
+            match taken {
+                Some(true) => {
+                    self.sent.insert(tag, message);
+                    // DEV-268: each record of the user goes to each device
+                    // of the set, but one that a peer handed to this device.
+                    if !client.was_handed(&message) {
+                        client.publish_sync(conversation, &app, true, None, now, rng)?;
+                    }
                 }
-            } else if client.hands_off(outgoing.conversation)? {
+                // IMP-076: the run ended under this flush. The record keeps
+                // its row and its state, and the next run sends it with
+                // each record that still waits in the client.
+                Some(false) => return Ok(()),
                 // DEV-047: this device owns no channel, and the owner sends
                 // the record. Its state follows the record to the owner.
-                client.publish_sync(
-                    outgoing.conversation,
-                    &outgoing.app,
-                    true,
-                    Some(outgoing.message),
-                    now,
-                    rng,
-                )?;
-            } else {
-                client.fail(&outgoing.message, crate::FailureCause::NoPath, rng)?;
+                None if client.hands_off(conversation)? => {
+                    client.publish_sync(conversation, &app, true, Some(message), now, rng)?;
+                }
+                None => client.fail(&message, crate::FailureCause::NoPath, rng)?,
             }
         }
         // NET-097: the records of a sync channel wait for a session of the
@@ -338,7 +365,7 @@ impl Bridge {
             self.next_tag = self.next_tag.wrapping_add(1);
             let command = Command::Send {
                 contact,
-                app: send.app,
+                app: Zeroizing::new(send.app),
                 tag,
             };
             if self.commands.send(command).is_ok() {
@@ -385,6 +412,7 @@ impl Bridge {
             | Update::DeliveryGap(_)
             | Update::QueueRotated { .. }
             | Update::PeerMoved(_)
+            | Update::CandidateSent(_)
             | Update::ChannelRenewed(_)
             | Update::NotifyKey { .. }
             | Update::NotifyQueue { .. }
@@ -408,6 +436,14 @@ impl Bridge {
                 contact, is_device, ..
             } => {
                 let conversation = client.conversation_for(&contact.0)?;
+                // DEV-290: a sync channel that opens while no device waits
+                // for one belongs to a link that ended. It names no device
+                // of the set, thus it ends here. No view shows it, no
+                // record goes on it, and no later run reads its queue.
+                if is_device && !client.holds_pending_peer()? {
+                    client.refuse_device_channel(conversation, rng)?;
+                    return Ok(None);
+                }
                 self.contacts.insert(conversation, contact);
                 if is_device {
                     client.mark_device_peer(conversation, rng)?;

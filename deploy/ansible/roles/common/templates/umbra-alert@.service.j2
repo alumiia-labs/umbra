@@ -1,0 +1,8 @@
+# Written by Ansible (deploy/ansible/roles/common). A unit names this one
+# in its OnFailure line: umbra-alert@<unit name>.service.
+[Unit]
+Description=UMBRA alert: %i failed
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/umbra-alert %i

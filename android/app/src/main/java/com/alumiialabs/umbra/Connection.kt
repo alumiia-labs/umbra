@@ -98,7 +98,6 @@ private fun relayCount(count: Int) = if (count == 1) "1 relay" else "$count rela
 
 private fun place(hop: Hop) = "${hop.host} · ${hop.country}"
 
-/** Mockup 120. */
 @Composable
 fun ConnectionScreen(onBack: () -> Unit) {
     val context = LocalContext.current
@@ -136,9 +135,18 @@ fun ConnectionScreen(onBack: () -> Unit) {
             circuits.forEachIndexed { index, hops ->
                 // NET-343: a chain of one operator under a provisional directory.
                 val shared = connection?.oneOperator?.getOrNull(index) == true
+                // NET-201: two hops of one country are in one bloc. The
+                // record of the connection names no bloc, thus two hops of
+                // two countries of one bloc show no mark here.
+                val countries = hops.map { it.country }.filter { it.isNotBlank() }
+                val oneBloc = countries.size != countries.distinct().size
                 val path = hops.joinToString(" → ") { it.country }
-                val oneOperator = UiText.get(R.string.umbra_ui_net_343)
-                FactRow("route", "Circuit ${index + 1}", if (shared) "$path · $oneOperator" else path)
+                val mark = when {
+                    shared -> UiText.get(R.string.umbra_ui_net_343)
+                    oneBloc -> UiText.get(R.string.umbra_ui_net_201)
+                    else -> null
+                }
+                FactRow("route", "Circuit ${index + 1}", if (mark != null) "$path · $mark" else path)
                 HorizontalDivider(color = Palette.Divider)
             }
             val epoch = connection?.directoryEpoch?.toLong() ?: 0L

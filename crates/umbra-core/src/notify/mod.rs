@@ -29,8 +29,6 @@ pub const NTF_FAIL_MAX: u32 = 3;
 pub const WAKE_COALESCE_WINDOW: u64 = 10;
 /// `PUSH_TTL_MESSAGE`, in seconds.
 pub const PUSH_TTL_MESSAGE: u64 = 86_400;
-/// `PUSH_TTL_DIGEST`, in seconds.
-pub const PUSH_TTL_DIGEST: u64 = 3_600;
 /// `REPUSH_INTERVAL`, in seconds.
 pub const REPUSH_INTERVAL: u64 = 3_600;
 /// `REPUSH_MAX`.

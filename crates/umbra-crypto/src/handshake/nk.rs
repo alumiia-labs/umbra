@@ -11,6 +11,7 @@ use x25519_dalek::{PublicKey as XPublic, ReusableSecret, StaticSecret};
 
 use super::{contributory, suite, State, Trace, TAG_LEN};
 use crate::{labels, secret::Secret, Error};
+use zeroize::Zeroize;
 
 const NAME: &[u8] = b"UMBRA-NKhfs/v1";
 const EK_LEN: usize = 1184;
@@ -87,7 +88,9 @@ impl Client {
         // 3. e1
         let mut seed = Secret::<64>::zeroed();
         rng.fill_bytes(seed.expose_mut());
-        let e1_dk = DecapsulationKey::<MlKem768>::from_seed(Seed::from(*seed.expose()));
+        let mut dz = Seed::from(*seed.expose());
+        let e1_dk = DecapsulationKey::<MlKem768>::from_seed(dz);
+        dz.zeroize();
         e1_out.copy_from_slice(&e1_dk.encapsulation_key().to_bytes());
         st.mix_hash(e1_out);
         st.trace(trace, "1.3 e1");
@@ -103,7 +106,8 @@ impl Client {
         flight: &[u8],
         trace: &mut T,
     ) -> Result<Secret<32>, Error> {
-        let flight = flight.get(..FLIGHT2_LEN).ok_or(Error::Length)?;
+        // CRY-112: the flight carries no payload, thus a byte after the
+        // tag is a fault. Such a byte would be outside the transcript.
         if flight.len() != FLIGHT2_LEN {
             return Err(Error::Length);
         }
@@ -118,9 +122,10 @@ impl Client {
         st.mix_key(ee.as_bytes());
         st.trace(trace, "2.2 ee");
         let ct: ml_kem::Ciphertext<MlKem768> = Array::try_from(ekem1).map_err(|_| Error::Length)?;
-        let ss2 = self.e1_dk.decapsulate(&ct);
+        let mut ss2 = self.e1_dk.decapsulate(&ct);
         st.mix_hash(ekem1);
         st.mix_key(&ss2);
+        ss2.zeroize();
         st.trace(trace, "2.3 ekem1");
         st.open(&mut [], tag2)?;
         st.trace(trace, "2.4 tag2");
@@ -145,7 +150,10 @@ impl Relay {
         flight: &[u8],
         trace: &mut T,
     ) -> Result<Self, Error> {
-        let flight = flight.get(..FLIGHT1_LEN).ok_or(Error::Length)?;
+        // CRY-112: no payload, as at flight 2.
+        if flight.len() != FLIGHT1_LEN {
+            return Err(Error::Length);
+        }
         let (e, rest) = flight.split_at(32);
         let (e1, tag1) = rest.split_at(EK_LEN);
         let mut st = init(relay);
@@ -201,10 +209,11 @@ impl Relay {
         st.trace(trace, "2.2 ee");
         let e1 =
             EncapsulationKey::<MlKem768>::new(&Array::from(self.e1)).map_err(|_| Error::Key)?;
-        let (ekem1, ss2) = e1.encapsulate_with_rng(rng);
+        let (ekem1, mut ss2) = e1.encapsulate_with_rng(rng);
         ekem1_out.copy_from_slice(&ekem1);
         st.mix_hash(ekem1_out);
         st.mix_key(&ss2);
+        ss2.zeroize();
         st.trace(trace, "2.3 ekem1");
         tag_out.copy_from_slice(&st.seal(&mut [])?);
         st.trace(trace, "2.4 tag2");

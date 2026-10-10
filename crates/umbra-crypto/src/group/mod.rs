@@ -59,16 +59,17 @@ impl MemberKeys {
 
         let mut hybrid = Secret::<96>::zeroed();
         let _ = kdf.expand(labels::GROUP_KEM, hybrid.expose_mut());
+        // Each seed goes straight into a buffer that wipes itself.
         let (x_part, dz_part) = hybrid.expose().split_at(32);
-        let mut x = [0u8; 32];
-        let mut dz = [0u8; 64];
-        x.copy_from_slice(x_part);
-        dz.copy_from_slice(dz_part);
+        let mut x = Secret::<32>::zeroed();
+        let mut dz = Secret::<64>::zeroed();
+        x.expose_mut().copy_from_slice(x_part);
+        dz.expose_mut().copy_from_slice(dz_part);
 
         Self {
             roster: SigningKey::from_seed(Secret::new(*seed.expose())),
             pair: StaticSecret::from(*pair.expose()),
-            kem: KeyPair::from_seeds(Secret::new(x), Secret::new(dz)),
+            kem: KeyPair::from_seeds(x, dz),
         }
     }
 

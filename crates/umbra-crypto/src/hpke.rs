@@ -17,7 +17,7 @@ use hkdf::SimpleHkdf;
 use hmac::digest::{common::BlockSizeUser, Digest, OutputSizeUser};
 use rand_core::CryptoRng;
 use sha3::Sha3_256;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     kem::{self, Ciphertext, KeyPair, PublicKey},
@@ -113,8 +113,10 @@ fn labeled_extract<H: KdfHash>(suite: &[u8], salt: &[u8], label: &[u8], ikm: &[u
     labeled.extend_from_slice(suite);
     labeled.extend_from_slice(label);
     labeled.extend_from_slice(ikm);
-    let (prk, _) = SimpleHkdf::<H>::extract(Some(salt), &labeled);
-    prk.to_vec()
+    let (mut prk, _) = SimpleHkdf::<H>::extract(Some(salt), &labeled);
+    let out = prk.to_vec();
+    prk.zeroize();
+    out
 }
 
 /// `LabeledExpand(prk, label, info, L)`.
@@ -162,14 +164,19 @@ impl Context {
         context.push(MODE_BASE);
         context.extend_from_slice(&psk_id_hash);
         context.extend_from_slice(&info_hash);
-        let mut secret = labeled_extract::<H>(&suite, shared_secret.expose(), b"secret", b"");
+        // The wrapper wipes the secret on each path out of the call.
+        let secret = Zeroizing::new(labeled_extract::<H>(
+            &suite,
+            shared_secret.expose(),
+            b"secret",
+            b"",
+        ));
         let mut key = Secret::<KEY_LEN>::zeroed();
         labeled_expand::<H>(&suite, &secret, b"key", &context, key.expose_mut())?;
         let mut base_nonce = [0u8; NONCE_LEN];
         labeled_expand::<H>(&suite, &secret, b"base_nonce", &context, &mut base_nonce)?;
         let mut exporter = alloc::vec![0u8; <H as OutputSizeUser>::output_size()];
         labeled_expand::<H>(&suite, &secret, b"exp", &context, &mut exporter)?;
-        secret.zeroize();
         Ok(Context {
             key,
             base_nonce,

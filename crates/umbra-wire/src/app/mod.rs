@@ -215,29 +215,7 @@ impl<'a> AppMessage<'a> {
         let body_len = usize::try_from(r.u32()?).map_err(|_| Error::Malformed)?;
         let body = r.take(body_len)?;
         r.finish()?;
-        match kind {
-            AppKind::Text => {
-                core::str::from_utf8(body).map_err(|_| Error::Malformed)?;
-            }
-            AppKind::VerifyCommit if body.len() != 64 => {
-                return Err(Error::Malformed);
-            }
-            AppKind::VerifyReveal if body.len() != 32 => {
-                return Err(Error::Malformed);
-            }
-            AppKind::QueueAddress
-                if body.len() != crate::address::LEN || channel != Channel::Pairwise =>
-            {
-                return Err(Error::Malformed);
-            }
-            // IDN-187: a share goes on a pairwise channel alone.
-            AppKind::RecoveryShare
-                if body.len() != recovery::RECOVERY_SHARE_LEN || channel != Channel::Pairwise =>
-            {
-                return Err(Error::Malformed);
-            }
-            _ => {}
-        }
+        check_body(kind, body, channel)?;
         Ok(AppMessage {
             kind,
             msg_id,
@@ -245,6 +223,38 @@ impl<'a> AppMessage<'a> {
             body,
         })
     }
+}
+
+/// Checks a body against the rules of its kind that need no other parser.
+/// The rules are the text of kind `0x01` (`WIR-259`), the two fixed lengths
+/// of `WIR-362`, and the kinds that a pairwise channel alone carries. A
+/// rich record applies the same checks to its inner body, thus a wrapper
+/// is no path around them.
+pub(crate) fn check_body(kind: AppKind, body: &[u8], channel: Channel) -> Result<(), Error> {
+    match kind {
+        AppKind::Text => {
+            core::str::from_utf8(body).map_err(|_| Error::Malformed)?;
+        }
+        AppKind::VerifyCommit if body.len() != 64 => {
+            return Err(Error::Malformed);
+        }
+        AppKind::VerifyReveal if body.len() != 32 => {
+            return Err(Error::Malformed);
+        }
+        AppKind::QueueAddress
+            if body.len() != crate::address::LEN || channel != Channel::Pairwise =>
+        {
+            return Err(Error::Malformed);
+        }
+        // IDN-187: a share goes on a pairwise channel alone.
+        AppKind::RecoveryShare
+            if body.len() != recovery::RECOVERY_SHARE_LEN || channel != Channel::Pairwise =>
+        {
+            return Err(Error::Malformed);
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// `msg_ref = SHA3-256(K_set || msg_id)[0..16]`, the stored reference of a
@@ -295,10 +305,15 @@ mod tests {
         out[1] = 0x12;
         assert!(AppMessage::parse(&out, Channel::Pairwise).is_err());
         // A kind that the table does not list fails (`WIR-433`).
-        for retired in [0x0D, 0x0E, 0x11, 0x38] {
-            out[1] = retired;
+        for unlisted in [0x0E, 0x0F, 0x11, 0x38] {
+            out[1] = unlisted;
             assert!(AppMessage::parse(&out, Channel::Group).is_err());
         }
+        // A recovery share of a wrong length, and one on a group queue
+        // (`IDN-187`).
+        out[1] = 0x0D;
+        assert!(AppMessage::parse(&out, Channel::Pairwise).is_err());
+        assert!(AppMessage::parse(&out, Channel::Group).is_err());
         out[1] = 0x36;
         assert!(AppMessage::parse(&out, Channel::Pairwise).is_err());
         out[0] = 0x01;

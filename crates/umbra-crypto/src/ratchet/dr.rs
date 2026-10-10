@@ -8,10 +8,10 @@
 //! no `n`.
 //!
 //! **The initial ratchet key.** Part 5 §5.4.8 gives `RK` and the two header
-//! keys and names no initial DH key. This code takes the responder's flight-2
-//! ephemeral `er` as the responder's first ratchet key: the initiator holds
-//! its public half from the flight, and the responder keeps its private half
-//! until the first ratchet step replaces it.
+//! keys. Rules `CRY-136` and `CRY-137` give the first ratchet key: the
+//! responder's flight-2 ephemeral `er`. The initiator holds its public half
+//! from the flight, and the responder keeps its private half until the first
+//! ratchet step replaces it.
 //!
 //! Skipped message keys are bounded by the constants of §5.5.4, which are
 //! enforced and not advisory.
@@ -54,6 +54,20 @@ const SKIPPED_CAP: usize = if MAX_STORED < MAX_BYTES / SKIPPED_BYTES {
     MAX_STORED
 } else {
     MAX_BYTES / SKIPPED_BYTES
+};
+
+/// `MAX_STORED_DEVICE`, the skipped keys that all sessions of one device
+/// may hold together.
+pub const MAX_STORED_DEVICE: usize = 200_000;
+/// The bytes of the skipped keys of all sessions of one device, which is
+/// the second half of `MAX_STORED_DEVICE`.
+pub const MAX_BYTES_DEVICE: usize = 8 * 1_024 * 1_024;
+/// The skipped keys that one device holds at most, under the two halves of
+/// `MAX_STORED_DEVICE` both.
+pub const SKIPPED_CAP_DEVICE: usize = if MAX_STORED_DEVICE < MAX_BYTES_DEVICE / SKIPPED_BYTES {
+    MAX_STORED_DEVICE
+} else {
+    MAX_BYTES_DEVICE / SKIPPED_BYTES
 };
 
 /// The record version of Part 6 §6.5.
@@ -148,8 +162,6 @@ pub struct Received<'a> {
     pub len: usize,
 }
 
-/// `KDF_RK`: one HKDF call gives the next root key, the chain key, and the
-/// next header key, in that order (`CRY-063`).
 /// The two points of a ratchet step at which the braid of §5.5.2 mixes a
 /// post-quantum secret into the root key. A step derives the receiving chain
 /// first and the sending chain second; the peer derives the same two chains
@@ -195,25 +207,25 @@ impl<R: CryptoRng + ?Sized> StepHooks for NoBraid<'_, R> {
     }
 }
 
-fn kdf_rk(root_key: &Secret<32>, dh_output: &[u8; 32]) -> (Secret<32>, Secret<32>, Secret<32>) {
-    let kdf = Hkdf::<Sha3_256>::new(Some(root_key.expose()), dh_output);
+/// `KDF_RK`: one HKDF call gives the next root key, the chain key, and the
+/// next header key, in that order (`CRY-063`).
+fn kdf_rk(root_key: &Secret<32>, dh_output: &Secret<32>) -> (Secret<32>, Secret<32>, Secret<32>) {
+    let kdf = Hkdf::<Sha3_256>::new(Some(root_key.expose()), dh_output.expose());
     let mut output = Secret::<96>::zeroed();
     let _ = kdf.expand(labels::RATCHET_ROOT, output.expose_mut());
 
-    let mut next_root_key = [0u8; 32];
-    let mut chain_key = [0u8; 32];
-    let mut next_header_key = [0u8; 32];
+    // Each part goes straight into a buffer that wipes itself, thus no
+    // plain copy of a key stays behind.
+    let mut next_root_key = Secret::<32>::zeroed();
+    let mut chain_key = Secret::<32>::zeroed();
+    let mut next_header_key = Secret::<32>::zeroed();
     let (root_part, rest) = output.expose().split_at(32);
     let (chain_part, header_part) = rest.split_at(32);
-    next_root_key.copy_from_slice(root_part);
-    chain_key.copy_from_slice(chain_part);
-    next_header_key.copy_from_slice(header_part);
+    next_root_key.expose_mut().copy_from_slice(root_part);
+    chain_key.expose_mut().copy_from_slice(chain_part);
+    next_header_key.expose_mut().copy_from_slice(header_part);
 
-    (
-        Secret::new(next_root_key),
-        Secret::new(chain_key),
-        Secret::new(next_header_key),
-    )
+    (next_root_key, chain_key, next_header_key)
 }
 
 fn hmac_chain(chain_key: &Secret<32>, constant: u8) -> Secret<32> {
@@ -234,12 +246,14 @@ fn kdf_ck(chain_key: &Secret<32>) -> (Secret<32>, Secret<32>) {
     (next_chain_key, message_key)
 }
 
-fn dh(secret: &StaticSecret, public: &[u8; 32]) -> Result<[u8; 32], Error> {
+fn dh(secret: &StaticSecret, public: &[u8; 32]) -> Result<Secret<32>, Error> {
     let shared = secret.diffie_hellman(&XPublic::from(*public));
     if !shared.was_contributory() {
         return Err(Error::Ratchet);
     }
-    Ok(*shared.as_bytes())
+    let mut output = Secret::<32>::zeroed();
+    output.expose_mut().copy_from_slice(shared.as_bytes());
+    Ok(output)
 }
 
 fn seal(key: &Secret<32>, nonce: &[u8; 12], ad: &[u8], buf: &mut [u8]) -> Result<[u8; 16], Error> {
@@ -523,8 +537,10 @@ impl Session {
     }
 
     /// Decrypts `record` into `out`. `now` is the wall clock in seconds, for
-    /// the age of a stored skipped key.
-    pub fn receive<'a, R: CryptoRng + ?Sized>(
+    /// the age of a stored skipped key. A test alone calls it: see
+    /// [`Session::receive_with`] for the cause.
+    #[cfg(test)]
+    pub(crate) fn receive<'a, R: CryptoRng + ?Sized>(
         &mut self,
         record: &'a [u8],
         now: u64,
@@ -534,9 +550,13 @@ impl Session {
         self.receive_with(record, now, out, &mut NoBraid { rng })
     }
 
-    /// [`Session::receive`] with the braid hooks of a ratchet step. The
-    /// generator of a new ratchet key comes from the hooks.
-    pub fn receive_with<'a, H: StepHooks>(
+    /// Decrypts `record` into `out` with the braid hooks of a ratchet step.
+    /// The generator of a new ratchet key comes from the hooks.
+    ///
+    /// The chain moves and a step runs before the body authenticates, thus
+    /// a record that fails leaves the session changed. The crate alone calls
+    /// this, and [`super::braid::Ratchet::receive`] puts the state back.
+    pub(crate) fn receive_with<'a, H: StepHooks>(
         &mut self,
         record: &'a [u8],
         now: u64,
@@ -584,7 +604,14 @@ impl Session {
             return Err(Error::Ratchet);
         }
         if ratchet {
-            self.skip(header.pn, now)?;
+            // `MAX_SKIP` bounds the keys that the chain that ends leaves.
+            // A chain that lost more records than that keeps its first
+            // `MAX_SKIP` keys and the step runs. A refusal here would
+            // repeat at each later chain, because all of them carry this
+            // `pn`. The peer alone writes a header that opens, and its cost
+            // to this device stays `MAX_SKIP` keys.
+            let kept = header.pn.min(self.n_r.saturating_add(MAX_SKIP));
+            self.skip(kept, now)?;
             let frame_of_step = (frame_len > 0).then_some(frame);
             self.dh_ratchet(&header, frame_of_step, hooks)?;
         }
@@ -609,9 +636,37 @@ impl Session {
             .retain(|s| now.saturating_sub(s.stored_at) < SKIP_TTL);
     }
 
+    /// Starts the age of each skipped key again at `now`, after a clock
+    /// movement (`SCP-019`). An age that the movement interrupted deletes
+    /// no key (`SCP-021`): a key then lives one `SKIP_TTL` more at most.
+    /// The result says whether a key changed.
+    pub(crate) fn clock_moved(&mut self, now: u64) -> bool {
+        let mut changed = false;
+        for skipped in &mut self.skipped {
+            changed |= skipped.stored_at != now;
+            skipped.stored_at = now;
+        }
+        changed
+    }
+
     /// The count of skipped keys held.
     pub fn skipped_len(&self) -> usize {
         self.skipped.len()
+    }
+
+    /// The time at which the session stored each skipped key, the oldest
+    /// key first.
+    pub(crate) fn skipped_ages(&self) -> impl Iterator<Item = u64> + '_ {
+        self.skipped.iter().map(|skipped| skipped.stored_at)
+    }
+
+    /// Drops the `count` oldest skipped keys, for the bound of the device
+    /// (`MAX_STORED_DEVICE` of §5.5.4). The result is the count of the
+    /// keys that went.
+    pub(crate) fn evict_oldest(&mut self, count: usize) -> usize {
+        let count = count.min(self.skipped.len());
+        self.skipped.drain(..count);
+        count
     }
 
     /// The skipped key whose header key opens the header, with its index.
@@ -645,13 +700,14 @@ impl Session {
     }
 
     /// Stores the keys of the receiving chain up to `until` (`MAX_SKIP`,
-    /// `MAX_STORED`).
+    /// `MAX_STORED`). The call refuses a record that names a position more
+    /// than `MAX_SKIP` past the chain.
     fn skip(&mut self, until: u32, now: u64) -> Result<(), Error> {
         let Some(ck) = self.ck_r.take() else {
             return Ok(());
         };
         let hk = match self.hk_r.as_ref() {
-            Some(h) => *h.expose(),
+            Some(h) => Secret::new(*h.expose()),
             None => {
                 self.ck_r = Some(ck);
                 return Ok(());
@@ -677,7 +733,7 @@ impl Session {
         while self.n_r < until {
             let (next, mk) = kdf_ck(&ck);
             self.skipped.push(Skipped {
-                hk,
+                hk: *hk.expose(),
                 n: self.n_r,
                 mk: *mk.expose(),
                 stored_at: now,
@@ -908,5 +964,64 @@ mod tests {
         assert_eq!(b.skipped_len(), 1);
         b.prune(100 + SKIP_TTL);
         assert_eq!(b.skipped_len(), 0);
+    }
+
+    #[test]
+    fn a_clock_movement_starts_the_age_of_a_skipped_key_again() {
+        let (mut a, mut b, mut rng) = pair(b"clock");
+        let late = send(&mut a, &mut rng, b"late");
+        let m = send(&mut a, &mut rng, b"m");
+        let mut out = vec![0u8; 8];
+        b.receive(&m, 100, &mut rng, &mut out).unwrap();
+        assert_eq!(b.skipped_len(), 1);
+        // The device clock jumps forward by more than `SKIP_TTL`. The age
+        // starts again at the new time, thus the next skip drops no key.
+        let jumped = 100 + 2 * SKIP_TTL;
+        assert!(b.clock_moved(jumped));
+        assert!(!b.clock_moved(jumped));
+        let _ = send(&mut a, &mut rng, b"lost");
+        let next = send(&mut a, &mut rng, b"next");
+        b.receive(&next, jumped, &mut rng, &mut out).unwrap();
+        assert_eq!(b.skipped_len(), 2);
+        let r = b.receive(&late, jumped, &mut rng, &mut out).unwrap();
+        assert_eq!(&out[..r.len], b"late");
+        assert_eq!(b.skipped_len(), 1);
+        // A clock that jumps backward ends no key early, and the key lives
+        // one period from the new time and no more.
+        assert!(b.clock_moved(50));
+        b.prune(50 + SKIP_TTL - 1);
+        assert_eq!(b.skipped_len(), 1);
+        b.prune(50 + SKIP_TTL);
+        assert_eq!(b.skipped_len(), 0);
+    }
+
+    #[test]
+    fn a_chain_that_lost_more_than_max_skip_ends_no_later_chain() {
+        let (mut a, mut b, mut rng) = pair(b"lost chain");
+        let m0 = send(&mut a, &mut rng, b"m0");
+        assert_eq!(recv(&mut b, &mut rng, &m0).unwrap(), b"m0");
+        // The relay drops more than `MAX_SKIP` records of one chain.
+        let first_lost = send(&mut a, &mut rng, b"first lost");
+        for _ in 0..(MAX_SKIP + 3) {
+            let _ = send(&mut a, &mut rng, b"x");
+        }
+        let last_lost = send(&mut a, &mut rng, b"last lost");
+        // The next chain of the peer names all of them in `pn`. The step
+        // runs, and the chain that ended keeps its first `MAX_SKIP` keys.
+        let r0 = send(&mut b, &mut rng, b"r0");
+        assert_eq!(recv(&mut a, &mut rng, &r0).unwrap(), b"r0");
+        let m1 = send(&mut a, &mut rng, b"m1");
+        assert_eq!(recv(&mut b, &mut rng, &m1).unwrap(), b"m1");
+        assert_eq!(b.skipped_len(), MAX_SKIP as usize);
+        assert_eq!(recv(&mut b, &mut rng, &first_lost).unwrap(), b"first lost");
+        assert_eq!(
+            recv(&mut b, &mut rng, &last_lost).err(),
+            Some(Error::Ratchet)
+        );
+        // The session continues in both directions.
+        let r1 = send(&mut b, &mut rng, b"r1");
+        assert_eq!(recv(&mut a, &mut rng, &r1).unwrap(), b"r1");
+        let m2 = send(&mut a, &mut rng, b"m2");
+        assert_eq!(recv(&mut b, &mut rng, &m2).unwrap(), b"m2");
     }
 }

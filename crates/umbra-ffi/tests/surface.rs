@@ -17,7 +17,9 @@ use umbra_crypto::{
     hmac::{digest::KeyInit, Hmac, Mac},
     sha2::Sha256,
 };
-use umbra_ffi::bindings::{init, Config, FfiError, FfiEvent, SecureElementCallback, TextSink};
+use umbra_ffi::bindings::{
+    init, Config, FfiError, FfiEvent, Network, RelayEndpoint, SecureElementCallback, TextSink,
+};
 
 struct Keystore([u8; 32]);
 
@@ -125,6 +127,134 @@ fn the_surface_runs_a_first_launch_a_send_and_a_second_launch() {
         String::from_utf16(&view.0.lock().unwrap()).unwrap(),
         "over the surface"
     );
+    drop(handle);
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+const CA: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/fixtures/tls/ca.pem"
+);
+
+/// A network of three relays whose ingress relay listens at `port`.
+fn network_at(port: u16) -> Network {
+    Network {
+        relays: (1..=3u8)
+            .map(|layer| RelayEndpoint {
+                host: "localhost".into(),
+                ipv4: vec![127, 0, 0, 1],
+                port,
+                static_key: vec![layer; 32],
+                relay_id: vec![0x10 + layer; 32],
+                layer,
+                operator: format!("operator-{layer}"),
+                family: None,
+                country: format!("Z{}", char::from(b'A' + layer)),
+                asn: 64_500 + u32::from(layer),
+                prefix: Some(vec![10, layer]),
+                holds_files: false,
+                identity_pk: Vec::new(),
+                roles: None,
+                prefix_v6: None,
+                class: None,
+            })
+            .collect(),
+        root_ca_path: Some(CA.into()),
+        invitation_host: "invite.umbra.test".into(),
+        ndr_relay_url: None,
+        ndr_key_config: None,
+        ndr_relay_ipv4: None,
+        directory_relay_url: None,
+        directory_pins: None,
+        directory_relay_ipv4: None,
+        report_queues: Vec::new(),
+        removed_links: Vec::new(),
+        is_provisional: false,
+    }
+}
+
+/// The link that a run dials to its ingress relay.
+fn dialed(relay: &std::net::TcpListener) -> std::net::TcpStream {
+    relay.set_nonblocking(true).unwrap();
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_secs(20) {
+        match relay.accept() {
+            Ok((link, _)) => {
+                link.set_nonblocking(false).unwrap();
+                return link;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(error) => panic!("the relay took no link: {error}"),
+        }
+    }
+    panic!("the run did not dial its ingress relay");
+}
+
+/// Reads the link of a run until its end. The result is false when the
+/// other side still holds the link after three seconds.
+fn link_ended(link: &mut std::net::TcpStream) -> bool {
+    use std::io::Read as _;
+    link.set_read_timeout(Some(std::time::Duration::from_secs(3)))
+        .unwrap();
+    let mut bytes = [0u8; 4_096];
+    loop {
+        match link.read(&mut bytes) {
+            Ok(0) => return true,
+            Ok(_) => {}
+            Err(error) => {
+                return !matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_lock_stops_the_run_of_the_network_before_it_returns() {
+    let directory = std::env::temp_dir().join(format!("umbra-surface-l-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("client.db");
+    let _ = std::fs::remove_file(&path);
+    let config = Config {
+        database_path: path.to_str().unwrap().to_owned(),
+        argon2_floor_ms: 60_000,
+    };
+    let keystore = Arc::new(Keystore([8; 32])) as Arc<dyn SecureElementCallback>;
+    let handle = init(config, keystore, units("correct horse")).unwrap();
+
+    // An ingress relay that takes the connection and answers nothing: the
+    // run of the client waits in its dial, with the keys of its node.
+    let relay = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = relay.local_addr().unwrap().port();
+    handle.clone().connect(network_at(port)).unwrap();
+    let mut link = dialed(&relay);
+
+    // IMP-127: the lock stops the runtime itself, whatever the platform
+    // calls after it. The task of the run is gone when the call returns,
+    // and its link with it. The task does not wait for the end of its dial.
+    let start = std::time::Instant::now();
+    handle.lock();
+    assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    assert!(link_ended(&mut link), "a locked client held its link");
+    // The run of a locked client brings no update: the lock is the one
+    // event of its end.
+    let mut is_locked = false;
+    while let Some(event) = handle.next_event() {
+        assert!(!matches!(event, FfiEvent::Offline { .. }));
+        is_locked |= matches!(event, FfiEvent::Locked);
+    }
+    assert!(is_locked);
+
+    // The unlocked client starts a run again, and a disconnect ends it.
+    handle.unlock(units("correct horse")).unwrap();
+    handle.clone().connect(network_at(port)).unwrap();
+    let mut link = dialed(&relay);
+    handle.disconnect();
+    assert!(link_ended(&mut link));
     drop(handle);
     let _ = std::fs::remove_dir_all(&directory);
 }

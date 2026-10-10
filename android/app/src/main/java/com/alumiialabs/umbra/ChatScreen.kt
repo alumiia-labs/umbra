@@ -1,7 +1,7 @@
 package com.alumiialabs.umbra
 
 import androidx.activity.compose.BackHandler
-import android.app.Activity
+import androidx.activity.compose.LocalActivity
 import android.view.WindowManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -350,7 +350,11 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                         RowEntry("pen", "Edit") {
                             answered = null
                             edited = line
-                            composer.set(line.text.copyOf())
+                            // IMP-017: the field copies the text, and zeros
+                            // overwrite this copy.
+                            val copy = line.text.copyOf()
+                            composer.set(copy)
+                            copy.fill('\u0000')
                             // DEV-126: the limits of an edit.
                             notice = UiText.get(
                                 if (chat.isGroup) R.string.umbra_ui_dev_126_edit_group else R.string.umbra_ui_dev_126_edit,
@@ -772,7 +776,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                         modifier = Modifier.heightIn(min = 48.dp),
                     )
                 } else Row(verticalAlignment = Alignment.Bottom) {
-                    // Mockup 041: the plus sits inside the box, and it opens
+                    // The plus sits inside the box, and it opens
                     // the sheet of a photo, a video, and a file.
                     Box(
                         Modifier
@@ -1213,7 +1217,7 @@ private fun BubbleContent(
 
 /**
  * The message that a message answers, as each messenger shows it: a bar in
- * the accent colour, the name of the author, and the start of the text. An
+ * the accent color, the name of the author, and the start of the text. An
  * answer to a message that this device does not hold has no author
  * (`WIR-173`).
  */
@@ -1330,7 +1334,7 @@ fun ScreenshotBlock(conversation: Conversation) {
     // blocked conversation shows while the answer is on its way.
     var isSecure by remember(conversation) { mutableStateOf(true) }
     LaunchedEffect(conversation, Core.revision) { Core.screenshotBlocked(conversation) { isSecure = it } }
-    val activity = LocalContext.current as? Activity
+    val activity = LocalActivity.current
     DisposableEffect(isSecure) {
         val window = activity?.window
         if (isSecure) window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)

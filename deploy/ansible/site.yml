@@ -44,6 +44,11 @@
 - name: Phase 1 of each relay
   hosts: relays
   become: true
+  # One server at a time: a new binary or a changed setting restarts the
+  # relays of a server here, and the others stay up. A server whose relay
+  # does not come back stops the run.
+  serial: 1
+  max_fail_percentage: 0
   roles:
     - relay_identity
 
@@ -58,6 +63,7 @@
   become: true
   # One server at a time, thus a restart of its relays leaves the others up.
   serial: 1
+  max_fail_percentage: 0
   roles:
     - relay
 

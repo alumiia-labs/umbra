@@ -45,7 +45,7 @@ impl RecoveryShare {
         Ok(out)
     }
 
-    /// Reads a body (`IDN-190`).
+    /// Reads a body of Part 4 §4.7.3.
     pub fn parse(bytes: &[u8]) -> Result<Self, Error> {
         let mut r = Reader::new(bytes);
         if r.u8()? != 0x01 {

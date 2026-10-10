@@ -167,10 +167,16 @@ async fn a_registration_and_a_push_cross_the_ohttp_relay_to_the_endpoint() {
 /// body.
 type Seen = mpsc::UnboundedReceiver<(String, Option<String>, Vec<u8>)>;
 
+/// The error body of FCM for a registration token that is gone.
+const UNREGISTERED: &str = r#"{"error":{"code":404,"message":"Requested entity was not found.","status":"NOT_FOUND","details":[{"@type":"type.googleapis.com/google.firebase.fcm.v1.FcmError","errorCode":"UNREGISTERED"}]}}"#;
+/// The error body of FCM for a project that it does not know.
+const NO_PROJECT: &str =
+    r#"{"error":{"code":404,"message":"Requested entity was not found.","status":"NOT_FOUND"}}"#;
+
 /// A token endpoint and an FCM API on one loopback server. The token
 /// endpoint checks the RS256 signature of the assertion, and the API answers
-/// each message with the next status.
-async fn google(public_key: Vec<u8>, statuses: Vec<u16>) -> (u16, Seen) {
+/// each message with the next status and body.
+async fn google(public_key: Vec<u8>, statuses: Vec<(u16, &'static str)>) -> (u16, Seen) {
     use aws_lc_rs::signature::{UnparsedPublicKey, RSA_PKCS1_2048_8192_SHA256};
     let (listener, port) = listener().await;
     let tls = tls_acceptor(&fixture("leaf.pem"), &fixture("leaf.key")).unwrap();
@@ -201,8 +207,8 @@ async fn google(public_key: Vec<u8>, statuses: Vec<u16>) -> (u16, Seen) {
                     .await
                     .unwrap();
             } else {
-                let status = statuses.next().unwrap_or(500);
-                https::respond(&mut stream, status, "application/json", b"{}")
+                let (status, body) = statuses.next().unwrap_or((500, "{}"));
+                https::respond(&mut stream, status, "application/json", body.as_bytes())
                     .await
                     .unwrap();
             }
@@ -262,9 +268,18 @@ async fn an_fcm_token_gets_a_data_message_under_the_account_of_the_ndr() {
         .as_ref()
         .to_vec();
     let trust = native::tls_config_with_root_file(&fixture("ca.pem")).unwrap();
-    // FCM takes two messages and names the token gone at the third
-    // (`NTF-125`).
-    let (google_port, mut seen) = google(public, vec![200, 200, 404]).await;
+    // FCM takes two messages, answers 404 with no word of the token at the
+    // third, and names the token gone at the fourth (`NTF-125`, `NTF-130`).
+    let (google_port, mut seen) = google(
+        public,
+        vec![
+            (200, "{}"),
+            (200, "{}"),
+            (404, NO_PROJECT),
+            (404, UNREGISTERED),
+        ],
+    )
+    .await;
     let account = format!(
         "{{\"type\":\"service_account\",\"project_id\":\"test-project\",\
          \"private_key\":{},\"client_email\":\"ndr@test-project.iam.example\",\
@@ -356,6 +371,10 @@ async fn an_fcm_token_gets_a_data_message_under_the_account_of_the_ndr() {
         assert!(body.contains(r#""ttl":"86400s""#));
         assert!(!body.contains("collapse"));
     }
+    // A 404 that names no token is a push that did not go, and the
+    // registration stays: a fault of the settings drops none.
+    let answer = call(&route, &push, trust.clone(), &mut OsRng).await;
+    assert_eq!(answer.unwrap(), NdrResponse::Refused);
     let answer = call(&route, &push, trust.clone(), &mut OsRng).await;
     assert_eq!(answer.unwrap(), NdrResponse::Gone);
     let answer = call(&route, &push, trust, &mut OsRng).await;

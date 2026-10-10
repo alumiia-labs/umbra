@@ -156,6 +156,13 @@ impl Outbound {
         &self.relay_id
     }
 
+    /// Whether `address` names the queue that this end writes to. An
+    /// address of the same queue changes nothing: the end of a queue that
+    /// this device locked keeps its lock key ([`Outbound::locked`]).
+    pub fn writes_to(&self, address: &QueueAddress) -> bool {
+        self.sender_id == address.sender_id && self.relay_id == address.relay_id
+    }
+
     /// Seals one inner record of `kind` into an encoded `SEND`, in the
     /// smallest bucket that holds it. `corr_id` and `nonce` come from the
     /// CSPRNG.
@@ -710,12 +717,50 @@ impl PairwiseChannel {
         now: u64,
         rng: &mut R,
     ) -> Result<(Bucket, Vec<u8>), Error> {
+        let inner = self.seal_ratchet(app, now, rng)?;
+        self.outbound
+            .send_record(L6Kind::Ratchet, &inner, relay_session_pk, corr_id, nonce)
+    }
+
+    /// Seals one application record under the ratchet into an encoded
+    /// `SEND` for the queue at `address` (`NET-191`). The channel does not
+    /// write to that queue. The ratchet moves by the one record, and each
+    /// queue end of the channel stays. The caller stores the channel before
+    /// the record leaves the device.
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_to<R: CryptoRng + ?Sized>(
+        &mut self,
+        address: &QueueAddress,
+        app: &[u8],
+        relay_session_pk: &[u8; 32],
+        corr_id: [u8; 16],
+        nonce: [u8; 12],
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(Bucket, Vec<u8>), Error> {
+        let inner = self.seal_ratchet(app, now, rng)?;
+        Outbound::new(address).send_record(
+            L6Kind::Ratchet,
+            &inner,
+            relay_session_pk,
+            corr_id,
+            nonce,
+        )
+    }
+
+    /// The ratchet record of one application record, for a queue of the
+    /// peer.
+    fn seal_ratchet<R: CryptoRng + ?Sized>(
+        &mut self,
+        app: &[u8],
+        now: u64,
+        rng: &mut R,
+    ) -> Result<Vec<u8>, Error> {
         let bucket = self.bucket_for(app.len()).ok_or(Error::NoPath)?;
         let mut record = alloc::vec![0u8; bucket.l7_record()];
         let record_len = self.ratchet.send(app, true, now, rng, &mut record)?;
-        let inner = record.get(..record_len).ok_or(Error::Malformed)?;
-        self.outbound
-            .send_record(L6Kind::Ratchet, inner, relay_session_pk, corr_id, nonce)
+        record.truncate(record_len);
+        Ok(record)
     }
 
     /// Opens the payload of a `MSG` of the inbound queue. The caller
@@ -743,7 +788,23 @@ impl PairwiseChannel {
         rng: &mut R,
     ) -> Result<Received, Error> {
         let inbound = self.inbound_on_mut(queue).ok_or(Error::NoPath)?;
-        let (seq, inner) = match inbound.open(msg_payload, bucket, now)? {
+        let opened = inbound.open(msg_payload, bucket, now)?;
+        self.receive_opened(opened, bucket, now, rng)
+    }
+
+    /// Takes a record that a queue end of this channel opened down to its
+    /// inner record. [`PairwiseChannel::receive_on`] opens it for one of
+    /// the two inbound queues. The caller opens it for a queue that a
+    /// rotation replaced, which this device reads until its `DEL`
+    /// (`NET-177`). `bucket` is the bucket of the `MSG`.
+    pub fn receive_opened<R: CryptoRng + ?Sized>(
+        &mut self,
+        opened: Opened,
+        bucket: Bucket,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<Received, Error> {
+        let (seq, inner) = match opened {
             Opened::Duplicate => return Ok(Received::Duplicate),
             Opened::Undecryptable { seq } => {
                 return Ok(Received::Undecryptable {
@@ -831,6 +892,24 @@ impl PairwiseChannel {
         if let Some(previous) = self.previous.as_mut() {
             previous.restart_hole(from);
         }
+    }
+
+    /// Starts the age of each skipped key of the ratchet again after a
+    /// clock movement at `now` (Part 1 `SCP-019`, `SCP-021`). The result
+    /// says whether the stored form changed.
+    pub fn clock_moved(&mut self, now: u64) -> bool {
+        self.ratchet.clock_moved(now)
+    }
+
+    /// The count of skipped keys that the ratchet holds (Part 5 §5.5.4).
+    pub fn skipped_len(&self) -> usize {
+        self.ratchet.skipped_len()
+    }
+
+    /// The ratchet, for the bound of the skipped keys of the device
+    /// (`MAX_STORED_DEVICE` of Part 5 §5.5.4), which counts each channel.
+    pub(crate) fn ratchet_mut(&mut self) -> &mut Ratchet {
+        &mut self.ratchet
     }
 
     /// The `ACK` of the inbound queue `queue` that the cursor offers at

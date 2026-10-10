@@ -6,10 +6,13 @@ set -eu
 lineage="${RENEWED_LINEAGE:-/etc/letsencrypt/live/{{ umbra_fqdn }}}"
 install -o root -g umbra-tls -m 0644 "$lineage/fullchain.pem" /etc/umbra/tls/cert.pem
 install -o root -g umbra-tls -m 0640 "$lineage/privkey.pem" /etc/umbra/tls/key.pem
-# Each relay of this server runs as umbra-relay@<name>.
+# Each relay of this server runs as umbra-relay@<name>. The services
+# restart one at a time, thus the relays of one server are not down
+# together.
 for service in $(systemctl list-units --type=service --state=active --plain --no-legend 'umbra-relay@*' | awk '{print $1}') umbra-ndr umbra-directory; do
     if systemctl is-active --quiet "$service"; then
         systemctl restart "$service"
+        sleep 10
     fi
 done
 if systemctl is-active --quiet nginx; then

@@ -41,8 +41,8 @@ pub mod suite {
 
 /// The address type of a pairwise handshake, one byte of the prologue.
 ///
-/// Part 5 §5.4.8 names the two values and gives them no byte; the code fixes
-/// them here until the specification does.
+/// Part 5 §5.4.8 gives the two values and their bytes, and rule `CRY-135`
+/// puts the byte in the prologue.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum AddressType {
@@ -124,6 +124,17 @@ impl State {
         Ok(State { ck, h, k, n })
     }
 
+    /// A second copy of the state. A party reads a flight on the copy, thus
+    /// a flight that does not verify leaves the state as it was.
+    pub(crate) fn copy(&self) -> Self {
+        State {
+            ck: Secret::new(*self.ck.expose()),
+            h: self.h,
+            k: self.k.as_ref().map(|k| Secret::new(*k.expose())),
+            n: self.n,
+        }
+    }
+
     /// The initialization: `ck = SHA3-256(label || name)`, `h = ck`.
     pub(crate) fn new(name: &[u8]) -> Self {
         let mut hasher = Sha3_256::new();
@@ -150,12 +161,14 @@ impl State {
         let mut t = Secret::<64>::zeroed();
         // 64 bytes is inside the HKDF bound, thus expand cannot fail.
         let _ = hk.expand(labels::HANDSHAKE_CK, t.expose_mut());
-        let mut ck = [0u8; 32];
-        let mut k = [0u8; 32];
-        ck.copy_from_slice(&t.expose()[..32]);
-        k.copy_from_slice(&t.expose()[32..]);
-        self.ck = Secret::new(ck);
-        self.k = Some(Secret::new(k));
+        // Each half goes straight into a buffer that wipes itself.
+        let mut ck = Secret::<32>::zeroed();
+        let mut k = Secret::<32>::zeroed();
+        let (ck_part, k_part) = t.expose().split_at(32);
+        ck.expose_mut().copy_from_slice(ck_part);
+        k.expose_mut().copy_from_slice(k_part);
+        self.ck = ck;
+        self.k = Some(k);
         self.n = 0;
     }
 

@@ -56,6 +56,18 @@ impl PairCache {
     }
 }
 
+/// The slot of a record that goes out at `now` (`GRP-246`): the slot of the
+/// clock, and `t_e` while the clock lies below it. A rotator whose clock
+/// runs ahead inside `GROUP_SLOT_SKEW` starts an epoch whose chain holds no
+/// key of an earlier slot. Each receiver takes a slot of that skew
+/// (`GRP-228`).
+pub fn send_slot(epochs: &EpochStore, now: u64) -> u32 {
+    let slot = slot_of(now);
+    epochs
+        .current()
+        .map_or(slot, |current| slot.max(current.start_slot()))
+}
+
 /// The counters of the sending device, one for each epoch (`GRP-246`,
 /// `GRP-339`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -137,11 +149,13 @@ impl Sender {
         )
     }
 
-    /// As [`Sender::build`], under an earlier `roster_epoch` that the roster
-    /// history holds: the tags go to the members active at it. A member
-    /// behind the roster checks such a record under the epoch it holds
-    /// (`GRP-330`). A member whose pair key this roster lost since takes a
-    /// tag of zeros.
+    /// As [`Sender::build`], under an earlier `roster_epoch` that the
+    /// roster history holds: the tags go to the members active at it. A
+    /// member behind the roster checks such a record under the epoch it
+    /// holds (`GRP-330`). A member whose pair key this roster lost since
+    /// takes a tag of zeros. A member whose `pair_pk` gives no pair key
+    /// takes one too (`GRP-237`). One entry that fails stops no record to
+    /// each other member.
     #[allow(clippy::too_many_arguments)]
     pub fn build_at(
         &mut self,
@@ -160,10 +174,9 @@ impl Sender {
         if epoch == 0 {
             return Err(Error::NoPath);
         }
-        let slot = slot_of(now);
+        let slot = send_slot(epochs, now);
         let keys = epochs.record_keys(epoch, slot, now)?;
         let (record_key, _) = keys.first().ok_or(Error::NoPath)?;
-        let is_head = roster_epoch == roster.epoch_index();
         let active = roster
             .active_at(roster_epoch)
             .ok_or(Error::NoPath)?
@@ -176,13 +189,9 @@ impl Sender {
                 tags.extend_from_slice(&[0u8; TAG_LEN]);
                 continue;
             }
-            let key = match pairs.get(*index, roster, own) {
-                Ok(key) => key,
-                Err(_) if !is_head => {
-                    tags.extend_from_slice(&[0u8; TAG_LEN]);
-                    continue;
-                }
-                Err(error) => return Err(error),
+            let Ok(key) = pairs.get(*index, roster, own) else {
+                tags.extend_from_slice(&[0u8; TAG_LEN]);
+                continue;
             };
             tags.extend_from_slice(&key.record_tag(&RecordTag {
                 group_id: roster.group_id(),
@@ -233,7 +242,7 @@ impl Sender {
         now: u64,
     ) -> Result<Vec<u8>, Error> {
         let epoch = epochs.epoch();
-        let slot = slot_of(now);
+        let slot = send_slot(epochs, now);
         let keys = epochs.record_keys(epoch, slot, now)?;
         let (record_key, _) = keys.first().ok_or(Error::NoPath)?;
         let roster_epoch = roster.epoch_index();
@@ -263,7 +272,10 @@ impl Sender {
             .collect();
         let mut entries = Vec::with_capacity(targets.len());
         for index in targets {
-            let key = pairs.get(index, roster, own)?;
+            // GRP-237: an admin whose key gives no pair key takes no entry.
+            let Ok(key) = pairs.get(index, roster, own) else {
+                continue;
+            };
             entries.push((
                 index,
                 key.record_tag(&RecordTag {

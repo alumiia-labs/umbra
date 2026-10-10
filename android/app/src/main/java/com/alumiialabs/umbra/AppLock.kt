@@ -33,7 +33,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 
-/** The choices of mockup 108. `IMP-119` caps the idle time at 30 minutes. */
+/** `IMP-119` caps the idle time at 30 minutes. */
 private val AutoLockChoices = listOf(
     0L to ("Immediately" to "When you leave the app"),
     5 * 60L to ("5 minutes" to null),
@@ -46,7 +46,7 @@ private fun autoLockLabel(seconds: Long): String = when (seconds) {
     else -> "After ${seconds / 60} minutes of inactivity"
 }
 
-/** Mockup 106: the settings of the lock. The lock itself is one button of it. */
+/** The settings of the lock. The lock itself is one button of it. */
 @Composable
 fun AppLockScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
     Column(Modifier.fillMaxSize()) {
@@ -70,7 +70,6 @@ fun AppLockScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
     }
 }
 
-/** Mockup 108. */
 @Composable
 fun AutoLockScreen(onBack: () -> Unit) {
     var chosen by remember { mutableStateOf(Core.autoLockSeconds) }
@@ -185,7 +184,7 @@ fun AutoDownloadScreen(onBack: () -> Unit) {
     }
 }
 
-/** The mark of one choice of a list, as the mockups draw it. */
+/** The mark of one choice of a list. */
 @Composable
 fun RadioMark(isChosen: Boolean) {
     Box(
@@ -198,7 +197,7 @@ fun RadioMark(isChosen: Boolean) {
     }
 }
 
-/** Mockup 107. Each field gives a `CharArray`, as the unlock field does. */
+/** Each field gives a `CharArray`, as the unlock field does. */
 @Composable
 fun ChangePassphraseScreen(onBack: () -> Unit) {
     val current = rememberPlatformField()

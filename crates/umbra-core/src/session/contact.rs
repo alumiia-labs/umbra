@@ -29,7 +29,7 @@ use umbra_wire::address::{QueueAddress, LEN as QUEUE_ADDRESS_LEN};
 
 use crate::{identity::invitation::Bundle, Error};
 
-/// The one protocol version of this revision.
+/// The one protocol version of v1.
 pub const VERSION_RANGE: VersionRange = VersionRange { min: 1, max: 1 };
 
 /// The number of flight 1 in a handshake record (`WIR-502`).
@@ -116,6 +116,12 @@ impl Inviter {
         } else {
             FLIGHT_3
         }
+    }
+
+    /// The queue of the invitee, which flight 1 named and flight 2 goes to
+    /// (`NET-174`). An inviter before flight 1 holds none.
+    pub fn reply_to(&self) -> Option<&QueueAddress> {
+        self.reply_to.as_ref()
     }
 
     /// Reads flight 1 and writes flight 2. The result is the inner record

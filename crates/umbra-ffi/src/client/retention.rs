@@ -158,8 +158,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
             }
             // A fault of one message keeps it for the next sweep, and it
-            // stops no other removal.
-            if self.delete_if_held(message).is_err() {
+            // stops no other removal. ATT-161: the end of the period is no
+            // deletion, thus no chunk of a file leaves its relay here.
+            if self.remove_aged(message).is_err() {
                 continue;
             }
             let open = self.open_mut()?;

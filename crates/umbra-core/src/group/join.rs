@@ -74,11 +74,14 @@ pub(crate) fn wrap(control_type: ControlType, payload: &[u8]) -> Result<Vec<u8>,
 }
 
 /// The plain epoch that adds a joiner, from its `JoinRecord`
-/// (`GRP-310`, `GRP-319`).
+/// (`GRP-310`, `GRP-319`). An admin builds none for keys that each member
+/// would refuse (`GRP-320`), and none while its roster holds no certain
+/// index for it (`GRP-329`).
 pub fn add_epoch(roster: &Roster, join: &JoinRecord<'_>) -> Result<Vec<u8>, Error> {
     if join.group_id != *roster.group_id() {
         return Err(Error::Unverified);
     }
+    Roster::check_keys(&join.keys)?;
     let epoch = PlainEpoch {
         chain: Chain {
             group_id: *roster.group_id(),
@@ -86,7 +89,7 @@ pub fn add_epoch(roster: &Roster, join: &JoinRecord<'_>) -> Result<Vec<u8>, Erro
             previous_epoch_hash: *roster.chain_hash(),
         },
         op: PlainOp::Add {
-            index: roster.next_index()?,
+            index: roster.build_index()?,
             keys: join.keys.clone(),
         },
     };
@@ -172,8 +175,34 @@ pub struct Admitted {
     pub replicas: [ReplicaRef; 2],
 }
 
+impl Admitted {
+    /// Whether the entry at the index of the admit holds the three keys of
+    /// `own`, the joiner (`GRP-326`). Under another entry the joiner would
+    /// find no tag for itself and no slot, and it would read nothing with
+    /// no failed admission shown (`GRP-328`).
+    pub fn holds_keys(&self, own: &MemberKeys) -> bool {
+        self.roster.member(self.index).is_some_and(|entry| {
+            entry.active
+                && entry.pair_pk == own.pair_public()
+                && entry.kem_pk_hash == sha3_256(&[&own.kem().public().to_bytes()])
+                && entry.roster_pk_hash == sha3_256(&[&own.roster().verifying_key().to_bytes()])
+        })
+    }
+
+    /// The admission, for a joiner whose keys come from `seed`; an admit
+    /// under the entry of another member fails (`GRP-327`).
+    pub fn for_seed(self, seed: &Secret<32>) -> Result<Self, Error> {
+        if self.holds_keys(&MemberKeys::from_seed(seed)) {
+            Ok(self)
+        } else {
+            Err(Error::Unverified)
+        }
+    }
+}
+
 /// Verifies an admit against the fetched snapshot and the hash of the add
-/// record, and installs the epoch from the slot key.
+/// record, and installs the epoch from the slot key. The joiner then
+/// checks the entry of its index with [`Admitted::for_seed`].
 pub fn accept_admit(
     invitation: &GroupInvitation<'_>,
     snapshot: &RosterSnapshot<'_>,
@@ -221,7 +250,9 @@ pub fn accept_admit(
 
 /// The `RekeyRecord` of a member that moves to new keys, signed under the
 /// old roster key (`GRP-365`). With `on_chain` false the chain fields are
-/// zero, for the pairwise channel of `GRP-370`.
+/// zero, for the pairwise channel of `GRP-370`. A record for the chain
+/// takes an index that each member holds as the next one. Thus a roster
+/// whose index is open builds none (`GRP-329`).
 pub fn rekey_record<R: TryCryptoRng + ?Sized>(
     old: &MemberKeys,
     new: &JoinKeys,
@@ -249,7 +280,11 @@ pub fn rekey_record<R: TryCryptoRng + ?Sized>(
         chain,
         old_index,
         old_roster_pk: &old_pk,
-        new_index: roster.next_index()?,
+        new_index: if on_chain {
+            roster.build_index()?
+        } else {
+            roster.next_index()?
+        },
         new_keys: new.wire_keys(&kem_pk),
         sig: &[],
     };
@@ -367,7 +402,10 @@ mod tests {
             keys,
             path: &[],
         };
-        let admitted = accept_admit(&invitation, &snapshot, &add_hash, &creator_pk, 50).unwrap();
+        let admitted = accept_admit(&invitation, &snapshot, &add_hash, &creator_pk, 50)
+            .unwrap()
+            .for_seed(&joiner.seed)
+            .unwrap();
         assert_eq!(admitted.index, 1);
         assert_eq!(admitted.epoch.epoch(), 3);
         // GRP-224: the joiner takes `t_e` of the epoch, and its key starts
@@ -388,6 +426,54 @@ mod tests {
             ..snapshot
         };
         assert!(accept_admit(&invitation, &wrong, &add_hash, &creator_pk, 50).is_err());
+        // GRP-326: the entry at the index of the admit holds the keys of
+        // the joiner. An admit with the index of another member fails.
+        let other = GroupInvitation {
+            group_id: group,
+            stage: match &invitation.stage {
+                InvitationStage::Admit(admit) => {
+                    InvitationStage::Admit(alloc::boxed::Box::new(InvitationAdmit {
+                        index: 0,
+                        epoch: admit.epoch,
+                        t_e: admit.t_e,
+                        t_join: admit.t_join,
+                        slot_key: admit.slot_key,
+                        read_sk: admit.read_sk,
+                        write_sk: admit.write_sk,
+                        roster_epoch: admit.roster_epoch,
+                        replicas: admit.replicas,
+                        descriptor: admit.descriptor,
+                    }))
+                }
+                _ => panic!("the invitation is no admit"),
+            },
+        };
+        let whole = RosterSnapshot {
+            chain_hash: add_hash,
+            ..wrong
+        };
+        let under_other = accept_admit(&other, &whole, &add_hash, &creator_pk, 50).unwrap();
+        assert!(!under_other.holds_keys(&joiner.keys));
+        assert_eq!(
+            under_other.for_seed(&joiner.seed).err(),
+            Some(Error::Unverified)
+        );
+        assert!(
+            accept_admit(&invitation, &whole, &add_hash, &creator_pk, 50)
+                .unwrap()
+                .for_seed(&joiner.seed)
+                .is_ok()
+        );
+        // GRP-320: an admin builds no add for a pair key of low order.
+        let kem = joiner.keys.kem().public().to_bytes();
+        let low = JoinRecord {
+            group_id: group,
+            keys: WireKeys {
+                pair_pk: [0; 32],
+                ..joiner.wire_keys(&kem)
+            },
+        };
+        assert_eq!(add_epoch(&roster, &low).err(), Some(Error::Unverified));
     }
 
     #[test]

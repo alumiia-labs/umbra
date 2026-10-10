@@ -196,8 +196,8 @@ object Core {
     var verifyCode by mutableStateOf<Pair<Conversation, String>?>(null)
         private set
 
-    /** The words of a ceremony that did not start or did not finish. */
-    var verifyFault by mutableStateOf<String?>(null)
+    /** The words of a ceremony that did not start or did not finish, and its conversation. */
+    var verifyFault by mutableStateOf<Pair<Conversation, String>?>(null)
         private set
 
     /** The conversation that the user verified a moment ago. */
@@ -215,7 +215,23 @@ object Core {
     // The keys of ML-DSA and ML-KEM take a deep stack, as the tokio runtime
     // of the network gives its own threads.
     private val worker = Executors.newSingleThreadExecutor { Thread(null, it, "umbra-core", 16L shl 20) }
+
+    /**
+     * The fetch of a manifest and of a key chain waits for a carrier, 20 s
+     * at most for each one. It has a thread of its own, thus no view and no
+     * send waits for a carrier (`IMP-079`).
+     */
+    private val networkWorker = Executors.newSingleThreadExecutor { Thread(null, it, "umbra-network", 16L shl 20) }
+
+    /** The remux of a video, the encode of an audio file, and the save of a file take seconds each. */
+    private val mediaWorker = Executors.newSingleThreadExecutor { Thread(null, it, "umbra-media", 16L shl 20) }
+
+    /** The lock waits for no call of the worker (`IMP-127`). */
+    private val lockWorker = Executors.newSingleThreadExecutor { Thread(null, it, "umbra-lock", 16L shl 20) }
     private var handle: Handle? = null
+
+    /** The handle of an unlock that failed. The next unlock takes it, thus one store opens one time. */
+    private var waiting: Handle? = null
     private var draining = false
 
     init {
@@ -234,14 +250,39 @@ object Core {
     /** Whether a run started and did not report its first state yet. */
     private var isStarting = false
 
+    /**
+     * Whether `dropRun` ended the run of Private mode or of Off, and no
+     * view asked for a new one since. The network thread reads it before
+     * and after it starts a run. Thus a start that waited for a carrier
+     * makes no run that the app dropped.
+     */
+    @Volatile
+    private var runDropped = false
+
+    /** Whether a push or the Private clock asked for a session while a start waited. */
+    private var wakeWaits = false
+
+    /** Whether the run that starts or stands is a wake session (`NET-100`). */
+    private var isWakeSession = false
+
     /** Whether a view of the app is on the screen. */
+    @Volatile
     private var isVisible = false
+
+    /** The mode of this device (Part 8 §8.3), as `Modes` gave it last. */
+    private var mode = NotifyMode.Instant
+
+    /** The ingress relays of the last connection that named one (`NTF-053`). */
+    private var ingressPair: Set<String>? = null
 
     /** Whether the foreground service of the socket carrier runs. */
     private var carrierHolds = false
     private var lastTouchMs = 0L
     private var retryDelayMs = FIRST_RETRY_MS
     private const val TOUCH_GAP_MS = 10_000L
+
+    /** How long a run stands after the last view left, in Private mode and in Off. */
+    private const val OFF_SCREEN_MS = 30_000L
     private const val FIRST_RETRY_MS = 2_000L
     private const val LAST_RETRY_MS = 30_000L
     private const val STOPPED = 0
@@ -264,7 +305,7 @@ object Core {
             passphrase.fill('\u0000')
             var unlocked: Handle? = null
             try {
-                val opened = handle ?: launch(app, units)
+                val opened = handle ?: waiting ?: launch(app, units).also { waiting = it }
                 opened.unlock(units)
                 unlocked = opened
                 begin(app, opened)
@@ -285,6 +326,7 @@ object Core {
     /** Takes an open client: its list, its network, and its events. */
     private fun begin(app: Context, opened: Handle) {
         handle = opened
+        waiting = null
         // The store holds each contact, thus the list needs no network.
         val stored = summaries(opened)
         val idleSeconds = opened.autoLockSeconds().toLong()
@@ -296,17 +338,6 @@ object Core {
         opened.setMetered(isMetered(app))
         val backupAt = opened.lastBackupAt()?.toLong()
         val owns = opened.ownsChannels()
-        // A network that does not start leaves the store open, and the
-        // retry of the run starts it later.
-        BuildNetwork.network(app, opened)?.let { network ->
-            main.post { isStarting = true }
-            try {
-                opened.connect(network)
-            } catch (offline: FfiException) {
-                main.post { isStarting = false }
-                retryLater(app)
-            }
-        }
         drain(opened, app)
         main.post {
             chats.clear()
@@ -318,16 +349,13 @@ object Core {
             ownsChannels = owns
             restoreNote = null
             phase = Phase.Open
-            // NTF-084: three blobs in a row did not open while locked.
-            if (WakeStore.isRenewDue(app)) {
-                call {
-                    it.renewPushRoots()
-                    WakeStore.renewed(app)
-                }
-            }
-            // The user opened the client, thus a view is on the
-            // screen, and the platform permits the start.
-            DeliveryService.start(app)
+            mode = Modes.mode(app)
+            // The store is open before the network starts: the fetch of the
+            // manifest waits for a carrier, and the list does not wait for
+            // it. A network that does not start leaves the store open, and
+            // the retry of the run starts it later.
+            connect(app)
+            renewRoots(app)
             refreshJoinFlow()
             readDevices()
             readProfile()
@@ -338,6 +366,51 @@ object Core {
             readHistoryAge()
         }
     }
+
+    /** NTF-084: three blobs in a row did not open, thus the client makes each root again. */
+    private fun renewRoots(app: Context) {
+        if (!WakeStore.isRenewDue(app)) return
+        call {
+            it.renewPushRoots()
+            WakeStore.renewed(app)
+        }
+    }
+
+    /** Whether the mode and the state of the client hold the carrier (Part 8 §8.3). */
+    fun wantsCarrier() = phase == Phase.Open && mode != NotifyMode.Off
+
+    /**
+     * Starts the foreground service of the carrier (`NTF-116`). The platform
+     * permits the start while a view is on the screen alone. An unlock, a
+     * restore, or a link can end after the user left. Thus a start that
+     * has no view waits for the next one.
+     */
+    private fun holdCarrier(app: Context) {
+        if (carrierHolds || !isVisible || !wantsCarrier()) return
+        DeliveryService.start(app)
+    }
+
+    /**
+     * The mode of this device, at an open and at each change (Part 8 §8.3).
+     * Off holds no carrier. A change between the two other modes writes the
+     * notice of the service again.
+     */
+    fun modeIs(context: Context, now: NotifyMode) {
+        val app = context.applicationContext
+        val changed = mode != now
+        mode = now
+        if (now == NotifyMode.Off) {
+            if (carrierHolds) DeliveryService.stop(app)
+        } else if (carrierHolds && changed && isVisible) {
+            DeliveryService.start(app)
+        } else {
+            holdCarrier(app)
+        }
+        leftScreen()
+    }
+
+    /** Whether a view of the app is on the screen. */
+    fun isOnScreen() = isVisible
 
     /** The devices of the set (Part 7). */
     val devices = mutableStateListOf<Device>()
@@ -403,8 +476,10 @@ object Core {
         main.post { onResult(blocked) }
     }
 
-    fun setBlocked(conversation: Conversation, blocked: Boolean) = call { client ->
+    fun setBlocked(context: Context, conversation: Conversation, blocked: Boolean) = call { client ->
         client.setBlocked(conversation.id, blocked)
+        // The wake table names a blocked contact silent.
+        refreshWake(context)
         main.post { revision++ }
     }
 
@@ -752,6 +827,7 @@ object Core {
             passphrase.fill('\u0000')
             var opened: Handle? = null
             try {
+                dropWaiting()
                 val first = launch(app, units)
                 opened = first
                 first.unlock(units)
@@ -916,6 +992,7 @@ object Core {
             // IDN-003: the root seed makes a store with the identity alone.
             if (kind == 4 && shareUnits.isEmpty()) {
                 try {
+                    dropWaiting()
                     val database = File(app.filesDir, "umbra.db")
                     val made = initFromRootSeed(
                         Config(database.absolutePath, measureArgon2FloorMs()),
@@ -947,6 +1024,7 @@ object Core {
             }
             var opened: Handle? = null
             try {
+                dropWaiting()
                 val first = launch(app, units)
                 opened = first
                 first.unlock(units)
@@ -1005,6 +1083,12 @@ object Core {
         }
     }
 
+    /** Closes the handle of an unlock that failed, before another call opens the store. */
+    private fun dropWaiting() {
+        waiting?.close()
+        waiting = null
+    }
+
     /** Ends the store of a restore that did not complete: a first launch comes again. */
     private fun dropStore(app: Context, opened: Handle) {
         opened.disconnect()
@@ -1034,6 +1118,7 @@ object Core {
                 it.close()
             }
             handle = null
+            waiting = null
             // NTF-137: the wake table lies outside the store.
             runCatching { WakeStore.delete(app) }
             (app.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager)
@@ -1089,16 +1174,17 @@ object Core {
                 degraded = null
                 linkFault = null
                 retryDelayMs = FIRST_RETRY_MS
-                readConnection()
+                readConnection(app)
                 readDirectory()
                 maintainDirectory()
                 scheduleMaintenance(app)
             }
-            is FfiEvent.Circuits -> readConnection()
+            is FfiEvent.Circuits -> readConnection(app)
             is FfiEvent.Offline -> {
                 isStarting = false
+                isWakeSession = false
                 online = false
-                readConnection()
+                readConnection(app)
                 if (event.cause.toInt() == WAKE_DONE) {
                     // NET-100: the push-wake session ended on time. A view
                     // on the screen takes a full run.
@@ -1114,11 +1200,13 @@ object Core {
                 } else {
                     // The two lines of Part 14 §14.9.2. The cause shows in the
                     // view of the connection.
-                    degraded = if (event.cause.toInt() == DIAL_FAILED) {
-                        "The relays do not answer. Messages wait."
-                    } else {
-                        "No connection. Messages wait."
-                    }
+                    degraded = UiText.get(
+                        if (event.cause.toInt() == DIAL_FAILED) {
+                            R.string.umbra_ui_imp_077_ingress
+                        } else {
+                            R.string.umbra_ui_imp_077_offline
+                        },
+                    )
                     linkFault = cause(event.cause)
                     retryLater(app)
                 }
@@ -1148,8 +1236,10 @@ object Core {
             }
             // The view of the ceremony starts again from its own state.
             is FfiEvent.VerificationRefused -> {
-                verifyCode = null
-                verifyFault = "The two devices made no code."
+                val conversation = Conversation(event.conversation)
+                // The ceremony of one contact ends no code of another.
+                if (verifyCode?.first == conversation) verifyCode = null
+                verifyFault = conversation to "The two devices made no code."
             }
             is FfiEvent.Message -> {
                 revision++
@@ -1158,8 +1248,9 @@ object Core {
                 refreshChats()
                 // DEV-223: the device woke on its mode, and the setting of the
                 // conversation decides what it shows.
+                // Part 8 §8.3: Off shows a message when the user opens the app.
                 val client = handle
-                if (!isVisible && client != null) {
+                if (!isVisible && client != null && mode != NotifyMode.Off) {
                     // GRP-229: while the clock may be wrong, no alert
                     // shows a preview (Part 14 §14.9.2).
                     val preview = Modes.preview(app) && chats.none { it.isClockSuspect } &&
@@ -1190,6 +1281,10 @@ object Core {
                                         text?.fill('\u0000')
                                     }
                                 }
+                            } else {
+                                // The push of this record showed an alert
+                                // before the client read the setting.
+                                Notifier.pushSettled(app, Conversation(event.conversation))
                             }
                         } catch (_: FfiException) {
                             // A lock that overtook the read shows no alert.
@@ -1252,19 +1347,55 @@ object Core {
                 // IMP-161: a draft that waits holds its file in the clear.
                 cancelSend()
                 online = false
+                isWakeSession = false
+                wakeWaits = false
                 invitation = null
+                // A scanned invitation is a capability.
+                scannedInvitation = null
+                joinCode = null
+                // The run ended with the lock, thus its two lines are old.
+                // `fault` stays: the lock view shows it, as for a store
+                // that does not verify.
+                degraded = null
+                linkFault = null
                 toName = null
                 verifyCode = null
+                verifyFault = null
                 verifiedNow = null
+                // IMP-017: the preview of a row is message text.
+                chats.forEach { it.preview?.fill('\u0000') }
                 chats.clear()
                 publicLinks.clear()
                 contactRequests.clear()
                 myHandle = null
                 suggestedName = null
+                // A locked client holds no name, no picture, and no list of
+                // the store in its memory.
+                myHandleLink = null
+                myName = ""
+                myPicture.fill(0)
+                myPicture = ByteArray(0)
+                devices.clear()
+                historyHoles.clear()
+                rosterForks.clear()
+                heldDeletions = 0
+                introductions.clear()
+                failedAdmissions.clear()
+                directoryWarnings.clear()
+                entriesAtLimit.clear()
+                directoryNote = null
+                madeLink = null
+                takeoverOf = null
+                requestSent = false
+                typingNow.clear()
+                connection = null
+                linkStatus = LinkStatus.Idle
+                main.removeCallbacks(dropRun)
                 phase = Phase.Locked
                 // A locked client holds no key that reads a queue, thus the
-                // carrier ends, and the user learns it.
-                DeliveryService.stop(app)
+                // carrier ends, and the user learns it. A service that did
+                // not start yet ends itself at its start.
+                if (carrierHolds) DeliveryService.stop(app)
                 // A lock takes the text of each alert off the shade.
                 Notifier.clear(app)
                 if (!isVisible) Notifier.locked(app)
@@ -1280,6 +1411,9 @@ object Core {
                 refreshChats()
                 readDevices()
                 readDirectory()
+                // A block or an alert setting of another device changes
+                // which conversations the wake table names silent.
+                refreshWake(app)
             }
             // The sync channel of a device opened.
             is FfiEvent.DeviceLinked -> {
@@ -1288,7 +1422,7 @@ object Core {
             }
             is FfiEvent.ContactRequest -> {
                 readDirectory()
-                if (!isVisible) Notifier.request(app)
+                if (!isVisible && mode != NotifyMode.Off) Notifier.request(app)
             }
         }
         // An event can hold a handle of a message, and this frees it.
@@ -1303,9 +1437,18 @@ object Core {
         else -> "A fault in the client."
     }
 
-    private fun readConnection() = call { client ->
+    private fun readConnection(app: Context) = call { client ->
         val read = client.connection()
-        main.post { connection = read }
+        main.post {
+            connection = read
+            // NTF-053: a new ingress relay pair draws a new phase of the
+            // Private clock. The two pins change places with no new pair.
+            val pair = setOfNotNull(read.ingress?.host, read.standby?.host)
+            if (pair.isNotEmpty() && pair != ingressPair) {
+                ingressPair = pair
+                Modes.ingressChanged(app)
+            }
+        }
     }
 
     /**
@@ -1320,13 +1463,40 @@ object Core {
         main.postDelayed({ if (wantsNetwork() && !online) connect(app) }, delay)
     }
 
-    /** The platform leaves the sockets of a visible app and of the carrier. */
-    private fun wantsNetwork() = phase == Phase.Open && (isVisible || carrierHolds)
+    /**
+     * The platform leaves the sockets of a visible app and of the carrier.
+     * Instant mode alone holds a run with no view (Part 8 §8.3). The fixed
+     * clock of Private mode starts each run of that mode, and Off has none.
+     */
+    private fun wantsNetwork() =
+        phase == Phase.Open && (isVisible || (carrierHolds && mode == NotifyMode.Instant))
 
     /** The foreground service tells the core when it starts and when it ends. */
     fun carrierRuns(context: Context, runs: Boolean) {
         carrierHolds = runs
-        if (runs && !online && phase == Phase.Open) connect(context)
+        if (runs && !online && wantsNetwork()) connect(context)
+    }
+
+    /** Ends the run of Private mode and of Off after the last view left. */
+    private val dropRun = Runnable {
+        if (isVisible || phase != Phase.Open || mode == NotifyMode.Instant) return@Runnable
+        // NET-100: a wake session ends by itself, and no drop cuts its drain.
+        if (isWakeSession) return@Runnable
+        // A start that waits on the network thread makes no run after this.
+        runDropped = true
+        call { client -> if (!isVisible) client.disconnect() }
+    }
+
+    /**
+     * Private mode and Off hold no run with no view. The run stands a short
+     * time, thus a picker of the platform or a send that the user started
+     * ends first.
+     */
+    private fun leftScreen() {
+        main.removeCallbacks(dropRun)
+        if (!isVisible && phase == Phase.Open && mode != NotifyMode.Instant) {
+            main.postDelayed(dropRun, OFF_SCREEN_MS)
+        }
     }
 
     /** The user acted, thus the idle time of the auto-lock starts again. */
@@ -1339,21 +1509,44 @@ object Core {
 
     /** The activity tells the core when a view enters or leaves the screen. */
     fun visible(context: Context, nowVisible: Boolean) {
+        val app = context.applicationContext
         isVisible = nowVisible
         // The client makes cover cells while a view is on the screen only.
         call { it.setForeground(nowVisible) }
         if (nowVisible) Notifier.clear(context)
-        // NTF-135: the table is written before a lock can take the keys.
-        if (!nowVisible) refreshWake(context)
         // The setting "Immediately" locks when the last view leaves.
-        if (!nowVisible && autoLockSeconds == 0L && phase == Phase.Open) lock()
+        // NTF-135: the client writes the table before a lock can take the keys.
+        if (!nowVisible && autoLockSeconds == 0L && phase == Phase.Open) {
+            lock(app)
+        } else if (!nowVisible) {
+            refreshWake(context)
+        }
+        leftScreen()
+        if (nowVisible && phase == Phase.Open) {
+            // NTF-084: three blobs in a row did not open in this session.
+            renewRoots(app)
+            // A carrier that had no view at the unlock starts now.
+            holdCarrier(app)
+        }
         if (nowVisible && !online && phase == Phase.Open) {
             retryDelayMs = FIRST_RETRY_MS
             connect(context)
         }
     }
 
-    fun lock() = call { it.lock() }
+    /**
+     * Locks the client at once. The lock has a thread of its own: a call
+     * that waits on the worker keeps `K_store` in RAM no longer (`IMP-127`).
+     * With a context the lock writes the wake table first (`NTF-135`).
+     */
+    fun lock(context: Context? = null) {
+        val client = handle ?: return
+        val app = context?.applicationContext
+        lockWorker.execute {
+            if (app != null && Modes.mode(app) == NotifyMode.Instant) writeWake(app, client)
+            client.lock()
+        }
+    }
 
     /**
      * Writes the wake table of a client in Instant mode (Part 8 `NTF-135`),
@@ -1513,7 +1706,7 @@ object Core {
     /** A push came: an open client with no run starts one and drains. */
     fun wake(context: Context) {
         val app = context.applicationContext
-        main.post { if (isOpen() && !online) connect(app, isWake = !isVisible && !carrierHolds) }
+        main.post { if (isOpen() && !online) connect(app, isWake = !wantsNetwork()) }
     }
 
     /**
@@ -1623,9 +1816,18 @@ object Core {
         // The open, the carrier, and the screen each ask for a run in the
         // first second. A second run replaces the first, and the handshake
         // that the first one started ends with it.
-        if (isStarting && !force) return
+        if (isStarting && !force) {
+            // The start that waits serves this call too. A full run that
+            // the app asks for again stays, and a wake waits for the end
+            // of a start that the app dropped.
+            if (isWake) wakeWaits = true else runDropped = false
+            return
+        }
         isStarting = true
-        call { client ->
+        isWakeSession = isWake
+        wakeWaits = false
+        runDropped = false
+        on(networkWorker) { client ->
             val network = BuildNetwork.network(app, client)
             if (network == null) {
                 // No manifest verified, fresh or kept, thus no run starts
@@ -1633,10 +1835,17 @@ object Core {
                 // that ended tries again.
                 main.post {
                     isStarting = false
-                    degraded = "The relays do not answer. Messages wait."
+                    isWakeSession = false
+                    degraded = UiText.get(R.string.umbra_ui_imp_077_ingress)
                     retryLater(app)
                 }
-                return@call
+                return@on
+            }
+            // The fetch can wait 20 s for each carrier, and Private mode
+            // and Off drop their run 30 s after the last view left.
+            if (!isWake && runDropped) {
+                startDropped(app)
+                return@on
             }
             try {
                 // NET-100: a push wake is a session of 6 s at most.
@@ -1646,13 +1855,35 @@ object Core {
                 // ended does.
                 main.post {
                     isStarting = false
+                    isWakeSession = false
                     retryLater(app)
                 }
                 throw failure
             }
+            // The drop came while the run started, and its disconnect ran
+            // before the run stood. The run ends here.
+            if (!isWake && runDropped) {
+                client.disconnect()
+                startDropped(app)
+                return@on
+            }
             // A run starts in the foreground tier, thus it takes the state
             // of this moment.
             client.setForeground(isVisible)
+        }
+    }
+
+    /**
+     * The network thread started no run, because the app dropped it. A view
+     * that came back since gets its run, and a wake that waited gets its
+     * session.
+     */
+    private fun startDropped(app: Context) = main.post {
+        isStarting = false
+        val waited = wakeWaits
+        wakeWaits = false
+        if (phase == Phase.Open && !online) {
+            if (wantsNetwork()) connect(app) else if (waited) connect(app, isWake = true)
         }
     }
 
@@ -1834,7 +2065,7 @@ object Core {
             try {
                 client.startVerification(conversation.id)
             } catch (failure: FfiException) {
-                main.post { verifyFault = "A short code needs a connection." }
+                main.post { verifyFault = conversation to "A short code needs a connection." }
             }
         }
     }
@@ -1864,16 +2095,22 @@ object Core {
         val titles = chats.associate { it.conversation.id.toList() to it.title }
         call { client ->
             // GRP-334: an @name of a member of a group names that member.
-            val mentions = if (client.isGroup(conversation.id)) {
-                client.groupMembers(conversation.id)
-                    .filter { !it.isSelf }
-                    .filter { member ->
-                        val name = member.contact?.let { titles[it.toList()] } ?: "Member ${member.index}"
-                        mentions(text, name)
-                    }
-                    .map { it.index }
-            } else {
-                emptyList()
+            val mentions = try {
+                if (client.isGroup(conversation.id)) {
+                    client.groupMembers(conversation.id)
+                        .filter { !it.isSelf }
+                        .filter { member ->
+                            val name = member.contact?.let { titles[it.toList()] } ?: "Member ${member.index}"
+                            mentions(text, name)
+                        }
+                        .map { it.index }
+                } else {
+                    emptyList()
+                }
+            } catch (failure: FfiException) {
+                // A lock that overtook the send leaves no text in the array.
+                text.fill('\u0000')
+                throw failure
             }
             val units = text.map { it.code.toUShort() }
             text.fill('\u0000')
@@ -1907,7 +2144,11 @@ object Core {
         main.post { onLoaded(value) }
     }
 
-    fun setAlert(conversation: Conversation, value: UByte) = call { it.setAlertSetting(conversation.id, value) }
+    fun setAlert(context: Context, conversation: Conversation, value: UByte) = call { client ->
+        client.setAlertSetting(conversation.id, value)
+        // The wake table names a conversation with its alerts off silent.
+        refreshWake(context)
+    }
 
     fun screenshotBlocked(conversation: Conversation, onLoaded: (Boolean) -> Unit) = call { client ->
         val value = client.screenshotBlocked(conversation.id)
@@ -1997,15 +2238,23 @@ object Core {
     /** Sends a picked video after its remux (`ATT-155`). */
     fun sendVideo(context: Context, conversation: Conversation, source: android.net.Uri, caption: CharArray? = null) {
         val app = context.applicationContext
-        call { client ->
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return@call
+        on(mediaWorker) { client ->
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return@on
+            // ATT `MAX_FILE_SIZE`: the size that the provider names refuses
+            // a video before the remux copies one sample.
+            val named = runCatching { Files.describe(app, source).size }.getOrDefault(-1L)
+            if (named > MAX_FILE_SIZE) {
+                caption?.fill('\u0000')
+                main.post { fault = "That video did not open, or it is above 250 MB." }
+                return@on
+            }
             val draft = client.newDraft(conversation.id)
             val bytes = Files.attachVideo(app, source, draft)
             if (bytes < 0) {
                 draft.destroy()
                 caption?.fill('\u0000')
                 main.post { fault = "That video did not open, or it is above 250 MB." }
-                return@call
+                return@on
             }
             putCaption(draft, caption)
             offer(client, PendingSend(conversation, draft, bytes, isOriginal = false))
@@ -2015,8 +2264,8 @@ object Core {
     /** Sends a picked audio file, encoded again with no field of the original. */
     fun sendAudio(context: Context, conversation: Conversation, source: android.net.Uri, caption: CharArray? = null) {
         val app = context.applicationContext
-        call { client ->
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return@call
+        on(mediaWorker) { client ->
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return@on
             val picked = Files.describe(app, source)
             val draft = client.newDraft(conversation.id)
             val bytes = Files.attachAudio(app, source, picked, draft)
@@ -2024,7 +2273,7 @@ object Core {
                 draft.destroy()
                 caption?.fill('\u0000')
                 main.post { fault = "That audio file did not open, or it is above 250 MB." }
-                return@call
+                return@on
             }
             putCaption(draft, caption)
             offer(client, PendingSend(conversation, draft, bytes, isOriginal = false))
@@ -2049,32 +2298,48 @@ object Core {
             fault = "That recording is too short."
             return
         }
-        call { client ->
-            val draft = client.newDraft(conversation.id)
-            val bytes = Files.attachVoice(recording, seconds, draft)
-            if (bytes < 0) {
-                draft.destroy()
-                main.post { fault = "That recording did not open." }
-                return@call
+        // IMP-172: a lock that overtakes the send leaves no recording in
+        // the memory. `attachVoice` closes the file of a draft that exists.
+        val client = handle ?: return recording.discard()
+        worker.execute {
+            val draft = try {
+                client.newDraft(conversation.id)
+            } catch (failure: FfiException) {
+                recording.discard()
+                return@execute
             }
-            offer(client, PendingSend(conversation, draft, bytes, isOriginal = false))
+            try {
+                val bytes = Files.attachVoice(recording, seconds, draft)
+                if (bytes < 0) {
+                    draft.destroy()
+                    main.post { fault = "That recording did not open." }
+                    return@execute
+                }
+                offer(client, PendingSend(conversation, draft, bytes, isOriginal = false))
+            } catch (locked: FfiException.Locked) {
+                // A send that the lock overtook is no fault of the user.
+            } catch (failure: FfiException) {
+                main.post { fault = "That did not work: ${failure.javaClass.simpleName}." }
+            }
         }
     }
 
     /** Sends a picked file as it is, with its name. */
     fun sendDocument(context: Context, conversation: Conversation, source: android.net.Uri, caption: CharArray? = null) {
         val app = context.applicationContext
-        call { client ->
+        on(mediaWorker) { client ->
             val picked = Files.describe(app, source)
             if (picked.size > MAX_FILE_SIZE) {
+                caption?.fill('\u0000')
                 main.post { fault = "A file can be 250 MB at most." }
-                return@call
+                return@on
             }
             val draft = client.newDraft(conversation.id)
             if (!Files.attachDocument(app, source, picked, draft)) {
                 draft.destroy()
+                caption?.fill('\u0000')
                 main.post { fault = "That file did not open." }
-                return@call
+                return@on
             }
             putCaption(draft, caption)
             offer(client, PendingSend(conversation, draft, picked.size, Files.isMediaOriginal(picked.mime)))
@@ -2130,7 +2395,7 @@ object Core {
      */
     fun saveFile(context: Context, line: Line, target: android.net.Uri, onSaved: () -> Unit) {
         val app = context.applicationContext
-        call { client ->
+        on(mediaWorker) { client ->
             val output = try {
                 app.contentResolver.openOutputStream(target, "wt")
             } catch (unwritable: Exception) {
@@ -2138,7 +2403,7 @@ object Core {
             }
             if (output == null) {
                 main.post { fault = "That place does not take a file." }
-                return@call
+                return@on
             }
             // The core cannot open the descriptor of a document provider a
             // second time, thus its bytes go through a pipe, in pieces.
@@ -2162,11 +2427,18 @@ object Core {
                     chunk.fill(0)
                 }
             }
+            var written = false
             try {
                 client.saveFile(line.handle, "/proc/self/fd/${write.fd}")
+                written = true
             } finally {
                 write.close()
                 copier.join()
+                // IMP-045: a save that failed leaves no part of the file at
+                // the place that the user chose.
+                if (!written || !copied) {
+                    runCatching { android.provider.DocumentsContract.deleteDocument(app.contentResolver, target) }
+                }
             }
             main.post { if (copied) onSaved() else fault = "The file did not save." }
         }
@@ -2435,9 +2707,12 @@ object Core {
         )
     }
 
-    private fun call(action: (Handle) -> Unit) {
+    private fun call(action: (Handle) -> Unit) = on(worker, action)
+
+    /** Runs a call of the client on one thread of the core, and shows its fault. */
+    private fun on(thread: java.util.concurrent.Executor, action: (Handle) -> Unit) {
         val client = handle ?: return
-        worker.execute {
+        thread.execute {
             try {
                 action(client)
             } catch (locked: FfiException.Locked) {

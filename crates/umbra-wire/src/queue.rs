@@ -116,7 +116,10 @@ pub fn open(
     let (body, tag) = ct.split_at(plain_len);
     let plain = out.get_mut(..plain_len).ok_or(Error::Capacity)?;
     plain.copy_from_slice(body);
-    key.open(&nonce, VERSION, sender_id, plain, tag)?;
+    // WIR-032: a tag that does not verify is the same error as a record
+    // that does not parse.
+    key.open(&nonce, VERSION, sender_id, plain, tag)
+        .map_err(|_| Error::Malformed)?;
     let mut p = Reader::new(plain);
     let true_len = usize::from(p.u16()?);
     let kind = L6Kind::from_byte(p.u8()?)?;
@@ -232,5 +235,34 @@ mod tests {
         assert!(open(&key, &[2; 32], &bad, Bucket::B0, &mut out).is_err());
         assert!(open(&key, &[9; 32], &send, Bucket::B0, &mut out).is_err());
         assert!(open(&key, &[2; 32], &send[..389], Bucket::B0, &mut out).is_err());
+    }
+
+    #[test]
+    fn each_rejection_of_a_record_is_the_one_error() {
+        let key = QueueKey::derive(&Secret::new([1; 32]), &[2; 32]);
+        let mut send = vec![0u8; Bucket::B0.l6_record()];
+        seal(
+            &key,
+            [3; 12],
+            &[2; 32],
+            L6Kind::Ratchet,
+            b"short",
+            Bucket::B0,
+            &mut send,
+        )
+        .unwrap();
+        let mut out = vec![0u8; 400];
+        // WIR-032: a wrong version, a changed byte under the tag, and a
+        // wrong sender.
+        let mut version = send.clone();
+        version[0] = 0x02;
+        let mut changed = send.clone();
+        changed[20] ^= 1;
+        for (record, sender) in [(&version, [2u8; 32]), (&changed, [2; 32]), (&send, [9; 32])] {
+            assert_eq!(
+                open(&key, &sender, record, Bucket::B0, &mut out),
+                Err(Error::Malformed)
+            );
+        }
     }
 }

@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 7: Device Sets, History Sync, and Revocation
 
 **Status:** Draft
-**Version:** 0.11.0-draft
-**Date:** 2026-10-02
+**Version:** 0.12.0
+**Date:** 2026-10-09
 
 ---
 
@@ -13,23 +13,17 @@ a feature**. A design that assumed one ratchet for each pairwise queue cannot
 add it later. Such a design has to rebuild the key schedule, or it has to push
 the ratchet state onto relays.
 
-The evidence is direct. After four years, SimpleX has no full multi-device
-support. Its July 2025 proposal stores the double-ratchet state on relays, in an
-encrypted form. That proposal gives a seized relay an encrypted blob for each
-user, and the *update time of that blob alone* is a strong activity signal. The
-proposal itself admits that the design "reduces break-in recovery between queue
-rotations."
-
-The proposal has four open problems. The problems are concurrent state updates,
-the prevention of two subscriptions at the same time, and skipped-message
-handling. The fourth problem is a ratchet conflict when two devices process the
-same message. Those problems have no solution today.
+A double-ratchet state on a relay, in an encrypted form, gives a seized relay an encrypted blob for each user, and the
+*update time of that blob alone* is a strong activity signal. That design
+also has four problems: concurrent state updates, the prevention of two
+subscriptions at the same time, skipped-message handling, and a ratchet
+conflict when two devices process the same message.
 
 Thus UMBRA specifies device sets in the initial key schedule.
 
 ## 7.2 The accepted trade
 
-The owner selected multi-device operation **with** history sync. Part 2 §A6
+UMBRA v1 has multi-device operation **with** history sync. Part 2 §A6
 states the consequence. This part states it again, because a user needs this
 fact before the link and not after it:
 
@@ -80,7 +74,12 @@ over the channel of §7.4.
 `RootIdentity`.**
 
 - **[DEV-224]** A device MUST make its own `device_id` from its own CSPRNG at
-  the link. **[DEV-225]** A device MUST NOT derive `device_id` from a key, from
+  the link. A `device_id` names one device. A roster epoch MUST NOT hold two
+  entries with one `device_id`. A parser MUST reject an epoch that does.
+  A device MUST refuse the link of a new device whose `device_id` its
+  roster holds in `devices` or in `revoked`. Two entries with one identifier
+  would share one sync channel, and one of the two devices would lose its
+  sync with no notice. **[DEV-225]** A device MUST NOT derive `device_id` from a key, from
   a hardware identifier, or from an earlier `device_id`.
 - **[DEV-143]** A device MUST make `DeviceRosterKey_i` from its own CSPRNG. **[DEV-144]** A device MUST
   NOT derive that keypair from the `RootIdentity`, from `K_devset`, or from
@@ -90,18 +89,18 @@ over the channel of §7.4.
 - **[DEV-147]** A device MUST publish the public half of `DeviceRosterKey_i` in its
   `DeviceEntry` of §7.3.1.
 
-> *Cause.* An earlier draft derived one `DeviceRosterKey` from `K_devset`, and
-> `K_devset` comes from the `RootIdentity`. §7.4 gives the `RootIdentity` to
-> each linked device. Thus each linked device could derive that one signing key,
-> and a revoked device could sign roster epoch *n+2* and put itself back in the
-> set. Revocation is mitigation 3 of §7.2, and under that derivation the
-> mitigation reached no device that had ever been linked. A per-device key that
+> *Cause.* `K_devset` comes from the `RootIdentity`, and §7.4 gives the
+> `RootIdentity` to each linked device. If one `DeviceRosterKey` came from
+> `K_devset`, each linked device could derive that one signing key. A revoked
+> device could then sign roster epoch *n+2* and put itself back in the set.
+> Revocation is mitigation 3 of §7.2, and under that derivation the mitigation
+> reaches no device that was linked at any time. A per-device key that
 > the device makes locally removes the signing authority of a revoked device,
 > because §7.3.1 rule 4 takes the authority from the previous epoch and not from
 > a secret that every device holds.
 >
 > The `RootIdentity` still reaches each device, and §7.2 states that cost. That
-> cost is now a cost against the pairwise identities and the recovery path
+> cost is a cost against the pairwise identities and the recovery path
 > only. §7.7.1 gives the full identity reset for that case.
 
 ### 7.3.1 The roster
@@ -146,16 +145,16 @@ OwnerClaim {
 **The subject is blinded.** `K_set` is the `DeviceSetKey` of Part 4 §4.2, and
 Part 6 §6.6 uses it in the same manner for `msg_ref`. **[DEV-226]** A device
 MUST compute `subject` as `SHA3-256(K_set || scope || value)`. For scope `0x01`
-the value is the pairwise identity public key. The scope `0x02` named an
-identity of an earlier draft, and it is retired. For scope
+the value is the pairwise identity public key, which is the 32-byte X25519
+public key of Part 4 §4.5. The scope `0x02` is reserved. For scope
 `0x03` the value is the
 `device_id` of the absent device, and §7.5.4 gives that claim. For scope
 `0x04` the value is 32 zero bytes, thus one claim names the group sender owner
 of Part 11 §11.12 for every group of the user, and §7.5.4 gives that claim.
 
-> *Cause.* A roster that named each subject in the clear was a list of each
-> contact of the user. That list was signed, and each
-> device and the archive of §7.6.1 held it. `K_set` never leaves the device
+> *Cause.* A roster that names each subject in the clear is a list of each
+> contact of the user. That list is signed, and each
+> device and the archive of §7.6.1 hold it. `K_set` never leaves the device
 > set, thus a party outside the set cannot test a candidate against the list.
 > A seized device holds `K_set`. Thus the blinding protects the archive and a
 > roster that left the set, and it does not protect a seized device. Part 15
@@ -166,7 +165,7 @@ A `DeviceEntry` is 3 225 bytes and an `OwnerClaim` is 49 bytes. A roster at
 bucket `B3`. That total is 60 bytes of fields, 8 entries at 3 225 bytes, 4
 tombstones at 16 bytes, 8 claims at 49 bytes, and a 3 309-byte signature. Part 6
 §6.9 gives the body of an `AppMessage` 32 448 bytes at `B3`, and the
-`DeviceSetControl` header of §7.5.5 takes 3 more bytes. **[DEV-164]** A revision MUST derive
+`DeviceSetControl` header of §7.5.5 takes 3 more bytes. **[DEV-164]** A later version MUST derive
 this total again if it adds a field to `DeviceEntry` or raises `MAX_DEVICES`.
 
 A roster epoch travels as a device-set control record of §7.5.5, with the
@@ -203,7 +202,9 @@ Part 5 §5.11 holds the label `"umbra/v1/device-roster"`.
    current roster to a new device, and that transfer moves on the authenticated
    channel of §7.4.
 5. **[DEV-157]** A verifier MUST reject an epoch whose `revoked` list does not hold each
-   `DeviceId` that an earlier epoch revoked. A tombstone is permanent.
+   `DeviceId` that an earlier epoch revoked. A tombstone is permanent. Thus a
+   parser MUST also reject an epoch that names a `DeviceId` of its own
+   `revoked` list in its `devices` list.
 6. **[DEV-176]** A device MUST set `epoch` to the `epoch` of the previous roster plus 1.
    **[DEV-180]** A device MUST NOT apply a roster epoch that names its own `DeviceId` in
    `revoked`. **[DEV-181]** That device MUST show that event to the user.
@@ -228,11 +229,12 @@ the same time. That event is normal use, and it is not evidence of an attack.
 > DEV-180 also makes each honest device reject a competing epoch that revokes
 > that honest device. The residual is a hostile device that revokes one honest
 > device and not the other. The two honest devices then disagree, and §7.7
-> shows the fork at the next epoch. An earlier draft of DEV-178 suppressed the
-> fork display for each pair of successors that rule 1 or rule 2 ordered. In a
-> set of three devices a hostile device then revoked the two honest devices
-> in two competing epochs. Rule 2 selected one of them in silence at each
-> honest device. Part 15 §15.3 records that residual.
+> shows the fork at the next epoch. Part 15 §15.3 records that residual.
+> DEV-178 suppresses the fork display only when the two `revoked` lists hold
+> the same entries. A suppression for each pair of successors that rule 1 or
+> rule 2 orders has a defect. In a set of three devices a hostile device can
+> then revoke the two honest devices in two competing epochs. Rule 2 then
+> selects one of them in silence at each honest device.
 
 > *The effect on a revoked device.* A revoked device holds its own
 > `DeviceRosterKey_i` and the roster chain up to the epoch that revoked it. It
@@ -259,9 +261,8 @@ ratchet ownership and the group sender ownership.
 - **[DEV-163]** The provisioning payload of §7.4 MUST carry the current ownership table.
   Thus a new device does not replay the roster chain to build that table.
 
-> *Cause.* An earlier draft said that the roster names the ratchet owner and the
-> chain owner, and the `Roster` structure carried no field for either name.
-> §7.5.4 depends on that name. A delta of claims keeps
+> *Cause.* §7.5.4 depends on the name of the owner of each subject, thus the
+> roster carries a field for that name. A delta of claims keeps
 > the roster small at 150 contacts, and a full ownership table in each epoch
 > does not.
 
@@ -343,8 +344,9 @@ absent device owns. The device that publishes it is the claimant.
 
 > *Cause.* A phone that a user loses owns each ratchet that it established.
 > `OWNER_CLAIM_RATE` gives a surviving device 4 records each day at 8 claims
-> each, thus the user regained 32 contacts each day. At 150 contacts that
-> recovery took 5 days, and each contact in the meantime saw no message from
+> each. With claims of scope `0x01` alone, the user regains 32 contacts each
+> day. At 150 contacts that recovery takes 5 days, and each contact in the
+> meantime sees no message from
 > the user. One absence claim moves each subject at once. Part 3 §3.12 gives
 > the cost of that claim on the day of a loss, and Part 2 §2.4 states the
 > trade.
@@ -359,13 +361,26 @@ audit the chain later.
   that it applied. §7.7 compares `prev_hash` against those hashes.
   **[DEV-229]** A device MUST NOT retain a signed claim record or a superseded
   roster epoch after the fold. The highest roster epoch stays, because DEV-152
-  finds the signer of the next epoch in its `devices` list.
+  finds the signer of the next epoch in its `devices` list. The 8 roster
+  epochs before the highest one are the one exception. A device MUST keep
+  them. A device MUST NOT keep an earlier one. A roster epoch is a control record
+  with no counter and no resend (`DEV-271`), and DEV-150 verifies an epoch
+  against the epoch before it alone. Thus a device that missed one epoch
+  verifies no later one, and the kept epochs are its way back.
+  A device sends its highest epoch on each sync channel at the start of
+  each run. A device that takes from a peer an epoch below its own
+  highest one, equal to the epoch that it applied at that index, MUST send
+  that peer each epoch that follows it, in order, when it keeps each of
+  them. The peer applies each one under the six rules above. A device that
+  is more than 9 epochs behind verifies no epoch again, and the user links
+  it again under §7.4.
 
 > *Cause.* §7.5.4 makes a device claim a ratchet ownership after
 > `OWNER_TIMEOUT`, which is 90 seconds. A user that moves between a phone and a
 > laptop makes that claim often. A `Roster` at `MAX_DEVICES` is 29 625 bytes and
 > it uses bucket `B3` at 32 860 bytes on the wire, and a device sends it on each
-> of its *d* − 1 sync channels. Thus an ownership change cost a full rewrite of
+> of its *d* − 1 sync channels. Thus an ownership change in a roster epoch
+> costs a full rewrite of
 > the device list. This record costs 8 240 bytes, which is 4.0 times less, and
 > Part 3 §3.12 holds the row. A claim record carries no `DeviceEntry`, thus it
 > also does not carry 3 225 bytes for each device that did not change.
@@ -508,9 +523,39 @@ Provision {                      // sealed under the seal key, XChaCha20-Poly130
   until a claim of §7.3.1 or §7.5.4. Until then it MUST NOT read the queue of
   a contact, send a group record, or write a backup of Part 4 §4.7.2: each
   queue has one reader, and the backup root of a week has one writer.
+  The v1 client publishes no claim and applies none. Thus the
+  device that owns the channels at the first link owns them for the life of
+  the set. That device alone signs an epoch that adds or revokes a device. **A
+  set whose owning device is lost or seized thus cannot revoke that device,
+  cannot link a device, and sends and reads nothing more.** The other
+  devices keep the history that they hold. The user recovers through the
+  restore of Part 4 §4.7 on a new device, with the Recovery Code that the
+  owning device held and that the user wrote down (`DEV-295`). That new
+  device starts a new set. Part 4 §4.7 gives what a restore renews at the
+  contacts of the user. A user with no Recovery Code recovers nothing of
+  the set. Steps 1 and 3 of §7.7 and the absence claim of §7.3.1 describe
+  the path that a later version builds. They are not a property of
+  v1.
 - **[DEV-290]** The existing device MUST keep the roster of epoch *n+1* only
   when the sync channel of the new device opens. A link that ends before
-  that leaves epoch *n* in force. **[DEV-297]** From the confirmation of
+  that leaves epoch *n* in force. A link that the user cancels, or that
+  expires, after the confirmation of `DEV-283` MUST retire the sync
+  invitation of `DEV-286` at once. The existing device erases the one-time
+  prekey and the handshake state of that invitation, and it sends the `DEL`
+  of its queue. An invitation whose queue no relay made yet ends when the
+  relay made it, and no party gets its bundle. The existing device also
+  removes the pending device from its store. The existing device MUST
+  refuse a contact whose handshake names it a device while the existing
+  device holds no pending device. The channel of that contact ends as the
+  channel of a revoked device ends. No
+  view shows it, no record goes on it, and no later run reads its queue.
+  **Limit of v1.** The existing device holds the list of its
+  sync invitations in the memory of one run. The existing device does not
+  retire an invitation of a link that ended with its run, or while the
+  client was locked. That invitation
+  stays until `INVITE_TTL` of Part 4 ends it (`IDN-127`). The refusal above
+  covers that time, because the pending device leaves the store at the end
+  of the link, or at the next unlock. **[DEV-297]** From the confirmation of
   `DEV-283`, the existing device MUST retain each record that it publishes
   for the new device, and it MUST send each one when that sync channel
   opens, under the pacing of §7.5.5. A record between the snapshot and the
@@ -528,7 +573,8 @@ Provision {                      // sealed under the seal key, XChaCha20-Poly130
   link QR code MUST operate one time only.
 - **[DEV-007]** A device that has a provision MUST refuse a link into a second device set. **[DEV-008]** The
   client MUST make the user do an explicit local wipe before a second link.
-- **The web client.** **[DEV-264]** A web client of Part 14 §14.7 MUST link
+- **The web client.** Part 1 §1.1 defers the web client, and the four
+  rules below bind it when it ships. **[DEV-264]** A web client of Part 14 §14.7 MUST link
   as a device of this section, and it MUST NOT make a `RootIdentity`.
   **[DEV-265]** When a web client returns to this flow after it lost its
   store, the existing device MUST revoke the old entry under §7.7 before step
@@ -540,13 +586,12 @@ Provision {                      // sealed under the seal key, XChaCha20-Poly130
   direction the existing device MUST show the label of the new device, and it
   MUST get an explicit confirmation from the user, before step 4.
 
-> *Cause of the sealed hello and of the rows of the snapshot.* A first
-> layout put the fields of the hello in the clear, and a relay that held it
-> read the label of the device. The same layout put the roster and the sync
-> bundle in the provision: at eight devices the roster alone is near 29 KB,
-> and the provision then did not fit one chunk.
+> *Cause of the sealed hello and of the rows of the snapshot.* A hello with
+> its fields in the clear lets a relay that holds it read the label of the
+> device. A provision that holds the roster and the sync bundle does not fit
+> one chunk: at eight devices the roster alone is near 29 KB.
 
-> *Cause of the handle-addressed chunks.* An earlier draft ran the link as a
+> *Cause of the handle-addressed chunks.* The alternative is a
 > handshake over an ephemeral queue. The new device holds no root identity
 > before the provision, and each queue of the reference client hangs off one.
 > A handle-addressed chunk needs no identity, the restore of Part 4 §4.7.2
@@ -578,10 +623,11 @@ sync channel to it. A device that takes, from the device that owns the
 channels, a `SyncedRecord` equal in `scope`, `subject`, `author`, and `inner`
 to one that it published and still retains MUST drop it.
 
-> *Cause.* An earlier draft gave *d(d−1)/2* channels, and the link of §7.4
-> opened one. A record that a linked device composed then reached the owner
-> alone, and each other linked device never read it, while the log of the
-> composing device kept it for each peer that it could not reach. The owner
+> *Cause.* A full mesh needs *d(d−1)/2* channels, and the link of §7.4
+> opens one. Without the relay of `DEV-308`, a record that a linked device
+> composes reaches the owner alone. Each other linked device does not read it,
+> and the log of the
+> composing device keeps it for each peer that it cannot reach. The owner
 > reads each channel already, thus its relay costs one publish for each
 > record, and a new link needs no channel of its own to each other device.
 
@@ -613,11 +659,11 @@ The sync traffic has these properties:
   waiting for the pacing clock.
 
   > *Cause.* Part 3 §3.6.2 gives the cover clock a mean of 20 seconds in the
-  > foreground. Under the pacing rule a message that a user typed on a laptop
-  > waited a mean of 20 seconds before the phone could send it. U2 of Part 2
-  > §2.4 gives a p50 of 2.0 seconds. §7.5.4 described that cost as one round
-  > trip, and it is not. An earlier draft gave a flat limit of 4 records each
-  > minute. A user that sent 5 short lines in a row then saw the fifth line
+  > foreground. Under the pacing rule alone, a message that a user types on a
+  > laptop waits a mean of 20 seconds before the phone can send it. U2 of
+  > Part 2 §2.4 gives a p50 of 2.0 seconds. A flat limit of 4 records each
+  > minute is the alternative to the bucket. A user that sends 5 short lines
+  > in a row then sees the fifth line
   > wait, with no statement of the cause. The bucket lets
   > a burst of 12 through, and the mean rate stays at 4 each minute.
   >
@@ -795,11 +841,11 @@ MutableItem {                 // the body of kind 0x20 at sub-kind 0x01
   that arrives after its winner went can then win again, and each item of
   that table converges forward in any case.
 
-> *Cause.* An earlier draft named the context and the sub-kinds and gave
-> them no layout, thus two implementations could not exchange one sync
-> record. The three layouts above are the one carrier of each. A later draft
-> gave the synced record no conversation and no author, thus a receiver
-> could not tell where a record went, or whether the user wrote it.
+> *Cause.* Two implementations can exchange a sync record only when the
+> context and each sub-kind have a layout. The three layouts above are the
+> one carrier of each. Without a conversation and an author in the synced
+> record, a receiver cannot tell where a record goes, or whether the user
+> wrote it.
 
 **The counters of a context.**
 
@@ -813,7 +859,27 @@ MutableItem {                 // the body of kind 0x20 at sub-kind 0x01
   point of `DEV-055` that the sender holds for that device.
 - **[DEV-275]** A device MUST add one to its `lamport` before each send of a
   counted record. At the receipt of a counted record, it MUST set its
-  `lamport` to the higher of its own value and the value of the record.
+  `lamport` to the higher of its own value and the value of the record. A
+  device MUST reject a counted record whose `lamport` is more than 2³² above
+  its own value. It takes neither the counter nor the content of that
+  record, and its own `lamport` stays. That bound is relative to the
+  receiver. The device that owns the channels can take two records in turn
+  that are each inside the bound. Its value is then more than 2³² above
+  a device that saw neither. A device that it links later starts at zero,
+  and a device that was behind stays behind. Thus the bound holds at the
+  device that owns the channels, for each record of each other device.
+  A device that owns no channel MUST take a counted record of the device
+  that owns them at any `lamport`. Its own `lamport` starts again from that
+  value. Each record of the set reaches such a device through the owner of
+  the channels (`DEV-308`), which applied the bound to each write that it
+  took. A new device takes its first `lamport` in this way, from the first
+  record of the device that linked it. A device MUST NOT let its `lamport`
+  stop at its last value, and it sends no counted record when the next
+  value does not exist. A `lamport` counts the writes of a set, and no set
+  writes 2³² records between two syncs of one device. Without the bound,
+  one record of one device with the last value of the field gives that
+  value to each device. Each later write of the set carries it, and
+  `DEV-270` then orders by the writer alone for the life of the set.
 - **[DEV-276]** A device MUST reject a `SyncAck` whose `counter` is above its
   own causal counter, because no record holds that counter.
 - **[DEV-277]** A device MUST retain a `MutableItem` for the resend of §7.5.5
@@ -822,9 +888,9 @@ MutableItem {                 // the body of kind 0x20 at sub-kind 0x01
   wins under `DEV-270`, thus an older value would lose at the peer in any
   case.
 
-> *Cause.* §7.5.5 acknowledges a causal counter, and no rule said where a
-> record carries its own counter or which records take one. The entry of the
-> sender in the vector is that place, and it costs no field.
+> *Cause.* §7.5.5 acknowledges a causal counter, thus a record has to carry
+> its own counter, and a rule has to name the records that take one. The
+> entry of the sender in the vector is that place, and it costs no field.
 
 Each kind of Part 6 §6.6 is in exactly one class. **[DEV-021]** A new kind MUST declare its
 class in Part 6 §6.6. **[DEV-022]** A client MUST NOT process a kind that declares no class.
@@ -908,7 +974,7 @@ class in Part 6 §6.6. **[DEV-022]** A client MUST NOT process a kind that decla
   then on, whether or not it owns the channel. The device that owns the
   channels MUST publish, at the start of each run, the item of each contact
   that its engine does not hold, and a receiver MUST hold a synced record
-  whose subject names no conversation until the item comes. **[DEV-198]** A revision that adds a chat-list item MUST add a row.
+  whose subject names no conversation until the item comes. **[DEV-198]** A later version that adds a chat-list item MUST add a row.
 
   **[DEV-304]** The device that owns the channels MUST publish the delivery
   state of each message that it sent when that state becomes delivered,
@@ -1017,10 +1083,16 @@ ratchet state for the contact *c*. If the two devices send, the ratchet forks.
   broadcast of an `OwnerClaimRecord` of §7.3.1. The pair (`roster_epoch`,
   `claim_seq`) gives the order of the claims, and the device ID breaks a tie.
   **[DEV-169]** A device MUST NOT claim the ownership of a
-  subject before `OWNER_TIMEOUT` passes.
-- At a change of the ownership, the new owner does a **DH ratchet step
-  immediately**. Thus a stale former owner cannot decrypt the traffic that
-  follows.
+  subject before `OWNER_TIMEOUT` passes. The v1 client builds
+  no claim, and `DEV-287` states what follows from that.
+- At a change of the ownership, the new owner takes the **next DH ratchet
+  step of the channel**. That is the step of Part 5 §5.5 that follows the next record
+  of the peer under a new ratchet key. A sender cannot step alone, because the
+  peer derives each receiving chain from its own newest ratchet key, which the
+  sender holds only after that record. Thus a stale former owner decrypts no
+  traffic after that step. It decrypts the records of the peer before the
+  step only when it also reads their queue, which the queue rotation of §7.7
+  step 2c ends.
 
 **The group sender owner.** A group has no ratchet, and a group record carries
 a per-sender `counter` that Part 11 §11.3.4 keeps strictly increasing in each
@@ -1042,9 +1114,21 @@ the owner is in the background, the owner takes the record at its next push
 wake, and Part 8 §8.3 gives that wake latency. Part 2 §2.4 U2 states the target
 for this path, which is a p50 of 6 s and a p95 of 20 s in Instant mode.
 
+**That target covers an unlocked owner.** Part 14 rule `IMP-119` locks a
+client after 15 minutes with no action of the user. A locked client
+holds no key and runs no network (Part 14 rule `IMP-127`). A push wake of a
+locked owner shows which conversation waits (Part 8 rule `NTF-136`), and it
+takes no record. Thus a locked owner sends nothing for another device, reads
+no pairwise queue, and publishes no sync record again under `DEV-308`.
+Each other device of the set waits for the unlock of that owner. The claim of `DEV-049`
+is the designed bound of that wait, at `OWNER_TIMEOUT` and under
+`OWNER_CLAIM_RATE`. The v1 client builds no claim (`DEV-287`),
+thus in v1 the wait ends at the unlock of the owner and at no
+other time. A linked device shows the composed record as `queued` for that
+time. Part 2 §2.4 states the trade, and Part 15 §15.3 holds the row.
+
 This design costs one round trip when a device that is not the owner sends
-first. In exchange it removes the full class of ratchet-fork bugs. That class of
-bug is the cause that the multi-device proposal of SimpleX has not shipped. The
+first. In exchange it removes the full class of ratchet-fork bugs. The
 alternative is the Sesame-style per-device session mesh of Signal. That
 alternative is also correct, but it multiplies the pairwise sessions by the
 device count at the two ends. For two users with 8 devices each, the count
@@ -1088,7 +1172,7 @@ SyncAck {
 > claim record of §7.3.1. The value `0x04` names the `FileDescriptor` of a
 > catch-up object of §7.5.1, and Part 12 §12.3 gives that structure. The value
 > `0x05` names a `SyncSeedUpdate` of §7.7.
-> **[DEV-053]** A revision
+> **[DEV-053]** A later version
 > that adds a device-set control record MUST give that record a new
 > `control_type` value.
 >
@@ -1181,8 +1265,7 @@ A **low-rate set** takes at least one new record in each `SYNC_ACK_MAX_DELAY`
 period. That set takes fewer than `SYNC_ACK_BATCH` records in that period. Thus
 a low-rate set pays the idle term only. At `MAX_DEVICES` of 8 a low-rate set
 pays 7 × 4 = 28 cells each day, which is 28 × 560 = 15 680 bytes. **The 28-cell
-figure describes the low-rate set, and it is not a floor on the full cost.** An
-earlier draft named it a floor, and this document withdraws that name.
+figure describes the low-rate set, and it is not a floor on the full cost.**
 
 A busy channel adds the batch term, and the batch term is the larger of the two.
 Part 3 §3.12 gives a mix of 278 records each day. A device that takes 278
@@ -1226,7 +1309,24 @@ a new sync queue is rare.
    record in its local database. Part 6 §6.4 gives `QUOTA` as the value `0x50`.
    **[DEV-068]** That device MUST NOT show a delivery failure to the user.
 3. **[DEV-069]** A device MUST resend each retained record above the acknowledged counter of
-   the peer. **[DEV-070]** If no sync acknowledgment arrived from that peer, a device MUST
+   the peer. A retained counter whose body the device holds no more, as that
+   of a timed record whose period ended (`DEV-211`), MUST go in that resend
+   as a **void**. A void is a `MutableItem` with `item` 0, which is no row of the
+   table of §7.5.3. It has an empty `key` and an empty `value`, the `writer`
+   and the current `lamport` of the sender, and the counter of the lost
+   record as the counter of the sender in its `vector`. A void takes no new
+   counter. A device that takes a `MutableItem` with `item` 0 MUST take its
+   counter under `DEV-055`. That device MUST apply nothing. That device MUST
+   NOT publish it
+   again under `DEV-308`. Without the void the acknowledgment point of the
+   peer stays below that counter permanently. Each acknowledgment then starts the
+   resend of each later record again, and no device drops the bodies of
+   those records. A device that holds 65 536 counters of one source above
+   its acknowledgment point MUST NOT take a further one above that point.
+   The source sends that counter again. That bound keeps the stored state of a
+   device finite when a source sends counters with holes. A counter that
+   left the log under `DEV-075` goes in no resend and in no void, and
+   `DEV-077` shows its range. **[DEV-070]** If no sync acknowledgment arrived from that peer, a device MUST
    resend each retained record. **[DEV-071]** A device MUST do that resend when a sync
    acknowledgment arrives. **[DEV-072]** A device MUST also do that resend at a new sync
    queue. A rotation or a `QUEUE_IDLE_TTL` deletion makes a new sync queue, and
@@ -1296,8 +1396,8 @@ revision that it rejected to the device set.
 > does not extend the window. A device that does not own the ratchet takes the
 > target on the sync channel, at the pace of §7.5.1 or in a catch-up object.
 > Thus its own receive time is later than that of the owner by an unbounded
-> amount. An earlier draft let each device measure, and the devices of one
-> recipient then disagreed about one edit.
+> amount. If each device measured the window, the devices of one
+> recipient would disagree about one edit.
 
 **The revision limit.** `EDIT_MAX` is 8 revisions of one message. **[DEV-088]** A receiver
 MUST reject the revision that follows the limit. §7.5.3 gives the high-water
@@ -1407,9 +1507,9 @@ An edit or a deletion in a group is one group record of Part 11 §11.3, and the
 group sender owner of §7.5.4 posts it as any group send. The group is one
 destination under DEV-107.
 
-> *Cause.* An earlier draft sent an edit and a deletion to each member on a
-> pairwise channel, with an independent delay for each member, because a burst
-> to the member set was a membership beacon. A group record reaches every
+> *Cause.* A send of an edit or a deletion to each member on a
+> pairwise channel needs an independent delay for each member, because a burst
+> to the member set is a membership beacon. A group record reaches every
 > member through one group queue, thus there is no set of sends to spread.
 
 **[DEV-112]** A client MUST send an edit and a deletion under the ordinary ARQ of Part 3 §3.7.
@@ -1498,13 +1598,14 @@ holds the plaintext. **[DEV-126]** Thus the interface MUST state each limit belo
 - A device that returns after a long absence: "This device was offline for more
   than 60 days. It can still hold messages that you deleted while it was away."
 - A backup restore: "A restore brings back the messages that the backup holds. A
-  backup can be up to 8 weeks old. A message that you deleted after that backup
+  backup can be up to 26 weeks old. A message that you deleted after that backup
   comes back."
 - An exported archive: "An archive file is outside UMBRA. A delete does not
   reach it."
-- An attachment: "UMBRA discards the key for the file. The file parts stay at
-  the relay for up to 45 days, and a person who already downloaded the file
-  keeps the file."
+- An attachment: "UMBRA discards the key for the file. If you sent the file,
+  UMBRA asks each relay to erase its parts. If another person sent it, its
+  parts stay at the relay for up to 28 days. A person who already downloaded
+  the file keeps the file."
 - A revocation: "This device deleted N messages since the last change to your
   device list. If you did not delete them, restore from a backup that predates
   today."
@@ -1568,8 +1669,8 @@ A conversation timer removes a message from each device after a period. Part 6
 > restore, after the period ended. Part 4 §4.7.2 holds a full object for
 > `BACKUP_FULL_INTERVAL` and a relay holds it for `BACKUP_TTL`, thus the record
 > would outlive its timer by up to 180 days. A user that sets a timer states an
-> intent, and a silent recovery path defeats it. An earlier draft listed three
-> stores, and a new store then fell outside the rule. The positive form above
+> intent, and a silent recovery path defeats it. A rule that lists the
+> forbidden stores lets a new store fall outside the rule. The positive form above
 > names the two permitted paths, and each other path is out.
 
 **The timer in a group.** Each rule of this section binds a private group in
@@ -1613,9 +1714,9 @@ setting that decides **what the device shows**, and it is per conversation.
   Part 8 §8.3. The device wakes on the profile mode, and the setting decides
   what the client renders after the wake.
 
-> *Cause.* Part 8 §8.3 sets the mode for each profile, thus a user that joins
-> one busy group had to choose between a silent device and a device that wakes
-> for each of 500 members. The setting above separates the two decisions. It
+> *Cause.* Part 8 §8.3 sets the mode for each profile. With that mode alone, a
+> user that joins one busy group has to choose between a silent device and a
+> device that wakes for each of 500 members. The setting above separates the two decisions. It
 > also costs no wake and no cell, because it acts after the drain.
 >
 > A `mentions` setting needs the mention list of Part 6 §6.6.5, and that list is
@@ -1651,9 +1752,8 @@ The pairwise identity stays correct. Part 3 §3.2.6 gives the re-establishment.
 It is a new queue, a `QueueAddress` on a live channel, and the dead-channel
 blob when no live channel remains.
 
-SimpleX records the opposite behavior. A stale backup and a rotated address
-break the connection silently and permanently. That unrecoverable failure makes
-non-technical users abandon a messenger, and in UMBRA it is a conformance bug.
+A connection that a stale backup and a rotated address break silently and
+permanently is a conformance bug in UMBRA.
 
 **[DEV-136]** A client MUST NOT upload the archive to UMBRA infrastructure. The archive is a
 file, and the user puts it in a location of their choice.
@@ -1668,7 +1768,8 @@ has to be fast and complete.
    That device signs the epoch with its own DeviceRosterKey (§7.3.1 rule 3).
 2. Every remaining device, on observing epoch n+1:
      a. deletes the sync channels to the revoked device;
-     b. performs an immediate DH ratchet step on every pairwise channel it owns;
+     b. takes the next DH ratchet step on every pairwise channel it owns, which
+        follows the next record of the peer (§7.5.4);
      c. rotates every queue the revoked device knew;
      d. derives the sync channel seed of epoch n+1 from the seed update;
      e. starts the group re-key of Part 11 §11.12 for each group of the user.
@@ -1705,24 +1806,51 @@ SyncSeedUpdate {
 - **[DEV-255]** A device MUST NOT open a sync channel to a revoked device.
   **[DEV-256]** A device MUST reject a sync channel from a revoked device.
   **[DEV-257]** After a device applies the epoch that revokes a device, it MUST
-  NOT accept a sync record from that device.
+  NOT accept a sync record from that device. That holds from the record
+  after the epoch on, for the records that one read of a queue gives
+  together too.
 - **[DEV-313]** The signer of an epoch with a new `revoked` entry MUST send
   that epoch once on the sync channel of each device that it revokes, before
   it deletes that channel under step 2a. Thus an honest device learns of its
   removal and shows it under `DEV-181`. The epoch tells that device nothing
-  that it does not hold.
+  that it does not hold. The signer MUST send the epochs that it keeps under
+  `DEV-229` on that channel before that epoch. A device that missed
+  one of them verifies the epoch of its removal through them alone. A device
+  that takes a verified epoch which revokes it at the index of its own
+  highest epoch, as a rival of that epoch, MUST show the event under
+  `DEV-181` in the same manner. The signer keeps the notice in its store with the
+  epoch. It deletes the channel when a relay accepted the notice, or
+  `MSG_TTL` after the revocation, whichever comes first. Thus a removal on a
+  device with no connection still reaches the removed device. Each time the
+  signer sends the notice again, after a lock or at a new run, it MUST send
+  the kept epochs that lead to the epoch of the notice before it again, and
+  no epoch above that epoch. It is possible that the removed device missed an epoch,
+  and the queue of the first send does not live through a lock. Until then the
+  channel carries that one record. The signer sends no later epoch and no
+  sync record on it, and it discards each record that arrives on it under
+  `DEV-257`.
 - **[DEV-262]** A device that applies an epoch with a new `revoked` entry MUST
   start the group re-key of Part 11 §11.12 for each group of the user. The
-  ratchet step of step 2b heals a pairwise channel and no group key, and Part
-  11 §11.12 gives the cause.
+  ratchet step of step 2b heals a pairwise channel at the next record of the
+  peer and no group key, and Part 11 §11.12 gives the cause. Until that step
+  the rotation of step 2c is what keeps the revoked device from the records of
+  the channel. The revoked device holds the chain keys and no queue to read
+  them from.
 
 A `SyncSeedUpdate` is 40 bytes. With the sub-kind, the version, and the
 `control_type` the body is 43 bytes, and it fits bucket `B0` of Part 6 §6.9.
 
-> *Cause.* An earlier draft told each remaining device to derive the sync
-> channel seed again, and it gave no new input. A derivation from `K_devset`
+**The rotations of step 2c are a debt of the store.** The device that owns
+the pairwise channels writes the list of its contacts to its store before it
+writes the epoch. Each session then asks for the rotation of each contact on
+that list, with the delay of Part 3 `NET-180`. A contact leaves the list
+when its new queue exists. Thus a revocation with no connection, and a
+session that ends before a rotation, lose no rotation.
+
+> *Cause.* A derivation from `K_devset`
 > alone gives the seed that the revoked device holds, because §7.3 says that
-> device holds the `RootIdentity`. Thus step 2d changed nothing. The random
+> device holds the `RootIdentity`. With no new input, step 2d changes
+> nothing. The random
 > input from the signer is a value that the revoked device does not see,
 > because DEV-255 gives it no sync channel. The chain over the old seed binds
 > each update to the seed before it.
@@ -1746,7 +1874,12 @@ A `SyncSeedUpdate` is 40 bytes. With the sub-kind, the version, and the
   and that case is normal use.
 - **[DEV-182]** A device that finds that a peer applied a different epoch at one index MUST
   show the fork. Two honest devices reach that state only after a hostile device
-  signed an epoch, and §7.3.1 states that residual.
+  signed an epoch, and §7.3.1 states that residual. The device MUST name the
+  `signer_id` of that epoch only when its signature verifies under the
+  `DeviceRosterKey` of that device, which the kept epoch before it or the
+  highest epoch gives. In each other case it MUST name the device whose sync
+  channel carried the epoch. Thus a device of the set cannot put a fork on
+  another device with an epoch that it forged.
 - **The device set is the only audience of a roster.** §7.6 forbids a device to
   share the roster with a contact, and §7.3.1 forbids a plaintext roster at a
   relay. Thus a fork from a revoked device reaches the remaining devices only,
@@ -1784,7 +1917,19 @@ the group re-key of Part 11 §11.12 in each group of the user.
 message by `msg_ref`. **[DEV-305]** A full identity reset MUST keep that seed
 as the storage seed, and it MUST keep `K_store` and `K_set`. **[DEV-306]** The
 new `RootIdentity` MUST give each pairwise identity and each key of discovery
-of Part 9 after the reset. **[DEV-307]** A device set of more than one device
+of Part 9 after the reset. An entry of Part 9 that the device published before
+the reset is the one exception. The directory holds the key of the earlier
+root for it. Thus the device keeps that root for that entry alone, to open a
+hello, to renew the lease, and to rotate or retire the entry. A rotation of
+the key moves the entry to the new root, and the device erases the earlier
+root with the last entry that it serves. The key of the earlier root signs the
+write of that rotation, and it signs the write again after a fault. Thus the
+device MUST keep an earlier root while an entry that it publishes, or a
+version of an entry that its store took and the log does not show yet, has a
+key from that root or needs that key for its write. It MUST erase the root
+only after the log showed the version that replaced the last such entry under
+the new key, or after that entry went. A write that only the store took, and
+a write that the directory refused, erase no root. **[DEV-307]** A device set of more than one device
 MUST remove each other device under §7.7 before the reset.
 
 > *Cause.* A reply holds its target as a `msg_ref` alone, and a new `K_set`
@@ -1810,7 +1955,7 @@ MUST remove each other device under §7.7 before the reset.
 | `SYNC_ACK_MAX_DELAY` | 6 h |
 | Roster epoch rate limit | 1 in 10 s for each device |
 | `OWNER_CLAIM_MAX` | 8 claims in one roster epoch or in one claim record (§7.3.1) |
-| `OWNER_CLAIM_RATE` | 4 claim records of scope `0x01` or `0x02` for each device each day (§7.3.1) |
+| `OWNER_CLAIM_RATE` | 4 claim records of scope `0x01` or `0x04` for each device each day (§7.3.1). Scope `0x02` is retired |
 | `OWNER_ABSENCE` | 24 h, measured by the claimant from the last record it took from the absent device (§7.3.1) |
 | `OWNER_ABSENCE_RATE` | 1 claim record of scope `0x03` for each device each hour (§7.3.1) |
 | `SYNC_INTERACTIVE_RATE` | 4 interactive sync records each minute, as the refill rate of the bucket (§7.5.1) |

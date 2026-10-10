@@ -4,9 +4,11 @@
 //! from the moment the user attaches it, thus an upload continues after a
 //! new start, and from the moment a download ends. Three tables hold the
 //! state of a file, its bytes, and the write credential of each chunk that
-//! this device uploaded (`ATT-160`).
+//! this device uploaded (`ATT-160`). A fourth one keeps those credentials
+//! past the deletion of the message, until each relay erased its chunk
+//! (`ATT-161`).
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use umbra_core::{
     attach::{
@@ -35,6 +37,39 @@ pub(super) const FILE_STATE: TableId = TableId(0x0F);
 pub(super) const FILE_DATA: TableId = TableId(0x10);
 /// The write credential of each chunk of a file that this device uploaded.
 pub(super) const CHUNK_CRED: TableId = TableId(0x11);
+/// The erase of the chunks of each file that this device uploaded
+/// (`ATT-160`, `ATT-161`). The upload writes two rows under the message: a
+/// copy of the credentials, and a hold. A deletion of the message takes the
+/// hold and the row of `CHUNK_CRED` away (`IMP-164`), and the copy is then
+/// due. The copy stays until each relay answered the `CDEL`, across each
+/// lock and each new start. `CHUNK_LIFE_MAX` after the upload ends it too.
+/// A message that leaves with no erase of its chunks takes the copy and the
+/// hold along, thus no credential outlives its message there.
+pub(super) const ERASE_DUE: TableId = TableId(0x55);
+/// The first byte of a credentials row of `ERASE_DUE` (`IMP-130`). The time
+/// of the upload in seconds follows it, and then the credentials as a row
+/// of `CHUNK_CRED` holds them.
+const ERASE_VERSION: u8 = 0x01;
+/// The one byte of a hold row of `ERASE_DUE`.
+const ERASE_HOLD: u8 = 0x00;
+/// The first byte of a row of `ERASE_DUE` that holds one object of a device
+/// link (Part 7 `DEV-003`). The time of the write in seconds follows it,
+/// and then the credential as a row of `CHUNK_CRED` holds it. Such a row
+/// has no hold and no message. It is due when its link runs no more, and
+/// the caller says when that is.
+const ERASE_LINK: u8 = 0x02;
+/// The version and the time of a credentials row of `ERASE_DUE`.
+const ERASE_HEAD: usize = 1 + 8;
+
+/// The natural key of the row of `ERASE_DUE` of one link object.
+fn link_key(chunk_id: &[u8; 32]) -> Vec<u8> {
+    [b"link".as_slice(), chunk_id.as_slice()].concat()
+}
+
+/// The natural key of the hold row of a message.
+fn hold_key(message: &RowId) -> Vec<u8> {
+    [b"hold".as_slice(), message.as_slice()].concat()
+}
 
 /// The state, the class, and the three media fields. A row of this
 /// version adds the size and the name after them.
@@ -106,6 +141,30 @@ pub struct DownloadJob {
     pub descriptor: Box<FileDescriptor>,
 }
 
+/// The erase of the file of one message, between the read of its
+/// credentials and the commit of the deletion ([`Client::file_erasures`]).
+pub(super) struct FileErasure {
+    jobs: Vec<ErasureJob>,
+    /// Whether `ERASE_DUE` holds a copy of the credentials.
+    is_kept: bool,
+    /// The hold row of the message in `ERASE_DUE`.
+    hold: RowId,
+}
+
+impl FileErasure {
+    /// The rows of `ERASE_DUE` that the deletion batch of the caller takes.
+    /// The batch takes the hold alone when chunks go at their relays, thus
+    /// the copy is due from the commit on. It takes the copy too when none
+    /// goes.
+    pub(super) fn rows(&self, message: &MsgRef) -> Vec<RowId> {
+        if self.jobs.is_empty() {
+            vec![message.0, self.hold]
+        } else {
+            vec![self.hold]
+        }
+    }
+}
+
 /// One chunk that this device uploaded, and that a deletion took (`ATT-161`).
 pub struct ErasureJob {
     /// The chunk.
@@ -122,6 +181,10 @@ pub(super) struct FileQueues {
     pub uploads: VecDeque<UploadJob>,
     pub downloads: VecDeque<DownloadJob>,
     pub erasures: VecDeque<ErasureJob>,
+    /// The row of `ERASE_DUE` of each chunk whose `CDEL` has no answer yet,
+    /// and the count of those chunks for each row.
+    pub erasing: BTreeMap<[u8; 32], RowId>,
+    pub erase_left: BTreeMap<RowId, usize>,
     /// Whether the platform said that the network costs by the byte.
     pub is_metered: bool,
 }
@@ -141,7 +204,7 @@ impl FileExtras {
         AttachmentBody::parse(body).map_or_else(
             |_| FileExtras::default(),
             |parsed| FileExtras {
-                name: parsed.name.map(str::to_owned),
+                name: parsed.name.map(std::borrow::Cow::into_owned),
                 preview: parsed.preview.map(<[u8]>::to_vec),
             },
         )
@@ -179,7 +242,10 @@ fn state_row(state: FileState, shape: &Shape, size: u64, extras: &FileExtras) ->
 }
 
 /// The name and the preview in a state row. A row of an earlier version
-/// holds neither, or the name alone.
+/// holds neither, or the name alone. A name that the store took before
+/// `WIR-532` can hold a bidirectional format character. The name reads with
+/// none, as the parser of the body reads it, thus the record that carries
+/// it encodes again.
 fn extras_of_state_row(row: &[u8]) -> FileExtras {
     let rest = row.get(STATE_ROW_LEN + 8..).unwrap_or(&[]);
     let Some((&name_len, rest)) = rest.split_first() else {
@@ -187,8 +253,9 @@ fn extras_of_state_row(row: &[u8]) -> FileExtras {
     };
     let name = rest
         .get(..usize::from(name_len))
-        .filter(|name| !name.is_empty())
-        .and_then(|name| String::from_utf8(name.to_vec()).ok());
+        .and_then(|name| core::str::from_utf8(name).ok())
+        .map(crate::draft::without_bidi_marks)
+        .filter(|name| !name.is_empty());
     let rest = rest.get(usize::from(name_len)..).unwrap_or(&[]);
     let preview = rest
         .get(..2)
@@ -428,6 +495,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     ) -> Result<(), Error> {
         let info = self.file_info(message)?.ok_or(Error::NotFound)?;
         let extras = self.file_extras(message)?;
+        let now = self.clock;
         let open = self.open_mut()?;
         let mut plain = Zeroizing::new(
             open.store
@@ -435,6 +503,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .ok_or(Error::NotFound)?,
         );
         let conversation = conversation_of(&plain)?;
+        // ATT-160: the copy of the credentials for the erase, and its hold.
+        let credentials = credentials_row(&uploaded.credentials)?;
+        let mut erase = Zeroizing::new(Vec::with_capacity(
+            ERASE_HEAD.saturating_add(credentials.len()),
+        ));
+        erase.push(ERASE_VERSION);
+        erase.extend_from_slice(&now.to_be_bytes());
+        erase.extend_from_slice(&credentials);
+        let hold = open.store.row_id(ERASE_DUE, &hold_key(&message.0));
         // WIR-531: the name travels after the descriptor, inside the record.
         let descriptor = FileDescriptor::parse(&{
             let mut bytes = Zeroizing::new(vec![0u8; uploaded.descriptor.len()]);
@@ -451,7 +528,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         };
         let attachment = AttachmentBody {
             descriptor,
-            name: extras.name.as_deref(),
+            name: extras.name.as_deref().map(std::borrow::Cow::Borrowed),
             preview: extras.preview.as_deref(),
             caption,
         };
@@ -484,9 +561,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             CHUNK_CRED,
             message.0,
             Some(conversation.0),
-            &credentials_row(&uploaded.credentials)?,
+            &credentials,
             rng,
         )?;
+        // The two rows name no conversation, thus a deletion that goes by
+        // the owner of a row takes neither.
+        batch.put(ERASE_DUE, message.0, None, &erase, rng)?;
+        batch.put(ERASE_DUE, hold, None, &[ERASE_HOLD], rng)?;
         batch.put(
             FILE_STATE,
             message.0,
@@ -544,15 +625,39 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(())
     }
 
-    /// The download of the file of a message ended with no result.
+    /// The download of the file of a message ended with no result. A new
+    /// attempt can follow, until `CHUNK_LIFE_MAX` after the arrival of the
+    /// message. No relay holds a chunk past that time (`ATT-160`), thus the
+    /// file is gone then (`ATT-052`). A replica that no consensus names any
+    /// more answers nothing (`ATT-010`). Without this bound its file would
+    /// fail at each tap with no end.
     pub fn download_failed<R: CryptoRng + ?Sized>(
         &mut self,
         message: &MsgRef,
         rng: &mut R,
     ) -> Result<(), Error> {
-        self.set_file_state(message, FileState::Failed, rng)?;
+        let state = if self.is_past_chunk_life(message)? {
+            FileState::Gone
+        } else {
+            FileState::Failed
+        };
+        self.set_file_state(message, state, rng)?;
         self.events.push_back(Event::File { message: *message });
         Ok(())
+    }
+
+    /// Whether `CHUNK_LIFE_MAX` passed since the store took a message. The
+    /// time is the one of this device: the upload came before it, and the
+    /// time that the sender wrote proves nothing.
+    fn is_past_chunk_life(&self, message: &MsgRef) -> Result<bool, Error> {
+        let plain = Zeroizing::new(
+            self.open_ref()?
+                .store
+                .get(TableId::MESSAGE, &message.0)?
+                .ok_or(Error::NotFound)?,
+        );
+        let stored_at = info_of(&plain)?.stored_at_ms / 1_000;
+        Ok(self.clock.saturating_sub(stored_at) >= umbra_core::attach::CHUNK_LIFE_MAX)
     }
 
     /// Each replica of a chunk of the file of a received message holds
@@ -725,7 +830,191 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for row in rows {
             self.requeue_file(&MsgRef(row))?;
         }
+        // ATT-161: each `CDEL` that an earlier run did not complete.
+        self.requeue_erasures()
+    }
+
+    /// Puts the chunks of each due row of `ERASE_DUE` into the work list
+    /// again (`ATT-161`). A row is due when a deletion took its hold and
+    /// its row of `CHUNK_CRED`, and a relay did not answer its `CDEL` yet.
+    /// A row older than `CHUNK_LIFE_MAX` leaves, because no relay holds its
+    /// chunks (`ATT-160`).
+    fn requeue_erasures(&mut self) -> Result<(), Error> {
+        let now = self.clock;
+        let open = self.open_mut()?;
+        let mut due = Vec::new();
+        let mut ended = Vec::new();
+        for (row, plain) in open.store.list(ERASE_DUE, None)? {
+            let plain = Zeroizing::new(plain);
+            let Some((head, credentials)) = plain.split_at_checked(ERASE_HEAD) else {
+                // A hold row. Its credentials row takes it along.
+                continue;
+            };
+            // IMP-130: a row of a version that this build does not read
+            // stays, and it stops no unlock and no run.
+            if head.first() != Some(&ERASE_VERSION) {
+                continue;
+            }
+            let at = head
+                .get(1..)
+                .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+                .map_or(0, u64::from_be_bytes);
+            let hold = open.store.row_id(ERASE_DUE, &hold_key(&row));
+            if at != 0 && now.saturating_sub(at) >= umbra_core::attach::CHUNK_LIFE_MAX {
+                ended.push((row, hold));
+                continue;
+            }
+            let is_held = open.store.get(ERASE_DUE, &hold)?.is_some();
+            if open.store.get(CHUNK_CRED, &row)?.is_some() {
+                continue;
+            }
+            // A hold with no row of `CHUNK_CRED`: the message left on a
+            // path that erases no chunk. A removal by a moderator and the
+            // removal of its conversation are such paths. No later deletion
+            // names the copy, thus it goes, and no `CDEL` leaves for it.
+            if is_held {
+                ended.push((row, hold));
+                continue;
+            }
+            if let Ok(jobs) = read_credentials_row(credentials) {
+                due.push((row, jobs));
+            }
+        }
+        if !ended.is_empty() {
+            let mut batch = open.store.begin();
+            for (row, hold) in ended {
+                batch.delete(ERASE_DUE, row);
+                batch.delete(ERASE_DUE, hold);
+            }
+            batch.commit()?;
+        }
+        for (row, jobs) in due {
+            self.erase_from(row, jobs);
+        }
         Ok(())
+    }
+
+    /// Keeps the erasure of one object that a device link put on the chunk
+    /// path (`DEV-003`), from the write of the object on. The memory of a
+    /// link ends at a lock and with its process. The object would then stay
+    /// at its relays for its whole lifetime. The row leaves when each relay
+    /// answered the `CDEL` ([`Client::chunk_erased`]).
+    pub fn keep_erasure<R: CryptoRng + ?Sized>(
+        &mut self,
+        chunk_id: &[u8; 32],
+        cred: &Secret<32>,
+        relays: &[[u8; 32]],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let now = self.clock;
+        let credentials = credentials_row(&[ChunkCredential {
+            chunk_id: *chunk_id,
+            cred: Secret::new(*cred.expose()),
+            relays: relays.to_vec(),
+        }])?;
+        let mut value = Zeroizing::new(Vec::with_capacity(
+            ERASE_HEAD.saturating_add(credentials.len()),
+        ));
+        value.push(ERASE_LINK);
+        value.extend_from_slice(&now.to_be_bytes());
+        value.extend_from_slice(&credentials);
+        let open = self.open_mut()?;
+        let row = open.store.row_id(ERASE_DUE, &link_key(chunk_id));
+        let mut batch = open.store.begin();
+        batch.put(ERASE_DUE, row, None, &value, rng)?;
+        batch.commit()?;
+        // The answer to a `CDEL` of this run takes the row away.
+        self.files.erasing.insert(*chunk_id, row);
+        self.files.erase_left.insert(row, 1);
+        Ok(())
+    }
+
+    /// The erasure of each link object that the store keeps, for a caller
+    /// that runs no link. Each one is the object of a link that ended. A
+    /// row older than `CHUNK_LIFE_MAX` leaves, because no relay holds its
+    /// object (`ATT-160`).
+    pub fn kept_erasures(&mut self) -> Result<Vec<ErasureJob>, Error> {
+        let now = self.clock;
+        let open = self.open_mut()?;
+        let mut due = Vec::new();
+        let mut ended = Vec::new();
+        for (row, plain) in open.store.list(ERASE_DUE, None)? {
+            let plain = Zeroizing::new(plain);
+            let Some((head, credentials)) = plain.split_at_checked(ERASE_HEAD) else {
+                continue;
+            };
+            if head.first() != Some(&ERASE_LINK) {
+                continue;
+            }
+            let at = head
+                .get(1..)
+                .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+                .map_or(0, u64::from_be_bytes);
+            if at != 0 && now.saturating_sub(at) >= umbra_core::attach::CHUNK_LIFE_MAX {
+                ended.push(row);
+                continue;
+            }
+            if let Ok(jobs) = read_credentials_row(credentials) {
+                due.push((row, jobs));
+            }
+        }
+        if !ended.is_empty() {
+            let mut batch = open.store.begin();
+            for row in ended {
+                batch.delete(ERASE_DUE, row);
+            }
+            batch.commit()?;
+        }
+        let mut out = Vec::new();
+        for (row, jobs) in due {
+            self.files.erase_left.insert(row, jobs.len());
+            for job in jobs {
+                self.files.erasing.insert(job.chunk_id, row);
+                out.push(job);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Puts the chunks of one row of `ERASE_DUE` into the work list, each
+    /// one once, and counts the answers that the row waits for.
+    fn erase_from(&mut self, row: RowId, jobs: Vec<ErasureJob>) {
+        let files = &mut self.files;
+        for job in &jobs {
+            files.erasing.insert(job.chunk_id, row);
+        }
+        files.erase_left.insert(row, jobs.len());
+        for job in jobs {
+            if !files
+                .erasures
+                .iter()
+                .any(|waiting| waiting.chunk_id == job.chunk_id)
+            {
+                files.erasures.push_back(job);
+            }
+        }
+    }
+
+    /// Each relay of one chunk answered its `CDEL` (`ATT-161`). The row of
+    /// `ERASE_DUE` leaves with the last chunk of its file. A chunk whose
+    /// answer a lock or a new start lost goes again, and a relay that holds
+    /// it no more answers that too.
+    pub fn chunk_erased(&mut self, chunk_id: &[u8; 32]) -> Result<(), Error> {
+        let Some(row) = self.files.erasing.remove(chunk_id) else {
+            return Ok(());
+        };
+        let left = self.files.erase_left.get(&row).copied().unwrap_or(0);
+        if left > 1 {
+            self.files.erase_left.insert(row, left.saturating_sub(1));
+            return Ok(());
+        }
+        self.files.erase_left.remove(&row);
+        let open = self.open_mut()?;
+        let hold = open.store.row_id(ERASE_DUE, &hold_key(&row));
+        let mut batch = open.store.begin();
+        batch.delete(ERASE_DUE, row);
+        batch.delete(ERASE_DUE, hold);
+        Ok(batch.commit()?)
     }
 
     /// Puts the transfer of one file back into the work list, when its
@@ -779,14 +1068,48 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     }
 
     /// The chunks of the file of a message that this device uploaded, for
-    /// the erase of `ATT-161`. The caller deletes the three file rows in its
-    /// batch, and it queues these after the commit.
-    pub(super) fn file_erasures(&self, message: &MsgRef) -> Result<Vec<ErasureJob>, Error> {
+    /// the erase of `ATT-161`. The call writes nothing. The caller deletes
+    /// the three file rows and the rows of [`FileErasure::rows`] in its
+    /// batch, and it calls [`Client::start_erasures`] after the commit.
+    ///
+    /// The batch of the caller takes the hold of the message out of
+    /// `ERASE_DUE` with the row of `CHUNK_CRED`. Thus the copy of the
+    /// credentials there is due from that commit on, and the erase lives
+    /// through a lock and a new start. A deletion that does not commit, or
+    /// that a check refuses, leaves the hold, and nothing is due.
+    pub(super) fn file_erasures(&self, message: &MsgRef) -> Result<FileErasure, Error> {
         let store = &self.open_ref()?.store;
-        match store.get(CHUNK_CRED, &message.0)? {
-            Some(row) => read_credentials_row(&Zeroizing::new(row)),
-            None => Ok(Vec::new()),
+        let jobs = match store.get(CHUNK_CRED, &message.0)? {
+            Some(row) => read_credentials_row(&Zeroizing::new(row))?,
+            None => Vec::new(),
+        };
+        Ok(FileErasure {
+            jobs,
+            // A file of an earlier version holds no copy, and its erase
+            // waits in the memory alone.
+            is_kept: store.get(ERASE_DUE, &message.0)?.is_some(),
+            hold: store.row_id(ERASE_DUE, &hold_key(&message.0)),
+        })
+    }
+
+    /// The rows of `ERASE_DUE` of a message that leaves with no erase of
+    /// its chunks: the copy of the credentials and its hold. The caller
+    /// deletes them in the batch that takes the message.
+    pub(super) fn erase_rows(&self, message: &MsgRef) -> Result<[RowId; 2], Error> {
+        let store = &self.open_ref()?.store;
+        Ok([message.0, store.row_id(ERASE_DUE, &hold_key(&message.0))])
+    }
+
+    /// Puts the chunks of a deleted message into the work list, after the
+    /// commit of its deletion.
+    pub(super) fn start_erasures(&mut self, message: &MsgRef, erasure: FileErasure) {
+        if erasure.is_kept && !erasure.jobs.is_empty() {
+            for job in &erasure.jobs {
+                self.files.erasing.insert(job.chunk_id, message.0);
+            }
+            self.files.erase_left.insert(message.0, erasure.jobs.len());
         }
+        self.files.erasures.extend(erasure.jobs);
     }
 }
 
@@ -796,7 +1119,7 @@ pub(super) fn outgoing_state_row(shape: &Shape, size: u64, extras: &FileExtras) 
 }
 
 #[cfg(test)]
-#[allow(clippy::indexing_slicing)]
+#[allow(clippy::indexing_slicing, clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -819,5 +1142,61 @@ mod tests {
             // IDN-186: the shape, the size, and the extras stay.
             assert_eq!(row[1..], rest[..]);
         }
+    }
+
+    #[test]
+    fn a_stored_name_with_a_bidirectional_mark_reads_with_none() {
+        // A row of a build before `WIR-532` forbade the marks.
+        let extras = FileExtras {
+            name: Some("report\u{202E}fdp.exe".to_owned()),
+            preview: None,
+        };
+        let row = state_row(FileState::Ready, &Shape::default(), 7, &extras);
+        let read = extras_of_state_row(&row).name.unwrap();
+        assert_eq!(read, "reportfdp.exe");
+        assert!(umbra_wire::descriptor::is_file_name(&read));
+        // A name of marks alone is no name.
+        let extras = FileExtras {
+            name: Some("\u{200E}\u{2069}".to_owned()),
+            preview: None,
+        };
+        let row = state_row(FileState::Ready, &Shape::default(), 7, &extras);
+        assert_eq!(extras_of_state_row(&row).name, None);
+    }
+
+    #[test]
+    fn a_stored_record_whose_name_holds_a_bidirectional_mark_still_gives_its_file() {
+        use umbra_wire::descriptor::{ChunkRef, Level};
+        let descriptor = FileDescriptor {
+            level: Level::Data,
+            file_key: Secret::new([6; 32]),
+            file_nonce: [7; 24],
+            commit: [8; 32],
+            digest: [9; 32],
+            media_seconds: 0,
+            padded_size: umbra_wire::descriptor::CHUNK_SIZE,
+            mime_class: umbra_wire::descriptor::class::DOC,
+            pixel_w: 0,
+            pixel_h: 0,
+            refs: vec![ChunkRef {
+                relay_id: [1; 32],
+                chunk_id: [2; 32],
+                cred_pk: [3; 32],
+                replicas: [[4; 12], [5; 12]],
+            }],
+        };
+        // The body as a build before the rule of the marks wrote it.
+        let name = "a\u{200E}b.pdf";
+        let mut body = vec![0u8; descriptor.len()];
+        descriptor.encode(&mut body).unwrap();
+        body.push(u8::try_from(name.len()).unwrap());
+        body.extend_from_slice(name.as_bytes());
+        body.extend_from_slice(&[0, 0]);
+        // The file stays in reach, and its name shows with no mark.
+        assert_eq!(fetchable(&body).unwrap().refs.len(), 1);
+        let (row, wanted) = incoming_state_row(&body, u64::MAX);
+        assert!(wanted.is_some());
+        assert_eq!(row[0], FileState::Wanted as u8);
+        assert_eq!(extras_of_state_row(&row).name.as_deref(), Some("ab.pdf"));
     }
 }

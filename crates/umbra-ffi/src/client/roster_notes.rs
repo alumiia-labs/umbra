@@ -113,6 +113,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// that period, and no party holds them. The read time moves once in
     /// `READ_CLOCK_STEP` at most, thus a subscription that runs costs no
     /// write at each tick.
+    ///
+    /// The call directly after [`Client::group_subscriptions`] names a
+    /// group whose `GSUB` goes now, and the session of that group starts
+    /// here. Each other call names the groups that a subscription reads at
+    /// this tick, and it is the sign of life of each watch (`GRP-396`).
     pub fn group_reads<R: CryptoRng + ?Sized>(
         &mut self,
         conversations: &[ConversationId],
@@ -120,6 +125,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         rng: &mut R,
     ) -> Result<(), Error> {
         let now = now_ms / 1_000;
+        if self.groups.offered {
+            for &conversation in conversations {
+                self.group_read_started(conversation, now, rng)?;
+            }
+        } else {
+            self.group_reads_live(conversations, now);
+        }
         for &conversation in conversations {
             let key = [conversation.0.as_slice(), b"read"].concat();
             let last = self.clock(&key)?;

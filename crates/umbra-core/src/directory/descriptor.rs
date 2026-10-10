@@ -152,6 +152,12 @@ impl<'a> RelayDescriptor<'a> {
         {
             return Err(Error::Malformed);
         }
+        // REL-092: the code is two capital letters. The bloc of a code is a
+        // match of its bytes, thus `us` beside `US` would be a second bloc
+        // of one country. Two such relays would pass invariant 2.
+        if !out.jurisdiction.iter().all(u8::is_ascii_uppercase) {
+            return Err(Error::Malformed);
+        }
         let key = VerifyingKey::from_bytes(out.identity_pk)?;
         let sig = Signature::from_bytes(out.sig)?;
         let mut preimage =
@@ -379,6 +385,15 @@ pub(crate) mod tests {
         bad_host[1 + 32 + 1952 + 32 + 4 + 16 + 2] = b' ';
         assert!(RelayEntry::parse(&bad_host).is_err());
         assert!(RelayEntry::parse(&bytes[..ENTRY_LEN - 1]).is_err());
+    }
+
+    #[test]
+    fn a_jurisdiction_that_is_not_two_capital_letters_is_no_entry() {
+        // REL-092: each of these verifies under the key of its relay.
+        for code in [*b"de", *b"De", *b"dE", *b"D1", [b'D', 0]] {
+            assert!(RelayEntry::parse(&entry_bytes(1, code, 3_320, 1)).is_err());
+        }
+        assert!(RelayEntry::parse(&entry_bytes(1, *b"DE", 3_320, 1)).is_ok());
     }
 
     #[test]

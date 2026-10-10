@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The UniFFI bindings, which scripts/android.sh writes, name
+  java.lang.ref.Cleaner of API 33. The generated code looks the class up at
+  run time and falls back to the cleaner of JNA below that level. Thus the
+  check is off for that folder alone. The code of the app keeps it.
+-->
+<lint>
+    <issue id="NewApi">
+        <ignore path="src/main/kotlin-generated/**" />
+    </issue>
+</lint>

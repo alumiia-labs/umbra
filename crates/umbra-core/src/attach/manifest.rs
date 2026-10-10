@@ -9,7 +9,7 @@ use umbra_wire::{
     descriptor::{ChunkRef, Level, CHUNK_REF_LEN},
 };
 
-use super::{segment, MANIFEST_REFS_PER_CHUNK, MAX_DESCRIPTOR_REFS, SEGMENT_SIZE};
+use super::{segment, HOT_REPLICAS, MANIFEST_REFS_PER_CHUNK, MAX_DESCRIPTOR_REFS, SEGMENT_SIZE};
 use crate::Error;
 
 /// The refs a descriptor holds at each bucket (§12.3.2). No descriptor
@@ -41,6 +41,15 @@ pub const fn level_for(data_chunks: usize, bucket_refs: usize) -> Result<Level, 
 /// The manifest chunk count for `data_chunks` refs.
 pub const fn manifest_chunks(data_chunks: usize) -> usize {
     segment::unit_count(data_chunks.saturating_mul(CHUNK_REF_LEN), SEGMENT_SIZE)
+}
+
+/// The manifest chunk counts that a receiver takes for `data_chunks`
+/// (`ATT-184`). The range starts at one ref for each data chunk. It ends at
+/// the refs that `HOT_REPLICAS` relays take, which is one ref for each three
+/// relays (`ATT-176`).
+pub const fn manifest_chunk_range(data_chunks: usize) -> core::ops::RangeInclusive<usize> {
+    let refs_each = HOT_REPLICAS.div_ceil(3);
+    manifest_chunks(data_chunks)..=manifest_chunks(data_chunks.saturating_mul(refs_each))
 }
 
 /// Writes one `ChunkRef`.
@@ -183,6 +192,11 @@ mod tests {
         assert_eq!(manifest_chunks(271), 1);
         assert_eq!(manifest_chunks(272), 2);
         assert_eq!(manifest_chunks(MAX_DATA_CHUNKS), MAX_DESCRIPTOR_REFS);
+        // ATT-184: a sender at `HOT_REPLICAS` writes two refs for each
+        // chunk, and a receiver takes the manifest of that size.
+        assert_eq!(manifest_chunk_range(271), 1..=2);
+        assert_eq!(manifest_chunk_range(272), 2..=3);
+        assert!(!manifest_chunk_range(272).contains(&4));
         assert_eq!(descriptor_refs(Bucket::B3), MAX_DESCRIPTOR_REFS);
     }
 

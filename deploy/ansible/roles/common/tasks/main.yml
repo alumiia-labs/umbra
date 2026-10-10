@@ -4,7 +4,45 @@
       - umbra_domain != "example.org"
       - umbra_asn | int > 0
       - umbra_family | length == 64
-    fail_msg: Fill umbra_domain, umbra_asn, and umbra_family in group_vars/all.yml.
+      # Let's Encrypt refuses a contact address at example.org.
+      - "'example.org' not in umbra_acme_email"
+    fail_msg: Fill umbra_domain, umbra_acme_email, umbra_asn, and umbra_family in group_vars/all.yml.
+  run_once: true
+  delegate_to: localhost
+
+# The firewall closes port 22 to each address outside umbra_ssh_from, and
+# to a whole address family that the list does not name. Ansible and the
+# operator reach this server at ansible_host. A list with no address
+# of that family would lock both out at the next login.
+- name: The SSH list holds an address of the family that reaches this server
+  ansible.builtin.assert:
+    that:
+      - >-
+        umbra_ssh_from | length == 0
+        or (':' in ansible_host
+            and umbra_ssh_from | map('string') | select('search', ':') | list | length > 0)
+        or (':' not in ansible_host
+            and umbra_ssh_from | map('string') | reject('search', ':') | list | length > 0)
+    fail_msg: >-
+      umbra_ssh_from holds no {{ 'IPv6' if ':' in ansible_host else 'IPv4' }}
+      address, and Ansible reaches {{ inventory_hostname }} at
+      {{ ansible_host }}. The firewall would close SSH to that address
+      family. Add the address that you reach the servers from, or empty the
+      list.
+
+# NTF-002: the OHTTP relay sees the address of a client, and the gateway
+# behind it sees what the client sends. An entry relay is the OHTTP relay,
+# thus each gateway needs an entry relay on another server than its own.
+- name: Each gateway has an OHTTP relay on another server
+  ansible.builtin.assert:
+    that:
+      - groups['relays'] | difference(groups['ndr']) | map('extract', hostvars, 'relays') | flatten | selectattr('role', 'equalto', 'entry') | list | length > 0
+      - groups['relays'] | difference(groups['directory']) | map('extract', hostvars, 'relays') | flatten | selectattr('role', 'equalto', 'entry') | list | length > 0
+    fail_msg: >-
+      The inventory needs an entry relay on a server that does not run the
+      notification server. It also needs one on a server that does not run the
+      directory. One server must not hold both an OHTTP relay and the gateway
+      that it forwards to (Part 8 NTF-002).
   run_once: true
   delegate_to: localhost
 
@@ -40,12 +78,53 @@
     enabled: true
     state: started
 
+# Debian reaches time-sync.target when chrony starts. This unit holds the
+# target back until chrony has set the clock, and each UMBRA service starts
+# after the target.
+- name: The unit that waits for the clock is there
+  ansible.builtin.template:
+    src: umbra-clock.service.j2
+    dest: /etc/systemd/system/umbra-clock.service
+    mode: "0644"
+
+- name: chrony sets the clock before a service starts
+  ansible.builtin.systemd:
+    name: umbra-clock.service
+    enabled: true
+    state: started
+    daemon_reload: true
+
+# A unit that names umbra-alert@<name>.service in its OnFailure line tells
+# the operator of its failure (the signer does).
+- name: The alert of a failed unit is there
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { src: umbra-alert.sh.j2, dest: /usr/local/sbin/umbra-alert, mode: "0755" }
+    - { src: "umbra-alert@.service.j2", dest: "/etc/systemd/system/umbra-alert@.service", mode: "0644" }
+
 - name: Security updates install on their own
   ansible.builtin.copy:
     dest: /etc/apt/apt.conf.d/20auto-upgrades
     content: |
       APT::Periodic::Update-Package-Lists "1";
       APT::Periodic::Unattended-Upgrade "1";
+    mode: "0644"
+
+# A fix of the kernel or of the C library takes effect at a restart alone.
+# Each server restarts at an hour of its own, thus two servers never go
+# down together; a server with no such update does not restart. The name
+# sorts after 50unattended-upgrades of Debian, which this file overrides.
+- name: A security update that needs a restart gets one, one server each hour
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/52umbra-reboot
+    content: |
+      // Written by Ansible (deploy/ansible/roles/common).
+      Unattended-Upgrade::Automatic-Reboot "true";
+      Unattended-Upgrade::Automatic-Reboot-WithUsers "true";
+      Unattended-Upgrade::Automatic-Reboot-Time "{{ '%02d:30' | format((umbra_reboot_hour | int + groups['all'].index(inventory_hostname)) % 24) }}";
     mode: "0644"
 
 # Each service runs as a user of its own, thus a fault of the relay reads

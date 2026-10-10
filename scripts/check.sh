@@ -52,10 +52,17 @@ step "build, aarch64-linux-android"
 cargo build --workspace --target aarch64-linux-android
 
 step "dependency policy"
-cargo deny check bans licenses sources
-# The platform graph of register R3: its licences, under the exceptions of
-# deny.toml. Its crates stay off the bans allow list (Part 14 §14.2.3).
-cargo deny --features umbra-ffi/bindings,umbra-relay/native check licenses
+# The advisories check reads the RustSec database, thus this step needs the
+# network. It fails on a known fault and on a yanked version (Part 14
+# §14.2.7).
+# `deps.py --check` below can fail with no change in the tree. A `skip`
+# entry of deny.toml is then older than 90 days. Check the entry again.
+# Then give it a new date or remove it.
+cargo deny check advisories bans licenses sources
+# The platform graph of register R3: its advisories, its licenses under the
+# exceptions of deny.toml, and its sources. Its crates stay off the bans
+# allow list (Part 14 §14.2.3).
+cargo deny --features umbra-ffi/bindings,umbra-relay/native check advisories licenses sources
 
 step "generated files are current"
 python scripts/deps.py --check
@@ -63,6 +70,11 @@ python scripts/vectors.py --check
 
 step "specification consistency"
 python scripts/speccheck.py --quiet
+
+step "web site of the domain"
+# Part 4 §4.3.1: no page of the invitation host holds a script or reads a
+# resource of a second host. The App Link file names the app.
+python scripts/sitecheck.py
 
 step "interface strings"
 # Part 14 §14.9.3: each string that a rule requires, in each locale.

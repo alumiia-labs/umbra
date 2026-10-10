@@ -158,6 +158,10 @@ pub struct Upload {
     /// The proofs that a later tick asks for again.
     retries: Vec<(usize, usize)>,
     ticks: u32,
+    /// The name of this upload at the node. It is a random value that leaves
+    /// the device in no form. The solution of a registration serves one
+    /// upload alone (Part 13 `ABU-108`).
+    admissions: u64,
 }
 
 /// The credentials of the placed data chunks of a file of level `0x01`,
@@ -234,6 +238,7 @@ impl Upload {
             waiting: BTreeMap::new(),
             retries: Vec::new(),
             ticks: 0,
+            admissions: u64::from_be_bytes(random_bytes(rng)),
         })
     }
 
@@ -398,7 +403,7 @@ impl Upload {
                 },
             ),
         };
-        let handle = node.chunk(relay, chunk_id, job, rng)?;
+        let handle = node.chunk_of(self.admissions, relay, chunk_id, job, rng)?;
         self.waiting.insert(handle, (index, step, self.ticks));
         Ok(())
     }
@@ -462,15 +467,12 @@ impl Upload {
                 };
                 let mut failed = core::mem::take(&mut chunk.failed);
                 failed.extend(bad);
-                let held: Vec<[u8; 32]> = chunk
-                    .relays
-                    .iter()
-                    .zip(&chunk.tokens)
-                    .filter(|(_, token)| token.is_some())
-                    .map(|(relay, _)| *relay)
-                    .collect();
+                let refused = match step {
+                    Step::Register(at) => Some(at),
+                    _ => None,
+                };
                 let cred = chunk.cred;
-                for relay in held {
+                for relay in chunk.erase_targets(refused) {
                     erase(node, relay, cred, rng);
                 }
                 let repairs = chunk.repairs;
@@ -675,6 +677,23 @@ impl Upload {
 }
 
 impl ChunkState {
+    /// The relays that take a `CDEL` when the chunk starts again
+    /// (`ATT-189`). They are each relay that gave a token, and each relay
+    /// whose `CNEW` has no answer yet. A relay with no answer can register
+    /// after the new start. Its `CID` then names no step of the upload, thus
+    /// no later `CDEL` would go to it. A relay refuses a `CDEL` of a chunk
+    /// that it does not hold, and that costs nothing. The relay of
+    /// `refused`, whose registration failed, holds none and takes none.
+    fn erase_targets(&self, refused: Option<usize>) -> Vec<[u8; 32]> {
+        self.relays
+            .iter()
+            .zip(&self.tokens)
+            .enumerate()
+            .filter(|(at, (_, token))| token.is_some() || Some(*at) != refused)
+            .map(|(_, (relay, _))| *relay)
+            .collect()
+    }
+
     /// A chunk under a new identifier and a new credential, at a new draw of
     /// relays that leaves out each relay of `failed` (`ATT-034`, `ATT-055`).
     fn draw<R: CryptoRng + ?Sized>(
@@ -769,9 +788,23 @@ struct Wanted {
     /// no such chunk.
     answers: u32,
     refusals: u32,
-    /// The replicas that a hold-off left out (`ATT-174`): the chunk may
-    /// sit there, thus the refusals of the others lose no file.
-    held: u32,
+    /// The replicas that this fetch does not ask. It does not ask a relay
+    /// inside its hold-off (`ATT-174`). It does not ask a hint that names no
+    /// relay or two relays of the consensus (`ATT-010`, `ATT-012`). The
+    /// chunk may sit there, thus the refusals of the others lose no file.
+    left_out: u32,
+}
+
+impl Wanted {
+    /// Whether each replica that the refs name answered that it holds no
+    /// such chunk (`ATT-052`).
+    const fn is_gone(&self) -> bool {
+        self.order.is_empty()
+            && self.bytes.is_none()
+            && self.refusals > 0
+            && self.refusals == self.answers
+            && self.left_out == 0
+    }
 }
 
 /// The download of one file. A file of level `0x01` reads its manifest
@@ -820,27 +853,32 @@ fn plan<R: CryptoRng + ?Sized>(
         .iter()
         .map(|chunk| {
             let mut replicas = chunk.relay_ids.clone();
+            // ATT-010, ATT-012: a hint that does not resolve is a replica
+            // out of reach, and no statement that the chunk is gone.
+            let mut unresolved = 0usize;
             for hint in &chunk.hints {
                 let ids = relays.iter().map(|relay| relay.relay_id);
-                if let Ok(relay) = resolve_hint(hint, ids) {
-                    if !replicas.contains(&relay) {
-                        replicas.push(relay);
-                    }
+                match resolve_hint(hint, ids) {
+                    Ok(relay) if !replicas.contains(&relay) => replicas.push(relay),
+                    Ok(_) => {}
+                    Err(_) => unresolved = unresolved.saturating_add(1),
                 }
             }
             let mut order = fetch_order(&chunk.chunk_id, &replicas, hold_offs, now, &mut |bound| {
                 random_below(rng, bound)
             });
             order.reverse();
-            let held =
-                u32::try_from(replicas.len().saturating_sub(order.len())).unwrap_or(u32::MAX);
+            let left_out = replicas
+                .len()
+                .saturating_sub(order.len())
+                .saturating_add(unresolved);
             Wanted {
                 order,
                 bytes: None,
                 is_asked: false,
                 answers: 0,
                 refusals: 0,
-                held,
+                left_out: u32::try_from(left_out).unwrap_or(u32::MAX),
             }
         })
         .collect()
@@ -885,9 +923,10 @@ impl Download {
                 let manifest_chunks =
                     usize::try_from(assembler.chunk_count()).map_err(|_| Error::Malformed)?;
                 // ATT-073: a manifest names more data chunks than one
-                // descriptor holds.
+                // descriptor holds. ATT-184: a manifest with a second ref
+                // for a chunk takes more chunks than one ref for each.
                 if data_chunks <= class.descriptor_refs
-                    || manifest_chunks != manifest::manifest_chunks(data_chunks)
+                    || !manifest::manifest_chunk_range(data_chunks).contains(&manifest_chunks)
                 {
                     return Err(Error::Malformed);
                 }
@@ -926,8 +965,8 @@ impl Download {
                 .order
                 .retain(|relay| !hold_offs.blocked(chunk_id, relay, now));
             let left_out = before.saturating_sub(wanted.order.len());
-            wanted.held = wanted
-                .held
+            wanted.left_out = wanted
+                .left_out
                 .saturating_add(u32::try_from(left_out).unwrap_or(u32::MAX));
         }
         self.hold_offs = hold_offs.clone();
@@ -984,17 +1023,14 @@ impl Download {
     }
 
     /// Whether each replica of one chunk answered that it holds no such
-    /// chunk (Part 12 `ATT-052`). No new attempt finds that chunk, thus
-    /// the file is lost. A download that failed for another cause, as a
-    /// circuit that fell, gives false.
+    /// chunk (Part 12 `ATT-052`). No new attempt finds that chunk, thus the
+    /// file is lost. A download that failed for another cause gives false,
+    /// and a later attempt can end well. Such a cause is a circuit that fell
+    /// or a relay inside its hold-off (`ATT-174`). A replica whose hint the
+    /// consensus of this device does not resolve is one too (`ATT-010`,
+    /// `ATT-012`).
     pub fn is_gone(&self) -> bool {
-        self.wanted.iter().any(|wanted| {
-            wanted.order.is_empty()
-                && wanted.bytes.is_none()
-                && wanted.refusals > 0
-                && wanted.refusals == wanted.answers
-                && wanted.held == 0
-        })
+        self.wanted.iter().any(Wanted::is_gone)
     }
 
     /// Moves the clock of the download one tick: a `CGET` past
@@ -1286,5 +1322,101 @@ impl ChunkFetch {
         // ATT-019: the next replica.
         self.ask(node, rng)?;
         Ok(Progress::Running(0, 1))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
+mod tests {
+    use super::*;
+    use crate::abuse::test_rng::Rng;
+    use crate::attach::seal::relay_hint;
+
+    fn relay(id: u8) -> AttachmentRelay {
+        AttachmentRelay {
+            relay_id: [id; 32],
+            operator_id: [id; 32],
+            family_id: [id; 32],
+        }
+    }
+
+    /// One chunk at relay 1 in full and at relays 2 and 3 by hint.
+    fn three_replicas() -> [Replicas; 1] {
+        [Replicas {
+            chunk_id: [7; 32],
+            cred_pk: [8; 32],
+            relay_ids: alloc::vec![[1; 32]],
+            hints: alloc::vec![relay_hint(&[2; 32]), relay_hint(&[3; 32])],
+        }]
+    }
+
+    /// Each replica that the plan asks answers that it holds no chunk.
+    fn refuse_each(wanted: &mut Wanted) {
+        while wanted.order.pop().is_some() {
+            wanted.answers += 1;
+            wanted.refusals += 1;
+        }
+    }
+
+    #[test]
+    fn a_file_is_gone_when_each_named_replica_refused_and_not_before() {
+        let set = [relay(1), relay(2), relay(3)];
+        let none = HoldOffs::default();
+        let mut wanted = plan(&three_replicas(), &set, &none, 0, &mut Rng(1));
+        assert_eq!(wanted[0].order.len(), 3);
+        assert_eq!(wanted[0].left_out, 0);
+        assert!(!wanted[0].is_gone());
+        refuse_each(&mut wanted[0]);
+        assert!(wanted[0].is_gone());
+        // An answer that did not come is no refusal.
+        let mut slow = plan(&three_replicas(), &set, &none, 0, &mut Rng(2));
+        refuse_each(&mut slow[0]);
+        slow[0].refusals -= 1;
+        assert!(!slow[0].is_gone());
+    }
+
+    #[test]
+    fn a_hint_that_does_not_resolve_is_out_of_reach_and_not_gone() {
+        // ATT-010: the consensus of this device holds relay 1 alone, and
+        // relay 1 lost the chunk. The two other replicas may hold it.
+        let none = HoldOffs::default();
+        let mut wanted = plan(&three_replicas(), &[relay(1)], &none, 0, &mut Rng(1));
+        assert_eq!(wanted[0].order, alloc::vec![[1u8; 32]]);
+        assert_eq!(wanted[0].left_out, 2);
+        refuse_each(&mut wanted[0]);
+        assert!(!wanted[0].is_gone());
+        // ATT-012: a hint that two relays of the consensus match counts
+        // the same.
+        let twice = [relay(1), relay(2), relay(2)];
+        let mut wanted = plan(&three_replicas(), &twice, &none, 0, &mut Rng(2));
+        assert_eq!(wanted[0].left_out, 2);
+        refuse_each(&mut wanted[0]);
+        assert!(!wanted[0].is_gone());
+        // ATT-174: a relay inside its hold-off counts the same.
+        let set = [relay(1), relay(2), relay(3)];
+        let mut hold = HoldOffs::default();
+        hold.note([7; 32], [2; 32], 100);
+        let mut wanted = plan(&three_replicas(), &set, &hold, 200, &mut Rng(3));
+        assert_eq!(wanted[0].left_out, 1);
+        refuse_each(&mut wanted[0]);
+        assert!(!wanted[0].is_gone());
+    }
+
+    #[test]
+    fn a_new_start_erases_at_each_relay_that_can_hold_a_registration() {
+        let pool = [relay(1), relay(2), relay(3)];
+        let mut chunk = ChunkState::draw(&pool, Vec::new(), 0, 3, &mut Rng(1)).unwrap();
+        let relays = chunk.relays.clone();
+        // ATT-189: the first relay gave its token, the second refused, and
+        // the `CNEW` at the third has no answer yet. The third can register
+        // after the new start, thus it takes a `CDEL` too.
+        chunk.tokens[0] = Some([9; 32]);
+        assert_eq!(
+            chunk.erase_targets(Some(1)),
+            alloc::vec![relays[0], relays[2]]
+        );
+        // A `CPUT` or a `CREP` that failed erases at each relay.
+        chunk.tokens = alloc::vec![Some([9; 32]); 3];
+        assert_eq!(chunk.erase_targets(None), relays);
     }
 }

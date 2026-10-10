@@ -43,17 +43,24 @@ impl ReceiptHold {
     /// Takes the batch that may go in the opportunity at `now`: the targets
     /// past `RECEIPT_MIN_DELAY` (`NET-050`), at most `RECEIPT_BATCH_MAX`
     /// (`NET-045`), in the strictly increasing byte order the wire body
-    /// needs. The rest waits for the next opportunity (`NET-056`).
+    /// needs. The oldest receipts go first, because each one takes the
+    /// first opportunity after its floor (`NET-051`). Thus no receipt
+    /// waits to `RECEIPT_MAX_HOLD` behind a newer one. The rest waits for
+    /// the next opportunity (`NET-056`).
     pub fn take_batch(&mut self, now: u64) -> Vec<[u8; 16]> {
         self.discard_stale(now);
-        let mut ready: Vec<[u8; 16]> = self
+        let mut oldest: Vec<Held> = self
             .held
             .iter()
             .filter(|h| now.saturating_sub(h.at) >= RECEIPT_MIN_DELAY)
-            .map(|h| h.target)
+            .copied()
             .collect();
+        // The identifier breaks a tie, thus the choice is the same on each
+        // run.
+        oldest.sort_unstable_by_key(|h| (h.at, h.target));
+        oldest.truncate(RECEIPT_BATCH_MAX);
+        let mut ready: Vec<[u8; 16]> = oldest.iter().map(|h| h.target).collect();
         ready.sort_unstable();
-        ready.truncate(RECEIPT_BATCH_MAX);
         self.held.retain(|h| !ready.contains(&h.target));
         ready
     }
@@ -93,6 +100,25 @@ mod tests {
         assert!(batch.windows(2).all(|w| w[0] < w[1]));
         assert_eq!(hold.len(), 3);
         assert_eq!(hold.discard_stale(1_000 + RECEIPT_MAX_HOLD), 3);
+        assert!(hold.is_empty());
+    }
+
+    #[test]
+    fn the_oldest_receipts_leave_first_whatever_their_identifiers() {
+        let mut hold = ReceiptHold::default();
+        // The oldest receipt holds the highest identifier.
+        hold.push([0xFF; 16], 1_000);
+        for i in 0..12u8 {
+            hold.push([i; 16], 1_010 + u64::from(i));
+        }
+        let batch = hold.take_batch(2_000 + RECEIPT_MIN_DELAY);
+        assert_eq!(batch.len(), RECEIPT_BATCH_MAX);
+        assert!(batch.windows(2).all(|w| w[0] < w[1]));
+        assert_eq!(batch.last(), Some(&[0xFF; 16]));
+        // The newest wait, and not the highest.
+        assert!(!batch.contains(&[8; 16]));
+        let rest = hold.take_batch(2_000 + RECEIPT_MIN_DELAY);
+        assert_eq!(rest, [[8; 16], [9; 16], [10; 16], [11; 16]]);
         assert!(hold.is_empty());
     }
 }

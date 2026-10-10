@@ -154,10 +154,17 @@ impl ChunkStore {
         self.capacity.saturating_sub(self.used())
     }
 
-    /// Whether the store is above `CHUNK_STORE_TARGET`, which the relay
-    /// signals as a capacity fault (`ATT-091`).
+    /// The bytes of the held chunks alone.
+    fn held_bytes(&self) -> u64 {
+        u64::try_from(self.held.len()).map_or(u64::MAX, |n| n.saturating_mul(CHUNK_BYTES))
+    }
+
+    /// Whether the held chunks are above `CHUNK_STORE_TARGET`, which the
+    /// relay signals as a capacity fault (`ATT-091`). A pending registration
+    /// holds no bytes and does not count here, thus a flood of
+    /// registrations erases no chunk (`ATT-090`).
     pub fn over_target(&self) -> bool {
-        self.used() > self.target
+        self.held_bytes() > self.target
     }
 
     /// The chunks held.
@@ -237,7 +244,7 @@ impl ChunkStore {
                 registered_at: registration.registered_at,
                 renewed_at: now,
                 erase_at,
-                fetch_hour: now,
+                fetch_hour: 0,
                 fetches: 0,
             },
         );
@@ -270,16 +277,21 @@ impl ChunkStore {
     /// under the egress budget and the fetch rate (`ATT-169` to
     /// `ATT-172`).
     pub fn get(&mut self, chunk_id: &[u8; 32], now: u64) -> Result<&[u8], Reject> {
-        if now.saturating_sub(self.egress_day) >= 86_400 {
-            self.egress_day = now;
+        // The day of the budget starts at midnight UTC (§12.7).
+        let day = now.saturating_sub(now % 86_400);
+        if day > self.egress_day {
+            self.egress_day = day;
             self.egress_bytes = 0;
         }
         let held = self.held.get_mut(chunk_id).ok_or(Reject::Rejected)?;
         if self.egress_bytes.saturating_add(CHUNK_BYTES) > CHUNK_EGRESS_BUDGET_DAY {
             return Err(Reject::Busy);
         }
-        if now.saturating_sub(held.fetch_hour) >= 3_600 {
-            held.fetch_hour = now;
+        // The hour of the rate is an hour of the UTC clock, and no time
+        // that the `CPUT` gave.
+        let hour = now.saturating_sub(now % 3_600);
+        if hour > held.fetch_hour {
+            held.fetch_hour = hour;
             held.fetches = 0;
         }
         if held.fetches >= CHUNK_FETCH_RATE {
@@ -356,9 +368,26 @@ impl ChunkStore {
         before.saturating_sub(self.held.len().saturating_add(self.pending.len()))
     }
 
-    /// Erases attachment chunks, oldest renewal first, until the store is
-    /// at the target. A backup-class chunk stays (`ATT-168`, `ATT-179`).
+    /// Erases attachment chunks, oldest renewal first, until the held chunks
+    /// are at the target. A backup-class chunk stays (`ATT-168`, `ATT-179`).
+    /// A pending registration holds no bytes, thus it makes no chunk leave
+    /// (`ATT-090`). When the registrations alone pass the target, the oldest
+    /// of them leave in place of a chunk. Returns the count of the chunks
+    /// erased.
     pub fn trim(&mut self) -> usize {
+        let most = usize::try_from(self.target / CHUNK_BYTES).unwrap_or(usize::MAX);
+        let excess = self.pending.len().saturating_sub(most);
+        if excess > 0 {
+            let mut oldest: Vec<(u64, [u8; 32])> = self
+                .pending
+                .iter()
+                .map(|(id, registration)| (registration.registered_at, *id))
+                .collect();
+            oldest.sort_unstable();
+            for (_, id) in oldest.into_iter().take(excess) {
+                self.pending.remove(&id);
+            }
+        }
         let mut erased = 0usize;
         while self.over_target() {
             let oldest = self
@@ -530,5 +559,91 @@ mod tests {
         let mut second = [0u8; 32];
         second[3] = 1;
         assert!(store.credentials(&second).is_none());
+    }
+
+    #[test]
+    fn a_pending_registration_makes_no_held_chunk_leave() {
+        let mut store = ChunkStore::with_target(u64::MAX, 4 * CHUNK_BYTES);
+        let chunk = alloc::vec![5u8; CHUNK_SIZE];
+        let id = |i: u32| {
+            let mut id = [0u8; 32];
+            id[..4].copy_from_slice(&i.to_be_bytes());
+            id
+        };
+        for i in 0..4 {
+            store
+                .register(id(i), Class::Attachment, creds(1), [9; 32], [7; 32], 0)
+                .unwrap();
+            store.put(id(i), &chunk, 0).unwrap();
+        }
+        // Three registrations with no bytes put the used store above the
+        // target, and the trim erases no chunk for them (ATT-090).
+        for i in 10..13 {
+            store
+                .register(
+                    id(i),
+                    Class::Attachment,
+                    creds(2),
+                    [8; 32],
+                    [7; 32],
+                    u64::from(i),
+                )
+                .unwrap();
+        }
+        assert!(store.used() > 4 * CHUNK_BYTES);
+        assert!(!store.over_target());
+        assert_eq!(store.trim(), 0);
+        assert_eq!(store.held_count(), 4);
+        assert!(store.registration(&id(12)).is_some());
+        // The registrations alone pass the target: the oldest of them
+        // leave, and each chunk stays.
+        for i in 13..16 {
+            store
+                .register(
+                    id(i),
+                    Class::Attachment,
+                    creds(2),
+                    [8; 32],
+                    [7; 32],
+                    u64::from(i),
+                )
+                .unwrap();
+        }
+        assert_eq!(store.trim(), 0);
+        assert_eq!(store.held_count(), 4);
+        assert!(store.registration(&id(10)).is_none());
+        assert!(store.registration(&id(11)).is_none());
+        assert!(store.registration(&id(12)).is_some());
+        assert!(store.registration(&id(15)).is_some());
+        assert!(store.take_erased().is_empty());
+    }
+
+    #[test]
+    fn the_egress_day_and_the_fetch_hour_follow_the_utc_clock() {
+        let mut store = ChunkStore::new(u64::MAX);
+        let chunk = alloc::vec![6u8; CHUNK_SIZE];
+        // The `CPUT` comes 10 s before midnight UTC.
+        let late = 5 * 86_400 - 10;
+        store
+            .register([1; 32], Class::Attachment, creds(1), [9; 32], [7; 32], late)
+            .unwrap();
+        store.put([1; 32], &chunk, late).unwrap();
+        store.get(&[1; 32], late).unwrap();
+        store.egress_bytes = CHUNK_EGRESS_BUDGET_DAY;
+        assert_eq!(store.get(&[1; 32], late + 9), Err(Reject::Busy));
+        // The budget starts again at midnight, and not 24 h after the
+        // first fetch.
+        store.get(&[1; 32], late + 10).unwrap();
+        assert_eq!(store.egress_bytes, CHUNK_BYTES);
+        store.egress_bytes = CHUNK_EGRESS_BUDGET_DAY;
+        assert_eq!(store.get(&[1; 32], late + 86_400), Err(Reject::Busy));
+        store.egress_bytes = 0;
+        // The rate of one chunk starts again at each hour of the clock.
+        let hour = 5 * 86_400 + 7_200;
+        for _ in 0..CHUNK_FETCH_RATE {
+            store.get(&[1; 32], hour - 1).unwrap();
+        }
+        assert_eq!(store.get(&[1; 32], hour - 1), Err(Reject::Limit));
+        store.get(&[1; 32], hour).unwrap();
     }
 }

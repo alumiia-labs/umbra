@@ -2,7 +2,14 @@
 
 # The domain under which each server gets a name: <inventory name>.<domain>,
 # as east-1.example.org. Point an A record at each server first.
-umbra_domain: example.org            # FILL
+umbra_domain: umbrachat.app
+
+# The host of an invitation link, `https://<host>/i#<fragment>` (Part 4
+# §4.3.1). The default is the domain itself, thus a link is short and its QR
+# code is coarse. No server of this playbook serves that host. The web site
+# of the domain serves `/.well-known/assetlinks.json` and the landing
+# document at `/i` (`IDN-120` to `IDN-122`).
+# umbra_invitation_host: umbrachat.app
 
 # The address that Let's Encrypt writes to about the certificates.
 umbra_acme_email: ops@example.org    # FILL
@@ -25,8 +32,28 @@ umbra_bin_dir: "{{ playbook_dir }}/../../target/deploy/bin"
 # notification server needs it to send pushes. It never goes into git.
 umbra_fcm_credentials: ""            # FILL, the path of the JSON file
 
-# The bytes that each relay holds for files (Part 12), in bytes.
-umbra_chunk_capacity: 53687091200    # 50 GiB
+# The bytes that each exit relay holds for files (Part 12), in bytes. The
+# relay holds the bytes of each chunk in memory until its store reads them
+# from the disk. Thus this value is a part of the memory of the server and
+# not of its disk. Raise it only together with umbra_exit_memory_max. Do
+# not raise it above the memory of the server. Part 12 `ATT-086` lets a
+# relay of the provisional directory declare less than 100 GiB.
+umbra_chunk_capacity: 1073741824     # 1 GiB
+
+# The memory limits of the services, as systemd reads them (MemoryHigh and
+# MemoryMax). Above the first one the kernel slows the service; at the
+# second one it stops the service, and systemd starts it again. Thus one
+# service never takes the memory of the others on its server.
+umbra_relay_memory_high: 1200M       # an entry relay or a middle relay
+umbra_relay_memory_max: 1400M
+# An exit relay reads each chunk two times into memory at its start, thus
+# its limit holds two times umbra_chunk_capacity and the queues.
+umbra_exit_memory_high: 2300M
+umbra_exit_memory_max: 2500M
+umbra_service_memory_high: 448M      # the notification server, the directory
+umbra_service_memory_max: 512M
+umbra_signer_memory_high: 448M       # one run of the signer
+umbra_signer_memory_max: 512M
 
 # The port of the notification server and of the directory. Port 443 holds
 # the relay on the same server. Only the relays reach this port.
@@ -39,6 +66,23 @@ umbra_ssh_from: []
 # The key directory that the signer signs with. A rotation of the key set
 # (README, "Rotating the directory keys") moves it to a new directory.
 umbra_signer_keys: /var/lib/umbra-signer/keys
+
+# An hour takes one manifest (Part 10 `REL-160`). A run that changes the
+# relay set in an hour that has a manifest waits for the next hour, then
+# signs. `true` signs a second manifest for the hour at once. Each client
+# that holds the first one rejects it until the next hour, and can show the
+# warning of `REL-161`. Give it for one run: -e umbra_sign_force=true
+umbra_sign_force: false
+
+# A security update that needs a restart restarts the server at this hour
+# of its clock. One server restarts each hour: the first server of the
+# inventory at <hour>:30, the next one an hour later.
+umbra_reboot_hour: 9
+
+# A command that runs when the signer fails, as a script that sends a mail
+# or calls a hook. Its one argument is the name of the failed unit. With no
+# command, the failure goes to the journal and to each terminal.
+umbra_alert_command: ""
 
 # The directory on this machine where the playbooks put what the servers
 # made in public: descriptors, the key set, the pins of the app.

@@ -24,7 +24,7 @@ use umbra_crypto::{
 use umbra_queue::params::RECEIPT_MIN_DELAY;
 use umbra_relay::{
     circuits::LinkId,
-    node::{Config, Output, RelayNode},
+    node::{Config, Output, QueryAnswer, RelayNode},
     service::queue::NdrPush,
     store::{MemoryStore, RelayStore},
 };
@@ -1430,6 +1430,13 @@ fn code_of(events: &[ClientEvent]) -> Option<u32> {
     })
 }
 
+fn ended_of(events: &[ClientEvent]) -> usize {
+    events
+        .iter()
+        .filter(|event| matches!(event, ClientEvent::VerificationEnded { .. }))
+        .count()
+}
+
 fn control(kind: AppKind, body: &[u8]) -> Vec<u8> {
     let message = AppMessage {
         kind,
@@ -1461,8 +1468,8 @@ fn a_ceremony_gives_one_code_and_only_the_user_verifies() {
         .confirm_verification(&alice_contact)
         .is_err());
 
-    // Alice starts. The two devices get one code, and no record of the
-    // ceremony shows as a message.
+    // Alice starts. IDN-170: the client of Bob answers nothing and
+    // reveals nothing before Bob acts, thus no device holds a code.
     let now = network.now;
     network.clients[ALICE]
         .start_verification(&alice_contact, now, &mut Rng(3))
@@ -1471,6 +1478,18 @@ fn a_ceremony_gives_one_code_and_only_the_user_verifies() {
     assert!(network.clients[ALICE]
         .confirm_verification(&alice_contact)
         .is_err());
+    network.settle();
+    assert_eq!(code_of(&network.take_events(ALICE)), None);
+    assert_eq!(code_of(&network.take_events(BOB)), None);
+    assert!(network.clients[BOB]
+        .confirm_verification(&bob_contact)
+        .is_err());
+    // Bob accepts. The two devices get one code, and no record of the
+    // ceremony shows as a message.
+    let now = network.now;
+    network.clients[BOB]
+        .start_verification(&bob_contact, now, &mut Rng(30))
+        .unwrap();
     network.settle();
     let alice_events = network.take_events(ALICE);
     let bob_events = network.take_events(BOB);
@@ -1503,18 +1522,36 @@ fn a_ceremony_gives_one_code_and_only_the_user_verifies() {
         .start_verification(&bob_contact, now, &mut Rng(4))
         .unwrap();
     network.settle();
+    let now = network.now;
+    network.clients[ALICE]
+        .start_verification(&alice_contact, now, &mut Rng(40))
+        .unwrap();
+    network.settle();
     let second = code_of(&network.take_events(BOB)).expect("a code at Bob");
     assert_eq!(code_of(&network.take_events(ALICE)), Some(second));
     assert_ne!(second, code);
 
-    // The user starts two times in a row. The answer to the first start
-    // pairs with nothing, and the two devices end with one code.
+    // The user starts two times in a row. Bob accepts the second start,
+    // and the two devices end with one code. The ceremony of Bob held the
+    // commit of Alice from the ceremony before, thus her new start ends
+    // it, and Bob learns that (IDN-170).
     for seed in [5, 6] {
         let now = network.now;
         network.clients[ALICE]
             .start_verification(&alice_contact, now, &mut Rng(seed))
             .unwrap();
     }
+    network.settle();
+    let bob_events = network.take_events(BOB);
+    assert_eq!(code_of(&bob_events), None);
+    assert_eq!(ended_of(&bob_events), 1);
+    assert!(network.clients[BOB]
+        .confirm_verification(&bob_contact)
+        .is_err());
+    let now = network.now;
+    network.clients[BOB]
+        .start_verification(&bob_contact, now, &mut Rng(50))
+        .unwrap();
     network.settle();
     let third = code_of(&network.take_events(ALICE)).expect("a code at Alice");
     assert_eq!(code_of(&network.take_events(BOB)), Some(third));
@@ -1537,11 +1574,16 @@ fn a_ceremony_gives_one_code_and_only_the_user_verifies() {
         .count();
     assert_eq!(codes, 1);
 
-    // IDN-144: a reveal that does not match its commit gives no code.
+    // IDN-170: the ceremony of Alice holds the commit of Bob, thus a new
+    // start of Bob ends it one time. Each later start waits for Alice
+    // with no answer. IDN-144: a reveal that does not match its commit
+    // gives no code.
     let forged_start = [[0x11; 32], [0; 32]].concat();
+    let later_start = [[0x12; 32], [0; 32]].concat();
     for (seed, kind, body) in [
         (9, AppKind::VerifyCommit, forged_start.as_slice()),
         (10, AppKind::VerifyReveal, [0x22; 32].as_slice()),
+        (11, AppKind::VerifyCommit, later_start.as_slice()),
     ] {
         let now = network.now;
         network.clients[BOB]
@@ -1549,10 +1591,15 @@ fn a_ceremony_gives_one_code_and_only_the_user_verifies() {
             .unwrap();
         network.settle();
     }
-    assert_eq!(code_of(&network.take_events(ALICE)), None);
+    let alice_events = network.take_events(ALICE);
+    assert_eq!(code_of(&alice_events), None);
+    assert_eq!(ended_of(&alice_events), 1);
     assert!(network.clients[ALICE]
         .confirm_verification(&alice_contact)
         .is_err());
+    // No answer and no reveal of Alice reached Bob: his ceremony still
+    // holds the code of the ceremony before, and no new one.
+    assert_eq!(code_of(&network.take_events(BOB)), None);
 }
 
 #[test]
@@ -1739,14 +1786,30 @@ fn a_probe_cell_is_covered_by_the_receipts_of_each_link() {
     };
     // The link from hop k to hop k + 1 carries the tag of hop k + 1.
     for hop in 1..3usize {
+        // REL-179: each relay takes a query that names it.
         let query = ReceiptQuery {
             authority_index: 0,
+            relay_id: chain[hop],
             epoch,
             tag: tags[hop],
         };
+        let before = ReceiptQuery {
+            relay_id: chain[hop - 1],
+            ..query
+        };
         let at = epoch * umbra_core::directory::EPOCH_SECONDS;
-        let taken = network.relays[hop - 1].receipt_answer(&query, at).unwrap();
-        let issued = network.relays[hop].receipt_answer(&query, at).unwrap();
+        assert_eq!(
+            network.relays[hop - 1].receipt_answer(&query, at),
+            QueryAnswer::Elsewhere
+        );
+        let taken = network.relays[hop - 1]
+            .receipt_answer(&before, at)
+            .given()
+            .unwrap();
+        let issued = network.relays[hop]
+            .receipt_answer(&query, at)
+            .given()
+            .unwrap();
         let verdict = judge_link(
             chain[hop - 1],
             chain[hop],
@@ -1761,23 +1824,50 @@ fn a_probe_cell_is_covered_by_the_receipts_of_each_link() {
     // it answers RECEIPT_QUERY_MAX in one epoch and no more.
     let query = ReceiptQuery {
         authority_index: 0,
+        relay_id: chain[1],
         epoch,
         tag: tags[1],
     };
     let at = epoch * umbra_core::directory::EPOCH_SECONDS;
     let max = umbra_core::directory::stat::RECEIPT_QUERY_MAX;
-    for _ in 2..max {
-        assert!(network.relays[1].receipt_answer(&query, at).is_some());
+    // REL-180: a query for another relay counts toward no bound, and the
+    // relay tells it from a query above the bound.
+    let elsewhere = ReceiptQuery {
+        relay_id: chain[2],
+        ..query
+    };
+    for _ in 0..max {
+        assert_eq!(
+            network.relays[1].receipt_answer(&elsewhere, at),
+            QueryAnswer::Elsewhere
+        );
     }
-    assert!(network.relays[1].receipt_answer(&query, at).is_none());
+    for _ in 2..max {
+        assert!(network.relays[1]
+            .receipt_answer(&query, at)
+            .given()
+            .is_some());
+    }
+    assert_eq!(
+        network.relays[1].receipt_answer(&query, at),
+        QueryAnswer::Above
+    );
+    assert_eq!(
+        network.relays[1].receipt_answer(&elsewhere, at),
+        QueryAnswer::Elsewhere
+    );
     // Another authority, and the next epoch, have their own bound.
     let other = ReceiptQuery {
         authority_index: 1,
         ..query
     };
-    assert!(network.relays[1].receipt_answer(&other, at).is_some());
+    assert!(network.relays[1]
+        .receipt_answer(&other, at)
+        .given()
+        .is_some());
     assert!(network.relays[1]
         .receipt_answer(&query, at + umbra_core::directory::EPOCH_SECONDS)
+        .given()
         .is_some());
 }
 

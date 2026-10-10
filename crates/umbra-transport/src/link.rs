@@ -1,11 +1,15 @@
 //! The session link of Part 6 §6.2.2 and §6.2.3, on both ends.
 //!
 //! A session outlives its connection. The client opens it once, frames
-//! each cell with a sequence, keeps a resend window, and resumes it on a
-//! new connection inside `SESSION_RESUME_WINDOW`. The relay binds the
-//! session to at most one connection and drops a frame whose sequence it
-//! accepted before. No type here waits, reads, or writes: the runtime
-//! moves the bytes.
+//! each cell with a sequence, and can resume it on a new connection inside
+//! `SESSION_RESUME_WINDOW`. The relay binds the session to at most one
+//! connection and drops a frame whose sequence it accepted before. No type
+//! here waits, reads, or writes: the runtime moves the bytes.
+//!
+//! v1 defers the resume (Part 3 §3.8). After a lost connection
+//! a client opens a new session, and the ARQ of Part 3 §3.7 sends each
+//! record again. Thus a link keeps no cell unless its owner asks for the
+//! resend window with [`ClientLink::keep_for_resume`].
 
 use alloc::{
     collections::{BTreeSet, VecDeque},
@@ -33,6 +37,10 @@ pub struct ClientLink {
     resume_count: u32,
     connected: bool,
     closed_at: Option<u64>,
+    /// Whether the link keeps each cell for a resume. A link that never
+    /// resumes keeps none. Nothing would drain the window of a client, and
+    /// an upload would hold 1 000 cells of it for no use.
+    keeps: bool,
     window: VecDeque<(u32, Vec<u8>)>,
     /// The highest frame sequence of the relay that the client accepted.
     relay_seq: Option<u32>,
@@ -62,11 +70,19 @@ impl ClientLink {
                 resume_count: 0,
                 connected: true,
                 closed_at: None,
+                keeps: false,
                 window: VecDeque::new(),
                 relay_seq: None,
             },
             used,
         ))
+    }
+
+    /// Keeps a copy of each later cell in the resend window, for a link
+    /// that resumes its session (`WIR-525`). The owner then names each
+    /// frame that the relay drained with [`ClientLink::drained`].
+    pub fn keep_for_resume(&mut self) {
+        self.keeps = true;
     }
 
     /// The session identifier.
@@ -79,10 +95,11 @@ impl ClientLink {
         self.next_seq
     }
 
-    /// Frames `cell` into a cell capsule (`WIR-138`), keeps a copy in the
-    /// resend window, and returns the capsule length. Fails when `seq`
-    /// would wrap (`WIR-139`). A full window drops its oldest frame
-    /// (`WIR-525`).
+    /// Frames `cell` into a cell capsule (`WIR-138`) and returns the
+    /// capsule length. Fails when `seq` would wrap (`WIR-139`). A link
+    /// that resumes keeps a copy in the resend window, and a full window
+    /// drops its oldest frame (`WIR-525`). A link that does not resume
+    /// keeps no copy (Part 3 §3.8).
     pub fn send(&mut self, cell: &[u8], out: &mut [u8]) -> Result<usize, Error> {
         if !self.connected {
             return Err(Error::State);
@@ -92,10 +109,12 @@ impl ClientLink {
         }
         let seq = self.next_seq;
         let used = self.frame(seq, false, cell, out)?;
-        if self.window.len() >= RESEND_WINDOW {
-            self.window.pop_front();
+        if self.keeps {
+            if self.window.len() >= RESEND_WINDOW {
+                self.window.pop_front();
+            }
+            self.window.push_back((seq, cell.to_vec()));
         }
-        self.window.push_back((seq, cell.to_vec()));
         self.next_seq = self.next_seq.saturating_add(1);
         Ok(used)
     }
@@ -351,9 +370,29 @@ mod tests {
     use alloc::vec;
 
     #[test]
+    fn a_link_that_does_not_resume_keeps_no_cell() {
+        let mut buf = vec![0u8; 40_000];
+        let (mut client, _) = ClientLink::open([1; 8], Secret::new([2; 32]), &mut buf).unwrap();
+        let cell = vec![7u8; 512];
+        // Part 3 §3.8: a v1 client opens a new session after a lost
+        // connection, thus an upload leaves no cell behind.
+        for _ in 0..RESEND_WINDOW + 200 {
+            client.send(&cell, &mut buf).unwrap();
+        }
+        assert!(client.window.is_empty());
+        assert_eq!(client.next_seq(), 1_200);
+        // The signal of a drained frame changes nothing.
+        client.drained(5);
+        let mut none = Vec::new();
+        client.resend_all(&mut none).unwrap();
+        assert!(none.is_empty());
+    }
+
+    #[test]
     fn a_full_window_drops_its_oldest_frame_and_refuses_no_send() {
         let mut buf = vec![0u8; 40_000];
         let (mut client, _) = ClientLink::open([1; 8], Secret::new([2; 32]), &mut buf).unwrap();
+        client.keep_for_resume();
         let cell = vec![7u8; 512];
         // WIR-525: a long upload sends past the window.
         for _ in 0..RESEND_WINDOW + 200 {
@@ -370,6 +409,7 @@ mod tests {
         let (kind, value, _) = capsule::parse(&buf[..n]).unwrap();
         assert_eq!(kind, CapsuleType::Session);
         let mut relay = RelayLink::open(SessionControl::parse(value).unwrap()).unwrap();
+        client.keep_for_resume();
 
         let cell = vec![7u8; 512];
         let n = client.send(&cell, &mut buf).unwrap();

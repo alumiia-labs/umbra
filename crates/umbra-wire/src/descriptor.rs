@@ -1,7 +1,7 @@
 //! The file descriptor of Part 12 §12.3: what a receiver needs to fetch
 //! and open one object on the chunk path.
 
-use alloc::vec::Vec;
+use alloc::{borrow::Cow, vec::Vec};
 
 use umbra_crypto::secret::Secret;
 
@@ -196,8 +196,9 @@ impl FileDescriptor {
 pub struct AttachmentBody<'a> {
     /// The descriptor.
     pub descriptor: FileDescriptor,
-    /// The name of the file, with no path.
-    pub name: Option<&'a str>,
+    /// The name of the file, with no path. A name that a parser read holds
+    /// no bidirectional format character (`WIR-532`).
+    pub name: Option<Cow<'a, str>>,
     /// A JPEG thumbnail of an image or of the first frame of a video.
     pub preview: Option<&'a [u8]>,
     /// The text that the sender wrote with the file.
@@ -214,7 +215,14 @@ impl<'a> AttachmentBody<'a> {
     /// Reads a body. A body ends after the descriptor, after one
     /// `name_len`, its name, one `preview_len`, and its preview, or after
     /// those and one `caption_len` and its caption. Each other form is
-    /// malformed (`WIR-532`).
+    /// malformed (`WIR-532`), and so is a trailer with no name, no preview,
+    /// and no caption.
+    ///
+    /// A name with a bidirectional format character is not malformed. A
+    /// stored record, and a record of a sender before that rule, can hold
+    /// one, and its file must stay in reach. The name comes back with no
+    /// such character, thus no view and no save shows another extension
+    /// than the bytes hold. A name of such characters alone is no name.
     pub fn parse(body: &'a [u8]) -> Result<Self, Error> {
         let count = body
             .get(REF_COUNT_AT..REF_COUNT_AT + 4)
@@ -253,14 +261,21 @@ impl<'a> AttachmentBody<'a> {
             Some(caption)
         };
         r.finish()?;
+        // WIR-532: a trailer that carries nothing is a second encoding of a
+        // body that ends after the descriptor.
+        if name.is_empty() && preview.is_empty() && caption.is_none() {
+            return Err(Error::Malformed);
+        }
         let name = if name.is_empty() {
             None
         } else {
             let name = core::str::from_utf8(name).map_err(|_| Error::Malformed)?;
-            if !is_file_name(name) {
+            if !is_plain_name(name) {
                 return Err(Error::Malformed);
             }
-            Some(name)
+            let name = without_bidi_format(name);
+            // What stays after the marks can be empty, `.`, or `..`.
+            is_file_name(&name).then_some(name)
         };
         let preview = if preview.is_empty() {
             None
@@ -282,7 +297,7 @@ impl<'a> AttachmentBody<'a> {
 
     /// The encoded length.
     pub fn len(&self) -> usize {
-        let trailer = match (self.name, self.preview, self.caption) {
+        let trailer = match (self.name.as_deref(), self.preview, self.caption) {
             (None, None, None) => 0,
             (name, preview, caption) => {
                 3 + name.map_or(0, str::len)
@@ -307,7 +322,9 @@ impl<'a> AttachmentBody<'a> {
         if self.caption.is_some_and(|caption| !is_caption(caption)) {
             return Err(Error::Malformed);
         }
-        if self.name.is_some_and(|name| !is_file_name(name)) {
+        // WIR-532: a sender writes no name with a bidirectional format
+        // character, although a parser reads one.
+        if self.name.as_deref().is_some_and(|name| !is_file_name(name)) {
             return Err(Error::Malformed);
         }
         let is_picture = matches!(self.descriptor.mime_class, class::IMAGE | class::VIDEO);
@@ -317,7 +334,7 @@ impl<'a> AttachmentBody<'a> {
         {
             return Err(Error::Malformed);
         }
-        let name = self.name.map_or(&[][..], str::as_bytes);
+        let name = self.name.as_deref().map_or(&[][..], str::as_bytes);
         let preview = self.preview.unwrap_or(&[]);
         let tail = out.get_mut(at..).ok_or(Error::Malformed)?;
         let mut w = Writer::new(tail);
@@ -342,15 +359,44 @@ pub fn is_preview(bytes: &[u8]) -> bool {
         && bytes.ends_with(&[0xFF, 0xD9])
 }
 
-/// Whether a text is a valid file name (`WIR-532`): 1 to `FILE_NAME_MAX`
-/// bytes, no control character, no path separator, and not `.` or `..`.
+/// Whether a text is a file name that a sender writes (`WIR-532`). Such a
+/// name has 1 to `FILE_NAME_MAX` bytes, no control character, no
+/// bidirectional format character, and no path separator. It is not `.`
+/// or `..`.
 pub fn is_file_name(name: &str) -> bool {
+    is_plain_name(name) && !name.chars().any(is_bidi_format)
+}
+
+/// The part of `WIR-532` that a parser rejects a name for: its length, a
+/// control character, a path separator, and `.` or `..`.
+fn is_plain_name(name: &str) -> bool {
     (1..=FILE_NAME_MAX).contains(&name.len())
         && name != "."
         && name != ".."
         && !name
             .chars()
             .any(|c| c.is_control() || c == '/' || c == '\\')
+}
+
+/// A name with no bidirectional format character. A name that holds none
+/// comes back as it is.
+pub fn without_bidi_format(name: &str) -> Cow<'_, str> {
+    if name.chars().any(is_bidi_format) {
+        Cow::Owned(name.chars().filter(|c| !is_bidi_format(*c)).collect())
+    } else {
+        Cow::Borrowed(name)
+    }
+}
+
+/// Whether a character changes the direction of the text around it: the
+/// marks, the embeddings, the overrides, and the isolates. With one, a
+/// sender shows a name that ends in a different extension than the bytes
+/// of the name do.
+const fn is_bidi_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+    )
 }
 
 #[cfg(test)]
@@ -420,14 +466,14 @@ mod tests {
     fn a_body_carries_a_name_and_a_preview_after_the_descriptor_or_none() {
         let named = AttachmentBody {
             descriptor: one_ref_descriptor(),
-            name: Some("Report 2026.pdf"),
+            name: Some("Report 2026.pdf".into()),
             preview: None,
             caption: None,
         };
         let mut out = vec![0u8; named.len()];
         assert_eq!(named.encode(&mut out).unwrap(), 257 + 3 + 15);
         let back = AttachmentBody::parse(&out).unwrap();
-        assert_eq!(back.name, Some("Report 2026.pdf"));
+        assert_eq!(back.name.as_deref(), Some("Report 2026.pdf"));
         assert_eq!(back.preview, None);
         assert_eq!(back.descriptor.mime_class, class::DOC);
 
@@ -534,16 +580,100 @@ mod tests {
             assert!(!is_file_name(bad), "{bad:?}");
             let body = AttachmentBody {
                 descriptor: one_ref_descriptor(),
-                name: Some(bad),
+                name: Some(bad.into()),
                 preview: None,
                 caption: None,
             };
             let mut out = vec![0u8; body.len()];
             assert!(body.encode(&mut out).is_err(), "{bad:?}");
         }
+        // A parser rejects each one too.
+        for bad in ["a/b", "a\\b", "a\nb", "a\u{7f}", ".", ".."] {
+            assert!(AttachmentBody::parse(&named_bytes(bad)).is_err(), "{bad:?}");
+        }
         assert!(is_file_name("été – notes.txt"));
         let long = "a".repeat(FILE_NAME_MAX + 1);
         assert!(!is_file_name(&long));
         assert!(is_file_name(&long[1..]));
+    }
+
+    /// A body with one name, as a sender before the rule of the
+    /// bidirectional format characters wrote it: no check of the name.
+    fn named_bytes(name: &str) -> Vec<u8> {
+        let descriptor = one_ref_descriptor();
+        let mut out = vec![0u8; descriptor.len()];
+        descriptor.encode(&mut out).unwrap();
+        out.push(u8::try_from(name.len()).unwrap());
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(&[0, 0]);
+        out
+    }
+
+    #[test]
+    fn a_sender_writes_no_name_with_a_bidirectional_format_character() {
+        for mark in [
+            '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}',
+            '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+        ] {
+            let bad = alloc::format!("report{mark}fdp.exe");
+            assert!(!is_file_name(&bad), "{bad:?}");
+            let body = AttachmentBody {
+                descriptor: one_ref_descriptor(),
+                name: Some(bad.as_str().into()),
+                preview: None,
+                caption: None,
+            };
+            let mut out = vec![0u8; body.len()];
+            assert!(body.encode(&mut out).is_err(), "{bad:?}");
+        }
+        // A name in a script that runs from right to left holds none.
+        assert!(is_file_name("تقرير.pdf"));
+        assert!(is_file_name("דוח 2026.pdf"));
+    }
+
+    #[test]
+    fn a_parser_reads_a_name_with_a_bidirectional_format_character_with_none() {
+        for mark in [
+            '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}',
+            '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+        ] {
+            // A stored record, or one of an earlier sender: the file stays
+            // in reach, and the name shows the extension of its bytes.
+            let stored = named_bytes(&alloc::format!("report{mark}fdp.exe"));
+            let back = AttachmentBody::parse(&stored).unwrap();
+            assert_eq!(back.name.as_deref(), Some("reportfdp.exe"), "{mark:?}");
+            assert_eq!(back.descriptor.refs.len(), 1);
+            // The name that came back is one that a sender writes.
+            let mut out = vec![0u8; back.len()];
+            assert_eq!(back.encode(&mut out).unwrap(), 257 + 3 + 13);
+        }
+        // What stays after the marks is no name: the body has none.
+        for left in ["\u{200E}", ".\u{202E}", ".\u{200F}.\u{2069}"] {
+            let stored = named_bytes(left);
+            let back = AttachmentBody::parse(&stored).unwrap();
+            assert_eq!(back.name, None, "{left:?}");
+        }
+        // A name with no such character comes back as the bytes hold it.
+        let back_bytes = named_bytes("דוח 2026.pdf");
+        let back = AttachmentBody::parse(&back_bytes).unwrap();
+        assert!(matches!(back.name, Some(Cow::Borrowed("דוח 2026.pdf"))));
+    }
+
+    #[test]
+    fn a_trailer_that_carries_nothing_is_rejected() {
+        let bare = AttachmentBody {
+            descriptor: one_ref_descriptor(),
+            name: None,
+            preview: None,
+            caption: None,
+        };
+        let mut out = vec![0u8; bare.len()];
+        assert_eq!(bare.encode(&mut out).unwrap(), 257);
+        assert!(AttachmentBody::parse(&out).is_ok());
+        // A name_len of zero and a preview_len of zero, with no caption.
+        out.extend_from_slice(&[0, 0, 0]);
+        assert!(AttachmentBody::parse(&out).is_err());
+        // The same empty part before a caption is a complete trailer.
+        assert!(AttachmentBody::parse(&captioned_bytes()).is_ok());
     }
 }

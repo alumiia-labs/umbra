@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 5: Cryptographic Core
 
 **Status:** Draft
-**Version:** 0.11.0-draft
-**Date:** 2026-10-02
+**Version:** 0.12.0
+**Date:** 2026-10-09
 
 ---
 
@@ -57,8 +57,7 @@ be on the path of a send on a pairwise channel that exists.
 
 Part 14 §14.2 gives the dependency register R1 for the message core, and the
 dependency register R2 for the auxiliary primitives above. Each register carries
-a cap of its own. Part 14 §14.2 states that no party has measured either count,
-and it names the party that measures them.
+a cap of its own. `DEPENDENCIES.md` holds the measured counts.
 
 **[CRY-005]** An implementation MUST NOT use a cryptographic primitive that this section does
 not list. To add an auxiliary primitive, add a row to the auxiliary register and
@@ -82,16 +81,9 @@ the table above.
   > archived state retroactively. The argument also says that Ed25519 limits the
   > cryptanalytic risk in a much younger scheme.
   >
-  > UMBRA declines, and there are two causes. First, the objects that need that
-  > limit most are the **release manifests and the TUF signing root**. Those
-  > objects are *outside* the protocol (Part 14 §14.8, Part 15 §15.5). They are
-  > in a separate trust domain with offline 3-of-5 threshold keys across three
-  > jurisdictions. That domain can use a scheme that is not a lattice scheme.
-  > Thus the limit is in place where it counts most, and the protocol does not
-  > carry a seventh primitive.
-  >
-  > Second, `sig_id` (§5.10) is a wire field that the two parties negotiate.
-  > Thus a deployment can add a hybrid without a flag day if the cryptanalysis
+  > UMBRA declines, thus the protocol does not carry a seventh primitive.
+  > `sig_id` (§5.10) is a wire field that the two parties negotiate. Thus a
+  > deployment can add a hybrid without a flag day if the cryptanalysis
   > of ML-DSA moves. This is a real residual risk, and Part 15 §15.7 records it.
 - **The core does not use SHA-2.** TLS in the transport layer (Part 3 §3.8)
   brings its own SHA-2, and that is outside the TCB of the cryptographic core.
@@ -146,7 +138,7 @@ RootIdentity (256-bit seed, device-local, NEVER on the network and NEVER to a
 ├── DeviceKey_i       per device: X25519 + ML-KEM-768, generated ON that device
 │                     (the Root seed is transferred once at link time, Part 7)
 │
-├── PairwiseIdentity_c   per contact c: X25519 + ML-KEM-768
+├── PairwiseIdentity_c   per contact c: X25519 + ML-KEM-768 (the KEM half is reserved, Part 4 §4.5.1)
 │                        = Hybrid( Expand("umbra/v1/pairwise" || salt_c, 96) )
 │                        salt_c is 16 random bytes for each contact
 │
@@ -183,12 +175,12 @@ Algorithm 16 of FIPS 203, and it takes the two 32-byte seeds `d` and `z`.
    vector from one fixed `RootIdentity`. That vector gives each key of the
    diagram.
 
-> *Cause.* An earlier draft wrote each line as `KDF(Root, label)`, with no salt,
-> no output length, and no split of the output into the two keypairs. Two
-> clients could restore one root seed to two different identities, and the
-> user reached no contact after a restore. Part 9 §9.9.1 and Part 12 §12.3.3
-> already write the full call, and CRY-034 to CRY-037 pin the `UMBRA-KEM`
-> encoding to the byte. This section now holds the same rigor.
+> *Cause.* A line of the form `KDF(Root, label)` gives no salt, no output
+> length, and no split of the output into the two keypairs. Two clients can
+> then restore one root seed to two different identities, and the user reaches
+> no contact after a restore. Part 9 §9.9.1 and Part 12 §12.3.3 write the full
+> call, and CRY-034 to CRY-037 pin the `UMBRA-KEM` encoding to the byte. This
+> section holds the same rigor.
 
 Each key in the diagram above comes from one 256-bit `RootIdentity` seed. The
 one-way KDF gives the unlinkability, and separate generation does not. An
@@ -366,10 +358,9 @@ key that the relay does not hold. The hello of Part 9 §9.6 seals them to
 `HK_pub`. A relay that substitutes a prekey fails that AEAD, and the protection
 costs nothing in deniability.
 
-> **Deviation note.** An earlier draft carried a 32-byte `prekey_commitment`
-> beside `responder_kem_ek`. No rule computed it, no step of §5.4.8 bound it,
-> and the AEAD of the blob already protects the field that it committed to.
-> This revision removes the field.
+> *Cause.* The fields above hold no commitment to `responder_kem_ek`. The AEAD
+> of the blob already protects that field, thus a commitment adds no
+> protection.
 
 > *This decision has the largest effect on deniability in UMBRA.* A signature on
 > a prekey bundle is the cause that breaks the offline deniability of PQXDH.
@@ -512,27 +503,24 @@ empties, and no fallback handshake exists.
   prekey. Part 4 rule `IDN-127` deletes an invitation at `INVITE_TTL`, and
   CRY-123 then applies.
 
-> **Deviation note.** An earlier draft said that a client publishes a pool of
-> 500 keys or more. It said that the relay of the responder enforces the
-> consumption, and that an empty pool degrades to an interactive 3-flow
-> handshake. No part defined a relay pool, a fetch, or the flights of that
-> fallback. §5.7 records the prekey-exhaustion denial of service that a served
-> pool carries. A prekey that travels inside its own invitation has no pool and
-> no exhaustion. The cost is that a stranger reaches a Public Address through a
-> request that the user accepts. Part 4 §4.2.3 already makes the public layer
-> a doorbell.
+> *Cause.* The alternative is a pool of prekeys that a relay serves. A served
+> pool needs a fetch, an enforcement of the consumption at the relay, and a
+> fallback handshake for an empty pool. §5.7 records the prekey-exhaustion
+> denial of service that a served pool carries. A prekey that travels inside
+> its own invitation has no pool and no exhaustion. The cost is that a stranger
+> reaches a Public Address through a request that the user accepts. Part 4
+> §4.2.3 already makes the public layer a doorbell.
 
-> **Deviation note.** An earlier draft carried no prekey identifier. A responder
-> then ran the schedule of §5.4.8 for each candidate in the pool. That draft
-> also said "until `tag1` verifies", which is an early exit, and CRY-011 said
-> that the trial is constant-time across the candidates. The two sentences
-> cannot both hold.
+> *Cause of the prekey identifier.* Without an identifier, a responder runs
+> the schedule of §5.4.8 for each outstanding prekey. A trial that stops when
+> `tag1` verifies is an early exit, and it is not constant-time across the
+> candidates.
 >
-> The trial also had no cost bound. That draft made a pool 500 keys or more,
-> and no party authenticates flight 1 before the work. Thus one unauthenticated
-> record cost a phone up to 500 ML-KEM decapsulations, and Part 13 §13.2 does
-> not gate a send. The identifier removes the trial, the contradiction, and that
-> amplification together. It costs 16 bytes on flight 1.
+> That trial also has no cost bound. No party authenticates flight 1 before
+> the work, and Part 13 §13.2 does not gate a send. Thus one unauthenticated
+> record costs a phone one ML-KEM decapsulation for each outstanding prekey.
+> The identifier removes the trial and that amplification together. It costs
+> 16 bytes on flight 1.
 
 ### 5.4.6 No wall-clock anywhere in the handshake
 
@@ -541,7 +529,7 @@ mechanism of WireGuard has a documented compromise-amplification failure. With
 one of the two static keys, an attacker forges an initiation that carries a
 maximum timestamp. That initiation **blocks all the future handshakes
 permanently** for that peer. Mobile clients have unreliable clocks, and a
-nonprofit relay set is an attractive target.
+relay set of the project is an attractive target.
 
 Replay protection binds to the consumption of a one-time prekey. It also binds
 to a 16-byte random nonce with queue scope, which message 2 echoes. The KDF
@@ -678,7 +666,11 @@ flight 1.
 
 The value `n_hs` is 16 bytes from the device CSPRNG, and §5.4.6 gives its
 function. The value `app_1` is the application payload. Part 3 rule `NET-173`
-puts the `QueueAddress` of the first queue of the initiator in it.
+puts the `QueueAddress` of the first queue of the initiator in it. The values
+`app_2` of flight 2 and `app_3` of flight 3 are the application payloads of
+those flights. Version 1 defines no content for either, and a party
+sends each one empty. Thus `payload2` seals `n_hs` alone, and `payload3`
+seals an empty string.
 **[CRY-054]** A responder MUST NOT make the final session state from `payload1`. CRY-013
 of §5.4.6 states the same rule.
 
@@ -728,8 +720,10 @@ sent. **[CRY-058]** An initiator MUST abort if the two values differ.
 ```
 
 The value `s_i` is the 32-byte static X25519 public key of the initiator. That
-key is the `PairwiseIdentity_c` public key of §5.2 or the `PublicAddressKey_j`
-public key. Flight 3 carries it under a key that has absorbed `ee` and `ss2`,
+key is the X25519 public key of the `PairwiseIdentity_c` of §5.2 or of the
+`PublicAddressKey_j`. No flight carries the ML-KEM-768 half of either, thus
+a party holds the 32-byte key of its peer and no static KEM key (Part 4
+§4.5). Flight 3 carries it under a key that has absorbed `ee` and `ss2`,
 and §5.4.3 gives the identity-hiding grade that this order produces.
 
 **The split.**
@@ -762,11 +756,11 @@ of §5.4.9 has one exception of the same kind: the last hop of a circuit MUST
 keep its `er_sk` as `RelaySession_sk` under Part 3 rule `NET-285`, and it
 MUST erase it when the circuit ends.
 
-> *Cause.* An earlier draft gave `RK` and the two header keys and named no
-> initial DH key. The Double Ratchet needs one, and the two candidates were
-> the responder static key, which gives the first chain no forward secrecy,
-> and a fresh key in a payload that no rule defined. The flight-2 ephemeral
-> is fresh, both parties hold it, and the first ratchet step erases it.
+> *Cause.* The split gives `RK` and the two header keys, and the Double
+> Ratchet needs an initial DH key as well. The two other candidates are the
+> responder static key, which gives the first chain no forward secrecy, and
+> a fresh key in a payload, which adds a field. The flight-2 ephemeral is
+> fresh, both parties hold it, and the first ratchet step erases it.
 
 **The transcript binding of CRY-009 maps onto this schedule as follows.**
 
@@ -787,13 +781,14 @@ second transcript in which `range_i` is (1, 1) and `range_r` is (1, 2).
 **[CRY-127]** Those vectors MUST hold a flight 1 whose `mode` byte is `0x02`,
 and the responder aborts before `MixHash(prologue)`.
 
-> *Cause.* An earlier draft put `range_i` in the prologue and in no flight. The
-> two parties then derived one `h` only because version 1 has one range. The
-> first implementation that advertised a wider range would have failed each
-> handshake, and `WIR-093` bound a value that never traveled.
+> *Cause.* Flight 1 carries `range_i`, because the prologue holds it. With
+> `range_i` in the prologue and in no flight, the two parties derive one `h`
+> only while each party advertises the same range. An implementation that
+> advertises a wider range then fails each handshake, and `WIR-093` binds a
+> value that does not travel.
 >
-> *Cause of the mode byte.* An earlier draft named a handshake mode in
-> `CRY-033` and carried it in no field. One byte in flight 1 and in the
+> *Cause of the mode byte.* `CRY-033` binds a handshake mode, thus a field
+> carries it. One byte in flight 1 and in the
 > prologue separates a later mode from this one at the first hash. §5.11
 > records the PQXDH precedent, which is a confusion between a full mode and a
 > reduced mode.
@@ -925,12 +920,12 @@ thus `CRY-031` permits the shared label.
    `UMBRA-NKhfs` transcript. **[CRY-117]** That vector MUST give `ck`, `h`,
    and `n` after each numbered step, and it MUST give `ss_hop`.
 
-> *Cause.* An earlier draft named `NKhfs` in Part 3 and in Part 10, and no part
-> defined it. Two implementations could not interoperate at the transport layer,
-> and no security argument covered the layer that each message crosses. The
-> relay static ML-KEM key of that draft had no consumer, and Part 10
-> §10.5.3 removes it. An encapsulation to that key would add 1 088 bytes to
-> flight 1. The `EXTEND` cell of Part 3 §3.4.3 would then leave bucket `B1`.
+> *Cause.* Part 3 and Part 10 name `NKhfs`, and each message crosses that
+> layer. Thus this section defines the handshake to the byte. Without a
+> definition, two implementations cannot interoperate at the transport layer,
+> and no security argument covers that layer. A relay holds no static ML-KEM
+> key (Part 10 §10.5.3). An encapsulation to such a key would add 1 088 bytes
+> to flight 1. The `EXTEND` cell of Part 3 §3.4.3 would then leave bucket `B1`.
 
 ## 5.5 The ratchet
 
@@ -967,6 +962,20 @@ UMBRA uses three ratchets together, and mixes them through one KDF.
 - Record AEAD: ChaCha20-Poly1305 for the header and for the body. UMBRA rejects
   AES-256-CBC with HMAC explicitly. The rejection gives one primitive fewer,
   constant-time operation on each ARM target, and no separate IV derivation.
+  The field names below are those of `RatchetRecord` in Part 6 §6.5.
+  - The header AEAD runs under the header key `HK` of the direction. Its
+    nonce is `hdr_nonce`, its associated data is `version || ctx` (5 bytes),
+    and its plaintext is `dh_pk || BE32(pn) || BE32(n)` (40 bytes). The
+    field `hdr_ct` is the ciphertext and then the 16-byte tag.
+  - The body AEAD runs under the message key `MK` of the record. Its nonce is
+    `body_nonce`, and its associated data is each byte of the record before
+    `body_nonce`: `version || ctx || hdr_nonce || hdr_ct || pq_frame_len ||
+    pq_frame`. Thus a braid frame cannot move to another record. The field
+    `body_ct` is the ciphertext and then the 16-byte tag.
+  - The sender takes `hdr_nonce` and `body_nonce` from the randomness
+    function of §5.9, 12 bytes each, new for each record. A message key
+    seals one body. A header key seals each header of one chain, and the
+    random nonce separates them.
 
 **[CRY-017]** **A client MUST use the header-encrypted variant of the Double Ratchet.**
 Cleartext `dh`, `pn`, and `n` fields let a relay link messages into sessions and
@@ -976,10 +985,8 @@ pairwise queues.
 ### 5.5.2 Post-quantum ratchet: chunked ML-KEM braid
 
 UMBRA adopts the SPQR and ML-KEM Braid construction of Signal (spec Revision 1,
-2025-02-21, deployed 2025-10-02). As far as this document knows, it is the only
-ratchet in production that renews a post-quantum secret inside each session on a
-continuing schedule. A handshake-only renewal does not count. That claim is
-unverified, and one reviewer disputed it.
+2025-02-21, deployed 2025-10-02). It renews a post-quantum secret inside each
+session on a continuing schedule.
 
 **What one braid epoch carries.** In one direction, one epoch carries two
 objects. The first object is the **new encapsulation key of the sender**. The
@@ -1015,27 +1022,32 @@ names for that epoch, and against no other key. No field names the target.
 
 **[CRY-091]** A receiver that rebuilt the material MUST compare
 `SHA3-256(ek_vector || rho)` against the hash in `header`. **[CRY-092]** That
-receiver MUST reject the braid epoch when the two values differ.
+receiver MUST reject the braid epoch when the two values differ. The
+rejection is of the epoch and not of a record. The body of the record that
+carried the last chunk opened under its message key, thus the receiver
+delivers that record and each later one. It takes no encapsulation key from
+that epoch, and it makes no ciphertext against it. The receiver ignores a
+frame with another fault in the same way, and it delivers the record of that
+frame.
 
-> **Deviation note.** An earlier draft put the FIPS 203 seed `d` in `header`,
-> and it marked `ek_vector` as derivable from it. It counted the derived
-> positions as held. The seed `d` fixes the decapsulation key. Thus the
-> codeword published the private half of the key that it announced. A quantum
-> adversary that held the session state read each later `ss_pq`, and that
-> draft voided the post-quantum half of G5.
+> *Cause.* The `header` does not hold the FIPS 203 seed `d`. The seed `d`
+> fixes the decapsulation key. Thus a codeword that holds `d` publishes the
+> private half of the key that it announces. A quantum adversary that holds
+> the session state then reads each later `ss_pq`, and the post-quantum half
+> of G5 is void.
 >
 > The header above holds the public seed `rho` and `H(ek)`, which is the
 > header of the ML-KEM Braid of Signal. The `ek_vector` travels as coded
-> data. The heal window at the default width rose from 18
-> records to 36 records, and that is the price of a key that stays private.
+> data. A header that holds `d` gives a heal window of 18 records at the
+> default width. The window here is 36 records, and that is the price of a
+> key that stays private.
 >
-> A still earlier draft marked `ct1` as computable from the header alone. At
-> the receiver that statement is not reachable, because `ct1` is a function of
-> the peer key and of the secret coin. The party that can compute `c1` from a
-> header is the peer, as the encapsulator of its own next epoch. FIPS 203
-> derives the coin from `m` and `H(ek)`. This revision does not use that
-> property, because §5.5.5 fixes each target by epoch number. A later revision can add
-> it as a pipelining step.
+> A receiver cannot compute `ct1` from the header alone, because `ct1` is a
+> function of the peer key and of the secret coin. The party that can compute
+> `c1` from a header is the peer, as the encapsulator of its own next epoch.
+> FIPS 203 derives the coin from `m` and `H(ek)`. Version 1 does not use that
+> property, because §5.5.5 fixes each target by epoch number. A later version
+> can add it as a pipelining step.
 
 At the close of a PQ epoch, the two parties mix the ML-KEM shared secret into
 the root key:
@@ -1130,10 +1142,6 @@ code.
 > residual, which is a chunk that arrives after the epoch needs it, or a chunk
 > that the ARQ has not yet recovered. The code turns a wait into a rebuild.
 >
-> An earlier draft of the table gave one Overhead of 12.5 % in each row, and it
-> counted derived positions in the heal window. The rows above derive each
-> figure from *k* and *r* again.
->
 > **[CRY-075]** Two implementations MUST produce byte-identical chunks for one
 > material and one schedule. Part 14 §14.5 gives the cross-backend rule that
 > covers that requirement. **[CRY-083]** The test suite MUST hold a vector for
@@ -1199,9 +1207,10 @@ the same sense. Five rules govern the incomplete epoch.
    `T` occurs during an incomplete epoch. In that schedule the epoch continues
    under one epoch number.
 
-> *Cause.* An earlier draft made `T` a restart trigger, and it gave no rule for
-> an incomplete epoch. A user that sent a few records each month never
-> completed an epoch of 41 chunks, and each 7 days the timer started a new one.
+> *Cause.* A limit `T` that starts a new epoch during an incomplete epoch
+> stops a quiet conversation from healing. A user that sends a few records
+> each month then completes no epoch of 41 chunks, because each 7 days the
+> timer starts a new one.
 > Apple PQ3 completes a quiet rekey with encrypted delivery receipts, and
 > CRY-021 bans the retransmission that PQ3 pairs with them. The rules above
 > carry a chunk on each record, and a receipt of Part 6 §6.6.9 is a record.
@@ -1220,37 +1229,68 @@ can reach:
 | --- | --- |
 | `MAX_SKIP` (per chain) | 1 000 |
 | `MAX_STORED` (per session) | 2 000 |
-| `MAX_BYTES` (per session) | 80 KiB |
+| `MAX_BYTES` (per session) | 80 KiB, which is 1 077 keys of 76 bytes |
 | `SKIP_TTL` | **45 days**, which equals `MSG_TTL` |
 | `MAX_STORED_DEVICE` (global) | 200 000 keys / 8 MiB |
+
+**The two session limits.** A session holds one skipped key as 76 bytes: the
+header key of 32 bytes, the message key of 32 bytes, the index of 4 bytes,
+and the time of 8 bytes. `MAX_BYTES` of 80 KiB is 81 920 bytes, thus it
+holds 1 077 such keys. That count is below `MAX_STORED`, thus `MAX_BYTES` is
+the limit that binds, and a session holds at most 1 077 skipped keys.
+`MAX_STORED` stays as the count bound of a stored form that a later
+version makes smaller, and `CRY-153` applies the lower of the two.
 
 The device-global limit exists to stop a device with many held sessions from
 an allocation of the per-session maximum by each of its peers. A group holds no
 pairwise session among its members (Part 11 §11.3), thus the contact count and
-the device-set size bound the session count.
+the device-set size bound the session count. The 8 MiB of `MAX_STORED_DEVICE`
+are 8 388 608 bytes, thus they hold 110 376 keys of 76 bytes. That count is
+below 200 000, thus the bytes are the limit that binds. A device that passes
+the limit after a skip drops the oldest skipped keys first, whatever session
+holds them, in the manner of `CRY-153`.
 
 **[CRY-098]** `SKIP_TTL` MUST NOT be below the `MSG_TTL` of Part 3 §3.2.4.
 **[CRY-099]** A revision MUST hold the two values equal, and a revision MUST NOT
 raise `MSG_TTL` alone.
 
-> *Cause.* An earlier draft set `SKIP_TTL` to 14 days against a `MSG_TTL` of 45
-> days. A relay holds an undelivered message for 45 days. A receiver that
-> skipped the key of that message discarded that key on day 14, thus the message
-> arrived and it did not decrypt. U9 of Part 2 §2.4 sets the undecryptable rate
+> *Cause.* A relay holds an undelivered message for 45 days. With a `SKIP_TTL`
+> of 14 days, a receiver that skipped the key of that message discards that
+> key on day 14, thus the message arrives and it does not decrypt. U9 of Part 2 §2.4 sets the undecryptable rate
 > below 1 in 10⁵, and that window is 31 days wide on the ordinary path. Part 12
-> §12.7.1 corrects the same class of error for `CHUNK_TTL`, and rules
-> ATT-050 and ATT-051 give the same relation.
+> §12.7.1 does not hold the same relation for `CHUNK_TTL`. It sets a chunk
+> at 14 days, below `MSG_TTL`, on purpose: a record that arrives after its
+> chunks left opens, and its file does not. Part 2 §2.4 holds that trade in
+> its table, and rules `ATT-050` and `ATT-051` give the relation that Part 12
+> does keep.
 >
 > **This is a trade, and Part 2 §2.4 requires the text to state it.** A skipped
-> key now lives 45 days in place of 14. A seized device therefore gives A6 a
+> key lives 45 days and not 14. A seized device therefore gives A6 a
 > wider set of message keys. `MAX_SKIP`, `MAX_STORED`, `MAX_BYTES`, and
-> `MAX_STORED_DEVICE` bound the count of that set, and only the age changes.
+> `MAX_STORED_DEVICE` bound the count of that set, and only the age differs.
 > Part 15 §15.3 records the residual.
 
 **[CRY-153]** A session MUST drop each skipped key older than `SKIP_TTL` at
 each skip, and a skip that would pass `MAX_STORED` or `MAX_BYTES` MUST drop the
 oldest keys first. A session that refused a skip at the limit would open no
 later record of that peer, and the contact would end.
+
+`MAX_SKIP` bounds the keys that one chain leaves in two cases. Inside a chain,
+a session refuses a record whose `n` is more than `MAX_SKIP` above the next
+position of that chain, and the refusal holds for that record alone. At a DH
+ratchet step, the `pn` of the header names the length of the chain that ends.
+If `pn` is more than `MAX_SKIP` above the next position of that chain, the
+session stores the first `MAX_SKIP` keys of the chain, stores no key past
+them, and takes the step. A refusal at the step would repeat at each later
+chain, because each of them carries that `pn`, and the direction would end.
+The peer alone writes a header that opens, thus `MAX_SKIP` keys stay the cost
+of one step.
+
+The age of a skipped key is a duration of Part 1 §1.9, and it starts when the
+session stores the key. At a clock movement the session starts the age of each
+key that it holds again (Part 1 rule `SCP-019`). Thus a movement of the device
+clock deletes no key (rule `SCP-021`) and adds one `SKIP_TTL` at most to the
+life of a key.
 
 **[CRY-023]** An implementation MUST store the skipped keys encrypted at rest under `K_store`.
 The specification records that these keys are a long-tailed hole in the forward
@@ -1296,11 +1336,10 @@ the ciphertext against the key of that epoch (§5.5.3). Under rule 1 that
 codeword also carries the peer's next key, thus a party that completed an
 epoch holds the target of its next one.
 
-> *Cause.* An earlier draft fixed the codeword to the byte and left open which
-> key a ciphertext targets, when a shared secret enters the root key, and how
-> the first epoch starts with no peer key. A receiver that guessed a target
-> ran implicit rejection on the wrong key and desynchronized the root key
-> without an error. The rules above make the target a function of the epoch
+> *Cause.* The codeword does not show which key a ciphertext targets, when a
+> shared secret enters the root key, or how the first epoch starts with no
+> peer key. A receiver that guesses a target runs implicit rejection on the
+> wrong key and desynchronizes the root key without an error. The rules above make the target a function of the epoch
 > number, tie every advance to a DH chain start so that one record reveals
 > the epoch, and bind each mix to a DH step that both parties identify from
 > the same chain. The test vectors of Part 6 §6.8 hold the schedule of
@@ -1331,8 +1370,8 @@ that limit goes to bucket `B1`.
 
 ## 5.7 Deniability posture
 
-UMBRA targets **offline (participation) deniability**. This document records the
-limit honestly and does not overclaim.
+UMBRA targets **offline (participation) deniability**. It claims no more than
+that.
 
 **What UMBRA gives:**
 
@@ -1385,9 +1424,9 @@ authentication is classical under §5.4.4. The codebase holds one KEM and one
 AEAD for this, and it does not hold a second ratchet. A file-encryption key
 travels inside a group record, thus it inherits the same protection.
 
-> *Cause.* An earlier draft moved a symmetric sender key to each member over
-> the PQ ratchet of a pairwise channel, and a group of N members held N × (N −
-> 1) such channels. The group queue of Part 11 §11.2 holds no pairwise channel
+> *Cause.* The alternative moves a symmetric sender key to each member over
+> the PQ ratchet of a pairwise channel, and a group of N members then holds
+> N × (N − 1) such channels. The group queue of Part 11 §11.2 holds no pairwise channel
 > among members, thus the epoch key needs a carrier of its own, and the
 > `UMBRA-KEM` of §5.3 is that carrier.
 
@@ -1397,8 +1436,17 @@ travels inside a group record, thus it inherits the same protection.
 **unconditionally**:
 
 ```
-randomness(context) = HMAC-SHA3-256( K_rng_harden, CSPRNG(32) || context )
+randomness(context) = HMAC-SHA3-256( K_rng_harden,
+                                     CSPRNG(32) || context || call || BE32(block) )
 ```
+
+`call` is 16 bytes that no other draw under `K_rng_harden` carries. Those
+bytes are the number of the draw in the process as a `u64`, then the wall time in
+nanoseconds as a `u64`, each big-endian. `block` counts the 32-byte blocks of
+one draw from zero. A platform generator that gives the same 32 bytes twice
+thus gives two different values (RFC 8937 §4, `tag2`). No value of this
+function goes on the wire as it is, thus the layout is local to an
+implementation.
 
 An implementation uses this function for each KEM encapsulation coin, each
 ephemeral key, and each signature nonce.
@@ -1558,8 +1606,28 @@ names the object type and its lifetime:
 > `quota-holder` names the holder of a chunk quota at a relay (Part 12).
 > `ndr-removal` gives the removal secret of the next registration of a
 > handle from the one before it, thus each registration takes a fresh secret
-> and a lost answer can be sent again (Part 8 `NTF-124`). The code used six
-> of them before this register named them.
+> and a lost answer can be sent again (Part 8 `NTF-124`).
+>
+> *The construction under six labels.* No other part gives these, thus
+> this note gives each one in full.
+>
+> - `"umbra/v1/relay-ntf"`, `"umbra/v1/ndr"`, and `"umbra/v1/directory"` each
+>   derive one `UMBRA-KEM` key pair from a 32-byte seed. With `label` as one
+>   of the three: `x = SHA3-256(label || "/x" || seed)` is the X25519 seed,
+>   and `d = SHA3-256(label || "/d" || seed)` and
+>   `z = SHA3-256(label || "/z" || seed)` are the two ML-KEM-768 seeds of
+>   FIPS 203 key generation, in that order. The seed of a queue relay is its
+>   static secret (Part 8 rule `NTF-129`). The seed of the NDR gateway
+>   and of the directory gateway is a secret of its operator.
+> - `"umbra/v1/client-rng"` is the `context` of `randomness(context)` of
+>   `CRY-025` for each draw of a client runtime, in each state of its store.
+> - `"umbra/v1/quota-holder"` names the holder of an upload quota at a relay:
+>   `holder = SHA3-256(label || kind || value)`. For an admission by token,
+>   `kind` is the ASCII string `token` and `value` is the nonce of the token.
+>   For an admission by proof of work, `kind` is the ASCII string `pow` and
+>   `value` is the seed and then the nonce of the solution.
+> - `"umbra/v1/handle-blob"` is the salt of the blob challenge of Part 9
+>   §9.9.3, which that section gives.
 
 **The list above is closed.** **[CRY-028]** An implementation MUST NOT use a label that this
 list does not hold. **[CRY-029]** A revision that needs a new label MUST add that label to
@@ -1590,15 +1658,14 @@ primitive register in the same manner.
 > Without a label the two keys share one KDF namespace with each derivation
 > above.
 
-> *The cause of the nine labels that this revision adds.* Part 6 §6.6.5
+> *The cause of the mention label and the manifest label.* Part 6 §6.6.5
 > derives a mention identifier under `"umbra/v1/mention"`, and Part 12 §12.3.4
-> derives a manifest key under `"umbra/v1/file-manifest"`. The seven labels below
-> came with the correction pass of the same revision.
+> derives a manifest key under `"umbra/v1/file-manifest"`.
 >
-> *The cause of the eleven group-queue labels.* The 0.2.0-draft revision
-> replaces the sender key of a group with the group queue of Part 11, and it
-> removes `"umbra/v1/sender-key"` and `"umbra/v1/group-member"` (the member
-> identifier became a member index, which no KDF makes). Part 11 §11.3.1
+> *The cause of the eleven group-queue labels.* A group uses the group queue
+> of Part 11 and no sender key, thus the list holds no
+> `"umbra/v1/sender-key"` and no `"umbra/v1/group-member"` (the member
+> identifier is a member index, which no KDF makes). Part 11 §11.3.1
 > derives the first slot key of an epoch from `K_e` under
 > `"umbra/v1/group-slot"`, each later slot key from the previous one under
 > `"umbra/v1/group-slot-next"`, and the record key of a slot under
@@ -1618,7 +1685,7 @@ primitive register in the same manner.
 > `"umbra/v1/group-rekey"`, and it lives for one re-key. Each label names one
 > object type, and CRY-031 holds.
 >
-> *The cause of the seven correction labels.* Part 5 §5.4.8 hashes a
+> *The cause of seven more labels.* Part 5 §5.4.8 hashes a
 > one-time prekey under `"umbra/v1/prekey-id"`. Part 10 §10.5.4 computes the
 > relay layer under `"umbra/v1/relay-layer"`, and Part 10 §10.6.3 signs a family
 > certificate under `"umbra/v1/relay-family"`. Part 10 §10.4.2 signs a link
@@ -1688,28 +1755,25 @@ primitive register in the same manner.
 > the current one. The two derivations take different input, thus CRY-031
 > gives them two labels.
 
-> *The cause of the handle-key label.* An earlier draft named `HK_pub` in Part 9
-> §9.3 and gave it no derivation. Part 4 §4.2.4 now derives the handle key from
-> the root identity with a rotation counter, thus a restored client recovers the
-> private half. The label separates the handle key from
+> *The cause of the handle-key label.* Part 9 §9.3 names the handle key
+> `HK_pub`. Part 4 §4.2.4 derives that key from the root identity with a
+> rotation counter, thus a restored client recovers the private half. The label separates the handle key from
 > `"umbra/v1/public-address"`, and a directory crawl does not link the two.
 
-> **`"umbra/v1/relay-layer"` corrects a shared label.** An earlier draft
-> computed the layer assignment under `"umbra/v1/relay-descriptor"`, which
-> already names the descriptor signature. CRY-031 forbids two object types under
-> one label. The note of that draft also said that one label carried three
-> domains. Part 10 §10.5.3 gives the leaf hash and the node hash no
-> label at all, thus that note described a construction that the text does not
-> hold.
+> *The cause of the relay-layer label.* The label
+> `"umbra/v1/relay-descriptor"` names the descriptor signature. CRY-031
+> forbids two object types under one label, thus the layer assignment has a
+> label of its own. Part 10 §10.5.3 gives the leaf hash and the node hash no
+> label at all.
 
-> *The cause of the six labels that an earlier revision added.* Part 7 §7.3.1 signs a
+> *The cause of six labels of Part 7, Part 11, and Part 12.* Part 7 §7.3.1 signs a
 > `Roster` under `"umbra/v1/device-roster"`. Part 11 §11.9.2 signs a granting
 > epoch under `"umbra/v1/group-grant"`, and Part 11 §11.9.6 signs a moderation
 > epoch under `"umbra/v1/group-moderation"`. Part 12 §12.3.2 hashes a relay
 > identity under `"umbra/v1/relayref"`. Part 12 §12.3.1 commits an attachment key
 > under `"umbra/v1/file-commit"`, and Part 12 §12.3.3 derives a chunk read
 > credential under `"umbra/v1/chunk-read"`. Each of the six names one object
-> type, and an earlier draft used three of them with no entry in this list.
+> type.
 
 > *The cause of the three platform-surface labels.* Part 14 §14.6.4 derives a
 > record key under `"umbra/v1/record-key"`, and `"umbra/v1/storage"` names the

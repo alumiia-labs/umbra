@@ -20,12 +20,15 @@ impl SpendSet {
             return Err(Error::Stale);
         }
         // A new current epoch retires the set two epochs back. A retired
-        // slot holds no epoch, thus two slots never hold the same one.
+        // slot holds no epoch, thus two slots never hold the same one. The
+        // slot of the next epoch stays (`ABU-114`). A clock that steps back
+        // over an epoch boundary must not let the tokens of that epoch spend
+        // a second time. A slot further ahead retires, thus a clock that was
+        // far ahead for a time does not hold both slots until its epoch
+        // comes.
+        let live = epoch.saturating_sub(1)..=epoch.saturating_add(1);
         for slot in &mut self.epochs {
-            if slot
-                .as_ref()
-                .is_some_and(|(held, _)| *held != epoch && *held != epoch.wrapping_sub(1))
-            {
+            if slot.as_ref().is_some_and(|(held, _)| !live.contains(held)) {
                 *slot = None;
             }
         }
@@ -100,5 +103,27 @@ mod tests {
         set.spend(22, 22, [5; 32]).unwrap();
         assert_eq!(set.spend(22, 22, [5; 32]), Err(Error::Stale));
         assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn a_clock_that_steps_back_keeps_the_nonces_of_the_later_epoch() {
+        let mut set = SpendSet::default();
+        set.spend(11, 11, [1; 32]).unwrap();
+        set.spend(11, 10, [2; 32]).unwrap();
+        // The clock reads epoch 10 for a time. Both slots are in use, thus a
+        // token of epoch 9 finds no slot, and the set refuses it.
+        set.spend(10, 10, [3; 32]).unwrap();
+        assert_eq!(set.spend(10, 9, [4; 32]), Err(Error::Stale));
+        // The clock is right again, and the nonce of epoch 11 stays spent.
+        assert_eq!(set.spend(11, 11, [1; 32]), Err(Error::Stale));
+        assert_eq!(set.spend(11, 10, [2; 32]), Err(Error::Stale));
+        assert_eq!(set.len(), 3);
+        // A slot more than one epoch ahead of the clock retires.
+        let mut ahead = SpendSet::default();
+        ahead.spend(50, 50, [1; 32]).unwrap();
+        ahead.spend(50, 49, [2; 32]).unwrap();
+        ahead.spend(11, 11, [3; 32]).unwrap();
+        ahead.spend(11, 10, [4; 32]).unwrap();
+        assert_eq!(ahead.len(), 2);
     }
 }

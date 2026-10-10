@@ -129,18 +129,51 @@ fn tls_config_under(roots: RootCertStore) -> Result<Arc<ClientConfig>, NativeErr
     Ok(Arc::new(config))
 }
 
-fn socket_addr(dial: &Dial, prefer_v6: bool) -> Option<SocketAddr> {
-    let v6 = dial
-        .addr_v6
-        .map(|a| SocketAddr::from((std::net::Ipv6Addr::from(a), dial.port)));
+/// How long a dial waits for one address before it turns to the next one.
+/// The callers give a dial 10 s or more. Thus the address of the second
+/// family keeps the larger part for its connect, its handshake, and its
+/// upgrade.
+const FAMILY_WAIT: Duration = Duration::from_secs(4);
+
+/// The addresses of a dial in the order of their use: IPv4 first, then
+/// IPv6, each one that the descriptor holds.
+fn socket_addrs(dial: &Dial) -> impl Iterator<Item = SocketAddr> {
     let v4 = dial
         .addr_v4
         .map(|a| SocketAddr::from((std::net::Ipv4Addr::from(a), dial.port)));
-    if prefer_v6 {
-        v6.or(v4)
-    } else {
-        v4.or(v6)
+    let v6 = dial
+        .addr_v6
+        .map(|a| SocketAddr::from((std::net::Ipv6Addr::from(a), dial.port)));
+    v4.into_iter().chain(v6)
+}
+
+/// Connects to the first address of the dial that answers. A relay with
+/// two address families stays in reach on a network that carries one of
+/// them. An address that refuses, or that stays silent for `FAMILY_WAIT`,
+/// gives its turn to the next one. The last address waits for the deadline
+/// of the caller alone. One address is in use at a time, thus the relay
+/// sees one address of the client.
+async fn connect_tcp(dial: &Dial) -> Result<TcpStream, NativeError> {
+    let mut addrs = socket_addrs(dial).peekable();
+    let mut failed: NativeError = Error::Refused.into();
+    while let Some(addr) = addrs.next() {
+        let connected = if addrs.peek().is_some() {
+            match timeout(FAMILY_WAIT, TcpStream::connect(addr)).await {
+                Ok(connected) => connected,
+                Err(_) => {
+                    failed = NativeError::Timeout;
+                    continue;
+                }
+            }
+        } else {
+            TcpStream::connect(addr).await
+        };
+        match connected {
+            Ok(tcp) => return Ok(tcp),
+            Err(error) => failed = error.into(),
+        }
     }
+    Err(failed)
 }
 
 /// The path of the relay manifest at an HTTPS carrier (Part 3 §3.10).
@@ -239,8 +272,7 @@ async fn fetch_carried(
     path: &str,
     max: usize,
 ) -> Result<Vec<u8>, NativeError> {
-    let addr = socket_addr(dial, false).ok_or(Error::Refused)?;
-    let tcp = TcpStream::connect(addr).await?;
+    let tcp = connect_tcp(dial).await?;
     let name = ServerName::try_from(dial.host.clone()).map_err(|_| Error::Refused)?;
     let mut stream = tokio_rustls::TlsConnector::from(config)
         .connect(name, tcp)
@@ -265,6 +297,15 @@ async fn fetch_carried(
             return Err(Error::Refused.into());
         }
     }
+    read_carried(&inbound)
+}
+
+/// The body of the answer of a carrier. The status is `200`, and a
+/// `Content-Length` that equals what came proves that the body is whole.
+/// The read takes a cut connection as the end of the stream. Thus a body
+/// that the close alone delimits can be a body cut short, and the call
+/// refuses it.
+fn read_carried(inbound: &[u8]) -> Result<Vec<u8>, NativeError> {
     let head_end = inbound
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
@@ -277,6 +318,7 @@ async fn fetch_carried(
         return Err(Error::Refused.into());
     }
     let body = inbound.get(head_end.saturating_add(4)..).unwrap_or(&[]);
+    let mut is_whole = false;
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
             continue;
@@ -285,11 +327,15 @@ async fn fetch_carried(
         if name.eq_ignore_ascii_case("Transfer-Encoding") {
             return Err(Error::Refused.into());
         }
-        if name.eq_ignore_ascii_case("Content-Length")
-            && value.trim().parse::<usize>().ok() != Some(body.len())
-        {
-            return Err(Error::Refused.into());
+        if name.eq_ignore_ascii_case("Content-Length") {
+            if value.trim().parse::<usize>().ok() != Some(body.len()) {
+                return Err(Error::Refused.into());
+            }
+            is_whole = true;
         }
+    }
+    if !is_whole {
+        return Err(Error::Refused.into());
     }
     Ok(body.to_vec())
 }
@@ -312,8 +358,7 @@ impl TcpLink {
         key: [u8; 16],
         mask_seed: [u8; 4],
     ) -> Result<Self, NativeError> {
-        let addr = socket_addr(dial, false).ok_or(Error::Refused)?;
-        let tcp = TcpStream::connect(addr).await?;
+        let tcp = connect_tcp(dial).await?;
         tcp.set_nodelay(true)?;
         let name = ServerName::try_from(dial.host.clone()).map_err(|_| Error::Refused)?;
         let connector = tokio_rustls::TlsConnector::from(config);
@@ -401,7 +446,9 @@ pub struct QuicLink {
 impl QuicLink {
     /// Connects over QUIC with the same TLS configuration.
     pub async fn connect(dial: &Dial, config: Arc<ClientConfig>) -> Result<Self, NativeError> {
-        let addr = socket_addr(dial, false).ok_or(Error::Refused)?;
+        // No caller dials QUIC in v1, thus the dial takes the first address
+        // alone and has no turn to the second family.
+        let addr = socket_addrs(dial).next().ok_or(Error::Refused)?;
         let mut tls = (*config).clone();
         tls.alpn_protocols = vec![QUIC_ALPN.to_vec()];
         let quic_config = quinn::crypto::rustls::QuicClientConfig::try_from(tls)
@@ -440,13 +487,13 @@ impl QuicLink {
             .map_err(|e| NativeError::Quic(e.to_string()))
     }
 
-    /// Receives one capsule, delimited by its own header.
+    /// Receives one capsule, delimited by its own header. The capsule
+    /// comes whole, with that header, as [`TcpLink::recv`] gives it: each
+    /// caller parses the capsule again.
     pub async fn recv(&mut self) -> Result<Vec<u8>, NativeError> {
         loop {
-            if let Ok((_, value, used)) = umbra_wire::capsule::parse(&self.inbound) {
-                let out = value.to_vec();
-                self.inbound.drain(..used);
-                return Ok(out);
+            if let Some(capsule) = take_capsule(&mut self.inbound) {
+                return Ok(capsule);
             }
             let mut chunk = [0u8; 4_096];
             let n = self
@@ -462,6 +509,13 @@ impl QuicLink {
             }
         }
     }
+}
+
+/// Takes the first capsule from the front of a QUIC stream, header
+/// included, or `None` while the stream holds no whole capsule.
+fn take_capsule(inbound: &mut Vec<u8>) -> Option<Vec<u8>> {
+    let (_, _, used) = umbra_wire::capsule::parse(inbound).ok()?;
+    Some(inbound.drain(..used).collect())
 }
 
 /// One connected transport.
@@ -557,6 +611,92 @@ pub async fn connect(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_quic_stream_gives_each_capsule_whole_with_its_header() {
+        let mut first = [0u8; 64];
+        let n = umbra_wire::capsule::encode(
+            umbra_wire::capsule::CapsuleType::Session,
+            &[0x03, 1, 2, 3, 4, 5, 6, 7, 8],
+            &mut first,
+        )
+        .unwrap();
+        let capsule = first.get(..n).unwrap();
+        let mut inbound = capsule.to_vec();
+        inbound.extend_from_slice(capsule.get(..n - 1).unwrap());
+        // The caller parses what it takes, thus the header stays.
+        let taken = take_capsule(&mut inbound).unwrap();
+        assert_eq!(taken, capsule);
+        assert!(umbra_wire::capsule::parse(&taken).is_ok());
+        // A capsule that is not whole waits for the rest of the stream.
+        assert_eq!(take_capsule(&mut inbound), None);
+        assert_eq!(inbound.len(), n - 1);
+        inbound.extend_from_slice(capsule.get(n - 1..).unwrap());
+        assert_eq!(take_capsule(&mut inbound).unwrap(), capsule);
+        assert!(inbound.is_empty());
+    }
+
+    #[test]
+    fn a_carried_body_that_the_close_alone_ends_is_refused() {
+        let whole = format!("{}{}", manifest_response_head(2), "ok");
+        assert_eq!(read_carried(whole.as_bytes()).unwrap(), b"ok");
+        // A cut connection gives the same bytes as a whole answer here.
+        let open = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nok";
+        assert!(read_carried(open).is_err());
+        let short = format!("{}{}", manifest_response_head(9), "ok");
+        assert!(read_carried(short.as_bytes()).is_err());
+        let chunked = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n";
+        assert!(read_carried(chunked).is_err());
+        let absent = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+        assert!(read_carried(absent).is_err());
+    }
+
+    #[test]
+    fn a_dial_holds_its_addresses_with_ipv4_first() {
+        let mut dial = Dial {
+            host: "relay.example".into(),
+            addr_v4: Some([192, 0, 2, 1]),
+            addr_v6: Some([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
+            port: 443,
+        };
+        let both: Vec<SocketAddr> = socket_addrs(&dial).collect();
+        assert_eq!(both.len(), 2);
+        assert!(both.first().unwrap().is_ipv4());
+        assert!(both.last().unwrap().is_ipv6());
+        dial.addr_v4 = None;
+        assert!(socket_addrs(&dial).next().unwrap().is_ipv6());
+        dial.addr_v6 = None;
+        assert_eq!(socket_addrs(&dial).next(), None);
+    }
+
+    #[tokio::test]
+    async fn a_dial_turns_to_ipv6_when_ipv4_refuses() {
+        // A machine with no IPv6 loopback cannot run this test.
+        let Ok(listener) = tokio::net::TcpListener::bind("[::1]:0").await else {
+            return;
+        };
+        let port = listener.local_addr().unwrap().port();
+        // Nothing listens at the IPv4 loopback on that port.
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_err() {
+            return;
+        }
+        let mut dial = Dial {
+            host: "relay.example".into(),
+            addr_v4: Some([127, 0, 0, 1]),
+            addr_v6: Some(std::net::Ipv6Addr::LOCALHOST.octets()),
+            port,
+        };
+        let tcp = connect_tcp(&dial).await.unwrap();
+        assert!(tcp.peer_addr().unwrap().is_ipv6());
+        // With one family alone, the refusal is the answer.
+        dial.addr_v6 = None;
+        assert!(matches!(connect_tcp(&dial).await, Err(NativeError::Io(_))));
+        dial.addr_v4 = None;
+        assert!(matches!(
+            connect_tcp(&dial).await,
+            Err(NativeError::Protocol(Error::Refused))
+        ));
+    }
 
     #[test]
     fn the_client_configuration_builds_with_the_two_groups_and_no_resumption() {

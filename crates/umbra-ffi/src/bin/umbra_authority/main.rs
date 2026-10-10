@@ -219,7 +219,9 @@ fn relays_of(settings: &Settings) -> Result<(RelayInfo, Dial, Vec<RelayInfo>), &
     Ok((info(guard), dial_of(guard), chain))
 }
 
-/// The relay set of the manifest, verified under the key set.
+/// The relay set of the manifest, verified under the key set. A manifest
+/// with a part of the signed set gives none (`REL-147`). A probe of a chain
+/// would find a listed relay absent, and the guard would come from a part.
 fn relay_set(settings: &Settings) -> Result<RelaySet, &'static str> {
     let manifest = std::fs::read(&settings.manifest).map_err(|_| "the manifest does not read")?;
     let keyset = std::fs::read(&settings.keyset).map_err(|_| "the key set does not read")?;
@@ -230,8 +232,12 @@ fn relay_set(settings: &Settings) -> Result<RelaySet, &'static str> {
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| "the clock is before 1970")?
         .as_secs();
-    RelaySet::accept(&mut consensus, &manifest, &BlocList::v1(), now)
-        .map_err(|_| "the manifest does not verify")
+    let set = RelaySet::accept(&mut consensus, &manifest, &BlocList::v1(), now)
+        .map_err(|_| "the manifest does not verify")?;
+    if !set.is_whole {
+        return Err("the manifest holds a part of the relay set");
+    }
+    Ok(set)
 }
 
 /// The reports of one relay in one epoch.

@@ -5,7 +5,7 @@
 
 use umbra_core::attach::{transfer::Shape, MAX_FILE_SIZE, VOICE_MAX_SECONDS};
 use umbra_wire::descriptor::class;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{ConversationId, Error, MsgRef};
 
@@ -132,16 +132,25 @@ impl Draft {
         {
             return Err(Error::Malformed);
         }
-        file.preview = Some(preview.to_vec());
+        // IMP-039: a preview is a picture of the file, thus the one that
+        // this call replaces leaves the memory as the text does.
+        if let Some(mut earlier) = file.preview.replace(preview.to_vec()) {
+            earlier.zeroize();
+        }
         Ok(())
     }
 
     /// Names the file of the draft. An image, a video, and a voice
     /// recording carry no name, because the name of a camera file holds its
     /// time (`ATT-192`).
+    ///
+    /// The name of a picked file can hold a bidirectional format character,
+    /// which no name of the wire holds (`WIR-532`). The draft takes the name
+    /// with no such character, thus the file still goes.
     pub fn set_file_name(&mut self, name: &str) -> Result<(), Error> {
         let file = self.file.as_mut().ok_or(Error::NotFound)?;
-        if !umbra_wire::descriptor::is_file_name(name) {
+        let mut name = Zeroizing::new(without_bidi_marks(name));
+        if !umbra_wire::descriptor::is_file_name(&name) {
             return Err(Error::Malformed);
         }
         if matches!(
@@ -150,7 +159,9 @@ impl Draft {
         ) {
             return Err(Error::Malformed);
         }
-        file.name = Some(name.to_owned());
+        if let Some(mut earlier) = file.name.replace(core::mem::take(&mut *name)) {
+            earlier.zeroize();
+        }
         Ok(())
     }
 
@@ -172,6 +183,46 @@ impl Draft {
     pub fn is_empty(&self) -> bool {
         self.text.is_empty() && self.file.is_none()
     }
+
+    /// Overwrites the preview and the name of a file that did not leave
+    /// the draft with a send (`IMP-039`). The file and the text overwrite
+    /// themselves.
+    fn wipe_file(&mut self) {
+        if let Some(file) = &mut self.file {
+            if let Some(preview) = &mut file.preview {
+                preview.zeroize();
+            }
+            if let Some(name) = &mut file.name {
+                name.zeroize();
+            }
+        }
+    }
+}
+
+impl Drop for Draft {
+    fn drop(&mut self) {
+        self.wipe_file();
+    }
+}
+
+/// A file name with no bidirectional format character: the marks, the
+/// embeddings, the overrides, and the isolates that `WIR-532` forbids. With
+/// one, a name shows another extension than its bytes hold. A file system
+/// permits them, thus the name of a picked file, and a name that the store
+/// took before the rule, can hold one.
+pub(crate) fn without_bidi_marks(name: &str) -> String {
+    name.chars()
+        .filter(|c| {
+            !matches!(
+                c,
+                '\u{061C}'
+                    | '\u{200E}'
+                    | '\u{200F}'
+                    | '\u{202A}'..='\u{202E}'
+                    | '\u{2066}'..='\u{2069}'
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -244,5 +295,46 @@ mod tests {
             .attach(bytes(), shape(class::AUDIO, VOICE_MAX_SECONDS + 1))
             .unwrap();
         draft.attach(bytes(), shape(class::DOC, 0)).unwrap();
+    }
+
+    #[test]
+    fn a_draft_that_drops_overwrites_the_preview_and_the_name_of_its_file() {
+        // The test puts the two values in place with no check of them.
+        let mut draft = Draft::new(ConversationId([3; 16]));
+        draft
+            .attach(Zeroizing::new(vec![7; 10]), Shape::default())
+            .unwrap();
+        let file = draft.file.as_mut().unwrap();
+        file.preview = Some(vec![0xFF, 0xD8, 0xFF, 0xD9]);
+        file.name = Some("minutes.pdf".to_owned());
+        // IMP-039: the drop runs this, and a wiped buffer holds no byte.
+        draft.wipe_file();
+        let file = draft.file.as_ref().unwrap();
+        assert_eq!(file.preview.as_deref(), Some(&[][..]));
+        assert_eq!(file.name.as_deref(), Some(""));
+        // A file that left with the send is no part of the draft.
+        assert!(draft.take_file().is_some());
+        draft.wipe_file();
+        assert!(draft.is_empty());
+    }
+
+    #[test]
+    fn a_picked_name_with_a_bidirectional_mark_goes_with_no_mark() {
+        let mut draft = Draft::new(ConversationId([4; 16]));
+        let shape = Shape {
+            mime_class: class::DOC,
+            ..Shape::default()
+        };
+        draft.attach(Zeroizing::new(vec![7; 10]), shape).unwrap();
+        // WIR-532: the wire takes no such character, and the attach works.
+        draft
+            .set_file_name("\u{200F}report\u{202E}fdp.exe\u{2069}")
+            .unwrap();
+        let name = draft.file.as_ref().unwrap().name.clone().unwrap();
+        assert_eq!(name, "reportfdp.exe");
+        assert!(umbra_wire::descriptor::is_file_name(&name));
+        // A name of marks alone is no name, and each other check holds.
+        assert_eq!(draft.set_file_name("\u{061C}"), Err(Error::Malformed));
+        assert_eq!(draft.set_file_name("a/b"), Err(Error::Malformed));
     }
 }

@@ -1,7 +1,9 @@
 [Unit]
 Description=UMBRA relay %i (Parts 3 and 10)
-After=network-online.target
-Wants=network-online.target
+# A root is valid for three hours, and a wrong clock rejects it (Part 10
+# §10.5.2). Thus the service starts after chrony sets the clock.
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
 
 [Service]
 User=umbra-relay
@@ -38,6 +40,11 @@ UMask=0077
 LimitCORE=0
 ReadWritePaths=/var/lib/umbra-relay/%i
 LimitNOFILE=65536
+# One relay never takes the memory of the others on this server. The file
+# umbra-relay@<name>.service.d/10-umbra.conf gives an exit relay its own
+# limit, and hides the files of the other relays of this server.
+MemoryHigh={{ umbra_relay_memory_high }}
+MemoryMax={{ umbra_relay_memory_max }}
 
 [Install]
 WantedBy=multi-user.target

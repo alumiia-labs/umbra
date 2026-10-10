@@ -44,6 +44,13 @@ pub const SYNC_INTERACTIVE_RATE: u32 = 4;
 pub const SYNC_INTERACTIVE_BURST: u32 = 12;
 /// `SYNC_CATCHUP_LAG`, records.
 pub const SYNC_CATCHUP_LAG: u64 = 360;
+/// The most that the Lamport counter of a counted record can be above the
+/// counter of its receiver (`DEV-275`): 2^32. A device rejects a record
+/// above it.
+pub const SYNC_LAMPORT_LEAD: u64 = 1 << 32;
+/// The counters above a hole that a device holds for one source at most:
+/// 65 536. A record above it waits for the resend of its source.
+pub const SYNC_AHEAD_MAX: usize = 65_536;
 /// `FORWARD_MAX_DEPTH`.
 pub const FORWARD_MAX_DEPTH: u8 = 5;
 /// `EDIT_WINDOW`, in seconds.

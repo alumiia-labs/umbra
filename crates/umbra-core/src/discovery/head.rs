@@ -288,6 +288,18 @@ impl<'a> HeadState<'a> {
         if head.tree_size < self.highest_tree_size {
             return Err(Error::Stale);
         }
+        // DIS-160: a second root at a retained size is a split view, and
+        // the two heads are the evidence of `DIS-051`.
+        let held = self
+            .retained
+            .iter()
+            .position(|h| h.tree_size == head.tree_size);
+        if held
+            .and_then(|at| self.retained.get(at))
+            .is_some_and(|h| h.root != head.root)
+        {
+            return Err(Error::Unverified);
+        }
         if head
             .timestamp
             .saturating_add(TREE_HEAD_FRESHNESS + CLOCK_SKEW)
@@ -299,12 +311,18 @@ impl<'a> HeadState<'a> {
             return Err(Error::Stale);
         }
         self.highest_tree_size = head.tree_size;
-        self.retained.push(AcceptedHead {
+        let accepted = AcceptedHead {
             tree_size: head.tree_size,
             root: head.root,
             timestamp: head.timestamp,
             accepted_at: device_clock,
-        });
+        };
+        // One row for each size: the same head again takes the place of
+        // its row, and `DIS-063` then counts from the later acceptance.
+        match held.and_then(|at| self.retained.get_mut(at)) {
+            Some(row) => *row = accepted,
+            None => self.retained.push(accepted),
+        }
         Ok(())
     }
 
@@ -484,11 +502,23 @@ mod tests {
         timestamp: u64,
         keyset_hash: [u8; 32],
     ) -> Vec<u8> {
+        let root = [tree_size as u8; 32];
+        signed_head_over(keys, which, tree_size, timestamp, keyset_hash, root)
+    }
+
+    fn signed_head_over(
+        keys: &[SigningKey],
+        which: &[u8],
+        tree_size: u64,
+        timestamp: u64,
+        keyset_hash: [u8; 32],
+        root: [u8; 32],
+    ) -> Vec<u8> {
         let mut rng = Rng(1);
         let head = SignedTreeHead {
             tree_size,
             timestamp,
-            root: [tree_size as u8; 32],
+            root,
             keyset_hash,
             sigs: Vec::new(),
         };
@@ -517,6 +547,30 @@ mod tests {
         let n = head.encode(&mut out).unwrap();
         out.truncate(n);
         out
+    }
+
+    #[test]
+    fn a_second_root_at_one_size_is_refused_and_a_repeat_keeps_one_row() {
+        let keys = signers(1);
+        let ks_bytes = keyset_bytes(&keys, 1);
+        let (keyset, _) = LogKeySet::parse(&ks_bytes).unwrap();
+        let hash = keyset.hash().unwrap();
+        let mut state = HeadState::new(keyset).unwrap();
+        let clock = 1_000_000u64;
+        let head = signed_head(&keys, &[0, 1], 10, clock - 100, hash);
+        let head = SignedTreeHead::parse(&head).unwrap();
+        state.accept(&head, clock).unwrap();
+        // The state accepts the same head again, and it adds no row.
+        state.accept(&head, clock + 5).unwrap();
+        assert_eq!(state.retained.len(), 1);
+        assert_eq!(state.at(10).unwrap().accepted_at, clock + 5);
+        // DIS-160: two signers sign another root at that size.
+        let split = signed_head_over(&keys, &[1, 2], 10, clock - 50, hash, [0xEE; 32]);
+        assert_eq!(
+            state.accept(&SignedTreeHead::parse(&split).unwrap(), clock + 6),
+            Err(Error::Unverified)
+        );
+        assert_eq!(state.at(10).unwrap().root, [10; 32]);
     }
 
     #[test]

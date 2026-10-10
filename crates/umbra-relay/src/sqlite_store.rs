@@ -509,7 +509,26 @@ const RECEIPT_SCHEMA: &str = "
 /// and a restart keeps each receipt that a query may ask for (`REL-073`).
 pub struct SqliteShelf {
     connection: Connection,
+    /// The bytes of receipts that the file holds at most.
+    max_bytes: u64,
+    /// The receipts that the shelf kept since it last read its size.
+    since_check: u32,
 }
+
+/// The bytes of receipts that a receipt file holds at most. The peers of a
+/// relay set the rate of its receipts. The file shares a disk with the
+/// queues, whose failed commit stops the relay. Above the bound the oldest
+/// receipts leave first, before `RECEIPT_RETENTION`.
+pub const RECEIPT_FILE_MAX: u64 = 8 << 30;
+/// The receipts between two reads of the size of the file.
+const SIZE_CHECK_EVERY: u32 = 64;
+/// The receipts that leave in one transaction when the file is above its
+/// bound, and the transactions of one check. The shelf runs on the task of
+/// the node, thus one check erases a bounded count of rows. That count is
+/// more than the receipts between two checks, thus the file comes back
+/// under its bound over some checks. No cell waits for one long erase.
+const TRIM_BATCH: i64 = 8;
+const TRIM_STEPS: u32 = 16;
 
 /// The index column of a leaf: its first 8 bytes.
 fn leaf_key(leaf: &[u8; 32]) -> i64 {
@@ -528,7 +547,68 @@ impl SqliteShelf {
         // A crash loses at most the last receipts, which no client needs.
         fault(connection.pragma_update(None, "synchronous", "NORMAL"))?;
         fault(connection.execute_batch(RECEIPT_SCHEMA))?;
-        Ok(SqliteShelf { connection })
+        Ok(SqliteShelf {
+            connection,
+            max_bytes: RECEIPT_FILE_MAX,
+            since_check: 0,
+        })
+    }
+
+    /// Sets the bytes that the file holds at most.
+    pub fn set_max_bytes(&mut self, max_bytes: u64) {
+        self.max_bytes = max_bytes;
+    }
+
+    /// The bytes of the pages that hold a row.
+    fn used_bytes(&self) -> Result<u64, StoreFault> {
+        let read = |pragma: &str| -> Result<u64, StoreFault> {
+            unsigned(fault(
+                self.connection
+                    .query_row(pragma, [], |row| row.get::<_, i64>(0)),
+            )?)
+        };
+        let pages = read("PRAGMA page_count")?.saturating_sub(read("PRAGMA freelist_count")?);
+        Ok(pages.saturating_mul(read("PRAGMA page_size")?))
+    }
+
+    /// Erases the oldest receipts while the file is above its bound, in at
+    /// most `TRIM_STEPS` transactions of `TRIM_BATCH` receipts.
+    fn trim(&mut self) -> Result<(), StoreFault> {
+        let mut trimmed = false;
+        for _ in 0..TRIM_STEPS {
+            if self.used_bytes()? <= self.max_bytes {
+                break;
+            }
+            // The last receipt of the batch, or each one when the file
+            // holds less than a batch.
+            let last: i64 = fault(
+                self.connection
+                    .query_row(
+                        "SELECT id FROM receipts ORDER BY id LIMIT 1 OFFSET ?1",
+                        [TRIM_BATCH - 1],
+                        |row| row.get(0),
+                    )
+                    .optional(),
+            )?
+            .unwrap_or(i64::MAX);
+            let transaction = fault(self.connection.transaction())?;
+            fault(transaction.execute("DELETE FROM receipt_leaves WHERE receipt <= ?1", [last]))?;
+            let gone = fault(transaction.execute("DELETE FROM receipts WHERE id <= ?1", [last]))?;
+            fault(transaction.commit())?;
+            trimmed = true;
+            // A file that is above its bound with no receipt has nothing
+            // more to give.
+            if gone == 0 {
+                break;
+            }
+        }
+        if trimmed {
+            fault(
+                self.connection
+                    .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(())),
+            )?;
+        }
+        Ok(())
     }
 
     fn put(&mut self, kept: &KeptReceipt) -> Result<(), StoreFault> {
@@ -634,7 +714,14 @@ impl SqliteShelf {
 
 impl ReceiptShelf for SqliteShelf {
     fn keep(&mut self, kept: KeptReceipt) -> Result<(), StoreFault> {
-        self.put(&kept)
+        self.put(&kept)?;
+        self.since_check = self.since_check.saturating_add(1);
+        if self.since_check >= SIZE_CHECK_EVERY {
+            self.since_check = 0;
+            // A fault leaves the rows, and the next check trims them.
+            let _ = self.trim();
+        }
+        Ok(())
     }
 
     fn find(&self, epoch: u64, leaf: &[u8; 32]) -> Vec<KeptReceipt> {
@@ -659,6 +746,43 @@ impl ReceiptShelf for SqliteShelf {
 mod tests {
     use super::*;
     use crate::store::MemoryStore;
+
+    #[test]
+    fn a_receipt_file_above_its_bound_loses_its_oldest_receipts() {
+        let path = file("receipts-bound.db");
+        let mut shelf = SqliteShelf::open(&path).unwrap();
+        shelf.set_max_bytes(1 << 20);
+        let kept = |index: u32| KeptReceipt {
+            issued: true,
+            epoch: 7,
+            signed: vec![1; 3_400],
+            leaves: (0..1_024u32)
+                .map(|leaf| {
+                    let mut bytes = [0u8; 32];
+                    bytes[..4].copy_from_slice(&index.to_be_bytes());
+                    bytes[4..8].copy_from_slice(&leaf.to_be_bytes());
+                    bytes
+                })
+                .collect(),
+            at: u64::from(index),
+        };
+        // Each full window takes about 60 kB with its index, thus 256 of
+        // them pass the bound many times.
+        for index in 0..256 {
+            shelf.keep(kept(index)).unwrap();
+        }
+        let (issued, _) = shelf.held();
+        assert!(issued < 256, "{issued}");
+        assert!(shelf.used_bytes().unwrap() <= 1 << 20);
+        // The newest receipt stays, and the oldest one left.
+        let leaf = |index: u32| {
+            let mut bytes = [0u8; 32];
+            bytes[..4].copy_from_slice(&index.to_be_bytes());
+            bytes
+        };
+        assert!(shelf.find(7, &leaf(0)).is_empty());
+        assert_eq!(shelf.find(7, &leaf(255)).len(), 1);
+    }
 
     #[test]
     fn a_receipt_file_finds_a_leaf_and_erases_after_retention() {

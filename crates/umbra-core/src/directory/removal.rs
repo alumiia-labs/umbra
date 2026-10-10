@@ -19,6 +19,11 @@ use crate::Error;
 
 /// `LINK_REMOVAL_EPOCHS`: the life of a removed link, in consensus epochs.
 pub const LINK_REMOVAL_EPOCHS: u64 = 168;
+/// `LINK_REMOVALS_MAX`: the most removed links of one manifest. No root
+/// covers the count, and each removal costs a client five to seven
+/// ML-DSA-65 verifications. Thus the bound is what a carrier can make a
+/// client verify.
+pub const LINK_REMOVALS_MAX: usize = 512;
 /// The fixed part of a `LinkRemoval`, before its signatures.
 const FIXED_LEN: usize = 1 + 8 + 32 + 32;
 
@@ -121,6 +126,15 @@ impl LinkRemoval {
         Ok(removal)
     }
 
+    /// The two relays that the removal at the front of `bytes` names, with
+    /// no check of it. A caller reads them to pass over a link that it
+    /// holds already, before it pays for the signatures.
+    pub fn link_of(bytes: &[u8]) -> Option<([u8; 32], [u8; 32])> {
+        let relay_a = bytes.get(9..41)?.try_into().ok()?;
+        let relay_b = bytes.get(41..FIXED_LEN)?.try_into().ok()?;
+        Some((relay_a, relay_b))
+    }
+
     /// Whether two relays side by side form this link, in either order.
     pub fn names(&self, one: &[u8; 32], other: &[u8; 32]) -> bool {
         (self.relay_a == *one && self.relay_b == *other)
@@ -217,6 +231,8 @@ mod tests {
         let five: Vec<(u8, &SigningKey)> = (0..5u8).map(|i| (i, &keys[usize::from(i)])).collect();
         let signed = removal.sign(&five, &mut rng).unwrap();
         assert_eq!(LinkRemoval::len_of(&signed).unwrap(), signed.len());
+        assert_eq!(LinkRemoval::link_of(&signed), Some(([3; 32], [9; 32])));
+        assert_eq!(LinkRemoval::link_of(&signed[..72]), None);
         assert_eq!(LinkRemoval::verify(&signed, &keyset, 100).unwrap(), removal);
         assert_eq!(
             LinkRemoval::verify(&signed, &keyset, 100 + LINK_REMOVAL_EPOCHS + 1),

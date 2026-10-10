@@ -20,7 +20,12 @@ use umbra_wire::ndr::{encode_token, NdrRequest, TokenCarrier, NDR_REQUEST_LEN, P
 use zeroize::Zeroizing;
 
 use super::{Client, SETTINGS};
-use crate::{Error, Event};
+use crate::{ConversationId, Error, Event};
+
+/// The value that the wake table holds in the place of the conversation of
+/// a queue that raises no alert (`ABU-029`, `DEV-219`). No conversation has
+/// this identifier: an identifier is a keyed hash of its contact.
+pub const WAKE_SILENT: [u8; 16] = [0xFF; 16];
 
 /// The root of each queue relay: `relay_id`, `k_ntf_root`, `relay_idx`.
 const NOTIFY_RELAY: TableId = TableId(0x19);
@@ -573,7 +578,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// The wake table of Part 8 `NTF-135`: each root that a binding uses,
     /// and each queue alias with the conversation of its queue. The
     /// platform seals it under its keystore, thus a locked client opens a
-    /// blob with it (`NTF-136`).
+    /// blob with it (`NTF-136`). An alias whose queue raises no alert names
+    /// [`WAKE_SILENT`] in the place of its conversation. The platform
+    /// writes the table again after each block and each change of a
+    /// notification setting.
     pub fn wake_table(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
         let mut roots: Vec<[u8; 32]> = Vec::new();
         let mut keep = |root: &Secret<32>| {
@@ -599,6 +607,21 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 conversations.push((recipient, row));
             }
         }
+        // ABU-029, DEV-219: a locked client reads no setting, thus the
+        // table says which queue raises no alert. Such a queue is the queue
+        // of a blocked contact, of a conversation that shows no
+        // notification, or of a sync channel. A sync channel is no
+        // conversation of a view.
+        let mut silent = self.device_peers()?;
+        for (_, conversation) in &conversations {
+            let conversation = ConversationId(*conversation);
+            if !silent.contains(&conversation)
+                && (self.is_blocked(conversation)?
+                    || self.alert_setting(conversation)? == super::ALERT_NONE)
+            {
+                silent.push(conversation);
+            }
+        }
         let aliases = store
             .list(NOTIFY_QUEUE, None)?
             .iter()
@@ -608,7 +631,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     .iter()
                     .find(|(recipient, _)| *recipient == queue.recipient_id)
                     .map_or([0; 16], |(_, conversation)| *conversation);
-                (queue.alias, conversation)
+                if silent.contains(&ConversationId(conversation)) {
+                    (queue.alias, WAKE_SILENT)
+                } else {
+                    (queue.alias, conversation)
+                }
             })
             .collect();
         let table = umbra_core::notify::wakekey::WakeTable { roots, aliases };

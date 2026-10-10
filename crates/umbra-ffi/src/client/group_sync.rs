@@ -11,6 +11,7 @@
 
 use umbra_core::{
     devset::sync::{group_subject, ITEM_GROUP_REKEY, ITEM_GROUP_STATE},
+    group::state::Group,
     identity::backup::{BackupObject, BackupRow, KIND_FULL},
     store::{
         engine::Backend,
@@ -119,7 +120,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// The state of one group as a backup object: its row, its seeds, its
     /// name, and each row that it owns in [`OWNED_BY_GROUP`].
-    fn group_state_object(
+    pub(super) fn group_state_object(
         &self,
         conversation: ConversationId,
         now: u64,
@@ -222,8 +223,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     }
 
     /// Writes the state of a group that arrived (`DEV-299`). Each row must
-    /// belong to the group that the subject names, and a group that this
-    /// device holds keeps its own row.
+    /// belong to the group that the subject names. A group that this device
+    /// holds keeps its own row, with its own cursors (`DEV-261`). The state
+    /// of a new admission replaces a row whose membership ended, or that
+    /// names an earlier index of the member (`GRP-414`, `GRP-421`). The
+    /// device that owns the channels joined the group again, and the row
+    /// here opens nothing that the group sends now.
     pub fn apply_group_state<R: CryptoRng + ?Sized>(
         &mut self,
         subject: &[u8; 32],
@@ -249,9 +254,27 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Err(Error::Integrity);
         }
         let conversation = self.conversation_of_group(&group_id)?;
-        if self.is_group(conversation)? {
+        let replaces = self.is_group(conversation)?;
+        if replaces && !self.state_replaces(conversation, &group_id, &object)? {
             return Ok(conversation);
         }
+        // The rows of the membership before leave with it. The read mark
+        // and the name of the conversation are of this device, and they
+        // stay.
+        let stale = if replaces {
+            self.forget_group_work(conversation);
+            let store = &self.open_ref()?.store;
+            let mut rows = self.membership_rows(conversation)?;
+            for key in [previous_seed_key(&group_id), lost_seed_key(&group_id)] {
+                rows.push((
+                    TableId::LOCAL_IDENTITY,
+                    store.row_id(TableId::LOCAL_IDENTITY, &key),
+                ));
+            }
+            rows
+        } else {
+            Vec::new()
+        };
         let store = &self.open_ref()?.store;
         let allowed = |table: TableId, row: &RowId, owner: Option<&RowId>| -> bool {
             if table == GROUP {
@@ -278,6 +301,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
+        for (table, row) in stale {
+            batch.delete(table, row);
+        }
         for row in &object.rows {
             if let BackupRow::Put {
                 table,
@@ -286,6 +312,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 plain,
             } = row
             {
+                if replaces && *table == CONVERSATION {
+                    continue;
+                }
                 batch.put(*table, *row, *owner, plain, rng)?;
             }
         }
@@ -295,6 +324,56 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // DEV-301: a re-key item that came before the group applies now.
         self.retry_rekey_items(super::unix_now_seconds().saturating_mul(1_000), rng)?;
         Ok(conversation)
+    }
+
+    /// Whether the state of a group that arrived takes the place of the row
+    /// that this device holds. The state must hold a member of an open
+    /// group. It replaces a row whose own index left the roster, and a row
+    /// that names a lower index. An admin gives each admission and each
+    /// re-key a higher index (`GRP-305`, `GRP-306`). Thus the state of an
+    /// earlier admission that arrives late replaces nothing.
+    fn state_replaces(
+        &self,
+        conversation: ConversationId,
+        group_id: &[u8; 32],
+        object: &BackupObject,
+    ) -> Result<bool, Error> {
+        let store = &self.open_ref()?.store;
+        let find = |table: TableId, at: RowId| {
+            object.rows.iter().find_map(|row| match row {
+                BackupRow::Put {
+                    table: held,
+                    row,
+                    plain,
+                    ..
+                } if *held == table && *row == at => Some(plain),
+                _ => None,
+            })
+        };
+        let seed_of = |key: &[u8]| -> Option<Secret<32>> {
+            let plain = find(
+                TableId::LOCAL_IDENTITY,
+                store.row_id(TableId::LOCAL_IDENTITY, key),
+            )?;
+            Some(Secret::new(plain.as_slice().try_into().ok()?))
+        };
+        let (Some(row), Some(seed)) = (find(GROUP, conversation.0), seed_of(group_id)) else {
+            return Ok(false);
+        };
+        // The byte after the identifier is the state of the group at the
+        // device that wrote the row, and 0 is an open group.
+        let Some((&[0], stored)) = row.get(32..).and_then(|rest| rest.split_at_checked(1)) else {
+            return Ok(false);
+        };
+        let previous = seed_of(&previous_seed_key(group_id));
+        let Ok(incoming) = Group::restore_with_previous(stored, &seed, previous.as_ref()) else {
+            return Ok(false);
+        };
+        if incoming.own_role().is_none() {
+            return Ok(false);
+        }
+        let held = self.group_of(conversation)?;
+        Ok(held.own_role().is_none() || incoming.own_index() > held.own_index())
     }
 
     /// Keeps a synced record of a group that this device does not hold.

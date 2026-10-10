@@ -109,7 +109,26 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         )?;
         // NET-194: the dead-channel work drops the blob of a blocked
         // contact at its next pass.
-        Ok(())
+        if !blocked {
+            return Ok(());
+        }
+        // ABU-031: a read receipt that waits for its slot says that the
+        // user read a record of this contact, and it goes with the block.
+        let open = self.open_mut()?;
+        let mut waiting = Vec::new();
+        for (row, plain) in open.store.list(super::RECEIPT, Some(&conversation.0))? {
+            if plain.get(16) == Some(&(umbra_wire::app::AppKind::ReadReceipt as u8)) {
+                waiting.push(row);
+            }
+        }
+        if waiting.is_empty() {
+            return Ok(());
+        }
+        let mut batch = open.store.begin();
+        for row in waiting {
+            batch.delete(super::RECEIPT, row);
+        }
+        Ok(batch.commit()?)
     }
 
     /// The members of a group that the user blocked, by index.

@@ -65,11 +65,12 @@ impl ChunkService {
         }
     }
 
-    /// A service that holds the chunks of an earlier run.
-    pub fn restore(capacity: u64, loaded: &Loaded) -> Self {
+    /// A service that holds the chunks of an earlier run. It takes the
+    /// chunks out of `loaded`, thus a full store is in memory one time.
+    pub fn restore(capacity: u64, loaded: &mut Loaded) -> Self {
         let mut service = ChunkService::new(capacity);
-        for (chunk_id, held) in &loaded.chunks {
-            service.store.restore(*chunk_id, held.clone());
+        for (chunk_id, held) in core::mem::take(&mut loaded.chunks) {
+            service.store.restore(chunk_id, held);
         }
         service
     }
@@ -199,10 +200,15 @@ impl ChunkService {
                 Ok(reply(ChunkCmd::Cdat, &chunk))
             }
             ChunkCmd::Crnw => {
-                let read_pk = self.credentials(&chunk_id)?.read_pk;
-                session.accept(command, &read_pk)?;
                 // ATT-126: a renewal has no answer, and a refused one has
-                // none too.
+                // none too. A `NACK` for a chunk that the relay does not
+                // hold would show the state that the rule keeps for a fetch.
+                let Ok(credentials) = self.credentials(&chunk_id) else {
+                    return Ok(Vec::new());
+                };
+                if session.accept(command, &credentials.read_pk).is_err() {
+                    return Ok(Vec::new());
+                }
                 if self.store.renew(&chunk_id, now).is_ok() {
                     if let Some(erase_at) = self.store.erase_at(&chunk_id) {
                         self.changes.push(StoreChange::ChunkRenewed {
@@ -482,11 +488,14 @@ mod tests {
         payload_of(cid, ChunkCmd::Cid);
 
         // The next run holds the chunk, and the registration is gone.
-        let loaded = disk.load().unwrap();
+        let mut loaded = disk.load().unwrap();
         // NET-301: the file holds the time to the hour.
         assert_eq!(loaded.chunks[&[0xC1; 32]].renewed_at, store_time(1_000));
-        assert_eq!(loaded.chunks[&[0xC1; 32]].erase_at % 3_600, 0);
-        bench.service = ChunkService::restore(1 << 24, &loaded);
+        let erase_at = loaded.chunks[&[0xC1; 32]].erase_at;
+        assert_eq!(erase_at % 3_600, 0);
+        bench.service = ChunkService::restore(1 << 24, &mut loaded);
+        // The service took the bytes, and no second copy stays.
+        assert!(loaded.chunks.is_empty());
         assert_eq!(bench.service.held_count(), 1);
         let (got, _) = bench.send(ChunkCmd::Cget, [0xC1; 32], &[], &read, b"");
         assert_eq!(payload_of(got, ChunkCmd::Cdat), chunk);
@@ -494,7 +503,7 @@ mod tests {
         assert_eq!(lost, Err(Reject::Rejected));
 
         // ATT-046: the erase time ends the chunk in the store too.
-        bench.service.sweep(loaded.chunks[&[0xC1; 32]].erase_at);
+        bench.service.sweep(erase_at);
         disk.commit(&bench.service.take_changes()).unwrap();
         assert!(disk.load().unwrap().chunks.is_empty());
     }
@@ -549,6 +558,12 @@ mod tests {
         // ATT-126: a renewal has no answer.
         let (renewed, _) = bench.send(ChunkCmd::Crnw, chunk_id, &[], &read, b"");
         assert_eq!(renewed, Ok(Vec::new()));
+        // ATT-126: a renewal of a chunk that the relay does not hold, and
+        // one under another key, get no `NACK` too.
+        let (unknown, _) = bench.send(ChunkCmd::Crnw, [0xEE; 32], &[], &read, b"");
+        assert_eq!(unknown, Ok(Vec::new()));
+        let (refused, _) = bench.send(ChunkCmd::Crnw, chunk_id, &[], &cred, b"");
+        assert_eq!(refused, Ok(Vec::new()));
 
         // A `CREP` gives one copy for each target, and a proof as its answer.
         let targets = CrepPayload {

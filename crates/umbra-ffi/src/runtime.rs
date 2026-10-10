@@ -27,26 +27,63 @@ use umbra_transport::{
     race::{Plan, Wire},
     Dial,
 };
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// The entropy of the operating system, hardened under `K_rng_harden` once a
 /// store is open (Part 5 §5.9, Part 14 `IMP-093`). A client that cannot draw
 /// a random value stops, because each key and each identifier needs one.
 pub struct OsRng;
 
-/// `K_rng_harden` of the store that this process opened. It stays until the
-/// process ends, thus a platform generator that fails after the first
-/// unlock shows no raw output on the wire.
+/// `K_rng_harden` of the store that this process opened. It stays while the
+/// store is open, thus a platform generator that fails after the first
+/// unlock shows no raw output on the wire. A lock takes it away with each
+/// other key (`IMP-127`). A locked client runs no network, and its values
+/// come from the platform source alone until the next unlock.
 static HARDEN: std::sync::Mutex<Option<Secret<32>>> = std::sync::Mutex::new(None);
 
 /// The context of each value of this process under the hardening.
 const HARDEN_CONTEXT: &[u8] = umbra_crypto::labels::CLIENT_RNG;
+
+/// The draws of this process under the hardening.
+static HARDEN_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The value that separates one hardened draw from each other (RFC 8937 §4):
+/// the call number of the process and the wall time in nanoseconds. The
+/// number separates two draws of one process, and the time separates two
+/// processes that start from one image of the memory.
+fn harden_call() -> [u8; umbra_crypto::rng::CALL_LEN] {
+    let call = HARDEN_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+    let mut out = [0u8; umbra_crypto::rng::CALL_LEN];
+    let (head, tail) = out.split_at_mut(8);
+    head.copy_from_slice(&call.to_be_bytes());
+    tail.copy_from_slice(&nanos.to_be_bytes());
+    out
+}
 
 /// Hardens each later value of [`OsRng`] under `key`.
 pub fn harden_with(key: Secret<32>) {
     *HARDEN
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(key);
+}
+
+/// Takes `K_rng_harden` out of the memory at a lock (`IMP-127`). The key
+/// overwrites itself at its drop.
+pub fn harden_clear() {
+    *HARDEN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+}
+
+/// Whether [`OsRng`] hardens its values now.
+pub fn is_hardened() -> bool {
+    HARDEN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_some()
 }
 
 /// The platform source alone.
@@ -97,9 +134,8 @@ impl TryRng for OsRng {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match held.as_ref() {
-            Some(key) => {
-                HardenedRng::new(&mut PlatformRng, key, HARDEN_CONTEXT).try_fill_bytes(dst)
-            }
+            Some(key) => HardenedRng::new(&mut PlatformRng, key, HARDEN_CONTEXT, harden_call())
+                .try_fill_bytes(dst),
             None => PlatformRng.try_fill_bytes(dst),
         }
     }
@@ -138,13 +174,21 @@ pub enum Command {
     /// Accept the bundle of the sync channel that a device gave in its
     /// provision.
     AcceptDevice(Vec<u8>),
+    /// The link of a device ended with no sync channel (Part 7 `DEV-290`):
+    /// each invitation that [`Command::InviteDevice`] asked for in this
+    /// run ends. Its prekey and its handshake state go, and its queue
+    /// takes a `DEL`. An invitation whose queue no relay made yet ends
+    /// when the relay made it, and no update names it.
+    EndDeviceInvitation,
     /// Send one application record. An [`Update::Sent`] with the same tag
     /// follows the acknowledgment of the relay.
     Send {
         /// The contact.
         contact: ContactId,
-        /// The encoded `AppMessage`.
-        app: Vec<u8>,
+        /// The encoded `AppMessage`. It is plaintext, thus it overwrites
+        /// itself at its drop, also while the command waits for a circuit
+        /// (`IMP-126`).
+        app: Zeroizing<Vec<u8>>,
         /// A value of the caller, which comes back in the update.
         tag: u64,
     },
@@ -172,12 +216,18 @@ pub enum Command {
     /// Makes a new queue for a contact after its own delay, for an
     /// operation that moves the queues of many contacts (`NET-180`).
     RotateSwept(ContactId),
-    /// The dead-channel blob of the peer gave its address (`NET-190`).
+    /// The dead-channel blob of the peer gave a candidate address
+    /// (`NET-190`).
     PeerMoved {
         /// The contact.
         contact: ContactId,
         /// The encoded `QueueAddress`.
         address: Zeroizing<Vec<u8>>,
+        /// Whether the channel is dead, and not silent alone.
+        dead: bool,
+        /// Whether an earlier run sent to this candidate already
+        /// (`NET-191`): this run then sends nothing more to it.
+        sent: bool,
     },
     /// The user accepted a new pairwise key of the peer (Part 4 §4.5.1).
     PeerKey {
@@ -238,8 +288,9 @@ pub trait Persist: Send {
         None
     }
 
-    /// The batch of the last [`Persist::due_receipt`] left in a slot, and
-    /// the store erases it (`NET-054`).
+    /// A relay answered the record of the batch of the last
+    /// [`Persist::due_receipt`], and the store erases it (`NET-054`). The
+    /// runtime asks for no second batch before.
     fn receipt_sent(&mut self) {}
 
     /// One cross-relay token for a `NEW` that a relay under load refused
@@ -254,8 +305,22 @@ pub trait Persist: Send {
         None
     }
 
-    /// The digest of the last [`Persist::due_digest`] left in a slot.
+    /// A relay answered the record of the digest of the last
+    /// [`Persist::due_digest`].
     fn digest_sent(&mut self) {}
+
+    /// Takes a hello that arrived on a rendezvous queue, before the batch
+    /// that moves the cursor of that queue (`WIR-115`). The runtime calls
+    /// it in the step that commits the call of the node, and it writes no
+    /// capsule of that call before. Thus no `ACK` of the hello leaves while
+    /// the store does not hold its request. A run that ends between the two
+    /// commits gets the hello again, and a store drops the second copy. The
+    /// result is none for a store that takes no hello here: the runtime
+    /// then gives it as an [`Update::Hello`]. False ends the run with no
+    /// commit, as a batch that the store did not take does.
+    fn commit_hello(&mut self, _queue: &[u8; 32], _envelope: &[u8]) -> Option<bool> {
+        None
+    }
 }
 
 /// A store that keeps nothing, for a run whose state ends with it.
@@ -373,6 +438,10 @@ pub enum Update {
     },
     /// The peer gave a new address on the channel.
     PeerMoved(ContactId),
+    /// The address of this device left for the candidate address of a
+    /// contact (`NET-191`). Or a relay answered the bundle of a renewal
+    /// that went there (`NET-330`). The store keeps that.
+    CandidateSent(ContactId),
     /// A renewal replaced the channel of a contact (Part 3 §3.2.6).
     ChannelRenewed(ContactId),
     /// A minute of a ready run passed. The work of weeks and hours, as the
@@ -402,12 +471,11 @@ pub enum Update {
         /// Whether the channel is the sync channel of a device.
         is_device: bool,
     },
-    /// An application record arrived.
+    /// An application record arrived. The store took its plaintext in the
+    /// batch of its ratchet state, thus the update carries none.
     Message {
         /// The contact.
         contact: ContactId,
-        /// The encoded `AppMessage`.
-        app: Vec<u8>,
     },
     /// The six-digit code of a ceremony, which the two users compare.
     VerificationCode {
@@ -465,34 +533,193 @@ pub enum Ended {
     WakeDone = 7,
 }
 
+/// The queue of each invitation of `asked` that the changes of one call
+/// store: the stored form of an invitation holds its bundle. The node
+/// names an invitation by the handle of its call alone, and it ends one by
+/// its queue.
+fn invitation_queues(changes: &[StateChange], asked: &[(u64, &[u8])]) -> Vec<(u64, [u8; 32])> {
+    let holds = |state: &[u8], bundle: &[u8]| {
+        !bundle.is_empty() && state.windows(bundle.len()).any(|part| part == bundle)
+    };
+    asked
+        .iter()
+        .filter_map(|(handle, bundle)| {
+            changes.iter().find_map(|change| match change {
+                StateChange::Invitation { queue, state } if holds(state, bundle) => {
+                    Some((*handle, *queue))
+                }
+                _ => None,
+            })
+        })
+        .collect()
+}
+
 /// Commits what the last call of the node gave. The caller writes the
 /// capsules of the node after this function only (`IMP-131`). The `ACK` of a
 /// record follows its commit (`WIR-115`), in a slot of the cover clock.
+///
+/// `device_invites` holds the handle of each invitation of a device link
+/// that waits for its queue. The result names the queue of each one that
+/// this call made (`DEV-290`).
+///
+/// A hello of this call goes to the store first (`WIR-115`), and the
+/// result says whether the store took the hellos.
 fn settle(
     node: &mut ClientNode,
     persist: &mut dyn Persist,
     events: &[ClientEvent],
-) -> Result<(), Ended> {
-    let received: Vec<(ContactId, Vec<u8>)> = events
+    device_invites: &BTreeSet<u64>,
+) -> Result<Settled, Ended> {
+    let changes = node.take_changes().map_err(|_| Ended::NodeFault)?;
+    let mut stores_hellos = false;
+    for event in events {
+        if let ClientEvent::Hello { queue, envelope } = event {
+            match persist.commit_hello(queue, envelope) {
+                Some(true) => stores_hellos = true,
+                Some(false) => return Err(Ended::StoreFault),
+                None => {}
+            }
+        }
+    }
+    let asked: Vec<(u64, &[u8])> = events
+        .iter()
+        .filter_map(|event| match event {
+            ClientEvent::Invitation { handle, bundle } if device_invites.contains(handle) => {
+                Some((*handle, bundle.as_slice()))
+            }
+            _ => None,
+        })
+        .collect();
+    let made = invitation_queues(&changes, &asked);
+    let mut received: Vec<(ContactId, Vec<u8>)> = events
         .iter()
         .filter_map(|event| match event {
             ClientEvent::Message { contact, app } => Some((*contact, app.clone())),
             _ => None,
         })
         .collect();
-    let changes = node.take_changes().map_err(|_| Ended::NodeFault)?;
+    let settled = Settled {
+        made,
+        stores_hellos,
+    };
     if changes.is_empty() && received.is_empty() {
-        return Ok(());
+        return Ok(settled);
     }
-    if !persist.commit(changes, &received) {
+    let committed = persist.commit(changes, &received);
+    // IMP-126: the store holds each record now, and this copy of the
+    // plaintext leaves the memory.
+    for (_, app) in &mut received {
+        app.zeroize();
+    }
+    if !committed {
         return Err(Ended::StoreFault);
     }
-    Ok(())
+    Ok(settled)
+}
+
+/// What one commit of [`settle`] found.
+struct Settled {
+    /// The queue of each device invitation that the call made, by the
+    /// handle of its call.
+    made: Vec<(u64, [u8; 32])>,
+    /// Whether the store took the hellos of the call, thus no update
+    /// carries one.
+    stores_hellos: bool,
+}
+
+/// The ARQ of the records of the user inside one run (Part 3 §3.7). A
+/// relay that answers a `SEND` with `BUSY` or `ADMISSION` refuses the
+/// moment and not the record, thus the record goes again (`NET-218`). It
+/// goes in a slot of the cover clock and at no timeout (`NET-071`). It goes
+/// `SEND_MAX_ATTEMPTS` times at most (`NET-219`), and for `SEND_GIVE_UP` at
+/// most (`NET-220`). A record whose ARQ stops fails (`NET-221`). The run
+/// holds the plaintext of each record that waits for its relay
+/// acknowledgment, and each copy overwrites itself at its drop (`IMP-126`).
+/// The store holds the record too, thus the next run sends one that this
+/// run lost.
+#[derive(Default)]
+struct Resends {
+    held: BTreeMap<u64, HeldSend>,
+    /// The tags that wait for a slot, the oldest refusal first.
+    due: VecDeque<u64>,
+}
+
+struct HeldSend {
+    contact: ContactId,
+    app: Zeroizing<Vec<u8>>,
+    arq: umbra_queue::client::arq::Arq,
+}
+
+impl Resends {
+    /// The first send of the record of `tag` left at `now`.
+    fn sent(&mut self, tag: u64, contact: ContactId, app: Zeroizing<Vec<u8>>, now: u64) {
+        let mut arq = umbra_queue::client::arq::Arq::new();
+        arq.sent(now);
+        self.held.insert(tag, HeldSend { contact, app, arq });
+    }
+
+    /// The ARQ of `tag` ended: a relay took the record, or the record
+    /// failed.
+    fn ended(&mut self, tag: u64) {
+        self.held.remove(&tag);
+        self.due.retain(|held| *held != tag);
+    }
+
+    /// A relay refused the record of `tag` with `reason` at `now`. The
+    /// result says whether the record goes again in a slot. False is the
+    /// end of its ARQ.
+    fn refused(&mut self, tag: u64, reason: umbra_queue::Reject, now: u64) -> bool {
+        let Some(held) = self.held.get_mut(&tag) else {
+            return false;
+        };
+        held.arq.rejected(reason);
+        if held.arq.may_send(now) {
+            if !self.due.contains(&tag) {
+                self.due.push_back(tag);
+            }
+            return true;
+        }
+        self.ended(tag);
+        false
+    }
+
+    /// The record that takes the next slot at `now`: its tag, and whether
+    /// the send is its first retransmission (`NET-065`). Each record whose
+    /// ARQ stopped while it waited goes to `stopped`.
+    fn next(&mut self, now: u64, stopped: &mut Vec<u64>) -> Option<(u64, bool)> {
+        while let Some(tag) = self.due.front().copied() {
+            let Some(held) = self.held.get_mut(&tag) else {
+                self.due.pop_front();
+                continue;
+            };
+            if held.arq.may_send(now) {
+                return Some((tag, held.arq.attempts() == 1));
+            }
+            self.ended(tag);
+            stopped.push(tag);
+        }
+        None
+    }
+
+    /// The record of `tag` takes this slot: its contact and its bytes, and
+    /// the send counts at `now`.
+    fn take(&mut self, tag: u64, now: u64) -> Option<(ContactId, Zeroizing<Vec<u8>>)> {
+        self.due.retain(|held| *held != tag);
+        let held = self.held.get_mut(&tag)?;
+        held.arq.sent(now);
+        Some((held.contact, held.app.clone()))
+    }
 }
 
 /// The mean time between two slots of the cover clock: λ = 0.05 cells for
 /// each second (Part 3 §3.6.2, tier A).
 const COVER_MEAN: Duration = Duration::from_secs(20);
+
+/// The longest time that the run waits for the answer of a relay
+/// (`IMP-146`). The answer is to the record of a batch of receipts or of a
+/// digest. The store keeps the batch past it, and a later slot carries it
+/// again.
+const CARRIED_WAIT: Duration = Duration::from_secs(600);
 
 /// A monotonic source that runs while the device sleeps. `Instant` stops
 /// in a suspend on Linux and Android, and a night of sleep then reads as a
@@ -518,12 +745,89 @@ impl AwakeClock {
         }
     }
 
-    /// The seconds since `self`.
-    fn elapsed(&self) -> u64 {
+    /// The seconds since `self`, and whether the source of that count runs
+    /// while the device sleeps. A file that did not read at one of the two
+    /// times gives the count of `Instant`, which no sleep moves.
+    fn elapsed(&self) -> (u64, bool) {
         match (self.uptime, Self::uptime()) {
-            (Some(then), Some(now)) => now.saturating_sub(then),
-            _ => self.instant.elapsed().as_secs(),
+            (Some(then), Some(now)) => (now.saturating_sub(then), true),
+            _ => (self.instant.elapsed().as_secs(), false),
         }
+    }
+}
+
+/// The idle time of the auto-lock (`IMP-119`, Part 1 `SCP-018`). It is the
+/// time since the last action of the user, on a monotonic source that runs
+/// while the device sleeps. The device clock has no part in it, thus a step
+/// of that clock neither locks a client nor keeps one open. With no source
+/// that counts the sleep the count is the one of `Instant`: the client then
+/// locks late by each sleep, and never early.
+pub struct IdleClock {
+    last: AwakeClock,
+}
+
+impl Default for IdleClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl IdleClock {
+    /// An idle time that starts now.
+    pub fn new() -> Self {
+        IdleClock {
+            last: AwakeClock::now(),
+        }
+    }
+
+    /// The user acted, and the idle time starts again.
+    pub fn touch(&mut self) {
+        self.last = AwakeClock::now();
+    }
+
+    /// The seconds since the last action of the user.
+    pub fn idle(&self) -> u64 {
+        self.last.elapsed().0
+    }
+}
+
+/// The two clocks at the first reading of this process: the monotonic
+/// source, and the device clock in seconds.
+static CLOCK_ANCHOR: std::sync::OnceLock<(AwakeClock, u64)> = std::sync::OnceLock::new();
+
+/// The reading of [`clock_offset`] that a run of this process saw last. A
+/// run that starts compares its first reading against it. Thus it sees a
+/// movement of the device clock while no run lived: under a lock, or with
+/// no network.
+static CLOCK_SEEN: std::sync::Mutex<Option<(i64, bool)>> = std::sync::Mutex::new(None);
+
+/// How far the device clock at `now` ran ahead of the monotonic source
+/// since the first reading of this process, in seconds. The result also
+/// says whether that source runs while the device sleeps.
+fn clock_offset(now: u64) -> (i64, bool) {
+    let (anchor, then) = CLOCK_ANCHOR.get_or_init(|| (AwakeClock::now(), now));
+    let (mono, counts_sleep) = anchor.elapsed();
+    let ahead = i128::from(now) - i128::from(*then) - i128::from(mono);
+    let bound = if ahead < 0 { i64::MIN } else { i64::MAX };
+    (i64::try_from(ahead).unwrap_or(bound), counts_sleep)
+}
+
+/// Whether the device clock moved between two readings of
+/// [`clock_offset`] by more than `CLOCK_SKEW` (Part 1 `SCP-019`). The two
+/// compare against one source. On a source that runs while the device
+/// sleeps, a movement in each direction counts. A source that stops in a
+/// sleep falls behind the device clock by each sleep. Thus a device clock
+/// that ran ahead of it shows a sleep or a movement, and it counts as none.
+/// A night of sleep must not start each rotation, each invitation, and each
+/// `DEL` again. A device clock that fell behind such a source moved back.
+/// Two readings of two sources compare no more.
+fn clock_stepped(before: (i64, bool), after: (i64, bool)) -> bool {
+    let skew = i64::try_from(umbra_core::directory::CLOCK_SKEW).unwrap_or(i64::MAX);
+    let moved = after.0.saturating_sub(before.0);
+    match (before.1, after.1) {
+        (true, true) => moved.saturating_abs() > skew,
+        (false, false) => moved < skew.saturating_neg(),
+        _ => false,
     }
 }
 
@@ -570,6 +874,8 @@ pub async fn run_client(
         return;
     };
     if node.connected(&mut rng).is_err() {
+        // REL-172: the counts go to the next run.
+        let _ = updates.send(Update::Faults(Box::new(node.take_faults())));
         let _ = updates.send(Update::Offline(Ended::NodeFault));
         return;
     }
@@ -580,22 +886,42 @@ pub async fn run_client(
     let mut notify_tags: BTreeMap<u64, u64> = BTreeMap::new();
     let mut rendezvous_tags: BTreeMap<u64, u64> = BTreeMap::new();
     let mut tags: BTreeMap<u64, u64> = BTreeMap::new();
+    // NET-218: the records of the user that wait for a relay
+    // acknowledgment, for the ARQ of this run.
+    let mut resends = Resends::default();
     let mut device_invites: BTreeSet<u64> = BTreeSet::new();
+    // DEV-290: the queue of each device invitation of this run that waits
+    // for its flight 1. The second set holds the handle of each one whose
+    // link ended before a relay made its queue.
+    let mut device_halves: Vec<[u8; 32]> = Vec::new();
+    let mut ended_invites: BTreeSet<u64> = BTreeSet::new();
     let mut is_foreground = true;
     let mut next_slot = tokio::time::Instant::now() + cover_delay(&mut rng);
     // The tick of `CIRCUIT_BUILD_TIMEOUT`. It sends nothing unless a build
     // ran out, and the cover clock stays memoryless.
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     // The check of the queue rotations of Part 3 §3.2.6. A rotation
-    // counts in days, thus a check each minute is on time.
-    let mut next_rotation_check = unix_now();
+    // counts in days, thus a check each minute is on time. The minute
+    // counts on the monotonic source (`SCP-018`): a device clock that moves
+    // back stops no check, and no work of [`Update::Tick`] with it.
+    let mut next_rotation_check = tokio::time::Instant::now();
+    // IMP-146: the batch of receipts or the digest that a slot carried,
+    // until a relay answered its record. With it goes the time at which the
+    // run waits for that answer no more. The store erases the batch at the
+    // answer, thus a run that ends before it leaves the batch there. While
+    // one waits, no slot asks the store for a second one: the store names
+    // the batch of its last answer alone.
+    let mut carried: Option<(CoverSlot, tokio::time::Instant)> = None;
     let mut last_faults = LinkFaults::default();
     // NET-100: the end of a push-wake session, or none for a run of the
     // screen or of the carrier.
     let mut wake_end: Option<tokio::time::Instant> = None;
-    // SCP-018: the monotonic source beside the device clock, from which a
-    // tick sees a clock movement.
-    let mut clock_base = (AwakeClock::now(), unix_now());
+    // SCP-018, SCP-019: the reading of the two clocks that this run saw
+    // last, from which a tick sees a clock movement. It starts from the
+    // reading of the last run of this process.
+    let mut clock_seen = *CLOCK_SEEN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let ended = 'run: loop {
         // WIR-254, WIR-339: the indices of the records of the user, and the
         // holes of the records of the contacts.
@@ -656,20 +982,63 @@ pub async fn run_client(
             () = tokio::time::sleep_until(next_slot) => {
                 next_slot = tokio::time::Instant::now() + cover_delay(&mut rng);
                 let now = unix_now();
-                let receipt = persist.due_receipt(now);
+                // NET-071, NET-065: a record of the user that a relay
+                // refused with `BUSY` or `ADMISSION` goes again in a slot.
+                // Its first retransmission comes before each other item. A
+                // later one comes after an acknowledgment. The node takes
+                // the slot first for what it holds, with no cover cell, and
+                // the record goes when the node left the slot free.
+                let mut stopped = Vec::new();
+                let resend = resends.next(now, &mut stopped);
+                for tag in stopped {
+                    let _ = updates.send(Update::Failed(tag));
+                }
+                if let Some((tag, is_first)) = resend {
+                    let is_free = is_first
+                        || matches!(
+                            node.on_cover_slot(false, None, None, now, &mut rng),
+                            Ok(CoverSlot::Nothing)
+                        );
+                    if is_free {
+                        if let Some((contact, app)) = resends.take(tag, now) {
+                            match node.send(&contact, &app, now, &mut rng) {
+                                Ok(handle) => {
+                                    tags.insert(handle, tag);
+                                }
+                                Err(_) => {
+                                    resends.ended(tag);
+                                    let _ = updates.send(Update::Unsent(tag));
+                                }
+                            }
+                        }
+                    }
+                    for contact in node.take_gaps() {
+                        let _ = updates.send(Update::DeliveryGap(contact));
+                    }
+                    Vec::new()
+                } else {
+                // IMP-146: a batch whose record took no answer in
+                // `CARRIED_WAIT` waits for none, and a slot carries the
+                // batch of the store again.
+                if carried.is_some_and(|(_, until)| tokio::time::Instant::now() >= until) {
+                    carried = None;
+                }
+                let receipt = if carried.is_none() { persist.due_receipt(now) } else { None };
                 // NET-065: a digest only where no receipt waits.
-                let digest = if receipt.is_none() { persist.due_digest(now) } else { None };
+                let asks_digest = carried.is_none() && receipt.is_none();
+                let digest = if asks_digest { persist.due_digest(now) } else { None };
                 let given = receipt.as_ref().map(|(contact, app)| (contact, app.as_slice()));
                 let offered = digest.as_ref().map(|(contact, app)| (contact, app.as_slice()));
-                match node.on_cover_slot(is_foreground, given, offered, now, &mut rng) {
-                    Ok(CoverSlot::Receipt) => persist.receipt_sent(),
-                    Ok(CoverSlot::Digest) => persist.digest_sent(),
-                    _ => {}
+                if let Ok(slot @ (CoverSlot::Receipt | CoverSlot::Digest)) =
+                    node.on_cover_slot(is_foreground, given, offered, now, &mut rng)
+                {
+                    carried = Some((slot, tokio::time::Instant::now() + CARRIED_WAIT));
                 }
                 for contact in node.take_gaps() {
                     let _ = updates.send(Update::DeliveryGap(contact));
                 }
                 Vec::new()
+                }
             }
             // NET-169: a build that no relay answers ends, and the run
             // ends with its last circuit.
@@ -678,13 +1047,15 @@ pub async fn run_client(
                 // SCP-019: a step of the device clock of more than
                 // CLOCK_SKEW against the monotonic source interrupts each
                 // duration that runs.
-                let mono = i128::from(clock_base.0.elapsed());
-                let wall = i128::from(now) - i128::from(clock_base.1);
-                if (wall - mono).abs() > i128::from(umbra_core::directory::CLOCK_SKEW) {
+                let offset = clock_offset(now);
+                if clock_seen.is_some_and(|seen| clock_stepped(seen, offset)) {
                     node.clock_moved(now);
                     let _ = updates.send(Update::ClockMoved);
                 }
-                clock_base = (AwakeClock::now(), now);
+                clock_seen = Some(offset);
+                *CLOCK_SEEN
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(offset);
                 node.set_challenge_clock(now);
                 let mut events = node.on_tick(now);
                 // DIS-015: the rendezvous circuits start on their own delay.
@@ -692,10 +1063,14 @@ pub async fn run_client(
                 // NET-347: a record that waits takes a new build after one
                 // that ran out of time.
                 let _ = node.rebuild_lost(now, &mut rng);
+                // A `SUB` that a relay refused with `LIMIT` or `BUSY` goes
+                // again at the end of its wait.
+                let _ = node.subscribe_due(now, &mut rng);
                 // NET-176: a fault of one rotation ends no run, and the
                 // next check tries again.
-                if node.is_ready() && now >= next_rotation_check {
-                    next_rotation_check = now.saturating_add(60);
+                if node.is_ready() && tokio::time::Instant::now() >= next_rotation_check {
+                    next_rotation_check =
+                        tokio::time::Instant::now() + Duration::from_secs(60);
                     events.extend(node.rotate_due(now, &mut rng).unwrap_or_default());
                     let _ = updates.send(Update::Tick);
                 }
@@ -725,14 +1100,34 @@ pub async fn run_client(
                 Err(_) => break 'run Ended::NodeFault,
             }
         }
-        if let Err(ended) = settle(&mut node, persist.as_mut(), &events) {
-            break 'run ended;
-        }
+        let asked: BTreeSet<u64> = device_invites.union(&ended_invites).copied().collect();
+        let Settled {
+            made,
+            stores_hellos,
+        } = match settle(&mut node, persist.as_mut(), &events, &asked) {
+            Ok(settled) => settled,
+            Err(ended) => break 'run ended,
+        };
         for event in events {
             let update = match event {
                 ClientEvent::CircuitReady => Update::Online,
                 ClientEvent::Invitation { handle, bundle } => {
+                    let queue = made
+                        .iter()
+                        .find(|(held, _)| *held == handle)
+                        .map(|(_, queue)| *queue);
+                    if ended_invites.remove(&handle) {
+                        // DEV-290: the link of this invitation ended before
+                        // a relay made its queue. It ends here, and no
+                        // party gets its bundle. The next call commits the
+                        // change, and the `DEL` leaves at a later check.
+                        if let Some(queue) = queue {
+                            let _ = node.end_invitation(&queue, &mut rng);
+                        }
+                        continue;
+                    }
                     if device_invites.remove(&handle) {
+                        device_halves.extend(queue);
                         Update::DeviceInvitation(bundle)
                     } else {
                         Update::Invitation(bundle)
@@ -749,12 +1144,21 @@ pub async fn run_client(
                     peer_static,
                     is_device,
                 },
-                ClientEvent::Message { contact, app } => Update::Message { contact, app },
+                ClientEvent::Message { contact, mut app } => {
+                    // IMP-126: the store took the record in `settle`.
+                    app.zeroize();
+                    Update::Message { contact }
+                }
                 ClientEvent::VerificationCode { contact, code } => {
                     Update::VerificationCode { contact, code }
                 }
+                // IDN-170: the code that the view shows verifies no more.
+                ClientEvent::VerificationEnded { contact } => Update::VerificationRefused(contact),
                 ClientEvent::Accepted { handle } => match tags.remove(&handle) {
-                    Some(tag) => Update::Sent(tag),
+                    Some(tag) => {
+                        resends.ended(tag);
+                        Update::Sent(tag)
+                    }
                     None => continue,
                 },
                 ClientEvent::Room { handle, remaining } => match tags.get(&handle) {
@@ -769,11 +1173,31 @@ pub async fn run_client(
                     handle,
                     reason: umbra_queue::Reject::Limit,
                 } if tags.contains_key(&handle) => match tags.remove(&handle) {
-                    Some(tag) => Update::Held(tag),
+                    // The client holds the record for the room of the
+                    // queue, and it gives it to a later send (`IMP-082`).
+                    Some(tag) => {
+                        resends.ended(tag);
+                        Update::Held(tag)
+                    }
+                    None => continue,
+                },
+                // NET-218: a `BUSY` or an `ADMISSION` ends no send. The
+                // record stays queued, and a slot carries it again.
+                ClientEvent::Rejected {
+                    handle,
+                    reason: reason @ (umbra_queue::Reject::Busy | umbra_queue::Reject::Admission),
+                } if tags.contains_key(&handle) => match tags.remove(&handle) {
+                    Some(tag) if resends.refused(tag, reason, unix_now()) => continue,
+                    // NET-219 to NET-221: the ARQ stopped, and the record
+                    // fails.
+                    Some(tag) => Update::Failed(tag),
                     None => continue,
                 },
                 ClientEvent::Rejected { handle, .. } => match tags.remove(&handle) {
-                    Some(tag) => Update::Failed(tag),
+                    Some(tag) => {
+                        resends.ended(tag);
+                        Update::Failed(tag)
+                    }
                     // A relay refused the `NEW` of a rendezvous queue.
                     None => match rendezvous_tags.remove(&handle) {
                         Some(tag) => Update::RendezvousRefused(tag),
@@ -813,6 +1237,8 @@ pub async fn run_client(
                     },
                     None => continue,
                 },
+                // WIR-115: the store took the hello with its queue cursor.
+                ClientEvent::Hello { .. } if stores_hellos => continue,
                 ClientEvent::Hello { queue, envelope } => Update::Hello { queue, envelope },
                 ClientEvent::ReportQueue { address, .. } => Update::ReportQueue { address },
                 ClientEvent::LinkFault { sealed, .. } => Update::LinkFault(sealed),
@@ -832,6 +1258,22 @@ pub async fn run_client(
                     address: Zeroizing::new(address),
                 },
                 ClientEvent::PeerMoved { contact } => Update::PeerMoved(contact),
+                ClientEvent::CandidateSent { contact } => Update::CandidateSent(contact),
+                // IMP-146, NET-054: a relay answered the record of the
+                // batch, and the store erases it. An answer that names no
+                // batch of this run, as one that came past `CARRIED_WAIT`,
+                // erases nothing.
+                ClientEvent::Carried { slot } => {
+                    if carried.is_some_and(|(held, _)| held == slot) {
+                        carried = None;
+                        match slot {
+                            CoverSlot::Receipt => persist.receipt_sent(),
+                            CoverSlot::Digest => persist.digest_sent(),
+                            _ => {}
+                        }
+                    }
+                    continue;
+                }
                 ClientEvent::ChannelRenewed { contact } => Update::ChannelRenewed(contact),
                 ClientEvent::CircuitLost => break 'run Ended::CircuitLost,
                 ClientEvent::CircuitAged => break 'run Ended::Aged,
@@ -877,6 +1319,15 @@ pub async fn run_client(
                         let _ = updates.send(Update::Refused);
                     }
                 }
+                // DEV-290: a link that ended retires its sync invitation.
+                // A queue whose handshake finished holds no half, and the
+                // call changes nothing for it.
+                Command::EndDeviceInvitation => {
+                    ended_invites.append(&mut device_invites);
+                    for queue in device_halves.drain(..) {
+                        let _ = node.end_invitation(&queue, &mut rng);
+                    }
+                }
                 Command::Accept(given) => {
                     let accepted = if given.len() == FRAGMENT_LEN {
                         node.accept_link(&given, &mut rng)
@@ -906,6 +1357,7 @@ pub async fn run_client(
                     match node.send(&contact, &app, now, &mut rng) {
                         Ok(handle) => {
                             tags.insert(handle, tag);
+                            resends.sent(tag, contact, app, now);
                         }
                         Err(_) => {
                             let _ = updates.send(Update::Unsent(tag));
@@ -928,8 +1380,19 @@ pub async fn run_client(
                 Command::RotateSwept(contact) => {
                     let _ = node.rotate_swept(&contact, now, &mut rng);
                 }
-                Command::PeerMoved { contact, address } => {
-                    let _ = node.peer_moved(&contact, &address, now, &mut rng);
+                Command::PeerMoved {
+                    contact,
+                    address,
+                    dead,
+                    sent,
+                } => {
+                    let told = node.peer_candidate(&contact, &address, dead, sent, now, &mut rng);
+                    // NET-191: the store learns of the one send.
+                    for event in told.unwrap_or_default() {
+                        if let ClientEvent::CandidateSent { contact } = event {
+                            let _ = updates.send(Update::CandidateSent(contact));
+                        }
+                    }
                 }
                 Command::PeerKey { contact, key } => {
                     let _ = node.set_peer_key(&contact, key);
@@ -983,7 +1446,7 @@ pub async fn run_client(
                     );
                 }
             }
-            if let Err(ended) = settle(&mut node, persist.as_mut(), &[]) {
+            if let Err(ended) = settle(&mut node, persist.as_mut(), &[], &BTreeSet::new()) {
                 break 'run ended;
             }
         }
@@ -991,4 +1454,183 @@ pub async fn run_client(
     // REL-172: the counts go to the next run.
     let _ = updates.send(Update::Faults(Box::new(node.take_faults())));
     let _ = updates.send(Update::Offline(ended));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_record_that_a_relay_refuses_with_busy_goes_again_inside_its_bounds() {
+        use umbra_queue::{
+            params::{SEND_GIVE_UP, SEND_MAX_ATTEMPTS},
+            Reject,
+        };
+        let contact = ContactId([3; 32]);
+        let app = || Zeroizing::new(vec![1, 2, 3]);
+        let mut resends = Resends::default();
+        let mut stopped = Vec::new();
+        resends.sent(7, contact, app(), 100);
+        assert_eq!(resends.next(100, &mut stopped), None);
+        // NET-218: a `BUSY` and an `ADMISSION` continue the ARQ, and the
+        // record waits for a slot. NET-065: the flag names the first
+        // retransmission alone.
+        assert!(resends.refused(7, Reject::Busy, 101));
+        assert_eq!(resends.next(101, &mut stopped), Some((7, true)));
+        assert_eq!(resends.take(7, 102).map(|(to, _)| to), Some(contact));
+        assert_eq!(resends.next(102, &mut stopped), None);
+        assert!(resends.refused(7, Reject::Admission, 103));
+        assert_eq!(resends.next(103, &mut stopped), Some((7, false)));
+        // NET-219: the send of `SEND_MAX_ATTEMPTS` is the last one.
+        for _ in 2..SEND_MAX_ATTEMPTS {
+            assert!(resends.take(7, 104).is_some());
+            let goes = resends.refused(7, Reject::Busy, 104);
+            assert_eq!(goes, resends.held.contains_key(&7));
+        }
+        assert!(!resends.held.contains_key(&7));
+        assert_eq!(resends.next(105, &mut stopped), None);
+
+        // NET-220: a record that waits for a slot past `SEND_GIVE_UP` of
+        // its first send stops, and the caller fails it.
+        resends.sent(8, contact, app(), 1_000);
+        assert!(resends.refused(8, Reject::Busy, 1_001));
+        assert_eq!(resends.next(1_000 + SEND_GIVE_UP, &mut stopped), None);
+        assert_eq!(stopped, [8]);
+        // A relay that took the record ends its ARQ, and a refusal of a
+        // record that this run does not hold continues none.
+        resends.sent(9, contact, app(), 2_000);
+        resends.ended(9);
+        assert!(!resends.refused(9, Reject::Busy, 2_001));
+    }
+
+    /// A store that counts what it takes, in the order of the calls.
+    struct Ordered {
+        calls: Vec<&'static str>,
+        takes_hello: Option<bool>,
+    }
+
+    impl Persist for Ordered {
+        fn commit(&mut self, _: Vec<StateChange>, _: &[(ContactId, Vec<u8>)]) -> bool {
+            self.calls.push("batch");
+            true
+        }
+
+        fn commit_hello(&mut self, _: &[u8; 32], _: &[u8]) -> Option<bool> {
+            self.calls.push("hello");
+            self.takes_hello
+        }
+    }
+
+    #[test]
+    fn a_hello_goes_to_the_store_before_the_batch_of_its_queue_cursor() {
+        let root = umbra_crypto::hierarchy::RootIdentity::new(Secret::new([7; 32]));
+        let relay = |number: u8| umbra_crypto::handshake::nk::RelayStatic {
+            s: [number; 32],
+            relay_id: [number; 32],
+        };
+        let mut node = ClientNode::new([relay(1), relay(2), relay(3)], root);
+        let hello = [ClientEvent::Hello {
+            queue: [4; 32],
+            envelope: vec![5; 8],
+        }];
+        // WIR-115: the store takes the hello in the step that commits the
+        // call, and the run gives no update for it.
+        let mut store = Ordered {
+            calls: Vec::new(),
+            takes_hello: Some(true),
+        };
+        let settled = settle(&mut node, &mut store, &hello, &BTreeSet::new());
+        assert!(settled.is_ok_and(|settled| settled.stores_hellos));
+        assert_eq!(store.calls.first(), Some(&"hello"));
+        // A store that did not take it ends the run before the batch, thus
+        // no cursor moves and no `ACK` leaves.
+        let mut store = Ordered {
+            calls: Vec::new(),
+            takes_hello: Some(false),
+        };
+        let settled = settle(&mut node, &mut store, &hello, &BTreeSet::new());
+        assert!(matches!(settled, Err(Ended::StoreFault)));
+        assert_eq!(store.calls, ["hello"]);
+        // A store with no part in it leaves the hello to the update.
+        let mut store = Ordered {
+            calls: Vec::new(),
+            takes_hello: None,
+        };
+        let settled = settle(&mut node, &mut store, &hello, &BTreeSet::new());
+        assert!(settled.is_ok_and(|settled| !settled.stores_hellos));
+    }
+
+    #[test]
+    fn the_queue_of_a_device_invitation_is_the_one_whose_stored_form_holds_its_bundle() {
+        let bundle = vec![0x5A; 64];
+        let other = vec![0x3C; 64];
+        let stored = |queue: u8, bundle: &[u8]| StateChange::Invitation {
+            queue: [queue; 32],
+            state: Zeroizing::new([&[0x04u8; 49][..], bundle, &[9; 20]].concat()),
+        };
+        let changes = [
+            stored(1, &other),
+            StateChange::InvitationEnded { queue: [3; 32] },
+            stored(2, &bundle),
+        ];
+        // DEV-290: the invitation of handle 7 reads queue 2, and a handle
+        // whose bundle no change stores names no queue.
+        let asked = [(7u64, bundle.as_slice()), (8, &[0x11; 64][..])];
+        assert_eq!(invitation_queues(&changes, &asked), [(7, [2; 32])]);
+        assert!(invitation_queues(&changes, &[(9, &[][..])]).is_empty());
+    }
+
+    #[test]
+    fn the_idle_time_counts_on_the_monotonic_source_and_no_device_clock_enters_it() {
+        // IMP-119: the idle time takes no reading of the device clock,
+        // thus no step of that clock moves it. It starts at the action of
+        // the user, and it starts again there.
+        let mut idle = IdleClock::new();
+        assert!(idle.idle() <= 1);
+        idle.touch();
+        assert!(idle.idle() <= 1);
+    }
+
+    #[test]
+    fn a_sleep_is_no_clock_movement_on_a_source_that_stops_in_it() {
+        let skew = i64::try_from(umbra_core::directory::CLOCK_SKEW).unwrap_or(i64::MAX);
+        // SCP-019: on a source that counts the sleep, a step of the device
+        // clock in each direction is a movement. A step inside CLOCK_SKEW
+        // is none.
+        assert!(!clock_stepped((0, true), (skew, true)));
+        assert!(clock_stepped((0, true), (skew + 1, true)));
+        assert!(clock_stepped((40, true), (39 - skew, true)));
+        assert!(!clock_stepped((40, true), (40 - skew, true)));
+        // A source that stops in a sleep falls behind by each sleep. A
+        // night of sleep is thus no movement, and each duration of a
+        // rotation, of an invitation, and of a `DEL` runs on.
+        assert!(!clock_stepped((0, false), (8 * 3_600, false)));
+        // A device clock that fell behind such a source moved back.
+        assert!(clock_stepped((0, false), (-skew - 1, false)));
+        assert!(!clock_stepped((0, false), (-skew, false)));
+        // Two readings of two sources compare no more.
+        assert!(!clock_stepped((0, true), (90_000, false)));
+        assert!(!clock_stepped((0, false), (-90_000, true)));
+        // The reading of this process starts at its anchor.
+        let now = unix_now();
+        let (offset, _) = clock_offset(now);
+        assert!(offset.abs() <= skew);
+    }
+
+    #[test]
+    fn a_lock_takes_the_hardening_key_and_the_source_still_gives_values() {
+        harden_with(Secret::new([7; 32]));
+        assert!(is_hardened());
+        let mut hardened = [0u8; 32];
+        let _ = OsRng.try_fill_bytes(&mut hardened);
+        // IMP-127: a locked client holds no key, and its values come from
+        // the platform source alone.
+        harden_clear();
+        assert!(!is_hardened());
+        let mut plain = [0u8; 32];
+        let _ = OsRng.try_fill_bytes(&mut plain);
+        assert_ne!(hardened, [0u8; 32]);
+        assert_ne!(plain, [0u8; 32]);
+        assert_ne!(hardened, plain);
+    }
 }

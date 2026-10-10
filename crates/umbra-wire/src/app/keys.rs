@@ -135,7 +135,7 @@ pub struct KeySupply<'a> {
     pub request: KeyRequest,
     /// The status.
     pub status: SupplyStatus,
-    /// Empty in each scope of this draft.
+    /// Empty in each scope.
     pub body: &'a [u8],
 }
 
@@ -143,6 +143,9 @@ impl<'a> KeySupply<'a> {
     /// Writes the supply.
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, Error> {
         self.request.check()?;
+        if !self.body.is_empty() {
+            return Err(Error::Malformed);
+        }
         let mut w = Writer::new(out);
         self.request.put(&mut w)?;
         w.u8(self.status as u8)?;
@@ -151,12 +154,16 @@ impl<'a> KeySupply<'a> {
         Ok(w.position())
     }
 
-    /// Reads a supply (`WIR-332`).
+    /// Reads a supply (`WIR-332`). The body is empty in each scope of this
+    /// draft, thus a supply with a body is malformed.
     pub fn parse(bytes: &'a [u8]) -> Result<Self, Error> {
         let mut r = Reader::new(bytes);
         let request = KeyRequest::read(&mut r)?;
         let status = SupplyStatus::from_byte(r.u8()?)?;
         let body_len = usize::from(r.u16()?);
+        if body_len != 0 {
+            return Err(Error::Malformed);
+        }
         let body = r.take(body_len)?;
         r.finish()?;
         Ok(KeySupply {
@@ -327,6 +334,30 @@ mod tests {
         out[1] = 0x01;
         out[42] = 0x04;
         assert!(KeySupply::parse(&out[..45]).is_err());
+    }
+
+    #[test]
+    fn a_supply_with_a_body_is_rejected() {
+        let mut out = [0u8; 100];
+        let request = KeyRequest {
+            scope: KeyScope::Session,
+            id: [1; 32],
+            epoch: 3,
+            index: 7,
+        };
+        let full = KeySupply {
+            request,
+            status: SupplyStatus::Resent,
+            body: b"x",
+        };
+        assert!(full.encode(&mut out).is_err());
+        let empty = KeySupply { body: b"", ..full };
+        assert_eq!(empty.encode(&mut out).unwrap(), SUPPLY_LEN);
+        // The same supply from a peer, with a body_len of 1 and one byte.
+        out[44] = 1;
+        assert!(KeySupply::parse(&out[..46]).is_err());
+        out[44] = 0;
+        assert!(KeySupply::parse(&out[..45]).is_ok());
     }
 
     #[test]

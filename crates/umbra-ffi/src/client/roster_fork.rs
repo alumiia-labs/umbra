@@ -172,7 +172,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(parent) = self.roster_parent()? else {
             return Ok(false);
         };
-        if rival.verify_rival(&parent).is_err() || rival.revokes(&own) {
+        if rival.verify_rival(&parent).is_err() {
+            return Ok(false);
+        }
+        // DEV-180, DEV-181: this device does not apply a verified rival
+        // that revokes it, and the user learns of it as on the successor
+        // path.
+        if rival.revokes(&own) {
+            self.mark_removed_from_set(rng)?;
             return Ok(false);
         }
         let label = label_of(&rival.signer_id, &[&rival, &head]);

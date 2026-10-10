@@ -135,9 +135,13 @@ impl CircuitSession {
         !self.batcher.is_empty()
     }
 
-    /// Queues an encoded command under a handle of the caller. A `corr_id`
-    /// that this session used is rejected, because the relay rejects it
-    /// (`NET-122`). The result says whether an answer will name the handle.
+    /// Queues an encoded command under a handle of the caller. The session
+    /// rejects a `corr_id` of a command that still waits for its answer,
+    /// because the answer would name two commands (`WIR-498`). The session
+    /// holds no list of each value that it used. The caller draws 16 bytes
+    /// from the CSPRNG for each command, and the relay rejects a repeated
+    /// value (`NET-122`). The result says whether an answer will name the
+    /// handle.
     pub fn queue(&mut self, encoded: Vec<u8>, handle: u64) -> Result<bool, Error> {
         let (cmd, corr_id) = {
             // A `SEND` fills the command area of its bucket, thus the
@@ -299,6 +303,12 @@ impl CircuitSession {
             }),
             Cmd::Nack => {
                 let nack = NackPayload::parse(command.payload)?;
+                // WIR-494: the `corr_id` of the header and the one of the
+                // payload agree. A `NACK` whose two values differ names no
+                // command, and it drops.
+                if nack.corr_id != command.corr_id {
+                    return Ok(None);
+                }
                 // WIR-323: a NACK that names no command of this session.
                 let watched = self
                     .watched

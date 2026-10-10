@@ -1,0 +1,14 @@
+# Written by Ansible (deploy/ansible/roles/relay), for the relay
+# {{ relay.name }} of {{ inventory_hostname }}.
+[Service]
+{% if relay.role == 'exit' %}
+# An exit relay holds the chunks of Part 12 in memory.
+MemoryHigh={{ umbra_exit_memory_high }}
+MemoryMax={{ umbra_exit_memory_max }}
+{% endif %}
+{% for other in relays if other.name != relay.name %}
+# The relays of one server run as one user. This relay does not see the
+# seed, the static key, or the store of {{ other.name }}.
+InaccessiblePaths=-/etc/umbra/relays/{{ other.name }}
+InaccessiblePaths=-/var/lib/umbra-relay/{{ other.name }}
+{% endfor %}

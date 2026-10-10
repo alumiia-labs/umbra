@@ -45,6 +45,13 @@ const GROUP_RELINK_MAX: Duration = Duration::from_secs(60);
 /// carried counts as delivered. Neither command has an answer.
 const SETTLED: Duration = Duration::from_secs(30);
 
+/// The first wait before a `GSUB` goes again after a `LIMIT`. Each `LIMIT`
+/// of the same group queue doubles it, up to [`GSUB_AGAIN_MAX`].
+const GSUB_AGAIN_FIRST: Duration = Duration::from_secs(2);
+
+/// The longest wait before a `GSUB` goes again after a `LIMIT`.
+const GSUB_AGAIN_MAX: Duration = Duration::from_secs(30);
+
 /// What the caller asks of the task. Each command names one replica: the
 /// caller sends the same record to each of the two (`GRP-194`).
 pub enum GroupCommand {
@@ -115,6 +122,22 @@ pub enum GroupCommand {
         /// `GPOST` (`GRP-398`).
         fallback: Option<Secret<32>>,
         /// The cursor.
+        from_seq: u32,
+    },
+    /// A second `GSUB` of one group in one session, at the other replica
+    /// than the one that it reads, for a gap (`GRP-205`, `GRP-255`). It is
+    /// a `GSUB` in each respect but one: a loss of it ends no subscription,
+    /// thus the caller hears of none.
+    Repair {
+        /// The relay.
+        relay: [u8; 32],
+        /// The group queue at that relay.
+        group_queue_id: [u8; 32],
+        /// `read_sk` of the epoch.
+        read: Secret<32>,
+        /// `read_sk` of the previous epoch inside its grace (`GRP-398`).
+        fallback: Option<Secret<32>>,
+        /// The cursor at that replica.
         from_seq: u32,
     },
     /// `GKEY` at one replica, which an admin sends at a rotation.
@@ -216,6 +239,19 @@ impl GroupCommand {
                 fallback: fallback.as_ref().map(|held| Secret::new(*held.expose())),
                 from_seq: *from_seq,
             },
+            GroupCommand::Repair {
+                relay,
+                group_queue_id,
+                read,
+                fallback,
+                from_seq,
+            } => GroupCommand::Repair {
+                relay: *relay,
+                group_queue_id: *group_queue_id,
+                read: Secret::new(*read.expose()),
+                fallback: fallback.as_ref().map(|held| Secret::new(*held.expose())),
+                from_seq: *from_seq,
+            },
             GroupCommand::Rotate {
                 relay,
                 group_queue_id,
@@ -271,6 +307,19 @@ impl GroupCommand {
                 from_seq,
                 ..
             } => Some(GroupCommand::Subscribe {
+                relay,
+                group_queue_id,
+                read,
+                fallback: None,
+                from_seq,
+            }),
+            GroupCommand::Repair {
+                relay,
+                group_queue_id,
+                fallback: Some(read),
+                from_seq,
+                ..
+            } => Some(GroupCommand::Repair {
                 relay,
                 group_queue_id,
                 read,
@@ -402,9 +451,12 @@ pub async fn run_groups(
         // A `GKEY` or a `GDEL` that may not have arrived goes in the next
         // session. A `GSUB` of the caller comes again after `Reset`.
         carried.early.append(&mut carried.quiet);
-        carried
-            .early
-            .retain(|command| !matches!(command, GroupCommand::Subscribe { .. }));
+        carried.early.retain(|command| {
+            !matches!(
+                command,
+                GroupCommand::Subscribe { .. } | GroupCommand::Repair { .. }
+            )
+        });
         let _ = updates.send(GroupUpdate::Reset);
         backoff = if was_ready {
             GROUP_RELINK_FIRST
@@ -451,8 +503,13 @@ async fn session(
 ) -> (End, bool) {
     let mut rng = OsRng;
     let mut pending: std::collections::BTreeMap<u64, Pending> = std::collections::BTreeMap::new();
-    // The group queue of each `GSUB`, by the handle of the node.
-    let mut subscribed: std::collections::BTreeMap<u64, [u8; 32]> =
+    // Each `GSUB` as it left, by the handle of the node.
+    let mut subscribed: std::collections::BTreeMap<u64, GroupCommand> =
+        std::collections::BTreeMap::new();
+    // Each `GSUB` that a relay answered with `LIMIT`, with the instant at
+    // which it goes again, and the wait of each group queue (`NET-349`).
+    let mut again: Vec<(tokio::time::Instant, GroupCommand)> = Vec::new();
+    let mut waits: std::collections::BTreeMap<[u8; 32], Duration> =
         std::collections::BTreeMap::new();
     // The second form of each command that carries a credential of the
     // previous epoch, by the handle of its first form (`GRP-398`).
@@ -503,6 +560,12 @@ async fn session(
                 if ready_since.is_some_and(|since| since.elapsed() >= SETTLED) {
                     carried.quiet.clear();
                 }
+                // A `GSUB` whose wait after a `LIMIT` ran out goes again.
+                let now = tokio::time::Instant::now();
+                let (due, later): (Vec<_>, Vec<_>) =
+                    again.drain(..).partition(|(at, _)| *at <= now);
+                again = later;
+                carried.early.extend(due.into_iter().map(|(_, command)| command));
                 // CIRCUIT_BUILD_TIMEOUT: a build that no relay answers ends.
                 let now = crate::runtime::unix_now();
                 node.set_challenge_clock(now);
@@ -523,16 +586,41 @@ async fn session(
                     // GRP-398: the relay holds the credentials of a new
                     // epoch only after a `GKEY`, thus a refusal under them
                     // goes again under the previous pair, and the caller
-                    // hears only of the second answer.
+                    // hears only of the second answer. A `LIMIT` and each
+                    // other reason refuse no credential.
                     let retry = second.remove(&handle);
-                    if let (GroupOutcome::Refused(_), Some(retry)) = (&outcome, retry) {
+                    if let (GroupOutcome::Refused(Reject::Rejected), Some(retry)) =
+                        (&outcome, retry)
+                    {
                         subscribed.remove(&handle);
                         pending.remove(&handle);
                         carried.early.insert(0, retry);
                         continue;
                     }
-                    if let Some(group_queue_id) = subscribed.remove(&handle) {
-                        let _ = updates.send(GroupUpdate::SubscriptionLost { group_queue_id });
+                    if let Some(command) = subscribed.remove(&handle) {
+                        let (GroupCommand::Subscribe { group_queue_id, .. }
+                        | GroupCommand::Repair { group_queue_id, .. }) = &command
+                        else {
+                            continue;
+                        };
+                        let group_queue_id = *group_queue_id;
+                        // NET-349: the relay held no room for the drain of
+                        // this `GSUB`, and it gave none of its records. The
+                        // same `GSUB` goes again after a wait, from the
+                        // cursor that it named. A record that the relay
+                        // accepted since arrived already, and it moved no
+                        // record of the backlog here.
+                        if outcome == GroupOutcome::Refused(Reject::Limit) {
+                            let wait = waits.entry(group_queue_id).or_insert(GSUB_AGAIN_FIRST);
+                            again.push((tokio::time::Instant::now() + *wait, command));
+                            *wait = wait.saturating_mul(2).min(GSUB_AGAIN_MAX);
+                            continue;
+                        }
+                        // GRP-205: the loss of a second `GSUB` for a gap
+                        // ends no subscription.
+                        if matches!(command, GroupCommand::Subscribe { .. }) {
+                            let _ = updates.send(GroupUpdate::SubscriptionLost { group_queue_id });
+                        }
                         continue;
                     }
                     let Some(held) = pending.remove(&handle) else {
@@ -627,6 +715,13 @@ async fn session(
                     read,
                     from_seq,
                     ..
+                }
+                | GroupCommand::Repair {
+                    relay,
+                    group_queue_id,
+                    read,
+                    from_seq,
+                    ..
                 } => (
                     None,
                     *relay,
@@ -688,11 +783,14 @@ async fn session(
                     if let Some(tag) = tag {
                         pending.insert(handle, Pending { tag, relay });
                     }
-                    if matches!(command, GroupCommand::Subscribe { .. }) {
-                        subscribed.insert(handle, group_queue_id);
-                    }
                     if let Some(retry) = command.under_fallback() {
                         second.insert(handle, retry);
+                    }
+                    if matches!(
+                        command,
+                        GroupCommand::Subscribe { .. } | GroupCommand::Repair { .. }
+                    ) {
+                        subscribed.insert(handle, command.copy());
                     }
                     if matches!(
                         command,

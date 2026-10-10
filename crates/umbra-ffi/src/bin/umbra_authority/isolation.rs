@@ -25,6 +25,26 @@ const PROBE_WAIT: Duration = Duration::from_secs(120);
 const RECEIPT_SETTLE: u64 = 120;
 /// The wait for the answer of one relay.
 const ASK_WAIT: Duration = Duration::from_secs(15);
+/// The distance that a probe keeps from each end of a consensus epoch
+/// (`REL-111`). A relay stamps a receipt with the epoch of its own clock.
+/// The query names the epoch of the clock of this program. At the turn of
+/// the hour the two epochs can differ, and an honest link would read as a
+/// fault.
+const PROBE_GUARD: u64 = 60;
+
+/// The seconds to wait at `now` before a probe that may take `PROBE_WAIT`,
+/// thus the probe stays `PROBE_GUARD` away from each end of its epoch.
+fn guard_wait(now: u64) -> u64 {
+    let into = now % EPOCH_SECONDS;
+    let last = EPOCH_SECONDS - PROBE_GUARD - PROBE_WAIT.as_secs();
+    if into < PROBE_GUARD {
+        PROBE_GUARD - into
+    } else if into > last {
+        EPOCH_SECONDS - into + PROBE_GUARD
+    } else {
+        0
+    }
+}
 
 /// The verdict of one query: each link held, or the first that did not.
 pub enum Verdict {
@@ -64,6 +84,11 @@ async fn probe(
     );
     let tls =
         native::tls_config_with_root_file(&settings.ca).map_err(|_| "the root does not read")?;
+    let wait = guard_wait(unix_now());
+    if wait > 0 {
+        println!("the probe waits {wait} s for the turn of the epoch");
+        tokio::time::sleep(Duration::from_secs(wait)).await;
+    }
     let (commands, runtime_commands) = mpsc::unbounded_channel();
     let (runtime_updates, mut updates) = mpsc::unbounded_channel();
     let dial: Dial = dial_of(a);
@@ -141,17 +166,29 @@ pub async fn isolate(
     let [first, second, third] = chain;
     let [_, second_tag, third_tag] = tags;
     for (from, to, tag) in [(first, second, second_tag), (second, third, third_tag)] {
+        // REL-179: each relay takes its own query, thus neither one holds a
+        // query that the other answers.
         let query = ReceiptQuery {
             authority_index: settings.index,
+            relay_id: to,
             epoch,
             tag,
         };
-        let body = query
-            .sign(key, &mut OsRng)
-            .map_err(|_| "the query does not sign")?;
-        let taken = ask(settings, find(&set, &from)?, &body).await;
+        let signed = |query: ReceiptQuery| {
+            query
+                .sign(key, &mut OsRng)
+                .map_err(|_| "the query does not sign")
+        };
+        let to_body = signed(query)?;
+        let from_body = signed(ReceiptQuery {
+            relay_id: from,
+            ..query
+        })?;
+        // The far end answers first: the relay before it then learns of
+        // the query after that answer came.
         let to_relay = find(&set, &to)?;
-        let issued = ask(settings, to_relay, &body).await;
+        let issued = ask(settings, to_relay, &to_body).await;
+        let taken = ask(settings, find(&set, &from)?, &from_body).await;
         let verdict = judge_link(
             from,
             to,
@@ -185,5 +222,31 @@ pub fn record(settings: &Settings, chain: &[[u8; 32]; 3], verdict: &Verdict, epo
         .open(&settings.verdicts)
     {
         let _ = writeln!(file, "{line}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_probe_keeps_away_from_each_end_of_its_epoch() {
+        let epoch = 490_000 * EPOCH_SECONDS;
+        let span = PROBE_WAIT.as_secs();
+        // The first seconds of an epoch wait for the guard.
+        assert_eq!(guard_wait(epoch), PROBE_GUARD);
+        assert_eq!(guard_wait(epoch + PROBE_GUARD - 1), 1);
+        assert_eq!(guard_wait(epoch + PROBE_GUARD), 0);
+        // A probe that could reach the end of the epoch waits for the next.
+        let last = epoch + EPOCH_SECONDS - PROBE_GUARD - span;
+        assert_eq!(guard_wait(last), 0);
+        assert_eq!(guard_wait(last + 1), span + 2 * PROBE_GUARD - 1);
+        assert_eq!(guard_wait(epoch + EPOCH_SECONDS - 1), PROBE_GUARD + 1);
+        // After each wait the whole probe lies inside one epoch.
+        for into in 0..EPOCH_SECONDS {
+            let start = epoch + into + guard_wait(epoch + into);
+            let from = start % EPOCH_SECONDS;
+            assert!(from >= PROBE_GUARD && from + span <= EPOCH_SECONDS - PROBE_GUARD);
+        }
     }
 }

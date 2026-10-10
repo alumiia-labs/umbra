@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
@@ -13,8 +15,19 @@ if (file("google-services.json").exists()) {
 // The semantic version of the app, the same as the Rust workspace and the
 // specification. The code grows with each one: major, minor, then patch, three
 // digits each.
-val appVersion = "0.11.0"
+val appVersion = "0.12.0"
 val (versionMajor, versionMinor, versionPatch) = appVersion.split(".").map(String::toInt)
+
+// The network file of the release, which scripts/release-network.sh writes
+// after a deployment. The manifest names its invitation host for the App
+// Link (IDN-123). The app reads its epoch at its start (REL-045). A debug
+// build needs no such file.
+val releaseNetworkFile = file("src/release/assets/umbra-network.properties")
+val releaseNetwork = Properties().apply {
+    if (releaseNetworkFile.isFile) releaseNetworkFile.inputStream().use { load(it) }
+}
+val releaseInvitationHost = releaseNetwork.getProperty("invitation_host")?.trim().orEmpty()
+val releaseShippedEpoch = releaseNetwork.getProperty("shipped_epoch")?.trim().orEmpty()
 
 android {
     namespace = "com.alumiialabs.umbra"
@@ -30,12 +43,15 @@ android {
         targetSdk = 36
         versionCode = versionMajor * 1_000_000 + versionMinor * 1_000 + versionPatch
         versionName = appVersion
+        // Part 14 §14.6.2: a release ships arm64-v8a alone. The debug type
+        // adds the ABI of an emulator.
         ndk {
-            abiFilters += listOf("arm64-v8a", "x86_64")
+            abiFilters += listOf("arm64-v8a")
         }
-        // IDN-123: the App Link of an invitation. A deployment names its
+        // IDN-123: the App Link of an invitation. A debug build names its
         // invitation host with -Pumbra.invitationHost; the default is the
-        // host of the devnet, which no party serves.
+        // host of the devnet, which no party serves. The release type takes
+        // the host of its network file in its place.
         manifestPlaceholders["invitationHost"] =
             (project.findProperty("umbra.invitationHost") as String?) ?: "invite.umbra.test"
         // The IPv4 address of the machine of scripts/devnet.sh, which the
@@ -52,6 +68,9 @@ android {
         // -Pumbra.minify=true shrinks a debug build as R8 shrinks the release,
         // thus a build for the devnet runs the code that ships.
         debug {
+            ndk {
+                abiFilters += listOf("x86_64")
+            }
             if (project.findProperty("umbra.minify") == "true") {
                 isMinifyEnabled = true
                 proguardFiles(
@@ -61,6 +80,11 @@ android {
             }
         }
         release {
+            // IDN-123: the App Link names the host that the app reads from
+            // the same file at its start. With no file the name is one that
+            // no party can serve, and `checkReleaseNetwork` ends the build.
+            manifestPlaceholders["invitationHost"] =
+                releaseInvitationHost.ifEmpty { "release-network-absent.invalid" }
             // R8 drops the code that the app never calls, and the resources
             // that nothing names; proguard-rules.pro keeps the Rust bindings.
             isMinifyEnabled = true
@@ -89,6 +113,40 @@ android {
         }
     }
 }
+
+// With no network file or with the host of the devnet, the App Link of a
+// release would name a host that no party serves (IDN-123). With no epoch, a
+// first launch would take each old manifest that a carrier gives (REL-045,
+// REL-046).
+val checkReleaseNetwork = tasks.register("checkReleaseNetwork") {
+    val path = releaseNetworkFile.absolutePath
+    val isPresent = releaseNetworkFile.isFile
+    val host = releaseInvitationHost
+    val epoch = releaseShippedEpoch
+    inputs.property("isPresent", isPresent)
+    inputs.property("host", host)
+    inputs.property("epoch", epoch)
+    doLast {
+        val problems = buildList {
+            if (!isPresent) {
+                add("$path is absent: run scripts/release-network.sh after the deployment")
+            } else {
+                val isHost = Regex("""[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+""").matches(host)
+                if (!isHost) add("invitation_host of $path is no host name: \"$host\"")
+                if (host == "invite.umbra.test" || host.endsWith(".test") || host.endsWith(".invalid")) {
+                    add("invitation_host of $path is the host of the devnet: \"$host\"")
+                }
+                if ((epoch.toULongOrNull() ?: 0uL) == 0uL) {
+                    add("shipped_epoch of $path is absent or zero: \"$epoch\" (REL-045)")
+                }
+            }
+        }
+        if (problems.isNotEmpty()) {
+            throw GradleException("The release has no network:\n  " + problems.joinToString("\n  "))
+        }
+    }
+}
+tasks.matching { it.name == "preReleaseBuild" }.configureEach { dependsOn(checkReleaseNetwork) }
 
 // The debug build trusts the test authority of the repository and dials the
 // network of scripts/devnet.sh. The release build holds neither.

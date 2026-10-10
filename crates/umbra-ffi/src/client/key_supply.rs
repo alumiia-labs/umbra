@@ -51,6 +51,18 @@ fn asked_key(conversation: ConversationId, index: u16) -> Vec<u8> {
     [conversation.0.as_slice(), b"asked", &index.to_be_bytes()].concat()
 }
 
+/// The mark of a request whose supply came, beside its row. The row of the
+/// request keeps its time for the rate, and the mark is one byte, thus the
+/// rate does not count it.
+fn answered_key(conversation: ConversationId, index: u16) -> Vec<u8> {
+    [conversation.0.as_slice(), b"answered", &index.to_be_bytes()].concat()
+}
+
+/// The setting that counts the key requests of a peer that this device
+/// answered, before the conversation (`WIR-338`). The value is the start of
+/// the 24 hours, then the count.
+const SERVED_SETTING: &[u8] = b"key-served/";
+
 impl<B: Backend, E: SecureElement> Client<B, E> {
     /// The node sealed a record of `message` under `index`.
     pub fn note_send_index<R: CryptoRng + ?Sized>(
@@ -119,7 +131,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let now = now_ms / 1_000;
         let store = &self.open_ref()?.store;
         let row = store.row_id(KEY_ASKED, &asked_key(conversation, index));
-        if store.get(KEY_ASKED, &row)?.is_some() {
+        let answered = store.row_id(KEY_ASKED, &answered_key(conversation, index));
+        // WIR-347: one request for one hole. The index wraps at 65 536,
+        // thus a request older than 24 hours named another record. A new
+        // hole at its index takes a request of its own.
+        let is_recent = store.get(KEY_ASKED, &row)?.is_some_and(|at| {
+            <[u8; 8]>::try_from(at.as_slice())
+                .is_ok_and(|at| now.saturating_sub(u64::from_be_bytes(at)) < DAY)
+        });
+        if is_recent {
             return Ok(false);
         }
         let recent = store
@@ -144,7 +164,41 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             &now.to_be_bytes(),
             rng,
         )?;
+        batch.delete(KEY_ASKED, answered);
         batch.commit()?;
+        Ok(true)
+    }
+
+    /// Counts one key request of the peer of a conversation, and says
+    /// whether it is inside `KEY_REQUEST_RATE` in 24 hours (`WIR-338`).
+    fn serves_key_request<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<bool, Error> {
+        let key = [SERVED_SETTING, conversation.0.as_slice()].concat();
+        let held = self.setting(&key)?;
+        let field = |at: usize| -> Option<[u8; 8]> {
+            held.as_deref()?
+                .get(at..at.checked_add(8)?)?
+                .try_into()
+                .ok()
+        };
+        let (mut since, mut count) = (
+            field(0).map_or(0, u64::from_be_bytes),
+            field(8).map_or(0, u64::from_be_bytes),
+        );
+        if now.saturating_sub(since) >= DAY {
+            since = now;
+            count = 0;
+        }
+        if count >= KEY_REQUEST_RATE as u64 {
+            return Ok(false);
+        }
+        count = count.saturating_add(1);
+        let value = [since.to_be_bytes(), count.to_be_bytes()].concat();
+        self.put_setting(&key, &value, rng)?;
         Ok(true)
     }
 
@@ -164,6 +218,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Ok(index) = u16::try_from(request.index) else {
             return Ok(());
         };
+        // WIR-338: a request above the rate goes, with no record again and
+        // no supply, thus a contact makes no flood of this device.
+        if !self.serves_key_request(conversation, now_ms / 1_000, rng)? {
+            return Ok(());
+        }
         let store = &self.open_ref()?.store;
         let row = store.row_id(SEND_INDEX, &index_key(conversation, index));
         let again = match store.get(SEND_INDEX, &row)? {
@@ -236,6 +295,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if open.store.get(KEY_ASKED, &row)?.is_none() {
             return Ok(());
         }
+        // WIR-347: one supply answers one request. A copy of a supply that
+        // came finds the mark, and it changes nothing.
+        let answered = open
+            .store
+            .row_id(KEY_ASKED, &answered_key(conversation, index));
+        if open.store.get(KEY_ASKED, &answered)?.is_some() {
+            return Ok(());
+        }
+        let open = self.open_mut()?;
+        let mut batch = open.store.begin();
+        batch.put(KEY_ASKED, answered, Some(conversation.0), &[1], rng)?;
+        batch.commit()?;
         if supply.status == SupplyStatus::NotHeld {
             self.put_roster_note(
                 conversation,

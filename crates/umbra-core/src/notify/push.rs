@@ -4,10 +4,7 @@
 
 use alloc::{collections::BTreeMap, vec::Vec};
 
-use super::{
-    HANDLE_LEN, PUSH_TTL_DIGEST, PUSH_TTL_MESSAGE, REPUSH_INTERVAL, REPUSH_MAX,
-    WAKE_COALESCE_WINDOW,
-};
+use super::{HANDLE_LEN, PUSH_TTL_MESSAGE, REPUSH_INTERVAL, REPUSH_MAX, WAKE_COALESCE_WINDOW};
 
 /// A push to hand to the NDR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,11 +37,9 @@ impl PushScheduler {
     fn push(handle: [u8; HANDLE_LEN], digest: bool, repush: bool) -> Push {
         Push {
             handle,
-            ttl: if digest {
-                PUSH_TTL_DIGEST
-            } else {
-                PUSH_TTL_MESSAGE
-            },
+            // NTF-086: one expiry for each push, thus the provider reads
+            // no push kind from it. The blob alone names a digest.
+            ttl: PUSH_TTL_MESSAGE,
             digest,
             repush,
         }
@@ -67,15 +62,22 @@ impl PushScheduler {
             state.pending = Some(state.pending.unwrap_or(true) && digest);
             return None;
         }
+        // This push carries the wake of each arrival before it, thus the
+        // end of the last window has nothing more to hand.
+        state.pending = None;
         state.last_handoff = Some(now);
         state.undrained_since.get_or_insert(now);
         state.repushes = 0;
         Some(Self::push(handle, digest, false))
     }
 
-    /// A drain of `handle` at `now`, which ends the re-push of `NTF-066`.
+    /// A drain of `handle`, which ends the re-push of `NTF-066` and the
+    /// push that waits for the end of the window. The device holds each
+    /// record of the window, thus one more push would wake it for nothing
+    /// (`NTF-014`).
     pub fn on_drain(&mut self, handle: &[u8; HANDLE_LEN]) {
         if let Some(state) = self.handles.get_mut(handle) {
+            state.pending = None;
             state.undrained_since = None;
             state.repushes = 0;
         }
@@ -93,6 +95,10 @@ impl PushScheduler {
             if let (Some(digest), true) = (state.pending, window_closed) {
                 state.pending = None;
                 state.last_handoff = Some(now);
+                // The arrival inside the window had no drain, thus this
+                // push starts the re-push clock (`NTF-066`).
+                state.undrained_since.get_or_insert(now);
+                state.repushes = 0;
                 due.push(Self::push(*handle, digest, false));
                 continue;
             }
@@ -135,7 +141,8 @@ mod tests {
         let mut s = PushScheduler::default();
         let h = [1u8; 16];
         let first = s.on_arrival(h, true, 100).unwrap();
-        assert_eq!(first.ttl, PUSH_TTL_DIGEST);
+        assert_eq!(first.ttl, PUSH_TTL_MESSAGE);
+        assert!(first.digest);
         assert!(s.on_arrival(h, true, 105).is_none());
         assert!(s.on_arrival(h, false, 106).is_none());
         assert!(s.tick(109).is_empty());
@@ -172,5 +179,53 @@ mod tests {
         assert!(s.tick(t + 1 + REPUSH_INTERVAL).is_empty());
         s.on_arrival(h, false, t + 2 + REPUSH_INTERVAL).unwrap();
         assert_eq!(s.tick(t + 2 + 2 * REPUSH_INTERVAL).len(), 1);
+    }
+
+    #[test]
+    fn a_drain_inside_the_window_ends_the_push_of_its_end() {
+        let mut s = PushScheduler::default();
+        let h = [1u8; 16];
+        s.on_arrival(h, false, 0).unwrap();
+        assert!(s.on_arrival(h, false, 1).is_none());
+        // The device drains both records before the window ends.
+        s.on_drain(&h);
+        assert!(s.tick(WAKE_COALESCE_WINDOW).is_empty());
+        assert!(s.tick(REPUSH_INTERVAL).is_empty());
+        assert!(!s.holds(&h));
+    }
+
+    #[test]
+    fn an_arrival_after_the_window_takes_the_push_of_its_end() {
+        let mut s = PushScheduler::default();
+        let h = [1u8; 16];
+        s.on_arrival(h, false, 0).unwrap();
+        assert!(s.on_arrival(h, false, 5).is_none());
+        // No tick ran at the end of the window. The next arrival gives one
+        // push at once, and the tick that follows hands no second one.
+        s.on_arrival(h, false, WAKE_COALESCE_WINDOW + 2).unwrap();
+        assert!(s.tick(WAKE_COALESCE_WINDOW + 3).is_empty());
+        assert!(s.tick(2 * WAKE_COALESCE_WINDOW + 2).is_empty());
+    }
+
+    #[test]
+    fn the_push_at_the_end_of_a_window_starts_the_re_push_clock() {
+        let mut s = PushScheduler::default();
+        let h = [1u8; 16];
+        s.on_arrival(h, false, 0).unwrap();
+        s.on_drain(&h);
+        // An arrival after the drain and inside the window waits for its
+        // end, and no drain follows the push of the end.
+        assert!(s.on_arrival(h, false, 5).is_none());
+        let end = s.tick(WAKE_COALESCE_WINDOW);
+        assert_eq!(end.len(), 1);
+        assert!(!end[0].repush);
+        assert!(s.tick(2 * WAKE_COALESCE_WINDOW).is_empty());
+        assert!(s.holds(&h));
+        assert!(s
+            .tick(WAKE_COALESCE_WINDOW + REPUSH_INTERVAL - 1)
+            .is_empty());
+        let again = s.tick(WAKE_COALESCE_WINDOW + REPUSH_INTERVAL);
+        assert_eq!(again.len(), 1);
+        assert!(again[0].repush);
     }
 }

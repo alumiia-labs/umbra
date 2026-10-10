@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 1: Scope, Conventions, and Terminology
 
 **Status:** Draft
-**Version:** 0.11.0-draft
-**Date:** 2026-10-02
+**Version:** 0.12.0
+**Date:** 2026-10-09
 
 ---
 
@@ -28,13 +28,24 @@ design objectives.
 This specification is normative. It contains all the information to build an
 implementation. A developer does not have to read the reference implementation.
 
-**Platform scope of v1.** Android and the web are the v1 client platforms.
-The web client is the same core in a browser extension, and it is a linked
-device of a device set; Part 14 §14.7 gives its form and its limits. An iOS
-client and a native desktop shell are deferred to a later revision, and Part
-14 §14.6.3 records what such a revision must revisit. The core stays
+**Platform scope of v1.** Android is the v1 client platform. v1 defers the
+web client, an iOS client, and a native desktop shell to a later version.
+Part 14 §14.6.3 records what such a version must revisit. The web
+client is the same core in a browser extension, and it is a linked device of
+a device set. Part 14 §14.7 keeps its form and its limits as a design. Each
+rule that binds a web client applies when the web client ships, and it binds
+no v1 conformance claim. Those rules are `NET-275` and `NET-277`, `WIR-486`,
+`DEV-264` to `DEV-267`, `NTF-110` and `NTF-111`, and `IMP-094` to `IMP-113`.
+Three rules that exist for a browser bind v1 as they stand,
+because each one binds a relay or forbids a form: `THR-015`, `NET-276`, and
+`WIR-485`. The core stays
 platform-neutral, thus the deferral changes the scope of this text and not
 the design.
+
+**Transport scope of v1.** Part 3 §3.8 defers QUIC, the session resume of
+Part 6 §6.2.3, and with them the transport race. Part 10 §10.3.1 defers the
+measurement session. Each such section names the rules that bind the later
+version, and it keeps the wire layouts.
 
 ## 1.2 What this document is not
 
@@ -189,10 +200,10 @@ Relay. A Notification Relay is a different role from a Queue Relay, and it gets
 less trust. Refer to Part 8.
 
 > **One name for one role.** Part 3 §3.1 is the source of these five names, and
-> this document uses no other name for a relay role. An earlier draft used
-> "Entry Relay" for an Ingress Relay, "Exit Relay" for a Queue Relay, and "Push
-> Relay" for a Notification Relay. Those three names are withdrawn. STE rule 1.5
-> permits one word for one meaning only.
+> this document uses no other name for a relay role. This document does not use
+> "Entry Relay" for an Ingress Relay, "Exit Relay" for a Queue Relay, or "Push
+> Relay" for a Notification Relay. STE rule 1.5 permits one word for one
+> meaning only.
 
 ### 1.5.4 Protocol objects
 
@@ -267,7 +278,7 @@ term in this register is approved for this document.
 | --- | --- |
 | Cryptographic primitives | ML-KEM, ML-DSA, X25519, ChaCha20-Poly1305, SHA-3, SHAKE, HKDF, AEAD, KEM, KDF, MAC, nonce, ciphertext, plaintext, key, keypair, seed, salt, entropy, codeword, parity, prologue |
 | Cryptographic operations | encrypt, decrypt, sign, verify, hash, derive, encapsulate, decapsulate, ratchet, wrap, unwrap, pad, zeroize, commit |
-| Protocol objects | envelope, message, queue, session, channel, cell, chunk, epoch, handshake, header, payload, prekey, token, tag, credential, subscription, receipt, revision, tombstone, checkpoint, stub, artifact, carrier, layout, listing, reaction, repost, hello, moderator set, mute list, activity bucket, tally, group queue, replica, slot, epoch-key record, tag vector, pair key, notify queue, roster snapshot |
+| Protocol objects | envelope, message, queue, session, channel, cell, chunk, epoch, handshake, header, payload, prekey, token, tag, credential, subscription, receipt, revision, tombstone, checkpoint, artifact, carrier, layout, listing, reaction, hello, group queue, replica, slot, epoch-key record, tag vector, pair key, notify queue, roster snapshot |
 | Network entities | relay, directory, client, server, node, hop, chain, transport, endpoint, bucket, invitation host, landing document, TLS provider, reverse proxy |
 | Platform components | operating system, input method, accessibility service, accessibility tree, task snapshot, clipboard, media store, platform backup, platform store, cover view, keystore, high-risk configuration, background push, alert push |
 | Identity objects | identity, address, handle, device, roster, membership, group, Profile, pseudonym, petname, avatar, pet-avatar, identicon, member index, group sender owner, joiner, claimant, catch-up object, canonical handle |
@@ -366,7 +377,7 @@ examples. Without the table below a maintainer finds the dependents by hand.
 | `HELLO_POW_EFFORT`, `HELLO_INBOUND_LIMIT` | Part 13 §13.13 | Part 9 §9.9, Part 2 §2.4 |
 | `INVITE_TTL` | Part 4 §4.8 | Part 5 §5.4.5 |
 | `INVITE_RESERVE_TTL` | Part 4 §4.8 | Part 6 §6.4 |
-| `CLUSTER_SAMPLE` | Part 10 §10.11 | Part 15 §15.3, Part 15 §15.6.1 |
+| `CLUSTER_SAMPLE` | Part 10 §10.11 | Part 15 §15.3 |
 | `AUTHORITY_FLOOR` | Part 10 §10.11 | Part 15 §15.6.1 |
 
 - **[SCP-008]** A revision that changes a constant of this table MUST change
@@ -375,12 +386,10 @@ examples. Without the table below a maintainer finds the dependents by hand.
   row to this table.
 - **[SCP-010]** A revision MUST NOT define one constant in two parts.
 
-> *Cause.* Two defects that this revision corrects came from a missing row.
-> The receipt section of an earlier draft of Part 11 quoted a U4 value of 15 MB
-> after Part 2 §2.4 moved that goal to 25 MB. Part 3 §3.12 counted a group
-> fan-out as 8 × 25 after Part 11 §11.2 stated that a fan-out is the recipient
-> count. Each of those figures sat in a
-> part that does not own the constant.
+> *Cause.* A figure that sits in a part that does not own the constant does
+> not follow a change at the owner. A quoted goal target and a quoted group
+> fan-out count are two such figures. A missing row hides the dependent part,
+> and the two parts then disagree.
 
 ## 1.8 The artifact register
 
@@ -392,8 +401,9 @@ gives each behavior a requirement ID, and it gives an artifact no such
 discipline.
 
 The table below lists each named artifact and the section that gives each fact.
-A cell that reads `none` records a gap of this draft. A row with such a cell is
-not a defect of the register. The register exists to show that cell. The
+A cell that reads `none` records a fact that this specification does not give.
+A row with such a cell is not a defect of the register. The register exists to
+show that cell. The
 "Made by" column names the party in the sense of §1.5. "Out of band" names a
 side channel that the user selects, such as a QR code scan.
 
@@ -429,7 +439,7 @@ side channel that the user selects, such as a QR code scan.
 | Public Address string | Part 4 §4.2.3 | Out of band | Client |
 | `Profile_j` | Part 4 §4.2.5 | The invitation, Part 4 §4.3.1 | Client |
 | One-time invitation link | Part 4 §4.3.1 | Out of band | Client |
-| Invitation landing document | Part 4 §4.3.1 | HTTPS at the invitation host | The nonprofit |
+| Invitation landing document | Part 4 §4.3.1 | HTTPS at the invitation host | The project |
 | Invitation blob | Part 5 §5.4.1 | The relay, under the link of Part 4 §4.3.1 | Client |
 | `KeyChangeNotice` | Part 4 §4.5.1 | `AppMessage`, kind `0x30` | Client |
 | Backup object, `BackupRootChunk`, `BackupRoot`, `BackupEntry` | Part 4 §4.7.2 | Backup-class chunks under `BNEW`, Part 12 §12.3.3, and the handle-addressed chunk of Part 12 §12.4.2 | Client |
@@ -519,15 +529,15 @@ The table has 107 rows, and none of them holds a `none` cell.
   MUST change the applicable cell in the same commit.
 - **[SCP-015]** A revision MUST NOT define one artifact in two parts.
 
-> *Cause.* A review of draft 0.1.0 found eight named mechanisms with no wire
-> object, no issuer, or no locator. The queue address of Part 3 §3.2.2 is one
-> of them. The proof-of-work challenge of Part 13 §13.8 is a second. Each one
-> sat behind a requirement that an implementer could not satisfy.
+> *Cause.* A named mechanism with no wire object, no issuer, or no locator
+> sits behind a requirement that an implementer cannot satisfy. The queue
+> address of Part 3 §3.2.2 and the proof-of-work challenge of Part 13 §13.8
+> are two mechanisms that need each of the three facts.
 >
-> The table above found more: the handshake flights of Part 5 §5.4.2 had a
-> byte layout and no carrier, until `HandshakeRecord` of Part 6 §6.4.2 took
-> them. Rule `SCP-015` follows rule `SCP-010`, and `Cell` is the one duplicate
-> pair that the table keeps.
+> A byte layout alone is not sufficient. The handshake flights of Part 5
+> §5.4.2 have a byte layout, and `HandshakeRecord` of Part 6 §6.4.2 is their
+> carrier. Rule `SCP-015` follows rule `SCP-010`, and `Cell` is the one
+> duplicate pair that the table keeps.
 
 ## 1.9 Time and the clock
 
@@ -561,7 +571,14 @@ slot window is a `clock` event of Part 14 §14.9.2.
   measures it. **[SCP-017]** A revision that adds a duration MUST name the
   event that starts it.
 - **[SCP-018]** A party MUST measure a duration from a monotonic source between
-  two restarts.
+  two restarts. A count on the device clock with a monotonic source beside
+  it satisfies this rule when the party acts on each difference between
+  the two. The party MUST then compare the device clock against one
+  source. A source that stops while the device sleeps shows a sleep as a
+  device clock that ran ahead, and that is no clock movement. Part 14 rule
+  `IMP-119` gives the idle time of the auto-lock, which counts on a
+  monotonic source alone. A change of the device clock neither shortens
+  nor lengthens that idle time.
 - **[SCP-019]** If a clock movement occurs while a duration runs, the party
   MUST start that duration again.
 - **[SCP-020]** A revision that adds a comparison between the clocks of two
@@ -576,7 +593,7 @@ slot window is a `clock` event of Part 14 §14.9.2.
 > the acknowledged sequence. One forward jump on the recipient destroys messages
 > that no party delivered. Rule `CRY-098` holds a skipped key for `SKIP_TTL`,
 > and an early deletion makes a delivered message permanently undecryptable.
-> That is the U9 failure that the cause note of Part 5 §5.5.4 closed.
+> That is the U9 failure that the cause note of Part 5 §5.5.4 gives.
 >
 > Rule `SCP-019` delays each of those deletions, and rule `SCP-021` forbids them
 > while the delay runs. Rule `SCP-021` binds the client, because a phone clock

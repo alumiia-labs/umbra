@@ -143,7 +143,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let rate = self
             .groups
             .key_answers_rate
-            .entry(conversation)
+            .entry((conversation, None))
             .or_default();
         if rate.allow(now) {
             self.groups.snapshot_jobs.push_back(job);

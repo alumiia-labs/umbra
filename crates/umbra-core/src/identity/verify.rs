@@ -33,6 +33,13 @@ pub fn digits(code: u32) -> alloc::string::String {
     alloc::format!("{code:06}")
 }
 
+/// The time that a start of the peer waits for an action of the user, in
+/// seconds (`IDN-170`). Two persons compare a code while they talk, thus a
+/// start that waited longer belongs to no comparison that still runs. An
+/// action of the user after it starts a ceremony of its own, and answers no
+/// start of that age.
+pub const HELD_START_LIFE: u64 = 600;
+
 /// The state of one ceremony at one client.
 pub struct Ceremony {
     own_nonce: [u8; 32],
@@ -40,6 +47,11 @@ pub struct Ceremony {
     peer_commit: Option<[u8; 32]>,
     peer_nonce: Option<[u8; 32]>,
     confirmed: bool,
+    /// The start of the peer that waits for an action of the user.
+    asked: Option<[u8; 32]>,
+    /// The time of the arrival of that start, in seconds, or none for a
+    /// start with no time.
+    asked_at: Option<u64>,
 }
 
 impl Ceremony {
@@ -51,7 +63,53 @@ impl Ceremony {
             peer_commit: None,
             peer_nonce: None,
             confirmed: false,
+            asked: None,
+            asked_at: None,
         }
+    }
+
+    /// Holds a start of the peer that no action of the user called for
+    /// (`IDN-170`). This state sends no commit and no reveal, and it gives
+    /// no code. The user accepts first, and the client then answers that
+    /// start from a ceremony of [`Ceremony::new`].
+    pub fn asked(start: [u8; 32]) -> Self {
+        Ceremony {
+            asked: Some(start),
+            ..Ceremony::new([0; 32])
+        }
+    }
+
+    /// [`Ceremony::asked`] with the time of the arrival of the start, in
+    /// seconds. The start waits for `HELD_START_LIFE` and no longer.
+    pub fn asked_at(start: [u8; 32], now: u64) -> Self {
+        Ceremony {
+            asked_at: Some(now),
+            ..Ceremony::asked(start)
+        }
+    }
+
+    /// The start of the peer that waits for the user, if this state holds
+    /// one.
+    pub fn asked_start(&self) -> Option<[u8; 32]> {
+        self.asked
+    }
+
+    /// The start of the peer that waits for the user at `now`. It is none
+    /// after `HELD_START_LIFE` from its arrival, and none when the clock
+    /// went back before that arrival. A start with no time does not lapse.
+    pub fn asked_start_at(&self, now: u64) -> Option<[u8; 32]> {
+        match self.asked_at {
+            Some(at) if now < at || now - at >= HELD_START_LIFE => None,
+            _ => self.asked,
+        }
+    }
+
+    /// Whether the ceremony took its one commit of the peer (`IDN-170`).
+    /// The reveal of this client went to that commit. Thus a later start or
+    /// answer of the peer gets no second reveal from this nonce. It gets no
+    /// answer without a new action of the user.
+    pub fn spent(&self) -> bool {
+        self.peer_commit.is_some()
     }
 
     /// The `VerifyCommit` to send first (`IDN-142`).
@@ -153,5 +211,41 @@ mod tests {
         assert!(a.verified());
         let mut fresh = Ceremony::new([5; 32]);
         assert!(fresh.user_confirmed().is_err());
+    }
+
+    #[test]
+    fn a_start_that_waits_for_the_user_reveals_nothing_and_one_ceremony_takes_one_commit() {
+        // IDN-170: a held start lapses after `HELD_START_LIFE`, and an
+        // action of the user after that answers none.
+        let timed = Ceremony::asked_at([7; 32], 1_000);
+        assert_eq!(timed.asked_start_at(1_000), Some([7; 32]));
+        assert_eq!(
+            timed.asked_start_at(1_000 + HELD_START_LIFE - 1),
+            Some([7; 32])
+        );
+        assert_eq!(timed.asked_start_at(1_000 + HELD_START_LIFE), None);
+        assert_eq!(timed.asked_start_at(999), None);
+        assert!(timed.reveal_to_send().is_err());
+        // IDN-170: the held start of the peer is no ceremony.
+        let mut asked = Ceremony::asked([7; 32]);
+        assert_eq!(asked.asked_start(), Some([7; 32]));
+        assert_eq!(asked.asked_start_at(u64::MAX), Some([7; 32]));
+        assert!(!asked.awaits_commit());
+        assert!(!asked.spent());
+        assert!(asked.reveal_to_send().is_err());
+        assert!(asked.peer_revealed([9; 32]).is_err());
+        assert_eq!(asked.code(&[1; 32], &[2; 32]), None);
+        assert!(asked.user_confirmed().is_err());
+
+        // A ceremony of the user holds no such start, and it is spent
+        // from the commit of the peer on.
+        let mut own = Ceremony::new([3; 32]);
+        assert_eq!(own.asked_start(), None);
+        own.commit_to_send();
+        assert!(own.awaits_commit());
+        assert!(!own.spent());
+        own.peer_committed(commit(&[4; 32]));
+        assert!(own.spent());
+        assert!(!own.awaits_commit());
     }
 }

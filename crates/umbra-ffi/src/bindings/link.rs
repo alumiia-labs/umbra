@@ -155,6 +155,10 @@ struct Offer {
     /// after it waits for the new device (`DEV-297`, `DEV-311`).
     sync_floor: u64,
     snapshot: Option<Box<Uploaded>>,
+    /// Whether the write of the provision left. The new device reads the
+    /// bundle of its sync channel through the provision. Thus no sync
+    /// channel that opened before this write is the one of this link.
+    provision_sent: bool,
     provision_relays: Vec<[u8; 32]>,
     provisioned_at: u64,
 }
@@ -274,6 +278,14 @@ impl Inner {
     /// Erases each object of the link that is still on the chunk path
     /// (`DEV-003`). Each one goes once.
     fn erase_link_objects(&mut self) {
+        for erasure in self.take_link_erasures() {
+            self.send_transfer(erasure);
+        }
+    }
+
+    /// Takes the erasure of each object of the link that is still on the
+    /// chunk path. Each one comes once.
+    fn take_link_erasures(&mut self) -> Vec<TransferCommand> {
         let mut slots = Vec::new();
         let mut chunks = Vec::new();
         match self.link.as_mut().map(|link| &mut link.job) {
@@ -300,19 +312,95 @@ impl Inner {
             }
             None => {}
         }
+        let mut erasures = Vec::new();
         for (slot, relays) in slots {
-            self.erase_slot(slot, relays);
+            if !relays.is_empty() {
+                erasures.push(TransferCommand::Erase {
+                    chunk_id: slot.handle,
+                    cred: slot.cred,
+                    relays,
+                });
+            }
         }
         for credential in chunks {
-            self.send_transfer(TransferCommand::Erase {
+            erasures.push(TransferCommand::Erase {
                 chunk_id: credential.chunk_id,
                 cred: credential.cred,
                 relays: credential.relays,
             });
         }
+        erasures
+    }
+
+    /// Ends the link of a locked client (`IMP-127`): the link key, the link
+    /// secret, the roster and the snapshot leave RAM with it. The transfer
+    /// task ends with the lock, and a command that it took would go with
+    /// it. Thus each erasure waits for the next run (`DEV-003`), and the
+    /// pending device leaves the store at the next unlock (`DEV-290`).
+    pub(super) fn drop_link_at_lock(&mut self) {
+        if self.client.is_unlocked() || self.link.is_none() {
+            return;
+        }
+        for erasure in self.take_link_erasures() {
+            self.hold_erasure(erasure);
+        }
+        self.peer_drop_due = true;
+        // The store keeps each erasure too, for a process that ends before
+        // the next run.
+        self.link_erasures_due = true;
+        self.link = None;
+    }
+
+    /// Takes the pending device of a link that ended out of the store. A
+    /// locked client removes no row, thus the removal waits for the unlock.
+    fn drop_link_peer(&mut self) {
+        // DEV-286: the pending device of a new device is the one that
+        // linked it. The snapshot named it, and it stays until the sync
+        // channel of the provision opens: no link of this process made it.
+        if matches!(self.client.pending_sync_bundle(), Ok(Some(_))) {
+            self.peer_drop_due = false;
+            return;
+        }
+        self.peer_drop_due = self.client.drop_pending_peer().is_err();
+    }
+
+    /// Retires the sync invitation of a link that ended with no sync
+    /// channel (`DEV-290`). A run that ended holds none.
+    fn end_link_invitation(&self) {
+        if let Some(running) = &self.bridge {
+            let _ = running.end_device_invitation();
+        }
+    }
+
+    /// Sends the erasure of each link object that the store keeps
+    /// (`DEV-003`): a link that ended at a lock, or with its process, left
+    /// them. A link that runs keeps its objects.
+    fn pump_link_erasures(&mut self) {
+        if !self.link_erasures_due
+            || self.link.is_some()
+            || self.bridge.is_none()
+            || !self.client.is_unlocked()
+        {
+            return;
+        }
+        let Ok(jobs) = self.client.kept_erasures() else {
+            return;
+        };
+        self.link_erasures_due = false;
+        for job in jobs {
+            self.send_transfer(TransferCommand::Erase {
+                chunk_id: job.chunk_id,
+                cred: job.cred,
+                relays: job.relays,
+            });
+        }
     }
 
     fn end_link(&mut self, status: LinkStatus) {
+        if !self.client.is_unlocked() {
+            self.drop_link_at_lock();
+            return;
+        }
         self.erase_link_objects();
         // A link that ends with no sync channel leaves no device that the
         // records wait for.
@@ -322,7 +410,8 @@ impl Inner {
                 Some(LinkJob::Offer(_))
             )
         {
-            let _ = self.client.drop_pending_peer();
+            self.drop_link_peer();
+            self.end_link_invitation();
         }
         if let Some(link) = self.link.as_mut() {
             link.status = status;
@@ -332,20 +421,54 @@ impl Inner {
 
     /// Ends the link that runs, and erases what it put on the chunk path.
     pub(super) fn cancel_link(&mut self) {
+        if !self.client.is_unlocked() {
+            self.drop_link_at_lock();
+            return;
+        }
         self.erase_link_objects();
         let was_offer = matches!(
             self.link.as_ref().map(|link| (&link.job, &link.status)),
             Some((LinkJob::Offer(_), status)) if !matches!(status, LinkStatus::Linked)
         );
         if was_offer {
-            let _ = self.client.drop_pending_peer();
+            self.drop_link_peer();
+            self.end_link_invitation();
         }
         self.link = None;
+    }
+
+    /// Asks the run for each queue rotation that a revocation still owes
+    /// (Part 7 §7.7 step 2c). NET-180: each contact moves after its own
+    /// delay, and the node keeps that time. The client paces the requests,
+    /// and it lets a contact go when its queue rotated.
+    pub(super) fn pump_revocation(&mut self, now: u64) {
+        let Inner { client, bridge, .. } = self;
+        let Some(running) = bridge.as_mut() else {
+            return;
+        };
+        if !client.is_unlocked() {
+            return;
+        }
+        for contact in client.rotation_owed(now).unwrap_or_default() {
+            let _ = running.rotate_swept(umbra_core::session::node::ContactId(contact));
+        }
     }
 
     /// The expiry of each step, and the read of a slot that holds nothing
     /// yet at each `POLL`.
     pub(super) fn pump_link(&mut self, now: u64) {
+        // IMP-127: a locked client runs no link.
+        self.drop_link_at_lock();
+        // DEV-290: the pending device of a link that ended under a lock, or
+        // with its process, leaves the store. A link that the user
+        // confirmed since holds its own.
+        if self.peer_drop_due && self.client.is_unlocked() {
+            self.drop_link_peer();
+        }
+        self.pump_link_erasures();
+        // Part 7 §7.7 step 2c: a removal of a device with no run up left
+        // its rotations in the store. The run that is up takes them.
+        self.pump_revocation(now);
         let next = match self.link.as_mut() {
             None => Next::Nothing,
             Some(link) if is_over(&link.status) => Next::Nothing,
@@ -417,7 +540,7 @@ impl Inner {
             | TransferUpdate::Failed { tag }
             | TransferUpdate::Interrupted { tag }
             | TransferUpdate::Gone { tag } => *tag,
-            TransferUpdate::Faults(_) => return Some(update),
+            TransferUpdate::Faults(_) | TransferUpdate::Erased { .. } => return Some(update),
         };
         if !matches!(
             self.transfer_tags.get(&tag),
@@ -436,6 +559,28 @@ impl Inner {
         else {
             return None;
         };
+        // DEV-003: the store keeps the erasure of each object that the link
+        // put on the chunk path, from here on. A lock and the end of the
+        // process then lose none. A locked client takes no row, and the
+        // memory holds the erasure alone.
+        match (&update, &erase) {
+            (TransferUpdate::HandleWritten { relays, .. }, Some((chunk_id, cred)))
+                if !relays.is_empty() =>
+            {
+                let _ = self.client.keep_erasure(chunk_id, cred, relays, &mut OsRng);
+            }
+            (TransferUpdate::Uploaded { uploaded, .. }, _) => {
+                for credential in &uploaded.credentials {
+                    let _ = self.client.keep_erasure(
+                        &credential.chunk_id,
+                        &credential.cred,
+                        &credential.relays,
+                        &mut OsRng,
+                    );
+                }
+            }
+            _ => {}
+        }
         // A transfer of a link that ended goes nowhere, and what it wrote
         // leaves the chunk path (`DEV-003`).
         let is_live = self
@@ -607,6 +752,7 @@ impl Inner {
             link,
             client,
             bridge,
+            peer_drop_due,
             ..
         } = self;
         let Some(LinkState {
@@ -622,6 +768,8 @@ impl Inner {
         offer.roster = Some(client.sign_linked_device(hello, &mut OsRng)?);
         offer.sync_floor = client.sync_counter()?;
         client.set_pending_peer(hello.device_id, &hello.label, &mut OsRng)?;
+        // The pending device is the one of this link from here on.
+        *peer_drop_due = false;
         running.invite_device()?;
         *status = LinkStatus::Sending;
         Ok(())
@@ -689,7 +837,16 @@ impl Inner {
         };
         let slot = secret.provision_slot();
         match sealed {
-            Ok(sealed) => self.write_slot(LinkStep::WriteProvision, slot, &sealed),
+            Ok(sealed) => {
+                if let Some(LinkState {
+                    job: LinkJob::Offer(offer),
+                    ..
+                }) = self.link.as_mut()
+                {
+                    offer.provision_sent = true;
+                }
+                self.write_slot(LinkStep::WriteProvision, slot, &sealed);
+            }
             Err(_) => self.end_link(LinkStatus::Failed),
         }
     }
@@ -705,6 +862,13 @@ impl Inner {
         else {
             return;
         };
+        // DEV-290: a sync channel that opened before the provision left is
+        // the one of an earlier link. The device of that link read its own
+        // provision before that link ended. Such a channel commits no
+        // roster of this link.
+        if !offer.provision_sent {
+            return;
+        }
         let committed = offer
             .roster
             .as_ref()
@@ -878,6 +1042,7 @@ impl Handle {
             roster: None,
             sync_floor: 0,
             snapshot: None,
+            provision_sent: false,
             provision_relays: Vec::new(),
             provisioned_at: 0,
         })));
@@ -945,10 +1110,13 @@ impl Handle {
         Ok(Arc::new(Linked(Mutex::new(Some(taken)))))
     }
 
-    /// Removes a device from the set (Part 7 §7.7): the epoch that revokes
-    /// it, the end of its sync channel, a new queue for each contact, since
-    /// the removed device knew each queue (step 2c), and the epoch to each
-    /// other device. The removed device keeps what it synced (`DEV-137`).
+    /// Removes a device from the set (Part 7 §7.7). The call makes the
+    /// epoch that revokes it, the notice to that device, and the end of its
+    /// sync channel. Each contact gets a new queue, since the removed
+    /// device knew each queue (step 2c). Each other device gets the epoch.
+    /// The store holds the rotations and the notice until each one is done,
+    /// thus the call needs no run. The removed device keeps what it synced
+    /// (`DEV-137`).
     pub fn remove_device(&self, device_id: Vec<u8>) -> Result<(), FfiError> {
         let device: umbra_core::devset::DeviceId = device_id
             .as_slice()
@@ -965,15 +1133,12 @@ impl Handle {
         inner
             .client
             .rekey_groups(super::unix_now_ms(), &mut OsRng)?;
+        // Step 2c: the store holds the rotation that the revocation owes
+        // each contact, and a run that is up takes each one now. With no
+        // run, the first step of the next run takes them.
+        inner.pump_revocation(super::unix_now());
         let Inner { client, bridge, .. } = &mut *inner;
         if let Some(running) = bridge.as_mut() {
-            let peers = client.device_peers()?;
-            for (conversation, contact) in running.contacts() {
-                // NET-180: each contact moves after its own delay.
-                if !peers.contains(&conversation) {
-                    running.rotate_swept(contact)?;
-                }
-            }
             running.flush(client, &mut OsRng)?;
         }
         inner.pump_groups();
@@ -1088,4 +1253,107 @@ pub fn init_linked(
         client.apply_restore(&restored, &mut OsRng)?;
         Ok(client.apply_link(&identity, &mut OsRng)?)
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::super::tests::{open, passphrase};
+    use super::*;
+
+    /// The side of the existing device, with its offer on one relay.
+    fn offer() -> LinkJob {
+        LinkJob::Offer(Box::new(Offer {
+            nonce: [5; 16],
+            link_key: KeyPair::generate(&mut OsRng),
+            offer: Vec::new(),
+            ticket: String::new(),
+            offered_at: unix_now(),
+            offer_relays: vec![[9; 32]],
+            hello: None,
+            roster: None,
+            sync_floor: 0,
+            snapshot: None,
+            provision_sent: false,
+            provision_relays: Vec::new(),
+            provisioned_at: 0,
+        }))
+    }
+
+    #[test]
+    fn a_lock_ends_the_link_and_keeps_its_erasure_for_the_next_run() {
+        let (handle, directory) = open("link-lock");
+        let mut inner = locked(&handle.inner);
+        // The pending device of a link of an earlier process goes first.
+        assert!(inner.peer_drop_due);
+        inner.pump_link(unix_now());
+        assert!(!inner.peer_drop_due);
+
+        inner.start(offer());
+        inner.client.lock();
+        inner.pump_link(unix_now());
+        // IMP-127: the link key leaves RAM with the link. DEV-003: the
+        // erasure of the offer waits, and DEV-290: so does the removal of
+        // the pending device, which a locked store does not take.
+        assert!(inner.link.is_none());
+        assert_eq!(inner.held_erasures.len(), 1);
+        assert!(inner.peer_drop_due);
+
+        // A cancel of the view after the lock finds no link, and no second
+        // erasure.
+        inner.cancel_link();
+        assert_eq!(inner.held_erasures.len(), 1);
+
+        inner.client.unlock(&passphrase(), unix_now()).unwrap();
+        inner.pump_link(unix_now());
+        assert!(!inner.peer_drop_due);
+        assert_eq!(inner.held_erasures.len(), 1);
+        drop(inner);
+        drop(handle);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_cancel_under_a_lock_ends_the_link_as_the_lock_does() {
+        let (handle, directory) = open("link-cancel");
+        let mut inner = locked(&handle.inner);
+        inner.start(offer());
+        inner.client.lock();
+        inner.cancel_link();
+        assert!(inner.link.is_none());
+        assert_eq!(inner.held_erasures.len(), 1);
+        assert!(inner.peer_drop_due);
+        drop(inner);
+        drop(handle);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_sync_channel_before_the_provision_commits_no_roster() {
+        let (handle, directory) = open("link-early");
+        let mut inner = locked(&handle.inner);
+        inner.start(offer());
+        let status = |inner: &Inner| inner.link.as_ref().map(|link| link.status.clone());
+        if let Some(link) = inner.link.as_mut() {
+            link.status = LinkStatus::Sending;
+        }
+        // DEV-290: the channel of a device of an earlier link opens while
+        // the snapshot of this link goes up. The link stays where it is.
+        inner.link_opened();
+        assert_eq!(status(&inner), Some(LinkStatus::Sending));
+        // After the provision left, the opening is the one of this link:
+        // it ends the link, here with no roster to commit.
+        if let Some(LinkState {
+            job: LinkJob::Offer(offer),
+            ..
+        }) = inner.link.as_mut()
+        {
+            offer.provision_sent = true;
+        }
+        inner.link_opened();
+        assert_eq!(status(&inner), Some(LinkStatus::Failed));
+        drop(inner);
+        drop(handle);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
 }

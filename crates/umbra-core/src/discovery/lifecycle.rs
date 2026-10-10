@@ -118,8 +118,18 @@ impl Label {
         if version_new != self.version.saturating_add(1) || hk_pub == [0; 1_216] {
             return Err(Error::Stale);
         }
-        if self.needs(now) == Needs::ReserveChallenge && hk_pub != self.hk_pub {
+        let needs = self.needs(now);
+        if needs == Needs::ReserveChallenge && hk_pub != self.hk_pub {
             return Err(Error::Unverified);
+        }
+        // DIS-172: the end of a timed registration holds through its
+        // tombstone, thus the holder of the reservation writes no lease
+        // past it. A registration after the reservation is a new one, and
+        // it takes no end from the label before it.
+        match needs {
+            Needs::Token => self.ends_at = None,
+            _ if self.ends_at.is_some_and(|end| end <= now) => return Err(Error::Stale),
+            _ => {}
         }
         self.version = version_new;
         self.hk_pub = hk_pub;
@@ -158,7 +168,6 @@ impl Label {
         self.lease_until = None;
         self.tombstoned_at = Some(now);
         self.lease_epoch = 0;
-        self.ends_at = None;
         Ok(())
     }
 
@@ -171,7 +180,6 @@ impl Label {
         self.version = self.version.saturating_add(1);
         self.lease_until = None;
         self.tombstoned_at = Some(now);
-        self.ends_at = None;
         Some(self.version)
     }
 }
@@ -288,6 +296,30 @@ mod tests {
         label.publish(3, pk(9), t + HANDLE_RESERVE).unwrap();
         assert_eq!(label.version, 3);
         assert_eq!(label.renew(epoch, t + HANDLE_RESERVE), Err(Error::Stale));
+    }
+
+    #[test]
+    fn a_timed_label_keeps_its_end_through_a_tombstone_and_a_new_write() {
+        // DIS-172: a registration that ends at 1 000.
+        let mut label = Label::register(pk(1), 0);
+        label.end_at(1_000);
+        // The holder retires it, and writes it again under the reserve
+        // challenge with the same key: the lease still stops at the end.
+        label.retire(1, 10).unwrap();
+        label.publish(2, pk(1), 20).unwrap();
+        assert!(label.tombstone_if_lapsed(999).is_none());
+        assert_eq!(label.tombstone_if_lapsed(1_000), Some(3));
+        // After the end the reservation gives its holder no new lease.
+        assert_eq!(label.needs(1_001), Needs::ReserveChallenge);
+        assert_eq!(label.publish(4, pk(1), 1_001), Err(Error::Stale));
+        // A registration after the reservation is a new one with no end.
+        let later = 1_000 + HANDLE_RESERVE;
+        assert_eq!(label.needs(later), Needs::Token);
+        label.publish(4, pk(9), later).unwrap();
+        assert!(label
+            .tombstone_if_lapsed(later + HANDLE_LEASE - 1)
+            .is_none());
+        assert_eq!(label.tombstone_if_lapsed(later + HANDLE_LEASE), Some(5));
     }
 
     #[test]

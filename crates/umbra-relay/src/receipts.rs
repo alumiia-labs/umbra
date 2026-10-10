@@ -134,6 +134,18 @@ pub struct ReceiptBook {
     erased_at: u64,
 }
 
+/// What the book does with a query that verified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Asked {
+    /// A query that the relay answers, and that counts in `REL-186`.
+    Fresh,
+    /// The epoch of the query holds nothing here: an empty answer, and no
+    /// count.
+    Outside,
+    /// The authority is above its bound (`REL-187`).
+    Above,
+}
+
 /// The time between two erases of old receipts: a receipt leaves at most
 /// this long after `RECEIPT_RETENTION`, and the shelf takes no write at
 /// each tick.
@@ -309,7 +321,9 @@ impl ReceiptBook {
         let Some(peer) = self.peer(link) else {
             return false;
         };
-        let Ok(receipt) = LinkReceipt::verify(signed, identity_pk) else {
+        // The checks that cost no signature come first, thus a receipt that
+        // names other relays or other cells costs none.
+        let Ok(receipt) = LinkReceipt::parse(signed) else {
             return false;
         };
         if receipt.to_relay != peer || receipt.from_relay != *own_id {
@@ -324,6 +338,9 @@ impl ReceiptBook {
         }
         let leaves: Vec<[u8; 32]> = sent.iter().take(count).copied().collect();
         if tree::root(&leaves) != Some(receipt.batch_root) {
+            return false;
+        }
+        if LinkReceipt::verify(signed, identity_pk).is_err() {
             return false;
         }
         sent.drain(..count);
@@ -342,6 +359,24 @@ impl ReceiptBook {
     /// The receipts that the book holds: those it issued, and those it took.
     pub fn held(&self) -> (usize, usize) {
         self.shelf.0.held()
+    }
+
+    /// Takes one query of `authority` for the epoch `asked` that verified
+    /// at `now`, and says what the relay does with it. A query of an epoch
+    /// after the one of `now`, or of one before `RECEIPT_RETENTION`, holds
+    /// nothing here. `ended` also puts the epoch of `now` outside, for a
+    /// query that asks for what an ended epoch leaves. Each other query
+    /// counts in the bound of its authority (`REL-186`).
+    pub fn admit_query(&mut self, authority: u8, asked: u64, ended: bool, now: u64) -> Asked {
+        let epoch = now / EPOCH_SECONDS;
+        let floor = epoch.saturating_sub(RECEIPT_RETENTION / EPOCH_SECONDS);
+        if asked > epoch || asked < floor || (ended && asked == epoch) {
+            return Asked::Outside;
+        }
+        if !self.admit(authority, now) {
+            return Asked::Above;
+        }
+        Asked::Fresh
     }
 
     /// Whether one more query of `authority` fits in the epoch of `now`
@@ -474,6 +509,24 @@ mod tests {
     }
 
     #[test]
+    fn a_query_of_an_epoch_that_holds_nothing_counts_toward_no_bound() {
+        let mut book = ReceiptBook::default();
+        let now = 500 * EPOCH_SECONDS + 7;
+        // An epoch that did not start, and one past the retention.
+        assert_eq!(book.admit_query(3, 501, false, now), Asked::Outside);
+        let old = 500 - RECEIPT_RETENTION / EPOCH_SECONDS - 1;
+        assert_eq!(book.admit_query(3, old, false, now), Asked::Outside);
+        // REL-192: the epoch that runs has no share yet.
+        assert_eq!(book.admit_query(3, 500, true, now), Asked::Outside);
+        // REL-187: the bound holds for each other query, and none of the
+        // queries above counted.
+        for _ in 0..umbra_core::directory::stat::RECEIPT_QUERY_MAX {
+            assert_eq!(book.admit_query(3, 499, true, now), Asked::Fresh);
+        }
+        assert_eq!(book.admit_query(3, 500, false, now), Asked::Above);
+    }
+
+    #[test]
     fn a_window_of_cells_gets_a_receipt_that_the_sender_keeps() {
         let mut rng = Rng(1);
         let (a, b) = ([0xA1; 32], [0xB2; 32]);
@@ -508,6 +561,7 @@ mod tests {
         // Each side answers for the cell: the taker issued, the sender took.
         let query = ReceiptQuery {
             authority_index: 0,
+            relay_id: b,
             epoch: 490_000,
             tag: cell(1_026)[16..32].try_into().unwrap(),
         };

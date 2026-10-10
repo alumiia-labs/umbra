@@ -246,6 +246,21 @@ impl<'a> BackupRoot<'a> {
     }
 }
 
+/// Of the entry lists of two roots of one week that opened, the one that a
+/// restore takes (`IDN-099`, `IDN-103`). A root carries no time and no
+/// sequence. A device adds each delta at the end of the root that it wrote
+/// before. Thus the later root holds each entry of the other one at its
+/// place, and more after them. A relay that serves the earlier one hides no
+/// delta. Two roots with no such relation name two full objects, and the
+/// first one stays: no field orders them.
+pub fn later_entries(held: Vec<Vec<u8>>, other: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+    if other.len() > held.len() && other.starts_with(&held) {
+        other
+    } else {
+        held
+    }
+}
+
 /// The type of a `RecoveryDigits` value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
@@ -400,11 +415,12 @@ pub fn split_social(
     k: u8,
     n: u8,
     coeffs: &[u8],
-) -> Result<Vec<[u8; 17]>, Error> {
+) -> Result<Zeroizing<Vec<[u8; 17]>>, Error> {
     if k < 2 || n < k || coeffs.len() != usize::from(k - 1) * 16 {
         return Err(Error::Malformed);
     }
-    let mut shares = Vec::with_capacity(usize::from(n));
+    // Each share is a secret of the user, thus the list leaves no copy.
+    let mut shares = Zeroizing::new(Vec::with_capacity(usize::from(n)));
     for x in 1..=n {
         let mut share = [0u8; 17];
         share[0] = x;
@@ -518,6 +534,23 @@ mod tests {
         assert_ne!(two.expose(), secret.expose());
         assert!(join_social(&[shares[0], shares[0]]).is_err());
         assert_eq!(gf_mul(gf_inv(0x53), 0x53), 1);
+    }
+
+    #[test]
+    fn a_restore_takes_the_root_that_holds_the_later_deltas() {
+        let full = alloc::vec![1u8; 9];
+        let first = alloc::vec![2u8; 9];
+        let second = alloc::vec![3u8; 9];
+        let earlier = alloc::vec![full.clone(), first.clone()];
+        let later = alloc::vec![full.clone(), first.clone(), second.clone()];
+        // IDN-099: the replica that answers first serves the earlier root.
+        assert_eq!(later_entries(earlier.clone(), later.clone()), later);
+        assert_eq!(later_entries(later.clone(), earlier.clone()), later);
+        assert_eq!(later_entries(later.clone(), later.clone()), later);
+        // A root of another full object is no later form of this one.
+        let other = alloc::vec![alloc::vec![7u8; 9], first, second, full];
+        assert_eq!(later_entries(earlier.clone(), other.clone()), earlier);
+        assert_eq!(later_entries(other.clone(), earlier), other);
     }
 
     #[test]

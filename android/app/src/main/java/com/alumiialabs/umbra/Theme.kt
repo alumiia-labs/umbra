@@ -10,7 +10,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontVariation
 import androidx.compose.ui.text.font.FontWeight
 
-/** The colors of `design/mockups/light`: warm white, forest green, pale sage. */
+/** The colors of the app: warm white, forest green, pale sage. */
 object Palette {
     val Surface = Color(0xFFF7F8F2)
     val Raised = Color(0xFFFFFFFF)

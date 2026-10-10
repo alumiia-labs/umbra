@@ -408,7 +408,16 @@ mod tests {
 
         let mut payload = [0u8; 17];
         nack([2; 16]).encode(&mut payload).unwrap();
+        // WIR-494: a NACK whose header names another `corr_id` than its
+        // payload names no command.
+        let split = Command {
+            payload: &payload,
+            ..stray
+        };
+        let cell = relay.backward(Bucket::B0, &split);
+        assert!(session.receive_cell(&cell).unwrap().is_empty());
         let named = Command {
+            corr_id: [2; 16],
             payload: &payload,
             ..stray
         };

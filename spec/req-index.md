@@ -73,15 +73,15 @@ column when a crate implements the requirement and a test covers it.
 | `CRY` | 120 | 27 | 0 | 0 | 1 | **148** |
 | `WIR` | 398 | 85 | 0 | 0 | 7 | **490** |
 | `DEV` | 205 | 90 | 0 | 0 | 8 | **303** |
-| `NTF` | 79 | 28 | 0 | 0 | 3 | **110** |
+| `NTF` | 77 | 28 | 0 | 0 | 3 | **108** |
 | `DIS` | 130 | 35 | 0 | 0 | 3 | **168** |
 | `REL` | 162 | 34 | 1 | 0 | 3 | **200** |
 | `GRP` | 235 | 65 | 0 | 0 | 6 | **306** |
 | `ATT` | 143 | 45 | 2 | 0 | 3 | **193** |
-| `ABU` | 72 | 30 | 1 | 0 | 0 | **103** |
-| `IMP` | 121 | 41 | 0 | 0 | 2 | **164** |
-| `SEC` | 13 | 5 | 1 | 0 | 2 | **21** |
-| **All** | 2085 | 629 | 7 | 0 | 56 | **2777** |
+| `ABU` | 71 | 29 | 1 | 0 | 0 | **101** |
+| `IMP` | 115 | 41 | 0 | 0 | 2 | **158** |
+| `SEC` | 4 | 3 | 0 | 0 | 1 | **8** |
+| **All** | 2067 | 626 | 6 | 0 | 55 | **2754** |
 
 ## SCP — Scope and Conventions
 
@@ -179,7 +179,7 @@ Source: `spec/03-network-architecture.md`
 | `NET-038` | §3.5.2 | MUST NOT | UMBRA | UMBRA MUST NOT copy that default. |  |  |
 | `NET-039` | §3.5.3 | MUST | The destination relay | The destination relay MUST take a delay for each message from an exponential distribution before it emits the message. |  |  |
 | `NET-040` | §3.5.4 | MUST | A revision | A revision MUST derive this value again if the bucket ladder or the default chunk width changes. |  |  |
-| `NET-041` | §3.5.4 | MUST | A client | A client MUST emit a delivery receipt when that client holds the message. |  |  |
+| `NET-041` | §3.5.4 | MUST | A client | A client whose user turned delivery receipts on for a contact MUST emit a delivery receipt when that client holds a message of that contact, and a client MUST NOT emit one for a contact with delivery receipts off. |  |  |
 | `NET-042` | §3.5.4 | MUST | A client | A client MUST emit a read receipt only after the user opens the conversation. |  |  |
 | `NET-043` | §3.5.4 | MUST NOT | A client | A client MUST NOT emit a read receipt because it rendered a notification. |  |  |
 | `NET-044` | §3.5.4 | MUST | The client | The client MUST batch acknowledgments for each queue. |  |  |
@@ -326,10 +326,10 @@ Source: `spec/03-network-architecture.md`
 | `NET-187` | §3.2.6 | MUST | A client | A client MUST repeat that fetch one time in each week while the condition holds. |  |  |
 | `NET-188` | §3.2.6 | MUST | A client | A client MUST draw the time of each fetch from a uniform distribution over 24 hours. |  |  |
 | `NET-189` | §3.2.6 | MUST NOT | A client | A client MUST NOT fetch a dead-channel handle of a contact whose channel is neither dead nor silent. |  |  |
-| `NET-190` | §3.2.6 | MUST | A client that opens a `DeadChannelBlob` of a peer | A client that opens a `DeadChannelBlob` of a peer MUST take its `QueueAddress` as the newest address of that peer. |  |  |
+| `NET-190` | §3.2.6 | MUST | A client that opens a `DeadChannelBlob` of a peer | A client that opens a `DeadChannelBlob` of a peer MUST hold its `QueueAddress` as a **candidate** address of that peer. |  |  |
 | `NET-191` | §3.2.6 | MUST | That client | That client MUST then send its own current `QueueAddress` as a record of kind `0x33` on that channel. |  |  |
 | `NET-192` | §3.2.6 | MUST | A client | A client MUST treat a `DeadChannelBlob` whose `sealed` field does not open under `blob_key` as an empty handle. |  |  |
-| `NET-193` | §3.2.6 | MUST | (unstated) | After a client accepts a `QueueAddress` of a contact, it MUST send again each record that holds no delivery receipt. |  |  |
+| `NET-193` | §3.2.6 | MUST | (unstated) | After a client accepts a `QueueAddress` of a contact whose channel was dead or silent, in a record of kind `0x33` under `NET-179`, it MUST send again each record of that contact that a relay acknowledged and that no receipt of the peer names. |  |  |
 | `NET-194` | §3.2.6 | MUST NOT | A client | A client MUST NOT write a `DeadChannelBlob` for a contact that the user blocked under Part 13 §13.12. |  |  |
 | `NET-195` | §3.2.4 | MUST | A relay | A relay MUST count an accepted `SEND` and a `SUB` on a queue as activity. |  |  |
 | `NET-196` | §3.2.4 | MUST NOT | A relay | A relay MUST NOT count a `COVER` as activity. |  |  |
@@ -449,7 +449,7 @@ Source: `spec/03-network-architecture.md`
 | `NET-310` | §3.2.5 | MUST | A client | A client MUST give the candidates of §3.4.6 to the selection in a random order weighted by class under Part 10 `REL-196`, and a relay that no other circuit of that client uses MUST come before a relay that one uses. |  |  |
 | `NET-311` | §3.2.5 | MUST NOT | (unstated) | A client MUST build each chain again at the start of a run, and it MUST NOT store a chain: the store names the relay of a queue, and no relay of a path to it. |  |  |
 | `NET-312` | §3.2.5 | MUST | A client | A client MUST reject a descriptor that has a relay line with no `layer`, no `operator`, no `country` or no `asn`, with one fact two times, or with a word that is no fact. |  |  |
-| `NET-313` | §3.2.5 | MUST | A client | A client MUST take the first relay of layer 1 as its pinned ingress of `NET-022`. |  |  |
+| `NET-313` | §3.2.5 | MUST | A client | A client MUST take the first relay of layer 1 as its pinned ingress of `NET-086` and of invariant 4 of §3.4.6. |  |  |
 | `NET-314` | §3.2.5 | MUST | A client | A client MUST read a descriptor with the first line `umbra-network 1`. |  |  |
 | `NET-315` | §3.2.5 | MUST | (unstated) | A stored queue can name a relay that the relay set holds no more, or a relay that no conformant chain reaches. |  |  |
 | `NET-316` | §3.10 | MUST | An HTTPS carrier | An HTTPS carrier MUST give the `RelayManifest` at the path `/.well-known/umbra/manifest`, as the body of a `200` response with a `Content-Length`. |  |  |
@@ -466,11 +466,11 @@ Source: `spec/03-network-architecture.md`
 | `NET-327` | §3.2.6 | MUST | A client that gets such a record | A client that gets such a record MUST drop it unless `responder_static_x25519` equals the pairwise key of the peer that the contact holds. |  |  |
 | `NET-328` | §3.2.6 | MUST | (unstated) | If the channels of both parties are stale, the party whose pairwise X25519 key is the lower as a big-endian integer MUST answer the bundle of the other, and the other MUST drop the bundle that it gets. |  |  |
 | `NET-329` | §3.2.6 | MUST | A handshake of a renewal | A handshake of a renewal MUST replace the channel of the contact only if the static key of the peer in it equals the pairwise key of the peer that the contact holds. |  |  |
-| `NET-330` | §3.2.6 | MUST | (unstated) | A client with a stale channel that takes a new address of the peer under rule 9 MUST send its bundle again to that address. |  |  |
+| `NET-330` | §3.2.6 | MUST | (unstated) | A client with a stale channel that holds a candidate address of the peer under rule 9 MUST send its bundle again to that address, until a relay answers it there and not again in a later run. |  |  |
 | `NET-331` | §3.4.3 | MUST NOT | An ingress relay | An ingress relay MUST NOT hold more than `LINK_CIRCUITS_MAX` circuits on one client link. |  |  |
 | `NET-332` | §3.4.3 | MUST | An ingress relay | An ingress relay MUST give a build cell on one client link no answer when that link spent `LINK_BUILD_BURST` builds and got none back at `LINK_BUILD_RATE`. |  |  |
 | `NET-333` | §3.4.3 | MUST | A relay | A relay MUST close a new connection at once when it holds `RELAY_CONN_MAX` connections. |  |  |
-| `NET-334` | §3.4.3 | MUST | An ingress relay | An ingress relay MUST close a new connection at once when its address holds `RELAY_CONN_PER_IP` connections. |  |  |
+| `NET-334` | §3.4.3 | MUST | An ingress relay | A relay MUST close a new connection at once when its address holds `RELAY_CONN_PER_IP` connections. |  |  |
 | `NET-335` | §3.4.3 | MUST | A relay | A relay MUST run at most `RELAY_HANDSHAKES_MAX` TLS handshakes at once, and it MUST close a connection that holds no upgrade request of Part 6 §6.2.1 at `RELAY_HANDSHAKE_TIMEOUT` from its accept. |  |  |
 | `NET-336` | §3.9 | MUST | A client | A client MUST put the same `delay_class` in the `HopHello` of each hop of one circuit. |  |  |
 | `NET-337` | §3.9 | MUST | A relay | A relay MUST drop an `EXTEND` whose `delay_class` is not one of the three values above. |  |  |
@@ -478,14 +478,14 @@ Source: `spec/03-network-architecture.md`
 | `NET-339` | §3.9 | MUST NOT | A relay | A relay MUST NOT release a forward cell of a circuit before an earlier forward cell of that circuit. |  |  |
 | `NET-340` | §3.4.6 | MAY | (unstated) | While the accepted `DirectoryKeySet` holds `independent_count` below `AUTHORITY_FLOOR`, the `provisional directory` state of Part 10 rule `REL-126`, a client MAY relax invariant 1 when no chain satisfies it under `NET-200`. |  |  |
 | `NET-341` | §3.4.6 | MUST NOT | A client | A client MUST NOT relax invariant 1 while `independent_count` is `AUTHORITY_FLOOR` or above. |  |  |
-| `NET-342` | §3.4.6 | MUST | A client | A client MUST select a chain that satisfies invariant 1 when one exists, with or without the relaxation of `NET-200`. |  |  |
+| `NET-342` | §3.4.6 | MUST | A client | A client MUST select a chain that satisfies invariant 1 when one exists, with or without the relaxations of `NET-200` and `NET-350`. |  |  |
 | `NET-343` | §3.4.6 | MUST | A client | A client MUST show the user each circuit whose chain holds two relays of one operator or of one family. |  |  |
-| `NET-344` | §3.4.6 | MUST | (unstated) | The same relaxation, under the same state, applies to each placement that needs different operators or families: the group replicas of Part 11 rule `GRP-191`, the chunk relays of Part 12 rule `ATT-017`, the backup relays of Part 4 rule `IDN-076`, and the two ingress pins of Part 10 rule `REL-154`. |  |  |
+| `NET-344` | §3.4.6 | MUST | (unstated) | The same relaxation, under the same state, applies to each placement that needs different operators or families: the new queue of a rotation of §3.2.4, the group replicas of Part 11 rule `GRP-191`, the chunk relays of Part 12 rule `ATT-017`, the backup relays of Part 4 rule `IDN-076`, and the two ingress pins of Part 10 rule `REL-154`. |  |  |
 | `NET-345` | §3.4.6 | MUST | A client | A client MUST end a pin that shares an operator or a family with the other pin when the relaxation ends, and it fills the place under `REL-154`. |  |  |
 | `NET-346` | §3.2.4 | MUST | At a start a relay | At a start a relay MUST keep the newest `QUEUE_QUOTA` records of a queue whose stored records pass that quota: the older ones ended in the run before. |  |  |
-| `NET-347` | §3.4.3 | MUST NOT | (unstated) | While a record waits for a circuit to that exit, the client MUST start a new build to it on a fresh chain, and it MUST NOT hold the record for its next run. |  |  |
+| `NET-347` | §3.4.3 | MUST NOT | (unstated) | While a record waits for a circuit to that queue relay, or an inbound queue of the client lives at it, the client MUST start a new build to it on a fresh chain, and it MUST NOT hold the record or the `SUB` of the queue for its next run. |  |  |
 | `NET-348` | §3.2.6 | MUST | (unstated) | While no record of the contact has arrived on the new queue, the owner MUST send that record again at the start of each run and after each `ADDRESS_RESEND` of 6 hours: a run that ends before the record leaves loses it. |  |  |
-| `NET-349` | §3.5.2 | MUST | The relay | The relay MUST send such a drain in steps of at most 256 KiB for each circuit at each tick of its own fixed clock, and it MUST hold at most 40 MiB of drains for one circuit: one drain then fills no link that the circuits of other clients share, and the steps follow no arrival. |  |  |
+| `NET-349` | §3.5.2 | MUST | The relay | The relay MUST send such a drain in steps of at most 256 KiB for each circuit at each tick of its own fixed clock. |  |  |
 | `NET-350` | §3.4.6 | MUST | (unstated) | Under the same state, a client MAY put hop 1 and hop 3 in one bloc, and after that it MAY put two hops in one autonomous system or one prefix, each only when no chain holds without it, in that order. |  |  |
 | `NET-351` | §3.4.6 | MUST NOT | A client | A client MUST NOT put hop 1 and hop 3 on one IPv4 address while a chain holds without it, after each relaxation of `NET-350`. |  |  |
 
@@ -554,7 +554,7 @@ Source: `spec/04-identity.md`
 | `IDN-057` | §4.5.1 | MUST NOT | A client | A client MUST NOT sign a key-change notice. |  |  |
 | `IDN-058` | §4.5.1 | MUST NOT | A client | A client MUST NOT carry a signature over the new keys inside the notice. |  |  |
 | `IDN-059` | §4.5.1 | MUST | A receiver | A receiver MUST accept a key-change notice only from the receiving chain of that session. |  |  |
-| `IDN-060` | §4.5.1 | MUST | A receiver | A receiver MUST bind the two new public keys into the next handshake transcript with that contact. |  |  |
+| `IDN-060` | §4.5.1 | MUST | A receiver | A receiver that accepts a notice MUST take `new_x25519_pk` as the pairwise identity public key of that contact. |  |  |
 | `IDN-061` | §4.5.1 | MUST | A receiver | A receiver MUST show the blocking notice of §4.5, and IDN-025 states that rule. |  |  |
 | `IDN-062` | §4.5.1 | MUST NOT | A receiver | A receiver MUST NOT apply the new keys before the user answers that prompt. |  |  |
 | `IDN-063` | §4.5.1 | MUST | A client | A client MUST send one key-change notice to each contact with an independent randomized delay for each contact. |  |  |
@@ -865,7 +865,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-020` | §6.4.2 | MUST NOT | A sender | A sender MUST NOT use a counter. |  |  |
 | `WIR-021` | §6.4.2 | MUST NOT | A sender | A sender MUST NOT repeat a nonce under one `K_QE`. |  |  |
 | `WIR-022` | §6.4.2 | MUST | A party | A party MUST bind `version || SenderId` as the associated data. |\| SenderId` as the associated data. |  |  |
-| `WIR-023` | §6.4.2 | MUST | A receiver | A receiver MUST reject an unknown kind and a retired kind. |  |  |
+| `WIR-023` | §6.4.2 | MUST | A receiver | A receiver MUST reject an unknown kind and a reserved kind. |  |  |
 | `WIR-024` | §6.4.2 | MUST | A sender | A sender MUST fill the L6 record to a fixed length for the bucket. |  |  |
 | `WIR-025` | §6.4.2 | MUST | (unstated) | Thus the `payload_len` of a `SEND` MUST equal that row. |  |  |
 | `WIR-026` | §6.4.2 | MUST | The `payload_len` of a `MSG` | The `payload_len` of a `MSG` MUST equal the L5 payload row of §6.9. |  |  |
@@ -926,7 +926,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-087` | §6.6.1 | MUST | A parser | A parser MUST reject a `k` above `DELETE_BATCH_MAX`. |  |  |
 | `WIR-088` | §6.6.1 | MUST | A parser | A parser MUST reject a target list that is not in strictly increasing byte order. |  |  |
 | `WIR-089` | §6.6.1 | MUST | A parser | A parser MUST reject a repeated target. |  |  |
-| `WIR-090` | §6.6.1 | MUST | A revision | A revision MUST derive this value again if the bucket ladder or the default chunk width changes. |  |  |
+| `WIR-090` | §6.6.1 | MUST | A revision | A later version MUST derive this value again if the bucket ladder or the default chunk width changes. |  |  |
 | `WIR-091` | §6.6.1 | MUST | (unstated) | If more targets wait, the client MUST split them across two records. |  |  |
 | `WIR-092` | §6.7 | MUST | The two parties | The two parties MUST abort if that value is below the `min` value of one of them. |  |  |
 | `WIR-093` | §6.7 | MUST | (unstated) | **Downgrade protection:** an implementation MUST bind the negotiated version and the two advertised ranges into the handshake transcript hash. |  |  |
@@ -942,7 +942,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-103` | §6.9 | MUST | A client | A client MUST compute the bucket from the capacity table. |  |  |
 | `WIR-104` | §6.9 | MUST NOT | A client | A client MUST NOT put a message in a bucket that does not hold it. |  |  |
 | `WIR-105` | §6.9 | MUST NOT | A relay | A relay MUST NOT read a capacity from a served cell. |  |  |
-| `WIR-106` | §6.4.2 | MUST | A revision | A revision MUST count that true length in each capacity row of §6.9. |  |  |
+| `WIR-106` | §6.4.2 | MUST | A revision | Each version MUST count that true length in each capacity row of §6.9. |  |  |
 | `WIR-107` | §6.4 | MUST | An attachment command | An attachment command MUST travel on the separate connection of Part 12 §12.8. |  |  |
 | `WIR-108` | §6.4 | MUST NOT | A client | A client MUST NOT batch an attachment command with a queue command. |  |  |
 | `WIR-109` | §6.4.1 | MUST NOT | A client | A client MUST NOT send a cell that carries one command when a second ready command fits the command area of that cell. |  |  |
@@ -1235,7 +1235,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-429` | §6.4.6 | MUST | A parser | A parser MUST reject a slot list that is not in strictly increasing `index` order. |  |  |
 | `WIR-430` | §6.4.6 | MUST | A parser | A parser MUST reject a repeated `index` in a slot list. |  |  |
 | `WIR-431` | §6.4.6 | MUST | A parser | A parser MUST reject an `own_count` that is not 0 or `GROUP_REPLICAS`. |  |  |
-| `WIR-433` | §6.6 | MUST | A parser | A parser MUST reject a `kind` or an `inner_kind` that the table above does not list, and one that the table marks as retired. |  |  |
+| `WIR-433` | §6.6 | MUST | A parser | A parser MUST reject a `kind` or an `inner_kind` that the table above does not list, and one that the table marks as reserved. |  |  |
 | `WIR-434` | §6.6.1 | MUST | A receiver | A receiver MUST resolve the target of an edit through each `RichRecord` wrapper. |  |  |
 | `WIR-435` | §6.6.3 | MUST | A parser | A parser MUST reject a `JoinRecord` whose length is not 1 313. |  |  |
 | `WIR-436` | §6.6.3 | MUST | A parser | A parser MUST reject a `stage` that is not `0x01` or `0x02`. |  |  |
@@ -1271,7 +1271,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-469` | §6.8 | MUST | The relay | The relay MUST reject a `GSUB` under the previous read key after `GROUP_READ_GRACE`, and a `GPOST` under the previous write key after `GROUP_WRITE_GRACE`. |  |  |
 | `WIR-471` | §6.8 | MUST | The vectors | The vectors MUST cover a snapshot at 3 members in one segment, and the segment count of a snapshot at `GROUP_MAX`, which is 21. |  |  |
 | `WIR-472` | §6.9 | MUST | A sender | A sender MUST compute the bucket of a group record from the group-queue capacity table. |  |  |
-| `WIR-473` | §6.9 | MUST | (unstated) | A revision that changes the fixed part of `GroupQueueRecord`, the fixed fields of `ContentPlain`, or `GROUP_TAG_LEN` MUST derive this table again. |  |  |
+| `WIR-473` | §6.9 | MUST | (unstated) | A later version that changes the fixed part of `GroupQueueRecord`, the fixed fields of `ContentPlain`, or `GROUP_TAG_LEN` MUST derive this table again. |  |  |
 | `WIR-474` | §6.6.3 | MUST | A parser | A parser MUST reject an admit that carries a granting epoch. |  |  |
 | `WIR-478` | §6.6.3 | MUST | A receiver | A receiver MUST verify `sig` against `old_roster_pk`, and `SHA3-256(old_roster_pk)` against the `roster_pk_hash` of `old_index` in its roster, before it acts on the record. |  |  |
 | `WIR-479` | §6.8 | MUST | The vectors | The vectors MUST cover one record of each of the eight control types. |  |  |
@@ -1320,8 +1320,8 @@ Source: `spec/06-wire-format.md`
 | `WIR-522` | §6.4.5 | MUST | It | It MUST replace `own_pk` with the third value, and it MUST keep no previous `own_pk`: a command under the owner key that the `GKEY` replaced is refused at once. |  |  |
 | `WIR-523` | §6.6.11 | MUST | A request of scope `0x02` on a pairwise channel | A request of scope `0x02` on a pairwise channel MUST carry 1 plus the member index of the requester in `index`, and one that another member posts on the group queue for it keeps that value; the tag of a group record names its poster and not the member that lacks the epoch. |  |  |
 | `WIR-524` | §6.2.3 | MUST | A relay | A relay MUST send a `CircuitDestroy` under `NET-322` on the link of each neighbor of a circuit that it ends, with the `circ_id` that the circuit carries on that link. |  |  |
-| `WIR-525` | §6.2.2 | MUST | A sender | A sender MUST keep the last `RESEND_WINDOW` frames of a session for a resume, 1 000 frames, and MUST drop the oldest one when a new frame comes to a full window. |  |  |
-| `WIR-526` | §6.4 | MUST | (unstated) | A relay that writes a digest of Part 8 §8.5 into a queue at another relay MUST send it as the value of one `UMBRA_DEPOSIT` capsule, on a connection of §6.2.1 that it opens for that deposit. |  |  |
+| `WIR-525` | §6.2.2 | MUST | A sender | In a version that serves the resume, a sender MUST keep the last `RESEND_WINDOW` frames of a session for a resume, 1 000 frames. |  |  |
+| `WIR-526` | §6.4 | MUST | (unstated) | A relay that writes a digest of Part 8 §8.5 into a queue at another relay MUST send it as the value of one `UMBRA_DEPOSIT` capsule, on a connection of §6.2.1 that it opens for deposits. |  |  |
 | `WIR-527` | §6.4 | MUST | A relay | A relay MUST hold the `corr_id` of each of the last 4 096 deposits that it took, and it MUST drop a deposit that repeats one. |  |  |
 | `WIR-528` | §6.4.2 | MUST | A receiver | A receiver MUST take the content of a renewal record as a bundle in the layout of Part 5 §5.4.1, and it MUST read it on the queue of a contact whose handshake is complete. |  |  |
 | `WIR-529` | §6.4 | MUST | (unstated) | A relay that sends its proof-of-work challenge to a carrier of the manifest (Part 13 `ABU-102`) MUST send it as the value of one `UMBRA_CHALLENGE` capsule, on a connection of §6.2.1 that it opens for that challenge. |  |  |
@@ -1392,7 +1392,7 @@ Source: `spec/07-device-sets.md`
 | `DEV-050` | §7.5.5 | MUST | A client | A client MUST put that record on a sync channel of §7.5.1 only. |  |  |
 | `DEV-051` | §7.5.5 | MUST NOT | A client | A client MUST NOT put it on a pairwise channel or on a group channel. |  |  |
 | `DEV-052` | §7.5.5 | MUST | A client | A client MUST reject a sync acknowledgment that arrives on a different channel. |  |  |
-| `DEV-053` | §7.5.5 | MUST | (unstated) | A revision that adds a device-set control record MUST give that record a new `control_type` value. |  |  |
+| `DEV-053` | §7.5.5 | MUST | (unstated) | A later version that adds a device-set control record MUST give that record a new `control_type` value. |  |  |
 | `DEV-054` | §7.5.5 | MUST NOT | A device | A device MUST NOT use the relay sequence number of Part 6 §6.4.3 as that counter. |  |  |
 | `DEV-055` | §7.5.5 | MUST | A device | A device MUST set `counter` to the highest causal counter of the peer with the property below. |  |  |
 | `DEV-056` | §7.5.5 | MUST | A device | A device MUST send a sync acknowledgment after it takes `SYNC_ACK_BATCH` records from one peer. |  |  |
@@ -1496,7 +1496,7 @@ Source: `spec/07-device-sets.md`
 | `DEV-161` | §7.3.1 | MUST NOT | A roster epoch | A roster epoch MUST NOT carry more than `OWNER_CLAIM_MAX` claims. |  |  |
 | `DEV-162` | §7.3.1 | MUST NOT | A device | A device MUST NOT name a subject two times in one epoch. |  |  |
 | `DEV-163` | §7.3.1 | MUST | (unstated) | The provisioning payload of §7.4 MUST carry the current ownership table. |  |  |
-| `DEV-164` | §7.3.1 | MUST | A revision | A revision MUST derive this total again if it adds a field to `DeviceEntry` or raises `MAX_DEVICES`. |  |  |
+| `DEV-164` | §7.3.1 | MUST | A revision | A later version MUST derive this total again if it adds a field to `DeviceEntry` or raises `MAX_DEVICES`. |  |  |
 | `DEV-165` | §7.4 | MUST | The new device | The new device MUST make its own `DeviceKey` and its own `DeviceRosterKey` before step 2. |  |  |
 | `DEV-166` | §7.4 | MUST | The existing device | The existing device MUST put those public halves in the `DeviceEntry` of epoch *n+1*. |  |  |
 | `DEV-167` | §7.4 | MUST NOT | The provision | The provision MUST NOT carry a `DeviceRosterKey` private half. |  |  |
@@ -1530,7 +1530,7 @@ Source: `spec/07-device-sets.md`
 | `DEV-195` | §7.5.1 | MUST | A client | A client MUST bound the interactive sync records on one channel by a token bucket. |  |  |
 | `DEV-196` | §7.5.1 | MUST NOT | A client | A client MUST NOT mark a record interactive when no user action waits on it. |  |  |
 | `DEV-197` | §7.5.3 | MUST | A client | A client MUST converge each item of that table across the device set. |  |  |
-| `DEV-198` | §7.5.3 | MUST | A revision that adds a chat-list item | A revision that adds a chat-list item MUST add a row. |  |  |
+| `DEV-198` | §7.5.3 | MUST | A revision that adds a chat-list item | A later version that adds a chat-list item MUST add a row. |  |  |
 | `DEV-199` | §7.5.3 | MUST | A client | A client MUST hold a draft under the record encryption of Part 14 §14.6.4. |  |  |
 | `DEV-200` | §7.5.3 | MUST NOT | A client | A client MUST NOT put a draft in the backup of Part 4 §4.7.2. |  |  |
 | `DEV-201` | §7.5.3 | MUST | A client | A client MUST erase a draft from the device set when the user sends it or clears it. |  |  |
@@ -1668,9 +1668,7 @@ Source: `spec/08-notifications.md`
 | `NTF-018` | §8.5 | MUST NOT | A group above `GROUP_ALL_NOTIFY_MAX` members | A group above `GROUP_ALL_NOTIFY_MAX` members MUST NOT make one alert for each record at the device. |  |  |
 | `NTF-019` | §8.5 | MUST | A queue relay | A queue relay MUST apply the window to each handle, whatever the class of the conversation behind it. |  |  |
 | `NTF-027` | §8.7 | MUST | This text is normative, and it | This text is normative, and it MUST appear in the security documentation that the user reads: |  |  |
-| `NTF-028` | §8.7 | MUST | (unstated) | The NDR of the nonprofit and its core queue relays MUST be in different legal jurisdictions. |  |  |
 | `NTF-029` | §8.7 | MUST | The client | The client MUST take the route to the NDR from the pin of its build (`NTF-127`) and from no relay. |  |  |
-| `NTF-030` | §8.7 | MUST | The NDR | The NDR MUST publish a no-logging policy, a warrant canary, and a transparency log of its software builds. |  |  |
 | `NTF-031` | §8.2.1 | MUST | A device | A device MUST make one `k_tok` and one `handle` for each group of at most `MAX_QUEUES_PER_HANDLE` queues. |  |  |
 | `NTF-032` | §8.2.1 | MUST NOT | A device | A device MUST NOT put more than `MAX_QUEUES_PER_HANDLE` queues under one handle. |  |  |
 | `NTF-033` | §8.2.1 | MUST | A device | A device MUST set `MAX_QUEUES_PER_HANDLE` equal to the `MAX_QUEUES_PER_SESSION` of Part 3 §3.2.5, which is 8. |  |  |
@@ -1678,9 +1676,9 @@ Source: `spec/08-notifications.md`
 | `NTF-035` | §8.2.2 | MUST | An implementation | An implementation MUST bind `ver || epoch` as the associated data of the AEAD. |  |  |
 | `NTF-036` | §8.2.2 | MUST | An implementation | An implementation MUST set each reserved bit of `flags` to zero. |  |  |
 | `NTF-037` | §8.2.2 | MUST | A receiver | A receiver MUST reject a blob whose reserved bits are not zero. |  |  |
-| `NTF-038` | §8.4.1 | MUST | A client | A client MUST carry a Private-mode wake over UnifiedPush or over a persistent socket. |  |  |
+| `NTF-038` | §8.4.1 | MUST | A client | A client MUST carry a Private-mode wake on a timer of the platform that no arrival moves. |  |  |
 | `NTF-039` | §8.4.1 | MUST NOT | A client | A client MUST NOT carry a fixed-cadence wake over a high-priority FCM message. |  |  |
-| `NTF-040` | §8.4.1 | MUST | A client that holds neither carrier | A client that holds neither carrier MUST show that Private mode is not available on that build. |  |  |
+| `NTF-040` | §8.4.1 | MUST | A client that holds neither carrier | A client on a platform that gives it no such timer MUST show that Private mode is not available on that build. |  |  |
 | `NTF-041` | §8.4.1 | MUST NOT | That client | That client MUST NOT show Private mode as active. |  |  |
 | `NTF-043` | §8.2.6 | MUST | (unstated) | In Instant mode, a client MUST register a rendezvous queue under a notification handle of its own. |  |  |
 | `NTF-044` | §8.2.6 | MUST NOT | A client | A client MUST NOT put a rendezvous queue and a pairwise queue under one `(handle, k_tok)` of §8.2.1. |  |  |
@@ -1694,9 +1692,9 @@ Source: `spec/08-notifications.md`
 | `NTF-052` | §8.3 | MUST | A client in Private mode | A client in Private mode MUST draw the phase of its fixed clock from the CSPRNG at each network change. |  |  |
 | `NTF-053` | §8.3 | MUST | The client | The client MUST draw it again at each change of its ingress relay pair. |  |  |
 | `NTF-065` | §8.4.3 | MUST | A queue relay | A queue relay MUST set the push expiry to `PUSH_TTL_MESSAGE` for a message push. |  |  |
-| `NTF-066` | §8.4.3 | MUST | (unstated) | If no drain of a handle follows a message push inside `REPUSH_INTERVAL`, the queue relay MUST hand one more push. |  |  |
+| `NTF-066` | §8.4.3 | MUST | (unstated) | If no drain of a handle follows a push inside `REPUSH_INTERVAL`, the queue relay MUST hand one more push. |  |  |
 | `NTF-067` | §8.4.3 | MUST NOT | A queue relay | A queue relay MUST NOT hand more than `REPUSH_MAX` re-pushes for one message. |  |  |
-| `NTF-068` | §8.4.3 | MUST | (unstated) | At each session open and at each session resume, a client MUST run the peek of Part 3 §3.7 item 4 on each queue of that session. |  |  |
+| `NTF-068` | §8.4.3 | MUST | (unstated) | At each session open, and at each session resume in a revision that serves one, a client MUST run the peek of Part 3 §3.7 item 4 on each queue of that session. |  |  |
 | `NTF-075` | §8.2.3 | MUST | A receiver | A receiver MUST accept a blob whose `epoch` is inside the window. |  |  |
 | `NTF-076` | §8.2.3 | MUST | A receiver | A receiver MUST reject a blob outside that window without an AEAD open. |  |  |
 | `NTF-077` | §8.2.3 | MUST | A receiver | A receiver MUST count the consecutive failed opens of blobs inside the window. |  |  |
@@ -1707,7 +1705,7 @@ Source: `spec/08-notifications.md`
 | `NTF-082` | §8.3 | MUST | The settings | The settings MUST offer the high-risk configuration, which is Private notifications with the content preview off: one screen holds the two controls, and a shortcut that sets both adds nothing that the user cannot do. |  |  |
 | `NTF-083` | §8.3 | MUST | A build | A build MUST ship Instant mode with the content preview off as the default of each Profile. |  |  |
 | `NTF-084` | §8.2.3 | MUST | The client | The client MUST then establish `k_ntf_root` again at the next foreground session. |  |  |
-| `NTF-086` | §8.4.3 | MUST | A queue relay | A queue relay MUST set it to `PUSH_TTL_DIGEST` for a digest push. |  |  |
+| `NTF-086` | §8.4.3 | MUST | A queue relay | A queue relay MUST set the same `PUSH_TTL_MESSAGE` for a digest push. |  |  |
 | `NTF-087` | §8.3 | MUST | An implementation | An implementation MUST measure the wake cost of the fixed clock on a mid-range Android device, with a power monitor, before a revision re-tunes the cadence of Private mode. |  |  |
 | `NTF-088` | §8.4.1 | MUST NOT | A party that dispatches a push | A party that dispatches a push MUST NOT set a collapse key on a message push. |  |  |
 | `NTF-089` | §8.4.1 | MUST | An Android client | An Android client MUST group the tray by the conversation of `queue_alias` after the AEAD open, with a notification group of the platform. |  |  |
@@ -1744,7 +1742,7 @@ Source: `spec/08-notifications.md`
 | `NTF-120` | §8.4.1 | MUST | A client | A client MUST end the service at a lock, because a locked client holds no key that reads a queue (Part 14 rule `IMP-127`). |  |  |
 | `NTF-121` | §8.4.1 | MUST NOT | A record that arrives | A record that arrives MUST NOT start the idle time of the auto-lock again. |  |  |
 | `NTF-122` | §8.2.7 | MUST | A party | A party MUST pad each request to `NDR_REQUEST_LEN` with zero bytes, and the NDR MUST refuse a request whose padding is not zero. |  |  |
-| `NTF-123` | §8.2.7 | MUST | The plaintext of `ct_token` | The plaintext of `ct_token` MUST be a `PushToken`: carrier `0x01` is UnifiedPush and its target is the `https` URL of the endpoint, and carrier `0x02` is FCM and its target is the registration token. |  |  |
+| `NTF-123` | §8.2.7 | MUST | The plaintext of `ct_token` | The plaintext of `ct_token` MUST be a `PushToken`: carrier `0x02` is FCM and its target is the registration token. |  |  |
 | `NTF-124` | §8.2.7 | MUST | A device | A device MUST draw a fresh 32-byte removal secret for the first registration of a handle, and each later registration of that handle MUST take `SHA3-256("umbra/v1/ndr-removal" || prior)` as its removal secret, where `prior` is the secret of the registration before it. |  |  |
 | `NTF-125` | §8.2.7 | MUST | The NDR | The NDR MUST bound the `ttl` of an `NPUSH` at `PUSH_TTL_MESSAGE`, and it MUST answer `gone` and drop the registration when the provider names the target gone. |  |  |
 | `NTF-126` | §8.2 | MUST | The inner message of that OHTTP | The inner message of that OHTTP MUST be one `NdrRequest` of §8.2.7 and its response one `NdrResponse`, with no Binary HTTP around them. |  |  |
@@ -2062,10 +2060,10 @@ Source: `spec/10-relay-directory.md`
 | `REL-118` | §10.5.2 | MUST | A client | A client MUST reject a `DirectoryRoot` whose `epoch_start_unix` differs from `epoch × 3 600`. |  |  |
 | `REL-119` | §10.5.2 | MUST | A directory authority | A directory authority MUST set `bloc_hash` to the SHA3-256 over the canonical `BlocList` of §10.6.3. |  |  |
 | `REL-120` | §10.5.2 | MUST | A client | A client MUST reject a `DirectoryRoot` whose `revoked_count` is above `MEASURER_REVOKE_MAX`. |  |  |
-| `REL-121` | §10.5.1 | MUST | The nonprofit | The nonprofit MUST admit a directory authority only when a legal person operates it. |  |  |
-| `REL-122` | §10.5.1 | MUST NOT | The nonprofit | The nonprofit MUST NOT admit two directory authorities under one beneficial control. |  |  |
-| `REL-123` | §10.5.1 | MUST | The nonprofit | The nonprofit MUST place the seven authorities in three or more jurisdiction blocs of §10.6.3. |  |  |
-| `REL-124` | §10.5.1 | MUST | The nonprofit | The nonprofit MUST publish the legal person, the jurisdiction, and the bloc of each authority. |  |  |
+| `REL-121` | §10.5.1 | MUST | The nonprofit | The project MUST admit a directory authority only when a legal person operates it. |  |  |
+| `REL-122` | §10.5.1 | MUST NOT | The nonprofit | The project MUST NOT admit two directory authorities under one beneficial control. |  |  |
+| `REL-123` | §10.5.1 | MUST | The nonprofit | The project MUST place the seven authorities in three or more jurisdiction blocs of §10.6.3. |  |  |
+| `REL-124` | §10.5.1 | MUST | The nonprofit | The project MUST publish the legal person, the jurisdiction, and the bloc of each authority. |  |  |
 | `REL-125` | §10.5.1 | MUST | The directory authorities | The directory authorities MUST set `independent_count` of the `DirectoryKeySet` to the count of authorities under different beneficial control. |  |  |
 | `REL-126` | §10.5.1 | MUST | A client | A client MUST show the user a `provisional directory` state while `independent_count` is below `AUTHORITY_FLOOR`. |  |  |
 | `REL-127` | §10.5.3 | MUST | A relay | A relay MUST set `chunk_store_gib` to the store that it declares under Part 12 §12.7, in GiB. |  |  |
@@ -2120,7 +2118,7 @@ Source: `spec/10-relay-directory.md`
 | `REL-176` | §10.4.2 | MUST | A relay | A relay MUST close a partial window at the end of each consensus epoch and issue its receipt, thus a cell late in an epoch gets a receipt too. |  |  |
 | `REL-177` | §10.4.2 | MUST | A relay | A relay MUST send each receipt that it issues to the other end of that link, as the value of an `UMBRA_RECEIPT` capsule of Part 6 §6.2.1. |  |  |
 | `REL-178` | §10.4.2 | MUST | A relay that takes a receipt | A relay that takes a receipt MUST verify its signature under the `identity_pk` of `to_relay`, and it MUST compute `batch_root` over the leaves of the next `cell_count` cells that it sent on that link. |  |  |
-| `REL-179` | §10.4.2 | MUST | A relay | A relay MUST answer a `ReceiptQuery` that verifies under the key of that authority in the key set of the relay set that it holds. |  |  |
+| `REL-179` | §10.4.2 | MUST | A relay | A relay MUST answer a `ReceiptQuery` that satisfies two conditions. |  |  |
 | `REL-180` | §10.4.2 | MUST | A relay | A relay MUST refuse a query that does not verify with HTTP status 403 and no body. |  |  |
 | `REL-181` | §10.4.2 | MUST | A client | A client MUST send a report on a ready circuit whose last relay holds a verified report queue, and it MUST build no circuit for a report before the report waited `REPORT_WAIT`. |  |  |
 | `REL-182` | §10.4.2 | MUST | After that wait, a client in the foreground | After that wait, a client in the foreground MUST build one circuit to the relay of a report queue that it draws at random, at most once in each epoch, and the report goes on that circuit. |  |  |
@@ -2149,7 +2147,7 @@ Source: `spec/11-private-groups.md`
 
 | ID | Section | Key word | Binds | Requirement | Module | Test |
 | --- | --- | --- | --- | --- | --- | --- |
-| `GRP-025` | §11.6 | MUST NOT | A client | A client MUST NOT use a peer-to-peer mesh fan-out above about 20 members. |  |  |
+| `GRP-025` | §11.6 | MUST NOT | A client | A client MUST NOT use a peer-to-peer mesh fan-out for a group of any size. |  |  |
 | `GRP-035` | §11.7 | MUST | A client | A client MUST identify each record by the triple (group, sender, `msg_id`) (Part 6 §6.6). |  |  |
 | `GRP-036` | §11.7 | MUST | A client | A client MUST remove a duplicate by that triple. |  |  |
 | `GRP-037` | §11.7 | MUST NOT | A client | A client MUST NOT use a ciphertext hash as an identifier, because Part 6 §6.1.1 rule 5 prohibits that use. |  |  |
@@ -2396,7 +2394,7 @@ Source: `spec/11-private-groups.md`
 | `GRP-363` | §11.4.1 | MUST | (unstated) | A member of role `admin` or above that installs an epoch it did not credential MUST send `GKEY` for that epoch to each replica at once. |  |  |
 | `GRP-364` | §11.4.1 | MUST | (unstated) | A rotator that reads an epoch-key record for the epoch it posted, from a lower member index, MUST switch to that secret, and if it holds `own_sk` it MUST send `GKEY` with the credentials of that secret to each replica. |  |  |
 | `GRP-365` | §11.12 | MUST | For each such group, that device | For each such group, that device MUST post a `RekeyRecord` of Part 6 §6.6.3 as a group record. |  |  |
-| `GRP-366` | §11.12 | MUST | A receiver | A receiver MUST verify a `RekeyRecord` under Part 6 rule `WIR-478`, and it MUST reject a `new_index` that breaks `GRP-320`. |  |  |
+| `GRP-366` | §11.12 | MUST | A receiver | A receiver MUST verify a `RekeyRecord` under Part 6 rule `WIR-478`. |  |  |
 | `GRP-367` | §11.12 | MUST | A receiver | A receiver MUST then apply the record as a roster record: `old_index` leaves the active set, and `new_index` enters it with the new keys and the role of `old_index`. |  |  |
 | `GRP-368` | §11.12 | MUST | (unstated) | A `RekeyRecord` is a rotation trigger of §11.4.1, and the index it excludes is `old_index`. |  |  |
 | `GRP-369` | §11.12 | MUST | (unstated) | A member that verifies two `RekeyRecord`s for one `old_index` with one `previous_epoch_hash` MUST apply the record whose SHA3-256 is lower, and it MUST show the fork under `GRP-070`, because one member made two successors. |  |  |
@@ -2462,7 +2460,7 @@ Source: `spec/12-attachments.md`
 
 | ID | Section | Key word | Binds | Requirement | Module | Test |
 | --- | --- | --- | --- | --- | --- | --- |
-| `ATT-001` | §12.1 | MUST | An attachment mechanism | An attachment mechanism MUST meet the three requirements below. |  |  |
+| `ATT-001` | §12.1 | MUST | An attachment mechanism | An attachment mechanism MUST meet the four requirements below. |  |  |
 | `ATT-002` | §12.1 | MUST NOT | The mechanism | **The mechanism MUST NOT make the sender stay online** until each recipient fetches the file. |  |  |
 | `ATT-003` | §12.1 | MUST NOT | The mechanism | The mechanism MUST NOT make the sender upload the file again for each group member. |  |  |
 | `ATT-004` | §12.1 | MUST NOT | A relay | A relay MUST NOT be able to tell that two chunks belong to one file. |  |  |
@@ -2739,10 +2737,8 @@ Source: `spec/13-anti-abuse.md`
 | `ABU-086` | §13.4 | MUST NOT | An addressee client | An addressee client MUST NOT show more than `HELLO_INBOUND_LIMIT` hellos for one published entry in one epoch. |  |  |
 | `ABU-087` | §13.4 | MUST | (unstated) | If the client reaches that limit, it MUST offer the rotation of Part 9 §9.9.3 to the user. |  |  |
 | `ABU-088` | §13.4 | MUST | The client | The client MUST discard a hello above the limit after it acknowledges the record. |  |  |
-| `ABU-089` | §13.2 | MUST | A parser | A parser MUST reject kind `0x02`, which an earlier draft gave to an ARC presentation. |  |  |
-| `ABU-090` | §13.9 | MUST | The nonprofit | The nonprofit MUST publish the price of a token batch with the cost model of Part 15 §15.6.1. |  |  |
-| `ABU-091` | §13.9 | MUST NOT | The nonprofit | The nonprofit MUST NOT set that price above the recovery of the relay cost. |  |  |
-| `ABU-092` | §13.8 | MUST | That derivation | That derivation MUST be `effort = min(POW_EFFORT_MAX, backlog / POW_BACKLOG_UNIT)`, raised to the floor of the verifier where one applies, with `backlog` the count of admissions pending in that period. |  |  |
+| `ABU-089` | §13.2 | MUST | A parser | A parser MUST reject kind `0x02`, which is reserved. |  |  |
+| `ABU-092` | §13.8 | MUST | That derivation | That derivation MUST be `effort = min(POW_EFFORT_MAX, backlog / POW_BACKLOG_UNIT)`, raised to the floor of the verifier where one applies. |  |  |
 | `ABU-093` | §13.3.2 | MUST | A party | A party MUST compute `token_key_id` as `SHA3-256` over the issuer public key bytes: the 256-byte modulus of a `0x0002` key, or the 32-byte ristretto255 element of a `0x0005` key. |  |  |
 | `ABU-094` | §13.3.2 | MUST | A party | A party MUST compute `challenge_digest` as `SHA3-256` over `TokenChallenge = token_type u16 || epoch u32 || redemption_context [32]u8`, where `epoch` is the epoch number of §13.6 and `redemption_context` is the `relay_id` of one relay under §13.7, or 32 zero bytes for any relay of the type. |  |  |
 | `ABU-095` | §13.3.2 | MUST | A verifier | A verifier MUST accept a token whose `challenge_digest` names the current epoch or the one before it, with its own `relay_id` or the zero context, and MUST reject each other digest. |  |  |
@@ -2758,7 +2754,7 @@ Source: `spec/13-anti-abuse.md`
 | `ABU-105` | §13.8 | MUST | A client | A client MUST fetch the challenges from the carrier that it pinned for the manifest, and it MUST take each one under `ABU-068`, with the `identity_pk` of the entry of the verifier. |  |  |
 | `ABU-106` | §13.8.1 | MUST | A relay | A relay MUST reject a `CNEW` and a `BNEW` whose `Admission` is of kind `0x00`. |  |  |
 | `ABU-107` | §13.8.1 | MUST | One solution | One solution MUST admit at most `POW_CHUNK_ALLOWANCE` `CNEW` and `BNEW` commands at its relay, while its challenge is live under `ABU-058`. |  |  |
-| `ABU-108` | §13.8.1 | SHOULD | A client | A client SHOULD use one solution for each registration at one relay until its allowance ends or its challenge is no longer the newest. |  |  |
+| `ABU-108` | §13.8.1 | SHOULD | A client | A client SHOULD use one solution for each registration of one upload at one relay. |  |  |
 | `ABU-109` | §13.9 | MUST | The seed of each solution | The seed of each solution MUST be `SHA3-256("umbra/v1/issue-pow" BE32(epoch) || blinded)`, and its `verifier_id` MUST be `SHA3-256("umbra/v1/issue-pow" || pk)`, where `pk` is the issuer key of that epoch. |  |  |
 | `ABU-110` | §13.9 | MUST | An issuer | An issuer MUST answer the epoch of its clock and the next one only, and the next one only after its key is in the log under `ABU-098`. |  |  |
 | `ABU-111` | §13.9 | MUST | An issuer | An issuer MUST take the RSA key of `0x0002` for an epoch from the log under `ABU-098`, and it MUST answer an epoch whose key the log does not hold as stale. |  |  |
@@ -2788,8 +2784,6 @@ Source: `spec/14-implementation.md`
 | `IMP-015` | §14.2.4 | MUST | That job | That job MUST fail the build on a difference against the committed file. |  |  |
 | `IMP-016` | §14.3 | MUST | That crate | That crate MUST give byte-identical output to the portable path. |  |  |
 | `IMP-017` | §14.4 | MUST NOT | (unstated) | Key material, a passphrase, and message plaintext MUST NOT be a Kotlin `String` or `ByteArray`. |  |  |
-| `IMP-019` | §14.5.2 | MUST | (unstated) | The portable build, the AVX2 build, and the NEON build MUST serialize each cryptographic object identically, at each commit. |  |  |
-| `IMP-020` | §14.5.4 | MUST | An implementation | An implementation MUST hold a `SOUNDNESS.md` file. |  |  |
 | `IMP-021` | §14.6.2 | MUST | (unstated) | `llvm-objdump -p libumbra.so | grep LOAD` MUST show `align 214` or higher. | grep LOAD` MUST show `align 2**14` or higher. |  |  |
 | `IMP-022` | §14.6.2 | MUST | `zipalign -v -c -P 16 4` | `zipalign -v -c -P 16 4` MUST pass. |  |  |
 | `IMP-023` | §14.6.4 | MUST | A client | A client MUST derive the record key with the input set of the block above, and with no other input. |  |  |
@@ -2798,12 +2792,10 @@ Source: `spec/14-implementation.md`
 | `IMP-026` | §14.6.4 | MUST | That item | That item MUST sit under a Block Store key of its own, apart from each local wrapping key. |  |  |
 | `IMP-027` | §14.6.4 | MUST | An implementation | An implementation MUST let the user export it and delete it from the UMBRA settings. |  |  |
 | `IMP-028` | §14.6.4 | MUST NOT | That operation | That operation MUST NOT change a local storage key. |  |  |
-| `IMP-029` | §14.6.5 | MUST | Relay reputation | Relay reputation MUST come from measured behavior only. |  |  |
+| `IMP-029` | §14.6.5 | MUST | Relay reputation | Relay reputation MUST come from the mechanisms of Part 10 §10.3 and Part 10 §10.4 only. |  |  |
 | `IMP-030` | §14.6.5 | MUST NOT | Relay reputation | Relay reputation MUST NOT come from device attestation. |  |  |
 | `IMP-031` | §14.6.5 | MUST NOT | Relay reputation | Relay reputation MUST NOT come from a "genuine device" proof. |  |  |
-| `IMP-032` | §14.8 | MUST | Two independent builds | Two independent builds of the Rust core, of the Android application, and of the extension bundle MUST give the same hash. |  |  |
-| `IMP-033` | §14.8 | MUST | A minimum of one rebuilder | A minimum of one rebuilder MUST be outside the control of the nonprofit. |  |  |
-| `IMP-034` | §14.5.2 | MUST | The repository | The repository MUST vendor the NIST ACVP and CAVP corpora and the C2SP `testvectors_v1` corpus at `tests/vectors/`. |  |  |
+| `IMP-034` | §14.5.2 | MUST | The repository | The repository MUST vendor the NIST ACVP corpora of ML-KEM and ML-DSA, the C2SP CCTV vectors of ML-KEM, and the RFC 9180 and RFC 9474 vectors at `tests/vectors/`. |  |  |
 | `IMP-035` | §14.5.2 | MUST | The repository | The repository MUST hold a `tests/vectors/PROVENANCE.md` file that records the upstream commit of each corpus. |  |  |
 | `IMP-036` | §14.5.2 | MUST NOT | A test | A test MUST NOT fetch a vector at test time. |  |  |
 | `IMP-037` | §14.6.1 | MUST NOT | The FFI surface | The FFI surface MUST NOT carry message plaintext, key material, or a passphrase as a Kotlin `ByteArray` or a Kotlin `String`. |  |  |
@@ -2874,8 +2866,6 @@ Source: `spec/14-implementation.md`
 | `IMP-111` | §14.7.5 | MUST | A web client | A web client MUST apply `IMP-044` to `IMP-047` with the download location as the platform media store. |  |  |
 | `IMP-112` | §14.7.5 | MUST | A web client | A web client MUST state that the screenshot block of `IMP-058` is not available in the browser, because a browser gives no equivalent of `FLAG_SECURE`. |  |  |
 | `IMP-113` | §14.7.6 | MUST NOT | The `umbra-web` crate | The `umbra-web` crate MUST NOT add more transitive crates than its row in §14.2.3. |  |  |
-| `IMP-114` | §14.7.6 | MUST | The extension bundle | The extension bundle MUST be reproducible under §14.8, and Part 15 rule `SEC-005` names it. |  |  |
-| `IMP-115` | §14.7.6 | MUST | The web client | The web client MUST verify the inclusion proof of Part 15 rule `SEC-006` for its own bundle at each start, and it MUST refuse to unlock the store while that proof is absent. |  |  |
 | `IMP-116` | §14.6.4 | MUST | A client | A client MUST run Argon2id with one lane, a memory of 64 MiB or more, and 3 passes or more. |  |  |
 | `IMP-117` | §14.6.4 | MUST | At the creation of the store, a client | At the creation of the store, a client MUST measure one try at that floor on the device, and it MUST raise the passes until one try takes about 3 s. |  |  |
 | `IMP-118` | §14.6.4 | MUST | A passphrase change | A passphrase change MUST wrap the same `K_store` under a new `salt_pw` and a new `nonce_w`. |  |  |
@@ -2947,21 +2937,8 @@ Source: `spec/15-security-considerations.md`
 | `SEC-002` | §15.1.1 | MUST NOT | A long-lived key | A long-lived key MUST NOT authorize it. |  |  |
 | `SEC-003` | §15.3 | MAY | A client | A client MAY split the text, and this specification does not require that split. |  |  |
 | `SEC-004` | §15.4 | MUST NOT | (unstated) | local performance MUST NOT replace a relay. |  |  |
-| `SEC-005` | §15.5 | MUST | (unstated) | The rebuild of the Rust core, the Android application, the web extension bundle, and the relay MUST be byte-identical. |  |  |
-| `SEC-006` | §15.5 | MUST | The client | The client MUST verify an inclusion proof before it applies an update. |  |  |
-| `SEC-007` | §15.5 | MUST | The client | The client MUST also **gossip the log heads with peers**, thus a split view becomes detectable. |  |  |
-| `SEC-008` | §15.5 | MUST | One or more of those channels | On Android, one or more of those channels MUST be outside the control of Google. |  |  |
-| `SEC-009` | §15.5 | MUST | One or more channels | One or more channels MUST rebuild the release independently and verify it byte-for-byte against the published artifact. |  |  |
-| `SEC-010` | §15.5 | MUST NOT | An implementation | An implementation MUST NOT treat one catalog as a dependency. |  |  |
-| `SEC-011` | §15.5 | MUST | One or more channels | One or more channels MUST be able to ship a security update in 24 hours. |  |  |
-| `SEC-012` | §15.6 | MUST | The entity that controls the release signing | The entity that controls the release signing MUST hold no seat, no staff, and no asset in such a jurisdiction. |  |  |
-| `SEC-013` | §15.6 | MAY | The project | The project MAY publish a warrant canary. |  |  |
-| `SEC-014` | §15.6 | MUST NOT | The project | The project MUST NOT present a warrant canary as a control. |  |  |
-| `SEC-015` | §15.7 | SHOULD | UMBRA | UMBRA SHOULD commission a formal analysis of the handshake, the ratchet, and the group key schedule before v1.0. |  |  |
 | `SEC-016` | §15.8 | MUST | Such a change | Such a change MUST come with a specification change and a version increment. |  |  |
 | `SEC-017` | §15.8 | MUST NOT | A revision | A revision MUST NOT make a silent amendment. |  |  |
 | `SEC-018` | §15.3 | MUST | A revision that adds a residual leak | A revision that adds a residual leak MUST add a row to this table. |  |  |
 | `SEC-019` | §15.3 | MUST | A revision that removes a leak | A revision that removes a leak MUST remove its row in the same commit. |  |  |
-| `SEC-020` | §15.5 | MUST | That channel | That channel MUST serve a non-certified Android device, which is a device without the Google services. |  |  |
-| `SEC-021` | §15.5 | MUST | A rebuilder of `SEC-009` | A rebuilder of `SEC-009` MUST fetch the extension bundle from each listed store and verify it against the published artifact, because the store and not the nonprofit serves that bundle. |  |  |
 

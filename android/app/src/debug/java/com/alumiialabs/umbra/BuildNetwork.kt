@@ -95,6 +95,11 @@ object BuildNetwork {
         }
     }
 
+    /**
+     * One call runs at a time. The call writes the kept manifest, and the
+     * network thread and the restore thread both come here.
+     */
+    @Synchronized
     fun network(context: Context, client: Handle): Network? {
         imported(context)?.let { return parseNetwork(it, null) }
         // The TLS stack of the Rust side reads a file, and an asset is none.
