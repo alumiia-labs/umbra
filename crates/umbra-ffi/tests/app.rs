@@ -2228,7 +2228,38 @@ fn one_app_offers_a_group_and_the_other_app_joins_it() {
     bob.send_draft(draft).unwrap();
     let (conversation, message) = wait_for_message(&alice);
     assert_eq!(conversation, group);
-    assert_eq!(rendered(&alice, message), "still in the group");
+    assert_eq!(rendered(&alice, message.clone()), "still in the group");
+
+    // DEV-325: an admin sets the one forward policy of the group, and a
+    // member below admin sets none. The policy binds each member for the
+    // messages of each other member.
+    assert!(bob.set_forward_prohibited(joined.clone(), true).is_err());
+    alice.set_forward_prohibited(group.clone(), true).unwrap();
+    assert!(alice.forward_rules(group.clone()).unwrap().own);
+    tick_until(
+        &[&alice, &bob],
+        || bob.forward_rules(joined.clone()).unwrap().peer,
+        "the policy of the group did not arrive",
+    );
+    let found = |handle: &Handle, conversation: &[u8], text: &str| {
+        handle
+            .messages(conversation.to_vec())
+            .unwrap()
+            .into_iter()
+            .find(|message| rendered(handle, message.clone()) == text)
+            .unwrap()
+    };
+    assert_eq!(
+        bob.forward(found(&bob, &joined, "we leave at six"), joined.clone())
+            .err(),
+        Some(FfiError::Refused)
+    );
+    assert_eq!(
+        alice.forward(message, group.clone()).err(),
+        Some(FfiError::Refused)
+    );
+    bob.forward(found(&bob, &joined, "still in the group"), joined.clone())
+        .unwrap();
 
     alice.disconnect();
     bob.disconnect();
@@ -4509,6 +4540,156 @@ fn a_blocked_contact_sends_and_nothing_shows() {
     send("after");
     wait_for_text(&alice, &alice_bob, "after");
     assert!(!holds_text(&alice, &alice_bob, "while blocked"));
+    for handle in [&alice, &bob] {
+        handle.disconnect();
+    }
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// Part 7 §7.5.10: a party prohibits the forward of its messages in one
+/// conversation, and the app of the other party obeys (`DEV-321`,
+/// `DEV-322`). The surface refuses the forward, thus the rule holds below
+/// each view.
+#[test]
+fn a_party_prohibits_the_forward_of_its_messages_and_the_other_app_obeys() {
+    let (_relays, ports) = start_relays(None, None);
+    let network = network_of(&ports);
+    let directory = std::env::temp_dir().join(format!("umbra-forward-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let alice = launch(&directory, "alice.db", 1);
+    let bob = launch(&directory, "bob.db", 2);
+    for handle in [&alice, &bob] {
+        handle.clone().connect(network.clone()).unwrap();
+    }
+    alice.invite().unwrap();
+    let link = wait_for(&alice, |event| match event {
+        FfiEvent::Invitation { link } => Some(link),
+        _ => None,
+    });
+    bob.accept(link).unwrap();
+    let alice_bob = wait_for_contact(&alice);
+    let bob_alice = wait_for_contact(&bob);
+    let say = |from: &Handle, conversation: &[u8], words: &str| {
+        let draft = from.new_draft(conversation.to_vec()).unwrap();
+        draft.set_text(units(words)).unwrap();
+        from.send_draft(draft).unwrap()
+    };
+    let of_bob = say(&bob, &bob_alice, "a text of bob");
+    wait_for_text(&alice, &alice_bob, "a text of bob");
+    say(&alice, &alice_bob, "a text of alice");
+    wait_for_text(&bob, &bob_alice, "a text of alice");
+    let of_alice = bob
+        .messages(bob_alice.clone())
+        .unwrap()
+        .into_iter()
+        .find(|message| rendered(&bob, message.clone()) == "a text of alice")
+        .unwrap();
+    let rules = bob.forward_rules(bob_alice.clone()).unwrap();
+    assert!(!rules.own && !rules.peer);
+    assert!(!bob.msg_info(of_alice.clone()).unwrap().no_forward);
+
+    // Alice turns the setting on. The record is a row of the conversation
+    // of Bob, and it binds the text that came before it.
+    let change = alice
+        .set_forward_prohibited(alice_bob.clone(), true)
+        .unwrap();
+    assert_eq!(alice.msg_info(change).unwrap().forward_policy, Some(true));
+    assert!(alice.forward_rules(alice_bob.clone()).unwrap().own);
+    tick_until(
+        &[&alice, &bob],
+        || bob.forward_rules(bob_alice.clone()).unwrap().peer,
+        "the policy of Alice did not arrive",
+    );
+    let rules = bob.forward_rules(bob_alice.clone()).unwrap();
+    assert!(rules.peer && !rules.own);
+    let marks = |handle: &Handle, conversation: &[u8]| -> Vec<bool> {
+        handle
+            .messages(conversation.to_vec())
+            .unwrap()
+            .into_iter()
+            .filter_map(|message| handle.msg_info(message).unwrap().forward_policy)
+            .collect()
+    };
+    assert_eq!(marks(&bob, &bob_alice), [true]);
+    assert!(bob.msg_info(of_alice.clone()).unwrap().no_forward);
+    assert!(!bob.msg_info(of_bob.clone()).unwrap().no_forward);
+    // The forward of a message of Alice fails, and the one of his own
+    // message works.
+    assert_eq!(
+        bob.forward(of_alice.clone(), bob_alice.clone()).err(),
+        Some(FfiError::Refused)
+    );
+    bob.forward(of_bob.clone(), bob_alice.clone()).unwrap();
+    wait_for(&alice, |event| match event {
+        FfiEvent::Message { message, .. } => {
+            (alice.msg_info(message).unwrap().forward_depth == 1).then_some(())
+        }
+        _ => None,
+    });
+    // The setting of Alice binds no message of Bob on her device.
+    let from_bob = alice
+        .messages(alice_bob.clone())
+        .unwrap()
+        .into_iter()
+        .find(|message| rendered(&alice, message.clone()) == "a text of bob")
+        .unwrap();
+    assert!(!alice.msg_info(from_bob).unwrap().no_forward);
+
+    // The stored value holds across a lock of Bob.
+    bob.lock();
+    bob.unlock(units("correct horse")).unwrap();
+    assert!(bob.forward_rules(bob_alice.clone()).unwrap().peer);
+    bob.clone().connect(network.clone()).unwrap();
+    let of_alice = bob
+        .messages(bob_alice.clone())
+        .unwrap()
+        .into_iter()
+        .find(|message| rendered(&bob, message.clone()) == "a text of alice")
+        .unwrap();
+    assert_eq!(
+        bob.forward(of_alice.clone(), bob_alice.clone()).err(),
+        Some(FfiError::Refused)
+    );
+
+    // Alice turns the setting off, and the forward works.
+    alice
+        .set_forward_prohibited(alice_bob.clone(), false)
+        .unwrap();
+    tick_until(
+        &[&alice, &bob],
+        || !bob.forward_rules(bob_alice.clone()).unwrap().peer,
+        "the second policy of Alice did not arrive",
+    );
+    assert_eq!(marks(&bob, &bob_alice), [true, false]);
+    bob.forward(of_alice, bob_alice.clone()).unwrap();
+    wait_for(&alice, |event| match event {
+        FfiEvent::Message { message, .. } => {
+            (rendered(&alice, message) == "a text of alice").then_some(())
+        }
+        _ => None,
+    });
+
+    // DIS-017, DIS-018: the picture that Bob gives Alice stays with Bob.
+    let picture = {
+        let mut bytes = vec![
+            0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0xC0, 0x00, 0xC0,
+        ];
+        bytes.extend([0x01, 0x01, 0x11, 0x00, 0xFF, 0xD9]);
+        bytes
+    };
+    assert!(bob.contact_picture(bob_alice.clone()).unwrap().is_empty());
+    bob.set_contact_picture(bob_alice.clone(), picture.clone())
+        .unwrap();
+    assert_eq!(bob.contact_picture(bob_alice.clone()).unwrap(), picture);
+    assert_eq!(
+        bob.set_contact_picture(bob_alice.clone(), vec![0; 7_000]),
+        Err(FfiError::TooLong)
+    );
+    bob.set_contact_picture(bob_alice.clone(), Vec::new())
+        .unwrap();
+    assert!(bob.contact_picture(bob_alice.clone()).unwrap().is_empty());
+
     for handle in [&alice, &bob] {
         handle.disconnect();
     }

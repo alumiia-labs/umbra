@@ -140,7 +140,9 @@ const INDEX_VALUE_LEN: usize = 1 + 16 + 32;
 /// timer of its conversation goes (`DEV-215`). The published entries go
 /// with their rendezvous queues, thus a restored handle keeps its current
 /// `r` (`IDN-108`); blocks and held handle keys go as the user set them.
-const BACKED_UP: [TableId; 37] = [
+/// The forward policy and the pet-avatar of each contact go too, thus a
+/// restore and a link keep them (`DEV-324`, `DEV-328`).
+const BACKED_UP: [TableId; 39] = [
     super::files::FILE_STATE,
     TableId::MESSAGE,
     TableId::TOMBSTONE,
@@ -178,6 +180,8 @@ const BACKED_UP: [TableId; 37] = [
     super::discovery::RENDEZVOUS_STATE,
     super::block::BLOCKED,
     super::held_handles::HELD_HANDLES,
+    super::forward::FORWARD_POLICY,
+    super::pictures::PET_AVATARS,
 ];
 
 /// A backup object that is due: its bytes, which go up as a file of the

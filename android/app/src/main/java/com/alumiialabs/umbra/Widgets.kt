@@ -575,9 +575,21 @@ fun BrandHero() {
     }
 }
 
-/** A letter on a pastel ground. The ground comes from the conversation. */
+/**
+ * The picture that the user gave a contact (Part 9 §9.8), or a letter on a
+ * pastel ground. The ground comes from the conversation.
+ */
 @Composable
 fun Avatar(chat: Chat, size: Int = 44) {
+    val picture = chat.picture
+    if (picture != null) {
+        androidx.compose.foundation.Image(
+            picture,
+            contentDescription = null,
+            modifier = Modifier.size(size.dp).clip(CircleShape),
+        )
+        return
+    }
     // A group with no name shows the icon of a group and no letter.
     val icon = if (chat.isGroup && chat.name.isEmpty()) "user-group" else null
     LetterAvatar(chat.name, chat.conversation.hashCode(), size, icon)
@@ -696,6 +708,7 @@ fun BackBar(
     onBack: () -> Unit,
     isVerified: Boolean = false,
     onTitle: (() -> Unit)? = null,
+    leading: (@Composable () -> Unit)? = null,
     actions: @Composable () -> Unit = {},
 ) {
     Row(
@@ -709,27 +722,36 @@ fun BackBar(
         // the title keeps its place.
         val shade = Modifier.weight(1f).outsetStart(TitleOutset)
         val titleArea = if (onTitle == null) shade else shade.press(role = Role.Button, onClick = onTitle)
-        Column(titleArea.padding(horizontal = TitleInset, vertical = 6.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    title,
-                    style = MaterialTheme.typography.titleLarge,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
-                )
-                if (isVerified) {
-                    Spacer(Modifier.width(8.dp))
-                    FaIcon("shield-check", label = "Verified", size = 16.dp, tint = Palette.Action)
-                }
+        Row(
+            titleArea.padding(horizontal = TitleInset, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (leading != null) {
+                leading()
+                Spacer(Modifier.width(10.dp))
             }
-            subtitle?.let {
-                Text(
-                    it,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = Palette.TextSecondary,
-                    modifier = Modifier.subline(),
-                )
+            Column {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        title,
+                        style = MaterialTheme.typography.titleLarge,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    if (isVerified) {
+                        Spacer(Modifier.width(8.dp))
+                        FaIcon("shield-check", label = "Verified", size = 16.dp, tint = Palette.Action)
+                    }
+                }
+                subtitle?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Palette.TextSecondary,
+                        modifier = Modifier.subline(),
+                    )
+                }
             }
         }
         actions()

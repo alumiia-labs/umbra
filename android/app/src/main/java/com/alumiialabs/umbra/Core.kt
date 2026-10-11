@@ -28,6 +28,7 @@ import uniffi.umbra_ffi.FfiRosterNote
 import uniffi.umbra_ffi.FfiPoll
 import uniffi.umbra_ffi.FfiEvent
 import uniffi.umbra_ffi.FfiException
+import uniffi.umbra_ffi.ForwardRules
 import uniffi.umbra_ffi.PublicLink
 import uniffi.umbra_ffi.FfiGroupMember
 import uniffi.umbra_ffi.FfiGroupOffer
@@ -102,6 +103,15 @@ class Quoted(
     val sender: UShort? = null,
 )
 
+/** The word of the interface for a file with no text: its kind, or its name. */
+fun fileWord(file: uniffi.umbra_ffi.MsgFile): String = when (file.mimeClass) {
+    CLASS_IMAGE -> "Photo"
+    CLASS_VIDEO -> "Video"
+    CLASS_VOICE -> "Voice message"
+    CLASS_AUDIO -> file.name ?: "Audio"
+    else -> file.name ?: "File"
+}
+
 /**
  * One row of the chat list and of the contact list. The name is a label of
  * the user. The preview is message text, thus it stays a `CharArray`.
@@ -111,6 +121,10 @@ class Chat(
     val name: String,
     val preview: CharArray?,
     val isPreviewOutgoing: Boolean,
+    /** Whether the newest message answers a message (Part 6 §6.6.5). */
+    val isPreviewReply: Boolean = false,
+    /** The picture that the user gave the contact, or null (Part 9 §9.8). */
+    val picture: androidx.compose.ui.graphics.ImageBitmap? = null,
     val lastAtMs: Long,
     val unread: Int,
     val isVerified: Boolean,
@@ -1388,6 +1402,8 @@ object Core {
                 decoding.clear()
                 VoicePlayer.stop()
                 previews.clear()
+                // A picture of a contact is private data of the user.
+                on(worker) { pictures.clear() }
                 // IMP-161: a draft that waits holds its file in the clear.
                 cancelSend()
                 online = false
@@ -2083,6 +2099,41 @@ object Core {
     fun setReceipts(conversation: Conversation, settings: Receipts) =
         call { it.setReceiptSettings(conversation.id, settings) }
 
+    /** The forward policy of a conversation (Part 7 §7.5.10). */
+    fun forwardRules(conversation: Conversation, onLoaded: (ForwardRules) -> Unit) = call { client ->
+        val rules = client.forwardRules(conversation.id)
+        main.post { onLoaded(rules) }
+    }
+
+    /** Sets the forward policy of the user, and the change goes to each party. */
+    fun setForwardProhibited(conversation: Conversation, isOn: Boolean) = call { client ->
+        client.setForwardProhibited(conversation.id, isOn)
+        main.post { revision++ }
+        refreshChats()
+    }
+
+    /**
+     * Encodes a picked image anew as the picture of a contact (`DIS-195`).
+     * A null source removes the picture. The bytes go from the picker to
+     * the store, and the device holds no file of them (`DIS-196`).
+     */
+    fun setContactPicture(context: Context, conversation: Conversation, source: android.net.Uri?) {
+        val app = context.applicationContext
+        call { client ->
+            val picture = if (source == null) {
+                ByteArray(0)
+            } else {
+                Photos.profilePicture(app, source) ?: run {
+                    main.post { fault = "That image did not open." }
+                    return@call
+                }
+            }
+            client.setContactPicture(conversation.id, picture)
+            picture.fill(0)
+            refreshChats()
+        }
+    }
+
     /** The timer of a conversation (Part 7 §7.5.8). */
     fun timer(conversation: Conversation, onLoaded: (ConversationTimer) -> Unit) = call { client ->
         val timer = client.conversationTimer(conversation.id)
@@ -2679,15 +2730,7 @@ object Core {
                 val of = client.msgInfo(target)
                 // The quote of a file is a word of the interface, or its name.
                 val quotedFile = of.file
-                if (quotedFile != null && !of.deleted) {
-                    quoted.chars = when (quotedFile.mimeClass) {
-                        CLASS_IMAGE -> "Photo"
-                        CLASS_VIDEO -> "Video"
-                        CLASS_VOICE -> "Voice message"
-                        CLASS_AUDIO -> quotedFile.name ?: "Audio"
-                        else -> quotedFile.name ?: "File"
-                    }.toCharArray()
-                }
+                if (quotedFile != null && !of.deleted) quoted.chars = fileWord(quotedFile).toCharArray()
                 Quoted(target.key().toList(), of.outgoing, quoted.chars, of.sender)
             }
             val poll = if (info.poll && !info.deleted) client.pollView(message) else null
@@ -2710,11 +2753,15 @@ object Core {
         val last = summary.lastMessage
         val sink = CharSink()
         var isOutgoing = false
+        var isReply = false
         last?.use {
             // A record of a kind with no text gives no preview.
             try {
                 val info = client.msgInfo(it)
                 isOutgoing = info.outgoing
+                // A placeholder and a hidden message show no property of
+                // the record.
+                isReply = info.isReply && !info.deleted && info.moderation != MOD_HIDE
                 // The words of a placeholder are words of the interface.
                 when {
                     info.deleted -> sink.chars = "Message deleted".toCharArray()
@@ -2722,13 +2769,8 @@ object Core {
                     // outside its conversation.
                     info.moderation == MOD_HIDE -> sink.chars = "Hidden message".toCharArray()
                     info.timer != null -> sink.chars = timerPreview(info.timer!!).toCharArray()
-                    info.file != null -> sink.chars = when (info.file?.mimeClass) {
-                        CLASS_IMAGE -> "Photo"
-                        CLASS_VIDEO -> "Video"
-                        CLASS_VOICE -> "Voice message"
-                        CLASS_AUDIO -> info.file?.name ?: "Audio"
-                        else -> info.file?.name ?: "File"
-                    }.toCharArray()
+                    info.forwardPolicy != null -> sink.chars = forwardPreview(info.forwardPolicy!!).toCharArray()
+                    info.file != null -> sink.chars = fileWord(info.file!!).toCharArray()
                     else -> client.msgRender(it, sink)
                 }
             } catch (noText: FfiException) {
@@ -2745,6 +2787,8 @@ object Core {
             name = summary.name,
             preview = sink.chars.takeIf { last != null },
             isPreviewOutgoing = isOutgoing,
+            isPreviewReply = isReply,
+            picture = if (group == null) pictureOf(client, summary.conversation) else null,
             lastAtMs = summary.lastAtMs.toLong(),
             unread = summary.unread.toInt(),
             isVerified = summary.verified,
@@ -2761,6 +2805,28 @@ object Core {
             isUnreachable = group?.isUnreachable ?: false,
             isClockSuspect = group?.isClockSuspect ?: false,
         )
+    }
+
+    /**
+     * The decoded picture of each contact, under its conversation, with the
+     * hash of its bytes. The worker thread alone reads and writes it, and a
+     * lock clears it.
+     */
+    private val pictures = HashMap<List<Byte>, Pair<Int, androidx.compose.ui.graphics.ImageBitmap>>()
+
+    /** The picture of a contact, decoded one time for each value. */
+    private fun pictureOf(client: Handle, conversation: ByteArray): androidx.compose.ui.graphics.ImageBitmap? {
+        val key = conversation.toList()
+        val bytes = client.contactPicture(conversation)
+        if (bytes.isEmpty()) {
+            pictures.remove(key)
+            return null
+        }
+        val hash = bytes.contentHashCode()
+        pictures[key]?.let { (held, image) -> if (held == hash) return image }
+        val image = Photos.profileImage(bytes) ?: return null
+        pictures[key] = hash to image
+        return image
     }
 
     private fun call(action: (Handle) -> Unit) = on(worker, action)

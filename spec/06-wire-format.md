@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 6: Wire Format and Encoding
 
 **Status:** Draft
-**Version:** 0.18.7
-**Date:** 2026-10-10
+**Version:** 0.19.0
+**Date:** 2026-10-11
 
 ---
 
@@ -1721,6 +1721,7 @@ client MUST NOT copy that raw value into a different row.
 | `0x36` | Verification commit (Part 4 §4.5.2) | Ephemeral |
 | `0x37` | Verification reveal (Part 4 §4.5.2) | Ephemeral |
 | `0x38` | Renewal guard (§6.6.12, Part 3 §3.2.6) | Control |
+| `0x39` | Forward policy (§6.6.13, Part 7 §7.5.10) | Control |
 
 **[WIR-362]** A parser MUST reject a body of kind `0x36` whose length is
 not 64, and a body of kind `0x37` whose length is not 32. Part 4 §4.5.2 gives
@@ -1798,6 +1799,7 @@ For kind `0x10` the body is a `GroupControl`, and §6.6.3 gives that structure.
 For kind `0x31` the body is a `DigestBody`, and §6.6.4 gives that structure.
 For kind `0x33` the body is a `QueueAddress`, and §6.6.10 gives that structure.
 For kind `0x38` the body is a `RenewalGuard`, and §6.6.12 gives that structure.
+For kind `0x39` the body is a `ForwardPolicy`, and §6.6.13 gives that structure.
 
 **[WIR-433]** A parser MUST reject a `kind` or an `inner_kind` that the
 table above does not list, and one that the table marks as reserved.
@@ -2401,6 +2403,8 @@ PollVote {
 | --- | --- |
 | `POLL_QUESTION_MAX` | 200 bytes of `question` |
 | `POLL_OPTION_TEXT_MAX` | 100 bytes of option `text` |
+| `POLL_OPEN_MIN` | 300 s, the shortest `open_seconds` that a sender sets |
+| `POLL_OPEN_MAX` | 2 592 000 s, which is 30 days, the longest `open_seconds` that a sender sets |
 
 A poll at `POLL_QUESTION_MAX`, at `POLL_OPTION_MAX`, and at
 `POLL_OPTION_TEXT_MAX` is 8 + 200 + 12 × 101 = 1 420 bytes. Inside a
@@ -2424,6 +2428,10 @@ table. A vote at `POLL_OPTION_MAX` is 30 bytes, thus each vote fits bucket
 - **[WIR-187]** A receiver MUST measure `open_seconds` from its own local
   receive time of the poll. **[WIR-188]** A receiver MUST NOT use `sent_at` for
   that measurement, and `WIR-076` states the same rule.
+- **[WIR-557]** A sender MUST set `open_seconds` to 0, or to a value from
+  `POLL_OPEN_MIN` to `POLL_OPEN_MAX`. A client MAY let the user select each
+  period in that range. A receiver MUST take each value of the field, and
+  it applies no bound.
 - **[WIR-189]** A receiver MUST discard a vote that arrives after the period
   closed. **[WIR-190]** A receiver MUST count one vote for each sender, and it
   MUST take the last vote of that sender by the sender-chain position of Part 11
@@ -2782,6 +2790,37 @@ device in the `RenewalRecord` of §6.4.2 alone.
 > other party of a channel can set the guard of a peer. The `guard_seq` of 0
 > is the value of no guard in a `RenewalRecord` and in the sync item of
 > Part 7 rule `DEV-319`, thus no guard record holds it.
+
+### 6.6.13 The forward policy
+
+A forward policy is the request of a party that no client forwards its
+messages of one conversation. Part 7 §7.5.10 gives the rules of the setting,
+its order, and its limits. This section gives the structure and the parser
+rules.
+
+```
+ForwardPolicy {                   // kind 0x39, 6 bytes
+    version         u8            // 0x01
+    seq             u32           // the counter of the setting, from 1
+    prohibits       u8            // 0x01 no forward, 0x00 the forward is free
+}
+```
+
+As the body of an `AppMessage` of kind `0x39` the record is 36 bytes, thus it
+uses bucket `B0`. A pairwise channel carries the record, and a group record of
+Part 11 §11.3 carries it as its `app`.
+
+1. **[WIR-555]** A parser MUST reject a `ForwardPolicy` whose `version` is not
+   `0x01`, a body of kind `0x39` whose `body_len` is not 6, a `seq` of 0, and
+   a `prohibits` other than `0x00` and `0x01`.
+2. **[WIR-556]** A sender MUST set `seq` to one above the highest `seq` that
+   it holds for the policy that the record changes. The first record of a
+   policy carries a `seq` of 1.
+
+> *Cause.* The counter gives the order of two records with no clock, as
+> `WIR-076` requires. Part 7 rule `DEV-323` applies the order. A `seq` of 0
+> is the stored value of a direction that took no record, thus no record
+> holds it.
 
 ## 6.7 Version negotiation
 

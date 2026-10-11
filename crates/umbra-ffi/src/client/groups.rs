@@ -3333,6 +3333,20 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         } else {
             None
         };
+        // DEV-325: a device of an admin sets the forward policy, and no
+        // other.
+        let policy = if parsed.kind == AppKind::ForwardPolicy {
+            let group = self.group_of(conversation)?;
+            if group.own_role().is_none_or(|role| role < Role::Admin) {
+                return Ok(());
+            }
+            let Ok(policy) = umbra_wire::app::signal::ForwardPolicy::parse(parsed.body) else {
+                return Ok(());
+            };
+            Some(policy)
+        } else {
+            None
+        };
         let open = self.open_ref()?;
         let reference = super::msg_ref(&open.device_set_key, &parsed.msg_id);
         let natural = [conversation.0.as_slice(), &reference].concat();
@@ -3371,6 +3385,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 rng,
             )?;
             return Ok(());
+        }
+        // DEV-323: an older policy changes nothing and is no row.
+        if let Some(policy) = policy {
+            if !self.take_group_forward_policy(conversation, &policy, rng)? {
+                return Ok(());
+            }
         }
         self.store_synced_group(conversation, app, now_ms, rng)?;
         if parsed.kind == AppKind::Poll {
@@ -5824,6 +5844,24 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     } else {
                         None
                     };
+                    // DEV-325: a policy record of a member below admin
+                    // goes, and so does one that is older than the policy
+                    // of the group (`DEV-323`).
+                    if parsed.kind == AppKind::ForwardPolicy {
+                        let is_admin = group
+                            .roster()
+                            .member(sender)
+                            .is_some_and(|member| member.role >= Role::Admin);
+                        let Ok(policy) = umbra_wire::app::signal::ForwardPolicy::parse(parsed.body)
+                        else {
+                            continue;
+                        };
+                        if !is_admin
+                            || !self.take_group_forward_policy(conversation, &policy, rng)?
+                        {
+                            continue;
+                        }
+                    }
                     let stored = self.store_group_message(conversation, &app, now_ms, rng)?;
                     if let Some(message) = stored {
                         let is_recovered =

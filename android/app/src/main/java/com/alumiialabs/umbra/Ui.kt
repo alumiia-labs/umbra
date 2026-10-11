@@ -570,14 +570,20 @@ private fun ChatRowContent(chat: Chat) {
                 overflow = TextOverflow.Ellipsis,
             )
             chat.preview?.let {
-                PlatformText(
-                    it,
-                    Palette.TextSecondary,
-                    modifier = Modifier.subline(),
-                    sizeSp = 13f,
-                    maxLines = 1,
-                    prefix = if (chat.isPreviewOutgoing) "You: " else "",
-                )
+                Row(Modifier.subline(), verticalAlignment = Alignment.CenterVertically) {
+                    // Part 6 §6.6.5: the newest message answers a message.
+                    if (chat.isPreviewReply) {
+                        FaIcon("reply", label = "Reply", size = 11.dp, tint = Palette.TextSecondary)
+                        Spacer(Modifier.width(5.dp))
+                    }
+                    PlatformText(
+                        it,
+                        Palette.TextSecondary,
+                        sizeSp = 13f,
+                        maxLines = 1,
+                        prefix = if (chat.isPreviewOutgoing) "You: " else "",
+                    )
+                }
             }
         }
         Spacer(Modifier.width(8.dp))

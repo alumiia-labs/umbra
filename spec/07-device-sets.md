@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 7: Device Sets, History Sync, and Revocation
 
 **Status:** Draft
-**Version:** 0.18.7
-**Date:** 2026-10-10
+**Version:** 0.19.0
+**Date:** 2026-10-11
 
 ---
 
@@ -937,7 +937,7 @@ class in Part 6 §6.6. **[DEV-022]** A client MUST NOT process a kind that decla
 | Peer signal | `0x06`, `0x07` | Part 3 §3.5.4 gives the rules. **[DEV-023]** A client MUST NOT put a peer signal on a sync channel |
 | Mutable state | `0x20` sub-kind `0x01` | The last writer wins, under `DEV-270` |
 | Ephemeral | `0x08` | The client does not store it |
-| Control | `0x0D`, `0x10`, `0x20` sub-kind `0x02`, `0x30`, `0x31`, `0x32`, `0x33`, `0x34`, `0x35`, `0x38` | Part 4 §4.7.3 gives `0x0D`. Part 11 gives `0x10`. §7.5.5 gives `0x20` sub-kind `0x02`, which is the sync acknowledgment. Part 4 §4.5.1 gives `0x30`. Part 9 §9.5.3 gives `0x31`. §7.5.8 gives `0x32`. Part 6 §6.6.10 gives `0x33`. Part 6 §6.6.11 gives `0x34` and `0x35`. Part 6 §6.6.12 gives `0x38` |
+| Control | `0x0D`, `0x10`, `0x20` sub-kind `0x02`, `0x30`, `0x31`, `0x32`, `0x33`, `0x34`, `0x35`, `0x38`, `0x39` | Part 4 §4.7.3 gives `0x0D`. Part 11 gives `0x10`. §7.5.5 gives `0x20` sub-kind `0x02`, which is the sync acknowledgment. Part 4 §4.5.1 gives `0x30`. Part 9 §9.5.3 gives `0x31`. §7.5.8 gives `0x32`. Part 6 §6.6.10 gives `0x33`. Part 6 §6.6.11 gives `0x34` and `0x35`. Part 6 §6.6.12 gives `0x38`. §7.5.10 gives `0x39` |
 | Wrapper | `0x09`, and `0x20` sub-kind `0x03` | Part 6 §6.6.5 gives the rich record, and `DEV-268` gives the synced record. Kind `0x12` of Part 6 §6.6.2 is reserved; a group content record is the `app` of a group record of Part 11 §11.3, and its own kind gives its class. **[DEV-174]** A client MUST take the class from `inner_kind`. **[DEV-175]** A client MUST NOT give a wrapper a class of its own |
 
 - **Insertion** is commutative. **[DEV-024]** A client MUST identify each message by the
@@ -1073,6 +1073,19 @@ class in Part 6 §6.6. **[DEV-022]** A client MUST NOT process a kind that decla
   MUST move the state of its copy up only, and it MUST take a failure for a
   copy that no receipt reached. A message that another device handed to
   the owner thus shows its receipts on the device that composed it.
+
+  **[DEV-327]** A device MUST publish the item of the pet-avatar of a
+  contact when the user sets, changes, or removes that picture. The item
+  takes the subject of `DEV-226` as its key. Its value is the picture of
+  Part 9 rule `DIS-195`, or no byte for a removal. A receiver MUST reject a
+  value above `PET_AVATAR_MAX` and a value that `DIS-195` does not permit.
+  The last writer wins under `DEV-270`, thus the newest change holds on
+  each device, a removal included. One `MutableItem` with the largest value
+  goes in one cell of bucket `B2`, thus the item needs no chunk path.
+  **[DEV-328]** The backup of Part 4 §4.7.2 and the snapshot of a link
+  (`DEV-004`) MUST carry the pet-avatar of each contact. A restore and a new
+  device then show each picture. The cost is `PET_AVATAR_MAX` for each
+  contact at the most, which is about 0.6 MiB for 100 contacts.
 
   **[DEV-298]** The device that owns the channels MUST publish the state of
   each group that it makes or joins while the set holds another device, when
@@ -1814,6 +1827,62 @@ setting that decides **what the device shows**, and it is per conversation.
 > A `mentions` setting needs the mention list of Part 6 §6.6.5, and that list is
 > inside the AEAD of the conversation. Thus the relay and the Notification
 > Delivery Relay of Part 8 learn nothing from this setting.
+
+### 7.5.10 The forward policy
+
+A party can ask that no client forwards its messages of one conversation.
+Part 6 §6.6.13 gives the record. **The policy is a request to a conformant
+client, and it is not an enforcement.**
+
+**The setting of each party.**
+
+- **[DEV-321]** Each party of a pairwise conversation MAY set a forward
+  policy for the messages that it sends in that conversation. A client MUST
+  send each change of that policy to the other party as a record of kind
+  `0x39` under the ratchet. A conversation with no record prohibits no
+  forward.
+- **[DEV-322]** While the newest policy of the other party prohibits the
+  forward, a client MUST NOT offer the forward of a message of that party
+  in that conversation, and it MUST refuse each request for such a forward.
+  The policy binds each message of that party that the client holds, a
+  message that came before the record included. A client MUST make the
+  check below the interface, thus no view is a path around it. The policy
+  of a party binds no message that the client itself sent.
+- **[DEV-323]** A client MUST hold the newest policy of each direction of a
+  conversation, and the two directions are independent. A client MUST apply
+  a record whose `seq` is above the `seq` that it holds for that direction.
+  At an equal `seq` it MUST apply a record that prohibits the forward when
+  the held value does not. It MUST discard each other record.
+- **[DEV-324]** A client MUST show a policy change as a record in the
+  conversation, as `DEV-207` requires for a timer change. The sync channel
+  carries the record as a `SyncedRecord` under `DEV-268` and `DEV-293`, and
+  the `author` of that copy gives the direction. Thus each device of a set
+  holds the two policies, and each device obeys `DEV-322`. The backup of
+  Part 4 §4.7.2 and the snapshot of a link MUST carry the held policy.
+
+> *Cause.* Two devices of one user can change the setting at one counter.
+> The prohibition wins at an equal counter, thus each device and the other
+> party converge on one value with no clock. That value is the more careful
+> one of the two. A record that arrives a second time, or after a newer
+> one, changes nothing.
+
+**The policy in a group.** A private group holds one policy. **[DEV-325]** A
+member below the `admin` role of Part 11 §11.9 MUST NOT set the forward
+policy of a private group, and a member MUST reject a policy record from a
+member below that role. The policy of a group binds each member for the
+messages of each other member. `DEV-323` gives the order of two records.
+
+**What the policy does not do.**
+
+- **[DEV-326]** A client MUST NOT show the policy as an enforcement. The
+  interface MUST state that a person can copy a message or take a
+  screenshot of it.
+- A client that does not conform ignores the record. The device of the other
+  party holds the plaintext, and UMBRA cannot reach a device that the user
+  does not control. `DEV-217` states the same limit for a timer.
+- The policy stops no copy of the text, no screenshot, and no save of a
+  file. Part 15 §15.3 holds the row.
+- In v1 the policy covers the forward of Part 6 §6.6.5 and no other action.
 
 ## 7.6 What contacts see
 

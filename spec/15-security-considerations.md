@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 15: Security Considerations and Known Limitations
 
 **Status:** Draft
-**Version:** 0.18.7
-**Date:** 2026-10-10
+**Version:** 0.19.0
+**Date:** 2026-10-11
 
 ---
 
@@ -270,6 +270,7 @@ that browser. UMBRA accepts this residual, and §15.3 holds the row.
 | A measurer whose capacity holds a part of a slot measures a cluster in more slots, thus more relays of that cluster stay outside each slot and can lend capacity | The directory authority, as an inflated class | Part 10 §10.3. The launch network is such a case: a slot of two relays for a cluster of six. The one operator of that network runs each relay, and it gains nothing from a false class of its own relay. UMBRA accepts this residual for the launch |
 | The typed text of each message, and the passphrase, at the input method | A7, as the input method | Part 14 §14.6.6. `IMP-057` sets the no-learning flag. The input method is a process that the user selected, and UMBRA cannot replace it. UMBRA accepts this residual |
 | Each rendered message, at an enabled accessibility service | A7, as an accessibility service | Part 14 §14.6.6. `IMP-060` keeps the accessibility tree whole, because a hidden message is a hidden conversation for a user that cannot see the screen. The user enables each such service. UMBRA accepts this residual |
+| A message of a party that prohibits the forward, at each place that the other party moves it to | The other party, and each party that it gives the message to | Part 7 §7.5.10. `DEV-322` binds a conformant client, and a changed client ignores the record. A copy of the text, a screenshot, and a save of a file stay possible on each client. `DEV-326` keeps the interface from a claim of enforcement. UMBRA accepts this residual |
 | A saved file and a screenshot, at each platform service | A7, as the platform cloud service | Part 14 §14.6.6. `IMP-045` makes the save an explicit action on one file, and `IMP-046` warns before the first one. `IMP-058` offers a screenshot block for one conversation on Android. UMBRA accepts this residual |
 | A page image below the file system, at the flash layer | A6, with the flash chips | Part 14 §14.6.4. `IMP-042` and `IMP-043` overwrite a freed page and truncate the log. The flash translation layer keeps an old page that no file system call reaches. The record key of that page is a value that `IMP-041` overwrote, thus the page opens under no key. UMBRA accepts this residual |
 | The rebuild timing of a circuit, from a drop of each cell of that circuit | An active A2 or A3 | Part 3 §3.11.1. `CIRCUIT_MAX_AGE` of 4 hours makes a rebuild normal, and the loop cover of Part 3 §3.6.1 measures the drop. UMBRA accepts this residual |

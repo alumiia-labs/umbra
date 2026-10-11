@@ -95,6 +95,12 @@ pub(super) fn vote_target(body: &[u8]) -> Option<[u8; 16]> {
     body.get(1..17).and_then(|b| b.try_into().ok())
 }
 
+/// `POLL_OPEN_MIN` of Part 6 §6.6.6: the shortest period of a poll that
+/// this client sends, in seconds.
+pub const POLL_OPEN_MIN: u32 = 300;
+/// `POLL_OPEN_MAX`: the longest such period, in seconds.
+pub const POLL_OPEN_MAX: u32 = 30 * 86_400;
+
 impl<B: Backend, E: SecureElement> Client<B, E> {
     /// The poll row of a message, its app bytes, and its conversation.
     fn poll_record(&self, poll: &MsgRef) -> Result<(ConversationId, Zeroizing<Vec<u8>>), Error> {
@@ -245,6 +251,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         // A poll that hides its count until the close needs a close.
         if hidden && open_seconds == 0 {
+            return Err(Error::Malformed);
+        }
+        // WIR-557: no period, or one inside the two bounds.
+        if open_seconds != 0 && !(POLL_OPEN_MIN..=POLL_OPEN_MAX).contains(&open_seconds) {
             return Err(Error::Malformed);
         }
         let poll = Poll {

@@ -99,6 +99,8 @@ pub enum AppKind {
     VerifyReveal = 0x37,
     /// A `RenewalGuard` of Part 3 §3.2.6, 36 bytes.
     RenewalGuard = 0x38,
+    /// A `ForwardPolicy` of §6.6.13, 6 bytes.
+    ForwardPolicy = 0x39,
 }
 
 impl AppKind {
@@ -129,6 +131,7 @@ impl AppKind {
             0x36 => AppKind::VerifyCommit,
             0x37 => AppKind::VerifyReveal,
             0x38 => AppKind::RenewalGuard,
+            0x39 => AppKind::ForwardPolicy,
             _ => return Err(Error::Malformed),
         })
     }
@@ -156,7 +159,8 @@ impl AppKind {
             | AppKind::QueueAddress
             | AppKind::KeyRequest
             | AppKind::KeySupply
-            | AppKind::RenewalGuard => Class::Control,
+            | AppKind::RenewalGuard
+            | AppKind::ForwardPolicy => Class::Control,
         }
     }
 }
@@ -263,6 +267,10 @@ pub(crate) fn check_body(kind: AppKind, body: &[u8], channel: Channel) -> Result
         {
             return Err(Error::Malformed);
         }
+        // WIR-555: the one length of a forward policy.
+        AppKind::ForwardPolicy if body.len() != signal::FORWARD_POLICY_LEN => {
+            return Err(Error::Malformed);
+        }
         _ => {}
     }
     Ok(())
@@ -316,7 +324,7 @@ mod tests {
         out[1] = 0x12;
         assert!(AppMessage::parse(&out, Channel::Pairwise).is_err());
         // A kind that the table does not list fails (`WIR-433`).
-        for unlisted in [0x0E, 0x0F, 0x11, 0x39] {
+        for unlisted in [0x0E, 0x0F, 0x11, 0x3A] {
             out[1] = unlisted;
             assert!(AppMessage::parse(&out, Channel::Group).is_err());
         }
@@ -329,6 +337,25 @@ mod tests {
         assert!(AppMessage::parse(&out, Channel::Pairwise).is_err());
         out[0] = 0x01;
         assert!(AppMessage::parse(&out, Channel::Pairwise).is_err());
+    }
+
+    #[test]
+    fn a_forward_policy_has_one_length_on_each_channel() {
+        for (len, is_taken) in [(5, false), (6, true), (7, false)] {
+            let body = vec![1u8; len];
+            let msg = AppMessage {
+                kind: AppKind::ForwardPolicy,
+                msg_id: [2; 16],
+                sent_at: 0,
+                body: &body,
+            };
+            let mut out = vec![0u8; msg.len()];
+            msg.encode(&mut out).unwrap();
+            // WIR-555: the length, on a pairwise channel and in a group.
+            for channel in [Channel::Pairwise, Channel::Group] {
+                assert_eq!(AppMessage::parse(&out, channel).is_ok(), is_taken);
+            }
+        }
     }
 
     #[test]

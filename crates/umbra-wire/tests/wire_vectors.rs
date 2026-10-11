@@ -48,8 +48,8 @@ use umbra_wire::{
         rich::RichRecord,
         share::{ContactShare, ShareType},
         signal::{
-            encode_timer, parse_timer, ReactionAction, ReactionBody, ReceiptBody, TypingState,
-            TIMER_VALUES,
+            encode_timer, parse_timer, ForwardPolicy, ReactionAction, ReactionBody, ReceiptBody,
+            TypingState, FORWARD_POLICY_LEN, TIMER_VALUES,
         },
         AppKind, AppMessage, Channel,
     },
@@ -1031,6 +1031,35 @@ fn app_bodies() -> Value {
     put("receipt_9", n, &buf);
     let n = encode_timer(TIMER_VALUES[8], &mut buf).unwrap();
     put("timer_90d", n, &buf);
+    // WIR-555: the two flags of a forward policy.
+    for (name, policy) in [
+        (
+            "forward_policy_on",
+            ForwardPolicy {
+                seq: 1,
+                prohibits: true,
+            },
+        ),
+        (
+            "forward_policy_off",
+            ForwardPolicy {
+                seq: 0x0102_0304,
+                prohibits: false,
+            },
+        ),
+    ] {
+        let n = policy.encode(&mut buf).unwrap();
+        assert_eq!(n, FORWARD_POLICY_LEN);
+        assert_eq!(ForwardPolicy::parse(&buf[..n]).unwrap(), policy);
+        // A flag outside the two values, and a counter of 0.
+        let mut odd = buf[..n].to_vec();
+        odd[5] = 0x02;
+        assert!(ForwardPolicy::parse(&odd).is_err());
+        odd[5] = 0x01;
+        odd[1..5].fill(0);
+        assert!(ForwardPolicy::parse(&odd).is_err());
+        put(name, n, &buf);
+    }
 
     let n = DigestBody {
         source: DigestSource::ConsensusRoot,

@@ -911,6 +911,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             ITEM_GROUP_STATE => self.on_group_state_item(subject, value)?,
             super::alerts::ITEM_ALERT => self.apply_alert_item(&subject, value, rng)?,
             super::drafts::ITEM_DRAFT => self.apply_draft_item(&subject, value, rng)?,
+            super::pictures::ITEM_PET_AVATAR => self.apply_picture_item(&subject, value, rng)?,
             super::ITEM_READ_MARKER | super::ITEM_VERIFICATION => {
                 self.apply_converged_item(item, &subject, value, rng)?
             }

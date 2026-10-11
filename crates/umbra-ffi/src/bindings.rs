@@ -100,6 +100,8 @@ pub enum FfiError {
     Offline,
     /// A limit on the rate of an act holds it back for a short time.
     Busy,
+    /// The other party asks that no client does the act (`DEV-322`).
+    Refused,
     /// A signed object does not verify under the keys that the build holds.
     Unverified,
     /// A signed object is older than one that the client verified already.
@@ -128,6 +130,7 @@ impl From<Error> for FfiError {
             Error::Closed => FfiError::Closed,
             Error::Offline => FfiError::Offline,
             Error::Busy => FfiError::Busy,
+            Error::Refused => FfiError::Refused,
         }
     }
 }
@@ -1030,6 +1033,12 @@ pub struct MsgInfo {
     /// The period that a timer record set, in seconds, for the row that
     /// marks a timer change (`DEV-207`).
     pub timer: Option<u32>,
+    /// The flag that a forward policy record set, for the row that marks
+    /// the change (`DEV-324`).
+    pub forward_policy: Option<bool>,
+    /// Whether the other party prohibits the forward of this message
+    /// (`DEV-322`). [`Handle::forward`] gives `Refused` for it.
+    pub no_forward: bool,
     /// The time at which the timer erases the message, in seconds.
     pub expires_at: Option<u64>,
     /// Whether the message is a poll: see [`Handle::poll_view`].
@@ -1167,6 +1176,17 @@ pub struct ConversationTimer {
     pub set_at_ms: u64,
     /// Whether the user set it, on this device or another of the set.
     pub by_user: bool,
+}
+
+/// The forward policy of a conversation (`DEV-321`).
+#[derive(uniffi::Record)]
+pub struct ForwardRules {
+    /// Whether the user prohibits the forward of the messages of the user.
+    /// For a group it is the one policy of the group.
+    pub own: bool,
+    /// Whether the other party prohibits the forward of its messages. For
+    /// a group it is the one policy of the group.
+    pub peer: bool,
 }
 
 /// The file of a message, with no byte of it.
@@ -6534,6 +6554,8 @@ impl Handle {
                 has_preview: extras.preview.is_some(),
             }),
             timer: info.timer,
+            forward_policy: info.forward_policy,
+            no_forward: info.no_forward,
             expires_at: info.expires_at,
             poll: info.poll,
             mentions_me: info.mentions_me,
@@ -6610,8 +6632,9 @@ impl Handle {
     }
 
     /// Sends a poll. `open_seconds` is its period after the receive time of
-    /// each party, or 0 for no close. A group above `POLL_GROUP_MAX`
-    /// members takes none (`GRP-149`).
+    /// each party, or 0 for no close. A period outside `POLL_OPEN_MIN` to
+    /// `POLL_OPEN_MAX` is `Malformed` (`WIR-557`). A group above
+    /// `POLL_GROUP_MAX` members takes none (`GRP-149`).
     pub fn send_poll(
         &self,
         conversation: Vec<u8>,
@@ -6903,9 +6926,68 @@ impl Handle {
         Ok(())
     }
 
+    /// The forward policy of a conversation.
+    pub fn forward_rules(&self, conversation: Vec<u8>) -> Result<ForwardRules, FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let inner = locked(&self.inner);
+        Ok(ForwardRules {
+            own: inner.client.prohibits_forward(conversation)?,
+            peer: inner.client.forward_setting(conversation)?.peer.prohibits,
+        })
+    }
+
+    /// Sets whether the user prohibits the forward of the messages of the
+    /// user in a conversation, and the record of the change goes to the
+    /// other party or to the group (`DEV-321`). In a group a member below
+    /// admin sets no policy (`DEV-325`).
+    pub fn set_forward_prohibited(
+        &self,
+        conversation: Vec<u8>,
+        is_on: bool,
+    ) -> Result<Arc<MsgHandle>, FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let mut inner = locked(&self.inner);
+        let Inner { client, bridge, .. } = &mut *inner;
+        let message = client.set_forward_policy(conversation, is_on, unix_now_ms(), &mut OsRng)?;
+        if let Some(running) = bridge {
+            running.flush(client, &mut OsRng)?;
+        }
+        inner.pump_groups();
+        drop(inner);
+        self.changed.notify_all();
+        Ok(Arc::new(MsgHandle(message)))
+    }
+
+    /// The picture that the user gave a contact, or an empty value
+    /// (`DIS-017`).
+    pub fn contact_picture(&self, conversation: Vec<u8>) -> Result<Vec<u8>, FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        Ok(locked(&self.inner).client.contact_picture(conversation)?)
+    }
+
+    /// Gives a contact a picture, a JPEG of at most `PET_AVATAR_MAX` bytes
+    /// that the platform encoded anew, or takes it away with an empty
+    /// value. Each other device of the set takes it (`DEV-327`), and no
+    /// other party does (`DIS-018`).
+    pub fn set_contact_picture(
+        &self,
+        conversation: Vec<u8>,
+        picture: Vec<u8>,
+    ) -> Result<(), FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let mut inner = locked(&self.inner);
+        let Inner { client, bridge, .. } = &mut *inner;
+        client.set_contact_picture(conversation, &picture, &mut OsRng)?;
+        if let Some(running) = bridge {
+            running.flush(client, &mut OsRng)?;
+        }
+        Ok(())
+    }
+
     /// Forwards the text of a message to a conversation, as a new message
     /// of this device (`WIR-177`). A text at `FORWARD_MAX_DEPTH` is
-    /// `TooLong`.
+    /// `TooLong`, and a message whose sender prohibits the forward is
+    /// `Refused` (`DEV-322`).
     pub fn forward(
         &self,
         message: Arc<MsgHandle>,

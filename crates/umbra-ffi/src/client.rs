@@ -32,6 +32,7 @@ mod moderation;
 mod modes;
 mod notify;
 mod own_delete;
+mod pictures;
 mod polls;
 mod quota;
 mod renewal_guard;
@@ -58,6 +59,7 @@ pub use devices::{DeviceInfo, REVOCATION_NOTICE_TTL};
 pub use discovery::{ContactRequest, EntryKind, Published, PROFILE_NAME_MAX};
 pub use files::{DownloadJob, ErasureJob, FileExtras, FileInfo, FileState, UploadJob};
 use files::{FileQueues, CHUNK_CRED, ERASE_DUE, FILE_DATA, FILE_STATE};
+pub use forward::{ForwardSetting, ForwardSide};
 pub use gossip::{GossipWarning, HeadCheck};
 #[cfg(feature = "bindings")]
 pub(crate) use groups::EPOCH_CHUNKS_MAX;
@@ -71,7 +73,8 @@ pub use key_changes::PendingKeyChange;
 pub use key_supply::NOTE_LOST;
 pub use moderation::{ModNote, MOD_HIDE, MOD_REMOVE, MOD_UNHIDE};
 pub use notify::{NdrCall, WAKE_SILENT};
-pub use polls::PollView;
+pub use pictures::PET_AVATAR_MAX;
+pub use polls::{PollView, POLL_OPEN_MAX, POLL_OPEN_MIN};
 pub use quota::HOLD_RETRY;
 pub use reset::ResetSummary;
 pub use roster_fork::{RosterFork, FORK_ONE_SIGNER, FORK_PEER, FORK_REVOKED};
@@ -1303,6 +1306,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut revised: BTreeMap<RowId, (u8, Option<SyncPlace>)> = BTreeMap::new();
         let mut pended: BTreeMap<RowId, (ConversationId, Zeroizing<Vec<u8>>)> = BTreeMap::new();
         let mut reacted: BTreeMap<(RowId, u8), usize> = BTreeMap::new();
+        // The forward policy of each conversation that this batch moves.
+        let mut forwards: BTreeMap<ConversationId, ForwardSetting> = BTreeMap::new();
         for (index, record) in records.iter().enumerate() {
             let app = &record.app;
             let conversation = record.conversation;
@@ -1372,6 +1377,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 let is_kept = match parsed.kind {
                     AppKind::Text | AppKind::Rich | AppKind::Attachment | AppKind::Poll => true,
                     AppKind::ConversationTimer => timers::timer_body(parsed.body).is_some(),
+                    AppKind::ForwardPolicy => forward::policy_body(parsed.body).is_some(),
                     _ => false,
                 };
                 if !record.synced && sends_delivery.contains(&conversation) && is_kept {
@@ -1909,6 +1915,27 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 planned.push(Planned::Put(
                     timers::TIMERS,
                     open.store.row_id(timers::TIMERS, &conversation.0),
+                    Some(conversation.0),
+                    setting.encode(),
+                ));
+            }
+            // DEV-321, DEV-323: each party sets the policy of its own
+            // messages, and an older record changes nothing and is no row.
+            if parsed.kind == AppKind::ForwardPolicy {
+                let Ok(policy) = umbra_wire::app::signal::ForwardPolicy::parse(parsed.body) else {
+                    continue;
+                };
+                let mut setting = match forwards.get(&conversation) {
+                    Some(held) => *held,
+                    None => forward::setting_in(&open.store, conversation)?,
+                };
+                if !setting.take(&policy, from_user) {
+                    continue;
+                }
+                forwards.insert(conversation, setting);
+                planned.push(Planned::Put(
+                    forward::FORWARD_POLICY,
+                    open.store.row_id(forward::FORWARD_POLICY, &conversation.0),
                     Some(conversation.0),
                     setting.encode(),
                 ));
@@ -4337,8 +4364,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
                 Err(_) => &[][..],
             },
-            // The mark of a timer change holds no text.
-            AppKind::ConversationTimer => &[][..],
+            // The mark of a timer change or of a policy change holds no
+            // text.
+            AppKind::ConversationTimer | AppKind::ForwardPolicy => &[][..],
             // A poll shows its question.
             AppKind::Poll => umbra_wire::app::poll::Poll::parse(parsed.body)
                 .map_or(&[][..], |poll| poll.question.as_bytes()),
@@ -4365,6 +4393,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         info.mentions_me = open.store.get(groups::MENTIONED, &message.0)?.is_some();
         info.sender = self.group_sender(message)?;
         info.recovered = self.is_recovered(message)?;
+        info.no_forward = self.forward_prohibited_of(&plain)?;
         // IMP-074: a failed message names its cause.
         if info.delivery == Delivery::Failed {
             info.failure = open
@@ -4573,6 +4602,13 @@ fn info_of(plain: &[u8]) -> Result<MessageInfo, Error> {
         } else {
             None
         },
+        forward_policy: if parsed.kind == AppKind::ForwardPolicy {
+            forward::policy_body(parsed.body)
+        } else {
+            None
+        },
+        // The store holds the policy: see `Client::info`.
+        no_forward: false,
         // The store holds the deadline: see `Client::info`.
         expires_at: None,
         poll: parsed.kind == AppKind::Poll,
@@ -6186,6 +6222,345 @@ mod tests {
         batch.commit().unwrap();
         assert_eq!(due(&mut client), [3, 4, 5]);
         assert_eq!(erase_rows(&client), 3);
+        client.audit().unwrap();
+    }
+
+    fn policy_record(seq: u32, prohibits: bool, msg_id: u8) -> Vec<u8> {
+        use umbra_wire::app::signal::ForwardPolicy;
+        let mut body = [0u8; 6];
+        ForwardPolicy { seq, prohibits }.encode(&mut body).unwrap();
+        record(AppKind::ForwardPolicy, [msg_id; 16], &body)
+    }
+
+    #[test]
+    fn a_forward_policy_binds_the_messages_of_its_sender_and_the_forward_refuses() {
+        let (mut client, mut rng, contact, conversation) = client_with_contact(401);
+        let other = client.conversation_for(&[0x44; 32]).unwrap();
+        client
+            .commit_network(
+                &[],
+                &[(contact, record(AppKind::Text, [1; 16], b"hers"))],
+                T0,
+                &mut rng,
+            )
+            .unwrap();
+        let hers = client.messages(conversation).unwrap()[0];
+        let mine = send(&mut client, conversation, "mine", T0 + 1);
+        // With no policy each text takes a forward.
+        assert!(!client.info(&hers).unwrap().no_forward);
+        client.forward(&hers, other, T0 + 2, &mut rng).unwrap();
+
+        // DEV-321, DEV-322: the policy of the contact binds her messages,
+        // the one that came before the record too.
+        client
+            .commit_network(
+                &[],
+                &[(contact, policy_record(1, true, 2))],
+                T0 + 3,
+                &mut rng,
+            )
+            .unwrap();
+        let setting = client.forward_setting(conversation).unwrap();
+        assert!(setting.peer.prohibits && !setting.own.prohibits);
+        assert!(client.info(&hers).unwrap().no_forward);
+        assert!(!client.info(&mine).unwrap().no_forward);
+        assert_eq!(
+            client.forward(&hers, other, T0 + 4, &mut rng),
+            Err(Error::Refused)
+        );
+        client.forward(&mine, other, T0 + 4, &mut rng).unwrap();
+        // DEV-324: the change is a row of the conversation, with no text.
+        let rows = client.messages(conversation).unwrap();
+        let mark = rows
+            .iter()
+            .find(|row| client.info(row).unwrap().forward_policy.is_some())
+            .unwrap();
+        assert_eq!(client.info(mark).unwrap().forward_policy, Some(true));
+        assert_eq!(text_of(&client, mark), "");
+        assert!(client.forward(mark, other, T0 + 4, &mut rng).is_err());
+
+        // The stored value holds across a restart.
+        client.lock();
+        client.unlock(&units("correct horse"), 2_000).unwrap();
+        assert!(client.forward_setting(conversation).unwrap().peer.prohibits);
+        assert_eq!(
+            client.forward(&hers, other, T0 + 5, &mut rng),
+            Err(Error::Refused)
+        );
+
+        // DEV-323: an older record and a second copy change nothing, and
+        // they are no row.
+        let before = client.messages(conversation).unwrap().len();
+        client
+            .commit_network(
+                &[],
+                &[
+                    (contact, policy_record(1, false, 3)),
+                    (contact, policy_record(1, true, 2)),
+                ],
+                T0 + 6,
+                &mut rng,
+            )
+            .unwrap();
+        assert_eq!(client.messages(conversation).unwrap().len(), before);
+        assert!(client.forward_setting(conversation).unwrap().peer.prohibits);
+        // A body that does not parse changes nothing.
+        let odd = record(AppKind::ForwardPolicy, [9; 16], &[1, 0, 0, 0, 9, 7]);
+        client
+            .commit_network(&[], &[(contact, odd)], T0 + 6, &mut rng)
+            .unwrap();
+        assert_eq!(client.forward_setting(conversation).unwrap().peer.seq, 1);
+
+        // The two directions are independent: the user sets the own one.
+        while client.take_outgoing().is_some() {}
+        let change = client
+            .set_forward_policy(conversation, true, T0 + 7, &mut rng)
+            .unwrap();
+        let sent = client.take_outgoing().unwrap();
+        assert_eq!(sent.message, change);
+        let parsed = AppMessage::parse(&sent.app, Channel::Pairwise).unwrap();
+        assert_eq!(parsed.kind, AppKind::ForwardPolicy);
+        assert_eq!(parsed.body, &[1, 0, 0, 0, 1, 1]);
+        assert!(client.prohibits_forward(conversation).unwrap());
+        assert_eq!(client.info(&change).unwrap().forward_policy, Some(true));
+        // The policy of the user binds no device of the user.
+        client.forward(&mine, other, T0 + 8, &mut rng).unwrap();
+
+        // The contact turns her policy off, and the forward works again.
+        client
+            .commit_network(
+                &[],
+                &[(contact, policy_record(2, false, 4))],
+                T0 + 9,
+                &mut rng,
+            )
+            .unwrap();
+        let setting = client.forward_setting(conversation).unwrap();
+        assert!(!setting.peer.prohibits && setting.own.prohibits);
+        assert!(!client.info(&hers).unwrap().no_forward);
+        client.forward(&hers, other, T0 + 10, &mut rng).unwrap();
+        // The next record of the user takes the next counter.
+        while client.take_outgoing().is_some() {}
+        client
+            .set_forward_policy(conversation, false, T0 + 11, &mut rng)
+            .unwrap();
+        let sent = client.take_outgoing().unwrap();
+        let parsed = AppMessage::parse(&sent.app, Channel::Pairwise).unwrap();
+        assert_eq!(parsed.body, &[1, 0, 0, 0, 2, 0]);
+        client.audit().unwrap();
+    }
+
+    #[test]
+    fn a_forward_policy_reaches_each_device_of_the_set_and_the_backup() {
+        use umbra_core::identity::backup::{BackupObject, BackupRow};
+
+        let (mut client, mut rng, contact, conversation) = client_with_contact(402);
+        link_device(&mut client, &mut rng);
+        // DEV-293: the record of the contact goes to each linked device.
+        let hers = policy_record(1, true, 1);
+        client
+            .commit_network(&[], &[(contact, hers.clone())], T0, &mut rng)
+            .unwrap();
+        let sends: Vec<_> = core::iter::from_fn(|| client.take_sync_send()).collect();
+        assert!(sends.iter().any(|send| carries(&send.app, &hers)));
+
+        // A linked device takes the copy in the direction of its author.
+        let (mut linked, mut rng2, _, peer_conversation) = client_with_contact(403);
+        let synced = |app: Vec<u8>, from_user: bool, conversation| Record {
+            conversation,
+            app,
+            from_user,
+            synced: true,
+            expires_in: 0,
+        };
+        linked
+            .commit_records_at(
+                &[],
+                &[synced(hers.clone(), false, peer_conversation)],
+                &[Some(([7; 16], 1))],
+                T0,
+                &mut rng2,
+            )
+            .unwrap();
+        let setting = linked.forward_setting(peer_conversation).unwrap();
+        assert!(setting.peer.prohibits && !setting.own.prohibits);
+
+        // DEV-047: the owner of the channels takes the record that the
+        // user made on a linked device, applies it, and sends it.
+        while client.take_outgoing().is_some() {}
+        let own = policy_record(1, true, 2);
+        client
+            .commit_records_at(
+                &[],
+                &[synced(own.clone(), true, conversation)],
+                &[Some(([7; 16], 2))],
+                T0 + 1,
+                &mut rng,
+            )
+            .unwrap();
+        assert!(client.prohibits_forward(conversation).unwrap());
+        assert_eq!(client.take_outgoing().unwrap().app, own);
+        // The next record of this device goes above the synced counter.
+        client
+            .set_forward_policy(conversation, false, T0 + 2, &mut rng)
+            .unwrap();
+        let sent = client.take_outgoing().unwrap();
+        let parsed = AppMessage::parse(&sent.app, Channel::Pairwise).unwrap();
+        assert_eq!(parsed.body, &[1, 0, 0, 0, 2, 0]);
+
+        // DEV-324: a backup carries the policy.
+        let upload = client.backup_due(T0 / 1_000 + 20, true).unwrap().unwrap();
+        let full = BackupObject::parse(&upload.plain).unwrap();
+        let policies = full
+            .rows
+            .iter()
+            .filter(|row| {
+                matches!(row, BackupRow::Put { table, .. } if *table == super::forward::FORWARD_POLICY)
+            })
+            .count();
+        assert_eq!(policies, 1);
+    }
+
+    /// A JPEG with a frame header of the two sides and `fill` bytes in an
+    /// application segment.
+    fn jpeg(side: u16, fill: usize) -> Vec<u8> {
+        let mut bytes = vec![0xFF, 0xD8, 0xFF, 0xE0];
+        bytes.extend(u16::try_from(fill + 2).unwrap().to_be_bytes());
+        bytes.extend(core::iter::repeat_n(0x4A, fill));
+        bytes.extend([0xFF, 0xC0, 0x00, 0x0B, 0x08]);
+        bytes.extend(side.to_be_bytes());
+        bytes.extend(side.to_be_bytes());
+        bytes.extend([0x01, 0x01, 0x11, 0x00, 0xFF, 0xD9]);
+        bytes
+    }
+
+    #[test]
+    fn a_contact_takes_a_picture_inside_the_bound_and_the_removal_erases_it() {
+        use umbra_core::identity::backup::{BackupObject, BackupRow};
+
+        let (mut client, mut rng, _, conversation) = client_with_contact(404);
+        // A store with no row, as each store of an earlier build is.
+        assert!(!client
+            .open_ref()
+            .unwrap()
+            .store
+            .table_ids()
+            .contains(&super::pictures::PET_AVATARS));
+        assert!(client.contact_picture(conversation).unwrap().is_empty());
+
+        let picture = jpeg(192, 100);
+        client
+            .set_contact_picture(conversation, &picture, &mut rng)
+            .unwrap();
+        assert_eq!(client.contact_picture(conversation).unwrap(), picture);
+        // The largest picture, and one byte above it.
+        let overhead = jpeg(192, 0).len();
+        let largest = jpeg(192, super::PET_AVATAR_MAX - overhead);
+        assert_eq!(largest.len(), super::PET_AVATAR_MAX);
+        client
+            .set_contact_picture(conversation, &largest, &mut rng)
+            .unwrap();
+        let above = jpeg(192, super::PET_AVATAR_MAX - overhead + 1);
+        assert_eq!(
+            client.set_contact_picture(conversation, &above, &mut rng),
+            Err(Error::TooLong)
+        );
+        // Bytes that are no JPEG, and a JPEG with a side above the bound.
+        assert_eq!(
+            client.set_contact_picture(conversation, b"GIF89a", &mut rng),
+            Err(Error::Malformed)
+        );
+        assert_eq!(
+            client.set_contact_picture(conversation, &jpeg(2_000, 0), &mut rng),
+            Err(Error::Malformed)
+        );
+        // A conversation that is no contact takes none.
+        let nobody = ConversationId([0x55; 16]);
+        assert_eq!(
+            client.set_contact_picture(nobody, &picture, &mut rng),
+            Err(Error::NotFound)
+        );
+        assert_eq!(client.contact_picture(conversation).unwrap(), largest);
+
+        // The picture holds across a restart, and a backup carries it.
+        client.lock();
+        client.unlock(&units("correct horse"), 2_000).unwrap();
+        assert_eq!(client.contact_picture(conversation).unwrap(), largest);
+        let upload = client.backup_due(T0 / 1_000 + 20, true).unwrap().unwrap();
+        let full = BackupObject::parse(&upload.plain).unwrap();
+        let pictures = full
+            .rows
+            .iter()
+            .filter(|row| {
+                matches!(row, BackupRow::Put { table, .. } if *table == super::pictures::PET_AVATARS)
+            })
+            .count();
+        assert_eq!(pictures, 1);
+
+        client
+            .set_contact_picture(conversation, &[], &mut rng)
+            .unwrap();
+        assert!(client.contact_picture(conversation).unwrap().is_empty());
+        client.audit().unwrap();
+    }
+
+    #[test]
+    fn a_picture_of_a_contact_and_its_removal_go_to_each_device_of_the_set() {
+        use umbra_core::devset::engine::SyncEngine;
+
+        let (mut client, mut rng, _, conversation) = client_with_contact(405);
+        let (tablet, _) = link_device(&mut client, &mut rng);
+        let own = client.device_identity().unwrap().unwrap().device_id;
+        let channel = ContactId([0x7C; 32]);
+        let subject = client.subject_of(conversation).unwrap().unwrap();
+
+        // DEV-327: the picture of this device goes as one item, and no
+        // record of it goes to the contact.
+        let picture = jpeg(192, 300);
+        client
+            .set_contact_picture(conversation, &picture, &mut rng)
+            .unwrap();
+        let sends: Vec<_> = core::iter::from_fn(|| client.take_sync_send()).collect();
+        assert_eq!(sends.len(), 1);
+        assert!(carries(&sends[0].app, &picture));
+        assert!(client.take_outgoing().is_none());
+        // The same picture again is no change and no item.
+        client
+            .set_contact_picture(conversation, &picture, &mut rng)
+            .unwrap();
+        assert!(client.take_sync_send().is_none());
+
+        // The other device gives a newer picture, and then removes it.
+        let mut engine = SyncEngine::new(tablet, &[own]).unwrap();
+        let mut item = |value: &[u8], msg_id: u8| {
+            let lamport = 1_000 + u64::from(msg_id);
+            let item = engine
+                .relay_mutable(
+                    super::pictures::ITEM_PET_AVATAR,
+                    &subject,
+                    value,
+                    lamport,
+                    tablet,
+                    [msg_id; 16],
+                    10,
+                )
+                .unwrap();
+            record(AppKind::DeviceSet, [msg_id; 16], &item.body)
+        };
+        let newer = jpeg(64, 50);
+        client
+            .commit_network(&[], &[(channel, item(&newer, 1))], T0, &mut rng)
+            .unwrap();
+        assert_eq!(client.contact_picture(conversation).unwrap(), newer);
+        // A value that is no picture changes nothing.
+        client
+            .commit_network(&[], &[(channel, item(b"no picture", 2))], T0, &mut rng)
+            .unwrap();
+        assert_eq!(client.contact_picture(conversation).unwrap(), newer);
+        client
+            .commit_network(&[], &[(channel, item(&[], 3))], T0, &mut rng)
+            .unwrap();
+        assert!(client.contact_picture(conversation).unwrap().is_empty());
         client.audit().unwrap();
     }
 }

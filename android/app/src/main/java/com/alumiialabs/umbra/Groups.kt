@@ -90,7 +90,9 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
     var timer by remember { mutableStateOf<UInt?>(null) }
     var alert by remember { mutableStateOf<UByte?>(null) }
     var isSecure by remember { mutableStateOf<Boolean?>(null) }
+    var noForward by remember { mutableStateOf<Boolean?>(null) }
     LaunchedEffect(chat.conversation, Core.revision) {
+        Core.forwardRules(chat.conversation) { noForward = it.own }
         Core.timer(chat.conversation) { timer = it.seconds }
         Core.alertSetting(chat.conversation) { alert = it }
         Core.screenshotBlocked(chat.conversation) { isSecure = it }
@@ -148,6 +150,19 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             }
             isSecure?.let {
                 ToggleRow("Block screenshots", it) { on -> Core.blockScreenshots(chat.conversation, on) }
+            }
+            // DEV-325: an admin alone sets the forward policy of a group.
+            noForward?.let {
+                if (chat.isMember && isAdmin) {
+                    ToggleRow("No forwarding", it) { on ->
+                        noForward = on
+                        Core.setForwardProhibited(chat.conversation, on)
+                    }
+                    // DEV-326: the policy is a request and no enforcement.
+                    if (it) Note(UiText.get(R.string.umbra_ui_dev_326))
+                } else if (it) {
+                    FactRow("share-nodes", "Forwarding", "Off")
+                }
             }
             if (chat.isMember) {
                 if (isAdmin) {
@@ -309,7 +324,15 @@ private fun MemberRow(member: FfiGroupMember, removable: Boolean, onRemove: () -
         pressable.padding(vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        LetterAvatar(memberName(member), member.index.toInt(), size = 44)
+        // A member that is a contact shows the picture of that contact.
+        val contact = member.contact?.takeIf { !member.isSelf }?.let { id ->
+            Core.chats.firstOrNull { it.conversation.id.contentEquals(id) }
+        }
+        if (contact?.picture != null) {
+            Avatar(contact, size = 44)
+        } else {
+            LetterAvatar(memberName(member), member.index.toInt(), size = 44)
+        }
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
             Text(memberName(member), style = MaterialTheme.typography.titleMedium)

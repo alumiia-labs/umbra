@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 1: Scope, Conventions, and Terminology
 
 **Status:** Draft
-**Version:** 0.18.7
-**Date:** 2026-10-10
+**Version:** 0.19.0
+**Date:** 2026-10-11
 
 ---
 
@@ -436,6 +436,7 @@ side channel that the user selects, such as a QR code scan.
 | `KeyRequest`, `KeySupply` | Part 6 §6.6.11 | `AppMessage`, kinds `0x34` and `0x35` | Client |
 | `VerifyCommit`, `VerifyReveal` | Part 4 §4.5.2 | `AppMessage`, kinds `0x36` and `0x37` | Client |
 | `RenewalGuard` | Part 6 §6.6.12 | `AppMessage`, kind `0x38` | Client |
+| `ForwardPolicy` | Part 6 §6.6.13 | `AppMessage`, kind `0x39` | Client |
 | `RecoveryDigits` | Part 4 §4.7.7 | Out of band | Client |
 | `DeadChannelBlob` | Part 3 §3.2.6 | A handle-addressed chunk, Part 12 §12.4.2 | Client |
 | Public Address string | Part 4 §4.2.3 | Out of band | Client |

@@ -1,5 +1,5 @@
-//! The reaction, the typing indicator, the receipt, and the conversation
-//! timer of Part 6 §6.6.8 and §6.6.9.
+//! The reaction, the typing indicator, the receipt, the conversation
+//! timer, and the forward policy of Part 6 §6.6.8, §6.6.9, and §6.6.13.
 
 use alloc::vec::Vec;
 
@@ -192,6 +192,52 @@ pub fn parse_timer(bytes: &[u8]) -> Result<u32, Error> {
     }
 }
 
+/// The length of a `ForwardPolicy`.
+pub const FORWARD_POLICY_LEN: usize = 6;
+
+/// The forward policy of Part 6 §6.6.13: whether the sender asks that no
+/// client forwards its messages of this conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForwardPolicy {
+    /// The counter of the setting, from 1.
+    pub seq: u32,
+    /// Whether the sender prohibits the forward.
+    pub prohibits: bool,
+}
+
+impl ForwardPolicy {
+    /// Writes the policy.
+    pub fn encode(&self, out: &mut [u8]) -> Result<usize, Error> {
+        if self.seq == 0 {
+            return Err(Error::Malformed);
+        }
+        let mut w = Writer::new(out);
+        w.u8(0x01)?;
+        w.u32(self.seq)?;
+        w.u8(u8::from(self.prohibits))?;
+        Ok(w.position())
+    }
+
+    /// Reads a policy (`WIR-555`).
+    pub fn parse(bytes: &[u8]) -> Result<Self, Error> {
+        let mut r = Reader::new(bytes);
+        if r.u8()? != 0x01 {
+            return Err(Error::Malformed);
+        }
+        let seq = r.u32()?;
+        let prohibits = match r.u8()? {
+            0x00 => false,
+            0x01 => true,
+            _ => return Err(Error::Malformed),
+        };
+        r.finish()?;
+        if seq == 0 {
+            return Err(Error::Malformed);
+        }
+        Ok(ForwardPolicy { seq, prohibits })
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::expect_used,
@@ -265,5 +311,29 @@ mod tests {
             assert_eq!(parse_timer(&out[..n]).unwrap(), v);
         }
         assert!(encode_timer(4_337, &mut out).is_err());
+    }
+
+    #[test]
+    fn a_forward_policy_holds_a_counter_from_one_and_one_flag() {
+        let mut out = [0u8; 8];
+        for prohibits in [false, true] {
+            let policy = ForwardPolicy { seq: 7, prohibits };
+            let n = policy.encode(&mut out).unwrap();
+            assert_eq!(n, FORWARD_POLICY_LEN);
+            assert_eq!(ForwardPolicy::parse(&out[..n]).unwrap(), policy);
+        }
+        assert_eq!(out[..6], [1, 0, 0, 0, 7, 1]);
+        // WIR-555: no other version, no counter of 0, no other flag, and no
+        // other length.
+        assert!(ForwardPolicy::parse(&[2, 0, 0, 0, 7, 1]).is_err());
+        assert!(ForwardPolicy::parse(&[1, 0, 0, 0, 0, 1]).is_err());
+        assert!(ForwardPolicy::parse(&[1, 0, 0, 0, 7, 2]).is_err());
+        assert!(ForwardPolicy::parse(&[1, 0, 0, 0, 7]).is_err());
+        assert!(ForwardPolicy::parse(&[1, 0, 0, 0, 7, 1, 0]).is_err());
+        let none = ForwardPolicy {
+            seq: 0,
+            prohibits: true,
+        };
+        assert!(none.encode(&mut out).is_err());
     }
 }

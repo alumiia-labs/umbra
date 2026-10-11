@@ -73,17 +73,17 @@ column when a crate implements the requirement and a test covers it.
 | `NET` | 257 | 90 | 1 | 0 | 9 | **357** |
 | `IDN` | 135 | 46 | 1 | 0 | 5 | **187** |
 | `CRY` | 120 | 27 | 0 | 0 | 1 | **148** |
-| `WIR` | 412 | 87 | 0 | 0 | 7 | **506** |
-| `DEV` | 211 | 91 | 0 | 0 | 8 | **310** |
+| `WIR` | 415 | 87 | 0 | 0 | 7 | **509** |
+| `DEV` | 215 | 94 | 0 | 0 | 9 | **318** |
 | `NTF` | 77 | 28 | 0 | 0 | 3 | **108** |
-| `DIS` | 130 | 35 | 0 | 0 | 3 | **168** |
+| `DIS` | 131 | 36 | 0 | 0 | 3 | **170** |
 | `REL` | 169 | 34 | 1 | 0 | 3 | **207** |
 | `GRP` | 233 | 65 | 0 | 0 | 5 | **303** |
 | `ATT` | 143 | 45 | 2 | 0 | 3 | **193** |
 | `ABU` | 71 | 29 | 1 | 0 | 0 | **101** |
 | `IMP` | 115 | 41 | 0 | 0 | 2 | **158** |
 | `SEC` | 4 | 3 | 0 | 0 | 1 | **8** |
-| **All** | 2100 | 630 | 6 | 0 | 54 | **2790** |
+| **All** | 2108 | 634 | 6 | 0 | 55 | **2803** |
 
 ## SCP — Scope and Conventions
 
@@ -1360,6 +1360,9 @@ Source: `spec/06-wire-format.md`
 | `WIR-552` | §6.4.2 | MUST | A sender that holds a renewal guard for the contact | A sender that holds a renewal guard for the contact MUST write its `guard_seq` and its `R`. |  |  |
 | `WIR-553` | §6.6.12 | MUST NOT | A client | A client MUST NOT send a record of kind `0x38` on a group channel, and a parser MUST reject one there. |  |  |
 | `WIR-554` | §6.8 | MUST | The parser | The parser MUST reject a `RenewalRecord` with a `guard_seq` of 0 and one nonzero byte of `secret`, a `RenewalRecord` of 35 bytes, a `RenewalGuard` of 36 bytes, and a `RenewalGuard` with a `guard_seq` of 0. |  |  |
+| `WIR-555` | §6.6.13 | MUST | A parser | A parser MUST reject a `ForwardPolicy` whose `version` is not `0x01`, a body of kind `0x39` whose `body_len` is not 6, a `seq` of 0, and a `prohibits` other than `0x00` and `0x01`. |  |  |
+| `WIR-556` | §6.6.13 | MUST | A sender | A sender MUST set `seq` to one above the highest `seq` that it holds for the policy that the record changes. |  |  |
+| `WIR-557` | §6.6.6 | MUST | A sender | A sender MUST set `open_seconds` to 0, or to a value from `POLL_OPEN_MIN` to `POLL_OPEN_MAX`. |  |  |
 
 ## DEV — Device Sets
 
@@ -1677,6 +1680,14 @@ Source: `spec/07-device-sets.md`
 | `DEV-318` | §7.7 | MUST | Before a take-over, the interface | Before a take-over, the interface MUST show the count of `DEV-235`. |  |  |
 | `DEV-319` | §7.5.3 | MUST | The device that owns the channels | The device that owns the channels MUST publish the item of the channel of a contact when it makes the contact. |  |  |
 | `DEV-320` | §7.5.3 | MUST | A device that owns no channel | A device that owns no channel MUST keep the newest item of each contact in its store, in the place of each older form of that channel, the form of its link snapshot included. |  |  |
+| `DEV-321` | §7.5.10 | MAY | Each party of a pairwise conversation | Each party of a pairwise conversation MAY set a forward policy for the messages that it sends in that conversation. |  |  |
+| `DEV-322` | §7.5.10 | MUST NOT | (unstated) | While the newest policy of the other party prohibits the forward, a client MUST NOT offer the forward of a message of that party in that conversation, and it MUST refuse each request for such a forward. |  |  |
+| `DEV-323` | §7.5.10 | MUST | A client | A client MUST hold the newest policy of each direction of a conversation, and the two directions are independent. |  |  |
+| `DEV-324` | §7.5.10 | MUST | A client | A client MUST show a policy change as a record in the conversation, as `DEV-207` requires for a timer change. |  |  |
+| `DEV-325` | §7.5.10 | MUST NOT | A member below the `admin` role of Part 11 §11.9 | A member below the `admin` role of Part 11 §11.9 MUST NOT set the forward policy of a private group, and a member MUST reject a policy record from a member below that role. |  |  |
+| `DEV-326` | §7.5.10 | MUST NOT | A client | A client MUST NOT show the policy as an enforcement. |  |  |
+| `DEV-327` | §7.5.3 | MUST | A device | A device MUST publish the item of the pet-avatar of a contact when the user sets, changes, or removes that picture. |  |  |
+| `DEV-328` | §7.5.3 | MUST | (unstated) | The backup of Part 4 §4.7.2 and the snapshot of a link (`DEV-004`) MUST carry the pet-avatar of each contact. |  |  |
 
 ## NTF — Notifications
 
@@ -1967,6 +1978,8 @@ Source: `spec/09-discovery.md`
 | `DIS-184` | §9.9.2 | MUST | A client | A client MUST reject a `VersionProof` whose `label_version` differs from the version that it asked for, whose step shows no leaf, or whose leaf differs from the commitment of `opening` and `entry`. |  |  |
 | `DIS-185` | §9.9.2 | MUST | A directory | A directory MUST answer a `Version` request with the proof of that version under its newest head. |  |  |
 | `DIS-194` | §9.10 | MUST NOT | (unstated) | A directory MUST answer a `Challenge` request for a label that holds a live challenge of the same purpose with that challenge again, and a wrong answer MUST NOT end it. |  |  |
+| `DIS-195` | §9.8 | MUST | A client | A client MUST take a pet-avatar from a picker that gives the client the one picture that the user selected. |  |  |
+| `DIS-196` | §9.8 | MUST NOT | (unstated) | A client MUST hold a pet-avatar under the record encryption of Part 14 §14.6.4, and it MUST NOT write the selected picture or the result to a file outside the store. |  |  |
 
 ## REL — Relay Directory
 

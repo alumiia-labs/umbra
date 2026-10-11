@@ -57,6 +57,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.border
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -360,10 +361,6 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                             val copy = line.text.copyOf()
                             composer.set(copy)
                             copy.fill('\u0000')
-                            // DEV-126: the limits of an edit.
-                            notice = UiText.get(
-                                if (chat.isGroup) R.string.umbra_ui_dev_126_edit_group else R.string.umbra_ui_dev_126_edit,
-                            )
                         },
                     )
                 }
@@ -371,7 +368,10 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                 if (file == null) {
                     add(RowEntry("copy", "Copy text") { copyMessage(context, line.text) })
                     // WIR-177: a text goes to another chat as a forward.
-                    if (line.poll == null) add(RowEntry("share-nodes", "Forward") { forwarding = line })
+                    // DEV-322: the sender of the message can prohibit it.
+                    if (line.poll == null && !line.info.noForward) {
+                        add(RowEntry("share-nodes", "Forward") { forwarding = line })
+                    }
                 } else if (file.state.toInt() == FILE_READY || line.info.outgoing) {
                     // IMP-045: the user saves one file.
                     add(RowEntry("download", "Save to device") { save(line) })
@@ -512,6 +512,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             },
             onBack = { if (threadOf != null) threadOf = null else onBack() },
             isVerified = chat.isVerified,
+            leading = { Avatar(chat, size = 36) },
             onTitle = {
                 push(
                     if (chat.isGroup) {
@@ -575,6 +576,9 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                 // DEV-207: a timer change is a row of the conversation.
                 if (line.info.timer != null) {
                     TimerLine(line, chat)
+                } else if (line.info.forwardPolicy != null) {
+                    // DEV-324: a policy change is a row of the conversation.
+                    ForwardLine(line, chat)
                 } else Bubble(
                     line,
                     chat,
@@ -644,6 +648,17 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
         }
         notice?.let {
             Box(Modifier.padding(horizontal = 12.dp)) { Note(it) }
+        }
+        // DEV-126: the limits of an edit show while the user edits. They go
+        // at the confirmation and at the cancel, and they wait for no relay.
+        if (edited != null) {
+            Box(Modifier.padding(horizontal = 12.dp)) {
+                Note(
+                    UiText.get(
+                        if (chat.isGroup) R.string.umbra_ui_dev_126_edit_group else R.string.umbra_ui_dev_126_edit,
+                    ),
+                )
+            }
         }
         // An answer and an edit start with the keyboard open, as a user
         // expects it.
@@ -757,6 +772,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                 ) {
                     // The words stay for the time of the exit.
                     val header = remember { mutableStateOf("reply" to "") }
+                    val quoted = remember { mutableStateOf(CharArray(0)) }
                     // A reply in a group names the member who wrote the message.
                     answered?.let {
                         header.value = "reply" to when {
@@ -764,9 +780,13 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                             chat.isGroup -> it.info.sender?.let { sender -> memberNames[sender] ?: "Member $sender" } ?: chat.title
                             else -> chat.title
                         }
+                        quoted.value = quoteWords(it)
                     }
-                    if (edited != null) header.value = "pen" to "Edit message"
-                    ComposerHeader(header.value.first, header.value.second) {
+                    if (edited != null) {
+                        header.value = "pen" to "Edit message"
+                        quoted.value = CharArray(0)
+                    }
+                    ComposerHeader(header.value.first, header.value.second, quoted.value) {
                         if (edited != null) composer.clear()
                         answered = null
                         edited = null
@@ -1268,7 +1288,7 @@ private fun QuoteBlock(author: String?, text: CharArray?, modifier: Modifier = M
  * text.
  */
 @Composable
-private fun ComposerHeader(icon: String, words: String, onCancel: () -> Unit) {
+private fun ComposerHeader(icon: String, words: String, quoted: CharArray, onCancel: () -> Unit) {
     Column {
         Row(
             Modifier.fillMaxWidth().padding(start = 18.dp, end = 6.dp, top = 6.dp),
@@ -1290,7 +1310,53 @@ private fun ComposerHeader(icon: String, words: String, onCancel: () -> Unit) {
                 contentAlignment = Alignment.Center,
             ) { FaIcon("xmark", label = "Cancel", size = 14.dp, tint = Palette.TextSecondary) }
         }
+        // The message that the answer names, in one line.
+        if (quoted.isNotEmpty()) {
+            PlatformText(
+                quoted,
+                Palette.TextSecondary,
+                modifier = Modifier.padding(start = 18.dp, end = 18.dp, bottom = 6.dp),
+                sizeSp = 13f,
+                maxLines = 1,
+            )
+        }
         HorizontalDivider(Modifier.padding(horizontal = 18.dp), color = Palette.Outline.copy(alpha = 0.5f))
+    }
+}
+
+/**
+ * The words of a message in the strip of its answer: its text, the question
+ * of a poll, the caption of a file, or the word of a file with no caption.
+ */
+private fun quoteWords(line: Line): CharArray {
+    val file = line.info.file
+    return if (file != null && line.text.isEmpty()) fileWord(file).toCharArray() else line.text
+}
+
+/** The preview of a forward policy change in the list of chats. */
+fun forwardPreview(prohibits: Boolean): String = if (prohibits) "Forwarding off" else "Forwarding on"
+
+/** The row of a forward policy change (`DEV-324`), in the form of a timer change. */
+@Composable
+private fun ForwardLine(line: Line, chat: Chat) {
+    val prohibits = line.info.forwardPolicy ?: return
+    val who = timerAuthor(chat, line.info.outgoing)
+    Box(Modifier.fillMaxWidth().padding(vertical = 6.dp), contentAlignment = Alignment.Center) {
+        Row(
+            Modifier
+                .background(Palette.Incoming, CircleShape)
+                .padding(horizontal = 12.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            FaIcon("share-nodes", size = 10.dp, tint = Palette.TextSecondary)
+            Spacer(Modifier.width(6.dp))
+            Text(
+                if (prohibits) "$who turned forwarding off" else "$who turned forwarding on",
+                style = MaterialTheme.typography.labelSmall,
+                color = Palette.TextSecondary,
+                textAlign = TextAlign.Center,
+            )
+        }
     }
 }
 

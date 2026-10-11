@@ -31,9 +31,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import uniffi.umbra_ffi.FfiPoll
 
@@ -51,6 +53,13 @@ private val PollPeriods = listOf(
     604_800u to "1 week",
 )
 
+/** `POLL_OPEN_MIN` and `POLL_OPEN_MAX` of Part 6 §6.6.6, in seconds. */
+private const val OPEN_MIN = 300L
+private const val OPEN_MAX = 2_592_000L
+
+/** The units of a custom period, with their seconds. */
+private val PeriodUnits = listOf("Minutes" to 60L, "Hours" to 3_600L, "Days" to 86_400L)
+
 /** The poll composer: a question, 2 to 12 options, and the rules of the vote. */
 @Composable
 fun NewPollScreen(chat: Chat, onBack: () -> Unit) {
@@ -59,8 +68,16 @@ fun NewPollScreen(chat: Chat, onBack: () -> Unit) {
     var multiple by remember { mutableStateOf(false) }
     var period by remember { mutableStateOf(0u) }
     var hidden by remember { mutableStateOf(false) }
+    // A period that the user sets: a count and a unit.
+    var isCustom by remember { mutableStateOf(false) }
+    var count by remember { mutableStateOf("") }
+    var unit by remember { mutableStateOf(1) }
+    val custom = (count.toLongOrNull() ?: 0L) * PeriodUnits[unit].second
+    // WIR-557: a period inside the two bounds.
+    val isInBounds = custom in OPEN_MIN..OPEN_MAX
+    val openSeconds = if (isCustom) custom.coerceIn(0L, OPEN_MAX).toUInt() else period
     val filled = options.map { it.trim() }.filter { it.isNotEmpty() }
-    val isReady = question.isNotBlank() && filled.size >= 2
+    val isReady = question.isNotBlank() && filled.size >= 2 && (!isCustom || isInBounds)
     Column(Modifier.fillMaxSize()) {
         BackBar("New poll", onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
@@ -74,14 +91,20 @@ fun NewPollScreen(chat: Chat, onBack: () -> Unit) {
             )
             Spacer(Modifier.height(12.dp))
             options.forEachIndexed { index, option ->
-                OutlinedTextField(
-                    value = option,
-                    onValueChange = { options[index] = fit(it, OPTION_BYTES) },
-                    label = { Text("Option ${index + 1}") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
-                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
-                )
+                Row(Modifier.padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = option,
+                        onValueChange = { options[index] = fit(it, OPTION_BYTES) },
+                        label = { Text("Option ${index + 1}") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
+                        modifier = Modifier.weight(1f),
+                    )
+                    // WIR-180: a poll holds two options at the least.
+                    if (options.size > 2) {
+                        IconAction("xmark", "Remove option ${index + 1}") { options.removeAt(index) }
+                    }
+                }
             }
             if (options.size < OPTION_MAX) {
                 InlineButton("Add option") { options.add("") }
@@ -101,26 +124,71 @@ fun NewPollScreen(chat: Chat, onBack: () -> Unit) {
                         .fillMaxWidth()
                         .pressShadeInColumn()
                         .press(role = Role.RadioButton) {
+                            isCustom = false
                             period = seconds
                             if (seconds == 0u) hidden = false
                         }
                         .padding(horizontal = PressInset, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    RadioMark(isChosen = period == seconds)
+                    RadioMark(isChosen = !isCustom && period == seconds)
                     Spacer(Modifier.width(14.dp))
                     Text(title)
                 }
             }
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .pressShadeInColumn()
+                    .press(role = Role.RadioButton) { isCustom = true }
+                    .padding(horizontal = PressInset, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                RadioMark(isChosen = isCustom)
+                Spacer(Modifier.width(14.dp))
+                Text("Custom")
+            }
+            if (isCustom) {
+                Row(Modifier.padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = count,
+                        onValueChange = { typed -> count = typed.filter(Char::isDigit).take(5) },
+                        label = { Text("Number") },
+                        singleLine = true,
+                        isError = count.isNotEmpty() && !isInBounds,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.width(120.dp),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    PeriodUnits.forEachIndexed { index, (title, _) ->
+                        val shape = RoundedCornerShape(12.dp)
+                        Box(
+                            Modifier
+                                .padding(end = 6.dp)
+                                .clip(shape)
+                                .background(if (unit == index) Palette.Container else Palette.Surface)
+                                .border(1.dp, if (unit == index) Palette.Action else Palette.Outline, shape)
+                                .press(role = Role.RadioButton) { unit = index }
+                                .padding(horizontal = 10.dp, vertical = 10.dp),
+                        ) { Text(title, style = MaterialTheme.typography.labelLarge) }
+                    }
+                }
+                Text(
+                    "5 minutes to 30 days",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (count.isNotEmpty() && !isInBounds) Palette.Error else Palette.TextSecondary,
+                    modifier = Modifier.padding(bottom = 8.dp).subline(),
+                )
+            }
             HorizontalDivider(color = Palette.Divider)
             // A count that stays hidden needs an end.
-            if (period != 0u) {
+            if (isCustom || period != 0u) {
                 ToggleRow("Hide results until it ends", hidden) { hidden = it }
                 HorizontalDivider(color = Palette.Divider)
             }
             Spacer(Modifier.height(16.dp))
             PrimaryButton("Send", enabled = isReady) {
-                Core.sendPoll(chat.conversation, question.trim(), filled, multiple, hidden, period)
+                Core.sendPoll(chat.conversation, question.trim(), filled, multiple, hidden, openSeconds)
                 onBack()
             }
             Spacer(Modifier.height(20.dp))

@@ -189,6 +189,12 @@ pub struct MessageInfo {
     /// The period that a timer record set, in seconds: the row is the mark
     /// of a timer change (`DEV-207`).
     pub timer: Option<u32>,
+    /// The flag that a forward policy record set: the row is the mark of
+    /// a policy change (`DEV-324`).
+    pub forward_policy: Option<bool>,
+    /// Whether the other party prohibits the forward of this message
+    /// (`DEV-322`).
+    pub no_forward: bool,
     /// The time at which the timer erases the message, in seconds.
     pub expires_at: Option<u64>,
     /// Whether the message is a poll: see `Client::poll_view`.
@@ -403,6 +409,8 @@ pub enum Error {
     Offline,
     /// A limit on the rate of an act holds it back for a short time.
     Busy,
+    /// The other party asks that no client does the act (`DEV-322`).
+    Refused,
 }
 
 impl From<umbra_core::Error> for Error {
@@ -442,6 +450,7 @@ impl core::fmt::Display for Error {
             Error::Closed => "the client is closed",
             Error::Offline => "the network does not run",
             Error::Busy => "a rate limit holds the act back",
+            Error::Refused => "the other party prohibits the act",
         })
     }
 }
@@ -4016,6 +4025,30 @@ mod tests {
                 &mut rng
             )
             .is_err());
+        // WIR-557: a period is 0, or it lies inside the two bounds.
+        use crate::client::{POLL_OPEN_MAX, POLL_OPEN_MIN};
+        let elsewhere = alice.conversation_for(&[0xC5; 32]).unwrap();
+        for (open_seconds, is_taken) in [
+            (1, false),
+            (POLL_OPEN_MIN - 1, false),
+            (POLL_OPEN_MIN, true),
+            (POLL_OPEN_MAX, true),
+            (POLL_OPEN_MAX + 1, false),
+            (u32::MAX, false),
+        ] {
+            let sent = alice.send_poll(
+                elsewhere,
+                "bound?",
+                &["yes", "no"],
+                false,
+                false,
+                open_seconds,
+                now * 1_000,
+                &mut rng,
+            );
+            assert_eq!(sent.is_ok(), is_taken, "{open_seconds}");
+            while alice.take_outgoing().is_some() {}
+        }
         let poll = alice
             .send_poll(
                 with_bob,

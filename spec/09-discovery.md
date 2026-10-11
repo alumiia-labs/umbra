@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 9: Discovery, Handles, and Key Transparency
 
 **Status:** Draft
-**Version:** 0.18.7
-**Date:** 2026-10-10
+**Version:** 0.19.0
+**Date:** 2026-10-11
 
 ---
 
@@ -829,6 +829,23 @@ pet-avatar to any party.** A pet-avatar is mutable state under Part 7 §7.5.3,
 thus the devices of one user converge on one value. §9.3.1 rule 3 keeps a
 pet-avatar out of the encrypted profile blob.
 
+**[DIS-195]** A client MUST take a pet-avatar from a picker that gives the
+client the one picture that the user selected. The client MUST crop that
+picture to its center square, and it MUST scale the square to 256 pixels or
+less on each side. It MUST encode the result anew as a JPEG of at most
+`PET_AVATAR_MAX` bytes, and that encode MUST remove each metadata field. A
+client MUST apply the bounds of `DIS-176` to a pet-avatar before it decodes
+one. **[DIS-196]** A client MUST hold a pet-avatar under the record
+encryption of Part 14 §14.6.4, and it MUST NOT write the selected picture or
+the result to a file outside the store. Part 7 rules `DEV-327` and `DEV-328`
+give the sync item and the backup. A contact with no pet-avatar shows a
+letter on a color, which the client makes on the device.
+
+> *Cause.* The picture is private data of the viewer: it can show the face of
+> the contact. Image metadata carries a place and a time. The bound of
+> `PET_AVATAR_MAX` lets one sync record of Part 7 §7.5.3 carry the picture in
+> one cell.
+
 The pet-avatar stands beside the petname. The viewer names the contact, and the
 viewer pictures the contact. Part 4 §4.2.5 gives the Profile, which holds the
 value that the contact selected. **[DIS-019]** The client MUST show the two values apart.
@@ -1190,6 +1207,7 @@ the record of the label in any case; only the evaluation of a lookup hides it.
 | `LEASE_MIN` | 1 hour: the shortest `lease` of a registration (`DIS-173`) |
 | `WELCOME_MAX` | 280 bytes of UTF-8, the welcome text of a profile blob (`DIS-176`) |
 | `PICTURE_MAX` | 6 144 bytes, the JPEG of a profile blob (`DIS-176`) |
+| `PET_AVATAR_MAX` | 6 144 bytes, the JPEG of a pet-avatar (`DIS-195`). It equals `PICTURE_MAX` |
 | `PROFILE_BLOB_MAX` | 6 503 bytes, the longest sealed profile blob: the version, the nonce, the longest plaintext of `DIS-176`, and the tag |
 | `TREE_HEAD_FRESHNESS` | 7 days, measured by the client from the `timestamp` of the head (§9.5.2) |
 | `TREE_HEAD_RETAIN` | 14 days, measured by the client from the acceptance of the head (§9.5.2) |

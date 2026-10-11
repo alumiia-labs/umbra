@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 14: Implementation Requirements and Assurance
 
 **Status:** Draft
-**Version:** 0.18.7
-**Date:** 2026-10-10
+**Version:** 0.19.0
+**Date:** 2026-10-11
 
 ---
 
@@ -994,6 +994,8 @@ read flight 1 already drops the copy (Part 6 `WIR-503`).
 | `0x52` | Sync Inbox | Each record that the sync engine took and the store did not take yet, written in the commit of the engine (`DEV-013`). |
 | `0x53` | Add Seq | The add of each joiner whose admit waits, under the row of the kept record of the add: the row of the join, the joiner, the group, the index, the replicas that returned a `GSEQ` and the `seq` at each, then the descriptor of the snapshot once it uploaded (`GRP-311`, `GRP-424`). |
 | `0x55` | Erase Due | The erase of each object that this device put on the chunk path, until each relay answered its `CDEL` or `CHUNK_LIFE_MAX` of Part 12 passed (`ATT-160`, `ATT-161`). A row of kind `0x01` holds the chunks of one uploaded file, under the row of its message. It holds the kind, the time of the upload in seconds, then the credentials as a row of `0x11` holds them. A second row of one byte `0x00` beside it is its hold. The upload writes the two, and the deletion of the message takes the hold away in the batch that takes the row of `0x11`. Thus the first row is due from then on (`IMP-164`). A message leaves with no erase of its chunks at the end of the history period, at a removal by a moderator, or with its conversation. Such a message takes the two rows along. A hold with no row of `0x11` is such a message, and the client deletes the two rows at the next start with no `CDEL`. A row of kind `0x02` holds one object of a device link of Part 7 `DEV-003`, under its `chunk_id`. It holds the kind, the time of the write, then the credential. It has no hold, and it is due when its link runs no more. No row names a conversation in its owner column. A backup of Part 4 §4.7.2 does not carry this table. The identifier `0x54` names no table. |
+| `0x56` | Forward Policy | The forward policy of each conversation, by the conversation: the `seq` and the flag of the user, then the `seq` and the flag of the other party (Part 7 `DEV-323`). A group holds its one policy in the second place (`DEV-325`). A direction that took no record holds a `seq` of 0. |
+| `0x57` | Pet Avatars | The pet-avatar of each contact, by the conversation: the conversation, then the JPEG of Part 9 rule `DIS-195`. A contact with no picture has no row. |
 
 The stored form of a row is local to one device, and no peer reads it. This
 part gives it no byte layout. **[IMP-130]** A stored object MUST start with a
