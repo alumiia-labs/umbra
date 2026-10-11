@@ -1,0 +1,5 @@
+# The test files hold fixed keys by purpose, thus the scan omits them.
+name: umbra
+paths-ignore:
+  - "crates/*/tests"
+  - "crates/umbra-crypto/src/handshake/tests.rs"
