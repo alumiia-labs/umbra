@@ -18,12 +18,13 @@
 
 # Port 80 is free on each server, thus certbot answers the challenge
 # itself; a renewal does the same each 60 days, on the timer of the
-# Debian package.
+# Debian package. Let's Encrypt sends no expiry mail, thus the account
+# holds no address.
 - name: This server holds a certificate for its name
   ansible.builtin.command:
     cmd: >-
       certbot certonly --standalone --non-interactive --agree-tos
-      --email {{ umbra_acme_email }} -d {{ umbra_fqdn }}
+      --register-unsafely-without-email -d {{ umbra_fqdn }}
       --deploy-hook /etc/letsencrypt/renewal-hooks/deploy/umbra.sh
     creates: "/etc/letsencrypt/live/{{ umbra_fqdn }}/fullchain.pem"
 

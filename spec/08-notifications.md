@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 8: Notifications and Mobile Delivery
 
 **Status:** Draft
-**Version:** 0.18.2
+**Version:** 0.18.3
 **Date:** 2026-10-10
 
 ---

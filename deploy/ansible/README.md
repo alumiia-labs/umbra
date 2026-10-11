@@ -68,7 +68,6 @@ In `group_vars/all.yml`:
 | Value | How to get it |
 |---|---|
 | `umbra_domain` | Your domain |
-| `umbra_acme_email` | The address for Let's Encrypt |
 | `umbra_asn` | `whois <address of a server>` prints the AS number of OVHcloud |
 | `umbra_family` | `openssl rand -hex 32`, made once and kept |
 | `umbra_fcm_credentials` | The path of the Firebase JSON on this machine |

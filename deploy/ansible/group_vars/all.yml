@@ -11,9 +11,6 @@ umbra_domain: umbrachat.app
 # document at `/i` (`IDN-120` to `IDN-122`).
 # umbra_invitation_host: umbrachat.app
 
-# The address that Let's Encrypt writes to about the certificates.
-umbra_acme_email: ops@example.org    # FILL
-
 # The country of every relay (Part 10 §10.6.3), and the autonomous system
 # of the provider. `whois <address of a server>` prints the AS number.
 umbra_country: US

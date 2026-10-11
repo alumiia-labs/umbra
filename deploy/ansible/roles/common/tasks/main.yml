@@ -4,9 +4,7 @@
       - umbra_domain != "example.org"
       - umbra_asn | int > 0
       - umbra_family | length == 64
-      # Let's Encrypt refuses a contact address at example.org.
-      - "'example.org' not in umbra_acme_email"
-    fail_msg: Fill umbra_domain, umbra_acme_email, umbra_asn, and umbra_family in group_vars/all.yml.
+    fail_msg: Fill umbra_domain, umbra_asn, and umbra_family in group_vars/all.yml.
   run_once: true
   delegate_to: localhost
 
