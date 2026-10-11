@@ -3874,12 +3874,14 @@ impl ClientNode {
 
     /// Starts a circuit that ends at `relay` for one more queue
     /// (`NET-022`). It starts none when a circuit of this client that ends
-    /// there, or that will end there, has room for one.
+    /// there, or that will end there, has room for one. The result says
+    /// whether such a circuit serves or builds. With no conformant chain
+    /// to the relay no build starts (`NET-033`), and the result is false.
     fn circuit_with_room_to<R: CryptoRng + ?Sized>(
         &mut self,
         relay: [u8; 32],
         rng: &mut R,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
         let class = self.delay_class;
         let serves = |slot: &Slot| {
             slot.is_general()
@@ -3892,12 +3894,21 @@ impl ClientNode {
                 }
         };
         if self.slots.iter().any(serves) {
-            return Ok(());
+            return Ok(true);
         }
         let current = self.current;
         let started = self.add_circuit(Some(relay), rng);
+        let builds = self
+            .slots
+            .last()
+            .is_some_and(|slot| !matches!(slot.circuit, Circuit::None));
+        // A circuit with no build serves no queue in this run. The check
+        // of the caller comes again, thus its slot does not stay.
+        if !builds {
+            self.slots.pop();
+        }
         self.current = current;
-        started
+        started.map(|()| builds)
     }
 
     /// Makes the new queue of a contact at a relay of another operator
@@ -3914,9 +3925,11 @@ impl ClientNode {
     /// directory, and at the end the relay of the lost queue itself. A
     /// queue at that relay is better than a contact that no record reaches.
     /// Each step leaves out a relay whose circuit ended in this run, thus
-    /// one relay that is down stops no step. The result says whether the
-    /// rotation started: its `NEW` left, or a circuit for it builds. False
-    /// says that no relay can take the queue at this check.
+    /// one relay that is down stops no step. A relay that cannot end a
+    /// chain is no target, and a target that no conformant chain reaches
+    /// gives its place to the next one (`NET-033`). The result says
+    /// whether the rotation started: its `NEW` left, or a circuit for it
+    /// builds. False says that no relay can take the queue at this check.
     fn start_rotation<R: CryptoRng + ?Sized>(
         &mut self,
         contact: [u8; 32],
@@ -3976,17 +3989,21 @@ impl ClientNode {
                 .relays
                 .iter()
                 .map(|relay| relay.candidate)
-                .filter(|relay| relay.queue && fits(step, relay) && !is_down(&relay.relay_id))
+                .filter(|relay| relay.is_exit() && fits(step, relay) && !is_down(&relay.relay_id))
                 .map(|relay| relay.relay_id)
                 .collect();
-            if targets.is_empty() {
-                continue;
-            }
+            // A check that starts no build loses the time to the next
+            // check, thus each target of the step has its turn.
             let draw = usize::from(u16::from_be_bytes(random(rng)));
-            return match targets.get(draw % targets.len()) {
-                Some(target) => self.circuit_with_room_to(*target, rng).map(|()| true),
-                None => Ok(false),
-            };
+            for turn in 0..targets.len() {
+                let at = draw.wrapping_add(turn) % targets.len();
+                let Some(target) = targets.get(at).copied() else {
+                    continue;
+                };
+                if self.circuit_with_room_to(target, rng)? {
+                    return Ok(true);
+                }
+            }
         }
         Ok(false)
     }
@@ -10633,6 +10650,58 @@ mod tests {
         rotate(&mut net, ALICE, &to_carol);
         assert_ne!(net.node(ALICE).inbound_queue(&to_carol).unwrap().0, lost);
         assert_eq!(net.node(ALICE).inbound_queue(&to_bob).unwrap().0, kept);
+    }
+
+    #[test]
+    fn a_rotation_builds_its_circuit_to_a_relay_that_a_chain_reaches() {
+        // The one circuit of Alice ends at the relay of her queue, thus
+        // each rotation needs a new circuit.
+        for seed in 0..16 {
+            let mut net = Net::new();
+            net.join(0x41, 3, None, &EXITS);
+            net.join(0x61, 3, None, &EXITS);
+            net.node(ALICE).invite(&mut Rng(1)).unwrap();
+            net.run();
+            let events = net.take(ALICE);
+            let [ClientEvent::Invitation { bundle, .. }] = &events[..] else {
+                panic!("{events:?}");
+            };
+            net.node(BOB).accept(bundle.clone(), &mut Rng(2)).unwrap();
+            net.run();
+            let alice = ready_contact(&net.take(ALICE)).unwrap();
+            assert_eq!(net.node(ALICE).slots.len(), 1);
+            // NET-033: no chain ends at a relay of layer 2 with the queue
+            // role, or at a queue relay of the operator of the ingress.
+            for number in 6..14 {
+                let mut relay = candidate(number, 2);
+                relay.candidate.queue = true;
+                net.node(ALICE).relays.push(relay);
+            }
+            for number in 14..16 {
+                let mut relay = candidate(number, 3);
+                relay.candidate.operator_id = [1; 32];
+                net.node(ALICE).relays.push(relay);
+            }
+            let (old, _, _) = net.node(ALICE).inbound_queue(&alice).unwrap();
+
+            // The first check starts the build, and the second one makes
+            // the queue.
+            net.now += 200 * 86_400;
+            let now = net.now;
+            net.node(ALICE).rotate_due(now, &mut Rng(seed)).unwrap();
+            let node = net.node(ALICE);
+            assert_eq!(node.slots.len(), 2, "seed {seed}");
+            let exit = node.slots[1].chain.unwrap()[2];
+            assert!(exit == [4; 32] || exit == [5; 32], "seed {seed}");
+            net.run();
+            net.node(ALICE)
+                .rotate_due(now + 1, &mut Rng(seed + 100))
+                .unwrap();
+            net.run();
+            let (made, relay, _) = net.node(ALICE).inbound_queue(&alice).unwrap();
+            assert_ne!(made, old, "seed {seed}");
+            assert_eq!(relay, exit, "seed {seed}");
+        }
     }
 
     #[test]

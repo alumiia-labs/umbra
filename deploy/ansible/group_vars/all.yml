@@ -15,7 +15,7 @@ umbra_domain: umbrachat.app
 # the provider. `whois <address of a server>` prints the AS number. A
 # server in another country states its own value in the inventory.
 umbra_country: US
-umbra_asn: 0                         # FILL, the AS number of OVHcloud US
+umbra_asn: 0                         # FILL, the AS number of the provider (OVH: 16276)
 
 # The name of the one operator, and the family of its relays: 64 hex
 # characters, made one time with `openssl rand -hex 32` and kept.
@@ -28,7 +28,7 @@ umbra_bin_dir: "{{ playbook_dir }}/../../target/deploy/bin"
 
 # The service account file of the Firebase project, on this machine. The
 # notification server needs it to send pushes. It never goes into git.
-umbra_fcm_credentials: ""            # FILL, the path of the JSON file
+umbra_fcm_credentials: "{{ lookup('env', 'HOME') }}/.umbra/fcm.json"
 
 # The bytes that each exit relay holds for files (Part 12), in bytes. The
 # relay holds the bytes of each chunk in memory until its store reads them
