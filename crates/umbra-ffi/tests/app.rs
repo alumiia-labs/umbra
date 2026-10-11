@@ -1532,6 +1532,165 @@ fn a_network_of_one_operator_carries_a_contact_while_the_directory_is_provisiona
     let _ = std::fs::remove_dir_all(&directory);
 }
 
+/// One run of the program `umbra-authority`, with each line of its standard
+/// output. The program ends with this value, thus a test that fails leaves
+/// no process.
+struct AuthorityTool {
+    child: std::process::Child,
+    lines: std::sync::mpsc::Receiver<String>,
+}
+
+impl AuthorityTool {
+    fn start(arguments: &[&str]) -> Self {
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_umbra-authority"))
+            .args(arguments)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let output = child.stdout.take().unwrap();
+        let (sender, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::BufRead as _;
+            for line in std::io::BufReader::new(output).lines() {
+                let Ok(line) = line else { break };
+                if sender.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        AuthorityTool { child, lines }
+    }
+
+    /// Waits for a line that starts with `wanted`, and gives each line up
+    /// to it. A line that starts with `refused` fails the test.
+    fn wait_for(&self, wanted: &str, refused: &str, wait: Duration) -> Vec<String> {
+        let end = Instant::now() + wait;
+        let mut seen = Vec::new();
+        loop {
+            let left = end.saturating_duration_since(Instant::now());
+            let line = self
+                .lines
+                .recv_timeout(left)
+                .unwrap_or_else(|_| panic!("no line `{wanted}`, the lines were {seen:?}"));
+            assert!(!line.starts_with(refused), "the tool printed `{line}`");
+            let is_wanted = line.starts_with(wanted);
+            seen.push(line);
+            if is_wanted {
+                return seen;
+            }
+        }
+    }
+}
+
+impl Drop for AuthorityTool {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[test]
+fn the_authority_tool_holds_its_report_queue_in_a_network_of_one_operator() {
+    let relays = tokio::runtime::Runtime::new().unwrap();
+    let SignedNetwork {
+        manifest,
+        keyset,
+        entries,
+        authorities,
+        epoch,
+        ..
+    } = start_signed_network_with(&relays, None, None, None, true);
+    let directory = std::env::temp_dir().join(format!("umbra-authority-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = |name: &str| directory.join(name).to_str().unwrap().to_owned();
+    // The settings of a test network: each seed is in the file.
+    let settings = |name: &str, manifest: &[u8], keyset: &[u8]| {
+        std::fs::write(path(&format!("{name}.manifest")), manifest).unwrap();
+        std::fs::write(path(&format!("{name}.keyset")), keyset).unwrap();
+        let text = format!(
+            "seed={seed}\nindex=0\nverdicts={verdicts}\nmanifest={manifest}\nkeyset={keyset}\n\
+             ca={CA}\nroot_seed={root}\nreport_seed={report}\nstate={state}\nqueue={queue}\n\
+             aggregators=0,1\n",
+            seed = "d1".repeat(32),
+            root = "a0".repeat(32),
+            report = "a1".repeat(32),
+            verdicts = path(&format!("{name}.verdicts")),
+            manifest = path(&format!("{name}.manifest")),
+            keyset = path(&format!("{name}.keyset")),
+            state = path(&format!("{name}.state")),
+            queue = path(&format!("{name}.queue")),
+        );
+        std::fs::write(path(&format!("{name}.conf")), text).unwrap();
+        path(&format!("{name}.conf"))
+    };
+
+    // REL-126, NET-340: the key set names one independent authority, thus
+    // the tool builds its chain under one operator, as a client does.
+    let provisional = settings("provisional", &manifest, &keyset);
+    let tool = AuthorityTool::start(&[&provisional]);
+    let lines = tool.wait_for("report queue made", "authority offline", 3 * STEP);
+    assert!(lines
+        .iter()
+        .any(|line| line.starts_with("authority online")));
+    drop(tool);
+    // REL-167: the file holds the address of the queue, then the key that
+    // seals each report.
+    let held = std::fs::read(path("provisional.queue")).unwrap();
+    let report_pk = umbra_crypto::seal::public_of(&Secret::new([0xA1; 32]));
+    assert!(held.len() > 32 && held.ends_with(&report_pk));
+    assert!(std::fs::metadata(path("provisional.state")).unwrap().len() > 0);
+
+    // REL-109: the probe of an isolation query takes the chain under query,
+    // which has one operator too. It waits when the epoch turns (`REL-111`).
+    let (parsed_keyset, _) = DirectoryKeySet::parse(&keyset).unwrap();
+    let mut consensus = Consensus::new(parsed_keyset, 0).unwrap();
+    let set = RelaySet::accept(
+        &mut consensus,
+        &RelayManifest::parse(&manifest).unwrap(),
+        &BlocList::v1(),
+        epoch * 3_600,
+    )
+    .unwrap();
+    let hop = |pick: &dyn Fn(&ListedRelay) -> bool| {
+        let relay = set.relays.iter().find(|relay| pick(relay)).unwrap();
+        relay
+            .candidate
+            .relay_id
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    let chain = [
+        hop(&|relay| relay.candidate.ingress),
+        hop(&|relay| relay.candidate.layer == 2 && !relay.candidate.ingress),
+        hop(&|relay| relay.candidate.is_exit()),
+    ]
+    .join(",");
+    let tool = AuthorityTool::start(&[&provisional, "probe", &chain]);
+    tool.wait_for("probe sent in epoch", "verdict", Duration::from_secs(300));
+    drop(tool);
+
+    // NET-341: the same relays under a key set at the floor give no chain,
+    // and the tool fails closed (NET-033).
+    let full = keyset_bytes(&authorities, 1).unwrap();
+    let strict = sign_manifest_under(
+        &authorities,
+        &full,
+        &[0, 1, 2, 4, 6],
+        epoch,
+        entries,
+        &BlocList::v1(),
+        &mut OsRng,
+    )
+    .unwrap();
+    let strict = settings("strict", &strict, &full);
+    let tool = AuthorityTool::start(&[&strict]);
+    tool.wait_for("authority offline: NodeFault", "authority online", 3 * STEP);
+    drop(tool);
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
 /// Waits for the end of one transfer, and drops each progress update.
 fn transfer_end(
     updates: &mut tokio::sync::mpsc::UnboundedReceiver<TransferUpdate>,

@@ -317,9 +317,7 @@ impl SealedRecord {
         if bytes.len() < OVERHEAD {
             return Err(Error::Malformed);
         }
-        let mut tag = [0u8; aead::TAG_LEN];
-        let start = bytes.len().saturating_sub(aead::TAG_LEN);
-        tag.copy_from_slice(bytes.get(start..).unwrap_or(&[0; aead::TAG_LEN]));
+        let mut tag: [u8; aead::TAG_LEN] = bytes.last_chunk().copied().ok_or(Error::Malformed)?;
         if bytes.iter().take(SALT_LEN).all(|byte| *byte == 0) {
             for byte in &mut tag {
                 *byte = !*byte;
@@ -437,6 +435,17 @@ mod tests {
         sealed.discard_key();
         assert!(sealed.is_discarded());
         assert_eq!(sealed.tag(), tag);
+        // The read of the stored bytes gives the same input as the record,
+        // and bytes below the length of a record give an error and no tag.
+        assert_eq!(
+            SealedRecord::mac_input_of(sealed.as_bytes()),
+            Ok(sealed.mac_input())
+        );
+        assert_ne!(sealed.mac_input(), tag);
+        assert_eq!(
+            SealedRecord::mac_input_of(&[0; OVERHEAD - 1]),
+            Err(Error::Malformed)
+        );
         assert_eq!(
             sealed.open(&store_key, table, &row, None),
             Err(Error::Stale)

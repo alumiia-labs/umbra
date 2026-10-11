@@ -342,6 +342,15 @@ fn relay_set(settings: &Settings) -> Result<RelaySet, &'static str> {
     Ok(set)
 }
 
+/// Whether the key set makes the directory provisional (`REL-126`). The
+/// tool then builds its chains under the relaxation of Part 3 `NET-340`,
+/// as each client does: with one operator no other chain exists.
+fn is_provisional(settings: &Settings) -> Result<bool, &'static str> {
+    let keyset = std::fs::read(&settings.keyset).map_err(|_| "the key set does not read")?;
+    let (keyset, _) = DirectoryKeySet::parse(&keyset).map_err(|_| "the key set does not parse")?;
+    Ok(keyset.independent_count < umbra_core::directory::AUTHORITY_FLOOR)
+}
+
 /// The reports of one relay in one epoch.
 struct Tally {
     /// The reports that name the relay.
@@ -438,6 +447,7 @@ async fn run_once(
         chain,
         RootIdentity::new(Secret::new(settings.root_seed)),
     );
+    node.set_bootstrap(is_provisional(settings)?);
     let (commands, runtime_commands) = mpsc::unbounded_channel();
     let (runtime_updates, mut updates) = mpsc::unbounded_channel();
     // A queue of an earlier run continues, and its address stays in the

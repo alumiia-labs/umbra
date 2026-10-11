@@ -14,7 +14,7 @@ use hkdf::Hkdf;
 use polyval::{universal_hash::UniversalHash, Polyval};
 use sha3::Sha3_256;
 use umbra_crypto::{labels, secret::Secret};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::Error;
 
@@ -57,27 +57,31 @@ impl KeySet {
     /// learns the value on the links after the first.
     pub fn derive(ss_hop: &Secret<32>, hop_index: u32) -> Self {
         let kdf = Hkdf::<Sha3_256>::new(Some(ss_hop.expose()), &[]);
-        let mut t = Secret::<208>::zeroed();
+        let mut t = Zeroizing::new([[0u8; BLOCK]; 2 * HOP_BLOCKS + 1]);
         // 208 bytes are inside the HKDF bound, thus expand cannot fail.
         let _ = kdf.expand_multi_info(
             &[labels::ONION_HOP, &hop_index.to_be_bytes()],
-            t.expose_mut(),
+            t.as_flattened_mut(),
         );
-        let bytes = t.expose();
-        let mut tweak = [0u8; BLOCK];
-        tweak.copy_from_slice(bytes.get(192..208).unwrap_or(&[0; BLOCK]));
+        let [f0, f1, f2, f3, f4, f5, b0, b1, b2, b3, b4, b5, tweak] = &*t;
         KeySet {
-            forward: HopKeys::from_slice(bytes.get(..96).unwrap_or(&[0; 96]), tweak),
-            backward: HopKeys::from_slice(bytes.get(96..192).unwrap_or(&[0; 96]), tweak),
+            forward: HopKeys::from_blocks([f0, f1, f2, f3, f4, f5], *tweak),
+            backward: HopKeys::from_blocks([b0, b1, b2, b3, b4, b5], *tweak),
         }
     }
 }
 
-fn block(bytes: &[u8]) -> [u8; BLOCK] {
-    let mut out = [0u8; BLOCK];
-    if let Some(head) = bytes.get(..BLOCK) {
-        out.copy_from_slice(head);
-    }
+/// The blocks of the key material of one hop in one direction: `K_prp` and
+/// `K_str` of two blocks each, then `K_h`, then the chaining value.
+const HOP_BLOCKS: usize = 6;
+
+/// A key of two blocks. The lengths are types, thus a length fault does not
+/// compile, and no key falls back to zero bytes.
+fn pair(head: &[u8; BLOCK], tail: &[u8; BLOCK]) -> Secret<{ 2 * BLOCK }> {
+    let mut out = Secret::<{ 2 * BLOCK }>::zeroed();
+    let (first, second) = out.expose_mut().split_at_mut(BLOCK);
+    first.copy_from_slice(head);
+    second.copy_from_slice(tail);
     out
 }
 
@@ -88,20 +92,14 @@ fn xor_into(dst: &mut [u8; BLOCK], src: &[u8; BLOCK]) {
 }
 
 impl HopKeys {
-    fn from_slice(material: &[u8], tweak: [u8; BLOCK]) -> Self {
-        let mut prp = [0u8; 32];
-        let mut stream = [0u8; 32];
-        let mut hash = [0u8; 16];
-        prp.copy_from_slice(material.get(..32).unwrap_or(&[0; 32]));
-        stream.copy_from_slice(material.get(32..64).unwrap_or(&[0; 32]));
-        hash.copy_from_slice(material.get(64..80).unwrap_or(&[0; 16]));
-        let chain = block(material.get(80..96).unwrap_or(&[0; BLOCK]));
+    fn from_blocks(material: [&[u8; BLOCK]; HOP_BLOCKS], tweak: [u8; BLOCK]) -> Self {
+        let [prp_head, prp_tail, stream_head, stream_tail, hash, chain] = material;
         HopKeys {
-            prp: Secret::new(prp),
-            stream: Secret::new(stream),
-            hash: Secret::new(hash),
+            prp: pair(prp_head, prp_tail),
+            stream: pair(stream_head, stream_tail),
+            hash: Secret::new(*hash),
             tweak,
-            chain,
+            chain: *chain,
         }
     }
 
@@ -182,9 +180,11 @@ impl HopKeys {
     /// set erased.
     pub fn update(&mut self, y_l: &[u8; BLOCK]) {
         let kdf = Hkdf::<Sha3_256>::new(Some(self.stream.expose()), y_l);
-        let mut u = Secret::<96>::zeroed();
-        let _ = kdf.expand(labels::ONION_HOP_UPDATE, u.expose_mut());
-        let fresh = HopKeys::from_slice(u.expose(), self.tweak);
+        let mut u = Zeroizing::new([[0u8; BLOCK]; HOP_BLOCKS]);
+        // 96 bytes are inside the HKDF bound, thus expand cannot fail.
+        let _ = kdf.expand(labels::ONION_HOP_UPDATE, u.as_flattened_mut());
+        let [u0, u1, u2, u3, u4, u5] = &*u;
+        let fresh = HopKeys::from_blocks([u0, u1, u2, u3, u4, u5], self.tweak);
         self.chain.zeroize();
         *self = fresh;
     }
@@ -223,6 +223,45 @@ mod tests {
         assert_eq!(x_l, [0; 16]);
         let x_l = receiver.forward.decipher(&y_l2, &mut replay).unwrap();
         assert_ne!(x_l, [0; 16]);
+    }
+
+    #[test]
+    fn each_key_is_its_own_part_of_the_derivation() {
+        // NET-106: the forward set, the backward set, then the tweak.
+        let kdf = Hkdf::<Sha3_256>::new(Some(&[7u8; 32]), &[]);
+        let mut t = [0u8; 208];
+        kdf.expand_multi_info(&[labels::ONION_HOP, &1u32.to_be_bytes()], &mut t)
+            .unwrap();
+        let print = |from: usize| {
+            umbra_crypto::hash::sha3_256(&[
+                &t[from..from + 32],
+                &t[from + 32..from + 64],
+                &t[from + 64..from + 80],
+                &t[192..208],
+                &t[from + 80..from + 96],
+            ])
+        };
+        let set = keys();
+        assert_eq!(set.forward.fingerprint(), print(0));
+        assert_eq!(set.backward.fingerprint(), print(96));
+        assert_eq!(set.forward.tweak(), t[192..208]);
+
+        // NET-204: the update gives the same four parts, and the tweak stays.
+        let mut forward = keys().forward;
+        let kdf = Hkdf::<Sha3_256>::new(Some(&t[32..64]), &[1; 16]);
+        let mut u = [0u8; 96];
+        kdf.expand(labels::ONION_HOP_UPDATE, &mut u).unwrap();
+        forward.update(&[1; 16]);
+        assert_eq!(
+            forward.fingerprint(),
+            umbra_crypto::hash::sha3_256(&[
+                &u[..32],
+                &u[32..64],
+                &u[64..80],
+                &t[192..208],
+                &u[80..96]
+            ])
+        );
     }
 
     #[test]

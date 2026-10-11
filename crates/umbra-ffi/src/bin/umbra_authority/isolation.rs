@@ -77,11 +77,12 @@ async fn probe(
     let mut seed = [0u8; 32];
     umbra_crypto::rand_core::TryRng::try_fill_bytes(&mut OsRng, &mut seed)
         .map_err(|_| "no random bytes")?;
-    let node = ClientNode::with_relays(
+    let mut node = ClientNode::with_relays(
         info(a),
         vec![info(b), info(c)],
         RootIdentity::new(Secret::new(seed)),
     );
+    node.set_bootstrap(super::is_provisional(settings)?);
     let tls = super::tls_of(settings)?;
     let wait = guard_wait(unix_now());
     if wait > 0 {
