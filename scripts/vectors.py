@@ -103,7 +103,8 @@ def render() -> str:
             "| File | Bytes | SHA-256 |",
             "| --- | --- | --- |",
         ]
-        for p in sorted(base.rglob("*")):
+        # A Windows path sorts without case, and a POSIX path sorts with it.
+        for p in sorted(base.rglob("*"), key=lambda p: p.relative_to(VECTORS).as_posix()):
             if p.is_file():
                 rel = p.relative_to(VECTORS).as_posix()
                 lines.append(f"| `{rel}` | {p.stat().st_size} | `{sha256(p)}` |")

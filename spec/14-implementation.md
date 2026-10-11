@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 14: Implementation Requirements and Assurance
 
 **Status:** Draft
-**Version:** 0.18.5
+**Version:** 0.18.6
 **Date:** 2026-10-10
 
 ---

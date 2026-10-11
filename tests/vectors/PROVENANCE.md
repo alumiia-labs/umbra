@@ -39,9 +39,9 @@ the files, and run the script again.
 
 | File | Bytes | SHA-256 |
 | --- | --- | --- |
+| `cctv/ML-KEM/README.md` | 7790 | `97c8e10fe83d4512edf8d37d8344cdc4a6dde321bac22a098b2ef3793cc3dd4d` |
 | `cctv/ML-KEM/intermediate/ML-KEM-768.txt` | 68979 | `4cdeed48a917ec2825a49a03815c31692d51b4be0b6850a0abc56cb39bab1f84` |
 | `cctv/ML-KEM/modulus/ML-KEM-768.txt` | 1847820 | `1070efdae5c268a57935a33097316990831e7d4bb45d59abf0bfe4812535839a` |
-| `cctv/ML-KEM/README.md` | 7790 | `97c8e10fe83d4512edf8d37d8344cdc4a6dde321bac22a098b2ef3793cc3dd4d` |
 | `cctv/ML-KEM/strcmp/ML-KEM-768.txt` | 7056 | `2b09aa46d8b1c7b9a549a25f009cbd3937b98df177e868d3eb6395930079e4fa` |
 | `cctv/ML-KEM/unluckysample/ML-KEM-768.txt` | 9637 | `fede6f787581dc708e5c3337d7e49de33333d23023470668cd0588b65ad0ba90` |
 
