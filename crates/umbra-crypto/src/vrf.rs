@@ -17,7 +17,7 @@ use sha2::{Digest, Sha512};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
 
-use crate::{secret::Secret, Error};
+use crate::{bytes::part, secret::Secret, Error};
 
 /// A public key.
 pub const PUBLIC_KEY_LEN: usize = 32;
@@ -49,9 +49,7 @@ fn encode_to_curve(salt: &[u8; 32], alpha: &[u8]) -> Result<EdwardsPoint, Error>
         h.update(alpha);
         h.update([ctr, 0x00]);
         let hash: [u8; 64] = h.finalize().into();
-        let mut head = [0u8; 32];
-        head.copy_from_slice(hash.get(..32).unwrap_or(&[0; 32]));
-        if let Some(point) = CompressedEdwardsY(head).decompress() {
+        if let Some(point) = CompressedEdwardsY(part::<0, 32, 64>(&hash)).decompress() {
             let cleared = point.mul_by_cofactor();
             if !cleared.is_identity() {
                 return Ok(cleared);
@@ -70,11 +68,12 @@ fn challenge(points: [&EdwardsPoint; 5]) -> Scalar {
     }
     h.update([0x00]);
     let hash: [u8; 64] = h.finalize().into();
-    let mut c = [0u8; 32];
-    if let Some(head) = c.get_mut(..CHALLENGE_LEN) {
-        head.copy_from_slice(hash.get(..CHALLENGE_LEN).unwrap_or(&[0; CHALLENGE_LEN]));
-    }
-    Scalar::from_bytes_mod_order(c)
+    challenge_scalar(part::<0, CHALLENGE_LEN, 64>(&hash))
+}
+
+/// The scalar of a challenge: its 16 bytes as a little-endian integer.
+fn challenge_scalar(c: [u8; CHALLENGE_LEN]) -> Scalar {
+    Scalar::from(u128::from_le_bytes(c))
 }
 
 /// `ECVRF_proof_to_hash` on a decoded `Gamma`.
@@ -87,21 +86,10 @@ fn gamma_to_hash(gamma: &EdwardsPoint) -> [u8; OUTPUT_LEN] {
 }
 
 fn decode_proof(pi: &[u8; PROOF_LEN]) -> Result<(EdwardsPoint, Scalar, Scalar), Error> {
-    let gamma_bytes: [u8; 32] = pi
-        .get(..32)
-        .and_then(|b| b.try_into().ok())
-        .ok_or(Error::Length)?;
-    let gamma = point_from_bytes(&gamma_bytes)?;
-    let mut c_bytes = [0u8; 32];
-    if let Some(head) = c_bytes.get_mut(..CHALLENGE_LEN) {
-        head.copy_from_slice(pi.get(32..48).unwrap_or(&[0; CHALLENGE_LEN]));
-    }
-    let c = Scalar::from_bytes_mod_order(c_bytes);
-    let s_bytes: [u8; 32] = pi
-        .get(48..)
-        .and_then(|b| b.try_into().ok())
-        .ok_or(Error::Length)?;
-    let s = Option::from(Scalar::from_canonical_bytes(s_bytes)).ok_or(Error::Signature)?;
+    let gamma = point_from_bytes(&part::<0, 32, PROOF_LEN>(pi))?;
+    let c = challenge_scalar(part::<32, CHALLENGE_LEN, PROOF_LEN>(pi));
+    let s = Option::from(Scalar::from_canonical_bytes(part::<48, 32, PROOF_LEN>(pi)))
+        .ok_or(Error::Signature)?;
     Ok((gamma, c, s))
 }
 
@@ -123,14 +111,12 @@ impl SecretKey {
     /// Expands `seed`.
     pub fn from_seed(seed: &Secret<32>) -> Self {
         let mut hashed: [u8; 64] = Sha512::digest(seed.expose()).into();
-        let mut x_bytes = [0u8; 32];
-        x_bytes.copy_from_slice(hashed.get(..32).unwrap_or(&[0; 32]));
+        let mut x_bytes = part::<0, 32, 64>(&hashed);
         x_bytes[0] &= 248;
         x_bytes[31] &= 127;
         x_bytes[31] |= 64;
         let x = Scalar::from_bytes_mod_order(x_bytes);
-        let mut nonce_seed = [0u8; 32];
-        nonce_seed.copy_from_slice(hashed.get(32..).unwrap_or(&[0; 32]));
+        let nonce_seed = part::<32, 32, 64>(&hashed);
         let public = (x * B).compress().to_bytes();
         hashed.zeroize();
         x_bytes.zeroize();
@@ -176,7 +162,7 @@ impl SecretKey {
             part.copy_from_slice(gamma.compress().as_bytes());
         }
         if let Some(part) = pi.get_mut(32..48) {
-            part.copy_from_slice(c.to_bytes().get(..CHALLENGE_LEN).unwrap_or(&[0; 16]));
+            part.copy_from_slice(&crate::bytes::part::<0, CHALLENGE_LEN, 32>(&c.to_bytes()));
         }
         if let Some(part) = pi.get_mut(48..) {
             part.copy_from_slice(&s.to_bytes());

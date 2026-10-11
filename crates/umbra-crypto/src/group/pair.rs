@@ -96,10 +96,8 @@ impl PairKey {
     }
 
     fn truncate(mac: Hmac<Sha3_256>) -> [u8; TAG_LEN] {
-        let full = mac.finalize().into_bytes();
-        let mut tag = [0u8; TAG_LEN];
-        tag.copy_from_slice(full.get(..TAG_LEN).unwrap_or(&[0u8; TAG_LEN]));
-        tag
+        let full: [u8; 32] = mac.finalize().into_bytes().into();
+        crate::bytes::part::<0, TAG_LEN, 32>(&full)
     }
 
     /// The tag of a content record to the peer.

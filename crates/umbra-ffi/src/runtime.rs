@@ -266,7 +266,7 @@ pub enum Command {
     /// [`Update::RendezvousQueue`] with the same tag follows.
     MakeRendezvousQueue(u64),
     /// Make the report queue of an authority (Part 10 `REL-166`). An
-    /// [`Update::ReportQueue`] follows.
+    /// [`Update::ReportQueue`] or an [`Update::ReportQueueRefused`] follows.
     MakeReportQueue,
     /// Build a circuit to a relay for the probe of an isolation query
     /// (Part 10 `REL-109`).
@@ -409,6 +409,10 @@ pub enum Update {
         /// The encoded `QueueAddress` that a client writes to.
         address: Vec<u8>,
     },
+    /// No relay made the report queue: the reason of the refusal, or none
+    /// when the node sent no `NEW`. The authority sends the command again
+    /// after a wait (Part 10 `REL-208`).
+    ReportQueueRefused(Option<umbra_queue::Reject>),
     /// A `SealedReport` arrived on the report queue (`WIR-536`).
     LinkFault(Vec<u8>),
     /// The loop of a probe left: its chain and the tag that each hop read.
@@ -1098,6 +1102,7 @@ pub async fn run_client(
     let mut shown_queues: Vec<([u8; 32], [u8; 32])> = Vec::new();
     let mut notify_tags: BTreeMap<u64, u64> = BTreeMap::new();
     let mut rendezvous_tags: BTreeMap<u64, u64> = BTreeMap::new();
+    let mut report_handles: BTreeSet<u64> = BTreeSet::new();
     let mut tags: BTreeMap<u64, u64> = BTreeMap::new();
     // NET-218: the records of the user that wait for a relay
     // acknowledgment, for the ARQ of this run.
@@ -1498,7 +1503,7 @@ pub async fn run_client(
                     }
                     None => continue,
                 },
-                ClientEvent::Rejected { handle, .. } => match tags.remove(&handle) {
+                ClientEvent::Rejected { handle, reason } => match tags.remove(&handle) {
                     Some(tag) => {
                         resends.ended(tag);
                         tags.retain(|_, held| *held != tag);
@@ -1507,6 +1512,10 @@ pub async fn run_client(
                     // A relay refused the `NEW` of a rendezvous queue.
                     None => match rendezvous_tags.remove(&handle) {
                         Some(tag) => Update::RendezvousRefused(tag),
+                        // REL-208: the authority hears of its refused `NEW`.
+                        None if report_handles.remove(&handle) => {
+                            Update::ReportQueueRefused(Some(reason))
+                        }
                         None => continue,
                     },
                 },
@@ -1546,7 +1555,12 @@ pub async fn run_client(
                 // WIR-115: the store took the hello with its queue cursor.
                 ClientEvent::Hello { .. } if stores_hellos => continue,
                 ClientEvent::Hello { queue, envelope } => Update::Hello { queue, envelope },
-                ClientEvent::ReportQueue { address, .. } => Update::ReportQueue { address },
+                ClientEvent::ReportQueue {
+                    handle, address, ..
+                } => {
+                    report_handles.remove(&handle);
+                    Update::ReportQueue { address }
+                }
                 ClientEvent::LinkFault { sealed, .. } => Update::LinkFault(sealed),
                 // The contact follows flight 1 of the addressee.
                 ClientEvent::HelloSent { .. } | ClientEvent::AdmissionAsked { .. } => continue,
@@ -1750,9 +1764,14 @@ pub async fn run_client(
                         let _ = updates.send(Update::RendezvousRefused(tag));
                     }
                 },
-                Command::MakeReportQueue => {
-                    let _ = node.make_report_queue(&mut rng);
-                }
+                Command::MakeReportQueue => match node.make_report_queue(&mut rng) {
+                    Ok(handle) => {
+                        report_handles.insert(handle);
+                    }
+                    Err(_) => {
+                        let _ = updates.send(Update::ReportQueueRefused(None));
+                    }
+                },
                 Command::OpenCircuit(relay) => {
                     let _ = node.open_circuit(relay, &mut rng);
                 }

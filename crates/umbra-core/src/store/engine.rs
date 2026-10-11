@@ -183,8 +183,7 @@ impl Form {
         match self {
             Form::Earlier => table_key.row_tag(domain.bytes(), &[table.0], &[0; 16]),
             Form::Current => {
-                let mut bound = [0u8; 16];
-                bound.copy_from_slice(mac.get(..16).unwrap_or(&[0; 16]));
+                let bound = umbra_crypto::bytes::part::<0, 16, 32>(mac);
                 table_key.row_tag_owned(domain.bytes(), &[table.0], None, &bound)
             }
         }
@@ -1082,7 +1081,7 @@ mod tests {
                 let row_id = rows.row_id(table, natural);
                 let sealed =
                     SealedRecord::seal_earlier(&key, table, &row_id, plain, &mut rng).unwrap();
-                state.insert(&table_key.row_tag(&[table.0], &row_id, &sealed.mac_input()));
+                state.insert(&table_key.row_tag(&[table.0], &row_id, &sealed.mac_input().unwrap()));
                 backend.rows.insert(
                     (table, row_id),
                     StoredRow {

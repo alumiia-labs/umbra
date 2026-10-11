@@ -55,9 +55,7 @@ fn vrf_input(search_key: &[u8], version: u32) -> Vec<u8> {
 }
 
 fn index_of(output: &[u8; vrf::OUTPUT_LEN]) -> [u8; 32] {
-    let mut index = [0u8; 32];
-    index.copy_from_slice(output.get(..32).unwrap_or(&[0; 32]));
-    index
+    umbra_crypto::bytes::part::<0, 32, { vrf::OUTPUT_LEN }>(output)
 }
 
 /// The binary ladder for a label whose newest version is `newest`: the

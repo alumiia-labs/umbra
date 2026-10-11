@@ -83,6 +83,8 @@ async fn probe(
         RootIdentity::new(Secret::new(seed)),
     );
     node.set_bootstrap(super::is_provisional(settings)?);
+    // REL-185: a chain with a removed link gives no probe circuit.
+    node.set_removed_links(set.removed_links.clone());
     let tls = super::tls_of(settings)?;
     let wait = guard_wait(unix_now());
     if wait > 0 {

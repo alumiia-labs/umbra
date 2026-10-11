@@ -53,10 +53,8 @@ impl Session {
     /// the `er` of the circuit (`NET-285`). A circuit does not resume, thus
     /// the session holds no resume secret.
     pub fn for_circuit(circ_id: &[u8; 16], relay_session_sk: StaticSecret) -> Self {
-        let mut id = [0u8; 8];
-        id.copy_from_slice(circ_id.get(..8).unwrap_or(&[0; 8]));
         Session {
-            id,
+            id: umbra_crypto::bytes::part::<0, 8, 16>(circ_id),
             secret: Secret::new([0; 32]),
             resume_count: u32::MAX,
             relay_session_sk,

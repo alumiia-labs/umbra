@@ -77,13 +77,13 @@ column when a crate implements the requirement and a test covers it.
 | `DEV` | 215 | 94 | 0 | 0 | 9 | **318** |
 | `NTF` | 77 | 28 | 0 | 0 | 3 | **108** |
 | `DIS` | 131 | 36 | 0 | 0 | 3 | **170** |
-| `REL` | 169 | 34 | 1 | 0 | 3 | **207** |
+| `REL` | 170 | 34 | 1 | 0 | 3 | **208** |
 | `GRP` | 233 | 65 | 0 | 0 | 5 | **303** |
 | `ATT` | 143 | 45 | 2 | 0 | 3 | **193** |
 | `ABU` | 71 | 29 | 1 | 0 | 0 | **101** |
 | `IMP` | 115 | 41 | 0 | 0 | 2 | **158** |
 | `SEC` | 4 | 3 | 0 | 0 | 1 | **8** |
-| **All** | 2108 | 634 | 6 | 0 | 55 | **2803** |
+| **All** | 2109 | 634 | 6 | 0 | 55 | **2804** |
 
 ## SCP — Scope and Conventions
 
@@ -2194,6 +2194,7 @@ Source: `spec/10-relay-directory.md`
 | `REL-205` | §10.3.1 | MUST | A relay | A relay MUST count the measurement attempts of each address. |  |  |
 | `REL-206` | §10.2 | MUST | Under that directory, an authority | Under that directory, an authority MUST list a relay of its own operator at the class that the operator declares, with three exceptions. |  |  |
 | `REL-207` | §10.3 | MUST | A measurer | A measurer MUST give a result for a relay only when that relay opened the measurement session. |  |  |
+| `REL-208` | §10.4.2 | MUST | An authority whose relay refuses its report queue | An authority whose relay refuses its report queue MUST send a `NEW` for that queue again after a wait. |  |  |
 
 ## GRP — Private Groups
 

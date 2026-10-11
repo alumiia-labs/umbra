@@ -133,11 +133,8 @@ impl Candidate {
     pub fn from_entry(entry: &RelayEntry<'_>, blocs: &BlocList) -> Self {
         let d = &entry.descriptor;
         let v4_prefix = (d.addr_v4 != [0; 4]).then(|| [d.addr_v4[0], d.addr_v4[1]]);
-        let v6_prefix = (d.addr_v6 != [0; 16]).then(|| {
-            let mut p = [0u8; 6];
-            p.copy_from_slice(d.addr_v6.get(..6).unwrap_or(&[0; 6]));
-            p
-        });
+        let v6_prefix =
+            (d.addr_v6 != [0; 16]).then(|| umbra_crypto::bytes::part::<0, 6, 16>(&d.addr_v6));
         // REL-158: a pending entry names no layer yet, thus it serves no
         // hop. The three roles go away together, and each selection path
         // then passes it by.

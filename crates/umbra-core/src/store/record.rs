@@ -80,10 +80,8 @@ impl RowKey {
             .unwrap_or_else(|_| Hmac::<Sha3_256>::new(&Default::default()));
         mac.update(&[table.0]);
         mac.update(natural_key);
-        let full = mac.finalize().into_bytes();
-        let mut id = [0u8; ROW_ID_LEN];
-        id.copy_from_slice(full.get(..ROW_ID_LEN).unwrap_or(&[0; ROW_ID_LEN]));
-        id
+        let full: [u8; 32] = mac.finalize().into_bytes().into();
+        umbra_crypto::bytes::part::<0, ROW_ID_LEN, 32>(&full)
     }
 }
 
@@ -231,12 +229,10 @@ impl SealedRecord {
         self.0
     }
 
-    /// The record tag, which the table MAC reads (`IDN-066`).
-    pub fn tag(&self) -> [u8; aead::TAG_LEN] {
-        let mut tag = [0u8; aead::TAG_LEN];
-        let start = self.0.len().saturating_sub(aead::TAG_LEN);
-        tag.copy_from_slice(self.0.get(start..).unwrap_or(&[0; aead::TAG_LEN]));
-        tag
+    /// The record tag, which the table MAC reads (`IDN-066`). Bytes below
+    /// the length of a tag give an error and no tag.
+    pub fn tag(&self) -> Result<[u8; aead::TAG_LEN], Error> {
+        self.0.last_chunk().copied().ok_or(Error::Malformed)
     }
 
     /// Opens the record of one row of one owner. A record from another
@@ -301,14 +297,8 @@ impl SealedRecord {
     /// with the file sets to zero bytes thus shows in the scan of the
     /// table (`IDN-031`, `IDN-163`), and a store with no discarded record
     /// keeps its MAC.
-    pub fn mac_input(&self) -> [u8; aead::TAG_LEN] {
-        let mut tag = self.tag();
-        if self.is_discarded() {
-            for byte in &mut tag {
-                *byte = !*byte;
-            }
-        }
-        tag
+    pub fn mac_input(&self) -> Result<[u8; aead::TAG_LEN], Error> {
+        Self::mac_input_of(&self.0)
     }
 
     /// [`SealedRecord::mac_input`] of the bytes that a backend holds, with
@@ -382,7 +372,7 @@ mod tests {
         // Each write draws a new salt and a new nonce.
         let again = SealedRecord::seal(&store_key, table, &row, None, b"hello", &mut rng).unwrap();
         assert_ne!(again.as_bytes()[..40], sealed.as_bytes()[..40]);
-        assert_ne!(again.tag(), sealed.tag());
+        assert_ne!(again.tag().unwrap(), sealed.tag().unwrap());
     }
 
     #[test]
@@ -431,17 +421,15 @@ mod tests {
         let table = TableId::MESSAGE;
         let mut sealed =
             SealedRecord::seal(&store_key, table, &row, None, b"erase me", &mut Rng(1)).unwrap();
-        let tag = sealed.tag();
+        let tag = sealed.tag().unwrap();
         sealed.discard_key();
         assert!(sealed.is_discarded());
-        assert_eq!(sealed.tag(), tag);
+        assert_eq!(sealed.tag(), Ok(tag));
         // The read of the stored bytes gives the same input as the record,
         // and bytes below the length of a record give an error and no tag.
-        assert_eq!(
-            SealedRecord::mac_input_of(sealed.as_bytes()),
-            Ok(sealed.mac_input())
-        );
-        assert_ne!(sealed.mac_input(), tag);
+        let marked = tag.map(|byte| !byte);
+        assert_eq!(sealed.mac_input(), Ok(marked));
+        assert_eq!(SealedRecord::mac_input_of(sealed.as_bytes()), Ok(marked));
         assert_eq!(
             SealedRecord::mac_input_of(&[0; OVERHEAD - 1]),
             Err(Error::Malformed)

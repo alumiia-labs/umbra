@@ -153,9 +153,7 @@ fn accept_either(
 }
 
 fn sender_id_of(queue: &[u8; QUEUE_ADDRESS_LEN]) -> [u8; 32] {
-    let mut sender_id = [0u8; 32];
-    sender_id.copy_from_slice(queue.get(33..65).unwrap_or(&[0; 32]));
-    sender_id
+    umbra_crypto::bytes::part::<33, 32, QUEUE_ADDRESS_LEN>(queue)
 }
 
 impl GroupService {

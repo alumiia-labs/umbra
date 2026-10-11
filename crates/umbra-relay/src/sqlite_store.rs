@@ -532,9 +532,7 @@ const TRIM_STEPS: u32 = 16;
 
 /// The index column of a leaf: its first 8 bytes.
 fn leaf_key(leaf: &[u8; 32]) -> i64 {
-    let mut head = [0u8; 8];
-    head.copy_from_slice(leaf.get(..8).unwrap_or(&[0; 8]));
-    i64::from_be_bytes(head)
+    i64::from_be_bytes(umbra_crypto::bytes::part::<0, 8, 32>(leaf))
 }
 
 impl SqliteShelf {

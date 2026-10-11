@@ -36,9 +36,7 @@ pub fn challenge_string(
 /// `SHA3-256(challenge || solution)`.
 pub fn passes(challenge: &[u8; 96], solution: &[u8; SOLUTION_LEN], effort: u32) -> bool {
     let digest = sha3_256(&[challenge, solution]);
-    let mut head = [0u8; 4];
-    head.copy_from_slice(digest.get(..4).unwrap_or(&[0xFF; 4]));
-    let r = u64::from(u32::from_be_bytes(head));
+    let r = u64::from(u32::from_be_bytes(crate::bytes::part::<0, 4, 32>(&digest)));
     r.saturating_mul(u64::from(effort)) <= u64::from(u32::MAX)
 }
 

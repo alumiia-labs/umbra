@@ -125,9 +125,7 @@ pub fn manifest_key(file_key: &Secret<32>, file_nonce: &[u8; 24]) -> Secret<32> 
 /// The `relay_hint` of a `RelayRef` (§12.3.2).
 pub fn relay_hint(relay_id: &[u8; 32]) -> [u8; 12] {
     let full = sha3_256(&[labels::RELAYREF, relay_id]);
-    let mut hint = [0u8; 12];
-    hint.copy_from_slice(full.get(..12).unwrap_or(&[0; 12]));
-    hint
+    umbra_crypto::bytes::part::<0, 12, 32>(&full)
 }
 
 /// The proof of possession that a `CPRF` carries (§12.4.1).

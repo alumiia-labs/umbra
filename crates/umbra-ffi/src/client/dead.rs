@@ -135,6 +135,8 @@ impl DeadRow {
         out.extend_from_slice(self.written_cred.expose());
         let count = self.written_relays.len().min(BLOB_RELAYS);
         out.push(u8::try_from(count).unwrap_or(0));
+        // The row has one length. The count names the relays, and zero
+        // bytes fill the places after them.
         for at in 0..BLOB_RELAYS {
             out.extend_from_slice(self.written_relays.get(at).unwrap_or(&[0; 32]));
         }

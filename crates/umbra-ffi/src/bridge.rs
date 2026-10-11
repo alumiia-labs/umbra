@@ -450,6 +450,7 @@ impl Bridge {
             | Update::Digest { .. }
             // The report queue belongs to an authority, and no app holds one.
             | Update::ReportQueue { .. }
+            | Update::ReportQueueRefused(_)
             | Update::LinkFault(_)
             | Update::Probe { .. }
             | Update::ProbeFailed

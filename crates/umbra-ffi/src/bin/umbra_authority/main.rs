@@ -75,9 +75,11 @@ use std::{collections::BTreeMap, path::PathBuf, process::ExitCode, sync::Arc, ti
 
 use tokio::sync::mpsc;
 use umbra_core::{
+    abuse::pow::ChallengeBook,
     directory::{
         bloc::BlocList,
         manifest::{ListedRelay, RelayManifest, RelaySet},
+        removal::LinkRemoval,
         report::LinkFaultReport,
         root::{Consensus, DirectoryKeySet},
         EPOCH_SECONDS,
@@ -85,8 +87,12 @@ use umbra_core::{
     session::node::{ClientNode, ContactId, RelayInfo, StateChange},
 };
 use umbra_crypto::{
-    handshake::nk::RelayStatic, hash::sha3_256, hierarchy::RootIdentity, seal, secret::Secret,
-    sign::SigningKey,
+    handshake::nk::RelayStatic,
+    hash::sha3_256,
+    hierarchy::RootIdentity,
+    seal,
+    secret::Secret,
+    sign::{SigningKey, VerifyingKey},
 };
 use umbra_ffi::runtime::{run_client, Command, Persist, Update};
 use umbra_transport::{native, Dial};
@@ -104,6 +110,20 @@ const RELAY_FAULT_RATE: f64 = 0.02;
 const SHARE_SETTLE: u64 = 120;
 /// The period of the check for an ended epoch.
 const EVALUATE_EVERY: Duration = Duration::from_secs(60);
+/// The first wait before the `NEW` of the report queue goes again
+/// (`REL-208`).
+const QUEUE_RETRY: Duration = Duration::from_secs(30);
+/// The longest such wait. It is below one epoch, thus `REL-166` holds when
+/// the relay has room again.
+const QUEUE_RETRY_MAX: Duration = Duration::from_secs(15 * 60);
+
+/// The wait before the next `NEW`. Each later wait is twice the wait
+/// before it, up to `QUEUE_RETRY_MAX` (`REL-208`).
+fn next_wait(wait: &mut Duration) -> Duration {
+    let now = *wait;
+    *wait = now.saturating_mul(2).min(QUEUE_RETRY_MAX);
+    now
+}
 
 /// Where the keys of the authorities come from.
 enum KeySource {
@@ -303,22 +323,65 @@ fn dial_of(relay: &ListedRelay) -> Dial {
     }
 }
 
-/// The relays of the manifest that the key set verifies: the first ingress
-/// relay to dial, and each relay of a chain.
-fn relays_of(settings: &Settings) -> Result<(RelayInfo, Dial, Vec<RelayInfo>), &'static str> {
-    let set = relay_set(settings)?;
-    let guard = set
-        .relays
+/// The first ingress relay of a verified set, which the tool dials.
+fn guard_of(set: &RelaySet) -> Result<&ListedRelay, &'static str> {
+    set.relays
         .iter()
         .find(|relay| relay.candidate.ingress && relay.addr_v4 != [0; 4])
-        .ok_or("the manifest holds no ingress relay")?;
+        .ok_or("the manifest holds no ingress relay")
+}
+
+/// What one run reads from the manifest.
+struct Network {
+    /// The ingress relay to dial.
+    guard: RelayInfo,
+    dial: Dial,
+    /// Each relay of a chain.
+    chain: Vec<RelayInfo>,
+    /// The removed links (`REL-184`).
+    removed: Vec<LinkRemoval>,
+}
+
+/// The relays of the manifest that the key set verifies.
+fn relays_of(settings: &Settings) -> Result<Network, &'static str> {
+    let set = relay_set(settings)?;
+    let guard = guard_of(&set)?;
     let chain = set
         .relays
         .iter()
         .filter(|relay| !relay.candidate.ingress)
         .map(info)
         .collect();
-    Ok((info(guard), dial_of(guard), chain))
+    Ok(Network {
+        guard: info(guard),
+        dial: dial_of(guard),
+        chain,
+        removed: set.removed_links,
+    })
+}
+
+/// The challenges of the relays from the ingress relay, each under the
+/// identity key of its relay (`ABU-068`). With them a `NEW` that a relay
+/// under load refused pays with a proof of work (`ABU-014`, `ABU-048`).
+async fn challenges(settings: &Settings) -> Option<ChallengeBook> {
+    let set = relay_set(settings).ok()?;
+    let dial = dial_of(guard_of(&set).ok()?);
+    let bundle = native::fetch_challenges(&dial, tls_of(settings).ok()?)
+        .await
+        .ok()?;
+    let now = unix_now();
+    let mut book = ChallengeBook::default();
+    for challenge in ChallengeBook::parse_bundle(&bundle).ok()? {
+        let identity = set
+            .relays
+            .iter()
+            .find(|relay| relay.candidate.relay_id == challenge.verifier_id)
+            .and_then(|relay| VerifyingKey::from_bytes(&relay.identity_pk).ok());
+        if let Some(identity) = identity {
+            let _ = book.take(challenge, &identity, now);
+        }
+    }
+    Some(book)
 }
 
 /// The relay set of the manifest, verified under the key set. A manifest
@@ -440,7 +503,12 @@ async fn run_once(
     counts: &mut Counts,
     report_sk: &Secret<32>,
 ) -> Result<(), &'static str> {
-    let (guard, dial, chain) = relays_of(settings)?;
+    let Network {
+        guard,
+        dial,
+        chain,
+        removed,
+    } = relays_of(settings)?;
     let tls = tls_of(settings)?;
     let mut node = ClientNode::with_relays(
         guard,
@@ -448,6 +516,8 @@ async fn run_once(
         RootIdentity::new(Secret::new(settings.root_seed)),
     );
     node.set_bootstrap(is_provisional(settings)?);
+    // REL-185: no chain of this run holds a removed link.
+    node.set_removed_links(removed);
     let (commands, runtime_commands) = mpsc::unbounded_channel();
     let (runtime_updates, mut updates) = mpsc::unbounded_channel();
     // A queue of an earlier run continues, and its address stays in the
@@ -473,11 +543,25 @@ async fn run_once(
     ));
     let report_pk = seal::public_of(report_sk);
     let mut clock = tokio::time::interval(EVALUATE_EVERY);
+    // REL-208: the time of the next `NEW` after a refusal, and the wait
+    // that the refusal after it takes.
+    let mut again: Option<tokio::time::Instant> = None;
+    let mut wait = QUEUE_RETRY;
     loop {
+        let at = again.unwrap_or_else(tokio::time::Instant::now);
         let update = tokio::select! {
             update = updates.recv() => update,
             _ = clock.tick() => {
                 evaluate(settings, key, counts);
+                continue;
+            }
+            () = tokio::time::sleep_until(at), if again.is_some() => {
+                again = None;
+                // ABU-048: the `NEW` goes again with the newest challenges.
+                if let Some(book) = challenges(settings).await {
+                    let _ = commands.send(Command::Challenges { book, now: unix_now() });
+                }
+                let _ = commands.send(Command::MakeReportQueue);
                 continue;
             }
         };
@@ -491,6 +575,14 @@ async fn run_once(
                 std::fs::write(&settings.queue, held)
                     .map_err(|_| "the queue file does not write")?;
                 println!("report queue made, written to {}", settings.queue.display());
+            }
+            Update::ReportQueueRefused(reason) => {
+                let after = next_wait(&mut wait);
+                println!(
+                    "report queue refused: {reason:?}, the next NEW goes in {} s",
+                    after.as_secs()
+                );
+                again = Some(tokio::time::Instant::now() + after);
             }
             Update::LinkFault(sealed) => match LinkFaultReport::open(report_sk, &sealed) {
                 Ok(report) => {
@@ -652,4 +744,17 @@ fn run_main() -> ExitCode {
             tokio::time::sleep(RETRY).await;
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_wait_for_the_next_new_grows_to_its_bound() {
+        // REL-208: 30 s, then twice the wait before it, up to 15 minutes.
+        let mut wait = QUEUE_RETRY;
+        let seconds: Vec<u64> = (0..8).map(|_| next_wait(&mut wait).as_secs()).collect();
+        assert_eq!(seconds, [30, 60, 120, 240, 480, 900, 900, 900]);
+    }
 }

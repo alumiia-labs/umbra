@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 10: Relay Directory, Measurement, and Selection
 
 **Status:** Draft
-**Version:** 0.19.1
+**Version:** 0.20.0
 **Date:** 2026-10-11
 
 ---
@@ -542,6 +542,13 @@ report.
   MUST read that queue at least once in each epoch. **[REL-167]** An
   authority that makes the manifest MUST carry the newest report queue of
   each authority that published one.
+- **[REL-208]** An authority whose relay refuses its report queue MUST send
+  a `NEW` for that queue again after a wait. The first wait is 30 s, and
+  each later wait is twice the wait before it, up to 15 minutes. Before
+  that `NEW` the authority fetches the challenges of the relays. Thus the
+  `NEW` answers an `ADMISSION` with a proof of work (Part 13 `ABU-014`,
+  `ABU-048`), and a `BUSY` leaves the authority with no queue for one wait
+  and not for its run.
 - **[REL-168]** A client MUST verify each `ReportQueue` under the key set that
   verified the root, and it MUST drop one whose signature fails, whose
   `authority_index` names no key of the set, or whose `epoch` is above the
