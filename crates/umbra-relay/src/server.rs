@@ -1576,6 +1576,11 @@ pub async fn serve_connection_until<S>(
     {
         return;
     }
+    // A TLS stream can hold a written record in its session until the next
+    // write. The peer sends nothing before this answer, thus the flush.
+    if stream.flush().await.is_err() {
+        return;
+    }
 
     let (writer, mut outbound, queued) = LinkWriter::new(LINK_BACKLOG);
     let opened = Input::Opened {
@@ -1621,8 +1626,12 @@ pub async fn serve_connection_until<S>(
                 return;
             };
             // A peer that reads nothing holds no task: the write ends at
-            // its bound, and the link closes.
-            let write = writer.write_all(frame.get(..used).unwrap_or(&[]));
+            // its bound, and the link closes. With no flush, the TLS session
+            // can hold the last capsule until the next one.
+            let write = async {
+                writer.write_all(frame.get(..used).unwrap_or(&[])).await?;
+                writer.flush().await
+            };
             if !matches!(
                 tokio::time::timeout(LINK_WRITE_TIMEOUT, write).await,
                 Ok(Ok(()))
@@ -2170,6 +2179,60 @@ mod tests {
         let used = websocket::encode(capsule, Some(&[9, 8, 7, 6]), &mut frame).unwrap();
         frame.truncate(used);
         frame
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_holds_a_write_until_its_flush_gets_each_flush() {
+        const CAPSULE_LEN: usize = 512;
+        let (inputs, mut node) = mpsc::channel(8);
+        let (mut peer, server) = tokio::io::duplex(8 * CAPSULE_LEN);
+        // The buffer holds each write until a flush, as a TLS session does
+        // for a record that its socket did not take.
+        let held = tokio::io::BufWriter::with_capacity(64 * CAPSULE_LEN, server);
+        tokio::spawn(serve_connection(held, 7, inputs, Arc::default()));
+        let key = [5u8; 16];
+        peer.write_all(upgrade::request("relay.example", &key).as_bytes())
+            .await
+            .unwrap();
+        let wait = Duration::from_secs(5);
+        let mut inbound = Vec::new();
+        let upgraded = async {
+            loop {
+                let mut chunk = [0u8; 1_024];
+                let n = peer.read(&mut chunk).await.unwrap();
+                assert!(n > 0, "the relay closed the stream");
+                inbound.extend_from_slice(&chunk[..n]);
+                if let Some(used) = upgrade::parse_response(&inbound, &key).unwrap() {
+                    inbound.drain(..used);
+                    break;
+                }
+            }
+        };
+        tokio::time::timeout(wait, upgraded)
+            .await
+            .expect("the answer to the upgrade stayed in the stream");
+        let Some(Input::Opened { writer, .. }) = node.recv().await else {
+            panic!("the connection did not open");
+        };
+        // One capsule with no capsule after it, as the answer to a build
+        // cell is.
+        assert!(writer.queue(vec![2u8; CAPSULE_LEN]));
+        let mut out = vec![0u8; 2 * CAPSULE_LEN];
+        let taken = async {
+            loop {
+                if let Some((len, _)) = websocket::decode(&inbound, false, &mut out).unwrap() {
+                    break len;
+                }
+                let mut chunk = [0u8; 1_024];
+                let n = peer.read(&mut chunk).await.unwrap();
+                assert!(n > 0, "the relay closed the stream");
+                inbound.extend_from_slice(&chunk[..n]);
+            }
+        };
+        let len = tokio::time::timeout(wait, taken)
+            .await
+            .expect("the last capsule stayed in the stream");
+        assert_eq!(out[..len], [2u8; CAPSULE_LEN]);
     }
 
     #[tokio::test]

@@ -48,6 +48,9 @@ pub const SOCKETS: usize = 4;
 const BATCH_CELLS: u64 = 128;
 /// The period at which a connection computes the cells that are due.
 const PACE: Duration = Duration::from_millis(2);
+/// The capsules of the relay that one connection holds before it reads
+/// their layers.
+const ARRIVALS: usize = 8_192;
 
 /// One relay under test.
 #[derive(Debug, Clone)]
@@ -337,26 +340,40 @@ async fn run_socket(
             }
         }
     });
+    // The reading half runs as its own task too, and it notes the time of
+    // each capsule. In one task with the sending, a measurer behind its
+    // rate reads one echo for each batch that it sends.
+    let (arrived, mut arrivals) = mpsc::channel::<(Instant, Vec<u8>)>(ARRIVALS);
+    let read = tokio::spawn(async move {
+        while let Ok(bytes) = reader.recv().await {
+            if arrived.send((Instant::now(), bytes)).await.is_err() {
+                break;
+            }
+        }
+    });
     let (mut sent, mut echoed) = (0u64, 0u64);
+    // Each capsule goes through its layers in its order, and an echo counts
+    // by the time at which it came.
+    let mut count = |socket: &mut Socket, arrivals: &mut mpsc::Receiver<(Instant, Vec<u8>)>| {
+        while let Ok((at, bytes)) = arrivals.try_recv() {
+            if socket.is_echo(&bytes) && at < end {
+                echoed += 1;
+            }
+        }
+    };
     tokio::time::sleep_until(start.into()).await;
     let mut pace = tokio::time::interval(PACE);
     let mut counter = 0u64;
     loop {
         let now = Instant::now();
-        if now >= end {
+        // A connection that ended carries no more of the test.
+        if now >= end || read.is_finished() {
             break;
         }
+        count(&mut socket, &mut arrivals);
         let due = (now.duration_since(start).as_secs_f64() * cells_each_second) as u64;
         let owed = due.saturating_sub(sent).min(BATCH_CELLS);
         tokio::select! {
-            received = reader.recv() => match received {
-                Ok(bytes) => {
-                    if socket.is_echo(&bytes) && Instant::now() < end {
-                        echoed += 1;
-                    }
-                }
-                Err(_) => break,
-            },
             permit = batches.reserve(), if owed > 0 => {
                 let Ok(permit) = permit else {
                     break;
@@ -373,11 +390,19 @@ async fn run_socket(
                 }
                 sent += batch.len() as u64;
                 permit.send(batch);
+                // A full batch tells of a measurer behind its rate. Such a
+                // loop never waits, and a thread that never waits polls no
+                // socket: the echoes stay unseen. The yield gives the
+                // thread to that poll.
+                if owed == BATCH_CELLS {
+                    tokio::task::yield_now().await;
+                }
             }
             _ = pace.tick() => {}
             () = tokio::time::sleep_until(end.into()) => break,
         }
     }
+    count(&mut socket, &mut arrivals);
     // The measurer ends its circuit and its session (Part 6 `WIR-246`):
     // the relay parks nothing of it.
     let mut last = Vec::new();
@@ -390,6 +415,7 @@ async fn run_socket(
     let _ = batches.send(last).await;
     drop(batches);
     let _ = tokio::time::timeout(Duration::from_secs(2), write).await;
+    read.abort();
     (sent, echoed)
 }
 

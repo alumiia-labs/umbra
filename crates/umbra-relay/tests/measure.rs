@@ -12,7 +12,7 @@
 
 use std::{collections::BTreeMap, time::Duration};
 
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpSocket};
 use umbra_core::directory::{
     authority::keyset_bytes,
     measure::{issue_cert, MeasurerTrust},
@@ -60,6 +60,27 @@ fn epoch_now() -> u64 {
 /// Starts a relay of `layer` that holds the key set of `authorities` and
 /// the list `revoked`, and returns where to measure it.
 async fn relay(layer: u8, authorities: &[SigningKey], revoked: &[[u8; 16]]) -> Target {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    relay_at(listener, layer, authorities, revoked)
+}
+
+/// A listener whose connections hold `bytes` of a peer before the relay
+/// reads them. No write of a measurer then waits in a short slot, as on a
+/// path with large buffers.
+fn wide_listener(bytes: u32) -> TcpListener {
+    let socket = TcpSocket::new_v4().unwrap();
+    socket.set_recv_buffer_size(bytes).unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    socket.listen(64).unwrap()
+}
+
+/// [`relay`] on `listener`.
+fn relay_at(
+    listener: TcpListener,
+    layer: u8,
+    authorities: &[SigningKey],
+    revoked: &[[u8; 16]],
+) -> Target {
     let static_secret = StaticSecret::from([layer; 32]);
     let held = RelayStatic {
         s: *XPublic::from(&static_secret).as_bytes(),
@@ -97,7 +118,6 @@ async fn relay(layer: u8, authorities: &[SigningKey], revoked: &[[u8; 16]]) -> T
         node.set_relay_identities([([0x99; 32], vec![0u8; 4])].into());
         node.set_previous_layer([[0x99; 32]].into());
     }
-    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(run_relay(
         node,
@@ -166,6 +186,33 @@ async fn a_relay_passes_a_class_that_the_loopback_holds_and_fails_one_far_above_
             .unwrap();
         assert!(outcome.passed, "{outcome:?}");
     }
+}
+
+/// One thread runs the measurer and the relay, thus the result does not
+/// change with the cores of the machine.
+#[tokio::test]
+async fn a_measurer_behind_its_rate_reads_the_echoes_of_its_slot() {
+    let authorities: Vec<SigningKey> = (0..7u8).map(|index| seeded(0x60 + index)).collect();
+    let key = seeded(0x70);
+    let cert = cert(&authorities, &key, [0x4D; 16]);
+    let tls = native::tls_config_with_root_file(CA).unwrap();
+    let target = relay_at(wide_listener(8 << 20), 1, &authorities, &[]);
+    // The C3 test at its full rate, which a test build does not send: the
+    // measurer holds a batch ready at each turn of the slot, and no write
+    // waits. The echoes that the relay sent in the slot count.
+    let high = Plan::of(3, Duration::from_secs(1), 4, 1).unwrap();
+    let outcome = measure(&target, &cert, &key, high, tls.clone())
+        .await
+        .unwrap();
+    assert!(!outcome.passed, "{outcome:?}");
+    assert!(outcome.echoed > 0, "{outcome:?}");
+    // One echo for each batch of 128 cells is the count of a measurer that
+    // reads between its batches alone.
+    assert!(outcome.echoed * 32 >= outcome.sent, "{outcome:?}");
+    // The relay takes the next session after that one (`REL-202`).
+    let low = Plan::of(0, Duration::from_secs(1), 2, 100).unwrap();
+    let outcome = measure(&target, &cert, &key, low, tls).await.unwrap();
+    assert!(outcome.passed, "{outcome:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

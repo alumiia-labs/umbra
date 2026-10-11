@@ -108,6 +108,8 @@ async fn post_now(
     head.push_str("\r\n");
     stream.write_all(head.as_bytes()).await?;
     stream.write_all(body).await?;
+    // A TLS stream can hold a written record until its flush.
+    stream.flush().await?;
     let mut inbound = Vec::with_capacity(1_024);
     let mut chunk = vec![0u8; 16_384];
     loop {

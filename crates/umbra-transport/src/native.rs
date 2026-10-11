@@ -283,6 +283,8 @@ async fn fetch_carried(
         dial.host
     );
     stream.write_all(request.as_bytes()).await?;
+    // A TLS stream can hold a written record until its flush.
+    stream.flush().await?;
     let mut inbound = Vec::with_capacity(65_536);
     let mut chunk = vec![0u8; 16_384];
     loop {
@@ -366,6 +368,8 @@ impl TcpLink {
         stream
             .write_all(upgrade::request(&dial.host, &key).as_bytes())
             .await?;
+        // A TLS stream can hold a written record until its flush.
+        stream.flush().await?;
         let mut inbound = Vec::with_capacity(4_096);
         let mut chunk = [0u8; 2_048];
         let used = loop {
