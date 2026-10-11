@@ -37,6 +37,9 @@ pub const STEP_TIMEOUT_TICKS: u32 = 30;
 /// How many times one chunk takes a new relay or a new start before the
 /// upload fails.
 pub const CHUNK_REPAIRS_MAX: u8 = 3;
+/// The chunks of one upload that started and that are not placed. A
+/// replica that gives no proof thus holds the upload at this count.
+pub const UNPLACED_UP_MAX: usize = 8 * MAX_CONCURRENT_UP;
 
 fn random_below<R: CryptoRng + ?Sized>(rng: &mut R, bound: u32) -> u32 {
     let mut bytes = [0u8; 4];
@@ -103,6 +106,12 @@ struct ChunkState {
     /// The new relays and the new starts that this chunk took.
     repairs: u8,
     is_started: bool,
+    /// Each relay gave its token, thus the chunk waits for its `CPUT`.
+    is_registered: bool,
+    /// The `CPUT` left.
+    is_put: bool,
+    /// The first relay answered the `CPUT`.
+    is_stored: bool,
     is_done: bool,
 }
 
@@ -255,7 +264,27 @@ impl Upload {
             .sum()
     }
 
+    /// Each `CPUT` that has no answer yet, a `CPUT` of a repair among them
+    /// (`ATT-164`). A chunk past its `CPUT` holds no place, thus its `CREP`
+    /// and its proofs travel while the next `CPUT` is in flight (`ATT-166`,
+    /// `ATT-178`).
     fn in_flight(&self) -> usize {
+        self.waiting
+            .values()
+            .filter(|(_, step, _)| matches!(step, Step::Put | Step::PutFresh(_)))
+            .count()
+    }
+
+    /// The chunks that register, or that wait for their `CPUT`.
+    fn ahead(&self) -> usize {
+        self.chunks
+            .iter()
+            .filter(|chunk| chunk.is_started && !chunk.is_put && !chunk.is_done)
+            .count()
+    }
+
+    /// The chunks that started and that are not placed.
+    fn unplaced(&self) -> usize {
         self.chunks
             .iter()
             .filter(|chunk| chunk.is_started && !chunk.is_done)
@@ -520,13 +549,27 @@ impl Upload {
         self.fill(node, rng)
     }
 
-    /// Starts each chunk that has room under `MAX_CONCURRENT_UP`.
+    /// Sends each `CPUT` that has room under `MAX_CONCURRENT_UP`, and
+    /// starts the registrations of the chunks that come next. A chunk thus
+    /// holds its tokens when a place opens, and the window waits for no
+    /// registration.
     fn fill<R: CryptoRng + ?Sized>(
         &mut self,
         node: &mut ClientNode,
         rng: &mut R,
     ) -> Result<(), Error> {
         while self.in_flight() < MAX_CONCURRENT_UP {
+            let Some(index) = self
+                .chunks
+                .iter()
+                .position(|chunk| chunk.is_registered && !chunk.is_put)
+            else {
+                break;
+            };
+            self.chunks.get_mut(index).ok_or(Error::Malformed)?.is_put = true;
+            self.send(node, index, Step::Put, rng)?;
+        }
+        while self.ahead() < MAX_CONCURRENT_UP && self.unplaced() < UNPLACED_UP_MAX {
             let Some(index) = self.chunks.iter().position(|chunk| !chunk.is_started) else {
                 break;
             };
@@ -568,12 +611,14 @@ impl Upload {
                             .upload
                             .register(*relay, token.ok_or(Error::Malformed)?)?;
                     }
-                    self.send(node, index, Step::Put, rng)?;
+                    // The `CPUT` leaves when the window has room.
+                    chunk.is_registered = true;
                 }
             }
             (Step::Put, ChunkOutcome::Stored) => {
                 let replicas = chunk.relays.len();
                 chunk.upload.put_done(replicas)?;
+                chunk.is_stored = true;
                 self.send(node, index, Step::Replicate, rng)?;
             }
             (Step::Replicate, ChunkOutcome::Replicated) => {
@@ -714,6 +759,9 @@ impl ChunkState {
             failed,
             repairs,
             is_started: false,
+            is_registered: false,
+            is_put: false,
+            is_stored: false,
             is_done: false,
         })
     }

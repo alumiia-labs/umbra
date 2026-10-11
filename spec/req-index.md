@@ -70,7 +70,7 @@ column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 257 | 90 | 1 | 0 | 9 | **357** |
+| `NET` | 258 | 90 | 1 | 0 | 9 | **358** |
 | `IDN` | 135 | 46 | 1 | 0 | 5 | **187** |
 | `CRY` | 120 | 27 | 0 | 0 | 1 | **148** |
 | `WIR` | 415 | 87 | 0 | 0 | 7 | **509** |
@@ -83,7 +83,7 @@ column when a crate implements the requirement and a test covers it.
 | `ABU` | 71 | 29 | 1 | 0 | 0 | **101** |
 | `IMP` | 115 | 41 | 0 | 0 | 2 | **158** |
 | `SEC` | 4 | 3 | 0 | 0 | 1 | **8** |
-| **All** | 2109 | 634 | 6 | 0 | 55 | **2804** |
+| **All** | 2110 | 634 | 6 | 0 | 55 | **2805** |
 
 ## SCP — Scope and Conventions
 
@@ -498,6 +498,7 @@ Source: `spec/03-network-architecture.md`
 | `NET-357` | §3.2.6 | MUST | A client | A client MUST set a new guard for each contact when a device leaves its device set under Part 7 §7.7 step 2. |  |  |
 | `NET-358` | §3.2.6 | MUST | A client | A client MUST set the first guard of a channel that holds no guard of this client and whose handshake ended. |  |  |
 | `NET-359` | §3.2.6 | MUST | The question of `NET-355` | The question of `NET-355` MUST state that an acceptance gives the conversation to the device that sent the request. |  |  |
+| `NET-360` | §3.5.2 | MUST | (unstated) | On a circuit that carries the attachment commands of Part 12, a relay MUST send each answer that waits at one tick of that clock, up to 256 KiB of cells for each tick. |  |  |
 
 ## IDN — Identity
 

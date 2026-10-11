@@ -714,6 +714,17 @@ impl Slot {
         matches!(self.circuit, Circuit::Ready(_))
     }
 
+    /// Whether the circuit is at the margin of `CIRCUIT_MAX_CELLS`
+    /// (`NET-321`).
+    fn is_full(&self) -> bool {
+        let Circuit::Ready(session) = &self.circuit else {
+            return false;
+        };
+        let (sent, received) = session.cells();
+        let full = CIRCUIT_MAX_CELLS.saturating_sub(CIRCUIT_CELL_MARGIN);
+        sent >= full || received >= full
+    }
+
     fn has_room(&self) -> bool {
         self.queues.len().saturating_add(self.reserved) < MAX_QUEUES_PER_SESSION
     }
@@ -4706,6 +4717,7 @@ impl ClientNode {
         let mut unreachable = Vec::new();
         let mut destroys = Vec::new();
         let is_group = self.range == Range::Group;
+        let is_bulk = self.range == Range::Attachment;
         let old = CIRCUIT_MAX_AGE.saturating_sub(CIRCUIT_AGE_MARGIN);
         for slot in &mut self.slots {
             if matches!(slot.circuit, Circuit::None) {
@@ -4713,10 +4725,23 @@ impl ClientNode {
             } else {
                 let born = *slot.born.get_or_insert(now);
                 has_aged |= slot.is_ready() && now.saturating_sub(born) >= old;
-                if let Circuit::Ready(session) = &slot.circuit {
-                    let (sent, received) = session.cells();
-                    let full = CIRCUIT_MAX_CELLS.saturating_sub(CIRCUIT_CELL_MARGIN);
-                    has_aged |= sent >= full || received >= full;
+                // A transfer passes the cell count of one circuit. Its
+                // commands go to a new circuit to the same relay, and the
+                // full one ends here when each answer came. Thus a large
+                // file ends no run.
+                let is_idle =
+                    matches!(&slot.circuit, Circuit::Ready(session) if session.pending() == 0);
+                if !is_bulk {
+                    has_aged |= slot.is_full();
+                } else if slot.is_full() && is_idle {
+                    if let Circuit::Ready(mut session) =
+                        core::mem::replace(&mut slot.circuit, Circuit::None)
+                    {
+                        destroys.extend(session.destroy_cell().ok());
+                    }
+                    slot.chain = None;
+                    slot.exit = None;
+                    slot.born = None;
                 }
             }
             if !matches!(slot.circuit, Circuit::Building { .. }) {
@@ -5864,10 +5889,16 @@ impl ClientNode {
         avoid: Option<usize>,
         class: DelayClass,
     ) -> Option<usize> {
+        // A full circuit of a transfer takes no new command.
+        let is_bulk = self.range == Range::Attachment;
         let ends_here = |(index, slot): (usize, &Slot)| {
             let exit = slot.chain.and_then(|chain| chain.last().copied());
-            (slot.is_general() && slot.is_ready() && slot.class == class && exit == Some(*relay))
-                .then_some(index)
+            (slot.is_general()
+                && slot.is_ready()
+                && slot.class == class
+                && exit == Some(*relay)
+                && !(is_bulk && slot.is_full()))
+            .then_some(index)
         };
         let mut found = self.slots.iter().enumerate().filter_map(ends_here);
         let other = found.clone().find(|index| Some(*index) != avoid);
@@ -5891,9 +5922,11 @@ impl ClientNode {
         class: DelayClass,
         rng: &mut R,
     ) -> Result<(), Error> {
+        let is_bulk = self.range == Range::Attachment;
         let ends_there = |slot: &Slot| {
             slot.is_general()
                 && slot.class == class
+                && !(is_bulk && slot.is_full())
                 && match slot.chain {
                     Some(chain) => chain.last() == Some(&relay),
                     None => slot.exit == Some(relay),

@@ -931,6 +931,11 @@ fn a_file_goes_up_from_one_client_and_comes_down_at_another() {
     for _ in 0..400 {
         for (handle, outcome) in chunk_answers(&mut mesh, RECEIVER) {
             answers += 1;
+            // One tick carries each answer that waits (`NET-360`), thus an
+            // answer of the first replica can follow the end.
+            if fetched.is_some() {
+                continue;
+            }
             let node = &mut mesh.clients[RECEIVER];
             if let Progress::Done(bytes) = download
                 .on_outcome(node, handle, outcome, &mut rng)
@@ -945,6 +950,50 @@ fn a_file_goes_up_from_one_client_and_comes_down_at_another() {
     }
     assert_eq!(fetched.expect("the download ends"), plain);
     assert!(answers > received.refs.len(), "{answers} answers");
+}
+
+/// `NET-321`: a transfer sends more cells than one circuit carries. The
+/// commands go to a new circuit to the same relay, and the run does not
+/// end. Before, the node gave `CircuitAged`, the run of the transfers ended
+/// at it, and an upload above about 100 MiB started again with no end.
+#[test]
+fn a_transfer_passes_the_cell_count_of_one_circuit_with_no_end_of_its_run() {
+    const SENDER: usize = 0;
+    let mut mesh = Mesh::new(&[0x69, 0x6A]);
+    use_transfer_node(&mut mesh, SENDER, 0x69);
+    mesh.settle();
+    let relay = relay_info(3).candidate.relay_id;
+    let mut rng = Rng(51);
+    let mut sent = 0u32;
+    let mut answered = 0u32;
+    let total = umbra_onion::CIRCUIT_MAX_CELLS + 800;
+    for _ in 0..4_000 {
+        // The window of an upload: some commands wait for their answers.
+        while sent < total && sent - answered < 64 {
+            let mut chunk_id = [0u8; 32];
+            chunk_id[..4].copy_from_slice(&sent.to_be_bytes());
+            let erase = ChunkJob::Erase {
+                cred: StaticSecret::from([0x33; 32]),
+            };
+            mesh.clients[SENDER]
+                .chunk(relay, chunk_id, erase, &mut rng)
+                .unwrap();
+            sent += 1;
+        }
+        answered += chunk_answers(&mut mesh, SENDER).len() as u32;
+        let now = mesh.now;
+        let ticked = mesh.clients[SENDER].on_tick(now);
+        assert!(
+            !ticked
+                .iter()
+                .any(|event| matches!(event, ClientEvent::CircuitAged | ClientEvent::CircuitLost)),
+            "the run ends after {sent} commands"
+        );
+        if answered == total {
+            break;
+        }
+    }
+    assert_eq!(answered, total, "{sent} commands left");
 }
 
 fn holder(index: usize) -> AttachmentRelay {
@@ -977,7 +1026,9 @@ fn a_file_above_one_descriptor_goes_up_and_down_through_its_manifest() {
     upload.tick(&mut mesh.clients[SENDER], &mut rng).unwrap();
     let mut uploaded: Option<Uploaded> = None;
     let mut last = (0, 0);
+    let mut ticks = 0;
     for _ in 0..20_000 {
+        ticks += 1;
         for (handle, outcome) in chunk_answers(&mut mesh, SENDER) {
             let node = &mut mesh.clients[SENDER];
             match upload.on_outcome(node, handle, outcome, &mut rng).unwrap() {
@@ -991,6 +1042,11 @@ fn a_file_above_one_descriptor_goes_up_and_down_through_its_manifest() {
         upload.tick(&mut mesh.clients[SENDER], &mut rng).unwrap();
     }
     let uploaded = uploaded.expect("the upload ends");
+    // NET-360, ATT-164: one tick of the pacing clock carries each answer
+    // that waits, and the window of 8 holds the `CPUT` alone. Thus the 271
+    // chunks need far less than the tick for each answer that they needed
+    // before, which was above 600 ticks.
+    assert!(ticks < 100, "{ticks} ticks");
     // 270 data chunks, whose 270 refs fit one manifest chunk of 271. The
     // progress counts both phases.
     assert_eq!(last.1, MAX_DESCRIPTOR_REFS as u32 + 2);

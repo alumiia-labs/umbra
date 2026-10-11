@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 12: Attachments and Large Objects
 
 **Status:** Draft
-**Version:** 0.20.1
+**Version:** 0.21.0
 **Date:** 2026-10-11
 
 ---
@@ -989,10 +989,10 @@ Three rules bound the failure that stays.
 | `CDEL` at a deletion, 3 for each chunk | 24 189 commands, batched 3 to a `B0` cell, which is 8 063 cells and 4.31 MiB |
 | Direct relay to relay, 2 `CRPUT` for each chunk | 16 126 × 32 766 = about 503.9 MiB |
 | Download at one replica | 8 063 × 32 860 = about 252.7 MiB |
-| Upload time, Fast mode, 5 Mbit/s uplink | about **7.5 minutes**, and the link binds it |
-| Upload time, Balanced mode | about **23 minutes**, and the round trip binds it |
-| Upload time, Private mode | about **80 minutes**, and the round trip binds it |
-| Download time at 20 Mbit/s, Fast, Balanced, Private | about 2, 6, and 19 minutes |
+| Upload time, Fast mode, 5 Mbit/s uplink | about **24 minutes**, and the turn of the window binds it |
+| Upload time, Balanced mode | about **39 minutes**, and the turn of the window binds it |
+| Upload time, Private mode | about **94 minutes**, and the turn of the window binds it |
+| Download time at 20 Mbit/s, Fast, Balanced, Private | about 6, 10, and 24 minutes |
 
 **The round-trip model.** A chain of Part 3 §3.12 costs about 210 ms of
 propagation in each direction. Thus a round trip is about 0.42 s in Fast mode.
@@ -1000,8 +1000,19 @@ Balanced mode adds an Erlang(3) delay of mean 0.45 s in each direction under
 Part 3 §3.9. Private mode adds 2.1 s in each direction. Thus a round trip is
 about 1.32 s in Balanced mode and about 4.62 s in Private mode. The window of
 `MAX_CONCURRENT_CHUNKS` holds 8 chunks up, which is 262 880 bytes in flight, and
-32 chunks down, which is 1 051 520 bytes. A window divided by a round trip gives
-the throughput, and the smaller of that figure and the link rate gives the time.
+32 chunks down, which is 1 051 520 bytes.
+
+**The turn of the window.** The answer to a `CPUT` and to a `CGET` leaves its
+relay at a tick of the pacing clock of Part 3 §3.5.2, thus it waits
+`PACING_MEAN` of 1 s as a mean. Part 3 rule `NET-360` sends each answer that
+waits at one tick, thus the answers of one window share that wait. One turn of
+the window is one round trip and one such wait: about 1.42 s in Fast mode,
+2.32 s in Balanced mode, and 5.62 s in Private mode. A window divided by its
+turn gives the throughput, and the smaller of that figure and the link rate
+gives the time. A file of 8 MiB is 257 chunks, thus its upload takes about
+46 s in Fast mode, 75 s in Balanced mode, and 3 minutes in Private mode. The
+registrations of a chunk run before its `CPUT` takes its place in the window,
+and its `CREP` and its `CVFY` run after it, thus neither adds a turn.
 
 - **[ATT-164]** A client MUST NOT hold more than 8 `CPUT` in flight.
   **[ATT-165]** A client MUST NOT hold more than 32 `CGET` in flight.
@@ -1013,8 +1024,9 @@ the throughput, and the smaller of that figure and the link rate gives the time.
 
 > *Cause.* A window of 8
 > fills a 5 Mbit/s uplink at a 0.42 s round trip, and a window of 32 fills a
-> 20 Mbit/s downlink. Under Balanced mode the round trip triples and the link
-> stays idle, thus the mode and not the link sets the time. A bulk circuit in
+> 20 Mbit/s downlink. The pacing wait and the delay of the mode make the turn
+> longer than that round trip, and the link stays idle. Thus the pacing clock
+> and the mode set the time, and not the link. A bulk circuit in
 > a faster mode than its conversation shows the mode of that conversation to
 > the ingress relay, which Part 3 §3.9.1 forbids.
 

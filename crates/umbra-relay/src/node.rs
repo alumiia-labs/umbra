@@ -266,10 +266,13 @@ const VERIFIES_PER_MINUTE: u32 = 32;
 pub const DEPOSITS_PER_MINUTE: u32 = 32;
 
 /// The answers that wait for the pacing clock of one circuit. The clock
-/// sends one each second (`NET-291`), thus a circuit that asks for more
-/// loses the newest: a record leaves its queue only at its `ACK`, and a
-/// command that took no answer goes again.
+/// sends one cell each second (`NET-291`), thus a circuit that asks for
+/// more loses the newest: a record leaves its queue only at its `ACK`, and
+/// a command that took no answer goes again.
 const OUTBOX_MAX: usize = 1_024;
+/// The bytes of the answers that one tick of the pacing clock sends on one
+/// attachment circuit (`NET-360`).
+const ANSWER_STEP: usize = 256 << 10;
 /// The bytes of a drain that one clock tick sends on one circuit. The
 /// records of one step are the one copy of a backlog that the relay makes.
 /// They go to their link in the same call. The drains of a link thus
@@ -2118,21 +2121,57 @@ impl RelayNode {
         else {
             return Vec::new();
         };
-        let action = if let Some(outbound) = endpoint.outbox.pop_front() {
-            let action = self.circuits.originate(
-                circuit,
-                outbound.bucket,
-                CellCommand::Data,
-                &outbound.encoded,
-            );
-            // NET-321: an answer that the circuit cannot carry ends it at
-            // once, thus the client builds again with no wait for the sweep.
-            if action.is_none() {
-                let ended = self.circuits.shed(circuit.link, circuit.circ_id);
-                return self.run(ended, now, rng);
+        if let Some(first) = endpoint.outbox.pop_front() {
+            // NET-360: the answers of an attachment circuit follow the
+            // commands of its own client and no arrival. Thus one tick
+            // carries each one that waits, up to one step.
+            let is_bulk = endpoint.range == Some(Range::Attachment);
+            let has_room = is_bulk
+                && fits(
+                    self.backlog.as_deref(),
+                    &self.framed,
+                    circuit.link,
+                    ANSWER_STEP,
+                    DRAIN_CALM_PART,
+                );
+            let mut actions = Vec::new();
+            let mut sent = 0usize;
+            let mut next = Some(first);
+            while let Some(outbound) = next.take() {
+                let bucket = outbound.bucket;
+                let mut content = outbound.encoded;
+                while endpoint.outbox.front().is_some_and(|more| {
+                    is_bulk
+                        && content.len().saturating_add(more.encoded.len()) <= bucket.command_area()
+                }) {
+                    if let Some(more) = endpoint.outbox.pop_front() {
+                        content.extend(more.encoded);
+                    }
+                }
+                let Some(action) =
+                    self.circuits
+                        .originate(circuit, bucket, CellCommand::Data, &content)
+                else {
+                    // NET-321: an answer that the circuit cannot carry ends
+                    // it at once, thus the client builds again with no wait
+                    // for the sweep.
+                    let ended = self.circuits.shed(circuit.link, circuit.circ_id);
+                    actions.extend(ended);
+                    return self.run(actions, now, rng);
+                };
+                actions.push(action);
+                sent = sent.saturating_add(bucket.cell_len());
+                let has_step = endpoint
+                    .outbox
+                    .front()
+                    .is_some_and(|more| sent.saturating_add(more.bucket.cell_len()) <= ANSWER_STEP);
+                if has_room && has_step {
+                    next = endpoint.outbox.pop_front();
+                }
             }
-            action
-        } else if endpoint.loops > 0 {
+            return self.run(actions, now, rng);
+        }
+        let action = if endpoint.loops > 0 {
             endpoint.loops = endpoint.loops.saturating_sub(1);
             self.circuits
                 .originate(circuit, Bucket::B0, CellCommand::Loop, &[])

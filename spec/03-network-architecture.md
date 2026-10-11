@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 3: Network Architecture
 
 **Status:** Draft
-**Version:** 0.20.1
+**Version:** 0.21.0
 **Date:** 2026-10-11
 
 ---
@@ -2011,8 +2011,26 @@ cell. This cover cell is bit-indistinguishable from a real `B0` delivery.
 
 **[NET-291]** A relay MUST send each cell that it starts on a circuit that ends
 at it on a tick of that clock. An answer, a `MSG`, a `NACK`, and a reflected
-loop cell each take one tick. The two exceptions are the `EXTENDED` cell of a
-build and the drain of `NET-037`.
+loop cell each take one tick. The three exceptions are the `EXTENDED` cell of a
+build, the drain of `NET-037`, and the answers of an attachment circuit under
+`NET-360`.
+
+**[NET-360]** On a circuit that carries the attachment commands of Part 12, a
+relay MUST send each answer that waits at one tick of that clock, up to 256 KiB
+of cells for each tick. It MUST pack the answers that fit one cell into that
+cell, as Part 6 §6.4.1 packs the commands of a client. A relay MUST send one
+cell only at a tick while the backlog of the link holds more than one quarter
+of its bound. With no answer that waits, the tick sends the cover cell of
+`NET-035`.
+
+> *Cause.* An answer on an attachment circuit follows a command of the client
+> of that circuit, and it follows no arrival from another party. The cells of
+> those commands show their count and their time to the same observer before
+> the answers leave. Thus the count of the answers at one tick gives that
+> observer nothing new, and `NET-036` holds: the ticks keep their schedule. One
+> answer for each tick makes each chunk of a file wait about 7 ticks, and 8 MB
+> then take about 13 minutes. Part 12 §12.8 keeps these circuits apart from the
+> circuits of the messages, thus the rule changes no delivery of a message.
 
 **The clock governs each held session.** A push-wake session is a held session,
 thus the clock runs during it. The one exception is the reconnect drain of §3.7
