@@ -1,13 +1,13 @@
 # Deploying the UMBRA network
 
 These playbooks install the launch network on Debian: four servers at
-OVHcloud US, over two sites. A server can run two relays; the inventory
+OVHcloud US, over three sites. A server can run two relays; the inventory
 lists the relays of each server.
 
 | Server | Site | Runs |
 |---|---|---|
 | `east-1` | Vint Hill, Virginia | Entry relay `entry-east` (port 443), exit relay `exit-1` (port 9443), and the notification server (`umbra-ndr`, port 8443) |
-| `east-2` | Vint Hill, Virginia | Middle relay (port 443) and exit relay `exit-3` (port 9443) |
+| `east-2` | Beauharnois, Quebec | Middle relay (port 443) and exit relay `exit-3` (port 9443) |
 | `west-1` | Hillsboro, Oregon | Entry relay `entry-west` (port 443), exit relay `exit-2` (port 9443), and the directory (`umbra-directory`, port 8443) |
 | `signer-west-1` | Hillsboro, Oregon | The directory signer; it signs the relay list each hour, and nginx serves it. The authority tool (`umbra-authority`) and the measurer (`umbra-measurer`) run beside it |
 

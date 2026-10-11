@@ -11,8 +11,9 @@ umbra_domain: umbrachat.app
 # document at `/i` (`IDN-120` to `IDN-122`).
 # umbra_invitation_host: umbrachat.app
 
-# The country of every relay (Part 10 §10.6.3), and the autonomous system
-# of the provider. `whois <address of a server>` prints the AS number.
+# The country of a relay (Part 10 §10.6.3), and the autonomous system of
+# the provider. `whois <address of a server>` prints the AS number. A
+# server in another country states its own value in the inventory.
 umbra_country: US
 umbra_asn: 0                         # FILL, the AS number of OVHcloud US
 

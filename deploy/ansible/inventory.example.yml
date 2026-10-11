@@ -1,4 +1,4 @@
-# The launch network: OVHcloud US, Debian, four servers over two sites.
+# The launch network: OVHcloud US, Debian, four servers over three sites.
 # Copy this file to inventory.yml (which git ignores), and put in the
 # addresses of the servers that OVH gave you.
 #
@@ -25,7 +25,10 @@ all:
             - { name: entry-east, role: entry, port: 443, class: 1 }
             - { name: exit-1, role: exit, port: 9443, class: 1 }
         east-2:
-          ansible_host: 203.0.113.11   # Vint Hill, Virginia
+          ansible_host: 203.0.113.11   # Beauharnois, Quebec
+          # A value here replaces the one of group_vars/all.yml. Set
+          # umbra_asn too when `whois` prints another AS number.
+          umbra_country: CA
           relays:
             - { name: middle, role: middle, port: 443, class: 1 }
             - { name: exit-3, role: exit, port: 9443, class: 1 }
