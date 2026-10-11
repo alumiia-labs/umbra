@@ -15,7 +15,7 @@ if (file("google-services.json").exists()) {
 // The semantic version of the app, the same as the Rust workspace and the
 // specification. The code grows with each one: major, minor, then patch, three
 // digits each.
-val appVersion = "0.18.6"
+val appVersion = "0.18.7"
 val (versionMajor, versionMinor, versionPatch) = appVersion.split(".").map(String::toInt)
 
 // The network file of the release, which scripts/release-network.sh writes
@@ -28,6 +28,16 @@ val releaseNetwork = Properties().apply {
 }
 val releaseInvitationHost = releaseNetwork.getProperty("invitation_host")?.trim().orEmpty()
 val releaseShippedEpoch = releaseNetwork.getProperty("shipped_epoch")?.trim().orEmpty()
+
+// The release signing key. Its place and its password come from the Gradle
+// properties of the user (~/.gradle/gradle.properties), never from this
+// repository: umbra.release.storeFile, umbra.release.storePassword, and
+// umbra.release.keyAlias. With no such properties, the release build is
+// unsigned.
+val releaseStoreFile = (project.findProperty("umbra.release.storeFile") as String?).orEmpty()
+val releaseStorePassword = (project.findProperty("umbra.release.storePassword") as String?).orEmpty()
+val releaseKeyAlias = (project.findProperty("umbra.release.keyAlias") as String?) ?: "umbra"
+val releaseTest = project.findProperty("umbra.releaseTest") == "true"
 
 android {
     namespace = "com.alumiialabs.umbra"
@@ -64,6 +74,18 @@ android {
         buildConfigField("String", "DEVNET_HOST", "\"$devnetHost\"")
     }
 
+    signingConfigs {
+        if (releaseStoreFile.isNotEmpty()) {
+            create("release") {
+                storeFile = file(releaseStoreFile)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                // A PKCS12 store has one password for the store and the key.
+                keyPassword = releaseStorePassword
+            }
+        }
+    }
+
     buildTypes {
         // -Pumbra.minify=true shrinks a debug build as R8 shrinks the release,
         // thus a build for the devnet runs the code that ships.
@@ -87,6 +109,18 @@ android {
                 releaseInvitationHost.ifEmpty { "release-network-absent.invalid" }
             // R8 drops the code that the app never calls, and the resources
             // that nothing names; proguard-rules.pro keeps the Rust bindings.
+            // -Pumbra.releaseTest=true gives the release type the ABI of an
+            // emulator and the debug signing key. Thus an emulator runs the
+            // code and the network that ship, before a release key exists.
+            // Such a build is no release: do not publish it.
+            if (releaseTest) {
+                ndk {
+                    abiFilters += listOf("x86_64")
+                }
+                signingConfig = signingConfigs.getByName("debug")
+            } else if (releaseStoreFile.isNotEmpty()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
