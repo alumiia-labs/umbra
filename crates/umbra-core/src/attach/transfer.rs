@@ -39,7 +39,17 @@ pub const STEP_TIMEOUT_TICKS: u32 = 30;
 pub const CHUNK_REPAIRS_MAX: u8 = 3;
 /// The chunks of one upload that started and that are not placed. A
 /// replica that gives no proof thus holds the upload at this count.
-pub const UNPLACED_UP_MAX: usize = 8 * MAX_CONCURRENT_UP;
+pub const UNPLACED_UP_MAX: usize = 4 * MAX_CONCURRENT_UP;
+/// The `CPUT` window at the start of an upload (`ATT-198`). The clock of a
+/// step starts when the command enters the link, thus a slow uplink with a
+/// wide window runs each step into `STEP_TIMEOUT_TICKS`.
+pub const UP_WINDOW_START: usize = 32;
+/// The window never closes below this count.
+pub const UP_WINDOW_MIN: usize = 8;
+/// A `CPUT` with its answer inside this many ticks opens the window.
+pub const UP_WINDOW_FAST_TICKS: u32 = 8;
+/// A `CPUT` with its answer after this many ticks closes the window.
+pub const UP_WINDOW_SLOW_TICKS: u32 = 15;
 
 fn random_below<R: CryptoRng + ?Sized>(rng: &mut R, bound: u32) -> u32 {
     let mut bytes = [0u8; 4];
@@ -167,6 +177,8 @@ pub struct Upload {
     /// The proofs that a later tick asks for again.
     /// The proofs to ask for again: the chunk, the replica, and the tick.
     retries: Vec<(usize, usize, u32)>,
+    /// The `CPUT` that this upload holds in flight at the most (`ATT-198`).
+    window: usize,
     ticks: u32,
     /// The name of this upload at the node. It is a random value that leaves
     /// the device in no form. The solution of a registration serves one
@@ -247,6 +259,7 @@ impl Upload {
             pool: relays.to_vec(),
             waiting: BTreeMap::new(),
             retries: Vec::new(),
+            window: UP_WINDOW_START,
             ticks: 0,
             admissions: u64::from_be_bytes(random_bytes(rng)),
         })
@@ -290,6 +303,11 @@ impl Upload {
             .iter()
             .filter(|chunk| chunk.is_started && !chunk.is_done)
             .count()
+    }
+
+    /// The `CPUT` that this upload holds in flight at the most (`ATT-198`).
+    pub fn window(&self) -> usize {
+        self.window
     }
 
     /// The chunks placed, and the chunk count of both phases.
@@ -541,6 +559,9 @@ impl Upload {
         for (handle, index, step) in late {
             // A start that took the chunk since removed the step already.
             if self.waiting.remove(&handle).is_some() {
+                if matches!(step, Step::Put) {
+                    self.window = (self.window / 2).max(UP_WINDOW_MIN);
+                }
                 self.repair(node, index, step, rng)?;
             }
         }
@@ -555,7 +576,7 @@ impl Upload {
         self.fill(node, rng)
     }
 
-    /// Sends each `CPUT` that has room under `MAX_CONCURRENT_UP`, and
+    /// Sends each `CPUT` that has room in the window of `ATT-198`, and
     /// starts the registrations of the chunks that come next. A chunk thus
     /// holds its tokens when a place opens, and the window waits for no
     /// registration.
@@ -564,7 +585,7 @@ impl Upload {
         node: &mut ClientNode,
         rng: &mut R,
     ) -> Result<(), Error> {
-        while self.in_flight() < MAX_CONCURRENT_UP {
+        while self.in_flight() < self.window {
             let Some(index) = self
                 .chunks
                 .iter()
@@ -575,7 +596,7 @@ impl Upload {
             self.chunks.get_mut(index).ok_or(Error::Malformed)?.is_put = true;
             self.send(node, index, Step::Put, rng)?;
         }
-        while self.ahead() < MAX_CONCURRENT_UP && self.unplaced() < UNPLACED_UP_MAX {
+        while self.ahead() < self.window && self.unplaced() < UNPLACED_UP_MAX {
             let Some(index) = self.chunks.iter().position(|chunk| !chunk.is_started) else {
                 break;
             };
@@ -601,10 +622,19 @@ impl Upload {
         outcome: ChunkOutcome,
         rng: &mut R,
     ) -> Result<Progress<Uploaded>, Error> {
-        let Some((index, step, _)) = self.waiting.remove(&handle) else {
+        let Some((index, step, sent)) = self.waiting.remove(&handle) else {
             let (done, total) = self.progress();
             return Ok(Progress::Running(done, total));
         };
+        // ATT-198: the time of a `CPUT` to its answer moves the window.
+        if matches!((step, &outcome), (Step::Put, ChunkOutcome::Stored)) {
+            let age = self.ticks.saturating_sub(sent);
+            if age <= UP_WINDOW_FAST_TICKS {
+                self.window = self.window.saturating_add(2).min(MAX_CONCURRENT_UP);
+            } else if age >= UP_WINDOW_SLOW_TICKS {
+                self.window = self.window.saturating_sub(4).max(UP_WINDOW_MIN);
+            }
+        }
         let chunk = self.chunks.get_mut(index).ok_or(Error::Malformed)?;
         match (step, outcome) {
             (Step::Register(at), ChunkOutcome::Registered(token)) => {

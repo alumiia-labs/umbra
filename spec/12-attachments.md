@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 12: Attachments and Large Objects
 
 **Status:** Draft
-**Version:** 0.22.0
+**Version:** 0.23.0
 **Date:** 2026-10-11
 
 ---
@@ -889,7 +889,7 @@ three properties hold:
 | `CHUNK_TTL` | 14 days, below `MSG_TTL` (§12.7.1) |
 | `CHUNK_LIFE_MAX` | 28 days. §12.3.3 rule 8 bounds a renewed chunk |
 | `REPLICAS` | 3, on different operators |
-| `MAX_CONCURRENT_CHUNKS` | 8 up, 32 down, and §12.7.2 derives both from the bandwidth-delay product |
+| `MAX_CONCURRENT_CHUNKS` | 128 up, 32 down, and §12.7.2 derives both from the bandwidth-delay product |
 | `RELAYREF_WIDTH` | 12 B (§12.3.2) |
 | `MAX_DESCRIPTOR_REFS` | 269, which is one `B3` cell |
 | `MANIFEST_REFS_PER_CHUNK` | 271, which is `SEGMENT_SIZE` divided by 120 |
@@ -1004,9 +1004,9 @@ Three rules bound the failure that stays.
 | `CDEL` at a deletion, 3 for each chunk | 24 189 commands, batched 3 to a `B0` cell, which is 8 063 cells and 4.31 MiB |
 | Direct relay to relay, 2 `CRPUT` for each chunk | 16 126 × 32 766 = about 503.9 MiB |
 | Download at one replica | 8 063 × 32 860 = about 252.7 MiB |
-| Upload time, Fast mode, 5 Mbit/s uplink | about **24 minutes**, and the turn of the window binds it |
-| Upload time, Balanced mode | about **39 minutes**, and the turn of the window binds it |
-| Upload time, Private mode | about **94 minutes**, and the turn of the window binds it |
+| Upload time, Fast mode, 5 Mbit/s uplink | about **7.5 minutes**, and the uplink binds it |
+| Upload time, Balanced mode | about **7.5 minutes**, and the uplink binds it |
+| Upload time, Private mode | about **7.5 minutes**, and the uplink binds it |
 | Download time at 20 Mbit/s, Fast, Balanced, Private | about 6, 10, and 24 minutes |
 
 **The round-trip model.** A chain of Part 3 §3.12 costs about 210 ms of
@@ -1014,8 +1014,8 @@ propagation in each direction. Thus a round trip is about 0.42 s in Fast mode.
 Balanced mode adds an Erlang(3) delay of mean 0.45 s in each direction under
 Part 3 §3.9. Private mode adds 2.1 s in each direction. Thus a round trip is
 about 1.32 s in Balanced mode and about 4.62 s in Private mode. The window of
-`MAX_CONCURRENT_CHUNKS` holds 8 chunks up, which is 262 880 bytes in flight, and
-32 chunks down, which is 1 051 520 bytes.
+`MAX_CONCURRENT_CHUNKS` holds 128 chunks up, which is 4 206 080 bytes in flight,
+and 32 chunks down, which is 1 051 520 bytes.
 
 **The turn of the window.** The answer to a `CPUT` and to a `CGET` leaves its
 relay at a tick of the pacing clock of Part 3 §3.5.2, thus it waits
@@ -1025,11 +1025,19 @@ the window is one round trip and one such wait: about 1.42 s in Fast mode,
 2.32 s in Balanced mode, and 5.62 s in Private mode. A window divided by its
 turn gives the throughput, and the smaller of that figure and the link rate
 gives the time. A file of 8 MiB is 257 chunks, thus its upload takes about
-46 s in Fast mode, 75 s in Balanced mode, and 3 minutes in Private mode. The
+14 s in each mode at a 5 Mbit/s uplink, and that uplink binds it. The start
+of the circuits, the proofs, and the manifest chunk add about 20 s. A
+measurement on the launch network gave 38 to 45 s for such a file on a
+22 Mbit/s uplink. The
 registrations of a chunk run before its `CPUT` takes its place in the window,
 and its `CREP` and its `CVFY` run after it, thus neither adds a turn.
 
-- **[ATT-164]** A client MUST NOT hold more than 8 `CPUT` in flight.
+- **[ATT-164]** A client MUST NOT hold more than 128 `CPUT` in flight.
+  **[ATT-198]** A client MUST start an upload with a window of 32 `CPUT`. It MUST
+  add 2 to the window for each `CPUT` whose answer comes inside 8 s. It MUST take
+  4 from the window for each `CPUT` whose answer comes after 15 s, and it MUST
+  halve the window at each `CPUT` with no answer inside the bound of `ATT-190`.
+  The window MUST NOT go below 8.
   **[ATT-165]** A client MUST NOT hold more than 32 `CGET` in flight.
   **[ATT-166]** A client MUST send the `CREP` of a chunk while the `CPUT` of the
   next chunk is in flight. **[ATT-178]** A client MUST NOT wait for the `CRPUT`
@@ -1037,11 +1045,16 @@ and its `CREP` and its `CVFY` run after it, thus neither adds a turn.
   attachment circuit of §12.8 in the privacy mode of the conversation that
   carries the descriptor.
 
-> *Cause.* A window of 8
-> fills a 5 Mbit/s uplink at a 0.42 s round trip, and a window of 32 fills a
-> 20 Mbit/s downlink. The pacing wait and the delay of the mode make the turn
-> longer than that round trip, and the link stays idle. Thus the pacing clock
-> and the mode set the time, and not the link. A bulk circuit in
+> *Cause.* A window of 8 fills a 5 Mbit/s uplink at a 0.42 s round trip. The
+> pacing wait of `NET-360` and the delay of the mode make the turn longer: a
+> measurement on the launch network gave about 4 s. A window of 8 then carries
+> 0.5 Mbit/s, and a window of 128 carries about 8 Mbit/s. A relay holds no count
+> of the `CPUT` of one client, thus the window is a limit of the client only.
+> The clock of a step starts when its command enters the link. A window of 128
+> on an uplink of 1 Mbit/s holds its last `CPUT` for 34 s, which is above the
+> bound of `ATT-190`. Thus the window of `ATT-198` starts small and follows the
+> time of the answers. The download window of 32 fills a 20 Mbit/s downlink
+> at the model turn. A bulk circuit in
 > a faster mode than its conversation shows the mode of that conversation to
 > the ingress relay, which Part 3 §3.9.1 forbids.
 

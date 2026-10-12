@@ -1117,12 +1117,15 @@ fn a_file_above_one_descriptor_goes_up_and_down_through_its_manifest() {
         }
         upload.tick(&mut mesh.clients[SENDER], &mut rng).unwrap();
     }
+    // ATT-198: each `CPUT` with a fast answer opened the window, up to its
+    // bound.
+    assert_eq!(upload.window(), umbra_core::attach::MAX_CONCURRENT_UP);
     let uploaded = uploaded.expect("the upload ends");
     // NET-360, ATT-164: one tick of the pacing clock carries each answer
-    // that waits, and the window of 8 holds the `CPUT` alone. Thus the 271
+    // that waits, and the window of `ATT-198` holds the `CPUT` alone. Thus the 271
     // chunks need far less than the tick for each answer that they needed
     // before, which was above 600 ticks.
-    assert!(ticks < 100, "{ticks} ticks");
+    assert!(ticks < 40, "{ticks} ticks");
     // 270 data chunks, whose 270 refs fit one manifest chunk of 271. The
     // progress counts both phases.
     assert_eq!(last.1, MAX_DESCRIPTOR_REFS as u32 + 2);

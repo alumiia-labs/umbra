@@ -41,7 +41,7 @@ pub const BACKUP_REPLICAS: usize = 2;
 /// `HOT_REPLICAS`.
 pub const HOT_REPLICAS: usize = 6;
 /// `MAX_CONCURRENT_CHUNKS`, up.
-pub const MAX_CONCURRENT_UP: usize = 8;
+pub const MAX_CONCURRENT_UP: usize = 128;
 /// `MAX_CONCURRENT_CHUNKS`, down.
 pub const MAX_CONCURRENT_DOWN: usize = 32;
 /// `MAX_DESCRIPTOR_REFS`, one `B3` cell.

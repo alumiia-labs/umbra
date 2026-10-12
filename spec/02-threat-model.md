@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 2: Threat Model and Security Goals
 
 **Status:** Draft
-**Version:** 0.22.0
+**Version:** 0.23.0
 **Date:** 2026-10-11
 
 ---
@@ -410,7 +410,7 @@ adds a trade MUST add a row to this table.
 | A forward is a new upload under a fresh key. Thus a relay joins no two conversations at one chunk, and the sender pays the upload again | Part 12 §12.3 |
 | A receiver renders the verified segments of a media object before the digest check. Thus a player starts early, and a truncated object shows its end late | Part 12 §12.3.1 |
 | A relay serves at most four times its store in a day and one chunk at most 60 times an hour. Thus a popular object moves to six replicas that its author pays for | Part 12 §12.11 |
-| A bulk circuit runs in the mode of its conversation, thus a Private-mode upload of 250 MiB takes about 94 minutes | Part 12 §12.7.2 |
+| A bulk circuit runs in the mode of its conversation, thus a Private-mode upload of 250 MiB takes about 7.5 minutes at a 5 Mbit/s uplink | Part 12 §12.7.2 |
 | A holder reads its own label at each tree head, thus a compelled insertion under that label raises the takeover warning at the holder, and each published label costs one metered lookup for each head | Part 9 §9.5.2 |
 | The invitation link names one invitation host, thus that host learns each browser open of a link by a party without the client | Part 4 §4.3.1 |
 | Private notifications wake the device on a fixed clock and open each queue-relay session. The idle background then rises to 149.22 MB or 196.68 MB each month. U4b names no target in v1. A locked client in Private mode receives nothing until the unlock | Part 3 §3.12, Part 8 §8.3 |

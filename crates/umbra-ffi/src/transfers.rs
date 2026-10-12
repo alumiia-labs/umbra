@@ -250,6 +250,7 @@ pub async fn run_transfers(
     // of the command. For each chunk: the answers that it waits for, and
     // whether each answer so far says that the relay holds it no more.
     let mut erasing: BTreeMap<u64, [u8; 32]> = BTreeMap::new();
+    let mut progress: BTreeMap<u64, (u32, u32)> = BTreeMap::new();
     let mut erase_left: BTreeMap<[u8; 32], (usize, bool)> = BTreeMap::new();
     // A run that ends ends no transfer: each one goes again in the next run.
     let fail_each = |active: &BTreeMap<u64, Active>, early: &[TransferCommand]| {
@@ -499,10 +500,21 @@ pub async fn run_transfers(
                         crate::devlog::line(format!("transfers: tag {tag} failed: {error:?}"));
                         TransferUpdate::Failed { tag }
                     });
-                    if !matches!(update, TransferUpdate::Progress { .. }) {
-                        active.remove(&tag);
+                    // Each answer gives a progress, and most of them move
+                    // no count. The client takes one that says something new.
+                    let is_new = match &update {
+                        TransferUpdate::Progress { done, total, .. } => {
+                            progress.insert(tag, (*done, *total)) != Some((*done, *total))
+                        }
+                        _ => {
+                            active.remove(&tag);
+                            progress.remove(&tag);
+                            true
+                        }
+                    };
+                    if is_new {
+                        let _ = updates.send(update);
                     }
-                    let _ = updates.send(update);
                     if node.faults().due().is_some() {
                         let faults = Box::new(node.take_faults());
                         let _ = updates.send(TransferUpdate::Faults(faults));

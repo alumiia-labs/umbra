@@ -79,11 +79,11 @@ column when a crate implements the requirement and a test covers it.
 | `DIS` | 131 | 36 | 0 | 0 | 3 | **170** |
 | `REL` | 170 | 34 | 1 | 0 | 3 | **208** |
 | `GRP` | 233 | 65 | 0 | 0 | 5 | **303** |
-| `ATT` | 144 | 45 | 2 | 0 | 3 | **194** |
+| `ATT` | 145 | 45 | 2 | 0 | 3 | **195** |
 | `ABU` | 71 | 29 | 1 | 0 | 0 | **101** |
 | `IMP` | 115 | 41 | 0 | 0 | 2 | **158** |
 | `SEC` | 4 | 3 | 0 | 0 | 1 | **8** |
-| **All** | 2111 | 634 | 6 | 0 | 55 | **2806** |
+| **All** | 2112 | 634 | 6 | 0 | 55 | **2807** |
 
 ## SCP — Scope and Conventions
 
@@ -2674,7 +2674,7 @@ Source: `spec/12-attachments.md`
 | `ATT-161` | §12.3.3 | MUST | (unstated) | When a client applies a deletion to a record with a descriptor it uploaded, it MUST send `CDEL` for each `ChunkRef`. |  |  |
 | `ATT-162` | §12.7.1 | MUST | A revision | A revision MUST hold `BACKUP_TTL` of Part 4 §4.8 at or above `BACKUP_LOOKBACK` weekly epochs less one epoch. |  |  |
 | `ATT-163` | §12.7.1 | MUST | A revision | A revision MUST hold `BACKUP_TTL` above `BACKUP_FULL_INTERVAL` plus `BACKUP_HISTORY_DAYS`. |  |  |
-| `ATT-164` | §12.7.2 | MUST NOT | A client | A client MUST NOT hold more than 8 `CPUT` in flight. |  |  |
+| `ATT-164` | §12.7.2 | MUST NOT | A client | A client MUST NOT hold more than 128 `CPUT` in flight. |  |  |
 | `ATT-165` | §12.7.2 | MUST NOT | A client | A client MUST NOT hold more than 32 `CGET` in flight. |  |  |
 | `ATT-166` | §12.7.2 | MUST | A client | A client MUST send the `CREP` of a chunk while the `CPUT` of the next chunk is in flight. |  |  |
 | `ATT-167` | §12.7.2 | MUST | A client | A client MUST build the attachment circuit of §12.8 in the privacy mode of the conversation that carries the descriptor. |  |  |
@@ -2707,6 +2707,7 @@ Source: `spec/12-attachments.md`
 | `ATT-195` | §12.3 | MUST | A container that the re-encode writes | A container that the re-encode writes MUST name no time: a sender MUST set the creation and the modification time of each MP4 header box (`mvhd`, `tkhd`, `mdhd`) to zero, and a value of the platform that names the device or its system MUST become zeros of the same length. |  |  |
 | `ATT-196` | §12.3 | MAY | An audio object that a sender encodes again | An audio object that a sender encodes again MAY keep the name that the user picked, with the extension of its new type. |  |  |
 | `ATT-197` | §12.4.1 | MUST | (unstated) | A relay set can hold no fresh relay for a chunk: each other relay holds a copy, failed, or is of an operator of a copy. |  |  |
+| `ATT-198` | §12.7.2 | MUST | A client | A client MUST start an upload with a window of 32 `CPUT`. |  |  |
 
 ## ABU — Anti-Abuse Without Identifiers
 

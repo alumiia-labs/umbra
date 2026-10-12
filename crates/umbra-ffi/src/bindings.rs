@@ -4464,11 +4464,16 @@ impl Persist for HandleStore {
 impl Handle {
     /// A task of the runtime gives one update of the network to the client.
     fn on_transfer_update(&self, update: TransferUpdate) {
+        let is_progress = matches!(update, TransferUpdate::Progress { .. });
         let mut inner = locked(&self.inner);
         inner.end_transfer(update);
         // A snapshot that arrived brought a group with it, and that group
-        // takes its subscription now.
-        inner.pump_groups();
+        // takes its subscription now. A progress brings none, and one file
+        // gives hundreds of them: the pump for each one held the end of an
+        // upload back for minutes.
+        if !is_progress {
+            inner.pump_groups();
+        }
         drop(inner);
         self.changed.notify_all();
     }

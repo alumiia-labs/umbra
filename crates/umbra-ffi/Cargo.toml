@@ -44,12 +44,12 @@ path = "src/bin/umbra_authority/main.rs"
 required-features = ["runtime"]
 
 [dependencies]
-umbra-crypto = { version = "0.22.0", path = "../umbra-crypto" }
-umbra-wire = { version = "0.22.0", path = "../umbra-wire" }
-umbra-core = { version = "0.22.0", path = "../umbra-core" }
-umbra-queue = { version = "0.22.0", path = "../umbra-queue" }
-umbra-transport = { version = "0.22.0", path = "../umbra-transport" }
-umbra-relay = { version = "0.22.0", path = "../umbra-relay", optional = true }
+umbra-crypto = { version = "0.23.0", path = "../umbra-crypto" }
+umbra-wire = { version = "0.23.0", path = "../umbra-wire" }
+umbra-core = { version = "0.23.0", path = "../umbra-core" }
+umbra-queue = { version = "0.23.0", path = "../umbra-queue" }
+umbra-transport = { version = "0.23.0", path = "../umbra-transport" }
+umbra-relay = { version = "0.23.0", path = "../umbra-relay", optional = true }
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -60,4 +60,4 @@ rusqlite = { version = "0.40", default-features = false, features = ["bundled"],
 
 [dev-dependencies]
 # The tests of cross-relay tokens make the RSA key of an issuer.
-umbra-crypto = { version = "0.22.0", path = "../umbra-crypto", features = ["keygen"] }
+umbra-crypto = { version = "0.23.0", path = "../umbra-crypto", features = ["keygen"] }
