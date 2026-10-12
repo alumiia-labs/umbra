@@ -569,6 +569,11 @@ pub const CIRCUIT_AGE_MARGIN: u64 = 60;
 /// client, and the client ticks once each second.
 pub const CIRCUIT_CELL_MARGIN: u32 = 64;
 
+/// The cells before `CIRCUIT_MAX_CELLS` at which a transfer stops using a
+/// circuit (`NET-321`). A relay answers a transfer with no pacing wait
+/// (`NET-360`), thus each command that waits brings a cell of the relay.
+pub const CIRCUIT_BULK_CELL_MARGIN: u32 = 2_048;
+
 /// The time before the age margin of `NET-320` at which a client starts
 /// the build of the circuit that takes the place of an aged one (Part 3
 /// §3.4.3, the preemptive build). The time holds a build with its back-off
@@ -715,13 +720,18 @@ impl Slot {
     }
 
     /// Whether the circuit is at the margin of `CIRCUIT_MAX_CELLS`
-    /// (`NET-321`).
-    fn is_full(&self) -> bool {
+    /// (`NET-321`). A transfer has its own margin.
+    fn is_full(&self, is_bulk: bool) -> bool {
         let Circuit::Ready(session) = &self.circuit else {
             return false;
         };
         let (sent, received) = session.cells();
-        let full = CIRCUIT_MAX_CELLS.saturating_sub(CIRCUIT_CELL_MARGIN);
+        let margin = if is_bulk {
+            CIRCUIT_BULK_CELL_MARGIN
+        } else {
+            CIRCUIT_CELL_MARGIN
+        };
+        let full = CIRCUIT_MAX_CELLS.saturating_sub(margin);
         sent >= full || received >= full
     }
 
@@ -4732,8 +4742,8 @@ impl ClientNode {
                 let is_idle =
                     matches!(&slot.circuit, Circuit::Ready(session) if session.pending() == 0);
                 if !is_bulk {
-                    has_aged |= slot.is_full();
-                } else if slot.is_full() && is_idle {
+                    has_aged |= slot.is_full(false);
+                } else if slot.is_full(true) && is_idle {
                     if let Circuit::Ready(mut session) =
                         core::mem::replace(&mut slot.circuit, Circuit::None)
                     {
@@ -5897,7 +5907,7 @@ impl ClientNode {
                 && slot.is_ready()
                 && slot.class == class
                 && exit == Some(*relay)
-                && !(is_bulk && slot.is_full()))
+                && !(is_bulk && slot.is_full(true)))
             .then_some(index)
         };
         let mut found = self.slots.iter().enumerate().filter_map(ends_here);
@@ -5926,7 +5936,7 @@ impl ClientNode {
         let ends_there = |slot: &Slot| {
             slot.is_general()
                 && slot.class == class
-                && !(is_bulk && slot.is_full())
+                && !(is_bulk && slot.is_full(true))
                 && match slot.chain {
                     Some(chain) => chain.last() == Some(&relay),
                     None => slot.exit == Some(relay),

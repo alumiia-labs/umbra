@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 12: Attachments and Large Objects
 
 **Status:** Draft
-**Version:** 0.23.0
-**Date:** 2026-10-11
+**Version:** 0.24.0
+**Date:** 2026-10-12
 
 ---
 
@@ -1007,7 +1007,7 @@ Three rules bound the failure that stays.
 | Upload time, Fast mode, 5 Mbit/s uplink | about **7.5 minutes**, and the uplink binds it |
 | Upload time, Balanced mode | about **7.5 minutes**, and the uplink binds it |
 | Upload time, Private mode | about **7.5 minutes**, and the uplink binds it |
-| Download time at 20 Mbit/s, Fast, Balanced, Private | about 6, 10, and 24 minutes |
+| Download time at 20 Mbit/s, Fast, Balanced, Private | about 2, 5.5, and 19 minutes |
 
 **The round-trip model.** A chain of Part 3 §3.12 costs about 210 ms of
 propagation in each direction. Thus a round trip is about 0.42 s in Fast mode.
@@ -1018,17 +1018,17 @@ about 1.32 s in Balanced mode and about 4.62 s in Private mode. The window of
 and 32 chunks down, which is 1 051 520 bytes.
 
 **The turn of the window.** The answer to a `CPUT` and to a `CGET` leaves its
-relay at a tick of the pacing clock of Part 3 §3.5.2, thus it waits
-`PACING_MEAN` of 1 s as a mean. Part 3 rule `NET-360` sends each answer that
-waits at one tick, thus the answers of one window share that wait. One turn of
-the window is one round trip and one such wait: about 1.42 s in Fast mode,
-2.32 s in Balanced mode, and 5.62 s in Private mode. A window divided by its
+relay when the relay serves the command (Part 3 rule `NET-360`), with no wait
+for the pacing clock of Part 3 §3.5.2. One turn of the window is one round
+trip: about 0.42 s in Fast mode, 1.32 s in Balanced mode, and 4.62 s in
+Private mode. A window divided by its
 turn gives the throughput, and the smaller of that figure and the link rate
 gives the time. A file of 8 MiB is 257 chunks, thus its upload takes about
 14 s in each mode at a 5 Mbit/s uplink, and that uplink binds it. The start
-of the circuits, the proofs, and the manifest chunk add about 20 s. A
-measurement on the launch network gave 38 to 45 s for such a file on a
-22 Mbit/s uplink. The
+of the circuits, the proofs, and the manifest chunk add some round trips. With
+a wait of `PACING_MEAN` in each of those steps, a measurement on the launch
+network gave 38 to 45 s for such a file on a 22 Mbit/s uplink, and about 20 s
+of it were those steps. The
 registrations of a chunk run before its `CPUT` takes its place in the window,
 and its `CREP` and its `CVFY` run after it, thus neither adds a turn.
 
@@ -1046,8 +1046,9 @@ and its `CREP` and its `CVFY` run after it, thus neither adds a turn.
   carries the descriptor.
 
 > *Cause.* A window of 8 fills a 5 Mbit/s uplink at a 0.42 s round trip. The
-> pacing wait of `NET-360` and the delay of the mode make the turn longer: a
-> measurement on the launch network gave about 4 s. A window of 8 then carries
+> delay of the mode and the load of a relay make the turn longer: a
+> measurement on the launch network gave about 4 s, with one pacing wait of
+> 1 s in it that `NET-360` held then. A window of 8 then carries
 > 0.5 Mbit/s, and a window of 128 carries about 8 Mbit/s. A relay holds no count
 > of the `CPUT` of one client, thus the window is a limit of the client only.
 > The clock of a step starts when its command enters the link. A window of 128

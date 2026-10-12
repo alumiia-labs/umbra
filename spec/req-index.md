@@ -498,7 +498,7 @@ Source: `spec/03-network-architecture.md`
 | `NET-357` | §3.2.6 | MUST | A client | A client MUST set a new guard for each contact when a device leaves its device set under Part 7 §7.7 step 2. |  |  |
 | `NET-358` | §3.2.6 | MUST | A client | A client MUST set the first guard of a channel that holds no guard of this client and whose handshake ended. |  |  |
 | `NET-359` | §3.2.6 | MUST | The question of `NET-355` | The question of `NET-355` MUST state that an acceptance gives the conversation to the device that sent the request. |  |  |
-| `NET-360` | §3.5.2 | MUST | (unstated) | On a circuit that carries the attachment commands of Part 12, a relay MUST send each answer that waits at one tick of that clock, up to 256 KiB of cells for each tick. |  |  |
+| `NET-360` | §3.5.2 | MUST | (unstated) | On a circuit that carries the attachment commands of Part 12, a relay MUST send the answers to the commands of one cell when it serves that cell, with no wait for a tick, up to 256 KiB of cells. |  |  |
 
 ## IDN — Identity
 

@@ -3102,7 +3102,7 @@ fn a_lost_phone_comes_back_from_its_backup_and_its_contact_talks_again() {
         FfiEvent::Online => Some(()),
         _ => None,
     });
-    fresh.restore_backup(digits).unwrap();
+    fresh.restore_backup(digits.clone()).unwrap();
     let start = Instant::now();
     loop {
         match fresh.restore_status() {
@@ -3111,6 +3111,9 @@ fn a_lost_phone_comes_back_from_its_backup_and_its_contact_talks_again() {
                 break;
             }
             RestoreStatus::Searching { .. } | RestoreStatus::Fetching { .. } => {}
+            // The root goes up after the object, on a write of its own. A
+            // slow machine can start the search before that write ends.
+            RestoreStatus::NotFound => fresh.restore_backup(digits.clone()).unwrap(),
             other => panic!("{other:?}"),
         }
         assert!(start.elapsed() < Duration::from_secs(60), "no restore");
@@ -4308,7 +4311,34 @@ fn a_group_made_after_the_link_reaches_each_linked_device() {
     let draft = bob.new_draft(joined.clone()).unwrap();
     draft.set_text(units("bob after the rekey")).unwrap();
     bob.send_draft(draft).unwrap();
-    wait_for_text(&alice, &group, "bob after the rekey");
+    // This step failed on a loaded machine with its cause open. A failure
+    // thus reports the state of each side.
+    let start = Instant::now();
+    while !holds_text(&alice, &group, "bob after the rekey") {
+        if start.elapsed() >= STEP {
+            let sent: Vec<u8> = bob
+                .messages(joined.clone())
+                .unwrap()
+                .into_iter()
+                .filter_map(|message| bob.msg_info(message).ok())
+                .filter(|info| info.outgoing)
+                .map(|info| info.delivery)
+                .collect();
+            let is_closed = bob.group_info(joined.clone()).map(|info| info.is_closed);
+            let late = Instant::now();
+            while !holds_text(&alice, &group, "bob after the rekey")
+                && late.elapsed() < Duration::from_secs(60)
+            {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            panic!(
+                "no message of Bob in time: deliveries of Bob {sent:?}, closed at Bob {is_closed:?}, at Alice after {} s more: {}",
+                late.elapsed().as_secs(),
+                holds_text(&alice, &group, "bob after the rekey"),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
     tick_until(
         &[&laptop],
         || holds_text(&laptop, &group, "bob after the rekey"),

@@ -1866,6 +1866,12 @@ impl RelayNode {
                             endpoint.post(reply.outbound, false);
                         }
                     }
+                    // NET-360: an answer of an attachment circuit follows
+                    // the command of its own client, thus it waits for no
+                    // tick. One step goes, and the clock sends the rest.
+                    if self.is_prompt(&circuit) {
+                        work.extend(self.answers(&circuit));
+                    }
                 }
                 Action::Loop { circuit } => {
                     self.ensure_endpoint(circuit);
@@ -2105,6 +2111,73 @@ impl RelayNode {
         }
     }
 
+    /// The cells of the answers that wait on a circuit. An attachment
+    /// circuit sends each one that waits, up to one step, while its link is
+    /// calm (`NET-360`). Each other circuit sends one cell.
+    fn answers(&mut self, circuit: &CircuitKey) -> Vec<Action> {
+        let Some(endpoint) = self.endpoints.get_mut(circuit) else {
+            return Vec::new();
+        };
+        let is_bulk = endpoint.range == Some(Range::Attachment);
+        let has_room = is_bulk
+            && fits(
+                self.backlog.as_deref(),
+                &self.framed,
+                circuit.link,
+                ANSWER_STEP,
+                DRAIN_CALM_PART,
+            );
+        let mut actions = Vec::new();
+        let mut sent = 0usize;
+        let mut next = endpoint.outbox.pop_front();
+        while let Some(outbound) = next.take() {
+            let bucket = outbound.bucket;
+            let mut content = outbound.encoded;
+            while endpoint.outbox.front().is_some_and(|more| {
+                is_bulk && content.len().saturating_add(more.encoded.len()) <= bucket.command_area()
+            }) {
+                if let Some(more) = endpoint.outbox.pop_front() {
+                    content.extend(more.encoded);
+                }
+            }
+            let Some(action) =
+                self.circuits
+                    .originate(circuit, bucket, CellCommand::Data, &content)
+            else {
+                // NET-321: an answer that the circuit cannot carry ends
+                // it at once, thus the client builds again with no wait
+                // for the sweep.
+                actions.extend(self.circuits.shed(circuit.link, circuit.circ_id));
+                return actions;
+            };
+            actions.push(action);
+            sent = sent.saturating_add(bucket.cell_len());
+            let has_step = endpoint
+                .outbox
+                .front()
+                .is_some_and(|more| sent.saturating_add(more.bucket.cell_len()) <= ANSWER_STEP);
+            if has_room && has_step {
+                next = endpoint.outbox.pop_front();
+            }
+        }
+        actions
+    }
+
+    /// Whether the answers of a circuit go with no wait for its clock: an
+    /// attachment circuit with a calm link (`NET-360`).
+    fn is_prompt(&self, circuit: &CircuitKey) -> bool {
+        self.endpoints
+            .get(circuit)
+            .is_some_and(|endpoint| !endpoint.paused && endpoint.range == Some(Range::Attachment))
+            && fits(
+                self.backlog.as_deref(),
+                &self.framed,
+                circuit.link,
+                ANSWER_STEP,
+                DRAIN_CALM_PART,
+            )
+    }
+
     /// One tick of the pacing clock of a circuit (`NET-035`, `NET-036`):
     /// the next command that waits, a reflected loop cell, or a `B0` cover
     /// cell. The schedule does not depend on the arrival of a message.
@@ -2121,54 +2194,8 @@ impl RelayNode {
         else {
             return Vec::new();
         };
-        if let Some(first) = endpoint.outbox.pop_front() {
-            // NET-360: the answers of an attachment circuit follow the
-            // commands of its own client and no arrival. Thus one tick
-            // carries each one that waits, up to one step.
-            let is_bulk = endpoint.range == Some(Range::Attachment);
-            let has_room = is_bulk
-                && fits(
-                    self.backlog.as_deref(),
-                    &self.framed,
-                    circuit.link,
-                    ANSWER_STEP,
-                    DRAIN_CALM_PART,
-                );
-            let mut actions = Vec::new();
-            let mut sent = 0usize;
-            let mut next = Some(first);
-            while let Some(outbound) = next.take() {
-                let bucket = outbound.bucket;
-                let mut content = outbound.encoded;
-                while endpoint.outbox.front().is_some_and(|more| {
-                    is_bulk
-                        && content.len().saturating_add(more.encoded.len()) <= bucket.command_area()
-                }) {
-                    if let Some(more) = endpoint.outbox.pop_front() {
-                        content.extend(more.encoded);
-                    }
-                }
-                let Some(action) =
-                    self.circuits
-                        .originate(circuit, bucket, CellCommand::Data, &content)
-                else {
-                    // NET-321: an answer that the circuit cannot carry ends
-                    // it at once, thus the client builds again with no wait
-                    // for the sweep.
-                    let ended = self.circuits.shed(circuit.link, circuit.circ_id);
-                    actions.extend(ended);
-                    return self.run(actions, now, rng);
-                };
-                actions.push(action);
-                sent = sent.saturating_add(bucket.cell_len());
-                let has_step = endpoint
-                    .outbox
-                    .front()
-                    .is_some_and(|more| sent.saturating_add(more.bucket.cell_len()) <= ANSWER_STEP);
-                if has_room && has_step {
-                    next = endpoint.outbox.pop_front();
-                }
-            }
+        if !endpoint.outbox.is_empty() {
+            let actions = self.answers(circuit);
             return self.run(actions, now, rng);
         }
         let action = if endpoint.loops > 0 {

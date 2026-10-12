@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 3: Network Architecture
 
 **Status:** Draft
-**Version:** 0.23.0
-**Date:** 2026-10-11
+**Version:** 0.24.0
+**Date:** 2026-10-12
 
 ---
 
@@ -1360,6 +1360,7 @@ causes does not occur.
 | `CIRCUIT_MAX_CELLS` | 8 192 |
 | `CIRCUIT_AGE_MARGIN` | 60 s. A client stops using a circuit this long before `CIRCUIT_MAX_AGE` (`NET-320`) |
 | `CIRCUIT_CELL_MARGIN` | 64 cells. A client stops using a circuit this many cells before `CIRCUIT_MAX_CELLS` in one direction (`NET-321`) |
+| `CIRCUIT_BULK_CELL_MARGIN` | 2 048 cells. It takes the place of `CIRCUIT_CELL_MARGIN` on an attachment circuit of Part 12 §12.8 (`NET-321`) |
 | `CIRCUIT_BUILD_TIMEOUT` | 5 s from the first `EXTEND` cell. Three round trips over a 200 ms path take about 0.6 s, thus the value has a wide margin |
 | `CIRCUIT_SPARE_LEAD` | 120 s before the age margin of `NET-320`, and 512 cells before the cell margin of `NET-321`. A client starts the spare of a circuit at that point |
 | `CIRCUIT_RETIRE_WAIT` | 30 s. A client reads a replaced circuit this long after the spare took its place |
@@ -1389,7 +1390,13 @@ causes does not occur.
   cell each second toward the client (`PACING_MEAN`, §3.9), thus that count reaches the limit
   after about 2 hours 16 minutes, before `CIRCUIT_MAX_AGE`. Part 10 rule
   `REL-201` takes a circuit with an open measurement session out of this
-  count, and it ends that circuit at the end of the session.
+  count, and it ends that circuit at the end of the session. On an
+  attachment circuit of Part 12 §12.8 a client MUST use
+  `CIRCUIT_BULK_CELL_MARGIN` as the margin. `NET-360` sends the answers of
+  such a circuit with no pacing wait, thus each command that waits for its
+  answer brings a cell toward the client. The margin holds the commands of
+  one upload window and its registrations. The client reads the circuit
+  until each answer came, and it sends its next commands on a new circuit.
 - **[NET-322]** A relay that ends a circuit MUST tell each neighbor of it
   with the `CircuitDestroy` of Part 6 §6.2.3, on each link of the circuit
   but the one that ended it: a link that closed for good, a `CircuitDestroy`,
@@ -2016,21 +2023,28 @@ build, the drain of `NET-037`, and the answers of an attachment circuit under
 `NET-360`.
 
 **[NET-360]** On a circuit that carries the attachment commands of Part 12, a
-relay MUST send each answer that waits at one tick of that clock, up to 256 KiB
-of cells for each tick. It MUST pack the answers that fit one cell into that
-cell, as Part 6 §6.4.1 packs the commands of a client. A relay MUST send one
-cell only at a tick while the backlog of the link holds more than one quarter
-of its bound. With no answer that waits, the tick sends the cover cell of
-`NET-035`.
+relay MUST send the answers to the commands of one cell when it serves that
+cell, with no wait for a tick, up to 256 KiB of cells. It MUST pack the answers
+that fit one cell into that cell, as Part 6 §6.4.1 packs the commands of a
+client. An answer above that step waits for a tick, and a tick sends each
+answer that waits, up to 256 KiB of cells. While the backlog of the link holds
+more than one quarter of its bound, an answer MUST wait for a tick, and a tick
+MUST send one cell only. With no answer that waits, the tick sends the cover
+cell of `NET-035`.
 
 > *Cause.* An answer on an attachment circuit follows a command of the client
 > of that circuit, and it follows no arrival from another party. The cells of
 > those commands show their count and their time to the same observer before
-> the answers leave. Thus the count of the answers at one tick gives that
-> observer nothing new, and `NET-036` holds: the ticks keep their schedule. One
-> answer for each tick makes each chunk of a file wait about 7 ticks, and 8 MB
-> then take about 13 minutes. Part 12 §12.8 keeps these circuits apart from the
-> circuits of the messages, thus the rule changes no delivery of a message.
+> the answers leave. Thus the count and the time of the answers give that
+> observer nothing new, and `NET-036` holds: the ticks keep their schedule, and
+> the forward cells keep the per-hop delay of `NET-338`. A transfer shows its
+> size on its circuit, and an observer of both ends matches it by that size
+> with or without a wait of the answers. One answer for each tick makes each
+> chunk of a file wait about 7 ticks, and 8 MB then take about 13 minutes. Each
+> answer at one tick leaves one wait of `PACING_MEAN` in each step of an
+> upload: its registrations, each turn of its window, its proofs, and its
+> manifest chunk. Part 12 §12.8 keeps these circuits apart from the circuits of
+> the messages, thus the rule changes no delivery of a message.
 
 **The clock governs each held session.** A push-wake session is a held session,
 thus the clock runs during it. The one exception is the reconnect drain of §3.7

@@ -1072,6 +1072,49 @@ fn a_transfer_passes_the_cell_count_of_one_circuit_with_no_end_of_its_run() {
     assert_eq!(answered, total, "{sent} commands left");
 }
 
+/// `NET-360`: the answer of an attachment command leaves its relay with
+/// the command, and no tick of the pacing clock runs between the two.
+#[test]
+fn an_answer_of_a_transfer_waits_for_no_tick() {
+    const SENDER: usize = 0;
+    let mut mesh = Mesh::new(&[0x6B, 0x6C]);
+    use_transfer_node(&mut mesh, SENDER, 0x6B);
+    mesh.settle();
+    let relay = relay_info(3).candidate.relay_id;
+    let mut rng = Rng(52);
+    // The first command builds the circuit, thus the mesh settles once.
+    for round in 0..2u8 {
+        let erase = ChunkJob::Erase {
+            cred: StaticSecret::from([0x34; 32]),
+        };
+        mesh.clients[SENDER]
+            .chunk(relay, [round; 32], erase, &mut rng)
+            .unwrap();
+        if round == 0 {
+            mesh.settle();
+            mesh.take_events(SENDER);
+        }
+    }
+    for capsule in mesh.clients[SENDER].take_capsules() {
+        let link = mesh.links[SENDER];
+        let outputs = mesh.relays[0].on_capsule(link, &capsule, mesh.now, &mut mesh.rng);
+        mesh.route(0, outputs);
+    }
+    mesh.flush_delayed();
+    while let Some(capsule) = mesh.inboxes[SENDER].pop_front() {
+        let events = mesh.clients[SENDER]
+            .on_capsule(&capsule, mesh.now, &mut mesh.rng)
+            .unwrap();
+        mesh.events[SENDER].extend(events);
+    }
+    let answers = mesh
+        .take_events(SENDER)
+        .into_iter()
+        .filter(|event| matches!(event, ClientEvent::Chunk { .. }))
+        .count();
+    assert_eq!(answers, 1);
+}
+
 fn holder(index: usize) -> AttachmentRelay {
     let info = relay_info(index).candidate;
     AttachmentRelay {
