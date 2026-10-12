@@ -165,7 +165,8 @@ pub struct Upload {
     /// Each command with no answer yet, and the tick of its send.
     waiting: BTreeMap<u64, (usize, Step, u32)>,
     /// The proofs that a later tick asks for again.
-    retries: Vec<(usize, usize)>,
+    /// The proofs to ask for again: the chunk, the replica, and the tick.
+    retries: Vec<(usize, usize, u32)>,
     ticks: u32,
     /// The name of this upload at the node. It is a random value that leaves
     /// the device in no form. The solution of a registration serves one
@@ -486,7 +487,7 @@ impl Upload {
                 }
                 chunk.is_done = false;
                 self.retries
-                    .retain(|(of, place)| (*of, *place) != (index, at));
+                    .retain(|(of, place, _)| (*of, *place) != (index, at));
                 self.send(node, index, Step::RegisterFresh(at), rng)
             }
             Step::Register(_) | Step::Put | Step::Replicate => {
@@ -543,7 +544,12 @@ impl Upload {
                 self.repair(node, index, step, rng)?;
             }
         }
-        for (index, at) in core::mem::take(&mut self.retries) {
+        let ticks = self.ticks;
+        let (due, later): (Vec<_>, Vec<_>) = core::mem::take(&mut self.retries)
+            .into_iter()
+            .partition(|(_, _, at_tick)| *at_tick <= ticks);
+        self.retries = later;
+        for (index, at, _) in due {
             self.send(node, index, Step::Verify(at), rng)?;
         }
         self.fill(node, rng)
@@ -647,11 +653,50 @@ impl Upload {
                     .find(|(of, _)| *of == at)
                     .ok_or(Error::Malformed)?;
                 entry.1 = entry.1.saturating_sub(1);
-                if entry.1 == 0 {
-                    self.repair(node, index, step, rng)?;
+                let left = entry.1;
+                if left == 0 {
+                    let others: Vec<[u8; 32]> = chunk
+                        .relays
+                        .iter()
+                        .enumerate()
+                        .filter(|(place, _)| *place != at)
+                        .map(|(_, relay)| *relay)
+                        .collect();
+                    let bad = chunk.relays.get(at).copied();
+                    let failed: Vec<[u8; 32]> = chunk.failed.iter().copied().chain(bad).collect();
+                    if has_fresh_relay(&self.pool, &others, &failed) {
+                        self.repair(node, index, step, rng)?;
+                    } else {
+                        // ATT-197: no other relay can take the copy, and
+                        // this relay holds a registration. Thus the bytes
+                        // go to it from this device.
+                        chunk.repairs = chunk.repairs.saturating_add(1);
+                        if chunk.repairs > CHUNK_REPAIRS_MAX {
+                            return Err(Error::Unverified);
+                        }
+                        entry.1 = VERIFY_ATTEMPTS;
+                        self.send(node, index, Step::PutFresh(at), rng)?;
+                    }
                 } else {
-                    self.retries.push((index, at));
+                    // ATT-190: each wait is two times the one before, thus
+                    // the asks give a copy about 30 ticks to arrive.
+                    let asked = u32::from(VERIFY_ATTEMPTS.saturating_sub(left));
+                    let wait = 1u32 << asked.saturating_sub(1).min(8);
+                    self.retries
+                        .push((index, at, self.ticks.saturating_add(wait)));
                 }
+            }
+            // The copy of the relay before came while the bytes of this
+            // device were on their way: the relay holds the chunk, and its
+            // proof says so.
+            (Step::PutFresh(at), ChunkOutcome::Refused(_))
+                if chunk.tokens.get(at).copied().flatten().is_some()
+                    && chunk
+                        .upload
+                        .relays()
+                        .any(|relay| chunk.relays.get(at) == Some(relay)) =>
+            {
+                self.retries.push((index, at, self.ticks));
             }
             (Step::RegisterFresh(at), ChunkOutcome::Registered(token)) => {
                 *chunk.tokens.get_mut(at).ok_or(Error::Malformed)? = Some(token);
@@ -769,6 +814,20 @@ impl ChunkState {
 
 /// One relay for the place of a replica that failed: no relay of `failed`,
 /// no relay of `others`, and no operator of `others` (`ATT-017`).
+/// Whether [`fresh_relay`] has a relay to give.
+fn has_fresh_relay(pool: &[AttachmentRelay], others: &[[u8; 32]], failed: &[[u8; 32]]) -> bool {
+    let operators: Vec<[u8; 32]> = pool
+        .iter()
+        .filter(|relay| others.contains(&relay.relay_id))
+        .map(|relay| relay.operator_id)
+        .collect();
+    pool.iter().any(|relay| {
+        !others.contains(&relay.relay_id)
+            && !failed.contains(&relay.relay_id)
+            && !operators.contains(&relay.operator_id)
+    })
+}
+
 fn fresh_relay<R: CryptoRng + ?Sized>(
     pool: &[AttachmentRelay],
     others: &[[u8; 32]],

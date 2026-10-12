@@ -952,6 +952,82 @@ fn a_file_goes_up_from_one_client_and_comes_down_at_another() {
     assert!(answers > received.refs.len(), "{answers} answers");
 }
 
+/// `ATT-197`: three relays hold files, and the copies to one of them do
+/// not arrive. No fresh relay exists, thus the bytes of each such copy go
+/// to that relay from the device, and the upload ends. Before, the upload
+/// failed at the first copy that gave no proof.
+#[test]
+fn an_upload_with_no_fresh_relay_sends_a_lost_copy_from_the_device() {
+    const SENDER: usize = 0;
+    const RECEIVER: usize = 1;
+    let mut mesh = Mesh::new(&[0x6B, 0x6C]);
+    use_transfer_node(&mut mesh, SENDER, 0x6B);
+    use_transfer_node(&mut mesh, RECEIVER, 0x6C);
+    mesh.settle();
+    let relays: Vec<AttachmentRelay> = (3..6).map(holder).collect();
+    let deaf = holder(4).relay_id;
+    mesh.loses_pushes_to = Some(deaf);
+
+    let plain: Vec<u8> = (0..SEGMENT_SIZE * 5 + 9).map(|i| (i % 241) as u8).collect();
+    let mut rng = Rng(61);
+    let mut upload = Upload::new(&plain, Shape::default(), &relays, &mut rng).unwrap();
+    upload.tick(&mut mesh.clients[SENDER], &mut rng).unwrap();
+    let mut uploaded: Option<Uploaded> = None;
+    for _ in 0..3_000 {
+        for (handle, outcome) in chunk_answers(&mut mesh, SENDER) {
+            let node = &mut mesh.clients[SENDER];
+            if let Progress::Done(done) =
+                upload.on_outcome(node, handle, outcome, &mut rng).unwrap()
+            {
+                uploaded = Some(done);
+            }
+        }
+        if uploaded.is_some() {
+            break;
+        }
+        upload.tick(&mut mesh.clients[SENDER], &mut rng).unwrap();
+    }
+    let uploaded = uploaded.expect("the upload ends");
+    // The relay with no copy holds a place of each chunk, and it was not the
+    // first relay of each one: the test met the case.
+    assert!(uploaded
+        .credentials
+        .iter()
+        .all(|credential| credential.relays.contains(&deaf)));
+    assert!(uploaded
+        .credentials
+        .iter()
+        .any(|credential| credential.relays.first() != Some(&deaf)));
+    assert!(upload.repairs() >= 1);
+
+    // The receiver reads each chunk from that relay alone.
+    let only: Vec<AttachmentRelay> = vec![holder(4)];
+    let mut rng = Rng(62);
+    let mut download = Download::new(&uploaded.descriptor, &only, &mut rng).unwrap();
+    download
+        .tick(&mut mesh.clients[RECEIVER], &mut rng)
+        .unwrap();
+    let mut fetched = None;
+    for _ in 0..600 {
+        for (handle, outcome) in chunk_answers(&mut mesh, RECEIVER) {
+            if fetched.is_some() {
+                continue;
+            }
+            let node = &mut mesh.clients[RECEIVER];
+            if let Progress::Done(bytes) = download
+                .on_outcome(node, handle, outcome, &mut rng)
+                .unwrap()
+            {
+                fetched = Some(bytes);
+            }
+        }
+        if fetched.is_some() {
+            break;
+        }
+    }
+    assert!(fetched.expect("the download ends") == plain);
+}
+
 /// `NET-321`: a transfer sends more cells than one circuit carries. The
 /// commands go to a new circuit to the same relay, and the run does not
 /// end. Before, the node gave `CircuitAged`, the run of the transfers ended

@@ -79,11 +79,11 @@ column when a crate implements the requirement and a test covers it.
 | `DIS` | 131 | 36 | 0 | 0 | 3 | **170** |
 | `REL` | 170 | 34 | 1 | 0 | 3 | **208** |
 | `GRP` | 233 | 65 | 0 | 0 | 5 | **303** |
-| `ATT` | 143 | 45 | 2 | 0 | 3 | **193** |
+| `ATT` | 144 | 45 | 2 | 0 | 3 | **194** |
 | `ABU` | 71 | 29 | 1 | 0 | 0 | **101** |
 | `IMP` | 115 | 41 | 0 | 0 | 2 | **158** |
 | `SEC` | 4 | 3 | 0 | 0 | 1 | **8** |
-| **All** | 2110 | 634 | 6 | 0 | 55 | **2805** |
+| **All** | 2111 | 634 | 6 | 0 | 55 | **2806** |
 
 ## SCP — Scope and Conventions
 
@@ -2706,6 +2706,7 @@ Source: `spec/12-attachments.md`
 | `ATT-194` | §12.3 | SHOULD | A sender | A sender SHOULD put a preview of Part 6 rule `WIR-533` in the body of an image and of a video: a thumbnail of low quality, at most `PREVIEW_SIDE` on its longest side. |  |  |
 | `ATT-195` | §12.3 | MUST | A container that the re-encode writes | A container that the re-encode writes MUST name no time: a sender MUST set the creation and the modification time of each MP4 header box (`mvhd`, `tkhd`, `mdhd`) to zero, and a value of the platform that names the device or its system MUST become zeros of the same length. |  |  |
 | `ATT-196` | §12.3 | MAY | An audio object that a sender encodes again | An audio object that a sender encodes again MAY keep the name that the user picked, with the extension of its new type. |  |  |
+| `ATT-197` | §12.4.1 | MUST | (unstated) | A relay set can hold no fresh relay for a chunk: each other relay holds a copy, failed, or is of an operator of a copy. |  |  |
 
 ## ABU — Anti-Abuse Without Identifiers
 

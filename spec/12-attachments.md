@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 12: Attachments and Large Objects
 
 **Status:** Draft
-**Version:** 0.21.0
+**Version:** 0.22.0
 **Date:** 2026-10-11
 
 ---
@@ -741,7 +741,22 @@ proof = SHA3-256( nonce || chunk )
   client MUST bound the time that it waits for one answer, and the count of
   the new relays and the new starts of one chunk. Past that count the upload
   fails, and the message fails with it. The reference client asks 6 times,
-  waits 30 seconds, and stops at 3.
+  waits 30 seconds, and stops at 3. Its wait before each new ask is two times
+  the wait before, from 1 second, thus a copy has about 30 seconds to arrive.
+- **[ATT-197]** A relay set can hold no fresh relay for a chunk: each other
+  relay holds a copy, failed, or is of an operator of a copy. When a relay of
+  such a chunk still answers unknown-chunk after the asks of `ATT-190`, the
+  client MUST send the `CPUT` to that relay itself, under the `storage_token`
+  that the relay gave at its registration. This `CPUT` counts as a new relay
+  under the bound of `ATT-190`. When the relay refuses that `CPUT`, the client
+  MUST ask for the proof again, because the copy of the first relay arrived in
+  that time. A relay whose proof differs gets no such `CPUT`, and `ATT-118`
+  holds for it.
+
+  > *Cause.* A copy that did not arrive is a fault of the path between two
+  > relays, and the relay that waits for it did nothing wrong. A network with
+  > three file relays, or with one operator, has no fresh relay. Without this
+  > rule one late copy fails the whole upload there.
 
 **Each copy.** **[ATT-120]** A client MUST verify each copy of each chunk.
 **[ATT-121]** A client MUST NOT leave a copy out, because a relay that could
