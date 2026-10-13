@@ -1,0 +1,9 @@
+# The workflows name each action by its commit hash. These updates keep the
+# hashes current. `deny.toml` controls the Cargo and Gradle dependencies,
+# thus this file omits them.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

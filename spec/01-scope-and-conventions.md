@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 1: Scope, Conventions, and Terminology
 
 **Status:** Draft
-**Version:** 0.25.3
+**Version:** 0.25.4
 **Date:** 2026-10-13
 
 ---
