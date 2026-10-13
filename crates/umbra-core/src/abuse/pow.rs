@@ -201,6 +201,28 @@ impl PowSolution {
         })
     }
 
+    /// One attempt at `verifier_id` and `seed`, with a nonce from `rng`.
+    /// One attempt in `effort` passes as a mean. A caller with more than
+    /// one thread runs attempts on each, thus no long solve holds the rest.
+    pub fn attempt<R: TryCryptoRng + ?Sized>(
+        verifier_id: &[u8; 32],
+        seed: &[u8; 32],
+        effort: u32,
+        rng: &mut R,
+    ) -> Result<Option<Self>, Error> {
+        let mut nonce = [0u8; equix::NONCE_LEN];
+        rng.try_fill_bytes(&mut nonce)
+            .map_err(|_| Error::from(umbra_crypto::Error::Rng))?;
+        Ok(
+            equix::attempt(verifier_id, seed, &nonce, effort).map(|solution| PowSolution {
+                seed: *seed,
+                nonce,
+                effort,
+                solution,
+            }),
+        )
+    }
+
     /// Checks the Equi-X solution and the pass test for `verifier_id`
     /// (`ABU-073`).
     pub fn check(&self, verifier_id: &[u8; 32]) -> Result<(), Error> {
@@ -430,6 +452,9 @@ pub struct ChunkAdmissions {
     /// The solution of each upload at each relay, with the registrations
     /// that it still admits.
     held: BTreeMap<(u64, [u8; 32]), (PowSolution, u16)>,
+    /// The solutions that the caller made ahead for an upload at a relay.
+    /// The caller can solve them at one time on more than one thread.
+    stock: BTreeMap<(u64, [u8; 32]), Vec<PowSolution>>,
 }
 
 impl ChunkAdmissions {
@@ -465,12 +490,33 @@ impl ChunkAdmissions {
             book.get(relay, now)
                 .is_some_and(|challenge| challenge.seed == solution.seed)
         });
+        // An upload that ended leaves its stock, which goes with its seed.
+        self.stock.retain(|(_, relay), solutions| {
+            book.get(relay, now).is_some_and(|challenge| {
+                solutions
+                    .iter()
+                    .any(|solution| solution.seed == challenge.seed)
+            })
+        });
         let challenge = self.book.get(relay, self.now)?;
         if let Some((solution, left)) = self.held.get_mut(&(upload, *relay)) {
             if *left > 0 {
                 *left -= 1;
                 return Some(*solution);
             }
+        }
+        let floor = challenge.effort.clamp(POW_CHUNK_FLOOR, POW_EFFORT_MAX);
+        if let Some(solutions) = self.stock.get_mut(&(upload, *relay)) {
+            solutions
+                .retain(|solution| solution.seed == challenge.seed && solution.effort >= floor);
+            if let Some(solution) = solutions.pop() {
+                self.held.insert(
+                    (upload, *relay),
+                    (solution, POW_CHUNK_ALLOWANCE.saturating_sub(1)),
+                );
+                return Some(solution);
+            }
+            self.stock.remove(&(upload, *relay));
         }
         // ABU-069: no new solve past one period from the fetch.
         if self.now.saturating_sub(self.fetched_at) >= POW_CHALLENGE_PERIOD {
@@ -483,6 +529,26 @@ impl ChunkAdmissions {
             (solution, POW_CHUNK_ALLOWANCE.saturating_sub(1)),
         );
         Some(solution)
+    }
+
+    /// The seed and the effort of a solution that admits a registration at
+    /// `relay` now, or none as [`ChunkAdmissions::next`] gives none.
+    pub fn work(&self, relay: &[u8; 32]) -> Option<([u8; 32], u32)> {
+        if self.now.saturating_sub(self.fetched_at) >= POW_CHALLENGE_PERIOD {
+            return None;
+        }
+        let challenge = self.book.get(relay, self.now)?;
+        let effort = challenge.effort.clamp(POW_CHUNK_FLOOR, POW_EFFORT_MAX);
+        Some((challenge.seed, effort))
+    }
+
+    /// Keeps a solution that the caller made ahead for `upload` at `relay`.
+    /// It serves that upload alone (`ABU-108`).
+    pub fn stock(&mut self, upload: u64, relay: [u8; 32], solution: PowSolution) {
+        self.stock
+            .entry((upload, relay))
+            .or_default()
+            .push(solution);
     }
 
     /// The newest challenge of `relay` that this device holds, live at the
@@ -742,6 +808,42 @@ mod tests {
         let mut book = ChallengeBook::default();
         book.take(challenge, &key.verifying_key(), now).unwrap();
         book
+    }
+
+    #[test]
+    fn a_solution_made_ahead_serves_its_upload_before_a_new_solve() {
+        let relay = [5u8; 32];
+        let mut held = ChunkAdmissions::default();
+        assert!(held.work(&relay).is_none());
+        held.set_book(book_of(5, 3, 1_000, 1_000), 1_000);
+        let (seed, effort) = held.work(&relay).unwrap();
+        assert_eq!((seed, effort), ([3; 32], POW_CHUNK_FLOOR));
+        // The caller makes two solutions ahead, one attempt at a time.
+        let mut rng = Rng(21);
+        let mut made = Vec::new();
+        while made.len() < 2 {
+            if let Some(solution) = PowSolution::attempt(&relay, &seed, effort, &mut rng).unwrap() {
+                solution.check(&relay).unwrap();
+                made.push(solution);
+            }
+        }
+        for solution in &made {
+            held.stock(1, relay, *solution);
+        }
+        // Each one serves its allowance, and no other upload takes one.
+        let first = held.next(1, &relay, &mut Rng(22)).unwrap();
+        assert!(made.contains(&first));
+        assert!(!made.contains(&held.next(2, &relay, &mut Rng(23)).unwrap()));
+        for _ in 1..POW_CHUNK_ALLOWANCE {
+            assert_eq!(held.next(1, &relay, &mut Rng(24)), Some(first));
+        }
+        let second = held.next(1, &relay, &mut Rng(25)).unwrap();
+        assert!(made.contains(&second) && second != first);
+        // A new challenge ends the stock to the old one.
+        held.stock(1, relay, first);
+        held.set_book(book_of(5, 4, 1_100, 1_100), 1_100);
+        assert_eq!(held.next(1, &relay, &mut Rng(26)).unwrap().seed, [4; 32]);
+        assert!(held.stock.is_empty());
     }
 
     #[test]

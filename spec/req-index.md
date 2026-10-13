@@ -79,11 +79,11 @@ column when a crate implements the requirement and a test covers it.
 | `DIS` | 131 | 36 | 0 | 0 | 3 | **170** |
 | `REL` | 170 | 34 | 1 | 0 | 3 | **208** |
 | `GRP` | 233 | 65 | 0 | 0 | 5 | **303** |
-| `ATT` | 145 | 45 | 2 | 0 | 3 | **195** |
+| `ATT` | 145 | 46 | 2 | 0 | 3 | **196** |
 | `ABU` | 71 | 29 | 1 | 0 | 0 | **101** |
 | `IMP` | 115 | 41 | 0 | 0 | 2 | **158** |
 | `SEC` | 4 | 3 | 0 | 0 | 1 | **8** |
-| **All** | 2112 | 634 | 6 | 0 | 55 | **2807** |
+| **All** | 2112 | 635 | 6 | 0 | 55 | **2808** |
 
 ## SCP — Scope and Conventions
 
@@ -2708,6 +2708,7 @@ Source: `spec/12-attachments.md`
 | `ATT-196` | §12.3 | MAY | An audio object that a sender encodes again | An audio object that a sender encodes again MAY keep the name that the user picked, with the extension of its new type. |  |  |
 | `ATT-197` | §12.4.1 | MUST | (unstated) | A relay set can hold no fresh relay for a chunk: each other relay holds a copy, failed, or is of an operator of a copy. |  |  |
 | `ATT-198` | §12.7.2 | MUST | A client | A client MUST start an upload with a window of 32 `CPUT`. |  |  |
+| `ATT-199` | §12.7.2 | MUST NOT | A client | A client MUST NOT hold more than 256 chunks that register or that wait for their `CPUT` with their tokens. |  |  |
 
 ## ABU — Anti-Abuse Without Identifiers
 

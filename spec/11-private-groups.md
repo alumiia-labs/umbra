@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 11: Private Groups (2–500)
 
 **Status:** Draft
-**Version:** 0.24.0
+**Version:** 0.25.0
 **Date:** 2026-10-12
 
 ---

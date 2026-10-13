@@ -888,19 +888,27 @@ fn a_group_record_wakes_a_member_that_went_away_through_its_notify_queue() {
     let draft = alice.new_draft(group).unwrap();
     draft.set_text(units("we leave at six")).unwrap();
     alice.send_draft(draft).unwrap();
-    let blob = services
-        .block_on(async { tokio::time::timeout(Duration::from_secs(30), posts.recv()).await })
-        .expect("no push reached the endpoint of Bob")
-        .unwrap();
-    assert_eq!(blob.len(), umbra_wire::ndr::BLOB_LEN);
-    // NTF-136: the table opens the blob, and its alias names the group.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let woken = umbra_ffi::bindings::open_wake_blob(table, blob, now);
-    assert_eq!(woken.status, 0);
-    assert_eq!(woken.conversation, Some(bob_group.clone()));
+    // NTF-136: the table opens the blob, and its alias names the group. A
+    // late record of the pairwise queue can push first, and its blob names
+    // that conversation.
+    let start = Instant::now();
+    let woken = loop {
+        let left = Duration::from_secs(30).saturating_sub(start.elapsed());
+        let blob = services
+            .block_on(async { tokio::time::timeout(left, posts.recv()).await })
+            .expect("no push for the group reached the endpoint of Bob")
+            .unwrap();
+        assert_eq!(blob.len(), umbra_wire::ndr::BLOB_LEN);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let woken = umbra_ffi::bindings::open_wake_blob(table.clone(), blob, now);
+        assert_eq!(woken.status, 0);
+        if woken.conversation == Some(bob_group.clone()) {
+            break woken;
+        }
+    };
     assert!(woken.waiting >= 1);
 
     // NTF-132, NTF-133: Bob comes back and leaves the group. His notify queue leaves
@@ -3079,12 +3087,12 @@ fn a_lost_phone_comes_back_from_its_backup_and_its_contact_talks_again() {
     // The backup of Alice goes up, and she writes her recovery code down.
     alice.set_foreground(true);
     let start = Instant::now();
-    while alice.last_backup_at().is_none() {
+    // The root follows the object, and a restore needs both. A fixed wait
+    // for the root was too short on a slow machine.
+    while alice.last_backup_at().is_none() || alice.is_backup_running() {
         assert!(start.elapsed() < Duration::from_secs(150), "no backup");
         std::thread::sleep(Duration::from_millis(250));
     }
-    // The root follows the object.
-    std::thread::sleep(Duration::from_secs(5));
     let code = Arc::new(View::default());
     alice.recovery_code(code.clone()).unwrap();
     let digits = code.0.lock().unwrap().clone();
@@ -3102,7 +3110,7 @@ fn a_lost_phone_comes_back_from_its_backup_and_its_contact_talks_again() {
         FfiEvent::Online => Some(()),
         _ => None,
     });
-    fresh.restore_backup(digits.clone()).unwrap();
+    fresh.restore_backup(digits).unwrap();
     let start = Instant::now();
     loop {
         match fresh.restore_status() {
@@ -3111,9 +3119,6 @@ fn a_lost_phone_comes_back_from_its_backup_and_its_contact_talks_again() {
                 break;
             }
             RestoreStatus::Searching { .. } | RestoreStatus::Fetching { .. } => {}
-            // The root goes up after the object, on a write of its own. A
-            // slow machine can start the search before that write ends.
-            RestoreStatus::NotFound => fresh.restore_backup(digits.clone()).unwrap(),
             other => panic!("{other:?}"),
         }
         assert!(start.elapsed() < Duration::from_secs(60), "no restore");

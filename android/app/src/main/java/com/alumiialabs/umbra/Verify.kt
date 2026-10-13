@@ -195,10 +195,6 @@ fun ConversationSettingsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) ->
                 )
                 HorizontalDivider(color = Palette.Divider)
             }
-            isSecure?.let {
-                ToggleRow("Block screenshots", it) { on -> Core.blockScreenshots(chat.conversation, on) }
-                HorizontalDivider(color = Palette.Divider)
-            }
             // Part 3 §3.9, NET-081: the mode is a control of speed and of
             // timing cover. A group takes the mode of the device.
             if (!chat.isGroup) {
@@ -206,6 +202,11 @@ fun ConversationSettingsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) ->
                     EntryRow(RowEntry("hourglass-half", "Delivery speed", modeLabel(it)) { isChoosingMode = true })
                     HorizontalDivider(color = Palette.Divider)
                 }
+            }
+            // The switches stay in one group, below the rows that open a screen.
+            isSecure?.let {
+                ToggleRow("Block screenshots", it) { on -> Core.blockScreenshots(chat.conversation, on) }
+                HorizontalDivider(color = Palette.Divider)
             }
             receipts?.let { now ->
                 ToggleRow("Send delivery receipts", now.delivery) { change(Receipts(it, now.read)) }

@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 13: Anti-Abuse Without Identifiers
 
 **Status:** Draft
-**Version:** 0.24.0
+**Version:** 0.25.0
 **Date:** 2026-10-12
 
 ---
@@ -532,7 +532,9 @@ It carries a solution even when the effort is 0.
   of two uploads. Thus no solution joins two files or two conversations at a
   relay (Part 12 `ATT-005`). An upload is one file with its manifest, one
   backup object, or one handle-addressed chunk. Part 12 §12.9 states what the
-  relay learns of the chunks of one upload.
+  relay learns of the chunks of one upload. A client MAY make the solutions
+  of one upload before its first registration, on more than one thread. The
+  work for each solution does not change.
 
 > *Cause.* Without a floor, an allocation at an effort of 0 costs nothing. The
 > relay holds one quota counter for each upload that carries no token (Part 12

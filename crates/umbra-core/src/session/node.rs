@@ -6752,6 +6752,13 @@ impl ClientNode {
         self.chunk_admissions.set_book(book, now);
     }
 
+    /// The admissions of the chunk commands of this node. The caller reads
+    /// the work of an upload there and gives the solutions that it made
+    /// ahead.
+    pub fn chunk_admissions(&mut self) -> &mut crate::abuse::pow::ChunkAdmissions {
+        &mut self.chunk_admissions
+    }
+
     /// Moves the clock that decides whether a challenge is still live.
     pub fn set_challenge_clock(&mut self, now: u64) {
         self.chunk_admissions.set_now(now);

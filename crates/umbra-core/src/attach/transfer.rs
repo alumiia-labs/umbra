@@ -40,6 +40,10 @@ pub const CHUNK_REPAIRS_MAX: u8 = 3;
 /// The chunks of one upload that started and that are not placed. A
 /// replica that gives no proof thus holds the upload at this count.
 pub const UNPLACED_UP_MAX: usize = 4 * MAX_CONCURRENT_UP;
+/// The chunks of one upload that register, or that hold their tokens and
+/// wait for their `CPUT` (`ATT-199`). A registration takes a round trip of
+/// its own, thus it starts long before its place in the window opens.
+pub const REGISTER_AHEAD_MAX: usize = 2 * MAX_CONCURRENT_UP;
 /// The `CPUT` window at the start of an upload (`ATT-198`). The clock of a
 /// step starts when the command enters the link, thus a slow uplink with a
 /// wide window runs each step into `STEP_TIMEOUT_TICKS`.
@@ -303,6 +307,28 @@ impl Upload {
             .iter()
             .filter(|chunk| chunk.is_started && !chunk.is_done)
             .count()
+    }
+
+    /// The name of this upload at the admissions of its node (`ABU-108`).
+    pub fn admission_name(&self) -> u64 {
+        self.admissions
+    }
+
+    /// The registrations that this upload sends to each relay, with no
+    /// repair: those of its data chunks, and those of its manifest chunks,
+    /// whose relays a later draw gives. The caller solves for them ahead.
+    pub fn registrations(&self) -> BTreeMap<[u8; 32], usize> {
+        let manifest = if self.data_chunks > self.class.descriptor_refs {
+            manifest::manifest_chunks(self.data_chunks)
+        } else {
+            0
+        };
+        let mut counts: BTreeMap<[u8; 32], usize> = BTreeMap::new();
+        for relay in self.chunks.iter().flat_map(|chunk| chunk.relays.iter()) {
+            let count = counts.entry(*relay).or_insert(manifest);
+            *count = count.saturating_add(1);
+        }
+        counts
     }
 
     /// The `CPUT` that this upload holds in flight at the most (`ATT-198`).
@@ -596,7 +622,7 @@ impl Upload {
             self.chunks.get_mut(index).ok_or(Error::Malformed)?.is_put = true;
             self.send(node, index, Step::Put, rng)?;
         }
-        while self.ahead() < self.window && self.unplaced() < UNPLACED_UP_MAX {
+        while self.ahead() < REGISTER_AHEAD_MAX && self.unplaced() < UNPLACED_UP_MAX {
             let Some(index) = self.chunks.iter().position(|chunk| !chunk.is_started) else {
                 break;
             };

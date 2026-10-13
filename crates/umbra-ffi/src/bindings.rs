@@ -6239,6 +6239,15 @@ impl Handle {
         locked(&self.inner).client.last_backup_at().ok().flatten()
     }
 
+    /// Whether a backup write runs: the object, or the root that names it
+    /// (`IDN-098`). A restore finds the object only after its root.
+    pub fn is_backup_running(&self) -> bool {
+        locked(&self.inner)
+            .transfer_tags
+            .values()
+            .any(|work| matches!(work, TransferWork::Backup(_) | TransferWork::BackupRoot(_)))
+    }
+
     /// Starts a restore of Part 4 §4.7.2 from the recovery code in
     /// `digits`, over the network of this handle: the root of the current
     /// week and then of each earlier week until one opens (`IDN-101`,

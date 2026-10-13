@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 12: Attachments and Large Objects
 
 **Status:** Draft
-**Version:** 0.24.0
+**Version:** 0.25.0
 **Date:** 2026-10-12
 
 ---
@@ -1028,7 +1028,11 @@ gives the time. A file of 8 MiB is 257 chunks, thus its upload takes about
 of the circuits, the proofs, and the manifest chunk add some round trips. With
 a wait of `PACING_MEAN` in each of those steps, a measurement on the launch
 network gave 38 to 45 s for such a file on a 22 Mbit/s uplink, and about 20 s
-of it were those steps. The
+of it were those steps. With no such wait the same file took 18 to 21 s. Of
+that time the device used about 9 s for the 15 solutions of Part 13 rule
+`ABU-107`, one after the other, and the registrations ran one window ahead
+only. With the solutions made at one time on each thread of the device, and
+with the registrations of `ATT-199`, the file took 15 to 18 s. The
 registrations of a chunk run before its `CPUT` takes its place in the window,
 and its `CREP` and its `CVFY` run after it, thus neither adds a turn.
 
@@ -1038,6 +1042,8 @@ and its `CREP` and its `CVFY` run after it, thus neither adds a turn.
   4 from the window for each `CPUT` whose answer comes after 15 s, and it MUST
   halve the window at each `CPUT` with no answer inside the bound of `ATT-190`.
   The window MUST NOT go below 8.
+  **[ATT-199]** A client MUST NOT hold more than 256 chunks that register or
+  that wait for their `CPUT` with their tokens.
   **[ATT-165]** A client MUST NOT hold more than 32 `CGET` in flight.
   **[ATT-166]** A client MUST send the `CREP` of a chunk while the `CPUT` of the
   next chunk is in flight. **[ATT-178]** A client MUST NOT wait for the `CRPUT`
@@ -1054,7 +1060,12 @@ and its `CREP` and its `CVFY` run after it, thus neither adds a turn.
 > The clock of a step starts when its command enters the link. A window of 128
 > on an uplink of 1 Mbit/s holds its last `CPUT` for 34 s, which is above the
 > bound of `ATT-190`. Thus the window of `ATT-198` starts small and follows the
-> time of the answers. The download window of 32 fills a 20 Mbit/s downlink
+> time of the answers. A registration takes a round trip of its own, and it
+> waits behind the bytes of the `CPUT` on its link. With the registrations one
+> window ahead, each `CPUT` left when its registration ended, and the window
+> stayed empty. Thus `ATT-199` lets the registrations run 256 chunks ahead. A
+> registration with no bytes holds `CHUNK_SIZE` of the store of a relay until
+> `CHUNK_TTL` (`ATT-181`), thus the count has a bound. The download window of 32 fills a 20 Mbit/s downlink
 > at the model turn. A bulk circuit in
 > a faster mode than its conversation shows the mode of that conversation to
 > the ingress relay, which Part 3 §3.9.1 forbids.

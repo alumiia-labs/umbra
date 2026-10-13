@@ -11,6 +11,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use tokio::sync::mpsc;
 use umbra_core::{
+    abuse::pow::PowSolution,
     attach::{
         handle::{HandleRead, HandleWrite},
         place::{AttachmentRelay, HoldOffs},
@@ -214,6 +215,72 @@ enum Active {
     Down(Box<Download>),
     Write(Box<HandleWrite>),
     Read(Box<HandleRead>),
+}
+
+/// The solutions that an upload makes ahead for one relay at the most. A
+/// solution serves while its challenge is the newest, thus a stock for a
+/// long upload ends unused.
+const SOLVE_AHEAD_MAX: usize = 8;
+
+/// Solves the puzzles of the registrations of `upload` at one time, on the
+/// threads of the device (`ABU-107`). One solve after the other took about
+/// half the time of an upload of 8 MB. A registration with no stock solves
+/// at its send, as before.
+async fn solve_ahead(node: &mut ClientNode, upload: &Upload) {
+    let allowance = usize::from(umbra_core::abuse::POW_CHUNK_ALLOWANCE);
+    // Each job: the relay, the seed, the effort, and the solutions to make.
+    let mut jobs: Vec<([u8; 32], [u8; 32], u32, usize)> = Vec::new();
+    for (relay, count) in upload.registrations() {
+        let Some((seed, effort)) = node.chunk_admissions().work(&relay) else {
+            continue;
+        };
+        let solves = count.div_ceil(allowance).min(SOLVE_AHEAD_MAX);
+        jobs.push((relay, seed, effort, solves));
+    }
+    if jobs.is_empty() {
+        return;
+    }
+    let solved = tokio::task::spawn_blocking(move || {
+        let threads = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+        let jobs = std::sync::Mutex::new(jobs);
+        let solved = std::sync::Mutex::new(Vec::new());
+        std::thread::scope(|scope| {
+            for _ in 0..threads {
+                scope.spawn(|| loop {
+                    // The job with the most left takes the next attempt.
+                    let next = jobs.lock().ok().and_then(|jobs| {
+                        jobs.iter()
+                            .filter(|job| job.3 > 0)
+                            .max_by_key(|job| job.3)
+                            .copied()
+                    });
+                    let Some((relay, seed, effort, _)) = next else {
+                        break;
+                    };
+                    let Ok(found) = PowSolution::attempt(&relay, &seed, effort, &mut OsRng) else {
+                        break;
+                    };
+                    let Some(solution) = found else {
+                        continue;
+                    };
+                    let (Ok(mut jobs), Ok(mut solved)) = (jobs.lock(), solved.lock()) else {
+                        break;
+                    };
+                    if let Some(job) = jobs.iter_mut().find(|job| job.0 == relay && job.3 > 0) {
+                        job.3 = job.3.saturating_sub(1);
+                        solved.push((relay, solution));
+                    }
+                });
+            }
+        });
+        solved.into_inner().unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default();
+    let name = upload.admission_name();
+    for (relay, solution) in solved {
+        node.chunk_admissions().stock(name, relay, solution);
+    }
 }
 
 /// Runs the transfers until the link ends, or until no transfer is left for
@@ -557,11 +624,14 @@ pub async fn run_transfers(
                 }
                 TransferCommand::Upload { tag, plain, shape } => {
                     node.set_chunk_class(classes.get(&tag).copied().unwrap_or_default());
-                    let started =
-                        Upload::new(&plain, shape, &relays, &mut rng).and_then(|mut upload| {
-                            upload.tick(&mut node, &mut rng)?;
-                            Ok(upload)
-                        });
+                    let mut started = Upload::new(&plain, shape, &relays, &mut rng);
+                    if let Ok(upload) = &started {
+                        solve_ahead(&mut node, upload).await;
+                    }
+                    started = started.and_then(|mut upload| {
+                        upload.tick(&mut node, &mut rng)?;
+                        Ok(upload)
+                    });
                     match started {
                         Ok(upload) => {
                             active.insert(tag, Active::Up(Box::new(upload)));
@@ -630,14 +700,17 @@ pub async fn run_transfers(
                     // ATT-167: each start takes a mode of its own, not the mode
                     // of the transfer before it.
                     node.set_chunk_class(umbra_core::session::node::DelayClass::default());
-                    let started = Upload::with_class(
+                    let mut started = Upload::with_class(
                         &plain,
                         Shape::default(),
                         &relays,
                         Class::BACKUP,
                         &mut rng,
-                    )
-                    .and_then(|mut upload| {
+                    );
+                    if let Ok(upload) = &started {
+                        solve_ahead(&mut node, upload).await;
+                    }
+                    started = started.and_then(|mut upload| {
                         upload.tick(&mut node, &mut rng)?;
                         Ok(upload)
                     });
