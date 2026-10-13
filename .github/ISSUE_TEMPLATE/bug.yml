@@ -1,0 +1,65 @@
+name: Fault report
+description: The app, a relay, or a tool does not do what the specification says.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report a vulnerability here. Use the private report form of the **Security** tab.
+        Do not include a passphrase, a key, an invitation link, or message content.
+  - type: dropdown
+    id: part
+    attributes:
+      label: Part
+      options:
+        - Android app
+        - Relay or other server program
+        - Rust core
+        - Deployment playbooks
+        - Web site
+        - Build or check scripts
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The version of the app, or the commit of the code.
+      placeholder: "0.25.1"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: The device and the Android version, or the operating system of the server.
+      placeholder: "Pixel 8, Android 15"
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps
+      description: Give the steps that show the fault.
+      placeholder: |
+        1. Open a conversation.
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+      description: Cite the specification rule if you know it, for example `NET-360`.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log lines
+      description: Remove each address, name, and identifier before you paste the lines.
+      render: text

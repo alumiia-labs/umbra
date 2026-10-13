@@ -1,0 +1,41 @@
+name: Proposal
+description: A new function or a change to the design.
+labels: ["proposal"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Agree on the design here before you write a large change.
+        The project does not accept analytics or other measurement in the app.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Tell what a user or an operator cannot do at this time.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Tell what changes. Name the specification parts that the change touches.
+    validations:
+      required: true
+  - type: textarea
+    id: threat
+    attributes:
+      label: Effect on the threat model
+      description: Tell what a relay, a network observer, or a contact learns that it did not learn before.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: Give the other designs that you examined, and why they are not as good.
+  - type: checkboxes
+    id: work
+    attributes:
+      label: Work
+      options:
+        - label: I can write this change.

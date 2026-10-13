@@ -40,6 +40,11 @@ bash scripts/check.sh           # the full check set of each commit
 `android/README.md` gives the build of the app. `deploy/ansible/README.md`
 gives the deployment of a network.
 
+## Contribute
+
+`CONTRIBUTING.md` gives the rules for an issue and for a pull request.
+`CODE_OF_CONDUCT.md` applies to each person in this project.
+
 ## Security
 
 `SECURITY.md` gives the procedure for a vulnerability report.

@@ -1,0 +1,41 @@
+name: Specification fault
+description: A rule is wrong, not clear, or in conflict with a different rule.
+labels: ["specification"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report a vulnerability here. Use the private report form of the **Security** tab.
+  - type: input
+    id: rule
+    attributes:
+      label: Rule or section
+      description: The rule identifier or the section number.
+      placeholder: "ATT-199, or Part 12 §12.4"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Specification version
+      placeholder: "0.25.1"
+    validations:
+      required: true
+  - type: textarea
+    id: fault
+    attributes:
+      label: Fault
+      description: Tell what is wrong. If two rules are in conflict, name the two rules.
+    validations:
+      required: true
+  - type: textarea
+    id: effect
+    attributes:
+      label: Effect
+      description: Tell what an implementation or a user loses because of the fault.
+    validations:
+      required: true
+  - type: textarea
+    id: correction
+    attributes:
+      label: Proposed correction

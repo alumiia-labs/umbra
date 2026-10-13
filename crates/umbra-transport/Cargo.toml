@@ -17,8 +17,8 @@ workspace = true
 native = ["dep:rustls", "dep:quinn", "dep:tokio", "dep:tokio-rustls", "dep:webpki-roots"]
 
 [dependencies]
-umbra-crypto = { version = "0.25.1", path = "../umbra-crypto" }
-umbra-wire = { version = "0.25.1", path = "../umbra-wire" }
+umbra-crypto = { version = "0.25.2", path = "../umbra-crypto" }
+umbra-wire = { version = "0.25.2", path = "../umbra-wire" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"], optional = true }
