@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/umbra-crypto", "crates/umbra-wire", "crates/umbra-onion", "crates/umbra-queue", "crates/umbra-transport", "crates/umbra-core", "crates/umbra-relay", "crates/umbra-ffi"]
 
 [workspace.package]
-version = "0.25.0"
+version = "0.25.1"
 edition = "2021"
 rust-version = "1.98"
 license = "AGPL-3.0-only"
@@ -21,6 +21,13 @@ panic = "deny"
 
 # A proof of work of Part 13 takes seconds in a build with no optimization,
 # thus a debug build and each test optimize the two crates of Equi-X.
+# The tests run real key exchanges, Argon2, and TLS. With no optimization of
+# the dependencies the socket tests of the client take about 20 minutes, and
+# their time bounds fail on a loaded machine. The crates of this workspace
+# keep no optimization, thus a change to them builds fast.
+[profile.dev.package."*"]
+opt-level = 2
+
 [profile.dev.package.equix]
 opt-level = 3
 
