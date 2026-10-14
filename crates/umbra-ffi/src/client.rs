@@ -33,6 +33,7 @@ mod modes;
 mod notify;
 mod own_delete;
 mod pictures;
+mod pins;
 mod polls;
 mod quota;
 mod renewal_guard;
@@ -56,7 +57,7 @@ mod timers;
 mod tokens;
 mod typing;
 
-pub use alerts::{ALERT_ALL, ALERT_MENTIONS, ALERT_NONE};
+pub use alerts::{ALERT_ALL, ALERT_MENTIONS, ALERT_NONE, MUTE_FOREVER};
 pub use backup::{BackupUpload, PendingBackup, RestoredBackup, RootWrite};
 pub use catch_up::CatchUp;
 pub use dead::DeadWork;
@@ -3600,8 +3601,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(batch.commit()?)
     }
 
-    /// One summary for each contact and for each group, the newest
-    /// conversation first. The list needs no network.
+    /// One summary for each contact and for each group: the pinned ones
+    /// first, and the newest conversation first in each part. The list
+    /// needs no network.
     ///
     /// The call skips a row that does not read, or that names another
     /// owner. The list of the conversations is the way to each other
@@ -3667,9 +3669,25 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     is_sound = false;
                     false
                 }),
+                pinned: self.is_pinned(conversation).unwrap_or_else(|_| {
+                    crate::devlog::line("summaries: a flags row does not read");
+                    is_sound = false;
+                    false
+                }),
+                muted_until_ms: self.muted_until(conversation).unwrap_or_else(|_| {
+                    crate::devlog::line("summaries: an alert row does not read");
+                    is_sound = false;
+                    0
+                }),
             });
         }
-        out.sort_by_key(|summary| core::cmp::Reverse(summary.last_at_ms));
+        // DEV-330: the pinned conversations first, the newest first in each.
+        out.sort_by_key(|summary| {
+            (
+                core::cmp::Reverse(summary.pinned),
+                core::cmp::Reverse(summary.last_at_ms),
+            )
+        });
         Ok((out, is_sound))
     }
 
@@ -6576,6 +6594,123 @@ mod tests {
             .commit_network(&[], &[(channel, item(&[], 3))], T0, &mut rng)
             .unwrap();
         assert!(client.contact_picture(conversation).unwrap().is_empty());
+        client.audit().unwrap();
+    }
+
+    #[test]
+    fn a_pin_and_a_mute_go_to_each_device_of_the_set() {
+        use super::{ALERT_ALL, ALERT_MENTIONS, ALERT_NONE, MUTE_FOREVER};
+        use umbra_core::devset::engine::SyncEngine;
+
+        let (mut client, mut rng, _, conversation) = client_with_contact(407);
+        let (tablet, _) = link_device(&mut client, &mut rng);
+        let own = client.device_identity().unwrap().unwrap().device_id;
+        let channel = ContactId([0x7C; 32]);
+        let subject = client.subject_of(conversation).unwrap().unwrap();
+
+        // DEV-329: a pin goes as one item, and no record goes to the contact.
+        client.set_pinned(conversation, true, &mut rng).unwrap();
+        assert_eq!(core::iter::from_fn(|| client.take_sync_send()).count(), 1);
+        assert!(client.take_outgoing().is_none());
+        assert!(client.is_pinned(conversation).unwrap());
+
+        // DEV-332: a mute keeps the setting, and the two go as one item.
+        let end = T0 * 1_000 + 60_000;
+        client
+            .set_alert_setting(conversation, ALERT_MENTIONS, &mut rng)
+            .unwrap();
+        client.set_muted_until(conversation, end, &mut rng).unwrap();
+        assert_eq!(client.alert_setting(conversation).unwrap(), ALERT_MENTIONS);
+        assert_eq!(client.muted_until(conversation).unwrap(), end);
+        let sends: Vec<_> = core::iter::from_fn(|| client.take_sync_send()).collect();
+        assert_eq!(sends.len(), 2);
+        let value = [[ALERT_MENTIONS].as_slice(), &end.to_be_bytes()].concat();
+        assert!(carries(&sends[1].app, &value));
+
+        let mut engine = SyncEngine::new(tablet, &[own]).unwrap();
+        let mut item = |kind: u8, value: &[u8], msg_id: u8| {
+            let lamport = 1_000 + u64::from(msg_id);
+            let item = engine
+                .relay_mutable(kind, &subject, value, lamport, tablet, [msg_id; 16], 10)
+                .unwrap();
+            record(AppKind::DeviceSet, [msg_id; 16], &item.body)
+        };
+        let mut take = |client: &mut TestClient, kind: u8, value: &[u8], msg_id: u8| {
+            client
+                .commit_network(&[], &[(channel, item(kind, value, msg_id))], T0, &mut rng)
+                .unwrap();
+        };
+        // DEV-329: the other bits and bytes belong to a later version.
+        take(&mut client, super::pins::ITEM_FLAGS, &[0xFE, 0x55], 1);
+        assert!(!client.is_pinned(conversation).unwrap());
+        take(&mut client, super::pins::ITEM_FLAGS, &[0x03], 2);
+        assert!(client.is_pinned(conversation).unwrap());
+        // DEV-332: a value of one byte is the setting with no mute.
+        take(&mut client, super::alerts::ITEM_ALERT, &[ALERT_ALL], 3);
+        assert_eq!(client.alert_setting(conversation).unwrap(), ALERT_ALL);
+        assert_eq!(client.muted_until(conversation).unwrap(), 0);
+        take(
+            &mut client,
+            super::alerts::ITEM_ALERT,
+            &[ALERT_NONE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+            4,
+        );
+        assert_eq!(client.muted_until(conversation).unwrap(), MUTE_FOREVER);
+        // A value of another length changes nothing.
+        take(
+            &mut client,
+            super::alerts::ITEM_ALERT,
+            &[ALERT_ALL, 1, 2, 3],
+            5,
+        );
+        assert_eq!(client.alert_setting(conversation).unwrap(), ALERT_NONE);
+        assert_eq!(client.muted_until(conversation).unwrap(), MUTE_FOREVER);
+        client.audit().unwrap();
+    }
+
+    #[test]
+    fn a_pinned_conversation_leads_the_list_and_a_deletion_empties_one_conversation() {
+        let (mut client, mut rng, _, conversation) = client_with_contact(409);
+        let second = ContactId([8; 32]);
+        let change = StateChange::Contact {
+            contact: second,
+            state: contact_state(6),
+        };
+        client
+            .commit_network(&[change], &[], T0 - 500, &mut rng)
+            .unwrap();
+        let other = client.conversation_for(&second.0).unwrap();
+        send(&mut client, conversation, "older", T0 * 1_000);
+        send(&mut client, other, "newer", T0 * 1_000 + 5_000);
+        let order = |client: &mut TestClient| -> Vec<ConversationId> {
+            client
+                .summaries()
+                .unwrap()
+                .iter()
+                .map(|summary| summary.conversation)
+                .collect()
+        };
+        assert_eq!(order(&mut client), [other, conversation]);
+        // DEV-330: a pinned conversation comes first, whatever its age.
+        client.set_pinned(conversation, true, &mut rng).unwrap();
+        assert_eq!(order(&mut client), [conversation, other]);
+        assert!(client.summaries().unwrap()[0].pinned);
+
+        // DEV-333: each message goes, in records of nine targets at most to
+        // the other devices, and nothing to the contact.
+        let _ = link_device(&mut client, &mut rng);
+        for at in 0..10 {
+            send(&mut client, other, "more", T0 * 1_000 + 10_000 + at);
+        }
+        while client.take_sync_send().is_some() {}
+        assert_eq!(client.messages(other).unwrap().len(), 11);
+        client
+            .delete_conversation(other, T0 * 1_000 + 20_000, &mut rng)
+            .unwrap();
+        assert!(client.messages(other).unwrap().is_empty());
+        assert_eq!(core::iter::from_fn(|| client.take_sync_send()).count(), 2);
+        assert!(client.take_outgoing().is_none());
+        assert_eq!(client.messages(conversation).unwrap().len(), 1);
         client.audit().unwrap();
     }
 

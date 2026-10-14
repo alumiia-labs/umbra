@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 7: Device Sets, History Sync, and Revocation
 
 **Status:** Draft
-**Version:** 0.28.1
+**Version:** 0.29.0
 **Date:** 2026-10-14
 
 ---
@@ -1087,6 +1087,17 @@ class in Part 6 §6.6. **[DEV-022]** A client MUST NOT process a kind that decla
   device then show each picture. The cost is `PET_AVATAR_MAX` for each
   contact at the most, which is about 0.6 MiB for 100 contacts.
 
+  **[DEV-329]** A device MUST publish the item of the archive flag, the pin
+  flag, and the folder label of a conversation when the user pins or unpins
+  that conversation. The item takes the subject of `DEV-226` as its key, or
+  the group subject of `DEV-296` for a group. Its value is one byte of
+  flags: bit 0 is the pin flag, and each other bit is 0. A receiver MUST
+  ignore each other bit and each byte after the first. The archive flag and
+  the folder label of a later version take those places.
+  **[DEV-330]** A client MUST show each pinned conversation above each other
+  conversation in its list. In each of the two parts the newest conversation
+  comes first.
+
   **[DEV-298]** The device that owns the channels MUST publish the state of
   each group that it makes or joins while the set holds another device, when
   the group holds its two replicas. The item takes the group subject of
@@ -1686,6 +1697,13 @@ holds the plaintext. **[DEV-126]** Thus the interface MUST state each limit belo
 
 - "This removes the message from your devices. The other person keeps their
   copy."
+- **[DEV-333]** A user MAY delete each message of one conversation for their
+  own devices in one act. The client MUST send that act as deletions of
+  scope `0x01` on the sync channel, at most `DELETE_BATCH_MAX` targets in
+  each record, and it MUST NOT send a record to the other party. The
+  interface MUST state the line above for that act. A pairwise conversation
+  with no message then leaves the list until the next message. A group
+  stays in the list until the user leaves it.
 - **[DEV-127]** The two operations MUST carry two different labels and two different
   confirmations. The deletion for your own devices can read as the stronger
   operation. **[DEV-128]** The interface MUST NOT make that operation the visually safer
@@ -1818,6 +1836,15 @@ setting that decides **what the device shows**, and it is per conversation.
 - **[DEV-223]** A client MUST NOT let the setting change the wake behavior of
   Part 8 §8.3. The device wakes on the profile mode, and the setting decides
   what the client renders after the wake.
+- **[DEV-331]** A user MAY mute a conversation until a time, or with no end.
+  A client MUST show no notification for a record of a muted conversation,
+  whatever its setting. The mute ends at its time with no act of the user.
+- **[DEV-332]** The mute and the setting MUST share one item of §7.5.3, thus
+  one last writer wins for the two. The value of the item is the setting as
+  one byte (`all` 0, `mentions` 1, `none` 2), then the end of the mute as a
+  `u64` of milliseconds of the Unix time. An end of 0 is no mute, and an end
+  of `2^64 - 1` is a mute with no end. A receiver MUST take a value of one
+  byte as the setting with no mute.
 
 > *Cause.* Part 8 §8.3 sets the mode for each profile. With that mode alone, a
 > user that joins one busy group has to choose between a silent device and a

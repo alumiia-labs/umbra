@@ -36,6 +36,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -542,6 +543,40 @@ private fun ChatsTab(push: (Screen) -> Unit) {
                 IconAction("magnifying-glass", "Search") { push(Screen.Search(null)) }
             }
         }
+        var notice by remember { mutableStateOf<String?>(null) }
+        LaunchedEffect(notice) {
+            if (notice != null) {
+                delay(4_000)
+                notice = null
+            }
+        }
+        notice?.let {
+            Box(Modifier.padding(start = 20.dp, end = 20.dp, bottom = 8.dp)) { Note(it) }
+        }
+        var acting by remember { mutableStateOf<Chat?>(null) }
+        var muting by remember { mutableStateOf<Chat?>(null) }
+        var deleting by remember { mutableStateOf<Chat?>(null) }
+        acting?.let { chat -> ChatOptions(chat, push, { muting = it }, { deleting = it }) { acting = null } }
+        muting?.let { chat -> MuteOptions(chat) { muting = null } }
+        deleting?.let { chat ->
+            ActionSheet(
+                "Delete this conversation?",
+                listOf(
+                    RowEntry("trash-can", "Delete on my devices") {
+                        Core.deleteConversation(chat.conversation)
+                        // DEV-129: the view says which deletion ran.
+                        notice = "Deleted on your devices."
+                    },
+                ),
+                // DEV-333: the line of a deletion for the own devices.
+                note = if (chat.isGroup) {
+                    "This removes the messages from your devices. The members keep their copies."
+                } else {
+                    "This removes the messages from your devices. The other person keeps their copy."
+                },
+                onDismiss = { deleting = null },
+            )
+        }
         // A group with no message still shows: the user made it, and its
         // creation is the act that put it here.
         val withMessages = Core.chats.filter { it.preview != null || it.isGroup }
@@ -551,17 +586,91 @@ private fun ChatsTab(push: (Screen) -> Unit) {
         }
         LazyColumn {
             items(withMessages, key = { it.conversation.key }) { chat ->
-                ChatRow(chat) { push(Screen.Chat(chat.conversation)) }
+                ChatRow(chat, onOpen = { push(Screen.Chat(chat.conversation)) }, onOptions = { acting = chat })
             }
         }
     }
 }
 
+/** The options of one conversation, at a long press of its row. */
 @Composable
-private fun ChatRow(chat: Chat, onOpen: () -> Unit) {
+private fun ChatOptions(
+    chat: Chat,
+    push: (Screen) -> Unit,
+    onMute: (Chat) -> Unit,
+    onDelete: (Chat) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+    val entries = buildList {
+        add(
+            if (chat.isPinned) {
+                RowEntry("thumbtack", "Unpin") { Core.setPinned(chat.conversation, false) }
+            } else {
+                RowEntry("thumbtack", "Pin to top") { Core.setPinned(chat.conversation, true) }
+            },
+        )
+        add(
+            if (chat.isMuted) {
+                RowEntry("bell", "Unmute", mutedLabel(context, chat.mutedUntilMs)) {
+                    Core.setMutedUntil(chat.conversation, 0u)
+                }
+            } else {
+                RowEntry("bell-slash", "Mute") { onMute(chat) }
+            },
+        )
+        if (chat.unread > 0) add(RowEntry("check", "Mark as read") { Core.markRead(chat.conversation) })
+        if (chat.isGroup) {
+            add(RowEntry("circle-info", "Group details") { push(Screen.GroupDetails(chat.conversation)) })
+        } else {
+            add(RowEntry("circle-info", "Contact details") { push(Screen.ContactDetails(chat.conversation)) })
+            add(RowEntry("gear", "Conversation settings") { push(Screen.ConversationSettings(chat.conversation)) })
+        }
+        add(RowEntry("trash-can", "Delete conversation") { onDelete(chat) })
+    }
+    ActionSheet(chat.title, entries, onDismiss = onDismiss)
+}
+
+/** The lengths of a mute (Part 7 `DEV-331`). */
+@Composable
+private fun MuteOptions(chat: Chat, onDismiss: () -> Unit) {
+    fun after(ms: Long) = (System.currentTimeMillis() + ms).toULong()
+    val hour = 3_600_000L
+    ActionSheet(
+        "Mute ${chat.title}",
+        listOf(
+            RowEntry("clock", "For 1 hour") { Core.setMutedUntil(chat.conversation, after(hour)) },
+            RowEntry("clock", "For 8 hours") { Core.setMutedUntil(chat.conversation, after(8 * hour)) },
+            RowEntry("clock", "For 1 week") { Core.setMutedUntil(chat.conversation, after(7 * 24 * hour)) },
+            RowEntry("bell-slash", "Until I unmute") { Core.setMutedUntil(chat.conversation, MUTE_FOREVER) },
+        ),
+        onDismiss = onDismiss,
+    )
+}
+
+/** The end of a mute, as a row of a sheet names it. */
+private fun mutedLabel(context: android.content.Context, untilMs: ULong): String =
+    if (untilMs == MUTE_FOREVER) {
+        "Muted"
+    } else {
+        "Muted until " + android.text.format.DateUtils.formatDateTime(
+            context,
+            untilMs.toLong(),
+            android.text.format.DateUtils.FORMAT_SHOW_TIME or android.text.format.DateUtils.FORMAT_SHOW_DATE or
+                android.text.format.DateUtils.FORMAT_ABBREV_MONTH,
+        )
+    }
+
+@Composable
+private fun ChatRow(chat: Chat, onOpen: () -> Unit, onOptions: () -> Unit) {
     // The preview is a view of the platform, thus the press area lies above
     // the content.
-    PressOver(Modifier.fillMaxWidth().pressShadeInList(), onClick = onOpen) { ChatRowContent(chat) }
+    PressOver(
+        Modifier.fillMaxWidth().pressShadeInList(),
+        onClick = onOpen,
+        longLabel = "Conversation options",
+        onLongClick = onOptions,
+    ) { ChatRowContent(chat) }
 }
 
 @Composable
@@ -598,11 +707,21 @@ private fun ChatRowContent(chat: Chat) {
         }
         Spacer(Modifier.width(8.dp))
         Column(horizontalAlignment = Alignment.End) {
-            Text(
-                timeLabel(LocalContext.current, chat.lastAtMs),
-                style = MaterialTheme.typography.labelSmall,
-                color = Palette.TextSecondary,
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (chat.isMuted) {
+                    FaIcon("bell-slash", label = "Muted", size = 12.dp, tint = Palette.TextSecondary)
+                    Spacer(Modifier.width(6.dp))
+                }
+                if (chat.isPinned) {
+                    FaIcon("thumbtack", label = "Pinned", size = 12.dp, tint = Palette.TextSecondary)
+                    Spacer(Modifier.width(6.dp))
+                }
+                Text(
+                    timeLabel(LocalContext.current, chat.lastAtMs),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Palette.TextSecondary,
+                )
+            }
             if (chat.unread > 0) {
                 Spacer(Modifier.height(4.dp))
                 Box(

@@ -16,7 +16,7 @@ use umbra_core::{
 };
 use umbra_crypto::rand_core::CryptoRng;
 use umbra_wire::app::{
-    edit::{DeleteBody, DeleteScope},
+    edit::{DeleteBody, DeleteScope, DELETE_BATCH_MAX},
     AppKind, AppMessage, Channel,
 };
 use zeroize::Zeroizing;
@@ -46,6 +46,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        let (conversation, target) = self.own_target(message)?;
+        self.publish_own_targets(conversation, vec![target], now_ms, rng)
+    }
+
+    /// The conversation of `message` and its raw `msg_id`, which a deletion
+    /// names. A row that does not parse, as a placeholder, is `Malformed`.
+    fn own_target(&self, message: &MsgRef) -> Result<(ConversationId, [u8; 16]), Error> {
         let plain = Zeroizing::new(
             self.open_ref()?
                 .store
@@ -57,9 +64,21 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let target = AppMessage::parse(app, Channel::Pairwise)
             .or_else(|_| AppMessage::parse(app, Channel::Group))?
             .msg_id;
+        Ok((conversation, target))
+    }
+
+    /// One deletion of scope `0x01` for `targets` of one conversation, at
+    /// most `DELETE_BATCH_MAX` of them in strict byte order.
+    fn publish_own_targets<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        targets: Vec<[u8; 16]>,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
         let body = DeleteBody {
             scope: DeleteScope::OwnDevices,
-            targets: vec![target],
+            targets,
         };
         let mut encoded = vec![0u8; body.len()];
         body.encode(&mut encoded)?;
@@ -74,6 +93,33 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut out = vec![0u8; record.len()];
         record.encode(&mut out)?;
         self.publish_sync(conversation, &out, true, None, now_ms / 1_000, rng)
+    }
+
+    /// Deletes each message of `conversation` on this device, and asks each
+    /// other device of the set to delete them too (`DEV-333`). No record
+    /// goes to the other party. A row that does not parse, as a placeholder,
+    /// goes on this device alone.
+    pub fn delete_conversation<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let messages = self.messages(conversation)?;
+        let mut targets: Vec<[u8; 16]> = messages
+            .iter()
+            .filter_map(|message| self.own_target(message).ok().map(|(_, target)| target))
+            .collect();
+        targets.sort_unstable();
+        targets.dedup();
+        for batch in targets.chunks(DELETE_BATCH_MAX) {
+            self.publish_own_targets(conversation, batch.to_vec(), now_ms, rng)?;
+        }
+        for message in &messages {
+            self.delete_for_me(message)?;
+        }
+        self.events.push_back(Event::Conversations);
+        Ok(())
     }
 
     /// Takes each deletion for the devices of this user out of the records

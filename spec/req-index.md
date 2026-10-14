@@ -74,7 +74,7 @@ column when a crate implements the requirement and a test covers it.
 | `IDN` | 135 | 46 | 1 | 0 | 5 | **187** |
 | `CRY` | 120 | 27 | 0 | 0 | 1 | **148** |
 | `WIR` | 415 | 87 | 0 | 0 | 7 | **509** |
-| `DEV` | 215 | 94 | 0 | 0 | 9 | **318** |
+| `DEV` | 218 | 94 | 0 | 0 | 11 | **323** |
 | `NTF` | 77 | 28 | 0 | 0 | 3 | **108** |
 | `DIS` | 131 | 36 | 0 | 0 | 3 | **170** |
 | `REL` | 170 | 34 | 1 | 0 | 3 | **208** |
@@ -83,7 +83,7 @@ column when a crate implements the requirement and a test covers it.
 | `ABU` | 71 | 29 | 1 | 0 | 0 | **101** |
 | `IMP` | 119 | 42 | 0 | 0 | 2 | **163** |
 | `SEC` | 4 | 3 | 0 | 0 | 1 | **8** |
-| **All** | 2116 | 636 | 6 | 0 | 55 | **2813** |
+| **All** | 2119 | 636 | 6 | 0 | 57 | **2818** |
 
 ## SCP — Scope and Conventions
 
@@ -1689,6 +1689,11 @@ Source: `spec/07-device-sets.md`
 | `DEV-326` | §7.5.10 | MUST NOT | A client | A client MUST NOT show the policy as an enforcement. |  |  |
 | `DEV-327` | §7.5.3 | MUST | A device | A device MUST publish the item of the pet-avatar of a contact when the user sets, changes, or removes that picture. |  |  |
 | `DEV-328` | §7.5.3 | MUST | (unstated) | The backup of Part 4 §4.7.2 and the snapshot of a link (`DEV-004`) MUST carry the pet-avatar of each contact. |  |  |
+| `DEV-329` | §7.5.3 | MUST | A device | A device MUST publish the item of the archive flag, the pin flag, and the folder label of a conversation when the user pins or unpins that conversation. |  |  |
+| `DEV-330` | §7.5.3 | MUST | A client | A client MUST show each pinned conversation above each other conversation in its list. |  |  |
+| `DEV-331` | §7.5.9 | MAY | A user | A user MAY mute a conversation until a time, or with no end. |  |  |
+| `DEV-332` | §7.5.9 | MUST | The mute and the setting | The mute and the setting MUST share one item of §7.5.3, thus one last writer wins for the two. |  |  |
+| `DEV-333` | §7.5.7 | MAY | A user | A user MAY delete each message of one conversation for their own devices in one act. |  |  |
 
 ## NTF — Notifications
 

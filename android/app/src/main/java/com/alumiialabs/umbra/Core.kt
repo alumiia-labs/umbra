@@ -116,6 +116,9 @@ fun fileWord(file: uniffi.umbra_ffi.MsgFile): String = when (file.mimeClass) {
  * One row of the chat list and of the contact list. The name is a label of
  * the user. The preview is message text, thus it stays a `CharArray`.
  */
+/** The end of a mute with no end (Part 7 `DEV-332`). */
+val MUTE_FOREVER: ULong = ULong.MAX_VALUE
+
 class Chat(
     val conversation: Conversation,
     val name: String,
@@ -152,7 +155,15 @@ class Chat(
     val isUnreachable: Boolean = false,
     /** Whether a record of a group waits for a clock check (`GRP-229`). */
     val isClockSuspect: Boolean = false,
+    /** Whether the user pinned the conversation (Part 7 `DEV-329`). */
+    val isPinned: Boolean = false,
+    /** The end of the mute in milliseconds of the Unix time, 0 for none (Part 7 `DEV-331`). */
+    val mutedUntilMs: ULong = 0u,
 ) {
+    /** Whether a mute holds now. */
+    val isMuted: Boolean
+        get() = mutedUntilMs > System.currentTimeMillis().toULong()
+
     /** What each list shows: the name of the user, or a stable short label. */
     val title: String
         get() = name.ifEmpty {
@@ -2196,6 +2207,28 @@ object Core {
         refreshChats()
     }
 
+    /** Pins or unpins a conversation on each device of the set (Part 7 `DEV-329`). */
+    fun setPinned(conversation: Conversation, isPinned: Boolean) = call { client ->
+        client.setPinned(conversation.id, isPinned)
+        refreshChats()
+    }
+
+    /**
+     * Mutes a conversation on each device of the set until `untilMs`, with
+     * no end at [MUTE_FOREVER], or ends the mute at 0 (Part 7 `DEV-331`).
+     */
+    fun setMutedUntil(conversation: Conversation, untilMs: ULong) = call { client ->
+        client.setMutedUntil(conversation.id, untilMs)
+        refreshChats()
+    }
+
+    /** Deletes each message of a conversation on the devices of this user (Part 7 `DEV-333`). */
+    fun deleteConversation(conversation: Conversation) = call { client ->
+        client.deleteConversation(conversation.id)
+        main.post { revision++ }
+        refreshChats()
+    }
+
     /**
      * Sends the text of a composer, as an answer to `replyTo` when the user
      * chose one. This call overwrites `text`.
@@ -2921,6 +2954,8 @@ object Core {
             needsInvitation = group?.needsInvitation ?: false,
             isUnreachable = group?.isUnreachable ?: false,
             isClockSuspect = group?.isClockSuspect ?: false,
+            isPinned = summary.pinned,
+            mutedUntilMs = summary.mutedUntilMs,
         )
     }
 

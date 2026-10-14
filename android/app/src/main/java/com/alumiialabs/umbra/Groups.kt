@@ -125,11 +125,6 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                 },
             )
             EntryRow(
-                RowEntry("magnifying-glass", "Search") {
-                    push(Screen.Search(chat.conversation))
-                },
-            )
-            EntryRow(
                 RowEntry("photo-film", "Media and files") {
                     push(Screen.Media(chat.conversation))
                 },

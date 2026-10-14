@@ -515,7 +515,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
     }
     Column(Modifier.fillMaxSize()) {
         // The name leads to the details of the contact, and that view holds
-        // each action of a conversation. The bar needs no menu beside it.
+        // each action of a conversation. The search sits beside it.
         BackBar(
             chat.title,
             subtitle = when {
@@ -536,6 +536,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                     },
                 )
             },
+            actions = { IconAction("magnifying-glass", "Search") { push(Screen.Search(chat.conversation)) } },
         )
         BlockedLine(chat)
         // GRP-199, GRP-200: the line ends at the first answer of a relay.

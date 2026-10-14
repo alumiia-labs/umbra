@@ -1255,6 +1255,11 @@ pub struct Summary {
     pub unread: u32,
     /// Whether the user verified the key that the contact holds now.
     pub verified: bool,
+    /// Whether the user pinned the conversation.
+    pub pinned: bool,
+    /// The end of the mute in milliseconds of the Unix time, 0 for no mute,
+    /// or the largest `u64` for a mute with no end.
+    pub muted_until_ms: u64,
 }
 
 /// One event of the stream.
@@ -5828,7 +5833,8 @@ impl Handle {
         Ok(bridge.confirm_verified(&conversation)?)
     }
 
-    /// One summary for each contact, the newest conversation first.
+    /// One summary for each contact and each group: the pinned ones first,
+    /// and the newest conversation first in each part.
     pub fn summaries(&self) -> Result<Vec<Summary>, FfiError> {
         let found = locked(&self.inner).client.summaries()?;
         Ok(found
@@ -5840,6 +5846,8 @@ impl Handle {
                 last_at_ms: summary.last_at_ms,
                 unread: summary.unread,
                 verified: summary.verified,
+                pinned: summary.pinned,
+                muted_until_ms: summary.muted_until_ms,
             })
             .collect())
     }
@@ -6869,9 +6877,38 @@ impl Handle {
     }
 
     /// Whether a message that arrived gives a notification under the
-    /// setting of its conversation.
+    /// setting and the mute of its conversation.
     pub fn should_alert(&self, message: Arc<MsgHandle>) -> Result<bool, FfiError> {
-        Ok(locked(&self.inner).client.should_alert(&message.0)?)
+        Ok(locked(&self.inner)
+            .client
+            .should_alert(&message.0, unix_now_ms())?)
+    }
+
+    /// Mutes a conversation until `until_ms` in milliseconds of the Unix
+    /// time, with no end at the largest `u64`, or ends the mute at 0, for
+    /// each device of the set (Part 7 `DEV-331`).
+    pub fn set_muted_until(&self, conversation: Vec<u8>, until_ms: u64) -> Result<(), FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let mut inner = locked(&self.inner);
+        let Inner { client, bridge, .. } = &mut *inner;
+        client.set_muted_until(conversation, until_ms, &mut OsRng)?;
+        if let Some(running) = bridge {
+            running.flush(client, &mut OsRng)?;
+        }
+        Ok(())
+    }
+
+    /// Pins or unpins a conversation, for each device of the set (Part 7
+    /// `DEV-329`).
+    pub fn set_pinned(&self, conversation: Vec<u8>, pinned: bool) -> Result<(), FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let mut inner = locked(&self.inner);
+        let Inner { client, bridge, .. } = &mut *inner;
+        client.set_pinned(conversation, pinned, &mut OsRng)?;
+        if let Some(running) = bridge {
+            running.flush(client, &mut OsRng)?;
+        }
+        Ok(())
     }
 
     /// The periods that a conversation timer takes, in seconds (`WIR-201`).
@@ -7070,6 +7107,23 @@ impl Handle {
             Err(error) => return Err(error.into()),
         }
         client.delete_for_me(&message.0)?;
+        if let Some(running) = bridge {
+            running.flush(client, &mut OsRng)?;
+        }
+        // ATT-161: the chunks of a file that this device uploaded go too.
+        inner.pump_transfers();
+        inner.pump_groups();
+        Ok(())
+    }
+
+    /// Deletes each message of a conversation from the devices of this
+    /// user (Part 7 `DEV-333`). The other party keeps its copy, and no
+    /// record goes to it.
+    pub fn delete_conversation(&self, conversation: Vec<u8>) -> Result<(), FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let mut inner = locked(&self.inner);
+        let Inner { client, bridge, .. } = &mut *inner;
+        client.delete_conversation(conversation, unix_now_ms(), &mut OsRng)?;
         if let Some(running) = bridge {
             running.flush(client, &mut OsRng)?;
         }

@@ -264,6 +264,11 @@ pub struct ConversationSummary {
     /// Whether the user verified the pairwise identity key that the
     /// contact holds now (Part 4 §4.5).
     pub verified: bool,
+    /// Whether the user pinned the conversation (Part 7 `DEV-329`).
+    pub pinned: bool,
+    /// The end of the mute of the conversation in milliseconds of the Unix
+    /// time, 0 for no mute, or `MUTE_FOREVER` (Part 7 `DEV-331`).
+    pub muted_until_ms: u64,
 }
 
 /// One event of the stream from Rust to the platform. An event carries a
@@ -1240,7 +1245,7 @@ mod tests {
 
     #[test]
     fn the_notification_setting_decides_what_a_record_shows() {
-        use crate::client::{ALERT_ALL, ALERT_MENTIONS, ALERT_NONE};
+        use crate::client::{ALERT_ALL, ALERT_MENTIONS, ALERT_NONE, MUTE_FOREVER};
 
         let mut rng = Rng(93);
         let mut client = new_client(&mut rng);
@@ -1271,17 +1276,31 @@ mod tests {
                 .unwrap()
         };
         let plain = send(&mut client, &mut other, "plain", vec![], now, &mut rng);
-        assert!(other.should_alert(&plain).unwrap());
+        assert!(other.should_alert(&plain, 0).unwrap());
         other
             .set_alert_setting(member, ALERT_MENTIONS, &mut rng)
             .unwrap();
-        assert!(!other.should_alert(&plain).unwrap());
+        assert!(!other.should_alert(&plain, 0).unwrap());
         let named = send(&mut client, &mut other, "@you", vec![1], now + 1, &mut rng);
-        assert!(other.should_alert(&named).unwrap());
+        assert!(other.should_alert(&named, 0).unwrap());
         other
             .set_alert_setting(member, ALERT_NONE, &mut rng)
             .unwrap();
-        assert!(!other.should_alert(&named).unwrap());
+        assert!(!other.should_alert(&named, 0).unwrap());
+        // DEV-331: a mute stops each notification until its end.
+        other
+            .set_alert_setting(member, ALERT_ALL, &mut rng)
+            .unwrap();
+        let end = (now + 60) * 1_000;
+        other.set_muted_until(member, end, &mut rng).unwrap();
+        assert!(!other.should_alert(&named, now * 1_000).unwrap());
+        assert!(other.should_alert(&named, end).unwrap());
+        other
+            .set_muted_until(member, MUTE_FOREVER, &mut rng)
+            .unwrap();
+        assert!(!other.should_alert(&named, u64::MAX - 1).unwrap());
+        other.set_muted_until(member, 0, &mut rng).unwrap();
+        assert!(other.should_alert(&named, now * 1_000).unwrap());
         // The conversation stays in the list.
         assert!(other
             .summaries()
