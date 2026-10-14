@@ -11,8 +11,8 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-umbra-crypto = { version = "0.26.0", path = "../umbra-crypto" }
-umbra-wire = { version = "0.26.0", path = "../umbra-wire" }
+umbra-crypto = { version = "0.27.0", path = "../umbra-crypto" }
+umbra-wire = { version = "0.27.0", path = "../umbra-wire" }
 # Register R1 of Part 14 §14.2.1: AES-256 and POLYVAL serve the onion layer
 # only (Part 5 §5.1 row 5).
 aes = { version = "0.9", default-features = false }

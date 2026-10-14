@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 14: Implementation Requirements and Assurance
 
 **Status:** Draft
-**Version:** 0.26.0
+**Version:** 0.27.0
 **Date:** 2026-10-13
 
 ---
@@ -1305,9 +1305,13 @@ error, and a word of 8 characters or more takes two.
   timer, or the end of the history period removed is no result. A text that
   an edit replaced is no match.
 - **[IMP-179]** A client MUST give no more than `SEARCH_RESULTS_MAX` = 200
-  results for one query. The order MUST be: the exact text of the query
-  first, then each word of the query in any order, then a word with a
-  spelling error. In each of the three the newest message comes first.
+  results for one query. The default order MUST be: the exact text of the
+  query first, then each word of the query in any order, then a word with a
+  spelling error. In each of the three the newest message comes first. A
+  client MAY offer an order by age alone, the newest first or the oldest
+  first. A client MAY limit a query to one conversation, to one sending
+  side, to the messages with a file, and to an age. Each limit MUST read the
+  row of the store, as `IMP-178` requires for the text.
 - **[IMP-180]** A client MUST NOT write a query to the store or to a file,
   and it MUST keep no list of earlier queries. It MUST erase the query from
   memory when the search view closes and at a lock. A search MUST NOT send a

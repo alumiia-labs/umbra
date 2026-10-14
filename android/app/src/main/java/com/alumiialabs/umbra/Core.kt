@@ -2750,6 +2750,9 @@ object Core {
         val key: List<Byte>,
         val text: CharArray,
         val atMs: Long,
+        val isOutgoing: Boolean,
+        /** The member index of the sender of a group message. */
+        val sender: UShort?,
         /** The match, as a range of [text]. An empty range marks nothing. */
         val start: Int,
         val end: Int,
@@ -2793,8 +2796,15 @@ object Core {
         }
     }
 
+    /**
+     * The limits of a search. The order is 0 for the best match first, 1 for
+     * the newest first, and 2 for the oldest first. The side is 0 for each
+     * sender, 1 for this user, and 2 for the other senders.
+     */
+    class SearchLimits(val order: Int, val from: Int, val isFilesOnly: Boolean, val sinceMs: Long)
+
     /** Searches the messages of one conversation, or of each one. */
-    fun search(query: CharArray, scope: Conversation?, onFound: (List<Found>) -> Unit) {
+    fun search(query: CharArray, scope: Conversation?, limits: SearchLimits, onFound: (List<Found>) -> Unit) {
         searchQuery?.fill('\u0000')
         searchQuery = query.copyOf()
         searchScope = scope
@@ -2802,7 +2812,14 @@ object Core {
         val turn = ++searchTurns
         call { client ->
             if (turn != searchTurns) return@call
-            val found = client.search(units, scope?.id).map { hit ->
+            val options = uniffi.umbra_ffi.FfiSearchOptions(
+                scope?.id,
+                limits.order.toUByte(),
+                limits.from.toUByte(),
+                limits.isFilesOnly,
+                limits.sinceMs.coerceAtLeast(0L).toULong(),
+            )
+            val found = client.search(units, options).map { hit ->
                 hit.message.use { message ->
                     val sink = CharSink()
                     try {
@@ -2821,6 +2838,8 @@ object Core {
                         message.key().toList(),
                         text,
                         info.storedAtMs.toLong(),
+                        info.outgoing,
+                        info.sender,
                         hit.start.toInt().coerceAtMost(end),
                         end,
                     )

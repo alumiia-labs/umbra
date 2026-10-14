@@ -44,7 +44,10 @@ mod screenshots;
 mod search;
 mod snapshot_recovery;
 pub use retention::{HISTORY_AGE_ALL, HISTORY_AGE_MIN};
-pub use search::{SearchHit, SEARCH_RESULTS_MAX, TIER_NEAR, TIER_PHRASE, TIER_WORDS};
+pub use search::{
+    SearchFrom, SearchHit, SearchOptions, SearchOrder, SEARCH_RESULTS_MAX, TIER_NEAR, TIER_PHRASE,
+    TIER_WORDS,
+};
 pub use snapshot_recovery::SnapshotJob;
 mod social;
 mod sync;
@@ -4687,6 +4690,7 @@ pub type ConversationRow = RowId;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
+    use super::search::SearchOptions;
     use umbra_core::{
         session::node::{shadow_contact_state, ContactId, StateChange},
         store::{
@@ -6582,7 +6586,7 @@ mod tests {
 
     fn search_of(client: &TestClient, query: &str) -> Vec<MsgRef> {
         client
-            .search(&units(query), None)
+            .search(&units(query), &SearchOptions::default())
             .unwrap()
             .into_iter()
             .map(|hit| hit.message)
@@ -6603,7 +6607,9 @@ mod tests {
         assert!(search_of(&client, "cafe").is_empty());
         build_search(&mut client);
         assert!(client.is_search_ready());
-        let hits = client.search(&units("cafe"), None).unwrap();
+        let hits = client
+            .search(&units("cafe"), &SearchOptions::default())
+            .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].message, first);
         assert_eq!(hits[0].conversation, conversation);
@@ -6615,7 +6621,13 @@ mod tests {
         assert_eq!(search_of(&client, "the"), [second, first]);
         assert!(search_of(&client, "airport").is_empty());
         assert!(client
-            .search(&units("cafe"), Some(ConversationId([7; 16])))
+            .search(
+                &units("cafe"),
+                &SearchOptions {
+                    scope: Some(ConversationId([7; 16])),
+                    ..SearchOptions::default()
+                },
+            )
             .unwrap()
             .is_empty());
     }
@@ -6649,7 +6661,10 @@ mod tests {
         assert_eq!(search_of(&client, "harbor"), [message]);
         client.lock();
         assert!(!client.is_search_ready());
-        assert_eq!(client.search(&units("harbor"), None), Err(Error::Locked));
+        assert_eq!(
+            client.search(&units("harbor"), &SearchOptions::default()),
+            Err(Error::Locked)
+        );
         client.unlock(&units("correct horse"), 2_000).unwrap();
         assert!(search_of(&client, "harbor").is_empty());
         build_search(&mut client);

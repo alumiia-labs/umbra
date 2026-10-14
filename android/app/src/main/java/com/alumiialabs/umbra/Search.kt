@@ -8,6 +8,9 @@ import android.text.style.StyleSpan
 import android.util.TypedValue
 import android.widget.TextView
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -18,6 +21,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -29,8 +35,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -44,6 +52,32 @@ private const val SNIPPET_LEAD = 24
 /** The wait after a change of a message before the index builds again. */
 private const val REBUILD_WAIT_MS = 400L
 
+private const val DAY_MS = 86_400_000L
+
+/** One value of a limit of the search, with its word and its icon. */
+private class Choice(val label: String, val icon: String, val value: Int)
+
+private val ORDERS = listOf(
+    Choice("Best match", "magnifying-glass", 0),
+    Choice("Newest", "clock", 1),
+    Choice("Oldest", "hourglass-half", 2),
+)
+private val SIDES = listOf(
+    Choice("From anyone", "user-group", 0),
+    Choice("From you", "paper-plane", 1),
+    Choice("From others", "comment", 2),
+)
+private val KINDS = listOf(
+    Choice("All messages", "comment", 0),
+    Choice("Files", "file", 1),
+)
+private val AGES = listOf(
+    Choice("Any time", "clock", 0),
+    Choice("Last 7 days", "clock", 7),
+    Choice("Last 30 days", "clock", 30),
+    Choice("Last year", "clock", 365),
+)
+
 /**
  * The search of the messages of one conversation, or of each one (Part 14
  * §14.6.7). The index sits in the memory of the core, and it leaves with
@@ -55,13 +89,23 @@ fun SearchScreen(scope: Conversation?, onBack: () -> Unit, push: (Screen) -> Uni
     var found by remember { mutableStateOf<List<Core.Found>?>(null) }
     var typed by remember { mutableIntStateOf(0) }
     var isFirstBuild by remember { mutableStateOf(true) }
+    var order by remember { mutableIntStateOf(0) }
+    var side by remember { mutableIntStateOf(0) }
+    var kind by remember { mutableIntStateOf(0) }
+    var age by remember { mutableIntStateOf(0) }
+    // The names of the members of each group that a result is from.
+    var members by remember { mutableStateOf(emptyMap<Conversation, Map<UShort, String>>()) }
+    val listState = rememberLazyListState()
+    // A new query or a new limit gives a new list, which starts at its top.
+    LaunchedEffect(found) { listState.scrollToItem(0) }
     if (scope != null) ScreenshotBlock(scope)
     val run = {
         val query = field.copy()
         if (query.all(Char::isWhitespace)) {
             found = null
         } else {
-            Core.search(query, scope) { found = it }
+            val since = if (age == 0) 0L else System.currentTimeMillis() - age * DAY_MS
+            Core.search(query, scope, Core.SearchLimits(order, side, kind == 1, since)) { found = it }
         }
         query.fill('\u0000')
     }
@@ -84,35 +128,106 @@ fun SearchScreen(scope: Conversation?, onBack: () -> Unit, push: (Screen) -> Uni
         Core.searchBuild { run() }
     }
     // A query in the time of a build reads the part that is ready.
-    LaunchedEffect(typed) { run() }
+    LaunchedEffect(typed, order, side, kind, age) { run() }
+    LaunchedEffect(found) {
+        val groups = found.orEmpty().map { it.conversation }.distinct().filter { conversation ->
+            conversation !in members && Core.chats.any { it.conversation == conversation && it.isGroup }
+        }
+        for (group in groups) {
+            Core.groupMembers(group) { loaded ->
+                members = members + (
+                    group to loaded.associate { member ->
+                        val title = member.contact?.let { contact ->
+                            Core.chats.firstOrNull { it.conversation.id.contentEquals(contact) }?.title
+                        }
+                        member.index to (title ?: "Member ${member.index}")
+                    }
+                    )
+            }
+        }
+    }
     Column(Modifier.fillMaxSize()) {
         Row(
-            Modifier.fillMaxWidth().padding(start = 4.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
+            Modifier.fillMaxWidth().padding(start = 4.dp, end = 16.dp, top = 8.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             IconAction("arrow-left", "Back", leave)
             Spacer(Modifier.width(4.dp))
             PlatformInput(field, "Search", isPassphrase = false, modifier = Modifier.weight(1f))
         }
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            LimitChip("Sort", ORDERS, order) { order = it }
+            LimitChip("From", SIDES, side) { side = it }
+            LimitChip("Show", KINDS, kind) { kind = it }
+            LimitChip("Date", AGES, age) { age = it }
+        }
         val results = found
         when {
             results == null -> Unit
             results.isEmpty() -> EmptyState("No results.")
-            else -> LazyColumn {
+            else -> LazyColumn(state = listState) {
                 items(results, key = { it.key }) { result ->
                     PressOver(
                         Modifier.fillMaxWidth().pressShadeInList(),
                         onClick = { push(Screen.Chat(result.conversation, result.key)) },
-                    ) { ResultRow(result, showsChat = scope == null) }
+                    ) { ResultRow(result, showsChat = scope == null, members[result.conversation]) }
                 }
             }
         }
     }
 }
 
+/** One limit of the search: its current value, and a sheet with each value. */
 @Composable
-private fun ResultRow(result: Core.Found, showsChat: Boolean) {
+private fun LimitChip(title: String, choices: List<Choice>, current: Int, onPick: (Int) -> Unit) {
+    var isOpen by remember { mutableStateOf(false) }
+    val chosen = choices.firstOrNull { it.value == current } ?: choices.first()
+    // A limit that is not the default shows in the color of a selection.
+    val isSet = chosen !== choices.first()
+    Box(
+        Modifier
+            .clip(CircleShape)
+            .background(if (isSet) Palette.Container else Palette.Incoming)
+            .press(role = Role.Button, label = title) { isOpen = true }
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+    ) {
+        Text(
+            chosen.label,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = if (isSet) FontWeight.SemiBold else FontWeight.Normal,
+            maxLines = 1,
+        )
+    }
+    if (isOpen) {
+        ActionSheet(
+            title,
+            choices.map { choice ->
+                RowEntry(choice.icon, choice.label, if (choice === chosen) "Selected" else null) {
+                    onPick(choice.value)
+                }
+            },
+            onDismiss = { isOpen = false },
+        )
+    }
+}
+
+/** The name of the sender of a result. */
+private fun senderOf(result: Core.Found, chat: Chat?, names: Map<UShort, String>?): String = when {
+    result.isOutgoing -> "You"
+    chat?.isGroup == true -> result.sender?.let { names?.get(it) ?: "Member $it" } ?: chat.title
+    else -> chat?.title.orEmpty()
+}
+
+@Composable
+private fun ResultRow(result: Core.Found, showsChat: Boolean, names: Map<UShort, String>?) {
     val chat = Core.chats.firstOrNull { it.conversation == result.conversation }
+    val sender = senderOf(result, chat, names)
     Row(
         Modifier.fillMaxWidth().padding(horizontal = PressInset, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -123,23 +238,26 @@ private fun ResultRow(result: Core.Found, showsChat: Boolean) {
         }
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.weight(1f)) {
-                    if (showsChat) {
-                        Text(
-                            chat?.title.orEmpty(),
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                }
+                // A search of one conversation names the sender here. A
+                // search of each one names the conversation.
+                Text(
+                    if (showsChat) chat?.title.orEmpty() else sender,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.width(8.dp))
                 Text(
                     timeLabel(LocalContext.current, result.atMs),
                     style = MaterialTheme.typography.labelSmall,
                     color = Palette.TextSecondary,
                 )
             }
-            Snippet(result, Modifier.subline())
+            // The contact of a conversation of two is its title, thus the
+            // line repeats no name for it.
+            val names = showsChat && (result.isOutgoing || chat?.isGroup == true)
+            Snippet(result, if (names) "$sender: " else "", Modifier.subline())
         }
     }
 }
@@ -149,7 +267,7 @@ private fun ResultRow(result: Core.Found, showsChat: Boolean) {
  * The text sits in a buffer of the view, and in no `String` (`IMP-037`).
  */
 @Composable
-private fun Snippet(result: Core.Found, modifier: Modifier = Modifier) {
+private fun Snippet(result: Core.Found, prefix: String, modifier: Modifier = Modifier) {
     val color = Palette.TextSecondary.toArgb()
     val markColor = Palette.Action.toArgb()
     AndroidView(
@@ -169,9 +287,10 @@ private fun Snippet(result: Core.Found, modifier: Modifier = Modifier) {
             // surrogates stays whole.
             var from = if (result.start > SNIPPET_LEAD + 4) result.start - SNIPPET_LEAD else 0
             if (from in 1 until text.size && text[from].isLowSurrogate()) from++
-            val lead = if (from > 0) 1 else 0
+            val lead = prefix.length + if (from > 0) 1 else 0
             val shown = CharArray(lead + text.size - from)
-            if (lead == 1) shown[0] = '…'
+            prefix.toCharArray(shown, 0, 0, prefix.length)
+            if (from > 0) shown[prefix.length] = '…'
             for (at in from until text.size) {
                 val char = text[at]
                 shown[lead + at - from] = if (char == '\n' || char == '\r') ' ' else char

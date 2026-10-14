@@ -1405,6 +1405,24 @@ pub enum FfiEvent {
 #[derive(uniffi::Object)]
 pub struct MsgHandle(MsgRef);
 
+/// The limits of one search.
+#[derive(uniffi::Record)]
+pub struct FfiSearchOptions {
+    /// One conversation, or each one.
+    pub conversation: Option<Vec<u8>>,
+    /// The order: 0 for the best rank first, 1 for the newest first, and 2
+    /// for the oldest first.
+    pub order: u8,
+    /// The side that sent the message: 0 for each side, 1 for this user,
+    /// and 2 for a contact or a member.
+    pub from: u8,
+    /// Whether a result is a message with a file.
+    pub files_only: bool,
+    /// The oldest insertion stamp of a result, in milliseconds, or 0 for
+    /// each age.
+    pub since_ms: u64,
+}
+
 /// One result of a search.
 #[derive(uniffi::Record)]
 pub struct FfiSearchHit {
@@ -7110,18 +7128,35 @@ impl Handle {
             .map_err(FfiError::from)
     }
 
-    /// The messages that match a query, the best rank first and the newest
-    /// first in each rank, in one conversation or in each one. The query
-    /// crosses as UTF-16 code units, as the text of a draft does, and the
-    /// core keeps no copy of it (`IMP-180`).
+    /// The messages that match a query, inside the limits of `options`.
+    /// The query crosses as UTF-16 code units, as the text of a draft does,
+    /// and the core keeps no copy of it (`IMP-180`).
     pub fn search(
         &self,
         code_units: Vec<u16>,
-        conversation: Option<Vec<u8>>,
+        options: FfiSearchOptions,
     ) -> Result<Vec<FfiSearchHit>, FfiError> {
         let code_units = Zeroizing::new(code_units);
-        let scope = conversation.as_deref().map(conversation_of).transpose()?;
-        let hits = locked(&self.inner).client.search(&code_units, scope)?;
+        let options = crate::client::SearchOptions {
+            scope: options
+                .conversation
+                .as_deref()
+                .map(conversation_of)
+                .transpose()?,
+            order: match options.order {
+                1 => crate::client::SearchOrder::Newest,
+                2 => crate::client::SearchOrder::Oldest,
+                _ => crate::client::SearchOrder::Rank,
+            },
+            from: match options.from {
+                1 => crate::client::SearchFrom::Me,
+                2 => crate::client::SearchFrom::Others,
+                _ => crate::client::SearchFrom::Any,
+            },
+            files_only: options.files_only,
+            since_ms: options.since_ms,
+        };
+        let hits = locked(&self.inner).client.search(&code_units, &options)?;
         Ok(hits
             .into_iter()
             .map(|hit| FfiSearchHit {

@@ -49,11 +49,72 @@ pub struct SearchHit {
     pub end: u32,
 }
 
-/// One message of the index.
-struct Doc {
+/// The order of the results of a query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SearchOrder {
+    /// The best rank first, and the newest first in each rank.
+    #[default]
+    Rank,
+    /// The newest message first, in each rank together.
+    Newest,
+    /// The oldest message first, in each rank together.
+    Oldest,
+}
+
+/// The side that sent a result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SearchFrom {
+    /// Each side.
+    #[default]
+    Any,
+    /// The user of this device.
+    Me,
+    /// A contact, or a member of a group.
+    Others,
+}
+
+/// The limits of one query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SearchOptions {
+    /// One conversation, or each one.
+    pub scope: Option<ConversationId>,
+    /// The order of the results.
+    pub order: SearchOrder,
+    /// The side that sent the message.
+    pub from: SearchFrom,
+    /// Whether a result is a message with a file.
+    pub files_only: bool,
+    /// The oldest insertion stamp of a result, in milliseconds, or 0 for
+    /// each age.
+    pub since_ms: u64,
+}
+
+impl SearchOptions {
+    fn keeps(&self, entry: &Entry) -> bool {
+        self.scope.is_none_or(|scope| scope == entry.conversation)
+            && match self.from {
+                SearchFrom::Any => true,
+                SearchFrom::Me => entry.outgoing,
+                SearchFrom::Others => !entry.outgoing,
+            }
+            && (!self.files_only || entry.has_file)
+            && entry.stored_at_ms >= self.since_ms
+    }
+}
+
+/// The values of one message that a limit of a query reads.
+#[derive(Clone, Copy)]
+struct Entry {
     message: MsgRef,
     conversation: ConversationId,
     stored_at_ms: u64,
+    outgoing: bool,
+    has_file: bool,
+}
+
+/// One message of the index.
+struct Doc {
+    entry: Entry,
     start: usize,
     end: usize,
 }
@@ -82,8 +143,8 @@ impl Drop for Index {
             list.zeroize();
         }
         for doc in &mut self.docs {
-            doc.message.0.zeroize();
-            doc.conversation.0.zeroize();
+            doc.entry.message.0.zeroize();
+            doc.entry.conversation.0.zeroize();
         }
     }
 }
@@ -346,13 +407,7 @@ impl Index {
     }
 
     /// Adds one message with its folded text.
-    fn add(
-        &mut self,
-        message: MsgRef,
-        conversation: ConversationId,
-        stored_at_ms: u64,
-        folded: &[u8],
-    ) {
+    fn add(&mut self, entry: Entry, folded: &[u8]) {
         let Ok(id) = u32::try_from(self.docs.len()) else {
             return;
         };
@@ -362,9 +417,7 @@ impl Index {
         let start = self.text.len();
         self.push_text(folded);
         self.docs.push(Doc {
-            message,
-            conversation,
-            stored_at_ms,
+            entry,
             start,
             end: self.text.len(),
         });
@@ -428,17 +481,22 @@ impl Index {
             .collect()
     }
 
-    /// `ids` in the scope, the newest first.
-    fn newest_first(&self, ids: Vec<u32>, scope: Option<ConversationId>) -> Vec<(u32, &Doc)> {
+    /// `ids` inside the limits of the query, the newest first, or the
+    /// oldest first for that order.
+    fn ordered(&self, ids: Vec<u32>, options: &SearchOptions) -> Vec<(u32, &Doc)> {
         let mut found: Vec<(u32, &Doc)> = ids
             .into_iter()
             .filter_map(|id| Some((id, self.doc(id)?)))
-            .filter(|(_, doc)| scope.is_none_or(|scope| scope == doc.conversation))
+            .filter(|(_, doc)| options.keeps(&doc.entry))
             .collect();
         found.sort_unstable_by(|(_, a), (_, b)| {
-            b.stored_at_ms
-                .cmp(&a.stored_at_ms)
-                .then(a.message.cmp(&b.message))
+            let by_age = a.entry.stored_at_ms.cmp(&b.entry.stored_at_ms);
+            let by_age = if options.order == SearchOrder::Oldest {
+                by_age
+            } else {
+                by_age.reverse()
+            };
+            by_age.then(a.entry.message.cmp(&b.entry.message))
         });
         found
     }
@@ -450,7 +508,7 @@ impl Index {
             return Vec::new();
         }
         let wanted = chars_of(term);
-        let mut buffer = [' '; NEAR_MAX];
+        let mut buffer = ['\0'; NEAR_MAX];
         let mut lists = Vec::new();
         for (word, list) in &self.words {
             if word.len().abs_diff(term.len()) > max.saturating_mul(4) {
@@ -467,15 +525,30 @@ impl Index {
         found
     }
 
-    /// At most `max` candidates of a folded query, the best rank first and
-    /// the newest first in each rank. A later rank is read only when the
-    /// ranks before it gave less than `max`, thus a query with many results
-    /// compares few texts.
-    fn candidates(&self, query: &[u8], scope: Option<ConversationId>, max: usize) -> Vec<&Doc> {
+    /// At most `max` candidates of a folded query, in the order of the
+    /// query. A later rank is read only when the ranks before it gave less
+    /// than `max`, thus a query with many results compares few texts.
+    fn candidates(&self, query: &[u8], options: &SearchOptions, max: usize) -> Vec<&Doc> {
         let terms: Vec<&[u8]> = query.split(|byte| *byte == b' ').take(TERMS_MAX).collect();
+        if options.order != SearchOrder::Rank {
+            // An order by age reads each rank together: each message that
+            // can hold each word, or a word near to it.
+            let mut possible: Option<Vec<u32>> = None;
+            for term in &terms {
+                let wider = either(&self.possible_holders(term), &self.near_holders(term));
+                possible = Some(possible.map_or(wider.clone(), |held| both(&held, &wider)));
+            }
+            return self
+                .ordered(possible.unwrap_or_default(), options)
+                .into_iter()
+                .filter(|(_, doc)| rank(self.text_of(doc), query).is_some())
+                .map(|(_, doc)| doc)
+                .take(max)
+                .collect();
+        }
         let mut taken = BTreeSet::new();
         let mut found = Vec::new();
-        for (id, doc) in self.newest_first(self.possible_holders(query), scope) {
+        for (id, doc) in self.ordered(self.possible_holders(query), options) {
             if found.len() >= max {
                 return found;
             }
@@ -490,7 +563,7 @@ impl Index {
                 let holders = self.possible_holders(term);
                 possible = Some(possible.map_or(holders.clone(), |held| both(&held, &holders)));
             }
-            for (id, doc) in self.newest_first(possible.unwrap_or_default(), scope) {
+            for (id, doc) in self.ordered(possible.unwrap_or_default(), options) {
                 if found.len() >= max {
                     return found;
                 }
@@ -509,7 +582,7 @@ impl Index {
             let wider = either(&self.holders(term), &self.near_holders(term));
             near = Some(near.map_or(wider.clone(), |held| both(&held, &wider)));
         }
-        for (id, doc) in self.newest_first(near.unwrap_or_default(), scope) {
+        for (id, doc) in self.ordered(near.unwrap_or_default(), options) {
             if found.len() >= max {
                 break;
             }
@@ -537,6 +610,19 @@ fn searched_text(plain: &[u8]) -> Result<Zeroizing<String>, Error> {
         }
     }
     Ok(text)
+}
+
+/// The values of a stored message that a limit of a query reads.
+fn entry_of(message: MsgRef, plain: &[u8]) -> Result<Entry, Error> {
+    let info = info_of(plain)?;
+    let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
+    Ok(Entry {
+        message,
+        conversation: conversation_of(plain)?,
+        stored_at_ms: info.stored_at_ms,
+        outgoing: info.outgoing,
+        has_file: AppMessage::parse(app, Channel::Pairwise)?.kind == AppKind::Attachment,
+    })
 }
 
 /// Whether a view shows the row and a search can read its text.
@@ -582,10 +668,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Ok(text) = searched_text(&plain) else {
                 continue;
             };
-            let stored_at_ms = info_of(&plain)?.stored_at_ms;
             build
                 .index
-                .add(MsgRef(row), conversation, stored_at_ms, &fold(&text));
+                .add(entry_of(MsgRef(row), &plain)?, &fold(&text));
         }
         self.search.building = Some(build);
         Ok(false)
@@ -601,15 +686,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         self.search = Search::default();
     }
 
-    /// The messages that match a query, as UTF-16 code units, in one
-    /// conversation or in each one. The store confirms each result
+    /// The messages that match a query, as UTF-16 code units, inside the
+    /// limits of `options`. The store confirms each result
     /// (`IMP-178`): a message that it holds no more, or whose text changed,
     /// is not one. The client keeps no query (`IMP-180`).
-    pub fn search(
-        &self,
-        query: &[u16],
-        scope: Option<ConversationId>,
-    ) -> Result<Vec<SearchHit>, Error> {
+    pub fn search(&self, query: &[u16], options: &SearchOptions) -> Result<Vec<SearchHit>, Error> {
         let open = self.open_ref()?;
         let typed = Zeroizing::new(String::from_utf16(query).map_err(|_| Error::Malformed)?);
         let query = fold(&typed);
@@ -623,15 +704,20 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         };
         let mut hits = Vec::new();
         // A row that the store holds no more takes a place of the first read.
-        for doc in index.candidates(&query, scope, SEARCH_RESULTS_MAX.saturating_mul(2)) {
+        for doc in index.candidates(&query, options, SEARCH_RESULTS_MAX.saturating_mul(2)) {
             if hits.len() >= SEARCH_RESULTS_MAX {
                 break;
             }
-            let Some(plain) = open.store.get(TableId::MESSAGE, &doc.message.0)? else {
+            let Some(plain) = open.store.get(TableId::MESSAGE, &doc.entry.message.0)? else {
                 continue;
             };
             let plain = Zeroizing::new(plain);
-            if conversation_of(&plain)? != doc.conversation || !is_searched(&plain)? {
+            if conversation_of(&plain)? != doc.entry.conversation || !is_searched(&plain)? {
+                continue;
+            }
+            // The limits read the row of the store too: an edit can
+            // take the file of a message away.
+            if !options.keeps(&entry_of(doc.entry.message, &plain)?) {
                 continue;
             }
             let Ok(text) = searched_text(&plain) else {
@@ -660,15 +746,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let limit = u32::try_from(shown_units).unwrap_or(u32::MAX);
             let (start, end) = if end <= limit { (start, end) } else { (0, 0) };
             hits.push(SearchHit {
-                message: doc.message,
-                conversation: doc.conversation,
+                message: doc.entry.message,
+                conversation: doc.entry.conversation,
                 tier,
                 start,
                 end,
             });
         }
         // A text that changed after the build can have a different rank.
-        hits.sort_by_key(|hit| hit.tier);
+        if options.order == SearchOrder::Rank {
+            hits.sort_by_key(|hit| hit.tier);
+        }
         Ok(hits)
     }
 }
@@ -678,25 +766,30 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 mod tests {
     use super::*;
 
+    fn entry(id: u8, conversation: u8, stored_at_ms: u64) -> Entry {
+        Entry {
+            message: MsgRef([id; 16]),
+            conversation: ConversationId([conversation; 16]),
+            stored_at_ms,
+            outgoing: id % 2 == 1,
+            has_file: false,
+        }
+    }
+
     fn index_of(texts: &[&str]) -> Index {
         let mut index = Index::default();
         for (at, text) in texts.iter().enumerate() {
             let id = u8::try_from(at).unwrap();
-            index.add(
-                MsgRef([id; 16]),
-                ConversationId([0; 16]),
-                u64::from(id),
-                &fold(text),
-            );
+            index.add(entry(id, 0, u64::from(id)), &fold(text));
         }
         index
     }
 
     fn found(index: &Index, query: &str) -> Vec<u8> {
         index
-            .candidates(&fold(query), None, usize::MAX)
+            .candidates(&fold(query), &SearchOptions::default(), usize::MAX)
             .into_iter()
-            .map(|doc| doc.message.0[0])
+            .map(|doc| doc.entry.message.0[0])
             .collect()
     }
 
@@ -751,11 +844,86 @@ mod tests {
     #[test]
     fn a_scope_keeps_the_results_of_one_conversation() {
         let mut index = Index::default();
-        index.add(MsgRef([1; 16]), ConversationId([1; 16]), 1, &fold("train"));
-        index.add(MsgRef([2; 16]), ConversationId([2; 16]), 2, &fold("train"));
-        let found = index.candidates(&fold("train"), Some(ConversationId([1; 16])), usize::MAX);
+        index.add(entry(1, 1, 1), &fold("train"));
+        index.add(entry(2, 2, 2), &fold("train"));
+        let options = SearchOptions {
+            scope: Some(ConversationId([1; 16])),
+            ..SearchOptions::default()
+        };
+        let found = index.candidates(&fold("train"), &options, usize::MAX);
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].message, MsgRef([1; 16]));
+        assert_eq!(found[0].entry.message, MsgRef([1; 16]));
+    }
+
+    #[test]
+    fn an_order_by_age_reads_each_rank_together() {
+        let index = index_of(&[
+            "dinner on friday",
+            "friday dinner",
+            "freiday dinner",
+            "lunch",
+        ]);
+        let by = |order| {
+            let options = SearchOptions {
+                order,
+                ..SearchOptions::default()
+            };
+            index
+                .candidates(&fold("friday dinner"), &options, usize::MAX)
+                .into_iter()
+                .map(|doc| doc.entry.message.0[0])
+                .collect::<Vec<u8>>()
+        };
+        assert_eq!(by(SearchOrder::Rank), [1, 0, 2]);
+        assert_eq!(by(SearchOrder::Newest), [2, 1, 0]);
+        assert_eq!(by(SearchOrder::Oldest), [0, 1, 2]);
+    }
+
+    #[test]
+    fn a_limit_keeps_the_side_the_age_and_the_files() {
+        let mut index = Index::default();
+        // The message 1 is of this user, and the message 2 has a file.
+        index.add(entry(1, 0, 10), &fold("harbor"));
+        let mut with_file = entry(2, 0, 20);
+        with_file.has_file = true;
+        index.add(with_file, &fold("harbor"));
+        let ids = |options: SearchOptions| {
+            index
+                .candidates(&fold("harbor"), &options, usize::MAX)
+                .into_iter()
+                .map(|doc| doc.entry.message.0[0])
+                .collect::<Vec<u8>>()
+        };
+        let any = SearchOptions::default();
+        assert_eq!(ids(any), [2, 1]);
+        assert_eq!(
+            ids(SearchOptions {
+                from: SearchFrom::Me,
+                ..any
+            }),
+            [1]
+        );
+        assert_eq!(
+            ids(SearchOptions {
+                from: SearchFrom::Others,
+                ..any
+            }),
+            [2]
+        );
+        assert_eq!(
+            ids(SearchOptions {
+                files_only: true,
+                ..any
+            }),
+            [2]
+        );
+        assert_eq!(
+            ids(SearchOptions {
+                since_ms: 15,
+                ..any
+            }),
+            [2]
+        );
     }
 
     #[test]
@@ -835,12 +1003,9 @@ mod tests {
             }
             let mut message = [0u8; 16];
             message[..4].copy_from_slice(&id.to_be_bytes());
-            index.add(
-                MsgRef(message),
-                ConversationId([0; 16]),
-                u64::from(id),
-                &fold(&text),
-            );
+            let mut entry = entry(0, 0, u64::from(id));
+            entry.message = MsgRef(message);
+            index.add(entry, &fold(&text));
         }
         let build = started.elapsed();
         let postings: usize = index.grams.values().map(Vec::len).sum::<usize>()
@@ -869,7 +1034,11 @@ mod tests {
         ] {
             let started = std::time::Instant::now();
             let count = index
-                .candidates(&fold(query), None, SEARCH_RESULTS_MAX * 2)
+                .candidates(
+                    &fold(query),
+                    &SearchOptions::default(),
+                    SEARCH_RESULTS_MAX * 2,
+                )
                 .len();
             std::println!("{query:?}: {count} candidates in {:?}", started.elapsed());
         }
