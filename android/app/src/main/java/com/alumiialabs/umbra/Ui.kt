@@ -43,6 +43,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -143,10 +144,10 @@ sealed interface Screen {
         }
 }
 
-enum class Tab(val label: String, val icon: String) {
-    Chats("Chats", "comment"),
-    Contacts("Contacts", "user-group"),
-    Settings("Settings", "gear"),
+enum class Tab(val label: Int, val icon: String) {
+    Chats(R.string.main_tab_chats, "comment"),
+    Contacts(R.string.main_tab_contacts, "user-group"),
+    Settings(R.string.main_tab_settings, "gear"),
 }
 
 @Composable
@@ -215,8 +216,8 @@ private fun OpenApp() {
             Screen.ResetIdentity -> ResetIdentityScreen(pop)
             Screen.SocialRecovery -> SocialRecoveryScreen(pop, push)
             Screen.UserHalf -> SecretDigitsScreen(
-                "Your user half",
-                "Keep this half yourself. With the pieces of your contacts it restores your account.",
+                stringResource(R.string.main_user_half_title),
+                stringResource(R.string.main_user_half_body),
                 pop,
             ) { Core.userHalf(it) }
             Screen.AutoDownload -> AutoDownloadScreen(pop)
@@ -224,9 +225,8 @@ private fun OpenApp() {
             Screen.RecoveryCode -> RecoveryCodeScreen(pop, push)
             // IDN-003: the seed that rebuilds the identity and no contact.
             Screen.RootSeed -> SecretDigitsScreen(
-                "Root seed",
-                "These digits rebuild your identity on a new device, with no contact and no message. " +
-                    "The recovery code restores the backup.",
+                stringResource(R.string.main_root_seed_title),
+                stringResource(R.string.main_root_seed_body),
                 pop,
             ) { loaded -> Core.rootSeed(loaded) }
             Screen.Devices -> DevicesScreen(pop, push)
@@ -275,8 +275,8 @@ private fun ContactView(
         is Screen.BlockMember -> BlockMemberScreen(chat, top.index, top.name, pop)
         is Screen.ConversationSettings -> ConversationSettingsScreen(chat, pop, push)
         is Screen.HeldShare -> SecretDigitsScreen(
-            "Share of ${chat.title}",
-            "Read these digits only to ${chat.title}, in person or over a call that you trust.",
+            stringResource(R.string.main_held_share_title, chat.title),
+            stringResource(R.string.main_held_share_body, chat.title),
             pop,
         ) { Core.heldShareDigits(chat.conversation, it) }
         is Screen.Disappearing -> DisappearingScreen(chat, pop)
@@ -344,12 +344,15 @@ private fun UnlockScreen() {
         BrandHero()
         Spacer(Modifier.height(28.dp))
         when {
-            isOpening -> Headline("Opening UMBRA")
-            isFirst && isRestoring -> Headline("Restore")
-            isFirst && isJoining -> Headline("Link this device")
+            isOpening -> Headline(stringResource(R.string.main_opening))
+            isFirst && isRestoring -> Headline(stringResource(R.string.main_restore))
+            isFirst && isJoining -> Headline(stringResource(R.string.main_link_this_device))
             // The one fact that a user cannot know: no party resets it.
-            isFirst -> Headline("Choose a passphrase.", "Nobody can reset it for you.")
-            else -> Headline("Welcome back.")
+            isFirst -> Headline(
+                stringResource(R.string.main_choose_passphrase),
+                stringResource(R.string.main_nobody_can_reset),
+            )
+            else -> Headline(stringResource(R.string.main_welcome_back))
         }
         Spacer(Modifier.height(20.dp))
         if (isFirst && isRestoring && !isOpening) {
@@ -358,7 +361,7 @@ private fun UnlockScreen() {
             JoinForm(onCancel = { isJoining = false })
         } else if (isOpening) {
             Text(
-                if (isFirst) "Protecting this device…" else "Unlocking this device…",
+                stringResource(if (isFirst) R.string.main_protecting else R.string.main_unlocking),
                 style = MaterialTheme.typography.bodySmall,
                 color = Palette.TextSecondary,
             )
@@ -371,13 +374,13 @@ private fun UnlockScreen() {
                 trackColor = Palette.Container,
             )
         } else {
-            FramedPlatformField(field, "Passphrase", isPassphrase = true)
+            FramedPlatformField(field, stringResource(R.string.main_passphrase), isPassphrase = true)
             if (isFirst) {
                 Spacer(Modifier.height(14.dp))
-                FramedPlatformField(confirm, "Confirm passphrase", isPassphrase = true)
+                FramedPlatformField(confirm, stringResource(R.string.main_confirm_passphrase), isPassphrase = true)
             }
             Spacer(Modifier.height(14.dp))
-            PrimaryButton(if (isFirst) "Create and open" else "Unlock") {
+            PrimaryButton(stringResource(if (isFirst) R.string.main_create_and_open else R.string.main_unlock)) {
                 val first = field.take()
                 if (!isFirst) {
                     first?.let { Core.open(context, it) }
@@ -394,13 +397,13 @@ private fun UnlockScreen() {
             }
             if (mismatch) {
                 Spacer(Modifier.height(10.dp))
-                Note("The two passphrases differ.", isError = true)
+                Note(stringResource(R.string.main_passphrases_differ), isError = true)
             }
             if (isFirst) {
                 Spacer(Modifier.height(8.dp))
-                SecondaryButton("Restore from a recovery code") { isRestoring = true }
+                SecondaryButton(stringResource(R.string.main_restore_from_code)) { isRestoring = true }
                 Spacer(Modifier.height(8.dp))
-                SecondaryButton("Link to another device") { isJoining = true }
+                SecondaryButton(stringResource(R.string.main_link_to_another_device)) { isJoining = true }
             }
         }
         Core.fault?.let {
@@ -424,6 +427,7 @@ private fun TabsScreen(tab: Tab, onTab: (Tab) -> Unit, push: (Screen) -> Unit) {
             // A contact or a group starts on the device that owns the
             // channels (Part 7 DEV-287).
             if (tab != Tab.Settings && Core.ownsChannels) {
+                val addContact = stringResource(R.string.main_add_contact)
                 Box(
                     Modifier
                         .align(Alignment.BottomEnd)
@@ -431,11 +435,11 @@ private fun TabsScreen(tab: Tab, onTab: (Tab) -> Unit, push: (Screen) -> Unit) {
                         .size(56.dp)
                         .clip(RoundedCornerShape(16.dp))
                         .background(Palette.Container)
-                        .clickable(role = Role.Button, onClickLabel = "Add a contact") {
+                        .clickable(role = Role.Button, onClickLabel = addContact) {
                             push(Screen.AddContact)
                         },
                     contentAlignment = Alignment.Center,
-                ) { FaIcon("user-plus", label = "Add a contact", tint = Palette.Action) }
+                ) { FaIcon("user-plus", label = addContact, tint = Palette.Action) }
             }
         }
         Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min).background(Palette.Incoming)) {
@@ -459,7 +463,7 @@ private fun TabsScreen(tab: Tab, onTab: (Tab) -> Unit, push: (Screen) -> Unit) {
                     ) { FaIcon(entry.icon, size = 18.dp, tint = Palette.Text) }
                     Spacer(Modifier.height(2.dp))
                     Text(
-                        entry.label,
+                        stringResource(entry.label),
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
                     )
@@ -493,7 +497,7 @@ private fun ConnectionNote() {
         Core.degraded?.let { add(it) }
         if (BuildNetwork.isProvisional) add(UiText.get(R.string.umbra_ui_rel_126))
         // DEV-181: another device of the set removed this one.
-        if (Core.removedFromSet) add("Another device removed this one from your devices.")
+        if (Core.removedFromSet) add(UiText.get(R.string.main_removed_from_set))
         if (Core.online && BuildNetwork.isClockCorrected) add(UiText.get(R.string.umbra_ui_rel_116))
         // GRP-229: a group record outside its slot window.
         // NTF-078: the same line for blobs that did not open while locked.
@@ -503,12 +507,12 @@ private fun ConnectionNote() {
         // DEV-076 to DEV-079: a hole of the synced history shows, and a gap
         // takes no dismissal.
         for (hole in Core.historyHoles) {
-            val name = hole.label.ifEmpty { "a removed device" }
+            val name = hole.label.ifEmpty { UiText.get(R.string.main_a_removed_device) }
             add(
                 if (hole.isArriving) {
-                    "History from $name is still arriving."
+                    UiText.get(R.string.main_history_arriving, name)
                 } else {
-                    "History from $name has a gap: ${hole.count} items did not arrive."
+                    UiText.plural(R.plurals.main_history_gap, hole.count.toInt(), name, hole.count.toLong())
                 },
             )
         }
@@ -538,9 +542,9 @@ private fun ChatsTab(push: (Screen) -> Unit) {
         HeldDeletionsPrompt()
         RequestsPrompt(push)
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.weight(1f)) { TabTitle("Chats") }
+            Box(Modifier.weight(1f)) { TabTitle(stringResource(R.string.main_tab_chats)) }
             Box(Modifier.padding(end = 8.dp, top = 8.dp)) {
-                IconAction("magnifying-glass", "Search") { push(Screen.Search(null)) }
+                IconAction("magnifying-glass", stringResource(R.string.common_search)) { push(Screen.Search(null)) }
             }
         }
         var notice by remember { mutableStateOf<String?>(null) }
@@ -560,19 +564,19 @@ private fun ChatsTab(push: (Screen) -> Unit) {
         muting?.let { chat -> MuteOptions(chat) { muting = null } }
         deleting?.let { chat ->
             ActionSheet(
-                "Delete this conversation?",
+                stringResource(R.string.main_delete_conversation_q),
                 listOf(
-                    RowEntry("trash-can", "Delete on my devices") {
+                    RowEntry("trash-can", stringResource(R.string.common_delete_on_my_devices)) {
                         Core.deleteConversation(chat.conversation)
                         // DEV-129: the view says which deletion ran.
-                        notice = "Deleted on your devices."
+                        notice = UiText.get(R.string.main_deleted_on_your_devices)
                     },
                 ),
                 // DEV-333: the line of a deletion for the own devices.
                 note = if (chat.isGroup) {
-                    "This removes the messages from your devices. The members keep their copies."
+                    stringResource(R.string.main_delete_note_group)
                 } else {
-                    "This removes the messages from your devices. The other person keeps their copy."
+                    stringResource(R.string.main_delete_note_contact)
                 },
                 onDismiss = { deleting = null },
             )
@@ -581,7 +585,7 @@ private fun ChatsTab(push: (Screen) -> Unit) {
         // creation is the act that put it here.
         val withMessages = Core.chats.filter { it.preview != null || it.isGroup }
         if (withMessages.isEmpty()) {
-            EmptyState("No conversations yet.")
+            EmptyState(stringResource(R.string.main_no_conversations))
             return
         }
         LazyColumn {
@@ -605,28 +609,28 @@ private fun ChatOptions(
     val entries = buildList {
         add(
             if (chat.isPinned) {
-                RowEntry("thumbtack", "Unpin") { Core.setPinned(chat.conversation, false) }
+                RowEntry("thumbtack", stringResource(R.string.main_unpin)) { Core.setPinned(chat.conversation, false) }
             } else {
-                RowEntry("thumbtack", "Pin to top") { Core.setPinned(chat.conversation, true) }
+                RowEntry("thumbtack", stringResource(R.string.main_pin_to_top)) { Core.setPinned(chat.conversation, true) }
             },
         )
         add(
             if (chat.isMuted) {
-                RowEntry("bell", "Unmute", mutedLabel(context, chat.mutedUntilMs)) {
+                RowEntry("bell", stringResource(R.string.main_unmute), mutedLabel(context, chat.mutedUntilMs)) {
                     Core.setMutedUntil(chat.conversation, 0u)
                 }
             } else {
-                RowEntry("bell-slash", "Mute") { onMute(chat) }
+                RowEntry("bell-slash", stringResource(R.string.main_mute)) { onMute(chat) }
             },
         )
-        if (chat.unread > 0) add(RowEntry("check", "Mark as read") { Core.markRead(chat.conversation) })
+        if (chat.unread > 0) add(RowEntry("check", stringResource(R.string.main_mark_as_read)) { Core.markRead(chat.conversation) })
         if (chat.isGroup) {
-            add(RowEntry("circle-info", "Group details") { push(Screen.GroupDetails(chat.conversation)) })
+            add(RowEntry("circle-info", stringResource(R.string.main_group_details)) { push(Screen.GroupDetails(chat.conversation)) })
         } else {
-            add(RowEntry("circle-info", "Contact details") { push(Screen.ContactDetails(chat.conversation)) })
-            add(RowEntry("gear", "Conversation settings") { push(Screen.ConversationSettings(chat.conversation)) })
+            add(RowEntry("circle-info", stringResource(R.string.main_contact_details)) { push(Screen.ContactDetails(chat.conversation)) })
+            add(RowEntry("gear", stringResource(R.string.common_conversation_settings)) { push(Screen.ConversationSettings(chat.conversation)) })
         }
-        add(RowEntry("trash-can", "Delete conversation") { onDelete(chat) })
+        add(RowEntry("trash-can", stringResource(R.string.main_delete_conversation)) { onDelete(chat) })
     }
     ActionSheet(chat.title, entries, onDismiss = onDismiss)
 }
@@ -637,12 +641,12 @@ private fun MuteOptions(chat: Chat, onDismiss: () -> Unit) {
     fun after(ms: Long) = (System.currentTimeMillis() + ms).toULong()
     val hour = 3_600_000L
     ActionSheet(
-        "Mute ${chat.title}",
+        stringResource(R.string.main_mute_title, chat.title),
         listOf(
-            RowEntry("clock", "For 1 hour") { Core.setMutedUntil(chat.conversation, after(hour)) },
-            RowEntry("clock", "For 8 hours") { Core.setMutedUntil(chat.conversation, after(8 * hour)) },
-            RowEntry("clock", "For 1 week") { Core.setMutedUntil(chat.conversation, after(7 * 24 * hour)) },
-            RowEntry("bell-slash", "Until I unmute") { Core.setMutedUntil(chat.conversation, MUTE_FOREVER) },
+            RowEntry("clock", stringResource(R.string.main_mute_1_hour)) { Core.setMutedUntil(chat.conversation, after(hour)) },
+            RowEntry("clock", stringResource(R.string.main_mute_8_hours)) { Core.setMutedUntil(chat.conversation, after(8 * hour)) },
+            RowEntry("clock", stringResource(R.string.main_mute_1_week)) { Core.setMutedUntil(chat.conversation, after(7 * 24 * hour)) },
+            RowEntry("bell-slash", stringResource(R.string.main_mute_until_unmute)) { Core.setMutedUntil(chat.conversation, MUTE_FOREVER) },
         ),
         onDismiss = onDismiss,
     )
@@ -651,13 +655,16 @@ private fun MuteOptions(chat: Chat, onDismiss: () -> Unit) {
 /** The end of a mute, as a row of a sheet names it. */
 private fun mutedLabel(context: android.content.Context, untilMs: ULong): String =
     if (untilMs == MUTE_FOREVER) {
-        "Muted"
+        UiText.get(R.string.main_muted)
     } else {
-        "Muted until " + android.text.format.DateUtils.formatDateTime(
-            context,
-            untilMs.toLong(),
-            android.text.format.DateUtils.FORMAT_SHOW_TIME or android.text.format.DateUtils.FORMAT_SHOW_DATE or
-                android.text.format.DateUtils.FORMAT_ABBREV_MONTH,
+        UiText.get(
+            R.string.main_muted_until,
+            android.text.format.DateUtils.formatDateTime(
+                context,
+                untilMs.toLong(),
+                android.text.format.DateUtils.FORMAT_SHOW_TIME or android.text.format.DateUtils.FORMAT_SHOW_DATE or
+                    android.text.format.DateUtils.FORMAT_ABBREV_MONTH,
+            ),
         )
     }
 
@@ -668,7 +675,7 @@ private fun ChatRow(chat: Chat, onOpen: () -> Unit, onOptions: () -> Unit) {
     PressOver(
         Modifier.fillMaxWidth().pressShadeInList(),
         onClick = onOpen,
-        longLabel = "Conversation options",
+        longLabel = stringResource(R.string.main_conversation_options),
         onLongClick = onOptions,
     ) { ChatRowContent(chat) }
 }
@@ -692,7 +699,7 @@ private fun ChatRowContent(chat: Chat) {
                 Row(Modifier.subline(), verticalAlignment = Alignment.CenterVertically) {
                     // Part 6 §6.6.5: the newest message answers a message.
                     if (chat.isPreviewReply) {
-                        FaIcon("reply", label = "Reply", size = 11.dp, tint = Palette.TextSecondary)
+                        FaIcon("reply", label = stringResource(R.string.main_reply), size = 11.dp, tint = Palette.TextSecondary)
                         Spacer(Modifier.width(5.dp))
                     }
                     PlatformText(
@@ -700,7 +707,7 @@ private fun ChatRowContent(chat: Chat) {
                         Palette.TextSecondary,
                         sizeSp = 13f,
                         maxLines = 1,
-                        prefix = if (chat.isPreviewOutgoing) "You: " else "",
+                        prefix = if (chat.isPreviewOutgoing) stringResource(R.string.main_you_prefix) else "",
                     )
                 }
             }
@@ -709,11 +716,11 @@ private fun ChatRowContent(chat: Chat) {
         Column(horizontalAlignment = Alignment.End) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (chat.isMuted) {
-                    FaIcon("bell-slash", label = "Muted", size = 12.dp, tint = Palette.TextSecondary)
+                    FaIcon("bell-slash", label = stringResource(R.string.main_muted), size = 12.dp, tint = Palette.TextSecondary)
                     Spacer(Modifier.width(6.dp))
                 }
                 if (chat.isPinned) {
-                    FaIcon("thumbtack", label = "Pinned", size = 12.dp, tint = Palette.TextSecondary)
+                    FaIcon("thumbtack", label = stringResource(R.string.main_pinned), size = 12.dp, tint = Palette.TextSecondary)
                     Spacer(Modifier.width(6.dp))
                 }
                 Text(
@@ -744,11 +751,11 @@ private fun ChatRowContent(chat: Chat) {
 @Composable
 private fun ContactsTab(push: (Screen) -> Unit) {
     Column(Modifier.fillMaxSize()) {
-        TabTitle("Contacts")
+        TabTitle(stringResource(R.string.main_tab_contacts))
         // A group is no contact, and its details are group details.
         val byName = Core.chats.filter { !it.isGroup }.sortedBy { it.title.lowercase() }
         if (byName.isEmpty()) {
-            EmptyState("No contacts yet.")
+            EmptyState(stringResource(R.string.main_no_contacts))
             return
         }
         LazyColumn {
@@ -766,7 +773,7 @@ private fun ContactsTab(push: (Screen) -> Unit) {
                     Text(chat.title, fontWeight = FontWeight.SemiBold)
                     if (chat.isVerified) {
                         Spacer(Modifier.width(8.dp))
-                        FaIcon("shield-check", label = "Verified", size = 14.dp, tint = Palette.Action)
+                        FaIcon("shield-check", label = stringResource(R.string.common_verified), size = 14.dp, tint = Palette.Action)
                     }
                 }
             }
@@ -787,62 +794,80 @@ fun EmptyState(title: String) {
 @Composable
 private fun SettingsTab(push: (Screen) -> Unit) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-        TabTitle("Settings")
+        TabTitle(stringResource(R.string.main_tab_settings))
         // This row leads to the settings of the lock. The lock
         // itself is the icon of the bar.
-        SettingRow("lock", "App lock", "Passphrase and auto-lock") { push(Screen.AppLock) }
-        SettingRow("bell", "Notifications", Modes.mode(LocalContext.current).label) { push(Screen.Notifications) }
-        SettingRow("comment", "Typing indicators", if (Core.typingEnabled) "On" else "Off") {
+        SettingRow("lock", stringResource(R.string.main_app_lock), stringResource(R.string.main_app_lock_detail)) { push(Screen.AppLock) }
+        SettingRow("bell", stringResource(R.string.common_notifications), Modes.mode(LocalContext.current).label) { push(Screen.Notifications) }
+        SettingRow(
+            "comment",
+            stringResource(R.string.main_typing_indicators),
+            stringResource(if (Core.typingEnabled) R.string.common_on else R.string.common_off),
+        ) {
             Core.turnTyping(!Core.typingEnabled)
         }
         // DEV-020: the setting states its trade where the user sets it.
         var isChoosingAge by remember { mutableStateOf(false) }
-        SettingRow("clock", "Keep history", historyLabel(Core.historyAge)) { isChoosingAge = true }
+        SettingRow("clock", stringResource(R.string.main_keep_history), historyLabel(Core.historyAge)) { isChoosingAge = true }
         if (isChoosingAge) {
             ActionSheet(
-                title = "Keep history",
+                title = stringResource(R.string.main_keep_history),
                 entries = HISTORY_AGES.map { seconds ->
                     RowEntry("clock", historyLabel(seconds)) {
                         Core.keepHistoryFor(seconds)
                         isChoosingAge = false
                     }
                 },
-                note = "With a short period, this device also drops older messages that your " +
-                    "other devices send it.",
+                note = stringResource(R.string.main_keep_history_note),
                 onDismiss = { isChoosingAge = false },
             )
         }
         // DEV-202: a draft on the other devices is text that no one sent.
         if (Core.devices.size > 1) {
-            SettingRow("pen", "Draft sync", if (Core.draftSync) "On" else "Off") {
+            SettingRow(
+                "pen",
+                stringResource(R.string.main_draft_sync),
+                stringResource(if (Core.draftSync) R.string.common_on else R.string.common_off),
+            ) {
                 Core.turnDraftSync(!Core.draftSync)
             }
         }
-        SettingRow("download", "Automatic download", autoDownloadLabel(Core.autoDownloadLimit, Core.autoDownloadWifiOnly)) {
+        SettingRow("download", stringResource(R.string.main_automatic_download), autoDownloadLabel(Core.autoDownloadLimit, Core.autoDownloadWifiOnly)) {
             push(Screen.AutoDownload)
         }
         val context = LocalContext.current
         LaunchedEffect(Unit) { Core.readBackup() }
         val backupAt = Core.lastBackupAt
-        val backup = if (backupAt == null) "No backup yet" else "Last backup ${timeLabel(context, backupAt * 1_000)}"
+        val backup = if (backupAt == null) {
+            stringResource(R.string.main_no_backup_yet)
+        } else {
+            stringResource(R.string.main_last_backup, timeLabel(context, backupAt * 1_000))
+        }
         // The recovery code and the backups belong to the device that owns
         // the channels (Part 7 §7.7).
         if (Core.ownsChannels) {
-            SettingRow("key", "Recovery code", backup) { push(Screen.RecoveryCode) }
+            SettingRow("key", stringResource(R.string.common_recovery_code), backup) { push(Screen.RecoveryCode) }
         }
-        SettingRow("laptop", "Linked devices", devicesLabel(Core.devices.size)) { push(Screen.Devices) }
+        SettingRow("laptop", stringResource(R.string.main_linked_devices), devicesLabel(Core.devices.size)) { push(Screen.Devices) }
         if (Core.ownsChannels) {
-            SettingRow("rotate", "Reset identity", "For a device in hostile hands") { push(Screen.ResetIdentity) }
+            SettingRow(
+                "rotate",
+                stringResource(R.string.common_reset_identity),
+                stringResource(R.string.main_reset_identity_detail),
+            ) { push(Screen.ResetIdentity) }
         }
         // DEV-008: a device leaves each set by an explicit local wipe.
         var isErasing by remember { mutableStateOf(false) }
-        SettingRow("trash-can", "Erase this device", "Each key and message on it") { isErasing = true }
+        SettingRow(
+            "trash-can",
+            stringResource(R.string.main_erase_this_device),
+            stringResource(R.string.main_erase_detail),
+        ) { isErasing = true }
         if (isErasing) {
             ActionSheet(
-                "Erase this device?",
-                listOf(RowEntry("trash-can", "Erase this device") { Core.eraseDevice(context) }),
-                note = "This deletes each message, contact, and key on this device. A backup, and each " +
-                    "other device of your set, keeps what it holds. The app then starts as new.",
+                stringResource(R.string.main_erase_q),
+                listOf(RowEntry("trash-can", stringResource(R.string.main_erase_this_device)) { Core.eraseDevice(context) }),
+                note = stringResource(R.string.main_erase_note),
                 onDismiss = { isErasing = false },
             )
         }
@@ -855,17 +880,16 @@ private fun SettingsTab(push: (Screen) -> Unit) {
 private val HISTORY_AGES = listOf(86_400L, 30L * 86_400, 365L * 86_400, -1L)
 
 private fun historyLabel(seconds: Long): String = when {
-    seconds < 0 -> "Forever"
-    seconds <= 86_400 -> "1 day"
-    seconds <= 30L * 86_400 -> "30 days"
-    seconds <= 365L * 86_400 -> "1 year"
-    else -> "Forever"
+    seconds < 0 -> UiText.get(R.string.main_history_forever)
+    seconds <= 86_400 -> UiText.get(R.string.main_history_1_day)
+    seconds <= 30L * 86_400 -> UiText.get(R.string.main_history_30_days)
+    seconds <= 365L * 86_400 -> UiText.get(R.string.main_history_1_year)
+    else -> UiText.get(R.string.main_history_forever)
 }
 
 private fun devicesLabel(count: Int): String = when (count) {
-    0, 1 -> "No other device"
-    2 -> "1 other device"
-    else -> "${count - 1} other devices"
+    0, 1 -> UiText.get(R.string.main_no_other_device)
+    else -> UiText.plural(R.plurals.main_other_devices, count - 1, count - 1)
 }
 
 @Composable

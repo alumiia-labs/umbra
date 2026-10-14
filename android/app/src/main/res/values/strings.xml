@@ -1,4 +1,1102 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  The text of the app. Each view has its prefix, and the words that many
+  views use start with `common_`. Part 14 §14.9.3 keeps the strings that a
+  rule of the specification requires in ui_rules.xml.
+-->
 <resources>
-    <string name="app_name">UMBRA</string>
+    <string name="app_name" translatable="false">UMBRA</string>
+
+    <string name="common_back">Back</string>
+    <string name="common_cancel">Cancel</string>
+    <string name="common_save">Save</string>
+    <string name="common_done">Done</string>
+    <string name="common_try_again">Try again</string>
+    <string name="common_send">Send</string>
+    <string name="common_dismiss">Dismiss</string>
+    <string name="common_search">Search</string>
+    <string name="common_delete">Delete</string>
+    <string name="common_accept">Accept</string>
+    <string name="common_you">You</string>
+    <string name="common_on">On</string>
+    <string name="common_off">Off</string>
+    <string name="common_photo">Photo</string>
+    <string name="common_video">Video</string>
+    <string name="common_file">File</string>
+    <string name="common_name">Name</string>
+    <string name="common_message">Message</string>
+    <string name="common_new_message">New message</string>
+    <string name="common_attach">Attach</string>
+    <string name="common_notifications">Notifications</string>
+    <string name="common_block">Block</string>
+    <string name="common_unblock">Unblock</string>
+    <string name="common_verified">Verified</string>
+    <string name="common_a_contact">A contact</string>
+    <string name="common_copy_link">Copy link</string>
+    <string name="common_share_link">Share link</string>
+    <string name="common_no_end">No end</string>
+    <string name="common_link_failed">The link failed.</string>
+    <string name="common_umbra_link">UMBRA link</string>
+    <string name="common_disappearing_messages">Disappearing messages</string>
+    <string name="common_media_and_files">Media and files</string>
+    <string name="common_conversation_settings">Conversation settings</string>
+    <string name="common_leave_group">Leave group</string>
+    <string name="common_delete_on_my_devices">Delete on my devices</string>
+    <string name="common_remove_for_everyone">Remove for everyone</string>
+    <string name="common_reset_identity">Reset identity</string>
+    <string name="common_recovery_code">Recovery code</string>
+    <string name="common_new_passphrase">New passphrase</string>
+    <string name="common_change_passphrase">Change passphrase</string>
+    <string name="common_connection">Connection</string>
+    <string name="common_your_handle">Your handle</string>
+    <!-- A member of a group with no name that the user knows. A typed mention matches this text. -->
+    <string name="common_member_number">Member %1$d</string>
+
+    <!-- Ui.kt: the tabs. The tab names are also the titles of the tabs. -->
+    <string name="main_tab_chats">Chats</string>
+    <string name="main_tab_contacts">Contacts</string>
+    <string name="main_tab_settings">Settings</string>
+
+    <!-- Ui.kt: the views of secret digits. -->
+    <string name="main_user_half_title">Your user half</string>
+    <string name="main_user_half_body">Keep this half yourself. With the pieces of your contacts it restores your account.</string>
+    <string name="main_root_seed_title">Root seed</string>
+    <string name="main_root_seed_body">These digits rebuild your identity on a new device, with no contact and no message. The recovery code restores the backup.</string>
+    <!-- %1$s is the name of the contact that holds the share. -->
+    <string name="main_held_share_title">Share of %1$s</string>
+    <!-- %1$s is the name of the contact that holds the share. -->
+    <string name="main_held_share_body">Read these digits only to %1$s, in person or over a call that you trust.</string>
+
+    <!-- Ui.kt: the first-run view and the unlock view. -->
+    <string name="main_opening">Opening UMBRA</string>
+    <string name="main_restore">Restore</string>
+    <string name="main_link_this_device">Link this device</string>
+    <string name="main_choose_passphrase">Choose a passphrase.</string>
+    <string name="main_nobody_can_reset">Nobody can reset it for you.</string>
+    <string name="main_welcome_back">Welcome back.</string>
+    <string name="main_protecting">Protecting this device…</string>
+    <string name="main_unlocking">Unlocking this device…</string>
+    <string name="main_passphrase">Passphrase</string>
+    <string name="main_confirm_passphrase">Confirm passphrase</string>
+    <string name="main_create_and_open">Create and open</string>
+    <string name="main_unlock">Unlock</string>
+    <string name="main_passphrases_differ">The two passphrases differ.</string>
+    <string name="main_restore_from_code">Restore from a recovery code</string>
+    <string name="main_link_to_another_device">Link to another device</string>
+
+    <!-- Ui.kt: the button that adds a contact, for a screen reader. -->
+    <string name="main_add_contact">Add a contact</string>
+
+    <!-- Ui.kt: the lines of a degraded state above the chat list. -->
+    <string name="main_removed_from_set">Another device removed this one from your devices.</string>
+    <!-- The name of a device in the history lines when the device has no label. -->
+    <string name="main_a_removed_device">a removed device</string>
+    <!-- %1$s is the label of a device, or "a removed device". -->
+    <string name="main_history_arriving">History from %1$s is still arriving.</string>
+    <!-- %1$s is the label of a device. %2$d is the count of items. -->
+    <plurals name="main_history_gap">
+        <item quantity="one">History from %1$s has a gap: %2$d item did not arrive.</item>
+        <item quantity="other">History from %1$s has a gap: %2$d items did not arrive.</item>
+    </plurals>
+
+    <!-- Ui.kt: the chat list. -->
+    <string name="main_delete_conversation_q">Delete this conversation?</string>
+    <string name="main_deleted_on_your_devices">Deleted on your devices.</string>
+    <string name="main_delete_note_group">This removes the messages from your devices. The members keep their copies.</string>
+    <string name="main_delete_note_contact">This removes the messages from your devices. The other person keeps their copy.</string>
+    <string name="main_no_conversations">No conversations yet.</string>
+    <!-- A screen reader reads this for the long press of a row in the chat list. -->
+    <string name="main_conversation_options">Conversation options</string>
+    <!-- A screen reader reads this for the icon of a preview that answers a message. -->
+    <string name="main_reply">Reply</string>
+    <!-- The prefix of the preview of a message that the user sent. Keep the space at the end. -->
+    <string name="main_you_prefix">"You: "</string>
+    <string name="main_pinned">Pinned</string>
+
+    <!-- Ui.kt: the options of one conversation, at a long press of its row. -->
+    <string name="main_unpin">Unpin</string>
+    <string name="main_pin_to_top">Pin to top</string>
+    <string name="main_unmute">Unmute</string>
+    <string name="main_mute">Mute</string>
+    <string name="main_mark_as_read">Mark as read</string>
+    <string name="main_group_details">Group details</string>
+    <string name="main_contact_details">Contact details</string>
+    <string name="main_delete_conversation">Delete conversation</string>
+
+    <!-- Ui.kt: the lengths of a mute. -->
+    <!-- %1$s is the name of the conversation. -->
+    <string name="main_mute_title">Mute %1$s</string>
+    <string name="main_mute_1_hour">For 1 hour</string>
+    <string name="main_mute_8_hours">For 8 hours</string>
+    <string name="main_mute_1_week">For 1 week</string>
+    <string name="main_mute_until_unmute">Until I unmute</string>
+    <string name="main_muted">Muted</string>
+    <!-- %1$s is the date and the time when the mute ends. -->
+    <string name="main_muted_until">Muted until %1$s</string>
+
+    <!-- Ui.kt: the contact list. -->
+    <string name="main_no_contacts">No contacts yet.</string>
+
+    <!-- Ui.kt: the settings tab. -->
+    <string name="main_app_lock">App lock</string>
+    <string name="main_app_lock_detail">Passphrase and auto-lock</string>
+    <string name="main_typing_indicators">Typing indicators</string>
+    <string name="main_keep_history">Keep history</string>
+    <string name="main_keep_history_note">With a short period, this device also drops older messages that your other devices send it.</string>
+    <string name="main_draft_sync">Draft sync</string>
+    <string name="main_automatic_download">Automatic download</string>
+    <string name="main_no_backup_yet">No backup yet</string>
+    <!-- %1$s is the time or the date of the last backup. -->
+    <string name="main_last_backup">Last backup %1$s</string>
+    <string name="main_linked_devices">Linked devices</string>
+    <string name="main_reset_identity_detail">For a device in hostile hands</string>
+    <string name="main_erase_this_device">Erase this device</string>
+    <string name="main_erase_detail">Each key and message on it</string>
+    <string name="main_erase_q">Erase this device?</string>
+    <string name="main_erase_note">This deletes each message, contact, and key on this device. A backup, and each other device of your set, keeps what it holds. The app then starts as new.</string>
+
+    <!-- Ui.kt: the periods of the history that the device keeps. -->
+    <string name="main_history_forever">Forever</string>
+    <string name="main_history_1_day">1 day</string>
+    <string name="main_history_30_days">30 days</string>
+    <string name="main_history_1_year">1 year</string>
+
+    <!-- Ui.kt: the line of the linked devices row. -->
+    <string name="main_no_other_device">No other device</string>
+    <!-- %1$d is the count of the other devices of the user. -->
+    <plurals name="main_other_devices">
+        <item quantity="one">%1$d other device</item>
+        <item quantity="other">%1$d other devices</item>
+    </plurals>
+
+    <!-- Widgets.kt: the shared controls. -->
+    <string name="widget_hide_passphrase">Hide passphrase</string>
+    <string name="widget_show_passphrase">Show passphrase</string>
+    <string name="widget_profile">Profile</string>
+    <!-- The name of the user when the profile has no name. The picture shows its first letter. -->
+    <string name="widget_me">Me</string>
+    <string name="widget_lock_now">Lock now</string>
+
+    <!-- Search.kt: the limits of the search. -->
+    <string name="search_sort">Sort</string>
+    <string name="search_from">From</string>
+    <string name="search_show">Show</string>
+    <string name="search_date">Date</string>
+    <string name="search_best_match">Best match</string>
+    <string name="search_newest">Newest</string>
+    <string name="search_oldest">Oldest</string>
+    <string name="search_from_anyone">From anyone</string>
+    <string name="search_from_you">From you</string>
+    <string name="search_from_others">From others</string>
+    <string name="search_all_messages">All messages</string>
+    <string name="search_files">Files</string>
+    <string name="search_any_time">Any time</string>
+    <string name="search_last_7_days">Last 7 days</string>
+    <string name="search_last_30_days">Last 30 days</string>
+    <string name="search_last_year">Last year</string>
+    <!-- The detail of the value of a limit that is chosen now. -->
+    <string name="search_selected">Selected</string>
+
+    <!-- Search.kt: the results. -->
+    <string name="search_no_results">No results.</string>
+    <!-- %1$s is the name of the sender of a result. Keep the space at the end. -->
+    <string name="search_sender_prefix">"%1$s: "</string>
+
+    <!-- Timer.kt: the periods of disappearing messages. They also go inside a sentence. -->
+    <string name="timer_30_seconds">30 seconds</string>
+    <string name="timer_5_minutes">5 minutes</string>
+    <string name="timer_1_hour">1 hour</string>
+    <string name="timer_8_hours">8 hours</string>
+    <string name="timer_1_day">1 day</string>
+    <string name="timer_1_week">1 week</string>
+    <string name="timer_4_weeks">4 weeks</string>
+    <string name="timer_90_days">90 days</string>
+    <!-- A period that is not in the list. %1$d is the count of seconds. -->
+    <plurals name="timer_seconds">
+        <item quantity="one">%1$d second</item>
+        <item quantity="other">%1$d seconds</item>
+    </plurals>
+
+    <!-- Timer.kt: the row of a timer change in a conversation. -->
+    <!-- The author of a timer change in a group. -->
+    <string name="timer_an_admin">An admin</string>
+    <!-- %1$s is who changed the timer: "You", "An admin", or the name of a contact. -->
+    <string name="timer_turned_off">%1$s turned off disappearing messages</string>
+    <!-- %1$s is who changed the timer: "You", "An admin", or the name of a contact. %2$s is a period, for example "5 minutes". -->
+    <string name="timer_set_to">%1$s set messages to disappear after %2$s</string>
+
+    <!-- Timer.kt: the preview of a timer change in the chat list. -->
+    <string name="timer_preview_off">Disappearing messages off</string>
+    <!-- %1$s is a period, for example "5 minutes". -->
+    <string name="timer_preview">Disappearing messages: %1$s</string>
+
+    <!-- Timer.kt: the timer view of a conversation. -->
+    <!-- %1$s is the date and the time of the change. -->
+    <string name="timer_set_by_you">Set by you, %1$s</string>
+    <!-- %1$s is the date and the time of the change. -->
+    <string name="timer_set_by_admin">Set by an admin, %1$s</string>
+    <!-- %1$s is the name of the contact. %2$s is the date and the time of the change. -->
+    <string name="timer_set_by">Set by %1$s, %2$s</string>
+
+    <!-- Timer.kt: the time that remains to a timed message, in short units. -->
+    <!-- A short time span: seconds, minutes, hours, days. -->
+    <string name="timer_span_seconds">%1$d s</string>
+    <string name="timer_span_minutes">%1$d min</string>
+    <string name="timer_span_hours">%1$d h</string>
+    <string name="timer_span_days">%1$d d</string>
+    <!-- %1$s is a short time span, such as "5 min". -->
+    <string name="timer_left">%1$s left</string>
+
+    <!-- Moderation.kt: the role of a moderator at the start of a sentence. -->
+    <string name="mod_an_admin">An admin</string>
+    <string name="mod_an_owner">An owner</string>
+    <string name="mod_a_moderator">A moderator</string>
+
+    <!-- Moderation.kt: the moderation notes of a group. %1$s is a role, for example "An admin". %2$d is the count of messages. -->
+    <plurals name="mod_removed">
+        <item quantity="one">%1$s removed %2$d message.</item>
+        <item quantity="other">%1$s removed %2$d messages.</item>
+    </plurals>
+    <!-- %1$s is a role, for example "An admin". %2$d is the count of messages. -->
+    <plurals name="mod_hid">
+        <item quantity="one">%1$s hid %2$d message.</item>
+        <item quantity="other">%1$s hid %2$d messages.</item>
+    </plurals>
+    <!-- %1$s is a role, for example "An admin". %2$d is the count of messages. -->
+    <plurals name="mod_put_back">
+        <item quantity="one">%1$s put back %2$d message.</item>
+        <item quantity="other">%1$s put back %2$d messages.</item>
+    </plurals>
+
+    <!-- Moderation.kt: the role of a member inside a sentence. -->
+    <string name="mod_role_observer">an observer</string>
+    <string name="mod_role_moderator">a moderator</string>
+    <string name="mod_role_admin">an admin</string>
+    <string name="mod_role_owner">an owner</string>
+    <string name="mod_role_member">a member</string>
+
+    <!-- Moderation.kt: the notes of a change of the roster of a group. -->
+    <!-- %1$s is the name of a member. -->
+    <string name="mod_joined">%1$s joined</string>
+    <string name="mod_you_left">You left the group</string>
+    <!-- %1$s is the name of a member. -->
+    <string name="mod_no_longer">%1$s is no longer in the group</string>
+    <!-- %1$s is a role, for example "an admin". -->
+    <string name="mod_you_are_now">You are now %1$s</string>
+    <!-- %1$s is the name of a member. %2$s is a role, for example "an admin". -->
+    <string name="mod_is_now">%1$s is now %2$s</string>
+    <string name="mod_members_disagree">The members disagree on a change to the group</string>
+    <!-- %1$s is the name of a member. -->
+    <string name="mod_two_changes">%1$s made two different changes to the group</string>
+
+    <!-- Block.kt: the block view. -->
+    <!-- %1$s is the name of a contact or of a member. -->
+    <string name="block_unblock_q">Unblock %1$s?</string>
+    <!-- %1$s is the name of a contact or of a member. -->
+    <string name="block_block_q">Block %1$s?</string>
+    <string name="block_unblock_note">Messages from now on show again. Messages sent while blocked stay gone.</string>
+
+    <!-- Block.kt: the line of a conversation that a block touches. -->
+    <!-- %1$d is the count of hidden messages. -->
+    <plurals name="block_hidden">
+        <item quantity="one">%1$d message from a blocked member is hidden.</item>
+        <item quantity="other">%1$d messages from blocked members are hidden.</item>
+    </plurals>
+    <string name="block_contact_dropped">Blocked. Messages from this contact are dropped.</string>
+
+    <!-- Alerts.kt: the notification setting of a conversation. -->
+    <string name="alerts_all_messages">All messages</string>
+    <string name="alerts_mentions_only">Mentions only</string>
+
+    <!-- Conversation view: the top bar and the list. -->
+    <string name="chat_thread">Thread</string>
+    <!-- The line under the name of a contact while the contact types. -->
+    <string name="chat_typing">typing…</string>
+    <string name="chat_end_to_end_encrypted">End-to-end encrypted</string>
+    <!-- The label above the messages of the current day. -->
+    <string name="chat_today">Today</string>
+    <!-- The divider above the first message that the user did not see. -->
+    <string name="chat_new_label">New</string>
+    <plurals name="chat_replies">
+        <item quantity="one">%1$d reply</item>
+        <item quantity="other">%1$d replies</item>
+    </plurals>
+    <!-- Screen reader label of the small picture under the last message that the contact read. -->
+    <string name="chat_read">Read</string>
+
+    <!-- Conversation view: notices under the list. -->
+    <string name="chat_microphone_did_not_start">The microphone did not start.</string>
+    <string name="chat_no_microphone_access">UMBRA has no access to the microphone.</string>
+    <!-- %1$s is the name of the conversation that got the forward. -->
+    <string name="chat_forwarded_to">Forwarded to %1$s.</string>
+    <string name="chat_deleted_on_your_devices">Deleted on your devices.</string>
+    <string name="chat_wait_between_deletions">Wait 10 seconds between two deletions for everyone.</string>
+    <string name="chat_asked_each_member_to_delete">Asked the app of each member to delete the message.</string>
+    <!-- %1$s is the name of the contact. -->
+    <string name="chat_asked_contact_to_delete">Asked the app of %1$s to delete the message.</string>
+    <string name="chat_caption_too_long">A caption can be 1 024 bytes at most.</string>
+
+    <!-- Conversation view: the sheets of a message. -->
+    <string name="chat_forward_to">Forward to</string>
+    <string name="chat_links">Links</string>
+    <!-- Removes a placeholder of a deleted message from this device. -->
+    <string name="chat_remove">Remove</string>
+    <string name="chat_show_for_everyone">Show for everyone</string>
+    <string name="chat_hide_for_everyone">Hide for everyone</string>
+    <string name="chat_hide_for_everyone_detail">This takes the message out of the view of each member. A member keeps the message on their device, and a later change puts it back.</string>
+    <string name="chat_send_again">Send again</string>
+    <string name="chat_reply">Reply</string>
+    <string name="chat_edit">Edit</string>
+    <string name="chat_copy_text">Copy text</string>
+    <string name="chat_forward">Forward</string>
+    <string name="chat_save_to_device">Save to device</string>
+    <!-- %1$s is an amount of data, for example "12 MB". -->
+    <string name="chat_send_uses_data">Sending uses about %1$s of data.</string>
+    <string name="chat_file_has_no_size">The app that holds this file names no size.</string>
+    <!-- %1$s is the size of the file, for example "12 MB". -->
+    <string name="chat_send_size_question">Send %1$s?</string>
+    <string name="chat_send_this_file_question">Send this file?</string>
+    <string name="chat_remove_this_message_question">Remove this message?</string>
+    <string name="chat_delete_for_everyone">Delete for everyone</string>
+    <string name="chat_delete_this_message_question">Delete this message?</string>
+    <string name="chat_delete_on_my_devices_question">Delete on my devices?</string>
+    <string name="chat_delete_on_my_devices_note">This removes the message from your devices. The other person keeps their copy.</string>
+    <string name="chat_delete_for_everyone_question">Delete for everyone?</string>
+    <string name="chat_delete_for_everyone_group_note">This asks the app of each member to delete the message. A member who left the group never gets the request. A member who sends nothing for more than 30 days leaves the group and never gets the request. A member can keep a copy.</string>
+    <!-- Screen reader label of a long press on a message. -->
+    <string name="chat_message_actions">Message actions</string>
+    <!-- %1$s is an emoji that the user reacted with. -->
+    <string name="chat_remove_reaction">Remove %1$s</string>
+    <!-- %1$s is an emoji. -->
+    <string name="chat_react">React %1$s</string>
+
+    <!-- Conversation view: the attach sheet. -->
+    <string name="chat_audio">Audio</string>
+    <string name="chat_poll">Poll</string>
+
+    <!-- Conversation view: the composer. -->
+    <string name="chat_membership_lapsed">Your membership lapsed while this device was away. Ask a member for a new invitation.</string>
+    <string name="chat_group_closed">The relays of this group hold it no more. It takes no new message.</string>
+    <string name="chat_device_took_your_place">A removed device took your place in this group. Your request to an admin waits.</string>
+    <string name="chat_no_longer_member">You are no longer a member of this group. The messages here stay on this device.</string>
+    <string name="chat_role_observer">Your role in this group is observer.</string>
+    <!-- The header of the composer while the user changes a sent message. -->
+    <string name="chat_edit_message">Edit message</string>
+    <string name="chat_record_voice_message">Record a voice message</string>
+    <!-- The label of a copied message in the clipboard of the system. -->
+    <string name="chat_clipboard_label">UMBRA message</string>
+
+    <!-- Conversation view: a bubble. -->
+    <!-- %1$s is a role word, for example "A moderator". -->
+    <string name="chat_role_hid_message">%1$s hid this message</string>
+    <!-- %1$s is a role word, for example "A moderator". -->
+    <string name="chat_role_removed_message">%1$s removed this message</string>
+    <string name="chat_you_deleted_message">You deleted this message</string>
+    <string name="chat_message_was_deleted">This message was deleted</string>
+    <string name="chat_forwarded">Forwarded</string>
+    <string name="chat_mentions_you">Mentions you</string>
+    <!-- One part of the status line under a bubble. The parts have " · " between them. -->
+    <string name="chat_edited">Edited</string>
+    <!-- One part of the status line under a bubble: a key supply opened the message. -->
+    <string name="chat_recovered">Recovered</string>
+    <!-- %1$d is the share of the upload in percent. -->
+    <string name="chat_sending_percent">Sending %1$d %%</string>
+    <string name="chat_sending">Sending</string>
+    <string name="chat_message_not_on_device">Message not on this device</string>
+
+    <!-- Conversation view: the delivery state of a sent message. -->
+    <string name="chat_delivery_waiting">Waiting</string>
+    <!-- A relay took the message. The contact does not have it yet. -->
+    <string name="chat_delivery_accepted">Accepted</string>
+    <string name="chat_delivery_delivered">Delivered</string>
+
+    <!-- Conversation view: a change of the forward policy. -->
+    <!-- The preview in the list of chats. -->
+    <string name="chat_forwarding_off">Forwarding off</string>
+    <!-- The preview in the list of chats. -->
+    <string name="chat_forwarding_on">Forwarding on</string>
+    <!-- %1$s is the person who made the change, for example "You" or a contact name. -->
+    <string name="chat_turned_forwarding_off">%1$s turned forwarding off</string>
+    <!-- %1$s is the person who made the change, for example "You" or a contact name. -->
+    <string name="chat_turned_forwarding_on">%1$s turned forwarding on</string>
+
+    <!-- New poll view. -->
+    <string name="poll_new_poll">New poll</string>
+    <string name="poll_question">Question</string>
+    <!-- %1$d is the number of the option field. -->
+    <string name="poll_option_number">Option %1$d</string>
+    <!-- %1$d is the number of the option field. -->
+    <string name="poll_remove_option_number">Remove option %1$d</string>
+    <string name="poll_add_option">Add option</string>
+    <string name="poll_more_than_one_answer">More than one answer</string>
+    <!-- The heading above the choices of the end of a poll. -->
+    <string name="poll_ends">Ends</string>
+    <string name="poll_one_hour">1 hour</string>
+    <string name="poll_one_day">1 day</string>
+    <string name="poll_one_week">1 week</string>
+    <!-- A period that the user sets. -->
+    <string name="poll_custom">Custom</string>
+    <string name="poll_number">Number</string>
+    <string name="poll_unit_minutes">Minutes</string>
+    <string name="poll_unit_hours">Hours</string>
+    <string name="poll_unit_days">Days</string>
+    <string name="poll_period_bounds">5 minutes to 30 days</string>
+    <string name="poll_hide_results_until_end">Hide results until it ends</string>
+
+    <!-- A poll in a bubble. -->
+    <string name="poll_kind_multiple">Poll · one or more</string>
+    <string name="poll_kind_single">Poll · one answer</string>
+    <plurals name="poll_votes_on_device">
+        <item quantity="one">%1$d vote on this device</item>
+        <item quantity="other">%1$d votes on this device</item>
+    </plurals>
+    <string name="poll_ended">Ended</string>
+    <!-- %1$s is the time that remains, for example "3 hours". -->
+    <string name="poll_ends_in">Ends in %1$s</string>
+    <string name="poll_results_at_end">Results at the end</string>
+
+    <!-- Voice message and recording bar. -->
+    <!-- %1$d is the share of the transfer in percent. -->
+    <string name="voice_percent">%1$d %%</string>
+    <string name="voice_receiving">Receiving</string>
+    <string name="voice_not_received">Not received</string>
+    <string name="voice_discard_recording">Discard the recording</string>
+    <!-- %1$s is the length of the recording, for example "15:00". The recorder stopped at its limit. -->
+    <string name="voice_duration_at_limit">%1$s · Limit</string>
+
+    <!-- Photo in a bubble and photo view. -->
+    <string name="photo_send_again">Send the photo again</string>
+    <string name="photo_preview">Photo preview</string>
+    <string name="photo_receiving">Receiving</string>
+    <string name="photo_not_received">Not received</string>
+
+    <!-- Picture of the profile or of a contact, with its crop. -->
+    <string name="picture_did_not_open">That image did not open.</string>
+    <string name="picture_edit_picture">Edit picture</string>
+    <!-- The small mark on the corner of the picture. -->
+    <string name="picture_edit">Edit</string>
+    <string name="picture_picture">Picture</string>
+    <string name="picture_choose_picture">Choose picture</string>
+    <string name="picture_remove_picture">Remove picture</string>
+
+    <!-- The new private group. -->
+    <string name="group_new_private_group">New private group</string>
+    <string name="group_bring_people_together">Bring your people together.</string>
+    <string name="group_name_label">Group name</string>
+    <string name="group_create">Create group</string>
+    <string name="group_connecting_note">Connecting. A group takes two relays at its creation.</string>
+
+    <!-- The group details. -->
+    <string name="group_details">Group details</string>
+    <string name="group_members">Members</string>
+    <string name="group_identifier">Group identifier</string>
+    <string name="group_members_and_roles">Members and roles</string>
+    <string name="group_block_screenshots">Block screenshots</string>
+    <string name="group_no_forwarding">No forwarding</string>
+    <string name="group_forwarding">Forwarding</string>
+    <string name="group_invite_contact">Invite a contact</string>
+    <string name="group_lapsed_note">Your membership lapsed while this device was away. Ask a member for a new invitation.</string>
+    <string name="group_closed_note">The relays of this group hold it no more. It takes no new message.</string>
+    <string name="group_owner_silent_note">An owner has been silent for 30 days. Make another member an owner.</string>
+    <string name="group_returning_note">A removed device took your place in this group. Your request to an admin waits.</string>
+    <string name="group_not_member_note">You are no longer a member of this group.</string>
+    <string name="group_relay_silent_note">One of the two relays of this group has not answered. Messages wait.</string>
+
+    <!-- A contact that asked to come in. %1$s is the name of the contact. -->
+    <string name="group_joiner_comes_in">%1$s comes in</string>
+    <string name="group_joiner_asks">%1$s asks to come in</string>
+    <string name="group_joiner_stuck">The roster did not reach the relays.</string>
+    <string name="group_joiner_added">The roster goes to them through the relays.</string>
+    <string name="group_joiner_waiting">The group gives them its roster and its keys.</string>
+    <!-- A button that admits the contact to the group. -->
+    <string name="group_let_in">Let in</string>
+
+    <!-- The roles of a member. -->
+    <string name="group_role_owner">Owner</string>
+    <string name="group_role_admin">Admin</string>
+    <string name="group_role_moderator">Moderator</string>
+    <string name="group_role_member">Member</string>
+    <string name="group_role_observer">Observer</string>
+    <string name="group_role_owner_detail">Can manage admins and owners</string>
+    <string name="group_role_admin_detail">Can manage members and settings</string>
+    <string name="group_role_moderator_detail">Can moderate content</string>
+    <string name="group_role_member_detail">Can send messages</string>
+
+    <!-- The members of a group. %1$d is the count of members. -->
+    <string name="group_members_title">Members · %1$d</string>
+    <string name="group_add_members">Add members</string>
+
+    <!-- The role of one member. -->
+    <string name="group_member_role">Member role</string>
+    <string name="group_save_role">Save role</string>
+    <string name="group_remove_from_group">Remove from group</string>
+
+    <!-- The removal of one member. %1$s is the name of the member. -->
+    <string name="group_membership">Group membership</string>
+    <string name="group_remove_title">Remove %1$s?</string>
+    <string name="group_remove_body">They read no message of this group after this. The messages and the files they already hold stay with them.</string>
+    <string name="group_remove_member">Remove member</string>
+
+    <!-- The way out of a group. %1$s is the name of the group. -->
+    <string name="group_leave_title">Leave %1$s?</string>
+    <string name="group_leave_body">You read no new message of this group after this. The members keep the messages you already sent.</string>
+    <string name="group_one_owner_note">This group has one owner. Give the role to another member first.</string>
+    <string name="group_stay">Stay in group</string>
+
+    <!-- The invitation of a contact to a group. -->
+    <string name="group_no_contacts">No contacts yet.</string>
+    <string name="group_invited">Invited</string>
+
+    <!-- An introduction. %1$s is the contact that introduces, %2$s is the third party. -->
+    <string name="group_intro_offer">%1$s introduces you to %2$s</string>
+    <string name="group_intro_ask">%1$s asks to introduce you to %2$s</string>
+    <string name="group_intro_note">Your app makes a new invitation for them. It carries no address of yours.</string>
+    <string name="group_allow">Allow</string>
+    <string name="group_decline">Decline</string>
+
+    <!-- The offer of a group. %1$s is the name of the group. -->
+    <string name="group_join_failed">Joining %1$s failed</string>
+    <string name="group_roster_not_verified">The roster of the group did not verify.</string>
+    <!-- %1$s is the contact that invites, %2$s is the name of the group. -->
+    <string name="group_offer">%1$s invited you to %2$s</string>
+    <string name="group_offer_note">The group learns that you joined, as each member does.</string>
+    <string name="group_join">Join</string>
+
+    <!-- The line under the name of a group. %1$d is the count of members. -->
+    <plurals name="group_subtitle">
+        <item quantity="one">Private group · %1$d member</item>
+        <item quantity="other">Private group · %1$d members</item>
+    </plurals>
+
+    <!-- A file or a video in a message. -->
+    <string name="files_download_again">Download again</string>
+    <string name="files_download">Download</string>
+    <!-- The share of a download. %1$d is a number from 0 to 99. -->
+    <string name="files_percent">%1$d %%</string>
+    <!-- %1$s is a duration or a size, %2$d is the share of the transfer in percent. -->
+    <string name="files_with_progress">%1$s · %2$d %%</string>
+    <!-- A received file whose chunks are gone because they are too old. -->
+    <string name="files_expired">Expired</string>
+    <!-- A received file whose chunks are gone. -->
+    <string name="files_lost">Lost</string>
+    <!-- %1$s is the padded size of a file before its download. -->
+    <string name="files_about_size">About %1$s</string>
+    <!-- %1$s is the size of the file. -->
+    <string name="files_receiving">%1$s · Receiving</string>
+    <!-- %1$s is the size of the file, %2$s is its state, for example "Lost". -->
+    <string name="files_with_state">%1$s · %2$s</string>
+    <!-- %1$s is the size of the file. -->
+    <string name="files_not_received">%1$s · Not received</string>
+
+    <!-- The video player. -->
+    <string name="files_pause">Pause</string>
+    <string name="files_play">Play</string>
+    <string name="files_video_not_playable">This video does not play on this device.</string>
+
+    <!-- The save of a file. -->
+    <string name="files_saved">Saved</string>
+    <string name="files_save_title">Save to this device?</string>
+
+    <!-- The media and the files of a conversation. -->
+    <string name="files_nothing_shared">Nothing shared yet.</string>
+    <string name="files_files">Files</string>
+
+    <!-- The contact details. -->
+    <string name="verify_contact_details">Contact details</string>
+    <string name="verify_edit_name">Edit name</string>
+    <string name="verify_verify_again">Verify again</string>
+    <string name="verify_verify_contact">Verify contact</string>
+    <string name="verify_introduce">Introduce to a contact</string>
+    <!-- The title of a list of contacts. %1$s is the contact to introduce. -->
+    <string name="verify_introduce_title">Introduce %1$s to</string>
+    <!-- %1$s is the contact that the app asked. -->
+    <string name="verify_asked">Asked %1$s</string>
+    <string name="verify_recovery_share">Recovery share</string>
+    <!-- %1$d is the number of the piece, %2$d the count of pieces, %3$d the count that a recovery needs. -->
+    <string name="verify_share_piece">Piece %1$d of %2$d, %3$d needed</string>
+
+    <!-- The conversation settings. -->
+    <string name="verify_delivery_speed">Delivery speed</string>
+    <string name="verify_block_screenshots">Block screenshots</string>
+    <string name="verify_delivery_receipts">Send delivery receipts</string>
+    <string name="verify_read_receipts">Send read receipts</string>
+    <string name="verify_no_forwarding">No forwarding</string>
+    <string name="verify_speed_note">Each relay holds a message for a random time: none when fast, about 0.15 s when balanced, and about 0.7 s when slow. A longer hold makes the timing of your messages harder to match. Files of this conversation take the same speed.</string>
+    <!-- The delivery speeds. -->
+    <string name="verify_speed_fast">Fast</string>
+    <string name="verify_speed_balanced">Balanced</string>
+    <string name="verify_speed_slow">Slow</string>
+
+    <!-- The verify views. %1$s is the name of the contact. -->
+    <string name="verify_compare_with">Compare with %1$s</string>
+    <string name="verify_trusted_channel">In person, or over a call that you trust.</string>
+    <string name="verify_qr_description">The safety number as a QR code</string>
+    <string name="verify_scan_code_of">Scan the code of %1$s</string>
+    <string name="verify_compare_short_code">Compare a short code</string>
+    <string name="verify_full_safety_number">Full safety number</string>
+    <string name="verify_title">Verify %1$s</string>
+    <string name="verify_done">You verified %1$s.</string>
+    <string name="verify_mismatch">The codes do not match.</string>
+    <string name="verify_mismatch_body">Another party can be between you and %1$s.</string>
+    <string name="verify_codes_match_question">Do your codes match?</string>
+    <string name="verify_codes_match">Yes, the codes match</string>
+    <string name="verify_codes_differ">They don\'t match</string>
+    <string name="verify_no_code">No code yet.</string>
+    <string name="verify_waiting">Waiting for the device of %1$s</string>
+    <string name="verify_prompt">%1$s wants to compare codes</string>
+
+    <!-- The safety number. -->
+    <string name="verify_safety_number">Safety number</string>
+    <string name="verify_copy">Copy</string>
+
+    <!-- A key change. %1$s is the name of the contact. -->
+    <string name="verify_new_key">%1$s has a new key</string>
+    <!-- %1$s is the name of the contact, %2$s is a sentence about the result of an acceptance. -->
+    <string name="verify_key_change_body">Compare this number with %1$s in person or over a call that you trust. %2$s</string>
+    <string name="verify_accept_new_key">Accept the new key</string>
+
+    <!-- A renewal of a connection. %1$s is the name of the contact. -->
+    <string name="verify_renewal">%1$s asks for a new connection</string>
+    <string name="verify_refuse">Refuse</string>
+
+    <!-- Devices: the prompt for a fork of the device list. -->
+    <!-- The name of a device that the user removed. -->
+    <string name="devices_a_removed_device">A removed device</string>
+    <!-- %1$s is the name of a device. -->
+    <string name="devices_fork_two_versions">%1$s signed two versions of your device list</string>
+    <!-- %1$s is the name of a device. -->
+    <string name="devices_fork_different_removal">%1$s removed a different device than another of your devices did</string>
+    <!-- %1$s is the name of a device. -->
+    <string name="devices_fork_different_list">%1$s holds a different device list than this device</string>
+    <!-- %1$s is the name of a device. -->
+    <string name="devices_fork_advice">If you did not make this change, remove %1$s and reset your identity.</string>
+
+    <!-- Devices: the prompt for the deletions that a restore brought back. -->
+    <plurals name="devices_held_deletions">
+        <item quantity="one">Your other devices deleted %1$d message that this restore brought back</item>
+        <item quantity="other">Your other devices deleted %1$d messages that this restore brought back</item>
+    </plurals>
+    <string name="devices_keep">Keep</string>
+
+    <!-- Devices: the list of linked devices and the removal sheet. -->
+    <!-- The text of the removal sheet that follows a rule text about revocation. -->
+    <string name="devices_hostile_hands">For a device in hostile hands, reset the identity in the settings.</string>
+    <plurals name="devices_removal_deletions">
+        <item quantity="one">It deleted %1$d message here since the last change of your devices. A restore from a backup made before now brings it back.</item>
+        <item quantity="other">It deleted %1$d messages here since the last change of your devices. A restore from a backup made before now brings them back.</item>
+    </plurals>
+    <!-- %1$s is the name of a device. -->
+    <string name="devices_remove_named">Remove %1$s?</string>
+    <string name="devices_remove_this_device">Remove this device?</string>
+    <string name="devices_remove">Remove</string>
+    <string name="devices_linked_devices">Linked devices</string>
+    <!-- The name of a device that has no name. -->
+    <string name="devices_device">Device</string>
+    <string name="devices_this_device">This device</string>
+    <string name="devices_owning_device_lost_question">Owning device lost?</string>
+    <string name="devices_link_a_device">Link a device</string>
+
+    <!-- Devices: the take-over of a set whose owning device is lost. -->
+    <string name="devices_new_recovery_code">New recovery code</string>
+    <string name="devices_lost_code_note">The code of the lost device opens no new backup.</string>
+    <string name="devices_owning_device_lost">Owning device lost</string>
+    <string name="devices_takeover_intro">This device takes over.</string>
+    <plurals name="devices_takeover_contacts">
+        <item quantity="one">%1$d contact</item>
+        <item quantity="other">%1$d contacts</item>
+    </plurals>
+    <plurals name="devices_takeover_groups">
+        <item quantity="one">%1$d group</item>
+        <item quantity="other">%1$d groups</item>
+    </plurals>
+    <!-- %1$s is a count of contacts, for example "3 contacts". %2$s is a count of groups, for example "1 group". -->
+    <string name="devices_takeover_move">%1$s and %2$s move to this device.</string>
+    <string name="devices_takeover_new_connection">Each contact gets a new connection.</string>
+    <plurals name="devices_takeover_unreachable">
+        <item quantity="one">%1$d contact did not reach this device in time and needs a new invitation.</item>
+        <item quantity="other">%1$d contacts did not reach this device in time and need a new invitation.</item>
+    </plurals>
+    <string name="devices_takeover_devices_leave">Your other devices leave. Link them again.</string>
+    <string name="devices_takeover_code_changes">The recovery code changes.</string>
+    <string name="devices_takeover_not_lost">The owning device is not lost yet.</string>
+    <string name="devices_take_over">Take over</string>
+
+    <!-- Devices: the link of a new device, as the existing device. -->
+    <string name="devices_scan_on_new_device">Scan this code on the new device</string>
+    <!-- A label for a screen reader. -->
+    <string name="devices_link_qr">The link as a QR code</string>
+    <string name="devices_copy_the_code">Copy the code</string>
+    <string name="devices_link_expires">Works once. Expires in 2 minutes.</string>
+    <string name="devices_codes_match_question">Do the codes match?</string>
+    <string name="devices_codes_match">Yes, the codes match</string>
+    <string name="devices_codes_do_not_match">They don\'t match</string>
+    <string name="devices_copying">Copying to the new device</string>
+    <string name="devices_linked">Linked</string>
+    <string name="devices_code_ran_out">The code ran out.</string>
+    <string name="devices_preparing_code">Preparing the code</string>
+
+    <!-- Devices: the link of a first launch, as the new device. -->
+    <string name="devices_confirm_on_other">Confirm on your other device.</string>
+    <string name="devices_code_of_link">Code of the link</string>
+    <!-- A button that links this device. -->
+    <string name="devices_link">Link</string>
+    <string name="devices_paste_code_instead">Paste the code instead</string>
+    <string name="devices_scan_the_code">Scan the code</string>
+
+    <!-- Contacts: the view that adds a contact. -->
+    <string name="contacts_add_contact">Add contact</string>
+    <string name="contacts_say_hello">A private way to say hello.</string>
+    <string name="contacts_create_invitation">Create invitation</string>
+    <string name="contacts_invitation_needs_connection">Connecting. An invitation needs a connection.</string>
+    <string name="contacts_use_invitation_instead">Use an invitation instead</string>
+    <string name="contacts_new_private_group">New private group</string>
+    <string name="contacts_reusable_link">Reusable link</string>
+
+    <!-- Contacts: the invitation of the user. -->
+    <string name="contacts_your_invitation">Your invitation</string>
+    <string name="contacts_invitation_expires">Works once. Expires in 14 days.</string>
+    <string name="contacts_asking_relay">Asking a relay to hold the invitation.</string>
+    <string name="contacts_share_invitation">Share invitation</string>
+    <string name="contacts_first_person">The first person who opens this link becomes the contact.</string>
+    <!-- A label for a screen reader. -->
+    <string name="contacts_invitation_qr">The invitation as a QR code</string>
+    <!-- The label of a copied invitation on the clipboard. -->
+    <string name="contacts_umbra_invitation">UMBRA invitation</string>
+
+    <!-- Contacts: the view that uses an invitation. -->
+    <string name="contacts_use_invitation">Use invitation</string>
+    <string name="contacts_someone_invited_you">Someone invited you?</string>
+    <string name="contacts_scan_qr_code">Scan a QR code</string>
+    <string name="contacts_link_or_handle">Link or handle</string>
+    <!-- "@name#1234" shows the form of a handle. Do not translate it. -->
+    <string name="contacts_link_or_handle_hint">Paste a link, or type @name#1234</string>
+    <string name="contacts_look_up">Look up</string>
+    <string name="contacts_your_name_in_request">Your name in the request</string>
+    <!-- The label of a field for a short note in a contact request. -->
+    <string name="contacts_note">Note</string>
+    <string name="contacts_request_sent">Request sent. The contact opens when they accept.</string>
+    <string name="contacts_looking_up">Looking up the entry and sending the request.</string>
+    <string name="contacts_send_anyway">Send anyway</string>
+    <string name="contacts_send_request">Send request</string>
+    <string name="contacts_opening_invitation">Opening the invitation through three relays.</string>
+    <string name="contacts_continue">Continue</string>
+
+    <!-- Contacts: the name and the edit of a contact. -->
+    <string name="contacts_new_contact">New contact</string>
+    <string name="contacts_name_this_contact">Name this contact.</string>
+    <string name="contacts_save_and_open_chat">Save and open chat</string>
+    <string name="contacts_not_now">Not now</string>
+    <string name="contacts_edit_contact">Edit contact</string>
+
+    <!-- Discovery: the periods of a timed link. -->
+    <string name="discovery_period_1_hour">1 hour</string>
+    <string name="discovery_period_1_day">1 day</string>
+    <string name="discovery_period_1_week">1 week</string>
+    <string name="discovery_period_30_days">30 days</string>
+
+    <!-- Discovery: the warnings of a directory entry. -->
+    <!-- %1$s is a reusable link or a handle. -->
+    <string name="discovery_takeover_warning">The directory shows a version of %1$s that this device did not write. Someone else may control it. Retire it, and make a new one.</string>
+    <string name="discovery_limit_reached">This week\'s request limit is reached. New requests are dropped until you move to a new queue.</string>
+    <string name="discovery_move_to_new_queue">Move to a new queue</string>
+
+    <!-- Discovery: the time until the end of a timed link. -->
+    <string name="discovery_ending">Ending</string>
+    <!-- %1$d is a count of minutes. -->
+    <string name="discovery_ends_in_minutes">Ends in %1$d min</string>
+    <!-- %1$d is a count of hours. -->
+    <string name="discovery_ends_in_hours">Ends in %1$d h</string>
+    <plurals name="discovery_ends_in_days">
+        <item quantity="one">Ends in %1$d day</item>
+        <item quantity="other">Ends in %1$d days</item>
+    </plurals>
+
+    <!-- Discovery: the reusable links. -->
+    <string name="discovery_reusable_links">Reusable links</string>
+    <string name="discovery_create_link">Create link</string>
+    <string name="discovery_publishing_link">Publishing the link.</string>
+    <string name="discovery_your_links">Your links</string>
+    <string name="discovery_reusable_link">Reusable link</string>
+    <string name="discovery_your_link">Your link</string>
+    <!-- A label for a screen reader. -->
+    <string name="discovery_reusable_link_qr">The reusable link as a QR code</string>
+    <string name="discovery_retiring">Retiring</string>
+    <string name="discovery_retire_link">Retire link</string>
+    <string name="discovery_writing_link_end">Writing the end of the link.</string>
+
+    <!-- Discovery: the handle of the user. -->
+    <string name="discovery_name_to_look_up">A name that people can look up.</string>
+    <string name="discovery_claim_handle">Claim handle</string>
+    <string name="discovery_publishing_handle">Publishing the handle.</string>
+    <string name="discovery_handle_listed">The directory lists each handle. A number after the name keeps it apart from the same name of another person.</string>
+    <string name="discovery_copy_handle">Copy handle</string>
+    <!-- The label of a copied handle on the clipboard. -->
+    <string name="discovery_umbra_handle">UMBRA handle</string>
+    <string name="discovery_reset_contact_requests">Reset contact requests</string>
+    <string name="discovery_release_handle">Release handle</string>
+    <string name="discovery_writing_release">Writing the release.</string>
+
+    <!-- Discovery: the profile of the user. -->
+    <string name="discovery_profile">Profile</string>
+    <!-- The value of the handle row when the user has no handle. -->
+    <string name="discovery_none">None</string>
+    <!-- The name of the user that gives the letter of an empty profile picture. -->
+    <string name="discovery_me">Me</string>
+    <string name="discovery_welcome_text">Welcome text</string>
+    <string name="discovery_profile_note">The link shows the picture, the name, and the welcome text. The handle alone shows none of them.</string>
+
+    <!-- Discovery: the contact requests. -->
+    <string name="discovery_contact_requests">Contact requests</string>
+    <string name="discovery_request_name_note">A request shows the name that its sender chose. No party checks it.</string>
+    <!-- The name of a request whose sender gave no name. -->
+    <string name="discovery_no_name">No name</string>
+    <string name="discovery_decline">Decline</string>
+    <plurals name="discovery_contact_requests_count">
+        <item quantity="one">%1$d contact request</item>
+        <item quantity="other">%1$d contact requests</item>
+    </plurals>
+
+    <!-- Recovery: the prompt and the views of the recovery code. -->
+    <string name="recovery_write_down_code">Write down your recovery code</string>
+    <string name="recovery_with_contacts">Recovery with contacts</string>
+    <string name="recovery_root_seed">Root seed</string>
+    <!-- %1$d is the count of pieces that a restore needs. The text sits between two rule texts. -->
+    <plurals name="recovery_pieces_restore">
+        <item quantity="one">%1$d piece and your user half restore your account.</item>
+        <item quantity="other">%1$d pieces and your user half restore your account.</item>
+    </plurals>
+    <!-- %1$s is a list of contact names. %2$d is the count of pieces needed. %3$d is the count of all pieces. -->
+    <string name="recovery_held_by">Held by %1$s, %2$d of %3$d needed</string>
+    <string name="recovery_pieces_needed">Pieces needed</string>
+    <!-- %1$d is the count of pieces needed. %2$d is the count of all pieces. -->
+    <string name="recovery_k_of_n">%1$d of %2$d</string>
+    <string name="recovery_send_pieces">Send the pieces</string>
+    <string name="recovery_show_user_half">Show your user half</string>
+    <string name="recovery_no_backup">No backup yet.</string>
+    <!-- %1$s is the time of the last backup. -->
+    <string name="recovery_last_backup">Last backup: %1$s.</string>
+
+    <!-- Recovery: the restore of a first launch. -->
+    <string name="recovery_user_half">User half</string>
+    <!-- %1$d is the number of a share of a contact. -->
+    <string name="recovery_share_number">Share %1$d</string>
+    <string name="recovery_add_share">Add a share</string>
+    <string name="recovery_restore">Restore</string>
+    <string name="recovery_use_recovery_code">Use the recovery code</string>
+    <string name="recovery_use_shares">Use shares of contacts</string>
+
+    <!-- Recovery: the reset of the identity. -->
+    <string name="recovery_reset_intro">UMBRA makes a new identity for this device.</string>
+    <string name="recovery_reset_new_key">Each contact gets your new key, and cannot write to you until they accept it.</string>
+    <string name="recovery_reset_groups">Each group moves you to new keys.</string>
+    <string name="recovery_reset_links_end">Your public links and your handle end.</string>
+    <string name="recovery_reset_messages_stay">Your messages and your contacts stay.</string>
+    <string name="recovery_remove_other_devices">Remove your other devices first.</string>
+    <string name="recovery_reset_question">Reset your identity?</string>
+    <string name="recovery_cannot_undo">You cannot undo this.</string>
+
+    <!-- Connection: the status in the top bar and the view of the connection. -->
+    <plurals name="connection_relays">
+        <item quantity="one">%1$d relay</item>
+        <item quantity="other">%1$d relays</item>
+    </plurals>
+    <string name="connection_connecting">Connecting</string>
+    <string name="connection_offline">Offline</string>
+    <string name="connection_connected">Connected</string>
+    <string name="connection_no_connection">No connection</string>
+    <plurals name="connection_circuits">
+        <item quantity="one">%1$d circuit</item>
+        <item quantity="other">%1$d circuits</item>
+    </plurals>
+    <!-- %1$d is the count of relays in use. %2$d is the count of known relays. %3$s is a count of circuits, for example "2 circuits". -->
+    <string name="connection_relays_in_circuits">%1$d of %2$d relays in %3$s</string>
+    <string name="connection_ingress_relay">Ingress relay</string>
+    <string name="connection_standby_relay">Standby relay</string>
+    <!-- %1$d is the number of a circuit. -->
+    <string name="connection_circuit_number">Circuit %1$d</string>
+    <string name="connection_relay_directory">Relay directory</string>
+    <string name="connection_not_signed">Not signed</string>
+    <string name="connection_signed_clock_differs">Signed · the device clock differs</string>
+    <string name="connection_signed_current">Signed · current</string>
+    <!-- The title of the row of push notifications. -->
+    <string name="connection_push">Push</string>
+    <string name="connection_push_private">Private · fixed clock, no token</string>
+    <string name="connection_push_off">Off · no token</string>
+    <string name="connection_push_polling">Polling</string>
+    <!-- %1$s is the name of a push carrier. %2$d is a count of groups. %3$d is a count of queues. NDR is the name of a server role. -->
+    <string name="connection_push_carrier">%1$s · %2$d groups at the NDR · %3$d queues bound</string>
+    <string name="connection_link_faults">Link faults</string>
+    <!-- %1$d loops came back of %2$d sent. %3$d lost, %4$d forced, %5$d reports waiting, %6$d report queues. -->
+    <string name="connection_link_faults_detail">%1$d of %2$d loops back · %3$d lost · %4$d forced · %5$d reports waiting · %6$d report queues</string>
+    <!-- %1$s is the size of a log of the handle directory, as a number. -->
+    <string name="connection_gossip_handle_directory">A contact holds another handle directory at size %1$s. One of the two views is forged.</string>
+    <!-- %1$s is the epoch of the relay directory, as a number. -->
+    <string name="connection_gossip_relay_directory">A contact holds another relay directory at epoch %1$s. One of the two views is forged.</string>
+    <string name="connection_reconnect">Reconnect</string>
+
+    <!-- Lock: the app lock and the auto-lock. -->
+    <string name="lock_immediately">Immediately</string>
+    <string name="lock_when_you_leave">When you leave the app</string>
+    <string name="lock_5_minutes">5 minutes</string>
+    <string name="lock_15_minutes">15 minutes</string>
+    <string name="lock_30_minutes">30 minutes</string>
+    <plurals name="lock_after_minutes">
+        <item quantity="one">After %1$d minute of inactivity</item>
+        <item quantity="other">After %1$d minutes of inactivity</item>
+    </plurals>
+    <string name="lock_app_lock">App lock</string>
+    <string name="lock_auto_lock">Auto-lock</string>
+    <string name="lock_lock_now">Lock now</string>
+    <string name="lock_no_message_while_locked">While UMBRA is locked, no message arrives.</string>
+
+    <!-- Lock: the automatic download limit. -->
+    <!-- %1$d is a size in megabytes. -->
+    <string name="lock_download_up_to">Up to %1$d MB</string>
+    <string name="lock_download_any_size">Any size</string>
+    <!-- %1$s is a download limit, for example "Up to 5 MB". -->
+    <string name="lock_download_wifi_only_suffix">%1$s · Wi-Fi only</string>
+    <string name="lock_automatic_download">Automatic download</string>
+    <string name="lock_only_on_wifi">Only on Wi-Fi</string>
+    <string name="lock_download_note">A download at a tap tells the relays of the file when you opened the chat.</string>
+
+    <!-- Lock: the change of the passphrase. -->
+    <string name="lock_current_passphrase">Current passphrase</string>
+    <string name="lock_confirm_new_passphrase">Confirm new passphrase</string>
+    <string name="lock_changing">Changing…</string>
+    <string name="lock_fill_three_fields">Fill in the three fields.</string>
+    <string name="lock_passphrases_differ">The two new passphrases differ.</string>
+    <string name="lock_no_reset">Nobody can reset a passphrase that you forget.</string>
+
+    <!-- Scan: the scanner views. -->
+    <string name="scan_scan_code">Scan code</string>
+    <string name="scan_their_invitation">Scan their invitation</string>
+    <string name="scan_paste_link_instead">Paste a link instead</string>
+    <!-- %1$s is the name of a contact. -->
+    <string name="scan_verify">Verify %1$s</string>
+    <!-- %1$s is the name of a contact. -->
+    <string name="scan_code_of">Scan the code of %1$s</string>
+    <!-- %1$s is the name of a contact. -->
+    <string name="scan_you_verified">You verified %1$s.</string>
+    <string name="scan_codes_do_not_match">The codes do not match.</string>
+    <!-- %1$s is the name of a contact. -->
+    <string name="scan_another_party">Another party can be between you and %1$s.</string>
+    <string name="scan_again">Scan again</string>
+    <string name="scan_no_camera">UMBRA has no access to the camera.</string>
+    <string name="scan_allow_camera">Allow the camera</string>
+
+    <!-- Core: the words for a file with no text -->
+    <string name="core_file_voice_message">Voice message</string>
+    <string name="core_file_audio">Audio</string>
+
+    <!-- Core: the short label of a conversation with no name. %1$s holds a short hex code. -->
+    <string name="core_title_group">Group %1$s</string>
+    <string name="core_title_contact">Contact %1$s</string>
+
+    <!-- Core: the placeholders of a chat preview -->
+    <string name="core_message_deleted">Message deleted</string>
+    <string name="core_hidden_message">Hidden message</string>
+
+    <!-- Core: unlock and passphrase -->
+    <string name="core_wrong_passphrase">That passphrase does not open this device.</string>
+    <!-- %1$s holds the technical name of the fault. -->
+    <string name="core_store_not_open">The store did not open: %1$s.</string>
+    <string name="core_locked">UMBRA is locked.</string>
+    <string name="core_current_passphrase_wrong">The current passphrase is not right.</string>
+    <!-- %1$s holds the technical name of the fault. -->
+    <string name="core_passphrase_not_changed">The passphrase did not change: %1$s.</string>
+
+    <!-- Core: the faults of the directory -->
+    <string name="core_directory_offline">The directory does not answer.</string>
+    <string name="core_directory_busy">The directory takes this change at its next epoch. Try again in a few minutes.</string>
+    <string name="core_directory_stale">That is taken, or it changed. Try again.</string>
+    <string name="core_directory_not_found">The directory holds no such link or handle.</string>
+    <string name="core_directory_unverified">The answer of the directory does not verify.</string>
+    <string name="core_directory_malformed">That is no link or handle.</string>
+    <!-- %1$s holds the technical name of the fault. -->
+    <string name="core_did_not_work">That did not work: %1$s.</string>
+
+    <!-- Core: pictures -->
+    <string name="core_image_did_not_fit">That image did not fit.</string>
+
+    <!-- Core: the link of a second device -->
+    <string name="core_link_busy">The last device is still finishing its link. Try again in a moment.</string>
+    <string name="core_connecting">Connecting…</string>
+    <string name="core_no_network">No network.</string>
+    <string name="core_copying">Copying from the other device…</string>
+    <string name="core_code_ran_out">The code ran out.</string>
+    <string name="core_not_link_code">This is not the code of a link.</string>
+    <!-- %1$s holds the technical name of the fault. -->
+    <string name="core_link_failed_kind">The link failed: %1$s.</string>
+
+    <!-- Core: the restore of a backup -->
+    <string name="core_looking_for_backup">Looking for the backup…</string>
+    <!-- The kinds of recovery digits. They go into core_digits_wrong_kind. -->
+    <string name="core_digits_recovery_code">the recovery code</string>
+    <string name="core_digits_user_half">the user half</string>
+    <string name="core_digits_share">a share</string>
+    <string name="core_digits_root_seed">the root seed</string>
+    <!-- %1$s holds the kind of the typed digits, %2$s the kind that the field takes (core_digits_*). -->
+    <string name="core_digits_wrong_kind">These are the digits of %1$s. This field takes %2$s.</string>
+    <!-- %1$s holds the technical name of the fault. -->
+    <string name="core_root_seed_not_open">The root seed did not open: %1$s.</string>
+    <string name="core_share_no_check">One share does not check.</string>
+    <string name="core_backup_not_found">No backup opens under this code.</string>
+    <string name="core_backup_no_identity">The backup holds no identity.</string>
+    <string name="core_backup_not_down">The backup did not come down.</string>
+    <!-- %1$d holds the objects that came down, %2$d all the objects. -->
+    <string name="core_restoring">Restoring %1$d of %2$d…</string>
+    <!-- %1$s holds the technical name of the fault. -->
+    <string name="core_restore_failed">The restore failed: %1$s.</string>
+
+    <!-- Core: invitations and verification -->
+    <string name="core_refused_relay">This build cannot reach the relay of that link.</string>
+    <string name="core_invitation_gone">This link gives no invitation. A second party opened it first, or it is older than 14 days. Tell your contact, and ask for a new link.</string>
+    <string name="core_verify_no_code">The two devices made no code.</string>
+    <string name="core_short_code_needs_connection">A short code needs a connection.</string>
+    <string name="core_store_no_verify">The local store does not verify.</string>
+
+    <!-- Core: the cause of a lost connection -->
+    <string name="core_cause_ingress_no_answer">The ingress relay did not answer.</string>
+    <string name="core_cause_ingress_closed">The link to the ingress relay closed.</string>
+    <string name="core_cause_circuit_ended">A relay ended the circuit.</string>
+    <string name="core_cause_store_no_batch">The store took no batch.</string>
+    <string name="core_cause_client_fault">A fault in the client.</string>
+
+    <!-- Core: the result of an identity reset. %1$d holds the count. -->
+    <plurals name="core_reset_contacts">
+        <item quantity="one">%1$d contact gets your new key.</item>
+        <item quantity="other">%1$d contacts get your new key.</item>
+    </plurals>
+    <plurals name="core_reset_groups">
+        <item quantity="one">%1$d group moves you to new keys.</item>
+        <item quantity="other">%1$d groups move you to new keys.</item>
+    </plurals>
+
+    <!-- Core: attachments -->
+    <string name="core_image_not_open">That image did not open.</string>
+    <string name="core_video_not_open">That video did not open, or it is above 250 MB.</string>
+    <string name="core_audio_not_open">That audio file did not open, or it is above 250 MB.</string>
+    <string name="core_recording_short">That recording is too short.</string>
+    <string name="core_recording_not_open">That recording did not open.</string>
+    <string name="core_file_too_big">A file can be 250 MB at most.</string>
+    <string name="core_file_not_open">That file did not open.</string>
+    <string name="core_place_no_file">That place does not take a file.</string>
+    <string name="core_file_not_saved">The file did not save.</string>
+
+    <!-- Notifications: the channels -->
+    <string name="notify_channel_connection_about">Shows that UMBRA holds a connection to take messages.</string>
+    <string name="notify_channel_messages">Messages</string>
+
+    <!-- Notifications: the alerts -->
+    <string name="notify_unlocked">UMBRA is unlocked</string>
+    <string name="notify_holds_connection">UMBRA holds a connection</string>
+    <string name="notify_arrive_until_lock">Messages arrive until the app locks.</string>
+    <string name="notify_new_contact_request">New contact request</string>
+    <string name="notify_locked">UMBRA is locked</string>
+    <string name="notify_open_to_take">Open the app to take messages.</string>
+
+    <!-- Notification modes -->
+    <string name="modes_instant">Instant</string>
+    <string name="modes_private">Private</string>
+    <string name="modes_show_sender_and_text">Show sender and text</string>
 </resources>

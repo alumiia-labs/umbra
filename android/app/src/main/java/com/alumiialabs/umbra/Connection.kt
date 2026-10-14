@@ -35,6 +35,8 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import uniffi.umbra_ffi.Hop
@@ -54,15 +56,15 @@ fun ConnectionStatus(onOpen: () -> Unit) {
     val state = Core.linkState
     val words = when (state) {
         LinkState.Connected -> relayCount(Core.connection?.relaysInUse?.toInt() ?: 0)
-        LinkState.Connecting -> "Connecting"
-        LinkState.Down -> "Offline"
+        LinkState.Connecting -> stringResource(R.string.connection_connecting)
+        LinkState.Down -> stringResource(R.string.connection_offline)
     }
     // The press shade is square and fills the height of the bar, as the lock
     // button beside it does.
     Row(
         Modifier
             .height(48.dp)
-            .press(role = Role.Button, label = "Connection") { onOpen() }
+            .press(role = Role.Button, label = stringResource(R.string.common_connection)) { onOpen() }
             .padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -94,7 +96,7 @@ private fun StatusDot(state: LinkState) {
     )
 }
 
-private fun relayCount(count: Int) = if (count == 1) "1 relay" else "$count relays"
+private fun relayCount(count: Int) = UiText.plural(R.plurals.connection_relays, count, count)
 
 private fun place(hop: Hop) = "${hop.host} · ${hop.country}"
 
@@ -104,7 +106,7 @@ fun ConnectionScreen(onBack: () -> Unit) {
     val connection = Core.connection
     val state = Core.linkState
     Column(Modifier.fillMaxSize()) {
-        BackBar("Connection", onBack = onBack)
+        BackBar(stringResource(R.string.common_connection), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
             Spacer(Modifier.height(12.dp))
             HeroIcon("wifi")
@@ -112,24 +114,28 @@ fun ConnectionScreen(onBack: () -> Unit) {
             val circuits = connection?.circuits.orEmpty()
             Headline(
                 when (state) {
-                    LinkState.Connected -> "Connected"
-                    LinkState.Connecting -> "Connecting"
-                    LinkState.Down -> "No connection"
+                    LinkState.Connected -> stringResource(R.string.connection_connected)
+                    LinkState.Connecting -> stringResource(R.string.connection_connecting)
+                    LinkState.Down -> stringResource(R.string.connection_no_connection)
                 },
                 when {
                     state == LinkState.Down -> Core.linkFault
                     connection == null -> null
-                    else -> "${connection.relaysInUse} of ${connection.relaysKnown} relays in " +
-                        if (circuits.size == 1) "1 circuit" else "${circuits.size} circuits"
+                    else -> stringResource(
+                        R.string.connection_relays_in_circuits,
+                        connection.relaysInUse.toLong(),
+                        connection.relaysKnown.toLong(),
+                        pluralStringResource(R.plurals.connection_circuits, circuits.size, circuits.size),
+                    )
                 },
             )
             Spacer(Modifier.height(10.dp))
             connection?.ingress?.let {
-                FactRow("globe", "Ingress relay", place(it))
+                FactRow("globe", stringResource(R.string.connection_ingress_relay), place(it))
                 HorizontalDivider(color = Palette.Divider)
             }
             connection?.standby?.let {
-                FactRow("globe", "Standby relay", place(it))
+                FactRow("globe", stringResource(R.string.connection_standby_relay), place(it))
                 HorizontalDivider(color = Palette.Divider)
             }
             circuits.forEachIndexed { index, hops ->
@@ -146,17 +152,21 @@ fun ConnectionScreen(onBack: () -> Unit) {
                     oneBloc -> UiText.get(R.string.umbra_ui_net_201)
                     else -> null
                 }
-                FactRow("route", "Circuit ${index + 1}", if (mark != null) "$path · $mark" else path)
+                FactRow(
+                    "route",
+                    stringResource(R.string.connection_circuit_number, index + 1),
+                    if (mark != null) "$path · $mark" else path,
+                )
                 HorizontalDivider(color = Palette.Divider)
             }
             val epoch = connection?.directoryEpoch?.toLong() ?: 0L
             FactRow(
                 "file-lines",
-                "Relay directory",
+                stringResource(R.string.connection_relay_directory),
                 when {
-                    epoch == 0L -> "Not signed"
-                    BuildNetwork.isClockCorrected -> "Signed · the device clock differs"
-                    else -> "Signed · current"
+                    epoch == 0L -> stringResource(R.string.connection_not_signed)
+                    BuildNetwork.isClockCorrected -> stringResource(R.string.connection_signed_clock_differs)
+                    else -> stringResource(R.string.connection_signed_current)
                 },
             )
             HorizontalDivider(color = Palette.Divider)
@@ -166,14 +176,18 @@ fun ConnectionScreen(onBack: () -> Unit) {
             push?.let {
                 FactRow(
                     "bell",
-                    "Push",
+                    stringResource(R.string.connection_push),
                     when {
                         // Part 8 §8.3: the mode decides the carrier.
-                        Modes.mode(context) == NotifyMode.Private -> "Private · fixed clock, no token"
-                        Modes.mode(context) == NotifyMode.Off -> "Off · no token"
-                        it.carrier.isEmpty() -> "Polling"
-                        else ->
-                            "${it.carrier} · ${it.registeredGroups} groups at the NDR · ${it.boundQueues} queues bound"
+                        Modes.mode(context) == NotifyMode.Private -> stringResource(R.string.connection_push_private)
+                        Modes.mode(context) == NotifyMode.Off -> stringResource(R.string.connection_push_off)
+                        it.carrier.isEmpty() -> stringResource(R.string.connection_push_polling)
+                        else -> stringResource(
+                            R.string.connection_push_carrier,
+                            it.carrier,
+                            it.registeredGroups.toLong(),
+                            it.boundQueues.toLong(),
+                        )
                     },
                 )
                 HorizontalDivider(color = Palette.Divider)
@@ -184,10 +198,16 @@ fun ConnectionScreen(onBack: () -> Unit) {
             faults?.let {
                 FactRow(
                     "route",
-                    "Link faults",
-                    "${it.loopsBack} of ${it.loopsSent} loops back · ${it.loopsLost} lost · " +
-                        "${it.forced} forced · ${it.reportsWaiting} reports waiting · " +
-                        "${it.reportQueues} report queues",
+                    stringResource(R.string.connection_link_faults),
+                    stringResource(
+                        R.string.connection_link_faults_detail,
+                        it.loopsBack.toLong(),
+                        it.loopsSent.toLong(),
+                        it.loopsLost.toLong(),
+                        it.forced.toLong(),
+                        it.reportsWaiting.toLong(),
+                        it.reportQueues.toLong(),
+                    ),
                 )
                 HorizontalDivider(color = Palette.Divider)
             }
@@ -198,17 +218,15 @@ fun ConnectionScreen(onBack: () -> Unit) {
                 Spacer(Modifier.height(12.dp))
                 Note(
                     if (warning.source == "directory") {
-                        "A contact holds another handle directory at size ${warning.epoch}. " +
-                            "One of the two views is forged."
+                        stringResource(R.string.connection_gossip_handle_directory, warning.epoch.toString())
                     } else {
-                        "A contact holds another relay directory at epoch ${warning.epoch}. " +
-                            "One of the two views is forged."
+                        stringResource(R.string.connection_gossip_relay_directory, warning.epoch.toString())
                     },
                     isError = true,
                 )
             }
             Spacer(Modifier.height(16.dp))
-            SecondaryButton("Reconnect") { Core.connect(context, force = true) }
+            SecondaryButton(stringResource(R.string.connection_reconnect)) { Core.connect(context, force = true) }
             Spacer(Modifier.height(24.dp))
         }
     }

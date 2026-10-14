@@ -37,12 +37,12 @@ object Notifier {
     fun makeChannels(context: Context) {
         val carrier = NotificationChannel(
             CARRIER_CHANNEL,
-            "Connection",
+            context.getString(R.string.common_connection),
             NotificationManager.IMPORTANCE_LOW,
-        ).apply { description = "Shows that UMBRA holds a connection to take messages." }
+        ).apply { description = context.getString(R.string.notify_channel_connection_about) }
         val messages = NotificationChannel(
             MESSAGE_CHANNEL,
-            "Messages",
+            context.getString(R.string.notify_channel_messages),
             NotificationManager.IMPORTANCE_HIGH,
         )
         manager(context).createNotificationChannels(listOf(carrier, messages))
@@ -71,9 +71,11 @@ object Notifier {
             .setSmallIcon(R.drawable.ic_stat_umbra)
             // Private mode holds no connection between two wakes of its clock.
             .setContentTitle(
-                if (Modes.mode(context) == NotifyMode.Private) "UMBRA is unlocked" else "UMBRA holds a connection",
+                context.getString(
+                    if (Modes.mode(context) == NotifyMode.Private) R.string.notify_unlocked else R.string.notify_holds_connection,
+                ),
             )
-            .setContentText("Messages arrive until the app locks.")
+            .setContentText(context.getString(R.string.notify_arrive_until_lock))
             .setContentIntent(openApp(context))
             .setOngoing(true)
             .build()
@@ -82,7 +84,7 @@ object Notifier {
     private fun lockScreen(context: Context): Notification =
         Notification.Builder(context, MESSAGE_CHANNEL)
             .setSmallIcon(R.drawable.ic_stat_umbra)
-            .setContentTitle("New message")
+            .setContentTitle(context.getString(R.string.common_new_message))
             .build()
 
     /**
@@ -102,7 +104,7 @@ object Notifier {
         }
         val alert = Notification.Builder(context, MESSAGE_CHANNEL)
             .setSmallIcon(R.drawable.ic_stat_umbra)
-            .setContentTitle(title ?: "New message")
+            .setContentTitle(title ?: context.getString(R.string.common_new_message))
             .apply { if (text != null && text.isNotEmpty()) setContentText(java.nio.CharBuffer.wrap(text)) }
             .setGroup(conversation.label)
             .setOnlyAlertOnce(quiet)
@@ -133,7 +135,7 @@ object Notifier {
         synchronized(pushOwed) { pushOwed.add(conversation?.key) }
         val alert = Notification.Builder(context, MESSAGE_CHANNEL)
             .setSmallIcon(R.drawable.ic_stat_umbra)
-            .setContentTitle("New message")
+            .setContentTitle(context.getString(R.string.common_new_message))
             .setOnlyAlertOnce(true)
             .setAutoCancel(true)
             .setContentIntent(openApp(context))
@@ -160,7 +162,7 @@ object Notifier {
         if (!mayPost(context)) return
         val alert = Notification.Builder(context, MESSAGE_CHANNEL)
             .setSmallIcon(R.drawable.ic_stat_umbra)
-            .setContentTitle("New contact request")
+            .setContentTitle(context.getString(R.string.notify_new_contact_request))
             .setAutoCancel(true)
             .setContentIntent(openApp(context))
             .setVisibility(Notification.VISIBILITY_PRIVATE)
@@ -177,8 +179,8 @@ object Notifier {
         if (!mayPost(context)) return
         val notice = Notification.Builder(context, CARRIER_CHANNEL)
             .setSmallIcon(R.drawable.ic_stat_umbra)
-            .setContentTitle("UMBRA is locked")
-            .setContentText("Open the app to take messages.")
+            .setContentTitle(context.getString(R.string.notify_locked))
+            .setContentText(context.getString(R.string.notify_open_to_take))
             .setAutoCancel(true)
             .setContentIntent(openApp(context))
             .build()

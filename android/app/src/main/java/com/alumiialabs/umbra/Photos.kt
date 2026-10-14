@@ -36,6 +36,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import java.io.ByteArrayOutputStream
 import kotlin.concurrent.thread
@@ -355,15 +356,15 @@ fun PhotoTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
         if (image != null) {
             Image(
                 image,
-                contentDescription = "Photo",
+                contentDescription = stringResource(R.string.common_photo),
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.matchParentSize().alpha(if (state == FILE_READY) 1f else 0.55f),
             )
-            if (canRetry) FaIcon("rotate", label = "Send the photo again", size = 22.dp, tint = Palette.Text)
+            if (canRetry) FaIcon("rotate", label = stringResource(R.string.photo_send_again), size = 22.dp, tint = Palette.Text)
         } else if (preview != null) {
             Image(
                 preview,
-                contentDescription = "Photo preview",
+                contentDescription = stringResource(R.string.photo_preview),
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.matchParentSize(),
             )
@@ -376,9 +377,9 @@ fun PhotoTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
                 Spacer(Modifier.height(6.dp))
                 Text(
                     lostLabel(line) ?: when (state) {
-                        FILE_WANTED -> "Receiving"
-                        FILE_FAILED -> "Not received"
-                        else -> "Photo"
+                        FILE_WANTED -> stringResource(R.string.photo_receiving)
+                        FILE_FAILED -> stringResource(R.string.photo_not_received)
+                        else -> stringResource(R.string.common_photo)
                     },
                     style = MaterialTheme.typography.labelSmall,
                     color = Palette.TextSecondary,
@@ -435,7 +436,7 @@ fun PhotoScreen(line: Line, chat: Chat, onBack: () -> Unit) {
         if (image != null) {
             Image(
                 image,
-                contentDescription = "Photo",
+                contentDescription = stringResource(R.string.common_photo),
                 contentScale = ContentScale.Fit,
                 modifier = Modifier.fillMaxSize().graphicsLayer {
                     scaleX = scale
@@ -462,12 +463,12 @@ fun PhotoScreen(line: Line, chat: Chat, onBack: () -> Unit) {
                         Modifier
                             .size(48.dp)
                             .clip(androidx.compose.foundation.shape.CircleShape)
-                            .press(role = androidx.compose.ui.semantics.Role.Button, label = "Back", onClick = onBack),
+                            .press(role = androidx.compose.ui.semantics.Role.Button, label = stringResource(R.string.common_back), onClick = onBack),
                         contentAlignment = Alignment.Center,
                     ) {
                         FaIcon(
                             "arrow-left",
-                            label = "Back",
+                            label = stringResource(R.string.common_back),
                             size = 20.dp,
                             tint = androidx.compose.ui.graphics.Color.White,
                         )
@@ -475,7 +476,7 @@ fun PhotoScreen(line: Line, chat: Chat, onBack: () -> Unit) {
                     Spacer(Modifier.width(6.dp))
                     Column {
                         Text(
-                            if (line.info.outgoing) "You" else chat.title,
+                            if (line.info.outgoing) stringResource(R.string.common_you) else chat.title,
                             style = MaterialTheme.typography.titleMedium,
                             color = androidx.compose.ui.graphics.Color.White,
                         )

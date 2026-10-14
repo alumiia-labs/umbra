@@ -105,11 +105,11 @@ class Quoted(
 
 /** The word of the interface for a file with no text: its kind, or its name. */
 fun fileWord(file: uniffi.umbra_ffi.MsgFile): String = when (file.mimeClass) {
-    CLASS_IMAGE -> "Photo"
-    CLASS_VIDEO -> "Video"
-    CLASS_VOICE -> "Voice message"
-    CLASS_AUDIO -> file.name ?: "Audio"
-    else -> file.name ?: "File"
+    CLASS_IMAGE -> UiText.get(R.string.common_photo)
+    CLASS_VIDEO -> UiText.get(R.string.common_video)
+    CLASS_VOICE -> UiText.get(R.string.core_file_voice_message)
+    CLASS_AUDIO -> file.name ?: UiText.get(R.string.core_file_audio)
+    else -> file.name ?: UiText.get(R.string.common_file)
 }
 
 /**
@@ -167,7 +167,7 @@ class Chat(
     /** What each list shows: the name of the user, or a stable short label. */
     val title: String
         get() = name.ifEmpty {
-            if (isGroup) "Group ${conversation.label}" else "Contact ${conversation.label}"
+            UiText.get(if (isGroup) R.string.core_title_group else R.string.core_title_contact, conversation.label)
         }
 }
 
@@ -335,7 +335,7 @@ object Core {
                 unlocked = opened
                 begin(app, opened)
             } catch (wrong: FfiException.WrongPassphrase) {
-                fail("That passphrase does not open this device.")
+                fail(UiText.get(R.string.core_wrong_passphrase))
             } catch (other: FfiException) {
                 // IMP-127: a fault after the unlock closes the store again,
                 // thus no key stays in RAM behind a locked screen.
@@ -343,7 +343,7 @@ object Core {
                     unlocked?.lock()
                 } catch (ignored: FfiException) {
                 }
-                fail("The store did not open: ${other.javaClass.simpleName}.")
+                fail(UiText.get(R.string.core_store_not_open, other.javaClass.simpleName))
             }
         }
     }
@@ -651,13 +651,13 @@ object Core {
     }
 
     private fun directoryFault(failure: FfiException): String = when (failure) {
-        is FfiException.Offline -> "The directory does not answer."
-        is FfiException.Busy -> "The directory takes this change at its next epoch. Try again in a few minutes."
-        is FfiException.Stale -> "That is taken, or it changed. Try again."
-        is FfiException.NotFound -> "The directory holds no such link or handle."
-        is FfiException.Unverified -> "The answer of the directory does not verify."
-        is FfiException.Malformed -> "That is no link or handle."
-        else -> "That did not work: ${failure.javaClass.simpleName}."
+        is FfiException.Offline -> UiText.get(R.string.core_directory_offline)
+        is FfiException.Busy -> UiText.get(R.string.core_directory_busy)
+        is FfiException.Stale -> UiText.get(R.string.core_directory_stale)
+        is FfiException.NotFound -> UiText.get(R.string.core_directory_not_found)
+        is FfiException.Unverified -> UiText.get(R.string.core_directory_unverified)
+        is FfiException.Malformed -> UiText.get(R.string.core_directory_malformed)
+        else -> UiText.get(R.string.core_did_not_work, failure.javaClass.simpleName)
     }
 
     fun createPublicLink(validSeconds: ULong) = directory { client ->
@@ -701,7 +701,7 @@ object Core {
                 ByteArray(0)
             } else {
                 Photos.picture(square) ?: run {
-                    main.post { directoryNote = "That image did not fit." }
+                    main.post { directoryNote = UiText.get(R.string.core_image_did_not_fit) }
                     return@directory
                 }
             }
@@ -841,7 +841,7 @@ object Core {
                 // DEV-302: the last device still opens its sync channel.
                 main.post {
                     linkStatus = LinkStatus.Idle
-                    fault = "The last device is still finishing its link. Try again in a moment."
+                    fault = UiText.get(R.string.core_link_busy)
                 }
             }
         }
@@ -887,7 +887,7 @@ object Core {
     fun join(context: Context, passphrase: CharArray, ticket: String) {
         val app = context.applicationContext
         fault = null
-        joinNote = "Connecting…"
+        joinNote = UiText.get(R.string.core_connecting)
         worker.execute {
             val units = passphrase.map { it.code.toUShort() }
             passphrase.fill('\u0000')
@@ -900,7 +900,7 @@ object Core {
                 val network = BuildNetwork.network(app, first)
                 if (network == null) {
                     dropStore(app, first)
-                    joinFailed("No network.")
+                    joinFailed(UiText.get(R.string.core_no_network))
                     return@execute
                 }
                 first.connect(network)
@@ -920,14 +920,14 @@ object Core {
                         }
                         is LinkStatus.Fetching -> main.post {
                             joinCode = null
-                            joinNote = "Copying from the other device…"
+                            joinNote = UiText.get(R.string.core_copying)
                         }
-                        is LinkStatus.Expired -> failure = "The code ran out."
-                        is LinkStatus.Failed -> failure = "The link failed."
+                        is LinkStatus.Expired -> failure = UiText.get(R.string.core_code_ran_out)
+                        is LinkStatus.Failed -> failure = UiText.get(R.string.common_link_failed)
                         else -> Unit
                     }
                     if (!isReady && failure == null) {
-                        if (System.currentTimeMillis() > deadline) failure = "The link failed."
+                        if (System.currentTimeMillis() > deadline) failure = UiText.get(R.string.common_link_failed)
                         Thread.sleep(500)
                     }
                 }
@@ -954,10 +954,10 @@ object Core {
                 begin(app, back)
             } catch (malformed: FfiException.Malformed) {
                 opened?.let { dropStore(app, it) }
-                joinFailed("This is not the code of a link.")
+                joinFailed(UiText.get(R.string.core_not_link_code))
             } catch (other: FfiException) {
                 opened?.let { dropStore(app, it) }
-                joinFailed("The link failed: ${other.javaClass.simpleName}.")
+                joinFailed(UiText.get(R.string.core_link_failed_kind, other.javaClass.simpleName))
             }
         }
     }
@@ -1042,7 +1042,7 @@ object Core {
     ) {
         val app = context.applicationContext
         fault = null
-        restoreNote = "Looking for the backup…"
+        restoreNote = UiText.get(R.string.core_looking_for_backup)
         worker.execute {
             val units = passphrase.map { it.code.toUShort() }
             passphrase.fill('\u0000')
@@ -1054,7 +1054,12 @@ object Core {
             // user half (IDN-191).
             val wanted = if (shareUnits.isEmpty()) 1 else 2
             val kind = recoveryDigitsKind(code).toInt()
-            val names = mapOf(1 to "the recovery code", 2 to "the user half", 3 to "a share", 4 to "the root seed")
+            val names = mapOf(
+                1 to R.string.core_digits_recovery_code,
+                2 to R.string.core_digits_user_half,
+                3 to R.string.core_digits_share,
+                4 to R.string.core_digits_root_seed,
+            )
             // IDN-003: the root seed makes a store with the identity alone.
             if (kind == 4 && shareUnits.isEmpty()) {
                 try {
@@ -1069,7 +1074,7 @@ object Core {
                     main.post { restoreNote = null }
                     begin(app, made)
                 } catch (failure: FfiException) {
-                    restoreFailed("The root seed did not open: ${failure.javaClass.simpleName}.")
+                    restoreFailed(UiText.get(R.string.core_root_seed_not_open, failure.javaClass.simpleName))
                 }
                 return@execute
             }
@@ -1079,13 +1084,17 @@ object Core {
                         // IDN-152: a check that fails says so.
                         UiText.get(R.string.umbra_ui_idn_152)
                     } else {
-                        "These are the digits of ${names[kind]}. This field takes ${names[wanted]}."
+                        UiText.get(
+                            R.string.core_digits_wrong_kind,
+                            names[kind]?.let { UiText.get(it) }.toString(),
+                            UiText.get(names.getValue(wanted)),
+                        )
                     },
                 )
                 return@execute
             }
             if (shareUnits.any { recoveryDigitsKind(it).toInt() != 3 }) {
-                restoreFailed("One share does not check.")
+                restoreFailed(UiText.get(R.string.core_share_no_check))
                 return@execute
             }
             var opened: Handle? = null
@@ -1097,7 +1106,7 @@ object Core {
                 val network = BuildNetwork.network(app, first)
                 if (network == null) {
                     dropStore(app, first)
-                    restoreFailed("No network.")
+                    restoreFailed(UiText.get(R.string.core_no_network))
                     return@execute
                 }
                 first.connect(network)
@@ -1112,16 +1121,18 @@ object Core {
                 while (!isReady && failure == null) {
                     when (val status = first.restoreStatus()) {
                         is RestoreStatus.Ready -> isReady = true
-                        is RestoreStatus.NotFound -> failure = "No backup opens under this code."
+                        is RestoreStatus.NotFound -> failure = UiText.get(R.string.core_backup_not_found)
                         // IDN-155: an empty identity is no account.
-                        is RestoreStatus.NoIdentity -> failure = "The backup holds no identity."
-                        is RestoreStatus.Failed -> failure = "The backup did not come down."
+                        is RestoreStatus.NoIdentity -> failure = UiText.get(R.string.core_backup_no_identity)
+                        is RestoreStatus.Failed -> failure = UiText.get(R.string.core_backup_not_down)
                         is RestoreStatus.Fetching ->
-                            main.post { restoreNote = "Restoring ${status.done} of ${status.total}…" }
+                            main.post {
+                                restoreNote = UiText.get(R.string.core_restoring, status.done.toInt(), status.total.toInt())
+                            }
                         else -> Unit
                     }
                     if (!isReady && failure == null) {
-                        if (System.currentTimeMillis() > deadline) failure = "The backup did not come down."
+                        if (System.currentTimeMillis() > deadline) failure = UiText.get(R.string.core_backup_not_down)
                         Thread.sleep(250)
                     }
                 }
@@ -1144,7 +1155,7 @@ object Core {
                 begin(app, back)
             } catch (other: FfiException) {
                 opened?.let { dropStore(app, it) }
-                restoreFailed("The restore failed: ${other.javaClass.simpleName}.")
+                restoreFailed(UiText.get(R.string.core_restore_failed, other.javaClass.simpleName))
             }
         }
     }
@@ -1278,12 +1289,10 @@ object Core {
                 }
             }
             is FfiEvent.Invitation -> invitation = event.link
-            is FfiEvent.Refused -> fault = "This build cannot reach the relay of that link."
+            is FfiEvent.Refused -> fault = UiText.get(R.string.core_refused_relay)
             // IDN-023: a fetch by a second party is an attack that the two
             // parties detect, thus the words name that cause first.
-            is FfiEvent.InvitationGone -> fault =
-                "This link gives no invitation. A second party opened it first, " +
-                "or it is older than 14 days. Tell your contact, and ask for a new link."
+            is FfiEvent.InvitationGone -> fault = UiText.get(R.string.core_invitation_gone)
             is FfiEvent.Contact -> {
                 // The link of this device served, or the link of a contact did.
                 invitation = null
@@ -1305,7 +1314,7 @@ object Core {
                 val conversation = Conversation(event.conversation)
                 // The ceremony of one contact ends no code of another.
                 if (verifyCode?.first == conversation) verifyCode = null
-                verifyFault = conversation to "The two devices made no code."
+                verifyFault = conversation to UiText.get(R.string.core_verify_no_code)
             }
             is FfiEvent.Message -> {
                 revision++
@@ -1475,7 +1484,7 @@ object Core {
                 Notifier.clear(app)
                 if (!isVisible) Notifier.locked(app)
             }
-            is FfiEvent.IntegrityFault -> fault = "The local store does not verify."
+            is FfiEvent.IntegrityFault -> fault = UiText.get(R.string.core_store_no_verify)
             // The drain thread wrote the table already.
             is FfiEvent.WakeTable -> {}
             // Another device of the set added a conversation, named one, or
@@ -1505,11 +1514,11 @@ object Core {
     }
 
     private fun cause(code: UByte): String = when (code.toInt()) {
-        DIAL_FAILED -> "The ingress relay did not answer."
-        2 -> "The link to the ingress relay closed."
-        3 -> "A relay ended the circuit."
-        5 -> "The store took no batch."
-        else -> "A fault in the client."
+        DIAL_FAILED -> UiText.get(R.string.core_cause_ingress_no_answer)
+        2 -> UiText.get(R.string.core_cause_ingress_closed)
+        3 -> UiText.get(R.string.core_cause_circuit_ended)
+        5 -> UiText.get(R.string.core_cause_store_no_batch)
+        else -> UiText.get(R.string.core_cause_client_fault)
     }
 
     private fun readConnection(app: Context) = call { client ->
@@ -1853,7 +1862,7 @@ object Core {
      * gets null, or the words of the fault.
      */
     fun changePassphrase(current: CharArray, new: CharArray, onResult: (String?) -> Unit) {
-        val client = handle ?: return onResult("UMBRA is locked.")
+        val client = handle ?: return onResult(UiText.get(R.string.core_locked))
         worker.execute {
             val currentUnits = current.map { it.code.toUShort() }
             val newUnits = new.map { it.code.toUShort() }
@@ -1863,9 +1872,9 @@ object Core {
                 client.changePassphrase(currentUnits, newUnits)
                 null
             } catch (wrong: FfiException.WrongPassphrase) {
-                "The current passphrase is not right."
+                UiText.get(R.string.core_current_passphrase_wrong)
             } catch (other: FfiException) {
-                "The passphrase did not change: ${other.javaClass.simpleName}."
+                UiText.get(R.string.core_passphrase_not_changed, other.javaClass.simpleName)
             }
             main.post { onResult(failure) }
         }
@@ -1880,9 +1889,10 @@ object Core {
         call { client ->
             val result = try {
                 val counts = client.resetIdentity()
-                val contacts = if (counts.contacts == 1u) "1 contact gets" else "${counts.contacts} contacts get"
-                val groups = if (counts.groups == 1u) "1 group moves" else "${counts.groups} groups move"
-                "$contacts your new key. $groups you to new keys."
+                val contacts = counts.contacts.toInt()
+                val groups = counts.groups.toInt()
+                UiText.plural(R.plurals.core_reset_contacts, contacts, contacts) + " " +
+                    UiText.plural(R.plurals.core_reset_groups, groups, groups)
             } catch (busy: FfiException.Busy) {
                 main.post { onDone(null) }
                 return@call
@@ -2138,7 +2148,7 @@ object Core {
                 ByteArray(0)
             } else {
                 Photos.picture(square) ?: run {
-                    main.post { fault = "That image did not fit." }
+                    main.post { fault = UiText.get(R.string.core_image_did_not_fit) }
                     return@call
                 }
             }
@@ -2186,7 +2196,7 @@ object Core {
             try {
                 client.startVerification(conversation.id)
             } catch (failure: FfiException) {
-                main.post { verifyFault = conversation to "A short code needs a connection." }
+                main.post { verifyFault = conversation to UiText.get(R.string.core_short_code_needs_connection) }
             }
         }
     }
@@ -2243,7 +2253,7 @@ object Core {
                     client.groupMembers(conversation.id)
                         .filter { !it.isSelf }
                         .filter { member ->
-                            val name = member.contact?.let { titles[it.toList()] } ?: "Member ${member.index}"
+                            val name = member.contact?.let { titles[it.toList()] } ?: UiText.get(R.string.common_member_number, member.index.toInt())
                             mentions(text, name)
                         }
                         .map { it.index }
@@ -2349,7 +2359,7 @@ object Core {
             client.newDraft(conversation.id).use { draft ->
                 if (!Photos.attach(app, source, draft)) {
                     caption?.fill('\u0000')
-                    main.post { fault = "That image did not open." }
+                    main.post { fault = UiText.get(R.string.core_image_not_open) }
                     return@call
                 }
                 putCaption(draft, caption)
@@ -2388,7 +2398,7 @@ object Core {
             val named = runCatching { Files.describe(app, source).size }.getOrDefault(-1L)
             if (named > MAX_FILE_SIZE) {
                 caption?.fill('\u0000')
-                main.post { fault = "That video did not open, or it is above 250 MB." }
+                main.post { fault = UiText.get(R.string.core_video_not_open) }
                 return@on
             }
             val draft = client.newDraft(conversation.id)
@@ -2396,7 +2406,7 @@ object Core {
             if (bytes < 0) {
                 draft.destroy()
                 caption?.fill('\u0000')
-                main.post { fault = "That video did not open, or it is above 250 MB." }
+                main.post { fault = UiText.get(R.string.core_video_not_open) }
                 return@on
             }
             putCaption(draft, caption)
@@ -2415,7 +2425,7 @@ object Core {
             if (bytes < 0) {
                 draft.destroy()
                 caption?.fill('\u0000')
-                main.post { fault = "That audio file did not open, or it is above 250 MB." }
+                main.post { fault = UiText.get(R.string.core_audio_not_open) }
                 return@on
             }
             putCaption(draft, caption)
@@ -2438,7 +2448,7 @@ object Core {
     fun sendVoice(conversation: Conversation, recording: VoiceRecording) {
         val seconds = recording.finish()
         if (seconds < 0) {
-            fault = "That recording is too short."
+            fault = UiText.get(R.string.core_recording_short)
             return
         }
         // IMP-172: a lock that overtakes the send leaves no recording in
@@ -2455,14 +2465,14 @@ object Core {
                 val bytes = Files.attachVoice(recording, seconds, draft)
                 if (bytes < 0) {
                     draft.destroy()
-                    main.post { fault = "That recording did not open." }
+                    main.post { fault = UiText.get(R.string.core_recording_not_open) }
                     return@execute
                 }
                 offer(client, PendingSend(conversation, draft, bytes, isOriginal = false))
             } catch (locked: FfiException.Locked) {
                 // A send that the lock overtook is no fault of the user.
             } catch (failure: FfiException) {
-                main.post { fault = "That did not work: ${failure.javaClass.simpleName}." }
+                main.post { fault = UiText.get(R.string.core_did_not_work, failure.javaClass.simpleName) }
             }
         }
     }
@@ -2474,14 +2484,14 @@ object Core {
             val picked = Files.describe(app, source)
             if (picked.size > MAX_FILE_SIZE) {
                 caption?.fill('\u0000')
-                main.post { fault = "A file can be 250 MB at most." }
+                main.post { fault = UiText.get(R.string.core_file_too_big) }
                 return@on
             }
             val draft = client.newDraft(conversation.id)
             if (!Files.attachDocument(app, source, picked, draft)) {
                 draft.destroy()
                 caption?.fill('\u0000')
-                main.post { fault = "That file did not open." }
+                main.post { fault = UiText.get(R.string.core_file_not_open) }
                 return@on
             }
             putCaption(draft, caption)
@@ -2545,7 +2555,7 @@ object Core {
                 null
             }
             if (output == null) {
-                main.post { fault = "That place does not take a file." }
+                main.post { fault = UiText.get(R.string.core_place_no_file) }
                 return@on
             }
             // The core cannot open the descriptor of a document provider a
@@ -2583,7 +2593,7 @@ object Core {
                     runCatching { android.provider.DocumentsContract.deleteDocument(app.contentResolver, target) }
                 }
             }
-            main.post { if (copied) onSaved() else fault = "The file did not save." }
+            main.post { if (copied) onSaved() else fault = UiText.get(R.string.core_file_not_saved) }
         }
     }
 
@@ -2733,7 +2743,7 @@ object Core {
             } catch (busy: FfiException.Busy) {
                 main.post(onBusy)
             } catch (failure: FfiException) {
-                main.post { fault = "That did not work: ${failure.javaClass.simpleName}." }
+                main.post { fault = UiText.get(R.string.core_did_not_work, failure.javaClass.simpleName) }
             }
         }
     }
@@ -2914,10 +2924,10 @@ object Core {
                 isReply = info.isReply && !info.deleted && info.moderation != MOD_HIDE
                 // The words of a placeholder are words of the interface.
                 when {
-                    info.deleted -> sink.chars = "Message deleted".toCharArray()
+                    info.deleted -> sink.chars = UiText.get(R.string.core_message_deleted).toCharArray()
                     // GRP-085: a message that a moderator hid shows no text
                     // outside its conversation.
-                    info.moderation == MOD_HIDE -> sink.chars = "Hidden message".toCharArray()
+                    info.moderation == MOD_HIDE -> sink.chars = UiText.get(R.string.core_hidden_message).toCharArray()
                     info.timer != null -> sink.chars = timerPreview(info.timer!!).toCharArray()
                     info.forwardPolicy != null -> sink.chars = forwardPreview(info.forwardPolicy!!).toCharArray()
                     info.file != null -> sink.chars = fileWord(info.file!!).toCharArray()
@@ -2994,12 +3004,12 @@ object Core {
             } catch (failure: FfiException) {
                 // A debug build names the call that failed.
                 if (BuildConfig.DEBUG) android.util.Log.w("umbra-core", "a call failed", failure)
-                main.post { fault = "That did not work: ${failure.javaClass.simpleName}." }
+                main.post { fault = UiText.get(R.string.core_did_not_work, failure.javaClass.simpleName) }
             } catch (failure: Exception) {
                 // A fault of the platform, as a content provider that
                 // refuses a file, ends the call and not the app.
                 if (BuildConfig.DEBUG) android.util.Log.w("umbra-core", "a call failed", failure)
-                main.post { fault = "That did not work: ${failure.javaClass.simpleName}." }
+                main.post { fault = UiText.get(R.string.core_did_not_work, failure.javaClass.simpleName) }
             }
         }
     }

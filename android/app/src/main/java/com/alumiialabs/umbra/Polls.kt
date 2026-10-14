@@ -36,6 +36,8 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import uniffi.umbra_ffi.FfiPoll
 
@@ -47,10 +49,10 @@ const val POLL_GROUP_MAX = 100
 
 /** The periods of a poll, with their words. */
 private val PollPeriods = listOf(
-    0u to "No end",
-    3_600u to "1 hour",
-    86_400u to "1 day",
-    604_800u to "1 week",
+    0u to R.string.common_no_end,
+    3_600u to R.string.poll_one_hour,
+    86_400u to R.string.poll_one_day,
+    604_800u to R.string.poll_one_week,
 )
 
 /** `POLL_OPEN_MIN` and `POLL_OPEN_MAX` of Part 6 §6.6.6, in seconds. */
@@ -58,7 +60,7 @@ private const val OPEN_MIN = 300L
 private const val OPEN_MAX = 2_592_000L
 
 /** The units of a custom period, with their seconds. */
-private val PeriodUnits = listOf("Minutes" to 60L, "Hours" to 3_600L, "Days" to 86_400L)
+private val PeriodUnits = listOf(R.string.poll_unit_minutes to 60L, R.string.poll_unit_hours to 3_600L, R.string.poll_unit_days to 86_400L)
 
 /** The poll composer: a question, 2 to 12 options, and the rules of the vote. */
 @Composable
@@ -79,13 +81,13 @@ fun NewPollScreen(chat: Chat, onBack: () -> Unit) {
     val filled = options.map { it.trim() }.filter { it.isNotEmpty() }
     val isReady = question.isNotBlank() && filled.size >= 2 && (!isCustom || isInBounds)
     Column(Modifier.fillMaxSize()) {
-        BackBar("New poll", onBack = onBack)
+        BackBar(stringResource(R.string.poll_new_poll), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
             Spacer(Modifier.height(12.dp))
             OutlinedTextField(
                 value = question,
                 onValueChange = { question = fit(it, QUESTION_BYTES) },
-                label = { Text("Question") },
+                label = { Text(stringResource(R.string.poll_question)) },
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
                 modifier = Modifier.fillMaxWidth(),
             )
@@ -95,25 +97,25 @@ fun NewPollScreen(chat: Chat, onBack: () -> Unit) {
                     OutlinedTextField(
                         value = option,
                         onValueChange = { options[index] = fit(it, OPTION_BYTES) },
-                        label = { Text("Option ${index + 1}") },
+                        label = { Text(stringResource(R.string.poll_option_number, index + 1)) },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
                         modifier = Modifier.weight(1f),
                     )
                     // WIR-180: a poll holds two options at the least.
                     if (options.size > 2) {
-                        IconAction("xmark", "Remove option ${index + 1}") { options.removeAt(index) }
+                        IconAction("xmark", stringResource(R.string.poll_remove_option_number, index + 1)) { options.removeAt(index) }
                     }
                 }
             }
             if (options.size < OPTION_MAX) {
-                InlineButton("Add option") { options.add("") }
+                InlineButton(stringResource(R.string.poll_add_option)) { options.add("") }
             }
             Spacer(Modifier.height(8.dp))
-            ToggleRow("More than one answer", multiple) { multiple = it }
+            ToggleRow(stringResource(R.string.poll_more_than_one_answer), multiple) { multiple = it }
             HorizontalDivider(color = Palette.Divider)
             Text(
-                "Ends",
+                stringResource(R.string.poll_ends),
                 style = MaterialTheme.typography.labelLarge,
                 color = Palette.TextSecondary,
                 modifier = Modifier.padding(top = 16.dp, bottom = 4.dp).subline(),
@@ -133,7 +135,7 @@ fun NewPollScreen(chat: Chat, onBack: () -> Unit) {
                 ) {
                     RadioMark(isChosen = !isCustom && period == seconds)
                     Spacer(Modifier.width(14.dp))
-                    Text(title)
+                    Text(stringResource(title))
                 }
             }
             Row(
@@ -146,14 +148,14 @@ fun NewPollScreen(chat: Chat, onBack: () -> Unit) {
             ) {
                 RadioMark(isChosen = isCustom)
                 Spacer(Modifier.width(14.dp))
-                Text("Custom")
+                Text(stringResource(R.string.poll_custom))
             }
             if (isCustom) {
                 Row(Modifier.padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     OutlinedTextField(
                         value = count,
                         onValueChange = { typed -> count = typed.filter(Char::isDigit).take(5) },
-                        label = { Text("Number") },
+                        label = { Text(stringResource(R.string.poll_number)) },
                         singleLine = true,
                         isError = count.isNotEmpty() && !isInBounds,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
@@ -170,11 +172,11 @@ fun NewPollScreen(chat: Chat, onBack: () -> Unit) {
                                 .border(1.dp, if (unit == index) Palette.Action else Palette.Outline, shape)
                                 .press(role = Role.RadioButton) { unit = index }
                                 .padding(horizontal = 10.dp, vertical = 10.dp),
-                        ) { Text(title, style = MaterialTheme.typography.labelLarge) }
+                        ) { Text(stringResource(title), style = MaterialTheme.typography.labelLarge) }
                     }
                 }
                 Text(
-                    "5 minutes to 30 days",
+                    stringResource(R.string.poll_period_bounds),
                     style = MaterialTheme.typography.bodySmall,
                     color = if (count.isNotEmpty() && !isInBounds) Palette.Error else Palette.TextSecondary,
                     modifier = Modifier.padding(bottom = 8.dp).subline(),
@@ -183,11 +185,11 @@ fun NewPollScreen(chat: Chat, onBack: () -> Unit) {
             HorizontalDivider(color = Palette.Divider)
             // A count that stays hidden needs an end.
             if (isCustom || period != 0u) {
-                ToggleRow("Hide results until it ends", hidden) { hidden = it }
+                ToggleRow(stringResource(R.string.poll_hide_results_until_end), hidden) { hidden = it }
                 HorizontalDivider(color = Palette.Divider)
             }
             Spacer(Modifier.height(16.dp))
-            PrimaryButton("Send", enabled = isReady) {
+            PrimaryButton(stringResource(R.string.common_send), enabled = isReady) {
                 Core.sendPoll(chat.conversation, question.trim(), filled, multiple, hidden, openSeconds)
                 onBack()
             }
@@ -224,7 +226,7 @@ fun PollContent(line: Line, poll: FfiPoll, modifier: Modifier = Modifier) {
             FaIcon("chart-bar", size = 14.dp, tint = Palette.TextSecondary)
             Spacer(Modifier.width(8.dp))
             Text(
-                if (poll.multiple) "Poll · one or more" else "Poll · one answer",
+                stringResource(if (poll.multiple) R.string.poll_kind_multiple else R.string.poll_kind_single),
                 style = MaterialTheme.typography.labelMedium,
                 color = Palette.TextSecondary,
             )
@@ -314,14 +316,17 @@ private fun ChoiceMark(isChosen: Boolean, isSquare: Boolean) {
 
 /** The state of a poll under its options: the local count, and the end. */
 private fun pollFooter(poll: FfiPoll): String {
-    val votes = if (poll.voters == 1u) "1 vote" else "${poll.voters} votes"
-    val end = when {
-        poll.closed -> "Ended"
-        poll.closesAt == 0uL -> null
-        else -> "Ends in " + leftLabel(poll.closesAt.toLong() - System.currentTimeMillis() / 1_000)
-            .removeSuffix(" left")
-    }
-    val hidden = if (poll.hidden && !poll.closed) "Results at the end" else null
+    val voters = poll.voters.toInt()
     // GRP-148: the count is what this device holds.
-    return listOfNotNull("$votes on this device", hidden, end).joinToString(" · ")
+    val votes = UiText.plural(R.plurals.poll_votes_on_device, voters, voters)
+    val end = when {
+        poll.closed -> UiText.get(R.string.poll_ended)
+        poll.closesAt == 0uL -> null
+        else -> UiText.get(
+            R.string.poll_ends_in,
+            spanLabel(poll.closesAt.toLong() - System.currentTimeMillis() / 1_000),
+        )
+    }
+    val hidden = if (poll.hidden && !poll.closed) UiText.get(R.string.poll_results_at_end) else null
+    return listOfNotNull(votes, hidden, end).joinToString(" · ")
 }

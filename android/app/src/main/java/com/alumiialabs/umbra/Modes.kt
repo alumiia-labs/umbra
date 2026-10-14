@@ -29,6 +29,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.work.WorkManager as Work
@@ -41,12 +42,16 @@ import java.security.SecureRandom
  * moves. Off drains when the user opens the app. The mode is a setting of
  * this device.
  */
-enum class NotifyMode(val label: String, private val words: Int) {
+enum class NotifyMode(private val labelId: Int, private val words: Int) {
     // NTF-009: the trade of each mode, in one honest line.
-    Instant("Instant", R.string.umbra_ui_ntf_009),
-    Private("Private", R.string.umbra_ui_ntf_009_private),
-    Off("Off", R.string.umbra_ui_ntf_009_off),
+    Instant(R.string.modes_instant, R.string.umbra_ui_ntf_009),
+    Private(R.string.modes_private, R.string.umbra_ui_ntf_009_private),
+    Off(R.string.common_off, R.string.umbra_ui_ntf_009_off),
     ;
+
+    /** The name of the mode. */
+    val label: String
+        get() = UiText.get(labelId)
 
     /** The trade of the mode in one line. */
     val trade: String
@@ -196,7 +201,7 @@ fun NotificationsScreen(onBack: () -> Unit) {
     var mode by remember { mutableStateOf(Modes.mode(context)) }
     var preview by remember { mutableStateOf(Modes.preview(context)) }
     Column(Modifier.fillMaxSize()) {
-        BackBar("Notifications", onBack = onBack)
+        BackBar(stringResource(R.string.common_notifications), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
             Spacer(Modifier.height(8.dp))
             for (choice in NotifyMode.entries) {
@@ -227,7 +232,7 @@ fun NotificationsScreen(onBack: () -> Unit) {
             }
             // NTF-082: the two controls of the high-risk configuration sit
             // on this one screen.
-            ToggleRow("Show sender and text", preview) {
+            ToggleRow(stringResource(R.string.modes_show_sender_and_text), preview) {
                 preview = it
                 Modes.setPreview(context, it)
             }

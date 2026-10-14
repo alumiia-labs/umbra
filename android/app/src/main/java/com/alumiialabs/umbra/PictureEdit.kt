@@ -49,6 +49,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -80,16 +81,16 @@ fun EditablePicture(hasPicture: Boolean, onSet: (Bitmap?) -> Unit, picture: @Com
         if (picked != null) {
             scope.launch {
                 val image = withContext(Dispatchers.Default) { Photos.forCrop(context.applicationContext, picked) }
-                if (image == null) Core.fault = "That image did not open." else cropping = image
+                if (image == null) Core.fault = UiText.get(R.string.picture_did_not_open) else cropping = image
             }
         }
     }
     Box(
-        Modifier.press(role = Role.Button, label = "Edit picture") { isChoosing = true },
+        Modifier.press(role = Role.Button, label = stringResource(R.string.picture_edit_picture)) { isChoosing = true },
     ) {
         Box(Modifier.clip(CircleShape)) { picture() }
         Text(
-            "Edit",
+            stringResource(R.string.picture_edit),
             style = MaterialTheme.typography.labelMedium,
             fontWeight = FontWeight.SemiBold,
             color = Color.White,
@@ -105,14 +106,14 @@ fun EditablePicture(hasPicture: Boolean, onSet: (Bitmap?) -> Unit, picture: @Com
     }
     if (isChoosing) {
         ActionSheet(
-            "Picture",
+            stringResource(R.string.picture_picture),
             buildList {
                 add(
-                    RowEntry("image", "Choose picture") {
+                    RowEntry("image", stringResource(R.string.picture_choose_picture)) {
                         picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                     },
                 )
-                if (hasPicture) add(RowEntry("trash-can", "Remove picture") { onSet(null) })
+                if (hasPicture) add(RowEntry("trash-can", stringResource(R.string.picture_remove_picture)) { onSet(null) })
             },
             onDismiss = { isChoosing = false },
         )
@@ -217,13 +218,13 @@ private fun CropDialog(image: Bitmap, onDone: (Bitmap) -> Unit, onCancel: () -> 
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Box(
-                    Modifier.size(48.dp).clip(CircleShape).press(role = Role.Button, label = "Cancel", onClick = onCancel),
+                    Modifier.size(48.dp).clip(CircleShape).press(role = Role.Button, label = stringResource(R.string.common_cancel), onClick = onCancel),
                     contentAlignment = Alignment.Center,
-                ) { FaIcon("xmark", label = "Cancel", size = 20.dp, tint = Color.White) }
+                ) { FaIcon("xmark", label = stringResource(R.string.common_cancel), size = 20.dp, tint = Color.White) }
                 Spacer(Modifier.weight(1f))
             }
             Text(
-                "Done",
+                stringResource(R.string.common_done),
                 style = MaterialTheme.typography.labelLarge,
                 fontWeight = FontWeight.SemiBold,
                 color = Color.White,
@@ -233,7 +234,7 @@ private fun CropDialog(image: Bitmap, onDone: (Bitmap) -> Unit, onCancel: () -> 
                     .padding(bottom = 24.dp)
                     .clip(CircleShape)
                     .background(Palette.Action)
-                    .press(role = Role.Button, label = "Done") {
+                    .press(role = Role.Button, label = stringResource(R.string.common_done)) {
                         val side = (frame / scale).toInt().coerceIn(1, minOf(image.width, image.height))
                         val left = (centerX - side / 2f).toInt().coerceIn(0, image.width - side)
                         val top = (centerY - side / 2f).toInt().coerceIn(0, image.height - side)

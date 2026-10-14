@@ -31,6 +31,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
@@ -49,7 +51,7 @@ import uniffi.umbra_ffi.LinkStatus
 @Composable
 fun RosterForkPrompt() {
     val fork = Core.rosterForks.firstOrNull() ?: return
-    val name = fork.label.ifEmpty { "A removed device" }
+    val name = fork.label.ifEmpty { stringResource(R.string.devices_a_removed_device) }
     Column(
         Modifier
             .fillMaxWidth()
@@ -58,19 +60,19 @@ fun RosterForkPrompt() {
     ) {
         Text(
             when (fork.kind.toInt()) {
-                1 -> "$name signed two versions of your device list"
-                2 -> "$name removed a different device than another of your devices did"
-                else -> "$name holds a different device list than this device"
+                1 -> stringResource(R.string.devices_fork_two_versions, name)
+                2 -> stringResource(R.string.devices_fork_different_removal, name)
+                else -> stringResource(R.string.devices_fork_different_list, name)
             },
         )
         Text(
-            "If you did not make this change, remove $name and reset your identity.",
+            stringResource(R.string.devices_fork_advice, name),
             style = MaterialTheme.typography.labelMedium,
             color = Palette.TextSecondary,
             modifier = Modifier.subline(),
         )
         Spacer(Modifier.height(8.dp))
-        InlineButton("Dismiss") { Core.dismissRosterFork(fork) }
+        InlineButton(stringResource(R.string.common_dismiss)) { Core.dismissRosterFork(fork) }
     }
 }
 
@@ -89,18 +91,12 @@ fun HeldDeletionsPrompt() {
             .background(Palette.Incoming)
             .padding(horizontal = 20.dp, vertical = 12.dp),
     ) {
-        Text(
-            if (count == 1) {
-                "Your other devices deleted 1 message that this restore brought back"
-            } else {
-                "Your other devices deleted $count messages that this restore brought back"
-            },
-        )
+        Text(pluralStringResource(R.plurals.devices_held_deletions, count, count))
         Spacer(Modifier.height(8.dp))
         Row {
-            InlineButton("Delete") { Core.applyHeldDeletions(apply = true) }
+            InlineButton(stringResource(R.string.common_delete)) { Core.applyHeldDeletions(apply = true) }
             Spacer(Modifier.width(12.dp))
-            InlineButton("Keep") { Core.applyHeldDeletions(apply = false) }
+            InlineButton(stringResource(R.string.devices_keep)) { Core.applyHeldDeletions(apply = false) }
         }
     }
 }
@@ -125,25 +121,26 @@ fun DevicesScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
         LaunchedEffect(device) { Core.deletionsFrom(device.deviceId) { deletions = it } }
         val removed = when (deletions) {
             0 -> ""
-            1 -> " It deleted 1 message here since the last change of your devices." +
-                " A restore from a backup made before now brings it back."
-            else -> " It deleted $deletions messages here since the last change of your devices." +
-                " A restore from a backup made before now brings them back."
+            else -> " " + pluralStringResource(R.plurals.devices_removal_deletions, deletions, deletions)
         }
         // Part 7 DEV-137 and DEV-138: the two limits of a removal, in
         // those words.
         ActionSheet(
-            title = "Remove ${device.label.ifEmpty { "this device" }}?",
+            title = if (device.label.isEmpty()) {
+                stringResource(R.string.devices_remove_this_device)
+            } else {
+                stringResource(R.string.devices_remove_named, device.label)
+            },
             entries = listOf(
-                RowEntry("trash-can", "Remove") { Core.removeDevice(device.deviceId) },
+                RowEntry("trash-can", stringResource(R.string.devices_remove)) { Core.removeDevice(device.deviceId) },
             ),
             note = UiText.get(R.string.umbra_ui_dev_137) +
-                " For a device in hostile hands, reset the identity in the settings." + removed,
+                " " + stringResource(R.string.devices_hostile_hands) + removed,
             onDismiss = { removing = null },
         )
     }
     Column(Modifier.fillMaxSize()) {
-        BackBar("Linked devices", onBack = onBack)
+        BackBar(stringResource(R.string.devices_linked_devices), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState())) {
             for (device in Core.devices) {
                 // The device that owns the channels removes another one.
@@ -158,10 +155,10 @@ fun DevicesScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                     FaIcon("mobile", size = 20.dp, tint = Palette.Text)
                     Spacer(Modifier.width(18.dp))
                     Column {
-                        Text(device.label.ifEmpty { "Device" })
+                        Text(device.label.ifEmpty { stringResource(R.string.devices_device) })
                         if (device.isSelf) {
                             Text(
-                                "This device",
+                                stringResource(R.string.devices_this_device),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = Palette.TextSecondary,
                                 modifier = Modifier.subline(),
@@ -171,11 +168,15 @@ fun DevicesScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                 }
             }
             if (Core.canTakeOver) {
-                EntryRow(RowEntry("triangle-exclamation", "Owning device lost?") { push(Screen.TakeOver) })
+                EntryRow(
+                    RowEntry("triangle-exclamation", stringResource(R.string.devices_owning_device_lost_question)) {
+                        push(Screen.TakeOver)
+                    },
+                )
             }
             Column(Modifier.padding(20.dp)) {
                 if (Core.ownsChannels) {
-                    PrimaryButton("Link a device") { push(Screen.LinkDevice) }
+                    PrimaryButton(stringResource(R.string.devices_link_a_device)) { push(Screen.LinkDevice) }
                 }
             }
         }
@@ -196,44 +197,50 @@ fun TakeOverScreen(onBack: () -> Unit) {
     var isRefused by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { Core.takeOverCount { count = it } }
     digits?.let { held ->
-        SecretDigitsScreen("New recovery code", "The code of the lost device opens no new backup.", onBack) { show ->
+        SecretDigitsScreen(
+            stringResource(R.string.devices_new_recovery_code),
+            stringResource(R.string.devices_lost_code_note),
+            onBack,
+        ) { show ->
             show(held)
         }
         return
     }
     Column(Modifier.fillMaxSize()) {
-        BackBar("Owning device lost", onBack = onBack)
+        BackBar(stringResource(R.string.devices_owning_device_lost), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
-            Text("This device takes over.")
+            Text(stringResource(R.string.devices_takeover_intro))
             Spacer(Modifier.height(12.dp))
             val lines = buildList {
                 count?.let { held ->
-                    val contacts = if (held.contacts == 1u) "1 contact" else "${held.contacts} contacts"
-                    val groups = if (held.groups == 1u) "1 group" else "${held.groups} groups"
-                    add("$contacts and $groups move to this device.")
-                }
-                add("Each contact gets a new connection.")
-                count?.unreachable?.takeIf { it > 0u }?.let { late ->
-                    add(
-                        if (late == 1u) {
-                            "1 contact did not reach this device in time and needs a new invitation."
-                        } else {
-                            "$late contacts did not reach this device in time and need a new invitation."
-                        },
+                    val contacts = UiText.plural(
+                        R.plurals.devices_takeover_contacts,
+                        held.contacts.toInt(),
+                        held.contacts.toLong(),
                     )
+                    val groups = UiText.plural(
+                        R.plurals.devices_takeover_groups,
+                        held.groups.toInt(),
+                        held.groups.toLong(),
+                    )
+                    add(UiText.get(R.string.devices_takeover_move, contacts, groups))
                 }
-                add("Your other devices leave. Link them again.")
-                add("The recovery code changes.")
+                add(UiText.get(R.string.devices_takeover_new_connection))
+                count?.unreachable?.takeIf { it > 0u }?.let { late ->
+                    add(UiText.plural(R.plurals.devices_takeover_unreachable, late.toInt(), late.toLong()))
+                }
+                add(UiText.get(R.string.devices_takeover_devices_leave))
+                add(UiText.get(R.string.devices_takeover_code_changes))
             }
             for (line in lines) {
                 Text("· $line", color = Palette.TextSecondary, modifier = Modifier.padding(bottom = 6.dp))
             }
             Spacer(Modifier.height(16.dp))
             if (isRefused) {
-                Note("The owning device is not lost yet.", isError = true)
+                Note(stringResource(R.string.devices_takeover_not_lost), isError = true)
                 Spacer(Modifier.height(12.dp))
             }
-            DangerButton("Take over", enabled = !isRunning) {
+            DangerButton(stringResource(R.string.devices_take_over), enabled = !isRunning) {
                 isRunning = true
                 isRefused = false
                 Core.takeOver(context) { code ->
@@ -292,14 +299,14 @@ fun LinkDeviceScreen(onBack: () -> Unit) {
         onDispose { if (Core.linkStatus !is LinkStatus.Linked) Core.cancelLink() }
     }
     Column(Modifier.fillMaxSize()) {
-        BackBar("Link a device", onBack = onBack)
+        BackBar(stringResource(R.string.devices_link_a_device), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
             when (val status = Core.linkStatus) {
                 is LinkStatus.Ticket -> {
-                    Headline("Scan this code on the new device")
+                    Headline(stringResource(R.string.devices_scan_on_new_device))
                     Spacer(Modifier.height(20.dp))
                     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                        QrCode(status.text, "The link as a QR code")
+                        QrCode(status.text, stringResource(R.string.devices_link_qr))
                     }
                     Spacer(Modifier.height(16.dp))
                     Text(
@@ -315,47 +322,55 @@ fun LinkDeviceScreen(onBack: () -> Unit) {
                             .padding(16.dp),
                     )
                     Spacer(Modifier.height(12.dp))
-                    SecondaryButton("Copy the code") { copySensitive(context, status.text, "UMBRA link") }
+                    SecondaryButton(stringResource(R.string.devices_copy_the_code)) {
+                        copySensitive(context, status.text, UiText.get(R.string.common_umbra_link))
+                    }
                     Spacer(Modifier.height(12.dp))
-                    Note("Works once. Expires in 2 minutes.")
+                    Note(stringResource(R.string.devices_link_expires))
                 }
                 is LinkStatus.Code -> {
-                    Headline("Do the codes match?")
+                    Headline(stringResource(R.string.devices_codes_match_question))
                     Spacer(Modifier.height(20.dp))
                     LinkCode(status.code)
                     Spacer(Modifier.height(24.dp))
-                    PrimaryButton("Yes, the codes match") { Core.confirmLink() }
+                    PrimaryButton(stringResource(R.string.devices_codes_match)) { Core.confirmLink() }
                     Spacer(Modifier.height(8.dp))
-                    SecondaryButton("They don't match") {
+                    SecondaryButton(stringResource(R.string.devices_codes_do_not_match)) {
                         Core.cancelLink()
                         onBack()
                     }
                 }
                 is LinkStatus.Sending, is LinkStatus.Waiting -> {
-                    Headline("Copying to the new device")
+                    Headline(stringResource(R.string.devices_copying))
                     Spacer(Modifier.height(20.dp))
                     Progress()
                 }
                 is LinkStatus.Linked -> {
                     HeroIcon("check")
                     Spacer(Modifier.height(20.dp))
-                    Headline("Linked")
+                    Headline(stringResource(R.string.devices_linked))
                     Spacer(Modifier.height(20.dp))
-                    PrimaryButton("Done", onClick = onBack)
+                    PrimaryButton(stringResource(R.string.common_done), onClick = onBack)
                 }
                 is LinkStatus.Expired, is LinkStatus.Failed -> {
                     HeroIcon("triangle-exclamation")
                     Spacer(Modifier.height(20.dp))
-                    Headline(if (status is LinkStatus.Expired) "The code ran out." else "The link failed.")
+                    Headline(
+                        if (status is LinkStatus.Expired) {
+                            stringResource(R.string.devices_code_ran_out)
+                        } else {
+                            stringResource(R.string.common_link_failed)
+                        },
+                    )
                     Spacer(Modifier.height(20.dp))
-                    PrimaryButton("Try again") { attempt++ }
+                    PrimaryButton(stringResource(R.string.common_try_again)) { attempt++ }
                 }
                 // A refused start (DEV-302) shows its fault below, and no
                 // wait that never ends.
-                is LinkStatus.Idle -> PrimaryButton("Try again") { attempt++ }
+                is LinkStatus.Idle -> PrimaryButton(stringResource(R.string.common_try_again)) { attempt++ }
                 else -> {
                     // The offer goes up to a relay before the code exists.
-                    Headline("Preparing the code")
+                    Headline(stringResource(R.string.devices_preparing_code))
                     Spacer(Modifier.height(20.dp))
                     Progress()
                 }
@@ -391,7 +406,7 @@ fun JoinForm(onCancel: () -> Unit) {
                 LinkCode(code)
                 Spacer(Modifier.height(16.dp))
                 Text(
-                    "Confirm on your other device.",
+                    stringResource(R.string.devices_confirm_on_other),
                     color = Palette.TextSecondary,
                     textAlign = TextAlign.Center,
                     modifier = Modifier.fillMaxWidth(),
@@ -408,7 +423,7 @@ fun JoinForm(onCancel: () -> Unit) {
                 OutlinedTextField(
                     value = pasted,
                     onValueChange = { pasted = it },
-                    label = { Text("Code of the link") },
+                    label = { Text(stringResource(R.string.devices_code_of_link)) },
                     keyboardOptions = KeyboardOptions(
                         keyboardType = KeyboardType.Password,
                         autoCorrectEnabled = false,
@@ -417,13 +432,13 @@ fun JoinForm(onCancel: () -> Unit) {
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Spacer(Modifier.height(12.dp))
-                PrimaryButton("Link", enabled = pasted.isNotBlank()) {
+                PrimaryButton(stringResource(R.string.devices_link), enabled = pasted.isNotBlank()) {
                     val phrase = held ?: return@PrimaryButton
                     held = null
                     Core.join(context, phrase, pasted.trim())
                 }
                 Spacer(Modifier.height(8.dp))
-                SecondaryButton("Back") { isPasting = false }
+                SecondaryButton(stringResource(R.string.common_back)) { isPasting = false }
             }
             held != null -> {
                 Scanner { text ->
@@ -432,19 +447,19 @@ fun JoinForm(onCancel: () -> Unit) {
                     Core.join(context, phrase, text)
                 }
                 Spacer(Modifier.height(8.dp))
-                SecondaryButton("Paste the code instead") { isPasting = true }
+                SecondaryButton(stringResource(R.string.devices_paste_code_instead)) { isPasting = true }
                 Spacer(Modifier.height(8.dp))
-                SecondaryButton("Back") {
+                SecondaryButton(stringResource(R.string.common_back)) {
                     held?.fill('\u0000')
                     held = null
                 }
             }
             else -> {
-                FramedPlatformField(passphrase, "New passphrase", isPassphrase = true)
+                FramedPlatformField(passphrase, stringResource(R.string.common_new_passphrase), isPassphrase = true)
                 Spacer(Modifier.height(14.dp))
-                PrimaryButton("Scan the code") { held = passphrase.take() }
+                PrimaryButton(stringResource(R.string.devices_scan_the_code)) { held = passphrase.take() }
                 Spacer(Modifier.height(8.dp))
-                SecondaryButton("Back", onClick = onCancel)
+                SecondaryButton(stringResource(R.string.common_back), onClick = onCancel)
             }
         }
     }

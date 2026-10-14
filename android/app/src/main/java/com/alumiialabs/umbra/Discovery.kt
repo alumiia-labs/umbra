@@ -36,6 +36,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
@@ -43,13 +45,13 @@ import androidx.compose.ui.unit.dp
 import uniffi.umbra_ffi.ContactRequestInfo
 import uniffi.umbra_ffi.PublicLink
 
-/** The periods of a timed link, in seconds. 0 is a link with no end. */
+/** The periods of a timed link, in seconds, and their labels. 0 is a link with no end. */
 private val LinkPeriods = listOf(
-    3_600uL to "1 hour",
-    86_400uL to "1 day",
-    604_800uL to "1 week",
-    2_592_000uL to "30 days",
-    0uL to "No end",
+    3_600uL to R.string.discovery_period_1_hour,
+    86_400uL to R.string.discovery_period_1_day,
+    604_800uL to R.string.discovery_period_1_week,
+    2_592_000uL to R.string.discovery_period_30_days,
+    0uL to R.string.common_no_end,
 )
 
 /** A row of a list that opens a view. */
@@ -97,11 +99,7 @@ private fun SectionLabel(text: String) {
 private fun TakeoverWarning(label: String) {
     if (label !in Core.directoryWarnings) return
     Spacer(Modifier.height(12.dp))
-    Note(
-        "The directory shows a version of $label that this device did not write. " +
-            "Someone else may control it. Retire it, and make a new one.",
-        isError = true,
-    )
+    Note(stringResource(R.string.discovery_takeover_warning, label), isError = true)
 }
 
 /** ABU-087: an entry at its limit of requests offers a new queue. */
@@ -109,9 +107,12 @@ private fun TakeoverWarning(label: String) {
 private fun LimitOffer(label: String) {
     if (label !in Core.entriesAtLimit) return
     Spacer(Modifier.height(12.dp))
-    Note("This week's request limit is reached. New requests are dropped until you move to a new queue.")
+    Note(stringResource(R.string.discovery_limit_reached))
     Spacer(Modifier.height(8.dp))
-    SecondaryButton("Move to a new queue", enabled = Core.online && !Core.directoryBusy) {
+    SecondaryButton(
+        stringResource(R.string.discovery_move_to_new_queue),
+        enabled = Core.online && !Core.directoryBusy,
+    ) {
         Core.rotateEntry(label)
     }
 }
@@ -135,13 +136,16 @@ private fun DirectoryState(working: String) {
 
 /** The time until the end of a timed link, in the largest whole unit. */
 private fun remaining(expiresAt: ULong): String {
-    if (expiresAt == 0uL) return "No end"
+    if (expiresAt == 0uL) return UiText.get(R.string.common_no_end)
     val left = expiresAt.toLong() - System.currentTimeMillis() / 1_000
     return when {
-        left <= 0 -> "Ending"
-        left < 3_600 -> "Ends in ${(left + 59) / 60} min"
-        left < 86_400 -> "Ends in ${(left + 3_599) / 3_600} h"
-        else -> "Ends in ${(left + 86_399) / 86_400} days"
+        left <= 0 -> UiText.get(R.string.discovery_ending)
+        left < 3_600 -> UiText.get(R.string.discovery_ends_in_minutes, (left + 59) / 60)
+        left < 86_400 -> UiText.get(R.string.discovery_ends_in_hours, (left + 3_599) / 3_600)
+        else -> {
+            val days = (left + 86_399) / 86_400
+            UiText.plural(R.plurals.discovery_ends_in_days, days.toInt(), days)
+        }
     }
 }
 
@@ -161,7 +165,7 @@ fun PublicLinksScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
         Core.madeLink = null
     }
     Column(Modifier.fillMaxSize()) {
-        BackBar("Reusable links", onBack = onBack)
+        BackBar(stringResource(R.string.discovery_reusable_links), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
             Spacer(Modifier.height(8.dp))
             for ((seconds, title) in LinkPeriods) {
@@ -175,15 +179,18 @@ fun PublicLinksScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                 ) {
                     RadioMark(isChosen = period == seconds)
                     Spacer(Modifier.width(14.dp))
-                    Text(title)
+                    Text(stringResource(title))
                 }
                 HorizontalDivider(color = Palette.Divider)
             }
             Spacer(Modifier.height(14.dp))
-            PrimaryButton("Create link", enabled = Core.online && !Core.directoryBusy) {
+            PrimaryButton(
+                stringResource(R.string.discovery_create_link),
+                enabled = Core.online && !Core.directoryBusy,
+            ) {
                 Core.createPublicLink(period)
             }
-            DirectoryState("Publishing the link.")
+            DirectoryState(stringResource(R.string.discovery_publishing_link))
             Spacer(Modifier.height(14.dp))
             // IDN-024: the UI states the limit of a reusable link.
             Note(UiText.get(R.string.umbra_ui_idn_024))
@@ -192,7 +199,7 @@ fun PublicLinksScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             Note(UiText.get(R.string.umbra_ui_idn_010))
             if (Core.publicLinks.isNotEmpty()) {
                 Spacer(Modifier.height(20.dp))
-                SectionLabel("Your links")
+                SectionLabel(stringResource(R.string.discovery_your_links))
                 for (link in Core.publicLinks) {
                     OpenRow("link", shortLink(link.link), remaining(link.expiresAt)) {
                         push(Screen.PublicLinkView(link.id.toList()))
@@ -213,31 +220,35 @@ fun PublicLinkScreen(id: List<Byte>, onBack: () -> Unit) {
     // A retired link leaves the list, and its view closes.
     LaunchedEffect(link == null) { if (link == null) onBack() }
     Column(Modifier.fillMaxSize()) {
-        BackBar("Reusable link", onBack = onBack)
+        BackBar(stringResource(R.string.discovery_reusable_link), onBack = onBack)
         link ?: return@Column
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
-            Headline("Your link", remaining(link.expiresAt))
+            Headline(stringResource(R.string.discovery_your_link), remaining(link.expiresAt))
             Spacer(Modifier.height(16.dp))
             Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                QrCode(link.link, description = "The reusable link as a QR code")
+                QrCode(link.link, description = stringResource(R.string.discovery_reusable_link_qr))
             }
             Spacer(Modifier.height(16.dp))
             MonoBox(link.link)
             TakeoverWarning(link.link)
             LimitOffer(link.link)
             Spacer(Modifier.height(12.dp))
-            PrimaryButton("Share link") { shareText(context, link.link, "Share link") }
+            val shareLink = stringResource(R.string.common_share_link)
+            val umbraLink = stringResource(R.string.common_umbra_link)
+            PrimaryButton(shareLink) { shareText(context, link.link, shareLink) }
             Spacer(Modifier.height(8.dp))
-            SecondaryButton("Copy link") { copySensitive(context, link.link, "UMBRA link") }
+            SecondaryButton(stringResource(R.string.common_copy_link)) { copySensitive(context, link.link, umbraLink) }
             Spacer(Modifier.height(8.dp))
-            QuietButton(if (isRetiring) "Retiring" else "Retire link") {
+            QuietButton(
+                stringResource(if (isRetiring) R.string.discovery_retiring else R.string.discovery_retire_link),
+            ) {
                 if (!isRetiring) {
                     isRetiring = true
                     Core.retirePublicLink(link)
                 }
             }
             LaunchedEffect(Core.directoryBusy) { if (!Core.directoryBusy) isRetiring = false }
-            DirectoryState("Writing the end of the link.")
+            DirectoryState(stringResource(R.string.discovery_writing_link_end))
         }
     }
 }
@@ -252,18 +263,18 @@ fun HandleScreen(onBack: () -> Unit) {
         Core.readDirectory()
     }
     Column(Modifier.fillMaxSize()) {
-        BackBar("Your handle", onBack = onBack)
+        BackBar(stringResource(R.string.common_your_handle), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
             val handle = Core.myHandle
             if (handle == null) {
                 HeroIcon("globe")
                 Spacer(Modifier.height(24.dp))
-                Headline("A name that people can look up.")
+                Headline(stringResource(R.string.discovery_name_to_look_up))
                 Spacer(Modifier.height(20.dp))
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it.take(32) },
-                    label = { Text("Name") },
+                    label = { Text(stringResource(R.string.common_name)) },
                     prefix = { Text("@") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(
@@ -274,19 +285,16 @@ fun HandleScreen(onBack: () -> Unit) {
                 )
                 Spacer(Modifier.height(12.dp))
                 PrimaryButton(
-                    "Claim handle",
+                    stringResource(R.string.discovery_claim_handle),
                     enabled = Core.online && !Core.directoryBusy && name.isNotBlank(),
                 ) {
                     focus.clearFocus()
                     Core.claimHandle(name)
                 }
-                DirectoryState("Publishing the handle.")
+                DirectoryState(stringResource(R.string.discovery_publishing_handle))
                 Spacer(Modifier.height(14.dp))
                 // Part 9 §9.3: the residual leak that the part states.
-                Note(
-                    "The directory lists each handle. A number after the name keeps it apart " +
-                        "from the same name of another person.",
-                )
+                Note(stringResource(R.string.discovery_handle_listed))
                 Spacer(Modifier.height(8.dp))
                 // IDN-010 to IDN-013: a published address against an invitation.
                 Note(UiText.get(R.string.umbra_ui_idn_010))
@@ -305,17 +313,24 @@ fun HandleScreen(onBack: () -> Unit) {
                         color = Palette.TextSecondary,
                     )
                     Spacer(Modifier.height(12.dp))
-                    PrimaryButton("Share link") { shareText(context, link, "Share link") }
+                    val shareLink = stringResource(R.string.common_share_link)
+                    val umbraLink = stringResource(R.string.common_umbra_link)
+                    PrimaryButton(shareLink) { shareText(context, link, shareLink) }
                     Spacer(Modifier.height(8.dp))
-                    SecondaryButton("Copy link") { copySensitive(context, link, "UMBRA link") }
+                    SecondaryButton(stringResource(R.string.common_copy_link)) {
+                        copySensitive(context, link, umbraLink)
+                    }
                     Spacer(Modifier.height(8.dp))
                 }
-                SecondaryButton("Copy handle") { copySensitive(context, handle, "UMBRA handle") }
+                val umbraHandle = stringResource(R.string.discovery_umbra_handle)
+                SecondaryButton(stringResource(R.string.discovery_copy_handle)) {
+                    copySensitive(context, handle, umbraHandle)
+                }
                 Spacer(Modifier.height(24.dp))
                 // Part 9 §9.9: a new key and a new rendezvous queue at one tap.
-                QuietButton("Reset contact requests") { Core.rotateHandleKey() }
-                QuietButton("Release handle") { Core.releaseHandle() }
-                DirectoryState("Writing the release.")
+                QuietButton(stringResource(R.string.discovery_reset_contact_requests)) { Core.rotateHandleKey() }
+                QuietButton(stringResource(R.string.discovery_release_handle)) { Core.releaseHandle() }
+                DirectoryState(stringResource(R.string.discovery_writing_release))
             }
         }
     }
@@ -329,13 +344,17 @@ fun HandleScreen(onBack: () -> Unit) {
 fun ProfileScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
     LaunchedEffect(Unit) { Core.readDirectory() }
     Column(Modifier.fillMaxSize()) {
-        BackBar("Profile", onBack = onBack)
+        BackBar(stringResource(R.string.discovery_profile), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
             ProfileFields()
             Spacer(Modifier.height(16.dp))
             HorizontalDivider(color = Palette.Divider)
-            OpenRow("globe", "Your handle", Core.myHandle ?: "None") { push(Screen.Handle) }
-            OpenRow("link", "Reusable links") { push(Screen.PublicLinks) }
+            OpenRow(
+                "globe",
+                stringResource(R.string.common_your_handle),
+                Core.myHandle ?: stringResource(R.string.discovery_none),
+            ) { push(Screen.Handle) }
+            OpenRow("link", stringResource(R.string.discovery_reusable_links)) { push(Screen.PublicLinks) }
         }
     }
 }
@@ -360,13 +379,13 @@ private fun ProfileFields() {
         EditablePicture(
             hasPicture = picture.isNotEmpty(),
             onSet = { square -> Core.setProfilePicture(square) { picture = it } },
-        ) { ProfilePicture(picture, name.ifEmpty { "Me" }, EDITABLE_PICTURE_SIZE) }
+        ) { ProfilePicture(picture, name.ifEmpty { stringResource(R.string.discovery_me) }, EDITABLE_PICTURE_SIZE) }
     }
     Spacer(Modifier.height(20.dp))
     OutlinedTextField(
         value = name,
         onValueChange = { name = it.take(32) },
-        label = { Text("Name") },
+        label = { Text(stringResource(R.string.common_name)) },
         singleLine = true,
         keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
         modifier = Modifier.fillMaxWidth(),
@@ -375,13 +394,13 @@ private fun ProfileFields() {
     OutlinedTextField(
         value = welcome,
         onValueChange = { welcome = it.take(280) },
-        label = { Text("Welcome text") },
+        label = { Text(stringResource(R.string.discovery_welcome_text)) },
         maxLines = 4,
         modifier = Modifier.fillMaxWidth(),
     )
     Spacer(Modifier.height(12.dp))
     PrimaryButton(
-        "Save",
+        stringResource(R.string.common_save),
         enabled = Core.online && !Core.directoryBusy && (name to welcome) != saved,
     ) {
         focus.clearFocus()
@@ -390,7 +409,7 @@ private fun ProfileFields() {
     }
     Spacer(Modifier.height(8.dp))
     // A technical fact: the directory holds the sealed blob, not its key.
-    Note("The link shows the picture, the name, and the welcome text. The handle alone shows none of them.")
+    Note(stringResource(R.string.discovery_profile_note))
 }
 
 @Composable
@@ -402,7 +421,7 @@ fun RequestsScreen(onBack: () -> Unit) {
         if (Core.contactRequests.isEmpty()) onBack()
     }
     Column(Modifier.fillMaxSize()) {
-        BackBar("Contact requests", onBack = onBack)
+        BackBar(stringResource(R.string.discovery_contact_requests), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState())) {
             for (request in Core.contactRequests) {
                 RequestRow(context, request)
@@ -410,7 +429,7 @@ fun RequestsScreen(onBack: () -> Unit) {
             }
             Box(Modifier.padding(20.dp)) {
                 // Part 9 §9.8: the name of a request is a claim of its sender.
-                Note("A request shows the name that its sender chose. No party checks it.")
+                Note(stringResource(R.string.discovery_request_name_note))
             }
         }
     }
@@ -424,7 +443,7 @@ private fun RequestRow(context: Context, request: ContactRequestInfo) {
             ProfilePicture(request.picture, request.name.ifBlank { "?" }, 44)
             Spacer(Modifier.width(14.dp))
             Column {
-                Text(request.name.ifBlank { "No name" })
+                Text(request.name.ifBlank { stringResource(R.string.discovery_no_name) })
                 Text(
                     "${request.via.removePrefix("umbra://p/")} · " +
                         timeLabel(context, request.receivedAt.toLong() * 1_000),
@@ -442,8 +461,8 @@ private fun RequestRow(context: Context, request: ContactRequestInfo) {
         }
         Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            InlineButton("Accept", enabled = Core.online) { Core.acceptRequest(request) }
-            InlineButton("Decline") { Core.declineRequest(request) }
+            InlineButton(stringResource(R.string.common_accept), enabled = Core.online) { Core.acceptRequest(request) }
+            InlineButton(stringResource(R.string.discovery_decline)) { Core.declineRequest(request) }
         }
     }
 }
@@ -463,7 +482,7 @@ fun RequestsPrompt(push: (Screen) -> Unit) {
     ) {
         FaIcon("user-plus", size = 18.dp, tint = Palette.Text)
         Spacer(Modifier.width(14.dp))
-        Text(if (count == 1) "1 contact request" else "$count contact requests")
+        Text(pluralStringResource(R.plurals.discovery_contact_requests_count, count, count))
     }
 }
 

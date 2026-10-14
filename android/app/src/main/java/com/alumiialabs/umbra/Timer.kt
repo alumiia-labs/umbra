@@ -26,6 +26,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -33,39 +34,47 @@ import uniffi.umbra_ffi.ConversationTimer
 
 /** The periods of a conversation timer (`WIR-201`), with their words. */
 private val TimerChoices = listOf(
-    0u to "Off",
-    30u to "30 seconds",
-    300u to "5 minutes",
-    3_600u to "1 hour",
-    28_800u to "8 hours",
-    86_400u to "1 day",
-    604_800u to "1 week",
-    2_419_200u to "4 weeks",
-    7_776_000u to "90 days",
+    0u to R.string.common_off,
+    30u to R.string.timer_30_seconds,
+    300u to R.string.timer_5_minutes,
+    3_600u to R.string.timer_1_hour,
+    28_800u to R.string.timer_8_hours,
+    86_400u to R.string.timer_1_day,
+    604_800u to R.string.timer_1_week,
+    2_419_200u to R.string.timer_4_weeks,
+    7_776_000u to R.string.timer_90_days,
 )
 
-/** The words of one period. */
+/**
+ * The words of one period. A period other than "Off" also goes inside a
+ * sentence, thus its words need no change of case.
+ */
 fun timerLabel(seconds: UInt): String =
-    TimerChoices.firstOrNull { it.first == seconds }?.second ?: "$seconds seconds"
+    TimerChoices.firstOrNull { it.first == seconds }?.second?.let { UiText.get(it) }
+        ?: UiText.plural(R.plurals.timer_seconds, seconds.toInt(), seconds.toLong())
 
 /** Who set a timer, for the row of the change (`DEV-206`). */
 fun timerAuthor(chat: Chat, isOutgoing: Boolean): String = when {
-    isOutgoing -> "You"
-    chat.isGroup -> "An admin"
+    isOutgoing -> UiText.get(R.string.common_you)
+    chat.isGroup -> UiText.get(R.string.timer_an_admin)
     else -> chat.title
 }
 
 /** The words of the row that marks a timer change (`DEV-207`). */
 fun timerChangeText(seconds: UInt, who: String): String =
     if (seconds == 0u) {
-        "$who turned off disappearing messages"
+        UiText.get(R.string.timer_turned_off, who)
     } else {
-        "$who set messages to disappear after ${timerLabel(seconds).lowercase()}"
+        UiText.get(R.string.timer_set_to, who, timerLabel(seconds))
     }
 
 /** The preview of a timer change in the list of chats. */
 fun timerPreview(seconds: UInt): String =
-    if (seconds == 0u) "Disappearing messages off" else "Disappearing messages: ${timerLabel(seconds).lowercase()}"
+    if (seconds == 0u) {
+        UiText.get(R.string.timer_preview_off)
+    } else {
+        UiText.get(R.string.timer_preview, timerLabel(seconds))
+    }
 
 /** The row of a timer change in a conversation, centred as a notice. */
 @Composable
@@ -107,11 +116,10 @@ fun DisappearingScreen(chat: Chat, onBack: () -> Unit) {
     }
     val context = LocalContext.current
     Column(Modifier.fillMaxSize()) {
-        BackBar("Disappearing messages", onBack = onBack)
+        BackBar(stringResource(R.string.common_disappearing_messages), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
             current?.let { now ->
                 if (now.setAtMs != 0uL) {
-                    val who = if (now.byUser) "you" else if (chat.isGroup) "an admin" else chat.title
                     val at = DateUtils.formatDateTime(
                         context,
                         now.setAtMs.toLong(),
@@ -119,7 +127,11 @@ fun DisappearingScreen(chat: Chat, onBack: () -> Unit) {
                     )
                     Spacer(Modifier.height(12.dp))
                     Text(
-                        "Set by $who, $at",
+                        when {
+                            now.byUser -> stringResource(R.string.timer_set_by_you, at)
+                            chat.isGroup -> stringResource(R.string.timer_set_by_admin, at)
+                            else -> stringResource(R.string.timer_set_by, chat.title, at)
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = Palette.TextSecondary,
                         modifier = Modifier.subline(),
@@ -137,12 +149,12 @@ fun DisappearingScreen(chat: Chat, onBack: () -> Unit) {
                     ) {
                         RadioMark(isChosen = chosen == seconds)
                         Spacer(Modifier.width(14.dp))
-                        Text(title)
+                        Text(stringResource(title))
                     }
                     HorizontalDivider(color = Palette.Divider)
                 }
                 Spacer(Modifier.height(14.dp))
-                PrimaryButton("Save", enabled = chosen != now.seconds) {
+                PrimaryButton(stringResource(R.string.common_save), enabled = chosen != now.seconds) {
                     Core.setTimer(chat.conversation, chosen)
                     onBack()
                 }
@@ -155,9 +167,12 @@ fun DisappearingScreen(chat: Chat, onBack: () -> Unit) {
 }
 
 /** The time that remains to a timed message, in its largest unit. */
-fun leftLabel(seconds: Long): String = when {
-    seconds < 60 -> "${seconds.coerceAtLeast(0)} s left"
-    seconds < 3_600 -> "${seconds / 60} min left"
-    seconds < 86_400 -> "${seconds / 3_600} h left"
-    else -> "${seconds / 86_400} d left"
+fun leftLabel(seconds: Long): String = UiText.get(R.string.timer_left, spanLabel(seconds))
+
+/** A short time span, the largest unit first. */
+fun spanLabel(seconds: Long): String = when {
+    seconds < 60 -> UiText.get(R.string.timer_span_seconds, seconds.coerceAtLeast(0))
+    seconds < 3_600 -> UiText.get(R.string.timer_span_minutes, seconds / 60)
+    seconds < 86_400 -> UiText.get(R.string.timer_span_hours, seconds / 3_600)
+    else -> UiText.get(R.string.timer_span_days, seconds / 86_400)
 }

@@ -71,6 +71,7 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.window.SecureFlagPolicy
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -306,7 +307,7 @@ fun FramedPlatformField(state: PlatformFieldState, label: String, isPassphrase: 
         if (isPassphrase) {
             IconAction(
                 if (state.isShown) "eye-slash" else "eye",
-                if (state.isShown) "Hide passphrase" else "Show passphrase",
+                stringResource(if (state.isShown) R.string.widget_hide_passphrase else R.string.widget_show_passphrase),
             ) { state.toggleShown() }
         }
     }
@@ -680,12 +681,13 @@ fun BrandBar(onConnection: () -> Unit, onProfile: () -> Unit) {
         // The profile of the user opens from its picture. A device that does
         // not own the channels publishes no profile (DEV-287).
         if (Core.ownsChannels) {
+            val me = stringResource(R.string.widget_me)
             Box(
                 Modifier
                     .size(48.dp)
-                    .press(role = Role.Button, label = "Profile", onClick = onProfile),
+                    .press(role = Role.Button, label = stringResource(R.string.widget_profile), onClick = onProfile),
                 contentAlignment = Alignment.Center,
-            ) { ProfilePicture(Core.myPicture, Core.myName.ifEmpty { "Me" }, 32) }
+            ) { ProfilePicture(Core.myPicture, Core.myName.ifEmpty { me }, 32) }
             Spacer(Modifier.width(4.dp))
         } else {
             Spacer(Modifier.width(8.dp))
@@ -699,7 +701,7 @@ fun BrandBar(onConnection: () -> Unit, onProfile: () -> Unit) {
             modifier = Modifier.weight(1f),
         )
         ConnectionStatus(onConnection)
-        IconAction("lock", "Lock now") { Core.lock() }
+        IconAction("lock", stringResource(R.string.widget_lock_now)) { Core.lock() }
     }
 }
 
@@ -718,7 +720,7 @@ fun BackBar(
         Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp, top = 8.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        IconAction("arrow-left", "Back", onBack)
+        IconAction("arrow-left", stringResource(R.string.common_back), onBack)
         // The shade of a title that leads somewhere fills the bar between
         // the back button and the actions, square as each other press shade.
         // It starts a little inside the empty side of the back button, thus
@@ -744,7 +746,7 @@ fun BackBar(
                     )
                     if (isVerified) {
                         Spacer(Modifier.width(8.dp))
-                        FaIcon("shield-check", label = "Verified", size = 16.dp, tint = Palette.Action)
+                        FaIcon("shield-check", label = stringResource(R.string.common_verified), size = 16.dp, tint = Palette.Action)
                     }
                 }
                 subtitle?.let {

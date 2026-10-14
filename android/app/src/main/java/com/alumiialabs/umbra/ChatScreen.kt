@@ -98,6 +98,8 @@ import uniffi.umbra_ffi.FfiRole
 import uniffi.umbra_ffi.FfiRosterNote
 import uniffi.umbra_ffi.MsgReaction
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
 
 @Composable
 fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: List<Byte>? = null) {
@@ -246,7 +248,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                     val title = member.contact?.let { contact ->
                         Core.chats.firstOrNull { it.conversation.id.contentEquals(contact) }?.title
                     }
-                    member.index to (if (member.isSelf) YOU else title ?: "Member ${member.index}")
+                    member.index to (if (member.isSelf) YOU else title ?: UiText.get(R.string.common_member_number, member.index.toInt()))
                 }
             }
             Core.moderationNotes(conversation) { modNotes = it }
@@ -269,7 +271,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
     val startRecording = {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             val made = VoiceRecording(context)
-            if (made.start()) recording = made else notice = "The microphone did not start."
+            if (made.start()) recording = made else notice = UiText.get(R.string.chat_microphone_did_not_start)
         }
     }
     // A recording ends when the app leaves the screen, because the platform
@@ -301,7 +303,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
         }
     }
     val askMicrophone = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { allowed ->
-        if (allowed) startRecording() else notice = "UMBRA has no access to the microphone."
+        if (allowed) startRecording() else notice = UiText.get(R.string.chat_no_microphone_access)
     }
     // A send that did not start says why in this view.
     LaunchedEffect(Core.fault) {
@@ -318,10 +320,10 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
     }
     forwarding?.let { line ->
         ActionSheet(
-            "Forward to",
+            stringResource(R.string.chat_forward_to),
             Core.chats.filter { !it.conversation.id.contentEquals(conversation.id) && !it.isClosed && it.isMember }.map { target ->
                 RowEntry(if (target.isGroup) "user-group" else "comment", target.title) {
-                    Core.forward(line.handle, target.conversation) { notice = "Forwarded to ${target.title}." }
+                    Core.forward(line.handle, target.conversation) { notice = UiText.get(R.string.chat_forwarded_to, target.title) }
                 }
             },
             onDismiss = { forwarding = null },
@@ -329,7 +331,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
     }
     linksOf?.let { line ->
         ActionSheet(
-            "Links",
+            stringResource(R.string.chat_links),
             Links.of(line.text).map { url ->
                 RowEntry(if (url.startsWith("umbra:", ignoreCase = true)) "link" else "globe", url) {
                     Links.open(context, url)
@@ -341,24 +343,24 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
     chosen?.let { line ->
         val entries = if (line.info.deleted) {
             // DEV-105: the user can clear a placeholder.
-            listOf(RowEntry("trash-can", "Remove") { Core.deleteForMe(line.handle) })
+            listOf(RowEntry("trash-can", stringResource(R.string.chat_remove)) { Core.deleteForMe(line.handle) })
         } else if (line.info.moderation == MOD_HIDE && line.key !in revealed) {
             // A hidden message that the user did not open gives no content.
             buildList {
                 if (chat.isGroup && (ownRole ?: FfiRole.MEMBER) >= FfiRole.MODERATOR) {
-                    add(RowEntry("eye", "Show for everyone") { Core.moderate(line.handle, MOD_UNHIDE) })
-                    add(RowEntry("ban", "Remove for everyone") { removing = line })
+                    add(RowEntry("eye", stringResource(R.string.chat_show_for_everyone)) { Core.moderate(line.handle, MOD_UNHIDE) })
+                    add(RowEntry("ban", stringResource(R.string.common_remove_for_everyone)) { removing = line })
                 }
-                add(RowEntry("trash-can", "Delete") { deleting = line })
+                add(RowEntry("trash-can", stringResource(R.string.common_delete)) { deleting = line })
             }
         } else {
             buildList {
                 // IMP-075: a failed text goes again at the action of the user.
                 if (line.info.outgoing && line.info.delivery.toInt() == FAILED && line.info.file == null) {
-                    add(RowEntry("rotate", "Send again") { Core.sendAgain(line.handle) })
+                    add(RowEntry("rotate", stringResource(R.string.chat_send_again)) { Core.sendAgain(line.handle) })
                 }
                 add(
-                    RowEntry("reply", "Reply") {
+                    RowEntry("reply", stringResource(R.string.chat_reply)) {
                         edited = null
                         answered = line
                     },
@@ -367,7 +369,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                 // device, inside 24 hours, below the limit of revisions.
                 if (line.info.editable) {
                     add(
-                        RowEntry("pen", "Edit") {
+                        RowEntry("pen", stringResource(R.string.chat_edit)) {
                             answered = null
                             edited = line
                             // IMP-017: the field copies the text, and zeros
@@ -380,42 +382,41 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                 }
                 val file = line.info.file
                 if (file == null) {
-                    add(RowEntry("copy", "Copy text") { copyMessage(context, line.text) })
+                    add(RowEntry("copy", stringResource(R.string.chat_copy_text)) { copyMessage(context, line.text) })
                     // WIR-177: a text goes to another chat as a forward.
                     // DEV-322: the sender of the message can prohibit it.
                     if (line.poll == null && !line.info.noForward) {
-                        add(RowEntry("share-nodes", "Forward") { forwarding = line })
+                        add(RowEntry("share-nodes", stringResource(R.string.chat_forward)) { forwarding = line })
                     }
                 } else if (file.state.toInt() == FILE_READY || line.info.outgoing) {
                     // IMP-045: the user saves one file.
-                    add(RowEntry("download", "Save to device") { save(line) })
+                    add(RowEntry("download", stringResource(R.string.chat_save_to_device)) { save(line) })
                 }
                 // ATT-054: the sender sends a file again as a new upload.
                 if (file != null && line.info.outgoing && file.state.toInt() == FILE_READY) {
-                    add(RowEntry("rotate", "Send again") { Core.resendFile(line.handle) })
+                    add(RowEntry("rotate", stringResource(R.string.chat_send_again)) { Core.resendFile(line.handle) })
                 }
                 // GRP-085: a hide is the first act of a moderator, and a
                 // remove asks again (GRP-086).
                 if (chat.isGroup && (ownRole ?: FfiRole.MEMBER) >= FfiRole.MODERATOR) {
                     if (line.info.moderation == MOD_HIDE) {
-                        add(RowEntry("eye", "Show for everyone") { Core.moderate(line.handle, MOD_UNHIDE) })
+                        add(RowEntry("eye", stringResource(R.string.chat_show_for_everyone)) { Core.moderate(line.handle, MOD_UNHIDE) })
                     } else {
                         add(
                             RowEntry(
                                 "eye",
-                                "Hide for everyone",
-                                "This takes the message out of the view of each member. A member keeps the " +
-                                    "message on their device, and a later change puts it back.",
+                                stringResource(R.string.chat_hide_for_everyone),
+                                stringResource(R.string.chat_hide_for_everyone_detail),
                             ) { Core.moderate(line.handle, MOD_HIDE) },
                         )
                     }
-                    add(RowEntry("ban", "Remove for everyone") { removing = line })
+                    add(RowEntry("ban", stringResource(R.string.common_remove_for_everyone)) { removing = line })
                 }
-                add(RowEntry("trash-can", "Delete") { deleting = line })
+                add(RowEntry("trash-can", stringResource(R.string.common_delete)) { deleting = line })
             }
         }
         ActionSheet(
-            "Message",
+            stringResource(R.string.common_message),
             entries,
             // A placeholder takes no reaction, and Part 11 gives a group no
             // reaction path.
@@ -437,22 +438,26 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
     Core.pendingSend?.takeIf { it.conversation == conversation }?.let { pending ->
         val notes = buildList {
             if (pending.bytes > LARGE_FILE_WARN) {
-                add("Sending uses about ${Files.uplink(context, pending.bytes)} of data.")
+                add(stringResource(R.string.chat_send_uses_data, Files.uplink(context, pending.bytes)))
             }
-            if (pending.bytes < 0) add("The app that holds this file names no size.")
+            if (pending.bytes < 0) add(stringResource(R.string.chat_file_has_no_size))
             if (pending.isOriginal) add(UiText.get(R.string.umbra_ui_att_157))
         }
         ActionSheet(
-            if (pending.bytes > 0) "Send ${Files.size(context, pending.bytes)}?" else "Send this file?",
-            listOf(RowEntry("paper-plane", "Send") { Core.confirmSend(pending) }),
+            if (pending.bytes > 0) {
+                stringResource(R.string.chat_send_size_question, Files.size(context, pending.bytes))
+            } else {
+                stringResource(R.string.chat_send_this_file_question)
+            },
+            listOf(RowEntry("paper-plane", stringResource(R.string.common_send)) { Core.confirmSend(pending) }),
             note = notes.joinToString(" "),
             onDismiss = { Core.cancelSend() },
         )
     }
     removing?.let { line ->
         ActionSheet(
-            "Remove this message?",
-            listOf(RowEntry("ban", "Remove for everyone") { Core.moderate(line.handle, MOD_REMOVE) }),
+            stringResource(R.string.chat_remove_this_message_question),
+            listOf(RowEntry("ban", stringResource(R.string.common_remove_for_everyone)) { Core.moderate(line.handle, MOD_REMOVE) }),
             // GRP-087: a remove is not reversible, and the sheet says so.
             note = UiText.get(R.string.umbra_ui_grp_087),
             onDismiss = { removing = null },
@@ -461,40 +466,40 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
     deleting?.let { line ->
         // DEV-127, DEV-128: two labels, and neither looks the safer one.
         val entries = buildList {
-            add(RowEntry("trash-can", "Delete on my devices") { deletingOwn = line })
+            add(RowEntry("trash-can", stringResource(R.string.common_delete_on_my_devices)) { deletingOwn = line })
             // A contact takes a deletion for a message of this device alone.
-            if (line.info.outgoing) add(RowEntry("trash-can", "Delete for everyone") { deletingAll = line })
+            if (line.info.outgoing) add(RowEntry("trash-can", stringResource(R.string.chat_delete_for_everyone)) { deletingAll = line })
         }
-        ActionSheet("Delete this message?", entries, onDismiss = { deleting = null })
+        ActionSheet(stringResource(R.string.chat_delete_this_message_question), entries, onDismiss = { deleting = null })
     }
     deletingOwn?.let { line ->
         ActionSheet(
-            "Delete on my devices?",
+            stringResource(R.string.chat_delete_on_my_devices_question),
             listOf(
-                RowEntry("trash-can", "Delete on my devices") {
+                RowEntry("trash-can", stringResource(R.string.common_delete_on_my_devices)) {
                     Core.deleteForMe(line.handle)
                     // DEV-129: the view says which deletion ran.
-                    notice = "Deleted on your devices."
+                    notice = UiText.get(R.string.chat_deleted_on_your_devices)
                 },
             ),
-            note = "This removes the message from your devices. The other person keeps their copy.",
+            note = stringResource(R.string.chat_delete_on_my_devices_note),
             onDismiss = { deletingOwn = null },
         )
     }
     deletingAll?.let { line ->
         ActionSheet(
-            "Delete for everyone?",
+            stringResource(R.string.chat_delete_for_everyone_question),
             listOf(
-                RowEntry("trash-can", "Delete for everyone") {
+                RowEntry("trash-can", stringResource(R.string.chat_delete_for_everyone)) {
                     if (answered?.key == line.key) answered = null
                     Core.deleteForEveryone(line.handle) {
-                        notice = "Wait 10 seconds between two deletions for everyone."
+                        notice = UiText.get(R.string.chat_wait_between_deletions)
                     }
                     // DEV-129: the view says which deletion ran.
                     notice = if (chat.isGroup) {
-                        "Asked the app of each member to delete the message."
+                        UiText.get(R.string.chat_asked_each_member_to_delete)
                     } else {
-                        "Asked the app of ${chat.title} to delete the message."
+                        UiText.get(R.string.chat_asked_contact_to_delete, chat.title)
                     }
                 },
             ),
@@ -503,9 +508,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
             // deletion goes to one conversation at once.
             note = (
                 if (chat.isGroup) {
-                    "This asks the app of each member to delete the message. A member who left " +
-                        "the group never gets the request. A member who sends nothing for more than 30 days " +
-                        "leaves the group and never gets the request. A member can keep a copy."
+                    stringResource(R.string.chat_delete_for_everyone_group_note)
                 } else {
                     UiText.get(R.string.umbra_ui_dev_126)
                 }
@@ -519,9 +522,9 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
         BackBar(
             chat.title,
             subtitle = when {
-                threadOf != null -> "Thread"
+                threadOf != null -> stringResource(R.string.chat_thread)
                 chat.isGroup -> groupSubtitle(chat)
-                conversation.id.toList() in Core.typingNow -> "typing…"
+                conversation.id.toList() in Core.typingNow -> stringResource(R.string.chat_typing)
                 else -> null
             },
             onBack = { if (threadOf != null) threadOf = null else onBack() },
@@ -536,7 +539,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                     },
                 )
             },
-            actions = { IconAction("magnifying-glass", "Search") { push(Screen.Search(chat.conversation)) } },
+            actions = { IconAction("magnifying-glass", stringResource(R.string.common_search)) { push(Screen.Search(chat.conversation)) } },
         )
         BlockedLine(chat)
         // GRP-199, GRP-200: the line ends at the first answer of a relay.
@@ -569,7 +572,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                         FaIcon("lock", size = 10.dp, tint = Palette.TextSecondary)
                         Spacer(Modifier.width(6.dp))
                         Text(
-                            "End-to-end encrypted",
+                            stringResource(R.string.chat_end_to_end_encrypted),
                             style = MaterialTheme.typography.labelSmall,
                             color = Palette.TextSecondary,
                         )
@@ -628,12 +631,12 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                     // A group names the sender of a run of its messages.
                     author = line.info.sender?.takeIf {
                         chat.isGroup && (before == null || before.info.outgoing || before.info.sender != it)
-                    }?.let { memberNames[it] ?: "Member $it" },
+                    }?.let { memberNames[it] ?: stringResource(R.string.common_member_number, it.toInt()) },
                     // A quote in a group names the member who wrote it.
                     quoteAuthor = line.quote?.let { quote ->
                         when {
-                            quote.isOutgoing -> "You"
-                            chat.isGroup -> quote.sender?.let { memberNames[it] ?: "Member $it" }
+                            quote.isOutgoing -> stringResource(R.string.common_you)
+                            chat.isGroup -> quote.sender?.let { memberNames[it] ?: stringResource(R.string.common_member_number, it.toInt()) }
                             else -> chat.title
                         }
                     },
@@ -642,7 +645,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                 val replies = replyCounts[line.key] ?: 0
                 if (replies > 0 && threadOf == null) {
                     Text(
-                        if (replies == 1) "1 reply" else "$replies replies",
+                        pluralStringResource(R.plurals.chat_replies, replies, replies),
                         style = MaterialTheme.typography.labelMedium,
                         color = Palette.Action,
                         modifier = Modifier
@@ -686,7 +689,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
             if (utf8Length(chars) > CAPTION_MAX) {
                 composer.set(chars)
                 chars.fill('\u0000')
-                notice = "A caption can be 1 024 bytes at most."
+                notice = UiText.get(R.string.chat_caption_too_long)
                 return@takeCaption null
             }
             chars
@@ -720,25 +723,25 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
             // and no access to the gallery or to the files.
             val entries = buildList {
                 add(
-                    RowEntry("image", "Photo") {
+                    RowEntry("image", stringResource(R.string.common_photo)) {
                         picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                     },
                 )
                 if (Files.canSendVideo) {
                     add(
-                        RowEntry("film", "Video") {
+                        RowEntry("film", stringResource(R.string.common_video)) {
                             videoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
                         },
                     )
-                    add(RowEntry("music", "Audio") { audioPicker.launch(arrayOf("audio/*")) })
+                    add(RowEntry("music", stringResource(R.string.chat_audio)) { audioPicker.launch(arrayOf("audio/*")) })
                 }
-                add(RowEntry("file", "File") { filePicker.launch(arrayOf("*/*")) })
+                add(RowEntry("file", stringResource(R.string.common_file)) { filePicker.launch(arrayOf("*/*")) })
                 // GRP-149: a group above POLL_GROUP_MAX members takes no poll.
                 if (!chat.isGroup || chat.members <= POLL_GROUP_MAX) {
-                    add(RowEntry("chart-bar", "Poll") { push(Screen.NewPoll(conversation)) })
+                    add(RowEntry("chart-bar", stringResource(R.string.chat_poll)) { push(Screen.NewPoll(conversation)) })
                 }
             }
-            ActionSheet("Attach", entries, onDismiss = { isAttaching = false })
+            ActionSheet(stringResource(R.string.common_attach), entries, onDismiss = { isAttaching = false })
         }
         // GRP-210: a group whose two relays hold it no more takes no new
         // message, and the composer would promise one. A group that
@@ -747,16 +750,16 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
             // GRP-297: the keys of the group moved on while this device was
             // away, and no member could give them to it.
             chat.isLapsed ->
-                "Your membership lapsed while this device was away. Ask a member for a new invitation."
-            chat.isClosed -> "The relays of this group hold it no more. It takes no new message."
+                stringResource(R.string.chat_membership_lapsed)
+            chat.isClosed -> stringResource(R.string.chat_group_closed)
             // GRP-373, GRP-374: a removed device took the index of this member.
             chat.isReturning ->
-                "A removed device took your place in this group. Your request to an admin waits."
+                stringResource(R.string.chat_device_took_your_place)
             chat.needsInvitation -> UiText.get(R.string.umbra_ui_grp_374)
             chat.isGroup && !chat.isMember ->
-                "You are no longer a member of this group. The messages here stay on this device."
+                stringResource(R.string.chat_no_longer_member)
             // An observer reads the group and posts nothing to it.
-            chat.isGroup && ownRole == FfiRole.OBSERVER -> "Your role in this group is observer."
+            chat.isGroup && ownRole == FfiRole.OBSERVER -> stringResource(R.string.chat_role_observer)
             else -> null
         }
         if (stopped != null) {
@@ -791,14 +794,14 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                     // A reply in a group names the member who wrote the message.
                     answered?.let {
                         header.value = "reply" to when {
-                            it.info.outgoing -> "You"
-                            chat.isGroup -> it.info.sender?.let { sender -> memberNames[sender] ?: "Member $sender" } ?: chat.title
+                            it.info.outgoing -> stringResource(R.string.common_you)
+                            chat.isGroup -> it.info.sender?.let { sender -> memberNames[sender] ?: stringResource(R.string.common_member_number, sender.toInt()) } ?: chat.title
                             else -> chat.title
                         }
                         quoted.value = quoteWords(it)
                     }
                     if (edited != null) {
-                        header.value = "pen" to "Edit message"
+                        header.value = "pen" to stringResource(R.string.chat_edit_message)
                         quoted.value = CharArray(0)
                     }
                     ComposerHeader(header.value.first, header.value.second, quoted.value) {
@@ -825,9 +828,9 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                             .padding(start = 4.dp)
                             .size(48.dp)
                             .clip(CircleShape)
-                            .press(role = Role.Button, label = "Attach") { isAttaching = true },
+                            .press(role = Role.Button, label = stringResource(R.string.common_attach)) { isAttaching = true },
                         contentAlignment = Alignment.Center,
-                    ) { FaIcon("plus", label = "Attach", size = 18.dp, tint = Palette.TextSecondary) }
+                    ) { FaIcon("plus", label = stringResource(R.string.common_attach), size = 18.dp, tint = Palette.TextSecondary) }
                     Box(
                         Modifier
                             .weight(1f)
@@ -838,7 +841,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                         // With no network the record waits in the store.
                         PlatformInput(
                             composer,
-                            hint = "Message",
+                            hint = stringResource(R.string.common_message),
                             isPassphrase = false,
                             modifier = Modifier.fillMaxWidth(),
                             maxLines = 5,
@@ -851,12 +854,13 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
             // send. An answer and an edit take a text.
             val offersVoice = recording == null && composer.isEmpty && answered == null && edited == null &&
                 Files.canSendVideo
+            val sendLabel = stringResource(if (offersVoice) R.string.chat_record_voice_message else R.string.common_send)
             Box(
                 Modifier
                     .size(48.dp)
                     .clip(CircleShape)
                     .background(Palette.Action)
-                    .clickable(role = Role.Button, onClickLabel = if (offersVoice) "Record a voice message" else "Send") {
+                    .clickable(role = Role.Button, onClickLabel = sendLabel) {
                         val active = recording
                         if (active != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                             recording = null
@@ -893,7 +897,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                     offersVoice -> "microphone"
                     else -> "paper-plane"
                 }
-                FaIcon(icon, label = if (offersVoice) "Record a voice message" else "Send", size = 18.dp, tint = Color.White)
+                FaIcon(icon, label = sendLabel, size = 18.dp, tint = Color.White)
             }
         }
     }
@@ -905,7 +909,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
  * `String` of it.
  */
 private fun copyMessage(context: Context, text: CharArray) {
-    val clip = ClipData.newPlainText("UMBRA message", CharBuffer.wrap(text))
+    val clip = ClipData.newPlainText(UiText.get(R.string.chat_clipboard_label), CharBuffer.wrap(text))
     clip.description.extras = PersistableBundle().apply {
         putBoolean("android.content.extra.IS_SENSITIVE", true)
     }
@@ -923,7 +927,7 @@ private fun isSameDay(a: ULong, b: ULong): Boolean {
 private fun DayLabel(atMs: Long) {
     val context = LocalContext.current
     val label = if (DateUtils.isToday(atMs)) {
-        "Today"
+        stringResource(R.string.chat_today)
     } else {
         DateUtils.formatDateTime(context, atMs, DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_SHOW_WEEKDAY)
     }
@@ -941,7 +945,7 @@ private fun NewLabel() {
     ) {
         HorizontalDivider(Modifier.weight(1f), color = Palette.Action.copy(alpha = 0.35f))
         Text(
-            "New",
+            stringResource(R.string.chat_new_label),
             style = MaterialTheme.typography.labelMedium,
             color = Palette.Action,
             modifier = Modifier.padding(horizontal = 12.dp),
@@ -1029,7 +1033,7 @@ private fun Bubble(
                             drawRect(flash)
                         },
                     onClick = onQuote,
-                    longLabel = "Message actions",
+                    longLabel = stringResource(R.string.chat_message_actions),
                     onLongClick = onLongPress,
                     // The options of a poll take their own press.
                     isOver = line.poll == null,
@@ -1054,7 +1058,7 @@ private fun QuickReactions(held: List<MsgReaction>, onPick: (String) -> Unit) {
                     .size(48.dp)
                     .clip(CircleShape)
                     .background(if (isMine) Palette.Container else Color.Transparent)
-                    .press(role = Role.Button, label = if (isMine) "Remove $emoji" else "React $emoji") {
+                    .press(role = Role.Button, label = if (isMine) stringResource(R.string.chat_remove_reaction, emoji) else stringResource(R.string.chat_react, emoji)) {
                         onPick(emoji)
                     },
                 contentAlignment = Alignment.Center,
@@ -1082,7 +1086,7 @@ private fun ReactionPills(line: Line) {
                     .clip(shape)
                     .background(if (isMine) Palette.Container else Palette.Surface)
                     .border(1.dp, if (isMine) Palette.Action else Palette.Divider, shape)
-                    .press(role = Role.Button, label = if (isMine) "Remove $emoji" else "React $emoji") {
+                    .press(role = Role.Button, label = if (isMine) stringResource(R.string.chat_remove_reaction, emoji) else stringResource(R.string.chat_react, emoji)) {
                         Core.react(line.handle, emoji)
                     }
                     .padding(horizontal = 8.dp, vertical = 3.dp),
@@ -1140,7 +1144,7 @@ private fun BubbleContent(
                 FaIcon("eye", size = 13.dp, tint = Palette.TextSecondary)
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    "${roleWord(line.info.moderatorRole)} hid this message",
+                    stringResource(R.string.chat_role_hid_message, roleWord(line.info.moderatorRole)),
                     style = MaterialTheme.typography.bodyMedium,
                     fontStyle = FontStyle.Italic,
                     color = Palette.TextSecondary,
@@ -1154,9 +1158,9 @@ private fun BubbleContent(
                 Spacer(Modifier.width(8.dp))
                 Text(
                     when {
-                        line.info.moderation == MOD_REMOVE -> "${roleWord(line.info.moderatorRole)} removed this message"
-                        isOutgoing -> "You deleted this message"
-                        else -> "This message was deleted"
+                        line.info.moderation == MOD_REMOVE -> stringResource(R.string.chat_role_removed_message, roleWord(line.info.moderatorRole))
+                        isOutgoing -> stringResource(R.string.chat_you_deleted_message)
+                        else -> stringResource(R.string.chat_message_was_deleted)
                     },
                     style = MaterialTheme.typography.bodyMedium,
                     fontStyle = FontStyle.Italic,
@@ -1198,7 +1202,7 @@ private fun BubbleContent(
             // WIR-177: a forward says so, and it names no earlier sender.
             if (line.info.forwardDepth.toInt() > 0) {
                 Text(
-                    "Forwarded",
+                    stringResource(R.string.chat_forwarded),
                     style = MaterialTheme.typography.labelMedium,
                     color = Palette.TextSecondary,
                     modifier = Modifier.align(Alignment.Start).padding(bottom = 2.dp),
@@ -1207,7 +1211,7 @@ private fun BubbleContent(
             // A mention of this member in a group (Part 11 §11.11).
             if (line.info.mentionsMe) {
                 Text(
-                    "Mentions you",
+                    stringResource(R.string.chat_mentions_you),
                     style = MaterialTheme.typography.labelMedium,
                     color = Palette.Action,
                     modifier = Modifier.align(Alignment.Start).padding(bottom = 2.dp),
@@ -1228,10 +1232,10 @@ private fun BubbleContent(
             // A placeholder shows its time and no state of a delivery. DEV-090:
             // an edited message says so, on the two devices.
             buildString {
-                if (line.info.edited) append("Edited · ")
+                if (line.info.edited) append(stringResource(R.string.chat_edited)).append(" · ")
                 append(clock)
                 // WIR-463: a record that a key supply opened says so.
-                if (line.info.recovered) append(" · Recovered")
+                if (line.info.recovered) append(" · ").append(stringResource(R.string.chat_recovered))
                 // A timed message says when it goes.
                 line.info.expiresAt?.let { at ->
                     append(" · ").append(leftLabel(at.toLong() - System.currentTimeMillis() / 1_000))
@@ -1242,8 +1246,8 @@ private fun BubbleContent(
                     val share = file?.let(::progressOf)
                     append(" · ").append(
                         when {
-                            isUploading && share != null -> "Sending $share %"
-                            isUploading -> "Sending"
+                            isUploading && share != null -> stringResource(R.string.chat_sending_percent, share)
+                            isUploading -> stringResource(R.string.chat_sending)
                             else -> deliveryLabel(line.info.delivery, line.info.failure)
                         },
                     )
@@ -1285,7 +1289,7 @@ private fun QuoteBlock(author: String?, text: CharArray?, modifier: Modifier = M
             }
             if (text == null) {
                 Text(
-                    "Message not on this device",
+                    stringResource(R.string.chat_message_not_on_device),
                     style = MaterialTheme.typography.bodySmall,
                     color = Palette.TextSecondary,
                 )
@@ -1321,9 +1325,9 @@ private fun ComposerHeader(icon: String, words: String, quoted: CharArray, onCan
                 modifier = Modifier.weight(1f),
             )
             Box(
-                Modifier.size(36.dp).clip(CircleShape).press(role = Role.Button, label = "Cancel", onClick = onCancel),
+                Modifier.size(36.dp).clip(CircleShape).press(role = Role.Button, label = stringResource(R.string.common_cancel), onClick = onCancel),
                 contentAlignment = Alignment.Center,
-            ) { FaIcon("xmark", label = "Cancel", size = 14.dp, tint = Palette.TextSecondary) }
+            ) { FaIcon("xmark", label = stringResource(R.string.common_cancel), size = 14.dp, tint = Palette.TextSecondary) }
         }
         // The message that the answer names, in one line.
         if (quoted.isNotEmpty()) {
@@ -1349,7 +1353,8 @@ private fun quoteWords(line: Line): CharArray {
 }
 
 /** The preview of a forward policy change in the list of chats. */
-fun forwardPreview(prohibits: Boolean): String = if (prohibits) "Forwarding off" else "Forwarding on"
+fun forwardPreview(prohibits: Boolean): String =
+    UiText.get(if (prohibits) R.string.chat_forwarding_off else R.string.chat_forwarding_on)
 
 /** The row of a forward policy change (`DEV-324`), in the form of a timer change. */
 @Composable
@@ -1366,7 +1371,10 @@ private fun ForwardLine(line: Line, chat: Chat) {
             FaIcon("share-nodes", size = 10.dp, tint = Palette.TextSecondary)
             Spacer(Modifier.width(6.dp))
             Text(
-                if (prohibits) "$who turned forwarding off" else "$who turned forwarding on",
+                stringResource(
+                    if (prohibits) R.string.chat_turned_forwarding_off else R.string.chat_turned_forwarding_on,
+                    who,
+                ),
                 style = MaterialTheme.typography.labelSmall,
                 color = Palette.TextSecondary,
                 textAlign = TextAlign.Center,
@@ -1383,8 +1391,9 @@ private const val READ = 3
 /** The small picture of the contact under the newest message that it saw. */
 @Composable
 private fun ReadMark(chat: Chat) {
+    val readLabel = stringResource(R.string.chat_read)
     Row(
-        Modifier.fillMaxWidth().padding(end = 4.dp, bottom = 2.dp).semantics { contentDescription = "Read" },
+        Modifier.fillMaxWidth().padding(end = 4.dp, bottom = 2.dp).semantics { contentDescription = readLabel },
         horizontalArrangement = Arrangement.End,
     ) { Avatar(chat, size = 16) }
 }
@@ -1394,9 +1403,9 @@ private fun ReadMark(chat: Chat) {
  * record. It does not mean that the contact has it.
  */
 private fun deliveryLabel(state: UByte, failure: UByte): String = when (state.toInt()) {
-    0 -> "Waiting"
-    1 -> "Accepted"
-    2 -> "Delivered"
+    0 -> UiText.get(R.string.chat_delivery_waiting)
+    1 -> UiText.get(R.string.chat_delivery_accepted)
+    2 -> UiText.get(R.string.chat_delivery_delivered)
     // IMP-074: a failed record names its cause.
     FAILED -> UiText.get(
         when (failure.toInt()) {

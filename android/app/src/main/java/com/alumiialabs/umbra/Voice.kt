@@ -40,6 +40,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import uniffi.umbra_ffi.MsgFile
@@ -339,11 +340,11 @@ fun VoiceTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
                     }
                     append(Files.duration(seconds))
                     when {
-                        progress != null && !line.info.outgoing -> append(" · ").append(progress).append(" %")
-                        state == FILE_WANTED -> append(" · Receiving")
+                        progress != null && !line.info.outgoing -> append(" · ").append(stringResource(R.string.voice_percent, progress))
+                        state == FILE_WANTED -> append(" · ").append(stringResource(R.string.voice_receiving))
                         state == FILE_HELD -> append(" · ").append(Files.size(context, file.size.toLong()))
                         lostLabel(line) != null -> append(" · ").append(lostLabel(line))
-                        state == FILE_FAILED && !line.info.outgoing -> append(" · Not received")
+                        state == FILE_FAILED && !line.info.outgoing -> append(" · ").append(stringResource(R.string.voice_not_received))
                     }
                 },
                 style = MaterialTheme.typography.labelSmall,
@@ -387,14 +388,18 @@ fun RecordingBar(recording: VoiceRecording, onDiscard: () -> Unit, modifier: Mod
                 .padding(start = 4.dp)
                 .size(48.dp)
                 .clip(CircleShape)
-                .press(role = Role.Button, label = "Discard the recording", onClick = onDiscard),
+                .press(role = Role.Button, label = stringResource(R.string.voice_discard_recording), onClick = onDiscard),
             contentAlignment = Alignment.Center,
-        ) { FaIcon("trash-can", label = "Discard the recording", size = 18.dp, tint = Palette.TextSecondary) }
+        ) { FaIcon("trash-can", label = stringResource(R.string.voice_discard_recording), size = 18.dp, tint = Palette.TextSecondary) }
         val isRecording = !recording.isEnded && !recording.isAtLimit
         Box(Modifier.size(8.dp).background(if (isRecording) Palette.Error else Palette.TextSecondary, CircleShape))
         Spacer(Modifier.width(10.dp))
         Text(
-            if (recording.isAtLimit) "${Files.duration(elapsed)} · Limit" else Files.duration(elapsed),
+            if (recording.isAtLimit) {
+                stringResource(R.string.voice_duration_at_limit, Files.duration(elapsed))
+            } else {
+                Files.duration(elapsed)
+            },
             style = MaterialTheme.typography.bodyLarge,
             color = Palette.Text,
         )

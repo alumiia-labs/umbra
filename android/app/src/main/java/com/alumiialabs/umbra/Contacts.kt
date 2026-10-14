@@ -43,6 +43,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -58,20 +59,20 @@ import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
 @Composable
 fun AddContactScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
     Column(Modifier.fillMaxSize()) {
-        BackBar("Add contact", onBack = onBack)
+        BackBar(stringResource(R.string.contacts_add_contact), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
             HeroIcon("link")
             Spacer(Modifier.height(24.dp))
-            Headline("A private way to say hello.")
+            Headline(stringResource(R.string.contacts_say_hello))
             Spacer(Modifier.height(20.dp))
-            PrimaryButton("Create invitation", enabled = Core.online) {
+            PrimaryButton(stringResource(R.string.contacts_create_invitation), enabled = Core.online) {
                 Core.invitation = null
                 Core.invite()
                 push(Screen.YourInvitation)
             }
             if (!Core.online) {
                 Spacer(Modifier.height(10.dp))
-                Note("Connecting. An invitation needs a connection.")
+                Note(stringResource(R.string.contacts_invitation_needs_connection))
             }
             Spacer(Modifier.height(12.dp))
             Row(
@@ -84,7 +85,7 @@ fun AddContactScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             ) {
                 FaIcon("qrcode", size = 20.dp, tint = Palette.Text)
                 Spacer(Modifier.width(16.dp))
-                Text("Use an invitation instead")
+                Text(stringResource(R.string.contacts_use_invitation_instead))
             }
             // The group of Part 11 starts beside the contacts.
             Row(
@@ -97,12 +98,12 @@ fun AddContactScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             ) {
                 FaIcon("user-group", size = 20.dp, tint = Palette.Text)
                 Spacer(Modifier.width(16.dp))
-                Text("New private group")
+                Text(stringResource(R.string.contacts_new_private_group))
             }
             // Part 9: a link for many people, and a name to look up.
             if (Core.ownsChannels) {
-                OpenRow("link", "Reusable link") { push(Screen.PublicLinks) }
-                OpenRow("globe", "Your handle", Core.myHandle) { push(Screen.Handle) }
+                OpenRow("link", stringResource(R.string.contacts_reusable_link)) { push(Screen.PublicLinks) }
+                OpenRow("globe", stringResource(R.string.common_your_handle), Core.myHandle) { push(Screen.Handle) }
             }
         }
     }
@@ -112,16 +113,19 @@ fun AddContactScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
 fun YourInvitationScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     Column(Modifier.fillMaxSize()) {
-        BackBar("Add contact", onBack = onBack)
+        BackBar(stringResource(R.string.contacts_add_contact), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
-            Headline("Your invitation", "Works once. Expires in 14 days.")
+            Headline(
+                stringResource(R.string.contacts_your_invitation),
+                stringResource(R.string.contacts_invitation_expires),
+            )
             Spacer(Modifier.height(16.dp))
             val link = Core.invitation
             if (link == null) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 3.dp)
                     Spacer(Modifier.width(12.dp))
-                    Text("Asking a relay to hold the invitation.")
+                    Text(stringResource(R.string.contacts_asking_relay))
                 }
                 Core.fault?.let {
                     Spacer(Modifier.height(16.dp))
@@ -144,18 +148,18 @@ fun YourInvitationScreen(onBack: () -> Unit) {
                     .padding(16.dp),
             )
             Spacer(Modifier.height(12.dp))
-            PrimaryButton("Share invitation") { share(context, link) }
+            PrimaryButton(stringResource(R.string.contacts_share_invitation)) { share(context, link) }
             Spacer(Modifier.height(8.dp))
-            SecondaryButton("Copy link") { copySensitive(context, link) }
+            SecondaryButton(stringResource(R.string.common_copy_link)) { copySensitive(context, link) }
             Spacer(Modifier.height(12.dp))
-            Note("The first person who opens this link becomes the contact.")
+            Note(stringResource(R.string.contacts_first_person))
         }
     }
 }
 
 /** A text as a QR code. The reader of the other device gets the same text. */
 @Composable
-fun QrCode(link: String, description: String = "The invitation as a QR code") {
+fun QrCode(link: String, description: String = stringResource(R.string.contacts_invitation_qr)) {
     val matrix: BitMatrix = remember(link) {
         val hints = mapOf(
             EncodeHintType.ERROR_CORRECTION to ErrorCorrectionLevel.M,
@@ -226,22 +230,24 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
     // A contact or a fault ends the wait. The naming view opens by itself.
     LaunchedEffect(Core.fault) { if (Core.fault != null) isWaiting = false }
     Column(Modifier.fillMaxSize()) {
-        BackBar("Use invitation", onBack = onBack)
+        BackBar(stringResource(R.string.contacts_use_invitation), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
             HeroIcon("qrcode")
             Spacer(Modifier.height(24.dp))
-            Headline("Someone invited you?")
+            Headline(stringResource(R.string.contacts_someone_invited_you))
             Spacer(Modifier.height(20.dp))
             if (!isWaiting) {
-                PrimaryButton("Scan a QR code", enabled = Core.online) { push(Screen.ScanInvitation) }
+                PrimaryButton(stringResource(R.string.contacts_scan_qr_code), enabled = Core.online) {
+                    push(Screen.ScanInvitation)
+                }
                 Spacer(Modifier.height(16.dp))
             }
             // An invitation is no message text, thus a composable field holds it.
             OutlinedTextField(
                 value = pasted,
                 onValueChange = { pasted = it },
-                label = { Text("Link or handle") },
-                placeholder = { Text("Paste a link, or type @name#1234") },
+                label = { Text(stringResource(R.string.contacts_link_or_handle)) },
+                placeholder = { Text(stringResource(R.string.contacts_link_or_handle_hint)) },
                 // The input method changes no character of the pasted value.
                 keyboardOptions = KeyboardOptions(
                     keyboardType = KeyboardType.Password,
@@ -267,7 +273,7 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                     Spacer(Modifier.height(12.dp))
                 }
                 if (isGiven && pasted.trim().startsWith("umbra://h/")) {
-                    SecondaryButton("Look up", enabled = Core.online) {
+                    SecondaryButton(stringResource(R.string.contacts_look_up), enabled = Core.online) {
                         val link = pasted.trim()
                         given = null
                         Core.previewContact(link) { if (pasted.trim() == link) preview = it }
@@ -277,7 +283,7 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it.take(32) },
-                    label = { Text("Your name in the request") },
+                    label = { Text(stringResource(R.string.contacts_your_name_in_request)) },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
                     modifier = Modifier.fillMaxWidth(),
@@ -286,29 +292,29 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                 OutlinedTextField(
                     value = note,
                     onValueChange = { note = it.take(280) },
-                    label = { Text("Note") },
+                    label = { Text(stringResource(R.string.contacts_note)) },
                     maxLines = 4,
                     keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Spacer(Modifier.height(12.dp))
                 if (Core.requestSent) {
-                    Note("Request sent. The contact opens when they accept.")
+                    Note(stringResource(R.string.contacts_request_sent))
                 } else if (Core.directoryBusy) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 3.dp)
                         Spacer(Modifier.width(12.dp))
-                        Text("Looking up the entry and sending the request.")
+                        Text(stringResource(R.string.contacts_looking_up))
                     }
                 } else if (Core.takeoverOf == pasted.trim()) {
                     // DIS-084, DIS-085: the hello goes only after a confirmation.
                     Note(UiText.get(R.string.umbra_ui_dis_084, pasted.trim()), isError = true)
                     Spacer(Modifier.height(12.dp))
-                    SecondaryButton("Send anyway", enabled = Core.online) {
+                    SecondaryButton(stringResource(R.string.contacts_send_anyway), enabled = Core.online) {
                         Core.sendRequest(pasted.trim(), name, note, confirmed = true)
                     }
                 } else {
-                    SecondaryButton("Send request", enabled = Core.online) {
+                    SecondaryButton(stringResource(R.string.contacts_send_request), enabled = Core.online) {
                         // The keyboard leaves, thus the result shows.
                         focus.clearFocus()
                         Core.sendRequest(pasted.trim(), name, note)
@@ -322,10 +328,13 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 3.dp)
                     Spacer(Modifier.width(12.dp))
-                    Text("Opening the invitation through three relays.")
+                    Text(stringResource(R.string.contacts_opening_invitation))
                 }
             } else {
-                SecondaryButton("Continue", enabled = Core.online && pasted.isNotBlank()) {
+                SecondaryButton(
+                    stringResource(R.string.contacts_continue),
+                    enabled = Core.online && pasted.isNotBlank(),
+                ) {
                     open(pasted)
                     pasted = ""
                 }
@@ -381,7 +390,7 @@ fun NameContactScreen(conversation: Conversation, onDone: () -> Unit) {
     // A request gave a name, which the user keeps or changes.
     var name by remember { mutableStateOf(Core.suggestedName.orEmpty().also { Core.suggestedName = null }) }
     Column(Modifier.fillMaxSize()) {
-        BackBar("New contact", onBack = onDone)
+        BackBar(stringResource(R.string.contacts_new_contact), onBack = onDone)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
             Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                 Box(
@@ -395,23 +404,25 @@ fun NameContactScreen(conversation: Conversation, onDone: () -> Unit) {
                 }
             }
             Spacer(Modifier.height(20.dp))
-            Headline("Name this contact.")
+            Headline(stringResource(R.string.contacts_name_this_contact))
             Spacer(Modifier.height(16.dp))
             // A name is a label of the user and no message text.
             OutlinedTextField(
                 value = name,
                 onValueChange = { name = it.take(60) },
-                label = { Text("Name") },
+                label = { Text(stringResource(R.string.common_name)) },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
                 modifier = Modifier.fillMaxWidth(),
             )
             Spacer(Modifier.height(16.dp))
-            PrimaryButton("Save and open chat") {
+            PrimaryButton(stringResource(R.string.contacts_save_and_open_chat)) {
                 if (name.isNotBlank()) Core.setName(conversation, name)
                 onDone()
             }
-            TextButton(onClick = onDone, modifier = Modifier.fillMaxWidth()) { Text("Not now") }
+            TextButton(onClick = onDone, modifier = Modifier.fillMaxWidth()) {
+                Text(stringResource(R.string.contacts_not_now))
+            }
         }
     }
 }
@@ -421,20 +432,20 @@ fun NameContactScreen(conversation: Conversation, onDone: () -> Unit) {
 fun RenameContactScreen(chat: Chat, onDone: () -> Unit) {
     var name by remember { mutableStateOf(chat.name) }
     Column(Modifier.fillMaxSize()) {
-        BackBar("Edit contact", onBack = onDone)
+        BackBar(stringResource(R.string.contacts_edit_contact), onBack = onDone)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
             Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { Avatar(chat, size = 84) }
             Spacer(Modifier.height(20.dp))
             OutlinedTextField(
                 value = name,
                 onValueChange = { name = it.take(60) },
-                label = { Text("Name") },
+                label = { Text(stringResource(R.string.common_name)) },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
                 modifier = Modifier.fillMaxWidth(),
             )
             Spacer(Modifier.height(16.dp))
-            PrimaryButton("Save") {
+            PrimaryButton(stringResource(R.string.common_save)) {
                 Core.setName(chat.conversation, name)
                 onDone()
             }
@@ -448,11 +459,11 @@ private fun share(context: Context, link: String) {
         type = "text/plain"
         putExtra(Intent.EXTRA_TEXT, link)
     }
-    context.startActivity(Intent.createChooser(send, "Share invitation"))
+    context.startActivity(Intent.createChooser(send, UiText.get(R.string.contacts_share_invitation)))
 }
 
 /** IMP-056: the clipboard preview of the platform hides a sensitive clip. */
-fun copySensitive(context: Context, text: String, label: String = "UMBRA invitation") {
+fun copySensitive(context: Context, text: String, label: String = UiText.get(R.string.contacts_umbra_invitation)) {
     val clip = ClipData.newPlainText(label, text)
     clip.description.extras = PersistableBundle().apply {
         putBoolean("android.content.extra.IS_SENSITIVE", true)

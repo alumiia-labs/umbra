@@ -37,6 +37,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -94,14 +96,18 @@ fun RecoveryPromptLine(push: (Screen) -> Unit) {
     ) {
         FaIcon("key", size = 18.dp, tint = Palette.Action)
         Spacer(Modifier.width(12.dp))
-        Text("Write down your recovery code", Modifier.weight(1f))
+        Text(stringResource(R.string.recovery_write_down_code), Modifier.weight(1f))
         Box(
             Modifier
                 .size(36.dp)
                 .clip(CircleShape)
-                .press(role = Role.Button, label = "Dismiss") { RecoveryPrompt.dismiss(context) },
+                .press(role = Role.Button, label = stringResource(R.string.common_dismiss)) {
+                    RecoveryPrompt.dismiss(context)
+                },
             contentAlignment = Alignment.Center,
-        ) { FaIcon("xmark", label = "Dismiss", size = 14.dp, tint = Palette.TextSecondary) }
+        ) {
+            FaIcon("xmark", label = stringResource(R.string.common_dismiss), size = 14.dp, tint = Palette.TextSecondary)
+        }
     }
 }
 
@@ -127,7 +133,7 @@ fun RecoveryCodeScreen(onBack: () -> Unit, push: (Screen) -> Unit = {}) {
         }
     }
     Column(Modifier.fillMaxSize()) {
-        BackBar("Recovery code", onBack = onBack)
+        BackBar(stringResource(R.string.common_recovery_code), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
             val shown = digits
             Column(
@@ -146,8 +152,10 @@ fun RecoveryCodeScreen(onBack: () -> Unit, push: (Screen) -> Unit = {}) {
             // IMP-050: the backup of the platform holds nothing of UMBRA.
             Note(UiText.get(R.string.umbra_ui_imp_050))
             Spacer(Modifier.height(16.dp))
-            EntryRow(RowEntry("user-group", "Recovery with contacts") { push(Screen.SocialRecovery) })
-            EntryRow(RowEntry("key", "Root seed") { push(Screen.RootSeed) })
+            EntryRow(
+                RowEntry("user-group", stringResource(R.string.recovery_with_contacts)) { push(Screen.SocialRecovery) },
+            )
+            EntryRow(RowEntry("key", stringResource(R.string.recovery_root_seed)) { push(Screen.RootSeed) })
         }
     }
 }
@@ -204,22 +212,29 @@ fun SocialRecoveryScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
     val count = chosen.size
     val needed = threshold.coerceIn(2, maxOf(2, count))
     Column(Modifier.fillMaxSize()) {
-        BackBar("Recovery with contacts", onBack = onBack)
+        BackBar(stringResource(R.string.recovery_with_contacts), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
             Spacer(Modifier.height(8.dp))
             // IDN-087, IDN-088: which half each holder takes, and what the
             // pieces do alone.
             Note(
-                UiText.get(R.string.umbra_ui_idn_088) + " $needed pieces and your user half restore your account. " +
+                UiText.get(R.string.umbra_ui_idn_088) + " " +
+                    pluralStringResource(R.plurals.recovery_pieces_restore, needed, needed) + " " +
                     UiText.get(R.string.umbra_ui_idn_087),
             )
             if (given.isNotEmpty()) {
+                val aContact = stringResource(R.string.common_a_contact)
                 val names = given.map { share ->
-                    contacts.firstOrNull { it.conversation.id.contentEquals(share.conversation) }?.title ?: "A contact"
+                    contacts.firstOrNull { it.conversation.id.contentEquals(share.conversation) }?.title ?: aContact
                 }
                 Spacer(Modifier.height(12.dp))
                 Text(
-                    "Held by ${names.joinToString(", ")}, ${given.first().threshold} of ${given.first().count} needed",
+                    stringResource(
+                        R.string.recovery_held_by,
+                        names.joinToString(", "),
+                        given.first().threshold.toInt(),
+                        given.first().count.toInt(),
+                    ),
                     style = MaterialTheme.typography.bodySmall,
                     color = Palette.TextSecondary,
                     modifier = Modifier.subline(),
@@ -233,7 +248,7 @@ fun SocialRecoveryScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             }
             if (count >= 2) {
                 Text(
-                    "Pieces needed",
+                    stringResource(R.string.recovery_pieces_needed),
                     style = MaterialTheme.typography.labelLarge,
                     color = Palette.TextSecondary,
                     modifier = Modifier.padding(top = 16.dp, bottom = 4.dp).subline(),
@@ -249,18 +264,18 @@ fun SocialRecoveryScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                     ) {
                         RadioMark(isChosen = needed == k)
                         Spacer(Modifier.width(14.dp))
-                        Text("$k of $count")
+                        Text(stringResource(R.string.recovery_k_of_n, k, count))
                     }
                 }
             }
             Spacer(Modifier.height(16.dp))
-            PrimaryButton("Send the pieces", enabled = count >= 2) {
+            PrimaryButton(stringResource(R.string.recovery_send_pieces), enabled = count >= 2) {
                 val holders = contacts.filter { it.conversation.id.toList() in chosen }.map { it.conversation }
                 Core.splitSocial(holders, needed) { isSent = !isSent }
                 chosen.clear()
             }
             Spacer(Modifier.height(8.dp))
-            SecondaryButton("Show your user half") { push(Screen.UserHalf) }
+            SecondaryButton(stringResource(R.string.recovery_show_user_half)) { push(Screen.UserHalf) }
             Spacer(Modifier.height(20.dp))
         }
     }
@@ -269,9 +284,9 @@ fun SocialRecoveryScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
 /** The time of the last backup, which is a fact that the user cannot know. */
 private fun backupLine(context: Context, atSeconds: Long?): String =
     if (atSeconds == null) {
-        "No backup yet."
+        UiText.get(R.string.recovery_no_backup)
     } else {
-        "Last backup: ${timeLabel(context, atSeconds * 1_000)}."
+        UiText.get(R.string.recovery_last_backup, timeLabel(context, atSeconds * 1_000))
     }
 
 /**
@@ -325,20 +340,28 @@ fun RestoreForm(onCancel: () -> Unit) {
             Text(Core.restoreNote.orEmpty(), color = Palette.TextSecondary)
             return@Column
         }
-        FramedPlatformField(code, if (withShares) "User half" else "Recovery code", isPassphrase = false)
+        FramedPlatformField(
+            code,
+            stringResource(if (withShares) R.string.recovery_user_half else R.string.common_recovery_code),
+            isPassphrase = false,
+        )
         if (withShares) {
             for (index in 0 until shareCount) {
                 Spacer(Modifier.height(8.dp))
-                FramedPlatformField(shares[index], "Share ${index + 1}", isPassphrase = false)
+                FramedPlatformField(
+                    shares[index],
+                    stringResource(R.string.recovery_share_number, index + 1),
+                    isPassphrase = false,
+                )
             }
             if (shareCount < shares.size) {
-                InlineButton("Add a share") { shareCount++ }
+                InlineButton(stringResource(R.string.recovery_add_share)) { shareCount++ }
             }
         }
         Spacer(Modifier.height(12.dp))
-        FramedPlatformField(passphrase, "New passphrase", isPassphrase = true)
+        FramedPlatformField(passphrase, stringResource(R.string.common_new_passphrase), isPassphrase = true)
         Spacer(Modifier.height(14.dp))
-        PrimaryButton("Restore") {
+        PrimaryButton(stringResource(R.string.recovery_restore)) {
             val digits = code.take()
             val phrase = passphrase.take()
             val taken = if (withShares) shares.take(shareCount).mapNotNull { it.take() } else emptyList()
@@ -351,11 +374,13 @@ fun RestoreForm(onCancel: () -> Unit) {
             }
         }
         Spacer(Modifier.height(8.dp))
-        SecondaryButton(if (withShares) "Use the recovery code" else "Use shares of contacts") {
+        SecondaryButton(
+            stringResource(if (withShares) R.string.recovery_use_recovery_code else R.string.recovery_use_shares),
+        ) {
             withShares = !withShares
         }
         Spacer(Modifier.height(8.dp))
-        SecondaryButton("Back", onClick = onCancel)
+        SecondaryButton(stringResource(R.string.common_back), onClick = onCancel)
     }
 }
 
@@ -370,15 +395,15 @@ fun ResetIdentityScreen(onBack: () -> Unit) {
     var result by remember { mutableStateOf<String?>(null) }
     var fault by remember { mutableStateOf<String?>(null) }
     Column(Modifier.fillMaxSize()) {
-        BackBar("Reset identity", onBack = onBack)
+        BackBar(stringResource(R.string.common_reset_identity), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
-            Text("UMBRA makes a new identity for this device.")
+            Text(stringResource(R.string.recovery_reset_intro))
             Spacer(Modifier.height(12.dp))
             for (line in listOf(
-                "Each contact gets your new key, and cannot write to you until they accept it.",
-                "Each group moves you to new keys.",
-                "Your public links and your handle end.",
-                "Your messages and your contacts stay.",
+                stringResource(R.string.recovery_reset_new_key),
+                stringResource(R.string.recovery_reset_groups),
+                stringResource(R.string.recovery_reset_links_end),
+                stringResource(R.string.recovery_reset_messages_stay),
             )) {
                 Text("· $line", color = Palette.TextSecondary, modifier = Modifier.padding(bottom = 6.dp))
             }
@@ -393,23 +418,23 @@ fun ResetIdentityScreen(onBack: () -> Unit) {
             }
             if (Core.devices.size > 1) {
                 // DEV-307: the other devices leave the set first.
-                Note("Remove your other devices first.")
+                Note(stringResource(R.string.recovery_remove_other_devices))
             } else {
-                DangerButton("Reset identity") { isAsking = true }
+                DangerButton(stringResource(R.string.common_reset_identity)) { isAsking = true }
             }
         }
     }
     if (isAsking) {
         ActionSheet(
-            "Reset your identity?",
+            stringResource(R.string.recovery_reset_question),
             listOf(
-                RowEntry("rotate", "Reset identity") {
+                RowEntry("rotate", stringResource(R.string.common_reset_identity)) {
                     Core.resetIdentity(context) { done ->
-                        if (done == null) fault = "Remove your other devices first." else result = done
+                        if (done == null) fault = UiText.get(R.string.recovery_remove_other_devices) else result = done
                     }
                 },
             ),
-            note = "You cannot undo this.",
+            note = stringResource(R.string.recovery_cannot_undo),
             onDismiss = { isAsking = false },
         )
     }

@@ -20,6 +20,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 
 /**
@@ -34,25 +35,28 @@ fun BlockScreen(
     onSet: (Boolean) -> Unit,
 ) {
     Column(Modifier.fillMaxSize()) {
-        BackBar(if (isBlocked == true) "Unblock" else "Block", onBack = onBack)
+        BackBar(
+            stringResource(if (isBlocked == true) R.string.common_unblock else R.string.common_block),
+            onBack = onBack,
+        )
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
             HeroIcon("ban")
             Spacer(Modifier.height(24.dp))
-            Headline(if (isBlocked == true) "Unblock $name?" else "Block $name?")
+            Headline(stringResource(if (isBlocked == true) R.string.block_unblock_q else R.string.block_block_q, name))
             Spacer(Modifier.height(16.dp))
             isBlocked ?: return@Column
             if (isBlocked) {
-                Note("Messages from now on show again. Messages sent while blocked stay gone.")
+                Note(stringResource(R.string.block_unblock_note))
                 Spacer(Modifier.height(16.dp))
-                PrimaryButton("Unblock") { onSet(false) }
+                PrimaryButton(stringResource(R.string.common_unblock)) { onSet(false) }
             } else {
                 Note(
                     UiText.get(R.string.umbra_ui_abu_040) + " " + UiText.get(R.string.umbra_ui_abu_041),
                 )
                 Spacer(Modifier.height(16.dp))
-                DangerButton("Block") { onSet(true) }
+                DangerButton(stringResource(R.string.common_block)) { onSet(true) }
             }
-            QuietButton("Cancel", onClick = onBack)
+            QuietButton(stringResource(R.string.common_cancel), onClick = onBack)
         }
     }
 }
@@ -90,13 +94,12 @@ fun BlockedLine(chat: Chat) {
             Core.discardedCount(chat.conversation) { count ->
                 line = when {
                     count == 0uL -> null
-                    count == 1uL -> "1 message from a blocked member is hidden."
-                    else -> "$count messages from blocked members are hidden."
+                    else -> UiText.plural(R.plurals.block_hidden, count.toInt(), count.toLong())
                 }
             }
         } else {
             Core.isBlocked(chat.conversation) { blocked ->
-                line = if (blocked) "Blocked. Messages from this contact are dropped." else null
+                line = if (blocked) UiText.get(R.string.block_contact_dropped) else null
             }
         }
     }

@@ -48,6 +48,7 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
@@ -69,16 +70,16 @@ import java.util.concurrent.atomic.AtomicBoolean
 @Composable
 fun ScanInvitationScreen(onBack: () -> Unit) {
     Column(Modifier.fillMaxSize()) {
-        BackBar("Scan code", onBack = onBack)
+        BackBar(stringResource(R.string.scan_scan_code), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
-            Headline("Scan their invitation")
+            Headline(stringResource(R.string.scan_their_invitation))
             Spacer(Modifier.height(20.dp))
             Scanner { text ->
                 Core.scannedInvitation = text
                 onBack()
             }
             Spacer(Modifier.height(16.dp))
-            SecondaryButton("Paste a link instead", onClick = onBack)
+            SecondaryButton(stringResource(R.string.scan_paste_link_instead), onClick = onBack)
         }
     }
 }
@@ -92,31 +93,31 @@ fun ScanInvitationScreen(onBack: () -> Unit) {
 fun ScanSafetyNumberScreen(chat: Chat, onBack: () -> Unit) {
     var isMatch by remember { mutableStateOf<Boolean?>(null) }
     Column(Modifier.fillMaxSize()) {
-        BackBar("Verify ${chat.title}", onBack = onBack)
+        BackBar(stringResource(R.string.scan_verify, chat.title), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
             when (isMatch) {
                 null -> {
-                    Headline("Scan the code of ${chat.title}")
+                    Headline(stringResource(R.string.scan_code_of, chat.title))
                     Spacer(Modifier.height(20.dp))
                     Scanner { text -> Core.verifyByNumber(chat.conversation, text) { isMatch = it } }
                 }
                 true -> {
                     HeroIcon("shield-check")
                     Spacer(Modifier.height(20.dp))
-                    Headline("You verified ${chat.title}.")
+                    Headline(stringResource(R.string.scan_you_verified, chat.title))
                     Spacer(Modifier.height(20.dp))
-                    PrimaryButton("Done", onClick = onBack)
+                    PrimaryButton(stringResource(R.string.common_done), onClick = onBack)
                 }
                 false -> {
                     HeroIcon("triangle-exclamation")
                     Spacer(Modifier.height(20.dp))
                     // A user cannot know what a mismatch means.
                     Headline(
-                        "The codes do not match.",
-                        "Another party can be between you and ${chat.title}.",
+                        stringResource(R.string.scan_codes_do_not_match),
+                        stringResource(R.string.scan_another_party, chat.title),
                     )
                     Spacer(Modifier.height(20.dp))
-                    PrimaryButton("Scan again") { isMatch = null }
+                    PrimaryButton(stringResource(R.string.scan_again)) { isMatch = null }
                 }
             }
         }
@@ -164,9 +165,9 @@ fun Scanner(onText: (String) -> Unit) {
     }
     if (!isAllowed) {
         Spacer(Modifier.height(12.dp))
-        Note("UMBRA has no access to the camera.", isError = true)
+        Note(stringResource(R.string.scan_no_camera), isError = true)
         Spacer(Modifier.height(12.dp))
-        PrimaryButton("Allow the camera") { ask.launch(Manifest.permission.CAMERA) }
+        PrimaryButton(stringResource(R.string.scan_allow_camera)) { ask.launch(Manifest.permission.CAMERA) }
     }
 }
 

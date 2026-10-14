@@ -62,6 +62,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -669,7 +670,7 @@ fun VideoTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
         if (frame != null) {
             Image(
                 frame,
-                contentDescription = "Video",
+                contentDescription = stringResource(R.string.common_video),
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize().alpha(if (state == FILE_READY) 1f else 0.55f),
             )
@@ -689,12 +690,11 @@ fun VideoTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
         } else {
             TransferMark(file, lostLabel(line))
         }
+        val duration = Files.duration(file.mediaSeconds.toInt())
+        // The time line of a sent video holds its progress.
+        val share = if (line.info.outgoing) null else progressOf(file)
         Text(
-            buildString {
-                append(Files.duration(file.mediaSeconds.toInt()))
-                // The time line of a sent video holds its progress.
-                if (!line.info.outgoing) progressOf(file)?.let { append(" · ").append(it).append(" %") }
-            },
+            if (share != null) stringResource(R.string.files_with_progress, duration, share) else duration,
             style = MaterialTheme.typography.labelSmall,
             color = Color.White,
             modifier = Modifier
@@ -733,10 +733,10 @@ fun TransferMark(file: MsgFile, lost: String? = null) {
         ) {
             val share = progressOf(file)
             when {
-                state == FILE_FAILED -> FaIcon("rotate", label = "Download again", size = 18.dp, tint = Color.White)
+                state == FILE_FAILED -> FaIcon("rotate", label = stringResource(R.string.files_download_again), size = 18.dp, tint = Color.White)
                 state == FILE_WANTED && share != null ->
-                    Text("$share %", style = MaterialTheme.typography.labelSmall, color = Color.White)
-                else -> FaIcon("download", label = "Download", size = 18.dp, tint = Color.White)
+                    Text(stringResource(R.string.files_percent, share), style = MaterialTheme.typography.labelSmall, color = Color.White)
+                else -> FaIcon("download", label = stringResource(R.string.files_download), size = 18.dp, tint = Color.White)
             }
         }
         if (state == FILE_HELD) {
@@ -770,8 +770,8 @@ fun lostLabel(line: Line): String? {
     if (line.info.outgoing) return null
     val isOld = System.currentTimeMillis() - line.info.sentAtMs.toLong() > CHUNK_TTL_MS
     return when {
-        (state == FILE_GONE || state == FILE_FAILED || state == FILE_HELD) && isOld -> "Expired"
-        state == FILE_GONE -> "Lost"
+        (state == FILE_GONE || state == FILE_FAILED || state == FILE_HELD) && isOld -> UiText.get(R.string.files_expired)
+        state == FILE_GONE -> UiText.get(R.string.files_lost)
         else -> null
     }
 }
@@ -808,25 +808,30 @@ fun FileTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(
-                file.name ?: "File",
+                file.name ?: stringResource(R.string.common_file),
                 style = MaterialTheme.typography.bodyMedium,
                 color = Palette.Text,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
+            val size = Files.size(context, file.size.toLong())
+            // A size before the download is the padded size, thus it says
+            // "about".
+            val shownSize = if (state == FILE_WANTED || state == FILE_HELD) {
+                stringResource(R.string.files_about_size, size)
+            } else {
+                size
+            }
+            val lost = lostLabel(line)
             Text(
-                buildString {
-                    // A size before the download is the padded size, thus
-                    // it says "about".
-                    if (state == FILE_WANTED || state == FILE_HELD) append("About ")
-                    append(Files.size(context, file.size.toLong()))
-                    when {
-                        // The time line of a sent file holds its progress.
-                        progress != null && !line.info.outgoing -> append(" · ").append(progress).append(" %")
-                        state == FILE_WANTED -> append(" · Receiving")
-                        lostLabel(line) != null -> append(" · ").append(lostLabel(line))
-                        state == FILE_FAILED && !line.info.outgoing -> append(" · Not received")
-                    }
+                when {
+                    // The time line of a sent file holds its progress.
+                    progress != null && !line.info.outgoing ->
+                        stringResource(R.string.files_with_progress, shownSize, progress)
+                    state == FILE_WANTED -> stringResource(R.string.files_receiving, shownSize)
+                    lost != null -> stringResource(R.string.files_with_state, shownSize, lost)
+                    state == FILE_FAILED && !line.info.outgoing -> stringResource(R.string.files_not_received, shownSize)
+                    else -> shownSize
                 },
                 style = MaterialTheme.typography.labelSmall,
                 color = Palette.TextSecondary,
@@ -912,7 +917,7 @@ fun VideoScreen(line: Line, onBack: () -> Unit) {
         Modifier
             .fillMaxSize()
             .background(Color.Black)
-            .press(role = Role.Button, label = if (isPlaying) "Pause" else "Play") {
+            .press(role = Role.Button, label = if (isPlaying) stringResource(R.string.files_pause) else stringResource(R.string.files_play)) {
                 if (!isReady) return@press
                 if (player.isPlaying) {
                     player.pause()
@@ -943,12 +948,12 @@ fun VideoScreen(line: Line, onBack: () -> Unit) {
             modifier = Modifier.fillMaxWidth().aspectRatio(ratio),
         )
         if (failed) {
-            Text("This video does not play on this device.", color = Color.White)
+            Text(stringResource(R.string.files_video_not_playable), color = Color.White)
         } else if (isReady && !isPlaying) {
             Box(
                 Modifier.size(64.dp).background(Color.Black.copy(alpha = 0.5f), CircleShape),
                 contentAlignment = Alignment.Center,
-            ) { FaIcon("play", label = "Play", size = 24.dp, tint = Color.White) }
+            ) { FaIcon("play", label = stringResource(R.string.files_play), size = 24.dp, tint = Color.White) }
         }
         Row(
             Modifier
@@ -962,9 +967,9 @@ fun VideoScreen(line: Line, onBack: () -> Unit) {
                 Modifier
                     .size(48.dp)
                     .clip(CircleShape)
-                    .press(role = Role.Button, label = "Back", onClick = onBack),
+                    .press(role = Role.Button, label = stringResource(R.string.common_back), onClick = onBack),
                 contentAlignment = Alignment.Center,
-            ) { FaIcon("arrow-left", label = "Back", size = 20.dp, tint = Color.White) }
+            ) { FaIcon("arrow-left", label = stringResource(R.string.common_back), size = 20.dp, tint = Color.White) }
         }
         if (isReady) {
             Row(
@@ -1025,7 +1030,7 @@ fun rememberSave(): (Line) -> Unit {
         val line = target
         target = null
         if (uri != null && line != null) {
-            Core.saveFile(context, line, uri) { Toast.makeText(context, "Saved", Toast.LENGTH_SHORT).show() }
+            Core.saveFile(context, line, uri) { Toast.makeText(context, UiText.get(R.string.files_saved), Toast.LENGTH_SHORT).show() }
         }
     }
     val start = { line: Line ->
@@ -1036,9 +1041,9 @@ fun rememberSave(): (Line) -> Unit {
     }
     warning?.let { line ->
         ActionSheet(
-            "Save to this device?",
+            stringResource(R.string.files_save_title),
             listOf(
-                RowEntry("download", "Save") {
+                RowEntry("download", stringResource(R.string.common_save)) {
                     context.getSharedPreferences(FILE_PREFS, Context.MODE_PRIVATE)
                         .edit().putBoolean(SAVE_WARNED, true).apply()
                     start(line)
@@ -1071,7 +1076,7 @@ fun MediaScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
     val media = all.filter { it.info.file?.mimeClass == CLASS_IMAGE || it.info.file?.mimeClass == CLASS_VIDEO }
     val files = all - media.toSet()
     Column(Modifier.fillMaxSize()) {
-        BackBar("Media and files", onBack = onBack)
+        BackBar(stringResource(R.string.common_media_and_files), onBack = onBack)
         androidx.compose.foundation.lazy.LazyColumn(
             Modifier.fillMaxSize(),
             contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp),
@@ -1079,7 +1084,7 @@ fun MediaScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             if (lines != null && all.isEmpty()) {
                 item {
                     Text(
-                        "Nothing shared yet.",
+                        stringResource(R.string.files_nothing_shared),
                         style = MaterialTheme.typography.bodyMedium,
                         color = Palette.TextSecondary,
                         modifier = Modifier.padding(20.dp),
@@ -1112,7 +1117,7 @@ fun MediaScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             if (files.isNotEmpty()) {
                 item {
                     Text(
-                        "Files",
+                        stringResource(R.string.files_files),
                         style = MaterialTheme.typography.titleSmall,
                         color = Palette.TextSecondary,
                         modifier = Modifier.padding(start = 20.dp, top = 20.dp, bottom = 8.dp),
@@ -1125,7 +1130,7 @@ fun MediaScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                 Box(
                     Modifier
                         .fillMaxWidth()
-                        .press(role = Role.Button, label = file.name ?: "File") {
+                        .press(role = Role.Button, label = file.name ?: stringResource(R.string.common_file)) {
                             when (if (isExpired(line)) 0 else file.state.toInt()) {
                                 FILE_FAILED, FILE_HELD -> Core.fetchFile(line.handle)
                                 FILE_READY -> save(line)
@@ -1154,7 +1159,7 @@ private fun MediaCell(line: Line, modifier: Modifier, onOpen: () -> Unit) {
         modifier
             .aspectRatio(1f)
             .background(Palette.Pressed)
-            .press(role = Role.Button, label = if (isVideo) "Video" else "Photo", onClick = onOpen),
+            .press(role = Role.Button, label = if (isVideo) stringResource(R.string.common_video) else stringResource(R.string.common_photo), onClick = onOpen),
         contentAlignment = Alignment.Center,
     ) {
         if (image != null) {

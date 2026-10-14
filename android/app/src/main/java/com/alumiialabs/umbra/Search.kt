@@ -38,6 +38,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -54,28 +55,28 @@ private const val REBUILD_WAIT_MS = 400L
 
 private const val DAY_MS = 86_400_000L
 
-/** One value of a limit of the search, with its word and its icon. */
-private class Choice(val label: String, val icon: String, val value: Int)
+/** One value of a limit of the search, with the resource of its word and its icon. */
+private class Choice(val label: Int, val icon: String, val value: Int)
 
 private val ORDERS = listOf(
-    Choice("Best match", "magnifying-glass", 0),
-    Choice("Newest", "clock", 1),
-    Choice("Oldest", "hourglass-half", 2),
+    Choice(R.string.search_best_match, "magnifying-glass", 0),
+    Choice(R.string.search_newest, "clock", 1),
+    Choice(R.string.search_oldest, "hourglass-half", 2),
 )
 private val SIDES = listOf(
-    Choice("From anyone", "user-group", 0),
-    Choice("From you", "paper-plane", 1),
-    Choice("From others", "comment", 2),
+    Choice(R.string.search_from_anyone, "user-group", 0),
+    Choice(R.string.search_from_you, "paper-plane", 1),
+    Choice(R.string.search_from_others, "comment", 2),
 )
 private val KINDS = listOf(
-    Choice("All messages", "comment", 0),
-    Choice("Files", "file", 1),
+    Choice(R.string.search_all_messages, "comment", 0),
+    Choice(R.string.search_files, "file", 1),
 )
 private val AGES = listOf(
-    Choice("Any time", "clock", 0),
-    Choice("Last 7 days", "clock", 7),
-    Choice("Last 30 days", "clock", 30),
-    Choice("Last year", "clock", 365),
+    Choice(R.string.search_any_time, "clock", 0),
+    Choice(R.string.search_last_7_days, "clock", 7),
+    Choice(R.string.search_last_30_days, "clock", 30),
+    Choice(R.string.search_last_year, "clock", 365),
 )
 
 /**
@@ -140,7 +141,7 @@ fun SearchScreen(scope: Conversation?, onBack: () -> Unit, push: (Screen) -> Uni
                         val title = member.contact?.let { contact ->
                             Core.chats.firstOrNull { it.conversation.id.contentEquals(contact) }?.title
                         }
-                        member.index to (title ?: "Member ${member.index}")
+                        member.index to (title ?: UiText.get(R.string.common_member_number, member.index.toInt()))
                     }
                     )
             }
@@ -151,9 +152,9 @@ fun SearchScreen(scope: Conversation?, onBack: () -> Unit, push: (Screen) -> Uni
             Modifier.fillMaxWidth().padding(start = 4.dp, end = 16.dp, top = 8.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconAction("arrow-left", "Back", leave)
+            IconAction("arrow-left", stringResource(R.string.common_back), leave)
             Spacer(Modifier.width(4.dp))
-            PlatformInput(field, "Search", isPassphrase = false, modifier = Modifier.weight(1f))
+            PlatformInput(field, stringResource(R.string.common_search), isPassphrase = false, modifier = Modifier.weight(1f))
         }
         Row(
             Modifier
@@ -162,15 +163,15 @@ fun SearchScreen(scope: Conversation?, onBack: () -> Unit, push: (Screen) -> Uni
                 .padding(horizontal = 16.dp, vertical = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            LimitChip("Sort", ORDERS, order) { order = it }
-            LimitChip("From", SIDES, side) { side = it }
-            LimitChip("Show", KINDS, kind) { kind = it }
-            LimitChip("Date", AGES, age) { age = it }
+            LimitChip(stringResource(R.string.search_sort), ORDERS, order) { order = it }
+            LimitChip(stringResource(R.string.search_from), SIDES, side) { side = it }
+            LimitChip(stringResource(R.string.search_show), KINDS, kind) { kind = it }
+            LimitChip(stringResource(R.string.search_date), AGES, age) { age = it }
         }
         val results = found
         when {
             results == null -> Unit
-            results.isEmpty() -> EmptyState("No results.")
+            results.isEmpty() -> EmptyState(stringResource(R.string.search_no_results))
             else -> LazyColumn(state = listState) {
                 items(results, key = { it.key }) { result ->
                     PressOver(
@@ -198,17 +199,19 @@ private fun LimitChip(title: String, choices: List<Choice>, current: Int, onPick
             .padding(horizontal = 14.dp, vertical = 8.dp),
     ) {
         Text(
-            chosen.label,
+            stringResource(chosen.label),
             style = MaterialTheme.typography.labelLarge,
             fontWeight = if (isSet) FontWeight.SemiBold else FontWeight.Normal,
             maxLines = 1,
         )
     }
     if (isOpen) {
+        val selected = stringResource(R.string.search_selected)
+        val labels = choices.map { stringResource(it.label) }
         ActionSheet(
             title,
-            choices.map { choice ->
-                RowEntry(choice.icon, choice.label, if (choice === chosen) "Selected" else null) {
+            choices.mapIndexed { index, choice ->
+                RowEntry(choice.icon, labels[index], if (choice === chosen) selected else null) {
                     onPick(choice.value)
                 }
             },
@@ -219,8 +222,8 @@ private fun LimitChip(title: String, choices: List<Choice>, current: Int, onPick
 
 /** The name of the sender of a result. */
 private fun senderOf(result: Core.Found, chat: Chat?, names: Map<UShort, String>?): String = when {
-    result.isOutgoing -> "You"
-    chat?.isGroup == true -> result.sender?.let { names?.get(it) ?: "Member $it" } ?: chat.title
+    result.isOutgoing -> UiText.get(R.string.common_you)
+    chat?.isGroup == true -> result.sender?.let { names?.get(it) ?: UiText.get(R.string.common_member_number, it.toInt()) } ?: chat.title
     else -> chat?.title.orEmpty()
 }
 
@@ -257,7 +260,7 @@ private fun ResultRow(result: Core.Found, showsChat: Boolean, names: Map<UShort,
             // The contact of a conversation of two is its title, thus the
             // line repeats no name for it.
             val names = showsChat && (result.isOutgoing || chat?.isGroup == true)
-            Snippet(result, if (names) "$sender: " else "", Modifier.subline())
+            Snippet(result, if (names) stringResource(R.string.search_sender_prefix, sender) else "", Modifier.subline())
         }
     }
 }

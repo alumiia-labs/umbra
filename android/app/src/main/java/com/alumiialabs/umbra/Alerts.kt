@@ -21,6 +21,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 
@@ -31,9 +32,9 @@ const val ALERT_NONE: UByte = 2u
 
 /** The words of one setting. */
 fun alertLabel(value: UByte): String = when (value) {
-    ALERT_MENTIONS -> "Mentions only"
-    ALERT_NONE -> "Off"
-    else -> "All messages"
+    ALERT_MENTIONS -> UiText.get(R.string.alerts_mentions_only)
+    ALERT_NONE -> UiText.get(R.string.common_off)
+    else -> UiText.get(R.string.alerts_all_messages)
 }
 
 /**
@@ -47,7 +48,7 @@ fun AlertsScreen(chat: Chat, onBack: () -> Unit) {
     LaunchedEffect(chat.conversation) { Core.alertSetting(chat.conversation) { chosen = it } }
     val choices = if (chat.isGroup) listOf(ALERT_ALL, ALERT_MENTIONS, ALERT_NONE) else listOf(ALERT_ALL, ALERT_NONE)
     Column(Modifier.fillMaxSize()) {
-        BackBar("Notifications", onBack = onBack)
+        BackBar(stringResource(R.string.common_notifications), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
             Spacer(Modifier.height(8.dp))
             chosen?.let { held ->

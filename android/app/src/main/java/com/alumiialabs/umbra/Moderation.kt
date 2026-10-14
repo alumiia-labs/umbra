@@ -25,12 +25,10 @@ const val MOD_UNHIDE: UByte = 3u
 
 /** The acting role of a placeholder (`GRP-082`). */
 fun roleWord(role: UByte): String = when (role.toInt()) {
-    4 -> "An admin"
-    5 -> "An owner"
-    else -> "A moderator"
+    4 -> UiText.get(R.string.mod_an_admin)
+    5 -> UiText.get(R.string.mod_an_owner)
+    else -> UiText.get(R.string.mod_a_moderator)
 }
-
-private fun messages(count: UShort) = if (count.toInt() == 1) "1 message" else "$count messages"
 
 /**
  * The words of one moderation epoch: each act and its count (`GRP-089`).
@@ -41,23 +39,27 @@ fun modNoteText(note: FfiModNote): String {
     val who = roleWord(note.actorRole)
     return buildList {
         if (note.removed > 0u) {
-            add("$who removed ${messages(note.removed)}. " + UiText.get(R.string.umbra_ui_grp_090))
+            add(counted(R.plurals.mod_removed, who, note.removed) + " " + UiText.get(R.string.umbra_ui_grp_090))
         }
-        if (note.hidden > 0u) add("$who hid ${messages(note.hidden)}.")
-        if (note.shown > 0u) add("$who put back ${messages(note.shown)}.")
+        if (note.hidden > 0u) add(counted(R.plurals.mod_hid, who, note.hidden))
+        if (note.shown > 0u) add(counted(R.plurals.mod_put_back, who, note.shown))
     }.joinToString(" ")
 }
+
+/** One act of a moderator on `count` messages, in words. */
+private fun counted(id: Int, who: String, count: UShort): String =
+    UiText.plural(id, count.toInt(), who, count.toInt())
 
 /** One line of a conversation that no member wrote: a change of the group. */
 class ChatNote(val atMs: ULong, val text: String, val icon: String)
 
 /** The role of a roster note, in words. */
 private fun roleName(role: UByte): String = when (role.toInt()) {
-    1 -> "an observer"
-    3 -> "a moderator"
-    4 -> "an admin"
-    5 -> "an owner"
-    else -> "a member"
+    1 -> UiText.get(R.string.mod_role_observer)
+    3 -> UiText.get(R.string.mod_role_moderator)
+    4 -> UiText.get(R.string.mod_role_admin)
+    5 -> UiText.get(R.string.mod_role_owner)
+    else -> UiText.get(R.string.mod_role_member)
 }
 
 /**
@@ -66,17 +68,21 @@ private fun roleName(role: UByte): String = when (role.toInt()) {
  * of plain epochs names nobody (`GRP-072` to `GRP-074`).
  */
 fun rosterNoteText(note: FfiRosterNote, names: Map<UShort, String>): String {
-    val who = names[note.index] ?: "Member ${note.index}"
+    val who = names[note.index] ?: UiText.get(R.string.common_member_number, note.index.toInt())
     val isYou = who == YOU
     return when (note.kind.toInt()) {
-        1 -> "$who joined"
-        2 -> if (isYou) "You left the group" else "$who is no longer in the group"
+        1 -> UiText.get(R.string.mod_joined, who)
+        2 -> if (isYou) UiText.get(R.string.mod_you_left) else UiText.get(R.string.mod_no_longer, who)
         3 -> UiText.get(R.string.umbra_ui_grp_050, who)
-        4 -> if (isYou) "You are now ${roleName(note.role)}" else "$who is now ${roleName(note.role)}"
-        5 -> if (note.index == NOBODY) {
-            "The members disagree on a change to the group"
+        4 -> if (isYou) {
+            UiText.get(R.string.mod_you_are_now, roleName(note.role))
         } else {
-            "$who made two different changes to the group"
+            UiText.get(R.string.mod_is_now, who, roleName(note.role))
+        }
+        5 -> if (note.index == NOBODY) {
+            UiText.get(R.string.mod_members_disagree)
+        } else {
+            UiText.get(R.string.mod_two_changes, who)
         }
         6 -> UiText.get(R.string.umbra_ui_net_103)
         7 -> UiText.get(R.string.umbra_ui_wir_341)
@@ -87,7 +93,7 @@ fun rosterNoteText(note: FfiRosterNote, names: Map<UShort, String>): String {
 private val NOBODY: UShort = 0xFFFFu
 
 /** The name of this member among the names of a group. */
-const val YOU = "You"
+val YOU: String get() = UiText.get(R.string.common_you)
 
 /** The notes of a group, in the order of time. */
 fun chatNotes(mods: List<FfiModNote>, roster: List<FfiRosterNote>, names: Map<UShort, String>): List<ChatNote> =
