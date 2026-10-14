@@ -179,7 +179,7 @@ fun AutoDownloadScreen(onBack: () -> Unit) {
             }
             Spacer(Modifier.height(14.dp))
             // A fact that a user cannot know, and that decides the choice above.
-            Note("A download at a tap shows the relays of the file when you opened the chat.")
+            Note("A download at a tap tells the relays of the file when you opened the chat.")
         }
     }
 }

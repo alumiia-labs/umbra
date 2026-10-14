@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 10: Relay Directory, Measurement, and Selection
 
 **Status:** Draft
-**Version:** 0.29.0
+**Version:** 0.29.1
 **Date:** 2026-10-14
 
 ---

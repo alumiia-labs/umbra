@@ -807,8 +807,8 @@ private fun SettingsTab(push: (Screen) -> Unit) {
                         isChoosingAge = false
                     }
                 },
-                note = "Older messages leave this device. With a short period, this device also " +
-                    "drops older messages that your other devices send it.",
+                note = "With a short period, this device also drops older messages that your " +
+                    "other devices send it.",
                 onDismiss = { isChoosingAge = false },
             )
         }

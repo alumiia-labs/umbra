@@ -30,6 +30,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -140,6 +141,14 @@ fun ConversationSettingsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) ->
     var mode by remember { mutableStateOf<Int?>(null) }
     var isChoosingMode by remember { mutableStateOf(false) }
     var forward by remember { mutableStateOf<ForwardRules?>(null) }
+    // DEV-326: the limit of the policy shows when the user turns it on.
+    var forwardNotice by remember { mutableStateOf(false) }
+    LaunchedEffect(forwardNotice) {
+        if (forwardNotice) {
+            delay(6_000)
+            forwardNotice = false
+        }
+    }
     LaunchedEffect(chat.conversation, Core.revision) { Core.forwardRules(chat.conversation) { forward = it } }
     LaunchedEffect(chat.conversation) { Core.privacyMode(chat.conversation) { mode = it } }
     LaunchedEffect(chat.conversation) { Core.receipts(chat.conversation) { receipts = it } }
@@ -194,18 +203,13 @@ fun ConversationSettingsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) ->
                 forward?.let { now ->
                     ToggleRow("No forwarding", now.own) { on ->
                         forward = ForwardRules(on, now.peer)
+                        forwardNotice = on
                         Core.setForwardProhibited(chat.conversation, on)
                     }
                 }
             }
-            if (receipts != null) {
+            if (forwardNotice) {
                 Spacer(Modifier.height(12.dp))
-                // A fact that a user cannot know, and that explains a wait.
-                Note("A receipt leaves 30 seconds or more after the message, so its time tells a relay less.")
-            }
-            if (!chat.isGroup && forward != null) {
-                Spacer(Modifier.height(8.dp))
-                // DEV-326: the policy is a request and no enforcement.
                 Note(UiText.get(R.string.umbra_ui_dev_326))
             }
         }

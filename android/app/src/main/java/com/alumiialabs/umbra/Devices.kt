@@ -350,8 +350,12 @@ fun LinkDeviceScreen(onBack: () -> Unit) {
                     Spacer(Modifier.height(20.dp))
                     PrimaryButton("Try again") { attempt++ }
                 }
+                // A refused start (DEV-302) shows its fault below, and no
+                // wait that never ends.
+                is LinkStatus.Idle -> PrimaryButton("Try again") { attempt++ }
                 else -> {
-                    Headline("Link a device")
+                    // The offer goes up to a relay before the code exists.
+                    Headline("Preparing the code")
                     Spacer(Modifier.height(20.dp))
                     Progress()
                 }
