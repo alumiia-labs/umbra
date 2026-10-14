@@ -1424,7 +1424,10 @@ fun ScreenshotBlock(conversation: Conversation) {
     val activity = LocalActivity.current
     DisposableEffect(isSecure) {
         val window = activity?.window
-        if (isSecure) window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-        onDispose { if (isSecure) window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE) }
+        // The state reads its new value at the dispose, thus the effect
+        // keeps the value that it set.
+        val isSet = isSecure
+        if (isSet) window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        onDispose { if (isSet) window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE) }
     }
 }

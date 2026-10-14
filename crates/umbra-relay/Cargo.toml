@@ -16,12 +16,12 @@ workspace = true
 native = ["umbra-core/precis", "umbra-transport/native", "dep:tokio", "dep:tokio-rustls", "dep:rustls", "dep:getrandom", "dep:rusqlite", "dep:aws-lc-rs"]
 
 [dependencies]
-umbra-crypto = { version = "0.28.0", path = "../umbra-crypto", features = ["keygen"] }
-umbra-wire = { version = "0.28.0", path = "../umbra-wire" }
-umbra-onion = { version = "0.28.0", path = "../umbra-onion" }
-umbra-queue = { version = "0.28.0", path = "../umbra-queue" }
-umbra-transport = { version = "0.28.0", path = "../umbra-transport" }
-umbra-core = { version = "0.28.0", path = "../umbra-core", default-features = false }
+umbra-crypto = { version = "0.28.1", path = "../umbra-crypto", features = ["keygen"] }
+umbra-wire = { version = "0.28.1", path = "../umbra-wire" }
+umbra-onion = { version = "0.28.1", path = "../umbra-onion" }
+umbra-queue = { version = "0.28.1", path = "../umbra-queue" }
+umbra-transport = { version = "0.28.1", path = "../umbra-transport" }
+umbra-core = { version = "0.28.1", path = "../umbra-core", default-features = false }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "time", "sync", "io-util", "macros"], optional = true }
