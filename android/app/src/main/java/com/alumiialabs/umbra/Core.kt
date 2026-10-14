@@ -681,17 +681,16 @@ object Core {
     }
 
     /**
-     * Encodes a picked image anew as the picture of the profile, and
-     * writes the profile blob (Part 9 §9.3.1). A null source removes it.
+     * Encodes the square that the user cropped anew as the picture of the
+     * profile, and writes the profile blob (Part 9 §9.3.1). Null removes it.
      */
-    fun setProfilePicture(context: Context, source: android.net.Uri?, onPicture: (ByteArray) -> Unit) {
-        val app = context.applicationContext
+    fun setProfilePicture(square: android.graphics.Bitmap?, onPicture: (ByteArray) -> Unit) {
         directory { client ->
-            val picture = if (source == null) {
+            val picture = if (square == null) {
                 ByteArray(0)
             } else {
-                Photos.profilePicture(app, source) ?: run {
-                    main.post { directoryNote = "That image did not open." }
+                Photos.picture(square) ?: run {
+                    main.post { directoryNote = "That image did not fit." }
                     return@directory
                 }
             }
@@ -2118,18 +2117,17 @@ object Core {
     }
 
     /**
-     * Encodes a picked image anew as the picture of a contact (`DIS-195`).
-     * A null source removes the picture. The bytes go from the picker to
-     * the store, and the device holds no file of them (`DIS-196`).
+     * Encodes the square that the user cropped anew as the picture of a
+     * contact (`DIS-195`). Null removes the picture. The bytes go from the
+     * picker to the store, and the device holds no file of them (`DIS-196`).
      */
-    fun setContactPicture(context: Context, conversation: Conversation, source: android.net.Uri?) {
-        val app = context.applicationContext
+    fun setContactPicture(conversation: Conversation, square: android.graphics.Bitmap?) {
         call { client ->
-            val picture = if (source == null) {
+            val picture = if (square == null) {
                 ByteArray(0)
             } else {
-                Photos.profilePicture(app, source) ?: run {
-                    main.post { fault = "That image did not open." }
+                Photos.picture(square) ?: run {
+                    main.post { fault = "That image did not fit." }
                     return@call
                 }
             }

@@ -34,11 +34,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.foundation.shape.CircleShape
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.activity.result.PickVisualMediaRequest
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.Role
@@ -348,7 +343,6 @@ fun ProfileScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
 /** The name and the welcome text of the profile blob (Part 9 §9.3.1). */
 @Composable
 private fun ProfileFields() {
-    val context = LocalContext.current
     var name by remember { mutableStateOf("") }
     var welcome by remember { mutableStateOf("") }
     var picture by remember { mutableStateOf(ByteArray(0)) }
@@ -362,29 +356,11 @@ private fun ProfileFields() {
             saved = held to text
         }
     }
-    // The picker gives this app the picked image alone.
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { picked ->
-        if (picked != null) Core.setProfilePicture(context, picked) { picture = it }
-    }
     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-        Box(
-            Modifier
-                .clip(CircleShape)
-                .press(role = Role.Button, label = "Choose a picture") {
-                    picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                },
-        ) { ProfilePicture(picture, name.ifEmpty { "Me" }, 104) }
-        Spacer(Modifier.height(12.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            InlineButton(if (picture.isEmpty()) "Add picture" else "Change") {
-                picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-            }
-            if (picture.isNotEmpty()) {
-                InlineButton("Remove") {
-                    Core.setProfilePicture(context, null) { picture = it }
-                }
-            }
-        }
+        EditablePicture(
+            hasPicture = picture.isNotEmpty(),
+            onSet = { square -> Core.setProfilePicture(square) { picture = it } },
+        ) { ProfilePicture(picture, name.ifEmpty { "Me" }, EDITABLE_PICTURE_SIZE) }
     }
     Spacer(Modifier.height(20.dp))
     OutlinedTextField(

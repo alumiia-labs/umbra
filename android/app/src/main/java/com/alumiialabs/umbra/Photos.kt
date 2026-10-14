@@ -47,14 +47,31 @@ import uniffi.umbra_ffi.MsgFile
 const val CLASS_IMAGE: UByte = 1u
 
 /** The states of the file of a message, as the core gives them. */
-/** The side of the picture of a profile, in pixels. */
-private const val PROFILE_PICTURE_SIDE = 192
-
 /** The longest side of a picture of a peer that the app decodes, in pixels. */
 private const val PEER_PICTURE_SIDE_MAX = 1_024
 
 /** `PICTURE_MAX` of Part 9 §9.12, in bytes. */
 private const val PICTURE_MAX = 6_144
+
+/**
+ * The sides that the encode of a picture tries, the largest first. A larger
+ * side holds more detail at a lower JPEG quality.
+ */
+private val PICTURE_SIDES = intArrayOf(256, 224, 192, 160)
+
+/**
+ * The lowest JPEG quality that the encode takes at a side before the last.
+ * Below it the blocks of a JPEG show more than the lost detail of a
+ * smaller side.
+ */
+private const val PICTURE_QUALITY_FLOOR = 50
+
+/** The range of the JPEG quality that the encode of a picture searches. */
+private const val PICTURE_QUALITY_MIN = 30
+private const val PICTURE_QUALITY_TOP = 95
+
+/** The longest side of a picked image in the crop view, in pixels. */
+private const val CROP_SIDE_MAX = 2_048
 
 const val FILE_UPLOADING = 1
 const val FILE_WANTED = 2
@@ -84,43 +101,102 @@ object Photos {
      * core through a pipe, thus the device holds no file of them
      * (`IMP-160`, `IMP-165`).
      */
+    /** The side of the largest picture, in pixels (`DIS-195`). */
+    val PICTURE_SIDE_MAX = PICTURE_SIDES.first()
+
     /**
-     * The picture of the profile blob (Part 9 §9.3.1): the middle square of
-     * a picked image at `PROFILE_PICTURE_SIDE`, as a new JPEG of at most
-     * `PICTURE_MAX` bytes. A new JPEG holds no metadata field of the source
-     * (`DIS-001` to `DIS-003`). The result is null for an image that does
-     * not open or does not fit.
+     * Decodes a picked image for the crop view, at `CROP_SIDE_MAX` on its
+     * longest side at most. The decoder applies the orientation. The result
+     * is null for an image that does not open.
      */
-    fun profilePicture(context: Context, source: Uri): ByteArray? {
-        val decoded = try {
-            ImageDecoder.decodeBitmap(ImageDecoder.createSource(context.contentResolver, source)) { decoder, info, _ ->
-                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
-                val shortest = minOf(info.size.width, info.size.height).coerceAtLeast(1)
-                if (shortest > PROFILE_PICTURE_SIDE * 2) {
-                    val scale = PROFILE_PICTURE_SIDE * 2f / shortest
-                    decoder.setTargetSize(
-                        (info.size.width * scale).toInt().coerceAtLeast(1),
-                        (info.size.height * scale).toInt().coerceAtLeast(1),
-                    )
-                }
+    fun forCrop(context: Context, source: Uri): Bitmap? = try {
+        ImageDecoder.decodeBitmap(ImageDecoder.createSource(context.contentResolver, source)) { decoder, info, _ ->
+            decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+            // The pixels are erased when the crop ends.
+            decoder.isMutableRequired = true
+            val longest = maxOf(info.size.width, info.size.height)
+            if (longest > CROP_SIDE_MAX) {
+                val scale = CROP_SIDE_MAX.toFloat() / longest
+                decoder.setTargetSize(
+                    (info.size.width * scale).toInt().coerceAtLeast(1),
+                    (info.size.height * scale).toInt().coerceAtLeast(1),
+                )
             }
-        } catch (unreadable: Exception) {
-            return null
         }
-        val side = minOf(decoded.width, decoded.height)
-        val square = Bitmap.createBitmap(decoded, (decoded.width - side) / 2, (decoded.height - side) / 2, side, side)
-        val picture = Bitmap.createScaledBitmap(square, PROFILE_PICTURE_SIDE, PROFILE_PICTURE_SIDE, true)
+    } catch (fault: Throwable) {
+        // `OutOfMemoryError` is no `Exception`.
+        null
+    }
+
+    /**
+     * The picture of the profile blob (Part 9 §9.3.1) or of a contact
+     * (`DIS-195`) from the square that the user cropped: a new JPEG of at most `PICTURE_MAX` bytes
+     * with no metadata field of the source (`DIS-001` to `DIS-003`). The
+     * encode takes the largest side of `PICTURE_SIDES` that keeps the
+     * quality at `PICTURE_QUALITY_FLOOR`, and the highest quality that fits.
+     * The result is null for a square that does not fit. The pixels of the
+     * square are erased after the encode.
+     */
+    fun picture(square: Bitmap): ByteArray? {
+        val made = arrayListOf(square)
         try {
-            for (quality in intArrayOf(80, 65, 50, 35, 25)) {
-                val out = ByteArrayOutputStream()
-                picture.compress(Bitmap.CompressFormat.JPEG, quality, out)
-                val bytes = out.toByteArray()
-                if (bytes.size <= PICTURE_MAX) return bytes
+            var step = square
+            var fallback: ByteArray? = null
+            for (side in PICTURE_SIDES) {
+                // A small crop gets no larger side than it holds.
+                if (side > square.width && side != PICTURE_SIDES.last()) continue
+                // Steps of a half keep each pixel an average of the pixels
+                // above it. One long step skips most of them, and its edges
+                // alias, which costs bytes and shows as noise.
+                while (step.width / 2 >= side) {
+                    step = Bitmap.createScaledBitmap(step, step.width / 2, step.width / 2, true)
+                    made += step
+                }
+                val scaled = Bitmap.createScaledBitmap(step, side, side, true)
+                made += scaled
+                // A transparent pixel becomes white and not black.
+                val flat = Bitmap.createBitmap(side, side, Bitmap.Config.ARGB_8888)
+                made += flat
+                flat.eraseColor(android.graphics.Color.WHITE)
+                android.graphics.Canvas(flat).drawBitmap(scaled, 0f, 0f, null)
+                val (quality, bytes) = bestFit(flat) ?: continue
+                if (quality >= PICTURE_QUALITY_FLOOR) {
+                    fallback?.fill(0)
+                    return bytes
+                }
+                if (fallback == null) fallback = bytes else bytes.fill(0)
             }
+            return fallback
+        } catch (fault: Throwable) {
             return null
         } finally {
-            for (made in listOf(picture, square, decoded).distinct()) made.recycle()
+            for (bitmap in made.distinct()) {
+                if (bitmap.isMutable) bitmap.eraseColor(0)
+                bitmap.recycle()
+            }
         }
+    }
+
+    /** The highest JPEG quality at which [bitmap] fits `PICTURE_MAX`, and its bytes. */
+    private fun bestFit(bitmap: Bitmap): Pair<Int, ByteArray>? {
+        var low = PICTURE_QUALITY_MIN
+        var high = PICTURE_QUALITY_TOP
+        var best: Pair<Int, ByteArray>? = null
+        while (low <= high) {
+            val quality = (low + high) / 2
+            val out = ByteArrayOutputStream()
+            bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
+            val bytes = out.toByteArray()
+            if (bytes.size <= PICTURE_MAX) {
+                best?.second?.fill(0)
+                best = quality to bytes
+                low = quality + 1
+            } else {
+                bytes.fill(0)
+                high = quality - 1
+            }
+        }
+        return best
     }
 
     fun attach(context: Context, source: Uri, draft: DraftHandle): Boolean {
@@ -232,7 +308,7 @@ object Photos {
 
     /**
      * The picture of a profile of a peer (`DIS-176`). An honest client sends
-     * `PROFILE_PICTURE_SIDE` on each side, thus a header that names more
+     * at most `PICTURE_SIDE_MAX` on each side, thus a header that names more
      * than `PEER_PICTURE_SIDE_MAX` shows no picture.
      */
     fun profileImage(bytes: ByteArray): ImageBitmap? {

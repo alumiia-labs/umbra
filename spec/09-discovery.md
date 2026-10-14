@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 9: Discovery, Handles, and Key Transparency
 
 **Status:** Draft
-**Version:** 0.27.3
+**Version:** 0.28.0
 **Date:** 2026-10-14
 
 ---
@@ -831,8 +831,9 @@ pet-avatar out of the encrypted profile blob.
 
 **[DIS-195]** A client MUST take a pet-avatar from a picker that gives the
 client the one picture that the user selected. The client MUST crop that
-picture to its center square, and it MUST scale the square to 256 pixels or
-less on each side. It MUST encode the result anew as a JPEG of at most
+picture to one square: the square that the user selects, or the center square
+when the user selects none. It MUST scale the square to 256 pixels or less on
+each side. It MUST encode the result anew as a JPEG of at most
 `PET_AVATAR_MAX` bytes, and that encode MUST remove each metadata field. A
 client MUST apply the bounds of `DIS-176` to a pet-avatar before it decodes
 one. **[DIS-196]** A client MUST hold a pet-avatar under the record

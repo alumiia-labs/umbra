@@ -17,10 +17,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.PickVisualMediaRequest
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.HorizontalDivider
@@ -36,7 +32,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
@@ -49,29 +44,6 @@ import uniffi.umbra_ffi.Receipts
 /** The details of one contact: who it is, and what the user can do with it. */
 @Composable
 fun ContactDetailsScreen(chat: Chat, onBack: () -> Unit, onMessage: () -> Unit, push: (Screen) -> Unit) {
-    val context = LocalContext.current
-    // Part 9 §9.8: the user gives the contact a picture. The picker gives
-    // this app the picked image alone.
-    var isPicturing by remember { mutableStateOf(false) }
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { picked ->
-        if (picked != null) Core.setContactPicture(context, chat.conversation, picked)
-    }
-    if (isPicturing) {
-        ActionSheet(
-            "Picture",
-            buildList {
-                add(
-                    RowEntry("image", "Choose picture") {
-                        picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                    },
-                )
-                if (chat.picture != null) {
-                    add(RowEntry("trash-can", "Remove picture") { Core.setContactPicture(context, chat.conversation, null) })
-                }
-            },
-            onDismiss = { isPicturing = false },
-        )
-    }
     Column(Modifier.fillMaxSize()) {
         BackBar("Contact details", onBack = onBack)
         Column(
@@ -79,9 +51,11 @@ fun ContactDetailsScreen(chat: Chat, onBack: () -> Unit, onMessage: () -> Unit, 
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Spacer(Modifier.height(12.dp))
-            Box(Modifier.clip(CircleShape).press(role = Role.Button, label = "Picture") { isPicturing = true }) {
-                Avatar(chat, size = 84)
-            }
+            // Part 9 §9.8: the user gives the contact a picture.
+            EditablePicture(
+                hasPicture = chat.picture != null,
+                onSet = { square -> Core.setContactPicture(chat.conversation, square) },
+            ) { Avatar(chat, size = EDITABLE_PICTURE_SIZE) }
             Spacer(Modifier.height(12.dp))
             Text(chat.title, style = MaterialTheme.typography.headlineMedium)
             if (chat.isVerified) {

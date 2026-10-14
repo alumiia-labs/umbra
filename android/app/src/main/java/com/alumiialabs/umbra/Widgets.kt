@@ -66,6 +66,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalDensity
@@ -587,6 +588,7 @@ fun Avatar(chat: Chat, size: Int = 44) {
             picture,
             contentDescription = null,
             modifier = Modifier.size(size.dp).clip(CircleShape),
+            filterQuality = FilterQuality.High,
         )
         return
     }
@@ -623,6 +625,7 @@ fun ProfilePicture(picture: ByteArray?, name: String, size: Int) {
         shown,
         contentDescription = null,
         modifier = Modifier.size(size.dp).clip(CircleShape),
+        filterQuality = FilterQuality.High,
     )
 }
 
