@@ -22,7 +22,7 @@ pull request.
 | A correction of the specification | The pull request gives the fault and its effect. |
 | A new specification rule | An issue agrees on the rule first. |
 | A new dependency | The pull request gives the reason. `deny.toml` must permit the license. |
-| A translation | Not at this time. The app has one locale. |
+| A translation | The rules of "Translations" below. |
 
 The project does not accept these changes:
 
@@ -65,6 +65,54 @@ ASD-STE100 Simplified Technical English. `AGENTS.md` gives the rules.
 - Use American English spelling.
 - Write a comment to give a reason. Do not write a comment that repeats the
   code.
+
+## Translations
+
+The app and the web site take translations as pull requests. Each language
+is one file of the app and one file of the site. The English files are the
+source.
+
+| Part | English source | Translation |
+| --- | --- | --- |
+| App text | `android/app/src/main/res/values/strings.xml` | `values-<code>/strings.xml`, as `values-de/strings.xml` or `values-pt-rBR/strings.xml` |
+| App text that a specification rule requires | `android/app/src/main/res/values/ui_rules.xml` | `values-<code>/ui_rules.xml` |
+| Web site | `site/locales/en.json` | `site/locales/<code>.json` |
+
+Do these steps:
+
+1. Copy the English file into the folder of your language. Translate the
+   text, and keep each name and each key as it is.
+2. Keep each placeholder, as `%1$s` or `%1$d`. You can move a placeholder
+   in the sentence. The number before `$` tells which value goes there.
+3. Put a backslash before each apostrophe and each double quote of the app
+   text: `\'` and `\"`.
+4. Translate each form of a `<plurals>` entry that your language uses
+   (`one`, `few`, `many`, `other`). Each entry needs an `other` form.
+5. Do not translate a string with `translatable="false"`.
+6. For the site, set `_language` to the name of the language in that
+   language, as `Deutsch`, and set `_dir` to `rtl` for a language that
+   reads from right to left.
+7. Run these checks:
+
+   ```sh
+   python scripts/l10ncheck.py    # names, placeholders, plurals, escapes
+   python scripts/uistrings.py    # the strings of the rules, in each language
+   python scripts/sitebuild.py    # writes the pages of the site
+   ```
+
+The app shows the English text for a string that a translation does not
+hold yet. A partial translation of `strings.xml` is thus correct.
+
+The strings of `ui_rules.xml` are different. A rule of the specification
+requires each of them, and most of them tell the user a limit of the
+security of UMBRA. A language ships only when it translates each of them
+(Part 14 `IMP-086`), and `scripts/uistrings.py` fails until it does. A
+wrong translation of one of them can mislead a user about the safety of a
+message. Thus a second person who speaks the language reviews each change
+to `ui_rules.xml` before the merge.
+
+The translated text is not ASD-STE100 English, but keep it plain and short
+in the same manner.
 
 ## Versions
 

@@ -69,6 +69,7 @@ cargo deny --features umbra-ffi/bindings,umbra-relay/native check advisories lic
 step "generated files are current"
 python scripts/deps.py --check
 python scripts/vectors.py --check
+python scripts/sitebuild.py --check
 
 step "specification consistency"
 python scripts/speccheck.py --quiet
@@ -81,5 +82,7 @@ python scripts/sitecheck.py
 step "interface strings"
 # Part 14 §14.9.3: each string that a rule requires, in each locale.
 python scripts/uistrings.py
+# Each translation of the app and of the site against its English source.
+python scripts/l10ncheck.py
 
 printf '\nall checks passed\n'

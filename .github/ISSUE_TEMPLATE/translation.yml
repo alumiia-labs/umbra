@@ -1,0 +1,31 @@
+name: Translation
+description: Start, or ask for, a translation of the app and the web site.
+labels: ["translation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        One issue for each language, thus two persons do not translate the same text.
+        "Translations" in CONTRIBUTING.md gives the files and the steps.
+  - type: input
+    id: language
+    attributes:
+      label: Language
+      description: The name of the language, and its code, as "German (de)" or "Portuguese, Brazil (pt-rBR)".
+    validations:
+      required: true
+  - type: checkboxes
+    id: parts
+    attributes:
+      label: Parts
+      options:
+        - label: The text of the app (strings.xml)
+        - label: The text that the specification rules require (ui_rules.xml)
+        - label: The web site (site/locales)
+  - type: checkboxes
+    id: work
+    attributes:
+      label: Work
+      options:
+        - label: I can translate this language.
+        - label: I can review a translation of this language by another person.
