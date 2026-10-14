@@ -100,7 +100,7 @@ import uniffi.umbra_ffi.MsgReaction
 import androidx.compose.ui.unit.sp
 
 @Composable
-fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
+fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: List<Byte>? = null) {
     var lines by remember { mutableStateOf(emptyList<Line>()) }
     val listState = rememberLazyListState()
     val conversation = chat.conversation
@@ -189,6 +189,20 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                 flashed = null
             }
         }
+    }
+    // A result of a search opens the conversation at its message. The view
+    // puts itself at its end first, thus the jump waits for one frame.
+    var isAtTarget by remember(conversation, target) { mutableStateOf(false) }
+    LaunchedEffect(target, lines.isNotEmpty()) {
+        if (target == null || isAtTarget || lines.isEmpty()) return@LaunchedEffect
+        val at = lines.indexOfFirst { it.key == target }
+        if (at < 0) return@LaunchedEffect
+        isAtTarget = true
+        androidx.compose.runtime.withFrameNanos { }
+        listState.scrollToItem(at + 1)
+        flashed = target
+        delay(1_500)
+        flashed = null
     }
     val context = LocalContext.current
     // The message whose text the composer changes.

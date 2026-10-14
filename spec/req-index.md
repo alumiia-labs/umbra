@@ -81,9 +81,9 @@ column when a crate implements the requirement and a test covers it.
 | `GRP` | 233 | 65 | 0 | 0 | 5 | **303** |
 | `ATT` | 145 | 46 | 2 | 0 | 3 | **196** |
 | `ABU` | 71 | 29 | 1 | 0 | 0 | **101** |
-| `IMP` | 115 | 41 | 0 | 0 | 2 | **158** |
+| `IMP` | 119 | 42 | 0 | 0 | 2 | **163** |
 | `SEC` | 4 | 3 | 0 | 0 | 1 | **8** |
-| **All** | 2112 | 635 | 6 | 0 | 55 | **2808** |
+| **All** | 2116 | 636 | 6 | 0 | 55 | **2813** |
 
 ## SCP — Scope and Conventions
 
@@ -2982,6 +2982,11 @@ Source: `spec/14-implementation.md`
 | `IMP-173` | §14.6.4 | MUST | The encode of a recording | The encode of a recording MUST carry no comment field and no time of the capture (`ATT-155`). |  |  |
 | `IMP-174` | §14.2.1 | MUST | An implementation | An implementation **MUST** turn `zeroize` on: with it off, a secret scalar and a shared secret stay in memory after a drop (Part 5 `CRY-059`). |  |  |
 | `IMP-175` | §14.6.4 | MUST | A client | A client MUST refuse a header whose memory is above four times the floor, or whose passes are above 3 000, before it runs Argon2id: a party with the file that raises the two values would otherwise make each unlock allocate without bound. |  |  |
+| `IMP-176` | §14.6.7 | MUST | A client | A client MUST hold the search index in memory alone. |  |  |
+| `IMP-177` | §14.6.7 | MUST | A client | A client MUST erase the search index at a lock, and it MUST overwrite the memory that held a text of the index. |  |  |
+| `IMP-178` | §14.6.7 | MUST | A client | A client MUST confirm each result against the store at the time of the query. |  |  |
+| `IMP-179` | §14.6.7 | MUST | A client | A client MUST give no more than `SEARCH_RESULTS_MAX` = 200 results for one query. |  |  |
+| `IMP-180` | §14.6.7 | MUST NOT | A client | A client MUST NOT write a query to the store or to a file, and it MUST keep no list of earlier queries. |  |  |
 
 ## SEC — Security Considerations
 

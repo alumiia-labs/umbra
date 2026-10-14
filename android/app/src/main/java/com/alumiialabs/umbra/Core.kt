@@ -1404,6 +1404,11 @@ object Core {
                 previews.clear()
                 // A picture of a contact is private data of the user.
                 on(worker) { pictures.clear() }
+                // IMP-180: the query of a search leaves with the key.
+                searchBuilds++
+                searchTurns++
+                searchQuery?.fill('\u0000')
+                searchQuery = null
                 // IMP-161: a draft that waits holds its file in the clear.
                 cancelSend()
                 online = false
@@ -2737,6 +2742,101 @@ object Core {
             Line(message, sink.chars, info, quote, client.reactions(message), poll)
         }
         main.post { onLoaded(lines) }
+    }
+
+    /** One result of a search: the message, its text, and the match in it. */
+    class Found(
+        val conversation: Conversation,
+        val key: List<Byte>,
+        val text: CharArray,
+        val atMs: Long,
+        /** The match, as a range of [text]. An empty range marks nothing. */
+        val start: Int,
+        val end: Int,
+    )
+
+    /**
+     * The query of the open search view. A view that the user leaves for a
+     * result and comes back to shows it again. It sits in memory alone, and
+     * it is zeros after the view closes and after a lock (`IMP-180`).
+     */
+    private var searchQuery: CharArray? = null
+
+    /** The scope of [searchQuery]: a query of one view shows in no other one. */
+    private var searchScope: Conversation? = null
+
+    /** The query that the search view of `scope` held, or null. */
+    fun searchQueryOf(scope: Conversation?): CharArray? = searchQuery.takeIf { searchScope == scope }
+
+    /** The newest build and the newest query: an older one gives no result. */
+    @Volatile
+    private var searchBuilds = 0
+
+    @Volatile
+    private var searchTurns = 0
+
+    /**
+     * Builds the search index in the memory of the core (`IMP-176`), one
+     * conversation in each turn of the worker. Thus each other call runs
+     * between two steps.
+     */
+    fun searchBuild(onReady: () -> Unit) {
+        val build = ++searchBuilds
+        call { it.searchBegin() }
+        searchStep(build, onReady)
+    }
+
+    private fun searchStep(build: Int, onReady: () -> Unit) {
+        call { client ->
+            if (build != searchBuilds) return@call
+            if (client.searchStep()) main.post(onReady) else searchStep(build, onReady)
+        }
+    }
+
+    /** Searches the messages of one conversation, or of each one. */
+    fun search(query: CharArray, scope: Conversation?, onFound: (List<Found>) -> Unit) {
+        searchQuery?.fill('\u0000')
+        searchQuery = query.copyOf()
+        searchScope = scope
+        val units = query.map { it.code.toUShort() }
+        val turn = ++searchTurns
+        call { client ->
+            if (turn != searchTurns) return@call
+            val found = client.search(units, scope?.id).map { hit ->
+                hit.message.use { message ->
+                    val sink = CharSink()
+                    try {
+                        client.msgRender(message, sink)
+                    } catch (noText: FfiException) {
+                        sink.chars = CharArray(0)
+                    }
+                    val info = client.msgInfo(message)
+                    // A match in the name of a file marks nothing, and a
+                    // file with no caption shows as its kind.
+                    val file = info.file
+                    val text = if (sink.chars.isEmpty() && file != null) fileWord(file).toCharArray() else sink.chars
+                    val end = hit.end.toInt().coerceAtMost(sink.chars.size)
+                    Found(
+                        Conversation(hit.conversation),
+                        message.key().toList(),
+                        text,
+                        info.storedAtMs.toLong(),
+                        hit.start.toInt().coerceAtMost(end),
+                        end,
+                    )
+                }
+            }
+            main.post { if (turn == searchTurns) onFound(found) }
+        }
+    }
+
+    /** Ends the search: the index and the query leave the memory. */
+    fun searchClose() {
+        searchBuilds++
+        searchTurns++
+        searchQuery?.fill('\u0000')
+        searchQuery = null
+        call { it.searchClose() }
     }
 
     /** Reads the list again, and gives it to `then` on the main thread. */

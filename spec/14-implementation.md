@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 14: Implementation Requirements and Assurance
 
 **Status:** Draft
-**Version:** 0.25.5
+**Version:** 0.26.0
 **Date:** 2026-10-13
 
 ---
@@ -1278,6 +1278,49 @@ removes one. Part 2 rule `THR-013` names those actions as its one exception.
 > wipes the master key, and a bitmap needs no key. A rule about where data goes
 > is cheaper than a lost feature. Thus each social affordance stays, and each
 > rule names an interface.
+
+### 14.6.7 Search of the messages
+
+A client MAY let the user search the messages of the device. The store of
+§14.6.4 seals each record on its own, and it holds no text that a query can
+read. An index in a file is a second copy of each message. Thus the index
+sits in memory alone, and the client builds it from the store after an
+unlock.
+
+The reference client folds each text: no case, no accent, and one space for
+each run of white space. It indexes each group of three bytes of the folded
+text. Thus a query finds a part of a word, a part of a sentence, and a text in
+a script with no spaces. A word of 5 characters or more takes one spelling
+error, and a word of 8 characters or more takes two.
+
+- **[IMP-176]** A client MUST hold the search index in memory alone. It MUST
+  NOT write the index, a part of it, or a value that it made from a message
+  text for the search, to the store or to a file.
+- **[IMP-177]** A client MUST erase the search index at a lock, and it MUST
+  overwrite the memory that held a text of the index. The index leaves with
+  `K_store`.
+- **[IMP-178]** A client MUST confirm each result against the store at the
+  time of the query. A result MUST be a message that the store holds, and its
+  text at that time MUST match the query. Thus a message that a deletion, a
+  timer, or the end of the history period removed is no result. A text that
+  an edit replaced is no match.
+- **[IMP-179]** A client MUST give no more than `SEARCH_RESULTS_MAX` = 200
+  results for one query. The order MUST be: the exact text of the query
+  first, then each word of the query in any order, then a word with a
+  spelling error. In each of the three the newest message comes first.
+- **[IMP-180]** A client MUST NOT write a query to the store or to a file,
+  and it MUST keep no list of earlier queries. It MUST erase the query from
+  memory when the search view closes and at a lock. A search MUST NOT send a
+  record or a request to a relay or to a different device.
+
+> *Cause.* A sealed index in the store is the faster design, since it needs
+> no build. But the count and the lengths of its rows show how much a user
+> writes and how often a word repeats, to a party that holds the file and no
+> key. A row of the index that outlives its message keeps words of a message
+> that a timer removed. `IMP-178` makes the store the one authority: an index
+> that is late is only a list of candidates. A measurement on 2026-10-13 gave
+> 0.6 s for the build of 100 000 messages on a desktop processor, about
+> 42 MiB of memory, and 1 ms to 10 ms for a query.
 
 ## 14.7 The web client
 

@@ -75,7 +75,11 @@ sealed interface Screen {
     data object Handle : Screen
     data object Profile : Screen
     data object Requests : Screen
-    data class Chat(val conversation: Conversation) : Screen
+    /** A conversation, at its end or at the message `target`. */
+    data class Chat(val conversation: Conversation, val target: List<Byte>? = null) : Screen
+
+    /** The search of one conversation, or of each one. */
+    data class Search(val scope: Conversation?) : Screen
     data class ContactDetails(val conversation: Conversation) : Screen
     data class EditName(val conversation: Conversation) : Screen
     data class BlockContact(val conversation: Conversation) : Screen
@@ -232,6 +236,7 @@ private fun OpenApp() {
             Screen.Handle -> HandleScreen(pop)
             Screen.Profile -> ProfileScreen(pop, push)
             Screen.Requests -> RequestsScreen(pop)
+            is Screen.Search -> SearchScreen(top.scope, pop, push)
             else -> {
                 val chat = Core.chats.firstOrNull { it.conversation == top.contact }
                 // The list loads again after a lock or a new run.
@@ -252,7 +257,7 @@ private fun ContactView(
     setStack: (List<Screen>) -> Unit,
 ) {
     when (top) {
-        is Screen.Chat -> ChatScreen(chat, pop, push)
+        is Screen.Chat -> ChatScreen(chat, pop, push, top.target)
         is Screen.ContactDetails -> ContactDetailsScreen(
             chat,
             onBack = pop,
@@ -531,7 +536,12 @@ private fun ChatsTab(push: (Screen) -> Unit) {
         RosterForkPrompt()
         HeldDeletionsPrompt()
         RequestsPrompt(push)
-        TabTitle("Chats")
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.weight(1f)) { TabTitle("Chats") }
+            Box(Modifier.padding(end = 8.dp, top = 8.dp)) {
+                IconAction("magnifying-glass", "Search") { push(Screen.Search(null)) }
+            }
+        }
         // A group with no message still shows: the user made it, and its
         // creation is the act that put it here.
         val withMessages = Core.chats.filter { it.preview != null || it.isGroup }

@@ -41,8 +41,10 @@ mod retention;
 mod roster_fork;
 mod roster_notes;
 mod screenshots;
+mod search;
 mod snapshot_recovery;
 pub use retention::{HISTORY_AGE_ALL, HISTORY_AGE_MIN};
+pub use search::{SearchHit, SEARCH_RESULTS_MAX, TIER_NEAR, TIER_PHRASE, TIER_WORDS};
 pub use snapshot_recovery::SnapshotJob;
 mod social;
 mod sync;
@@ -431,6 +433,8 @@ pub struct Client<B: Backend, E: SecureElement> {
     auto_lock: AutoLock,
     /// The scan of `IDN-162`, one table at each step.
     audit: Audit,
+    /// The search index, which sits in memory alone (`IMP-176`).
+    search: search::Search,
     /// The last clock of the platform tick, in seconds, or 0 before one.
     clock: u64,
     /// The records for the sync channels (Part 7 §7.5).
@@ -804,6 +808,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             groups: groups::GroupQueues::default(),
             auto_lock: AutoLock::new(now),
             audit: Audit::default(),
+            search: search::Search::default(),
             clock: 0,
         };
         // IDN-070: the recovery code comes at the first launch.
@@ -834,6 +839,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             groups: groups::GroupQueues::default(),
             auto_lock: AutoLock::new(now),
             audit: Audit::default(),
+            search: search::Search::default(),
             clock: 0,
         }
     }
@@ -1003,6 +1009,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             // The store brings them back at the unlock.
             self.files = FileQueues::default();
             self.groups = groups::GroupQueues::default();
+            // IMP-177: the search index leaves the memory with the key.
+            self.search = search::Search::default();
             self.events.push_back(Event::Locked);
         }
     }
@@ -4347,31 +4355,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .get(TableId::MESSAGE, &message.0)?
                 .ok_or(Error::NotFound)?,
         );
-        let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
-        let parsed = AppMessage::parse(app, Channel::Pairwise)?;
-        // The text of a file is its caption (WIR-535). A file of this
-        // device holds the caption alone until its upload ends.
-        let bytes = match parsed.kind {
-            AppKind::Attachment => match umbra_wire::descriptor::AttachmentBody::parse(parsed.body)
-            {
-                Ok(body) => body.caption.map_or(&[][..], str::as_bytes),
-                // A body that is no descriptor and no text shows no
-                // caption, and the rest of the conversation shows.
-                Err(_)
-                    if info_of(&plain)?.outgoing && core::str::from_utf8(parsed.body).is_ok() =>
-                {
-                    parsed.body
-                }
-                Err(_) => &[][..],
-            },
-            // The mark of a timer change or of a policy change holds no
-            // text.
-            AppKind::ConversationTimer | AppKind::ForwardPolicy => &[][..],
-            // A poll shows its question.
-            AppKind::Poll => umbra_wire::app::poll::Poll::parse(parsed.body)
-                .map_or(&[][..], |poll| poll.question.as_bytes()),
-            _ => text_of(&parsed)?,
-        };
+        let bytes = shown_text(&plain)?;
         let text = core::str::from_utf8(bytes).map_err(|_| Error::Integrity)?;
         let mut units = Zeroizing::new(Vec::with_capacity(text.len()));
         units.extend(text.encode_utf16());
@@ -4573,6 +4557,33 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         Ok(())
     }
+}
+
+/// The text that a view shows for a stored message: the text of a text
+/// message, the caption of a file, or the question of a poll.
+fn shown_text(plain: &[u8]) -> Result<&[u8], Error> {
+    let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
+    let parsed = AppMessage::parse(app, Channel::Pairwise)?;
+    // The text of a file is its caption (WIR-535). A file of this
+    // device holds the caption alone until its upload ends.
+    Ok(match parsed.kind {
+        AppKind::Attachment => match umbra_wire::descriptor::AttachmentBody::parse(parsed.body) {
+            Ok(body) => body.caption.map_or(&[][..], str::as_bytes),
+            // A body that is no descriptor and no text shows no
+            // caption, and the rest of the conversation shows.
+            Err(_) if info_of(plain)?.outgoing && core::str::from_utf8(parsed.body).is_ok() => {
+                parsed.body
+            }
+            Err(_) => &[][..],
+        },
+        // The mark of a timer change or of a policy change holds no
+        // text.
+        AppKind::ConversationTimer | AppKind::ForwardPolicy => &[][..],
+        // A poll shows its question.
+        AppKind::Poll => umbra_wire::app::poll::Poll::parse(parsed.body)
+            .map_or(&[][..], |poll| poll.question.as_bytes()),
+        _ => text_of(&parsed)?,
+    })
 }
 
 fn info_of(plain: &[u8]) -> Result<MessageInfo, Error> {
@@ -6562,5 +6573,86 @@ mod tests {
             .unwrap();
         assert!(client.contact_picture(conversation).unwrap().is_empty());
         client.audit().unwrap();
+    }
+
+    fn build_search(client: &mut TestClient) {
+        client.search_begin().unwrap();
+        while !client.search_step().unwrap() {}
+    }
+
+    fn search_of(client: &TestClient, query: &str) -> Vec<MsgRef> {
+        client
+            .search(&units(query), None)
+            .unwrap()
+            .into_iter()
+            .map(|hit| hit.message)
+            .collect()
+    }
+
+    #[test]
+    fn a_search_finds_a_message_and_marks_the_match_in_the_shown_text() {
+        let (mut client, _, _, conversation) = client_with_contact(61);
+        let first = send(
+            &mut client,
+            conversation,
+            "Meet me at the Café tomorrow",
+            T0,
+        );
+        let second = send(&mut client, conversation, "the train is late", T0 + 1);
+        // No build ran, thus a query finds nothing.
+        assert!(search_of(&client, "cafe").is_empty());
+        build_search(&mut client);
+        assert!(client.is_search_ready());
+        let hits = client.search(&units("cafe"), None).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message, first);
+        assert_eq!(hits[0].conversation, conversation);
+        assert_eq!(hits[0].tier, super::search::TIER_PHRASE);
+        let shown = units(&text_of(&client, &first));
+        let marked = &shown[hits[0].start as usize..hits[0].end as usize];
+        assert_eq!(String::from_utf16(marked).unwrap(), "Café");
+        assert_eq!(search_of(&client, "trian"), [second]);
+        assert_eq!(search_of(&client, "the"), [second, first]);
+        assert!(search_of(&client, "airport").is_empty());
+        assert!(client
+            .search(&units("cafe"), Some(ConversationId([7; 16])))
+            .unwrap()
+            .is_empty());
+    }
+
+    /// `IMP-178`: the index of an earlier build still names the message,
+    /// and the store decides.
+    #[test]
+    fn a_search_shows_no_deleted_message_and_no_text_before_an_edit() {
+        let (mut client, mut rng, _, conversation) = client_with_contact(62);
+        let gone = send(&mut client, conversation, "the secret harbor", T0);
+        let edited = send(&mut client, conversation, "harbor at nine", T0 + 1);
+        build_search(&mut client);
+        assert_eq!(search_of(&client, "harbor"), [edited, gone]);
+        client.delete_for_me(&gone).unwrap();
+        let mut draft = client.new_draft(conversation);
+        draft.set_text(&units("station at nine")).unwrap();
+        client.edit(&edited, draft, T0 + 2, &mut rng).unwrap();
+        assert!(search_of(&client, "harbor").is_empty());
+        // The new text comes with the next build.
+        assert!(search_of(&client, "station").is_empty());
+        build_search(&mut client);
+        assert_eq!(search_of(&client, "station"), [edited]);
+    }
+
+    /// `IMP-177`.
+    #[test]
+    fn a_lock_removes_the_search_index() {
+        let (mut client, _, _, conversation) = client_with_contact(63);
+        let message = send(&mut client, conversation, "the harbor", T0);
+        build_search(&mut client);
+        assert_eq!(search_of(&client, "harbor"), [message]);
+        client.lock();
+        assert!(!client.is_search_ready());
+        assert_eq!(client.search(&units("harbor"), None), Err(Error::Locked));
+        client.unlock(&units("correct horse"), 2_000).unwrap();
+        assert!(search_of(&client, "harbor").is_empty());
+        build_search(&mut client);
+        assert_eq!(search_of(&client, "harbor"), [message]);
     }
 }

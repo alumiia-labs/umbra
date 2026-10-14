@@ -1405,6 +1405,23 @@ pub enum FfiEvent {
 #[derive(uniffi::Object)]
 pub struct MsgHandle(MsgRef);
 
+/// One result of a search.
+#[derive(uniffi::Record)]
+pub struct FfiSearchHit {
+    /// The message.
+    pub message: Arc<MsgHandle>,
+    /// The conversation of the message.
+    pub conversation: Vec<u8>,
+    /// The rank: 0 for the exact text, 1 for each word in any order, and 2
+    /// for a word with a spelling error.
+    pub tier: u8,
+    /// The first match in the shown text, as a range of UTF-16 code units.
+    /// An empty range marks nothing.
+    pub start: u32,
+    /// The end of that range.
+    pub end: u32,
+}
+
 #[uniffi::export]
 impl MsgHandle {
     /// The identity of the message for the platform: two handles of one
@@ -7070,6 +7087,56 @@ impl Handle {
             .into_iter()
             .map(|message| Arc::new(MsgHandle(message)))
             .collect())
+    }
+
+    /// Starts a build of the search index in memory (`IMP-176`). An index
+    /// of a build before stays in use until this build ends.
+    pub fn search_begin(&self) -> Result<(), FfiError> {
+        locked(&self.inner)
+            .client
+            .search_begin()
+            .map_err(FfiError::from)
+    }
+
+    /// One step of the build: the messages of one conversation. The result
+    /// says whether the build is complete. No step holds the handle for the
+    /// time of the full history, thus the platform runs its other calls
+    /// between two steps. A query in the time of a build reads the part
+    /// that is ready.
+    pub fn search_step(&self) -> Result<bool, FfiError> {
+        locked(&self.inner)
+            .client
+            .search_step()
+            .map_err(FfiError::from)
+    }
+
+    /// The messages that match a query, the best rank first and the newest
+    /// first in each rank, in one conversation or in each one. The query
+    /// crosses as UTF-16 code units, as the text of a draft does, and the
+    /// core keeps no copy of it (`IMP-180`).
+    pub fn search(
+        &self,
+        code_units: Vec<u16>,
+        conversation: Option<Vec<u8>>,
+    ) -> Result<Vec<FfiSearchHit>, FfiError> {
+        let code_units = Zeroizing::new(code_units);
+        let scope = conversation.as_deref().map(conversation_of).transpose()?;
+        let hits = locked(&self.inner).client.search(&code_units, scope)?;
+        Ok(hits
+            .into_iter()
+            .map(|hit| FfiSearchHit {
+                message: Arc::new(MsgHandle(hit.message)),
+                conversation: hit.conversation.0.to_vec(),
+                tier: hit.tier,
+                start: hit.start,
+                end: hit.end,
+            })
+            .collect())
+    }
+
+    /// Removes the search index from the memory. A lock does the same.
+    pub fn search_close(&self) {
+        locked(&self.inner).client.search_end();
     }
 
     /// Locks the client, and ends the network with it. The runtime and
