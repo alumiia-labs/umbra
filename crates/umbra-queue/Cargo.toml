@@ -11,5 +11,5 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-umbra-crypto = { version = "0.27.2", path = "../umbra-crypto" }
-umbra-wire = { version = "0.27.2", path = "../umbra-wire" }
+umbra-crypto = { version = "0.27.3", path = "../umbra-crypto" }
+umbra-wire = { version = "0.27.3", path = "../umbra-wire" }
