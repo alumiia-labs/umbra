@@ -139,7 +139,7 @@ fun RecoveryCodeScreen(onBack: () -> Unit, push: (Screen) -> Unit = {}) {
             Column(
                 Modifier
                     .fillMaxWidth()
-                    .background(Color.White, RoundedCornerShape(24.dp))
+                    .background(Palette.Raised, RoundedCornerShape(24.dp))
                     .border(1.dp, Palette.Divider, RoundedCornerShape(24.dp))
                     .padding(vertical = 20.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -183,7 +183,7 @@ fun SecretDigitsScreen(title: String, note: String, onBack: () -> Unit, load: ((
             Column(
                 Modifier
                     .fillMaxWidth()
-                    .background(Color.White, RoundedCornerShape(24.dp))
+                    .background(Palette.Raised, RoundedCornerShape(24.dp))
                     .border(1.dp, Palette.Divider, RoundedCornerShape(24.dp))
                     .padding(vertical = 20.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,

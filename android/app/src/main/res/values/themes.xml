@@ -3,7 +3,7 @@
     <style name="Theme.Umbra" parent="android:Theme.Material.Light.NoActionBar">
         <!-- The ground of the app, before the first frame. -->
         <item name="android:windowBackground">@color/surface</item>
-        <!-- The app draws its own colours on each phone. -->
+        <!-- The app draws its own colors on each phone. -->
         <item name="android:forceDarkAllowed">false</item>
     </style>
 </resources>

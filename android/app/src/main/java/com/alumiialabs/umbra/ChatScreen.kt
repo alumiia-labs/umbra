@@ -897,7 +897,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                     offersVoice -> "microphone"
                     else -> "paper-plane"
                 }
-                FaIcon(icon, label = sendLabel, size = 18.dp, tint = Color.White)
+                FaIcon(icon, label = sendLabel, size = 18.dp, tint = Palette.OnAction)
             }
         }
     }

@@ -141,6 +141,10 @@
     <string name="main_app_lock">App lock</string>
     <string name="main_app_lock_detail">Passphrase and auto-lock</string>
     <string name="main_typing_indicators">Typing indicators</string>
+    <string name="main_appearance">Appearance</string>
+    <string name="main_appearance_system">Same as the phone</string>
+    <string name="main_appearance_light">Light</string>
+    <string name="main_appearance_dark">Dark</string>
     <string name="main_keep_history">Keep history</string>
     <string name="main_keep_history_note">With a short period, this device also drops older messages that your other devices send it.</string>
     <string name="main_draft_sync">Draft sync</string>

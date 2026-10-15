@@ -2,10 +2,10 @@
 <resources>
     <!-- Android 12 and later show a splash at the start: the mark of the
          logo on the ground of the app, thus the first frame follows it
-         with no change of colour. -->
+         with no change of color. -->
     <style name="Theme.Umbra" parent="android:Theme.Material.Light.NoActionBar">
         <item name="android:windowBackground">@color/surface</item>
-        <!-- The app draws its own colours on each phone. -->
+        <!-- The app draws its own colors on each phone. -->
         <item name="android:forceDarkAllowed">false</item>
         <item name="android:windowSplashScreenBackground">@color/surface</item>
         <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_splash</item>

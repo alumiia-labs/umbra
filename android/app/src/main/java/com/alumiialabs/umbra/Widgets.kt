@@ -216,8 +216,6 @@ fun PlatformInput(
                 background = null
                 setPadding(0, 0, 0, 0)
                 styleAsApp(this)
-                setTextColor(textColor)
-                setHintTextColor(hintColor)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
                 // IMP-057: the input method learns nothing from this field.
                 imeOptions = EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING or
@@ -253,6 +251,10 @@ fun PlatformInput(
                 })
                 state.view = this
             }
+        },
+        update = { view ->
+            view.setTextColor(textColor)
+            view.setHintTextColor(hintColor)
         },
     )
 }
@@ -530,7 +532,7 @@ fun InlineButton(
 /** The sage note with an icon, for a fact that the user needs at this point. */
 @Composable
 fun Note(text: String, isError: Boolean = false) {
-    val ground = if (isError) Color(0xFFF6E3E1) else Palette.Incoming
+    val ground = if (isError) Palette.ErrorGround else Palette.Incoming
     val ink = if (isError) Palette.Error else Palette.Text
     Row(
         Modifier
@@ -671,7 +673,7 @@ fun LetterAvatar(name: String, seed: Int, size: Int = 44, icon: String? = null) 
     }
 }
 
-/** The bar of a view under the tabs: the word mark and the lock. */
+/** The bar of a view under the tabs: the wordmark and the lock. */
 @Composable
 fun BrandBar(onConnection: () -> Unit, onProfile: () -> Unit) {
     Row(
@@ -694,12 +696,13 @@ fun BrandBar(onConnection: () -> Unit, onProfile: () -> Unit) {
             BrandMark(size = 22.dp)
             Spacer(Modifier.width(10.dp))
         }
-        Text(
-            "UMBRA",
-            letterSpacing = 4.sp,
-            style = MaterialTheme.typography.titleMedium,
-            modifier = Modifier.weight(1f),
-        )
+        Box(Modifier.weight(1f)) {
+            Icon(
+                painterResource(R.drawable.ic_umbra_wordmark),
+                contentDescription = stringResource(R.string.app_name),
+                tint = Palette.Text,
+            )
+        }
         ConnectionStatus(onConnection)
         IconAction("lock", stringResource(R.string.widget_lock_now)) { Core.lock() }
     }

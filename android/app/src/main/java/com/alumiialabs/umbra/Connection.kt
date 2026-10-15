@@ -44,8 +44,6 @@ import uniffi.umbra_ffi.Hop
 /** The three states of the link that the top bar and the view show. */
 enum class LinkState { Connected, Connecting, Down }
 
-private val Amber = Color(0xFFB07A1E)
-
 /**
  * The live state of the connection in the top bar: a dot, and the count of
  * the relays that the circuits of this device use. It leads to the view of
@@ -78,7 +76,7 @@ fun ConnectionStatus(onOpen: () -> Unit) {
 private fun StatusDot(state: LinkState) {
     val tint = when (state) {
         LinkState.Connected -> Palette.Action
-        LinkState.Connecting -> Amber
+        LinkState.Connecting -> Palette.Waiting
         LinkState.Down -> Palette.Error
     }
     val pulse = rememberInfiniteTransition(label = "connecting")

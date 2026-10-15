@@ -93,7 +93,7 @@ fun EditablePicture(hasPicture: Boolean, onSet: (Bitmap?) -> Unit, picture: @Com
             stringResource(R.string.picture_edit),
             style = MaterialTheme.typography.labelMedium,
             fontWeight = FontWeight.SemiBold,
-            color = Color.White,
+            color = Palette.OnAction,
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .offset(x = 4.dp, y = 2.dp)
@@ -227,7 +227,7 @@ private fun CropDialog(image: Bitmap, onDone: (Bitmap) -> Unit, onCancel: () -> 
                 stringResource(R.string.common_done),
                 style = MaterialTheme.typography.labelLarge,
                 fontWeight = FontWeight.SemiBold,
-                color = Color.White,
+                color = Palette.OnAction,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .navigationBarsPadding()

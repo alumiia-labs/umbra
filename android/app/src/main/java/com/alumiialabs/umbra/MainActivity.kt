@@ -2,7 +2,9 @@ package com.alumiialabs.umbra
 
 import android.Manifest
 import android.content.Intent
+import android.content.res.Configuration
 import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
 import android.os.Build
 import android.os.Bundle
 import android.view.View
@@ -12,7 +14,11 @@ import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.ComposeView
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
@@ -21,10 +27,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // The app has one light theme, thus the bars take dark icons in each
-        // mode of the system.
-        val clear = Color.TRANSPARENT
-        enableEdgeToEdge(SystemBarStyle.light(clear, clear), SystemBarStyle.light(clear, clear))
+        Appearances.start(this)
         UiText.start(this)
         Notifier.makeChannels(this)
         // NTF-052: a network change draws a new phase of the Private clock.
@@ -39,10 +42,9 @@ class MainActivity : ComponentActivity() {
             setRecentsScreenshotEnabled(false)
         }
         val content = ComposeView(this).apply { setContent { UmbraApp() } }
-        cover = View(this).apply {
-            setBackgroundColor(getColor(R.color.surface))
-            visibility = View.GONE
-        }
+        cover = View(this).apply { visibility = View.GONE }
+        paintWindow(Appearances.isDark)
+        lifecycleScope.launch { snapshotFlow { Appearances.isDark }.collect(::paintWindow) }
         // The cover is a platform view and no composable, because the
         // platform takes the snapshot before a recomposition can run.
         val root = FrameLayout(this)
@@ -57,6 +59,32 @@ class MainActivity : ComponentActivity() {
         root.addView(cover, MATCH_PARENT, MATCH_PARENT)
         setContentView(root)
         if (savedInstanceState == null) takeInvitation(intent)
+    }
+
+    // A choice in a sheet changes the look while the sheet holds the focus,
+    // and the bars then keep the look of the sheet. The window paints them
+    // again when it takes the focus back.
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) paintWindow(Appearances.isDark)
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        Appearances.follow(newConfig)
+    }
+
+    /**
+     * The bars take icons that show on the ground of the app, and the window
+     * and the cover take that ground, in the light and in the dark look.
+     */
+    private fun paintWindow(isDark: Boolean) {
+        val clear = Color.TRANSPARENT
+        val style = if (isDark) SystemBarStyle.dark(clear) else SystemBarStyle.light(clear, clear)
+        enableEdgeToEdge(style, style)
+        val ground = Palette.Surface.toArgb()
+        window.setBackgroundDrawable(ColorDrawable(ground))
+        cover.setBackgroundColor(ground)
     }
 
     override fun onNewIntent(intent: Intent) {

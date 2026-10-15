@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The dark look: the platform parts that the app does not draw, as
+         the bar of a text selection, take dark colors. -->
+    <style name="Theme.Umbra" parent="android:Theme.Material.NoActionBar">
+        <!-- The ground of the app, before the first frame. -->
+        <item name="android:windowBackground">@color/surface</item>
+        <!-- The app draws its own colors on each phone. -->
+        <item name="android:forceDarkAllowed">false</item>
+    </style>
+</resources>

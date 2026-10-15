@@ -739,7 +739,7 @@ private fun ChatRowContent(chat: Chat) {
                 ) {
                     Text(
                         "${chat.unread}",
-                        color = Color.White,
+                        color = Palette.OnAction,
                         style = MaterialTheme.typography.labelSmall,
                     )
                 }
@@ -799,6 +799,21 @@ private fun SettingsTab(push: (Screen) -> Unit) {
         // itself is the icon of the bar.
         SettingRow("lock", stringResource(R.string.main_app_lock), stringResource(R.string.main_app_lock_detail)) { push(Screen.AppLock) }
         SettingRow("bell", stringResource(R.string.common_notifications), Modes.mode(LocalContext.current).label) { push(Screen.Notifications) }
+        var isChoosingLook by remember { mutableStateOf(false) }
+        SettingRow("circle-half-stroke", stringResource(R.string.main_appearance), Appearances.choice.label) { isChoosingLook = true }
+        if (isChoosingLook) {
+            val context = LocalContext.current
+            ActionSheet(
+                title = stringResource(R.string.main_appearance),
+                entries = Appearance.entries.map { look ->
+                    RowEntry(if (look == Appearances.choice) "check" else "circle-half-stroke", look.label) {
+                        Appearances.choose(context, look)
+                        isChoosingLook = false
+                    }
+                },
+                onDismiss = { isChoosingLook = false },
+            )
+        }
         SettingRow(
             "comment",
             stringResource(R.string.main_typing_indicators),
