@@ -191,7 +191,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             &request,
         );
         let mut batch = open.store.begin();
-        batch.put(TableId::MESSAGE, request_row, Some(conversation.0), &stored, rng)?;
+        batch.put(
+            TableId::MESSAGE,
+            request_row,
+            Some(conversation.0),
+            &stored,
+            rng,
+        )?;
         batch.put(OUTBOX, request_row, None, &outbox_row(), rng)?;
         batch.put(SETTINGS, limit_row, None, &now.to_be_bytes(), rng)?;
         batch.commit()?;

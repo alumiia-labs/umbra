@@ -7257,11 +7257,31 @@ mod tests {
             }
             (message, outgoing.app)
         };
-        send(&mut alice, &mut bob, conversation, "from alice", 2_000_000, true);
-        let (seen, seen_app) = send(&mut bob, &mut alice, bob_conversation, "seen", 2_001_000, true);
+        send(
+            &mut alice,
+            &mut bob,
+            conversation,
+            "from alice",
+            2_000_000,
+            true,
+        );
+        let (seen, seen_app) = send(
+            &mut bob,
+            &mut alice,
+            bob_conversation,
+            "seen",
+            2_001_000,
+            true,
+        );
         // This text of Bob crosses the request: Alice gets it after.
-        let (crossing, crossing_app) =
-            send(&mut bob, &mut alice, bob_conversation, "crossing", 2_002_000, false);
+        let (crossing, crossing_app) = send(
+            &mut bob,
+            &mut alice,
+            bob_conversation,
+            "crossing",
+            2_002_000,
+            false,
+        );
         while alice.next_event().is_some() {}
         while bob.next_event().is_some() {}
         assert_eq!(alice.messages(conversation).unwrap().len(), 2);
@@ -7276,7 +7296,9 @@ mod tests {
         let parsed = AppMessage::parse(&request.app, Channel::Pairwise).unwrap();
         let body = DeleteBody::parse(parsed.body).unwrap();
         assert_eq!(body.scope, DeleteScope::Conversation);
-        let seen_id = AppMessage::parse(&seen_app, Channel::Pairwise).unwrap().msg_id;
+        let seen_id = AppMessage::parse(&seen_app, Channel::Pairwise)
+            .unwrap()
+            .msg_id;
         assert_eq!(body.targets, [seen_id]);
         assert_eq!(
             alice.delete_conversation_for_everyone(conversation, 3_005_000, &mut rng),
