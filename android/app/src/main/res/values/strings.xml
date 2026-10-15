@@ -927,6 +927,7 @@
     <string name="connection_signed_current">Signed · current</string>
     <!-- The title of the row of push notifications. -->
     <string name="connection_push">Push</string>
+    <string name="connection_push_direct">Direct · own connection, no token</string>
     <string name="connection_push_private">Private · fixed clock, no token</string>
     <string name="connection_push_off">Off · no token</string>
     <string name="connection_push_polling">Polling</string>
@@ -1106,6 +1107,7 @@
 
     <!-- Notification modes -->
     <string name="modes_instant">Instant</string>
+    <string name="modes_direct">Direct</string>
     <string name="modes_private">Private</string>
     <string name="modes_show_sender_and_text">Show sender and text</string>
 </resources>

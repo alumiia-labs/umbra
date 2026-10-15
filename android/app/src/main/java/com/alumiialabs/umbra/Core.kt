@@ -1549,11 +1549,12 @@ object Core {
 
     /**
      * The platform leaves the sockets of a visible app and of the carrier.
-     * Instant mode alone holds a run with no view (Part 8 §8.3). The fixed
-     * clock of Private mode starts each run of that mode, and Off has none.
+     * Instant mode and Direct mode alone hold a run with no view (Part 8
+     * §8.3). The fixed clock of Private mode starts each run of that mode,
+     * and Off has none.
      */
     private fun wantsNetwork() =
-        phase == Phase.Open && (isVisible || (carrierHolds && mode == NotifyMode.Instant))
+        phase == Phase.Open && (isVisible || (carrierHolds && mode.holdsConnection))
 
     /** The foreground service tells the core when it starts and when it ends. */
     fun carrierRuns(context: Context, runs: Boolean) {
@@ -1563,7 +1564,7 @@ object Core {
 
     /** Ends the run of Private mode and of Off after the last view left. */
     private val dropRun = Runnable {
-        if (isVisible || phase != Phase.Open || mode == NotifyMode.Instant) return@Runnable
+        if (isVisible || phase != Phase.Open || mode.holdsConnection) return@Runnable
         // NET-100: a wake session ends by itself, and no drop cuts its drain.
         if (isWakeSession) return@Runnable
         // A start that waits on the network thread makes no run after this.
@@ -1578,7 +1579,7 @@ object Core {
      */
     private fun leftScreen() {
         main.removeCallbacks(dropRun)
-        if (!isVisible && phase == Phase.Open && mode != NotifyMode.Instant) {
+        if (!isVisible && phase == Phase.Open && !mode.holdsConnection) {
             main.postDelayed(dropRun, OFF_SCREEN_MS)
         }
     }

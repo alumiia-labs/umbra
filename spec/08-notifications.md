@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 8: Notifications and Mobile Delivery
 
 **Status:** Draft
-**Version:** 0.32.1
+**Version:** 0.33.0
 **Date:** 2026-10-15
 
 ---
@@ -12,9 +12,10 @@ Android is the v1 client platform (Part 1 §1.1). An Android client in Instant
 mode receives a push through Firebase Cloud Messaging (FCM). It also holds a
 persistent socket of its own and a periodic poll. §8.4.1 gives the
 three carriers. FCM puts Google on the path of each push, and a legal process
-against Google can obtain the account behind a registration token. A device
-with no FCM takes its wakes from the socket and the poll, and no platform
-party is on that path. UMBRA carries no UnifiedPush.
+against Google can obtain the account behind a registration token. A client
+in Direct mode, and a device with no FCM, take the wakes from the socket and
+the poll, and no platform party is on that path. UMBRA carries no
+UnifiedPush.
 
 Thus the design goal of UMBRA is **not** to hide from the push provider that a
 build carries. The goal is this:
@@ -469,24 +470,25 @@ own work with the four limits below, and it holds them in memory alone.
 > end the pushes of a device, or point them at a token of its own. The hash
 > of a secret that only the device holds closes both.
 
-## 8.3 The three modes
+## 8.3 The four modes
 
-UMBRA ships the three modes. The user selects one for the device.
+UMBRA ships the four modes. The user selects one for the device.
 
 | Mode | The carrier on Android |
 | --- | --- |
 | Instant | FCM, the persistent socket of §8.4.1, and the poll of `NTF-131` |
+| Direct | The persistent socket of §8.4.1 and the poll of `NTF-131`. The client holds no push token |
 | Private | A timer of the platform on a fixed clock. Each tick starts one run that drains each queue and ends. The client holds no push token, no socket between two ticks, and no poll |
 | Off | None. A run starts when the user opens the application |
 
-| | **Instant** | **Private** | **Off** |
-| --- | --- | --- | --- |
-| Mechanism | One push for each event | Constant-rate wakes | Drain when the user opens the application |
-| Cadence | On arrival | Fixed 30 min | — |
-| Latency | ~1 s | up to the interval, and longer when the platform defers the timer | until the user opens the application |
-| Google learns | The wake time for each event, on a device with FCM | Nothing: the client holds no push token | Nothing: the client holds no push token |
-| A locked client | Shows which conversation waits (`NTF-136`), and fetches nothing | Receives nothing and shows nothing until the unlock | Receives nothing until the unlock |
-| Default | The shipped default | The high-risk configuration | Never a default |
+| | **Instant** | **Direct** | **Private** | **Off** |
+| --- | --- | --- | --- | --- |
+| Mechanism | One push for each event | Each record over the own socket of the client | Constant-rate wakes | Drain when the user opens the application |
+| Cadence | On arrival | On arrival, while the client is unlocked | Fixed 30 min | — |
+| Latency | ~1 s | ~1 s while the client is unlocked, and until the unlock after the lock | up to the interval, and longer when the platform defers the timer | until the user opens the application |
+| Google learns | The wake time for each event, on a device with FCM | Nothing: the client holds no push token | Nothing: the client holds no push token | Nothing: the client holds no push token |
+| A locked client | Shows which conversation waits (`NTF-136`), and fetches nothing | Receives nothing and shows nothing until the unlock | Receives nothing and shows nothing until the unlock | Receives nothing until the unlock |
+| Default | The shipped default of a build with FCM | The shipped default of a build with no FCM (`NTF-140`) | The high-risk configuration | Never a default |
 
 **A locked client in Private mode receives nothing.** Part 14 rule `IMP-119`
 locks the client after 15 minutes with no action of the user, and a locked
@@ -495,6 +497,29 @@ does nothing, and Private mode holds no wake table of `NTF-135`, because it
 holds no push. Thus the latency of Private mode is the interval only while
 the client is unlocked. After the lock it is the time to the next unlock,
 and `NTF-120` tells the user so one time. Part 15 §15.3 holds that row.
+
+**Direct mode is Instant mode with no push provider.** The client holds the
+persistent socket of §8.4.1 while it is unlocked, and each record arrives
+on it. No party of the push path is on the path of a record.
+
+- **[NTF-139]** A client in Direct mode MUST hold no push token. It MUST end
+  its registration at the NDR and its wake table when it enters the mode
+  (`NTF-137`). It MUST take each record over the persistent socket of §8.4.1
+  while it is unlocked, and over the poll of `NTF-131`.
+- **[NTF-140]** A build with no push carrier of a platform MUST NOT offer
+  Instant mode. That build MUST offer Direct mode in its place, and it MUST
+  ship Direct mode as the default.
+- **[NTF-141]** An implementation MUST measure the battery cost of Direct
+  mode over 24 h on a mid-range Android device before a revision makes it
+  the default of a build with FCM.
+
+> *Cause.* Instant mode gives Google the time of each push, and Part 8 §8.7
+> states what that time shows. Direct mode removes Google from the path, and
+> it keeps the latency of Instant mode while the client is unlocked. A locked
+> client holds no key that reads a queue (`NTF-120`), thus in Direct mode it
+> receives nothing until the unlock. The held socket costs battery that no
+> measurement bounds yet, thus `NTF-141` puts a measurement before a change
+> of the default.
 
 **A run with no view.** In Private mode and in Off mode a client holds no run
 while no view is on the screen. A client MAY keep the run for 30 s after the
@@ -552,7 +577,7 @@ high-risk configuration, which is Private notifications with the content
 preview off: one screen holds the two controls, and a shortcut that sets both
 adds nothing that the user cannot do. **[NTF-083]** A build MUST ship Instant mode with the content
 preview off as the default of each Profile. That default applies to each build
-that holds a carrier of §8.4.1.
+that holds FCM, and `NTF-140` gives the mode of a build with no FCM.
 
 > *Cause.* A user at the first launch cannot weigh a threat model, and U1 of
 > Part 2 §2.4 permits no security decision before the inbox. Thus onboarding
@@ -572,8 +597,8 @@ to the NDR.
 
 **Default path: a bounded foreground service.** A high-priority FCM message
 wakes a `specialUse` foreground service. That service drains the queues and then
-stops. On a device with no FCM, the persistent socket and the poll below
-carry the wakes.
+stops. In Direct mode and on a device with no FCM, the persistent socket and
+the poll below carry the wakes.
 
 - Declare `specialUse`, and **do not declare `dataSync`**. Android 15 limits
   `dataSync` to 6 hours in 24 hours, and it then throws a
@@ -593,7 +618,7 @@ carry the wakes.
 
 A **persistent socket** is the second carrier of Instant mode, behind the
 same Rust trait. It needs no Notification Delivery Relay and no provider,
-thus it is the carrier of a device that holds no FCM. The poll of `NTF-131`
+thus it is the carrier of Direct mode and of a device that holds no FCM. The poll of `NTF-131`
 is the third.
 
 - **[NTF-116]** A client that carries its wakes over a persistent socket MUST
@@ -621,8 +646,9 @@ is the third.
   an open client that has none, and that run drains each queue under
   Part 3 §3.7 item 4. A locked client holds no key of a queue, thus a poll
   of a locked client MUST do nothing. The Android build holds FCM and this
-  poll beside the persistent socket in Instant mode. It ends the poll in
-  Private mode and in Off mode.
+  poll beside the persistent socket in Instant mode, and this poll beside
+  the persistent socket in Direct mode. It ends the poll in Private mode and
+  in Off mode.
 - **[NTF-121]** A record that arrives MUST NOT start the idle time of the
   auto-lock again. An action of the user alone does that. Thus a peer that
   writes each 10 minutes does not keep `K_store` in RAM.
@@ -889,9 +915,10 @@ notify queue pushes as for any queue. Part 6 §6.4.5 gives the commands
   of Part 6 §6.4. At the start of a run, a client MUST end each notify queue
   that no group of its store names. Such a queue is left from a run that
   ended before the client wrote the queue to its group.
-- **[NTF-106]** A client in Private mode or in Off mode MUST NOT register a
-  group notify queue. Those modes find a record at the next drain of the group
-  queue.
+- **[NTF-106]** A client in Direct mode, in Private mode, or in Off mode
+  MUST NOT register a group notify queue. Direct mode finds a record on the
+  `GSUB` of its open client. Private mode and Off mode find a record at the
+  next drain of the group queue.
 - **[NTF-107]** On a wake, a client MUST drain the notify queue under Part 6
   §6.4.3. **[NTF-108]** The client MUST then open a session to one replica of
   the group queue with `GSUB` from its cursor. Part 11 §11.2.2 gives the
@@ -954,9 +981,12 @@ the user reads:
 > account has UMBRA installed. Google also learns the exact time and the count
 > of each notification that it delivers to that account. Each push looks the
 > same to Google, thus Google does not learn which one is a group message.
-> In Private mode and in Off mode UMBRA holds no push token, and Google
-> learns from the push path no time and no count. In Private mode a locked
-> UMBRA receives nothing until you unlock it.
+> Over many messages, the push times of two accounts that write to each
+> other can show Google that the two accounts talk.
+> In Direct mode, in Private mode, and in Off mode UMBRA holds no push
+> token, and Google learns from the push path no time and no count. In
+> Direct mode and in Private mode a locked UMBRA receives nothing until you
+> unlock it.
 >
 > In Instant mode, the Notification Delivery Relay of UMBRA learns the mapping
 > token↔handle↔arrival time. It learns this mapping transiently and in memory

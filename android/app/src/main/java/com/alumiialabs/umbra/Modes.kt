@@ -36,8 +36,9 @@ import androidx.work.WorkManager as Work
 import java.security.SecureRandom
 
 /**
- * The three modes of Part 8 §8.3, and the content preview of `NTF-083`.
- * Instant mode registers the push token of the platform. Private mode
+ * The four modes of Part 8 §8.3, and the content preview of `NTF-083`.
+ * Instant mode registers the push token of the platform. Direct mode holds
+ * no token and takes each record over its own connection. Private mode
  * holds no token, and the device wakes on a fixed clock that no arrival
  * moves. Off drains when the user opens the app. The mode is a setting of
  * this device.
@@ -45,6 +46,7 @@ import java.security.SecureRandom
 enum class NotifyMode(private val labelId: Int, private val words: Int) {
     // NTF-009: the trade of each mode, in one honest line.
     Instant(R.string.modes_instant, R.string.umbra_ui_ntf_009),
+    Direct(R.string.modes_direct, R.string.umbra_ui_ntf_009_direct),
     Private(R.string.modes_private, R.string.umbra_ui_ntf_009_private),
     Off(R.string.common_off, R.string.umbra_ui_ntf_009_off),
     ;
@@ -56,6 +58,10 @@ enum class NotifyMode(private val labelId: Int, private val words: Int) {
     /** The trade of the mode in one line. */
     val trade: String
         get() = UiText.get(words)
+
+    /** Instant and Direct hold the persistent socket while the client is open. */
+    val holdsConnection: Boolean
+        get() = this == Instant || this == Direct
 }
 
 object Modes {
@@ -71,11 +77,21 @@ object Modes {
     private fun preferences(context: Context) =
         context.applicationContext.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
 
-    /** The mode of this device. A build ships Instant (`NTF-083`). */
-    fun mode(context: Context): NotifyMode =
-        preferences(context).getString(MODE, null)?.let { held ->
-            NotifyMode.entries.firstOrNull { it.name == held }
+    /**
+     * The mode of this device. A build ships Instant (`NTF-083`). A build
+     * with no FCM holds no Instant mode, thus Direct takes its place
+     * (`NTF-140`).
+     */
+    fun mode(context: Context): NotifyMode {
+        val held = preferences(context).getString(MODE, null)?.let { name ->
+            NotifyMode.entries.firstOrNull { it.name == name }
         } ?: NotifyMode.Instant
+        return if (held == NotifyMode.Instant && !Push.isAvailable(context)) NotifyMode.Direct else held
+    }
+
+    /** The modes that this build offers (`NTF-140`). */
+    fun offered(context: Context): List<NotifyMode> =
+        NotifyMode.entries.filter { it != NotifyMode.Instant || Push.isAvailable(context) }
 
     /** Whether an alert shows the sender and the text. Off by default. */
     fun preview(context: Context): Boolean = preferences(context).getBoolean(PREVIEW, false)
@@ -100,6 +116,14 @@ object Modes {
                 Push.opened(app)
                 Poll.schedule(app)
                 Core.refreshWake(app)
+            }
+            NotifyMode.Direct -> {
+                // NTF-139: no token, thus no party of the push path.
+                Core.clearPushToken()
+                Push.closed(app)
+                WakeStore.delete(app)
+                cancelClock(app)
+                Poll.schedule(app)
             }
             NotifyMode.Private -> {
                 // NTF-039: no token, thus no push of high priority.
@@ -204,7 +228,7 @@ fun NotificationsScreen(onBack: () -> Unit) {
         BackBar(stringResource(R.string.common_notifications), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
             Spacer(Modifier.height(8.dp))
-            for (choice in NotifyMode.entries) {
+            for (choice in Modes.offered(context)) {
                 Row(
                     Modifier
                         .fillMaxWidth()

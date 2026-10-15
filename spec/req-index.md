@@ -75,7 +75,7 @@ column when a crate implements the requirement and a test covers it.
 | `CRY` | 120 | 27 | 0 | 0 | 1 | **148** |
 | `WIR` | 417 | 87 | 0 | 0 | 7 | **511** |
 | `DEV` | 220 | 94 | 0 | 0 | 12 | **326** |
-| `NTF` | 77 | 28 | 0 | 0 | 3 | **108** |
+| `NTF` | 79 | 29 | 0 | 0 | 3 | **111** |
 | `DIS` | 131 | 36 | 0 | 0 | 3 | **170** |
 | `REL` | 170 | 34 | 1 | 0 | 3 | **208** |
 | `GRP` | 233 | 65 | 0 | 0 | 5 | **303** |
@@ -83,7 +83,7 @@ column when a crate implements the requirement and a test covers it.
 | `ABU` | 71 | 29 | 1 | 0 | 0 | **101** |
 | `IMP` | 117 | 41 | 0 | 0 | 2 | **160** |
 | `SEC` | 4 | 3 | 0 | 0 | 1 | **8** |
-| **All** | 2121 | 635 | 6 | 0 | 58 | **2820** |
+| **All** | 2123 | 636 | 6 | 0 | 58 | **2823** |
 
 ## SCP — Scope and Conventions
 
@@ -1781,7 +1781,7 @@ Source: `spec/08-notifications.md`
 | `NTF-103` | §8.5.2 | MUST | A group-queue relay | A group-queue relay MUST discard a registration at a `GNUNREG` that names its queue. |  |  |
 | `NTF-104` | §8.5.2 | MUST | A client | A client MUST rotate a group notify queue with the triple of `NTF-007`. |  |  |
 | `NTF-105` | §8.5.2 | MUST | A client | A client MUST register the new queue before it drops the old one. |  |  |
-| `NTF-106` | §8.5.2 | MUST NOT | A client in Private mode or in Off mode | A client in Private mode or in Off mode MUST NOT register a group notify queue. |  |  |
+| `NTF-106` | §8.5.2 | MUST NOT | A client in Private mode or in Off mode | A client in Direct mode, in Private mode, or in Off mode MUST NOT register a group notify queue. |  |  |
 | `NTF-107` | §8.5.2 | MUST | On a wake, a client | On a wake, a client MUST drain the notify queue under Part 6 §6.4.3. |  |  |
 | `NTF-108` | §8.5.2 | MUST | The client | The client MUST then open a session to one replica of the group queue with `GSUB` from its cursor. |  |  |
 | `NTF-109` | §8.7 | MAY | A deployment | A deployment MAY operate its own Notification Delivery Relay. |  |  |
@@ -1814,6 +1814,9 @@ Source: `spec/08-notifications.md`
 | `NTF-136` | §8.4.1 | MUST | A locked client | A locked client MUST open each blob with that table under `NTF-075` to `NTF-079`. |  |  |
 | `NTF-137` | §8.4.1 | MUST | A client | A client MUST delete the wake table and its keystore key at a local wipe of Part 7 `DEV-008`, and when the mode leaves Instant. |  |  |
 | `NTF-138` | §8.2.7 | MUST | The NDR | The NDR MUST drop a registration `NDR_REG_TTL` after the `NREG` that made or last moved it, and it MUST answer `gone` to an `NPUSH` for it from then on. |  |  |
+| `NTF-139` | §8.3 | MUST | A client in Direct mode | A client in Direct mode MUST hold no push token. |  |  |
+| `NTF-140` | §8.3 | MUST NOT | A build with no push carrier of a platform | A build with no push carrier of a platform MUST NOT offer Instant mode. |  |  |
+| `NTF-141` | §8.3 | MUST | An implementation | An implementation MUST measure the battery cost of Direct mode over 24 h on a mid-range Android device before a revision makes it the default of a build with FCM. |  |  |
 
 ## DIS — Discovery, Handles, and Key Transparency
 
