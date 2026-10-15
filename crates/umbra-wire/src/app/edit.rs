@@ -70,6 +70,9 @@ pub enum DeleteScope {
     OwnDevices = 0x01,
     /// The other party.
     OtherParty = 0x02,
+    /// The whole pairwise conversation, at the other party (`WIR-558`).
+    /// The one target bounds the messages of the receiver that go.
+    Conversation = 0x03,
 }
 
 /// A tombstone over one or more targets.
@@ -96,6 +99,7 @@ impl DeleteBody {
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, Error> {
         if self.targets.is_empty()
             || self.targets.len() > DELETE_BATCH_MAX
+            || (self.scope == DeleteScope::Conversation && self.targets.len() != 1)
             || !strictly_increasing(&self.targets)
         {
             return Err(Error::Malformed);
@@ -118,6 +122,7 @@ impl DeleteBody {
         let scope = match r.u8()? {
             0x01 => DeleteScope::OwnDevices,
             0x02 => DeleteScope::OtherParty,
+            0x03 => DeleteScope::Conversation,
             _ => return Err(Error::Malformed),
         };
         let rest = r.remaining();
@@ -126,6 +131,10 @@ impl DeleteBody {
         }
         let k = rest / 16;
         if k == 0 || k > DELETE_BATCH_MAX {
+            return Err(Error::Malformed);
+        }
+        // WIR-559: the deletion of a conversation names one bound.
+        if scope == DeleteScope::Conversation && k != 1 {
             return Err(Error::Malformed);
         }
         let mut targets = Vec::with_capacity(k);
@@ -192,5 +201,25 @@ mod tests {
             targets: (0..10u8).map(|i| [i; 16]).collect(),
         };
         assert!(big.encode(&mut out).is_err());
+    }
+
+    #[test]
+    fn the_deletion_of_a_conversation_names_one_bound() {
+        let whole = DeleteBody {
+            scope: DeleteScope::Conversation,
+            targets: vec![[0; 16]],
+        };
+        let mut out = [0u8; 200];
+        assert_eq!(whole.encode(&mut out).unwrap(), 18);
+        assert_eq!(&out[..2], &[0x01, 0x03]);
+        assert_eq!(DeleteBody::parse(&out[..18]).unwrap(), whole);
+        // WIR-559: a second target is no bound.
+        let two = DeleteBody {
+            scope: DeleteScope::Conversation,
+            targets: vec![[1; 16], [2; 16]],
+        };
+        assert!(two.encode(&mut out).is_err());
+        out[18..34].copy_from_slice(&[2; 16]);
+        assert!(DeleteBody::parse(&out[..34]).is_err());
     }
 }

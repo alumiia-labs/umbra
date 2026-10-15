@@ -73,8 +73,8 @@ column when a crate implements the requirement and a test covers it.
 | `NET` | 258 | 90 | 1 | 0 | 9 | **358** |
 | `IDN` | 135 | 46 | 1 | 0 | 5 | **187** |
 | `CRY` | 120 | 27 | 0 | 0 | 1 | **148** |
-| `WIR` | 415 | 87 | 0 | 0 | 7 | **509** |
-| `DEV` | 218 | 94 | 0 | 0 | 11 | **323** |
+| `WIR` | 417 | 87 | 0 | 0 | 7 | **511** |
+| `DEV` | 220 | 94 | 0 | 0 | 12 | **326** |
 | `NTF` | 77 | 28 | 0 | 0 | 3 | **108** |
 | `DIS` | 131 | 36 | 0 | 0 | 3 | **170** |
 | `REL` | 170 | 34 | 1 | 0 | 3 | **208** |
@@ -83,7 +83,7 @@ column when a crate implements the requirement and a test covers it.
 | `ABU` | 71 | 29 | 1 | 0 | 0 | **101** |
 | `IMP` | 117 | 41 | 0 | 0 | 2 | **160** |
 | `SEC` | 4 | 3 | 0 | 0 | 1 | **8** |
-| **All** | 2117 | 635 | 6 | 0 | 57 | **2815** |
+| **All** | 2121 | 635 | 6 | 0 | 58 | **2820** |
 
 ## SCP — Scope and Conventions
 
@@ -1364,6 +1364,8 @@ Source: `spec/06-wire-format.md`
 | `WIR-555` | §6.6.13 | MUST | A parser | A parser MUST reject a `ForwardPolicy` whose `version` is not `0x01`, a body of kind `0x39` whose `body_len` is not 6, a `seq` of 0, and a `prohibits` other than `0x00` and `0x01`. |  |  |
 | `WIR-556` | §6.6.13 | MUST | A sender | A sender MUST set `seq` to one above the highest `seq` that it holds for the policy that the record changes. |  |  |
 | `WIR-557` | §6.6.6 | MUST | A sender | A sender MUST set `open_seconds` to 0, or to a value from `POLL_OPEN_MIN` to `POLL_OPEN_MAX`. |  |  |
+| `WIR-558` | §6.6.1 | MUST | A receiver | A receiver MUST reject a record of scope `0x03` that a group record carries. |  |  |
+| `WIR-559` | §6.6.1 | MUST | A parser | A parser MUST reject a record of scope `0x03` whose `k` is not 1. |  |  |
 
 ## DEV — Device Sets
 
@@ -1694,6 +1696,9 @@ Source: `spec/07-device-sets.md`
 | `DEV-331` | §7.5.9 | MAY | A user | A user MAY mute a conversation until a time, or with no end. |  |  |
 | `DEV-332` | §7.5.9 | MUST | The mute and the setting | The mute and the setting MUST share one item of §7.5.3, thus one last writer wins for the two. |  |  |
 | `DEV-333` | §7.5.7 | MAY | A user | A user MAY delete each message of one conversation for their own devices in one act. |  |  |
+| `DEV-334` | §7.5.7 | MAY | A user | A user MAY delete a whole pairwise conversation for everyone in one act. |  |  |
+| `DEV-335` | §7.5.6 | MUST | A receiver of a deletion of scope `0x03` from its contact | A receiver of a deletion of scope `0x03` from its contact MUST delete each message of the contact in that conversation that it holds. |  |  |
+| `DEV-336` | §7.5.6 | MUST | The receiver | The receiver MUST keep the request as one row of the conversation, and that row names the contact as the party that deleted the conversation. |  |  |
 
 ## NTF — Notifications
 

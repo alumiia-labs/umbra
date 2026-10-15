@@ -551,11 +551,26 @@ private fun ChatsTab(push: (Screen) -> Unit) {
         var acting by remember { mutableStateOf<Chat?>(null) }
         var muting by remember { mutableStateOf<Chat?>(null) }
         var deleting by remember { mutableStateOf<Chat?>(null) }
-        acting?.let { chat -> ChatOptions(chat, push, { muting = it }, { deleting = it }) { acting = null } }
+        var deletingHere by remember { mutableStateOf<Chat?>(null) }
+        var deletingAll by remember { mutableStateOf<Chat?>(null) }
+        // DEV-334: a conversation with a contact also goes for everyone. A
+        // group offers the deletion for the own devices alone.
+        val onDelete = { chat: Chat -> if (chat.isGroup) deletingHere = chat else deleting = chat }
+        acting?.let { chat -> ChatOptions(chat, push, { muting = it }, onDelete) { acting = null } }
         muting?.let { chat -> MuteOptions(chat) { muting = null } }
         deleting?.let { chat ->
             ActionSheet(
                 stringResource(R.string.main_delete_conversation_q),
+                listOf(
+                    RowEntry("trash-can", stringResource(R.string.common_delete_on_my_devices)) { deletingHere = chat },
+                    RowEntry("trash-can", stringResource(R.string.chat_delete_for_everyone)) { deletingAll = chat },
+                ),
+                onDismiss = { deleting = null },
+            )
+        }
+        deletingHere?.let { chat ->
+            ActionSheet(
+                stringResource(R.string.main_delete_on_my_devices_q),
                 listOf(
                     RowEntry("trash-can", stringResource(R.string.common_delete_on_my_devices)) {
                         Core.deleteConversation(chat.conversation)
@@ -569,7 +584,24 @@ private fun ChatsTab(push: (Screen) -> Unit) {
                 } else {
                     stringResource(R.string.main_delete_note_contact)
                 },
-                onDismiss = { deleting = null },
+                onDismiss = { deletingHere = null },
+            )
+        }
+        deletingAll?.let { chat ->
+            ActionSheet(
+                stringResource(R.string.chat_delete_for_everyone_question),
+                listOf(
+                    RowEntry("trash-can", stringResource(R.string.chat_delete_for_everyone)) {
+                        Core.deleteConversationForEveryone(chat.conversation) {
+                            notice = UiText.get(R.string.chat_wait_between_deletions)
+                        }
+                        // DEV-129: the view says which deletion ran.
+                        notice = UiText.get(R.string.main_asked_contact_to_delete_chat, chat.title)
+                    },
+                ),
+                // DEV-334: each limit of the request.
+                note = stringResource(R.string.umbra_ui_dev_334),
+                onDismiss = { deletingAll = null },
             )
         }
         // A group with no message still shows: the user made it, and its

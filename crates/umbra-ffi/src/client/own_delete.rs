@@ -9,10 +9,19 @@
 //! confirms them (`DEV-117`, `DEV-118`). Each device counts the deletions
 //! of each other device since the last roster epoch, which the removal of
 //! that device shows (`DEV-119`, `DEV-120`).
+//!
+//! A user also deletes a whole pairwise conversation for everyone
+//! (`DEV-334`): the deletion for the devices of the user, and one record
+//! of scope `0x03` that asks the contact to delete each message of the
+//! conversation, on each of its devices (`DEV-335`, `DEV-336`).
 
 use umbra_core::{
     devset::{roster::Roster, DeviceId},
-    store::{engine::Backend, record::TableId, wrap::SecureElement},
+    store::{
+        engine::Backend,
+        record::{RowId, TableId},
+        wrap::SecureElement,
+    },
 };
 use umbra_crypto::rand_core::CryptoRng;
 use umbra_wire::app::{
@@ -21,8 +30,11 @@ use umbra_wire::app::{
 };
 use zeroize::Zeroizing;
 
-use super::{conversation_of, msg_ref, sync::Synced, Client, MESSAGE_PREFIX};
-use crate::{ConversationId, Error, Event, MsgRef};
+use super::{
+    conversation_of, info_of, msg_ref, outbox_row, stored_message, sync::Synced, Client, Outgoing,
+    DELETE_RATE_LIMIT, INCOMING, LAST_DELETE_SETTING, MESSAGE_PREFIX, OUTBOX, OUTGOING, SETTINGS,
+};
+use crate::{ConversationId, Delivery, Error, Event, MsgRef};
 
 /// Each message that a deletion of another device names after a restore,
 /// by its row, with its conversation. It waits for the user (`DEV-118`).
@@ -117,6 +129,166 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         for message in &messages {
             self.delete_for_me(message)?;
+        }
+        self.events.push_back(Event::Conversations);
+        Ok(())
+    }
+
+    /// Deletes each message of a pairwise conversation on each device of
+    /// this user, as [`Client::delete_conversation`] does, and asks the
+    /// contact to delete each message of the conversation too (`DEV-334`).
+    /// The request names the newest message of the contact that this device
+    /// holds. Thus a message of the contact that crossed the request stays
+    /// on both sides (`DEV-335`). A group takes no such request, and a call
+    /// inside `DELETE_RATE_LIMIT` is [`Error::Busy`] and changes nothing.
+    pub fn delete_conversation_for_everyone<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        if self.is_group(conversation)? {
+            return Err(Error::Malformed);
+        }
+        let now = now_ms / 1_000;
+        let limit = [LAST_DELETE_SETTING, conversation.0.as_slice()].concat();
+        let open = self.open_ref()?;
+        let limit_row = open.store.row_id(SETTINGS, &limit);
+        if let Some(last) = open.store.get(SETTINGS, &limit_row)? {
+            let last: [u8; 8] = last.as_slice().try_into().map_err(|_| Error::Integrity)?;
+            if now.saturating_sub(u64::from_be_bytes(last)) < DELETE_RATE_LIMIT {
+                return Err(Error::Busy);
+            }
+        }
+        let bound = self.newest_of_contact(conversation)?;
+        self.delete_conversation(conversation, now_ms, rng)?;
+
+        let body = DeleteBody {
+            scope: DeleteScope::Conversation,
+            targets: vec![bound],
+        };
+        let mut encoded = vec![0u8; body.len()];
+        body.encode(&mut encoded)?;
+        let mut msg_id = [0u8; 16];
+        rng.fill_bytes(&mut msg_id);
+        let record = AppMessage {
+            kind: AppKind::Delete,
+            msg_id,
+            sent_at: now_ms,
+            body: &encoded,
+        };
+        let mut request = vec![0u8; record.len()];
+        record.encode(&mut request)?;
+        let open = self.open_mut()?;
+        let reference = msg_ref(&open.device_set_key, &msg_id);
+        let natural = [conversation.0.as_slice(), &reference].concat();
+        let request_row = open.store.row_id(TableId::MESSAGE, &natural);
+        let stored = stored_message(
+            OUTGOING,
+            Delivery::Queued,
+            conversation,
+            open.stamp.next(now_ms),
+            &request,
+        );
+        let mut batch = open.store.begin();
+        batch.put(TableId::MESSAGE, request_row, Some(conversation.0), &stored, rng)?;
+        batch.put(OUTBOX, request_row, None, &outbox_row(), rng)?;
+        batch.put(SETTINGS, limit_row, None, &now.to_be_bytes(), rng)?;
+        batch.commit()?;
+        self.outgoing.push_back(Outgoing {
+            message: MsgRef(request_row),
+            conversation,
+            app: request,
+        });
+        self.auto_lock.touch(now);
+        Ok(())
+    }
+
+    /// The `msg_id` of the newest message of the contact that this device
+    /// holds in `conversation`, or zero for none (`WIR-559`).
+    fn newest_of_contact(&self, conversation: ConversationId) -> Result<[u8; 16], Error> {
+        for message in self.messages(conversation)?.iter().rev() {
+            let Some(plain) = self.open_ref()?.store.get(TableId::MESSAGE, &message.0)? else {
+                continue;
+            };
+            let plain = Zeroizing::new(plain);
+            if info_of(&plain)?.outgoing {
+                continue;
+            }
+            let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
+            if let Ok(parsed) = AppMessage::parse(app, Channel::Pairwise) {
+                return Ok(parsed.msg_id);
+            }
+        }
+        Ok([0; 16])
+    }
+
+    /// Applies the request of the contact to delete the whole conversation
+    /// (`DEV-335`). Each message of the contact goes, and each message of
+    /// this device up to the one that the request names. A zero bound takes
+    /// no message of this device, and a bound that this device holds no
+    /// more takes each one. `later` holds the rows that the batch of the
+    /// request stored after it, and those stay. The request stays as one
+    /// row, the trace of `DEV-336`.
+    pub(super) fn take_clear<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        app: &[u8],
+        bound: [u8; 16],
+        later: &[RowId],
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let open = self.open_ref()?;
+        let up_to = if bound == [0; 16] {
+            None
+        } else {
+            let reference = msg_ref(&open.device_set_key, &bound);
+            let natural = [conversation.0.as_slice(), &reference].concat();
+            let row = open.store.row_id(TableId::MESSAGE, &natural);
+            match open.store.get(TableId::MESSAGE, &row)? {
+                // DEV-085: a bound of the contact names no message of the
+                // contact, and such a bound takes no message of this device.
+                Some(plain) => {
+                    let info = info_of(&Zeroizing::new(plain))?;
+                    info.outgoing.then_some(info.stored_at_ms)
+                }
+                None => Some(u64::MAX),
+            }
+        };
+        let mut gone = Vec::new();
+        for message in self.messages(conversation)? {
+            if later.contains(&message.0) {
+                continue;
+            }
+            let info = self.info(&message)?;
+            if !info.outgoing || up_to.is_some_and(|at| info.stored_at_ms <= at) {
+                gone.push(message);
+            }
+        }
+        for message in gone {
+            self.delete_if_held(&message)?;
+            self.events.push_back(Event::Deleted {
+                conversation,
+                message,
+            });
+        }
+        let parsed = AppMessage::parse(app, Channel::Pairwise)?;
+        let open = self.open_mut()?;
+        let reference = msg_ref(&open.device_set_key, &parsed.msg_id);
+        let natural = [conversation.0.as_slice(), &reference].concat();
+        let row = open.store.row_id(TableId::MESSAGE, &natural);
+        if open.store.get(TableId::MESSAGE, &row)?.is_none() {
+            let trace = stored_message(
+                INCOMING,
+                Delivery::Delivered,
+                conversation,
+                open.stamp.next(now_ms),
+                app,
+            );
+            let mut batch = open.store.begin();
+            batch.put(TableId::MESSAGE, row, Some(conversation.0), &trace, rng)?;
+            batch.commit()?;
         }
         self.events.push_back(Event::Conversations);
         Ok(())

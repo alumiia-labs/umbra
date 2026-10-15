@@ -528,6 +528,9 @@ fn outbox_sends(row: &[u8]) -> (u32, u64) {
 enum Tombstone {
     Placeholder,
     Request,
+    /// A deletion of the whole conversation (`DEV-334`): the request of
+    /// this device, or the trace of the request of the contact.
+    Cleared,
 }
 
 fn tombstone_of(parsed: &AppMessage<'_>) -> Result<Option<Tombstone>, Error> {
@@ -535,6 +538,9 @@ fn tombstone_of(parsed: &AppMessage<'_>) -> Result<Option<Tombstone>, Error> {
         return Ok(None);
     }
     let body = DeleteBody::parse(parsed.body)?;
+    if body.scope == DeleteScope::Conversation {
+        return Ok(Some(Tombstone::Cleared));
+    }
     Ok(Some(if body.targets == [parsed.msg_id] {
         Tombstone::Placeholder
     } else {
@@ -1319,6 +1325,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut reacted: BTreeMap<(RowId, u8), usize> = BTreeMap::new();
         // The forward policy of each conversation that this batch moves.
         let mut forwards: BTreeMap<ConversationId, ForwardSetting> = BTreeMap::new();
+        // DEV-335: each deletion of a whole conversation, with its bound and
+        // the count of the writes that this batch planned before it.
+        let mut clears: Vec<(ConversationId, Vec<u8>, [u8; 16], usize)> = Vec::new();
         for (index, record) in records.iter().enumerate() {
             let app = &record.app;
             let conversation = record.conversation;
@@ -1791,8 +1800,21 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 // A deletion is no message. WIR-084: a contact deletes for
                 // the other party, and a record of another scope, or one
                 // that does not parse, changes nothing.
-                let targets = match DeleteBody::parse(parsed.body) {
-                    Ok(body) if body.scope == DeleteScope::OtherParty => body.targets,
+                let body = DeleteBody::parse(parsed.body).ok();
+                // DEV-335: the contact deletes the whole conversation after
+                // this batch. A copy of a request of the user is no order:
+                // the deletions of scope 0x01 of DEV-333 reach this device.
+                if let Some(body) = body
+                    .as_ref()
+                    .filter(|body| body.scope == DeleteScope::Conversation)
+                {
+                    if let (false, Some(bound)) = (from_user, body.targets.first()) {
+                        clears.push((conversation, app.clone(), *bound, planned.len()));
+                    }
+                    continue;
+                }
+                let targets = match body {
+                    Some(body) if body.scope == DeleteScope::OtherParty => body.targets,
                     _ => Vec::new(),
                 };
                 for target in targets {
@@ -2159,6 +2181,23 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for outgoing in handoffs {
             self.synced_out.insert(outgoing.message);
             self.outgoing.push_back(outgoing);
+        }
+        for (conversation, app, bound, before) in clears {
+            // A message that this batch stored after the request stays.
+            let later: Vec<RowId> = planned
+                .get(before..)
+                .unwrap_or(&[])
+                .iter()
+                .filter_map(|write| match write {
+                    Planned::Put(table, row, Some(owner), _)
+                        if *table == TableId::MESSAGE && *owner == conversation.0 =>
+                    {
+                        Some(*row)
+                    }
+                    _ => None,
+                })
+                .collect();
+            settle(self.take_clear(conversation, &app, bound, &later, now_ms, rng));
         }
         for (conversation, body) in control {
             settle(self.on_pairwise_control(conversation, &body, now_ms, rng));
@@ -4599,6 +4638,8 @@ fn shown_text(plain: &[u8]) -> Result<&[u8], Error> {
         // The mark of a timer change or of a policy change holds no
         // text.
         AppKind::ConversationTimer | AppKind::ForwardPolicy => &[][..],
+        // The trace of a deletion of the conversation holds no text either.
+        AppKind::Delete if tombstone_of(&parsed)? == Some(Tombstone::Cleared) => &[][..],
         // A poll shows its question.
         AppKind::Poll => umbra_wire::app::poll::Poll::parse(parsed.body)
             .map_or(&[][..], |poll| poll.question.as_bytes()),
@@ -4638,6 +4679,7 @@ fn info_of(plain: &[u8]) -> Result<MessageInfo, Error> {
         } else {
             None
         },
+        cleared: tombstone_of(&parsed)? == Some(Tombstone::Cleared),
         // The store holds the policy: see `Client::info`.
         no_forward: false,
         // The store holds the deadline: see `Client::info`.
@@ -4678,7 +4720,13 @@ fn is_request(plain: &[u8]) -> Result<bool, Error> {
             | AppKind::RecoveryShare
             | AppKind::GroupControl
             | AppKind::KeyRequest
-    ) || tombstone_of(&parsed)? == Some(Tombstone::Request))
+    ) || match tombstone_of(&parsed)? {
+        Some(Tombstone::Request) => true,
+        // The request of this device shows no row, and the trace of the
+        // request of the contact shows one.
+        Some(Tombstone::Cleared) => plain.first() == Some(&OUTGOING),
+        _ => false,
+    })
 }
 
 /// Whether a stored record is an edit (`false`) or a deletion request

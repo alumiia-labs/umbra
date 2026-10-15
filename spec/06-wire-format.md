@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 6: Wire Format and Encoding
 
 **Status:** Draft
-**Version:** 0.31.0
+**Version:** 0.32.0
 **Date:** 2026-10-14
 
 ---
@@ -1836,7 +1836,8 @@ EditBody {
 
 DeleteBody {
     version     u8            // 0x01
-    scope       u8            // 0x01 the devices of one user, 0x02 the other party
+    scope       u8            // 0x01 the devices of one user, 0x02 the other party,
+                              // 0x03 the whole conversation at the other party
     targets     [k][16]u8     // k = (body_len - 2) / 16
 }
 ```
@@ -1870,8 +1871,16 @@ step.
 
 **The delete body.** The value `0x01` of `scope` names a deletion for the
 devices of one user, and the value `0x02` names a deletion for the other party.
-Part 7 §7.5.3 gives the routing of each value. **[WIR-084]** A receiver MUST reject a record
+The value `0x03` names a deletion of the whole pairwise conversation at the
+other party (Part 7 `DEV-334`). Part 7 §7.5.3 gives the routing of each value.
+**[WIR-084]** A receiver MUST reject a record
 whose scope byte does not match the channel that carried it.
+
+**[WIR-558]** A receiver MUST reject a record of scope `0x03` that a group
+record carries. **[WIR-559]** A parser MUST reject a record of scope `0x03`
+whose `k` is not 1. That one target is the bound of Part 7 `DEV-335`: the
+`msg_id` of the newest message of the receiver that the sender holds, or 16
+zero bytes when the sender holds none.
 
 **[WIR-085]** A parser MUST reject a record when (`body_len` − 2) mod 16 is not 0. **[WIR-086]** A parser
 MUST reject a `k` of 0. **[WIR-087]** A parser MUST reject a `k` above `DELETE_BATCH_MAX`. **[WIR-088]** A

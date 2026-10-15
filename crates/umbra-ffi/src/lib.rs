@@ -192,6 +192,9 @@ pub struct MessageInfo {
     /// The flag that a forward policy record set: the row is the mark of
     /// a policy change (`DEV-324`).
     pub forward_policy: Option<bool>,
+    /// Whether the row is the trace of a deletion of the whole
+    /// conversation by the contact (`DEV-336`).
+    pub cleared: bool,
     /// Whether the other party prohibits the forward of this message
     /// (`DEV-322`).
     pub no_forward: bool,
@@ -7224,6 +7227,81 @@ mod tests {
         bob.delete_for_me(&got).unwrap();
         assert!(bob.take_erasure().is_none());
         assert_eq!(bob.file_bytes(&got), Err(Error::NotFound));
+        alice.audit().unwrap();
+        bob.audit().unwrap();
+    }
+
+    #[test]
+    fn a_deletion_of_a_conversation_for_everyone_takes_each_side_up_to_its_bound() {
+        use umbra_wire::app::{
+            edit::{DeleteBody, DeleteScope},
+            AppMessage, Channel,
+        };
+
+        let mut rng = Rng(14);
+        let (mut alice, contact, conversation) = client_with_contact(15);
+        let (mut bob, _, bob_conversation) = client_with_contact(16);
+        let mut send = |from: &mut Client<MemoryBackend, Element>,
+                        to: &mut Client<MemoryBackend, Element>,
+                        at_from: ConversationId,
+                        words: &str,
+                        at: u64,
+                        arrives: bool| {
+            let mut draft = from.new_draft(at_from);
+            draft.set_text(&units(words)).unwrap();
+            let message = from.send_draft(draft, at, &mut rng).unwrap();
+            let outgoing = from.take_outgoing().unwrap();
+            if arrives {
+                to.commit_network(&[], &[(contact, outgoing.app.clone())], at + 500, &mut rng)
+                    .unwrap();
+            }
+            (message, outgoing.app)
+        };
+        send(&mut alice, &mut bob, conversation, "from alice", 2_000_000, true);
+        let (seen, seen_app) = send(&mut bob, &mut alice, bob_conversation, "seen", 2_001_000, true);
+        // This text of Bob crosses the request: Alice gets it after.
+        let (crossing, crossing_app) =
+            send(&mut bob, &mut alice, bob_conversation, "crossing", 2_002_000, false);
+        while alice.next_event().is_some() {}
+        while bob.next_event().is_some() {}
+        assert_eq!(alice.messages(conversation).unwrap().len(), 2);
+
+        // DEV-334: each message leaves each device of Alice at once, and one
+        // request names the newest message of Bob that Alice holds.
+        alice
+            .delete_conversation_for_everyone(conversation, 3_000_000, &mut rng)
+            .unwrap();
+        assert!(alice.messages(conversation).unwrap().is_empty());
+        let request = alice.take_outgoing().unwrap();
+        let parsed = AppMessage::parse(&request.app, Channel::Pairwise).unwrap();
+        let body = DeleteBody::parse(parsed.body).unwrap();
+        assert_eq!(body.scope, DeleteScope::Conversation);
+        let seen_id = AppMessage::parse(&seen_app, Channel::Pairwise).unwrap().msg_id;
+        assert_eq!(body.targets, [seen_id]);
+        assert_eq!(
+            alice.delete_conversation_for_everyone(conversation, 3_005_000, &mut rng),
+            Err(Error::Busy)
+        );
+
+        // DEV-335: Bob loses the text of Alice and his own text up to the
+        // bound. The crossing text stays, and one trace names the act.
+        bob.commit_network(&[], &[(contact, request.app.clone())], 3_100_000, &mut rng)
+            .unwrap();
+        let left = bob.messages(bob_conversation).unwrap();
+        assert_eq!(left.len(), 2);
+        assert_eq!(left[0], crossing);
+        assert!(!left.contains(&seen));
+        let trace = bob.info(&left[1]).unwrap();
+        assert!(trace.cleared && !trace.outgoing);
+        bob.render(&left[0], &mut View::default()).unwrap();
+
+        // The crossing text reaches Alice after the request, and it stays
+        // there too.
+        alice
+            .commit_network(&[], &[(contact, crossing_app)], 3_200_000, &mut rng)
+            .unwrap();
+        assert_eq!(alice.messages(conversation).unwrap().len(), 1);
+
         alice.audit().unwrap();
         bob.audit().unwrap();
     }

@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 7: Device Sets, History Sync, and Revocation
 
 **Status:** Draft
-**Version:** 0.31.0
+**Version:** 0.32.0
 **Date:** 2026-10-14
 
 ---
@@ -1152,7 +1152,9 @@ class in Part 6 §6.6. **[DEV-022]** A client MUST NOT process a kind that decla
 **The routing of a deletion.** A deletion for the devices of one user travels as
 kind `0x05` with the scope byte `0x01`, on a sync channel of §7.5.1. A deletion
 for the other party travels as kind `0x05` with the scope byte `0x02`, on a
-pairwise channel. Part 6 §6.6 gives the scope byte. **[DEV-044]** A client MUST NOT put a
+pairwise channel. A deletion of a whole pairwise conversation travels as kind
+`0x05` with the scope byte `0x03`, on a pairwise channel. Part 6 §6.6 gives the
+scope byte. **[DEV-044]** A client MUST NOT put a
 deletion inside kind `0x20`. **[DEV-045]** A receiver MUST reject a kind `0x05` record whose
 scope byte does not match the channel that carried it.
 
@@ -1496,6 +1498,38 @@ pending reference table below.
 > message the receiver has not yet sent. There is no signature in this
 > construction, thus the deniability of Part 5 §5.7 is untouched.
 
+**The deletion of a whole conversation.** A pairwise conversation takes a
+deletion of scope `0x03`, and a group does not (Part 6 `WIR-558`). Its one
+target is the bound of Part 6 `WIR-559`. That deletion is the one exception to
+`DEV-081` and `DEV-085`.
+
+- **[DEV-335]** A receiver of a deletion of scope `0x03` from its contact MUST
+  delete each message of the contact in that conversation that it holds. It
+  MUST delete each message that it sent in that conversation, up to and
+  including the bound, in the order of its store. A bound of 16 zero bytes
+  takes no message of the receiver. A bound that the receiver does not hold
+  takes each message of the receiver. A bound that names a message of the
+  contact takes no message of the receiver. The receiver MUST NOT delete a
+  message that arrived after the request. Each device of the receiver applies
+  the copy that the owner of the channels forwards to it. A copy of a request
+  of the user on a sync channel changes nothing, because the deletions of
+  `DEV-333` reach that device.
+- **[DEV-336]** The receiver MUST keep the request as one row of the
+  conversation, and that row names the contact as the party that deleted the
+  conversation. `DEV-102` permits the name, because the request came on the
+  ratchet of the contact. The user MAY remove that row.
+
+> *Cause of the bound.* A message of the receiver can cross the request. It
+> reaches the sender after the deletion there, and it stays at the sender. The
+> bound keeps it at the receiver too, thus the two sides show the same
+> conversation.
+
+> **This is a trade.** A party erases the messages of the other party on the
+> device of that party. Thus a harasser can erase the record that a victim
+> keeps for a report under Part 13 §13.10. The deletion is a request: a changed
+> client ignores it, and a copy or a screenshot of the conversation stays.
+> `DEV-336` keeps a trace of the act. Part 15 records this residual.
+
 **The edit window.** `EDIT_WINDOW` is 24 hours. **The ratchet owner of the
 recipient measures that window against its own local receive time of the
 target.** **[DEV-087]** The ratchet owner of the recipient MUST reject an edit
@@ -1704,6 +1738,18 @@ holds the plaintext. **[DEV-126]** Thus the interface MUST state each limit belo
   interface MUST state the line above for that act. A pairwise conversation
   with no message then leaves the list until the next message. A group
   stays in the list until the user leaves it.
+- **[DEV-334]** A user MAY delete a whole pairwise conversation for everyone in
+  one act. The client MUST send that act as the deletion of `DEV-333` and as
+  one record of scope `0x03` on the pairwise channel, under
+  `DELETE_RATE_LIMIT`. The client MUST NOT offer that act in a group. The
+  interface MUST state these lines for that act:
+  - "This asks the app of the other person to delete this chat, your messages
+    and theirs. The other person can keep a copy. A person who is offline gets
+    the request later. UMBRA cannot delete a message on a device that you do
+    not control."
+  - "A message that the other person sends while your request is on its way
+    stays on both sides."
+  - "The app of the other person shows that you deleted the chat."
 - **[DEV-127]** The two operations MUST carry two different labels and two different
   confirmations. The deletion for your own devices can read as the stronger
   operation. **[DEV-128]** The interface MUST NOT make that operation the visually safer

@@ -2239,6 +2239,22 @@ object Core {
         refreshChats()
     }
 
+    /** Part 7 `DEV-334`: the deletion of the own devices, and a request to the contact. */
+    fun deleteConversationForEveryone(conversation: Conversation, onBusy: () -> Unit) {
+        val client = handle ?: return
+        worker.execute {
+            try {
+                client.deleteConversationForEveryone(conversation.id)
+                main.post { revision++ }
+                refreshChats()
+            } catch (busy: FfiException.Busy) {
+                main.post(onBusy)
+            } catch (failure: FfiException) {
+                main.post { fault = UiText.get(R.string.core_did_not_work, failure.javaClass.simpleName) }
+            }
+        }
+    }
+
     /**
      * Sends the text of a composer, as an answer to `replyTo` when the user
      * chose one. This call overwrites `text`.
@@ -2919,6 +2935,7 @@ object Core {
                     info.moderation == MOD_HIDE -> sink.chars = UiText.get(R.string.core_hidden_message).toCharArray()
                     info.timer != null -> sink.chars = timerPreview(info.timer!!).toCharArray()
                     info.forwardPolicy != null -> sink.chars = forwardPreview(info.forwardPolicy!!).toCharArray()
+                    info.cleared -> sink.chars = UiText.get(R.string.core_chat_deleted).toCharArray()
                     info.file != null -> sink.chars = fileWord(info.file!!).toCharArray()
                     else -> client.msgRender(it, sink)
                 }

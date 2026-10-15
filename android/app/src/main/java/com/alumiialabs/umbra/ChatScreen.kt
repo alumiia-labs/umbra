@@ -594,6 +594,8 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                 } else if (line.info.forwardPolicy != null) {
                     // DEV-324: a policy change is a row of the conversation.
                     ForwardLine(line, chat)
+                } else if (line.info.cleared) {
+                    ClearedLine(chat)
                 } else Bubble(
                     line,
                     chat,
@@ -1372,6 +1374,28 @@ private fun ForwardLine(line: Line, chat: Chat) {
                     if (prohibits) R.string.chat_turned_forwarding_off else R.string.chat_turned_forwarding_on,
                     who,
                 ),
+                style = MaterialTheme.typography.labelSmall,
+                color = Palette.TextSecondary,
+                textAlign = TextAlign.Center,
+            )
+        }
+    }
+}
+
+/** The trace of a deletion of the whole conversation by the contact (`DEV-336`). */
+@Composable
+private fun ClearedLine(chat: Chat) {
+    Box(Modifier.fillMaxWidth().padding(vertical = 6.dp), contentAlignment = Alignment.Center) {
+        Row(
+            Modifier
+                .background(Palette.Incoming, CircleShape)
+                .padding(horizontal = 12.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            FaIcon("trash-can", size = 10.dp, tint = Palette.TextSecondary)
+            Spacer(Modifier.width(6.dp))
+            Text(
+                stringResource(R.string.chat_contact_deleted_chat, chat.title),
                 style = MaterialTheme.typography.labelSmall,
                 color = Palette.TextSecondary,
                 textAlign = TextAlign.Center,

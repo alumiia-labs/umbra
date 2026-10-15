@@ -1036,6 +1036,9 @@ pub struct MsgInfo {
     /// The flag that a forward policy record set, for the row that marks
     /// the change (`DEV-324`).
     pub forward_policy: Option<bool>,
+    /// Whether the row is the trace of a deletion of the whole
+    /// conversation by the contact (`DEV-336`).
+    pub cleared: bool,
     /// Whether the other party prohibits the forward of this message
     /// (`DEV-322`). [`Handle::forward`] gives `Refused` for it.
     pub no_forward: bool,
@@ -6612,6 +6615,7 @@ impl Handle {
             }),
             timer: info.timer,
             forward_policy: info.forward_policy,
+            cleared: info.cleared,
             no_forward: info.no_forward,
             expires_at: info.expires_at,
             poll: info.poll,
@@ -7102,6 +7106,25 @@ impl Handle {
         let mut inner = locked(&self.inner);
         let Inner { client, bridge, .. } = &mut *inner;
         client.delete_conversation(conversation, unix_now_ms(), &mut OsRng)?;
+        if let Some(running) = bridge {
+            running.flush(client, &mut OsRng)?;
+        }
+        // ATT-161: the chunks of a file that this device uploaded go too.
+        inner.pump_transfers();
+        inner.pump_groups();
+        Ok(())
+    }
+
+    /// Deletes each message of a pairwise conversation from the devices of
+    /// this user, and asks the contact to delete the whole conversation
+    /// (Part 7 `DEV-334`). A group is `Malformed`, and a request inside
+    /// 10 seconds of the last deletion request is `Busy`.
+    pub fn delete_conversation_for_everyone(&self, conversation: Vec<u8>) -> Result<(), FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let mut inner = locked(&self.inner);
+        let Inner { client, bridge, .. } = &mut *inner;
+        client.delete_conversation_for_everyone(conversation, unix_now_ms(), &mut OsRng)?;
+        // With no network the request waits in the store.
         if let Some(running) = bridge {
             running.flush(client, &mut OsRng)?;
         }

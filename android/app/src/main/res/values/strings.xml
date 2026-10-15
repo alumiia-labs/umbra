@@ -102,6 +102,9 @@
     <!-- Ui.kt: the chat list. -->
     <string name="main_delete_conversation_q">Delete this conversation?</string>
     <string name="main_deleted_on_your_devices">Deleted on your devices.</string>
+    <string name="main_delete_on_my_devices_q">Delete on my devices?</string>
+    <!-- %1$s is the name of the contact. -->
+    <string name="main_asked_contact_to_delete_chat">Deleted on your devices. UMBRA asked the app of %1$s to delete the chat.</string>
     <string name="main_delete_note_group">This removes the messages from your devices. The members keep their copies.</string>
     <string name="main_delete_note_contact">This removes the messages from your devices. The other person keeps their copy.</string>
     <string name="main_no_conversations">No conversations yet.</string>
@@ -362,6 +365,8 @@
     <string name="chat_send_this_file_question">Send this file?</string>
     <string name="chat_remove_this_message_question">Remove this message?</string>
     <string name="chat_delete_for_everyone">Delete for everyone</string>
+    <!-- %1$s is the name of the contact that deleted the whole chat. -->
+    <string name="chat_contact_deleted_chat">%1$s deleted this chat</string>
     <string name="chat_delete_this_message_question">Delete this message?</string>
     <string name="chat_delete_on_my_devices_question">Delete on my devices?</string>
     <string name="chat_delete_on_my_devices_note">This removes the message from your devices. The other person keeps their copy.</string>
@@ -996,6 +1001,8 @@
 
     <!-- Core: the placeholders of a chat preview -->
     <string name="core_message_deleted">Message deleted</string>
+    <!-- The preview in the chat list after the contact deleted the whole chat. -->
+    <string name="core_chat_deleted">Chat deleted</string>
     <string name="core_hidden_message">Hidden message</string>
 
     <!-- Core: unlock and passphrase -->
