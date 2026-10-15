@@ -90,13 +90,11 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
     val isAdmin = members.any { it.isSelf && it.role >= FfiRole.ADMIN }
     var timer by remember { mutableStateOf<UInt?>(null) }
     var alert by remember { mutableStateOf<UByte?>(null) }
-    var isSecure by remember { mutableStateOf<Boolean?>(null) }
     var noForward by remember { mutableStateOf<Boolean?>(null) }
     LaunchedEffect(chat.conversation, Core.revision) {
         Core.forwardRules(chat.conversation) { noForward = it.own }
         Core.timer(chat.conversation) { timer = it.seconds }
         Core.alertSetting(chat.conversation) { alert = it }
-        Core.screenshotBlocked(chat.conversation) { isSecure = it }
     }
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.group_details), onBack = onBack)
@@ -148,9 +146,6 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                 } else {
                     FactRow("clock", stringResource(R.string.common_disappearing_messages), timerLabel(it))
                 }
-            }
-            isSecure?.let {
-                ToggleRow(stringResource(R.string.group_block_screenshots), it) { on -> Core.blockScreenshots(chat.conversation, on) }
             }
             // DEV-325: an admin alone sets the forward policy of a group.
             noForward?.let {

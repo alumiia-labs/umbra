@@ -285,18 +285,9 @@ private fun ContactView(
         is Screen.Verify -> VerifyScreen(chat, pop, push)
         is Screen.VerifyCode -> VerifyCodeScreen(chat, top.starts, pop)
         is Screen.SafetyNumber -> SafetyNumberScreen(chat, pop)
-        is Screen.Photo -> {
-            ScreenshotBlock(top.conversation)
-            PhotoScreen(top.line, chat, pop)
-        }
-        is Screen.Video -> {
-            ScreenshotBlock(top.conversation)
-            VideoScreen(top.line, pop)
-        }
-        is Screen.Media -> {
-            ScreenshotBlock(top.conversation)
-            MediaScreen(chat, pop, push)
-        }
+        is Screen.Photo -> PhotoScreen(top.line, chat, pop)
+        is Screen.Video -> VideoScreen(top.line, pop)
+        is Screen.Media -> MediaScreen(chat, pop, push)
         is Screen.GroupDetails -> GroupDetailsScreen(chat, pop, push)
         is Screen.InviteToGroup -> InviteToGroupScreen(chat, pop)
         is Screen.GroupMembers -> GroupMembersScreen(chat, pop, push)

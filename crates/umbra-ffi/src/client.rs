@@ -41,7 +41,6 @@ mod reset;
 mod retention;
 mod roster_fork;
 mod roster_notes;
-mod screenshots;
 mod search;
 mod snapshot_recovery;
 pub use retention::{HISTORY_AGE_ALL, HISTORY_AGE_MIN};

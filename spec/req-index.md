@@ -81,9 +81,9 @@ column when a crate implements the requirement and a test covers it.
 | `GRP` | 233 | 65 | 0 | 0 | 5 | **303** |
 | `ATT` | 145 | 46 | 2 | 0 | 3 | **196** |
 | `ABU` | 71 | 29 | 1 | 0 | 0 | **101** |
-| `IMP` | 119 | 42 | 0 | 0 | 2 | **163** |
+| `IMP` | 117 | 41 | 0 | 0 | 2 | **160** |
 | `SEC` | 4 | 3 | 0 | 0 | 1 | **8** |
-| **All** | 2119 | 636 | 6 | 0 | 57 | **2818** |
+| **All** | 2117 | 635 | 6 | 0 | 57 | **2815** |
 
 ## SCP — Scope and Conventions
 
@@ -2875,8 +2875,6 @@ Source: `spec/14-implementation.md`
 | `IMP-055` | §14.6.6 | MUST | A client | A client MUST draw a cover view over each conversation surface before the application leaves the foreground. |  |  |
 | `IMP-056` | §14.6.6 | MUST | A client | An Android client MUST mark a copied message as sensitive with `ClipDescription.EXTRA_IS_SENSITIVE`. |  |  |
 | `IMP-057` | §14.6.6 | MUST | An Android client | An Android client MUST set `IME_FLAG_NO_PERSONALIZED_LEARNING` on each composer and on the passphrase field. |  |  |
-| `IMP-058` | §14.6.6 | MUST | A client | A client MUST offer a screenshot block as a setting of one conversation, and not as a global setting. |  |  |
-| `IMP-059` | §14.6.6 | MUST NOT | A client | A client MUST NOT block a screenshot in a conversation by default. |  |  |
 | `IMP-060` | §14.6.6 | MUST NOT | A client | A client MUST NOT hide a message from the accessibility tree. |  |  |
 | `IMP-061` | §14.6.4 | MUST | A client | A client MUST derive `K_wrap` with the block above, and with no other input. |  |  |
 | `IMP-062` | §14.6.4 | MUST | A client | A client MUST make the secure-element key with no export path. |  |  |
@@ -2925,7 +2923,6 @@ Source: `spec/14-implementation.md`
 | `IMP-109` | §14.7.4 | MUST | A web client | A web client MUST call `navigator.storage.persist()` at the first launch, and it MUST treat a refusal as no error. |  |  |
 | `IMP-110` | §14.7.5 | MUST | The settings of a web client | The settings of a web client MUST state that the browser receives messages while it runs, and that the phone receives each notification. |  |  |
 | `IMP-111` | §14.7.5 | MUST | A web client | A web client MUST apply `IMP-044` to `IMP-047` with the download location as the platform media store. |  |  |
-| `IMP-112` | §14.7.5 | MUST | A web client | A web client MUST state that the screenshot block of `IMP-058` is not available in the browser, because a browser gives no equivalent of `FLAG_SECURE`. |  |  |
 | `IMP-113` | §14.7.6 | MUST NOT | The `umbra-web` crate | The `umbra-web` crate MUST NOT add more transitive crates than its row in §14.2.3. |  |  |
 | `IMP-116` | §14.6.4 | MUST | A client | A client MUST run Argon2id with one lane, a memory of 64 MiB or more, and 3 passes or more. |  |  |
 | `IMP-117` | §14.6.4 | MUST | At the creation of the store, a client | At the creation of the store, a client MUST measure one try at that floor on the device, and it MUST raise the passes until one try takes about 3 s. |  |  |

@@ -495,7 +495,6 @@
     <string name="group_members">Members</string>
     <string name="group_identifier">Group identifier</string>
     <string name="group_members_and_roles">Members and roles</string>
-    <string name="group_block_screenshots">Block screenshots</string>
     <string name="group_no_forwarding">No forwarding</string>
     <string name="group_forwarding">Forwarding</string>
     <string name="group_invite_contact">Invite a contact</string>
@@ -621,7 +620,6 @@
 
     <!-- The conversation settings. -->
     <string name="verify_delivery_speed">Delivery speed</string>
-    <string name="verify_block_screenshots">Block screenshots</string>
     <string name="verify_delivery_receipts">Send delivery receipts</string>
     <string name="verify_read_receipts">Send read receipts</string>
     <string name="verify_no_forwarding">No forwarding</string>

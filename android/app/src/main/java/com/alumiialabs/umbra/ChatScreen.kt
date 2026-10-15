@@ -1,8 +1,6 @@
 package com.alumiialabs.umbra
 
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.LocalActivity
-import android.view.WindowManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -167,7 +165,6 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
     val readUpTo = lines.indexOfLast { it.info.outgoing && it.info.delivery.toInt() == READ }
     val replyCounts = remember(lines) { lines.mapNotNull { it.threadKey }.groupingBy { it }.eachCount() }
     val composer = rememberPlatformField()
-    ScreenshotBlock(conversation)
     // Part 6 §6.6.9: the text of the field starts and ends a typing state.
     LaunchedEffect(conversation) {
         composer.onChange = { if (!chat.isGroup) Core.typing(conversation, !composer.isEmpty) }
@@ -1421,23 +1418,3 @@ private fun deliveryLabel(state: UByte, failure: UByte): String = when (state.to
     else -> ""
 }
 
-/**
- * IMP-058: each screen of a conversation with the block, its photos,
- * videos and media list too, takes no screenshot.
- */
-@Composable
-fun ScreenshotBlock(conversation: Conversation) {
-    // The screen stays secure until the store answers, thus no frame of a
-    // blocked conversation shows while the answer is on its way.
-    var isSecure by remember(conversation) { mutableStateOf(true) }
-    LaunchedEffect(conversation, Core.revision) { Core.screenshotBlocked(conversation) { isSecure = it } }
-    val activity = LocalActivity.current
-    DisposableEffect(isSecure) {
-        val window = activity?.window
-        // The state reads its new value at the dispose, thus the effect
-        // keeps the value that it set.
-        val isSet = isSecure
-        if (isSet) window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-        onDispose { if (isSet) window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE) }
-    }
-}

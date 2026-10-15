@@ -99,7 +99,6 @@ fun SearchScreen(scope: Conversation?, onBack: () -> Unit, push: (Screen) -> Uni
     val listState = rememberLazyListState()
     // A new query or a new limit gives a new list, which starts at its top.
     LaunchedEffect(found) { listState.scrollToItem(0) }
-    if (scope != null) ScreenshotBlock(scope)
     val run = {
         val query = field.copy()
         if (query.all(Char::isWhitespace)) {

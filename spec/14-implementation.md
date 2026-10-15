@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 14: Implementation Requirements and Assurance
 
 **Status:** Draft
-**Version:** 0.30.0
+**Version:** 0.31.0
 **Date:** 2026-10-14
 
 ---
@@ -1208,6 +1208,11 @@ are platform stores.
 **Each social affordance stays.** A user can save a file, copy a message, and
 take a screenshot. Each of those is an explicit user action, and no rule below
 removes one. Part 2 rule `THR-013` names those actions as its one exception.
+The reference client offers no screenshot block for a conversation. A block
+binds the device of the user alone, and the other party can take a screenshot
+all the same, thus the block tells the user of a protection that it does not
+give. Part 13 §13.10 also makes a report about a private conversation a
+screenshot.
 
 **The decrypted attachment.**
 
@@ -1241,8 +1246,7 @@ removes one. Part 2 rule `THR-013` names those actions as its one exception.
   platform holds the cover and not the conversation. On Android 13 or newer a
   client also calls `setRecentsScreenshotEnabled(false)`. Before Android 13
   a sheet is a window of its own above the cover, thus it takes
-  `FLAG_SECURE`; the conversation under it keeps its screenshot of
-  `IMP-059`.
+  `FLAG_SECURE`.
 
 **The clipboard and the input method.**
 
@@ -1258,14 +1262,8 @@ removes one. Part 2 rule `THR-013` names those actions as its one exception.
   content-capture service reads each text of a view. The reference client
   sets the two on the root view, thus on each view of the application.
 
-**The screenshot and the accessibility tree.**
+**The accessibility tree.**
 
-- **[IMP-058]** A client MUST offer a screenshot block as a setting of one
-  conversation, and not as a global setting. On Android that block is
-  `FLAG_SECURE` on the window of that conversation.
-- **[IMP-059]** A client MUST NOT block a screenshot in a conversation by
-  default. Part 13 §13.10 makes a report about a private conversation a
-  screenshot.
 - **[IMP-060]** A client MUST NOT hide a message from the accessibility tree.
   An accessibility service serves a user that cannot see the screen, and a
   hidden message is a hidden conversation for that user.
@@ -1460,9 +1458,6 @@ the record construction of §14.6.4.
   client the platform stores are the clipboard, the download location, and the
   browser profile. **[IMP-111]** A web client MUST apply `IMP-044` to
   `IMP-047` with the download location as the platform media store.
-  **[IMP-112]** A web client MUST state that the screenshot block of `IMP-058`
-  is not available in the browser, because a browser gives no equivalent of
-  `FLAG_SECURE`.
 - Part 2 §2.4 goals U5 and U8 name an Android device, and they do not measure
   the web client. §14.9 binds the web client in full.
 

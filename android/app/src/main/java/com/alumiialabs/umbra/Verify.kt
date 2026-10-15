@@ -142,7 +142,6 @@ fun ConversationSettingsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) ->
     var receipts by remember { mutableStateOf<Receipts?>(null) }
     var timer by remember { mutableStateOf<UInt?>(null) }
     var alert by remember { mutableStateOf<UByte?>(null) }
-    var isSecure by remember { mutableStateOf<Boolean?>(null) }
     var mode by remember { mutableStateOf<Int?>(null) }
     var isChoosingMode by remember { mutableStateOf(false) }
     var forward by remember { mutableStateOf<ForwardRules?>(null) }
@@ -157,7 +156,6 @@ fun ConversationSettingsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) ->
     LaunchedEffect(chat.conversation, Core.revision) { Core.forwardRules(chat.conversation) { forward = it } }
     LaunchedEffect(chat.conversation) { Core.privacyMode(chat.conversation) { mode = it } }
     LaunchedEffect(chat.conversation) { Core.receipts(chat.conversation) { receipts = it } }
-    LaunchedEffect(chat.conversation, Core.revision) { Core.screenshotBlocked(chat.conversation) { isSecure = it } }
     LaunchedEffect(chat.conversation, Core.revision) { Core.alertSetting(chat.conversation) { alert = it } }
     LaunchedEffect(chat.conversation, Core.revision) { Core.timer(chat.conversation) { timer = it.seconds } }
     val change = { next: Receipts ->
@@ -192,10 +190,6 @@ fun ConversationSettingsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) ->
                 }
             }
             // The switches stay in one group, below the rows that open a screen.
-            isSecure?.let {
-                ToggleRow(stringResource(R.string.verify_block_screenshots), it) { on -> Core.blockScreenshots(chat.conversation, on) }
-                HorizontalDivider(color = Palette.Divider)
-            }
             receipts?.let { now ->
                 ToggleRow(stringResource(R.string.verify_delivery_receipts), now.delivery) { change(Receipts(it, now.read)) }
                 HorizontalDivider(color = Palette.Divider)
