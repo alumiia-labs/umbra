@@ -1061,14 +1061,15 @@ fn a_queue_takes_its_binding_and_a_live_arrival_wakes_nobody() {
     let (queue, relay) = queues[0];
     assert_eq!(relay, relay_static(3).0.relay_id);
     network.clients[0]
-        .notify_queue(&queue, &mut Rng(5))
+        .notify_queue(&queue, &[6; 32], &mut Rng(5))
         .unwrap();
     network.settle();
     let events = network.take_events(0);
+    // NTF-112: the `NPK` comes first, and the `NID` names the notifier.
     let [ClientEvent::NotifyKey {
         recipient_id,
         relay_ntf_pk,
-    }] = &events[..]
+    }, ClientEvent::NotifierId { .. }] = &events[..]
     else {
         panic!("{events:?}");
     };
@@ -1111,11 +1112,12 @@ fn a_lost_client_link_parks_its_circuits_and_the_next_arrival_is_pushed() {
     let (_, bob_contact) = contacts(&mut network);
     let (queue, _) = network.clients[0].inbound_queues()[0];
     network.clients[0]
-        .notify_queue(&queue, &mut Rng(5))
+        .notify_queue(&queue, &[6; 32], &mut Rng(5))
         .unwrap();
     network.settle();
     let events = network.take_events(0);
-    let [ClientEvent::NotifyKey { relay_ntf_pk, .. }] = &events[..] else {
+    let [ClientEvent::NotifyKey { relay_ntf_pk, .. }, ClientEvent::NotifierId { .. }] = &events[..]
+    else {
         panic!("{events:?}");
     };
     let binding = Binding {
@@ -2084,11 +2086,12 @@ fn bind_first_queue(network: &mut Network, client: usize) {
     use umbra_crypto::kem::PublicKey;
     let (queue, _) = network.clients[client].inbound_queues()[0];
     network.clients[client]
-        .notify_queue(&queue, &mut Rng(5))
+        .notify_queue(&queue, &[6; 32], &mut Rng(5))
         .unwrap();
     network.settle();
     let events = network.take_events(client);
-    let [ClientEvent::NotifyKey { relay_ntf_pk, .. }] = &events[..] else {
+    let [ClientEvent::NotifyKey { relay_ntf_pk, .. }, ClientEvent::NotifierId { .. }] = &events[..]
+    else {
         panic!("{events:?}");
     };
     let binding = Binding {

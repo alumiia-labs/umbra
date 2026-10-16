@@ -1,7 +1,8 @@
 //! The push registrations of this device (Part 8 §8.2): the root of each
 //! queue relay, the handle groups of at most `MAX_QUEUES_PER_HANDLE` queues
 //! with their `k_tok` and removal secret, the binding of each queue, and the
-//! push endpoint that the platform gave.
+//! push endpoint that the platform gave. A device in Direct mode binds each
+//! queue for the watch of a locked client in its place (§8.4.3).
 //!
 //! The store keeps what a registration needs across runs: a queue binds
 //! once, a group registers once, and a new endpoint registers each group
@@ -11,10 +12,12 @@
 
 use umbra_core::notify::ndr::next_removal;
 use umbra_core::{
-    notify::{binding::Binding, MAX_QUEUES_PER_HANDLE, ROTATE_INTERVAL},
+    notify::{binding::Binding, MAX_QUEUES_PER_HANDLE, ROTATE_INTERVAL, WATCH_HANDLE},
     store::{engine::Backend, record::TableId, wrap::SecureElement},
 };
-use umbra_crypto::{aead, hash::sha3_256, rand_core::CryptoRng, secret::Secret};
+use umbra_crypto::{
+    aead, hash::sha3_256, hkdf::Hkdf, labels, rand_core::CryptoRng, secret::Secret, sha3::Sha3_256,
+};
 use umbra_wire::ndr::{encode_token, NdrRequest, TokenCarrier, NDR_REQUEST_LEN, PUSH_TOKEN_MAX};
 
 use zeroize::Zeroizing;
@@ -32,14 +35,17 @@ const NOTIFY_RELAY: TableId = TableId(0x19);
 /// Each handle group: `handle`, `relay_id`, `k_tok`, the removal secret,
 /// the registration state, and the count of its queues.
 const NOTIFY_GROUP: TableId = TableId(0x1A);
-/// Each queue with a binding: `recipient_id`, `handle`, `queue_alias`, and
-/// whether its `NBIND` left.
+/// Each queue with a binding: `recipient_id`, `handle`, `queue_alias`,
+/// whether its `NBIND` left, and its `notifier_id` or zero bytes.
 const NOTIFY_QUEUE: TableId = TableId(0x1B);
 /// The push token of the platform as the NDR takes it: the carrier byte
 /// and its target (`NTF-123`).
 pub(super) const PUSH_TOKEN_SETTING: &[u8] = b"push-token";
 /// The hash of the contact set at the last check of `NTF-008`.
 pub(super) const CONTACT_SET_SETTING: &[u8] = b"push-contact-set";
+/// Whether this device binds its queues for the watch of a locked client
+/// (Direct mode, `NTF-142`): one byte, 1 for on.
+const WATCH_SETTING: &[u8] = b"push-watch";
 
 const RELAY_LEN: usize = 32 + 32 + 2;
 /// A group row of the first form, before the root and the rotation time.
@@ -52,7 +58,9 @@ const DIGEST: u8 = 1;
 /// A group of one rendezvous queue of Part 9 §9.6, which holds no other
 /// queue (`NTF-043`, `NTF-044`).
 const RENDEZVOUS: u8 = 2;
-const QUEUE_LEN: usize = 32 + 16 + 16 + 1;
+/// A queue row of the first form, before the `notifier_id`.
+const QUEUE_LEN_V1: usize = 32 + 16 + 16 + 1;
+const QUEUE_LEN: usize = QUEUE_LEN_V1 + 32;
 
 /// The NDR does not hold the group.
 const UNREGISTERED: u8 = 0;
@@ -89,6 +97,8 @@ struct Queue {
     handle: [u8; 16],
     alias: [u8; 16],
     bound: bool,
+    /// The `notifier_id` that the relay drew at the last `NKEY` (§8.2.4).
+    notifier_id: Option<[u8; 32]>,
 }
 
 fn take<const N: usize>(bytes: &[u8], at: &mut usize) -> Result<[u8; N], Error> {
@@ -178,12 +188,13 @@ impl Queue {
             &self.handle,
             &self.alias,
             &[u8::from(self.bound)],
+            &self.notifier_id.unwrap_or([0; 32]),
         ]
         .concat()
     }
 
     fn parse(bytes: &[u8]) -> Result<Self, Error> {
-        if bytes.len() != QUEUE_LEN {
+        if bytes.len() != QUEUE_LEN && bytes.len() != QUEUE_LEN_V1 {
             return Err(Error::Malformed);
         }
         let mut at = 0;
@@ -191,14 +202,24 @@ impl Queue {
         let handle = take(bytes, &mut at)?;
         let alias = take(bytes, &mut at)?;
         let [bound] = take(bytes, &mut at)?;
+        let notifier_id = if bytes.len() == QUEUE_LEN {
+            Some(take::<32>(bytes, &mut at)?).filter(|id| *id != [0; 32])
+        } else {
+            None
+        };
         Ok(Queue {
             recipient_id,
             handle,
             alias,
             bound: bound == 1,
+            notifier_id,
         })
     }
 }
+
+/// One watch of a locked client: the relay of the queue, its
+/// `notifier_id`, and its notifier secret (`NTF-145`).
+pub type WatchEntry = ([u8; 32], [u8; 32], Secret<32>);
 
 /// One request that waits for the NDR, with what its answer changes.
 pub struct NdrCall {
@@ -342,7 +363,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now: u64,
         rng: &mut R,
     ) -> Result<bool, Error> {
-        if self.push_token()?.is_none() {
+        if !self.binds()? {
             return Ok(false);
         }
         let mut groups = self.notify_groups()?;
@@ -409,6 +430,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 fresh.count = fresh.count.saturating_add(1);
                 queue.handle = fresh.handle;
                 queue.bound = false;
+                queue.notifier_id = None;
                 rows.push((NOTIFY_QUEUE, queue.recipient_id.to_vec(), queue.encode()));
             }
         }
@@ -485,7 +507,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now: u64,
         rng: &mut R,
     ) -> Result<Vec<[u8; 32]>, Error> {
-        if self.push_token()?.is_none() {
+        if !self.binds()? {
             return Ok(Vec::new());
         }
         let mut relays = self.notify_relays()?;
@@ -551,6 +573,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 handle: group.handle,
                 alias: random(rng),
                 bound: false,
+                notifier_id: None,
             });
             unbound.push(*recipient_id);
         }
@@ -706,13 +729,112 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(root) = group.root else {
             return Ok(None);
         };
+        // NTF-143: with no push token the binding serves the watch alone,
+        // and it names no handle and no token key of an NDR.
+        let (handle, k_tok) = if self.push_token()?.is_some() {
+            (group.handle, group.k_tok)
+        } else {
+            (WATCH_HANDLE, Secret::new([0; 32]))
+        };
         Ok(Some(Binding {
             root,
-            handle: group.handle,
-            k_tok: group.k_tok,
+            handle,
+            k_tok,
             queue_alias: queue.alias,
             relay_idx: relay.relay_idx,
         }))
+    }
+
+    /// Whether the queues of this device bind: under a push token, or for
+    /// the watch of Direct mode (`NTF-142`).
+    pub(crate) fn binds(&self) -> Result<bool, Error> {
+        Ok(self.push_token()?.is_some() || self.locked_watch()?)
+    }
+
+    /// Whether this device binds its queues for the watch of a locked
+    /// client (Direct mode, `NTF-142`).
+    pub fn locked_watch(&self) -> Result<bool, Error> {
+        let open = self.open_ref()?;
+        let row = open.store.row_id(SETTINGS, WATCH_SETTING);
+        Ok(open.store.get(SETTINGS, &row)?.as_deref() == Some(&[1u8][..]))
+    }
+
+    /// Turns the watch of Direct mode on or off. Each queue binds again at
+    /// the next run, because the handle of its binding changes with it.
+    pub fn set_watch<R: CryptoRng + ?Sized>(&mut self, on: bool, rng: &mut R) -> Result<(), Error> {
+        if self.locked_watch()? == on {
+            return Ok(());
+        }
+        let mut rows = vec![(SETTINGS, WATCH_SETTING.to_vec(), vec![u8::from(on)])];
+        for (_, bytes) in self.open_ref()?.store.list(NOTIFY_QUEUE, None)? {
+            let Ok(mut queue) = Queue::parse(&bytes) else {
+                continue;
+            };
+            queue.bound = false;
+            queue.notifier_id = None;
+            rows.push((NOTIFY_QUEUE, queue.recipient_id.to_vec(), queue.encode()));
+        }
+        self.put_rows(&rows, rng)
+    }
+
+    /// The notifier secret of a queue (Part 8 §8.2.4): `HKDF-SHA3-256` of
+    /// the root of its group, with the `RecipientId` as the salt. It
+    /// rotates with that root (`NTF-007`), and the store holds no copy.
+    pub fn notifier_secret(&self, recipient_id: &[u8; 32]) -> Result<Option<Secret<32>>, Error> {
+        let Some(binding) = self.binding_of(recipient_id)? else {
+            return Ok(None);
+        };
+        let kdf = Hkdf::<Sha3_256>::new(Some(recipient_id), binding.root.expose());
+        let mut secret = Secret::<32>::zeroed();
+        kdf.expand(labels::NTF_NOTIFIER, secret.expose_mut())
+            .map_err(|_| Error::Malformed)?;
+        Ok(Some(secret))
+    }
+
+    /// The relay drew the `notifier_id` of a queue at its `NKEY`.
+    pub fn set_notifier_id<R: CryptoRng + ?Sized>(
+        &mut self,
+        recipient_id: &[u8; 32],
+        notifier_id: [u8; 32],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let Some(mut queue) = self.notify_queue(recipient_id)? else {
+            return Ok(());
+        };
+        if queue.notifier_id == Some(notifier_id) {
+            return Ok(());
+        }
+        queue.notifier_id = Some(notifier_id);
+        self.put_rows(
+            &[(NOTIFY_QUEUE, recipient_id.to_vec(), queue.encode())],
+            rng,
+        )
+    }
+
+    /// Each watch of a locked client: the relay, the `notifier_id`, and
+    /// the notifier secret of each queue whose binding left (`NTF-145`).
+    /// The list is empty while the watch is off.
+    pub fn watch_entries(&self) -> Result<Vec<WatchEntry>, Error> {
+        if !self.locked_watch()? || self.push_token()?.is_some() {
+            return Ok(Vec::new());
+        }
+        let groups = self.notify_groups()?;
+        let mut out = Vec::new();
+        for (_, bytes) in self.open_ref()?.store.list(NOTIFY_QUEUE, None)? {
+            let Ok(queue) = Queue::parse(&bytes) else {
+                continue;
+            };
+            let Some(notifier_id) = queue.notifier_id.filter(|_| queue.bound) else {
+                continue;
+            };
+            let Some(group) = groups.iter().find(|group| group.handle == queue.handle) else {
+                continue;
+            };
+            if let Some(secret) = self.notifier_secret(&queue.recipient_id)? {
+                out.push((group.relay_id, notifier_id, secret));
+            }
+        }
+        Ok(out)
     }
 
     /// A queue ended: its binding leaves, and its group holds one queue

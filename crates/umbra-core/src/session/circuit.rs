@@ -171,8 +171,8 @@ impl CircuitSession {
         // `WIR-323` drops it: the records of a lost `ACK` come again. A
         // `SUB` is the one that the session watches below.
         // A `CRNW` of Part 12 has no answer at all (`ATT-126`), and neither
-        // has an `NBIND` (`NTF-129`). Of the group range only a `GNEW`
-        // and a `GPOST` are answered (§6.4.5).
+        // has an `NBIND` (`NTF-129`) or an `NSUB` (`NTF-142`). Of the group
+        // range only a `GNEW` and a `GPOST` are answered (§6.4.5).
         const CRNW: u8 = 0x7A;
         let awaits = !matches!(
             cmd,
@@ -181,6 +181,7 @@ impl CircuitSession {
                 | Cmd::Unsub
                 | Cmd::Del
                 | Cmd::Nbind
+                | Cmd::Nsub
                 | Cmd::Attachment(CRNW)
                 | Cmd::Group(
                     GroupCmd::Gsub

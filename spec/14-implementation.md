@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 14: Implementation Requirements and Assurance
 
 **Status:** Draft
-**Version:** 0.33.0
+**Version:** 0.34.0
 **Date:** 2026-10-15
 
 ---
@@ -495,7 +495,9 @@ that draft is dropped, and it MUST do that whether the send succeeded or failed.
   drop its state at that stop. That state holds ratchet keys, queue keys, and
   circuit keys, and a locked client holds no key in RAM. The hardening
   secret `K_rng_harden` of `IMP-093` is a key of the store too, and it
-  leaves RAM at the lock with each other key.
+  leaves RAM at the lock with each other key. The watch of Part 8 `NTF-142`
+  runs after the lock in a runtime of its own. It holds the watch table of
+  `NTF-145` and the keys of its own circuits, and no key of the store.
 - **[IMP-128]** A client MUST order a conversation view by the time of its own
   store of each message. It MUST NOT order the view by `sent_at`, because that
   value comes from the peer, and a peer could thus put a message before an

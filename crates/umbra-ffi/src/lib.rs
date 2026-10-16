@@ -28,6 +28,8 @@ pub mod transfers;
 
 #[cfg(feature = "bindings")]
 pub mod bindings;
+#[cfg(feature = "bindings")]
+pub mod watch;
 
 #[cfg(feature = "bindings")]
 uniffi::setup_scaffolding!();
@@ -1989,6 +1991,63 @@ mod tests {
         upload.tries = 2;
         client.epoch_upload_failed(upload);
         assert!(client.take_epoch_upload().is_none());
+    }
+
+    #[test]
+    fn a_watch_binds_each_queue_under_no_handle_and_names_its_notifier() {
+        use umbra_core::notify::WATCH_HANDLE;
+        use umbra_wire::ndr::TokenCarrier;
+        let mut rng = Rng(93);
+        let mut client = new_client(&mut rng);
+        let queues: Vec<([u8; 32], [u8; 32])> = (0..3u8).map(|i| ([i; 32], [0xA1; 32])).collect();
+        // NTF-142: the watch binds each queue with no push token.
+        client.set_watch(true, &mut rng).unwrap();
+        assert!(client.locked_watch().unwrap());
+        let unbound = client.queues_to_bind(&queues, 0, &mut rng).unwrap();
+        assert_eq!(unbound.len(), 3);
+        client.binds_sent(&unbound);
+        // NTF-143: the binding names no handle and no token key of an NDR.
+        let binding = client.binding_of(&[0; 32]).unwrap().unwrap();
+        assert_eq!(binding.handle, WATCH_HANDLE);
+        assert_eq!(binding.k_tok.expose(), &[0; 32]);
+        assert!(client.ndr_calls_due(&mut rng).unwrap().is_empty());
+        // The notifier secret is stable, and differs for each queue.
+        let one = client.notifier_secret(&[0; 32]).unwrap().unwrap();
+        let again = client.notifier_secret(&[0; 32]).unwrap().unwrap();
+        let two = client.notifier_secret(&[1; 32]).unwrap().unwrap();
+        assert_eq!(one.expose(), again.expose());
+        assert_ne!(one.expose(), two.expose());
+        // NTF-145: a queue is a watch when its binding left and the relay
+        // drew its `notifier_id`.
+        assert!(client.watch_entries().unwrap().is_empty());
+        client
+            .set_notifier_id(&[0; 32], [0x77; 32], &mut rng)
+            .unwrap();
+        assert!(client.watch_entries().unwrap().is_empty());
+        client.queue_bound(&[0; 32], &mut rng).unwrap();
+        let entries = client.watch_entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, [0xA1; 32]);
+        assert_eq!(entries[0].1, [0x77; 32]);
+        assert_eq!(entries[0].2.expose(), one.expose());
+        // A push token takes the place of the watch: the binding names its
+        // handle again, and the table names no watch.
+        client
+            .set_push_token(Some((TokenCarrier::Fcm, "fcm-token")), &mut rng)
+            .unwrap();
+        assert_ne!(
+            client.binding_of(&[0; 32]).unwrap().unwrap().handle,
+            WATCH_HANDLE
+        );
+        assert!(client.watch_entries().unwrap().is_empty());
+        // The end of the watch binds each queue again.
+        client.set_push_token(None, &mut rng).unwrap();
+        client.set_watch(false, &mut rng).unwrap();
+        assert!(client.watch_entries().unwrap().is_empty());
+        assert!(client
+            .queues_to_bind(&queues, 0, &mut rng)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

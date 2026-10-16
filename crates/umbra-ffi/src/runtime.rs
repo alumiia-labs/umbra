@@ -254,7 +254,12 @@ pub enum Command {
     EndSweeps,
     /// Send the `NKEY` of an inbound queue. An [`Update::NotifyKey`]
     /// follows with the notification key of its relay (Part 8 §8.2.3).
-    NotifyQueue([u8; 32]),
+    NotifyQueue {
+        /// The queue.
+        recipient_id: [u8; 32],
+        /// The public half of its notifier key (§8.2.4).
+        notifier_pk: [u8; 32],
+    },
     /// Send the `NBIND` of an inbound queue: its binding, sealed.
     BindQueue {
         /// The queue.
@@ -489,6 +494,13 @@ pub enum Update {
     /// A minute of a ready run passed. The work of weeks and hours, as the
     /// dead-channel blob of Part 3 §3.2.6, runs at it.
     Tick,
+    /// The relay of an inbound queue drew its `notifier_id`.
+    NotifierId {
+        /// The queue.
+        recipient_id: [u8; 32],
+        /// The `notifier_id`.
+        notifier_id: [u8; 32],
+    },
     /// The relay of an inbound queue answered its `NKEY`.
     NotifyKey {
         /// The queue.
@@ -1571,6 +1583,15 @@ pub async fn run_client(
                     recipient_id,
                     relay_ntf_pk,
                 },
+                ClientEvent::NotifierId {
+                    recipient_id,
+                    notifier_id,
+                } => Update::NotifierId {
+                    recipient_id,
+                    notifier_id,
+                },
+                // A watch runs in a node of its own (`NTF-142`).
+                ClientEvent::Wake { .. } => continue,
                 ClientEvent::QueueEnded { queue } => Update::QueueEnded(queue),
                 ClientEvent::ChannelDead { contact } => Update::ChannelDead(contact),
                 ClientEvent::QueueRotated { contact, address } => Update::QueueRotated {
@@ -1747,8 +1768,11 @@ pub async fn run_client(
                     node.end_sweeps(now);
                     next_rotation_check = tokio::time::Instant::now();
                 }
-                Command::NotifyQueue(recipient_id) => {
-                    let _ = node.notify_queue(&recipient_id, &mut rng);
+                Command::NotifyQueue {
+                    recipient_id,
+                    notifier_pk,
+                } => {
+                    let _ = node.notify_queue(&recipient_id, &notifier_pk, &mut rng);
                 }
                 Command::BindQueue {
                     recipient_id,

@@ -1104,6 +1104,8 @@
     <string name="notify_new_contact_request">New contact request</string>
     <string name="notify_locked">UMBRA is locked</string>
     <string name="notify_open_to_take">Open the app to take messages.</string>
+    <string name="notify_arrive_watched">Messages arrive at once. After the lock, an alert shows that one waits.</string>
+    <string name="notify_watching">An alert shows that a message waits. Open the app to read it.</string>
 
     <!-- Notification modes -->
     <string name="modes_instant">Instant</string>

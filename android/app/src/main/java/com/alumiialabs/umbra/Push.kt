@@ -6,7 +6,6 @@ import com.google.firebase.FirebaseApp
 import com.google.firebase.messaging.FirebaseMessaging
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
-import uniffi.umbra_ffi.openWakeBlob
 
 /**
  * The FCM carrier of Part 8 §8.4.1. A build with the `google-services.json`
@@ -95,13 +94,10 @@ class PushService : FirebaseMessagingService() {
         // The blob opens in each state, thus an open client counts it too
         // (NTF-078, NTF-079).
         val conversation = waiting(app, message.data["b"])
-        // The wake table names a blocked contact, a conversation with its
-        // alerts off, and a sync channel with 16 bytes of 0xFF. Such a
-        // blob opened, and it shows no alert. An open client writes the
-        // table at each change of a block and of an alert setting, thus
-        // the table decides for it too.
-        val isSilent = conversation != null &&
-            conversation.id.size == SILENT_ID_LEN && conversation.id.all { it == SILENT_BYTE }
+        // A blob that the table names silent opened, and it shows no
+        // alert. An open client writes the table at each change of a block
+        // and of an alert setting, thus the table decides for it too.
+        val isSilent = WakeStore.isSilent(conversation)
         if (Core.isOpen()) {
             // A view on the screen shows the message itself. The alert of
             // the record takes the place of this one, or ends it.
@@ -110,13 +106,7 @@ class PushService : FirebaseMessagingService() {
             return
         }
         if (isSilent) return
-        // A locked client reads no setting of a conversation, thus each
-        // later push of one conversation makes no second sound.
-        if (conversation != null) {
-            Notifier.message(app, conversation, quiet = true)
-        } else {
-            Notifier.pushed(app)
-        }
+        Notifier.waiting(app, conversation)
     }
 
     /** The conversation of a blob that the wake table opens, or none. */
@@ -126,23 +116,6 @@ class PushService : FirebaseMessagingService() {
             runCatching { Base64.decode(it, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP) }
                 .getOrNull()
         } ?: return null
-        val table = WakeStore.read(app) ?: return null
-        val outcome = try {
-            openWakeBlob(table, blob, (System.currentTimeMillis() / 1_000).toULong())
-        } finally {
-            table.fill(0)
-        }
-        // NTF-076: a blob outside the window ran no open, thus it counts
-        // toward no failure.
-        when (outcome.status.toInt()) {
-            0 -> WakeStore.opened(app)
-            2 -> WakeStore.failed(app)
-        }
-        return outcome.conversation?.let(::Conversation)
-    }
-
-    private companion object {
-        const val SILENT_ID_LEN = 16
-        const val SILENT_BYTE = 0xFF.toByte()
+        return WakeStore.openBlob(app, blob)
     }
 }

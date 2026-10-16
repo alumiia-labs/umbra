@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 8: Notifications and Mobile Delivery
 
 **Status:** Draft
-**Version:** 0.33.0
+**Version:** 0.34.0
 **Date:** 2026-10-15
 
 ---
@@ -14,7 +14,8 @@ persistent socket of its own and a periodic poll. §8.4.1 gives the
 three carriers. FCM puts Google on the path of each push, and a legal process
 against Google can obtain the account behind a registration token. A client
 in Direct mode, and a device with no FCM, take the wakes from the socket and
-the poll, and no platform party is on that path. UMBRA carries no
+the poll, and no platform party is on that path. A locked client in Direct
+mode takes its wakes from a watch of its own (§8.4.3). UMBRA carries no
 UnifiedPush.
 
 Thus the design goal of UMBRA is **not** to hide from the push provider that a
@@ -276,11 +277,19 @@ requirement, and the push payload stays small.
 ### 8.2.4 Separate notifier credentials
 
 A queue carries an independent notifier keypair (`NKEY`), which returns a
-different `notifier_id`. Thus the NDR subscribes and receives arrival signals,
-and the NDR **cannot read a message and cannot acknowledge a message**. **[NTF-005]** A party
+different `notifier_id`. The holder of that credential can watch the queue
+for arrivals (§8.4.3), and it **cannot read a message and cannot acknowledge
+a message**. **[NTF-005]** A party
 MUST NOT be able to derive the notifier ID from the `RecipientId` of the queue.
 **[NTF-006]** A party MUST NOT be able to derive the notifier ID from the `SenderId` of the
 queue.
+
+The notifier key is an X25519 key pair. Its secret is
+`HKDF-SHA3-256(k_ntf_root, salt = RecipientId, info = "umbra/v1/ntf-notifier")`,
+with the `k_ntf_root` of the handle group of the queue. Thus the key
+rotates with that root under `NTF-007`, and the store holds no copy of it.
+The relay draws a fresh `notifier_id` at each `NKEY`, and it ends the
+credential before it.
 
 ### 8.2.5 Rotation
 
@@ -477,17 +486,17 @@ UMBRA ships the four modes. The user selects one for the device.
 | Mode | The carrier on Android |
 | --- | --- |
 | Instant | FCM, the persistent socket of §8.4.1, and the poll of `NTF-131` |
-| Direct | The persistent socket of §8.4.1 and the poll of `NTF-131`. The client holds no push token |
+| Direct | The persistent socket of §8.4.1 and the poll of `NTF-131` while the client is unlocked, and the watch of §8.4.3 after the lock. The client holds no push token |
 | Private | A timer of the platform on a fixed clock. Each tick starts one run that drains each queue and ends. The client holds no push token, no socket between two ticks, and no poll |
 | Off | None. A run starts when the user opens the application |
 
 | | **Instant** | **Direct** | **Private** | **Off** |
 | --- | --- | --- | --- | --- |
 | Mechanism | One push for each event | Each record over the own socket of the client | Constant-rate wakes | Drain when the user opens the application |
-| Cadence | On arrival | On arrival, while the client is unlocked | Fixed 30 min | — |
-| Latency | ~1 s | ~1 s while the client is unlocked, and until the unlock after the lock | up to the interval, and longer when the platform defers the timer | until the user opens the application |
+| Cadence | On arrival | On arrival | Fixed 30 min | — |
+| Latency | ~1 s | ~1 s. After the lock, an alert at ~1 s and the record at the unlock | up to the interval, and longer when the platform defers the timer | until the user opens the application |
 | Google learns | The wake time for each event, on a device with FCM | Nothing: the client holds no push token | Nothing: the client holds no push token | Nothing: the client holds no push token |
-| A locked client | Shows which conversation waits (`NTF-136`), and fetches nothing | Receives nothing and shows nothing until the unlock | Receives nothing and shows nothing until the unlock | Receives nothing until the unlock |
+| A locked client | Shows which conversation waits (`NTF-136`), and fetches nothing | Shows which conversation waits through its watch (`NTF-144`), and fetches nothing | Receives nothing and shows nothing until the unlock | Receives nothing until the unlock |
 | Default | The shipped default of a build with FCM | The shipped default of a build with no FCM (`NTF-140`) | The high-risk configuration | Never a default |
 
 **A locked client in Private mode receives nothing.** Part 14 rule `IMP-119`
@@ -500,12 +509,13 @@ and `NTF-120` tells the user so one time. Part 15 §15.3 holds that row.
 
 **Direct mode is Instant mode with no push provider.** The client holds the
 persistent socket of §8.4.1 while it is unlocked, and each record arrives
-on it. No party of the push path is on the path of a record.
+on it. After the lock, the watch of §8.4.3 shows which conversation waits.
+No party of the push path is on the path of a record or of a wake.
 
 - **[NTF-139]** A client in Direct mode MUST hold no push token. It MUST end
-  its registration at the NDR and its wake table when it enters the mode
-  (`NTF-137`). It MUST take each record over the persistent socket of §8.4.1
-  while it is unlocked, and over the poll of `NTF-131`.
+  its registration at the NDR when it enters the mode. It MUST take each
+  record over the persistent socket of §8.4.1 while it is unlocked, and over
+  the poll of `NTF-131`.
 - **[NTF-140]** A build with no push carrier of a platform MUST NOT offer
   Instant mode. That build MUST offer Direct mode in its place, and it MUST
   ship Direct mode as the default.
@@ -517,9 +527,9 @@ on it. No party of the push path is on the path of a record.
 > states what that time shows. Direct mode removes Google from the path, and
 > it keeps the latency of Instant mode while the client is unlocked. A locked
 > client holds no key that reads a queue (`NTF-120`), thus in Direct mode it
-> receives nothing until the unlock. The held socket costs battery that no
-> measurement bounds yet, thus `NTF-141` puts a measurement before a change
-> of the default.
+> holds the watch of §8.4.3, which sees an arrival and reads nothing. The
+> held socket and the watch cost battery that no measurement bounds yet,
+> thus `NTF-141` puts a measurement before a change of the default.
 
 **A run with no view.** In Private mode and in Off mode a client holds no run
 while no view is on the screen. A client MAY keep the run for 30 s after the
@@ -640,7 +650,9 @@ is the third.
 - **[NTF-120]** A client MUST end the service at a lock, because a locked
   client holds no key that reads a queue (Part 14 rule `IMP-127`). A client
   that locks with no view on the screen MUST tell the user one time, with no
-  sound, that no message arrives until the unlock.
+  sound, that no message arrives until the unlock. A client in Direct mode
+  keeps the service for the watch of §8.4.3 in its place, and its notice
+  says that an alert shows that a message waits.
 - **[NTF-131]** A client that holds no push carrier MAY poll: a periodic
   job of the platform, no more often than its least period, starts a run of
   an open client that has none, and that run drains each queue under
@@ -659,19 +671,22 @@ after 15 minutes with no action of the user. A locked client holds no
 section delivers a record to it. The **wake key** lets it open the blob of
 §8.2.2 all the same, and show which conversation waits.
 
-- **[NTF-135]** An Android client in Instant mode MUST hold a **wake table**
+- **[NTF-135]** An Android client in Instant mode or in Direct mode MUST hold
+  a **wake table**
   outside `K_store`: each `k_ntf_root` that a binding of §8.2.3 uses, and
   each `queue_alias` with the conversation of its queue. It MUST seal the
   table under a key of the platform keystore that needs no user
   authentication, and it MUST write the table again while it is open, after
   each change of a binding and when it leaves the foreground.
-- **[NTF-136]** A locked client MUST open each blob with that table under
+- **[NTF-136]** A locked client MUST open each blob of a push or of a watch
+  with that table under
   `NTF-075` to `NTF-079`. It MUST show that a message waits in the
   conversation of `queue_alias`, grouped under `NTF-089`, with no text of a
   message and no name of a contact. It MUST NOT fetch or acknowledge the
   record, which stays at the relay until the unlock.
 - **[NTF-137]** A client MUST delete the wake table and its keystore key at a
-  local wipe of Part 7 `DEV-008`, and when the mode leaves Instant.
+  local wipe of Part 7 `DEV-008`, and when the mode leaves Instant mode and
+  Direct mode.
 
 > *Cause.* Without a wake key, each push to a locked client shows a line that
 > names nothing, and the record waits for the unlock in silence. A client
@@ -738,6 +753,65 @@ settings. v1 does not ask for that permission.
 > see, or it needs a platform push. No method removes this limit. A
 > specification that says differently gives an application that does not deliver
 > messages.
+
+### 8.4.3 The watch of a locked client
+
+A locked client in Direct mode holds no push token and no key of a queue.
+It holds a **watch**: a subscription of each of its queues under the
+notifier credential of §8.2.4, which sees an arrival and reads no record.
+The queue relay sends the blob of §8.2.2 on that subscription in the place
+of an `NPUSH`, and the client opens it with the wake table of `NTF-135`.
+
+```
+  Sender ──SEND──▶ Queue Relay R ──NWAKE(blob)──▶ circuit ──▶ locked client
+                        │                                      │
+                        │ no live SUB, a live NSUB             │ wake table:
+                        │ of the queue                         │ "a message waits"
+```
+
+- **[NTF-142]** A client in Direct mode MUST bind each inbound queue with
+  `NKEY` and `NBIND`, as Instant mode does, under the notifier key of §8.2.4.
+  At the lock it MUST start a watch: one `NSUB` for each bound queue, with
+  the `notifier_id` as the queue identifier and the notifier key as the
+  signer of the deniable authenticator. The watch MUST run on a link of its
+  own and on circuits of its own, with at most `MAX_QUEUES_PER_SESSION`
+  watches on one circuit (Part 3 `NET-022`). It MUST hold no key of
+  `K_store`, and it MUST end at the unlock. A queue relay MUST accept an
+  `NSUB` only under the notifier credential that the queue holds, and a
+  watch MUST end with its circuit and at the next `NKEY` of the queue.
+- **[NTF-143]** The binding of a client with no push token MUST name
+  `WATCH_HANDLE`, which is 16 zero bytes, and a `k_tok` of 32 zero bytes. A
+  queue relay MUST NOT send an `NPUSH` under that handle.
+- **[NTF-144]** A queue relay MUST send each record that no live
+  subscription takes (`NTF-128`) as an `NWAKE` on the circuit of a live
+  watch of its queue, with the blob of §8.2.2 sealed under the binding of
+  the queue, and it MUST then send no `NPUSH` for that record. The locked
+  client MUST show the blob under `NTF-136`, and it MUST NOT fetch or
+  acknowledge the record.
+- **[NTF-145]** A client in Direct mode MUST hold a **watch table** outside
+  `K_store`: the ingress relay of its last run, the relay entries of its
+  chains, and the relay, the `notifier_id`, and the notifier secret of each
+  bound queue. It MUST seal the table as `NTF-135` seals the wake table,
+  write it again after each change of a binding, and delete it when the
+  mode leaves Direct mode and at a local wipe.
+
+> *Cause.* Without the watch, a locked client in Direct mode shows nothing
+> until the unlock, and the user must keep UMBRA unlocked to learn of a
+> message. A watch under the queue key would give each later record to a
+> party that seizes the device in the AFU state, because that key fetches
+> and deletes records. The notifier credential sees an arrival alone. The
+> wake table already gives such a party the conversation of each blob, thus
+> the watch table adds the relays and the notifier secrets, and no record.
+> The blob is the blob of a push, thus one open path serves the two modes.
+
+> *Residual.* The watch carries no cover traffic of Part 3 §3.6, thus the
+> ingress relay sees the time of each wake at the address of the device. It
+> does not learn the account or the queue. A queue relay learns that a queue
+> is watched, and one circuit of a watch shows it at most
+> `MAX_QUEUES_PER_SESSION` notifier identifiers, which is the bound of a
+> transport session. A record that arrives between the end of the run and
+> the `NSUB` of its queue takes no wake, and the unlock shows it. Part 15
+> §15.3 holds the rows.
 
 ### 8.4.2 Padding, expiry, the re-push, and the peek
 
@@ -861,8 +935,8 @@ queue with each replica of the group queue. The group-queue relay writes a
 notify queue pushes as for any queue. Part 6 §6.4.5 gives the commands
 `GNREG` and `GNUNREG`.
 
-- **[NTF-090]** A client in Instant mode MUST make one notify queue for each
-  group at `mentions` or `all`, on each device. Part 7 §7.5.9 gives the
+- **[NTF-090]** A client in Instant mode or in Direct mode MUST make one
+  notify queue for each group at `mentions` or `all`, on each device. Part 7 §7.5.9 gives the
   setting. **[NTF-091]** A client MUST put a group notify queue under a
   notification handle that holds no pairwise queue and no rendezvous queue.
   **[NTF-092]** A client MAY put the notify queues of several groups under one
@@ -915,10 +989,10 @@ notify queue pushes as for any queue. Part 6 §6.4.5 gives the commands
   of Part 6 §6.4. At the start of a run, a client MUST end each notify queue
   that no group of its store names. Such a queue is left from a run that
   ended before the client wrote the queue to its group.
-- **[NTF-106]** A client in Direct mode, in Private mode, or in Off mode
-  MUST NOT register a group notify queue. Direct mode finds a record on the
-  `GSUB` of its open client. Private mode and Off mode find a record at the
-  next drain of the group queue.
+- **[NTF-106]** A client in Private mode or in Off mode MUST NOT register a
+  group notify queue. Those modes find a record at the next drain of the
+  group queue. A client in Direct mode finds a record on the `GSUB` of its
+  open client, and its watch takes the digest of a locked client.
 - **[NTF-107]** On a wake, a client MUST drain the notify queue under Part 6
   §6.4.3. **[NTF-108]** The client MUST then open a session to one replica of
   the group queue with `GSUB` from its cursor. Part 11 §11.2.2 gives the
@@ -985,8 +1059,9 @@ the user reads:
 > other can show Google that the two accounts talk.
 > In Direct mode, in Private mode, and in Off mode UMBRA holds no push
 > token, and Google learns from the push path no time and no count. In
-> Direct mode and in Private mode a locked UMBRA receives nothing until you
-> unlock it.
+> Direct mode a locked UMBRA shows that a message waits, and the first relay
+> of its connection sees the time of each such alert. In Private mode a
+> locked UMBRA receives nothing until you unlock it.
 >
 > In Instant mode, the Notification Delivery Relay of UMBRA learns the mapping
 > token↔handle↔arrival time. It learns this mapping transiently and in memory

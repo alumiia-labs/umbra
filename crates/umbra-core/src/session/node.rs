@@ -233,6 +233,21 @@ pub enum ClientEvent {
         /// The records since the last digest.
         post_count: u8,
     },
+    /// The relay of an inbound queue drew the `notifier_id` of its `NKEY`
+    /// (Part 8 §8.2.4). A watch names the queue by it (`NTF-142`).
+    NotifierId {
+        /// The queue.
+        recipient_id: [u8; 32],
+        /// The `notifier_id`.
+        notifier_id: [u8; 32],
+    },
+    /// A relay sent the blob of one arrival on a watch (`NTF-144`).
+    Wake {
+        /// The `notifier_id` of the watch.
+        notifier_id: [u8; 32],
+        /// The blob of Part 8 §8.2.2.
+        blob: Vec<u8>,
+    },
     /// The relay of an inbound queue answered its `NKEY` with its
     /// notification key (`NTF-112`). The caller seals the binding of the
     /// queue to it and sends it with [`ClientNode::bind_queue`].
@@ -923,6 +938,13 @@ struct HeldGroup {
     group_queue_id: [u8; 32],
     handle: u64,
     job: GroupJob,
+}
+
+/// A watch of a queue that waits for a circuit to its relay (`NTF-142`).
+struct HeldWatch {
+    relay: [u8; 32],
+    notifier_id: [u8; 32],
+    notifier: StaticSecret,
 }
 
 /// What a group-queue command waits for.
@@ -1919,6 +1941,8 @@ pub struct ClientNode {
     chunk_admissions: crate::abuse::pow::ChunkAdmissions,
     /// The group-queue commands that wait for a circuit to their relay.
     held_groups: Vec<HeldGroup>,
+    /// The watches that wait for a circuit to their relay.
+    held_watches: Vec<HeldWatch>,
     /// The range of each circuit of this node (`WIR-107`). A node for
     /// attachments carries no queue command (Part 12 §12.8).
     range: Range,
@@ -2134,6 +2158,7 @@ impl ClientNode {
             held_chunks: Vec::new(),
             chunk_admissions: crate::abuse::pow::ChunkAdmissions::default(),
             held_groups: Vec::new(),
+            held_watches: Vec::new(),
             spares: Vec::new(),
             retiring: Vec::new(),
             spare_tries: BTreeMap::new(),
@@ -6245,21 +6270,21 @@ impl ClientNode {
     }
 
     /// Sends the `NKEY` of an inbound queue on the circuit that serves it
-    /// (`NTF-112`). A [`ClientEvent::NotifyKey`] carries the answer.
+    /// (`NTF-112`), with the public half of its notifier key (§8.2.4). A
+    /// [`ClientEvent::NotifyKey`] and a [`ClientEvent::NotifierId`] carry
+    /// the answer.
     pub fn notify_queue<R: CryptoRng + ?Sized>(
         &mut self,
         recipient_id: &[u8; 32],
+        notifier_pk: &[u8; 32],
         rng: &mut R,
     ) -> Result<(), Error> {
         self.current = self.slot_of(recipient_id).ok_or(Error::NoPath)?;
         let session_pk = self.session_pk()?;
-        // The notifier key of §8.2.4 serves no party of v1: the
-        // relay pushes, and no NDR subscribes. A fresh value names nothing.
-        let notifier_pk: [u8; 32] = random(rng);
         let command = self
             .inbound_of(recipient_id)
             .ok_or(Error::NoPath)?
-            .notifier_key(&session_pk, random(rng), &notifier_pk)?;
+            .notifier_key(&session_pk, random(rng), notifier_pk)?;
         self.queue_command(command, Waiting::Notify(*recipient_id))?;
         self.pump()
     }
@@ -6454,6 +6479,122 @@ impl ClientNode {
             return Err(Error::Malformed);
         }
         self.bound_command(relay, group_queue_id, job, rng)
+    }
+
+    /// Watches a queue under its notifier credential (`NTF-142`): an
+    /// `NSUB` on a circuit to `relay` that serves at most
+    /// `MAX_QUEUES_PER_SESSION` watches. With no such circuit the watch
+    /// waits, and a circuit starts. A [`ClientEvent::Wake`] carries each
+    /// blob of the watch.
+    pub fn watch<R: CryptoRng + ?Sized>(
+        &mut self,
+        relay: [u8; 32],
+        notifier_id: [u8; 32],
+        notifier: StaticSecret,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let held = HeldWatch {
+            relay,
+            notifier_id,
+            notifier,
+        };
+        if self.watch_slot(&relay, &notifier_id).is_some() {
+            return self.start_watch(held, rng);
+        }
+        self.held_watches.push(held);
+        self.circuit_for_watch(relay, rng)
+    }
+
+    /// Whether a watch waits for a circuit.
+    pub fn watches_wait(&self) -> bool {
+        !self.held_watches.is_empty()
+    }
+
+    /// Starts a circuit for each relay of a watch that waits. A build that
+    /// ended leaves its watches here, and the runtime calls this again.
+    pub fn retry_watches<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<(), Error> {
+        let relays: BTreeSet<[u8; 32]> = self.held_watches.iter().map(|held| held.relay).collect();
+        for relay in relays {
+            self.circuit_for_watch(relay, rng)?;
+        }
+        Ok(())
+    }
+
+    /// A ready circuit to `relay` that holds this watch or has room for it
+    /// (`NET-022`).
+    fn watch_slot(&self, relay: &[u8; 32], notifier_id: &[u8; 32]) -> Option<usize> {
+        self.slots.iter().position(|slot| {
+            let exit = slot.chain.and_then(|chain| chain.last().copied());
+            slot.is_general()
+                && slot.is_ready()
+                && exit == Some(*relay)
+                && (slot.queues.contains(notifier_id) || slot.has_room())
+        })
+    }
+
+    /// Starts a circuit to `relay` when no circuit of this node to it
+    /// builds or runs with room.
+    fn circuit_for_watch<R: CryptoRng + ?Sized>(
+        &mut self,
+        relay: [u8; 32],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let serves = |slot: &Slot| {
+            let ends_there = match slot.chain {
+                Some(chain) => chain.last() == Some(&relay),
+                None => slot.exit == Some(relay),
+            };
+            slot.is_general()
+                && ends_there
+                && !matches!(slot.circuit, Circuit::None)
+                && slot.has_room()
+        };
+        if self.slots.iter().any(serves) {
+            return Ok(());
+        }
+        let current = self.current;
+        let dead = |slot: &Slot| {
+            slot.is_general() && slot.exit == Some(relay) && matches!(slot.circuit, Circuit::None)
+        };
+        let started = match self.slots.iter().position(dead) {
+            Some(index) => {
+                self.current = index;
+                self.build_current(rng)
+            }
+            None => self.add_circuit(Some(relay), rng),
+        };
+        self.current = current;
+        started
+    }
+
+    /// Signs the `NSUB` of a watch for the session of its circuit, and
+    /// queues it. The command has no answer.
+    fn start_watch<R: CryptoRng + ?Sized>(
+        &mut self,
+        held: HeldWatch,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        self.current = self
+            .watch_slot(&held.relay, &held.notifier_id)
+            .ok_or(Error::NoPath)?;
+        let session_pk = self.session_pk()?;
+        if let Some(slot) = self.slots.get_mut(self.current) {
+            slot.queues.insert(held.notifier_id);
+        }
+        let mut command = Command {
+            cmd: Cmd::Nsub,
+            corr_id: random(rng),
+            queue_id: held.notifier_id,
+            auth: [0; 32],
+            payload: &[],
+        };
+        let key =
+            CommandAuthKey::derive(&held.notifier, &session_pk).map_err(|_| Error::Unverified)?;
+        command.sign(&key, &[])?;
+        let mut encoded = alloc::vec![0u8; command.len()];
+        command.encode(&mut encoded)?;
+        self.queue_command(encoded, Waiting::Other)?;
+        self.pump()
     }
 
     /// Sends a command of a range where one circuit serves one queue: a
@@ -7992,6 +8133,20 @@ impl ClientNode {
         {
             self.circuit_for_group(relay, rng)?;
         }
+        // NET-022: one circuit takes at most `MAX_QUEUES_PER_SESSION`
+        // watches, and the rest wait for a circuit of their own.
+        let mut waits = Vec::new();
+        for held in core::mem::take(&mut self.held_watches) {
+            if held.relay == exit && self.watch_slot(&exit, &held.notifier_id).is_some() {
+                self.start_watch(held, rng)?;
+            } else {
+                waits.push(held);
+            }
+        }
+        self.held_watches = waits;
+        if self.held_watches.iter().any(|held| held.relay == exit) {
+            self.circuit_for_watch(exit, rng)?;
+        }
         self.current = ready;
         let waiting: Vec<[u8; 32]> = self
             .contacts
@@ -8519,6 +8674,22 @@ impl ClientNode {
                 } => {
                     if cmd == Cmd::Group(GroupCmd::Gmsg) {
                         out.extend(group_record(queue_id, &payload));
+                    }
+                    // NTF-112: the `NID` follows the `NPK` that took the
+                    // wait, under the identifier of the queue.
+                    if cmd == Cmd::Nid {
+                        if let Ok(notifier_id) = <[u8; 32]>::try_from(payload.as_slice()) {
+                            out.push(ClientEvent::NotifierId {
+                                recipient_id: queue_id,
+                                notifier_id,
+                            });
+                        }
+                    }
+                    if cmd == Cmd::Nwake {
+                        out.push(ClientEvent::Wake {
+                            notifier_id: queue_id,
+                            blob: payload,
+                        });
                     }
                 }
                 CircuitEvent::LoopReturned => {

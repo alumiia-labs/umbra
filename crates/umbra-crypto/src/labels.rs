@@ -119,6 +119,7 @@ labels! {
     QUOTA_HOLDER = "umbra/v1/quota-holder";
     NDR_REMOVAL = "umbra/v1/ndr-removal";
     RENEWAL_GUARD = "umbra/v1/renewal-guard";
+    NTF_NOTIFIER = "umbra/v1/ntf-notifier";
 }
 
 #[cfg(test)]

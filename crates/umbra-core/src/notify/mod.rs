@@ -21,6 +21,9 @@ pub const EPOCH_SECONDS: u64 = 86_400;
 pub const MAX_QUEUES_PER_HANDLE: usize = umbra_queue::params::MAX_QUEUES_PER_SESSION;
 /// A notification handle.
 pub const HANDLE_LEN: usize = 16;
+/// The handle of a binding that serves a watch alone (Part 8 `NTF-143`).
+/// A queue relay sends no `NPUSH` under it, and no NDR holds it.
+pub const WATCH_HANDLE: [u8; HANDLE_LEN] = [0; HANDLE_LEN];
 /// The rotation period of the triple and the root (`NTF-007`), in seconds.
 pub const ROTATE_INTERVAL: u64 = 7 * 86_400;
 /// `NTF_FAIL_MAX`.

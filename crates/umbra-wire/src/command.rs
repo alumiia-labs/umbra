@@ -53,6 +53,10 @@ pub enum Cmd {
     Npk,
     /// `0x33`, sent by the recipient: the sealed binding, Part 8 §8.2.3.
     Nbind,
+    /// `0x34`, sent by the notifier: the watch of a queue, Part 8 §8.4.3.
+    Nsub,
+    /// `0x35`, sent by the relay: the blob of one arrival on a watch.
+    Nwake,
     /// `0x40`.
     Del,
     /// `0x50`, sent by the relay.
@@ -87,6 +91,8 @@ impl Cmd {
             Cmd::Nid => 0x31,
             Cmd::Npk => 0x32,
             Cmd::Nbind => 0x33,
+            Cmd::Nsub => 0x34,
+            Cmd::Nwake => 0x35,
             Cmd::Del => 0x40,
             Cmd::Quota => 0x50,
             Cmd::Nack => 0x51,
@@ -115,6 +121,8 @@ impl Cmd {
             0x31 => Cmd::Nid,
             0x32 => Cmd::Npk,
             0x33 => Cmd::Nbind,
+            0x34 => Cmd::Nsub,
+            0x35 => Cmd::Nwake,
             0x40 => Cmd::Del,
             0x50 => Cmd::Quota,
             0x51 => Cmd::Nack,
@@ -135,7 +143,7 @@ impl Cmd {
             Cmd::Send => Some(bucket.l6_record()),
             Cmd::Msg | Cmd::Cover => Some(bucket.l5_payload()),
             Cmd::Ack | Cmd::Quota => Some(4),
-            Cmd::Sub | Cmd::Unsub | Cmd::Del | Cmd::Ires => Some(0),
+            Cmd::Sub | Cmd::Unsub | Cmd::Del | Cmd::Ires | Cmd::Nsub => Some(0),
             Cmd::Ilink => Some(LINK_ID_LEN),
             Cmd::Iget => Some(IGET_LEN),
             // WIR-505: a blob fills the record length of its bucket, as a
@@ -144,6 +152,7 @@ impl Cmd {
             Cmd::Nkey | Cmd::Nid => Some(32),
             Cmd::Npk => Some(NPK_LEN),
             Cmd::Nbind => Some(NBIND_LEN),
+            Cmd::Nwake => Some(NWAKE_LEN),
             Cmd::Ids => Some(IDS_LEN),
             Cmd::Nack => Some(crate::nack::LEN),
             Cmd::Group(g) => g.fixed_payload_len(bucket),
@@ -336,6 +345,8 @@ pub const NPK_LEN: usize = 1_216;
 /// The length of an `NBIND` payload: the HPKE encapsulation of 1 120 bytes,
 /// the 98-byte binding of Part 8 §8.2.3, and the 16-byte tag.
 pub const NBIND_LEN: usize = 1_120 + 98 + 16;
+/// The length of an `NWAKE` payload: the blob of Part 8 §8.2.2.
+pub const NWAKE_LEN: usize = 69;
 /// The length of a `NEW` payload at an empty admission.
 pub const NEW_NONE_LEN: usize = 67;
 
@@ -528,17 +539,19 @@ mod tests {
         assert_eq!(IdsPayload::parse(&out[..96]).unwrap(), ids);
         assert_eq!(Cmd::Quota.fixed_payload_len(Bucket::B0), Some(4));
         assert_eq!(Cmd::Nkey.fixed_payload_len(Bucket::B0), Some(32));
+        assert_eq!(Cmd::Nsub.fixed_payload_len(Bucket::B0), Some(0));
+        assert_eq!(Cmd::Nwake.fixed_payload_len(Bucket::B0), Some(NWAKE_LEN));
     }
 
     #[test]
     fn the_namespace_is_closed() {
         for b in [
-            0x00u8, 0x08, 0x13, 0x22, 0x34, 0x41, 0x52, 0x61, 0x6F, 0x7C, 0x80, 0x85, 0x86, 0x9B,
+            0x00u8, 0x08, 0x13, 0x22, 0x36, 0x41, 0x52, 0x61, 0x6F, 0x7C, 0x80, 0x85, 0x86, 0x9B,
             0x9F, 0xA0, 0xFF,
         ] {
             assert!(Cmd::from_byte(b).is_err(), "{b:#x}");
         }
-        for b in [0x03u8, 0x07, 0x70, 0x7B, 0x90, 0x9A] {
+        for b in [0x03u8, 0x07, 0x34, 0x35, 0x70, 0x7B, 0x90, 0x9A] {
             assert_eq!(Cmd::from_byte(b).unwrap().to_byte(), b);
         }
     }

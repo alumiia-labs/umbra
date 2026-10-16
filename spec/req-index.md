@@ -75,7 +75,7 @@ column when a crate implements the requirement and a test covers it.
 | `CRY` | 120 | 27 | 0 | 0 | 1 | **148** |
 | `WIR` | 417 | 87 | 0 | 0 | 7 | **511** |
 | `DEV` | 220 | 94 | 0 | 0 | 12 | **326** |
-| `NTF` | 79 | 29 | 0 | 0 | 3 | **111** |
+| `NTF` | 83 | 29 | 0 | 0 | 3 | **115** |
 | `DIS` | 131 | 36 | 0 | 0 | 3 | **170** |
 | `REL` | 170 | 34 | 1 | 0 | 3 | **208** |
 | `GRP` | 233 | 65 | 0 | 0 | 5 | **303** |
@@ -83,7 +83,7 @@ column when a crate implements the requirement and a test covers it.
 | `ABU` | 71 | 29 | 1 | 0 | 0 | **101** |
 | `IMP` | 117 | 41 | 0 | 0 | 2 | **160** |
 | `SEC` | 4 | 3 | 0 | 0 | 1 | **8** |
-| **All** | 2123 | 636 | 6 | 0 | 58 | **2823** |
+| **All** | 2127 | 636 | 6 | 0 | 58 | **2827** |
 
 ## SCP — Scope and Conventions
 
@@ -1294,7 +1294,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-484` | §6.6.3 | MUST | A receiver | A receiver MUST discard a `RekeyRecord` on a pairwise channel whose chain fields are not zero, and a `RekeyRecord` in a group record whose chain fields are zero. |  |  |
 | `WIR-485` | §6.2.1 | MUST NOT | A relay | A relay MUST NOT negotiate the `permessage-deflate` extension of RFC 7692, or any other WebSocket extension, on an L1 connection. |  |  |
 | `WIR-486` | §6.2.1 | MUST | (unstated) | A web client sends each capsule through the WebSocket API of its browser, thus rules `WIR-225` to `WIR-228` bind the native client and the relay, and the browser decides the record layout of the client. |  |  |
-| `WIR-487` | §6.4 | MUST | A party | A party MUST reject a command of `ACK`, `NKEY`, `NID`, `QUOTA`, `NACK`, `SUB`, `UNSUB`, or `DEL` whose `payload_len` differs from the length that the table above gives. |  |  |
+| `WIR-487` | §6.4 | MUST | A party | A party MUST reject a command of `ACK`, `NKEY`, `NID`, `QUOTA`, `NACK`, `SUB`, `UNSUB`, `NSUB`, `NWAKE`, or `DEL` whose `payload_len` differs from the length that the table above gives. |  |  |
 | `WIR-488` | §6.4 | MUST | A party | A party MUST reject a `NEW` whose `payload_len` differs from 64 plus the length of its `Admission`, and an `IDS` whose `payload_len` is not 96. |  |  |
 | `WIR-489` | §6.6.3 | MUST | A parser | A parser MUST reject an `op` of a `PlainEpoch` that the layout above does not hold, and a `PlainEpoch` whose length does not equal the sum of the fields of its `op`. |  |  |
 | `WIR-490` | §6.6.3 | MUST | A parser | A parser MUST reject a `GrantingEpoch` or a `ModerationEpoch` whose length does not hold the one 1 952-byte roster key of its signer and the 3 309-byte signature after the fields before them. |  |  |
@@ -1320,7 +1320,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-510` | §6.4 | MUST | At the first `IGET` that verifies, a relay | At the first `IGET` that verifies, a relay MUST answer with the blob, delete the blob and the link identifier, and put `lock_pk` in the place of the `QS_auth` of the queue. |  |  |
 | `WIR-511` | §6.4 | MUST | A relay | A relay MUST answer an `IGET` for an identifier that it does not hold with the `NACK` reason `REJECTED`, and `WIR-317` gives that one reason to an unknown link, to a link with no blob, and to an `auth` that does not verify. |  |  |
 | `WIR-512` | §6.4 | MUST NOT | A relay | A relay MUST NOT answer a `COVER` of a client. |  |  |
-| `WIR-513` | §6.4 | MUST NOT | A client | A client MUST NOT hold a `COVER`, an `ACK`, an `UNSUB`, or a `DEL` in the table of the commands that wait for an answer. |  |  |
+| `WIR-513` | §6.4 | MUST NOT | A client | A client MUST NOT hold a `COVER`, an `ACK`, an `UNSUB`, an `NSUB`, or a `DEL` in the table of the commands that wait for an answer. |  |  |
 | `WIR-514` | §6.6.9 | MUST | (unstated) | A read receipt, kind `0x07`, is a marker that moves forward. |  |  |
 | `WIR-515` | §6.4 | MUST | A relay | A relay MUST send a `CRPUT` as the value of one `UMBRA_REPLICA` capsule, on a connection of §6.2.1 that it opens for that copy. |  |  |
 | `WIR-516` | §6.4 | MUST NOT | (unstated) | The sender MUST set `corr_id` and `auth` of that command to zero bytes, and the receiver MUST NOT read them. |  |  |
@@ -1765,7 +1765,7 @@ Source: `spec/08-notifications.md`
 | `NTF-087` | §8.3 | MUST | An implementation | An implementation MUST measure the wake cost of the fixed clock on a mid-range Android device, with a power monitor, before a revision re-tunes the cadence of Private mode. |  |  |
 | `NTF-088` | §8.4.1 | MUST NOT | A party that dispatches a push | A party that dispatches a push MUST NOT set a collapse key on a message push. |  |  |
 | `NTF-089` | §8.4.1 | MUST | An Android client | An Android client MUST group the tray by the conversation of `queue_alias` after the AEAD open, with a notification group of the platform. |  |  |
-| `NTF-090` | §8.5.2 | MUST | A client in Instant mode | A client in Instant mode MUST make one notify queue for each group at `mentions` or `all`, on each device. |  |  |
+| `NTF-090` | §8.5.2 | MUST | A client in Instant mode | A client in Instant mode or in Direct mode MUST make one notify queue for each group at `mentions` or `all`, on each device. |  |  |
 | `NTF-091` | §8.5.2 | MUST | A client | A client MUST put a group notify queue under a notification handle that holds no pairwise queue and no rendezvous queue. |  |  |
 | `NTF-092` | §8.5.2 | MAY | A client | A client MAY put the notify queues of several groups under one handle. |  |  |
 | `NTF-093` | §8.5.2 | MUST | A client | A client MUST register the `QueueAddress` of the notify queue with each replica of the group queue by `GNREG`. |  |  |
@@ -1781,7 +1781,7 @@ Source: `spec/08-notifications.md`
 | `NTF-103` | §8.5.2 | MUST | A group-queue relay | A group-queue relay MUST discard a registration at a `GNUNREG` that names its queue. |  |  |
 | `NTF-104` | §8.5.2 | MUST | A client | A client MUST rotate a group notify queue with the triple of `NTF-007`. |  |  |
 | `NTF-105` | §8.5.2 | MUST | A client | A client MUST register the new queue before it drops the old one. |  |  |
-| `NTF-106` | §8.5.2 | MUST NOT | A client in Private mode or in Off mode | A client in Direct mode, in Private mode, or in Off mode MUST NOT register a group notify queue. |  |  |
+| `NTF-106` | §8.5.2 | MUST NOT | A client in Private mode or in Off mode | A client in Private mode or in Off mode MUST NOT register a group notify queue. |  |  |
 | `NTF-107` | §8.5.2 | MUST | On a wake, a client | On a wake, a client MUST drain the notify queue under Part 6 §6.4.3. |  |  |
 | `NTF-108` | §8.5.2 | MUST | The client | The client MUST then open a session to one replica of the group queue with `GSUB` from its cursor. |  |  |
 | `NTF-109` | §8.7 | MAY | A deployment | A deployment MAY operate its own Notification Delivery Relay. |  |  |
@@ -1810,13 +1810,17 @@ Source: `spec/08-notifications.md`
 | `NTF-132` | §8.5.2 | MUST | (unstated) | A client that leaves a group, that the group removes, or whose group closes MUST send a `GNUNREG` for its notify queue to each replica while it holds a read key of the group. |  |  |
 | `NTF-133` | §8.5.2 | MUST | A client | A client MUST end a notify queue that it drops with a `DEL` of Part 6 §6.4. |  |  |
 | `NTF-134` | §8.2.7 | MUST | An NDR | An NDR MUST refuse an `NPUSH` whose carrier it does not serve, and it MUST NOT post to an address that no provider of its own names. |  |  |
-| `NTF-135` | §8.4.1 | MUST | An Android client in Instant mode | An Android client in Instant mode MUST hold a **wake table** outside `K_store`: each `k_ntf_root` that a binding of §8.2.3 uses, and each `queue_alias` with the conversation of its queue. |  |  |
-| `NTF-136` | §8.4.1 | MUST | A locked client | A locked client MUST open each blob with that table under `NTF-075` to `NTF-079`. |  |  |
+| `NTF-135` | §8.4.1 | MUST | An Android client in Instant mode | An Android client in Instant mode or in Direct mode MUST hold a **wake table** outside `K_store`: each `k_ntf_root` that a binding of §8.2.3 uses, and each `queue_alias` with the conversation of its queue. |  |  |
+| `NTF-136` | §8.4.1 | MUST | A locked client | A locked client MUST open each blob of a push or of a watch with that table under `NTF-075` to `NTF-079`. |  |  |
 | `NTF-137` | §8.4.1 | MUST | A client | A client MUST delete the wake table and its keystore key at a local wipe of Part 7 `DEV-008`, and when the mode leaves Instant. |  |  |
 | `NTF-138` | §8.2.7 | MUST | The NDR | The NDR MUST drop a registration `NDR_REG_TTL` after the `NREG` that made or last moved it, and it MUST answer `gone` to an `NPUSH` for it from then on. |  |  |
 | `NTF-139` | §8.3 | MUST | A client in Direct mode | A client in Direct mode MUST hold no push token. |  |  |
 | `NTF-140` | §8.3 | MUST NOT | A build with no push carrier of a platform | A build with no push carrier of a platform MUST NOT offer Instant mode. |  |  |
 | `NTF-141` | §8.3 | MUST | An implementation | An implementation MUST measure the battery cost of Direct mode over 24 h on a mid-range Android device before a revision makes it the default of a build with FCM. |  |  |
+| `NTF-142` | §8.4.3 | MUST | A client in Direct mode | A client in Direct mode MUST bind each inbound queue with `NKEY` and `NBIND`, as Instant mode does, under the notifier key of §8.2.4. |  |  |
+| `NTF-143` | §8.4.3 | MUST | The binding of a client with no push token | The binding of a client with no push token MUST name `WATCH_HANDLE`, which is 16 zero bytes, and a `k_tok` of 32 zero bytes. |  |  |
+| `NTF-144` | §8.4.3 | MUST | A queue relay | A queue relay MUST send each record that no live subscription takes (`NTF-128`) as an `NWAKE` on the circuit of a live watch of its queue, with the blob of §8.2.2 sealed under the binding of the queue, and it MUST then send no `NPUSH` for that record. |  |  |
+| `NTF-145` | §8.4.3 | MUST | A client in Direct mode | A client in Direct mode MUST hold a **watch table** outside `K_store`: the ingress relay of its last run, the relay entries of its chains, and the relay, the `notifier_id`, and the notifier secret of each bound queue. |  |  |
 
 ## DIS — Discovery, Handles, and Key Transparency
 

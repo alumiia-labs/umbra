@@ -182,9 +182,13 @@ impl Bridge {
         })
     }
 
-    /// Sends the `NKEY` of an inbound queue (Part 8 §8.2.3).
-    pub fn notify_queue(&self, recipient_id: [u8; 32]) -> Result<(), Error> {
-        self.command(Command::NotifyQueue(recipient_id))
+    /// Sends the `NKEY` of an inbound queue with the public half of its
+    /// notifier key (Part 8 §8.2.3, §8.2.4).
+    pub fn notify_queue(&self, recipient_id: [u8; 32], notifier_pk: [u8; 32]) -> Result<(), Error> {
+        self.command(Command::NotifyQueue {
+            recipient_id,
+            notifier_pk,
+        })
     }
 
     /// Sends the sealed binding of an inbound queue as its `NBIND`.
@@ -443,6 +447,7 @@ impl Bridge {
             | Update::CandidateSent(_)
             | Update::ChannelRenewed(_)
             | Update::NotifyKey { .. }
+            | Update::NotifierId { .. }
             | Update::NotifyQueue { .. }
             | Update::RendezvousQueue { .. }
             | Update::RendezvousRefused(_)

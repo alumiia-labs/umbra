@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 5: Cryptographic Core
 
 **Status:** Draft
-**Version:** 0.33.0
+**Version:** 0.34.0
 **Date:** 2026-10-15
 
 ---
@@ -1596,9 +1596,15 @@ names the object type and its lifetime:
 "umbra/v1/quota-holder"
 "umbra/v1/ndr-removal"
 "umbra/v1/renewal-guard"
+"umbra/v1/ntf-notifier"
 ```
 
-> *The cause of the last nine labels.* The two verifier labels take the
+> *The cause of `"umbra/v1/ntf-notifier"`.* Part 8 §8.2.4 derives the
+> notifier key of a queue from the root of its handle group. A label of its
+> own keeps that key apart from each epoch key of the same root, which
+> `"umbra/v1/ntf"` derives.
+>
+> *The cause of the last nine labels before it.* The two verifier labels take the
 > `verifier_id` of Part 9 `DIS-165` and Part 13 `ABU-109` apart from the seed
 > of the same proof of work, as `hello-seed` and `hello-verifier` are apart
 > (`CRY-031`). `relay-ntf`, `ndr`, and `directory` derive the key pair of a

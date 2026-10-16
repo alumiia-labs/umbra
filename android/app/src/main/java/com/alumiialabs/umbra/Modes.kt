@@ -113,21 +113,26 @@ object Modes {
         when (mode(app)) {
             NotifyMode.Instant -> {
                 cancelClock(app)
+                Core.setWatch(false)
+                WakeStore.deleteWatch(app)
                 Push.opened(app)
                 Poll.schedule(app)
                 Core.refreshWake(app)
             }
             NotifyMode.Direct -> {
-                // NTF-139: no token, thus no party of the push path.
+                // NTF-139: no token, thus no party of the push path. The
+                // watch of a locked client takes the blobs (`NTF-142`).
                 Core.clearPushToken()
                 Push.closed(app)
-                WakeStore.delete(app)
+                Core.setWatch(true)
                 cancelClock(app)
                 Poll.schedule(app)
+                Core.refreshWake(app)
             }
             NotifyMode.Private -> {
                 // NTF-039: no token, thus no push of high priority.
                 Core.clearPushToken()
+                Core.setWatch(false)
                 Push.closed(app)
                 // NTF-137: no push, thus no wake table.
                 WakeStore.delete(app)
@@ -137,6 +142,7 @@ object Modes {
             }
             NotifyMode.Off -> {
                 Core.clearPushToken()
+                Core.setWatch(false)
                 Push.closed(app)
                 WakeStore.delete(app)
                 Work.getInstance(app).cancelUniqueWork(Poll.NAME)

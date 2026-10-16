@@ -14,7 +14,8 @@ import android.os.IBinder
  *
  * The service holds no key and no socket of its own. It runs while the client
  * is unlocked, because a locked client holds no key that reads a queue
- * (`IMP-127`).
+ * (`IMP-127`). In Direct mode it runs on after the lock, and it holds the
+ * [Watcher] of the locked client (`NTF-142`).
  */
 class DeliveryService : Service() {
 
@@ -35,17 +36,21 @@ class DeliveryService : Service() {
         }
         // A lock or a change to Off that came before this start ends the
         // service here: a stop before `startForeground` ends the process.
-        if (!Core.wantsCarrier()) {
+        val watches = !Core.wantsCarrier() && Core.wantsWatch(this)
+        if (!Core.wantsCarrier() && !watches) {
             stopSelf()
             return START_NOT_STICKY
         }
         Core.carrierRuns(this, true)
-        // A process that the platform starts again holds a locked client,
-        // and a locked client takes no record. Thus no restart is asked for.
-        return START_NOT_STICKY
+        if (watches) Watcher.start(this)
+        // A process that the platform starts again holds a locked client.
+        // In Direct mode that client holds its watch, thus the platform
+        // starts the service again; in each other mode it takes no record.
+        return if (Modes.mode(this) == NotifyMode.Direct) START_STICKY else START_NOT_STICKY
     }
 
     override fun onDestroy() {
+        Watcher.stop()
         Core.carrierRuns(this, false)
         super.onDestroy()
     }

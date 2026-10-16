@@ -740,6 +740,87 @@ fn a_message_to_an_app_that_went_away_reaches_its_push_endpoint() {
     bob.disconnect();
 }
 
+/// The blobs of a watch, as the platform takes them.
+struct Wakes(std::sync::mpsc::Sender<Vec<u8>>);
+
+impl umbra_ffi::watch::WatchListener for Wakes {
+    fn wake(&self, blob: Vec<u8>) {
+        let _ = self.0.send(blob);
+    }
+}
+
+#[test]
+fn a_message_to_a_locked_app_in_direct_mode_wakes_its_watch() {
+    let (_relays, ports) = start_relays(None, None);
+    let network = network_of(&ports);
+    let directory = std::env::temp_dir().join(format!("umbra-watch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let alice = launch(&directory, "alice.db", 1);
+    let bob = launch(&directory, "bob.db", 2);
+    // NTF-139, NTF-142: Direct mode holds no push token, and it binds each
+    // queue for the watch.
+    alice.set_watch(true).unwrap();
+    alice.clone().connect(network.clone()).unwrap();
+    bob.clone().connect(network.clone()).unwrap();
+    alice.invite().unwrap();
+    let link = wait_for(&alice, |event| match event {
+        FfiEvent::Invitation { link } => Some(link),
+        _ => None,
+    });
+    bob.accept(link).unwrap();
+    let alice_conversation = wait_for_contact(&alice);
+    let bob_conversation = wait_for_contact(&bob);
+
+    // NTF-145: the queue of Alice binds, and the relay names its notifier.
+    let started = Instant::now();
+    let table = loop {
+        let table = alice.watch_table().unwrap();
+        if !table.is_empty() {
+            break table;
+        }
+        assert!(started.elapsed() < STEP, "{:?}", alice.push_state());
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let wake_table = alice.wake_table().unwrap();
+
+    // IMP-127: the lock ends the run, and the watch alone stays.
+    alice.disconnect();
+    alice.lock();
+    let (wakes, woken) = std::sync::mpsc::channel();
+    let watch = umbra_ffi::watch::start_watch(table, Arc::new(Wakes(wakes))).unwrap();
+
+    // NTF-144: a record of Bob gives the watch its blob. The `NSUB` takes
+    // a circuit build first, thus Bob writes until a blob arrives.
+    let started = Instant::now();
+    let blob = loop {
+        let draft = bob.new_draft(bob_conversation.clone()).unwrap();
+        draft.set_text(units("are you there")).unwrap();
+        bob.send_draft(draft).unwrap();
+        if let Ok(blob) = woken.recv_timeout(Duration::from_secs(2)) {
+            break blob;
+        }
+        assert!(started.elapsed() < STEP * 2, "no wake");
+    };
+    // NTF-136: the wake table opens the blob, and it names the
+    // conversation of Bob.
+    let opened = umbra_ffi::bindings::open_wake_blob(
+        wake_table,
+        blob,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    );
+    assert_eq!(opened.status, 0);
+    assert_eq!(opened.conversation, Some(alice_conversation));
+    assert!(opened.waiting >= 1);
+
+    watch.stop();
+    bob.disconnect();
+    std::fs::remove_dir_all(&directory).ok();
+}
+
 #[test]
 fn a_group_record_wakes_a_member_that_went_away_through_its_notify_queue() {
     use umbra_crypto::{kem::KeyPair, ohttp};

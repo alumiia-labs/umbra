@@ -1,6 +1,7 @@
 //! The pairwise queues of one relay (Part 3 §3.2, Part 6 §6.4): `NEW`,
-//! `SEND`, `SUB`, `UNSUB`, `ACK`, `NKEY`, and `DEL`, with the answer of
-//! each one and the push of a `MSG` to the circuit that subscribed.
+//! `SEND`, `SUB`, `UNSUB`, `ACK`, `NKEY`, `NSUB`, and `DEL`, with the
+//! answer of each one, the push of a `MSG` to the circuit that subscribed,
+//! and the `NWAKE` of a watch (Part 8 §8.4.3).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -10,7 +11,7 @@ use umbra_core::{
         binding::Binding,
         blob, epoch_of,
         push::{Push, PushScheduler},
-        HANDLE_LEN, PUSH_TTL_MESSAGE,
+        HANDLE_LEN, PUSH_TTL_MESSAGE, WATCH_HANDLE,
     },
 };
 use umbra_crypto::{
@@ -61,6 +62,10 @@ pub struct QueueService {
     by_sender: BTreeMap<[u8; 32], [u8; 32]>,
     /// The circuit that holds the subscription of a queue.
     subscribers: BTreeMap<[u8; 32], CircuitKey>,
+    /// `RecipientId` by `notifier_id` (Part 8 §8.2.4).
+    by_notifier: BTreeMap<[u8; 32], [u8; 32]>,
+    /// The circuit that holds the watch of a queue (`NTF-142`).
+    watchers: BTreeMap<[u8; 32], CircuitKey>,
     /// The changes since the last [`QueueService::take_changes`].
     changes: Vec<StoreChange>,
     /// The notification state of a queue relay (Part 8 §8.2.3).
@@ -118,6 +123,31 @@ fn handle_of(queue: &Queue) -> Option<[u8; HANDLE_LEN]> {
     Binding::parse(queue.binding()?.expose())
         .ok()
         .map(|binding| binding.handle)
+}
+
+/// The binding of a queue and the blob of one arrival, sealed under it
+/// (`NTF-114`).
+fn seal_blob<R: CryptoRng + ?Sized>(
+    queue: &Queue,
+    digest: bool,
+    now: u64,
+    rng: &mut R,
+) -> Option<(Binding, [u8; blob::BLOB_LEN])> {
+    let binding = queue
+        .binding()
+        .and_then(|held| Binding::parse(held.expose()).ok())?;
+    let mut nonce = [0u8; 24];
+    rng.fill_bytes(&mut nonce);
+    let plain = blob::Plain {
+        relay_idx: binding.relay_idx,
+        queue_alias: binding.queue_alias,
+        waiting_count: u8::try_from(queue.waiting()).unwrap_or(u8::MAX),
+        // The field holds the low 32 bits of the clock.
+        relay_ts: u32::try_from(now & u64::from(u32::MAX)).unwrap_or(0),
+        flags: if digest { blob::FLAG_DIGEST } else { 0 },
+    };
+    let sealed = blob::seal(&binding.root, epoch_of(now), nonce, &plain).ok()?;
+    Some((binding, sealed))
 }
 
 fn random_id<R: CryptoRng + ?Sized>(rng: &mut R) -> [u8; 32] {
@@ -226,6 +256,10 @@ impl QueueService {
         let Some(handle) = self.queues.get(&recipient_id).and_then(handle_of) else {
             return;
         };
+        // NTF-143: a binding of a watch names no NDR.
+        if handle == WATCH_HANDLE {
+            return;
+        }
         let Some(notify) = self.notify.as_mut() else {
             return;
         };
@@ -267,23 +301,7 @@ impl QueueService {
         else {
             return;
         };
-        let Some(binding) = queue
-            .binding()
-            .and_then(|held| Binding::parse(held.expose()).ok())
-        else {
-            return;
-        };
-        let mut nonce = [0u8; 24];
-        rng.fill_bytes(&mut nonce);
-        let plain = blob::Plain {
-            relay_idx: binding.relay_idx,
-            queue_alias: binding.queue_alias,
-            waiting_count: u8::try_from(queue.waiting()).unwrap_or(u8::MAX),
-            // The field holds the low 32 bits of the clock.
-            relay_ts: u32::try_from(now & u64::from(u32::MAX)).unwrap_or(0),
-            flags: if push.digest { blob::FLAG_DIGEST } else { 0 },
-        };
-        let Ok(sealed) = blob::seal(&binding.root, epoch_of(now), nonce, &plain) else {
+        let Some((binding, sealed)) = seal_blob(queue, push.digest, now, rng) else {
             return;
         };
         let mut request = Box::new([0u8; NDR_REQUEST_LEN]);
@@ -334,11 +352,46 @@ impl QueueService {
                 outbound,
             })
         });
-        if live.is_none() {
-            self.on_arrival(recipient_id, digest, now);
-            self.seal_due(now, rng);
+        if live.is_some() {
+            return Ok((remaining, live));
         }
+        // NTF-144: a live watch takes the blob in the place of an `NPUSH`.
+        if let Some(wake) = self.watch_wake(&recipient_id, digest, now, rng) {
+            return Ok((remaining, Some(wake)));
+        }
+        self.on_arrival(recipient_id, digest, now);
+        self.seal_due(now, rng);
         Ok((remaining, live))
+    }
+
+    /// The `NWAKE` of one arrival for the circuit that watches the queue,
+    /// or none with no watch or no binding.
+    fn watch_wake<R: CryptoRng + ?Sized>(
+        &self,
+        recipient_id: &[u8; 32],
+        digest: bool,
+        now: u64,
+        rng: &mut R,
+    ) -> Option<Reply> {
+        let circuit = *self.watchers.get(recipient_id)?;
+        let queue = self.queues.get(recipient_id)?;
+        let (_, notifier_id) = *queue.notifier()?;
+        let (_, sealed) = seal_blob(queue, digest, now, rng)?;
+        let mut corr_id = [0u8; 16];
+        // WIR-495: a command that the relay starts draws its own corr_id.
+        rng.fill_bytes(&mut corr_id);
+        Some(Reply {
+            circuit,
+            outbound: super::encode(Cmd::Nwake, corr_id, notifier_id, &sealed),
+        })
+    }
+
+    /// Ends the watch and the `notifier_id` of a queue that leaves.
+    fn forget_notifier(&mut self, recipient_id: &[u8; 32], queue: &Queue) {
+        if let Some((_, notifier_id)) = queue.notifier() {
+            self.by_notifier.remove(notifier_id);
+        }
+        self.watchers.remove(recipient_id);
     }
 
     /// One `SEND` of another relay, from an `UMBRA_DEPOSIT` capsule: the
@@ -396,6 +449,9 @@ impl QueueService {
             service
                 .by_sender
                 .insert(queue.keys().sender_id, recipient_id);
+            if let Some((_, notifier_id)) = queue.notifier() {
+                service.by_notifier.insert(*notifier_id, recipient_id);
+            }
             service.queues.insert(recipient_id, queue);
         }
         // An invitation of a queue that is gone serves no party.
@@ -572,6 +628,21 @@ impl QueueService {
             | Cmd::Nbind
             | Cmd::Ires
             | Cmd::Iput => self.recipient_command(circuit, session, drains, command, now, rng),
+            Cmd::Nsub => {
+                // NTF-142: the notifier credential of §8.2.4 signs the
+                // watch, and the queue keys sign nothing of it. WIR-317: an
+                // unknown notifier and a failed auth give one reason.
+                let recipient_id = *self
+                    .by_notifier
+                    .get(&command.queue_id)
+                    .ok_or(Reject::Rejected)?;
+                let queue = self.queues.get(&recipient_id).ok_or(Reject::Rejected)?;
+                let (notifier_pk, _) = *queue.notifier().ok_or(Reject::Rejected)?;
+                session.accept(command, &notifier_pk)?;
+                session.bind_queue(command.queue_id)?;
+                self.watchers.insert(recipient_id, circuit);
+                Ok(Vec::new())
+            }
             // A cover command of a client names no queue. It gets no answer,
             // and it is no activity of a queue (`NET-196`).
             Cmd::Cover => Ok(Vec::new()),
@@ -697,7 +768,13 @@ impl QueueService {
                 let notifier_pk: [u8; 32] =
                     command.payload.try_into().map_err(|_| Reject::Rejected)?;
                 let notifier_id = random_id(rng);
+                // A new credential ends the watch of the one before it.
+                if let Some((_, before)) = queue.notifier() {
+                    self.by_notifier.remove(before);
+                }
+                self.watchers.remove(&recipient_id);
                 queue.set_notifier(notifier_pk, notifier_id);
+                self.by_notifier.insert(notifier_id, recipient_id);
                 let mut replies = Vec::new();
                 // NTF-112: the notification key goes before the `NID`.
                 if let Some(notify) = &self.notify {
@@ -752,6 +829,7 @@ impl QueueService {
                 // WIR-039 to WIR-042: no identifier of the queue stays.
                 if let Some(queue) = self.queues.remove(&recipient_id) {
                     self.by_sender.remove(&queue.keys().sender_id);
+                    self.forget_notifier(&recipient_id, &queue);
                     drop(queue.delete());
                 }
                 self.changes
@@ -822,6 +900,8 @@ impl QueueService {
                 queue.subscribe(false, now);
             }
         }
+        // A watch lives with its circuit (`NTF-142`).
+        self.watchers.retain(|_, held| held != circuit);
     }
 
     /// The client of a circuit paused its session (`WIR-546`): each
@@ -870,6 +950,7 @@ impl QueueService {
         for recipient_id in idle {
             if let Some(queue) = self.queues.remove(&recipient_id) {
                 self.by_sender.remove(&queue.keys().sender_id);
+                self.forget_notifier(&recipient_id, &queue);
             }
             self.end_invitations(recipient_id);
             self.changes
@@ -1445,5 +1526,104 @@ mod tests {
         bench.send(Cmd::Send, ids.sender_id, &record, &qs).unwrap();
         bench.service.push_tick(NOW + 5, &mut Rng(12));
         assert_eq!(bench.service.take_ndr_pushes().len(), 1);
+    }
+
+    #[test]
+    fn a_watch_takes_the_blob_of_each_arrival_in_the_place_of_a_push() {
+        let mut bench = Bench::new();
+        let qr = StaticSecret::from([4; 32]);
+        let qs = StaticSecret::from([5; 32]);
+        let notifier = StaticSecret::from([8; 32]);
+        let new = NewPayload {
+            qr_auth_pk: *XPublic::from(&qr).as_bytes(),
+            qs_auth_pk: *XPublic::from(&qs).as_bytes(),
+            admission: Admission::NONE,
+        };
+        let mut out = [0u8; 128];
+        let n = new.encode(&mut out).unwrap();
+        let ids = bench.send(Cmd::New, [0; 32], &out[..n], &qr).unwrap();
+        let ids = IdsPayload::parse(&payloads(&ids)[0].1).unwrap();
+        let notifier_pk = *XPublic::from(&notifier).as_bytes();
+        let answers = payloads(
+            &bench
+                .send(Cmd::Nkey, ids.recipient_id, &notifier_pk, &qr)
+                .unwrap(),
+        );
+        let relay_ntf = umbra_crypto::kem::PublicKey::from_bytes(&answers[0].1).unwrap();
+        let notifier_id: [u8; 32] = answers[1].1.clone().try_into().unwrap();
+        // NTF-143: a binding of a watch names no handle of an NDR.
+        let binding = Binding {
+            root: Secret::new([0x21; 32]),
+            handle: WATCH_HANDLE,
+            k_tok: Secret::new([0; 32]),
+            queue_alias: [0x24; 16],
+            relay_idx: 3,
+        };
+        let sealed = binding
+            .seal(&relay_ntf, &ids.recipient_id, &mut bench.rng)
+            .unwrap();
+        bench
+            .send(Cmd::Nbind, ids.recipient_id, &sealed, &qr)
+            .unwrap();
+        let record = vec![0x55; Bucket::B0.l6_record()];
+
+        // With no watch, the binding gives no `NPUSH` at all.
+        bench.send(Cmd::Send, ids.sender_id, &record, &qs).unwrap();
+        bench.service.push_tick(NOW + 30, &mut Rng(9));
+        assert!(bench.service.take_ndr_pushes().is_empty());
+
+        // NTF-142: the key of a queue does not sign a watch, and neither
+        // does a notifier that the relay does not hold.
+        assert!(bench.send(Cmd::Nsub, notifier_id, &[], &qr).is_err());
+        assert!(bench.send(Cmd::Nsub, [9; 32], &[], &notifier).is_err());
+        assert!(bench
+            .send(Cmd::Nsub, notifier_id, &[], &notifier)
+            .unwrap()
+            .is_empty());
+
+        // NTF-144: each arrival gives the watch its blob, under the
+        // `notifier_id`, and the NDR takes nothing.
+        let replies = bench.send(Cmd::Send, ids.sender_id, &record, &qs).unwrap();
+        assert_eq!(replies.len(), 2);
+        let (wake, _) =
+            Command::parse(&replies[1].outbound.encoded, replies[1].outbound.bucket).unwrap();
+        assert_eq!(wake.cmd, Cmd::Nwake);
+        assert_eq!(wake.queue_id, notifier_id);
+        assert_eq!(replies[1].circuit, CIRCUIT);
+        let plain = Receiver::new(Secret::new([0x21; 32]))
+            .open(wake.payload, NOW)
+            .unwrap();
+        assert_eq!(plain.queue_alias, [0x24; 16]);
+        assert_eq!(plain.waiting_count, 2);
+        assert!(bench.service.take_ndr_pushes().is_empty());
+
+        // NTF-128: a live subscription takes the record, and the watch
+        // takes no blob of it.
+        bench.send(Cmd::Sub, ids.recipient_id, &[], &qr).unwrap();
+        let replies = bench.send(Cmd::Send, ids.sender_id, &record, &qs).unwrap();
+        assert_eq!(payloads(&replies)[1].0, Cmd::Msg);
+        bench.send(Cmd::Unsub, ids.recipient_id, &[], &qr).unwrap();
+
+        // The watch ends with its circuit.
+        bench.service.circuit_closed(&CIRCUIT, NOW);
+        let replies = bench.send(Cmd::Send, ids.sender_id, &record, &qs).unwrap();
+        assert_eq!(replies.len(), 1);
+
+        // A new `NKEY` ends the old `notifier_id`, and a restart keeps the
+        // new one.
+        bench.session = Session::for_circuit(&[7; 16], StaticSecret::from([9; 32]));
+        let answers = payloads(
+            &bench
+                .send(Cmd::Nkey, ids.recipient_id, &notifier_pk, &qr)
+                .unwrap(),
+        );
+        let next_id: [u8; 32] = answers[1].1.clone().try_into().unwrap();
+        assert!(bench.send(Cmd::Nsub, notifier_id, &[], &notifier).is_err());
+        let mut loaded = Loaded::default();
+        for change in bench.service.take_changes() {
+            loaded.apply(&change);
+        }
+        bench.service = QueueService::restore(loaded);
+        assert!(bench.send(Cmd::Nsub, next_id, &[], &notifier).is_ok());
     }
 }

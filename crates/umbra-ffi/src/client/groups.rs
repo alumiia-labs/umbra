@@ -5137,12 +5137,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     }
 
     /// Each open group that holds no notify queue yet, while the device
-    /// holds a push token, thus it is in Instant mode (`NTF-090`,
-    /// `NTF-106`).
+    /// holds a push token or watches its queues, thus it is in Instant
+    /// mode or in Direct mode (`NTF-090`, `NTF-106`).
     /// A group whose notify queue is older than `ROTATE_INTERVAL` gets a new
     /// one too, which replaces it after its registration (`NTF-104`).
     pub fn groups_without_notify(&self, now: u64) -> Result<Vec<ConversationId>, Error> {
-        if self.push_token()?.is_none() {
+        if !self.binds()? {
             return Ok(Vec::new());
         }
         let mut out = Vec::new();

@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 6: Wire Format and Encoding
 
 **Status:** Draft
-**Version:** 0.33.0
+**Version:** 0.34.0
 **Date:** 2026-10-15
 
 ---
@@ -619,6 +619,8 @@ party MUST NOT compute `auth` as an AEAD ciphertext.
 | `0x31` | `NID` | Relay | `notifier_id`, 32 bytes |
 | `0x32` | `NPK` | Relay | the notification key of the relay, an `UMBRA-KEM` public key of 1 216 bytes, Part 8 §8.2.3 |
 | `0x33` | `NBIND` | Recipient | the sealed `NotifyBinding` of Part 8 §8.2.3, 1 234 bytes |
+| `0x34` | `NSUB` | Notifier | —. The `queue_id` is the `notifier_id`, and the notifier key of Part 8 §8.2.4 signs `auth` |
+| `0x35` | `NWAKE` | Relay | the blob of Part 8 §8.2.2, 69 bytes. The `queue_id` is the `notifier_id` |
 | `0x40` | `DEL` | Recipient | — |
 | `0x50` | `QUOTA` | Relay | the remaining record count of the queue, `u32`, 4 bytes |
 | `0x51` | `NACK` | Relay | `NackPayload`, 17 B, §6.4.4 |
@@ -716,8 +718,9 @@ of its own, such as a `MSG`, a `GMSG`, and a `COVER`.
 
 A `NEW` requests no parameter. The relay applies its own quota of Part 3
 §3.2.4, and `QUOTA` reports it. **[WIR-487]** A party MUST reject a command
-of `ACK`, `NKEY`, `NID`, `QUOTA`, `NACK`, `SUB`, `UNSUB`, or `DEL` whose
-`payload_len` differs from the length that the table above gives.
+of `ACK`, `NKEY`, `NID`, `QUOTA`, `NACK`, `SUB`, `UNSUB`, `NSUB`, `NWAKE`,
+or `DEL` whose `payload_len` differs from the length that the table above
+gives.
 **[WIR-488]** A party MUST reject a `NEW` whose `payload_len` differs from 64
 plus the length of its `Admission`, and an `IDS` whose `payload_len` is not
 96.
@@ -727,10 +730,11 @@ plus the length of its `Admission`, and an `IDS` whose `payload_len` is not
 > canonical length under §6.1.1 rule 4.
 
 **[WIR-512]** A relay MUST NOT answer a `COVER` of a client. An accepted
-`ACK`, `SUB`, `UNSUB`, or `DEL` has no answer command: the records of a `SUB`
-are its effect, and a `NACK` reports a refusal.
-**[WIR-513]** A client MUST NOT hold a `COVER`, an `ACK`, an `UNSUB`, or a
-`DEL` in the table of the commands that wait for an answer. A `NACK` for one
+`ACK`, `SUB`, `UNSUB`, `NSUB`, or `DEL` has no answer command: the records
+of a `SUB` and the wakes of an `NSUB` are its effect, and a `NACK` reports a
+refusal.
+**[WIR-513]** A client MUST NOT hold a `COVER`, an `ACK`, an `UNSUB`, an
+`NSUB`, or a `DEL` in the table of the commands that wait for an answer. A `NACK` for one
 of them then names no command of the session, and `WIR-323` drops it. A
 `SUB` waits in that table, because Part 3 `NET-324` acts on its `REJECTED`. A
 lost `ACK` costs a second delivery, which the cursor of `IMP-135` drops.

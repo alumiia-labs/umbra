@@ -65,20 +65,45 @@ object Notifier {
             manager(context).areNotificationsEnabled()
         }
 
-    /** The notice of the foreground service, which the platform requires. */
-    fun carrier(context: Context): Notification =
-        Notification.Builder(context, CARRIER_CHANNEL)
-            .setSmallIcon(R.drawable.ic_stat_umbra)
+    /**
+     * The notice of the foreground service, which the platform requires. A
+     * locked client in Direct mode holds the watch under it (`NTF-142`).
+     */
+    fun carrier(context: Context): Notification {
+        val watches = !Core.isOpen() && Modes.mode(context) == NotifyMode.Direct
+        val title = when {
+            watches -> R.string.notify_locked
             // Private mode holds no connection between two wakes of its clock.
-            .setContentTitle(
-                context.getString(
-                    if (Modes.mode(context) == NotifyMode.Private) R.string.notify_unlocked else R.string.notify_holds_connection,
-                ),
-            )
-            .setContentText(context.getString(R.string.notify_arrive_until_lock))
+            Modes.mode(context) == NotifyMode.Private -> R.string.notify_unlocked
+            else -> R.string.notify_holds_connection
+        }
+        val text = when {
+            watches -> R.string.notify_watching
+            Modes.mode(context) == NotifyMode.Direct -> R.string.notify_arrive_watched
+            else -> R.string.notify_arrive_until_lock
+        }
+        return Notification.Builder(context, CARRIER_CHANNEL)
+            .setSmallIcon(R.drawable.ic_stat_umbra)
+            .setContentTitle(context.getString(title))
+            .setContentText(context.getString(text))
             .setContentIntent(openApp(context))
             .setOngoing(true)
             .build()
+    }
+
+    /** The service runs on, and its notice follows the state of the client. */
+    fun refreshCarrier(context: Context) {
+        manager(context).notify(CARRIER_ID, carrier(context))
+    }
+
+    /**
+     * A locked client learned that a message waits: from a push, or from
+     * its watch (`NTF-136`). It reads no setting of a conversation, thus
+     * each later wake of one conversation makes no second sound.
+     */
+    fun waiting(context: Context, conversation: Conversation?) {
+        if (conversation != null) message(context, conversation, quiet = true) else pushed(context)
+    }
 
     /** The form of an alert on a secure lock screen: that one exists. */
     private fun lockScreen(context: Context): Notification =

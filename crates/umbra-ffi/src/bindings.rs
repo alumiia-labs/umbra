@@ -937,7 +937,7 @@ fn read_facts(relay: &mut RelayEndpoint, facts: &[&str]) -> Result<(), FfiError>
 /// The facts of a relay of the set, for the selection of a chain. The
 /// operator is its own family, because a descriptor holds no family
 /// certificate.
-fn relay_info(endpoint: &RelayEndpoint) -> Result<RelayInfo, FfiError> {
+pub(crate) fn relay_info(endpoint: &RelayEndpoint) -> Result<RelayInfo, FfiError> {
     let key = relay_static(endpoint)?;
     let operator =
         umbra_crypto::hash::sha3_256(&[b"umbra/test/operator", endpoint.operator.as_bytes()]);
@@ -1695,6 +1695,9 @@ struct Inner {
     next_notify_tag: u64,
     /// Whether a handle group rotated in this run (`NTF-081`).
     rotated_in_run: bool,
+    /// The inbound queues of the run with their relays, as its last report
+    /// gave them. A change of the mode binds them at once.
+    run_queues: Vec<([u8; 32], [u8; 32])>,
     /// The silent channels of the last check, and the time of the next
     /// one (`NET-186`).
     silent: Vec<crate::ConversationId>,
@@ -4313,6 +4316,7 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             notify_pending: BTreeMap::new(),
             next_notify_tag: 0,
             rotated_in_run: false,
+            run_queues: Vec::new(),
             silent: Vec::new(),
             next_silence_check: 0,
             dead_work: Vec::new(),
@@ -4549,6 +4553,7 @@ impl Handle {
             circuits_changed,
             notify_pending,
             rotated_in_run,
+            run_queues,
             ndr_retry,
             silent,
             dead_work,
@@ -4571,6 +4576,7 @@ impl Handle {
             // notification key. NTF-007, NTF-081: one handle group that is
             // due rotates in a run, and its queues bind again.
             Update::Queues(queues) => {
+                run_queues.clone_from(queues);
                 if !*rotated_in_run {
                     *rotated_in_run = client
                         .rotate_one_group(unix_now(), &mut OsRng)
@@ -4582,7 +4588,7 @@ impl Handle {
                 ) {
                     let mut sent = Vec::new();
                     for recipient_id in unbound {
-                        if running.notify_queue(recipient_id).is_ok() {
+                        if send_nkey(client, running, recipient_id) {
                             sent.push(recipient_id);
                         }
                     }
@@ -4695,8 +4701,20 @@ impl Handle {
                     if running.bind_queue(*recipient_id, sealed).is_ok()
                         && !client.queue_bound(recipient_id, &mut OsRng).unwrap_or(true)
                     {
-                        let _ = running.notify_queue(*recipient_id);
+                        send_nkey(client, running, *recipient_id);
                     }
+                }
+            }
+            // NTF-145: the watch table follows each new `notifier_id`.
+            Update::NotifierId {
+                recipient_id,
+                notifier_id,
+            } => {
+                if client
+                    .set_notifier_id(recipient_id, *notifier_id, &mut OsRng)
+                    .is_ok()
+                {
+                    client.wake_changed();
                 }
             }
             Update::Faults(held) => {
@@ -4871,15 +4889,31 @@ impl Handle {
                 .client
                 .ndr_call_taken(call, &mut OsRng)
                 .unwrap_or_default();
-            if let Some(running) = inner.bridge.as_ref() {
+            let Inner { client, bridge, .. } = &mut *inner;
+            if let Some(running) = bridge.as_ref() {
                 for recipient_id in again {
-                    let _ = running.notify_queue(recipient_id);
+                    send_nkey(client, running, recipient_id);
                 }
             }
         }
         drop(flight);
         drop(inner);
     }
+}
+
+/// Sends the `NKEY` of a queue with the public half of its notifier key
+/// (Part 8 §8.2.4). The result says whether the command left.
+fn send_nkey(
+    client: &Client<SqliteBackend, ForeignElement>,
+    running: &Bridge,
+    recipient_id: [u8; 32],
+) -> bool {
+    let Ok(Some(secret)) = client.notifier_secret(&recipient_id) else {
+        return false;
+    };
+    let notifier = umbra_crypto::x25519::StaticSecret::from(*secret.expose());
+    let public = *umbra_crypto::x25519::PublicKey::from(&notifier).as_bytes();
+    running.notify_queue(recipient_id, public).is_ok()
 }
 
 /// The route to the NDR that the build pinned, or none.
@@ -4982,6 +5016,59 @@ impl Handle {
         let mut table = locked(&self.inner).client.wake_table()?;
         // The bytes move out whole, thus no second copy waits for a wipe.
         Ok(core::mem::take(&mut *table))
+    }
+
+    /// Turns the watch of Direct mode on or off (Part 8 `NTF-142`). Each
+    /// queue binds again at the next run.
+    pub fn set_watch(&self, on: bool) -> Result<(), FfiError> {
+        let mut inner = locked(&self.inner);
+        inner.client.set_watch(on, &mut OsRng)?;
+        inner.client.wake_changed();
+        // A run that holds its queues binds them now, and not at its next
+        // report of them.
+        let Inner {
+            client,
+            bridge,
+            run_queues,
+            ..
+        } = &mut *inner;
+        if let (Ok(unbound), Some(running)) = (
+            client.queues_to_bind(run_queues, unix_now(), &mut OsRng),
+            bridge.as_ref(),
+        ) {
+            let sent: Vec<[u8; 32]> = unbound
+                .into_iter()
+                .filter(|recipient_id| send_nkey(client, running, *recipient_id))
+                .collect();
+            client.binds_sent(&sent);
+        }
+        Ok(())
+    }
+
+    /// The watch table of Part 8 `NTF-145`, for the platform to seal under
+    /// its keystore beside the wake table. It is empty while no queue can
+    /// be watched: with the watch off, or before a run named its relays.
+    pub fn watch_table(&self) -> Result<Vec<u8>, FfiError> {
+        let inner = locked(&self.inner);
+        let entries = inner.client.watch_entries()?;
+        let guard = inner.guard.and_then(|guard_id| {
+            inner
+                .relays
+                .iter()
+                .find(|relay| relay.relay_id.as_slice() == guard_id.as_slice())
+        });
+        let Some(guard) = guard.filter(|_| !entries.is_empty()) else {
+            return Ok(Vec::new());
+        };
+        let table = crate::watch::WatchTable::new(
+            guard.clone(),
+            inner.relays.clone(),
+            inner.root_ca_path.clone(),
+            inner.bootstrap,
+            entries,
+        );
+        let mut encoded = table.encode()?;
+        Ok(core::mem::take(&mut *encoded))
     }
 
     /// NTF-084: three blobs in a row did not open, thus each push root is

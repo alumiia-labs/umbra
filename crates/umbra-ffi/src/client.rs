@@ -77,7 +77,7 @@ pub use intros::Introduction;
 pub use key_changes::PendingKeyChange;
 pub use key_supply::NOTE_LOST;
 pub use moderation::{ModNote, MOD_HIDE, MOD_REMOVE, MOD_UNHIDE};
-pub use notify::{NdrCall, WAKE_SILENT};
+pub use notify::{NdrCall, WatchEntry, WAKE_SILENT};
 pub use pictures::PET_AVATAR_MAX;
 pub use polls::{PollView, POLL_OPEN_MAX, POLL_OPEN_MIN};
 pub use quota::HOLD_RETRY;

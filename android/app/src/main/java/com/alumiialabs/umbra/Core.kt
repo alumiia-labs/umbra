@@ -375,6 +375,9 @@ object Core {
             restoreNote = null
             phase = Phase.Open
             mode = Modes.mode(app)
+            // NTF-142: the open client takes each record over its own run.
+            Watcher.stop()
+            if (carrierHolds) Notifier.refreshCarrier(app)
             // The store is open before the network starts: the fetch of the
             // manifest waits for a carrier, and the list does not wait for
             // it. A network that does not start leaves the store open, and
@@ -1478,11 +1481,16 @@ object Core {
                 phase = Phase.Locked
                 // A locked client holds no key that reads a queue, thus the
                 // carrier ends, and the user learns it. A service that did
-                // not start yet ends itself at its start.
-                if (carrierHolds) DeliveryService.stop(app)
+                // not start yet ends itself at its start. In Direct mode
+                // the service holds the watch of the locked client in its
+                // place (`NTF-142`).
+                val watches = wantsWatch(app)
+                if (carrierHolds) {
+                    if (watches) Watcher.start(app) else DeliveryService.stop(app)
+                }
                 // A lock takes the text of each alert off the shade.
                 Notifier.clear(app)
-                if (!isVisible) Notifier.locked(app)
+                if (!isVisible && !(watches && carrierHolds)) Notifier.locked(app)
             }
             is FfiEvent.IntegrityFault -> fault = UiText.get(R.string.core_store_no_verify)
             // The drain thread wrote the table already.
@@ -1628,40 +1636,62 @@ object Core {
         val client = handle ?: return
         val app = context?.applicationContext
         lockWorker.execute {
-            if (app != null && Modes.mode(app) == NotifyMode.Instant) writeWake(app, client)
+            if (app != null && holdsWakeTable(app)) writeWake(app, client)
             client.lock()
         }
     }
 
     /**
-     * Writes the wake table of a client in Instant mode (Part 8 `NTF-135`),
-     * thus a locked client opens each push blob. A build with no push holds
-     * none.
+     * Whether the mode holds a wake table (Part 8 `NTF-135`): Instant mode
+     * on a build with push, and Direct mode, whose watch takes the blobs.
+     */
+    private fun holdsWakeTable(app: Context) = when (Modes.mode(app)) {
+        NotifyMode.Instant -> Push.isAvailable(app)
+        NotifyMode.Direct -> true
+        else -> false
+    }
+
+    /**
+     * Writes the wake table, thus a locked client opens each blob, and in
+     * Direct mode the watch table beside it (`NTF-145`).
      */
     fun refreshWake(context: Context) {
         val app = context.applicationContext
-        if (Modes.mode(app) != NotifyMode.Instant || !Push.isAvailable(app)) return
+        if (!holdsWakeTable(app)) return
         call { client -> writeWake(app, client) }
     }
 
-    /** One write of the table. `WakeStore` checks the mode at the write itself. */
+    /** One write of the tables. `WakeStore` checks the mode at the write itself. */
     private fun writeWake(app: Context, client: Handle) {
-        if (!Push.isAvailable(app)) return
-        // A lock that came first leaves the table of the last write.
-        val table = try {
-            client.wakeTable()
+        if (!holdsWakeTable(app)) return
+        // A lock that came first leaves the tables of the last write.
+        val (table, watch) = try {
+            val table = client.wakeTable()
+            table to if (Modes.mode(app) == NotifyMode.Direct) client.watchTable() else null
         } catch (locked: FfiException) {
             return
         }
         try {
             WakeStore.write(app, table)
+            watch?.let { WakeStore.writeWatch(app, it) }
         } catch (fault: Exception) {
-            // The table of the last write serves until the next one.
+            // The tables of the last write serve until the next one.
             if (BuildConfig.DEBUG) android.util.Log.w("umbra-core", "the wake table did not write", fault)
         } finally {
             table.fill(0)
+            watch?.fill(0)
         }
     }
+
+    /**
+     * Whether a locked client holds the watch of Direct mode (`NTF-142`):
+     * the mode, and a table that the last open client wrote.
+     */
+    fun wantsWatch(context: Context) =
+        phase != Phase.Open && Modes.mode(context) == NotifyMode.Direct && WakeStore.hasWatch(context)
+
+    /** Turns the watch of Direct mode on or off in the store (`NTF-142`). */
+    fun setWatch(on: Boolean) = call { it.setWatch(on) }
 
     /** Whether the client is open, thus it holds the keys of its queues. */
     fun isOpen() = phase == Phase.Open
