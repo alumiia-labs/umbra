@@ -81,9 +81,9 @@ column when a crate implements the requirement and a test covers it.
 | `GRP` | 233 | 65 | 0 | 0 | 5 | **303** |
 | `ATT` | 145 | 46 | 2 | 0 | 3 | **196** |
 | `ABU` | 71 | 29 | 1 | 0 | 0 | **101** |
-| `IMP` | 117 | 41 | 0 | 0 | 2 | **160** |
+| `IMP` | 117 | 41 | 1 | 0 | 2 | **161** |
 | `SEC` | 4 | 3 | 0 | 0 | 1 | **8** |
-| **All** | 2127 | 636 | 6 | 0 | 58 | **2827** |
+| **All** | 2127 | 636 | 7 | 0 | 58 | **2828** |
 
 ## SCP — Scope and Conventions
 
@@ -3001,6 +3001,7 @@ Source: `spec/14-implementation.md`
 | `IMP-178` | §14.6.7 | MUST | A client | A client MUST confirm each result against the store at the time of the query. |  |  |
 | `IMP-179` | §14.6.7 | MUST | A client | A client MUST give no more than `SEARCH_RESULTS_MAX` = 200 results for one query. |  |  |
 | `IMP-180` | §14.6.7 | MUST NOT | A client | A client MUST NOT write a query to the store or to a file, and it MUST keep no list of earlier queries. |  |  |
+| `IMP-181` | §14.6.1 | SHOULD | A client | A client SHOULD show the `sent_at` of a message as its time. |  |  |
 
 ## SEC — Security Considerations
 

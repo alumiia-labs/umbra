@@ -5047,19 +5047,23 @@ impl Handle {
 
     /// The watch table of Part 8 `NTF-145`, for the platform to seal under
     /// its keystore beside the wake table. It is empty while no queue can
-    /// be watched: with the watch off, or before a run named its relays.
+    /// be watched. Before a run named its relays it gives `Offline`, and
+    /// the platform keeps the table of the last write.
     pub fn watch_table(&self) -> Result<Vec<u8>, FfiError> {
         let inner = locked(&self.inner);
         let entries = inner.client.watch_entries()?;
-        let guard = inner.guard.and_then(|guard_id| {
-            inner
-                .relays
-                .iter()
-                .find(|relay| relay.relay_id.as_slice() == guard_id.as_slice())
-        });
-        let Some(guard) = guard.filter(|_| !entries.is_empty()) else {
+        if entries.is_empty() {
             return Ok(Vec::new());
-        };
+        }
+        let guard = inner
+            .guard
+            .and_then(|guard_id| {
+                inner
+                    .relays
+                    .iter()
+                    .find(|relay| relay.relay_id.as_slice() == guard_id.as_slice())
+            })
+            .ok_or(FfiError::Offline)?;
         let table = crate::watch::WatchTable::new(
             guard.clone(),
             inner.relays.clone(),

@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 8: Notifications and Mobile Delivery
 
 **Status:** Draft
-**Version:** 0.34.0
-**Date:** 2026-10-15
+**Version:** 0.35.0
+**Date:** 2026-10-16
 
 ---
 
@@ -633,8 +633,10 @@ is the third.
 
 - **[NTF-116]** A client that carries its wakes over a persistent socket MUST
   hold that socket in a `specialUse` foreground service, with a notice that the
-  user can see for the whole time. Android closes the sockets of an
-  application a short time after it leaves the screen, and a test on an
+  user can see for the whole time. That notice is no message, thus its
+  channel MUST show no badge on the icon of the application. Android
+  closes the sockets of an application a short time after it leaves the
+  screen, and a test on an
   emulator of API 35 showed the close after 45 seconds. The 6 s bound of
   `NTF-012` applies to a push-wake session, and it does not apply to this
   service.
@@ -652,7 +654,7 @@ is the third.
   that locks with no view on the screen MUST tell the user one time, with no
   sound, that no message arrives until the unlock. A client in Direct mode
   keeps the service for the watch of §8.4.3 in its place, and its notice
-  says that an alert shows that a message waits.
+  names the locked state alone.
 - **[NTF-131]** A client that holds no push carrier MAY poll: a periodic
   job of the platform, no more often than its least period, starts a run of
   an open client that has none, and that run drains each queue under

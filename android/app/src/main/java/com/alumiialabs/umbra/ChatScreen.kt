@@ -1221,7 +1221,7 @@ private fun BubbleContent(
         Spacer(Modifier.height(2.dp))
         val clock = DateUtils.formatDateTime(
             LocalContext.current,
-            line.info.storedAtMs.toLong(),
+            line.info.shownAtMs,
             DateUtils.FORMAT_SHOW_TIME,
         )
         // A read message carries no word: the mark under the newest

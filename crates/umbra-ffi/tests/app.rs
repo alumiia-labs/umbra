@@ -775,7 +775,7 @@ fn a_message_to_a_locked_app_in_direct_mode_wakes_its_watch() {
     // NTF-145: the queue of Alice binds, and the relay names its notifier.
     let started = Instant::now();
     let table = loop {
-        let table = alice.watch_table().unwrap();
+        let table = alice.watch_table().unwrap_or_default();
         if !table.is_empty() {
             break table;
         }

@@ -1665,11 +1665,21 @@ object Core {
     private fun writeWake(app: Context, client: Handle) {
         if (!holdsWakeTable(app)) return
         // A lock that came first leaves the tables of the last write.
-        val (table, watch) = try {
-            val table = client.wakeTable()
-            table to if (Modes.mode(app) == NotifyMode.Direct) client.watchTable() else null
+        val table = try {
+            client.wakeTable()
         } catch (locked: FfiException) {
             return
+        }
+        // A run that named no relay yet gives no watch table, and the one of
+        // the last write stays.
+        val watch = if (Modes.mode(app) == NotifyMode.Direct) {
+            try {
+                client.watchTable()
+            } catch (offline: FfiException) {
+                null
+            }
+        } else {
+            null
         }
         try {
             WakeStore.write(app, table)
@@ -2914,7 +2924,7 @@ object Core {
                         Conversation(hit.conversation),
                         message.key().toList(),
                         text,
-                        info.storedAtMs.toLong(),
+                        info.shownAtMs,
                         info.outgoing,
                         info.sender,
                         hit.start.toInt().coerceAtMost(end),

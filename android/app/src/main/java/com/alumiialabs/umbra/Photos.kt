@@ -483,7 +483,7 @@ fun PhotoScreen(line: Line, chat: Chat, onBack: () -> Unit) {
                         Text(
                             android.text.format.DateUtils.formatDateTime(
                                 androidx.compose.ui.platform.LocalContext.current,
-                                line.info.storedAtMs.toLong(),
+                                line.info.shownAtMs,
                                 android.text.format.DateUtils.FORMAT_SHOW_DATE or
                                     android.text.format.DateUtils.FORMAT_SHOW_TIME,
                             ),

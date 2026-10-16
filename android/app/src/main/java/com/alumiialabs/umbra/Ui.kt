@@ -954,6 +954,23 @@ private fun SettingRow(icon: String, title: String, detail: String, onClick: (()
     }
 }
 
+/** `MSG_TTL` of Part 3: no record waits at a relay for longer. */
+private const val MSG_TTL_MS = 45L * 86_400_000L
+
+/**
+ * IMP-181: the time that a message shows, which is the send time that its
+ * sender wrote. A record that waited at the relay for the unlock thus shows
+ * when it was sent. The value is advisory (`WIR-076`), thus it never shows
+ * a time after the store of the message or before a record could wait, and
+ * the view orders by the store time alone (`IMP-128`).
+ */
+val uniffi.umbra_ffi.MsgInfo.shownAtMs: Long
+    get() {
+        val stored = storedAtMs.toLong()
+        val sent = sentAtMs.toLong()
+        return if (sent in (stored - MSG_TTL_MS)..stored) sent else stored
+    }
+
 /**
  * The time of a list row: the clock today, and the day before that. The
  * platform reads the 12 or 24 hour setting of the user from the context.

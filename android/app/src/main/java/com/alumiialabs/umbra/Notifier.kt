@@ -21,7 +21,10 @@ object Notifier {
     private const val LOCKED_ID = 2
     private const val PUSH_ID = 3
     private const val REQUEST_ID = 4
-    private const val CARRIER_CHANNEL = "carrier"
+    // The platform keeps the settings of a channel that exists, thus the
+    // channel with no badge takes a new identifier, and the old one leaves.
+    private const val CARRIER_CHANNEL = "connection"
+    private const val OLD_CARRIER_CHANNEL = "carrier"
     private const val MESSAGE_CHANNEL = "messages"
     private const val MESSAGE_TAG = "message"
 
@@ -39,13 +42,21 @@ object Notifier {
             CARRIER_CHANNEL,
             context.getString(R.string.common_connection),
             NotificationManager.IMPORTANCE_LOW,
-        ).apply { description = context.getString(R.string.notify_channel_connection_about) }
+        ).apply {
+            description = context.getString(R.string.notify_channel_connection_about)
+            // The notice of the service is no message, thus the icon of the
+            // app shows no count for it.
+            setShowBadge(false)
+        }
         val messages = NotificationChannel(
             MESSAGE_CHANNEL,
             context.getString(R.string.notify_channel_messages),
             NotificationManager.IMPORTANCE_HIGH,
         )
         manager(context).createNotificationChannels(listOf(carrier, messages))
+        // A service whose notice still stands on the old channel keeps it,
+        // and a later start deletes it.
+        runCatching { manager(context).deleteNotificationChannel(OLD_CARRIER_CHANNEL) }
     }
 
     private fun openApp(context: Context): PendingIntent = PendingIntent.getActivity(
@@ -77,15 +88,10 @@ object Notifier {
             Modes.mode(context) == NotifyMode.Private -> R.string.notify_unlocked
             else -> R.string.notify_holds_connection
         }
-        val text = when {
-            watches -> R.string.notify_watching
-            Modes.mode(context) == NotifyMode.Direct -> R.string.notify_arrive_watched
-            else -> R.string.notify_arrive_until_lock
-        }
+        // The notice names the state alone: the user knows the app.
         return Notification.Builder(context, CARRIER_CHANNEL)
             .setSmallIcon(R.drawable.ic_stat_umbra)
             .setContentTitle(context.getString(title))
-            .setContentText(context.getString(text))
             .setContentIntent(openApp(context))
             .setOngoing(true)
             .build()

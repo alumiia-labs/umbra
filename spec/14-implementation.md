@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 14: Implementation Requirements and Assurance
 
 **Status:** Draft
-**Version:** 0.34.0
-**Date:** 2026-10-15
+**Version:** 0.35.0
+**Date:** 2026-10-16
 
 ---
 
@@ -502,6 +502,16 @@ that draft is dropped, and it MUST do that whether the send succeeded or failed.
   store of each message. It MUST NOT order the view by `sent_at`, because that
   value comes from the peer, and a peer could thus put a message before an
   earlier one. `msg_info` gives the two times, and it gives no content.
+- **[IMP-181]** A client SHOULD show the `sent_at` of a message as its time.
+  It MUST show the store time in its place when `sent_at` is after the store
+  time, or earlier than the store time less `MSG_TTL`. The time that a
+  message shows MUST NOT change the order of `IMP-128`.
+
+  > *Cause.* A locked client stores each record at the unlock (`IMP-127`),
+  > thus a store time shows the unlock and not the message. The sender
+  > writes `sent_at`, and Part 6 `WIR-076` makes it advisory. A time on the
+  > screen is no security decision, and the two bounds keep a wrong clock
+  > of a peer from a time that no record could have.
 - **[IMP-129]** A conversation identifier on the surface MUST be the surrogate
   of §14.6.4 under the store key, and it MUST NOT be a queue identifier. Thus
   the owner column of a message row names no queue to a party that reads the
