@@ -44,12 +44,12 @@ path = "src/bin/umbra_authority/main.rs"
 required-features = ["runtime"]
 
 [dependencies]
-umbra-crypto = { version = "0.36.1", path = "../umbra-crypto" }
-umbra-wire = { version = "0.36.1", path = "../umbra-wire" }
-umbra-core = { version = "0.36.1", path = "../umbra-core" }
-umbra-queue = { version = "0.36.1", path = "../umbra-queue" }
-umbra-transport = { version = "0.36.1", path = "../umbra-transport" }
-umbra-relay = { version = "0.36.1", path = "../umbra-relay", optional = true }
+umbra-crypto = { version = "0.36.2", path = "../umbra-crypto" }
+umbra-wire = { version = "0.36.2", path = "../umbra-wire" }
+umbra-core = { version = "0.36.2", path = "../umbra-core" }
+umbra-queue = { version = "0.36.2", path = "../umbra-queue" }
+umbra-transport = { version = "0.36.2", path = "../umbra-transport" }
+umbra-relay = { version = "0.36.2", path = "../umbra-relay", optional = true }
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
 # The fold of a text for the search of Part 14 §14.6.7: it takes the accents away.
 unicode-normalization = { version = "0.1", default-features = false }
@@ -62,4 +62,4 @@ rusqlite = { version = "0.40", default-features = false, features = ["bundled"],
 
 [dev-dependencies]
 # The tests of cross-relay tokens make the RSA key of an issuer.
-umbra-crypto = { version = "0.36.1", path = "../umbra-crypto", features = ["keygen"] }
+umbra-crypto = { version = "0.36.2", path = "../umbra-crypto", features = ["keygen"] }

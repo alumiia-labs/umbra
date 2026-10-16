@@ -4,7 +4,9 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: devnet
+  name: {{ include "umbra-devnet.fullname" . }}
+  labels:
+    {{- include "umbra-devnet.labels" . | nindent 4 }}
 spec:
   replicas: 1
   # One pod at a time holds the volume and the ports.
@@ -12,11 +14,11 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app.kubernetes.io/component: network
+      {{- include "umbra-devnet.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        app.kubernetes.io/component: network
+        {{- include "umbra-devnet.labels" . | nindent 8 }}
     spec:
       automountServiceAccountToken: false
       securityContext:
@@ -28,13 +30,11 @@ spec:
           type: RuntimeDefault
       containers:
         - name: devnet
-          # The image of the Dockerfile: docker compose build, then import it
-          # into the cluster (README.md).
-          image: umbra-devnet:latest
-          imagePullPolicy: IfNotPresent
-          envFrom:
-            - configMapRef:
-                name: devnet
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: UMBRA_DEVNET_HOST
+              value: {{ include "umbra-devnet.host" . | quote }}
           ports:
             - name: ingress-a
               containerPort: 7441
@@ -46,11 +46,7 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 5
           resources:
-            requests:
-              cpu: 250m
-              memory: 512Mi
-            limits:
-              memory: 2Gi
+            {{- toYaml .Values.resources | nindent 12 }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -64,7 +60,23 @@ spec:
               mountPath: /tmp
       volumes:
         - name: state
+          {{- if .Values.persistence.enabled }}
           persistentVolumeClaim:
-            claimName: devnet
+            claimName: {{ include "umbra-devnet.fullname" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
         - name: tmp
           emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

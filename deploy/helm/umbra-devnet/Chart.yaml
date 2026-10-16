@@ -1,0 +1,12 @@
+# The test network of scripts/devnet.sh on Kubernetes or k3s. Its seeds are
+# in the repository, thus it protects nothing. Run it on a test cluster
+# alone. deploy/helm/README.md gives the steps.
+apiVersion: v2
+name: umbra-devnet
+description: The UMBRA test network in one pod, with seeds that protect nothing
+type: application
+version: 0.36.2
+appVersion: "0.36.2"
+home: https://umbrachat.app
+sources:
+  - https://github.com/alumiia-labs/umbra

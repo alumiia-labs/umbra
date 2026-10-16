@@ -1,0 +1,6 @@
+The test network starts. Its seeds are in the repository, thus it protects nothing.
+
+The ingress relays list {{ include "umbra-devnet.host" . }} for clients, on the ports 7441 and 7446.
+The log shows "the manifest names the report queue" when the network is ready:
+
+  kubectl -n {{ .Release.Namespace }} logs -f deploy/{{ include "umbra-devnet.fullname" . }}
