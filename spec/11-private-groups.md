@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 11: Private Groups (2–500)
 
 **Status:** Draft
-**Version:** 0.35.0
+**Version:** 0.36.0
 **Date:** 2026-10-16
 
 ---
@@ -835,9 +835,13 @@ secret of the epoch, the secret of a one-slot record. That occurs when no other
 record of that epoch opened before that record. That member MUST make the
 secret of a record that holds a slot for every member the current one when that
 record arrives. That member MUST keep the secret of the one-slot record as the
-alternate under the same two conditions. **[GRP-274]** A receiver MUST try the
-alternate secret of an epoch when the record key of that epoch fails to open a
-record. **[GRP-364]** A rotator that reads an epoch-key record for the epoch it
+alternate under the same two conditions. A member MUST keep the alternate of
+an epoch for the `GROUP_EPOCH_GRACE` of that epoch, also after the next epoch
+installs. **[GRP-274]** A receiver MUST try the alternate secret of an epoch
+when the record key of that epoch fails to open a record. The two secrets
+start at two slots, thus a receiver MUST also try the alternate when the
+other secret gives no key for the slot of the record. **[GRP-364]** A rotator
+that reads an epoch-key record for the epoch it
 posted, from a lower member index, MUST switch to that secret, and if it holds
 `own_sk` it MUST send `GKEY` with the credentials of that secret to each
 replica.
@@ -1157,14 +1161,16 @@ the relay and not of an epoch, thus a rotation of §11.4 leaves it where it was.
 > from `t_e` and thus each record before the join. A one-slot record that
 > carries `K_e` would give it that history at a promotion. The owner credentials
 > are all that the record has to deliver.
-**[GRP-379]** A receiver MUST reject a slot whose `own_count` is above 0 when
-the rotator held a role below `admin` at the `roster_epoch` of the record,
-because only an admin holds `own_sk`. A receiver MUST take the role of a
-rotator from an entry that is active in its current roster alone. The
-record names its `roster_epoch` itself, and the roster keeps the role of an
-entry that left. Thus a member that left the role or the group would name a
-roster epoch at which it was active. That member would hand bytes of its own as
-the owner credentials.
+**[GRP-379]** A receiver MUST NOT take the owner credentials of a slot whose
+rotator holds a role below `admin`, because only an admin holds `own_sk`. A
+receiver MUST take the role of a rotator from an entry that is active in its
+current roster alone. The record names its `roster_epoch` itself, and the
+roster keeps the role of an entry that left. Thus a member that left the role
+or the group would name a roster epoch at which it was active. That member
+would hand bytes of its own as the owner credentials. A receiver MUST still
+take the epoch secret of such a slot under the other checks. A demotion that
+the receiver applied before it read the record would else refuse a rotation
+that served the group, and `GRP-355` lets a member below `admin` rotate.
 
 > *Cause.* A group has one secret for each epoch, held by every member, thus any member can answer under the backoff of §11.4.1, and
 > no repair waits for a role holder. The rate bounds the requests for one
@@ -1270,7 +1276,10 @@ rule `WIR-445` keeps a group record off a pairwise channel.
 **A group carries no delivery receipt, no read receipt, and no typing
 indicator.** **[GRP-299]** A member MUST NOT send a receipt of Part 6 §6.6.9
 kind `0x06` or kind `0x07` in a group. **[GRP-300]** A member MUST NOT send a
-typing indicator of kind `0x08` in a group. **[GRP-301]** A client MUST NOT
+typing indicator of kind `0x08` in a group. A receiver MUST drop such a
+record, a reaction of kind `0x03`, and each kind that is no message of a
+group, with no row and no alert. This part gives a reaction in a group no
+rule. **[GRP-301]** A client MUST NOT
 show a `delivered` or a `read` state for a group record; the states of Part 14
 §14.9.1 that a group record reaches are `queued`, `accepted`, and `failed`.
 
@@ -1376,7 +1385,13 @@ show a `delivered` or a `read` state for a group record; the states of Part 14
 
 ## 11.9 Administration
 
-The roles are `owner`, `admin`, `moderator`, `member`, and `observer`.
+The roles are `owner`, `admin`, `moderator`, `member`, and `observer`. An
+`observer` reads the group and posts no message to it. **[GRP-425]** A
+receiver MUST reject a content record from a member that holds `observer`
+in its current roster, unless it carries a roster object, a `KeyRequest`,
+a `KeySupply`, or a deletion of the author of §11.9.6. Thus an observer
+still leaves, re-keys, takes a missed epoch, and deletes a message that it
+sent before its demotion.
 **[GRP-051]** A group MUST have two or more members with the `owner` role. One
 owner is one point of failure for the administration, and U6 does not permit
 that condition. `ROLE_HOLDER_MAX` is 16 members at `moderator` or above.
@@ -1562,14 +1577,26 @@ a member, or it takes that role away.
   (`GRP-316`, `GRP-317`). The creator of the group is the first granter. A
   member receives the roster key of the creator in the group invitation.
 - **[GRP-063]** A verifier MUST reject a granting epoch from a granter that
-  holds a role below `admin`.
+  holds a role below `admin`, or that is not in the active set. A
+  `RekeyRecord` and a self-removal take their maker out of the active set
+  and leave its entry and its role. A verifier MUST also reject a granting
+  epoch whose `grantee_index` is its `granter_index`. Only an `owner` gives
+  `owner`, and only an `owner` changes the role of an `owner`. A verifier
+  MUST reject each other such epoch, on the chain and on the authority path
+  of a snapshot.
 - **[GRP-316]** A granting epoch and a moderation epoch MUST carry the full
   `roster_pk` of the member that signs it. **[GRP-317]** A verifier MUST
   check that `roster_pk` against the `roster_pk_hash` of the roster entry of
   that member before it verifies the signature under it. **[GRP-399]** A
   verifier of a snapshot MUST reject it when a member at `moderator` or
   above is neither the creator nor the grantee of that role in the last
-  granting epoch of the path that names it.
+  granting epoch of the path that names it. The path starts at the creator,
+  under the roster key of the invitation, at index 0 when no entry holds
+  that key. The verifier MUST compare the `roster_pk_hash` of each such
+  entry, and not its role alone: the creator is the entry of that key, and a
+  grantee is the entry of the `grantee_roster_pk_hash` of its grant. An
+  entry with keys of its own at the index of a creator that left holds no
+  role.
 
 > *Cause of `GRP-316`.* The alternative is a grant at `moderator` or above
 > that carries the key of the grantee. The roster holds only the hash of the
@@ -1686,10 +1713,15 @@ keeps no member in a group against its will.
   **[GRP-071]** That member MUST NOT select one successor silently. One member
   that makes two successors equivocated, and that act is evidence. While
   `GRP-417` keeps the roster before the head, a member can verify a second
-  successor from the maker of the head. That member MUST keep the successor
-  whose SHA3-256 is lower, as `GRP-369` orders two `RekeyRecord`s. It shows the
-  fork in each case. Thus each member that reads the two successors holds one
-  head, in each order of arrival. `GRP-119` lets a device whose epoch lost
+  successor from the maker of the head. When one of the two is a
+  `RekeyRecord` of that maker, that member MUST keep the `RekeyRecord`.
+  Otherwise that member MUST keep the successor whose SHA3-256 is lower, as
+  `GRP-369` orders two `RekeyRecord`s. It shows the fork in each case. Thus
+  each member that reads the two successors holds one head, in each order of
+  arrival. A signature is random, thus a device in hostile hands that holds
+  the old roster key can grind a granting or a moderation epoch to a lower
+  hash. Under the hash order alone that epoch would undo the re-key of
+  §11.12, again at each attempt. `GRP-119` lets a device whose epoch lost
   publish its change again. A second successor that arrives after the chain
   moved past the first one changes nothing, as `GRP-417` states for another
   maker.
@@ -1806,6 +1838,11 @@ it to. A receiver takes none from an index whose keys a rival changed under
 thus a deletion or an edit can arrive before its target. A receiver MUST then
 keep it as a pending reference of Part 7 rule `DEV-093` under the member that
 sent it. The receiver MUST apply it when the target of that member arrives.
+A deletion that came first takes the target at its arrival. The receiver
+never held the target, thus it MUST store no row and raise no alert for it,
+as Part 7 rule `DEV-102` gives for an unknown target. Each replica gives the
+target, thus the receiver MUST keep the pending deletion until
+`REF_ORPHAN_TTL`, and the copy of the other replica stays out with it.
 
 **A moderator action** has two forms.
 
@@ -1953,7 +1990,9 @@ bytes, thus it fits bucket `B0`.
   directly after that removal.
 - **[GRP-166]** If the silent member holds `moderator` or above, the admin
   MUST first remove that role with a granting epoch. §11.9.2 lets a plain
-  epoch remove a `member` or an `observer` only. **[GRP-167]** A member MUST
+  epoch remove a `member` or an `observer` only. `GRP-063` lets an `owner`
+  alone take the role of an `owner`, thus an admin below `owner` leaves a
+  silent `owner` to the owners. **[GRP-167]** A member MUST
   NOT count a silence demotion against `GRANT_RATE`. A backlog of silent
   members at `GROUP_MAX` cannot clear under that rate. A receiver cannot
   tell a silence demotion from another one, thus it counts no granting
@@ -2242,7 +2281,9 @@ The re-key below is that move, and it needs no admin.
 - **[GRP-369]** A member that verifies two `RekeyRecord`s for one `old_index`
   with one `previous_epoch_hash` MUST apply the record whose SHA3-256 is
   lower, and it MUST show the fork under `GRP-070`, because one member made
-  two successors. The record that takes the place of the first one is a
+  two successors. `GRP-070` keeps a `RekeyRecord` over each other successor of
+  its maker, thus a granting or a moderation epoch of the old roster key does
+  not take the place of a re-key. The record that takes the place of the first one is a
   rotation trigger too. It excludes the keys of the record that lost, which
   hold no index. A member that verifies the second of the two records MUST keep
   the fact that the `RekeyRecord` of that `roster_epoch` had a rival. That

@@ -24,6 +24,9 @@ pub struct Held {
     /// The time of the `NREG` that made or moved it, in seconds
     /// (`NTF-138`).
     pub registered_at: u64,
+    /// Whether a push went to the provider under it. A move keeps the mark,
+    /// and the bound of the NDR reads it (§8.2.7).
+    pub pushed: bool,
 }
 
 /// The time that a registration lives after its last `NREG` (`NTF-138`).
@@ -51,6 +54,11 @@ pub enum NdrChange {
         /// The handle.
         handle: [u8; HANDLE_LEN],
     },
+    /// The first push of a registration went to the provider.
+    Pushed {
+        /// The handle.
+        handle: [u8; HANDLE_LEN],
+    },
 }
 
 /// One push for the provider. The target is the open push token, which
@@ -58,9 +66,9 @@ pub enum NdrChange {
 pub struct Delivery {
     /// The handle, for `Ndr::gone` when the provider refuses the target.
     pub handle: [u8; HANDLE_LEN],
-    /// The provider.
+    /// The provider, which is FCM (`NTF-134`).
     pub carrier: TokenCarrier,
-    /// The endpoint URL of UnifiedPush, or the FCM registration token.
+    /// The FCM registration token.
     pub target: Zeroizing<Vec<u8>>,
     /// The expiry for the provider, in seconds.
     pub ttl: u32,
@@ -92,9 +100,6 @@ fn opens_registration(secret: &Secret<32>, held: &[u8; 32]) -> bool {
 pub struct Ndr {
     held: BTreeMap<[u8; HANDLE_LEN], Held>,
     changes: Vec<NdrChange>,
-    /// Whether this deployment serves UnifiedPush endpoints as well as FCM
-    /// (`NTF-134`). The reference NDR does not.
-    unified_push: bool,
 }
 
 impl Ndr {
@@ -103,15 +108,20 @@ impl Ndr {
         Ndr {
             held: held.into_iter().collect(),
             changes: Vec::new(),
-            unified_push: false,
         }
     }
 
-    /// Makes the NDR serve UnifiedPush endpoints too, for a deployment that
-    /// holds such endpoints (`NTF-134`).
-    pub fn serving_unified_push(mut self, serves: bool) -> Self {
-        self.unified_push = serves;
-        self
+    /// Marks the registration of `handle` as one that took a push. The
+    /// result is whether the mark is new, and then a change waits.
+    pub fn took_push(&mut self, handle: &[u8; HANDLE_LEN]) -> bool {
+        match self.held.get_mut(handle) {
+            Some(held) if !held.pushed => {
+                held.pushed = true;
+                self.changes.push(NdrChange::Pushed { handle: *handle });
+                true
+            }
+            _ => false,
+        }
     }
 
     /// The registrations held.
@@ -168,16 +178,19 @@ impl Ndr {
                 // point it elsewhere. The secret of the held registration
                 // moves it, and so does the secret before it in the chain:
                 // that request repeats a move whose answer was lost.
+                let mut pushed = false;
                 if let Some(held) = self.held.get(&handle) {
                     if !opens_registration(&prior, &held.removal_hash) {
                         return (NdrResponse::Refused, None);
                     }
+                    pushed = held.pushed;
                 }
                 let held = Held {
                     nonce,
                     ct_token: ct_token.to_vec(),
                     removal_hash,
                     registered_at: now,
+                    pushed,
                 };
                 self.held.insert(handle, held.clone());
                 self.changes.push(NdrChange::Registered { handle, held });
@@ -221,14 +234,11 @@ impl Ndr {
                 if aead::open(&k_tok, &held.nonce, &handle, &mut token, tag).is_err() {
                     return (NdrResponse::Refused, None);
                 }
+                // NTF-134: the NDR posts to FCM alone, and to no address
+                // that a caller named. The reserved carrier does not read.
                 let Ok((carrier, target)) = parse_token(&token) else {
                     return (NdrResponse::Refused, None);
                 };
-                // NTF-134: the NDR posts to the provider that it serves, and
-                // to no address that a caller named.
-                if carrier != TokenCarrier::Fcm && !self.unified_push {
-                    return (NdrResponse::Refused, None);
-                }
                 let delivery = Delivery {
                     handle,
                     carrier,
@@ -402,12 +412,57 @@ mod tests {
     }
 
     #[test]
+    fn the_handle_of_a_watch_takes_no_registration_and_a_move_keeps_the_push_mark() {
+        let mut rng = Rng(3);
+        let set = HandleSet::assign(&[[1; 32]], &[], &[], 0, &mut rng).unwrap();
+        let group = &set.groups()[0];
+        let mut plain = [0u8; PUSH_TOKEN_MAX];
+        let n = encode_token(TokenCarrier::Fcm, b"fcm-device-1", &mut plain).unwrap();
+        let registration = group.registration(&plain[..n], [4; 24]).unwrap();
+        let hash = sha3_256(&[&[9u8; 32][..]]);
+        let register = request(&NdrRequest::Register {
+            handle: group.handle,
+            nonce: registration.nonce,
+            ct_token: &registration.ct_token,
+            removal_hash: hash,
+            prior: Secret::new([9; 32]),
+        });
+        // NTF-143: the same `NREG` under 16 zero bytes is refused, and the
+        // NDR holds nothing.
+        let mut watch = register;
+        watch[1..=HANDLE_LEN].fill(0);
+        let mut ndr = Ndr::default();
+        assert_eq!(ndr.handle(&watch, NOW).0, NdrResponse::Refused);
+        assert!(ndr.is_empty() && ndr.take_changes().is_empty());
+
+        assert_eq!(ndr.handle(&register, NOW).0, NdrResponse::Taken);
+        drop(ndr.take_changes());
+        // The first push marks the registration once, and a move keeps it.
+        assert!(ndr.took_push(&group.handle));
+        assert!(!ndr.took_push(&group.handle));
+        assert!(!ndr.took_push(&[5; 16]));
+        assert_eq!(
+            ndr.take_changes(),
+            alloc::vec![NdrChange::Pushed {
+                handle: group.handle
+            }]
+        );
+        assert_eq!(ndr.handle(&register, NOW + 1).0, NdrResponse::Taken);
+        let changes = ndr.take_changes();
+        assert!(matches!(
+            changes.as_slice(),
+            [NdrChange::Registered { held, .. }] if held.pushed
+        ));
+    }
+
+    #[test]
     fn a_gone_target_drops_the_registration_and_a_restart_keeps_the_rest() {
         let held = Held {
             nonce: [1; 24],
             ct_token: alloc::vec![2; 40],
             removal_hash: [3; 32],
             registered_at: NOW,
+            pushed: false,
         };
         let mut ndr = Ndr::restore([([7; 16], held.clone()), ([8; 16], held)]);
         assert_eq!(ndr.len(), 2);

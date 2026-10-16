@@ -104,9 +104,10 @@ impl Bridge {
     }
 
     /// Makes a new queue for a contact after its own delay, as a revocation
-    /// of a device does for each contact (`NET-180`, `NET-181`).
-    pub fn rotate_swept(&self, contact: ContactId) -> Result<(), Error> {
-        self.command(Command::RotateSwept(contact))
+    /// of a device does for each contact (`NET-180`, `NET-181`). `guard`
+    /// sets a new renewal guard too (`NET-357`), once for one revocation.
+    pub fn rotate_swept(&self, contact: ContactId, guard: bool) -> Result<(), Error> {
+        self.command(Command::RotateSwept(contact, guard))
     }
 
     /// Makes a new queue for a dead channel (`NET-182`).

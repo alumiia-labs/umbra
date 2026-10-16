@@ -15,6 +15,8 @@
 //! of scope `0x03` that asks the contact to delete each message of the
 //! conversation, on each of its devices (`DEV-335`, `DEV-336`).
 
+use std::collections::BTreeMap;
+
 use umbra_core::{
     devset::{roster::Roster, DeviceId},
     store::{
@@ -31,8 +33,9 @@ use umbra_wire::app::{
 use zeroize::Zeroizing;
 
 use super::{
-    conversation_of, info_of, msg_ref, outbox_row, stored_message, sync::Synced, Client, Outgoing,
-    DELETE_RATE_LIMIT, INCOMING, LAST_DELETE_SETTING, MESSAGE_PREFIX, OUTBOX, OUTGOING, SETTINGS,
+    conversation_of, info_of, msg_ref, outbox_row, own_pending_key, stored_message, sync::Synced,
+    Client, Outgoing, DELETE_RATE_LIMIT, INCOMING, LAST_DELETE_SETTING, MESSAGE_PREFIX, OUTBOX,
+    OUTGOING, PENDING, PENDING_ROW_LEN, REF_ORPHAN_MAX, SETTINGS,
 };
 use crate::{ConversationId, Delivery, Error, Event, MsgRef};
 
@@ -46,6 +49,41 @@ const DELETIONS_FROM: &[u8] = b"deletions-from/";
 
 fn count_key(device: &DeviceId) -> Vec<u8> {
     [DELETIONS_FROM, device.as_slice()].concat()
+}
+
+/// One deletion for the devices of the user that another device of the set
+/// sent (`DEV-126`).
+pub(super) struct OwnDeletion {
+    conversation: ConversationId,
+    /// The device that sent it, which `DEV-119` counts.
+    source: DeviceId,
+    is_group: bool,
+    targets: Vec<[u8; 16]>,
+}
+
+/// Takes each deletion for the devices of the user out of a batch of
+/// synced records. The other records go on in their order.
+pub(super) fn split_own_deletions(synced: Vec<Synced>) -> (Vec<Synced>, Vec<OwnDeletion>) {
+    let mut kept = Vec::with_capacity(synced.len());
+    let mut deletions = Vec::new();
+    for record in synced {
+        let targets = AppMessage::parse(&record.app, Channel::Pairwise)
+            .ok()
+            .filter(|parsed| parsed.kind == AppKind::Delete && record.from_user)
+            .and_then(|parsed| DeleteBody::parse(parsed.body).ok())
+            .filter(|body| body.scope == DeleteScope::OwnDevices)
+            .map(|body| body.targets);
+        match targets {
+            Some(targets) => deletions.push(OwnDeletion {
+                conversation: record.conversation,
+                source: record.origin.0,
+                is_group: record.is_group,
+                targets,
+            }),
+            None => kept.push(record),
+        }
+    }
+    (kept, deletions)
 }
 
 impl<B: Backend, E: SecureElement> Client<B, E> {
@@ -127,9 +165,44 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for batch in targets.chunks(DELETE_BATCH_MAX) {
             self.publish_own_targets(conversation, batch.to_vec(), now_ms, rng)?;
         }
-        for message in &messages {
-            self.delete_for_me(message)?;
+        // An edit, a reaction, or a vote of the user that waits for its
+        // relay names a message that goes now, and no view shows it. Its
+        // record would carry the content after the act. A deletion for the
+        // other party and a control record stay: they carry no content.
+        let mut gone = messages;
+        let mut texts = Vec::new();
+        let open = self.open_ref()?;
+        for (row, plain) in open.store.list(TableId::MESSAGE, Some(&conversation.0))? {
+            let plain = Zeroizing::new(plain);
+            let kind = plain.get(MESSAGE_PREFIX..).and_then(|app| {
+                AppMessage::parse(app, Channel::Pairwise)
+                    .or_else(|_| AppMessage::parse(app, Channel::Group))
+                    .ok()
+                    .map(|parsed| parsed.kind)
+            });
+            let is_content = matches!(
+                kind,
+                Some(AppKind::Edit | AppKind::Reaction | AppKind::PollVote)
+            );
+            if is_content && !gone.contains(&MsgRef(row)) {
+                gone.push(MsgRef(row));
+            }
         }
+        // An edit that waits for its target holds a text. A deletion that
+        // waits stays, thus a target that comes later stays deleted.
+        for (row, entry) in open.store.list(PENDING, Some(&conversation.0))? {
+            if entry.len() > PENDING_ROW_LEN {
+                texts.push(row);
+            }
+            drop(Zeroizing::new(entry));
+        }
+        self.delete_all_held(&gone)?;
+        let open = self.open_mut()?;
+        let mut batch = open.store.begin();
+        for row in texts {
+            batch.delete(PENDING, row);
+        }
+        batch.commit()?;
         self.events.push_back(Event::Conversations);
         Ok(())
     }
@@ -272,8 +345,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 gone.push(message);
             }
         }
+        self.delete_all_held(&gone)?;
         for message in gone {
-            self.delete_if_held(&message)?;
             self.events.push_back(Event::Deleted {
                 conversation,
                 message,
@@ -300,46 +373,42 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(())
     }
 
-    /// Takes each deletion for the devices of this user out of the records
-    /// that another device of the set sent, and removes its targets here.
-    /// The other records go on.
+    /// Removes the targets of each deletion for the devices of this user
+    /// that [`split_own_deletions`] took out of a batch of another device of
+    /// the set. The caller stores the other records of the batch first. A
+    /// pairwise target that did not arrive yet waits in the pending
+    /// reference table, and its arrival takes it (`DEV-093`).
     pub(super) fn take_own_deletions<R: CryptoRng + ?Sized>(
         &mut self,
-        synced: Vec<Synced>,
+        deletions: Vec<OwnDeletion>,
+        now_ms: u64,
         rng: &mut R,
-    ) -> Result<Vec<Synced>, Error> {
-        let mut kept = Vec::with_capacity(synced.len());
+    ) -> Result<(), Error> {
+        let holds = self.setting(HOLDS_DELETIONS)?.is_some();
         let mut gone = Vec::new();
-        let mut sources = Vec::new();
-        for record in synced {
-            let targets = AppMessage::parse(&record.app, Channel::Pairwise)
-                .ok()
-                .filter(|parsed| parsed.kind == AppKind::Delete && record.from_user)
-                .and_then(|parsed| DeleteBody::parse(parsed.body).ok())
-                .filter(|body| body.scope == DeleteScope::OwnDevices)
-                .map(|body| body.targets);
-            let Some(targets) = targets else {
-                kept.push(record);
-                continue;
-            };
-            sources.push(record.origin.0);
+        let mut waiting: Vec<(ConversationId, Vec<u8>, [u8; 16])> = Vec::new();
+        for deletion in &deletions {
             let open = self.open_ref()?;
-            for target in targets {
-                let reference = msg_ref(&open.device_set_key, &target);
-                let natural = [record.conversation.0.as_slice(), &reference].concat();
+            for target in &deletion.targets {
+                let reference = msg_ref(&open.device_set_key, target);
+                let natural = [deletion.conversation.0.as_slice(), &reference].concat();
                 let row = open.store.row_id(TableId::MESSAGE, &natural);
                 if open.store.get(TableId::MESSAGE, &row)?.is_some() {
-                    gone.push((record.conversation, MsgRef(row)));
+                    gone.push((deletion.conversation, MsgRef(row)));
+                } else if !holds && !deletion.is_group {
+                    // A group target waits under the rules of its group.
+                    waiting.push((deletion.conversation, natural, reference));
                 }
             }
         }
-        for source in sources {
-            self.count_deletion(&source, rng)?;
+        for deletion in &deletions {
+            self.count_deletion(&deletion.source, rng)?;
         }
+        self.pend_own_deletions(&waiting, now_ms, rng)?;
         // DEV-118: after a restore each one waits for the user.
-        if self.setting(HOLDS_DELETIONS)?.is_some() {
+        if holds {
             if gone.is_empty() {
-                return Ok(kept);
+                return Ok(());
             }
             let open = self.open_mut()?;
             let mut batch = open.store.begin();
@@ -348,16 +417,60 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
             batch.commit()?;
             self.events.push_back(Event::Conversations);
-            return Ok(kept);
+            return Ok(());
         }
+        let messages: Vec<MsgRef> = gone.iter().map(|(_, message)| *message).collect();
+        self.delete_all_held(&messages)?;
         for (conversation, message) in gone {
-            self.delete_for_me(&message)?;
             self.events.push_back(Event::Deleted {
                 conversation,
                 message,
             });
         }
-        Ok(kept)
+        Ok(())
+    }
+
+    /// Keeps a pending entry for each target of a deletion of the user that
+    /// did not arrive, up to `REF_ORPHAN_MAX` for each conversation
+    /// (`DEV-093`, `DEV-095`). An edit that waits for the same target stays,
+    /// and the arrival of the target takes the two.
+    fn pend_own_deletions<R: CryptoRng + ?Sized>(
+        &mut self,
+        waiting: &[(ConversationId, Vec<u8>, [u8; 16])],
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        if waiting.is_empty() {
+            return Ok(());
+        }
+        let open = self.open_mut()?;
+        let mut held: BTreeMap<ConversationId, usize> = BTreeMap::new();
+        let mut entries = Vec::new();
+        for (conversation, natural, reference) in waiting {
+            let count = match held.get(conversation) {
+                Some(count) => *count,
+                None => open.store.list(PENDING, Some(&conversation.0))?.len(),
+            };
+            if count >= REF_ORPHAN_MAX {
+                continue;
+            }
+            held.insert(*conversation, count.saturating_add(1));
+            let row = open.store.row_id(PENDING, &own_pending_key(natural));
+            let entry = Zeroizing::new(
+                [
+                    conversation.0.as_slice(),
+                    reference,
+                    &(now_ms / 1_000).to_be_bytes(),
+                ]
+                .concat(),
+            );
+            entries.push((row, *conversation, entry));
+        }
+        let mut batch = open.store.begin();
+        for (row, conversation, entry) in &entries {
+            batch.put(PENDING, *row, Some(conversation.0), entry, rng)?;
+        }
+        Ok(batch.commit()?)
     }
 
     fn roster_epoch(&self) -> Result<u64, Error> {

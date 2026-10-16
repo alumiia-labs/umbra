@@ -19,26 +19,34 @@ impl SpendSet {
         if token_epoch != epoch && token_epoch != epoch.wrapping_sub(1) {
             return Err(Error::Stale);
         }
-        // A new current epoch retires the set two epochs back. A retired
-        // slot holds no epoch, thus two slots never hold the same one. The
-        // slot of the next epoch stays (`ABU-114`). A clock that steps back
-        // over an epoch boundary must not let the tokens of that epoch spend
-        // a second time. A slot further ahead retires, thus a clock that was
-        // far ahead for a time does not hold both slots until its epoch
-        // comes.
-        let live = epoch.saturating_sub(1)..=epoch.saturating_add(1);
-        for slot in &mut self.epochs {
-            if slot.as_ref().is_some_and(|(held, _)| !live.contains(held)) {
-                *slot = None;
+        let index = match self.slot_of(token_epoch) {
+            Some(index) => index,
+            None => {
+                // A slot keeps its nonces until a new epoch needs its place
+                // (`ABU-114`). Thus a clock that steps far ahead and back
+                // again spends no nonce a second time, unless a spend at the
+                // far epoch took that place. The slot of the next epoch
+                // stays, and a slot outside the live epochs takes the new
+                // one: the free slot first, then the one farthest from the
+                // clock.
+                let live = epoch.saturating_sub(1)..=epoch.saturating_add(1);
+                let distance = |held: u32| held.abs_diff(epoch);
+                let free = self.epochs.iter().position(Option::is_none);
+                let farthest = self
+                    .epochs
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(at, slot)| slot.as_ref().map(|(held, _)| (at, *held)))
+                    .filter(|(_, held)| !live.contains(held))
+                    .max_by_key(|(_, held)| distance(*held))
+                    .map(|(at, _)| at);
+                let index = free.or(farthest).ok_or(Error::Stale)?;
+                if let Some(slot) = self.epochs.get_mut(index) {
+                    *slot = None;
+                }
+                index
             }
-        }
-        let held = self
-            .epochs
-            .iter()
-            .position(|slot| slot.as_ref().is_some_and(|(held, _)| *held == token_epoch));
-        let index = held
-            .or_else(|| self.epochs.iter().position(Option::is_none))
-            .ok_or(Error::Stale)?;
+        };
         let (_, set) = self
             .epochs
             .get_mut(index)
@@ -48,6 +56,29 @@ impl SpendSet {
             return Err(Error::Stale);
         }
         Ok(())
+    }
+
+    fn slot_of(&self, token_epoch: u32) -> Option<usize> {
+        self.epochs
+            .iter()
+            .position(|slot| slot.as_ref().is_some_and(|(held, _)| *held == token_epoch))
+    }
+
+    /// Whether `nonce` of `token_epoch` is spent. A caller tests this before
+    /// a costly check, and spends after that check.
+    pub fn is_spent(&self, token_epoch: u32, nonce: &[u8; 32]) -> bool {
+        self.slot_of(token_epoch)
+            .and_then(|index| self.epochs.get(index))
+            .and_then(Option::as_ref)
+            .is_some_and(|(_, set)| set.contains(nonce))
+    }
+
+    /// The nonces held for `token_epoch`.
+    pub fn count(&self, token_epoch: u32) -> usize {
+        self.slot_of(token_epoch)
+            .and_then(|index| self.epochs.get(index))
+            .and_then(Option::as_ref)
+            .map_or(0, |(_, set)| set.len())
     }
 
     /// Takes back a nonce of `token_epoch` that a store kept, at the start
@@ -125,5 +156,27 @@ mod tests {
         ahead.spend(11, 11, [3; 32]).unwrap();
         ahead.spend(11, 10, [4; 32]).unwrap();
         assert_eq!(ahead.len(), 2);
+    }
+
+    #[test]
+    fn a_clock_that_steps_far_ahead_and_back_keeps_the_nonces_that_it_did_not_need() {
+        let mut set = SpendSet::default();
+        set.spend(10, 10, [1; 32]).unwrap();
+        set.spend(10, 9, [2; 32]).unwrap();
+        // The clock steps to epoch 50 and spends one token there. The slot
+        // farthest from 50 takes it, and the slot of 10 stays.
+        set.spend(50, 50, [3; 32]).unwrap();
+        assert!(set.is_spent(10, &[1; 32]));
+        assert!(!set.is_spent(9, &[2; 32]));
+        // The clock is right again: the nonce of 10 does not spend again.
+        assert_eq!(set.spend(10, 10, [1; 32]), Err(Error::Stale));
+        assert_eq!(set.count(10), 1);
+        // A clock that spends nothing at the far epoch keeps both slots.
+        let mut quiet = SpendSet::default();
+        quiet.spend(10, 10, [1; 32]).unwrap();
+        quiet.spend(10, 9, [2; 32]).unwrap();
+        assert_eq!(quiet.spend(50, 10, [4; 32]), Err(Error::Stale));
+        assert_eq!(quiet.spend(10, 9, [2; 32]), Err(Error::Stale));
+        assert_eq!(quiet.spend(10, 10, [1; 32]), Err(Error::Stale));
     }
 }

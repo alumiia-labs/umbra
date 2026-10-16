@@ -98,6 +98,10 @@ pub(crate) struct State {
     n: u64,
 }
 
+/// The largest stored form of a [`State`]: `ck`, `h`, the flag and `k`, and
+/// `n`.
+pub(crate) const STATE_STORED_LEN: usize = 32 + 32 + 1 + 32 + 8;
+
 impl Drop for State {
     fn drop(&mut self) {
         self.h.zeroize();

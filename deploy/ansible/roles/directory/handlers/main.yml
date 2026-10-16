@@ -1,5 +1,8 @@
+# The run stops when the service does not stay up after the restart.
 - name: Restart umbra-directory
-  ansible.builtin.systemd:
-    name: umbra-directory
-    state: restarted
-    daemon_reload: true
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      systemctl daemon-reload
+      /usr/local/sbin/umbra-restart umbra-directory.service {{ umbra_service_port }}
+  changed_when: true

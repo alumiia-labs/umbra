@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 13: Anti-Abuse Without Identifiers
 
 **Status:** Draft
-**Version:** 0.35.0
+**Version:** 0.36.0
 **Date:** 2026-10-16
 
 ---
@@ -343,7 +343,12 @@ that relay.
 
 **[ABU-114]** A verifier MUST keep its set of spent nonces across a restart,
 until the end of the epoch after the epoch of each nonce. A set that a restart
-empties takes each token of two epochs one more time.
+empties takes each token of two epochs one more time. A verifier that holds
+the nonces of two epochs MUST drop the nonces of one epoch only when a token of
+a new epoch needs their place, and then the epoch farthest from its clock.
+Thus a clock that steps ahead and back again takes no nonce a second time,
+unless a token at the far epoch took the place of that epoch. Part 15 §15.3
+lists that residual.
 
 **[ABU-006]** **UMBRA MUST NOT build a global double-spend database.** Such a database is a
 central linkage asset, a seizure target, and a scaling bottleneck. The cost is

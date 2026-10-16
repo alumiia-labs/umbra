@@ -1,9 +1,7 @@
 //! The wake rules at the client (Part 8 §8.3, §8.4.1, §8.4.2, §8.2.6): the
-//! three modes and their carriers, the fixed clock of Private mode with
-//! its random phase, the bound of a push-wake session, and the drain of a
-//! rendezvous queue in each mode.
+//! three modes and their carriers, and the bound of a push-wake session.
 
-use super::{RENDEZVOUS_DRAIN_PRIVATE, WAKE_SESSION_MAX};
+use super::WAKE_SESSION_MAX;
 
 /// The cadence of Private mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,50 +80,6 @@ impl Mode {
     }
 }
 
-/// The fixed clock of Private mode: an interval and a phase from the
-/// CSPRNG, drawn again at each network change and at each change of the
-/// ingress pair (`NTF-052`, `NTF-053`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FixedClock {
-    interval: u64,
-    phase: u64,
-}
-
-impl FixedClock {
-    /// A clock at `cadence` with a phase from `random`.
-    pub fn new(cadence: Cadence, random: u64) -> Self {
-        let interval = cadence.seconds();
-        FixedClock {
-            interval,
-            phase: random % interval,
-        }
-    }
-
-    /// Draws the phase again.
-    pub fn rephase(&mut self, random: u64) {
-        self.phase = random % self.interval;
-    }
-
-    /// The next wake at or after `now`. An arrival never moves it.
-    pub fn next_wake(&self, now: u64) -> u64 {
-        let base = now.saturating_sub(self.phase);
-        let slots = base / self.interval;
-        let candidate = slots
-            .saturating_mul(self.interval)
-            .saturating_add(self.phase);
-        if candidate >= now {
-            candidate
-        } else {
-            candidate.saturating_add(self.interval)
-        }
-    }
-
-    /// The interval.
-    pub const fn interval(&self) -> u64 {
-        self.interval
-    }
-}
-
 /// A push-wake session, bounded by `WAKE_SESSION_MAX` and with no spare
 /// circuit (`NTF-012`, `NTF-013`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,24 +102,6 @@ impl WakeSession {
     pub const CIRCUITS: usize = 1;
 }
 
-/// Whether a rendezvous queue is due for a drain (`NTF-045` to
-/// `NTF-047`). In Instant mode the push carries the wake, thus no scheduled
-/// drain is due.
-pub fn rendezvous_drain_due(
-    mode: Mode,
-    last_drain: Option<u64>,
-    now: u64,
-    foreground: bool,
-) -> bool {
-    match mode {
-        Mode::Instant => false,
-        Mode::Private(_) => {
-            last_drain.is_none_or(|at| now.saturating_sub(at) >= RENDEZVOUS_DRAIN_PRIVATE)
-        }
-        Mode::Off => foreground,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,41 +116,9 @@ mod tests {
         assert!(Mode::DEFAULT.registers_push());
         assert!(!Mode::Private(Cadence::Twenty).registers_push());
 
-        let clock = FixedClock::new(Cadence::Twenty, 1_000_007);
-        let interval = clock.interval();
-        let first = clock.next_wake(50_000);
-        assert!(first >= 50_000 && first < 50_000 + interval);
-        assert_eq!(clock.next_wake(first), first);
-        assert_eq!(clock.next_wake(first + 1), first + interval);
-        let mut moved = clock;
-        moved.rephase(3);
-        assert_eq!(moved.next_wake(0), 3);
-
         let session = WakeSession::open(10);
         assert!(!session.must_stop(15));
         assert!(session.must_stop(16));
         assert_eq!(WakeSession::CIRCUITS, 1);
-
-        assert!(!rendezvous_drain_due(Mode::Instant, None, 0, false));
-        assert!(rendezvous_drain_due(
-            Mode::Private(Cadence::Twenty),
-            None,
-            0,
-            false
-        ));
-        assert!(!rendezvous_drain_due(
-            Mode::Private(Cadence::Twenty),
-            Some(0),
-            86_399,
-            false
-        ));
-        assert!(rendezvous_drain_due(
-            Mode::Private(Cadence::Twenty),
-            Some(0),
-            86_400,
-            false
-        ));
-        assert!(rendezvous_drain_due(Mode::Off, Some(0), 1, true));
-        assert!(!rendezvous_drain_due(Mode::Off, Some(0), 1, false));
     }
 }

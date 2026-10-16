@@ -723,18 +723,26 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
             val entries = buildList {
                 add(
                     RowEntry("image", stringResource(R.string.common_photo)) {
+                        Core.awaitsResult()
                         picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                     },
                 )
                 if (Files.canSendVideo) {
                     add(
                         RowEntry("film", stringResource(R.string.common_video)) {
+                            Core.awaitsResult()
                             videoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
                         },
                     )
-                    add(RowEntry("music", stringResource(R.string.chat_audio)) { audioPicker.launch(arrayOf("audio/*")) })
+                    add(RowEntry("music", stringResource(R.string.chat_audio)) {
+                        Core.awaitsResult()
+                        audioPicker.launch(arrayOf("audio/*"))
+                    })
                 }
-                add(RowEntry("file", stringResource(R.string.common_file)) { filePicker.launch(arrayOf("*/*")) })
+                add(RowEntry("file", stringResource(R.string.common_file)) {
+                    Core.awaitsResult()
+                    filePicker.launch(arrayOf("*/*"))
+                })
                 // GRP-149: a group above POLL_GROUP_MAX members takes no poll.
                 if (!chat.isGroup || chat.members <= POLL_GROUP_MAX) {
                     add(RowEntry("chart-bar", stringResource(R.string.chat_poll)) { push(Screen.NewPoll(conversation)) })

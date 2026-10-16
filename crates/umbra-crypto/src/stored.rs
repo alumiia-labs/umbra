@@ -4,7 +4,8 @@
 //! revision reads the rows of an earlier one or rejects them.
 //!
 //! The writer overwrites its buffer at the drop, because the state holds
-//! chain keys and ratchet keys.
+//! chain keys and ratchet keys. It also overwrites each buffer that it
+//! leaves when it grows, thus no reallocation frees a copy of a key.
 
 use alloc::vec::Vec;
 
@@ -29,8 +30,22 @@ impl Writer {
         Self(Zeroizing::new(Vec::with_capacity(capacity)))
     }
 
+    /// Makes room for `additional` bytes. The bytes move to a new buffer,
+    /// and the old one wipes itself at its drop, as `Vec::reserve` does not.
+    fn reserve(&mut self, additional: usize) {
+        let needed = self.0.len().saturating_add(additional);
+        if needed <= self.0.capacity() {
+            return;
+        }
+        let capacity = needed.max(self.0.capacity().saturating_mul(2)).max(64);
+        let mut next = Zeroizing::new(Vec::with_capacity(capacity));
+        next.extend_from_slice(&self.0);
+        self.0 = next;
+    }
+
     /// One byte.
     pub fn u8(&mut self, value: u8) {
+        self.reserve(1);
         self.0.push(value);
     }
 
@@ -56,6 +71,7 @@ impl Writer {
 
     /// Bytes of a length that the reader knows.
     pub fn bytes(&mut self, value: &[u8]) {
+        self.reserve(value.len());
         self.0.extend_from_slice(value);
     }
 
@@ -183,6 +199,20 @@ mod tests {
         assert_eq!(reader.var().unwrap(), b"abc");
         assert_eq!(reader.option(|r| r.array::<4>()).unwrap(), Some([9; 4]));
         assert_eq!(reader.option(|r| r.array::<4>()).unwrap(), None);
+        reader.end().unwrap();
+    }
+
+    #[test]
+    fn a_writer_that_grows_keeps_each_byte() {
+        let mut writer = Writer::new();
+        for i in 0..1_000u32 {
+            writer.u32(i);
+        }
+        let bytes = writer.finish();
+        let mut reader = Reader::new(&bytes);
+        for i in 0..1_000u32 {
+            assert_eq!(reader.u32().unwrap(), i);
+        }
         reader.end().unwrap();
     }
 

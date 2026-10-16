@@ -20,7 +20,8 @@ use umbra_core::notify::{
     MAX_QUEUES_PER_HANDLE, WAKE_COALESCE_WINDOW,
 };
 use umbra_crypto::{hash::sha3_256, kem::KeyPair, ohttp, zeroize::Zeroizing};
-use umbra_transport::https::{self, Url};
+use umbra_queue::params::store_time;
+use umbra_transport::https;
 use umbra_wire::ndr::{NdrRequest, NdrResponse, TokenCarrier, HANDLE_LEN};
 
 use crate::{
@@ -33,8 +34,6 @@ use crate::{
 pub const GATEWAY_PATH: &str = "/gateway";
 /// The longest encapsulated request.
 const REQUEST_MAX: usize = 4_096;
-/// The wait for the provider.
-const PROVIDER_WAIT: Duration = Duration::from_secs(10);
 /// The time that one connection has from its accept to its answer, the
 /// wait for the provider included.
 const CONNECTION_TIME: Duration = Duration::from_secs(30);
@@ -55,10 +54,15 @@ const ACCEPT_RETRY: Duration = Duration::from_millis(50);
 /// device exists. This bound keeps the memory and the file of the NDR
 /// inside what a server holds. The NDR takes an `NREG` that moves a held
 /// handle at the bound. An `NREG` for one more handle takes the place of
-/// the oldest registration that took no push since the start of this run.
-/// The NDR refuses it when each registration took one. Before this, the
-/// NDR refused each new handle at the bound. A flood of first `NREG`
-/// requests then left each new device with no push for `NDR_REG_TTL`.
+/// the oldest registration that never took a push. The NDR refuses it when
+/// each registration took one. Before this, the NDR refused each new handle
+/// at the bound. A flood of first `NREG` requests then left each new device
+/// with no push for `NDR_REG_TTL`.
+///
+/// The store keeps the mark of a push. Before this, the mark was in memory
+/// alone, and a restart made each registration one that took no push. A
+/// flood after a restart then took the places of the devices that had
+/// taken pushes for weeks.
 pub const REGISTRATIONS_MAX: usize = 1 << 20;
 /// The new handles that the NDR registers in one minute, over all OHTTP
 /// relays. At this rate a flood needs more than 14 hours to reach
@@ -118,7 +122,7 @@ struct Guard {
     new_handles: u32,
     new_by_relay: BTreeMap<[u8; 16], u32>,
     /// The time of the registration of each handle, and whether it took a
-    /// push since the start of this run.
+    /// push.
     born: BTreeMap<[u8; HANDLE_LEN], (u64, bool)>,
     /// The handles that took no push, the oldest registration first.
     unpushed: BTreeSet<(u64, [u8; HANDLE_LEN])>,
@@ -241,6 +245,7 @@ impl Guard {
                     self.registered(*handle, held.registered_at);
                 }
                 NdrChange::Unregistered { handle } => self.unregistered(handle),
+                NdrChange::Pushed { handle } => self.pushed(handle),
             }
         }
     }
@@ -277,6 +282,11 @@ impl NdrStore for MemoryNdrStore {
                 NdrChange::Unregistered { handle } => {
                     self.0.remove(handle);
                 }
+                NdrChange::Pushed { handle } => {
+                    if let Some(held) = self.0.get_mut(handle) {
+                        held.pushed = true;
+                    }
+                }
             }
         }
         Ok(())
@@ -306,18 +316,30 @@ impl SqliteNdrStore {
                 nonce         BLOB NOT NULL,
                 ct_token      BLOB NOT NULL,
                 removal_hash  BLOB NOT NULL,
-                registered_at INTEGER NOT NULL DEFAULT 0
+                registered_at INTEGER NOT NULL DEFAULT 0,
+                pushed        INTEGER NOT NULL DEFAULT 0
             ) WITHOUT ROWID;",
         ))?;
+        let has_column = |name: &str| {
+            fault(connection.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('registrations') WHERE name = ?1",
+                [name],
+                |row| row.get::<_, i64>(0),
+            ))
+            .map(|count| count > 0)
+        };
         // A file of an earlier build holds no time of registration.
-        let has_time = fault(connection.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('registrations') WHERE name = 'registered_at'",
-            [],
-            |row| row.get::<_, i64>(0),
-        ))? > 0;
-        if !has_time {
+        if !has_column("registered_at")? {
             fault(connection.execute_batch(
                 "ALTER TABLE registrations ADD COLUMN registered_at INTEGER NOT NULL DEFAULT 0;",
+            ))?;
+        }
+        // Nor does it hold the mark of a push. Its rows lived through an
+        // earlier run, thus each counts as one that took a push, and a
+        // flood takes the place of none of them.
+        if !has_column("pushed")? {
+            fault(connection.execute_batch(
+                "ALTER TABLE registrations ADD COLUMN pushed INTEGER NOT NULL DEFAULT 1;",
             ))?;
         }
         Ok(SqliteNdrStore { connection })
@@ -327,7 +349,8 @@ impl SqliteNdrStore {
 impl NdrStore for SqliteNdrStore {
     fn load(&mut self) -> Result<Vec<([u8; HANDLE_LEN], Held)>, StoreFault> {
         let mut statement = fault(self.connection.prepare(
-            "SELECT handle, nonce, ct_token, removal_hash, registered_at FROM registrations",
+            "SELECT handle, nonce, ct_token, removal_hash, registered_at, pushed
+             FROM registrations",
         ))?;
         let rows = fault(statement.query_map([], |row| {
             Ok((
@@ -336,13 +359,14 @@ impl NdrStore for SqliteNdrStore {
                 row.get::<_, Vec<u8>>(2)?,
                 row.get::<_, Vec<u8>>(3)?,
                 row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
             ))
         }))?;
         // A row of an earlier build lives its full time from this start.
-        let now = unix_now();
+        let now = store_time(unix_now());
         let mut out = Vec::new();
         for row in rows {
-            let (handle, nonce, ct_token, removal_hash, at) = fault(row)?;
+            let (handle, nonce, ct_token, removal_hash, at, pushed) = fault(row)?;
             out.push((
                 handle.try_into().map_err(|_| StoreFault)?,
                 Held {
@@ -350,6 +374,7 @@ impl NdrStore for SqliteNdrStore {
                     ct_token,
                     removal_hash: removal_hash.try_into().map_err(|_| StoreFault)?,
                     registered_at: u64::try_from(at).ok().filter(|at| *at > 0).unwrap_or(now),
+                    pushed: pushed != 0,
                 },
             ));
         }
@@ -363,20 +388,28 @@ impl NdrStore for SqliteNdrStore {
         let transaction = fault(self.connection.transaction())?;
         for change in changes {
             match change {
+                // NET-301: the file holds the time of an `NREG` to the end
+                // of its grain, thus a seized file shows no time to the
+                // second. A registration then lives at most one grain more.
                 NdrChange::Registered { handle, held } => fault(transaction.execute(
                     "INSERT OR REPLACE INTO registrations
-                     (handle, nonce, ct_token, removal_hash, registered_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                     (handle, nonce, ct_token, removal_hash, registered_at, pushed)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                     params![
                         handle.as_slice(),
                         held.nonce.as_slice(),
                         held.ct_token,
                         held.removal_hash.as_slice(),
-                        i64::try_from(held.registered_at).unwrap_or(i64::MAX)
+                        i64::try_from(store_time(held.registered_at)).unwrap_or(i64::MAX),
+                        i64::from(held.pushed)
                     ],
                 ))?,
                 NdrChange::Unregistered { handle } => fault(transaction.execute(
                     "DELETE FROM registrations WHERE handle = ?1",
+                    params![handle.as_slice()],
+                ))?,
+                NdrChange::Pushed { handle } => fault(transaction.execute(
+                    "UPDATE registrations SET pushed = 1 WHERE handle = ?1",
                     params![handle.as_slice()],
                 ))?,
             };
@@ -434,11 +467,14 @@ impl State {
     }
 
     /// The state of a run that continues the registrations `held` of an
-    /// earlier one. None of them took a push in this run yet.
+    /// earlier one, each with the mark of a push that the store kept.
     fn restored(held: Vec<([u8; HANDLE_LEN], Held)>, store: Box<dyn NdrStore>) -> Self {
         let mut guard = Guard::default();
         for (handle, registration) in &held {
             guard.registered(*handle, registration.registered_at);
+            if registration.pushed {
+                guard.pushed(handle);
+            }
         }
         State {
             guard,
@@ -526,7 +562,12 @@ impl State {
             if !self.guard.admits_push(delivery.handle, now) {
                 return Some((NdrResponse::Refused, None));
             }
-            self.guard.pushed(&delivery.handle);
+            // The store keeps the first push of a registration, thus a
+            // restart keeps its place at the bound.
+            if self.ndr.took_push(&delivery.handle) {
+                let pushed = self.ndr.take_changes();
+                self.commit(&pushed, now)?;
+            }
         }
         // A push that goes to the provider and a request that changed a
         // registration proved a right, and their bytes pass no second time.
@@ -548,39 +589,16 @@ impl State {
     }
 }
 
-/// Posts the blob to the provider. FCM takes a data message of high
-/// priority, and a UnifiedPush endpoint takes the 69 bytes as the body; each
-/// carries the expiry (`NTF-065`). An NDR with no FCM account posts nothing
-/// for an FCM token.
-async fn deliver(delivery: &Delivery, tls: Arc<rustls::ClientConfig>, fcm: Option<&Fcm>) -> Sent {
+/// Posts the blob to FCM as a data message of high priority, with the
+/// expiry (`NTF-065`). The NDR posts to no other provider (`NTF-134`), and
+/// an NDR with no FCM account posts nothing.
+async fn deliver(delivery: &Delivery, fcm: Option<&Fcm>) -> Sent {
     let Ok(target) = core::str::from_utf8(&delivery.target) else {
         return Sent::Refused;
     };
-    if delivery.carrier == TokenCarrier::Fcm {
-        return match fcm {
-            Some(fcm) => fcm.send(target, &delivery.blob, delivery.ttl).await,
-            None => Sent::Refused,
-        };
-    }
-    let Some(url) = Url::parse(target) else {
-        return Sent::Refused;
-    };
-    let ttl = delivery.ttl.to_string();
-    let posted = https::post(
-        &url,
-        "application/octet-stream",
-        &[("TTL", &ttl), ("Urgency", "high")],
-        &delivery.blob,
-        tls,
-        4_096,
-        PROVIDER_WAIT,
-    )
-    .await;
-    match posted {
-        // An endpoint that is gone answers 404 or 410.
-        Ok((404 | 410, _)) => Sent::Gone,
-        Ok((200..=299, _)) => Sent::Taken,
-        Ok(_) | Err(_) => Sent::Refused,
+    match (delivery.carrier, fcm) {
+        (TokenCarrier::Fcm, Some(fcm)) => fcm.send(target, &delivery.blob, delivery.ttl).await,
+        _ => Sent::Refused,
     }
 }
 
@@ -589,7 +607,6 @@ async fn serve(
     relay: [u8; 16],
     gateway: Arc<Gateway>,
     state: Arc<Mutex<State>>,
-    provider_tls: Arc<rustls::ClientConfig>,
     fcm: Option<Arc<Fcm>>,
 ) {
     let mut inbound = Vec::new();
@@ -621,7 +638,7 @@ async fn serve(
         return;
     };
     if let Some(delivery) = delivery {
-        match deliver(&delivery, provider_tls, fcm.as_deref()).await {
+        match deliver(&delivery, fcm.as_deref()).await {
             // NTF-125: the provider named the target gone. A handle that
             // moved to another token since the push started keeps its
             // registration, and the relay may try again.
@@ -647,24 +664,19 @@ async fn serve(
     let _ = https::respond(&mut stream, 200, "message/ohttp-res", &sealed).await;
 }
 
-/// Runs the NDR until the listener fails. `provider_tls` is the
-/// configuration that the posts to the providers trust, and `fcm` the
-/// sender of the FCM account of the deployment, if it has one.
-/// `unified_push` makes it post to UnifiedPush endpoints too (`NTF-134`).
+/// Runs the NDR until the listener fails. `fcm` is the sender of the FCM
+/// account of the deployment, if it has one, and the NDR posts to no
+/// other provider (`NTF-134`).
 pub async fn run_ndr(
     listener: TcpListener,
     tls: TlsAcceptor,
     gateway: Gateway,
     mut store: Box<dyn NdrStore>,
-    provider_tls: Arc<rustls::ClientConfig>,
     fcm: Option<Fcm>,
-    unified_push: bool,
 ) -> Result<(), StoreFault> {
     let fcm = fcm.map(Arc::new);
     let held = store.load()?;
-    let mut state = State::restored(held, store);
-    state.ndr = core::mem::take(&mut state.ndr).serving_unified_push(unified_push);
-    let state = Arc::new(Mutex::new(state));
+    let state = Arc::new(Mutex::new(State::restored(held, store)));
     // NTF-138: a registration that no `NREG` renewed leaves, at the start
     // and each hour after it.
     let sweeping = state.clone();
@@ -700,14 +712,13 @@ pub async fn run_ndr(
         let tls = tls.clone();
         let gateway = gateway.clone();
         let state = state.clone();
-        let provider_tls = provider_tls.clone();
         let fcm = fcm.clone();
         tokio::spawn(async move {
             let _permit = permit;
             let _ = tokio::time::timeout(CONNECTION_TIME, async move {
                 let accepted = tokio::time::timeout(HANDSHAKE_TIME, tls.accept(tcp)).await;
                 if let Ok(Ok(stream)) = accepted {
-                    serve(stream, relay, gateway, state, provider_tls, fcm).await;
+                    serve(stream, relay, gateway, state, fcm).await;
                 }
             })
             .await;
@@ -750,16 +761,19 @@ mod tests {
             .unwrap();
         }
         // NTF-138: the row of the earlier build lives its full time from
-        // this start, and a new row keeps the time of its NREG.
+        // this start. It lived through a run, thus it counts as one that
+        // took a push.
         let mut store = SqliteNdrStore::open(path).unwrap();
         let loaded = store.load().unwrap();
         assert_eq!(loaded.len(), 1);
         assert!(loaded[0].1.registered_at + 60 >= unix_now());
-        let held = Held {
+        assert!(loaded[0].1.pushed);
+        let mut held = Held {
             nonce: [4; 24],
             ct_token: vec![5; 40],
             removal_hash: [6; 32],
             registered_at: 1_700_000_000,
+            pushed: false,
         };
         store
             .commit(&[NdrChange::Registered {
@@ -768,9 +782,20 @@ mod tests {
             }])
             .unwrap();
         drop(store);
+        // NET-301: a new row keeps the time of its NREG to the end of its
+        // grain, and no push marks it yet.
         let mut again = SqliteNdrStore::open(path).unwrap();
         let loaded = again.load().unwrap();
-        assert!(loaded.contains(&([8; HANDLE_LEN], held)));
+        held.registered_at = store_time(held.registered_at);
+        assert_ne!(held.registered_at, 1_700_000_000);
+        assert!(loaded.contains(&([8; HANDLE_LEN], held.clone())));
+        again
+            .commit(&[NdrChange::Pushed {
+                handle: [8; HANDLE_LEN],
+            }])
+            .unwrap();
+        held.pushed = true;
+        assert!(again.load().unwrap().contains(&([8; HANDLE_LEN], held)));
         drop(again);
         let _ = std::fs::remove_dir_all(&directory);
     }
@@ -947,15 +972,21 @@ mod tests {
         assert_eq!(taken(&mut state, 9, &first, NOW + 4), NdrResponse::Taken);
         assert_eq!(state.ndr.len(), 2);
 
-        // A run that restarts holds each registration as one that took no
-        // push, the oldest first.
+        // A run that restarts keeps the mark of each push, and the move of
+        // the first one kept its mark too. Before this, the restart made each
+        // registration one that took no push, and a new handle then took the
+        // place of a device that had taken pushes.
         let held = state.store.load().unwrap();
+        assert!(held.iter().all(|(_, registration)| registration.pushed));
         let mut again = State::restored(held, Box::new(MemoryNdrStore::default()));
         again.registrations_max = 2;
-        assert_eq!(taken(&mut again, 10, &fourth, NOW + 5), NdrResponse::Taken);
+        assert_eq!(
+            taken(&mut again, 10, &fourth, NOW + 5),
+            NdrResponse::Refused
+        );
         assert_eq!(
             taken(&mut again, 11, &third_push, NOW + 5),
-            NdrResponse::Gone
+            NdrResponse::Taken
         );
         assert_eq!(
             taken(&mut again, 12, &first_push, NOW + 5),

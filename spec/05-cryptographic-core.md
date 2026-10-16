@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 5: Cryptographic Core
 
 **Status:** Draft
-**Version:** 0.35.0
+**Version:** 0.36.0
 **Date:** 2026-10-16
 
 ---
@@ -498,7 +498,10 @@ empties, and no fallback handshake exists.
   the set of outstanding prekeys. A leak of *which* prekey a lookup touched
   breaks the construction.
 - **[CRY-089]** A responder MUST erase the private half of a one-time prekey
-  when it consumes that prekey. **[CRY-123]** If the user deletes an invitation
+  when it consumes that prekey. A responder consumes a prekey at the first
+  flight 1 under it that verifies. A flight 1 that fails consumes nothing,
+  thus a second holder of the bundle cannot end the invitation with a forged
+  flight (Part 6 `WIR-503`). **[CRY-123]** If the user deletes an invitation
   that no party consumed, the responder MUST erase the private half of its
   prekey. Part 4 rule `IDN-127` deletes an invitation at `INVITE_TTL`, and
   CRY-123 then applies.
@@ -1162,7 +1165,8 @@ bytes. The width 128 gives 91 bytes of `B0` text, the width 64 gives 155 bytes,
 and the width 32 gives 187 bytes. **[CRY-018]** A client MUST select the chunk width so that
 the record fits the smallest bucket that holds the message. **[CRY-019]** If no permitted
 width gives a fit, the client MUST send the record with `pq_frame_len = 0`. **[CRY-020]** The
-client MUST then send the chunk on a later record.
+client MUST then send the chunk on a later record. Such a record shows no
+epoch number, and rule `CRY-148` gives how the peer takes it at a DH step.
 
 **[CRY-021]** **UMBRA MUST NOT use the retransmit-until-acknowledged strategy of Apple PQ3.**
 A conversation is unbalanced when a phone or a linked desktop is offline for
@@ -1326,8 +1330,14 @@ field that names a target, an epoch, or a mix.
    before it derives the sending chain of its first DH ratchet step whose
    chain carries an epoch above `e`. **[CRY-148]** The peer MUST apply the
    same mix immediately before it derives the receiving chain of the step that
-   the same chain starts, which it recognizes by the epoch number in the
-   frame of any record of that chain. **[CRY-149]** A party MUST retain
+   the same chain starts. It recognizes that step by the epoch number in the
+   frame of the record that starts the step at the peer. A record of the
+   chain can carry no frame under `CRY-019`, and the first record of the
+   chain can arrive late. When the record that starts the step carries no
+   frame and a secret waits for the mix, the peer MUST derive the receiving
+   chain without the mix and then with it. It MUST keep the derivation under
+   which the body of the record opens, and it MUST keep neither when no body
+   opens. **[CRY-149]** A party MUST retain
    `ss_e` from the moment it computes it, by encapsulation or by
    decapsulation, until the mix consumes it.
 
@@ -1443,7 +1453,9 @@ randomness(context) = HMAC-SHA3-256( K_rng_harden,
 `call` is 16 bytes that no other draw under `K_rng_harden` carries. Those
 bytes are the number of the draw in the process as a `u64`, then the wall time in
 nanoseconds as a `u64`, each big-endian. `block` counts the 32-byte blocks of
-one draw from zero. A platform generator that gives the same 32 bytes twice
+one draw from zero. One draw can fill more than one buffer, and `block` runs
+across them and restarts at no buffer. Thus two buffers of one draw never
+take the same input. A platform generator that gives the same 32 bytes twice
 thus gives two different values (RFC 8937 §4, `tag2`). No value of this
 function goes on the wire as it is, thus the layout is local to an
 implementation.
@@ -1489,8 +1501,9 @@ of agility, and a deployment pays it one time.
 
 ## 5.11 Domain separation
 
-**[CRY-027]** Each KDF invocation and each signature MUST carry a label prefix. The label
-names the object type and its lifetime:
+**[CRY-027]** Each KDF invocation and each signature MUST carry a label prefix. The
+one exception is the `msg_ref` of Part 6 rule `WIR-067`, and the note after
+the list gives its cause. The label names the object type and its lifetime:
 
 ```
 "umbra/v1/rng-harden"
@@ -1617,6 +1630,18 @@ names the object type and its lifetime:
 > and a lost answer can be sent again (Part 8 `NTF-124`). `renewal-guard`
 > is the prefix of the commitment of Part 3 rule `NET-354`. Thus no other
 > hash of this specification over a 32-byte value opens a renewal guard.
+>
+> *The exception of `msg_ref`.* Part 6 rule `WIR-067` derives
+> `msg_ref = SHA3-256(K_set || msg_id)[0..16]` with no label. Each device of
+> a set stores its references under that value, and the devices of one set
+> compare them. A label now would change each stored reference, and a device
+> of an earlier release would not find the references of a later one. The
+> lack of a label gives no collision with a labeled derivation. The input of
+> each labeled hash starts with the bytes `umbra/v1/`, and the input of
+> `msg_ref` starts with `K_set`, 32 pseudorandom bytes that the labeled
+> derivation `"umbra/v1/device-set"` of Part 4 §4.2 gives. No other
+> derivation hashes `K_set` with no label. A later version with a new reference format
+> gives that format a label of this list.
 >
 > *The construction under six labels.* No other part gives these, thus
 > this note gives each one in full.

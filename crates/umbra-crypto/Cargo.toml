@@ -38,7 +38,7 @@ crypto-bigint = { version = "0.7.5", default-features = false, features = ["zero
 crypto-primes = { version = "0.7.2", default-features = false, optional = true }
 # Register R2 AUX-8 of Part 14 §14.2.2: Equi-X with the JIT feature off. The
 # crate needs std, which each v1 platform has, thus a feature carries it.
-equix = { version = "0.2.5", default-features = false, optional = true }
+equix = { version = "0.8.0", default-features = false, optional = true }
 
 [features]
 default = ["pow"]

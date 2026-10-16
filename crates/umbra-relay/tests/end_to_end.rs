@@ -359,7 +359,7 @@ fn ratchets() -> (Ratchet, Ratchet) {
         rk: Secret::new([1; 32]),
         hk_i2r: Secret::new([2; 32]),
         hk_r2i: Secret::new([3; 32]),
-        transcript: [0; 32],
+        transcript: umbra_crypto::zeroize::Zeroizing::new([0; 32]),
         dh_initial: dh,
     };
     (
@@ -798,6 +798,44 @@ fn a_flood_of_builds_on_one_link_gets_the_budget_of_that_link_and_no_more() {
         assert!(middle.circuits_held() <= 4);
     }
     assert_eq!(middle.circuits_held(), 4);
+}
+
+#[test]
+fn a_fault_of_a_client_ends_its_session_and_parks_none() {
+    let (mut ingress, relay) = lone_relay(1);
+    // WIR-542: a connection that closes parks a session that holds a
+    // circuit.
+    let mut lost = Direct::open(&mut ingress, 3, 100);
+    assert!(lost.first_hop(&mut ingress, &relay, 3, 100).is_some());
+    ingress.link_closed(3, 101);
+    assert_eq!(ingress.sessions_parked(), 1);
+
+    // A capsule with a byte after its value is a fault of the peer: the
+    // session ends with each circuit, and it parks not.
+    let mut client = Direct::open(&mut ingress, 1, 100);
+    assert!(client.first_hop(&mut ingress, &relay, 1, 100).is_some());
+    let mut buffer = vec![0u8; 40_000];
+    let used = client.link.send(&[0u8; 512], &mut buffer).unwrap();
+    let mut trailing = buffer[..used].to_vec();
+    trailing.push(0);
+    let outputs = ingress.on_capsule(1, &trailing, 101, &mut Rng(9));
+    assert!(closes(&outputs, 1));
+    // The runtime tells the node of the close after it.
+    ingress.link_closed(1, 102);
+    assert_eq!(ingress.sessions_parked(), 1);
+
+    // WIR-538: a capsule between two relays on a client link is a fault
+    // too.
+    let mut other = Direct::open(&mut ingress, 2, 100);
+    assert!(other.first_hop(&mut ingress, &relay, 2, 100).is_some());
+    let value = vec![0u8; capsule::RECEIPT_LEN];
+    let mut receipt = vec![0u8; capsule::HEADER_LEN + value.len()];
+    let used = capsule::encode(capsule::CapsuleType::Receipt, &value, &mut receipt).unwrap();
+    let outputs = ingress.on_capsule(2, &receipt[..used], 101, &mut Rng(9));
+    assert!(closes(&outputs, 2));
+    ingress.link_closed(2, 102);
+    assert_eq!(ingress.sessions_parked(), 1);
+    assert_eq!(ingress.circuits_held(), 1);
 }
 
 #[test]

@@ -28,8 +28,8 @@
 # epoch is 60 seconds here, thus a new handle shows within a minute.
 #
 # Authority 0 holds a report queue at a queue relay (Part 10 §10.4.2), as a
-# client holds one. Once the relay made it, the manifest names it, and each
-# link-fault report of a client shows as one line of umbra-authority.
+# client holds one. Once the relay made it, the manifest names it, and the
+# totals of the link-fault reports of clients show in the log of umbra-authority.
 #
 # The measurer of Part 10 §10.3 runs one class test of each relay after the
 # start, with a certificate of the test authorities, a slot of 3 seconds,
@@ -56,6 +56,11 @@ fi
 
 # The configuration of each relay, with the address of the host.
 host="${UMBRA_DEVNET_HOST:-10.0.2.2}"
+# The address goes into a sed expression, thus it takes no other character.
+if ! [[ "$host" =~ ^[A-Za-z0-9.-]+$ ]]; then
+    echo "UMBRA_DEVNET_HOST is an IPv4 address or a host name: $host" >&2
+    exit 1
+fi
 for relay in 1 2 3 4 5 6 7; do
     sed "s/10\.0\.2\.2/$host/g" "tests/fixtures/devnet/relay$relay.conf" \
         > "target/devnet/conf/relay$relay.conf"
@@ -94,16 +99,19 @@ if [ -f target/devnet/fcm-service-account.json ]; then
     echo "the NDR sends to FCM"
 fi
 
+# Debian has python3 alone, and Windows often has python alone.
+if python3 -c '' 2>/dev/null; then python=python3; else python=python; fi
+
 # The debug build pins the gateway key of the NDR (`NTF-127`), and the seed
 # of ndr.conf gives the same one at each start.
-"$bin"/umbra-ndr key-config "$ndr_conf"     | python -c "import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read().strip()))"     | cmp -s - tests/fixtures/devnet/ndr-key-config.bin || {
+"$bin"/umbra-ndr key-config "$ndr_conf"     | "$python" -c "import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read().strip()))"     | cmp -s - tests/fixtures/devnet/ndr-key-config.bin || {
     echo "the NDR key differs from tests/fixtures/devnet/ndr-key-config.bin"
     exit 1
 }
 
 # The debug build pins the directory (`DIS-163`), and the seeds of
 # directory.conf give the same keys at each start.
-"$bin"/umbra-directory pins tests/fixtures/devnet/directory.conf     | python -c "import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read().strip()))"     | cmp -s - tests/fixtures/devnet/directory-pins.bin || {
+"$bin"/umbra-directory pins tests/fixtures/devnet/directory.conf     | "$python" -c "import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read().strip()))"     | cmp -s - tests/fixtures/devnet/directory-pins.bin || {
     echo "the directory keys differ from tests/fixtures/devnet/directory-pins.bin"
     exit 1
 }

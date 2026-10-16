@@ -1036,6 +1036,7 @@ fun rememberSave(): (Line) -> Unit {
     val start = { line: Line ->
         line.info.file?.let { file ->
             target = line
+            Core.awaitsResult()
             launcher.launch(Files.suggestedName(file) to Files.typeOf(file))
         }
     }

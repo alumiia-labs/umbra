@@ -5,6 +5,7 @@
   ansible.builtin.apt:
     name: nginx
     state: present
+    lock_timeout: "{{ umbra_apt_lock_timeout }}"
 
 - name: The user of the signer is there
   ansible.builtin.user:
@@ -27,6 +28,13 @@
     - { path: /var/www/umbra/.well-known/umbra, owner: umbra-signer, mode: "0755" }
     # The listed class of each relay, which the signer writes (REL-001).
     - { path: /var/lib/umbra-signer/state, owner: umbra-signer, mode: "0755" }
+
+- name: The binary of the signer that runs now stays as umbra-signer.prev
+  ansible.builtin.include_role:
+    name: common
+    tasks_from: binary
+  vars:
+    umbra_binary: umbra-signer
 
 - name: The binary of the signer is there
   ansible.builtin.copy:

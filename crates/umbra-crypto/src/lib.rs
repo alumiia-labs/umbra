@@ -90,6 +90,10 @@ pub enum Error {
     Auth,
     /// A queue end-to-end record does not open.
     Queue,
+    /// An AEAD object of another layer does not open: an object at rest, a
+    /// sealed blob, an HPKE message, or an OHTTP message. One value covers
+    /// each cause, thus no caller learns why.
+    Aead,
 }
 
 impl core::fmt::Display for Error {
@@ -105,6 +109,7 @@ impl core::fmt::Display for Error {
             Error::Group => "group record rejected",
             Error::Auth => "authenticator rejected",
             Error::Queue => "queue record rejected",
+            Error::Aead => "sealed object rejected",
         };
         f.write_str(s)
     }

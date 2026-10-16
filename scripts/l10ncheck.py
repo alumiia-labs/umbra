@@ -16,8 +16,9 @@ text. `scripts/uistrings.py` holds each string of a rule to a stricter
 rule: a shipped language holds each one (Part 14 `IMP-086`).
 
 The site: each `site/locales/<code>.json` against `en.json`. The check fails
-on a key that `en.json` does not hold, on a value that is not text, and on
-markup in a value, because the page writes each value as plain text.
+on a file name that is no language code, as `de` or `pt-BR`, on a key that
+`en.json` does not hold, on a value that is not text, and on markup in a
+value, because the page writes each value as plain text.
 
 Usage: python scripts/l10ncheck.py
 """
@@ -37,6 +38,9 @@ PLACEHOLDER = re.compile(r"%(?:\d+\$)?[-#+ 0,(]*\d*(?:\.\d+)?[a-zA-Z%]")
 # A language folder: values-de, values-pt-rBR, values-b+sr+Latn. A folder
 # of another qualifier, as values-v31 or values-night, is no language.
 LANGUAGE = re.compile(r"^values-([a-z]{2,3}(-r[A-Z]{2})?|b\+[A-Za-z0-9+]+)$")
+# A language of the site, as de or pt-BR. scripts/sitebuild.py holds the
+# same rule.
+SITE_CODE = re.compile(r"[a-z]{2,3}(-[A-Z]{2})?")
 
 
 class Entry:
@@ -131,6 +135,8 @@ def check_site(problems: list[str]) -> list[str]:
         if path.stem == "en":
             continue
         where = f"site {path.name}"
+        if not SITE_CODE.fullmatch(path.stem):
+            problems.append(f"{where}: the name is no language code, as de or pt-BR")
         try:
             text = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as fault:

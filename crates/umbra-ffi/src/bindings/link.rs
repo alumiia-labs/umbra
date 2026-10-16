@@ -486,8 +486,8 @@ impl Inner {
         if !client.is_unlocked() {
             return;
         }
-        for contact in client.rotation_owed(now).unwrap_or_default() {
-            let _ = running.rotate_swept(umbra_core::session::node::ContactId(contact));
+        for (contact, guard) in client.rotation_owed(now).unwrap_or_default() {
+            let _ = running.rotate_swept(umbra_core::session::node::ContactId(contact), guard);
         }
     }
 
@@ -510,7 +510,7 @@ impl Inner {
 
     /// Ends the run that is up, as a disconnect does, and erases the
     /// parked session. No node of the old ownership commits after this.
-    fn end_run_for_ownership(&mut self) {
+    pub(super) fn end_run_for_ownership(&mut self) {
         self.resume.clear();
         self.run = self.run.wrapping_add(1);
         self.bridge = None;
@@ -1283,9 +1283,9 @@ impl Handle {
             runtime.shutdown_background();
         }
         locked(&self.run_done).take();
-        held.give(sink.as_ref());
+        let given = held.give(sink.as_ref());
         self.changed.notify_all();
-        Ok(())
+        given
     }
 
     /// Whether another device of the set removed this one (`DEV-181`).

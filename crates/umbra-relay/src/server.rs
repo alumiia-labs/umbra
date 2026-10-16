@@ -4,7 +4,8 @@
 //! clock, the random source, and the sockets, and no protocol rule.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    cmp::Reverse,
+    collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque},
     net::IpAddr,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -255,6 +256,9 @@ pub struct Placed {
     pub carriers: Vec<[u8; 32]>,
     /// The key set and the revoked list of the root (`REL-066`).
     pub measurer_trust: umbra_core::directory::measure::MeasurerTrust,
+    /// The layer and the static key of each relay of a later layer, for
+    /// the loop chains of this relay (`NET-363`).
+    pub loop_relays: BTreeMap<[u8; 32], (u8, [u8; 32])>,
 }
 
 impl Placed {
@@ -272,6 +276,7 @@ impl Placed {
             identities: placement.identities.clone(),
             carriers: placement.carriers.keys().copied().collect(),
             measurer_trust: placement.measurer_trust.clone(),
+            loop_relays: placement.chain_keys.clone(),
         }
     }
 }
@@ -373,8 +378,21 @@ pub async fn run_node(
     // NET-349: the node reads the backlog of a link before it frames a cell.
     let gauges = Gauges::default();
     node.set_backlog(Box::new(gauges.clone()));
+    // NET-320, NET-332: a step of the wall clock ends no circuit early and
+    // holds no build back.
+    node.use_monotonic_clock();
     let mut adopted = Adopted::default();
+    // NET-035, NET-036: the next tick of each paced circuit, and the same
+    // ticks in their order. A tick reads the circuits that are due alone.
+    // An entry of the heap whose time the map no longer holds is stale.
     let mut next_tick: BTreeMap<CircuitKey, tokio::time::Instant> = BTreeMap::new();
+    let mut ticks: BinaryHeap<Reverse<(tokio::time::Instant, CircuitKey)>> = BinaryHeap::new();
+    let draw_wait = move |rng: &mut OsRng| {
+        let mut draw = [0u8; 4];
+        let _ = rng.try_fill_bytes(&mut draw);
+        let wait = exponential(pacing_mean_ms, u32::from_le_bytes(draw));
+        Duration::from_millis(wait.max(1))
+    };
     let mut clock =
         tokio::time::interval(Duration::from_millis((pacing_mean_ms / 20).clamp(1, 50)));
     // The periods run on a clock that never steps back, thus a change of the
@@ -417,6 +435,7 @@ pub async fn run_node(
                     node.set_relay_identities(placed.identities);
                     node.set_carriers(placed.carriers);
                     node.set_measurer_trust(placed.measurer_trust);
+                    node.set_loop_relays(&placed.loop_relays);
                     // REL-174: the link of a relay that left the layer
                     // before closes.
                     node.close_strangers(unix_now())
@@ -483,20 +502,36 @@ pub async fn run_node(
                 let instant = tokio::time::Instant::now();
                 let mut outputs = Vec::new();
                 // NET-035, NET-036: a Poisson clock for each circuit, which
-                // no arrival moves.
-                // The endpoints come in their order, thus a search finds
-                // each one in log time.
-                let paced: Vec<CircuitKey> = node.paced_circuits().copied().collect();
-                next_tick.retain(|circuit, _| paced.binary_search(circuit).is_ok());
-                for circuit in paced {
-                    let due = next_tick.entry(circuit).or_insert(instant);
-                    if *due <= instant {
-                        outputs.extend(node.pacing_tick(&circuit, now, &mut rng));
-                        let mut draw = [0u8; 4];
-                        let _ = rng.try_fill_bytes(&mut draw);
-                        let wait = exponential(pacing_mean_ms, u32::from_le_bytes(draw));
-                        *due = instant + Duration::from_millis(wait.max(1));
+                // no arrival moves. The first tick of a new or woken clock
+                // is a draw too: a tick at once would follow the cell that
+                // started the clock.
+                for circuit in node.take_paced_new() {
+                    if let std::collections::btree_map::Entry::Vacant(slot) =
+                        next_tick.entry(circuit)
+                    {
+                        let at = instant + draw_wait(&mut rng);
+                        slot.insert(at);
+                        ticks.push(Reverse((at, circuit)));
                     }
+                }
+                while let Some(Reverse((at, circuit))) = ticks.peek().copied() {
+                    if at > instant {
+                        break;
+                    }
+                    ticks.pop();
+                    if next_tick.get(&circuit) != Some(&at) {
+                        continue;
+                    }
+                    // A circuit that ended or paused leaves the clock, and
+                    // a wake puts it back.
+                    if !node.is_paced(&circuit) {
+                        next_tick.remove(&circuit);
+                        continue;
+                    }
+                    outputs.extend(node.pacing_tick(&circuit, now, &mut rng));
+                    let next = instant + draw_wait(&mut rng);
+                    next_tick.insert(circuit, next);
+                    ticks.push(Reverse((next, circuit)));
                 }
                 // NET-037: the next step of each drain.
                 outputs.extend(node.drain_tick(now, &mut rng));
@@ -520,9 +555,23 @@ pub async fn run_node(
                 outputs
             }
         };
-        if store.commit(&node.take_changes()).is_err() {
-            eprintln!("the store took no commit, and the relay stops");
-            return;
+        // NET-298: the changes of a call commit before an output of it
+        // leaves. A commit writes to the disk, thus it runs on a thread for
+        // blocking work, and the runtime threads serve the sockets meanwhile.
+        let changes = node.take_changes();
+        if !changes.is_empty() {
+            let committed = tokio::task::spawn_blocking(move || {
+                let result = store.commit(&changes);
+                (store, result)
+            })
+            .await;
+            match committed {
+                Ok((back, Ok(()))) => store = back,
+                _ => {
+                    eprintln!("the store took no commit, and the relay stops");
+                    return;
+                }
+            }
         }
         if let Some(bundle) = node.take_challenge_bundle(unix_now()) {
             let _ = requests.send(Request::Challenges(bundle));
@@ -580,6 +629,11 @@ const PUSH_TIMEOUT: Duration = Duration::from_secs(20);
 /// The pushes that wait or run at once. A push above it goes nowhere, as a
 /// copy that did not arrive does.
 const PUSHES_HELD: usize = 1_024;
+
+/// The pushes to the NDR that run at once. Each one is a task and an
+/// OHTTP request. Before this bound, a burst of arrivals for many queues
+/// started one task for each, with no cap.
+const NDR_PUSHES_HELD: usize = 1_024;
 
 /// The deposits of digests and the challenges that wait for one relay.
 /// They have places of their own, apart from the chunk copies. A burst of
@@ -802,6 +856,52 @@ const LINK_BACKLOG: usize = 32 << 20;
 const RELAY_LINK_BACKLOG: usize = 64 << 20;
 /// The time that one write to a link may take before the link closes.
 const LINK_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+/// `LINK_DRAIN_MARK`: a backlog above this many bytes must drain at
+/// `LINK_DRAIN_RATE` (`NET-364`).
+const LINK_DRAIN_MARK: usize = 1 << 20;
+/// `LINK_DRAIN_WINDOW`: the time over which the relay measures the drain of
+/// a backlog above its mark.
+const LINK_DRAIN_WINDOW: Duration = Duration::from_secs(60);
+/// The bytes that a link above its mark writes at least in one window:
+/// `LINK_DRAIN_RATE` of 16 KiB/s over `LINK_DRAIN_WINDOW`.
+const LINK_DRAIN_MIN: usize = (16 << 10) * 60;
+
+/// The drain of the backlog of one link (`NET-364`). A peer that reads
+/// slower than `LINK_DRAIN_RATE` while its backlog stays above
+/// `LINK_DRAIN_MARK` for a whole window ends its link. Before this, a peer
+/// that read about 1 KiB/s finished each frame inside `LINK_WRITE_TIMEOUT`
+/// and held the whole backlog bound of its link for as long as it liked.
+#[derive(Default)]
+struct DrainWatch {
+    /// The start of the window and the bytes written at that start, while
+    /// the backlog stays above the mark.
+    above: Option<(tokio::time::Instant, usize)>,
+}
+
+impl DrainWatch {
+    /// Takes the backlog `queued` and the bytes `written` so far at `now`.
+    /// The result is true for a link that drains too slowly, and it ends.
+    fn too_slow(&mut self, now: tokio::time::Instant, queued: usize, written: usize) -> bool {
+        if queued <= LINK_DRAIN_MARK {
+            self.above = None;
+            return false;
+        }
+        match self.above {
+            None => self.above = Some((now, written)),
+            Some((since, at_start)) if now.duration_since(since) >= LINK_DRAIN_WINDOW => {
+                if written.wrapping_sub(at_start) < LINK_DRAIN_MIN {
+                    return true;
+                }
+                self.above = Some((now, written));
+            }
+            Some(_) => {}
+        }
+        false
+    }
+}
+
+/// The period of the check of [`DrainWatch`].
+const DRAIN_CHECK: Duration = Duration::from_secs(1);
 
 /// The time that a POST has for its answer after the deadline of its
 /// request (`NET-335`).
@@ -1592,6 +1692,7 @@ pub async fn serve_connection_until<S>(
         return;
     }
     let mut capsule = vec![0u8; MAX_CAPSULE];
+    let written = AtomicUsize::new(0);
     // The two directions run side by side. A peer writes its capsules
     // before it reads, as a client run does. A write of this relay that
     // stopped each read would then wait for that peer while the peer waits
@@ -1639,12 +1740,29 @@ pub async fn serve_connection_until<S>(
                 return;
             }
             queued.fetch_sub(bytes.len(), Ordering::Relaxed);
+            written.fetch_add(bytes.len(), Ordering::Relaxed);
+        }
+    };
+    // NET-364: a link whose backlog drains too slowly ends.
+    let watch = async {
+        let mut drain = DrainWatch::default();
+        let mut check = tokio::time::interval(DRAIN_CHECK);
+        loop {
+            check.tick().await;
+            let (held, sent) = (
+                queued.load(Ordering::Relaxed),
+                written.load(Ordering::Relaxed),
+            );
+            if drain.too_slow(tokio::time::Instant::now(), held, sent) {
+                return;
+            }
         }
     };
     // The end of one direction ends the connection.
     tokio::select! {
         () = reads => {}
         () = writes => {}
+        () = watch => {}
     }
     let _ = node.send(Input::Closed { link }).await;
 }
@@ -1869,6 +1987,10 @@ pub async fn dial_next(
     if node.send(opened).await.is_err() {
         return;
     }
+    // NET-364: the next hop drains the backlog of its link too.
+    let mut drain = DrainWatch::default();
+    let mut check = tokio::time::interval(DRAIN_CHECK);
+    let mut written = 0usize;
     loop {
         tokio::select! {
             received = connection.recv() => match received {
@@ -1886,9 +2008,16 @@ pub async fn dial_next(
                         break;
                     }
                     queued.fetch_sub(bytes.len(), Ordering::Relaxed);
+                    written = written.wrapping_add(bytes.len());
                 }
                 None => break,
             },
+            _ = check.tick() => {
+                let held = queued.load(Ordering::Relaxed);
+                if drain.too_slow(tokio::time::Instant::now(), held, written) {
+                    break;
+                }
+            }
         }
     }
     let _ = node.send(Input::Closed { link }).await;
@@ -1949,6 +2078,7 @@ pub async fn run_relay(
         let mut link: LinkId = 1;
         let pushes_held = Arc::new(tokio::sync::Semaphore::new(PUSHES_HELD));
         let pushes_running = Arc::new(tokio::sync::Semaphore::new(PUSHES_RUNNING));
+        let ndr_pushes_held = Arc::new(tokio::sync::Semaphore::new(NDR_PUSHES_HELD));
         let mut lanes: BTreeMap<[u8; 32], Arc<Lane>> = BTreeMap::new();
         // Each relay of the next layer gets a link at the start, thus the
         // first circuit of a client does not wait for a dial.
@@ -2032,8 +2162,14 @@ pub async fn run_relay(
                     let Some((route, tls)) = carried_ndr.clone() else {
                         continue;
                     };
+                    // A push above the bound goes nowhere, and the re-push
+                    // of NTF-066 sends it again.
+                    let Ok(held) = ndr_pushes_held.clone().try_acquire_owned() else {
+                        continue;
+                    };
                     let inputs = dial_inputs.clone();
                     tokio::spawn(async move {
+                        let _held = held;
                         let answer = ndr::call(&route, &push.request, tls, &mut OsRng).await;
                         // NTF-125: a gone token stops the pushes of its
                         // handle. Any other failure waits for the re-push.
@@ -2128,6 +2264,33 @@ mod tests {
         assert!(empty.queue(vec![9]));
         assert_eq!(empty.take(), Some(vec![9]));
         assert_eq!(empty.take(), None);
+    }
+
+    #[test]
+    fn a_link_whose_backlog_drains_too_slowly_ends_after_one_window() {
+        let start = tokio::time::Instant::now();
+        let at = |seconds: u64| start + Duration::from_secs(seconds);
+        let full = LINK_DRAIN_MARK + 1;
+        // NET-364: a backlog below its mark ends nothing.
+        let mut watch = DrainWatch::default();
+        assert!(!watch.too_slow(at(0), LINK_DRAIN_MARK, 0));
+        assert!(!watch.too_slow(at(600), LINK_DRAIN_MARK, 0));
+        // A peer that reads about 1 KiB/s above the mark ends at the end
+        // of its window, and not before.
+        assert!(!watch.too_slow(at(600), full, 0));
+        assert!(!watch.too_slow(at(659), full, 59 << 10));
+        assert!(watch.too_slow(at(660), full, 60 << 10));
+        // A peer that reads `LINK_DRAIN_RATE` keeps its link window after
+        // window.
+        let mut watch = DrainWatch::default();
+        assert!(!watch.too_slow(at(0), full, 0));
+        assert!(!watch.too_slow(at(60), full, LINK_DRAIN_MIN));
+        assert!(!watch.too_slow(at(120), full, 2 * LINK_DRAIN_MIN));
+        // A backlog that fell below the mark starts a new window.
+        assert!(!watch.too_slow(at(130), LINK_DRAIN_MARK, 2 * LINK_DRAIN_MIN));
+        assert!(!watch.too_slow(at(131), full, 2 * LINK_DRAIN_MIN));
+        assert!(!watch.too_slow(at(190), full, 2 * LINK_DRAIN_MIN));
+        assert!(watch.too_slow(at(191), full, 2 * LINK_DRAIN_MIN));
     }
 
     #[test]

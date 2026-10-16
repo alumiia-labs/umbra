@@ -2,7 +2,8 @@
 # authority 0, the fault rate of each relay, the isolation query, and the
 # verdicts that the signer reads. It runs on the server of the signer, as
 # the user of the signer, because it reads the seed files of that user. Its
-# unit hides each seed that it does not need.
+# unit shows it the two seeds that it needs and hides each other file of
+# the signer.
 - name: The directories of the authority tool are there
   ansible.builtin.file:
     path: "{{ item.path }}"
@@ -16,6 +17,13 @@
     # The tool makes the two secrets of the report queue here at its first
     # start, each readable by its owner alone.
     - { path: /var/lib/umbra-authority/secrets, owner: umbra-signer, mode: "0700" }
+
+- name: The binary of the authority tool that runs now stays as umbra-authority.prev
+  ansible.builtin.include_role:
+    name: common
+    tasks_from: binary
+  vars:
+    umbra_binary: umbra-authority
 
 - name: The binary of the authority tool is there
   ansible.builtin.copy:

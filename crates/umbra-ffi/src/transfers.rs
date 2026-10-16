@@ -428,10 +428,12 @@ pub async fn run_transfers(
                 for tag in failed {
                     crate::devlog::line(format!("transfers: tag {tag} failed at a tick"));
                     active.remove(&tag);
+                    classes.remove(&tag);
                     let _ = updates.send(TransferUpdate::Failed { tag });
                 }
                 for (tag, found) in read {
                     active.remove(&tag);
+                    classes.remove(&tag);
                     let _ = updates.send(TransferUpdate::HandleRead {
                         tag,
                         chunks: found.chunks,
@@ -576,6 +578,7 @@ pub async fn run_transfers(
                         _ => {
                             active.remove(&tag);
                             progress.remove(&tag);
+                            classes.remove(&tag);
                             true
                         }
                     };
@@ -637,6 +640,7 @@ pub async fn run_transfers(
                             active.insert(tag, Active::Up(Box::new(upload)));
                         }
                         Err(_) => {
+                            classes.remove(&tag);
                             let _ = updates.send(TransferUpdate::Failed { tag });
                         }
                     }
@@ -649,6 +653,12 @@ pub async fn run_transfers(
                     cred,
                     relays,
                 } => {
+                    // ATT-161: a chunk that no relay holds is erased. With
+                    // no update, the store would send it again in each run.
+                    if relays.is_empty() {
+                        let _ = updates.send(TransferUpdate::Erased { chunk_id });
+                        continue;
+                    }
                     // ATT-167: each start takes a mode of its own, not the mode
                     // of the transfer before it.
                     node.set_chunk_class(umbra_core::session::node::DelayClass::default());
@@ -656,7 +666,7 @@ pub async fn run_transfers(
                     // the answers itself. A command that did not leave
                     // counts as an answer that is not done.
                     let mut left = 0usize;
-                    let mut each = !relays.is_empty();
+                    let mut each = true;
                     for relay in relays {
                         let job = ChunkJob::Erase {
                             cred: StaticSecret::from(*cred.expose()),
@@ -783,6 +793,7 @@ pub async fn run_transfers(
                             active.insert(tag, Active::Down(Box::new(download)));
                         }
                         Err(_) => {
+                            classes.remove(&tag);
                             let _ = updates.send(TransferUpdate::Failed { tag });
                         }
                     }

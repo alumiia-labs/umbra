@@ -39,12 +39,14 @@ UMask=0077
 LimitCORE=0
 CapabilityBoundingSet=
 ReadWritePaths=/var/lib/umbra-authority
-ReadOnlyPaths=/var/lib/umbra-signer
-# The tool signs as authority 0 and as the aggregators 0 and 1. This
-# service reaches the network, thus it sees those two seeds alone. Two keys
-# sign no root, and the signer issues a MeasurerCert under two other keys.
-{% for index in range(2, 7) %}
-InaccessiblePaths=-{{ umbra_signer_keys }}/authority-{{ index }}.seed
+# The tool signs as authority 0 and as the aggregators 0 and 1
+# (authority.conf). This service reaches the network, thus it sees those two
+# seeds alone. Two keys sign no root, and the signer issues a MeasurerCert
+# under two other keys. An empty file system replaces the whole directory of
+# the signer, thus a second key directory of a rotation stays hidden too.
+TemporaryFileSystem=/var/lib/umbra-signer:ro
+{% for index in [0, 1] %}
+BindReadOnlyPaths={{ umbra_signer_keys }}/authority-{{ index }}.seed
 {% endfor %}
 LimitNOFILE=4096
 # One service never takes the memory of the others on this server.

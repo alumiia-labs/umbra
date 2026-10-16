@@ -6,8 +6,9 @@
   IDN-122  the host serves `/.well-known/assetlinks.json`, which names the
            client package.
 
-The check reads each HTML document of the site, because a script on any of
-them runs on the invitation host. It also holds the mail logo to the file
+The check reads each HTML document and each SVG image of the site, because
+a script on any of them runs on the invitation host. It holds the headers
+of `_headers` to the rules of `HEADERS` below, and the mail logo to the file
 that `scripts/logo.py` writes.
 
 Usage: python scripts/sitecheck.py [--release] [--live <origin>]
@@ -16,8 +17,9 @@ Usage: python scripts/sitecheck.py [--release] [--live <origin>]
               certificate is the placeholder.
   --live      also fetch the pages from the origin given, as
               https://umbrachat.app, with the request of a browser. Hold
-              what the host serves to the same rules. A host can write into
-              a page while it serves the page, which no file here shows.
+              what the host serves, and the headers of each answer, to the
+              same rules. A host can write into a page or drop a header
+              while it serves the page, which no file here shows.
 """
 from __future__ import annotations
 
@@ -34,6 +36,66 @@ PACKAGE = "com.alumiialabs.umbra"
 LOADS = {"src", "srcset", "href", "action", "formaction", "poster", "data",
          "background", "ping", "manifest", "cite", "xlink:href"}
 FINGERPRINT = re.compile(r"^([0-9A-F]{2}:){31}[0-9A-F]{2}$")
+# The directives of the Content-Security-Policy of each page. A browser
+# then refuses a script, a frame, or a form that a page holds after all.
+CSP = ("default-src 'none'", "frame-ancestors 'none'", "base-uri 'none'",
+       "form-action 'none'")
+# Each other header of each page, and a part of its value. `no-transform`
+# keeps Cloudflare from writing into a page.
+HEADERS = {
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "strict-transport-security": "max-age=",
+    "cache-control": "no-transform",
+}
+
+
+def header_problems(where: str, headers: dict[str, str]) -> list[str]:
+    """The faults of the headers of one page; `headers` has lower-case names."""
+    problems = []
+    policy = [part.strip() for part in headers.get("content-security-policy", "").split(";")]
+    for directive in CSP:
+        if directive not in policy:
+            problems.append(f"{where}: the Content-Security-Policy has no {directive}")
+    for name, part in HEADERS.items():
+        if part not in headers.get(name, "").lower():
+            problems.append(f"{where}: no {name} with {part}")
+    return problems
+
+
+def read_headers(path: Path) -> dict[str, dict[str, str]]:
+    """The rules of a `_headers` file of Cloudflare: each path with its
+    headers, by lower-case name. A `! name` line drops a header, and the rule
+    keeps a mark `!name` for it."""
+    rules: dict[str, dict[str, str]] = {}
+    current = None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line[0].isspace():
+            current = rules.setdefault(line.strip(), {})
+        elif current is not None and line.strip().startswith("!"):
+            current["!" + line.strip()[1:].strip().lower()] = ""
+        elif current is not None and ":" in line:
+            name, value = line.strip().split(":", 1)
+            current[name.strip().lower()] = value.strip()
+    return rules
+
+
+def check_headers(problems: list[str]) -> None:
+    rules = read_headers(SITE / "_headers")
+    every = rules.get("/*")
+    if every is None:
+        problems.append("_headers: no rule for /*, which holds the headers of each page")
+        return
+    problems.extend(header_problems("_headers /*", every))
+    for path, headers in rules.items():
+        for name in ["content-security-policy", *HEADERS]:
+            if "!" + name in headers and name not in headers:
+                problems.append(f"_headers {path}: drops {name}")
+        cache = headers.get("cache-control")
+        if cache is not None and "no-transform" not in cache.lower():
+            problems.append(f"_headers {path}: a Cache-Control with no no-transform")
 
 
 class Document(HTMLParser):
@@ -98,8 +160,12 @@ def main() -> None:
     for path in documents:
         name = path.relative_to(SITE).as_posix()
         Document(name, problems).feed(path.read_text(encoding="utf-8"))
+    # A browser runs a script of an SVG image that it opens as a document.
+    for path in sorted(SITE.rglob("*.svg")):
+        Document(path.relative_to(SITE).as_posix(), problems).feed(path.read_text(encoding="utf-8"))
     for path in sorted(SITE.rglob("*.js")) + sorted(SITE.rglob("*.mjs")):
         problems.append(f"{path.relative_to(SITE).as_posix()}: IDN-120: a script file")
+    check_headers(problems)
 
     links = SITE / ".well-known" / "assetlinks.json"
     try:
@@ -132,19 +198,25 @@ def main() -> None:
     if "--live" in sys.argv[1:]:
         import urllib.request
         origin = sys.argv[sys.argv.index("--live") + 1].rstrip("/")
-        for path in ("/i", "/no-such-page"):
+        codes = sorted(path.stem for path in (ROOT / "site" / "locales").glob("*.json")
+                       if path.stem != "en")
+        for path in ["/i", "/no-such-page"] + [f"/{code}/i" for code in codes]:
             request = urllib.request.Request(origin + path, headers={
                 "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0",
                 "Accept": "text/html"})
             try:
                 with urllib.request.urlopen(request, timeout=20) as answer:
                     body = answer.read().decode("utf-8", "replace")
+                    headers = answer.headers
             except urllib.error.HTTPError as error:
                 body = error.read().decode("utf-8", "replace")
+                headers = error.headers
             except OSError as error:
                 problems.append(f"{origin}{path}: no answer: {error}")
                 continue
             Document(f"{origin}{path}", problems).feed(body)
+            problems.extend(header_problems(
+                f"{origin}{path}", {name.lower(): value for name, value in headers.items()}))
 
     print(f"documents: {len(documents)}  problems: {len(problems)}")
     for line in problems:

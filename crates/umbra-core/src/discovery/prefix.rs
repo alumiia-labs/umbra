@@ -211,6 +211,13 @@ pub struct PrefixTree {
     cache_nonce: Option<[u8; 32]>,
 }
 
+/// The cache of a sealed epoch, which an epoch that does not close gives
+/// back.
+pub(crate) struct SealCache {
+    cache: BTreeMap<NodeKey, [u8; 32]>,
+    nonce: Option<[u8; 32]>,
+}
+
 impl PartialEq for PrefixTree {
     fn eq(&self, other: &Self) -> bool {
         self.leaves == other.leaves
@@ -255,6 +262,25 @@ impl PrefixTree {
         self.cache.clear();
         self.cache_nonce = None;
         Ok(())
+    }
+
+    /// Takes the cache of the sealed epoch out, for [`PrefixTree::undo`].
+    pub(crate) fn take_cache(&mut self) -> SealCache {
+        SealCache {
+            cache: core::mem::take(&mut self.cache),
+            nonce: self.cache_nonce.take(),
+        }
+    }
+
+    /// Takes back the leaves of an epoch that did not close, and puts back
+    /// the cache of the epoch before it. The log operator calls this alone,
+    /// before any proof names one of those leaves.
+    pub(crate) fn undo(&mut self, indexes: &[[u8; 32]], kept: SealCache) {
+        for index in indexes {
+            self.leaves.remove(index);
+        }
+        self.cache = kept.cache;
+        self.cache_nonce = kept.nonce;
     }
 
     /// Whether the tree holds a leaf at `index`.

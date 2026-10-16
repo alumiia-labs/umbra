@@ -965,6 +965,17 @@ const REBUILD_WAIT_MAX: u64 = 300;
 /// thus the oldest leaves the map past this bound.
 const WATCHED_WAITS: usize = 1_024;
 
+/// What became of a record of a contact that the node sealed or kept.
+enum Queued {
+    /// Its `SEND` waits on a circuit for the next pump.
+    Sent,
+    /// It waits in the contact for a circuit to this relay, in this mode.
+    Held([u8; 32], DelayClass),
+    /// The channel is stale: the record waits in the contact for the end of
+    /// a renewal (`NET-325`), and a guard waits for a later check.
+    Kept,
+}
+
 impl Waiting {
     /// Whether the command has no answer but a `NACK`.
     fn answers_only_a_refusal(&self) -> bool {
@@ -2749,9 +2760,7 @@ impl ClientNode {
                 .iter()
                 .map(|relay| relay.candidate)
                 .filter(|relay| {
-                    relay.relay_id != ingress.relay_id
-                        && (relay.operator_id == ingress.operator_id
-                            || relay.family_id == ingress.family_id)
+                    relay.relay_id != ingress.relay_id && !relay.apart_operator(&ingress)
                 })
                 .map(|relay| relay.relay_id)
                 .collect()
@@ -3311,10 +3320,13 @@ impl ClientNode {
             }
         }
         // NET-355: a contact that holds a guard of the peer answers the
-        // bundle that opens it, and no other one.
-        let opens = record
-            .proof
-            .is_some_and(|(_, secret)| guard_commitment(secret) == held.peer_guard.commitment);
+        // bundle that opens it, and no other one. NET-356: a guard that a
+        // handshake spent opens no bundle, since its secret left in that
+        // bundle.
+        let opens = !held.peer_guard.spent
+            && record
+                .proof
+                .is_some_and(|(_, secret)| guard_commitment(secret) == held.peer_guard.commitment);
         if held.peer_guard.seq != 0 && !held.device && !opens {
             let held = self.contacts.get_mut(&contact).ok_or(Error::NoPath)?;
             // The newest bundle takes the place of one that waits, and the
@@ -3649,23 +3661,61 @@ impl ClientNode {
 
     /// Makes a new queue for a contact after its own delay, as one operation
     /// that moves the queues of many contacts does: a revocation of a
-    /// device (`NET-180`, `NET-181`). The time stays across runs.
+    /// device (`NET-180`, `NET-181`). The time stays across runs. Each call
+    /// sets a new guard (`NET-357`), thus the caller makes one call for one
+    /// revocation, and [`ClientNode::sweep_again`] for each later request.
     pub fn rotate_swept<R: CryptoRng + ?Sized>(
         &mut self,
         contact: &ContactId,
         now: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
-        let held = self.contacts.get_mut(&contact.0).ok_or(Error::NoPath)?;
-        if held.sweep_at == 0 {
-            let at = now.saturating_add(sweep_delay(u64::from_be_bytes(random(rng))).max(1));
-            held.sweep_at = at;
-            self.moved.insert(contact.0);
-            // NET-357: the device that left the set holds the secret of
-            // the guard. The new guard goes with the rotation.
-            self.new_guard(&contact.0, at, rng);
-        }
+        let at = self.arm_sweep(contact, now, rng)?;
+        // NET-357: the device that left the set holds the secret of the
+        // guard. A sweep of another cause that waits, or a rotation that
+        // runs, changes nothing of that, thus the new guard goes in each
+        // case. Its record goes at the time of the swept rotation.
+        let at = at.unwrap_or_else(|| {
+            now.saturating_add(sweep_delay(u64::from_be_bytes(random(rng))).max(1))
+        });
+        self.new_guard(&contact.0, at, rng);
         Ok(())
+    }
+
+    /// Asks again for the swept rotation of a contact, with no new guard:
+    /// a rotation that a revocation still owes, after a run that made none
+    /// (`NET-180`).
+    pub fn sweep_again<R: CryptoRng + ?Sized>(
+        &mut self,
+        contact: &ContactId,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        self.arm_sweep(contact, now, rng).map(|_| ())
+    }
+
+    /// Sets the time of a swept rotation of a contact when none waits, and
+    /// gives the time that waits. A rotation that runs, or one in its grace,
+    /// takes no second time: its `NEW` cleared the time, and a second one
+    /// would start one more rotation that no party asked for.
+    fn arm_sweep<R: CryptoRng + ?Sized>(
+        &mut self,
+        contact: &ContactId,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<Option<u64>, Error> {
+        let rotates = self.rotating.contains(&contact.0);
+        let held = self.contacts.get_mut(&contact.0).ok_or(Error::NoPath)?;
+        if held.sweep_at != 0 {
+            return Ok(Some(held.sweep_at));
+        }
+        if rotates || held.channel.previous().is_some() {
+            return Ok(None);
+        }
+        let at = now.saturating_add(sweep_delay(u64::from_be_bytes(random(rng))).max(1));
+        held.sweep_at = at;
+        self.moved.insert(contact.0);
+        Ok(Some(at))
     }
 
     /// Ends each delay of `NET-180` that runs, as a wait of that time in a
@@ -7337,6 +7387,25 @@ impl ClientNode {
         now: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        match self.queue_send(contact, app, waiting, now, rng)? {
+            Queued::Sent => self.pump(),
+            Queued::Held(relay, class) => self.circuit_in(relay, class, rng),
+            Queued::Kept => Ok(()),
+        }
+    }
+
+    /// Seals one application record for a contact and queues its `SEND` on
+    /// a circuit, or keeps it in the contact. A fault leaves the record
+    /// with the caller: no `SEND` of it waits, and the contact holds it
+    /// not.
+    fn queue_send<R: CryptoRng + ?Sized>(
+        &mut self,
+        contact: [u8; 32],
+        app: &[u8],
+        waiting: Waiting,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<Queued, Error> {
         // A `SEND` binds no queue to a session. It goes on a circuit to the
         // relay of the queue, and on one that does not serve the inbound
         // queue of the contact when one is ready.
@@ -7350,7 +7419,7 @@ impl ClientNode {
             if !matches!(waiting, Waiting::Guard { .. }) {
                 held.waiting_sends.push_back((app.to_vec(), user_handle));
             }
-            return Ok(());
+            return Ok(Queued::Kept);
         }
         let channel = &self.contacts.get(&contact).ok_or(Error::NoPath)?.channel;
         let relay = *channel.outbound().relay_id();
@@ -7372,7 +7441,7 @@ impl ClientNode {
                 let held = self.contacts.get_mut(&contact).ok_or(Error::NoPath)?;
                 held.waiting_sends.push_back((app.to_vec(), user_handle));
             }
-            return self.circuit_in(relay, class, rng);
+            return Ok(Queued::Held(relay, class));
         };
         self.current = slot;
         let session_pk = self.session_pk()?;
@@ -7381,6 +7450,7 @@ impl ClientNode {
         let (_, encoded) =
             held.channel
                 .send(app, &session_pk, random(rng), random(rng), now, rng)?;
+        // The ratchet moved, and the store takes it with each outcome.
         self.moved.insert(contact);
         // NET-218: a record of the user answers to its handle, and the
         // runtime sends it again. A record that the node made has no such
@@ -7407,7 +7477,7 @@ impl ClientNode {
             },
         };
         self.queue_command(encoded, waiting)?;
-        self.pump()
+        Ok(Queued::Sent)
     }
 
     /// One slot of the cover clock (Part 3 §3.6.2). An acknowledgment that
@@ -8180,10 +8250,36 @@ impl ClientNode {
             return Ok(());
         }
         // A record that cannot go stops no later one, and it ends no run:
-        // each other record of the contact goes in its order.
+        // each other record of the contact goes in its order. A record whose
+        // seal or `SEND` failed waits again, in front of each record that
+        // came since, and no record leaves the node with no event.
+        let mut failed = VecDeque::new();
+        let mut sent = false;
+        let mut builds = Vec::new();
         for (app, user_handle) in core::mem::take(&mut held.waiting_sends) {
             let waiting = user_handle.map_or(Waiting::Other, Waiting::UserSend);
-            let _ = self.send_now(contact, &app, waiting, now, rng);
+            match self.queue_send(contact, &app, waiting, now, rng) {
+                Ok(Queued::Sent) => sent = true,
+                Ok(Queued::Held(relay, class)) => builds.push((relay, class)),
+                Ok(Queued::Kept) => {}
+                Err(_) => failed.push_back((app, user_handle)),
+            }
+        }
+        if let Some(held) = self.contacts.get_mut(&contact) {
+            if !failed.is_empty() {
+                failed.append(&mut held.waiting_sends);
+                held.waiting_sends = failed;
+                self.moved.insert(contact);
+            }
+        }
+        // The `SEND` of each record waits on its circuit, and a later pump
+        // sends what this one could not.
+        builds.dedup();
+        for (relay, class) in builds {
+            let _ = self.circuit_in(relay, class, rng);
+        }
+        if sent {
+            let _ = self.pump();
         }
         Ok(())
     }
@@ -8363,6 +8459,7 @@ impl ClientNode {
         rng: &mut R,
     ) -> Result<Vec<ClientEvent>, Error> {
         let mut out = Vec::new();
+        let mut fault = Ok(());
         let arrival = self.current;
         for event in events {
             // A reply to one event can go to a second circuit. The next
@@ -8660,11 +8757,16 @@ impl ClientNode {
                         reason,
                     });
                 }
+                // A fault of one record loses no event of an earlier record
+                // of the cell, and the records after it still open.
                 CircuitEvent::Message {
                     queue_id,
                     bucket,
                     payload,
-                } => out.extend(self.on_message(queue_id, bucket, &payload, now, rng)?),
+                } => match self.on_message(queue_id, bucket, &payload, now, rng) {
+                    Ok(events) => out.extend(events),
+                    Err(error) => fault = fault.and(Err(error)),
+                },
                 // A `GMSG` carries a `corr_id` of the relay, thus it names
                 // no command of this session.
                 CircuitEvent::Relay {
@@ -8700,7 +8802,10 @@ impl ClientNode {
             }
         }
         self.pump()?;
-        Ok(out)
+        match fault {
+            Err(error) if out.is_empty() => Err(error),
+            _ => Ok(out),
+        }
     }
 
     /// The relay answered a `GNEW` or a `GPOST`.
@@ -9160,8 +9265,16 @@ impl ClientNode {
             // come from the relay of the new queue, which holds no key of
             // the channel.
             let rotated = rotated && matches!(received, Received::App { .. });
+            // From here on the record is in the channel, and its events go
+            // to the store with the cursor of its queue (`WIR-115`). A fault
+            // of a step that follows loses none of them and ends no run. A
+            // run that ended would read the record again, and the same
+            // fault would end each later run. Each such step leaves what it
+            // owes in the state, and a later check takes it again.
             if let Received::Renewal { bundle, .. } = &received {
-                out.extend(self.on_renewal(contact, bundle, now, rng)?);
+                if let Ok(events) = self.on_renewal(contact, bundle, now, rng) {
+                    out.extend(events);
+                }
                 return Ok(out);
             }
             let mut guard_record = None;
@@ -9221,7 +9334,9 @@ impl ClientNode {
                 }
             }
             if let Some((kind, value, answers)) = ceremony_record {
-                out.extend(self.on_verification(contact, kind, value, answers, now, rng)?);
+                if let Ok(events) = self.on_verification(contact, kind, value, answers, now, rng) {
+                    out.extend(events);
+                }
             }
             if let Some(body) = guard_record {
                 self.on_guard(contact, &body);
@@ -9230,13 +9345,15 @@ impl ClientNode {
                 self.bound_skipped();
             }
             if owes_address {
-                self.answer_address(contact, now, rng)?;
+                let _ = self.answer_address(contact, now, rng);
             }
             // The record opened the sending chain of an inviter.
-            self.send_waiting(contact, now, rng)?;
-            self.send_guard(contact, now, rng)?;
+            let _ = self.send_waiting(contact, now, rng);
+            let _ = self.send_guard(contact, now, rng);
             if rotated {
-                out.extend(self.end_rotation(contact, now, rng)?);
+                if let Ok(events) = self.end_rotation(contact, now, rng) {
+                    out.extend(events);
+                }
             }
             return Ok(out);
         }
@@ -9330,6 +9447,29 @@ impl ClientNode {
                         self.halves.insert(queue_id, half);
                         return Ok(Vec::new());
                     };
+                    // NET-329: the flight 3 of a renewal comes from the
+                    // peer of the contact, and the check runs before any
+                    // state of the contact changes. Flight 3 answers the
+                    // flight 1 of the same party, thus a flight 3 under
+                    // another key shows that a holder of the bundle wrote
+                    // the flight 1 that spent the prekey. No flight of the
+                    // peer completes this responder state any more. The
+                    // handshake ends, its queue owes its `DEL`, and a later
+                    // check offers a new bundle (`NET-326`).
+                    if let Some(contact) = half.renews {
+                        let expected = self
+                            .contacts
+                            .get(&contact)
+                            .map(|held| held.peer_static)
+                            .or_else(|| self.bare.get(&contact).map(|held| held.peer_static));
+                        if expected != Some(peer_static) {
+                            self.changes
+                                .push(StateChange::InvitationEnded { queue: queue_id });
+                            self.renewal_ended(&contact);
+                            self.owe_del(half.inbound, half.inbound_relay, false, now, 0)?;
+                            return Ok(Vec::new());
+                        }
+                    }
                     // NET-175: the queue of the invitee is the outbound
                     // queue from this point.
                     (keys, peer_static, Outbound::new(&reply_to), Role::Responder)
@@ -10507,6 +10647,45 @@ mod tests {
     }
 
     #[test]
+    fn a_handshake_of_another_holder_of_the_bundle_changes_no_channel() {
+        const CAROL: usize = 2;
+        let mut net = Net::new();
+        let [alice, bob] = contacts(&mut net);
+        let queue = net.node(ALICE).inbound_queue(&alice).unwrap().0;
+        // Bob is away, and Carol holds the bundle of the renewal of Alice.
+        net.parties[BOB].cut = true;
+        offer(&mut net, &alice);
+        let offered: Vec<[u8; 32]> = net.node(ALICE).halves.keys().copied().collect();
+        assert_eq!(offered.len(), 1);
+        let bundle = net.node(ALICE).halves[&offered[0]].bundle.clone();
+        net.join(0x71, 3, None, &EXITS);
+        net.node(CAROL).accept(bundle, &mut Rng(4)).unwrap();
+        net.run();
+        // NET-329: the flight 3 of Carol names another key. The channel of
+        // Alice stays, and the handshake and the renewal end.
+        let events = net.take(ALICE);
+        assert!(!events.contains(&ClientEvent::ChannelRenewed { contact: alice }));
+        assert_eq!(net.node(ALICE).inbound_queue(&alice).unwrap().0, queue);
+        assert!(net.node(ALICE).halves.is_empty());
+        assert!(!net.node(ALICE).renewing.contains(&alice.0));
+        assert!(net.node(ALICE).is_stale(&alice));
+        // The queue of the offer owes its `DEL`, and the next checks offer
+        // a new bundle.
+        let now = net.now;
+        net.node(ALICE).rotate_due(now, &mut Rng(8)).unwrap();
+        net.run();
+        assert_eq!(net.count(ALICE, Cmd::Del), 1);
+        net.now = net.node(ALICE).sweep_time(&alice).unwrap();
+        let now = net.now;
+        net.node(ALICE).rotate_due(now, &mut Rng(9)).unwrap();
+        net.run();
+        let again: Vec<[u8; 32]> = net.node(ALICE).halves.keys().copied().collect();
+        assert_eq!(again.len(), 1);
+        assert_ne!(again, offered);
+        assert!(net.node(BOB).contacts.contains_key(&bob.0));
+    }
+
+    #[test]
     fn a_contact_with_no_channel_renews_from_the_key_and_the_queue_of_the_peer() {
         let mut net = Net::new();
         net.join(0x41, 3, None, &EXITS);
@@ -11334,7 +11513,7 @@ mod tests {
         assert_eq!(held_guard(&mut net, BOB, &bob).0, 1);
         // The same request again sets no second guard.
         net.node(ALICE)
-            .rotate_swept(&alice, now, &mut Rng(7))
+            .sweep_again(&alice, now, &mut Rng(7))
             .unwrap();
         assert_eq!(own_guard(&mut net, ALICE, &alice).0, 2);
         net.now = at;
@@ -11398,6 +11577,101 @@ mod tests {
             .node(BOB)
             .answer_renewal(&bob, true, &mut Rng(11))
             .is_err());
+    }
+
+    #[test]
+    fn a_waiting_record_that_does_not_seal_waits_again_and_stops_no_other() {
+        let mut net = Net::new();
+        let [alice, _] = contacts(&mut net);
+        net.take(BOB);
+        // A record that no bucket holds, ahead of a record that one holds.
+        let held = net.node(ALICE).contacts.get_mut(&alice.0).unwrap();
+        held.waiting_sends
+            .push_back((alloc::vec![0; 100_000], Some(77)));
+        held.waiting_sends.push_back((text(1), Some(78)));
+        let now = net.now;
+        net.node(ALICE)
+            .send_waiting(alice.0, now, &mut Rng(4))
+            .unwrap();
+        net.run();
+        assert_eq!(messages(&net.take(BOB)), 1);
+        // The record that did not go stays, and no event lost it.
+        let waiting = &net.node(ALICE).contacts[&alice.0].waiting_sends;
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0].1, Some(77));
+    }
+
+    #[test]
+    fn a_guard_that_a_handshake_spent_opens_no_bundle() {
+        let mut net = Net::new();
+        let [alice, bob] = contacts(&mut net);
+        let (seq, secret, _) = own_guard(&mut net, ALICE, &alice);
+        assert_eq!(
+            held_guard(&mut net, BOB, &bob),
+            (seq, guard_commitment(&secret), false)
+        );
+        // NET-356: a renewal spent the guard, and the guard that takes its
+        // place did not arrive yet. A party that read the bundle of that
+        // renewal holds the secret, and it offers a bundle with it.
+        net.node(BOB)
+            .contacts
+            .get_mut(&bob.0)
+            .unwrap()
+            .peer_guard
+            .spent = true;
+        let queue = net.node(BOB).inbound_queue(&bob).unwrap().0;
+        offer(&mut net, &alice);
+        assert_eq!(net.take(BOB), [ClientEvent::RenewalAsked { contact: bob }]);
+        assert!(net.node(BOB).halves.is_empty());
+        assert!(net.node(BOB).renewal_asked(&bob));
+        assert_eq!(net.node(BOB).inbound_queue(&bob).unwrap().0, queue);
+    }
+
+    #[test]
+    fn a_revocation_sets_its_guard_beside_another_sweep_and_asks_no_second_rotation() {
+        let mut net = Net::new();
+        let [alice, _] = contacts(&mut net);
+        let now = net.now;
+        // NET-345: a sweep of another cause waits.
+        net.node(ALICE).contacts.get_mut(&alice.0).unwrap().sweep_at = now + 50;
+        let (seq, secret, _) = own_guard(&mut net, ALICE, &alice);
+        net.node(ALICE)
+            .rotate_swept(&alice, now, &mut Rng(5))
+            .unwrap();
+        // NET-357: the guard of the revocation goes with the rotation that
+        // waits.
+        let (next, new_secret, owed) = own_guard(&mut net, ALICE, &alice);
+        assert_eq!((next, owed), (seq + 1, true));
+        assert_ne!(new_secret, secret);
+        assert_eq!(net.node(ALICE).sweep_time(&alice), Some(now + 50));
+        assert_eq!(net.node(ALICE).contacts[&alice.0].guard.at, now + 50);
+
+        // The `NEW` of the rotation cleared the time, and its `IDS` did not
+        // come yet. A request again sets no time of a second rotation.
+        net.node(ALICE).contacts.get_mut(&alice.0).unwrap().sweep_at = 0;
+        net.node(ALICE).rotating.insert(alice.0);
+        net.node(ALICE)
+            .sweep_again(&alice, now, &mut Rng(6))
+            .unwrap();
+        assert_eq!(net.node(ALICE).sweep_time(&alice), None);
+        net.node(ALICE).rotating.remove(&alice.0);
+
+        // A request again in the grace of the rotation sets none either.
+        net.node(ALICE).rotate_now(&alice).unwrap();
+        rotate(&mut net, ALICE, &alice);
+        assert!(net.node(ALICE).inbound_queue(&alice).unwrap().2);
+        let now = net.now;
+        net.node(ALICE)
+            .sweep_again(&alice, now, &mut Rng(7))
+            .unwrap();
+        assert_eq!(net.node(ALICE).sweep_time(&alice), None);
+        assert_eq!(own_guard(&mut net, ALICE, &alice).0, seq + 1);
+        // A second revocation in that time sets its own guard.
+        net.node(ALICE)
+            .rotate_swept(&alice, now, &mut Rng(8))
+            .unwrap();
+        assert_eq!(own_guard(&mut net, ALICE, &alice).0, seq + 2);
+        assert_eq!(net.node(ALICE).sweep_time(&alice), None);
     }
 
     #[test]

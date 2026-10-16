@@ -51,10 +51,10 @@
 # set with a relay more or less takes a restart of each relay; the play
 # goes one server at a time.
 - name: "The relay {{ relay.name }} takes a changed relay set"
-  ansible.builtin.systemd:
-    name: "umbra-relay@{{ relay.name }}"
-    state: restarted
+  ansible.builtin.command:
+    cmd: "/usr/local/sbin/umbra-restart umbra-relay@{{ relay.name }}.service {{ relay.port }}"
   when: hostvars[groups['signer'][0]].umbra_relay_set.changed | default(false)
+  changed_when: true
 
 - name: "The relay {{ relay.name }} answers on its port"
   ansible.builtin.wait_for:

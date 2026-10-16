@@ -1,8 +1,8 @@
 //! The push path of Part 8 over real sockets on loopback: a device
 //! registers with the NDR through a relay with the OHTTP relay role, a
 //! queue relay pushes through the same relay, and the NDR posts the blob to
-//! a UnifiedPush endpoint. A target that the endpoint names gone ends the
-//! registration.
+//! FCM. A token that FCM names gone ends the registration. A token under
+//! the reserved carrier reaches no address.
 
 #![cfg(feature = "native")]
 #![allow(
@@ -44,8 +44,8 @@ async fn listener() -> (TcpListener, u16) {
     (listener, port)
 }
 
-/// A UnifiedPush endpoint that answers each post with the next status and
-/// hands each request to the test.
+/// An endpoint that answers each post with the next status and hands each
+/// request to the test.
 async fn endpoint(statuses: Vec<u16>) -> (u16, mpsc::UnboundedReceiver<Request>) {
     let (listener, port) = listener().await;
     let tls = tls_acceptor(&fixture("leaf.pem"), &fixture("leaf.key")).unwrap();
@@ -74,11 +74,11 @@ fn encode(request: &NdrRequest<'_>) -> [u8; NDR_REQUEST_LEN] {
 }
 
 #[tokio::test]
-async fn a_registration_and_a_push_cross_the_ohttp_relay_to_the_endpoint() {
+async fn a_token_under_the_reserved_carrier_reaches_no_endpoint() {
     let trust = native::tls_config_with_root_file(&fixture("ca.pem")).unwrap();
-    let (push_port, mut pushed) = endpoint(vec![201, 410]).await;
+    let (push_port, mut pushed) = endpoint(vec![201]).await;
 
-    // The NDR, with its gateway key.
+    // The NDR, with its gateway key and no FCM account.
     let pair = KeyPair::generate(&mut OsRng);
     let public = pair.public().clone();
     let (ndr_listener, ndr_port) = listener().await;
@@ -87,10 +87,7 @@ async fn a_registration_and_a_push_cross_the_ohttp_relay_to_the_endpoint() {
         tls_acceptor(&fixture("leaf.pem"), &fixture("leaf.key")).unwrap(),
         Gateway { key_id: 1, pair },
         Box::new(MemoryNdrStore::default()),
-        trust.clone(),
         None,
-        // The endpoint of the test is a UnifiedPush endpoint on this machine.
-        true,
     ));
 
     // A relay with the OHTTP relay role, whose node sees no request.
@@ -117,19 +114,19 @@ async fn a_registration_and_a_push_cross_the_ohttp_relay_to_the_endpoint() {
         gateway: public,
     };
 
-    // The device registers its endpoint under a handle.
+    // A caller registers an address of its choice under the carrier that
+    // UnifiedPush used. The NDR cannot read the token at the `NREG`.
     let set = HandleSet::assign(&[[1; 32]], &[], &[], 0, &mut OsRng).unwrap();
     let group = &set.groups()[0];
     let target = format!("https://localhost:{push_port}/up/device-1");
     let mut plain = [0u8; PUSH_TOKEN_MAX];
     let n = encode_token(TokenCarrier::UnifiedPush, target.as_bytes(), &mut plain).unwrap();
     let registration = group.registration(&plain[..n], [4; 24]).unwrap();
-    let removal = Secret::new([9; 32]);
     let register = encode(&NdrRequest::Register {
         handle: group.handle,
         nonce: registration.nonce,
         ct_token: &registration.ct_token,
-        removal_hash: sha3_256(&[removal.expose()]),
+        removal_hash: sha3_256(&[&[9u8; 32][..]]),
         prior: Secret::new([0; 32]),
     });
     let answer = call(&route, &register, trust.clone(), &mut OsRng)
@@ -137,30 +134,17 @@ async fn a_registration_and_a_push_cross_the_ohttp_relay_to_the_endpoint() {
         .unwrap();
     assert_eq!(answer, NdrResponse::Taken);
 
-    // The queue relay pushes, and the endpoint gets the blob with its expiry.
+    // NTF-123, NTF-134: the push opens the token, the reserved carrier does
+    // not read, and the NDR posts to no address.
     let push = encode(&NdrRequest::Push {
         handle: group.handle,
         k_tok: Secret::new(*group.k_tok.expose()),
         ttl: 86_400,
         blob: [0x42; BLOB_LEN],
     });
-    let answer = call(&route, &push, trust.clone(), &mut OsRng)
-        .await
-        .unwrap();
-    assert_eq!(answer, NdrResponse::Taken);
-    let got = pushed.recv().await.unwrap();
-    assert_eq!(got.path, "/up/device-1");
-    assert_eq!(got.body, [0x42; BLOB_LEN]);
-    assert!(got.headers.contains(&("ttl".into(), "86400".into())));
-
-    // NTF-125: the endpoint names the target gone, the NDR drops the
-    // registration, and the next push is gone as well, thus the relay stops.
-    let answer = call(&route, &push, trust.clone(), &mut OsRng)
-        .await
-        .unwrap();
-    assert_eq!(answer, NdrResponse::Gone);
     let answer = call(&route, &push, trust, &mut OsRng).await.unwrap();
-    assert_eq!(answer, NdrResponse::Gone);
+    assert_eq!(answer, NdrResponse::Refused);
+    assert!(pushed.try_recv().is_err());
 }
 
 /// What the fake Google server saw: each path, its authorization, and its
@@ -301,9 +285,7 @@ async fn an_fcm_token_gets_a_data_message_under_the_account_of_the_ndr() {
         tls_acceptor(&fixture("leaf.pem"), &fixture("leaf.key")).unwrap(),
         Gateway { key_id: 1, pair },
         Box::new(MemoryNdrStore::default()),
-        trust.clone(),
         Some(fcm),
-        false,
     ));
     let (relay_listener, relay_port) = listener().await;
     let (node, _unused) = mpsc::channel(8);

@@ -117,7 +117,6 @@ fn framing() -> Value {
         let frame = SessionFrame {
             session_id: [0x22; 8],
             seq: 5,
-            resend: false,
             cell: &cell,
         };
         let mut frame_bytes = vec![0u8; cell.len() + 12];

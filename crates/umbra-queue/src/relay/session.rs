@@ -18,13 +18,23 @@ use crate::{params::MAX_QUEUES_PER_SESSION, Reject};
 /// replay set.
 const SEEN_MAX: usize = 65_536;
 
+/// The part of a `corr_id` that the replay set holds: its first 8 bytes.
+/// A client draws each `corr_id` from its CSPRNG, thus two of one session
+/// share these bytes with a chance near 2^-33 at `SEEN_MAX` commands. Such a
+/// pair costs a `NACK` and a send again, and no repeat passes. The set
+/// takes half the memory of whole values: a circuit keeps it for up to
+/// `CIRCUIT_MAX_AGE`.
+fn seen_key(corr_id: &[u8; 16]) -> u64 {
+    u64::from_le_bytes(umbra_crypto::bytes::part::<0, 8, 16>(corr_id))
+}
+
 /// One session.
 pub struct Session {
     id: [u8; 8],
     secret: Secret<32>,
     resume_count: u32,
     relay_session_sk: StaticSecret,
-    seen: BTreeSet<[u8; 16]>,
+    seen: BTreeSet<u64>,
     queues: Vec<[u8; 32]>,
 }
 
@@ -97,7 +107,8 @@ impl Session {
         auth_pk: &[u8; 32],
         bind: &[u8],
     ) -> Result<(), Reject> {
-        if self.seen.contains(&command.corr_id) {
+        let key_of_seen = seen_key(&command.corr_id);
+        if self.seen.contains(&key_of_seen) {
             return Err(Reject::Rejected);
         }
         // NET-122: the replay check holds each `corr_id` of the session, and
@@ -109,7 +120,7 @@ impl Session {
         let key = CommandAuthKey::derive(&self.relay_session_sk, auth_pk)
             .map_err(|_| Reject::Rejected)?;
         command.verify(&key, bind).map_err(|_| Reject::Rejected)?;
-        self.seen.insert(command.corr_id);
+        self.seen.insert(key_of_seen);
         Ok(())
     }
 
@@ -185,6 +196,11 @@ mod tests {
         assert_eq!(session.accept(&cmd, &[9; 32]), Err(Reject::Rejected));
         cmd.sign(&key, b"").unwrap();
         session.accept(&cmd, &client_pk).unwrap();
+        // The set holds the first 8 bytes of each value: a value that
+        // shares them is refused, and no repeat passes.
+        cmd.corr_id[15] = 8;
+        cmd.sign(&key, b"").unwrap();
+        assert_eq!(session.accept(&cmd, &client_pk), Err(Reject::Rejected));
 
         for i in 0..MAX_QUEUES_PER_SESSION {
             session.bind_queue([i as u8; 32]).unwrap();

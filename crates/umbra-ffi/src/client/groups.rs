@@ -5809,6 +5809,22 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         self.take_vote(conversation, parsed.body, sender, position, now, rng)?;
                         continue;
                     }
+                    // WIR-075, GRP-299, GRP-300: a group stores the kinds of
+                    // a message alone. A receipt, a typing indicator, and
+                    // each kind of the pairwise channel make no row and no
+                    // alert. Part 11 gives a reaction no rule in a group,
+                    // and the view offers none, thus it goes as well.
+                    if !matches!(
+                        parsed.kind,
+                        AppKind::Text
+                            | AppKind::Attachment
+                            | AppKind::Rich
+                            | AppKind::Poll
+                            | AppKind::ConversationTimer
+                            | AppKind::ForwardPolicy
+                    ) {
+                        continue;
+                    }
                     // A record that does not parse under the layout of a
                     // group goes (WIR-163, WIR-180).
                     // DEV-174: a rich record takes its class from the kind
@@ -5829,6 +5845,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         _ => false,
                     };
                     if is_invalid {
+                        continue;
+                    }
+                    // DEV-093, DEV-102: a deletion of its author came first.
+                    // The view shows nothing at that position, and no alert
+                    // goes. The entry stays, thus the copy of the other
+                    // replica stays out too.
+                    if self.held_group_deletion(conversation, &parsed.msg_id, sender, now_ms)? {
                         continue;
                     }
                     // DEV-249: a timer record of a member below admin goes.
@@ -5876,8 +5899,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                                 self.stamp_deadline(conversation, message, parsed.kind, now, rng)?
                             }
                         }
-                        // DEV-093: an edit or a deletion of its author that
-                        // a replica gave first applies now.
+                        // DEV-093: an edit of its author that a replica gave
+                        // first applies now.
                         self.take_held_group_change(
                             conversation,
                             message,
@@ -6345,9 +6368,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     self.put_clock(conversation, key, now, rng)?;
                     continue;
                 };
+                // GRP-063, GRP-166: only an owner takes the role of an
+                // owner, thus an admin leaves a silent owner to the owners.
+                let own_role = group.own_role();
                 let action = match PresenceTracker::eviction(role, active, owners) {
                     Eviction::Remove => Some(Silence::Remove),
-                    Eviction::DemoteFirst => Some(Silence::Demote),
+                    Eviction::DemoteFirst
+                        if role < Role::Owner || own_role == Some(Role::Owner) =>
+                    {
+                        Some(Silence::Demote)
+                    }
                     _ => None,
                 };
                 let Some(action) =
@@ -7776,7 +7806,8 @@ mod tests {
         let ms = |seconds: u64| seconds * 1_000;
 
         // DEV-093: one replica gives the deletion before the message. The
-        // deletion waits, and the message is a tombstone at its arrival.
+        // deletion waits. DEV-102: the client never held the message, thus
+        // the view shows nothing at that position and no alert goes.
         let mine = say(&mut other, member, "a secret", T0 + 10, &mut rng);
         let message = other.take_group_post().unwrap();
         other
@@ -7788,11 +7819,20 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(client.messages(group).unwrap().is_empty());
-        let held = client
+        while client.next_event().is_some() {}
+        assert!(client
             .on_group_record(&QUEUES[0], 30, &message.record, ms(T0 + 13), &mut rng)
             .unwrap()
-            .unwrap();
-        assert!(client.info(&held).unwrap().deleted);
+            .is_none());
+        // The copy of the other replica stays out as well.
+        assert!(client
+            .on_group_record(&QUEUES[1], 30, &message.record, ms(T0 + 14), &mut rng)
+            .unwrap()
+            .is_none());
+        assert!(client.messages(group).unwrap().is_empty());
+        while let Some(event) = client.next_event() {
+            assert!(!matches!(event, Event::Message { .. }));
+        }
 
         // An edit waits in the same way.
         let mine = say(&mut other, member, "meet at 8", T0 + 20, &mut rng);
@@ -7829,6 +7869,57 @@ mod tests {
             .unwrap();
         carry(&mut other, &mut [&mut client], &mut seq, T0 + 50, &mut rng);
         assert!(client.info(&held).unwrap().deleted);
+    }
+
+    #[test]
+    fn a_kind_that_is_no_message_of_a_group_makes_no_row_and_no_alert() {
+        let mut rng = Rng(311);
+        let mut client = new_client(&mut rng);
+        let mut other = new_client(&mut rng);
+        let group = new_group(&mut client, &mut rng);
+        let member = invite(
+            &mut client,
+            &mut other,
+            group,
+            (AT_ADMIN, AT_JOINER),
+            T0 + 1,
+            &mut rng,
+        );
+        while client.next_event().is_some() {}
+        // WIR-075, GRP-299, GRP-300: a receipt, a typing indicator, a
+        // reaction, and a kind of the pairwise channel.
+        let commit = [0x11u8; 64];
+        let reveal = [0x22u8; 32];
+        let kinds: [(AppKind, &[u8]); 6] = [
+            (AppKind::Reaction, b"\x01\x02"),
+            (AppKind::DeliveryReceipt, b"\x01"),
+            (AppKind::ReadReceipt, b"\x01"),
+            (AppKind::Typing, b"\x01"),
+            (AppKind::VerifyCommit, &commit),
+            (AppKind::VerifyReveal, &reveal),
+        ];
+        for (place, (kind, body)) in kinds.into_iter().enumerate() {
+            let record = AppMessage {
+                kind,
+                msg_id: [0x60 + u8::try_from(place).unwrap(); 16],
+                sent_at: (T0 + 10) * 1_000,
+                body,
+            };
+            let mut app = vec![0u8; record.len()];
+            record.encode(&mut app).unwrap();
+            assert!(AppMessage::parse(&app, umbra_wire::app::Channel::Group).is_ok());
+            let mut posting = other.group_of(member).unwrap();
+            let sealed = posting.post(&app, T0 + 10, &mut rng).unwrap();
+            other.save_group(member, &posting, &mut rng).unwrap();
+            assert!(client
+                .on_group_record(&QUEUES[0], 30, &sealed, (T0 + 11) * 1_000, &mut rng)
+                .unwrap()
+                .is_none());
+        }
+        assert!(client.messages(group).unwrap().is_empty());
+        while let Some(event) = client.next_event() {
+            assert!(!matches!(event, Event::Message { .. }));
+        }
     }
 
     #[test]

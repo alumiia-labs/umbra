@@ -61,6 +61,9 @@ pub struct DirectoryLink {
     /// The newest head that this device accepted: its size, its root, and
     /// its timestamp (`DIS-061`).
     held: Arc<std::sync::Mutex<Option<HeldHead>>>,
+    /// The key set of the log that a signed rotation gave, or none for the
+    /// pinned set (`DIS-199`).
+    keyset: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
 }
 
 impl From<DirError> for FfiError {
@@ -125,6 +128,21 @@ impl LogChannel for DirectoryLink {
     fn now(&self) -> u64 {
         unix_now()
     }
+
+    fn keyset(&self) -> Vec<u8> {
+        self.keyset
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap_or_else(|| self.pins.keyset.clone())
+    }
+
+    fn set_keyset(&self, keyset: Vec<u8>) {
+        *self
+            .keyset
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(keyset);
+    }
 }
 
 impl DirectoryLink {
@@ -152,15 +170,23 @@ impl DirectoryLink {
             pins: Arc::new(pins),
             tls,
             held: Arc::default(),
+            keyset: Arc::default(),
         })
     }
 
-    /// The link for one call, from the head that the store holds.
-    fn with_held(&self, held: Option<HeldHead>) -> Self {
+    /// The link for one call, from the head and the key set that the store
+    /// holds.
+    fn with_held(&self, held: Option<HeldHead>, keyset: Vec<u8>) -> Self {
         DirectoryLink {
             held: Arc::new(std::sync::Mutex::new(held)),
+            keyset: Arc::new(std::sync::Mutex::new(Some(keyset))),
             ..self.clone()
         }
+    }
+
+    /// The key set that this link holds now.
+    fn held_keyset(&self) -> Vec<u8> {
+        LogChannel::keyset(self)
     }
 
     /// Sends one request and returns the body of a done answer.
@@ -284,13 +310,25 @@ impl DirectoryLink {
         Ok(reader::vrf_key(self)?)
     }
 
-    /// The newest entry of a label input, verified under the log.
+    /// The newest entry of a label input, verified under the log. A head
+    /// past its freshness gives `Stale` here.
     pub fn find(&self, input: &[u8]) -> Result<Found, FfiError> {
         Ok(self.find_keyed(input)?.0)
     }
 
-    /// The newest entry of a label input and its search key.
+    /// The newest entry of a label input and its search key, under a fresh
+    /// head.
     fn find_keyed(&self, input: &[u8]) -> Result<(Found, [u8; 64]), FfiError> {
+        let found = self.find_read(input)?;
+        if found.0.degraded {
+            return Err(FfiError::Stale);
+        }
+        Ok(found)
+    }
+
+    /// The newest entry of a label input and its search key. A head past its
+    /// freshness gives the degraded read of `DIS-067`, which `Found` marks.
+    fn find_read(&self, input: &[u8]) -> Result<(Found, [u8; 64]), FfiError> {
         Ok(reader::find_keyed(self, input, &mut OsRng)?)
     }
 
@@ -324,13 +362,36 @@ impl DirectoryLink {
         dirclient::token_bytes(token).map_err(|_| FfiError::Malformed)
     }
 
-    /// Registers the first version of a label under a token (`DIS-101`),
-    /// with the lease of a timed link (`DIS-172`).
-    pub fn register(&self, input: &[u8], entry: &[u8], lease: Option<u32>) -> Result<(), FfiError> {
+    /// Registers a label under a token (`DIS-101`), with the lease of a
+    /// timed link (`DIS-172`). The registration challenge proves `key`
+    /// (`DIS-197`), and it names the version of the entry that `entry_of`
+    /// writes. The result is that version.
+    pub fn register(
+        &self,
+        input: &[u8],
+        name: &[u8],
+        key: &KeyPair,
+        entry_of: impl FnOnce(u32) -> Result<Vec<u8>, FfiError>,
+        lease: Option<u32>,
+    ) -> Result<u32, FfiError> {
+        // The proof of work of the token comes first, thus the challenge
+        // lives through it.
         let token = self.token()?;
-        let body = dirclient::register_body(&token, input, entry, lease)
+        let body = dirclient::register_challenge_body(input, &key.public().to_bytes())
             .map_err(|_| FfiError::Malformed)?;
-        self.send(Kind::Register, &body).map(|_| ())
+        let challenge = self.send(Kind::Challenge, &body)?;
+        let (challenge, purpose) =
+            dirclient::parse_register_challenge(&challenge).map_err(|_| FfiError::Malformed)?;
+        let Purpose::Write { version_new } = purpose else {
+            return Err(FfiError::Malformed);
+        };
+        let entry = entry_of(version_new)?;
+        let ans = answer(purpose, key, name, &challenge, Some(&entry))
+            .map_err(|_| FfiError::Unverified)?;
+        let body = dirclient::register_body(&token, input, &entry, &ans, lease)
+            .map_err(|_| FfiError::Malformed)?;
+        self.send(Kind::Register, &body)?;
+        Ok(version_new)
     }
 
     /// Writes the next version of a label under the key of the version
@@ -451,6 +512,10 @@ pub struct ContactPreview {
     pub welcome: String,
     /// The JPEG picture from the profile blob, or empty.
     pub picture: Vec<u8>,
+    /// Whether the read is the degraded read of Part 9 §9.5.2: no head that
+    /// the log gave passes its freshness, thus the view shows the preview
+    /// as unverified (`DIS-068`).
+    pub unverified: bool,
 }
 
 /// A reusable link of this device (Part 4 §4.3.2), as a view shows it.
@@ -616,6 +681,7 @@ struct HeldLink<'a> {
     handle: &'a Handle,
     link: DirectoryLink,
     before: Option<HeldHead>,
+    keyset: Vec<u8>,
 }
 
 impl core::ops::Deref for HeldLink<'_> {
@@ -628,6 +694,14 @@ impl core::ops::Deref for HeldLink<'_> {
 
 impl Drop for HeldLink<'_> {
     fn drop(&mut self) {
+        // DIS-199: a key set that a signed rotation gave stays for the next
+        // call.
+        let keyset = self.link.held_keyset();
+        if keyset != self.keyset {
+            let _ = locked(&self.handle.inner)
+                .client
+                .keep_log_keyset(&keyset, &mut OsRng);
+        }
         let Some((size, root, timestamp)) = self.link.held() else {
             return;
         };
@@ -653,15 +727,14 @@ impl Handle {
             return Err(FfiError::NotFound);
         }
         let before = inner.client.newest_head()?;
-        let link = inner
-            .directory
-            .as_ref()
-            .ok_or(FfiError::Offline)?
-            .with_held(before);
+        let directory = inner.directory.as_ref().ok_or(FfiError::Offline)?;
+        let keyset = inner.client.log_keyset(&directory.pins.keyset)?;
+        let link = directory.with_held(before, keyset.clone());
         Ok(HeldLink {
             handle: self,
             link,
             before,
+            keyset,
         })
     }
 
@@ -710,7 +783,7 @@ impl Handle {
         index: u32,
         label: Vec<u8>,
         name: Vec<u8>,
-        entry_of: impl FnOnce(&KeyPair, QueueAddress) -> Result<Vec<u8>, FfiError>,
+        entry_of: impl FnOnce(&KeyPair, QueueAddress, u32) -> Result<Vec<u8>, FfiError>,
         expires_at: u64,
     ) -> Result<Published, FfiError> {
         // DIS-172: the directory ends a timed link at its end, also while
@@ -725,13 +798,21 @@ impl Handle {
         let registered = (|| {
             let key = locked(&self.inner).client.entry_key(kind, index, 0)?;
             let address = QueueAddress::parse(&rendezvous).map_err(|_| FfiError::Malformed)?;
-            let entry = entry_of(&key, address)?;
-            link.register(&label, &entry, lease)
+            link.register(
+                &label,
+                &name,
+                &key,
+                |version| entry_of(&key, address, version),
+                lease,
+            )
         })();
-        if let Err(error) = registered {
-            self.end_rendezvous(queue);
-            return Err(error);
-        }
+        let version = match registered {
+            Ok(version) => version,
+            Err(error) => {
+                self.end_rendezvous(queue);
+                return Err(error);
+            }
+        };
         let now = unix_now();
         let mut id = [0u8; 16];
         OsRng
@@ -746,7 +827,7 @@ impl Handle {
             name,
             queue,
             rendezvous,
-            version: 0,
+            version,
             created_at: now,
             expires_at,
             renewed_at: now,
@@ -1459,13 +1540,13 @@ impl Handle {
             index,
             address_label_input(&address),
             address.to_vec(),
-            |_, rendezvous| {
+            |_, rendezvous, version| {
                 let mut out = vec![0u8; ADDRESS_ENTRY_LEN];
                 AddressEntry {
                     address,
                     address_pk,
                     rendezvous: Some(rendezvous),
-                    version: 0,
+                    version,
                 }
                 .encode(&mut out)
                 .map_err(|_| FfiError::Malformed)?;
@@ -1530,12 +1611,12 @@ impl Handle {
                 0,
                 canonical.clone(),
                 canonical,
-                |key, rendezvous| {
+                |key, rendezvous, version| {
                     let entry = DirectoryEntry {
                         handle: entry_name,
                         hk_pub: key.public().to_bytes(),
                         rendezvous: Some(rendezvous),
-                        version: 0,
+                        version,
                     };
                     let mut out = vec![0u8; entry.len()];
                     let used = entry.encode(&mut out).map_err(|_| FfiError::Malformed)?;
@@ -1632,7 +1713,10 @@ impl Handle {
     /// log, and the hello leaves when the runtime has made its queue. A
     /// [`FfiEvent::Contact`] follows when the addressee accepts. A handle
     /// that a different party now holds gives [`FfiError::Takeover`], and
-    /// the hello goes only with `confirmed` (`DIS-085`).
+    /// the hello goes only with `confirmed` (`DIS-085`). In the degraded
+    /// read of Part 9 §9.5.2 the entry is unverified: the call gives
+    /// [`FfiError::Unverified`], and the hello goes only with `confirmed`
+    /// (`DIS-068`, `DIS-069`).
     pub fn send_contact_request(
         &self,
         target: String,
@@ -1658,7 +1742,11 @@ impl Handle {
                     .0
             };
             let input = handle.label_input();
-            let (found, search_key) = link.find_keyed(&input)?;
+            let (found, search_key) = link.find_read(&input)?;
+            if found.degraded && !confirmed {
+                return Err(FfiError::Unverified);
+            }
+            let degraded = found.degraded;
             let bytes = found.entry.ok_or(FfiError::NotFound)?;
             let entry = DirectoryEntry::parse(&bytes).map_err(|_| FfiError::Unverified)?;
             if entry.handle != input || Some(entry.version) != found.version {
@@ -1670,17 +1758,28 @@ impl Handle {
                 hk_pub: entry.hk_pub,
             };
             let held = locked(&self.inner).client.held_handle_key(&input)?;
-            if let Some(held) = held {
-                let verdict = link.assess_handle(&input, &search_key, &held, &resolved)?;
-                if verdict == Takeover::Warn && !confirmed {
-                    return Err(FfiError::Takeover);
+            if degraded {
+                // DIS-070: an unverified read replaces no held key, and the
+                // device holds no key from it.
+                if held.is_some_and(|held| held.hk_pub != resolved.hk_pub) {
+                    return Err(FfiError::Unverified);
                 }
+            } else {
+                if let Some(held) = held {
+                    let verdict = link.assess_handle(&input, &search_key, &held, &resolved)?;
+                    if verdict == Takeover::Warn && !confirmed {
+                        return Err(FfiError::Takeover);
+                    }
+                }
+                to_hold = Some((input, resolved));
             }
-            to_hold = Some((input, resolved));
             (entry.hk_pub, rendezvous)
         } else {
             let address = address::parse(target).map_err(|_| FfiError::Malformed)?;
-            let found = link.find(&address_label_input(&address))?;
+            let (found, _) = link.find_read(&address_label_input(&address))?;
+            if found.degraded && !confirmed {
+                return Err(FfiError::Unverified);
+            }
             let bytes = found.entry.ok_or(FfiError::NotFound)?;
             let entry = AddressEntry::parse(&bytes).map_err(|_| FfiError::Unverified)?;
             // IDN-131, DIS-128: the key hashes to the address.
@@ -1796,7 +1895,8 @@ impl Handle {
         let (handle, fragment) =
             parse_profile_link(&target, &username_case_mapped).map_err(|_| FfiError::Malformed)?;
         let input = handle.label_input();
-        let found = link.find(&input)?;
+        // DIS-067: a stale head still completes the lookup.
+        let (found, _) = link.find_read(&input)?;
         let bytes = found.entry.ok_or(FfiError::NotFound)?;
         // DIS-157: the entry names this handle at the newest version, and a
         // tombstone previews no contact.
@@ -1810,6 +1910,7 @@ impl Handle {
             name: String::new(),
             welcome: String::new(),
             picture: Vec::new(),
+            unverified: found.degraded,
         };
         if let Some(plain) = found
             .blob

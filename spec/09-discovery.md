@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 9: Discovery, Handles, and Key Transparency
 
 **Status:** Draft
-**Version:** 0.35.0
+**Version:** 0.36.0
 **Date:** 2026-10-16
 
 ---
@@ -607,6 +607,23 @@ auditor holds the intent of the holder.
 15. **[DIS-065]** A client MUST reject a `LogKeySet` whose `keyset_epoch` is at
     or below the `keyset_epoch` that the client holds.
 16. **[DIS-066]** A client build MUST ship the genesis `LogKeySet`.
+17. **[DIS-198]** A directory MUST answer a `KeySet` request of §9.10 with
+    each `SignedLogKeySet` whose `keyset_epoch` is above the epoch of the
+    request, in ascending order, and with four sets at the most. Each set
+    in the answer is signed by the set before it.
+    **[DIS-199]** A client that gets a `SignedTreeHead` whose `keyset_hash`
+    differs from the hash of the set that it holds MUST send `KeySet`
+    requests from the epoch of that set, and MUST take each set of the
+    answers under `DIS-064` and `DIS-065` until it holds the set of the head.
+    The client MUST keep each set that it took in its store, and it MUST
+    reject the head under `DIS-060` when no such set reaches the hash of the
+    head.
+
+> *Cause.* A rotation that no client can fetch makes each head after it fail
+> `DIS-060` at each client. Each lookup then fails until a new build ships
+> the new set. The chain of signed sets comes from the directory, and the
+> signers of each set sign the next one, thus the directory cannot add a set
+> of its own.
 
 Two signers rotate the third out when an auditor stops, disputes, or receives
 a legal order. Thus the loss of one signer costs one rotation and not the
@@ -616,14 +633,17 @@ directory.
 `SignedTreeHead` that passes rules 5 to 11. The loss of one signer does not put
 a client in that state, because two signers suffice. The loss of two does.
 
-17. **[DIS-067]** In the degraded read, a client MUST complete a lookup of
+18. **[DIS-067]** In the degraded read, a client MUST complete a lookup of
     §9.4. **[DIS-068]** In the degraded read, a client MUST show the result of
-    a lookup as unverified.
-18. **[DIS-069]** In the degraded read, a client MUST NOT send the hello of
+    a lookup as unverified. The client verifies the signatures of the head
+    under `DIS-058` to `DIS-060` and its proofs under `DIS-053`, and it
+    applies `DIS-061`. It MUST NOT retain that head under `DIS-063`, and it
+    MUST NOT take the key of an issuer of Part 13 §13.5 under that head.
+19. **[DIS-069]** In the degraded read, a client MUST NOT send the hello of
     §9.6 step 2 without an explicit user confirmation.
-19. **[DIS-070]** In the degraded read, a client MUST NOT replace a held
+20. **[DIS-070]** In the degraded read, a client MUST NOT replace a held
     `HK_pub` with a resolved value that differs.
-20. **[DIS-071]** In the degraded read, a client MUST NOT show a split-view
+21. **[DIS-071]** In the degraded read, a client MUST NOT show a split-view
     warning under `DIS-034`. The client holds no accepted head to compare
     against.
 
@@ -751,6 +771,14 @@ name and the picture of the sender, and in the place of the welcome text the
 note that the sender wrote with the request. A receiver MUST show the name,
 the picture, and the note as claims of the sender (§9.8), and it MUST read a
 profile that does not parse as a bare name of at most 32 bytes.
+**[DIS-201]** A client MUST
+reject a profile plaintext whose name holds a control character (Unicode
+general category Cc), U+2028, U+2029, or a bidirectional format character
+(U+061C, U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069). The same rule
+holds for the welcome text and the note, which can hold U+000A as a line
+break. A client MUST NOT write such a plaintext, and a bare name of
+`DIS-180` passes the same test. Such a character moves or hides the text
+around it, thus a stranger could show a name that reads as another one.
 **[DIS-181]** A client MUST seal each hello record in bucket `B3` of Part 6
 §6.9, whatever the hello holds. A picture and a note change the length of a
 hello, and a relay of the rendezvous queue would read that length. A request
@@ -965,7 +993,10 @@ for that user.
   last `HK_pub` of the label. **[DIS-076]** If the answer is correct, the
   directory MUST publish a new version of the label with the same `HK_pub`.
 - **[DIS-077]** After `HANDLE_RESERVE`, a directory MUST publish a registration
-  of the label as the next version after the tombstone version.
+  of the label as the next version after the tombstone version. That
+  registration runs the challenge of `DIS-197` under the key of the new
+  entry, thus no party registers the published key of the last holder with a
+  queue of its own.
 
 **The takeover warning.** A registration after the reservation is a consistent
 publication, thus the log proves it. `DIS-020` keeps a rotation silent, and a
@@ -1077,12 +1108,25 @@ write. `DIS-094`, `DIS-097` and `DIS-100` give the same for an entry. Part 5
 - **[DIS-100]** A directory MUST NOT retain `ss`, `k`, or `ans` after the
   write.
 - **[DIS-101]** A registration of a label that no version holds MUST carry the
-  token of §9.9, and it needs no challenge. §9.9.2 covers a tombstoned label.
+  token of §9.9. §9.9.2 covers a tombstoned label.
+- **[DIS-197]** Before a directory publishes a registration, it MUST run the
+  challenge above under the key of the entry that registers: `HK_pub` of a
+  `DirectoryEntry`, or `address_pk` of an `AddressEntry`. The directory
+  encapsulates to that key, `version_new` is the version that the
+  registration gives under `DIS-170`, and `ans` covers the entry. A
+  `Challenge` request of purpose `0x04` carries the key, and the directory
+  answers it with the version after the challenge. The directory MUST refuse
+  a registration without a correct `ans`, and it MUST spend the token only
+  after each other test of the registration passed.
 - **[DIS-102]** A directory MUST NOT run the challenge for the tombstone of a
   lapsed lease. The directory publishes that version itself.
 
 > *Cause.* Without a rule about who writes a new version, a party that holds a
 > registration token can publish a version of the label of another user.
+> Without `DIS-197`, a party with a token registers a lapsed label under the
+> published key of its last holder and with a queue of its own. The key is
+> the same, thus `DIS-081` shows no takeover, and each contact sends its
+> hello to that queue.
 > §9.9.2 then shows that user as a takeover. The
 > challenge above is the challenge of §9.9.1 under a second label, with the
 > entry hash in the answer. Thus a directory that relays a challenge to the
@@ -1128,12 +1172,13 @@ DirResponse {                     // padded to the smallest DIR_RESPONSE_SIZES v
 | `0x01` Evaluate | `admission Admission`, `blinded [32]u8` | `element [32]u8`, `proof [64]u8` |
 | `0x02` Lookup | `search_key [64]u8` | `head_len u16`, the newest `SignedTreeHead`, `blob_len u16`, the sealed blob of §9.3.1 or nothing, the `LookupProof` |
 | `0x03` Head | `from_size u64`, 0 for none | `head_len u16`, the newest `SignedTreeHead`, `count u8`, `count` hashes of the consistency proof from `from_size` |
-| `0x04` Register | `token [162]u8`, `label_len u16`, the label input, `entry_len u16`, the entry, and optionally `lease u32` | empty |
-| `0x05` Challenge | `purpose u8` (0x01 renew, 0x02 write, 0x03 blob), `label_len u16`, the label input | the 1 136 bytes of §9.9.1 or §9.9.3, then `lease_epoch u64` for a renewal |
+| `0x04` Register | `token [162]u8`, `label_len u16`, the label input, `entry_len u16`, the entry, `answer [32]u8` of `DIS-197`, and optionally `lease u32` | empty |
+| `0x05` Challenge | `purpose u8` (0x01 renew, 0x02 write, 0x03 blob, 0x04 registration), `label_len u16`, the label input, and for a registration the key of the entry `[1216]u8` | the 1 136 bytes of §9.9.1 or §9.9.3, then `lease_epoch u64` for a renewal or `label_version u32` for a registration |
 | `0x06` Write | `label_len u16`, the label input, `answer [32]u8`, `entry_len u16`, the entry | empty |
 | `0x07` Renew | `label_len u16`, the label input, `answer [32]u8` | empty |
 | `0x08` Blob | `label_len u16`, the label input, `answer [32]u8`, `blob_len u16`, the sealed blob of §9.3.1 or nothing | empty |
 | `0x09` Version | `search_key [64]u8`, `label_version u32` | `head_len u16`, the newest `SignedTreeHead`, the `VersionProof` of §9.9.2 |
+| `0x0A` KeySet | `keyset_epoch u64` that the client holds | `count u8`, then `count` times `len u16` and a `SignedLogKeySet` of §9.5.2 (`DIS-198`) |
 | `0x10` Issue | Part 13 §13.9 | Part 13 §13.9 |
 
 The label input is the canonical handle of §9.3.2 for a handle, the input of
@@ -1151,6 +1196,10 @@ the record of the label in any case; only the evaluation of a lookup hides it.
   `SHA3-256("umbra/v1/lookup-pow-verifier" || pk)`, where `pk` is the VOPRF key of the directory. A solution thus
   serves one blinded element, and a second request with that element gains
   nothing, because it gets the same element back.
+  **[DIS-200]** A directory MUST hold the seed of each solution that it
+  took for this epoch and the one before it, and it MUST refuse a solution
+  whose seed it holds before it verifies that solution. A second request
+  then costs the directory no Equi-X check, no evaluation, and no proof.
 - **[DIS-166]** A directory MUST stage a registration, a write, and a renewal
   for the next epoch of the log, and a client MUST read its own version under
   `DIS-137` at the first head after it. **[DIS-167]** A directory MUST close an
@@ -1166,8 +1215,10 @@ the record of the label in any case; only the evaluation of a lookup hides it.
 - **[DIS-169]** A directory MUST refuse a registration whose entry does not
   name the label input: the handle of a `DirectoryEntry`, or the `address`
   of an `AddressEntry` whose `check` passes. **[DIS-170]** The version of a
-  registered entry MUST be 0, and the version of a written entry MUST be the
-  version of the label plus one.
+  registered entry MUST be 0 for a label that no version holds, and the
+  version after the tombstone for a label after `HANDLE_RESERVE`
+  (`DIS-077`). The version of a written entry MUST be the version of the
+  label plus one.
 - **[DIS-171]** A holder MAY write the tombstone form of §9.3 under the
   challenge of §9.9.3 to retire its entry before its lease ends.
   `HANDLE_RESERVE` holds for such a tombstone as for a lapsed lease.

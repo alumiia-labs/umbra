@@ -36,7 +36,8 @@ pub fn placement_list(handle: &[u8; 32], relays: &[AttachmentRelay]) -> Vec<[u8;
     let mut families: Vec<[u8; 32]> = Vec::new();
     let mut list = Vec::new();
     for (_, relay) in ranked {
-        if families.contains(&relay.family_id) {
+        // REL-209: a zero family_id declares no family.
+        if relay.family_id != [0; 32] && families.contains(&relay.family_id) {
             continue;
         }
         families.push(relay.family_id);

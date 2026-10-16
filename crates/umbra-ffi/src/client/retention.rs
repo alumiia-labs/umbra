@@ -172,7 +172,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 message: *message,
             });
         }
-        self.drop_sync_sent_of(&due)?;
+        let messages: Vec<MsgRef> = due.iter().map(|(_, message)| *message).collect();
+        self.drop_sync_sent_of(&messages)?;
         self.advance_watermarks(pruned, rng)?;
         Ok(due.len())
     }

@@ -1,12 +1,15 @@
 package com.alumiialabs.umbra
 
 import android.Manifest
+import android.app.KeyguardManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 
@@ -33,6 +36,11 @@ object Notifier {
      * Null stands for a push that named none.
      */
     private val pushOwed = HashSet<String?>()
+
+    /** Each alert that shows a sender or a text, by its identifier, with its group. */
+    private val withContent = HashMap<Int, String>()
+
+    private var watchesScreen = false
 
     private fun manager(context: Context) =
         context.getSystemService(NotificationManager::class.java)
@@ -86,7 +94,11 @@ object Notifier {
             watches -> R.string.notify_locked
             // Private mode holds no connection between two wakes of its clock.
             Modes.mode(context) == NotifyMode.Private -> R.string.notify_unlocked
-            else -> R.string.notify_holds_connection
+            else -> when (Core.linkState) {
+                LinkState.Connected -> R.string.notify_holds_connection
+                LinkState.Connecting -> R.string.connection_connecting
+                LinkState.Down -> R.string.connection_offline
+            }
         }
         // The notice names the state alone: the user knows the app.
         return Notification.Builder(context, CARRIER_CHANNEL)
@@ -97,7 +109,7 @@ object Notifier {
             .build()
     }
 
-    /** The service runs on, and its notice follows the state of the client. */
+    /** The service runs on, and its notice follows the state of the client and of its link. */
     fun refreshCarrier(context: Context) {
         manager(context).notify(CARRIER_ID, carrier(context))
     }
@@ -133,25 +145,78 @@ object Notifier {
             text?.fill('\u0000')
             return
         }
+        // NTF-119: the system setting that shows all content ignores the
+        // public version, thus a locked device gets the bare alert.
+        val shows = (title != null || (text != null && text.isNotEmpty())) && !isDeviceLocked(context)
         val alert = Notification.Builder(context, MESSAGE_CHANNEL)
             .setSmallIcon(R.drawable.ic_stat_umbra)
-            .setContentTitle(title ?: context.getString(R.string.common_new_message))
-            .apply { if (text != null && text.isNotEmpty()) setContentText(java.nio.CharBuffer.wrap(text)) }
+            .setContentTitle(title?.takeIf { shows } ?: context.getString(R.string.common_new_message))
+            .apply { if (shows && text != null && text.isNotEmpty()) setContentText(java.nio.CharBuffer.wrap(text)) }
             .setGroup(conversation.label)
             .setOnlyAlertOnce(quiet)
             .setAutoCancel(true)
             .setContentIntent(openApp(context))
-            // NTF-119: the lock screen shows that an alert exists, and no
-            // more.
             .setVisibility(Notification.VISIBILITY_PRIVATE)
             .setPublicVersion(lockScreen(context))
             .build()
+        val id = conversation.hashCode()
         // NTF-018: the alert of the conversation takes the place of the alert
         // of its push, thus one message shows one alert.
         synchronized(pushOwed) { pushOwed.clear() }
         manager(context).cancel(MESSAGE_TAG, PUSH_ID)
-        manager(context).notify(MESSAGE_TAG, conversation.hashCode(), alert)
+        synchronized(withContent) {
+            if (shows) withContent[id] = conversation.label else withContent.remove(id)
+        }
+        if (shows) watchScreen(context)
+        manager(context).notify(MESSAGE_TAG, id, alert)
         text?.fill('\u0000')
+    }
+
+    private fun isDeviceLocked(context: Context): Boolean {
+        val keyguard = context.getSystemService(KeyguardManager::class.java) ?: return true
+        return keyguard.isKeyguardLocked || keyguard.isDeviceLocked
+    }
+
+    /**
+     * NTF-119: the screen goes off before the lock screen shows, thus each
+     * alert with a sender or a text takes its bare form then, with no sound.
+     */
+    private fun watchScreen(context: Context) {
+        val app = context.applicationContext
+        synchronized(withContent) {
+            if (watchesScreen) return
+            watchesScreen = true
+        }
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) = hideContent(app)
+        }
+        val filter = IntentFilter(Intent.ACTION_SCREEN_OFF)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            app.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            app.registerReceiver(receiver, filter)
+        }
+    }
+
+    private fun hideContent(context: Context) {
+        val shown = synchronized(withContent) { HashMap(withContent).also { withContent.clear() } }
+        if (shown.isEmpty()) return
+        val manager = manager(context)
+        val active = manager.activeNotifications.filter { it.tag == MESSAGE_TAG }.map { it.id }.toSet()
+        for ((id, group) in shown) {
+            if (id !in active) continue
+            val bare = Notification.Builder(context, MESSAGE_CHANNEL)
+                .setSmallIcon(R.drawable.ic_stat_umbra)
+                .setContentTitle(context.getString(R.string.common_new_message))
+                .setGroup(group)
+                .setOnlyAlertOnce(true)
+                .setAutoCancel(true)
+                .setContentIntent(openApp(context))
+                .setVisibility(Notification.VISIBILITY_PRIVATE)
+                .setPublicVersion(lockScreen(context))
+                .build()
+            manager.notify(MESSAGE_TAG, id, bare)
+        }
     }
 
     /**
@@ -221,6 +286,7 @@ object Notifier {
     /** The user looks at the app, thus each alert is old. */
     fun clear(context: Context) {
         synchronized(pushOwed) { pushOwed.clear() }
+        synchronized(withContent) { withContent.clear() }
         val manager = manager(context)
         manager.activeNotifications
             .filter { it.tag == MESSAGE_TAG || it.id == LOCKED_ID }

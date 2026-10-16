@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 7: Device Sets, History Sync, and Revocation
 
 **Status:** Draft
-**Version:** 0.35.0
+**Version:** 0.36.0
 **Date:** 2026-10-16
 
 ---
@@ -1233,7 +1233,8 @@ for this path, which is a p50 of 6 s and a p95 of 20 s in Instant mode.
 
 **That target covers an unlocked owner.** Part 14 rule `IMP-119` locks a
 client after 15 minutes with no action of the user. A locked client
-holds no key and runs no network (Part 14 rule `IMP-127`). A push wake of a
+holds no key that reads a queue, and runs no network run (Part 14 rule
+`IMP-127`). The watch of Part 8 §8.4.3 in Direct mode reads no queue. A push wake of a
 locked owner shows which conversation waits (Part 8 rule `NTF-136`), and it
 takes no record. Thus a locked owner sends nothing for another device, reads
 no pairwise queue, and publishes no sync record again under `DEV-308`.
@@ -1576,7 +1577,12 @@ The client does not keep the earlier text. The author discards the Part 14
 **A record that arrives before its target.** Messages arrive out of order. **[DEV-093]** A
 client MUST hold an edit or a deletion whose target has not arrived in a
 **pending reference table**. The key of that table is the triple (conversation,
-direction, target), or the triple (group, author, target). **[DEV-094]** A client MUST store
+direction, target), or the triple (group, author, target). A deletion of scope
+`0x01` names a message of either party, thus its key is the pair
+(conversation, target), and it takes the target of each direction. A client
+MUST apply an edit, a deletion, or a reaction to a target that an earlier
+record of the same batch stored, and it MUST apply a deletion of scope `0x01`
+after the other records of its batch. **[DEV-094]** A client MUST store
 the `msg_ref` of Part 6 §6.6 as that target.
 
 | Parameter | Value |
@@ -1737,7 +1743,10 @@ holds the plaintext. **[DEV-126]** Thus the interface MUST state each limit belo
   each record, and it MUST NOT send a record to the other party. The
   interface MUST state the line above for that act. A pairwise conversation
   with no message then leaves the list until the next message. A group
-  stays in the list until the user leaves it.
+  stays in the list until the user leaves it. The act MUST also remove each
+  edit, reaction, and vote of the user in that conversation that waits for
+  its relay, and each pending edit of `DEV-093` with its text. A deletion for
+  the other party that waits, and a pending deletion, stay.
 - **[DEV-334]** A user MAY delete a whole pairwise conversation for everyone in
   one act. The client MUST send that act as the deletion of `DEV-333` and as
   one record of scope `0x03` on the pairwise channel, under

@@ -271,9 +271,12 @@ object Photos {
     class Decoder : FileSink {
         var image: ImageBitmap? = null
 
+        // An exception that crosses into Rust ends the process.
         override fun put(bytes: ByteArray) {
             try {
                 image = bounded(bytes, SHOWN_SIDE_MAX)
+            } catch (fault: Exception) {
+                image = null
             } finally {
                 bytes.fill(0)
             }

@@ -70,20 +70,20 @@ column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 258 | 90 | 1 | 0 | 9 | **358** |
-| `IDN` | 135 | 46 | 1 | 0 | 5 | **187** |
+| `NET` | 262 | 90 | 1 | 0 | 9 | **362** |
+| `IDN` | 136 | 46 | 1 | 0 | 5 | **188** |
 | `CRY` | 120 | 27 | 0 | 0 | 1 | **148** |
-| `WIR` | 417 | 87 | 0 | 0 | 7 | **511** |
+| `WIR` | 417 | 88 | 0 | 0 | 7 | **512** |
 | `DEV` | 220 | 94 | 0 | 0 | 12 | **326** |
-| `NTF` | 83 | 29 | 0 | 0 | 3 | **115** |
-| `DIS` | 131 | 36 | 0 | 0 | 3 | **170** |
-| `REL` | 170 | 34 | 1 | 0 | 3 | **208** |
-| `GRP` | 233 | 65 | 0 | 0 | 5 | **303** |
+| `NTF` | 84 | 29 | 0 | 0 | 3 | **116** |
+| `DIS` | 136 | 36 | 0 | 0 | 3 | **175** |
+| `REL` | 171 | 34 | 1 | 0 | 3 | **209** |
+| `GRP` | 234 | 65 | 0 | 0 | 5 | **304** |
 | `ATT` | 145 | 46 | 2 | 0 | 3 | **196** |
 | `ABU` | 71 | 29 | 1 | 0 | 0 | **101** |
 | `IMP` | 117 | 41 | 1 | 0 | 2 | **161** |
 | `SEC` | 4 | 3 | 0 | 0 | 1 | **8** |
-| **All** | 2127 | 636 | 7 | 0 | 58 | **2828** |
+| **All** | 2140 | 637 | 7 | 0 | 58 | **2842** |
 
 ## SCP — Scope and Conventions
 
@@ -499,6 +499,10 @@ Source: `spec/03-network-architecture.md`
 | `NET-358` | §3.2.6 | MUST | A client | A client MUST set the first guard of a channel that holds no guard of this client and whose handshake ended. |  |  |
 | `NET-359` | §3.2.6 | MUST | The question of `NET-355` | The question of `NET-355` MUST state that an acceptance gives the conversation to the device that sent the request. |  |  |
 | `NET-360` | §3.5.2 | MUST | (unstated) | On a circuit that carries the attachment commands of Part 12, a relay MUST send the answers to the commands of one cell when it serves that cell, with no wait for a tick, up to 256 KiB of cells. |  |  |
+| `NET-361` | §3.4.3 | MUST | A relay | A relay MUST keep the ephemeral key `e` of the `HopHello` of each build that it runs a key agreement for, at least the last `HELLO_REPLAY_MIN` of them. |  |  |
+| `NET-362` | §3.9 | MUST | A relay | A relay MUST hold at most `CIRCUIT_DELAYED_MAX` forward cells of one circuit for their delay, and at most `RELAY_DELAYED_MAX` forward cells in all. |  |  |
+| `NET-363` | §3.6.3 | MUST | A relay of layer 1 or 2 that holds a relay set | A relay of layer 1 or 2 that holds a relay set MUST hold one loop chain through each relay of the next layer that it holds a link to. |  |  |
+| `NET-364` | §3.5.2 | MUST | A relay | A relay MUST close a link whose backlog stays above `LINK_DRAIN_MARK` for a whole `LINK_DRAIN_WINDOW` while the relay writes less than `LINK_DRAIN_RATE` to it in that window. |  |  |
 
 ## IDN — Identity
 
@@ -693,6 +697,7 @@ Source: `spec/04-identity.md`
 | `IDN-192` | §4.7.3 | MUST | A new split | A new split MUST draw a new `set_id`, and the interface MUST show the holders of the current split alone. |  |  |
 | `IDN-193` | §4.6 | MUST | The set of tables | The set of tables MUST carry a MAC of the same form, under `table_id = 0x00`: one `row_tag` for each table that the store holds, with the `table_id` of that table as `row_id` and 16 zero bytes as `record_tag`. |  |  |
 | `IDN-194` | §4.7.2 | MUST | A backup object | A backup object MUST carry the renewal guard of each contact in the row of that contact: the `guard_seq` and the secret `R` of Part 3 rule `NET-354`. |  |  |
+| `IDN-195` | §4.6 | MUST | A client | A client MUST run that scan over the contact table and over each table that holds a handshake before the first record of a run leaves under a ratchet from the store. |  |  |
 
 ## CRY — Cryptographic Core
 
@@ -842,7 +847,7 @@ Source: `spec/05-cryptographic-core.md`
 | `CRY-145` | §5.5.5 | MUST | A party | A party MUST start an epoch at the first record of a DH sending chain and at no other record. |  |  |
 | `CRY-146` | §5.5.5 | MUST | The first record of a chain | The first record of a chain MUST carry a braid frame; rule `CRY-019` does not apply to that record, and a client selects a bucket that holds the frame. |  |  |
 | `CRY-147` | §5.5.5 | MUST | P | P MUST apply the mix of `CRY-064` for epoch `e` immediately before it derives the sending chain of its first DH ratchet step whose chain carries an epoch above `e`. |  |  |
-| `CRY-148` | §5.5.5 | MUST | The peer | The peer MUST apply the same mix immediately before it derives the receiving chain of the step that the same chain starts, which it recognizes by the epoch number in the frame of any record of that chain. |  |  |
+| `CRY-148` | §5.5.5 | MUST | The peer | The peer MUST apply the same mix immediately before it derives the receiving chain of the step that the same chain starts. |  |  |
 | `CRY-149` | §5.5.5 | MUST | A party | A party MUST retain `ss_e` from the moment it computes it, by encapsulation or by decapsulation, until the mix consumes it. |  |  |
 | `CRY-150` | §5.4.1 | MUST | A client | A client MUST write the six fields in the order above, with `bundle_len` before `relay_bundle`, and a reader MUST reject a bundle with bytes after `relay_bundle`. |  |  |
 | `CRY-151` | §5.4.1 | MUST | An HPKE of AUX-6 | An HPKE of AUX-6 MUST build its `suite_id` as `"HPKE" || kem_id || kdf_id || aead_id` from the identifiers of §5.4, which are `0x0001` each, and it MUST use `UMBRA-KEM` as the KEM with `Nsecret` of 32, `Nenc` of 1 120, and `Npk` of 1 216, HKDF-SHA3-256 as the KDF, and ChaCha20-Poly1305 as the AEAD, with the labeled extract and expand of RFC 9180 §4 unchanged. |  |  |
@@ -978,9 +983,9 @@ Source: `spec/06-wire-format.md`
 | `WIR-137` | §6.2.2 | MUST NOT | A client | A client MUST NOT reuse a `session_id` across two sessions to one relay. |  |  |
 | `WIR-138` | §6.2.2 | MUST | A sender | A sender MUST increase `seq` by one for each frame, and it MUST start at zero. |  |  |
 | `WIR-139` | §6.2.2 | MUST | A sender | A sender MUST close the session before `seq` wraps. |  |  |
-| `WIR-140` | §6.2.2 | MUST | A sender | A sender MUST send each frame one time, and it MUST set bit 0 of `flags` to zero. |  |  |
+| `WIR-140` | §6.2.2 | MUST | A sender | A sender MUST send each frame one time, and it MUST set `flags` to zero. |  |  |
 | `WIR-141` | §6.2.2 | MUST | A receiver | A receiver MUST ignore a frame whose `seq` it already accepted. |  |  |
-| `WIR-142` | §6.2.2 | MUST | A receiver | A receiver MUST reject a frame whose `flags` holds a non-zero value above bit 0. |  |  |
+| `WIR-142` | §6.2.2 | MUST | A receiver | A receiver MUST reject a frame whose `flags` is not zero. |  |  |
 | `WIR-143` | §6.3 | MUST | A measurer | A measurer MUST send a `MEAS_OPEN` cell in bucket `B3`. |  |  |
 | `WIR-146` | §6.6.3 | MUST | A sender | A sender MUST wrap each group control object in a `GroupControl`. |  |  |
 | `WIR-147` | §6.6.3 | MUST | A parser | A parser MUST reject a `control_type` that the table above does not hold. |  |  |
@@ -1294,7 +1299,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-484` | §6.6.3 | MUST | A receiver | A receiver MUST discard a `RekeyRecord` on a pairwise channel whose chain fields are not zero, and a `RekeyRecord` in a group record whose chain fields are zero. |  |  |
 | `WIR-485` | §6.2.1 | MUST NOT | A relay | A relay MUST NOT negotiate the `permessage-deflate` extension of RFC 7692, or any other WebSocket extension, on an L1 connection. |  |  |
 | `WIR-486` | §6.2.1 | MUST | (unstated) | A web client sends each capsule through the WebSocket API of its browser, thus rules `WIR-225` to `WIR-228` bind the native client and the relay, and the browser decides the record layout of the client. |  |  |
-| `WIR-487` | §6.4 | MUST | A party | A party MUST reject a command of `ACK`, `NKEY`, `NID`, `QUOTA`, `NACK`, `SUB`, `UNSUB`, `NSUB`, `NWAKE`, or `DEL` whose `payload_len` differs from the length that the table above gives. |  |  |
+| `WIR-487` | §6.4 | MUST | A party | A party MUST reject a command of `ACK`, `NKEY`, `NID`, `QUOTA`, `NACK`, `SUB`, `UNSUB`, `NSUB`, `NWAKE`, `DEL`, or `COVER` whose `payload_len` differs from the length that the table above gives. |  |  |
 | `WIR-488` | §6.4 | MUST | A party | A party MUST reject a `NEW` whose `payload_len` differs from 64 plus the length of its `Admission`, and an `IDS` whose `payload_len` is not 96. |  |  |
 | `WIR-489` | §6.6.3 | MUST | A parser | A parser MUST reject an `op` of a `PlainEpoch` that the layout above does not hold, and a `PlainEpoch` whose length does not equal the sum of the fields of its `op`. |  |  |
 | `WIR-490` | §6.6.3 | MUST | A parser | A parser MUST reject a `GrantingEpoch` or a `ModerationEpoch` whose length does not hold the one 1 952-byte roster key of its signer and the 3 309-byte signature after the fields before them. |  |  |
@@ -1306,7 +1311,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-496` | §6.4 | MUST | A relay | A relay MUST answer an accepted `SEND` with one `QUOTA` under `WIR-494`. |  |  |
 | `WIR-497` | §6.4 | MUST | A client | A client MUST take a `QUOTA` or a `NACK` as an answer only when its `corr_id` names a command of the same circuit that holds no answer yet, and it MUST discard each other one. |  |  |
 | `WIR-498` | §6.4 | MUST NOT | A client | A client MUST NOT use a `corr_id` two times on one circuit. |  |  |
-| `WIR-499` | §6.2.1 | MUST | A sender | A sender MUST put an `UMBRA_SESSION` capsule in a frame with the 7-bit length form of RFC 6455 §5.2, because that capsule is 47, 35, 23, or 15 bytes. |  |  |
+| `WIR-499` | §6.2.1 | MUST | A sender | A sender MUST put an `UMBRA_SESSION` capsule in a frame with the 7-bit length form of RFC 6455 §5.2, because that capsule is 47, 43, 23, or 15 bytes. |  |  |
 | `WIR-500` | §6.2.1 | MUST | A receiver | A receiver MUST reject a frame in the 16-bit length form whose length is below 126, and a frame in the 64-bit length form. |  |  |
 | `WIR-501` | §6.2.2 | MUST | (unstated) | Each direction of a session holds a `seq` of its own. |  |  |
 | `WIR-502` | §6.4.2 | MUST | A party | A party MUST send each flight of `UMBRA-XKhfs` as a `HandshakeRecord`, and in the smallest bucket whose L7 row of §6.9 holds the record. |  |  |
@@ -1366,6 +1371,7 @@ Source: `spec/06-wire-format.md`
 | `WIR-557` | §6.6.6 | MUST | A sender | A sender MUST set `open_seconds` to 0, or to a value from `POLL_OPEN_MIN` to `POLL_OPEN_MAX`. |  |  |
 | `WIR-558` | §6.6.1 | MUST | A receiver | A receiver MUST reject a record of scope `0x03` that a group record carries. |  |  |
 | `WIR-559` | §6.6.1 | MUST | A parser | A parser MUST reject a record of scope `0x03` whose `k` is not 1. |  |  |
+| `WIR-560` | §6.5 | MUST NOT | A receiver | A receiver MUST NOT count a hole at a `send_index` of a record that opened, also in an earlier run, thus it MUST keep the indices that opened in the store with the channel. |  |  |
 
 ## DEV — Device Sets
 
@@ -1725,7 +1731,7 @@ Source: `spec/08-notifications.md`
 | `NTF-019` | §8.5 | MUST | A queue relay | A queue relay MUST apply the window to each handle, whatever the class of the conversation behind it. |  |  |
 | `NTF-027` | §8.7 | MUST | This text is normative, and it | This text is normative, and it MUST appear in the security documentation that the user reads: |  |  |
 | `NTF-029` | §8.7 | MUST | The client | The client MUST take the route to the NDR from the pin of its build (`NTF-127`) and from no relay. |  |  |
-| `NTF-031` | §8.2.1 | MUST | A device | A device MUST make one `k_tok` and one `handle` for each group of at most `MAX_QUEUES_PER_HANDLE` queues. |  |  |
+| `NTF-031` | §8.2.1 | MUST | A device | A device in Instant mode MUST make one `k_tok` and one `handle` for each group of at most `MAX_QUEUES_PER_HANDLE` queues. |  |  |
 | `NTF-032` | §8.2.1 | MUST NOT | A device | A device MUST NOT put more than `MAX_QUEUES_PER_HANDLE` queues under one handle. |  |  |
 | `NTF-033` | §8.2.1 | MUST | A device | A device MUST set `MAX_QUEUES_PER_HANDLE` equal to the `MAX_QUEUES_PER_SESSION` of Part 3 §3.2.5, which is 8. |  |  |
 | `NTF-034` | §8.2.1 | MUST | A device | A device MUST divide its queues across handles again at each rotation of NTF-007. |  |  |
@@ -1812,7 +1818,7 @@ Source: `spec/08-notifications.md`
 | `NTF-134` | §8.2.7 | MUST | An NDR | An NDR MUST refuse an `NPUSH` whose carrier it does not serve, and it MUST NOT post to an address that no provider of its own names. |  |  |
 | `NTF-135` | §8.4.1 | MUST | An Android client in Instant mode | An Android client in Instant mode or in Direct mode MUST hold a **wake table** outside `K_store`: each `k_ntf_root` that a binding of §8.2.3 uses, and each `queue_alias` with the conversation of its queue. |  |  |
 | `NTF-136` | §8.4.1 | MUST | A locked client | A locked client MUST open each blob of a push or of a watch with that table under `NTF-075` to `NTF-079`. |  |  |
-| `NTF-137` | §8.4.1 | MUST | A client | A client MUST delete the wake table and its keystore key at a local wipe of Part 7 `DEV-008`, and when the mode leaves Instant. |  |  |
+| `NTF-137` | §8.4.1 | MUST | A client | A client MUST delete the wake table and its keystore key at a local wipe of Part 7 `DEV-008`, and when the mode changes to Private mode or Off mode. |  |  |
 | `NTF-138` | §8.2.7 | MUST | The NDR | The NDR MUST drop a registration `NDR_REG_TTL` after the `NREG` that made or last moved it, and it MUST answer `gone` to an `NPUSH` for it from then on. |  |  |
 | `NTF-139` | §8.3 | MUST | A client in Direct mode | A client in Direct mode MUST hold no push token. |  |  |
 | `NTF-140` | §8.3 | MUST NOT | A build with no push carrier of a platform | A build with no push carrier of a platform MUST NOT offer Instant mode. |  |  |
@@ -1820,7 +1826,8 @@ Source: `spec/08-notifications.md`
 | `NTF-142` | §8.4.3 | MUST | A client in Direct mode | A client in Direct mode MUST bind each inbound queue with `NKEY` and `NBIND`, as Instant mode does, under the notifier key of §8.2.4. |  |  |
 | `NTF-143` | §8.4.3 | MUST | The binding of a client with no push token | The binding of a client with no push token MUST name `WATCH_HANDLE`, which is 16 zero bytes, and a `k_tok` of 32 zero bytes. |  |  |
 | `NTF-144` | §8.4.3 | MUST | A queue relay | A queue relay MUST send each record that no live subscription takes (`NTF-128`) as an `NWAKE` on the circuit of a live watch of its queue, with the blob of §8.2.2 sealed under the binding of the queue, and it MUST then send no `NPUSH` for that record. |  |  |
-| `NTF-145` | §8.4.3 | MUST | A client in Direct mode | A client in Direct mode MUST hold a **watch table** outside `K_store`: the ingress relay of its last run, the relay entries of its chains, and the relay, the `notifier_id`, and the notifier secret of each bound queue. |  |  |
+| `NTF-145` | §8.4.3 | MUST | A client in Direct mode | A client in Direct mode MUST hold a **watch table** outside `K_store`: the ingress relay of its last run, the relay set of its last run, and the relay, the `notifier_id`, and the notifier secret of each bound queue. |  |  |
+| `NTF-146` | §8.4.3 | MUST | A queue relay | A queue relay MUST send at most one `NWAKE` for one queue inside one `WAKE_COALESCE_WINDOW`. |  |  |
 
 ## DIS — Discovery, Handles, and Key Transparency
 
@@ -1928,7 +1935,7 @@ Source: `spec/09-discovery.md`
 | `DIS-098` | §9.9.3 | MUST NOT | A directory | A directory MUST NOT publish `entry_new` without a correct `ans`. |  |  |
 | `DIS-099` | §9.9.3 | MUST NOT | A directory | A directory MUST NOT publish an `entry_new` whose `version` is not the current version plus one. |  |  |
 | `DIS-100` | §9.9.3 | MUST NOT | A directory | A directory MUST NOT retain `ss`, `k`, or `ans` after the write. |  |  |
-| `DIS-101` | §9.9.3 | MUST | A registration of a label that no version holds | A registration of a label that no version holds MUST carry the token of §9.9, and it needs no challenge. |  |  |
+| `DIS-101` | §9.9.3 | MUST | A registration of a label that no version holds | A registration of a label that no version holds MUST carry the token of §9.9. |  |  |
 | `DIS-102` | §9.9.3 | MUST NOT | A directory | A directory MUST NOT run the challenge for the tombstone of a lapsed lease. |  |  |
 | `DIS-103` | §9.3.3 | MUST NOT | A client | A client MUST NOT publish an `AddressEntry` without an explicit act of the user for that Public Address. |  |  |
 | `DIS-104` | §9.3.3 | MUST | A client | A client MUST set `address_pk` to the public half of the `PublicAddressKey_j` whose hash is `address`. |  |  |
@@ -1979,7 +1986,7 @@ Source: `spec/09-discovery.md`
 | `DIS-167` | §9.10 | MUST | A directory | A directory MUST close an epoch of the log at each `DIRECTORY_EPOCH`, and an epoch with no update closes too. |  |  |
 | `DIS-168` | §9.10 | MUST | A directory | A directory MUST hold an issued challenge for `CHALLENGE_TTL` at the most, and it MUST refuse an answer after that time. |  |  |
 | `DIS-169` | §9.10 | MUST | A directory | A directory MUST refuse a registration whose entry does not name the label input: the handle of a `DirectoryEntry`, or the `address` of an `AddressEntry` whose `check` passes. |  |  |
-| `DIS-170` | §9.10 | MUST | The version of a registered entry | The version of a registered entry MUST be 0, and the version of a written entry MUST be the version of the label plus one. |  |  |
+| `DIS-170` | §9.10 | MUST | The version of a registered entry | The version of a registered entry MUST be 0 for a label that no version holds, and the version after the tombstone for a label after `HANDLE_RESERVE` (`DIS-077`). |  |  |
 | `DIS-171` | §9.10 | MAY | A holder | A holder MAY write the tombstone form of §9.3 under the challenge of §9.9.3 to retire its entry before its lease ends. |  |  |
 | `DIS-172` | §9.10 | MAY | A registration | A registration MAY end with `lease`, in seconds. |  |  |
 | `DIS-173` | §9.10 | MUST | A directory | A directory MUST refuse a `lease` below `LEASE_MIN` or above `HANDLE_LEASE` as malformed. |  |  |
@@ -1998,6 +2005,11 @@ Source: `spec/09-discovery.md`
 | `DIS-194` | §9.10 | MUST NOT | (unstated) | A directory MUST answer a `Challenge` request for a label that holds a live challenge of the same purpose with that challenge again, and a wrong answer MUST NOT end it. |  |  |
 | `DIS-195` | §9.8 | MUST | A client | A client MUST take a pet-avatar from a picker that gives the client the one picture that the user selected. |  |  |
 | `DIS-196` | §9.8 | MUST NOT | (unstated) | A client MUST hold a pet-avatar under the record encryption of Part 14 §14.6.4, and it MUST NOT write the selected picture or the result to a file outside the store. |  |  |
+| `DIS-197` | §9.9.3 | MUST | Before a directory publishes a registration, it | Before a directory publishes a registration, it MUST run the challenge above under the key of the entry that registers: `HK_pub` of a `DirectoryEntry`, or `address_pk` of an `AddressEntry`. |  |  |
+| `DIS-198` | §9.5.2 | MUST | A directory | A directory MUST answer a `KeySet` request of §9.10 with each `SignedLogKeySet` whose `keyset_epoch` is above the epoch of the request, in ascending order, and with four sets at the most. |  |  |
+| `DIS-199` | §9.5.2 | MUST | (unstated) | A client that gets a `SignedTreeHead` whose `keyset_hash` differs from the hash of the set that it holds MUST send `KeySet` requests from the epoch of that set, and MUST take each set of the answers under `DIS-064` and `DIS-065` until it holds the set of the head. |  |  |
+| `DIS-200` | §9.10 | MUST | A directory | A directory MUST hold the seed of each solution that it took for this epoch and the one before it, and it MUST refuse a solution whose seed it holds before it verifies that solution. |  |  |
+| `DIS-201` | §9.6 | MUST | A client | A client MUST reject a profile plaintext whose name holds a control character (Unicode general category Cc), U+2028, U+2029, or a bidirectional format character (U+061C, U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069). |  |  |
 
 ## REL — Relay Directory
 
@@ -2213,6 +2225,7 @@ Source: `spec/10-relay-directory.md`
 | `REL-206` | §10.2 | MUST | Under that directory, an authority | Under that directory, an authority MUST list a relay of its own operator at the class that the operator declares, with three exceptions. |  |  |
 | `REL-207` | §10.3 | MUST | A measurer | A measurer MUST give a result for a relay only when that relay opened the measurement session. |  |  |
 | `REL-208` | §10.4.2 | MUST | An authority whose relay refuses its report queue | An authority whose relay refuses its report queue MUST send a `NEW` for that queue again after a wait. |  |  |
+| `REL-209` | §10.6.3 | MUST | A client | A client MUST read a `family_id` of 32 zero bytes as no family. |  |  |
 
 ## GRP — Private Groups
 
@@ -2477,7 +2490,7 @@ Source: `spec/11-private-groups.md`
 | `GRP-376` | §11.4.3 | MUST | (unstated) | A member that receives a `KeyRequest` of scope `0x02` on a pairwise channel MUST answer it at once when `GRP-404` permits, because no other member read it, and MUST post it otherwise as a group record that keeps the `index` of `WIR-523`, thus another member answers under the backoff. |  |  |
 | `GRP-377` | §11.4.3 | MUST NOT | A member | A member MUST NOT answer a `KeyRequest` from an index that the current roster does not hold. |  |  |
 | `GRP-378` | §11.4.3 | MUST | A member | A member MUST discard an epoch request above that rate. |  |  |
-| `GRP-379` | §11.4.3 | MUST | A receiver | A receiver MUST reject a slot whose `own_count` is above 0 when the rotator held a role below `admin` at the `roster_epoch` of the record, because only an admin holds `own_sk`. |  |  |
+| `GRP-379` | §11.4.3 | MUST | A receiver | A receiver MUST NOT take the owner credentials of a slot whose rotator holds a role below `admin`, because only an admin holds `own_sk`. |  |  |
 | `GRP-380` | §11.4.1 | MAY | An implementation | An implementation MAY draw that delay as `mean × ln(2^32 / (u + 1))` from one uniform 32-bit `u`, with a logarithm from the bit length and a sixteen-entry table of the fraction; the shape of the distribution is what the backoff needs, and not its precision. |  |  |
 | `GRP-381` | §11.9.2 | MUST | A verifier | A verifier MUST run every check of an epoch before it records that epoch as a successor of its predecessor, thus a rejected epoch never counts as one of the two successors of `GRP-070`. |  |  |
 | `GRP-382` | §11.9.2 | MUST | A plain epoch that adds or removes a member | A plain epoch that adds or removes a member MUST come from a member at `admin` or above, and a self-removal from the member that leaves; a verifier MUST discard each other plain epoch under `GRP-066`. |  |  |
@@ -2523,6 +2536,7 @@ Source: `spec/11-private-groups.md`
 | `GRP-422` | §11.4.1 | MUST | (unstated) | A member that holds a trigger since the `roster_epoch` of its current epoch, and that the trigger does not exclude, MUST rotate before it posts a record other than a roster object. |  |  |
 | `GRP-423` | §11.3.2 | MUST | (unstated) | An admin that joined inside the current epoch, and thus holds no `K_e` under `GRP-384`, MUST derive the key of the admit from its own slot chain, and it MUST hand no slot key before the oldest slot that the chain holds. |  |  |
 | `GRP-424` | §11.9.1 | MUST | The admin | The admin MUST then send the admit with a `seq_of_add` of 0 for that replica, and for a replica that the group took after the add, and the joiner reads it from its start. |  |  |
+| `GRP-425` | §11.9 | MUST | A receiver | A receiver MUST reject a content record from a member that holds `observer` in its current roster, unless it carries a roster object, a `KeyRequest`, a `KeySupply`, or a deletion of the author of §11.9.6. |  |  |
 
 ## ATT — Attachments and Large Objects
 

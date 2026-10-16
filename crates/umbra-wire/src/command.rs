@@ -155,9 +155,30 @@ impl Cmd {
             Cmd::Nwake => Some(NWAKE_LEN),
             Cmd::Ids => Some(IDS_LEN),
             Cmd::Nack => Some(crate::nack::LEN),
+            Cmd::Attachment(b) => attachment_payload_len(b),
             Cmd::Group(g) => g.fixed_payload_len(bucket),
             _ => None,
         }
+    }
+}
+
+/// The `payload_len` that Part 12 §12.3.3 fixes for an attachment command,
+/// or `None` for `CNEW`, `BNEW`, and `CREP`, whose payload has a field of
+/// its own length. A bucket changes none of them.
+const fn attachment_payload_len(b: u8) -> Option<usize> {
+    const CHUNK: usize = crate::descriptor::CHUNK_SIZE as usize;
+    match b {
+        // CID: `storage_token`. CPRF: `proof`.
+        0x71 | 0x79 => Some(32),
+        // CPUT and CDAT: one chunk (`ATT-043`).
+        0x72 | 0x74 => Some(CHUNK),
+        // CGET, CDEL, and CRNW: empty.
+        0x73 | 0x75 | 0x7A => Some(0),
+        // CRPUT: `storage_token` and one chunk.
+        0x77 => Some(32 + CHUNK),
+        // CVFY: `nonce`.
+        0x78 => Some(16),
+        _ => None,
     }
 }
 
@@ -554,5 +575,33 @@ mod tests {
         for b in [0x03u8, 0x07, 0x34, 0x35, 0x70, 0x7B, 0x90, 0x9A] {
             assert_eq!(Cmd::from_byte(b).unwrap().to_byte(), b);
         }
+    }
+
+    #[test]
+    fn an_attachment_command_holds_the_length_of_its_payload() {
+        let encode = |cmd: u8, payload: &[u8]| {
+            let command = Command {
+                cmd: Cmd::Attachment(cmd),
+                corr_id: [0; 16],
+                queue_id: [0; 32],
+                auth: [0; 32],
+                payload,
+            };
+            let mut out = vec![0u8; command.len()];
+            command.encode(&mut out).unwrap();
+            out
+        };
+        // A CGET carries no payload, and a CVFY carries a 16-byte nonce.
+        assert!(Command::parse(&encode(0x73, &[]), Bucket::B0).is_ok());
+        assert!(Command::parse(&encode(0x73, &[0]), Bucket::B0).is_err());
+        assert!(Command::parse(&encode(0x78, &[0; 16]), Bucket::B0).is_ok());
+        assert!(Command::parse(&encode(0x78, &[0; 17]), Bucket::B0).is_err());
+        // A CPUT carries one chunk, at any bucket.
+        let chunk = vec![0u8; crate::descriptor::CHUNK_SIZE as usize];
+        assert!(Command::parse(&encode(0x72, &chunk), Bucket::B3).is_ok());
+        assert!(Command::parse(&encode(0x72, &chunk[1..]), Bucket::B3).is_err());
+        // A CNEW carries an `Admission` of its own length.
+        assert_eq!(Cmd::Attachment(0x70).fixed_payload_len(Bucket::B0), None);
+        assert_eq!(Cmd::Attachment(0x76).fixed_payload_len(Bucket::B0), None);
     }
 }

@@ -1,8 +1,8 @@
-//! The hello of Part 9 §9.6: the sealed envelope to the entry key, the
-//! derived proof-of-work values of Part 13 §13.4, the inbound limit, and
-//! the spent-nonce set of one Profile.
+//! The hello of Part 9 §9.6: the sealed envelope to the entry key, and the
+//! derived proof-of-work values of Part 13 §13.4. The client keeps the
+//! inbound limit and the spent nonces of a Profile in its store.
 
-use alloc::{collections::BTreeSet, vec::Vec};
+use alloc::vec::Vec;
 
 use umbra_crypto::{
     aead,
@@ -19,7 +19,7 @@ use umbra_wire::{
     codec::{Reader, Writer},
 };
 
-use super::{HELLO_INBOUND_LIMIT, HELLO_POW_EFFORT};
+use super::HELLO_POW_EFFORT;
 use crate::{identity::invitation::Bundle, Error};
 
 /// The version byte of a hello envelope.
@@ -181,72 +181,6 @@ impl HelloPow {
     }
 }
 
-/// The inbound limit of one published entry (`ABU-086` to `ABU-088`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct InboundLimit {
-    epoch: u32,
-    shown: u32,
-}
-
-impl InboundLimit {
-    /// Whether a hello at `epoch` may be shown, and counts it if so. Above
-    /// the limit the client discards the hello after the acknowledgement
-    /// and offers the rotation.
-    pub fn allow(&mut self, epoch: u32) -> bool {
-        if epoch != self.epoch {
-            self.epoch = epoch;
-            self.shown = 0;
-        }
-        if self.shown >= HELLO_INBOUND_LIMIT {
-            return false;
-        }
-        self.shown = self.shown.saturating_add(1);
-        true
-    }
-
-    /// Whether the limit is reached at `epoch`, which offers the rotation.
-    pub fn reached(&self, epoch: u32) -> bool {
-        self.epoch == epoch && self.shown >= HELLO_INBOUND_LIMIT
-    }
-}
-
-/// The spent-nonce set of one Profile: the nonces of the current epoch
-/// and of the one before it (`ABU-080`, `ABU-081`, `ABU-056`).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SpentNonces {
-    epochs: [(u32, BTreeSet<[u8; 32]>); 2],
-}
-
-impl SpentNonces {
-    /// Accepts a token nonce of `token_epoch` at the current `epoch`, or
-    /// rejects a repeat or an epoch outside the two accepted.
-    pub fn accept(&mut self, epoch: u32, token_epoch: u32, nonce: [u8; 32]) -> Result<(), Error> {
-        if token_epoch != epoch && token_epoch != epoch.wrapping_sub(1) {
-            return Err(Error::Stale);
-        }
-        // A new current epoch retires the set two epochs back.
-        for (held_epoch, set) in &mut self.epochs {
-            if *held_epoch != epoch && *held_epoch != epoch.wrapping_sub(1) {
-                set.clear();
-                *held_epoch = token_epoch;
-            }
-        }
-        let slot = match self.epochs.iter_mut().find(|(e, _)| *e == token_epoch) {
-            Some(slot) => slot,
-            None => self
-                .epochs
-                .iter_mut()
-                .find(|(_, set)| set.is_empty())
-                .ok_or(Error::Stale)?,
-        };
-        slot.0 = token_epoch;
-        if !slot.1.insert(nonce) {
-            return Err(Error::Stale);
-        }
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
@@ -319,31 +253,10 @@ mod tests {
     }
 
     #[test]
-    fn the_pow_values_the_inbound_limit_and_the_spent_set_hold() {
+    fn the_pow_values_hold() {
         let pow = HelloPow::derive(&[1; 1_216], 5);
         assert_eq!(pow.effort, HELLO_POW_EFFORT);
         assert_ne!(pow.seed, HelloPow::derive(&[1; 1_216], 6).seed);
         assert_eq!(HelloPow::accepted_seeds(&[1; 1_216], 6)[1], pow.seed);
-
-        let mut limit = InboundLimit::default();
-        for _ in 0..HELLO_INBOUND_LIMIT {
-            assert!(limit.allow(1));
-        }
-        assert!(!limit.allow(1));
-        assert!(limit.reached(1));
-        assert!(limit.allow(2));
-
-        let mut spent = SpentNonces::default();
-        spent.accept(10, 10, [1; 32]).unwrap();
-        assert_eq!(spent.accept(10, 10, [1; 32]), Err(Error::Stale));
-        spent.accept(10, 9, [1; 32]).unwrap();
-        assert_eq!(spent.accept(10, 8, [2; 32]), Err(Error::Stale));
-        assert_eq!(spent.accept(10, 11, [2; 32]), Err(Error::Stale));
-        // The next epoch keeps the set of 10 and retires the set of 9.
-        spent.accept(11, 11, [3; 32]).unwrap();
-        assert_eq!(spent.accept(11, 10, [1; 32]), Err(Error::Stale));
-        spent.accept(12, 12, [4; 32]).unwrap();
-        spent.accept(12, 11, [1; 32]).unwrap();
-        assert_eq!(spent.accept(12, 11, [3; 32]), Err(Error::Stale));
     }
 }

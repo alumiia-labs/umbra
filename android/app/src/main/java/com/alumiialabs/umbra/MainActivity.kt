@@ -41,7 +41,7 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             setRecentsScreenshotEnabled(false)
         }
-        val content = ComposeView(this).apply { setContent { UmbraApp() } }
+        val content = ComposeView(this).apply { setContent { NoPersonalizedLearning { UmbraApp() } } }
         cover = View(this).apply { visibility = View.GONE }
         paintWindow(Appearances.isDark)
         lifecycleScope.launch { snapshotFlow { Appearances.isDark }.collect(::paintWindow) }
@@ -99,10 +99,16 @@ class MainActivity : ComponentActivity() {
      * no request.
      */
     private fun takeInvitation(intent: Intent?) {
-        val text = when (intent?.action) {
-            Intent.ACTION_VIEW -> intent.dataString
-            Intent.ACTION_SEND -> intent.getStringExtra(Intent.EXTRA_TEXT)
-            else -> null
+        // Each app can send this intent, and a crafted extra throws at the
+        // read. A styled text is a CharSequence and no String.
+        val text = try {
+            when (intent?.action) {
+                Intent.ACTION_VIEW -> intent.dataString
+                Intent.ACTION_SEND -> intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
+                else -> null
+            }
+        } catch (fault: RuntimeException) {
+            null
         } ?: return
         if (text.length > LINK_TEXT_MAX) return
         val link = INVITATION_LINK.find(text)?.value

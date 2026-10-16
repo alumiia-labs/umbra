@@ -12,6 +12,7 @@ import android.text.method.PasswordTransformationMethod
 import android.util.TypedValue
 import android.view.View
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.TextView
@@ -60,6 +61,7 @@ import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.draw.alpha
@@ -69,7 +71,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.platform.InterceptPlatformTextInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.PlatformTextInputMethodRequest
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.window.SecureFlagPolicy
@@ -196,6 +201,29 @@ class PlatformFieldState {
 
 @Composable
 fun rememberPlatformField() = remember { PlatformFieldState() }
+
+/**
+ * IMP-057: the input method learns nothing from a Compose text field of
+ * [content]. Compose has no option for the flag, thus each start of an input
+ * session sets it.
+ */
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+fun NoPersonalizedLearning(content: @Composable () -> Unit) {
+    InterceptPlatformTextInput(
+        interceptor = { request, next ->
+            val private = object : PlatformTextInputMethodRequest {
+                override fun createInputConnection(outAttributes: EditorInfo): InputConnection =
+                    request.createInputConnection(outAttributes).also {
+                        outAttributes.imeOptions = outAttributes.imeOptions or
+                            EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
+                    }
+            }
+            next.startInputMethod(private)
+        },
+        content = content,
+    )
+}
 
 /** The view of a [PlatformFieldState], with no frame of its own. */
 @Composable
@@ -676,6 +704,7 @@ fun LetterAvatar(name: String, seed: Int, size: Int = 44, icon: String? = null) 
 /** The bar of a view under the tabs: the wordmark and the lock. */
 @Composable
 fun BrandBar(onConnection: () -> Unit, onProfile: () -> Unit) {
+    val context = LocalContext.current
     Row(
         Modifier.fillMaxWidth().padding(start = 12.dp, end = 8.dp, top = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -704,7 +733,7 @@ fun BrandBar(onConnection: () -> Unit, onProfile: () -> Unit) {
             )
         }
         ConnectionStatus(onConnection)
-        IconAction("lock", stringResource(R.string.widget_lock_now)) { Core.lock() }
+        IconAction("lock", stringResource(R.string.widget_lock_now)) { Core.lock(context) }
     }
 }
 

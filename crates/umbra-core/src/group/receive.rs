@@ -17,7 +17,7 @@ use umbra_wire::{
     app::{AppKind, AppMessage, Channel},
     bucket::Bucket,
     group::{
-        control::{ControlType, GroupControl},
+        control::{ControlType, GroupControl, Role},
         record::{open_content, ContentPlain, GroupQueueRecord, RecordKind, Tags},
     },
 };
@@ -173,6 +173,17 @@ fn is_roster_object(app: &[u8]) -> bool {
                     | ControlType::Rekey
             )
         })
+}
+
+/// Whether an observer may post an `AppMessage` (§11.9): a roster object, a
+/// request or a supply of a key, and the deletion of its own message.
+fn observer_may_post(app: &[u8]) -> bool {
+    AppMessage::parse(app, Channel::Group).is_ok_and(|message| {
+        matches!(
+            message.kind,
+            AppKind::GroupControl | AppKind::KeyRequest | AppKind::KeySupply | AppKind::Delete
+        )
+    })
 }
 
 /// Whether an `AppMessage` is a request or a supply of a key (§11.4.3).
@@ -340,13 +351,11 @@ impl Receiver {
             Err(e) => return Err(e),
         };
         let mut opened: Option<(Vec<u8>, bool, bool)> = None;
-        for (place, (key, previous)) in keys.iter().enumerate() {
+        for key in &keys {
             let mut out = alloc::vec![0u8; bucket.group_record()];
-            if let Ok(n) = open_content(&record, key, ctx.roster.group_id(), &mut out) {
+            if let Ok(n) = open_content(&record, &key.key, ctx.roster.group_id(), &mut out) {
                 out.truncate(n);
-                // GRP-274: the second key of the current epoch is the one
-                // of its alternate secret.
-                opened = Some((out, *previous, place > 0));
+                opened = Some((out, key.previous, key.alternate));
                 break;
             }
         }
@@ -445,9 +454,18 @@ impl Receiver {
             }
             return Ok(Outcome::Presence { sender });
         }
+        // An observer reads the group and posts nothing to it. Its roster
+        // objects, its key exchange, and the deletion of its own earlier
+        // messages still apply (§11.9).
+        let is_observer = roster
+            .member(sender)
+            .is_some_and(|member| member.role == Role::Observer);
+        if is_observer && !observer_may_post(plain.app) {
+            return Err(Error::Unverified);
+        }
         // GRP-273: a member other than its supplier writes under the
         // supplied secret, thus the group holds that secret.
-        if under_alternate {
+        if under_alternate && !previous_epoch {
             ctx.epochs.confirm_alternate(sender);
         }
         let epoch = record.epoch;

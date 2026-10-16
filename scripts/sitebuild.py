@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -32,6 +33,9 @@ SITE = ROOT / "site"
 PUBLIC = SITE / "public"
 LOCALES = SITE / "locales"
 SOURCE = "en"
+# A language code, as `de` or `pt-BR`. The code names a folder and goes into
+# the markup, thus it takes no other character.
+CODE = re.compile(r"[a-z]{2,3}(-[A-Z]{2})?")
 # Each page: its path under a language, and the keys of its text.
 PAGES = {
     "i.html": ("invitation_title", "invitation_heading", "invitation_body"),
@@ -42,6 +46,8 @@ PAGES = {
 def locales() -> dict[str, dict[str, str]]:
     found = {}
     for path in sorted(LOCALES.glob("*.json")):
+        if not CODE.fullmatch(path.stem):
+            sys.exit(f"site/locales/{path.name}: the name is no language code, as de or pt-BR")
         found[path.stem] = json.loads(path.read_text(encoding="utf-8"))
     return found
 
@@ -55,8 +61,9 @@ def languages_nav(texts: dict[str, dict[str, str]], current: str) -> str:
         if code == current:
             links.append(f"<span>{name}</span>")
         else:
-            href = "/i" if code == SOURCE else f"/{code}/i"
-            links.append(f'<a href="{href}" hreflang="{code}" lang="{code}">{name}</a>')
+            href = html.escape("/i" if code == SOURCE else f"/{code}/i")
+            attribute = html.escape(code)
+            links.append(f'<a href="{href}" hreflang="{attribute}" lang="{attribute}">{name}</a>')
     return "\n<nav>" + " · ".join(links) + "</nav>"
 
 
@@ -73,7 +80,7 @@ def render() -> dict[Path, str]:
                 continue
             nav = languages_nav(texts, code) if page == "i.html" else ""
             out[folder / page] = (
-                template.replace("{{lang}}", code)
+                template.replace("{{lang}}", html.escape(code))
                 .replace("{{dir}}", html.escape(merged.get("_dir", "ltr")))
                 .replace("{{title}}", html.escape(merged[title]))
                 .replace("{{heading}}", html.escape(merged[heading]))

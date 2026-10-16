@@ -20,6 +20,8 @@
 //! line is for a test network: the posts to the providers then trust that
 //! one authority and not the web roots.
 //!
+//! The NDR posts to FCM alone (Part 8 `NTF-134`).
+//!
 //! The `fcm_credentials` line names the service account file of the
 //! Firebase project of the deployment, and the NDR then sends to each FCM
 //! token. An `fcm_api` line names another API than FCM, for a test.
@@ -30,7 +32,7 @@ use std::{collections::BTreeMap, process::ExitCode};
 
 use tokio::net::TcpListener;
 use umbra_core::notify::seeded_pair;
-use umbra_crypto::{kem::KeyPair, ohttp};
+use umbra_crypto::{kem::KeyPair, ohttp, zeroize::Zeroizing};
 use umbra_relay::{
     fcm::{Fcm, ServiceAccount, FCM_API},
     ndr_server::{run_ndr, Gateway, NdrStore, SqliteNdrStore},
@@ -38,12 +40,17 @@ use umbra_relay::{
 };
 use umbra_transport::native;
 
-fn hex32(text: &str) -> Option<[u8; 32]> {
-    let bytes: Vec<u8> = (0..text.len())
-        .step_by(2)
-        .map(|at| u8::from_str_radix(text.get(at..at + 2)?, 16).ok())
-        .collect::<Option<_>>()?;
-    bytes.try_into().ok()
+/// Reads a seed of 64 hex characters. It leaves no copy in memory.
+fn hex32(text: &str) -> Option<Zeroizing<[u8; 32]>> {
+    if text.len() != 64 {
+        return None;
+    }
+    let mut out = Zeroizing::new([0u8; 32]);
+    for (at, slot) in out.iter_mut().enumerate() {
+        let start = at.checked_mul(2)?;
+        *slot = u8::from_str_radix(text.get(start..start.checked_add(2)?)?, 16).ok()?;
+    }
+    Some(out)
 }
 
 /// The gateway key of a seed.
@@ -71,7 +78,8 @@ async fn run() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let Ok(text) = std::fs::read_to_string(path) else {
+    // The text holds the seed of the gateway key, thus `Zeroizing` wipes it.
+    let Ok(text) = std::fs::read_to_string(path).map(Zeroizing::new) else {
         eprintln!("the settings file does not read");
         return ExitCode::from(2);
     };
@@ -134,8 +142,10 @@ async fn run() -> ExitCode {
     println!("ndr listen={listen} key_id={key_id}");
     let fcm = match values.get("fcm_credentials") {
         Some(path) => {
+            // The file holds the key of the account.
             let account = std::fs::read_to_string(path)
                 .ok()
+                .map(Zeroizing::new)
                 .and_then(|json| ServiceAccount::parse(&json));
             let api = values.get("fcm_api").copied().unwrap_or(FCM_API);
             match account.and_then(|account| Fcm::new(account, api, provider_tls.clone())) {
@@ -148,18 +158,7 @@ async fn run() -> ExitCode {
         }
         None => None,
     };
-    match run_ndr(
-        listener,
-        tls,
-        Gateway { key_id, pair },
-        store,
-        provider_tls,
-        fcm,
-        // NTF-134: the reference NDR posts to FCM alone.
-        false,
-    )
-    .await
-    {
+    match run_ndr(listener, tls, Gateway { key_id, pair }, store, fcm).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(_) => {
             eprintln!("the store does not load");

@@ -36,7 +36,9 @@ pub struct PairCache {
 }
 
 impl PairCache {
-    /// The pair key with `index`, derived at the first use (`GRP-236`).
+    /// The pair key with the active member at `index`, derived at the first
+    /// use (`GRP-236`). The cache holds no key of a member that left
+    /// (`GRP-245`), thus an index outside the active set gives none.
     pub fn get(
         &mut self,
         index: u16,
@@ -44,7 +46,10 @@ impl PairCache {
         own: &MemberKeys,
     ) -> Result<&PairKey, Error> {
         if let alloc::collections::btree_map::Entry::Vacant(slot) = self.keys.entry(index) {
-            let peer = roster.member(index).ok_or(Error::NoPath)?;
+            let peer = roster
+                .member(index)
+                .filter(|member| member.active)
+                .ok_or(Error::NoPath)?;
             slot.insert(own.pair_key(&peer.pair_pk, roster.group_id())?);
         }
         self.keys.get(&index).ok_or(Error::NoPath)
@@ -175,8 +180,7 @@ impl Sender {
             return Err(Error::NoPath);
         }
         let slot = send_slot(epochs, now);
-        let keys = epochs.record_keys(epoch, slot, now)?;
-        let (record_key, _) = keys.first().ok_or(Error::NoPath)?;
+        let record_key = &epochs.send_key(slot, now)?;
         let active = roster
             .active_at(roster_epoch)
             .ok_or(Error::NoPath)?
@@ -243,8 +247,7 @@ impl Sender {
     ) -> Result<Vec<u8>, Error> {
         let epoch = epochs.epoch();
         let slot = send_slot(epochs, now);
-        let keys = epochs.record_keys(epoch, slot, now)?;
-        let (record_key, _) = keys.first().ok_or(Error::NoPath)?;
+        let record_key = &epochs.send_key(slot, now)?;
         let roster_epoch = roster.epoch_index();
         let counter = self.counter(epoch);
         let version = [PRESENCE_VERSION];
@@ -309,5 +312,37 @@ impl Sender {
         )?;
         out.truncate(n);
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::group::{
+        roster::tests::{add_control, entry_of, plain_control},
+        test_util::member,
+    };
+    use umbra_wire::group::control::PlainOp;
+
+    #[test]
+    fn the_cache_derives_no_key_of_a_member_that_left() {
+        let creator = member(1);
+        let mut roster = Roster::genesis([7; 32], entry_of(&creator, 0, Role::Owner), 0);
+        let add = add_control(&roster, &member(2), 1);
+        roster
+            .apply(&GroupControl::parse(&add).unwrap(), 0, 1)
+            .unwrap();
+        let mut pairs = PairCache::default();
+        assert!(pairs.get(1, &roster, &creator).is_ok());
+        let remove = plain_control(&roster, PlainOp::Remove { index: 1 });
+        roster
+            .apply(&GroupControl::parse(&remove).unwrap(), 0, 2)
+            .unwrap();
+        pairs.remove(1);
+        // GRP-245: a record under the roster epoch before the removal gives
+        // that member a tag of zeros, and the cache stays without its key.
+        assert_eq!(pairs.get(1, &roster, &creator).err(), Some(Error::NoPath));
+        assert!(pairs.keys.is_empty());
     }
 }

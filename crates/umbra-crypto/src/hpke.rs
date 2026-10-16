@@ -202,7 +202,7 @@ impl Context {
         let mut out = plain.to_vec();
         let tag = ChaCha20Poly1305::new(self.key.expose().into())
             .encrypt_inout_detached(&Nonce::from(nonce), aad, out.as_mut_slice().into())
-            .map_err(|_| Error::Queue)?;
+            .map_err(|_| Error::Length)?;
         out.extend_from_slice(&tag);
         self.seq = self.seq.checked_add(1).ok_or(Error::Length)?;
         Ok(out)
@@ -227,7 +227,7 @@ impl Context {
                 out.as_mut_slice().into(),
                 &Tag::from(tag),
             )
-            .map_err(|_| Error::Queue)?;
+            .map_err(|_| Error::Aead)?;
         self.seq = self.seq.checked_add(1).ok_or(Error::Length)?;
         Ok(out)
     }

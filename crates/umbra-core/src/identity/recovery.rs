@@ -375,25 +375,23 @@ pub fn from_digits(text: &str, expected: DigitsType) -> Result<Zeroizing<Vec<u8>
     Ok(payload)
 }
 
-// Shamir over GF(2^8) with the AES polynomial, for the social half.
+// Shamir over GF(2^8) with the AES polynomial, for the social half. The
+// two operands are secret, thus each step takes the same path whatever
+// their bits: a mask takes the place of each branch, and no table serves.
 fn gf_mul(mut a: u8, mut b: u8) -> u8 {
     let mut p = 0u8;
     for _ in 0..8 {
-        if b & 1 != 0 {
-            p ^= a;
-        }
-        let high = a & 0x80;
-        a <<= 1;
-        if high != 0 {
-            a ^= 0x1B;
-        }
+        p ^= a & 0u8.wrapping_sub(b & 1);
+        let carry = 0u8.wrapping_sub(a >> 7);
+        a = (a << 1) ^ (0x1B & carry);
         b >>= 1;
     }
     p
 }
 
 fn gf_inv(a: u8) -> u8 {
-    // a^254 by square-and-multiply.
+    // a^254 by square-and-multiply. The exponent is public, thus the
+    // branch on its bits shows nothing of `a`.
     let mut result = 1u8;
     let mut base = a;
     let mut e = 254u8;
@@ -483,6 +481,33 @@ pub fn join_social(shares: &[[u8; 17]]) -> Result<Secret<16>, Error> {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_field_product_with_no_branch_is_the_product_of_the_field() {
+        // The carry-less product, reduced bit by bit, as a reference.
+        let reference = |a: u8, b: u8| {
+            let mut wide = 0u16;
+            for bit in 0..8 {
+                if b >> bit & 1 == 1 {
+                    wide ^= u16::from(a) << bit;
+                }
+            }
+            for bit in (8..16).rev() {
+                if wide >> bit & 1 == 1 {
+                    wide ^= 0x11B << (bit - 8);
+                }
+            }
+            wide as u8
+        };
+        for a in 0..=255u8 {
+            for b in 0..=255u8 {
+                assert_eq!(gf_mul(a, b), reference(a, b));
+            }
+            if a != 0 {
+                assert_eq!(gf_mul(a, gf_inv(a)), 1);
+            }
+        }
+    }
 
     #[test]
     fn the_digits_carry_a_type_and_a_checksum() {

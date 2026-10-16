@@ -202,6 +202,9 @@ struct Settings {
     limits: ConnectionLimits,
     /// The relays of the layer before, from the manifest (`REL-174`).
     previous: Option<std::collections::BTreeSet<[u8; 32]>>,
+    /// The layer and the static key of each relay of a later layer, for
+    /// the loop chains of this relay (Part 3 `NET-363`).
+    loop_relays: BTreeMap<[u8; 32], (u8, [u8; 32])>,
     /// The address of each relay of the set, which the cap of one address
     /// does not count (`NET-334`).
     addresses: std::collections::BTreeSet<std::net::IpAddr>,
@@ -415,6 +418,10 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
         eprintln!("no identity_seed line: the next layer takes no circuit of this relay");
     }
     let measurer_trust = placed.as_ref().map(|placed| placed.measurer_trust.clone());
+    let loop_relays = placed
+        .as_ref()
+        .map(|placed| placed.chain_keys.clone())
+        .unwrap_or_default();
     let (previous, addresses) = match &placed {
         Some(placed) => (Some(placed.previous.clone()), placed.addresses.clone()),
         None => (None, std::collections::BTreeSet::new()),
@@ -483,6 +490,7 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
         manifest,
         manifest_source,
         previous,
+        loop_relays,
         addresses,
         host_alias,
         // NET-334: the cap of one address counts no relay of the set, thus
@@ -813,6 +821,8 @@ async fn run() -> ExitCode {
             if let Some(previous) = settings.previous {
                 node.set_previous_layer(previous);
             }
+            // NET-069: the loop chains of a relay of layer 1 or 2.
+            node.set_loop_relays(&settings.loop_relays);
             node
         },
         listener,

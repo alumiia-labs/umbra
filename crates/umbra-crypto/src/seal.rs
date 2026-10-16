@@ -35,8 +35,9 @@ fn key_of(
     recipient: &[u8; 32],
     label: &[u8],
 ) -> Result<Secret<32>, Error> {
-    // A non-contributory output names no secret.
-    if shared == &[0u8; 32] {
+    // A non-contributory output names no secret. The test runs in constant
+    // time, because the value is the secret of the seal.
+    if bool::from(subtle::ConstantTimeEq::ct_eq(&shared[..], &[0u8; 32][..])) {
         return Err(Error::Key);
     }
     let salt = [ephemeral.as_slice(), recipient].concat();

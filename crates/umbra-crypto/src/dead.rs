@@ -5,13 +5,17 @@
 use hkdf::Hkdf;
 use sha3::Sha3_256;
 use x25519_dalek::PublicKey as XPublic;
+use zeroize::Zeroizing;
 
 use crate::{handshake::contributory, kem::KeyPair, labels, secret::Secret, Error};
 
 /// The pseudorandom key of one contact:
 /// `HKDF-SHA3-256-Extract(salt = "umbra/v1/dead-channel", ikm = ss_pair)`.
+///
+/// The key lives in a buffer that wipes itself, because the state of
+/// `Hkdf` has no wipe. Each expansion builds its own `Hkdf` from it.
 pub struct DeadChannel {
-    kdf: Hkdf<Sha3_256>,
+    prk: Zeroizing<[u8; 32]>,
 }
 
 impl DeadChannel {
@@ -22,17 +26,22 @@ impl DeadChannel {
             .x25519_secret()
             .diffie_hellman(&XPublic::from(*peer_x25519_pk));
         contributory(&ss)?;
-        let (_, kdf) = Hkdf::<Sha3_256>::extract(Some(labels::DEAD_CHANNEL), ss.as_bytes());
-        Ok(DeadChannel { kdf })
+        let (mut out, _) = Hkdf::<Sha3_256>::extract(Some(labels::DEAD_CHANNEL), ss.as_bytes());
+        let mut prk = Zeroizing::new([0u8; 32]);
+        prk.copy_from_slice(&out);
+        zeroize::Zeroize::zeroize(out.as_mut_slice());
+        Ok(DeadChannel { prk })
     }
 
     fn expand(&self, tag: u8, writer_pk: &[u8; 32], week: u32) -> Secret<32> {
         let mut out = Secret::new([0u8; 32]);
         let week = week.to_be_bytes();
         let info: [&[u8]; 3] = [&[tag], &week, writer_pk];
-        // A 32-byte output is inside the bound of HKDF, thus this never
-        // fails.
-        let _ = self.kdf.expand_multi_info(&info, out.expose_mut());
+        // A 32-byte key is the hash length, and a 32-byte output is inside
+        // the bound of HKDF, thus neither call fails.
+        if let Ok(kdf) = Hkdf::<Sha3_256>::from_prk(&*self.prk) {
+            let _ = kdf.expand_multi_info(&info, out.expose_mut());
+        }
         out
     }
 

@@ -93,6 +93,11 @@ umbra_sign_force: false
 # inventory at <hour>:30, the next one an hour later.
 umbra_reboot_hour: 9
 
+# The seconds that each apt task waits for the lock of apt. A new server
+# runs unattended-upgrades at its first start and holds the lock for
+# minutes.
+umbra_apt_lock_timeout: 900
+
 # A command that runs when the signer fails, as a script that sends a mail
 # or calls a hook. Its one argument is the name of the failed unit. With no
 # command, the failure goes to the journal and to each terminal.

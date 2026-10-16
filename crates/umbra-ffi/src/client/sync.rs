@@ -135,6 +135,33 @@ fn counter_ref(counter: u64) -> [u8; 16] {
     out
 }
 
+/// The messages of `conversation` that a record names: the message of the
+/// record itself, and the target of an edit, which carries its text.
+fn record_messages<B: Backend>(
+    open: &super::Open<B>,
+    conversation: ConversationId,
+    app: &[u8],
+) -> Vec<MsgRef> {
+    let Ok(parsed) = AppMessage::parse(app, umbra_wire::app::Channel::Pairwise)
+        .or_else(|_| AppMessage::parse(app, umbra_wire::app::Channel::Group))
+    else {
+        return Vec::new();
+    };
+    let mut ids = vec![parsed.msg_id];
+    if parsed.kind == AppKind::Edit {
+        if let Ok(edit) = umbra_wire::app::edit::EditBody::parse(parsed.body) {
+            ids.push(edit.target);
+        }
+    }
+    ids.iter()
+        .map(|id| {
+            let reference = super::msg_ref(&open.device_set_key, id);
+            let natural = [conversation.0.as_slice(), &reference].concat();
+            MsgRef(open.store.row_id(TableId::MESSAGE, &natural))
+        })
+        .collect()
+}
+
 impl<B: Backend, E: SecureElement> Client<B, E> {
     /// The sync channel of each other device, by its `device_id`.
     pub(super) fn peer_channels(&self) -> Result<BTreeMap<DeviceId, ConversationId>, Error> {
@@ -1469,23 +1496,26 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .filter(|at| *at != 0))
     }
 
-    /// Drops the body of each timed record whose period ended, thus no
-    /// resend holds it (`DEV-211`).
-    pub(super) fn drop_sync_sent_of(
-        &mut self,
-        due: &[(ConversationId, MsgRef)],
-    ) -> Result<(), Error> {
-        let mut gone = Vec::new();
+    /// Drops each copy of a record of a message in `gone` that waits for
+    /// another device of the set: the body for a resend, the copy that
+    /// waits for its publish, and a send in RAM. The record of an edit of
+    /// such a message goes too, since it carries a text. A timed record
+    /// whose period ended goes as no resend (`DEV-211`), and a deleted one
+    /// as none either (`DEV-099`). The resend sends a void in its place
+    /// (`DEV-069`).
+    pub(super) fn drop_sync_sent_of(&mut self, gone: &[MsgRef]) -> Result<(), Error> {
+        if gone.is_empty() {
+            return Ok(());
+        }
+        let names = |named: &[MsgRef]| named.iter().any(|one| gone.contains(one));
+        let mut sent = Vec::new();
         for (row, value) in self.open_ref()?.store.list(SYNC_SENT, None)? {
             let value = Zeroizing::new(value);
             let Some(body) = value.get(8..) else {
                 continue;
             };
-            if self
-                .timed_message_of(body)?
-                .is_some_and(|message| due.contains(&message))
-            {
-                gone.push(row);
+            if names(&self.messages_of_sync_body(body)?) {
+                sent.push(row);
             }
         }
         // DEV-243: a copy that still waits for its send goes nowhere after
@@ -1494,10 +1524,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for mut send in core::mem::take(&mut self.sync_out) {
             let ended = match AppMessage::parse(&send.app, umbra_wire::app::Channel::Pairwise) {
                 Ok(queued) if queued.kind == AppKind::DeviceSet => self
-                    .timed_message_of(queued.body)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|message| due.contains(&message)),
+                    .messages_of_sync_body(queued.body)
+                    .is_ok_and(|named| names(&named)),
                 _ => false,
             };
             if ended {
@@ -1506,39 +1534,43 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 self.sync_out.push_back(send);
             }
         }
+        let mut copies = Vec::new();
+        let open = self.open_ref()?;
+        for (row, held) in open.store.list(super::PUBLISH_PENDING, None)? {
+            let held = Zeroizing::new(held);
+            let Some((_, conversation, app)) = super::pending_copy(&held) else {
+                continue;
+            };
+            if names(&record_messages(open, conversation, app)) {
+                copies.push(row);
+            }
+        }
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
-        for row in gone {
+        for row in sent {
             batch.delete(SYNC_SENT, row);
+        }
+        for row in copies {
+            batch.delete(super::PUBLISH_PENDING, row);
         }
         Ok(batch.commit()?)
     }
 
-    /// The conversation and the message of a sync body, when the body is a
-    /// timed record of a conversation that this device holds.
-    fn timed_message_of(&mut self, body: &[u8]) -> Result<Option<(ConversationId, MsgRef)>, Error> {
+    /// The messages that a sync body names, when it is a record of a
+    /// conversation that this device holds: the message of the record, and
+    /// the target of an edit.
+    fn messages_of_sync_body(&mut self, body: &[u8]) -> Result<Vec<MsgRef>, Error> {
         let Ok(record) = SyncedRecord::parse(body) else {
-            return Ok(None);
+            return Ok(Vec::new());
         };
-        if record.context.expires_in == 0 {
-            return Ok(None);
-        }
         let Some(conversation) = self.conversation_of_subject(&record.origin.subject)? else {
-            return Ok(None);
+            return Ok(Vec::new());
         };
-        let channel = if record.origin.scope == SCOPE_GROUP {
-            umbra_wire::app::Channel::Group
-        } else {
-            umbra_wire::app::Channel::Pairwise
-        };
-        let Ok(parsed) = AppMessage::parse(record.inner, channel) else {
-            return Ok(None);
-        };
-        let open = self.open_ref()?;
-        let reference = super::msg_ref(&open.device_set_key, &parsed.msg_id);
-        let natural = [conversation.0.as_slice(), &reference].concat();
-        let message = MsgRef(open.store.row_id(TableId::MESSAGE, &natural));
-        Ok(Some((conversation, message)))
+        Ok(record_messages(
+            self.open_ref()?,
+            conversation,
+            record.inner,
+        ))
     }
 
     /// Drops the body of each record that each peer acknowledged.

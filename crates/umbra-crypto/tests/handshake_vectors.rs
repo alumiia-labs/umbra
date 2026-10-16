@@ -130,7 +130,7 @@ fn xk_transcript(range_i: VersionRange, range_r: VersionRange) -> Value {
     let mut buf = [0u8; 64];
     let (mut resp, _) = Responder::read_flight1(
         &s_r,
-        prekey,
+        &prekey,
         range_r,
         AddressType::Pairwise,
         &f1[..n1],
@@ -141,9 +141,8 @@ fn xk_transcript(range_i: VersionRange, range_r: VersionRange) -> Value {
     let mut f2 = [0u8; 4096];
     let n2 = resp.flight2(app.1, &mut rng_r, &mut f2, &mut tr_r).unwrap();
     init.read_flight2(&f2[..n2], &mut buf, &mut tr_i).unwrap();
-    let er = Responder::er_of(&f2[..n2]).unwrap();
     let mut f3 = [0u8; 4096];
-    let (ki, n3) = init.flight3(&s_i, &er, app.2, &mut f3, &mut tr_i).unwrap();
+    let (ki, n3) = init.flight3(&s_i, app.2, &mut f3, &mut tr_i).unwrap();
     let (kr, _, _) = resp.read_flight3(&f3[..n3], &mut buf, &mut tr_r).unwrap();
     assert_eq!(ki.rk.expose(), kr.rk.expose());
     // CRY-104: one h at the two parties after flight 1.
@@ -160,7 +159,7 @@ fn xk_transcript(range_i: VersionRange, range_r: VersionRange) -> Value {
         "responder_draws_in_order": { "note": "er_sk 32, ekem1 coin m 32", "values": rng_r.draws },
         "flight1": hex(&f1[..n1]), "flight2": hex(&f2[..n2]), "flight3": hex(&f3[..n3]),
         "initiator_steps": tr_i.0, "responder_steps": tr_r.0,
-        "split": { "rk": hex(ki.rk.expose()), "hk_i2r": hex(ki.hk_i2r.expose()), "hk_r2i": hex(ki.hk_r2i.expose()), "transcript": hex(&ki.transcript) },
+        "split": { "rk": hex(ki.rk.expose()), "hk_i2r": hex(ki.hk_i2r.expose()), "hk_r2i": hex(ki.hk_r2i.expose()), "transcript": hex(&ki.transcript[..]) },
     })
 }
 
@@ -194,7 +193,7 @@ fn xk_bad_mode() -> Value {
     let mut tr = Steps::default();
     let r = Responder::read_flight1(
         &s_r,
-        prekey,
+        &prekey,
         VersionRange::V1,
         AddressType::Pairwise,
         &f1[..n1],

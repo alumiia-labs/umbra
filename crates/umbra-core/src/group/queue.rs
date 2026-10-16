@@ -159,16 +159,32 @@ impl Replicas {
             refs,
             cursors,
             newest_epoch_key,
-            last_subscribed: r.option(|r| Ok(usize::from(r.u8()?)))?,
+            last_subscribed: r.option(|r| {
+                let which = usize::from(r.u8()?);
+                if which < GROUP_REPLICAS {
+                    Ok(which)
+                } else {
+                    Err(umbra_crypto::Error::Length)
+                }
+            })?,
             reachable,
         })
+    }
+
+    /// The replica after `which`, of the two.
+    const fn next_of(which: usize) -> usize {
+        if which == 0 {
+            1
+        } else {
+            0
+        }
     }
 
     /// The replica to subscribe to in this session: the other one than
     /// last time, or a random one at first (`GRP-203`, `GRP-204`).
     pub fn pick(&mut self, random: bool) -> usize {
         let next = match self.last_subscribed {
-            Some(last) => 1 - last,
+            Some(last) => Self::next_of(last),
             None => usize::from(random),
         };
         self.last_subscribed = Some(next);
@@ -177,7 +193,7 @@ impl Replicas {
 
     /// The other replica, for a gap repair (`GRP-205`).
     pub fn other(&self) -> usize {
-        self.last_subscribed.map_or(0, |last| 1 - last)
+        self.last_subscribed.map_or(0, Self::next_of)
     }
 
     /// The reference of replica `which`.
@@ -310,5 +326,21 @@ mod tests {
         r.set_reachable(0, false);
         assert!(r.unreachable());
         assert_eq!(r.targets(), alloc::vec![[1; 32], [3; 32]]);
+    }
+
+    #[test]
+    fn a_stored_replica_out_of_range_does_not_read() {
+        let mut replicas = Replicas::fresh(refs());
+        assert_eq!(replicas.pick(true), 1);
+        assert_eq!(replicas.other(), 0);
+        assert_eq!(replicas.pick(true), 0);
+        let mut w = Writer::new();
+        replicas.export(&mut w);
+        let mut bytes = w.finish().to_vec();
+        assert!(Replicas::import(&mut Reader::new(&bytes)).is_ok());
+        // The last byte is the replica of the last session.
+        let last = bytes.len() - 1;
+        bytes[last] = 7;
+        assert!(Replicas::import(&mut Reader::new(&bytes)).is_err());
     }
 }

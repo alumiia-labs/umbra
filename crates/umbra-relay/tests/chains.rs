@@ -1646,8 +1646,11 @@ fn rotate(mesh: &mut Mesh, client: usize, contact: &ContactId) {
     let before = mesh.clients[client].inbound_queue(contact).unwrap();
     for turn in 0..8 {
         let now = mesh.now;
+        // Each client draws its own ephemeral keys: a relay refuses a
+        // hello that repeats one (`NET-361`).
+        let rotate_seed = 700 + turn + 1_000 * client as u64;
         let events = mesh.clients[client]
-            .rotate_due(now, &mut Rng(700 + turn))
+            .rotate_due(now, &mut Rng(rotate_seed))
             .unwrap();
         mesh.events[client].extend(events);
         mesh.settle();
@@ -2168,7 +2171,12 @@ fn two_contacts_whose_queues_lapsed_meet_again_through_their_blobs() {
         // NET-190, NET-191: the peer moved, and the own address goes to it.
         let now = mesh.now;
         mesh.clients[client]
-            .peer_moved(&contacts[client], &address, now, &mut Rng(5))
+            .peer_moved(
+                &contacts[client],
+                &address,
+                now,
+                &mut Rng(5 + 1_000 * client as u64),
+            )
             .unwrap();
     }
     mesh.settle();

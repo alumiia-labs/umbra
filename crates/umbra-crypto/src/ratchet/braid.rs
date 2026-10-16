@@ -13,12 +13,15 @@
 //!    responder key exists yet. The responder starts its first epoch once it
 //!    has rebuilt the initiator's first.
 //! 3. **An epoch advances only at a DH chain start**, thus every record of a
-//!    chain carries one epoch number, and any record of the chain reveals it.
-//!    A chain-start record always carries a frame.
+//!    chain carries one epoch number, and any record of the chain with a
+//!    frame reveals it. A chain-start record always carries a frame.
 //! 4. **The secret of an epoch enters the root key at the owner's first DH
 //!    step whose chain carries the next epoch.** The owner mixes before it
 //!    derives that sending chain; the peer mixes before it derives the same
-//!    chain as its receiving chain, when it sees the higher epoch number.
+//!    chain as its receiving chain, when it sees the higher epoch number. A
+//!    record with no frame shows no epoch number. When such a record starts
+//!    the step at the peer and a secret waits, the body decides: the peer
+//!    reads it without the mix and then with it (`CRY-148`).
 //!
 //! An epoch is complete when the peer's ciphertext against its key has been
 //! rebuilt. A party starts the next epoch at the first chain start after its
@@ -195,7 +198,6 @@ impl Braid {
         material.chunk(width, index, chunk)?;
         // After the last chunk the sender returns to the first (CRY-131).
         self.next_chunk = (index + 1) % code.n();
-        self.records_in_epoch = self.records_in_epoch.saturating_add(1);
         Ok(len)
     }
 
@@ -257,6 +259,11 @@ struct Hooks<'a, R: ?Sized> {
     braid: &'a mut Braid,
     now: u64,
     rng: &'a mut R,
+    /// Whether a step whose record has no frame mixes the waiting secret.
+    mix_unframed: bool,
+    /// Set when a step had no frame while a secret waited, thus the other
+    /// choice of `mix_unframed` can open the record.
+    unframed: bool,
 }
 
 impl<R: CryptoRng + ?Sized> StepHooks for Hooks<'_, R> {
@@ -273,7 +280,17 @@ impl<R: CryptoRng + ?Sized> StepHooks for Hooks<'_, R> {
     ) -> Option<(u32, Secret<32>)> {
         // Rule 4 at the peer: a chain with a higher epoch means the peer
         // completed the one before it, whose secret this party made.
-        let frame = frame?;
+        let Some(frame) = frame else {
+            // CRY-148: a record with no frame shows no epoch, and the body
+            // decides whether the mix is due.
+            self.braid.peer_secret.as_ref()?;
+            self.unframed = true;
+            return if self.mix_unframed {
+                self.braid.peer_secret.take()
+            } else {
+                None
+            };
+        };
         let head = frame.get(..4)?;
         let chain_epoch = u32::from_be_bytes(head.try_into().ok()?);
         let (target, _) = self.braid.peer_secret.as_ref()?;
@@ -525,6 +542,7 @@ impl Ratchet {
 
     /// Encrypts `plaintext` into `out`. `frame_allowed` says whether the
     /// bucket has room for this epoch's frame; a chain-start record needs it.
+    /// `now` starts the clock `T` of the epoch at its first record (§5.5.3).
     pub fn send<R: CryptoRng + ?Sized>(
         &mut self,
         plaintext: &[u8],
@@ -533,7 +551,6 @@ impl Ratchet {
         rng: &mut R,
         out: &mut [u8],
     ) -> Result<usize, Error> {
-        let _ = now;
         let chain_start = self.session.sending_position() == 0;
         let has_epoch = self.braid.material.is_some();
         if chain_start && has_epoch && !frame_allowed {
@@ -546,7 +563,17 @@ impl Ratchet {
         } else {
             None
         };
-        self.session.send(plaintext, frame, rng, out)
+        let len = self.session.send(plaintext, frame, rng, out)?;
+        // §5.5.3: `N` counts each record of the epoch, with a frame or not,
+        // and both limits run from the first record, which carries the
+        // first chunk (CRY-146).
+        if has_epoch {
+            if self.braid.records_in_epoch == 0 {
+                self.braid.epoch_started_at = now;
+            }
+            self.braid.records_in_epoch = self.braid.records_in_epoch.saturating_add(1);
+        }
+        Ok(len)
     }
 
     /// Decrypts `record` into `out`. A record that does not open leaves
@@ -561,7 +588,19 @@ impl Ratchet {
         out: &mut [u8],
     ) -> Result<Opened, Error> {
         let before = self.export()?;
-        let opened = self.receive_once(record, now, rng, out);
+        let mut unframed = false;
+        let mut opened = self.receive_once(record, now, rng, out, false, &mut unframed);
+        // CRY-148: a step on a record with no frame took no mix while a
+        // secret waited. The step runs again with the mix, and the body
+        // opens under one of the two chains alone.
+        if opened.is_err() && unframed {
+            if let Ok(back) = Self::restore(&before) {
+                *self = back;
+                if let Ok(mixed) = self.receive_once(record, now, rng, out, true, &mut unframed) {
+                    opened = Ok(mixed);
+                }
+            }
+        }
         // Bytes that `export` just wrote restore, and the first fault is
         // the one that the caller gets.
         if opened.is_err() {
@@ -578,14 +617,20 @@ impl Ratchet {
         now: u64,
         rng: &mut R,
         out: &mut [u8],
+        mix_unframed: bool,
+        unframed: &mut bool,
     ) -> Result<Opened, Error> {
         let received: Received<'_> = {
             let mut hooks = Hooks {
                 braid: &mut self.braid,
                 now,
                 rng,
+                mix_unframed,
+                unframed: false,
             };
-            self.session.receive_with(record, now, out, &mut hooks)?
+            let received = self.session.receive_with(record, now, out, &mut hooks);
+            *unframed = hooks.unframed;
+            received?
         };
         // CRY-092: a frame with a fault costs the braid epoch and not the
         // record. The body opened, thus the message is authentic, and the
@@ -627,7 +672,7 @@ mod tests {
             rk: Secret::new([1u8; 32]),
             hk_i2r: Secret::new([2u8; 32]),
             hk_r2i: Secret::new([3u8; 32]),
-            transcript: [0u8; 32],
+            transcript: zeroize::Zeroizing::new([0u8; 32]),
             dh_initial: dh,
         };
         let a = Ratchet::new(
@@ -896,6 +941,66 @@ mod tests {
         }
         assert!(a.epoch() >= 3, "initiator epoch {}", a.epoch());
         assert!(b.epoch() >= 2, "responder epoch {}", b.epoch());
+    }
+
+    /// Sends a chain-start record with a frame and a second record with no
+    /// frame. The receiver takes the second first, thus the step at the
+    /// receiver runs on a record that shows no epoch (`CRY-148`).
+    fn second_before_first(a: &mut Ratchet, b: &mut Ratchet, rng: &mut TestRng, now: u64) {
+        let first = send(a, rng, b"first", now);
+        let mut second = vec![0u8; a.overhead_with_frame() + 6];
+        let n = a.send(b"second", false, now, rng, &mut second).unwrap();
+        second.truncate(n);
+        assert_eq!(recv(b, rng, &second, now).unwrap(), b"second");
+        assert_eq!(recv(b, rng, &first, now).unwrap(), b"first");
+        assert_eq!(a.mixed(), b.mixed());
+    }
+
+    #[test]
+    fn a_step_on_a_record_with_no_frame_finds_the_mix() {
+        let (mut a, mut b, mut rng) = pair(b"no frame", Width::W64);
+        let mut now = 0u64;
+        let (mut waited, mut due, mut advanced) = (false, false, false);
+        for _ in 0..2_000 {
+            if advanced && !due {
+                // The new chain of the initiator carries a new epoch, and
+                // the responder mixes before it derives that chain.
+                second_before_first(&mut a, &mut b, &mut rng, now);
+                due = true;
+            } else if !advanced && !waited && b.braid.peer_secret.is_some() {
+                // A secret waits, and the chain carries no new epoch.
+                second_before_first(&mut a, &mut b, &mut rng, now);
+                waited = true;
+            } else {
+                let m = send(&mut a, &mut rng, b"ping", now);
+                assert_eq!(recv(&mut b, &mut rng, &m, now).unwrap(), b"ping");
+            }
+            now += 1;
+            if waited && due {
+                break;
+            }
+            let m = send(&mut b, &mut rng, b"pong", now);
+            let epoch = a.epoch();
+            assert_eq!(recv(&mut a, &mut rng, &m, now).unwrap(), b"pong");
+            now += 1;
+            advanced = a.epoch() > epoch;
+        }
+        assert!(waited && due, "waited {waited}, due {due}");
+        assert!(a.mixed() >= 1);
+        // The root keys stay in step.
+        converse(&mut a, &mut b, &mut rng, 4, 45, &mut now);
+        assert_eq!(a.mixed(), b.mixed());
+    }
+
+    #[test]
+    fn a_record_with_no_frame_counts_toward_n() {
+        let (mut a, _, mut rng) = pair(b"count", Width::W64);
+        let mut out = vec![0u8; 512];
+        a.send(b"x", true, 5, &mut rng, &mut out).unwrap();
+        a.send(b"y", false, 9, &mut rng, &mut out).unwrap();
+        assert_eq!(a.braid.records_in_epoch, 2);
+        // T runs from the first record of the epoch.
+        assert_eq!(a.braid.epoch_started_at, 5);
     }
 
     #[test]

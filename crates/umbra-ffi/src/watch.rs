@@ -64,7 +64,7 @@ struct Entry {
 }
 
 /// What the watch needs while the client is locked (`NTF-145`): the
-/// ingress relay of the last run, the relays of its chains, and each
+/// ingress relay of the last run, the relay set of that run, and each
 /// watch. It holds no key of the store.
 pub struct WatchTable {
     guard: RelayEndpoint,
@@ -178,6 +178,26 @@ fn relay(r: &mut Reader<'_>) -> Result<RelayEndpoint, FfiError> {
     })
 }
 
+/// The most bytes that [`put_relay`] writes for `relay`: each field, and a
+/// length or a flag in front of each one.
+fn relay_size(relay: &RelayEndpoint) -> usize {
+    let fixed = 64;
+    [
+        relay.host.len(),
+        relay.ipv4.len(),
+        relay.static_key.len(),
+        relay.relay_id.len(),
+        relay.operator.len(),
+        relay.family.as_ref().map_or(0, String::len),
+        relay.country.len(),
+        relay.prefix.as_ref().map_or(0, Vec::len),
+        relay.identity_pk.len(),
+        relay.prefix_v6.as_ref().map_or(0, Vec::len),
+    ]
+    .into_iter()
+    .fold(fixed, usize::saturating_add)
+}
+
 impl WatchTable {
     /// The table of the open client.
     pub fn new(
@@ -203,9 +223,25 @@ impl WatchTable {
         }
     }
 
-    /// The bytes that the platform seals.
+    /// The most bytes that [`WatchTable::encode`] writes.
+    fn size(&self) -> usize {
+        let relays = self
+            .relays
+            .iter()
+            .map(relay_size)
+            .fold(relay_size(&self.guard), usize::saturating_add);
+        let path = self.root_ca_path.as_ref().map_or(0, String::len);
+        let entries = self.entries.len().saturating_mul(96);
+        [relays, path, entries]
+            .into_iter()
+            .fold(32, usize::saturating_add)
+    }
+
+    /// The bytes that the platform seals. The writer holds the notifier
+    /// secrets, thus it takes its full size first: a growth would free a
+    /// copy of them that no one wipes (`IMP-124`).
     pub fn encode(&self) -> Result<Zeroizing<Vec<u8>>, FfiError> {
-        let mut w = Writer::new();
+        let mut w = Writer::with_capacity(self.size());
         w.u8(VERSION);
         put_relay(&mut w, &self.guard)?;
         w.u32(u32::try_from(self.relays.len()).map_err(|_| FfiError::TooLong)?);
@@ -279,8 +315,14 @@ impl WatchTable {
 #[uniffi::export(with_foreign)]
 pub trait WatchListener: Send + Sync {
     /// Takes the blob of one arrival (Part 8 §8.2.2). The platform opens
-    /// it with the wake table under `NTF-136`.
-    fn wake(&self, blob: Vec<u8>);
+    /// it with the wake table under `NTF-136`. An exception of the platform
+    /// is an error, and the watch continues.
+    fn wake(&self, blob: Vec<u8>) -> Result<(), FfiError>;
+
+    /// The watch ended, and it starts no new session: its table holds no
+    /// relay that it can reach. No message arrives until the unlock, and
+    /// the platform tells the user so (`NTF-120`).
+    fn down(&self) -> Result<(), FfiError>;
 }
 
 /// A watch that runs. It ends at [`Watch::stop`] or when the platform
@@ -302,7 +344,11 @@ impl Watch {
 }
 
 /// Starts the watch of a locked client from its table (`NTF-142`). The
-/// caller holds the result for as long as the watch runs.
+/// caller holds the result for as long as the watch runs. A table whose
+/// ingress relay has no address, whose relay entry does not parse, or
+/// whose root certificate file does not read is an error here: no session
+/// of it could start, and the platform would show a watch that never runs
+/// (`NTF-120`).
 #[uniffi::export]
 pub fn start_watch(
     table: Vec<u8>,
@@ -313,6 +359,7 @@ pub fn start_watch(
     if parsed.is_empty() {
         return Err(FfiError::NotFound);
     }
+    node_of(&parsed, &mut OsRng)?;
     let (stop, stopped) = mpsc::unbounded_channel();
     std::thread::Builder::new()
         .name("umbra-watch".to_owned())
@@ -336,6 +383,20 @@ pub fn start_watch(
 enum End {
     Lost,
     Closed,
+    /// The table gives no node any more, thus no later session starts.
+    Down,
+}
+
+/// The wait before the next session (`NTF-118`): it doubles from
+/// [`RELINK_FIRST`] up to [`RELINK_MAX`], and a session that reached the
+/// ready state sets it back.
+fn next_wait(backoff: &mut Duration, was_ready: bool) -> Duration {
+    if was_ready {
+        *backoff = RELINK_FIRST;
+    }
+    let wait = *backoff;
+    *backoff = backoff.saturating_mul(2).min(RELINK_MAX);
+    wait
 }
 
 /// Runs the watch until the platform stops it. A session that ends starts
@@ -349,16 +410,18 @@ async fn run_watch(
     let mut backoff = RELINK_FIRST;
     loop {
         let (end, was_ready) = session(&table, listener.as_ref(), &mut stopped).await;
-        if matches!(end, End::Closed) {
-            break;
+        match end {
+            End::Lost => {}
+            End::Closed => break,
+            End::Down => {
+                crate::devlog::line("watch: down".to_owned());
+                let _ = listener.down();
+                break;
+            }
         }
-        backoff = if was_ready {
-            RELINK_FIRST
-        } else {
-            backoff.saturating_mul(2).min(RELINK_MAX)
-        };
+        let wait = next_wait(&mut backoff, was_ready);
         tokio::select! {
-            () = tokio::time::sleep(backoff) => {}
+            () = tokio::time::sleep(wait) => {}
             _ = stopped.recv() => break,
         }
     }
@@ -374,8 +437,8 @@ async fn session(
     stopped: &mut mpsc::UnboundedReceiver<()>,
 ) -> (End, bool) {
     let mut rng = OsRng;
-    let Some((mut node, dial, tls)) = node_of(table, &mut rng) else {
-        return (End::Lost, false);
+    let Ok((mut node, dial, tls)) = node_of(table, &mut rng) else {
+        return (End::Down, false);
     };
     let mut key = [0u8; 16];
     let mut mask = [0u8; 4];
@@ -430,7 +493,10 @@ async fn session(
                     is_ready = true;
                 }
                 ClientEvent::CircuitLost | ClientEvent::CircuitAged => break 'run End::Lost,
-                ClientEvent::Wake { blob, .. } => listener.wake(blob),
+                // A fault of the platform with one blob ends no watch.
+                ClientEvent::Wake { blob, .. } => {
+                    let _ = listener.wake(blob);
+                }
                 _ => {}
             }
         }
@@ -447,29 +513,30 @@ async fn session(
 fn node_of(
     table: &WatchTable,
     rng: &mut OsRng,
-) -> Option<(ClientNode, Dial, Arc<native::ClientConfig>)> {
+) -> Result<(ClientNode, Dial, Arc<native::ClientConfig>), FfiError> {
+    let address = table.guard.ipv4.as_slice().try_into();
     let dial = Dial {
         host: table.guard.host.clone(),
-        addr_v4: Some(table.guard.ipv4.as_slice().try_into().ok()?),
+        addr_v4: Some(address.map_err(|_| FfiError::Malformed)?),
         addr_v6: None,
         port: table.guard.port,
     };
-    let ingress = relay_info(&table.guard).ok()?;
+    let ingress = relay_info(&table.guard)?;
     let mut candidates = Vec::new();
     for relay in table.relays.iter().filter(|relay| relay.layer != 1) {
-        candidates.push(relay_info(relay).ok()?);
+        candidates.push(relay_info(relay)?);
     }
     let tls = match &table.root_ca_path {
         Some(path) => native::tls_config_with_root_file(path),
         None => native::tls_config(),
     }
-    .ok()?;
+    .map_err(|_| FfiError::Storage)?;
     let mut seed = [0u8; 32];
     let _ = rng.try_fill_bytes(&mut seed);
     let root = RootIdentity::new(Secret::new(seed));
     let mut node = ClientNode::with_relays(ingress, candidates, root);
     node.set_bootstrap(table.bootstrap);
-    Some((node, dial, tls))
+    Ok((node, dial, tls))
 }
 
 #[cfg(test)]
@@ -512,6 +579,10 @@ mod tests {
             vec![([3; 32], [4; 32], Secret::new([5; 32]))],
         );
         let bytes = table.encode().unwrap();
+        // IMP-124: the writer took its full size first, thus it grew in no
+        // reallocation.
+        assert!(bytes.len() <= table.size());
+        assert_eq!(bytes.capacity(), table.size());
         let back = WatchTable::parse(&bytes).unwrap();
         assert_eq!(back.guard.host, "r1.example");
         assert_eq!(back.relays.len(), 3);
@@ -528,5 +599,52 @@ mod tests {
         let mut long = bytes.to_vec();
         long.push(0);
         assert!(WatchTable::parse(&long).is_err());
+    }
+
+    #[test]
+    fn the_wait_before_a_new_session_doubles_from_two_seconds() {
+        // NTF-118: 2, 4, 8, 16, and then the ceiling of 30 s.
+        let mut backoff = RELINK_FIRST;
+        let waits: Vec<u64> = (0..6)
+            .map(|_| next_wait(&mut backoff, false).as_secs())
+            .collect();
+        assert_eq!(waits, [2, 4, 8, 16, 30, 30]);
+        // A session that reached the ready state sets it back to 2 s.
+        assert_eq!(next_wait(&mut backoff, true).as_secs(), 2);
+        assert_eq!(next_wait(&mut backoff, false).as_secs(), 4);
+    }
+
+    struct Nobody;
+
+    impl WatchListener for Nobody {
+        fn wake(&self, _blob: Vec<u8>) -> Result<(), FfiError> {
+            Ok(())
+        }
+
+        fn down(&self) -> Result<(), FfiError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_table_that_reaches_no_relay_starts_no_watch() {
+        let entries = || vec![([3; 32], [4; 32], Secret::new([5; 32]))];
+        let start = |table: WatchTable| {
+            start_watch(table.encode().unwrap().to_vec(), Arc::new(Nobody)).err()
+        };
+        // NTF-120: a guard with no IPv4 address.
+        let mut guard = endpoint(1, 1);
+        guard.ipv4 = vec![10, 0, 0];
+        let table = WatchTable::new(guard, vec![endpoint(2, 2)], None, false, entries());
+        assert_eq!(start(table), Some(FfiError::Malformed));
+        // A root certificate file that an update of the app removed.
+        let table = WatchTable::new(
+            endpoint(1, 1),
+            vec![endpoint(2, 2)],
+            Some("/no/such/root-ca.pem".to_owned()),
+            false,
+            entries(),
+        );
+        assert_eq!(start(table), Some(FfiError::Storage));
     }
 }

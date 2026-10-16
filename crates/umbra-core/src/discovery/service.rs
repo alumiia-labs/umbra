@@ -53,7 +53,7 @@ use crate::{
         },
         POW_EFFORT_MAX, POW_LOOKUP_FLOOR,
     },
-    Error,
+    identity, Error,
 };
 
 /// `DIRECTORY_EPOCH` of Part 9 §9.11, in seconds.
@@ -209,6 +209,22 @@ struct Pending {
 const RENEW: u8 = 0x01;
 const WRITE: u8 = 0x02;
 const BLOB: u8 = 0x03;
+/// A registration challenge, which proves the key of the new entry
+/// (`DIS-197`). Its slot holds the hash of that key beside the search key,
+/// thus two parties that register one label end no challenge of the other.
+const REGISTER: u8 = super::dirclient::REGISTER_PURPOSE;
+
+/// The registration challenges that wait at once. A request for one costs
+/// an encapsulation and no token, thus the count has a bound.
+const REGISTER_PENDING_MAX: usize = 4_096;
+
+/// The seeds of the lookup proofs of work that one epoch holds
+/// (`DIS-200`). Each one cost a proof of work at `POW_LOOKUP_FLOOR`.
+const LOOKUP_SEEDS_MAX: usize = 1 << 18;
+
+/// The rotations of the log key set that one answer to a `KeySet` request
+/// holds. Each one is near 16 KB, and the largest answer is 96 KiB.
+const KEYSET_CHAIN_ANSWER: usize = 4;
 
 /// The blind signatures of the cross-relay issuer that the directory holds
 /// for a second request. Each one is 256 bytes, thus the set stays near
@@ -229,6 +245,12 @@ pub struct Directory {
     labels: BTreeMap<Vec<u8>, LabelRecord>,
     challenges: BTreeMap<(Vec<u8>, u8), Pending>,
     spent: SpendSet,
+    /// The seed of each lookup proof of work that an evaluation took, for
+    /// this epoch and the one before it (`DIS-200`).
+    lookup_seeds: SpendSet,
+    /// Each `SignedLogKeySet` from the first set after the genesis set to
+    /// the set of the signers, in order (`DIS-198`).
+    keyset_chain: Vec<Vec<u8>>,
     issuer_seed: Secret<32>,
     issuers: BTreeMap<u32, FirstPartyIssuer>,
     cross_relay: Option<CrossRelayKeys>,
@@ -301,6 +323,8 @@ impl Directory {
             labels: BTreeMap::new(),
             challenges: BTreeMap::new(),
             spent: SpendSet::default(),
+            lookup_seeds: SpendSet::default(),
+            keyset_chain: Vec::new(),
             issuer_seed: keys.issuer_seed,
             cross_relay: keys.cross_relay,
             cross_relay_keys: BTreeMap::new(),
@@ -322,6 +346,28 @@ impl Directory {
     /// The ECVRF key of the log, which a client build ships (`DIS-158`).
     pub fn vrf_public(&self) -> &[u8; 32] {
         self.operator.vrf_public()
+    }
+
+    /// Takes the signed rotations of the log key set, from the first set
+    /// after the genesis set to the set of the signers, in order
+    /// (`DIS-045`, `DIS-198`). Each set holds a higher epoch than the one
+    /// before it, and the last one is the set that the heads name.
+    pub fn set_keyset_chain(&mut self, chain: Vec<Vec<u8>>) -> Result<(), Error> {
+        let mut epoch = 0u64;
+        let mut last = None;
+        for signed in &chain {
+            let (set, _) = LogKeySet::parse(signed)?;
+            if set.keyset_epoch <= epoch {
+                return Err(Error::Malformed);
+            }
+            epoch = set.keyset_epoch;
+            last = Some(set.hash()?);
+        }
+        if last.is_some_and(|hash| hash != self.keyset_hash) {
+            return Err(Error::Malformed);
+        }
+        self.keyset_chain = chain;
+        Ok(())
     }
 
     /// The events since the last call, which the store keeps in order.
@@ -424,19 +470,29 @@ impl Directory {
         self.labels.insert(search_key.to_vec(), record);
     }
 
-    /// Closes the epoch, and the two auditors check it.
+    /// Closes the epoch, and the two auditors check it. The log moves only
+    /// when both auditors pass, and the two move with it. A failed check
+    /// thus keeps each staged version for the next epoch.
     fn advance(&mut self, nonce: [u8; 32], at: u64) -> Result<(), Error> {
-        let update = self.operator.close_epoch(nonce)?;
-        // DIS-049, DIS-050: each auditor checks the epoch before it signs.
-        let mut root = None;
-        for auditor in &mut self.auditors {
-            let checked = auditor.audit(&update)?;
-            if root.is_some_and(|held| held != checked) {
-                return Err(Error::Unverified);
+        let auditors = &self.auditors;
+        let mut steps = Vec::with_capacity(auditors.len());
+        self.operator.close_epoch_checked(nonce, |update| {
+            // DIS-049, DIS-050: each auditor checks the epoch before it
+            // signs.
+            let mut root = None;
+            for auditor in auditors {
+                let (step, checked) = auditor.check(update)?;
+                if root.is_some_and(|held| held != checked) {
+                    return Err(Error::Unverified);
+                }
+                root = Some(checked);
+                steps.push(step);
             }
-            root = Some(checked);
+            root.map(|_| ()).ok_or(Error::NoPath)
+        })?;
+        for (auditor, step) in self.auditors.iter_mut().zip(steps) {
+            auditor.commit(step);
         }
-        root.ok_or(Error::NoPath)?;
         self.last_close = Some(at);
         Ok(())
     }
@@ -586,6 +642,7 @@ impl Directory {
             Kind::Renew => self.renew(body, now),
             Kind::Blob => self.put_blob(body, now),
             Kind::Version => self.version(body),
+            Kind::KeySet => self.keysets(body),
             Kind::Issue => self.issue(body, now, rng),
         };
         match result {
@@ -614,11 +671,21 @@ impl Directory {
             AdmissionKind::Pow => {
                 let solution = PowSolution::parse(admission.body).map_err(|_| Status::Malformed)?;
                 let epoch = epoch_number(now);
-                let live = [epoch, epoch.saturating_sub(1)]
-                    .iter()
-                    .any(|e| lookup_seed(*e, &blinded) == solution.seed);
-                if !live || solution.effort < POW_LOOKUP_FLOOR {
+                let seed_epoch = [epoch, epoch.saturating_sub(1)]
+                    .into_iter()
+                    .find(|e| lookup_seed(*e, &blinded) == solution.seed);
+                let Some(seed_epoch) = seed_epoch else {
                     return Err(Status::Refused);
+                };
+                // DIS-200: a seed serves one evaluation, thus a request that
+                // comes again costs no proof check and no evaluation.
+                if solution.effort < POW_LOOKUP_FLOOR
+                    || self.lookup_seeds.is_spent(seed_epoch, &solution.seed)
+                {
+                    return Err(Status::Refused);
+                }
+                if self.lookup_seeds.count(seed_epoch) >= LOOKUP_SEEDS_MAX {
+                    return Err(Status::Busy);
                 }
                 pow::verify(
                     &self.lookup_verifier,
@@ -628,6 +695,9 @@ impl Directory {
                     &solution.solution,
                 )
                 .map_err(|_| Status::Refused)?;
+                self.lookup_seeds
+                    .spend(epoch, seed_epoch, solution.seed)
+                    .map_err(|_| Status::Refused)?;
             }
             AdmissionKind::None => return Err(Status::Refused),
         }
@@ -641,6 +711,26 @@ impl Directory {
     /// Verifies and spends one first-party token of this epoch or the one
     /// before it (`ABU-094`, `ABU-095`).
     fn spend_token(&mut self, bytes: &[u8], now: u64) -> Result<(), Status> {
+        let (token_epoch, nonce) = self.check_token(bytes, now)?;
+        self.commit_spend(token_epoch, nonce, now)
+    }
+
+    /// Spends the nonce of a token that [`Directory::check_token`] passed.
+    fn commit_spend(&mut self, token_epoch: u32, nonce: [u8; 32], now: u64) -> Result<(), Status> {
+        self.spent
+            .spend(epoch_number(now), token_epoch, nonce)
+            .map_err(|_| Status::Refused)?;
+        // A restart takes the spent nonce again from the store.
+        self.events.push(DirEvent::Spent {
+            epoch: token_epoch,
+            nonce,
+        });
+        Ok(())
+    }
+
+    /// Verifies one first-party token of this epoch or the one before it,
+    /// and spends nothing: its epoch and its nonce.
+    fn check_token(&mut self, bytes: &[u8], now: u64) -> Result<(u32, [u8; 32]), Status> {
         let token = Token::parse(bytes).map_err(|_| Status::Malformed)?;
         if token.token_type != TYPE_FIRST_PARTY {
             return Err(Status::Refused);
@@ -656,17 +746,12 @@ impl Directory {
             if digest != token.challenge_digest {
                 continue;
             }
+            if self.spent.is_spent(token_epoch, &token.nonce) {
+                return Err(Status::Refused);
+            }
             let issuer = self.issuer(token_epoch).map_err(|_| Status::Refused)?;
             issuer.verify(&token).map_err(|_| Status::Refused)?;
-            self.spent
-                .spend(epoch, token_epoch, token.nonce)
-                .map_err(|_| Status::Refused)?;
-            // A restart takes the spent nonce again from the store.
-            self.events.push(DirEvent::Spent {
-                epoch: token_epoch,
-                nonce: token.nonce,
-            });
-            return Ok(());
+            return Ok((token_epoch, token.nonce));
         }
         Err(Status::Refused)
     }
@@ -711,6 +796,25 @@ impl Directory {
         let mut out = Vec::new();
         put_var16(&mut out, head).map_err(|_| Status::Busy)?;
         out.extend_from_slice(&proof);
+        Ok(out)
+    }
+
+    /// The signed rotations of the log key set after the epoch that the
+    /// reader holds, in order, up to `KEYSET_CHAIN_ANSWER` of them
+    /// (`DIS-198`). A reader at the newest set gets none.
+    fn keysets(&self, body: &[u8]) -> Result<Vec<u8>, Status> {
+        let held: [u8; 8] = body.try_into().map_err(|_| Status::Malformed)?;
+        let held = u64::from_be_bytes(held);
+        let after: Vec<&Vec<u8>> = self
+            .keyset_chain
+            .iter()
+            .filter(|signed| LogKeySet::parse(signed).is_ok_and(|(set, _)| set.keyset_epoch > held))
+            .take(KEYSET_CHAIN_ANSWER)
+            .collect();
+        let mut out = vec![u8::try_from(after.len()).map_err(|_| Status::Busy)?];
+        for signed in after {
+            put_var16(&mut out, signed).map_err(|_| Status::Busy)?;
+        }
         Ok(out)
     }
 
@@ -798,6 +902,24 @@ impl Directory {
         Ok(parsed.hk_pub)
     }
 
+    /// The version that a registration of a label gives, or why the label
+    /// takes none: a label that no version holds registers at 0 (`DIS-101`),
+    /// and one after its reservation as the next version (`DIS-077`).
+    fn register_version(&self, search_key: &[u8], now: u64) -> Result<u32, Status> {
+        match self.labels.get(search_key) {
+            None => Ok(0),
+            Some(record) if record.label.needs(now) == Needs::Token => {
+                Ok(record.label.version.saturating_add(1))
+            }
+            Some(_) => Err(Status::Stale),
+        }
+    }
+
+    /// The slot of the registration challenge of one key for a label.
+    fn register_slot(search_key: &[u8], key: &[u8]) -> Vec<u8> {
+        [search_key, &sha3_256(&[key])].concat()
+    }
+
     fn register<R: CryptoRng + TryCryptoRng + ?Sized>(
         &mut self,
         body: &[u8],
@@ -808,6 +930,7 @@ impl Directory {
         let mut r = Reader::new(body.get(FIRST_PARTY_LEN..).ok_or(Status::Malformed)?);
         let input = take_var16(&mut r).map_err(|_| Status::Malformed)?.to_vec();
         let entry = take_var16(&mut r).map_err(|_| Status::Malformed)?.to_vec();
+        let answer: [u8; ANSWER_LEN] = r.array().map_err(|_| Status::Malformed)?;
         // DIS-172: a registration can end before a full lease.
         let lease = if r.remaining() == 0 {
             None
@@ -820,16 +943,7 @@ impl Directory {
         };
         r.finish().map_err(|_| Status::Malformed)?;
         let search_key = self.voprf.evaluate_direct(&input).to_vec();
-        let held = self.labels.get(&search_key).cloned();
-        // A label that no version holds registers under a token (DIS-101),
-        // and one after its reservation as the next version (DIS-077).
-        let version = match &held {
-            None => 0,
-            Some(record) if record.label.needs(now) == Needs::Token => {
-                record.label.version.saturating_add(1)
-            }
-            Some(_) => return Err(Status::Stale),
-        };
+        let version = self.register_version(&search_key, now)?;
         // DIS-010: one version of a label in each epoch.
         if self.operator.is_staged(&search_key) {
             return Err(Status::Busy);
@@ -838,15 +952,9 @@ impl Directory {
         if key == [0; 1_216] {
             return Err(Status::Refused);
         }
-        self.spend_token(token, now)?;
-        if self
-            .stage(&search_key, entry, rng)
-            .map_err(|_| Status::Stale)?
-            != version
-        {
-            return Err(Status::Stale);
-        }
-        let mut label = match held {
+        // DIS-076: the label takes the change before the log does, thus a
+        // change that the label refuses stages no entry.
+        let mut label = match self.labels.get(&search_key).cloned() {
             None => Label::register(key, now),
             Some(mut record) => {
                 record
@@ -859,6 +967,24 @@ impl Directory {
         if let Some(seconds) = lease {
             label.end_at(now.saturating_add(seconds));
         }
+        if self.operator.next_version(&search_key) != Some(version) {
+            return Err(Status::Stale);
+        }
+        // DIS-197: the registrant holds the private half of the key of the
+        // entry, and the answer binds the entry.
+        let (token_epoch, nonce) = self.check_token(token, now)?;
+        let slot = Self::register_slot(&search_key, &key);
+        self.answer_pending(&slot, REGISTER, version, &answer, Some(&entry), now)?;
+        // The token spends after each check that can refuse, thus a refused
+        // registration keeps it.
+        self.commit_spend(token_epoch, nonce, now)?;
+        if self
+            .stage(&search_key, entry, rng)
+            .map_err(|_| Status::Stale)?
+            != version
+        {
+            return Err(Status::Stale);
+        }
         self.keep_label(
             &search_key,
             LabelRecord {
@@ -870,6 +996,73 @@ impl Directory {
         Ok(Vec::new())
     }
 
+    /// Issues the registration challenge of `DIS-197`: an encapsulation to
+    /// the key of the entry that registers, as the write challenge of
+    /// §9.9.3 for the version that the registration gives. The answer
+    /// carries that version after the challenge.
+    fn register_challenge<R: CryptoRng + ?Sized>(
+        &mut self,
+        r: &mut Reader<'_>,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<Vec<u8>, Status> {
+        let input = take_var16(r).map_err(|_| Status::Malformed)?.to_vec();
+        let key: [u8; 1_216] = r.array().map_err(|_| Status::Malformed)?;
+        r.finish().map_err(|_| Status::Malformed)?;
+        if key == [0; 1_216] {
+            return Err(Status::Refused);
+        }
+        // DIS-169: an address names the hash of its key.
+        let name = match input.strip_prefix(labels::ADDRESS_INDEX) {
+            Some(address) => {
+                let address: [u8; 20] = address.try_into().map_err(|_| Status::Malformed)?;
+                identity::address::check(&address, &key).map_err(|_| Status::Refused)?;
+                address.to_vec()
+            }
+            None => input.clone(),
+        };
+        let search_key = self.voprf.evaluate_direct(&input).to_vec();
+        let version = self.register_version(&search_key, now)?;
+        let slot = (Self::register_slot(&search_key, &key), REGISTER);
+        // DIS-194: a live challenge goes again.
+        if let Some(pending) = self.challenges.get(&slot) {
+            if pending.version == version && now.saturating_sub(pending.at) < CHALLENGE_TTL {
+                return Ok(pending.out.clone());
+            }
+        }
+        let waiting = self
+            .challenges
+            .iter()
+            .filter(|((_, purpose), pending)| {
+                *purpose == REGISTER && now.saturating_sub(pending.at) < CHALLENGE_TTL
+            })
+            .count();
+        if waiting >= REGISTER_PENDING_MAX {
+            return Err(Status::Busy);
+        }
+        let issued = Issued::new(
+            Purpose::Write {
+                version_new: version,
+            },
+            &key,
+            &name,
+            rng,
+        )
+        .map_err(|_| Status::Busy)?;
+        let mut out = issued.bytes().to_vec();
+        out.extend_from_slice(&version.to_be_bytes());
+        self.challenges.insert(
+            slot,
+            Pending {
+                issued,
+                at: now,
+                out: out.clone(),
+                version,
+            },
+        );
+        Ok(out)
+    }
+
     fn challenge<R: CryptoRng + ?Sized>(
         &mut self,
         body: &[u8],
@@ -878,6 +1071,9 @@ impl Directory {
     ) -> Result<Vec<u8>, Status> {
         let mut r = Reader::new(body);
         let purpose = r.u8().map_err(|_| Status::Malformed)?;
+        if purpose == REGISTER {
+            return self.register_challenge(&mut r, now, rng);
+        }
         let input = take_var16(&mut r).map_err(|_| Status::Malformed)?.to_vec();
         r.finish().map_err(|_| Status::Malformed)?;
         let search_key = self.voprf.evaluate_direct(&input).to_vec();
@@ -945,7 +1141,8 @@ impl Directory {
 
     /// Verifies an answer to the live challenge of `purpose` for a label,
     /// and ends that challenge when the answer holds (`DIS-168`). A wrong
-    /// answer ends nothing (`DIS-194`).
+    /// answer ends nothing (`DIS-194`). `search_key` names the slot: the
+    /// search key, or the slot of a registration challenge.
     #[allow(clippy::too_many_arguments)]
     fn answer_pending(
         &mut self,
@@ -1440,6 +1637,45 @@ mod tests {
         Ok(dirclient::parse_challenge(&answer, version).unwrap())
     }
 
+    /// A registration under the challenge of `DIS-197`: the challenge to the
+    /// key of the entry, the answer of `key` over the entry, and the token.
+    #[allow(clippy::too_many_arguments)]
+    fn register(
+        dir: &mut Directory,
+        token: &[u8],
+        input: &[u8],
+        entry: &[u8],
+        key: &KeyPair,
+        lease: Option<u32>,
+        now: u64,
+        rng: &mut Rng,
+    ) -> Result<Vec<u8>, DirError> {
+        register_as(dir, token, input, entry, key, key, lease, now, rng)
+    }
+
+    /// A registration whose challenge goes to `claimed`, answered by
+    /// `holder`.
+    #[allow(clippy::too_many_arguments)]
+    fn register_as(
+        dir: &mut Directory,
+        token: &[u8],
+        input: &[u8],
+        entry: &[u8],
+        claimed: &KeyPair,
+        holder: &KeyPair,
+        lease: Option<u32>,
+        now: u64,
+        rng: &mut Rng,
+    ) -> Result<Vec<u8>, DirError> {
+        let body = dirclient::register_challenge_body(input, &claimed.public().to_bytes()).unwrap();
+        let bytes = call(dir, Kind::Challenge, &body, now, rng)?;
+        let (challenge, purpose) = dirclient::parse_register_challenge(&bytes).unwrap();
+        let name = input.strip_prefix(labels::ADDRESS_INDEX).unwrap_or(input);
+        let ans = answer(purpose, holder, name, &challenge, Some(entry)).unwrap();
+        let body = dirclient::register_body(token, input, entry, &ans, lease).unwrap();
+        call(dir, Kind::Register, &body, now, rng)
+    }
+
     fn tokens(
         dir: &mut Directory,
         epoch: u32,
@@ -1513,27 +1749,77 @@ mod tests {
         let input = b"@alice#1234";
 
         let spent = tokens(&mut dir, epoch_number(T0), 2, T0, &mut rng);
-        let register =
-            dirclient::register_body(&spent[0], input, &handle_entry(input, &hk, 0), None).unwrap();
-        call(&mut dir, Kind::Register, &register, T0 + 1, &mut rng).unwrap();
+        let entry0 = handle_entry(input, &hk, 0);
+        // DIS-197: a party that holds no private half of the key of the
+        // entry does not register it, and its token stays unspent.
+        let thief = root.handle_key(5, 0);
+        assert_eq!(
+            register_as(
+                &mut dir,
+                &spent[0],
+                input,
+                &entry0,
+                &hk,
+                &thief,
+                None,
+                T0 + 1,
+                &mut rng
+            ),
+            Err(DirError::Status(Status::Refused))
+        );
+        register(
+            &mut dir,
+            &spent[0],
+            input,
+            &entry0,
+            &hk,
+            None,
+            T0 + 1,
+            &mut rng,
+        )
+        .unwrap();
         // DIS-170: a held label does not register again, and a token
         // spends once.
         assert_eq!(
-            call(&mut dir, Kind::Register, &register, T0 + 2, &mut rng),
+            register(
+                &mut dir,
+                &spent[0],
+                input,
+                &entry0,
+                &hk,
+                None,
+                T0 + 2,
+                &mut rng
+            ),
             Err(DirError::Status(Status::Stale))
         );
         let other = b"@bob#99";
-        let again =
-            dirclient::register_body(&spent[0], other, &handle_entry(other, &hk, 0), None).unwrap();
+        let other_entry = handle_entry(other, &hk, 0);
         assert_eq!(
-            call(&mut dir, Kind::Register, &again, T0 + 2, &mut rng),
+            register(
+                &mut dir,
+                &spent[0],
+                other,
+                &other_entry,
+                &hk,
+                None,
+                T0 + 2,
+                &mut rng
+            ),
             Err(DirError::Status(Status::Refused))
         );
         // DIS-169: the entry names its label.
-        let wrong =
-            dirclient::register_body(&spent[1], other, &handle_entry(input, &hk, 0), None).unwrap();
         assert_eq!(
-            call(&mut dir, Kind::Register, &wrong, T0 + 2, &mut rng),
+            register(
+                &mut dir,
+                &spent[1],
+                other,
+                &entry0,
+                &hk,
+                None,
+                T0 + 2,
+                &mut rng
+            ),
             Err(DirError::Status(Status::Refused))
         );
 
@@ -1650,11 +1936,9 @@ mod tests {
             let at = dir.last_close.unwrap();
             // A registration takes no such name.
             let spent = tokens(&mut dir, epoch_number(at), 1, at, &mut rng);
-            let register =
-                dirclient::register_body(&spent[0], input, &handle_entry(input, &hk, 0), None)
-                    .unwrap();
+            let entry = handle_entry(input, &hk, 0);
             assert_eq!(
-                call(&mut dir, Kind::Register, &register, at, &mut rng),
+                register(&mut dir, &spent[0], input, &entry, &hk, None, at, &mut rng),
                 Err(DirError::Status(Status::Refused))
             );
             // A directory of an earlier build holds the label.
@@ -1728,8 +2012,13 @@ mod tests {
             version: 0,
         });
         let spent = tokens(&mut dir, epoch_number(T0), 2, T0, &mut rng);
-        let register = dirclient::register_body(&spent[0], &input, &live, None).unwrap();
-        call(&mut dir, Kind::Register, &register, T0, &mut rng).unwrap();
+        // DIS-169: the challenge names the key whose hash is the address.
+        let other = root.public_address_key(4);
+        assert_eq!(
+            register(&mut dir, &spent[0], &input, &live, &other, None, T0, &mut rng),
+            Err(DirError::Status(Status::Refused))
+        );
+        register(&mut dir, &spent[0], &input, &live, &key, None, T0, &mut rng).unwrap();
 
         // DIS-171: the holder writes the tombstone.
         let tomb = encode(&AddressEntry {
@@ -1767,10 +2056,11 @@ mod tests {
         // DIS-073: a handle whose lease lapses takes its tombstone.
         let hk = root.handle_key(0, 0);
         let handle = b"@carol#42";
-        let register =
-            dirclient::register_body(&spent[1], handle, &handle_entry(handle, &hk, 0), None)
-                .unwrap();
-        call(&mut dir, Kind::Register, &register, now, &mut rng).unwrap();
+        let entry0 = handle_entry(handle, &hk, 0);
+        register(
+            &mut dir, &spent[1], handle, &entry0, &hk, None, now, &mut rng,
+        )
+        .unwrap();
         let lapse = now + HANDLE_LEASE + DIRECTORY_EPOCH;
         dir.tick(lapse, &mut rng).unwrap();
         // The tombstone stages at the tick, and shows at the next one.
@@ -1792,10 +2082,11 @@ mod tests {
         let hk = root.handle_key(0, 0);
         let handle = b"@carol#42";
         let spent = tokens(&mut dir, epoch_number(T0), 1, T0, &mut rng);
-        let register =
-            dirclient::register_body(&spent[0], handle, &handle_entry(handle, &hk, 0), None)
-                .unwrap();
-        call(&mut dir, Kind::Register, &register, T0, &mut rng).unwrap();
+        let entry0 = handle_entry(handle, &hk, 0);
+        register(
+            &mut dir, &spent[0], handle, &entry0, &hk, None, T0, &mut rng,
+        )
+        .unwrap();
         // A stored label with a fault: an address input of a wrong length,
         // whose tombstone entry does not build.
         let held = dir
@@ -1847,9 +2138,8 @@ mod tests {
         let hk = root.handle_key(0, 0);
         let input = b"@erin#77";
         let spent = tokens(&mut dir, epoch_number(T0), 1, T0, &mut rng);
-        let register =
-            dirclient::register_body(&spent[0], input, &handle_entry(input, &hk, 0), None).unwrap();
-        call(&mut dir, Kind::Register, &register, T0, &mut rng).unwrap();
+        let entry0 = handle_entry(input, &hk, 0);
+        register(&mut dir, &spent[0], input, &entry0, &hk, None, T0, &mut rng).unwrap();
         let now = T0 + DIRECTORY_EPOCH;
         dir.tick(now, &mut rng).unwrap();
         assert!(read_blob(&mut dir, input, now, &mut rng).is_none());
@@ -1927,13 +2217,30 @@ mod tests {
 
         // DIS-173: a lease below LEASE_MIN or above HANDLE_LEASE is no
         // lease, and the token stays unspent.
-        let short = dirclient::register_body(&spent[0], &input, &live, Some(60)).unwrap();
         assert_eq!(
-            call(&mut dir, Kind::Register, &short, T0, &mut rng),
+            register(
+                &mut dir,
+                &spent[0],
+                &input,
+                &live,
+                &key,
+                Some(60),
+                T0,
+                &mut rng
+            ),
             Err(DirError::Status(Status::Malformed))
         );
-        let register = dirclient::register_body(&spent[0], &input, &live, Some(3_600)).unwrap();
-        call(&mut dir, Kind::Register, &register, T0, &mut rng).unwrap();
+        register(
+            &mut dir,
+            &spent[0],
+            &input,
+            &live,
+            &key,
+            Some(3_600),
+            T0,
+            &mut rng,
+        )
+        .unwrap();
         let now = T0 + DIRECTORY_EPOCH;
         dir.tick(now, &mut rng).unwrap();
         assert_eq!(
@@ -1983,6 +2290,254 @@ mod tests {
         assert_eq!(
             call(&mut dir, Kind::Issue, &body, T0, &mut rng),
             Err(DirError::Status(Status::Refused))
+        );
+    }
+    #[test]
+    fn a_lapsed_label_registers_again_only_under_the_key_that_it_names() {
+        use crate::discovery::HANDLE_RESERVE;
+
+        let mut rng = Rng(31);
+        let (mut dir, keyset) = directory();
+        dir.tick(T0, &mut rng).unwrap();
+        let root = RootIdentity::new(Secret::new([31; 32]));
+        let hk = root.handle_key(0, 0);
+        let input = b"@frank#5150";
+        let spent = tokens(&mut dir, epoch_number(T0), 1, T0, &mut rng);
+        let entry0 = handle_entry(input, &hk, 0);
+        register(&mut dir, &spent[0], input, &entry0, &hk, None, T0, &mut rng).unwrap();
+        dir.tick(T0 + DIRECTORY_EPOCH, &mut rng).unwrap();
+        // DIS-073: the lease lapses, and the tombstone shows at version 1.
+        let lapse = T0 + HANDLE_LEASE + DIRECTORY_EPOCH;
+        dir.tick(lapse, &mut rng).unwrap();
+        dir.tick(lapse + DIRECTORY_EPOCH, &mut rng).unwrap();
+        // DIS-077: after the reservation the label registers as version 2.
+        let later = lapse + HANDLE_RESERVE;
+        dir.tick(later, &mut rng).unwrap();
+        let at = later + 1;
+        let fresh = tokens(&mut dir, epoch_number(at), 2, at, &mut rng);
+        // A second party reuses the published key of the holder with a
+        // queue of its own. It holds no private half, thus no answer of it
+        // holds (DIS-197).
+        let thief = root.handle_key(9, 0);
+        let stolen = {
+            let entry = DirectoryEntry {
+                handle: input.to_vec(),
+                hk_pub: hk.public().to_bytes(),
+                rendezvous: Some(queue(9)),
+                version: 2,
+            };
+            let mut out = vec![0u8; DIRECTORY_ENTRY_MAX];
+            let used = entry.encode(&mut out).unwrap();
+            out.truncate(used);
+            out
+        };
+        assert_eq!(
+            register_as(&mut dir, &fresh[0], input, &stolen, &hk, &thief, None, at, &mut rng),
+            Err(DirError::Status(Status::Refused))
+        );
+        // The challenge names the version that the entry carries.
+        assert_eq!(
+            register(
+                &mut dir,
+                &fresh[0],
+                input,
+                &handle_entry(input, &hk, 0),
+                &hk,
+                None,
+                at,
+                &mut rng
+            ),
+            Err(DirError::Status(Status::Refused))
+        );
+        // The holder registers it again under its own key.
+        let entry2 = handle_entry(input, &hk, 2);
+        register(&mut dir, &fresh[0], input, &entry2, &hk, None, at, &mut rng).unwrap();
+        let now = at + DIRECTORY_EPOCH;
+        dir.tick(now, &mut rng).unwrap();
+        assert_eq!(
+            read(&mut dir, &keyset, input, now, &mut rng).unwrap(),
+            entry2
+        );
+    }
+
+    #[test]
+    fn a_lookup_proof_of_work_serves_one_evaluation() {
+        let mut rng = Rng(32);
+        let (mut dir, _) = directory();
+        dir.tick(T0, &mut rng).unwrap();
+        let pk = *dir.voprf_public();
+        let (_, body) =
+            dirclient::evaluate_request(b"@gina#1", &pk, epoch_number(T0), None, &mut rng).unwrap();
+        call(&mut dir, Kind::Evaluate, &body, T0, &mut rng).unwrap();
+        // DIS-200: the same element and solution again cost no evaluation.
+        assert_eq!(
+            call(&mut dir, Kind::Evaluate, &body, T0 + 1, &mut rng),
+            Err(DirError::Status(Status::Refused))
+        );
+        assert_eq!(dir.lookup_seeds.len(), 1);
+    }
+
+    #[test]
+    fn an_epoch_that_an_auditor_refuses_keeps_its_versions_for_the_next_one() {
+        let mut rng = Rng(33);
+        let (mut dir, keyset) = directory();
+        dir.tick(T0, &mut rng).unwrap();
+        let root = RootIdentity::new(Secret::new([33; 32]));
+        let hk = root.handle_key(0, 0);
+        let input = b"@hana#33";
+        let spent = tokens(&mut dir, epoch_number(T0), 1, T0, &mut rng);
+        let entry0 = handle_entry(input, &hk, 0);
+        register(&mut dir, &spent[0], input, &entry0, &hk, None, T0, &mut rng).unwrap();
+        // An auditor that holds another log refuses the epoch: the log, the
+        // other auditor, and the staged version stay as they were.
+        let held = dir.auditors.clone();
+        let size = dir.operator.head().unwrap().0;
+        dir.auditors[1] = Auditor::default();
+        let now = T0 + DIRECTORY_EPOCH;
+        assert!(dir.tick(now, &mut rng).is_err());
+        assert_eq!(dir.operator.head().unwrap().0, size);
+        assert_eq!(dir.auditors[0], held[0]);
+        let search_key = dir.voprf.evaluate_direct(input).to_vec();
+        assert!(dir.operator.is_staged(&search_key));
+        // With the auditor back, the next tick closes the epoch.
+        dir.auditors[1] = held[1].clone();
+        dir.tick(now + 1, &mut rng).unwrap();
+        assert_eq!(dir.operator.head().unwrap().0, size + 1);
+        assert_eq!(
+            read(&mut dir, &keyset, input, now + 1, &mut rng).unwrap(),
+            entry0
+        );
+    }
+
+    /// A reader over a directory in this process, as a client holds it.
+    struct Local {
+        dir: core::cell::RefCell<Directory>,
+        rng: core::cell::RefCell<Rng>,
+        pins: dirclient::DirectoryPins,
+        held: core::cell::Cell<Option<crate::discovery::reader::HeldHead>>,
+        keyset: core::cell::RefCell<Vec<u8>>,
+        now: core::cell::Cell<u64>,
+    }
+
+    impl crate::discovery::reader::LogChannel for Local {
+        fn call(&self, request: &[u8]) -> Result<Vec<u8>, crate::discovery::reader::ReadError> {
+            let now = self.now.get();
+            Ok(self
+                .dir
+                .borrow_mut()
+                .handle(request, now, &mut *self.rng.borrow_mut()))
+        }
+        fn pins(&self) -> &dirclient::DirectoryPins {
+            &self.pins
+        }
+        fn held(&self) -> Option<crate::discovery::reader::HeldHead> {
+            self.held.get()
+        }
+        fn set_held(&self, head: crate::discovery::reader::HeldHead) {
+            self.held.set(Some(head));
+        }
+        fn now(&self) -> u64 {
+            self.now.get()
+        }
+        fn keyset(&self) -> Vec<u8> {
+            self.keyset.borrow().clone()
+        }
+        fn set_keyset(&self, keyset: Vec<u8>) {
+            *self.keyset.borrow_mut() = keyset;
+        }
+    }
+
+    #[test]
+    fn a_reader_follows_a_signed_key_set_rotation_and_reads_a_stale_head_as_degraded() {
+        use crate::directory::CLOCK_SKEW;
+        use crate::discovery::{reader, TREE_HEAD_FRESHNESS};
+
+        let mut rng = Rng(34);
+        let (old, genesis) = keys();
+        // DIS-064: the next set, signed by two signers of the genesis set.
+        let next: Vec<_> = [0u8, 1, 2]
+            .into_iter()
+            .map(|i| SigningKey::from_seed(Secret::new([90 + i; 32])))
+            .collect();
+        let public: Vec<_> = next.iter().map(|s| s.verifying_key().to_bytes()).collect();
+        let set = LogKeySet {
+            keyset_epoch: 2,
+            keys: public.iter().map(|k| &k[..]).collect(),
+        };
+        let mut next_set = vec![0u8; KEYSET_LEN];
+        let used = set.encode(&mut next_set).unwrap();
+        next_set.truncate(used);
+        let preimage = set.rotation_preimage().unwrap();
+        let mut signed = next_set.clone();
+        signed.push(2);
+        for (index, signer) in old.signers.iter().enumerate().take(2) {
+            signed.push(index as u8);
+            signed.extend_from_slice(&signer.sign(&preimage, &mut rng).unwrap().to_bytes());
+        }
+        let keys = DirectoryKeys {
+            signers: next,
+            keyset: next_set.clone(),
+            ..old
+        };
+        let mut dir = Directory::new(keys, DIRECTORY_EPOCH, ascii_profile).unwrap();
+        // DIS-198: the chain ends at the set of the signers.
+        assert!(dir.set_keyset_chain(vec![genesis.clone()]).is_err());
+        dir.set_keyset_chain(vec![signed]).unwrap();
+        dir.tick(T0, &mut rng).unwrap();
+        let pins = dirclient::DirectoryPins {
+            key_config: Vec::new(),
+            keyset: genesis.clone(),
+            vrf_public: *dir.vrf_public(),
+            voprf_public: *dir.voprf_public(),
+        };
+        let local = Local {
+            dir: core::cell::RefCell::new(dir),
+            rng: core::cell::RefCell::new(Rng(35)),
+            pins,
+            held: core::cell::Cell::new(None),
+            keyset: core::cell::RefCell::new(genesis.clone()),
+            now: core::cell::Cell::new(T0 + 1),
+        };
+        // DIS-199: a head under the next set takes the rotation, and the
+        // reader keeps that set.
+        let input = issuer_label_input(TYPE_FIRST_PARTY, epoch_number(T0));
+        let (found, _) = reader::find_keyed(&local, &input, &mut rng).unwrap();
+        assert!(found.entry.is_some());
+        assert!(!found.degraded);
+        assert_eq!(*local.keyset.borrow(), next_set);
+        assert!(local.held.get().is_some());
+
+        // DIS-067, DIS-068: a head past its freshness completes the lookup
+        // as unverified, and the reader holds no such head.
+        let held = local.held.get();
+        local.now.set(T0 + TREE_HEAD_FRESHNESS + CLOCK_SKEW + 2);
+        let (found, key) = reader::find_keyed(&local, &input, &mut rng).unwrap();
+        assert!(found.entry.is_some());
+        assert!(found.degraded);
+        assert_eq!(local.held.get(), held);
+        // A strict read and an issuer key take no such head.
+        assert_eq!(
+            reader::lookup(&local, &key).map(|_| ()),
+            Err(reader::ReadError::Stale)
+        );
+        assert_eq!(
+            reader::cross_relay_key(&local, epoch_number(T0), &mut rng).map(|_| ()),
+            Err(reader::ReadError::Stale)
+        );
+
+        // DIS-060: a reader whose held set no rotation reaches refuses.
+        let other = Local {
+            keyset: core::cell::RefCell::new(next_set.clone()),
+            now: core::cell::Cell::new(T0 + 1),
+            held: core::cell::Cell::new(None),
+            ..local
+        };
+        let mut wrong = next_set.clone();
+        wrong[1] = 0xFF;
+        *other.keyset.borrow_mut() = wrong;
+        assert_eq!(
+            reader::find_keyed(&other, &input, &mut rng).map(|_| ()),
+            Err(reader::ReadError::Unverified)
         );
     }
 }

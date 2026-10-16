@@ -44,8 +44,10 @@
 //! `keys` line and a `seed` line does not parse.
 //!
 //! The program writes `queue` once the relay made the queue, and the
-//! signer signs that file into the next manifest (`REL-167`). Each report
-//! that opens is one line on the standard output.
+//! signer signs that file into the next manifest (`REL-167`). The standard
+//! output gives the totals of the reports, one line each minute at most,
+//! and no hop of a report. The file `state` holds the keys of the queue, readable by its
+//! owner alone.
 //!
 //! After the end of each epoch the authority reads the noised chain count
 //! of each relay that `FAULT_MIN_REPORTS` reports of that epoch name, from
@@ -268,13 +270,39 @@ impl Persist for QueueStore {
     fn commit(&mut self, changes: Vec<StateChange>, _received: &[(ContactId, Vec<u8>)]) -> bool {
         for change in changes {
             if let StateChange::RendezvousQueue { state, .. } = change {
-                if std::fs::write(&self.state, state).is_err() {
+                if write_private(&self.state, &state).is_err() {
                     return false;
                 }
             }
         }
         true
     }
+}
+
+/// Writes `bytes` to `path`, readable by its owner alone. The bytes go to a
+/// file beside it first, thus a crash leaves the old file or the new one.
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut part = path.as_os_str().to_owned();
+    part.push(".part");
+    let part = PathBuf::from(part);
+    // A part of an earlier crash can have another mode, and the mode below
+    // applies to a new file alone.
+    match std::fs::remove_file(&part) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&part)?;
+    std::io::Write::write_all(&mut file, bytes)?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&part, path)
 }
 
 fn unix_now() -> u64 {
@@ -496,6 +524,15 @@ fn evaluate(settings: &Arc<Settings>, key: &Arc<SigningKey>, counts: &mut Counts
     }
 }
 
+/// The reports of one run, as totals. The log holds no hop of a report: the
+/// three hops of a report are the chain of one client.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct ReportTotals {
+    opened: u64,
+    counted: u64,
+    unopened: u64,
+}
+
 /// One run: the queue, and each report until the run ends.
 async fn run_once(
     settings: &Arc<Settings>,
@@ -547,11 +584,20 @@ async fn run_once(
     // that the refusal after it takes.
     let mut again: Option<tokio::time::Instant> = None;
     let mut wait = QUEUE_RETRY;
+    let mut reports = ReportTotals::default();
+    let mut logged = reports;
     loop {
         let at = again.unwrap_or_else(tokio::time::Instant::now);
         let update = tokio::select! {
             update = updates.recv() => update,
             _ = clock.tick() => {
+                if reports != logged {
+                    println!(
+                        "reports of this run: opened={} counted={} not_opened={}",
+                        reports.opened, reports.counted, reports.unopened
+                    );
+                    logged = reports;
+                }
                 evaluate(settings, key, counts);
                 continue;
             }
@@ -586,24 +632,17 @@ async fn run_once(
             }
             Update::LinkFault(sealed) => match LinkFaultReport::open(report_sk, &sealed) {
                 Ok(report) => {
-                    println!(
-                        "report epoch={} hops={},{},{} loops_sent={} loops_lost={}",
-                        report.epoch,
-                        to_hex(&report.hops[0]),
-                        to_hex(&report.hops[1]),
-                        to_hex(&report.hops[2]),
-                        report.loops_sent,
-                        report.loops_lost,
-                    );
+                    reports.opened += 1;
                     // REL-170: a report of the current epoch or the one
                     // before it counts, and each other goes.
                     let epoch = unix_now() / EPOCH_SECONDS;
                     if report.epoch == epoch || report.epoch.saturating_add(1) == epoch {
                         count_report(counts, &report);
+                        reports.counted += 1;
                     }
                 }
                 // REL-170: a report that does not open goes.
-                Err(_) => println!("a report did not open"),
+                Err(_) => reports.unopened += 1,
             },
             Update::Offline(ended) => {
                 println!("authority offline: {ended:?}");
@@ -747,6 +786,7 @@ fn run_main() -> ExitCode {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -756,5 +796,25 @@ mod tests {
         let mut wait = QUEUE_RETRY;
         let seconds: Vec<u64> = (0..8).map(|_| next_wait(&mut wait).as_secs()).collect();
         assert_eq!(seconds, [30, 60, 120, 240, 480, 900, 900, 900]);
+    }
+
+    #[test]
+    fn the_queue_state_replaces_the_old_file_and_is_private() {
+        let dir = std::env::temp_dir().join(format!("umbra-authority-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("report-queue.state");
+        std::fs::write(&path, b"old").unwrap();
+        // A part file of a crash, open to each user.
+        std::fs::write(dir.join("report-queue.state.part"), b"crash").unwrap();
+        write_private(&path, b"new").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert!(!dir.join("report-queue.state.part").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

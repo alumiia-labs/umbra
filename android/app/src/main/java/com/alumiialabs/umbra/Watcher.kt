@@ -65,12 +65,41 @@ object Watcher : WatchListener {
         }
     }
 
+    // An exception that crosses into Rust ends the process.
     override fun wake(blob: ByteArray) {
-        val app = app ?: return
-        // An open client takes the record over its own run.
-        if (Core.isOpen()) return
-        val conversation = WakeStore.openBlob(app, blob)
-        if (WakeStore.isSilent(conversation)) return
-        Notifier.waiting(app, conversation)
+        try {
+            val app = app ?: return
+            // An open client takes the record over its own run.
+            if (Core.isOpen()) return
+            val conversation = WakeStore.openBlob(app, blob)
+            if (WakeStore.isSilent(conversation)) return
+            Notifier.waiting(app, conversation)
+        } catch (fault: Exception) {
+            if (BuildConfig.DEBUG) android.util.Log.w("umbra-watch", "a wake failed", fault)
+        }
+    }
+
+    /**
+     * The watch gave up: its table names no session that can connect. The
+     * service ends, and the user learns that no message arrives until the
+     * unlock (`NTF-120`, `NTF-142`).
+     */
+    override fun down() {
+        try {
+            val app = app ?: return
+            worker.execute {
+                watch?.let {
+                    it.stop()
+                    it.destroy()
+                }
+                watch = null
+                if (!Core.isOpen()) {
+                    DeliveryService.stop(app)
+                    Notifier.locked(app)
+                }
+            }
+        } catch (fault: Exception) {
+            if (BuildConfig.DEBUG) android.util.Log.w("umbra-watch", "a down failed", fault)
+        }
     }
 }

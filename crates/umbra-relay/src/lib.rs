@@ -28,6 +28,7 @@ pub const fn issuer_floor(epoch: u32) -> u32 {
 pub mod directory_server;
 #[cfg(feature = "native")]
 pub mod fcm;
+pub mod loops;
 #[cfg(feature = "native")]
 pub mod measurer;
 #[cfg(feature = "native")]

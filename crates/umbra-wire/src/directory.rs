@@ -47,6 +47,8 @@ pub enum Kind {
     Blob = 0x08,
     /// The proof of one version of a label (Part 9 §9.9.2).
     Version = 0x09,
+    /// The signed successors of a key set of the log (Part 9 §9.5.2).
+    KeySet = 0x0A,
     /// A batch of first-party tokens (Part 13 §13.9).
     Issue = 0x10,
 }
@@ -63,6 +65,7 @@ impl Kind {
             0x07 => Kind::Renew,
             0x08 => Kind::Blob,
             0x09 => Kind::Version,
+            0x0A => Kind::KeySet,
             0x10 => Kind::Issue,
             _ => return Err(Error::Malformed),
         })

@@ -93,10 +93,10 @@ const LEAF_KEY: &str = concat!(
 struct Keystore([u8; 32]);
 
 impl SecureElementCallback for Keystore {
-    fn keyed(&self, input: Vec<u8>) -> Vec<u8> {
+    fn keyed(&self, input: Vec<u8>) -> Result<Vec<u8>, FfiError> {
         let mut mac = Hmac::<Sha256>::new_from_slice(&self.0).unwrap();
         mac.update(&input);
-        mac.finalize().into_bytes().to_vec()
+        Ok(mac.finalize().into_bytes().to_vec())
     }
 }
 
@@ -104,8 +104,9 @@ impl SecureElementCallback for Keystore {
 struct View(Mutex<Vec<u16>>);
 
 impl TextSink for View {
-    fn put(&self, code_units: Vec<u16>) {
+    fn put(&self, code_units: Vec<u16>) -> Result<(), FfiError> {
         *self.0.lock().unwrap() = code_units;
+        Ok(())
     }
 }
 
@@ -649,28 +650,98 @@ fn two_apps_meet_and_talk_through_the_exported_surface() {
     std::fs::remove_dir_all(&directory).ok();
 }
 
-#[test]
-fn a_message_to_an_app_that_went_away_reaches_its_push_endpoint() {
-    use umbra_crypto::{kem::KeyPair, ohttp};
-    // A UnifiedPush endpoint that hands each post to the test.
-    let services = tokio::runtime::Runtime::new().unwrap();
-    let endpoint = services
+/// A fake Google service: its token endpoint gives a token to any
+/// assertion, and its FCM API hands the blob of each message to the test.
+fn fake_fcm(
+    services: &tokio::runtime::Runtime,
+) -> (
+    umbra_relay::fcm::Fcm,
+    tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+) {
+    use umbra_relay::fcm::{Fcm, ServiceAccount};
+    let google = services
         .block_on(TcpListener::bind(("127.0.0.1", 0)))
         .unwrap();
-    let endpoint_port = endpoint.local_addr().unwrap().port();
-    let (pushed, mut posts) = tokio::sync::mpsc::unbounded_channel();
+    let port = google.local_addr().unwrap().port();
+    let (pushed, posts) = tokio::sync::mpsc::unbounded_channel();
     let acceptor = tls_acceptor(LEAF, LEAF_KEY).unwrap();
     services.spawn(async move {
         loop {
-            let (tcp, _) = endpoint.accept().await.unwrap();
+            let (tcp, _) = google.accept().await.unwrap();
             let mut stream = acceptor.accept(tcp).await.unwrap();
             let mut inbound = Vec::new();
-            if let Ok(request) = https::read_request(&mut stream, &mut inbound, 4_096).await {
-                let _ = pushed.send(request.body);
+            let Ok(request) = https::read_request(&mut stream, &mut inbound, 16_384).await else {
+                continue;
+            };
+            if request.path == "/token" {
+                let answer = r#"{"access_token":"tok-1","expires_in":3599}"#;
+                let _ =
+                    https::respond(&mut stream, 200, "application/json", answer.as_bytes()).await;
+                continue;
             }
-            let _ = https::respond(&mut stream, 201, "text/plain", &[]).await;
+            let body = String::from_utf8(request.body).unwrap();
+            let blob = body
+                .split(r#""b":""#)
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .map(decode_base64url)
+                .unwrap_or_default();
+            let _ = pushed.send(blob);
+            let _ = https::respond(&mut stream, 200, "application/json", b"{}").await;
         }
     });
+    let pem = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/fcm/test-key.pem"
+    ))
+    .unwrap();
+    let key = pem
+        .replace('\\', "\\\\")
+        .replace('\n', "\\n")
+        .replace('"', "\\\"");
+    let account = format!(
+        "{{\"type\":\"service_account\",\"project_id\":\"test-project\",\
+         \"private_key\":\"{key}\",\"client_email\":\"ndr@test-project.iam.example\",\
+         \"token_uri\":\"https://localhost:{port}/token\"}}"
+    );
+    let fcm = Fcm::new(
+        ServiceAccount::parse(&account).unwrap(),
+        &format!("https://localhost:{port}"),
+        native::tls_config_with_root_file(CA).unwrap(),
+    )
+    .unwrap();
+    (fcm, posts)
+}
+
+/// Base64url with no padding, as FCM carries a blob.
+fn decode_base64url(text: &str) -> Vec<u8> {
+    let value = |c: u8| -> u32 {
+        u32::from(match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'-' => 62,
+            b'_' => 63,
+            _ => panic!("not base64url"),
+        })
+    };
+    let clean: Vec<u8> = text.bytes().filter(|c| *c != b'=').collect();
+    let mut out = Vec::new();
+    for group in clean.chunks(4) {
+        let mut n = 0u32;
+        for (i, c) in group.iter().enumerate() {
+            n |= value(*c) << (18 - 6 * i);
+        }
+        out.extend_from_slice(&n.to_be_bytes()[1..group.len()]);
+    }
+    out
+}
+
+#[test]
+fn a_message_to_an_app_that_went_away_reaches_its_fcm_token() {
+    use umbra_crypto::{kem::KeyPair, ohttp};
+    let services = tokio::runtime::Runtime::new().unwrap();
+    let (fcm, mut posts) = fake_fcm(&services);
 
     // The NDR, and the relays that carry its requests.
     let pair = KeyPair::generate(&mut OsRng);
@@ -688,10 +759,7 @@ fn a_message_to_an_app_that_went_away_reaches_its_push_endpoint() {
         tls_acceptor(LEAF, LEAF_KEY).unwrap(),
         Gateway { key_id: 1, pair },
         Box::new(MemoryNdrStore::default()),
-        native::tls_config_with_root_file(CA).unwrap(),
-        None,
-        // The endpoint of the test is a UnifiedPush endpoint on this machine.
-        true,
+        Some(fcm),
     ));
     let (_relays, ports) = start_relays_with(None, None, Some(&ndr));
     let mut network = network_of(&ports);
@@ -703,9 +771,7 @@ fn a_message_to_an_app_that_went_away_reaches_its_push_endpoint() {
     std::fs::create_dir_all(&directory).unwrap();
     let alice = launch(&directory, "alice.db", 1);
     let bob = launch(&directory, "bob.db", 2);
-    alice
-        .set_push_endpoint(Some(format!("https://localhost:{endpoint_port}/up/alice")))
-        .unwrap();
+    alice.set_fcm_token(Some("fcm-alice".into())).unwrap();
     alice.clone().connect(network.clone()).unwrap();
     bob.clone().connect(network.clone()).unwrap();
     alice.invite().unwrap();
@@ -744,8 +810,13 @@ fn a_message_to_an_app_that_went_away_reaches_its_push_endpoint() {
 struct Wakes(std::sync::mpsc::Sender<Vec<u8>>);
 
 impl umbra_ffi::watch::WatchListener for Wakes {
-    fn wake(&self, blob: Vec<u8>) {
+    fn wake(&self, blob: Vec<u8>) -> Result<(), FfiError> {
         let _ = self.0.send(blob);
+        Ok(())
+    }
+
+    fn down(&self) -> Result<(), FfiError> {
+        Ok(())
     }
 }
 
@@ -825,23 +896,7 @@ fn a_message_to_a_locked_app_in_direct_mode_wakes_its_watch() {
 fn a_group_record_wakes_a_member_that_went_away_through_its_notify_queue() {
     use umbra_crypto::{kem::KeyPair, ohttp};
     let services = tokio::runtime::Runtime::new().unwrap();
-    let endpoint = services
-        .block_on(TcpListener::bind(("127.0.0.1", 0)))
-        .unwrap();
-    let endpoint_port = endpoint.local_addr().unwrap().port();
-    let (pushed, mut posts) = tokio::sync::mpsc::unbounded_channel();
-    let acceptor = tls_acceptor(LEAF, LEAF_KEY).unwrap();
-    services.spawn(async move {
-        loop {
-            let (tcp, _) = endpoint.accept().await.unwrap();
-            let mut stream = acceptor.accept(tcp).await.unwrap();
-            let mut inbound = Vec::new();
-            if let Ok(request) = https::read_request(&mut stream, &mut inbound, 4_096).await {
-                let _ = pushed.send(request.body);
-            }
-            let _ = https::respond(&mut stream, 201, "text/plain", &[]).await;
-        }
-    });
+    let (fcm, mut posts) = fake_fcm(&services);
     let pair = KeyPair::generate(&mut OsRng);
     let config = ohttp::encode_key_config(1, pair.public());
     let ndr_listener = services
@@ -857,10 +912,7 @@ fn a_group_record_wakes_a_member_that_went_away_through_its_notify_queue() {
         tls_acceptor(LEAF, LEAF_KEY).unwrap(),
         Gateway { key_id: 1, pair },
         Box::new(MemoryNdrStore::default()),
-        native::tls_config_with_root_file(CA).unwrap(),
-        None,
-        // The endpoint of the test is a UnifiedPush endpoint on this machine.
-        true,
+        Some(fcm),
     ));
     let relays = tokio::runtime::Runtime::new().unwrap();
     let network = start_signed_network_with(&relays, None, Some(&ndr), None, false);
@@ -870,8 +922,7 @@ fn a_group_record_wakes_a_member_that_went_away_through_its_notify_queue() {
     std::fs::create_dir_all(&directory).unwrap();
     let alice = launch(&directory, "alice.db", 1);
     let bob = launch(&directory, "bob.db", 2);
-    bob.set_push_endpoint(Some(format!("https://localhost:{endpoint_port}/up/bob")))
-        .unwrap();
+    bob.set_fcm_token(Some("fcm-bob".into())).unwrap();
     let mut networks = Vec::new();
     for handle in [&alice, &bob] {
         let mut verified = handle

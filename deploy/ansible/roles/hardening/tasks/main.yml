@@ -27,7 +27,10 @@
       - fail2ban
       - python3-systemd
     state: present
+    lock_timeout: "{{ umbra_apt_lock_timeout }}"
 
+# Root logs in over SSH only when Ansible logs in as root. A run as another
+# user with sudo closes the root login.
 - name: SSH takes keys alone, and no forwarding
   ansible.builtin.copy:
     dest: /etc/ssh/sshd_config.d/10-umbra.conf
@@ -36,7 +39,7 @@
       # Written by Ansible (deploy/ansible/roles/hardening).
       PasswordAuthentication no
       KbdInteractiveAuthentication no
-      PermitRootLogin prohibit-password
+      PermitRootLogin {{ 'prohibit-password' if (ansible_user | default('root')) == 'root' else 'no' }}
       PermitEmptyPasswords no
       MaxAuthTries 3
       LoginGraceTime 30

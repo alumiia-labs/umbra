@@ -10,11 +10,23 @@ table inet filter
 delete table inet filter
 
 {% set relay_addresses = groups['relays'] | map('extract', hostvars, 'ansible_host') | list %}
+{% set ns = namespace(relay_addresses6=[]) %}
+{% for host in groups['relays'] if hostvars[host].umbra_ipv6 is defined %}
+{% set ns.relay_addresses6 = ns.relay_addresses6 + [hostvars[host].umbra_ipv6] %}
+{% endfor %}
 table inet filter {
   set relays4 {
     type ipv4_addr
 {% if relay_addresses %}
     elements = { {{ relay_addresses | join(', ') }} }
+{% endif %}
+  }
+
+  # The IPv6 address of each relay server that states umbra_ipv6.
+  set relays6 {
+    type ipv6_addr
+{% if ns.relay_addresses6 %}
+    elements = { {{ ns.relay_addresses6 | join(', ') }} }
 {% endif %}
   }
 
@@ -62,6 +74,7 @@ table inet filter {
     # The gateways of the notification server and the directory answer the
     # OHTTP relays of the network alone.
     tcp dport {{ umbra_service_port }} ip saddr @relays4 accept
+    tcp dport {{ umbra_service_port }} ip6 saddr @relays6 accept
 {% endif %}
   }
 

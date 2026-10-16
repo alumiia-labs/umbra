@@ -26,8 +26,6 @@ pub struct SessionFrame<'a> {
     pub session_id: [u8; 8],
     /// The frame index in this session.
     pub seq: u32,
-    /// Bit 0 of `flags`, which v1 reserves and sends as zero (`WIR-140`).
-    pub resend: bool,
     /// The cell, of one bucket.
     pub cell: &'a [u8],
 }
@@ -39,7 +37,8 @@ impl<'a> SessionFrame<'a> {
         let mut w = Writer::new(out);
         w.put(&self.session_id)?;
         w.u24(self.seq)?;
-        w.u8(u8::from(self.resend))?;
+        // WIR-140: v1 defines no flag, thus `flags` is zero.
+        w.u8(0)?;
         w.put(self.cell)?;
         Ok(w.position())
     }
@@ -50,8 +49,7 @@ impl<'a> SessionFrame<'a> {
         let mut r = Reader::new(bytes);
         let session_id = r.array()?;
         let seq = r.u24()?;
-        let flags = r.u8()?;
-        if flags & !0x01 != 0 {
+        if r.u8()? != 0 {
             return Err(Error::Malformed);
         }
         let cell = r.rest();
@@ -60,7 +58,6 @@ impl<'a> SessionFrame<'a> {
             SessionFrame {
                 session_id,
                 seq,
-                resend: flags & 0x01 != 0,
                 cell,
             },
             bucket,
@@ -280,17 +277,19 @@ mod tests {
         let frame = SessionFrame {
             session_id: [2; 8],
             seq: 0x0A_0B_0C,
-            resend: true,
             cell: &cell,
         };
         let mut out = vec![0u8; 524];
         assert_eq!(frame.encode(&mut out).unwrap(), 524);
+        assert_eq!(out[11], 0);
         let (back, bucket) = SessionFrame::parse(&out).unwrap();
         assert_eq!(bucket, Bucket::B0);
         assert_eq!(back.seq, 0x0A_0B_0C);
-        assert!(back.resend);
-        out[11] = 0x02;
-        assert!(SessionFrame::parse(&out).is_err());
+        // WIR-142: each bit of `flags` is reserved, bit 0 too.
+        for flags in [0x01, 0x02, 0x80] {
+            out[11] = flags;
+            assert!(SessionFrame::parse(&out).is_err());
+        }
         out[11] = 0x00;
         assert!(SessionFrame::parse(&out[..523]).is_err());
     }

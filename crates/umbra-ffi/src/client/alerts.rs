@@ -102,6 +102,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     ) -> Result<(), Error> {
         let value = alert_value(setting, muted_until_ms);
         self.put_alert(conversation, &value, rng)?;
+        // NTF-135: the wake table names a silent and a muted queue.
+        self.wake_changed();
         if let Some(subject) = self.subject_of(conversation)? {
             self.publish_mutable(ITEM_ALERT, &subject, &value, rng)?;
         }
@@ -147,6 +149,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if let Some(conversation) = self.conversation_of_subject(subject)? {
             self.put_alert(conversation, &alert_value(setting, muted_until_ms), rng)?;
             self.events.push_back(Event::Conversations);
+            self.wake_changed();
         }
         Ok(())
     }

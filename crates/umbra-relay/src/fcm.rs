@@ -73,7 +73,9 @@ pub fn sent_of(status: u16, body: &[u8]) -> Sent {
 /// service account file holds.
 pub fn json_string(json: &str, key: &str) -> Option<String> {
     let rest = value_after(json, key)?.strip_prefix('"')?;
-    let mut out = String::new();
+    // The string can be a key, thus it takes its full room at once and no
+    // growth leaves a copy behind.
+    let mut out = String::with_capacity(rest.len());
     let mut chars = rest.chars();
     loop {
         match chars.next()? {
@@ -139,8 +141,9 @@ pub fn base64url(bytes: &[u8]) -> String {
     out
 }
 
-/// Decodes the standard base64 of a PEM body.
-fn base64_decode(text: &str) -> Option<Vec<u8>> {
+/// Decodes the standard base64 of a PEM body. The body is a key, thus each
+/// buffer wipes itself.
+fn base64_decode(text: &str) -> Option<Zeroizing<Vec<u8>>> {
     let value = |c: u8| -> Option<u32> {
         Some(u32::from(match c {
             b'A'..=b'Z' => c - b'A',
@@ -151,11 +154,12 @@ fn base64_decode(text: &str) -> Option<Vec<u8>> {
             _ => return None,
         }))
     };
-    let clean: Vec<u8> = text
-        .bytes()
-        .filter(|c| !c.is_ascii_whitespace() && *c != b'=')
-        .collect();
-    let mut out = Vec::with_capacity(clean.len() * 3 / 4);
+    let mut clean = Zeroizing::new(Vec::with_capacity(text.len()));
+    clean.extend(
+        text.bytes()
+            .filter(|c| !c.is_ascii_whitespace() && *c != b'='),
+    );
+    let mut out = Zeroizing::new(Vec::with_capacity(clean.len() * 3 / 4 + 3));
     for group in clean.chunks(4) {
         let mut n = 0u32;
         for (i, c) in group.iter().enumerate() {
@@ -182,13 +186,14 @@ pub struct ServiceAccount {
 }
 
 impl ServiceAccount {
-    /// Reads a service account file of Google Cloud.
+    /// Reads a service account file of Google Cloud. Each copy of the key
+    /// wipes itself when the read ends.
     pub fn parse(json: &str) -> Option<ServiceAccount> {
-        let pem = json_string(json, "private_key")?;
-        let body: String = pem
-            .lines()
-            .filter(|line| !line.starts_with("-----"))
-            .collect();
+        let pem = Zeroizing::new(json_string(json, "private_key")?);
+        let mut body = Zeroizing::new(String::with_capacity(pem.len()));
+        for line in pem.lines().filter(|line| !line.starts_with("-----")) {
+            body.push_str(line);
+        }
         let der = base64_decode(&body)?;
         let audience = json_string(json, "token_uri")?;
         Some(ServiceAccount {
@@ -376,8 +381,8 @@ mod tests {
         assert_eq!(base64url(b"fo"), "Zm8");
         assert_eq!(base64url(b"foo"), "Zm9v");
         assert_eq!(base64url(&[0xFB, 0xFF]), "-_8");
-        assert_eq!(base64_decode("Zm9vYmE=").unwrap(), b"fooba");
-        assert_eq!(base64_decode("Zm9v\nYmFy").unwrap(), b"foobar");
+        assert_eq!(base64_decode("Zm9vYmE=").unwrap().as_slice(), b"fooba");
+        assert_eq!(base64_decode("Zm9v\nYmFy").unwrap().as_slice(), b"foobar");
     }
 
     #[test]

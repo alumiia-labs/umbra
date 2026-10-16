@@ -20,13 +20,16 @@ use crate::secret::Secret;
 /// A generator that hardens an inner CSPRNG under `K_rng_harden`.
 ///
 /// The `context` names the use, such as a KEM coin or an ephemeral key. The
-/// `call` separates one draw from each other draw of the process. A
-/// counter separates the blocks of one call.
+/// `call` separates one draw from each other draw of the process. One draw
+/// is the life of one generator, and it can fill more than one buffer.
 pub struct HardenedRng<'a, R> {
     inner: &'a mut R,
     mac: Hmac<Sha3_256>,
     context: &'static [u8],
     call: [u8; CALL_LEN],
+    /// `block` of `CRY-025`: the 32-byte blocks of the draw from zero. It
+    /// runs across each fill and restarts at no fill, thus two fills under
+    /// one `call` never take the same input.
     counter: u32,
 }
 

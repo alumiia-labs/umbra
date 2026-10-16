@@ -20,6 +20,12 @@ use crate::{kem::scalar_of, labels, secret::Secret, Error};
 /// The length of the AEAD tag on a content record.
 pub const RECORD_TAG_LEN: usize = 16;
 
+/// The slots that one call of the chain derives forward at most. Each slot
+/// costs one HKDF, thus a slot far ahead would cost hours. A caller takes
+/// a slot up to `t_now + GROUP_SLOT_SKEW` of Part 11 §11.3.2 alone. This
+/// bound is about 7 years of slots of one hour, and no epoch lives as long.
+pub const CHAIN_STEP_MAX: u32 = 65_536;
+
 /// `K_e`, the secret of one group epoch.
 pub struct EpochSecret(Secret<32>);
 
@@ -175,12 +181,19 @@ impl ChainState {
         ChainState { epoch, slot, key }
     }
 
+    /// The steps from the slot of this state to `slot`, which must lie at
+    /// or after it and inside [`CHAIN_STEP_MAX`].
+    fn steps_to(&self, slot: u32) -> Result<u32, Error> {
+        match slot.checked_sub(self.slot) {
+            Some(steps) if steps <= CHAIN_STEP_MAX => Ok(steps),
+            _ => Err(Error::Group),
+        }
+    }
+
     /// `K_{e,slot}` itself, for an admit; the slot must be at or after the
     /// one this state holds.
     pub fn slot_key(&self, slot: u32) -> Result<Secret<32>, Error> {
-        if slot < self.slot {
-            return Err(Error::Group);
-        }
+        self.steps_to(slot)?;
         let mut key = Secret::new(*self.key.expose());
         let mut at = self.slot;
         while at < slot {
@@ -195,9 +208,7 @@ impl ChainState {
     /// The chain runs forward only, thus a slot before the current one is an
     /// error.
     pub fn advance(&mut self, slot: u32) -> Result<(), Error> {
-        if slot < self.slot {
-            return Err(Error::Group);
-        }
+        self.steps_to(slot)?;
         while self.slot < slot {
             self.key = next_slot_key(&self.key);
             self.slot = self.slot.saturating_add(1);
@@ -210,9 +221,7 @@ impl ChainState {
     /// The stored key does not move; a receiver derives forward for one
     /// record and keeps its window where it is.
     pub fn record_key(&self, slot: u32) -> Result<Secret<32>, Error> {
-        if slot < self.slot {
-            return Err(Error::Group);
-        }
+        self.steps_to(slot)?;
         let mut key = Secret::new(*self.key.expose());
         let mut at = self.slot;
         while at < slot {
@@ -298,6 +307,20 @@ mod tests {
         assert!(state.record_key(101).is_err());
         assert!(state.advance(101).is_err());
         assert!(state.advance(102).is_ok());
+    }
+
+    #[test]
+    fn a_slot_far_ahead_costs_no_unbounded_work() {
+        let mut state = secret().start(&GROUP, 1, 100);
+        assert!(state.record_key(100 + CHAIN_STEP_MAX).is_ok());
+        assert_eq!(
+            state.record_key(100 + CHAIN_STEP_MAX + 1).err(),
+            Some(Error::Group)
+        );
+        assert_eq!(state.record_key(u32::MAX).err(), Some(Error::Group));
+        assert_eq!(state.slot_key(u32::MAX).err(), Some(Error::Group));
+        assert_eq!(state.advance(u32::MAX), Err(Error::Group));
+        assert_eq!(state.slot(), 100);
     }
 
     #[test]

@@ -30,6 +30,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
@@ -53,6 +54,7 @@ private fun autoLockLabel(seconds: Long): String = when (seconds) {
 /** The settings of the lock. The lock itself is one button of it. */
 @Composable
 fun AppLockScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
+    val context = LocalContext.current
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.lock_app_lock), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
@@ -68,10 +70,19 @@ fun AppLockScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             )
             HorizontalDivider(color = Palette.Divider)
             Spacer(Modifier.height(14.dp))
-            SecondaryButton(stringResource(R.string.lock_lock_now)) { Core.lock() }
+            SecondaryButton(stringResource(R.string.lock_lock_now)) { Core.lock(context) }
             Spacer(Modifier.height(14.dp))
-            // A fact that a user cannot know, and that decides the choice above.
-            Note(stringResource(R.string.lock_no_message_while_locked))
+            // A fact that a user cannot know, and that decides the choice
+            // above. Instant and Direct mode show that a message waits.
+            Note(
+                stringResource(
+                    if (Modes.mode(context).holdsConnection) {
+                        R.string.lock_message_waits_while_locked
+                    } else {
+                        R.string.lock_no_message_while_locked
+                    },
+                ),
+            )
         }
     }
 }

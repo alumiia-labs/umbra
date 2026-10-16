@@ -10,8 +10,9 @@
 use umbra_core::{
     abuse::{epoch_number, pow::PowSolution},
     discovery::{
+        head::LogKeySet,
         hello::{self, HelloBody},
-        profile::ProfilePlain,
+        profile::{is_plain_name, is_plain_note, ProfilePlain},
         HELLO_INBOUND_LIMIT,
     },
     store::{
@@ -56,6 +57,9 @@ const BLOB_DUE_SETTING: &[u8] = b"profile-blob-due";
 /// The selected picture of the profile blob: a JPEG after the re-encode of
 /// `DIS-001`.
 const PICTURE_SETTING: &[u8] = b"profile-picture";
+/// The newest `LogKeySet` that a signed rotation gave this device
+/// (`DIS-199`).
+const LOG_KEYSET_SETTING: &[u8] = b"log-keyset";
 
 /// The longest name of a Profile (Part 4 §4.2.5).
 pub const PROFILE_NAME_MAX: usize = 32;
@@ -394,6 +398,31 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(batch.commit()?)
     }
 
+    /// The key set of the log that this device holds: the stored set of a
+    /// signed rotation when its epoch is above the one of `pinned`, the
+    /// genesis set of the build, and else `pinned` (`DIS-066`, `DIS-199`).
+    pub fn log_keyset(&self, pinned: &[u8]) -> Result<Vec<u8>, Error> {
+        let epoch = |bytes: &[u8]| {
+            LogKeySet::parse(bytes)
+                .ok()
+                .map(|(set, _)| set.keyset_epoch)
+        };
+        Ok(match self.get_row(super::SETTINGS, LOG_KEYSET_SETTING)? {
+            Some(held) if epoch(&held) > epoch(pinned) => held.to_vec(),
+            _ => pinned.to_vec(),
+        })
+    }
+
+    /// Keeps a key set of the log that a signed rotation gave.
+    pub fn keep_log_keyset<R: CryptoRng + ?Sized>(
+        &mut self,
+        keyset: &[u8],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        LogKeySet::parse(keyset).map_err(|_| Error::Malformed)?;
+        self.put_row(super::SETTINGS, LOG_KEYSET_SETTING, keyset, rng)
+    }
+
     /// Each entry that this device publishes, oldest first.
     pub fn published(&self) -> Result<Vec<Published>, Error> {
         let store = &self.open_ref()?.store;
@@ -625,6 +654,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if name.len() > PROFILE_NAME_MAX {
             return Err(Error::TooLong);
         }
+        // DIS-201: no control character, line break, or bidirectional
+        // format character.
+        if !is_plain_name(name) {
+            return Err(Error::Malformed);
+        }
         self.put_row(super::SETTINGS, PROFILE_NAME_SETTING, name.as_bytes(), rng)?;
         self.put_row(super::SETTINGS, BLOB_DUE_SETTING, &[1], rng)
     }
@@ -646,6 +680,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let text = text.trim();
         if text.len() > umbra_core::discovery::profile::WELCOME_MAX {
             return Err(Error::TooLong);
+        }
+        if !is_plain_note(text) {
+            return Err(Error::Malformed);
         }
         self.put_row(super::SETTINGS, WELCOME_SETTING, text.as_bytes(), rng)?;
         self.put_row(super::SETTINGS, BLOB_DUE_SETTING, &[1], rng)
@@ -818,7 +855,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             Err(_) => (
                 core::str::from_utf8(body.profile)
                     .ok()
-                    .filter(|name| name.len() <= PROFILE_NAME_MAX)
+                    .filter(|name| name.len() <= PROFILE_NAME_MAX && is_plain_name(name))
                     .unwrap_or_default()
                     .to_owned(),
                 String::new(),

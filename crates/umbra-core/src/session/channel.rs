@@ -560,18 +560,135 @@ pub struct PairwiseChannel {
     outbound: Outbound,
     inbound: Inbound,
     previous: Option<Inbound>,
-    /// The `send_index` of each record that opened in this run, the oldest
-    /// first, at most `OPENED_HELD` of them. A record that fails at one of
-    /// them is a copy, and no hole (`WIR-253`).
-    opened: alloc::collections::VecDeque<u16>,
+    /// The `send_index` of each record that opened, in a window below the
+    /// newest one. A record that fails at one of them is a copy, and no
+    /// hole (`WIR-253`).
+    opened: OpenedWindow,
 }
 
-/// The indices that a channel holds of the records that opened.
-const OPENED_HELD: usize = 4_096;
+/// The words of the window of [`OpenedWindow`].
+const OPENED_WORDS: usize = 32;
+/// The indices below the newest one that opened that the window holds
+/// (`WIR-560`).
+const OPENED_WINDOW: u16 = 2_048;
+/// How far above the newest index that opened a record that does not open
+/// can name a hole (`WIR-560`): the skipped keys that one chain may leave
+/// (`MAX_SKIP`).
+const HOLE_AHEAD: u16 = 1_000;
+const _: () = assert!(OPENED_WINDOW as usize == 64 * OPENED_WORDS);
+const _: () = assert!(HOLE_AHEAD as u32 == umbra_crypto::ratchet::dr::MAX_SKIP);
+
+/// The `send_index` of each record of the peer that opened, as the newest
+/// one and a bit for each of the `OPENED_WINDOW` indices below it. The
+/// store holds it with the channel, thus a copy of a record that opened in
+/// an earlier run names no hole either.
+#[derive(Clone, Copy, Default)]
+struct OpenedWindow {
+    newest: Option<u16>,
+    /// Bit `d` stands for the index `newest - d`.
+    bits: [u64; OPENED_WORDS],
+}
+
+impl OpenedWindow {
+    fn bit(&self, distance: u16) -> bool {
+        self.bits
+            .get(usize::from(distance / 64))
+            .is_some_and(|word| (word >> (distance % 64)) & 1 == 1)
+    }
+
+    fn set(&mut self, distance: u16) {
+        if let Some(word) = self.bits.get_mut(usize::from(distance / 64)) {
+            *word |= 1 << (distance % 64);
+        }
+    }
+
+    /// Moves each bit `by` places down the window, as a newer index opened.
+    fn shift(&mut self, by: u16) {
+        if by >= OPENED_WINDOW {
+            self.bits = [0; OPENED_WORDS];
+            return;
+        }
+        let words = usize::from(by / 64);
+        let bits = u32::from(by % 64);
+        let old = self.bits;
+        let at = |index: Option<usize>| index.and_then(|index| old.get(index)).copied();
+        for (index, word) in self.bits.iter_mut().enumerate() {
+            let high = at(index.checked_sub(words)).unwrap_or(0);
+            let low = at(index.checked_sub(words.saturating_add(1))).unwrap_or(0);
+            *word = if bits == 0 {
+                high
+            } else {
+                (high << bits) | (low >> (64 - bits))
+            };
+        }
+    }
+
+    fn contains(&self, index: u16) -> bool {
+        self.newest.is_some_and(|newest| {
+            let behind = newest.wrapping_sub(index);
+            behind < OPENED_WINDOW && self.bit(behind)
+        })
+    }
+
+    fn insert(&mut self, index: u16) {
+        let Some(newest) = self.newest else {
+            self.newest = Some(index);
+            self.bits = [0; OPENED_WORDS];
+            self.set(0);
+            return;
+        };
+        // The index counts modulo 65 536 (`WIR-251`), thus the nearer of
+        // the two directions names its place.
+        let ahead = index.wrapping_sub(newest);
+        if ahead != 0 && ahead < 0x8000 {
+            self.shift(ahead);
+            self.newest = Some(index);
+            self.set(0);
+        } else {
+            let behind = newest.wrapping_sub(index);
+            if behind < OPENED_WINDOW {
+                self.set(behind);
+            }
+        }
+    }
+
+    /// Whether a record at `index` that did not open names a hole
+    /// (`WIR-560`). The index of a record that does not open has no
+    /// authentication, thus a holder of the queue key can write any one. A
+    /// hole sits inside the window below the newest index that opened, or
+    /// at most `HOLE_AHEAD` above it.
+    fn names_hole(&self, index: u16) -> bool {
+        if self.contains(index) {
+            return false;
+        }
+        // Before the first record opened, the session starts at zero.
+        let newest = self.newest.unwrap_or(u16::MAX);
+        let ahead = index.wrapping_sub(newest);
+        let behind = newest.wrapping_sub(index);
+        (ahead != 0 && ahead <= HOLE_AHEAD) || (self.newest.is_some() && behind < OPENED_WINDOW)
+    }
+
+    fn export(&self, writer: &mut Writer) {
+        writer.option(self.newest.as_ref(), |writer, newest| writer.u16(*newest));
+        for word in self.bits {
+            writer.u64(word);
+        }
+    }
+
+    fn restore(reader: &mut Reader<'_>) -> Result<Self, Error> {
+        let newest = reader.option(Reader::u16)?;
+        let mut bits = [0u64; OPENED_WORDS];
+        for word in &mut bits {
+            *word = reader.u64()?;
+        }
+        Ok(OpenedWindow { newest, bits })
+    }
+}
 
 /// The version byte of a stored channel. Version `0x01` holds no previous
-/// inbound queue.
-const STORED_VERSION: u8 = 0x02;
+/// inbound queue, and version `0x02` holds no window of the indices that
+/// opened.
+const STORED_VERSION: u8 = 0x03;
 
 impl PairwiseChannel {
     /// Writes the channel for the at-rest store: the two queue ends and the
@@ -591,6 +708,7 @@ impl PairwiseChannel {
             None => writer.u8(0),
         }
         writer.var(&self.ratchet.export()?)?;
+        self.opened.export(&mut writer);
         Ok(writer.finish())
     }
 
@@ -598,7 +716,7 @@ impl PairwiseChannel {
     pub fn restore(bytes: &[u8]) -> Result<Self, Error> {
         let mut reader = Reader::new(bytes);
         let version = reader.u8()?;
-        if version != STORED_VERSION && version != 0x01 {
+        if !matches!(version, 0x01 | 0x02 | STORED_VERSION) {
             return Err(Error::Malformed);
         }
         let outbound = Outbound::restore(&mut reader)?;
@@ -612,13 +730,17 @@ impl PairwiseChannel {
             },
         };
         let ratchet = Ratchet::restore(reader.var()?)?;
+        let opened = match version {
+            STORED_VERSION => OpenedWindow::restore(&mut reader)?,
+            _ => OpenedWindow::default(),
+        };
         reader.end()?;
         Ok(PairwiseChannel {
             ratchet,
             outbound,
             inbound,
             previous,
-            opened: alloc::collections::VecDeque::new(),
+            opened,
         })
     }
 
@@ -626,7 +748,7 @@ impl PairwiseChannel {
     /// its stored form. It holds no ratchet and no queue of this device.
     pub fn stored_outbound(bytes: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
         let mut reader = Reader::new(bytes);
-        if !matches!(reader.u8()?, 0x01 | STORED_VERSION) {
+        if !matches!(reader.u8()?, 0x01 | 0x02 | STORED_VERSION) {
             return Err(Error::Malformed);
         }
         let outbound = Outbound::restore(&mut reader)?;
@@ -642,7 +764,7 @@ impl PairwiseChannel {
             outbound,
             inbound,
             previous: None,
-            opened: alloc::collections::VecDeque::new(),
+            opened: OpenedWindow::default(),
         }
     }
 
@@ -858,21 +980,19 @@ impl PairwiseChannel {
             Ok(opened) => {
                 app.truncate(opened.len);
                 if let Some(ctx) = ctx {
-                    if self.opened.len() >= OPENED_HELD {
-                        self.opened.pop_front();
-                    }
-                    self.opened.push_back(ctx.send_index);
+                    self.opened.insert(ctx.send_index);
                 }
                 Ok(Received::App { seq, bytes: app })
             }
-            // WIR-253: a record of another session, or a copy of one that
-            // opened, names no hole of this session (`WIR-254`).
+            // WIR-253: a record of another session, a copy of one that
+            // opened, and an index far from the indices that opened name no
+            // hole of this session (`WIR-254`, `WIR-560`).
             Err(_) => Ok(Received::Undecryptable {
                 seq,
                 send_index: ctx
                     .filter(|ctx| {
                         ctx.session_tag == self.ratchet.next_ctx().session_tag
-                            && !self.opened.contains(&ctx.send_index)
+                            && self.opened.names_hole(ctx.send_index)
                     })
                     .map(|ctx| ctx.send_index),
             }),
@@ -960,6 +1080,48 @@ impl PairwiseChannel {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_window_of_the_opened_indices_names_a_hole_near_them_alone() {
+        let mut window = OpenedWindow::default();
+        // WIR-560: before the first record opened, the session starts at
+        // zero.
+        assert!(window.names_hole(0));
+        assert!(window.names_hole(HOLE_AHEAD - 1));
+        assert!(!window.names_hole(HOLE_AHEAD));
+        assert!(!window.names_hole(40_000));
+        for index in [0, 1, 3, 70, 200] {
+            window.insert(index);
+        }
+        for index in [0, 1, 3, 70, 200] {
+            assert!(window.contains(index) && !window.names_hole(index));
+        }
+        assert!(!window.contains(2) && window.names_hole(2));
+        assert!(window.names_hole(199) && window.names_hole(201));
+        assert!(window.names_hole(200 + HOLE_AHEAD));
+        assert!(!window.names_hole(201 + HOLE_AHEAD));
+        // A late record below the newest one takes its bit.
+        window.insert(2);
+        assert!(window.contains(2));
+        // The store keeps the window.
+        let mut writer = Writer::new();
+        window.export(&mut writer);
+        let bytes = writer.finish();
+        let mut reader = Reader::new(&bytes);
+        let restored = OpenedWindow::restore(&mut reader).unwrap();
+        reader.end().unwrap();
+        assert!((0..=200).all(|index| restored.contains(index) == window.contains(index)));
+        // An index that leaves the window names no hole, and the index
+        // wraps at 65 536 (`WIR-251`).
+        window.insert(200 + OPENED_WINDOW);
+        assert!(!window.contains(200) && !window.names_hole(200));
+        assert!(window.names_hole(201));
+        let mut wrapping = OpenedWindow::default();
+        wrapping.insert(65_530);
+        wrapping.insert(4);
+        assert!(wrapping.contains(65_530) && wrapping.contains(4));
+        assert!(wrapping.names_hole(65_535) && wrapping.names_hole(5));
+    }
 
     #[test]
     fn a_floor_raises_the_bucket_of_a_small_record() {

@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 8: Notifications and Mobile Delivery
 
 **Status:** Draft
-**Version:** 0.35.0
+**Version:** 0.36.0
 **Date:** 2026-10-16
 
 ---
@@ -94,8 +94,9 @@ handle_i   = 16 random bytes
 ct_token_i = XChaCha20-Poly1305(k_tok_i, nonce, push_token, ad = handle_i)
 ```
 
-**[NTF-031]** A device MUST make one `k_tok` and one `handle` for each group of
-at most `MAX_QUEUES_PER_HANDLE` queues. **[NTF-032]** A device MUST NOT put more
+**[NTF-031]** A device in Instant mode MUST make one `k_tok` and one `handle`
+for each group of at most `MAX_QUEUES_PER_HANDLE` queues. A queue in Direct
+mode takes `WATCH_HANDLE` of `NTF-143` and no group. **[NTF-032]** A device MUST NOT put more
 than `MAX_QUEUES_PER_HANDLE` queues under one handle. **[NTF-033]** A device
 MUST set `MAX_QUEUES_PER_HANDLE` equal to the `MAX_QUEUES_PER_SESSION` of Part 3
 §3.2.5, which is 8. **[NTF-034]** A device MUST divide its queues across handles
@@ -240,7 +241,10 @@ NotifyBinding {                   // 98 bytes, sealed under NBIND
   is the encapsulation, then the ciphertext with its tag, which is 1 234 bytes.
   **[NTF-114]** A queue relay MUST seal the blobs of that queue under the
   fields of the binding, and it MUST NOT hold a binding after the queue is
-  deleted or after the rotation of `NTF-007` replaces it.
+  deleted or after the rotation of `NTF-007` replaces it. It MUST send a
+  push of a handle only under a binding that names that handle. When a new
+  binding of a queue names another handle, the relay MUST end each push to
+  come of the old handle that no other queue of the relay names.
 - **[NTF-128]** A queue relay MUST NOT push for a record that it sends at
   once on a live subscription of the queue, and a subscription and an `ACK`
   of the queue each count as a drain of its handle for `NTF-066`. A drain
@@ -276,7 +280,7 @@ requirement, and the push payload stays small.
 
 ### 8.2.4 Separate notifier credentials
 
-A queue carries an independent notifier keypair (`NKEY`), which returns a
+A queue carries a notifier keypair of its own (`NKEY`), which returns a
 different `notifier_id`. The holder of that credential can watch the queue
 for arrivals (§8.4.3), and it **cannot read a message and cannot acknowledge
 a message**. **[NTF-005]** A party
@@ -288,6 +292,11 @@ The notifier key is an X25519 key pair. Its secret is
 `HKDF-SHA3-256(k_ntf_root, salt = RecipientId, info = "umbra/v1/ntf-notifier")`,
 with the `k_ntf_root` of the handle group of the queue. Thus the key
 rotates with that root under `NTF-007`, and the store holds no copy of it.
+The notifier key is no queue key of Part 3 §3.2.2, and `NET-009` to
+`NET-014` do not apply to it. A queue relay that holds the binding of the
+queue holds `k_ntf_root`, thus it can derive the notifier key of each queue
+of that handle group. That relay links those queues through the handle
+already (`NTF-031`), thus the derivation links no more.
 The relay draws a fresh `notifier_id` at each `NKEY`, and it ends the
 credential before it.
 
@@ -424,10 +433,13 @@ own work with the four limits below, and it holds them in memory alone.
 
 - The NDR holds at most 2^20 registrations. It takes an `NREG` that moves a
   handle that it holds. An `NREG` for one more handle at the bound takes the
-  place of the oldest registration that took no push since the start of the
-  NDR. The NDR refuses that `NREG` when each registration took one. A bound
-  that refuses each new handle lets a flood of first `NREG` requests leave
-  each new device with no push for the life of a registration.
+  place of the oldest registration that never took a push. The NDR refuses
+  that `NREG` when each registration took one. A bound that refuses each new
+  handle lets a flood of first `NREG` requests leave each new device with no
+  push for the life of a registration. The NDR keeps the mark of the first
+  push of a registration in its store, and a move of the handle keeps it.
+  A restart thus keeps the place of each device that took a push, and a
+  flood after a restart takes the places of the flood before it.
 - The NDR registers at most 1 200 new handles in one minute, and at most 300
   of them from one OHTTP relay. It tells an OHTTP relay by the address of the
   connection. It refuses a first `NREG` above either bound, and the device
@@ -641,20 +653,28 @@ is the third.
   `NTF-012` applies to a push-wake session, and it does not apply to this
   service.
 - **[NTF-117]** That service MUST hold no key and no socket of its own. The
-  one run of the network of Part 14 §14.6.1 continues under it.
+  one run of the network of Part 14 §14.6.1 continues under it. The one
+  exception is the watch of §8.4.3 in Direct mode after a lock: it holds
+  the watch table of `NTF-145` and the link of its own circuits, and no key
+  that reads a queue.
 - **[NTF-118]** A client MUST start a new run after a run ends with a fault,
   while a view is on the screen or the service runs. The delay before a new
   run MUST double from 2 s to a ceiling of 30 s, and a run that reaches the
   ready state MUST set it back to 2 s.
 - **[NTF-119]** A message alert MUST show no text of the message and no name
   of a contact while the content preview is off (`NTF-083`). On the lock
-  screen it MUST show that an alert exists, and no more.
+  screen it MUST show that an alert exists, and no more. A setting of the
+  platform that shows the full content of each alert on the lock screen does
+  not change that. Thus the Android client posts the bare alert while the
+  device is locked, and it takes the name and the text off each alert when
+  the screen goes off.
 - **[NTF-120]** A client MUST end the service at a lock, because a locked
   client holds no key that reads a queue (Part 14 rule `IMP-127`). A client
   that locks with no view on the screen MUST tell the user one time, with no
   sound, that no message arrives until the unlock. A client in Direct mode
-  keeps the service for the watch of §8.4.3 in its place, and its notice
-  names the locked state alone.
+  MUST NOT end the service at a lock and MUST NOT show that one-time
+  notice. The service carries the watch of §8.4.3, and its notice names
+  the locked state alone.
 - **[NTF-131]** A client that holds no push carrier MAY poll: a periodic
   job of the platform, no more often than its least period, starts a run of
   an open client that has none, and that run drains each queue under
@@ -679,7 +699,13 @@ section delivers a record to it. The **wake key** lets it open the blob of
   each `queue_alias` with the conversation of its queue. It MUST seal the
   table under a key of the platform keystore that needs no user
   authentication, and it MUST write the table again while it is open, after
-  each change of a binding and when it leaves the foreground.
+  each change of a binding and when it leaves the foreground. A queue that
+  raises no alert, as the queue of a conversation that Part 7 `DEV-331` mutes
+  with no end, names 16 bytes `0xFF` in the place of its conversation. The
+  table MUST hold the end of each other mute for the `queue_alias` of its
+  conversation, and a locked client MUST show no alert for such an alias
+  before that end. A client MUST write the table again after each change of
+  a mute and of a notification setting.
 - **[NTF-136]** A locked client MUST open each blob of a push or of a watch
   with that table under
   `NTF-075` to `NTF-079`. It MUST show that a message waits in the
@@ -687,8 +713,8 @@ section delivers a record to it. The **wake key** lets it open the blob of
   message and no name of a contact. It MUST NOT fetch or acknowledge the
   record, which stays at the relay until the unlock.
 - **[NTF-137]** A client MUST delete the wake table and its keystore key at a
-  local wipe of Part 7 `DEV-008`, and when the mode leaves Instant mode and
-  Direct mode.
+  local wipe of Part 7 `DEV-008`, and when the mode changes to Private mode
+  or Off mode. A change between Instant mode and Direct mode keeps them.
 
 > *Cause.* Without a wake key, each push to a locked client shows a line that
 > names nothing, and the record waits for the unlock in silence. A client
@@ -756,65 +782,6 @@ settings. v1 does not ask for that permission.
 > specification that says differently gives an application that does not deliver
 > messages.
 
-### 8.4.3 The watch of a locked client
-
-A locked client in Direct mode holds no push token and no key of a queue.
-It holds a **watch**: a subscription of each of its queues under the
-notifier credential of §8.2.4, which sees an arrival and reads no record.
-The queue relay sends the blob of §8.2.2 on that subscription in the place
-of an `NPUSH`, and the client opens it with the wake table of `NTF-135`.
-
-```
-  Sender ──SEND──▶ Queue Relay R ──NWAKE(blob)──▶ circuit ──▶ locked client
-                        │                                      │
-                        │ no live SUB, a live NSUB             │ wake table:
-                        │ of the queue                         │ "a message waits"
-```
-
-- **[NTF-142]** A client in Direct mode MUST bind each inbound queue with
-  `NKEY` and `NBIND`, as Instant mode does, under the notifier key of §8.2.4.
-  At the lock it MUST start a watch: one `NSUB` for each bound queue, with
-  the `notifier_id` as the queue identifier and the notifier key as the
-  signer of the deniable authenticator. The watch MUST run on a link of its
-  own and on circuits of its own, with at most `MAX_QUEUES_PER_SESSION`
-  watches on one circuit (Part 3 `NET-022`). It MUST hold no key of
-  `K_store`, and it MUST end at the unlock. A queue relay MUST accept an
-  `NSUB` only under the notifier credential that the queue holds, and a
-  watch MUST end with its circuit and at the next `NKEY` of the queue.
-- **[NTF-143]** The binding of a client with no push token MUST name
-  `WATCH_HANDLE`, which is 16 zero bytes, and a `k_tok` of 32 zero bytes. A
-  queue relay MUST NOT send an `NPUSH` under that handle.
-- **[NTF-144]** A queue relay MUST send each record that no live
-  subscription takes (`NTF-128`) as an `NWAKE` on the circuit of a live
-  watch of its queue, with the blob of §8.2.2 sealed under the binding of
-  the queue, and it MUST then send no `NPUSH` for that record. The locked
-  client MUST show the blob under `NTF-136`, and it MUST NOT fetch or
-  acknowledge the record.
-- **[NTF-145]** A client in Direct mode MUST hold a **watch table** outside
-  `K_store`: the ingress relay of its last run, the relay entries of its
-  chains, and the relay, the `notifier_id`, and the notifier secret of each
-  bound queue. It MUST seal the table as `NTF-135` seals the wake table,
-  write it again after each change of a binding, and delete it when the
-  mode leaves Direct mode and at a local wipe.
-
-> *Cause.* Without the watch, a locked client in Direct mode shows nothing
-> until the unlock, and the user must keep UMBRA unlocked to learn of a
-> message. A watch under the queue key would give each later record to a
-> party that seizes the device in the AFU state, because that key fetches
-> and deletes records. The notifier credential sees an arrival alone. The
-> wake table already gives such a party the conversation of each blob, thus
-> the watch table adds the relays and the notifier secrets, and no record.
-> The blob is the blob of a push, thus one open path serves the two modes.
-
-> *Residual.* The watch carries no cover traffic of Part 3 §3.6, thus the
-> ingress relay sees the time of each wake at the address of the device. It
-> does not learn the account or the queue. A queue relay learns that a queue
-> is watched, and one circuit of a watch shows it at most
-> `MAX_QUEUES_PER_SESSION` notifier identifiers, which is the bound of a
-> transport session. A record that arrives between the end of the run and
-> the `NSUB` of its queue takes no wake, and the unlock shows it. Part 15
-> §15.3 holds the rows.
-
 ### 8.4.2 Padding, expiry, the re-push, and the peek
 
 **Padding requirement.** **[NTF-017]** The response path for a message fetch
@@ -864,6 +831,92 @@ platform.
 > `NTF-088` and of the `digest` flag inside the blob. One expiry gives the
 > two parties one push kind. The cost is a digest push that the provider
 > holds for a day for a device that is off, which is 69 bytes.
+
+### 8.4.3 The watch of a locked client
+
+A locked client in Direct mode holds no push token and no key of a queue.
+It holds a **watch**: a subscription of each of its queues under the
+notifier credential of §8.2.4, which sees an arrival and reads no record.
+The queue relay sends the blob of §8.2.2 on that subscription in the place
+of an `NPUSH`, and the client opens it with the wake table of `NTF-135`.
+
+```
+  Sender ──SEND──▶ Queue Relay R ──NWAKE(blob)──▶ circuit ──▶ locked client
+                        │                                      │
+                        │ no live SUB, a live NSUB             │ wake table:
+                        │ of the queue                         │ "a message waits"
+```
+
+- **[NTF-142]** A client in Direct mode MUST bind each inbound queue with
+  `NKEY` and `NBIND`, as Instant mode does, under the notifier key of §8.2.4.
+  At the lock it MUST start a watch: one `NSUB` for each bound queue, with
+  the `notifier_id` as the queue identifier and the notifier key as the
+  signer of the deniable authenticator. The watch MUST run on a link of its
+  own and on circuits of its own, with at most `MAX_QUEUES_PER_SESSION`
+  watches on one circuit (Part 3 `NET-022`). It MUST hold no key of
+  `K_store`, and it MUST end at the unlock. A queue relay MUST accept an
+  `NSUB` only under the notifier credential that the queue holds, and a
+  watch MUST end with its circuit and at the next `NKEY` of the queue. A
+  client MUST NOT start a watch whose table gives no session: an ingress
+  relay with no address, a relay entry that does not parse, or a root
+  certificate that does not read. A watch that can start no new session
+  MUST end and tell the platform, and the platform tells the user under
+  `NTF-120`.
+- **[NTF-143]** The binding of a client with no push token MUST name
+  `WATCH_HANDLE`, which is 16 zero bytes, and a `k_tok` of 32 zero bytes. A
+  queue relay MUST NOT send an `NPUSH` under that handle, and it MUST hold
+  no state of a handle for it: no coalescing window, no re-push, and no
+  queue of the last arrival. A queue relay MUST ignore an answer `gone` for
+  that handle. A party MUST NOT send a request to the NDR under that
+  handle, and the NDR MUST refuse such a request.
+- **[NTF-144]** A queue relay MUST send each record that no live
+  subscription takes (`NTF-128`) as an `NWAKE` on the circuit of a live
+  watch of its queue, with the blob of §8.2.2 sealed under the binding of
+  the queue, and it MUST then send no `NPUSH` for that record. The locked
+  client MUST show the blob under `NTF-136`, and it MUST NOT fetch or
+  acknowledge the record.
+- **[NTF-146]** A queue relay MUST send at most one `NWAKE` for one queue
+  inside one `WAKE_COALESCE_WINDOW`. An arrival inside the window of the
+  last `NWAKE` waits, and at the end of that window the relay MUST send one
+  `NWAKE` for the arrivals that waited, with the `waiting_count` of that
+  time. A message among them outranks a digest. At an `NSUB`, the relay
+  MUST send one `NWAKE` at once when an arrival that no subscription took
+  got no wake yet. A subscription of the queue ends each wake that waits.
+- **[NTF-145]** A client in Direct mode MUST hold a **watch table** outside
+  `K_store`: the ingress relay of its last run, the relay set of its last
+  run, and the relay, the `notifier_id`, and the notifier secret of each
+  bound queue. It MUST seal the table as `NTF-135` seals the wake table,
+  write it again after each change of a binding, and delete it when the
+  mode leaves Direct mode and at a local wipe.
+
+> *Cause.* Without the watch, a locked client in Direct mode shows nothing
+> until the unlock, and the user must keep UMBRA unlocked to learn of a
+> message. A watch under the queue key would give each later record to a
+> party that seizes the device in the AFU state, because that key fetches
+> and deletes records. The notifier credential sees an arrival alone. The
+> wake table already gives such a party the conversation of each blob, thus
+> the watch table adds the relays and the notifier secrets, and no record.
+> The blob is the blob of a push, thus one open path serves the two modes.
+> `NTF-146` gives a burst of records one alert, as `NTF-048` gives it one
+> push. Before `NTF-146`, a record that arrived while no watch of its queue
+> lived showed no alert until the unlock: the watch circuit rebuilds after
+> each fault of its link, and the watch starts some seconds after the
+> lock.
+
+> *Residual.* The watch carries no cover traffic of Part 3 §3.6, thus the
+> ingress relay sees the time of each wake at the address of the device. It
+> does not learn the account or the queue. A queue relay learns that a queue
+> is watched, and one circuit of a watch shows it at most
+> `MAX_QUEUES_PER_SESSION` notifier identifiers, which is the bound of a
+> transport session. A record that arrives while no watch of its queue
+> lives takes its wake at the next `NSUB` (`NTF-146`). The relay holds that
+> mark in memory alone, thus a restart of the relay before that `NSUB`
+> loses the wake, and the unlock shows the record. A client that leaves
+> Direct mode for Private mode or Off mode binds no queue, thus the queue
+> relay keeps each binding under `WATCH_HANDLE`. Such a binding gives no
+> `NPUSH` under `NTF-143`, and no watch starts in those modes, thus it
+> wakes nothing. The next mode that binds, or the end of the queue under
+> `NTF-114`, replaces it. Part 15 §15.3 holds the rows.
 
 ## 8.5 Coalescing and groups
 

@@ -35,6 +35,10 @@ pub struct Placement {
     pub layer: u8,
     /// Where to dial each relay of the next layer (`NET-167`).
     pub next: BTreeMap<[u8; 32], Dial>,
+    /// The layer and the static key of each relay with the chain role in a
+    /// layer after this one, for the loop chains of this relay (Part 3
+    /// `NET-363`).
+    pub chain_keys: BTreeMap<[u8; 32], (u8, [u8; 32])>,
     /// The relays of the layer before, which dial this relay for the
     /// circuits of their clients (Part 3 `NET-332`).
     pub previous: BTreeSet<[u8; 32]>,
@@ -146,6 +150,12 @@ pub fn placement(
         .filter(|relay| relay.candidate.chain && layer_of(relay) == layer.saturating_add(1))
         .map(|relay| (relay.candidate.relay_id, dial_of(relay)))
         .collect();
+    let chain_keys = set
+        .relays
+        .iter()
+        .filter(|relay| relay.candidate.chain && layer_of(relay) > layer)
+        .map(|relay| (relay.candidate.relay_id, (layer_of(relay), relay.ntor_pk)))
+        .collect();
     let previous = set
         .relays
         .iter()
@@ -187,6 +197,7 @@ pub fn placement(
     Ok(Placement {
         layer,
         next,
+        chain_keys,
         previous,
         addresses,
         valid_until,

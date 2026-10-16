@@ -137,7 +137,7 @@ mod tests {
             rk: Secret::new([1; 32]),
             hk_i2r: Secret::new([2; 32]),
             hk_r2i: Secret::new([3; 32]),
-            transcript: [0; 32],
+            transcript: umbra_crypto::zeroize::Zeroizing::new([0; 32]),
             dh_initial: dh,
         };
         let alice = Ratchet::new(
@@ -292,16 +292,19 @@ mod tests {
         };
         assert_eq!(queue_id, bob.inbound().recipient_id());
         // A channel of the first stored form holds no flag of a previous
-        // queue before its ratchet, and it restores to the same channel.
+        // queue before its ratchet, and no window of the indices that
+        // opened after it. It restores to the same channel.
         let exported = bob.export().unwrap();
-        let flag = (1..exported.len() - 5)
+        // The window with no index: its flag and 32 words.
+        let body = &exported[..exported.len() - 1 - 256];
+        let flag = (1..body.len() - 5)
             .rev()
             .find(|&at| {
-                let len = u32::from_be_bytes(exported[at + 1..at + 5].try_into().unwrap());
-                exported[at] == 0 && len as usize == exported.len() - at - 5
+                let len = u32::from_be_bytes(body[at + 1..at + 5].try_into().unwrap());
+                body[at] == 0 && len as usize == body.len() - at - 5
             })
             .unwrap();
-        let mut first_form = exported.to_vec();
+        let mut first_form = body.to_vec();
         first_form.remove(flag);
         first_form[0] = 0x01;
         let restored = PairwiseChannel::restore(&first_form).unwrap();
@@ -354,6 +357,17 @@ mod tests {
             bob.receive(&replayed, Bucket::B0, 24, &mut rng).unwrap(),
             Received::Undecryptable {
                 seq: seq + 1,
+                send_index: None,
+            }
+        );
+        // The store keeps the indices that opened, thus a copy in a later
+        // run draws no key request either.
+        let mut bob = PairwiseChannel::restore(&bob.export().unwrap()).unwrap();
+        msg_from_send(seq + 2, &stored, Bucket::B0, &mut replayed).unwrap();
+        assert_eq!(
+            bob.receive(&replayed, Bucket::B0, 25, &mut rng).unwrap(),
+            Received::Undecryptable {
+                seq: seq + 2,
                 send_index: None,
             }
         );

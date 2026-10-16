@@ -1,0 +1,32 @@
+#!/bin/sh
+# Written by Ansible (deploy/ansible/roles/common). It restarts one unit and
+# checks that the unit stays up:
+#
+#   umbra-restart <unit> [<port>]
+#
+# A service that fails at its start comes back after RestartSec, thus
+# is-active alone can show a service that fails again and again. The check
+# waits, then it also compares the restart count of systemd and looks for a
+# listener on the port. The exit status is 1 when a check fails, and the
+# journal gets one line.
+set -u
+unit="$1"
+port="${2:-}"
+settle=30
+
+fail() {
+    logger -p daemon.err -t umbra-restart "$unit: $1"
+    echo "$unit: $1" >&2
+    exit 1
+}
+
+systemctl restart "$unit" || fail "the restart failed"
+before=$(systemctl show --value -p NRestarts "$unit")
+sleep "$settle"
+systemctl is-active --quiet "$unit" || fail "not active $settle s after the restart"
+after=$(systemctl show --value -p NRestarts "$unit")
+[ "$after" = "$before" ] || fail "systemd restarted it $before -> $after times within $settle s"
+if [ -n "$port" ] && [ -z "$(ss -Htln "sport = :$port")" ]; then
+    fail "no listener on port $port"
+fi
+echo "$unit: up"

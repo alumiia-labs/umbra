@@ -24,10 +24,10 @@ use umbra_ffi::bindings::{
 struct Keystore([u8; 32]);
 
 impl SecureElementCallback for Keystore {
-    fn keyed(&self, input: Vec<u8>) -> Vec<u8> {
+    fn keyed(&self, input: Vec<u8>) -> Result<Vec<u8>, FfiError> {
         let mut mac = Hmac::<Sha256>::new_from_slice(&self.0).unwrap();
         mac.update(&input);
-        mac.finalize().into_bytes().to_vec()
+        Ok(mac.finalize().into_bytes().to_vec())
     }
 }
 
@@ -35,8 +35,9 @@ impl SecureElementCallback for Keystore {
 struct View(Mutex<Vec<u16>>);
 
 impl TextSink for View {
-    fn put(&self, code_units: Vec<u16>) {
+    fn put(&self, code_units: Vec<u16>) -> Result<(), FfiError> {
         *self.0.lock().unwrap() = code_units;
+        Ok(())
     }
 }
 

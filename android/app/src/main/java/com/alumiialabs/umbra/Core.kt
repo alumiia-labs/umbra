@@ -13,6 +13,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.asAndroidBitmap
 import java.io.File
 import java.util.concurrent.Executors
 import kotlin.concurrent.thread
@@ -326,16 +327,17 @@ object Core {
         worker.execute {
             // UniFFI has no `CharArray` type, thus this list is the one copy
             // that the collector frees (`IMP-124`).
-            val units = passphrase.map { it.code.toUShort() }
+            val units = unitsOf(passphrase)
             passphrase.fill('\u0000')
             var unlocked: Handle? = null
             try {
                 val opened = handle ?: waiting ?: launch(app, units).also { waiting = it }
                 opened.unlock(units)
                 unlocked = opened
+                units.clear()
                 begin(app, opened)
             } catch (wrong: FfiException.WrongPassphrase) {
-                fail(UiText.get(R.string.core_wrong_passphrase))
+                fail(UiText.get(if (KeystoreElement.isKeyLost) R.string.core_key_lost else R.string.core_wrong_passphrase))
             } catch (other: FfiException) {
                 // IMP-127: a fault after the unlock closes the store again,
                 // thus no key stays in RAM behind a locked screen.
@@ -343,7 +345,15 @@ object Core {
                     unlocked?.lock()
                 } catch (ignored: FfiException) {
                 }
-                fail(UiText.get(R.string.core_store_not_open, other.javaClass.simpleName))
+                fail(
+                    if (KeystoreElement.isKeyLost) {
+                        UiText.get(R.string.core_key_lost)
+                    } else {
+                        UiText.get(R.string.core_store_not_open, other.javaClass.simpleName)
+                    },
+                )
+            } finally {
+                units.clear()
             }
         }
     }
@@ -754,6 +764,9 @@ object Core {
     /** The handle that a different party now holds (Part 9 §9.9.2), which waits for a confirmation. */
     var takeoverOf by mutableStateOf<String?>(null)
 
+    /** The target whose lookup the directory gave with no proof (`DIS-068`), which waits for a confirmation. */
+    var unverifiedOf by mutableStateOf<String?>(null)
+
     /**
      * Sends a request to a reusable link or a handle, under the name of the user. A handle that
      * a different party now holds waits in [takeoverOf] until the user confirms (`DIS-085`).
@@ -761,6 +774,7 @@ object Core {
     fun sendRequest(target: String, name: String, note: String, confirmed: Boolean = false) {
         requestSent = false
         takeoverOf = null
+        unverifiedOf = null
         directory { client ->
             client.setProfileName(name)
             try {
@@ -768,6 +782,9 @@ object Core {
                 main.post { requestSent = true }
             } catch (takeover: FfiException.Takeover) {
                 main.post { takeoverOf = target }
+            } catch (unverified: FfiException.Unverified) {
+                if (confirmed) throw unverified
+                main.post { unverifiedOf = target }
             }
         }
     }
@@ -892,14 +909,23 @@ object Core {
         fault = null
         joinNote = UiText.get(R.string.core_connecting)
         worker.execute {
-            val units = passphrase.map { it.code.toUShort() }
+            // IMP-124: the wait below lasts minutes, thus the passphrase waits
+            // in an array that this call overwrites, and each list lives for
+            // one call.
+            val held = passphrase.copyOf()
             passphrase.fill('\u0000')
             var opened: Handle? = null
             try {
                 dropWaiting()
-                val first = launch(app, units)
-                opened = first
-                first.unlock(units)
+                val units = unitsOf(held)
+                val first = try {
+                    launch(app, units).also {
+                        opened = it
+                        it.unlock(units)
+                    }
+                } finally {
+                    units.clear()
+                }
                 val network = BuildNetwork.network(app, first)
                 if (network == null) {
                     dropStore(app, first)
@@ -944,12 +970,15 @@ object Core {
                 first.close()
                 opened = null
                 val database = File(app.filesDir, "umbra.db")
-                val back = initLinked(
-                    Config(database.absolutePath, measureArgon2FloorMs()),
-                    KeystoreElement(app),
-                    units,
-                    linked,
-                )
+                val back = withUnits(held) { units ->
+                    initLinked(
+                        Config(database.absolutePath, measureArgon2FloorMs()),
+                        KeystoreElement(app),
+                        units,
+                        linked,
+                    )
+                }
+                held.fill('\u0000')
                 main.post {
                     joinNote = null
                     joinCode = null
@@ -961,6 +990,8 @@ object Core {
             } catch (other: FfiException) {
                 opened?.let { dropStore(app, it) }
                 joinFailed(UiText.get(R.string.core_link_failed_kind, other.javaClass.simpleName))
+            } finally {
+                held.fill('\u0000')
             }
         }
     }
@@ -1047,118 +1078,140 @@ object Core {
         fault = null
         restoreNote = UiText.get(R.string.core_looking_for_backup)
         worker.execute {
-            val units = passphrase.map { it.code.toUShort() }
+            // IMP-124: the wait below lasts minutes, thus the passphrase waits
+            // in an array that this call overwrites, and each list lives for
+            // one call.
+            val held = passphrase.copyOf()
             passphrase.fill('\u0000')
-            val code = digits.map { it.code.toUShort() }
+            val code = unitsOf(digits)
             digits.fill('\u0000')
-            val shareUnits = shares.map { share -> share.map { it.code.toUShort() }.also { share.fill('\u0000') } }
-            // IDN-151 to IDN-154: the check and the type come first, and a
-            // wrong type names both types. A restore with shares takes the
-            // user half (IDN-191).
-            val wanted = if (shareUnits.isEmpty()) 1 else 2
-            val kind = recoveryDigitsKind(code).toInt()
-            val names = mapOf(
-                1 to R.string.core_digits_recovery_code,
-                2 to R.string.core_digits_user_half,
-                3 to R.string.core_digits_share,
-                4 to R.string.core_digits_root_seed,
-            )
-            // IDN-003: the root seed makes a store with the identity alone.
-            if (kind == 4 && shareUnits.isEmpty()) {
+            val shareUnits = shares.map { share -> unitsOf(share).also { share.fill('\u0000') } }
+            try {
+                // IDN-151 to IDN-154: the check and the type come first, and a
+                // wrong type names both types. A restore with shares takes the
+                // user half (IDN-191).
+                val wanted = if (shareUnits.isEmpty()) 1 else 2
+                val kind = recoveryDigitsKind(code).toInt()
+                val names = mapOf(
+                    1 to R.string.core_digits_recovery_code,
+                    2 to R.string.core_digits_user_half,
+                    3 to R.string.core_digits_share,
+                    4 to R.string.core_digits_root_seed,
+                )
+                // IDN-003: the root seed makes a store with the identity alone.
+                if (kind == 4 && shareUnits.isEmpty()) {
+                    try {
+                        dropWaiting()
+                        val database = File(app.filesDir, "umbra.db")
+                        val made = withUnits(held) { units ->
+                            initFromRootSeed(
+                                Config(database.absolutePath, measureArgon2FloorMs()),
+                                KeystoreElement(app),
+                                units,
+                                code,
+                            )
+                        }
+                        main.post { restoreNote = null }
+                        begin(app, made)
+                    } catch (failure: FfiException) {
+                        restoreFailed(UiText.get(R.string.core_root_seed_not_open, failure.javaClass.simpleName))
+                    }
+                    return@execute
+                }
+                if (kind != wanted) {
+                    restoreFailed(
+                        if (kind == 0) {
+                            // IDN-152: a check that fails says so.
+                            UiText.get(R.string.umbra_ui_idn_152)
+                        } else {
+                            UiText.get(
+                                R.string.core_digits_wrong_kind,
+                                names[kind]?.let { UiText.get(it) }.toString(),
+                                UiText.get(names.getValue(wanted)),
+                            )
+                        },
+                    )
+                    return@execute
+                }
+                if (shareUnits.any { recoveryDigitsKind(it).toInt() != 3 }) {
+                    restoreFailed(UiText.get(R.string.core_share_no_check))
+                    return@execute
+                }
+                var opened: Handle? = null
                 try {
                     dropWaiting()
-                    val database = File(app.filesDir, "umbra.db")
-                    val made = initFromRootSeed(
-                        Config(database.absolutePath, measureArgon2FloorMs()),
-                        KeystoreElement(app),
-                        units,
-                        code,
-                    )
-                    main.post { restoreNote = null }
-                    begin(app, made)
-                } catch (failure: FfiException) {
-                    restoreFailed(UiText.get(R.string.core_root_seed_not_open, failure.javaClass.simpleName))
-                }
-                return@execute
-            }
-            if (kind != wanted) {
-                restoreFailed(
-                    if (kind == 0) {
-                        // IDN-152: a check that fails says so.
-                        UiText.get(R.string.umbra_ui_idn_152)
+                    val units = unitsOf(held)
+                    val first = try {
+                        launch(app, units).also {
+                            opened = it
+                            it.unlock(units)
+                        }
+                    } finally {
+                        units.clear()
+                    }
+                    val network = BuildNetwork.network(app, first)
+                    if (network == null) {
+                        dropStore(app, first)
+                        restoreFailed(UiText.get(R.string.core_no_network))
+                        return@execute
+                    }
+                    first.connect(network)
+                    if (shareUnits.isEmpty()) {
+                        first.restoreBackup(code)
                     } else {
-                        UiText.get(
-                            R.string.core_digits_wrong_kind,
-                            names[kind]?.let { UiText.get(it) }.toString(),
-                            UiText.get(names.getValue(wanted)),
+                        first.restoreBackupWithShares(code, shareUnits)
+                    }
+                    code.clear()
+                    shareUnits.forEach { it.clear() }
+                    val deadline = System.currentTimeMillis() + RESTORE_WAIT_MS
+                    var failure: String? = null
+                    var isReady = false
+                    while (!isReady && failure == null) {
+                        when (val status = first.restoreStatus()) {
+                            is RestoreStatus.Ready -> isReady = true
+                            is RestoreStatus.NotFound -> failure = UiText.get(R.string.core_backup_not_found)
+                            // IDN-155: an empty identity is no account.
+                            is RestoreStatus.NoIdentity -> failure = UiText.get(R.string.core_backup_no_identity)
+                            is RestoreStatus.Failed -> failure = UiText.get(R.string.core_backup_not_down)
+                            is RestoreStatus.Fetching ->
+                                main.post {
+                                    restoreNote = UiText.get(R.string.core_restoring, status.done.toInt(), status.total.toInt())
+                                }
+                            else -> Unit
+                        }
+                        if (!isReady && failure == null) {
+                            if (System.currentTimeMillis() > deadline) failure = UiText.get(R.string.core_backup_not_down)
+                            Thread.sleep(250)
+                        }
+                    }
+                    if (failure != null) {
+                        dropStore(app, first)
+                        restoreFailed(failure)
+                        return@execute
+                    }
+                    val restored = first.takeRestored()
+                    first.disconnect()
+                    first.close()
+                    opened = null
+                    val database = File(app.filesDir, "umbra.db")
+                    val back = withUnits(held) { units ->
+                        initRestored(
+                            Config(database.absolutePath, measureArgon2FloorMs()),
+                            KeystoreElement(app),
+                            units,
+                            restored,
                         )
-                    },
-                )
-                return@execute
-            }
-            if (shareUnits.any { recoveryDigitsKind(it).toInt() != 3 }) {
-                restoreFailed(UiText.get(R.string.core_share_no_check))
-                return@execute
-            }
-            var opened: Handle? = null
-            try {
-                dropWaiting()
-                val first = launch(app, units)
-                opened = first
-                first.unlock(units)
-                val network = BuildNetwork.network(app, first)
-                if (network == null) {
-                    dropStore(app, first)
-                    restoreFailed(UiText.get(R.string.core_no_network))
-                    return@execute
-                }
-                first.connect(network)
-                if (shareUnits.isEmpty()) {
-                    first.restoreBackup(code)
-                } else {
-                    first.restoreBackupWithShares(code, shareUnits)
-                }
-                val deadline = System.currentTimeMillis() + RESTORE_WAIT_MS
-                var failure: String? = null
-                var isReady = false
-                while (!isReady && failure == null) {
-                    when (val status = first.restoreStatus()) {
-                        is RestoreStatus.Ready -> isReady = true
-                        is RestoreStatus.NotFound -> failure = UiText.get(R.string.core_backup_not_found)
-                        // IDN-155: an empty identity is no account.
-                        is RestoreStatus.NoIdentity -> failure = UiText.get(R.string.core_backup_no_identity)
-                        is RestoreStatus.Failed -> failure = UiText.get(R.string.core_backup_not_down)
-                        is RestoreStatus.Fetching ->
-                            main.post {
-                                restoreNote = UiText.get(R.string.core_restoring, status.done.toInt(), status.total.toInt())
-                            }
-                        else -> Unit
                     }
-                    if (!isReady && failure == null) {
-                        if (System.currentTimeMillis() > deadline) failure = UiText.get(R.string.core_backup_not_down)
-                        Thread.sleep(250)
-                    }
+                    held.fill('\u0000')
+                    begin(app, back)
+                } catch (other: FfiException) {
+                    opened?.let { dropStore(app, it) }
+                    restoreFailed(UiText.get(R.string.core_restore_failed, other.javaClass.simpleName))
                 }
-                if (failure != null) {
-                    dropStore(app, first)
-                    restoreFailed(failure)
-                    return@execute
-                }
-                val restored = first.takeRestored()
-                first.disconnect()
-                first.close()
-                opened = null
-                val database = File(app.filesDir, "umbra.db")
-                val back = initRestored(
-                    Config(database.absolutePath, measureArgon2FloorMs()),
-                    KeystoreElement(app),
-                    units,
-                    restored,
-                )
-                begin(app, back)
-            } catch (other: FfiException) {
-                opened?.let { dropStore(app, it) }
-                restoreFailed(UiText.get(R.string.core_restore_failed, other.javaClass.simpleName))
+            } finally {
+                held.fill('\u0000')
+                code.clear()
+                shareUnits.forEach { it.clear() }
             }
         }
     }
@@ -1217,7 +1270,22 @@ object Core {
         val database = File(app.filesDir, "umbra.db")
         // The first launch alone reads the measurement.
         val floorMs = if (database.exists()) 0uL else measureArgon2FloorMs()
-        return init(Config(database.absolutePath, floorMs), KeystoreElement(app), passphrase)
+        // A store that exists needs the key that wrapped it, and a new key
+        // opens nothing.
+        val element = KeystoreElement(app, mayCreate = !storeHasHeader(database.absolutePath))
+        return init(Config(database.absolutePath, floorMs), element, passphrase)
+    }
+
+    /** The code units of a passphrase or of digits for one call (`IMP-124`). The caller clears the list. */
+    private fun unitsOf(chars: CharArray): MutableList<UShort> = chars.mapTo(ArrayList(chars.size)) { it.code.toUShort() }
+
+    private inline fun <T> withUnits(chars: CharArray, use: (List<UShort>) -> T): T {
+        val units = unitsOf(chars)
+        try {
+            return use(units)
+        } finally {
+            units.clear()
+        }
     }
 
     private fun fail(message: String) = main.post {
@@ -1258,6 +1326,7 @@ object Core {
                 readDirectory()
                 maintainDirectory()
                 scheduleMaintenance(app)
+                noticeLink(app)
             }
             is FfiEvent.Circuits -> readConnection(app)
             is FfiEvent.Offline -> {
@@ -1290,6 +1359,7 @@ object Core {
                     linkFault = cause(event.cause)
                     retryLater(app)
                 }
+                noticeLink(app)
             }
             is FfiEvent.Invitation -> invitation = event.link
             is FfiEvent.Refused -> fault = UiText.get(R.string.core_refused_relay)
@@ -1473,6 +1543,7 @@ object Core {
                 directoryNote = null
                 madeLink = null
                 takeoverOf = null
+                unverifiedOf = null
                 requestSent = false
                 typingNow.clear()
                 connection = null
@@ -1519,6 +1590,12 @@ object Core {
         }
         // An event can hold a handle of a message, and this frees it.
         event.destroy()
+    }
+
+    /** The notice of the service names the state of the link (`NTF-120`). */
+    private fun noticeLink(app: Context) {
+        // A service that a lock ends shows no notice again.
+        if (carrierHolds && phase == Phase.Open) Notifier.refreshCarrier(app)
     }
 
     private fun cause(code: UByte): String = when (code.toInt()) {
@@ -1607,12 +1684,29 @@ object Core {
         // The client makes cover cells while a view is on the screen only.
         call { it.setForeground(nowVisible) }
         if (nowVisible) Notifier.clear(context)
+        if (nowVisible) {
+            resultLock?.let { main.removeCallbacks(it) }
+            resultLock = null
+            resultUntilMs = 0L
+        }
         // The setting "Immediately" locks when the last view leaves.
         // NTF-135: the client writes the table before a lock can take the keys.
-        if (!nowVisible && autoLockSeconds == 0L && phase == Phase.Open) {
+        val resultGraceMs = resultUntilMs - SystemClock.elapsedRealtime()
+        if (!nowVisible && autoLockSeconds == 0L && phase == Phase.Open && resultGraceMs <= 0) {
             lock(app)
         } else if (!nowVisible) {
             refreshWake(context)
+            // IMP-140: a picker of the platform takes the screen for a result
+            // of this app, and the lock waits for that result for a bounded time.
+            if (autoLockSeconds == 0L && phase == Phase.Open) {
+                resultUntilMs = 0L
+                val later = Runnable {
+                    resultLock = null
+                    if (!isVisible && phase == Phase.Open) lock(app)
+                }
+                resultLock = later
+                main.postDelayed(later, resultGraceMs)
+            }
         }
         leftScreen()
         if (nowVisible && phase == Phase.Open) {
@@ -1630,15 +1724,30 @@ object Core {
     /**
      * Locks the client at once. The lock has a thread of its own: a call
      * that waits on the worker keeps `K_store` in RAM no longer (`IMP-127`).
-     * With a context the lock writes the wake table first (`NTF-135`).
+     * Each lock writes the wake table first (`NTF-135`), and in Direct mode
+     * the watch table that the locked client watches with.
      */
-    fun lock(context: Context? = null) {
+    fun lock(context: Context) {
         val client = handle ?: return
-        val app = context?.applicationContext
+        val app = context.applicationContext
         lockWorker.execute {
-            if (app != null && holdsWakeTable(app)) writeWake(app, client)
+            if (holdsWakeTable(app)) writeWake(app, client)
             client.lock()
         }
+    }
+
+    /** The end of the wait for the result of a picker, on the clock since boot, or 0. */
+    private var resultUntilMs = 0L
+    private var resultLock: Runnable? = null
+    private const val RESULT_GRACE_MS = 2 * 60_000L
+
+    /**
+     * The app opens a picker or a save view of the platform for a result.
+     * That view takes the screen, and the lock of "Immediately" waits for
+     * the result, up to [RESULT_GRACE_MS] (`IMP-140`).
+     */
+    fun awaitsResult() {
+        resultUntilMs = SystemClock.elapsedRealtime() + RESULT_GRACE_MS
     }
 
     /**
@@ -2035,6 +2144,7 @@ object Core {
         val conversation = Conversation(client.createGroup(name))
         val list = summaries(client)
         main.post {
+            if (lockedSince(list)) return@post
             chats.clear()
             chats.addAll(list)
             onMade(conversation)
@@ -2669,6 +2779,10 @@ object Core {
                 }
                 main.post {
                     decoding.remove(line.key)
+                    if (phase != Phase.Open) {
+                        dropImage(frame)
+                        return@post
+                    }
                     frame?.let { images[line.key] = it }
                 }
             }
@@ -2717,6 +2831,10 @@ object Core {
                 }
                 main.post {
                     decoding.remove(line.key)
+                    if (phase != Phase.Open) {
+                        dropImage(decoder.image)
+                        return@post
+                    }
                     decoder.image?.let { images[line.key] = it }
                 }
             }
@@ -2740,7 +2858,13 @@ object Core {
                 } catch (absent: FfiException) {
                     // The record carries no preview.
                 }
-                main.post { decoder.image?.let { previews[line.key] = it } }
+                main.post {
+                    if (phase != Phase.Open) {
+                        dropImage(decoder.image)
+                        return@post
+                    }
+                    decoder.image?.let { previews[line.key] = it }
+                }
             }
         }
         return null
@@ -2949,10 +3073,28 @@ object Core {
     private fun refreshChats(then: (List<Chat>) -> Unit = {}) = call { client ->
         val list = summaries(client)
         main.post {
+            if (lockedSince(list)) return@post
             chats.clear()
             chats.addAll(list)
             then(list)
         }
+    }
+
+    /**
+     * Whether a lock came after a worker read the list. The list then
+     * shows nothing, and its previews are message text (`IMP-017`).
+     */
+    private fun lockedSince(list: List<Chat>): Boolean {
+        if (phase == Phase.Open) return false
+        list.forEach { it.preview?.fill('\u0000') }
+        return true
+    }
+
+    /** A decode that a lock overtook stays out of the memory of the view (`IMP-166`). */
+    private fun dropImage(image: androidx.compose.ui.graphics.ImageBitmap?) {
+        val bitmap = image?.asAndroidBitmap() ?: return
+        if (bitmap.isMutable) bitmap.eraseColor(0)
+        bitmap.recycle()
     }
 
     private fun summaries(client: Handle): List<Chat> = client.summaries().map { summary ->
@@ -3064,8 +3206,13 @@ object Core {
     private class CharSink : TextSink {
         var chars = CharArray(0)
 
+        // An exception that crosses into Rust ends the process.
         override fun put(codeUnits: List<UShort>) {
-            chars = CharArray(codeUnits.size) { codeUnits[it].toInt().toChar() }
+            try {
+                chars = CharArray(codeUnits.size) { codeUnits[it].toInt().toChar() }
+            } catch (fault: Exception) {
+                chars = CharArray(0)
+            }
         }
     }
 }

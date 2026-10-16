@@ -54,7 +54,8 @@ use crate::Error;
 const PENDING_MAX: usize = 8;
 
 /// The chunked epoch-key records that wait at most. No key of this member
-/// opened one, thus the bound is small and the oldest leaves first.
+/// opened one, and no field names the party that posted it. Thus the bound
+/// is small, and a record of a higher epoch leaves first.
 const WAITING_MAX: usize = 4;
 
 const BUCKETS: [Bucket; 4] = [Bucket::B0, Bucket::B1, Bucket::B2, Bucket::B3];
@@ -1707,7 +1708,7 @@ impl Group {
     fn install_opened(&mut self, opened: Opened, now: u64) -> Result<(), Error> {
         // GRP-400: a slot with no epoch secret hands the owner credentials
         // and installs no epoch. Only a slot of the current epoch holds it.
-        if opened.payload.epoch_secret.expose() == &[0; 32] {
+        if umbra_crypto::ct_eq(opened.payload.epoch_secret.expose(), &[0; 32]) {
             if opened.epoch != self.epochs.epoch() || opened.payload.own_sks.len() != GROUP_REPLICAS
             {
                 return Err(Error::Unverified);
@@ -1779,7 +1780,10 @@ impl Group {
         let is_known = self.pending.iter().any(|held| {
             held.epoch == opened.epoch
                 && held.payload.rotator == rotator
-                && held.payload.epoch_secret.expose() == opened.payload.epoch_secret.expose()
+                && umbra_crypto::ct_eq(
+                    held.payload.epoch_secret.expose(),
+                    opened.payload.epoch_secret.expose(),
+                )
         });
         if is_known
             || opened.epoch <= self.epochs.epoch()
@@ -1794,16 +1798,28 @@ impl Group {
     }
 
     /// Keeps the body of a chunked epoch-key record of an epoch above the
-    /// current one for which this member fetches no chunk yet.
+    /// current one for which this member fetches no chunk yet. Any writer
+    /// of the queue posts such a body, and nothing in it verifies before
+    /// the fetch. Thus a body that no rotation can give stays out, and at
+    /// the bound the body of the highest epoch leaves. The next epoch is
+    /// the lowest one, and a body of a later epoch takes no place of it.
     fn keep_waiting(&mut self, epoch: u32, start_slot: u32, body: &[u8], now: u64) {
-        let is_chunked = matches!(
-            EpochKeyBody::parse(body, |_| Some(0)),
-            Ok(EpochKeyBody {
-                carrier: Carrier::Chunked { .. },
-                ..
-            })
-        );
-        if !is_chunked
+        let Ok(EpochKeyBody {
+            roster_epoch,
+            slot_count,
+            carrier: Carrier::Chunked { .. },
+        }) = EpochKeyBody::parse(body, |_| Some(0))
+        else {
+            return;
+        };
+        // GRP-383: a start slot past the age bound installs nothing.
+        // GRP-256: a record below the admission of this member holds no
+        // slot for it.
+        let is_possible = start_slot_place(start_slot, now) != core::cmp::Ordering::Less
+            && roster_epoch >= self.roster.admission_epoch()
+            && slot_count > 0
+            && usize::from(slot_count) <= super::GROUP_MAX;
+        if !is_possible
             || epoch <= self.epochs.epoch()
             || self
                 .waiting
@@ -1813,7 +1829,21 @@ impl Group {
             return;
         }
         if self.waiting.len() >= WAITING_MAX {
-            self.waiting.remove(0);
+            // The highest epoch leaves, and of one epoch the body that came
+            // last. A body that came first keeps its place.
+            let Some((last, highest)) = self
+                .waiting
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, held)| (held.epoch, held.arrived_at))
+                .map(|(place, held)| (place, held.epoch))
+            else {
+                return;
+            };
+            if epoch >= highest {
+                return;
+            }
+            self.waiting.remove(last);
         }
         self.waiting.push(Waiting {
             epoch,
@@ -2014,7 +2044,7 @@ impl Group {
             return false;
         };
         current.epoch() == epoch
-            && current.secret().expose().expose() != &[0; 32]
+            && current.holds_secret()
             && index != self.own_index
             && self
                 .roster
@@ -2187,26 +2217,17 @@ impl Group {
             let member = self.roster.member(index)?;
             keys.pair_key(&member.pair_pk, self.roster.group_id()).ok()
         };
-        let (payload, _) = super::epoch::open_own_slot(
+        super::epoch::open_own_slot(
             slots,
             own_index,
             keys,
             self.roster.group_id(),
             epoch,
+            start_slot,
             roster_epoch,
             |index| self.role_at(index, roster_epoch),
             pair_with,
-        )?;
-        let pair = pair_with(payload.rotator).ok_or(Error::NoPath)?;
-        super::epoch::verify_slot_tag(
-            &pair,
-            self.roster.group_id(),
-            epoch,
-            start_slot,
-            roster_epoch,
-            &payload,
-        )?;
-        Ok(payload)
+        )
     }
 
     /// The role of a rotator at `index` whose record names `roster_epoch`
@@ -2214,9 +2235,10 @@ impl Group {
     /// active now or was not active then. The record names its roster epoch
     /// itself, and the roster keeps the role of an entry that left. Thus
     /// the role of an entry counts only while the entry is active. A member
-    /// that left the role or the group gets none under any roster epoch.
-    /// The history bounds the second test, thus an epoch that it does not
-    /// hold leaves the first one alone.
+    /// that left the group gets none under any roster epoch. A member that
+    /// left a role gets the role that it holds now, thus its slot hands no
+    /// owner credentials. The history bounds the second test, thus an epoch
+    /// that it does not hold leaves the first one alone.
     fn role_at(&self, index: u16, roster_epoch: u32) -> Option<Role> {
         let member = self.roster.member(index).filter(|member| member.active)?;
         self.roster
@@ -4767,5 +4789,76 @@ mod tests {
         assert_eq!(bucket_for(125, app_of(350)), Some(Bucket::B2));
         assert_eq!(bucket_for(500, app_of(1_985)), Some(Bucket::B2));
         assert_eq!(bucket_for(500, 1 << 20), None);
+    }
+
+    #[test]
+    fn an_observer_posts_no_message_and_still_leaves() {
+        let now = 1_700_000_000;
+        let (mut creator, mut member, _) = pair(now);
+        let mut rng = Rng(83);
+        let grant = creator.grant(1, Role::Observer, &mut rng).unwrap();
+        let grant = GroupControl::parse(&grant).unwrap();
+        creator.apply_control(&grant, 0, now).unwrap();
+        member.apply_control(&grant, 0, now).unwrap();
+        assert_eq!(member.own_role(), Some(Role::Observer));
+        // §11.9: an observer reads the group and posts nothing to it.
+        let said = member
+            .post(&text("from an observer"), now, &mut rng)
+            .unwrap();
+        assert_eq!(creator.receive(&said, now), Err(Error::Unverified));
+        // Its roster objects still apply.
+        let leave = member.leave_object().unwrap();
+        let leave = member.post(&control_app(&leave, 9), now, &mut rng).unwrap();
+        assert!(matches!(
+            read_control(&mut creator, &leave, now),
+            Ok(Applied::Removed(_))
+        ));
+    }
+
+    /// A chunked epoch-key body of `roster_epoch` with a descriptor of
+    /// `mark`.
+    fn chunked(roster_epoch: u32, mark: u8) -> Vec<u8> {
+        let descriptor = [mark; 40];
+        let body = EpochKeyBody {
+            roster_epoch,
+            slot_count: 2,
+            carrier: Carrier::Chunked {
+                slots_per_chunk: 1,
+                descriptor: &descriptor,
+            },
+        };
+        let mut out = alloc::vec![0u8; Bucket::B0.group_body()];
+        let n = body.encode(Bucket::B0, &mut out).unwrap();
+        out.truncate(n);
+        out
+    }
+
+    #[test]
+    fn a_chunked_body_of_a_later_epoch_takes_no_place_of_the_next_one() {
+        let now = 1_700_000_000;
+        let (mut creator, _, _) = pair(now);
+        let t = slot_of(now);
+        let e = creator.epoch();
+        // Any writer of the queue posts bodies of later epochs first.
+        for (step, mark) in [(5u32, 1u8), (6, 2), (7, 3), (8, 4)] {
+            let _ = creator.install_epoch_key(e + step, t, &chunked(1, mark), now);
+        }
+        assert_eq!(creator.waiting.len(), WAITING_MAX);
+        // The body of the next epoch takes the place of the highest one.
+        let _ = creator.install_epoch_key(e + 1, t, &chunked(1, 9), now);
+        let held: Vec<u32> = creator.waiting.iter().map(|held| held.epoch).collect();
+        assert!(held.contains(&(e + 1)) && !held.contains(&(e + 8)));
+        // A body of a later epoch than each one held goes, and so does
+        // one whose start slot is past the age bound (GRP-383).
+        let _ = creator.install_epoch_key(e + 9, t, &chunked(1, 10), now);
+        assert!(!creator.waiting.iter().any(|held| held.epoch == e + 9));
+        let _ = creator.install_epoch_key(e + 2, 0, &chunked(1, 11), now);
+        assert!(!creator.waiting.iter().any(|held| held.epoch == e + 2));
+        // Of one epoch, the body that came first keeps its place.
+        let _ = creator.install_epoch_key(e + 1, t, &chunked(1, 12), now + 1);
+        assert!(creator
+            .waiting
+            .iter()
+            .any(|held| held.epoch == e + 1 && held.body == chunked(1, 9)));
     }
 }

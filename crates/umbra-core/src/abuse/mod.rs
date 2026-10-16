@@ -8,7 +8,6 @@
 //! `umbra-crypto`, which is on by default.
 
 pub mod admission;
-pub mod block;
 pub mod issuer;
 pub mod pow;
 pub mod spend;

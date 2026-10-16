@@ -491,8 +491,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             batch.put(SETTINGS, notice_row, None, &notice, rng)?;
         }
         batch.commit()?;
-        // The run that is up takes the rotations at its next step.
+        // The run that is up takes the rotations at its next step, each
+        // with a new guard (`NET-357`).
         self.rotation_asked = 0;
+        self.rotation_guarded.clear();
         Ok(())
     }
 
@@ -516,12 +518,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// run that is up (Part 7 §7.7 step 2c). The identifier of the first
     /// queue names each one. The run asks the node for each one, and the
     /// node keeps the time of the rotation across runs (`NET-180`). The
-    /// result is empty inside `ROTATION_ASK_EVERY` of the last one.
+    /// result is empty inside `ROTATION_ASK_EVERY` of the last one. The
+    /// flag of each contact asks for a new guard too (`NET-357`): the first
+    /// request of a run after a revocation has it, and a later one has it
+    /// not. Thus a request again sets no second guard.
     ///
     /// Step 2b is not here. The ratchet of this build makes a DH step at a
     /// record of the peer alone. Until then the new queue cuts the revoked
     /// device off.
-    pub fn rotation_owed(&mut self, now: u64) -> Result<Vec<[u8; 32]>, Error> {
+    pub fn rotation_owed(&mut self, now: u64) -> Result<Vec<([u8; 32], bool)>, Error> {
         if self.rotation_asked != 0 && now.saturating_sub(self.rotation_asked) < ROTATION_ASK_EVERY
         {
             return Ok(Vec::new());
@@ -538,8 +543,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut contacts = Vec::new();
         for conversation in owed.as_chunks::<16>().0 {
             // A contact that left the store owes nothing.
-            if let Ok(contact) = self.contact_id_of(ConversationId(*conversation)) {
-                contacts.push(contact);
+            let conversation = ConversationId(*conversation);
+            if let Ok(contact) = self.contact_id_of(conversation) {
+                contacts.push((contact, self.rotation_guarded.insert(conversation)));
             }
         }
         if !contacts.is_empty() {
@@ -549,6 +555,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     }
 
     /// The queue of a contact rotated: a revocation owes it no rotation.
+    /// A rotation before the request of this run for the new guard
+    /// (`NET-357`) ends nothing: the guard is still owed, and the next
+    /// request sets it.
     pub(super) fn rotation_done<R: CryptoRng + ?Sized>(
         &mut self,
         conversation: ConversationId,
@@ -558,7 +567,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Ok(());
         };
         let (entries, _) = owed.as_chunks::<16>();
-        if !entries.contains(&conversation.0) {
+        if !entries.contains(&conversation.0) || !self.rotation_guarded.remove(&conversation) {
             return Ok(());
         }
         // A contact that left the store owes nothing either.
@@ -802,6 +811,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 self.put_setting(ROTATION_OWED, &owed, rng)?;
             }
             self.rotation_asked = 0;
+            self.rotation_guarded.clear();
         }
         self.put_roster(bytes, rng)?;
         self.fold_claims(&before, &next, rng)?;

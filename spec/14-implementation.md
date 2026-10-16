@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 14: Implementation Requirements and Assurance
 
 **Status:** Draft
-**Version:** 0.35.0
+**Version:** 0.36.0
 **Date:** 2026-10-16
 
 ---
@@ -452,7 +452,8 @@ hand over pixels, which are the same plaintext. The core MUST overwrite its
 copy after the call. A media player reads a video in ranges, thus the core
 MAY hold one copy of the file in its memory for the time that the player is
 open, and give each range that the player asks for. The core MUST overwrite
-that copy when the player closes, and MUST refuse each range after a lock.
+that copy when the player closes and at a lock, and MUST refuse each range
+after a lock.
 A picture that a peer made is a profile picture of Part 9 rule `DIS-176` or a
 picture of a contact request. The platform MUST decode such a picture to at
 most 1 024 pixels on each side. It MUST read the size of the picture
@@ -467,6 +468,8 @@ passphrase and key material stay under `IMP-037`.
 **[IMP-038]** `Draft` and `MsgRef` MUST be opaque UniFFI object handles.
 **[IMP-039]** An implementation MUST zeroize the buffer behind a `Draft` when
 that draft is dropped, and it MUST do that whether the send succeeded or failed.
+It MUST also zeroize that buffer at a lock, and a send of that draft after the
+lock fails.
 
 **Three points where the platform shapes the surface.**
 
@@ -482,7 +485,12 @@ that draft is dropped, and it MUST do that whether the send succeeded or failed.
   that takes the input of the keyed function and returns its 32 bytes. The
   Android keystore has a Java interface only, thus this one value crosses as
   bytes. The Rust side MUST overwrite the returned value after it derives
-  `K_wrap`.
+  `K_wrap`. The Android adapter computes the value into a buffer that it
+  overwrites, and the copy that it returns stays on the JVM heap until the
+  collector frees it; Part 15 §15.3 holds that residual. The adapter MUST
+  NOT make a new key for a store that exists, because a new key opens
+  nothing. The client MUST then show that the key is lost, and not that the
+  passphrase is wrong.
 - **[IMP-126]** A record that waits for the send path MUST sit in the store
   under the record encryption of §14.6.4, in a table of its own. A lock MUST
   clear the queue in RAM, and an unlock MUST fill it again from that table.
@@ -493,9 +501,12 @@ that draft is dropped, and it MUST do that whether the send succeeded or failed.
 
 - **[IMP-127]** A lock MUST stop the network runtime, and the runtime MUST
   drop its state at that stop. That state holds ratchet keys, queue keys, and
-  circuit keys, and a locked client holds no key in RAM. The hardening
+  circuit keys, and a locked client holds no key of the store in RAM. The hardening
   secret `K_rng_harden` of `IMP-093` is a key of the store too, and it
-  leaves RAM at the lock with each other key. The watch of Part 8 `NTF-142`
+  leaves RAM at the lock with each other key. A restore of Part 4 §4.7.2
+  that runs holds the backup root key, and at its end the root seed and the
+  rows of the backup. It MUST end at the lock, and the user starts it again
+  after the unlock. The watch of Part 8 `NTF-142`
   runs after the lock in a runtime of its own. It holds the watch table of
   `NTF-145` and the keys of its own circuits, and no key of the store.
 - **[IMP-128]** A client MUST order a conversation view by the time of its own
@@ -505,7 +516,12 @@ that draft is dropped, and it MUST do that whether the send succeeded or failed.
 - **[IMP-181]** A client SHOULD show the `sent_at` of a message as its time.
   It MUST show the store time in its place when `sent_at` is after the store
   time, or earlier than the store time less `MSG_TTL`. The time that a
-  message shows MUST NOT change the order of `IMP-128`.
+  message shows MUST NOT change the order of `IMP-128`. The store time of a
+  row that the snapshot of a link carries is the store time on the device
+  that made the snapshot. A synced record of Part 7 §7.5.3 and a record of a
+  catch-up object carry no store time of their source, thus the store time
+  of such a row is the time at which this device stores it, and `sent_at`
+  shows the time of the message under the bounds above.
 
   > *Cause.* A locked client stores each record at the unlock (`IMP-127`),
   > thus a store time shows the unlock and not the message. The sender
@@ -581,7 +597,11 @@ that draft is dropped, and it MUST do that whether the send succeeded or failed.
   record key (`DEV-099`, `DEV-100`). The row keeps its direction, its
   conversation, and its store time, thus the placeholder stands at the
   position of the message. A deletion for the devices of one user, on a
-  device set of one device, erases the row and sends nothing.
+  device set of one device, erases the row and sends nothing. Each deletion
+  MUST also drop each copy of the record, and of an edit of it, that waits
+  for another device of the set: the body for a resend, the copy that waits
+  for its publish, and a send that waits in RAM. The resend sends a void in
+  its place (Part 7 `DEV-069`).
 - **[IMP-152]** A deletion request of this device is a record that waits for
   the send path as each other record does (`DEV-112`). It holds a raw
   `msg_id` under `WIR-070`. A client MUST show it in no view and in no
@@ -747,7 +767,10 @@ WrapHeader {                      // 97 bytes
   calibrates again. **[IMP-175]** A client MUST refuse a header whose memory
   is above four times the floor, or whose passes are above 3 000, before it
   runs Argon2id: a party with the file that raises the two values would
-  otherwise make each unlock allocate without bound.
+  otherwise make each unlock allocate without bound. It MUST also refuse a
+  header whose memory or passes are below the floor of `IMP-116`. No client
+  writes such a header, thus it is a fault of the file, and no wrap at a
+  later passphrase change takes its cost.
 - **[IMP-118]** A passphrase change MUST wrap the same `K_store` under a new
   `salt_pw` and a new `nonce_w`. It MUST NOT change `K_store`, because each
   record key derives from it.
@@ -767,7 +790,10 @@ WrapHeader {                      // 97 bytes
   **[IMP-140]** A client MUST keep that setting in the store, under the record
   encryption of this section. A client MAY offer a lock at the moment the
   application leaves the screen, and it MUST then keep an idle limit too, for
-  a device that stays on the screen with no action.
+  a device that stays on the screen with no action. A picker or a save view
+  of the platform that the application opens for its own result takes the
+  screen. That lock then waits for the result, for 2 minutes at most, because
+  a lock in between loses the picked file or the save.
 - **[IMP-141]** A client MUST ask for the current passphrase before a
   passphrase change. It MUST write the new header beside the database before
   it uses that header, because a client that holds a header which the file
@@ -933,7 +959,7 @@ read flight 1 already drops the copy (Part 6 `WIR-503`).
 | `0x09` | Conversations | What this device alone knows of one conversation: the time up to which the user saw its messages, and the name that the user gave the contact |
 | `0x0A` | Settings | One setting of this device under its name, such as the idle time of the auto-lock, the receipts of one conversation, the highest directory epoch (`IMP-159`), or the ingress pins (`REL-153`). Seven names hold protocol state. `unanswered/<conversation>` holds the time, in milliseconds, of the first relay acknowledgment of that conversation that no record of the peer followed yet (Part 3 §3.2.6). A record of the peer erases it. `rotation-owed` holds the conversation of each contact whose queue rotation a revocation still owes (Part 7 §7.7 step 2c). `leaving-channels` holds the sync channel and the `device_id` of each revoked device that still waits for the notice of `DEV-313`. `revocation-notice/<device_id>` holds the time of that revocation, in seconds, and the epoch that revokes the device. `key-served/<conversation>` holds the start of the 24 hours and the count of the key requests of that peer that this device answered (`WIR-338`). `held/<message>` holds the wait of one record that a full queue refused (`IMP-082`). It holds the time from which `HOLD_RETRY` counts to its next send and the time of its first `LIMIT`, both in seconds. It also holds the count of its `LIMIT` answers, which gives the length of the wait. A relay that takes the record erases it, and the failure of the record at a bound erases it too. `device-invites` holds the queue of each sync invitation of this device that waits for its handshake (Part 7 rule `DEV-290`). The end of an invitation takes its queue off the list, and no backup carries the list |
 | `0x0B` | Held receipts | One receipt that waits for a slot: the conversation, the kind, the `msg_id` of its target, and the time that it reports (Part 3 §3.5.4) |
-| `0x0C` | Pending references | One deletion or one edit whose target did not arrive yet: the conversation, the `msg_ref` of the target, the time of the record, and the new text of an edit. An entry with no text is a deletion (Part 7 §7.5.6). The key of a row is the conversation, the target, and the direction of the record that waits (`DEV-093`). A row of an earlier build has a key with no direction, and it came from the contact |
+| `0x0C` | Pending references | One deletion or one edit whose target did not arrive yet: the conversation, the `msg_ref` of the target, the time of the record, and the new text of an edit. An entry with no text is a deletion (Part 7 §7.5.6). The key of a row is the conversation, the target, and the direction of the record that waits (`DEV-093`). A deletion for the devices of the user names no direction: its key ends in the bytes `own`, and it takes the target of either party. A row of an earlier build has a key with no direction, and it came from the contact |
 | `0x0D` | Revisions | How many times the sender of a message changed its text, under the row of that message, in one byte. After a revision that a sync channel gave, the source device and its causal counter follow. They are the high-water mark of `DEV-034` for the copies of that source. A message with no row here shows no edited mark |
 | `0x0E` | Reactions | One reaction: the conversation, the `msg_ref` of its target, the direction, and the emoji. One party holds one row for one emoji on one message (Part 6 §6.6.9) |
 | `0x0F` | File states | The file of one message, under the row of that message: whether this device uploads it, wants it, holds it, or failed at its transfer, and the media fields of its descriptor (Part 12 §12.3) |
@@ -946,7 +972,7 @@ read flight 1 already drops the copy (Part 6 `WIR-503`).
 | `0x16` | Group Presence | The activity clocks of §11.9.7: for each member that an admin of this device watches, the time of its last record or presence record, and for each group, the time of the last record of this device. The row `watch` of a group holds the time up to which an admin of this device watched that group. A gap of 10 minutes or more in it moves the clock of each member forward by that gap (`GRP-396`). A row holds a `BE64` of seconds, and its owner column names the group. |
 | `0x17` | Group Owners | For each group, the member indices that held the owner credentials of this device when it last took or drew them (`GRP-401`). A member that leaves that set leaves with credentials that the relay still takes, thus its departure calls for new ones. The row `gkey` of a group holds what this device knows of its `GKEY` commands, after a version byte: for each replica the `write_pk` of the epoch whose `GKEY` arrived there, and each owner credential that the current one replaced and whose `GKEY` did not arrive yet, the oldest first (`GRP-361`, `GRP-363`, `GRP-401`). The owner column names the group. |
 | `0x18` | Group Grants | The granting epochs on the authority path to a current role (`GRP-068`). A row holds one `GroupControl`, under the group and the `epoch_index` of the grant, and its owner column names the group. A grant on no path leaves when the next snapshot is built (`GRP-069`). |
-| `0x19` | Notify Relay | The root of each queue relay: `relay_id`, `k_ntf_root`, `relay_idx`. |
+| `0x19` | Notify Relay | The root of each queue relay: `relay_id`, `k_ntf_root`, `relay_idx`. A group row of an earlier build took the root of its relay. Each group holds a root of its own now, thus the root is 32 zero bytes once each group row holds its root. |
 | `0x1A` | Notify Group | Each handle group: `handle`, `relay_id`, `k_tok`, the removal secret, the registration state, and the count of its queues. |
 | `0x1B` | Notify Queue | Each queue with a binding: `recipient_id`, `handle`, `queue_alias`, and whether its `NBIND` left. |
 | `0x1C` | Group Notify | The notify queue of each group of Part 8 §8.5.2: its `RecipientId`, its encoded `QueueAddress`, the time of the last `GNREG` at each of the two replicas, the time the queue was made, and the queue that it replaces until that one leaves (`NTF-105`). |

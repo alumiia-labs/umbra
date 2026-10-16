@@ -28,13 +28,16 @@ use crate::{ConversationId, Error, Event};
 /// The value that the wake table holds in the place of the conversation of
 /// a queue that raises no alert (`ABU-029`, `DEV-219`). No conversation has
 /// this identifier: an identifier is a keyed hash of its contact.
-pub const WAKE_SILENT: [u8; 16] = [0xFF; 16];
+pub const WAKE_SILENT: [u8; 16] = umbra_core::notify::wakekey::WAKE_SILENT;
 
-/// The root of each queue relay: `relay_id`, `k_ntf_root`, `relay_idx`.
+/// The root of each queue relay: `relay_id`, `k_ntf_root`, `relay_idx`. A
+/// group of the first form took the root of its relay. Each group holds a
+/// root of its own now, thus the root of a relay is zero bytes once no row
+/// of the first form needs it.
 const NOTIFY_RELAY: TableId = TableId(0x19);
 /// Each handle group: `handle`, `relay_id`, `k_tok`, the removal secret,
 /// the registration state, and the count of its queues.
-const NOTIFY_GROUP: TableId = TableId(0x1A);
+pub(super) const NOTIFY_GROUP: TableId = TableId(0x1A);
 /// Each queue with a binding: `recipient_id`, `handle`, `queue_alias`,
 /// whether its `NBIND` left, and its `notifier_id` or zero bytes.
 const NOTIFY_QUEUE: TableId = TableId(0x1B);
@@ -112,13 +115,24 @@ fn take<const N: usize>(bytes: &[u8], at: &mut usize) -> Result<[u8; N], Error> 
 }
 
 impl Relay {
-    fn encode(&self) -> Vec<u8> {
-        [
-            self.relay_id.as_slice(),
-            self.root.expose(),
-            &self.relay_idx.to_be_bytes(),
-        ]
-        .concat()
+    fn encode(&self) -> Zeroizing<Vec<u8>> {
+        Zeroizing::new(
+            [
+                self.relay_id.as_slice(),
+                self.root.expose(),
+                &self.relay_idx.to_be_bytes(),
+            ]
+            .concat(),
+        )
+    }
+
+    /// The row of the relay with no root, which no group needs.
+    fn without_root(&self) -> Self {
+        Relay {
+            relay_id: self.relay_id,
+            root: Secret::new([0; 32]),
+            relay_idx: self.relay_idx,
+        }
     }
 
     fn parse(bytes: &[u8]) -> Result<Self, Error> {
@@ -135,18 +149,20 @@ impl Relay {
 }
 
 impl Group {
-    fn encode(&self) -> Vec<u8> {
-        let root = self.root.as_ref().map_or([0u8; 32], |held| *held.expose());
-        [
-            self.handle.as_slice(),
-            &self.relay_id,
-            self.k_tok.expose(),
-            self.removal.expose(),
-            &[self.state, self.count, self.class],
-            &root,
-            &self.rotated_at.to_be_bytes(),
-        ]
-        .concat()
+    fn encode(&self) -> Zeroizing<Vec<u8>> {
+        let root = Zeroizing::new(self.root.as_ref().map_or([0u8; 32], |held| *held.expose()));
+        Zeroizing::new(
+            [
+                self.handle.as_slice(),
+                &self.relay_id,
+                self.k_tok.expose(),
+                self.removal.expose(),
+                &[self.state, self.count, self.class],
+                root.as_slice(),
+                &self.rotated_at.to_be_bytes(),
+            ]
+            .concat(),
+        )
     }
 
     fn parse(bytes: &[u8]) -> Result<Self, Error> {
@@ -182,15 +198,17 @@ impl Group {
 }
 
 impl Queue {
-    fn encode(&self) -> Vec<u8> {
-        [
-            self.recipient_id.as_slice(),
-            &self.handle,
-            &self.alias,
-            &[u8::from(self.bound)],
-            &self.notifier_id.unwrap_or([0; 32]),
-        ]
-        .concat()
+    fn encode(&self) -> Zeroizing<Vec<u8>> {
+        Zeroizing::new(
+            [
+                self.recipient_id.as_slice(),
+                &self.handle,
+                &self.alias,
+                &[u8::from(self.bound)],
+                &self.notifier_id.unwrap_or([0; 32]),
+            ]
+            .concat(),
+        )
     }
 
     fn parse(bytes: &[u8]) -> Result<Self, Error> {
@@ -216,6 +234,9 @@ impl Queue {
         })
     }
 }
+
+/// One row under its natural key, with a value that can hold a secret.
+type Row = (TableId, Vec<u8>, Zeroizing<Vec<u8>>);
 
 /// One watch of a locked client: the relay of the queue, its
 /// `notifier_id`, and its notifier secret (`NTF-145`).
@@ -278,7 +299,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.push_token()?.unwrap_or_default() == plain {
             return Ok(());
         }
-        let mut rows = vec![(SETTINGS, PUSH_TOKEN_SETTING.to_vec(), plain)];
+        let mut rows = vec![(SETTINGS, PUSH_TOKEN_SETTING.to_vec(), Zeroizing::new(plain))];
         for mut group in self.notify_groups()? {
             if group.state == REGISTERED {
                 group.state = STALE;
@@ -289,18 +310,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     }
 
     /// Writes rows under their natural keys in one batch.
-    fn put_rows<R: CryptoRng + ?Sized>(
-        &mut self,
-        rows: &[(TableId, Vec<u8>, Vec<u8>)],
-        rng: &mut R,
-    ) -> Result<(), Error> {
+    fn put_rows<R: CryptoRng + ?Sized>(&mut self, rows: &[Row], rng: &mut R) -> Result<(), Error> {
         self.write_rows(rows, &[], rng)
     }
 
     /// Writes rows and deletes rows under their natural keys in one batch.
     fn write_rows<R: CryptoRng + ?Sized>(
         &mut self,
-        rows: &[(TableId, Vec<u8>, Vec<u8>)],
+        rows: &[Row],
         deleted: &[(TableId, Vec<u8>)],
         rng: &mut R,
     ) -> Result<(), Error> {
@@ -382,8 +399,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     group.rotated_at = 0;
                 }
             }
-            rows.push((SETTINGS, CONTACT_SET_SETTING.to_vec(), set.to_vec()));
+            rows.push((
+                SETTINGS,
+                CONTACT_SET_SETTING.to_vec(),
+                Zeroizing::new(set.to_vec()),
+            ));
         }
+        // Each group row below holds its root, thus no relay root stays.
+        rows.extend(self.unused_relay_roots()?);
         let due = groups.iter().position(|group| {
             group.state != RETIRED && now.saturating_sub(group.rotated_at) >= ROTATE_INTERVAL
         });
@@ -459,34 +482,57 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(store.get(super::NOTIFY_STATE, &row)?.is_some())
     }
 
+    /// Each handle group. A row that does not read is no group: one such
+    /// row stops no rotation, no wake table, and no NDR call.
     fn notify_groups(&self) -> Result<Vec<Group>, Error> {
         let relays = self.notify_relays()?;
-        let mut groups: Vec<Group> = self
-            .open_ref()?
-            .store
-            .list(NOTIFY_GROUP, None)?
-            .iter()
-            .map(|(_, bytes)| Group::parse(bytes))
-            .collect::<Result<_, _>>()?;
+        let mut groups = Vec::new();
+        for (_, bytes) in self.open_ref()?.store.list(NOTIFY_GROUP, None)? {
+            let bytes = Zeroizing::new(bytes);
+            match Group::parse(&bytes) {
+                Ok(group) => groups.push(group),
+                Err(_) => crate::devlog::line("push: a group row does not read"),
+            }
+        }
         // A row of the first form holds the root of its relay.
         for group in &mut groups {
             if group.root.is_none() {
                 group.root = relays
                     .iter()
                     .find(|relay| relay.relay_id == group.relay_id)
+                    .filter(|relay| relay.root.expose() != &[0; 32])
                     .map(|relay| Secret::new(*relay.root.expose()));
             }
         }
         Ok(groups)
     }
 
+    /// Each queue relay. A row that does not read is no relay.
     fn notify_relays(&self) -> Result<Vec<Relay>, Error> {
-        self.open_ref()?
-            .store
-            .list(NOTIFY_RELAY, None)?
+        let mut relays = Vec::new();
+        for (_, bytes) in self.open_ref()?.store.list(NOTIFY_RELAY, None)? {
+            let bytes = Zeroizing::new(bytes);
+            match Relay::parse(&bytes) {
+                Ok(relay) => relays.push(relay),
+                Err(_) => crate::devlog::line("push: a relay row does not read"),
+            }
+        }
+        Ok(relays)
+    }
+
+    /// The row of each relay that still holds a root, with zero bytes in
+    /// its place. Each group row that a rotation or a bind writes holds the
+    /// root that it uses, thus the root of the relay serves no binding.
+    fn unused_relay_roots(&self) -> Result<Vec<Row>, Error> {
+        Ok(self
+            .notify_relays()?
             .iter()
-            .map(|(_, bytes)| Relay::parse(bytes))
-            .collect()
+            .filter(|relay| relay.root.expose() != &[0; 32])
+            .map(|relay| {
+                let row = relay.without_root();
+                (NOTIFY_RELAY, row.relay_id.to_vec(), row.encode())
+            })
+            .collect())
     }
 
     fn notify_queue(&self, recipient_id: &[u8; 32]) -> Result<Option<Queue>, Error> {
@@ -525,9 +571,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
             if !relays.iter().any(|relay| relay.relay_id == *relay_id) {
                 let relay_idx = u16::try_from(relays.len()).map_err(|_| Error::TooLong)?;
+                // Each group draws a root of its own (`NTF-007`).
                 relays.push(Relay {
                     relay_id: *relay_id,
-                    root: Secret::new(random(rng)),
+                    root: Secret::new([0; 32]),
                     relay_idx,
                 });
             }
@@ -580,9 +627,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if new_queues.is_empty() {
             return Ok(unbound);
         }
+        // Each group row below holds its root, thus no relay root stays.
         let rows: Vec<_> = relays
             .iter()
-            .map(|relay| (NOTIFY_RELAY, relay.relay_id.to_vec(), relay.encode()))
+            .map(|relay| {
+                let row = relay.without_root();
+                (NOTIFY_RELAY, row.relay_id.to_vec(), row.encode())
+            })
             .chain(
                 groups
                     .iter()
@@ -602,22 +653,20 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// and each queue alias with the conversation of its queue. The
     /// platform seals it under its keystore, thus a locked client opens a
     /// blob with it (`NTF-136`). An alias whose queue raises no alert names
-    /// [`WAKE_SILENT`] in the place of its conversation. The platform
-    /// writes the table again after each block and each change of a
-    /// notification setting.
+    /// [`WAKE_SILENT`] in the place of its conversation, and an alias of a
+    /// muted conversation holds the end of its mute (`DEV-331`). The
+    /// platform writes the table again after each block, and a change of a
+    /// notification setting or a mute gives [`Event::WakeTable`].
     pub fn wake_table(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
         let mut roots: Vec<[u8; 32]> = Vec::new();
-        let mut keep = |root: &Secret<32>| {
-            if !roots.contains(root.expose()) {
-                roots.push(*root.expose());
-            }
-        };
-        for relay in self.notify_relays()? {
-            keep(&relay.root);
-        }
+        // A group of the first form took the root of its relay, and the
+        // group list holds that root for it. Each binding uses the root of
+        // its group, a retired group too until its queues bind again.
         for group in self.notify_groups()? {
             if let Some(root) = &group.root {
-                keep(root);
+                if !roots.contains(root.expose()) {
+                    roots.push(*root.expose());
+                }
             }
         }
         // A group notify queue names its group by its own row.
@@ -635,36 +684,55 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // of a blocked contact, of a conversation that shows no
         // notification, or of a sync channel. A sync channel is no
         // conversation of a view.
+        // DEV-331: a mute with no end is silent, and a locked client reads
+        // the end of each other mute from the table.
         let mut silent = self.device_peers()?;
+        let mut mutes: Vec<(ConversationId, u64)> = Vec::new();
         for (_, conversation) in &conversations {
             let conversation = ConversationId(*conversation);
-            if !silent.contains(&conversation)
-                && (self.is_blocked(conversation)?
-                    || self.alert_setting(conversation)? == super::ALERT_NONE)
+            if silent.contains(&conversation) {
+                continue;
+            }
+            let muted_until_ms = self.muted_until(conversation)?;
+            if self.is_blocked(conversation)?
+                || self.alert_setting(conversation)? == super::ALERT_NONE
+                || muted_until_ms == super::MUTE_FOREVER
             {
                 silent.push(conversation);
+            } else if muted_until_ms > 0 {
+                mutes.push((conversation, muted_until_ms.div_ceil(1_000)));
             }
         }
-        let aliases = store
+        let mut aliases = Vec::new();
+        let mut muted = Vec::new();
+        for queue in store
             .list(NOTIFY_QUEUE, None)?
             .iter()
             .filter_map(|(_, bytes)| Queue::parse(bytes).ok())
-            .map(|queue| {
-                let conversation = conversations
-                    .iter()
-                    .find(|(recipient, _)| *recipient == queue.recipient_id)
-                    .map_or([0; 16], |(_, conversation)| *conversation);
-                if silent.contains(&ConversationId(conversation)) {
-                    (queue.alias, WAKE_SILENT)
-                } else {
-                    (queue.alias, conversation)
-                }
-            })
-            .collect();
-        let table = umbra_core::notify::wakekey::WakeTable { roots, aliases };
+        {
+            let conversation = conversations
+                .iter()
+                .find(|(recipient, _)| *recipient == queue.recipient_id)
+                .map_or([0; 16], |(_, conversation)| *conversation);
+            if silent.contains(&ConversationId(conversation)) {
+                aliases.push((queue.alias, WAKE_SILENT));
+                continue;
+            }
+            aliases.push((queue.alias, conversation));
+            if let Some((_, until)) = mutes
+                .iter()
+                .find(|(muted, _)| *muted == ConversationId(conversation))
+            {
+                muted.push((queue.alias, *until));
+            }
+        }
+        let table = umbra_core::notify::wakekey::WakeTable {
+            roots,
+            aliases,
+            muted,
+        };
+        // The drop of the table wipes its roots.
         let encoded = Zeroizing::new(table.encode()?);
-        let umbra_core::notify::wakekey::WakeTable { mut roots, .. } = table;
-        zeroize::Zeroize::zeroize(&mut roots);
         Ok(encoded)
     }
 
@@ -765,7 +833,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.locked_watch()? == on {
             return Ok(());
         }
-        let mut rows = vec![(SETTINGS, WATCH_SETTING.to_vec(), vec![u8::from(on)])];
+        let mut rows = vec![(
+            SETTINGS,
+            WATCH_SETTING.to_vec(),
+            Zeroizing::new(vec![u8::from(on)]),
+        )];
         for (_, bytes) in self.open_ref()?.store.list(NOTIFY_QUEUE, None)? {
             let Ok(mut queue) = Queue::parse(&bytes) else {
                 continue;

@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 10: Relay Directory, Measurement, and Selection
 
 **Status:** Draft
-**Version:** 0.35.0
+**Version:** 0.36.0
 **Date:** 2026-10-16
 
 ---
@@ -368,6 +368,17 @@ bandwidth. It also uses the traffic that UMBRA generates for the cover function.
 The loop-failure input comes from the foreground only. A client makes a cover
 cell in the foreground only (Part 3 §3.6.2), thus a client gives about 72 loop
 samples each day. **[REL-004]** The directory MUST size the detection window for that rate.
+
+### 10.4.1 Indistinguishability of a probe from real traffic
+
+A design can also use positive measurement. **[REL-005]** In that case a probe MUST be
+**VRF-selected and cryptographically committed**. **[REL-006]** The directory MUST show the
+probe only after the epoch closes. Thus a probe is indistinguishable from real
+traffic while it moves. A relay that can tell a probe from a user packet serves
+the probes well and serves the other traffic badly.
+
+The loop cover cells of UMBRA are the correct vehicle. The directory VRF-selects
+a subset of those cells as scored measurements.
 
 ### 10.4.2 The two objects that carry that signal
 
@@ -808,17 +819,6 @@ the foreground a client pays 0 cells, because a report replaces a cover cell.
 > value.
 > The authority is that party for its own probe. The probe adds no key and no
 > party.
-
-### 10.4.1 Indistinguishability of a probe from real traffic
-
-A design can also use positive measurement. **[REL-005]** In that case a probe MUST be
-**VRF-selected and cryptographically committed**. **[REL-006]** The directory MUST show the
-probe only after the epoch closes. Thus a probe is indistinguishable from real
-traffic while it moves. A relay that can tell a probe from a user packet serves
-the probes well and serves the other traffic badly.
-
-The loop cover cells of UMBRA are the correct vehicle. The directory VRF-selects
-a subset of those cells as scored measurements.
 
 ## 10.5 The directory is a Byzantine broadcast, not a plurality vote
 
@@ -1674,6 +1674,12 @@ members || valid_after
 - **[REL-085]** A relay MUST sign the family certificate of each family that it
   declares, with the `identity_pk` of its own descriptor. **[REL-086]** A relay
   MUST set `family_id` of its descriptor to the SHA3-256 of that certificate.
+  A relay that declares no family sets `family_id` to 32 zero bytes.
+  **[REL-209]** A client MUST read a `family_id` of 32 zero bytes as no
+  family. Two relays with that value share no family under `REL-011`,
+  `REL-154`, Part 3 `NET-345`, and the placement list of Part 12 §12.4.2.
+  Else each relay with no family would count as one family with each other
+  such relay, and the conformant chain set would shrink to one such relay.
 - A **member** is a relay whose descriptor carries the hash of the certificate.
   **[REL-087]** A directory authority MUST verify each signature of a family
   certificate before it lists a member. **[REL-088]** A directory authority

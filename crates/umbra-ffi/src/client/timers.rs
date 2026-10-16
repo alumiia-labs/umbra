@@ -222,7 +222,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // DEV-211: a body that waits for a resend on a sync channel holds
         // the record too.
         if !due.is_empty() {
-            self.drop_sync_sent_of(&due)?;
+            let messages: Vec<MsgRef> = due.iter().map(|(_, message)| *message).collect();
+            self.drop_sync_sent_of(&messages)?;
         }
         Ok(due.len())
     }

@@ -27,6 +27,13 @@
     # The signer writes the certificate of each run here.
     - { path: /var/lib/umbra-measurer/cert, owner: umbra-signer }
 
+- name: The binary of the measurer that runs now stays as umbra-measurer.prev
+  ansible.builtin.include_role:
+    name: common
+    tasks_from: binary
+  vars:
+    umbra_binary: umbra-measurer
+
 - name: The binary of the measurer is there
   ansible.builtin.copy:
     src: "{{ umbra_bin_dir }}/umbra-measurer"

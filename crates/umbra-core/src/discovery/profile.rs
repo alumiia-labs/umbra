@@ -94,10 +94,41 @@ fn is_picture(bytes: &[u8]) -> bool {
         && frame_size(bytes).is_some_and(|(height, width)| side(height) && side(width))
 }
 
+/// Whether a character is one that no profile text holds (`DIS-201`): a
+/// control character, a line break other than the line feed of a welcome
+/// text, or a format character of the bidirectional algorithm. Such a
+/// character moves or hides the text around it, thus a name of a stranger
+/// could show as another name.
+fn is_barred(c: char, allows_line_feed: bool) -> bool {
+    match c {
+        '\n' => !allows_line_feed,
+        '\u{2028}' | '\u{2029}' => true,
+        '\u{061C}'
+        | '\u{200E}'
+        | '\u{200F}'
+        | '\u{202A}'..='\u{202E}'
+        | '\u{2066}'..='\u{2069}' => true,
+        c => c.is_control(),
+    }
+}
+
+/// Whether a name holds no character that `DIS-201` bars.
+pub fn is_plain_name(text: &str) -> bool {
+    !text.chars().any(|c| is_barred(c, false))
+}
+
+/// Whether a welcome text or a note holds no character that `DIS-201`
+/// bars. A line feed is a line break of the text, and it stays.
+pub fn is_plain_note(text: &str) -> bool {
+    !text.chars().any(|c| is_barred(c, true))
+}
+
 impl<'a> ProfilePlain<'a> {
     fn check(&self) -> Result<(), Error> {
         if self.name.len() > PROFILE_NAME_MAX
             || self.welcome.len() > WELCOME_MAX
+            || !is_plain_name(self.name)
+            || !is_plain_note(self.welcome)
             || (!self.picture.is_empty() && !is_picture(self.picture))
         {
             return Err(Error::Malformed);
@@ -235,6 +266,38 @@ mod tests {
         };
         let bytes = with_picture.encode().unwrap();
         assert_eq!(ProfilePlain::parse(&bytes).unwrap().picture, jpeg);
+
+        // DIS-201: no control character, line break, or bidirectional
+        // format character in the name, and a line feed alone in the note.
+        let note = ProfilePlain {
+            name: "Dana",
+            welcome: "Two lines,\nas typed.",
+            picture: &[],
+        };
+        assert_eq!(ProfilePlain::parse(&note.encode().unwrap()).unwrap(), note);
+        for name in [
+            "Da\nna",
+            "Dana\u{202E}",
+            "\u{2066}Dana",
+            "Da\u{0007}na",
+            "Dana\u{2028}",
+        ] {
+            assert!(!is_plain_name(name));
+            let barred = ProfilePlain {
+                name,
+                welcome: "",
+                picture: &[],
+            };
+            assert!(barred.encode().is_err());
+            // A blob that a stranger wrote with such a name does not parse.
+            let mut bytes = alloc::vec![PROFILE_VERSION, name.len() as u8];
+            bytes.extend_from_slice(name.as_bytes());
+            bytes.extend_from_slice(&[0, 0, 0, 0]);
+            assert!(ProfilePlain::parse(&bytes).is_err());
+        }
+        for welcome in ["a\rb", "a\u{200F}b", "a\u{0000}b", "a\tb"] {
+            assert!(!is_plain_note(welcome));
+        }
         const { assert!(PROFILE_BLOB_MAX < umbra_wire::directory::DIR_REQUEST_LEN - 128) };
     }
 }

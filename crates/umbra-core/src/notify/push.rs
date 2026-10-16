@@ -125,6 +125,12 @@ impl PushScheduler {
         due
     }
 
+    /// Drops each push to come for `handle`: no queue names it any more,
+    /// thus a later push would go under the binding of another handle.
+    pub fn forget(&mut self, handle: &[u8; HANDLE_LEN]) {
+        self.handles.remove(handle);
+    }
+
     /// Whether the scheduler holds state of `handle`.
     pub fn holds(&self, handle: &[u8; HANDLE_LEN]) -> bool {
         self.handles.contains_key(handle)

@@ -54,8 +54,10 @@ A text of a page in a script outside that range needs a wider subset.
   invitation. A script on any page of this host could read the fragment.
   `python scripts/sitecheck.py` fails on a script, an event attribute, a
   frame, a form, or a location outside this host, in each HTML file here.
-  The `Content-Security-Policy` of `_headers` makes a browser refuse the
-  same.
+  It reads each SVG image the same way. The `Content-Security-Policy` of
+  `_headers` makes a browser refuse the same, and the check fails when
+  `_headers` loses a header of each page. With `--live <origin>` it also
+  checks the headers that the host sends for `/i` and `/<code>/i`.
 - **No visitor data.** The Worker has no code and its logs are off.
 
 ## Before a release

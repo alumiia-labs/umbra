@@ -8,6 +8,13 @@
     umbra_service: umbra-directory
     umbra_fragments: directory.d
 
+- name: The binary of the directory that runs now stays as umbra-directory.prev
+  ansible.builtin.include_role:
+    name: common
+    tasks_from: binary
+  vars:
+    umbra_binary: umbra-directory
+
 - name: The binary of the directory is there
   ansible.builtin.copy:
     src: "{{ umbra_bin_dir }}/umbra-directory"

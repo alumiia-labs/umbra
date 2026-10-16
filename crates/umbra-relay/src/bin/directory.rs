@@ -16,6 +16,7 @@
 //! cross_relay_seed=<64 hex characters, optional>
 //! signer_seeds=<64 hex>,<64 hex>,<64 hex>
 //! keyset_epoch=1
+//! keyset_chain=<hex>,<hex>, optional
 //! epoch_seconds=600
 //! ```
 //!
@@ -23,6 +24,13 @@
 //! <settings>` prints in hex what a client build pins (`DIS-163`): the key
 //! configuration of the gateway, the key set of the signers, the VRF key of
 //! the log, and the VOPRF key of the directory.
+//!
+//! A rotation of the signers (`DIS-064`) takes new seeds and a higher
+//! `keyset_epoch`. `umbra-directory sign-keyset <old settings> <new
+//! settings>` prints in hex the `SignedLogKeySet` of the new set under the
+//! signers of the old one. `keyset_chain` lists each such set from the
+//! first rotation on, in order, and a client takes them to reach the set of
+//! the heads (`DIS-198`, `DIS-199`).
 //!
 //! In a deployment the second and the third signer are the two auditors of
 //! §9.5.2, each at its own operator. This process holds all three seeds for
@@ -42,7 +50,10 @@ use umbra_core::{
     },
     notify::seeded_pair,
 };
-use umbra_crypto::{kem::KeyPair, ohttp, rsabssa::SecretKey2048, secret::Secret, sign::SigningKey};
+use umbra_crypto::{
+    kem::KeyPair, ohttp, rsabssa::SecretKey2048, secret::Secret, sign::SigningKey,
+    zeroize::Zeroizing,
+};
 use umbra_relay::{
     directory_server::{run_directory, DirectoryStore, SqliteDirectoryStore},
     ndr_server::Gateway,
@@ -53,12 +64,56 @@ use umbra_relay::{
 /// signature need more than the 1 MiB that the main thread of Windows has.
 const STACK_BYTES: usize = 16 << 20;
 
-fn hex32(text: &str) -> Option<[u8; 32]> {
-    let bytes: Vec<u8> = (0..text.len())
+/// Reads a seed of 64 hex characters. It leaves no copy in memory.
+fn hex32(text: &str) -> Option<Zeroizing<[u8; 32]>> {
+    if text.len() != 64 {
+        return None;
+    }
+    let mut out = Zeroizing::new([0u8; 32]);
+    for (at, slot) in out.iter_mut().enumerate() {
+        let start = at.checked_mul(2)?;
+        *slot = u8::from_str_radix(text.get(start..start.checked_add(2)?)?, 16).ok()?;
+    }
+    Some(out)
+}
+
+fn hex_bytes(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..text.len())
         .step_by(2)
         .map(|at| u8::from_str_radix(text.get(at..at + 2)?, 16).ok())
-        .collect::<Option<_>>()?;
-    bytes.try_into().ok()
+        .collect()
+}
+
+fn hex_text(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn settings(text: &str) -> BTreeMap<&str, &str> {
+    text.lines()
+        .filter_map(|line| line.trim().split_once('='))
+        .collect()
+}
+
+/// The `SignedLogKeySet` of the set of `new` under each signer of `old`
+/// (`DIS-045`, `DIS-064`).
+fn sign_keyset(old: &BTreeMap<&str, &str>, new: &BTreeMap<&str, &str>) -> Option<Vec<u8>> {
+    let (old_keys, _) = keys(old)?;
+    let (_, next) = keys(new)?;
+    let (set, _) = LogKeySet::parse(&next).ok()?;
+    let preimage = set.rotation_preimage().ok()?;
+    let mut out = next.clone();
+    out.push(u8::try_from(old_keys.signers.len()).ok()?);
+    for (index, signer) in old_keys.signers.iter().enumerate() {
+        out.push(u8::try_from(index).ok()?);
+        let sig = signer
+            .sign(&preimage, &mut umbra_relay::server::OsRng)
+            .ok()?;
+        out.extend_from_slice(&sig.to_bytes());
+    }
+    Some(out)
 }
 
 /// The gateway key of a seed.
@@ -94,12 +149,12 @@ fn keys(values: &BTreeMap<&str, &str>) -> Option<(DirectoryKeys, Vec<u8>)> {
         values
             .get(name)
             .and_then(|text| hex32(text))
-            .map(Secret::new)
+            .map(|seed| Secret::new(*seed))
     };
     let signers: Vec<SigningKey> = values
         .get("signer_seeds")?
         .split(',')
-        .map(|text| hex32(text.trim()).map(|seed| SigningKey::from_seed(Secret::new(seed))))
+        .map(|text| hex32(text.trim()).map(|seed| SigningKey::from_seed(Secret::new(*seed))))
         .collect::<Option<_>>()?;
     let public: Vec<_> = signers
         .iter()
@@ -135,22 +190,37 @@ fn keys(values: &BTreeMap<&str, &str>) -> Option<(DirectoryKeys, Vec<u8>)> {
 
 async fn run() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
+    if let [flag, old, new] = arguments.as_slice() {
+        if flag == "sign-keyset" {
+            let (Ok(old), Ok(new)) = (std::fs::read_to_string(old), std::fs::read_to_string(new))
+            else {
+                eprintln!("a settings file does not read");
+                return ExitCode::from(2);
+            };
+            let Some(signed) = sign_keyset(&settings(&old), &settings(&new)) else {
+                eprintln!("the two settings files give no signed key set");
+                return ExitCode::from(2);
+            };
+            println!("{}", hex_text(&signed));
+            return ExitCode::SUCCESS;
+        }
+    }
     let (path, prints_pins) = match arguments.as_slice() {
         [flag, path] if flag == "pins" => (path, true),
         [path] => (path, false),
         _ => {
-            eprintln!("usage: umbra-directory <settings file> | pins <settings file>");
+            eprintln!(
+                "usage: umbra-directory <settings file> | pins <settings file> | sign-keyset <old settings> <new settings>"
+            );
             return ExitCode::from(2);
         }
     };
-    let Ok(text) = std::fs::read_to_string(path) else {
+    // The text holds each seed of the directory, thus `Zeroizing` wipes it.
+    let Ok(text) = std::fs::read_to_string(path).map(Zeroizing::new) else {
         eprintln!("the settings file does not read");
         return ExitCode::from(2);
     };
-    let values: BTreeMap<&str, &str> = text
-        .lines()
-        .filter_map(|line| line.trim().split_once('='))
-        .collect();
+    let values = settings(&text);
     let (Some(seed), Some(key_id), Some((keys, keyset))) = (
         values.get("kem_seed").and_then(|seed| hex32(seed)),
         values.get("key_id").and_then(|id| id.parse::<u8>().ok()),
@@ -170,13 +240,26 @@ async fn run() -> ExitCode {
         None => DIRECTORY_EPOCH,
     };
     let pair = gateway_pair(&seed);
-    let directory = match Directory::new(keys, epoch_seconds, username_case_mapped) {
+    let mut directory = match Directory::new(keys, epoch_seconds, username_case_mapped) {
         Ok(directory) => directory,
         Err(_) => {
             eprintln!("the keys do not load");
             return ExitCode::from(2);
         }
     };
+    if let Some(chain) = values.get("keyset_chain") {
+        let chain: Option<Vec<Vec<u8>>> = chain
+            .split(',')
+            .map(|text| hex_bytes(text.trim()))
+            .collect();
+        if chain
+            .and_then(|chain| directory.set_keyset_chain(chain).ok())
+            .is_none()
+        {
+            eprintln!("keyset_chain does not end at the key set of the signers");
+            return ExitCode::from(2);
+        }
+    }
     if prints_pins {
         let pins = DirectoryPins {
             key_config: ohttp::encode_key_config(key_id, pair.public()).to_vec(),
@@ -187,10 +270,7 @@ async fn run() -> ExitCode {
         let Ok(bytes) = pins.encode() else {
             return ExitCode::from(1);
         };
-        println!(
-            "{}",
-            bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
-        );
+        println!("{}", hex_text(&bytes));
         return ExitCode::SUCCESS;
     }
     let (Some(listen), Some(cert), Some(key), Some(store)) = (

@@ -5462,7 +5462,7 @@ mod tests {
         // stored form of the phone is that of a test, and the item is 245
         // bytes for each form.
         assert_eq!(sync(&mut phone, &mut laptop, &mut rng), 2);
-        let end_of = |client: &Client<MemoryBackend, Element>| {
+        let end_of = |client: &mut Client<MemoryBackend, Element>| {
             let stored = client.stored_network().unwrap();
             let (_, state) = stored
                 .contacts
@@ -5474,7 +5474,7 @@ mod tests {
         };
         // DEV-320: the laptop holds the contact as one that a node
         // restores, and no contact is out of its reach.
-        assert_eq!(end_of(&laptop), ([5; 32], vec![7; CHANNEL_END_LEN]));
+        assert_eq!(end_of(&mut laptop), ([5; 32], vec![7; CHANNEL_END_LEN]));
         assert!(!laptop.holds_no_channel(conversation).unwrap());
         let count = laptop.take_over_count().unwrap();
         assert_eq!((count.contacts, count.unreachable), (2, 0));
@@ -5490,7 +5490,7 @@ mod tests {
             .commit_network(&[state(8)], &[], HEARD * 1_000, &mut rng)
             .unwrap();
         assert_eq!(sync(&mut phone, &mut laptop, &mut rng), 1);
-        assert_eq!(end_of(&laptop).1, vec![8; CHANNEL_END_LEN]);
+        assert_eq!(end_of(&mut laptop).1, vec![8; CHANNEL_END_LEN]);
         // A commit that moves nothing publishes nothing.
         phone
             .commit_network(&[state(8)], &[], HEARD * 1_000, &mut rng)
@@ -5504,7 +5504,7 @@ mod tests {
         let mut stale = laptop.restored_stale().unwrap();
         stale.sort_unstable();
         assert_eq!(stale, [contact.0, carol.0]);
-        assert_eq!(end_of(&laptop).1, vec![8; CHANNEL_END_LEN]);
+        assert_eq!(end_of(&mut laptop).1, vec![8; CHANNEL_END_LEN]);
         laptop.audit().unwrap();
 
         // The laptop links a device before the renewal of Carol ends. The
@@ -5528,7 +5528,7 @@ mod tests {
         )
         .unwrap();
         third.apply_restore(&restored, &mut rng).unwrap();
-        assert_eq!(end_of(&third), ([5; 32], vec![8; CHANNEL_END_LEN]));
+        assert_eq!(end_of(&mut third), ([5; 32], vec![8; CHANNEL_END_LEN]));
     }
 
     #[test]
@@ -7927,7 +7927,7 @@ mod tests {
             contact,
             state: zeroize::Zeroizing::new(vec![step; 3]),
         };
-        let stored = |client: &Client<MemoryBackend, Element>| -> Vec<u8> {
+        let stored = |client: &mut Client<MemoryBackend, Element>| -> Vec<u8> {
             let network = client.stored_network().unwrap();
             let (_, state) = network
                 .contacts
@@ -7952,7 +7952,7 @@ mod tests {
             client
                 .commit_network(&[state(step)], &[(contact, app)], 2_000_000, &mut rng)
                 .unwrap();
-            assert_eq!(stored(&client), vec![step; 3]);
+            assert_eq!(stored(&mut client), vec![step; 3]);
             // The record shows nothing: no message, and no event.
             assert!(client.messages(conversation).unwrap().is_empty());
             assert_eq!(client.next_event(), None);
@@ -7967,7 +7967,7 @@ mod tests {
                 &mut rng,
             )
             .unwrap();
-        assert_eq!(stored(&client), vec![7; 3]);
+        assert_eq!(stored(&mut client), vec![7; 3]);
         let messages = client.messages(conversation).unwrap();
         assert_eq!(messages.len(), 1);
         let mut view = View::default();

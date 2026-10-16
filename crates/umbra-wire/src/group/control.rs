@@ -121,7 +121,7 @@ impl<'a> GroupControl<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum Role {
-    /// Reads only.
+    /// Reads, and posts no message (`GRP-425`).
     Observer = 0x01,
     /// A plain member.
     Member = 0x02,
@@ -129,7 +129,7 @@ pub enum Role {
     Moderator = 0x03,
     /// May change the roster.
     Admin = 0x04,
-    /// An admin that the roster cannot remove by a majority of one.
+    /// An admin whose role only an owner gives or takes (`GRP-063`).
     Owner = 0x05,
 }
 

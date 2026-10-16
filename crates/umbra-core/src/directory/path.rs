@@ -166,7 +166,13 @@ impl Candidate {
     /// Whether two relays stand under different operators and families:
     /// invariant 1.
     pub fn apart_operator(&self, other: &Candidate) -> bool {
-        self.operator_id != other.operator_id && self.family_id != other.family_id
+        self.operator_id != other.operator_id && !self.same_family(other)
+    }
+
+    /// Whether two relays declare one family. A `family_id` of zero bytes
+    /// declares no family, thus two such relays share none (`REL-209`).
+    pub fn same_family(&self, other: &Candidate) -> bool {
+        self.family_id != [0; 32] && self.family_id == other.family_id
     }
 
     /// Whether two relays share no autonomous system and no prefix:
@@ -589,6 +595,34 @@ mod tests {
             layer,
             class: 2,
         }
+    }
+
+    #[test]
+    fn two_relays_with_no_family_share_none() {
+        // REL-209: a zero family_id is no family, for a chain and for the
+        // ingress pins.
+        let list = BlocList::v1();
+        let (a, b, c) = (
+            list.bloc_of(b"DE"),
+            list.bloc_of(b"US"),
+            list.bloc_of(b"BR"),
+        );
+        let mut first = cand(1, a, 0, true);
+        let mut second = cand(2, b, 0, true);
+        first.family_id = [0; 32];
+        second.family_id = [0; 32];
+        assert!(!first.same_family(&second));
+        assert!(first.apart_operator(&second));
+        let mut pins = IngressPins::empty();
+        assert!(pins.refresh(&[first, second], 0, false));
+        assert_eq!(pins.pins().len(), 2);
+        // One declared family still joins the two.
+        let mut third = cand(3, c, 0, true);
+        third.family_id = [9; 32];
+        let mut fourth = cand(4, a, 0, true);
+        fourth.family_id = [9; 32];
+        assert!(third.same_family(&fourth));
+        assert!(!third.apart_operator(&fourth));
     }
 
     #[test]

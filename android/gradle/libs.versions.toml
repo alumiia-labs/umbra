@@ -1,15 +1,15 @@
 [versions]
 agp = "9.4.1"
-kotlin = "2.4.20"
+kotlin = "2.4.21"
 composeBom = "2026.09.00"
 activityCompose = "1.13.0"
 fragment = "1.9.1"
 camerax = "1.6.2"
 jna = "5.19.1"
 zxing = "3.5.4"
-firebaseBom = "33.7.0"
-googleServices = "4.4.2"
-work = "2.10.0"
+firebaseBom = "35.0.2"
+googleServices = "4.5.0"
+work = "2.12.0"
 
 [libraries]
 androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }

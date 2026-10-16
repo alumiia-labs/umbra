@@ -15,7 +15,7 @@ use crate::{
 pub const NDR_REQUEST_LEN: usize = 640;
 /// The length of each response.
 pub const NDR_RESPONSE_LEN: usize = 16;
-/// The longest push token: a UnifiedPush endpoint is a URL.
+/// The longest push token.
 pub const PUSH_TOKEN_MAX: usize = 512;
 /// The longest sealed push token, with its tag.
 pub const CT_TOKEN_MAX: usize = PUSH_TOKEN_MAX + 16;
@@ -27,6 +27,10 @@ pub const BLOB_LEN: usize = 69;
 const KIND_REGISTER: u8 = 0x01;
 const KIND_UNREGISTER: u8 = 0x02;
 const KIND_PUSH: u8 = 0x03;
+
+/// The handle of a binding that serves a watch alone (Part 8 `NTF-143`). No
+/// request to the NDR names it.
+const WATCH_HANDLE: [u8; HANDLE_LEN] = [0; HANDLE_LEN];
 
 /// One request to the NDR.
 pub enum NdrRequest<'a> {
@@ -77,6 +81,9 @@ impl NdrRequest<'_> {
     /// Writes the request, padded with zero bytes to `NDR_REQUEST_LEN`.
     pub fn encode(&self, out: &mut [u8; NDR_REQUEST_LEN]) -> Result<(), Error> {
         out.fill(0);
+        if *self.handle() == WATCH_HANDLE {
+            return Err(Error::Malformed);
+        }
         let mut w = Writer::new(out);
         match self {
             NdrRequest::Register {
@@ -118,7 +125,8 @@ impl NdrRequest<'_> {
         Ok(())
     }
 
-    /// Reads a request. The padding must be zero (`NTF-122`).
+    /// Reads a request. The padding must be zero (`NTF-122`), and the
+    /// handle must not be `WATCH_HANDLE` (`NTF-143`).
     pub fn parse(bytes: &[u8]) -> Result<NdrRequest<'_>, Error> {
         if bytes.len() != NDR_REQUEST_LEN {
             return Err(Error::Malformed);
@@ -126,6 +134,9 @@ impl NdrRequest<'_> {
         let mut r = Reader::new(bytes);
         let kind = r.u8()?;
         let handle = r.array::<HANDLE_LEN>()?;
+        if handle == WATCH_HANDLE {
+            return Err(Error::Malformed);
+        }
         let request = match kind {
             KIND_REGISTER => {
                 let nonce = r.array::<24>()?;
@@ -165,7 +176,8 @@ impl NdrRequest<'_> {
 /// token (`NTF-123`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenCarrier {
-    /// A UnifiedPush endpoint: the rest is an `https` URL.
+    /// The reserved carrier `0x01`, which UnifiedPush used. No version
+    /// serves it, and [`parse_token`] refuses it (`NTF-123`).
     UnifiedPush = 0x01,
     /// An FCM registration token.
     Fcm = 0x02,
@@ -182,19 +194,17 @@ pub fn encode_token(carrier: TokenCarrier, target: &[u8], out: &mut [u8]) -> Res
     Ok(target.len().saturating_add(1))
 }
 
-/// Reads a plain push token. A UnifiedPush target must be a printable
-/// ASCII `https` URL.
+/// Reads a plain push token. The carrier must be FCM, and the target
+/// printable ASCII. The reserved carrier `0x01` does not read (`NTF-123`).
 pub fn parse_token(bytes: &[u8]) -> Result<(TokenCarrier, &[u8]), Error> {
     let mut r = Reader::new(bytes);
     let carrier = match r.u8()? {
-        0x01 => TokenCarrier::UnifiedPush,
         0x02 => TokenCarrier::Fcm,
         _ => return Err(Error::Malformed),
     };
     let target = r.rest();
     let printable = target.iter().all(|b| (0x21..0x7F).contains(b));
-    let is_url = target.starts_with(b"https://") && target.len() > 8;
-    if target.is_empty() || !printable || (carrier == TokenCarrier::UnifiedPush && !is_url) {
+    if target.is_empty() || !printable {
         return Err(Error::Malformed);
     }
     Ok((carrier, target))
@@ -312,22 +322,45 @@ mod tests {
     }
 
     #[test]
-    fn a_token_names_its_carrier_and_a_push_endpoint_is_a_url() {
+    fn a_token_names_fcm_and_the_reserved_carrier_does_not_read() {
         let mut out = [0u8; PUSH_TOKEN_MAX];
+        let n = encode_token(TokenCarrier::Fcm, b"fcm-token", &mut out).unwrap();
+        let (carrier, target) = parse_token(&out[..n]).unwrap();
+        assert_eq!(carrier, TokenCarrier::Fcm);
+        assert_eq!(target, b"fcm-token");
+        // NTF-123: the carrier `0x01` is reserved, with any target.
         let n = encode_token(
             TokenCarrier::UnifiedPush,
             b"https://push.example/up/abc",
             &mut out,
         )
         .unwrap();
-        let (carrier, target) = parse_token(&out[..n]).unwrap();
-        assert_eq!(carrier, TokenCarrier::UnifiedPush);
-        assert_eq!(target, b"https://push.example/up/abc");
-        let n = encode_token(TokenCarrier::UnifiedPush, b"http://plain", &mut out).unwrap();
         assert!(parse_token(&out[..n]).is_err());
-        let n = encode_token(TokenCarrier::Fcm, b"fcm-token", &mut out).unwrap();
-        assert_eq!(parse_token(&out[..n]).unwrap().0, TokenCarrier::Fcm);
         assert!(parse_token(&[0x03, b'x']).is_err());
+        assert!(parse_token(&[0x02, b' ']).is_err());
+        assert!(parse_token(&[0x02]).is_err());
+    }
+
+    #[test]
+    fn no_request_names_the_handle_of_a_watch() {
+        // NTF-143: a request under 16 zero bytes neither writes nor reads.
+        let mut out = [0u8; NDR_REQUEST_LEN];
+        let push = NdrRequest::Push {
+            handle: [0; HANDLE_LEN],
+            k_tok: Secret::new([0; 32]),
+            ttl: 60,
+            blob: [6; BLOB_LEN],
+        };
+        assert_eq!(push.encode(&mut out), Err(Error::Malformed));
+        NdrRequest::Unregister {
+            handle: [1; HANDLE_LEN],
+            removal: Secret::new([4; 32]),
+        }
+        .encode(&mut out)
+        .unwrap();
+        assert!(NdrRequest::parse(&out).is_ok());
+        out[1..=HANDLE_LEN].fill(0);
+        assert!(NdrRequest::parse(&out).is_err());
     }
 
     #[test]

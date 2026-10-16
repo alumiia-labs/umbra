@@ -268,11 +268,23 @@ impl Assembler {
         self.next == self.chunk_count
     }
 
-    /// Whether `chunk` opens as the chunk at `index`, with no change to the
-    /// assembly. A download tests each answer of a relay with it.
-    pub fn opens(&self, index: u32, chunk: &[u8]) -> bool {
+    /// The segment of `chunk` as the chunk at `index`, when it opens, with
+    /// no change to the assembly. A download opens each answer of a relay
+    /// with it once, and [`Assembler::accept_opened`] takes the segment.
+    pub fn open_at(&self, index: u32, chunk: &[u8]) -> Option<Vec<u8>> {
         let last = index.saturating_add(1) == self.chunk_count;
-        open_chunk(&self.key, &self.nonce, index, last, chunk).is_ok()
+        open_chunk(&self.key, &self.nonce, index, last, chunk).ok()
+    }
+
+    /// Takes the segment that [`Assembler::open_at`] opened at the index
+    /// of the next chunk.
+    pub fn accept_opened(&mut self, segment: &[u8]) -> Result<(), Error> {
+        if self.is_complete() {
+            return Err(Error::Stale);
+        }
+        self.plain.extend_from_slice(segment);
+        self.next = self.next.saturating_add(1);
+        Ok(())
     }
 
     /// Opens the next chunk and returns its verified segment, which a media

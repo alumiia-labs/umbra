@@ -52,7 +52,7 @@ use umbra_transport::link::{ClientLink, RelayLink, ResumeFault};
 use umbra_wire::{
     address::QueueAddress,
     bucket::Bucket,
-    capsule::{self, CapsuleType},
+    capsule::{self, CapsuleType, Link as CapsuleLink},
     cell::CellCommand,
     command::{Cmd, Command},
     queue::L6Kind,
@@ -61,6 +61,7 @@ use umbra_wire::{
 
 use crate::{
     circuits::{Action, CircuitKey, CircuitTable, Holder, LinkId, Origin},
+    loops::Loops,
     receipts::{Asked, ReceiptBook},
     service::{
         chunk::{ChunkService, Push},
@@ -408,6 +409,12 @@ pub const LINK_IDLE_TIMEOUT: u64 = 600;
 const DIAL_TIMEOUT: u64 = 15;
 /// The time between a dial that failed and the next one (`NET-319`).
 const DIAL_HOLD_OFF: u64 = 1;
+/// `EXTEND_WAITING_MAX`: the `EXTEND` bodies that wait for the link to one
+/// relay of the next layer (`NET-319`). A body above it ends its circuit.
+pub const EXTEND_WAITING_MAX: usize = 8_192;
+/// `RELAY_DELAYED_MAX`: the forward cells that wait for their per-hop
+/// delay at one relay (`NET-362`). A cell above it ends its circuit.
+pub const RELAY_DELAYED_MAX: usize = 1 << 17;
 
 /// The last dial of a relay of the next layer that opened no link.
 #[derive(Clone, Copy)]
@@ -583,6 +590,14 @@ pub struct RelayNode {
     measure_attempts: BTreeMap<Holder, Attempts>,
     /// The address of each link, as the runtime cut it.
     sources: BTreeMap<LinkId, [u8; 16]>,
+    /// The loop chains of this relay (`NET-069`).
+    loops: Loops,
+    /// Whether the circuits take their time from the clock of the per-hop
+    /// delay, which never steps back, in place of the time of each call.
+    monotonic: bool,
+    /// The circuits whose pacing clock started since the runtime last
+    /// asked: a new endpoint, or one whose client woke it (`NET-035`).
+    paced_new: BTreeSet<CircuitKey>,
 }
 
 impl RelayNode {
@@ -641,7 +656,53 @@ impl RelayNode {
             measure_sessions: BTreeMap::new(),
             measure_attempts: BTreeMap::new(),
             sources: BTreeMap::new(),
+            loops: Loops::new(layer),
+            monotonic: false,
+            paced_new: BTreeSet::new(),
         }
+    }
+
+    /// The circuits take their time from a clock that never steps back
+    /// from now on: their age and the refill of each build budget
+    /// (`NET-320`, `NET-332`). A step of the wall clock then ends no
+    /// circuit early and holds no build back. The runtime calls it, and a
+    /// test that moves the time of each call does not.
+    pub fn use_monotonic_clock(&mut self) {
+        self.monotonic = true;
+    }
+
+    /// The time of the circuit table for a call at `now`.
+    fn table_now(&self, now: u64) -> u64 {
+        if self.monotonic {
+            clock_ms() / 1_000
+        } else {
+            now
+        }
+    }
+
+    /// The relays of the layers after this one, by `relay_id`, with the
+    /// layer and the static key of each, from the relay set. A relay of
+    /// layer 1 or 2 builds its loop chains through them (`NET-363`).
+    pub fn set_loop_relays(&mut self, relays: &BTreeMap<[u8; 32], (u8, [u8; 32])>) {
+        self.loops.set_relays(relays);
+    }
+
+    /// The loops that this relay sent and those that came back.
+    pub fn loop_counts(&self) -> (u64, u64) {
+        self.loops.counts()
+    }
+
+    /// The circuits whose pacing clock started since the last call. The
+    /// runtime draws the first tick of each one (`NET-036`).
+    pub fn take_paced_new(&mut self) -> Vec<CircuitKey> {
+        core::mem::take(&mut self.paced_new).into_iter().collect()
+    }
+
+    /// Whether the pacing clock of `circuit` runs.
+    pub fn is_paced(&self, circuit: &CircuitKey) -> bool {
+        self.endpoints
+            .get(circuit)
+            .is_some_and(|endpoint| !endpoint.paused)
     }
 
     /// The key set and the revoked list of the root that this relay holds
@@ -746,7 +807,12 @@ impl RelayNode {
             }
             None => None,
         };
-        match until {
+        // The table counts the end of the session on its own clock.
+        let table_until = until.map(|until| {
+            self.table_now(now)
+                .saturating_add(until.saturating_sub(now))
+        });
+        match table_until {
             Some(until) if self.circuits.open_measure(&circuit, until) => {
                 self.attempt_give(circuit.link);
                 // NET-335: the link of a measurer holds its place for the
@@ -876,6 +942,8 @@ impl RelayNode {
     /// their hello.
     pub fn set_source(&mut self, link: LinkId, source: [u8; 16]) {
         self.sources.insert(link, source);
+        // NET-332: the builds of one address count together in each layer.
+        self.circuits.set_source(link, source);
         if self.layer == 1 {
             self.circuits.set_holder(link, Holder::Source(source));
         }
@@ -1155,6 +1223,12 @@ impl RelayNode {
     /// re-push. The runtime calls it about once each second.
     pub fn push_tick<R: CryptoRng + ?Sized>(&mut self, now: u64, rng: &mut R) -> Vec<Output> {
         self.queues.push_tick(now, rng);
+        // NTF-146: the wake at the end of the window of a watch.
+        for reply in self.queues.take_wakes() {
+            if let Some(endpoint) = self.endpoints.get_mut(&reply.circuit) {
+                endpoint.post(reply.outbound, false);
+            }
+        }
         let mut outputs: Vec<Output> = self
             .queues
             .take_ndr_pushes()
@@ -1165,6 +1239,8 @@ impl RelayNode {
         // its turn under the rate of the group service.
         let due = self.groups.digest_tick(now);
         outputs.extend(self.deliver_digests(due, now, rng));
+        // NET-069: the loops of this relay, and the chains that carry them.
+        outputs.extend(self.loop_tick(now, rng));
         // NET-319: a dial that failed starts again while a body waits.
         let again: Vec<[u8; 32]> = self
             .extending
@@ -1212,6 +1288,32 @@ impl RelayNode {
             }
         }
         outputs
+    }
+
+    /// One tick of the loop chains (`NET-069`, `NET-363`). The runtime
+    /// calls it about once each second, with [`RelayNode::push_tick`].
+    fn loop_tick<R: CryptoRng + ?Sized>(&mut self, now: u64, rng: &mut R) -> Vec<Output> {
+        let at = self.table_now(now);
+        let cells = self.loops.tick(at, &self.next_hops, &self.circuits, rng);
+        self.send_loop_cells(cells, now, rng)
+    }
+
+    /// Frames the cells of the loop chains as each other cell of a link,
+    /// under the backlog bound of `NET-349`.
+    fn send_loop_cells<R: CryptoRng + ?Sized>(
+        &mut self,
+        cells: Vec<(LinkId, Vec<u8>)>,
+        now: u64,
+        rng: &mut R,
+    ) -> Vec<Output> {
+        if cells.is_empty() {
+            return Vec::new();
+        }
+        let actions = cells
+            .into_iter()
+            .map(|(link, cell)| Action::Send { link, cell })
+            .collect();
+        self.run(actions, now, rng)
     }
 
     /// The receipts that this relay issued and took, for a test.
@@ -1380,11 +1482,12 @@ impl RelayNode {
         // NET-154, NET-155.
         loop {
             rng.fill_bytes(&mut next.circ_id);
-            if self.circuits.is_free(&next) {
+            if self.circuits.is_free(&next) && !self.loops.owns(next.link, next.circ_id) {
                 break;
             }
         }
-        self.circuits.bind_next(from, next, body, now)
+        let at = self.table_now(now);
+        self.circuits.bind_next(from, next, body, at)
     }
 
     /// Takes the bytes of one capsule from a link.
@@ -1395,8 +1498,23 @@ impl RelayNode {
         now: u64,
         rng: &mut R,
     ) -> Vec<Output> {
-        let Ok((kind, value, _)) = capsule::parse(bytes) else {
-            return vec![Output::Close { link }];
+        // WIR-538: a client link carries no capsule between two relays. An
+        // accepted link at an ingress relay is the link of a client, and
+        // each other link is the link of a relay.
+        let kind_of_link =
+            if self.layer == 1 && !matches!(self.links.get(&link), Some(Framing::Dialed(_))) {
+                CapsuleLink::Client
+            } else {
+                CapsuleLink::Relays
+            };
+        // A capsule that does not parse, that its link does not carry, or
+        // that holds bytes after its value is a fault of the peer. The
+        // session ends, and it does not park (`WIR-542`).
+        let parsed = capsule::parse_on(bytes, kind_of_link)
+            .ok()
+            .filter(|(_, _, used)| *used == bytes.len());
+        let Some((kind, value, _)) = parsed else {
+            return self.drop_link(link, now);
         };
         // NET-335: the time of a link that holds no session runs from its
         // first sight.
@@ -1489,7 +1607,7 @@ impl RelayNode {
                 let cell = match self.links.get_mut(&link) {
                     Some(Framing::Accepted(framing)) => framing.receive(value),
                     Some(Framing::Dialed(framing)) => framing.receive(value),
-                    None => return vec![Output::Close { link }],
+                    None => return self.drop_link(link, now),
                 };
                 match cell {
                     Ok(Some(cell)) => {
@@ -1504,15 +1622,27 @@ impl RelayNode {
                                 outputs.extend(capsule_output(link, CapsuleType::Receipt, &signed));
                             }
                         }
+                        // NET-363: a cell of a loop chain of this relay.
+                        if let Some(circ_id) = cell.first_chunk::<16>() {
+                            if self.loops.owns(link, *circ_id) {
+                                let at = self.table_now(now);
+                                let cells = self.loops.on_cell(link, &cell, at, rng);
+                                outputs.extend(self.send_loop_cells(cells, now, rng));
+                                return outputs;
+                            }
+                        }
                         self.circuits.set_clock_ms(clock_ms());
                         let origin = self.origin(link, now);
-                        let actions = self.circuits.on_cell(link, &cell, origin, now, rng);
+                        let at = self.table_now(now);
+                        let actions = self.circuits.on_cell(link, &cell, origin, at, rng);
                         outputs.extend(self.run(actions, now, rng));
                         outputs
                     }
                     // WIR-141: a frame that the link accepted before.
                     Ok(None) => Vec::new(),
-                    Err(_) => vec![Output::Close { link }],
+                    // WIR-542: a frame fault ends the session, and it does
+                    // not park.
+                    Err(_) => self.drop_link(link, now),
                 }
             }
         }
@@ -1520,7 +1650,7 @@ impl RelayNode {
 
     fn on_control(&mut self, link: LinkId, value: &[u8], now: u64) -> Vec<Output> {
         let Ok(control) = SessionControl::parse(value) else {
-            return vec![Output::Close { link }];
+            return self.drop_link(link, now);
         };
         let held = self.links.contains_key(&link);
         match &control {
@@ -1542,7 +1672,7 @@ impl RelayNode {
                         }
                         Vec::new()
                     }
-                    Err(_) => vec![Output::Close { link }],
+                    Err(_) => self.drop_link(link, now),
                 }
             }
             SessionControl::Resume { session_id, .. } if !held => {
@@ -1551,6 +1681,11 @@ impl RelayNode {
             }
             // NET-322: a neighbor ended a circuit on this link.
             SessionControl::Destroy { circ_id } if held => {
+                // NET-363: a relay ended a loop chain of this relay.
+                let at = self.table_now(now);
+                if self.loops.on_destroy(link, *circ_id, at) {
+                    return Vec::new();
+                }
                 self.circuits.set_clock_ms(clock_ms());
                 let actions = self.circuits.on_destroy(link, *circ_id);
                 self.finish(actions, now)
@@ -1833,13 +1968,22 @@ impl RelayNode {
                             );
                             outputs.push(Output::Dial { relay_id });
                         }
+                        // NET-319: the bodies for one relay have a bound. A
+                        // body above it ends its circuit, and its client
+                        // builds again on another chain.
                         let waiting = self.extending.entry(relay_id).or_default();
-                        waiting.retain(|held| held.is_live(now));
-                        waiting.push(Waiting {
-                            from,
-                            body,
-                            arrived_at: now,
-                        });
+                        if waiting.len() >= EXTEND_WAITING_MAX {
+                            waiting.retain(|held| held.is_live(now));
+                        }
+                        if waiting.len() >= EXTEND_WAITING_MAX {
+                            work.extend(self.circuits.shed(from.link, from.circ_id));
+                        } else {
+                            waiting.push(Waiting {
+                                from,
+                                body,
+                                arrived_at: now,
+                            });
+                        }
                     }
                     Some(next_link) => {
                         work.extend(self.bind_extend(from, next_link, &body, now, rng));
@@ -1888,12 +2032,7 @@ impl RelayNode {
                     outputs.extend(self.echo(circuit, &content));
                 }
                 Action::Destroy { link, circ_id } => outputs.extend(self.destroy(link, circ_id)),
-                Action::Closed { circuit } => {
-                    self.measure_closed(&circuit, now);
-                    self.endpoints.remove(&circuit);
-                    self.queues.circuit_closed(&circuit, now);
-                    self.groups.circuit_closed(&circuit);
-                }
+                Action::Closed { circuit } => self.endpoint_closed(&circuit, now),
                 Action::Pause { key } => work.extend(self.circuits.pause_now(key)),
                 Action::PauseNext { link, circ_id } => {
                     outputs.extend(pause_output(link, circ_id));
@@ -1902,19 +2041,39 @@ impl RelayNode {
                 // NET-339: the end of a circuit after its delayed cells.
                 Action::End { key, from } => work.extend(self.circuits.end_now(key, from)),
                 // Part 3 §3.9: the cell waits for the per-hop delay of its
-                // circuit.
+                // circuit. NET-362: a cell above the bound of the relay
+                // ends its circuit. The end of a circuit and a pause always
+                // wait, because they hold no cell.
                 Action::Delayed {
                     at_ms,
                     circuit,
                     action,
                 } => {
-                    self.delayed_seq = self.delayed_seq.wrapping_add(1);
-                    self.delayed
-                        .insert((at_ms, self.delayed_seq), (circuit, *action));
+                    let is_cell = matches!(
+                        *action,
+                        Action::Send { .. } | Action::Serve { .. } | Action::Loop { .. }
+                    );
+                    if is_cell && self.delayed.len() >= RELAY_DELAYED_MAX {
+                        self.circuits.released(&circuit);
+                        work.extend(self.circuits.shed(circuit.link, circuit.circ_id));
+                    } else {
+                        self.delayed_seq = self.delayed_seq.wrapping_add(1);
+                        self.delayed
+                            .insert((at_ms, self.delayed_seq), (circuit, *action));
+                    }
                 }
             }
         }
         outputs
+    }
+
+    /// A circuit ended: the services drop what they held for it.
+    fn endpoint_closed(&mut self, circuit: &CircuitKey, now: u64) {
+        self.measure_closed(circuit, now);
+        self.endpoints.remove(circuit);
+        self.paced_new.remove(circuit);
+        self.queues.circuit_closed(circuit, now);
+        self.groups.circuit_closed(circuit);
     }
 
     /// The `CircuitDestroy` for `link`, or none for a parked link, which
@@ -1944,6 +2103,9 @@ impl RelayNode {
     /// the pacing clock of a paused circuit starts again (`WIR-546`).
     fn wake_endpoint(&mut self, circuit: &CircuitKey) {
         if let Some(endpoint) = self.endpoints.get_mut(circuit) {
+            if endpoint.paused {
+                self.paced_new.insert(*circuit);
+            }
             endpoint.paused = false;
         }
     }
@@ -2005,6 +2167,7 @@ impl RelayNode {
                 paused: false,
             },
         );
+        self.paced_new.insert(circuit);
         true
     }
 
@@ -2392,6 +2555,7 @@ impl RelayNode {
         self.sources.remove(&link);
         self.receipts.link_closed(link);
         self.next_hops.retain(|_, held| *held != link);
+        self.loops.link_closed(link);
         self.circuits.set_clock_ms(clock_ms());
         let actions = self.circuits.link_closed(link);
         let mut outputs = self.finish(actions, now);
@@ -2405,12 +2569,7 @@ impl RelayNode {
         let mut outputs = Vec::new();
         for action in actions {
             match action {
-                Action::Closed { circuit } => {
-                    self.measure_closed(&circuit, now);
-                    self.endpoints.remove(&circuit);
-                    self.queues.circuit_closed(&circuit, now);
-                    self.groups.circuit_closed(&circuit);
-                }
+                Action::Closed { circuit } => self.endpoint_closed(&circuit, now),
                 Action::Destroy { link, circ_id } => {
                     outputs.extend(self.destroy(link, circ_id));
                 }
@@ -2443,7 +2602,7 @@ impl RelayNode {
         self.dials
             .retain(|_, dial| now.saturating_sub(dial.at) < DIAL_TIMEOUT);
         self.circuits.set_clock_ms(clock_ms());
-        let aged = self.circuits.expire(now);
+        let aged = self.circuits.expire(self.table_now(now));
         let mut ended = self.finish(aged, now);
         // REL-069: an address whose attempts each came back leaves the
         // count.

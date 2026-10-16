@@ -56,9 +56,18 @@ pub const UP_WINDOW_FAST_TICKS: u32 = 8;
 pub const UP_WINDOW_SLOW_TICKS: u32 = 15;
 
 fn random_below<R: CryptoRng + ?Sized>(rng: &mut R, bound: u32) -> u32 {
-    let mut bytes = [0u8; 4];
-    rng.fill_bytes(&mut bytes);
-    u32::from_be_bytes(bytes) % bound.max(1)
+    let bound = bound.max(1);
+    // A draw at or above the highest multiple of the bound goes again, thus
+    // each value below the bound is equally likely.
+    let zone = u32::MAX - u32::MAX % bound;
+    loop {
+        let mut bytes = [0u8; 4];
+        rng.fill_bytes(&mut bytes);
+        let value = u32::from_be_bytes(bytes);
+        if value < zone {
+            return value % bound;
+        }
+    }
 }
 
 fn random_bytes<R: CryptoRng + ?Sized, const N: usize>(rng: &mut R) -> [u8; N] {
@@ -1275,20 +1284,21 @@ impl Download {
             return Ok(false);
         };
         // ATT-150: a chunk that does not open under its tag is one bad
-        // replica, and the next replica serves it (ATT-019).
-        let opens = match &outcome {
+        // replica, and the next replica serves it (ATT-019). The chunk
+        // opens once, and its segment waits for its turn.
+        let opened = match &outcome {
             ChunkOutcome::Fetched(bytes) => {
                 let position = u32::try_from(index).map_err(|_| Error::Malformed)?;
                 self.assembler
                     .as_ref()
-                    .is_some_and(|assembler| assembler.opens(position, bytes))
+                    .and_then(|assembler| assembler.open_at(position, bytes))
             }
-            _ => false,
+            _ => None,
         };
         let wanted = self.wanted.get_mut(index).ok_or(Error::Malformed)?;
         wanted.answers = wanted.answers.saturating_add(1);
         match outcome {
-            ChunkOutcome::Fetched(bytes) if opens => wanted.bytes = Some(bytes),
+            ChunkOutcome::Fetched(_) if opened.is_some() => wanted.bytes = opened,
             ChunkOutcome::Fetched(_) => {
                 wanted.refusals = wanted.refusals.saturating_add(1);
                 self.ask(node, index, rng)?;
@@ -1312,10 +1322,10 @@ impl Download {
         let assembler = self.assembler.as_mut().ok_or(Error::Stale)?;
         loop {
             let next = usize::try_from(assembler.next_index()).map_err(|_| Error::Malformed)?;
-            let Some(bytes) = self.wanted.get_mut(next).and_then(|w| w.bytes.take()) else {
+            let Some(segment) = self.wanted.get_mut(next).and_then(|w| w.bytes.take()) else {
                 break;
             };
-            assembler.accept(&bytes)?;
+            assembler.accept_opened(&segment)?;
         }
         let is_complete = assembler.is_complete();
         self.fill(node, rng)?;
@@ -1501,6 +1511,20 @@ mod tests {
             operator_id: [id; 32],
             family_id: [id; 32],
         }
+    }
+
+    #[test]
+    fn a_draw_below_a_bound_stays_below_it() {
+        let mut rng = Rng(5);
+        let mut seen = [false; 3];
+        for _ in 0..64 {
+            let value = random_below(&mut rng, 3);
+            assert!(value < 3);
+            seen[value as usize] = true;
+        }
+        assert!(seen.iter().all(|held| *held));
+        assert_eq!(random_below(&mut rng, 0), 0);
+        assert_eq!(random_below(&mut rng, 1), 0);
     }
 
     /// One chunk at relay 1 in full and at relays 2 and 3 by hint.

@@ -539,35 +539,82 @@ impl LogOperator {
     /// Closes the epoch under a fresh nonce: each staged version enters
     /// the prefix tree, and one leaf enters the log tree (`DIS-047`).
     pub fn close_epoch(&mut self, nonce: [u8; 32]) -> Result<EpochUpdate, Error> {
-        if !self.used_nonces.insert(nonce) {
+        self.close_epoch_checked(nonce, |_| Ok(()))
+    }
+
+    /// Closes the epoch as [`LogOperator::close_epoch`] does, when `check`
+    /// passes on its update. The auditors check there before the log moves
+    /// (`DIS-049`, `DIS-050`). A check or a step that fails changes nothing:
+    /// each staged version waits for the next close, and the log stays one
+    /// leaf behind no auditor.
+    pub fn close_epoch_checked(
+        &mut self,
+        nonce: [u8; 32],
+        check: impl FnOnce(&EpochUpdate) -> Result<(), Error>,
+    ) -> Result<EpochUpdate, Error> {
+        if self.used_nonces.contains(&nonce) {
             return Err(Error::Stale);
         }
+        let kept = self.tree.take_cache();
+        let mut indexes = Vec::with_capacity(self.staged.len());
+        match self.open_epoch(nonce, &mut indexes, check) {
+            Ok((update, versions, prefix_root, frontier, newest_path)) => {
+                self.used_nonces.insert(nonce);
+                for ((search_key, stored), version) in
+                    core::mem::take(&mut self.staged).into_iter().zip(versions)
+                {
+                    self.newest.insert(search_key.clone(), version);
+                    self.stored.insert((search_key, version), stored);
+                }
+                self.epochs.push((nonce, prefix_root));
+                self.log_nodes.push(epoch_leaf(&nonce, &prefix_root));
+                self.log_frontier = frontier;
+                self.newest_path = newest_path;
+                Ok(update)
+            }
+            Err(error) => {
+                self.tree.undo(&indexes, kept);
+                Err(error)
+            }
+        }
+    }
+
+    /// The update of the open epoch: the staged leaves enter the prefix
+    /// tree, which `indexes` names for an undo, and nothing else changes.
+    #[allow(clippy::type_complexity)]
+    fn open_epoch(
+        &mut self,
+        nonce: [u8; 32],
+        indexes: &mut Vec<[u8; 32]>,
+        check: impl FnOnce(&EpochUpdate) -> Result<(), Error>,
+    ) -> Result<(EpochUpdate, Vec<u32>, [u8; 32], LogFrontier, Vec<Step>), Error> {
         let mut added = Vec::with_capacity(self.staged.len());
-        for (search_key, stored) in core::mem::take(&mut self.staged) {
+        let mut versions = Vec::with_capacity(self.staged.len());
+        for (search_key, stored) in &self.staged {
             let version = self
                 .newest
-                .get(&search_key)
+                .get(search_key)
                 .map_or(0, |v| v.saturating_add(1));
-            let output = self.vrf.hash(&vrf_input(&search_key, version))?;
+            let output = self.vrf.hash(&vrf_input(search_key, version))?;
             let index = index_of(&output);
             let leaf_commitment = commitment(&stored.opening, &stored.entry);
             self.tree.insert(index, leaf_commitment)?;
+            indexes.push(index);
             added.push((index, leaf_commitment));
-            self.newest.insert(search_key.clone(), version);
-            self.stored.insert((search_key, version), stored);
+            versions.push(version);
         }
         let prefix_root = self.tree.seal(&nonce);
-        self.epochs.push((nonce, prefix_root));
-        let leaf_hash = epoch_leaf(&nonce, &prefix_root);
-        self.log_nodes.push(leaf_hash);
-        self.newest_path = self.log_frontier.push_proving(leaf_hash);
-        let log_root = self.log_frontier.root().ok_or(Error::NoPath)?;
-        Ok(EpochUpdate {
-            tree_size: self.log_nodes.len() as u64,
+        let mut frontier = self.log_frontier.clone();
+        let newest_path = frontier.push_proving(epoch_leaf(&nonce, &prefix_root));
+        let log_root = frontier.root().ok_or(Error::NoPath)?;
+        let update = EpochUpdate {
+            tree_size: frontier.size(),
             nonce,
             added,
             log_root,
-        })
+        };
+        check(&update)?;
+        Ok((update, versions, prefix_root, frontier, newest_path))
     }
 
     /// The proof for one lookup under the newest head.
@@ -646,6 +693,15 @@ impl Auditor {
     /// grew by one leaf over the log that the auditor holds (`DIS-049`). A
     /// failed check changes no state.
     pub fn audit(&mut self, update: &EpochUpdate) -> Result<[u8; 32], Error> {
+        let (step, root) = self.check(update)?;
+        self.commit(step);
+        Ok(root)
+    }
+
+    /// The check of [`Auditor::audit`], which changes nothing. The step
+    /// that it gives moves the auditor at [`Auditor::commit`], thus two
+    /// auditors move together or not at all.
+    pub fn check(&self, update: &EpochUpdate) -> Result<(AuditStep, [u8; 32]), Error> {
         let expected_size = self.log.size().saturating_add(1);
         if update.tree_size != expected_size || self.used_nonces.contains(&update.nonce) {
             return Err(Error::Unverified);
@@ -660,11 +716,29 @@ impl Auditor {
         if log.root() != Some(update.log_root) {
             return Err(Error::Unverified);
         }
-        self.tree = tree;
-        self.log = log;
-        self.used_nonces.insert(update.nonce);
-        Ok(update.log_root)
+        Ok((
+            AuditStep {
+                tree,
+                log,
+                nonce: update.nonce,
+            },
+            update.log_root,
+        ))
     }
+
+    /// Takes a step that [`Auditor::check`] gave.
+    pub fn commit(&mut self, step: AuditStep) {
+        self.tree = step.tree;
+        self.log = step.log;
+        self.used_nonces.insert(step.nonce);
+    }
+}
+
+/// The state of an auditor after one epoch that it checked.
+pub struct AuditStep {
+    tree: PrefixTree,
+    log: LogFrontier,
+    nonce: [u8; 32],
 }
 
 #[cfg(test)]

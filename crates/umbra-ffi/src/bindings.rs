@@ -117,6 +117,16 @@ impl core::fmt::Display for FfiError {
     }
 }
 
+/// A fault that the platform threw in a callback, as a Kotlin exception.
+/// Each callback returns a result, thus such a fault is an error of the
+/// call. A callback with no result would panic, and the release profile
+/// aborts the process at a panic.
+impl From<uniffi::UnexpectedUniFFICallbackError> for FfiError {
+    fn from(_: uniffi::UnexpectedUniFFICallbackError) -> Self {
+        FfiError::Storage
+    }
+}
+
 impl From<Error> for FfiError {
     fn from(inner: Error) -> Self {
         match inner {
@@ -142,15 +152,20 @@ impl From<Error> for FfiError {
 #[uniffi::export(with_foreign)]
 pub trait SecureElementCallback: Send + Sync {
     /// Returns the 32 bytes of the keyed function, or an empty list when
-    /// the keystore fails.
-    fn keyed(&self, input: Vec<u8>) -> Vec<u8>;
+    /// the keystore fails. An exception is a failure of the keystore too.
+    fn keyed(&self, input: Vec<u8>) -> Result<Vec<u8>, FfiError>;
 }
 
+#[derive(Clone)]
 struct ForeignElement(Arc<dyn SecureElementCallback>);
 
 impl SecureElement for ForeignElement {
     fn keyed(&self, input: &[u8]) -> Result<[u8; 32], umbra_core::Error> {
-        let output = Zeroizing::new(self.0.keyed(input.to_vec()));
+        let output = Zeroizing::new(
+            self.0
+                .keyed(input.to_vec())
+                .map_err(|_| umbra_core::Error::Storage)?,
+        );
         output
             .as_slice()
             .try_into()
@@ -162,7 +177,7 @@ impl SecureElement for ForeignElement {
 #[uniffi::export(with_foreign)]
 pub trait TextSink: Send + Sync {
     /// Takes the UTF-16 code units of the text.
-    fn put(&self, code_units: Vec<u16>);
+    fn put(&self, code_units: Vec<u16>) -> Result<(), FfiError>;
 }
 
 /// The decoder of the platform that takes the file of one message. This is
@@ -172,7 +187,7 @@ pub trait TextSink: Send + Sync {
 #[uniffi::export(with_foreign)]
 pub trait FileSink: Send + Sync {
     /// Takes the bytes of the file.
-    fn put(&self, bytes: Vec<u8>);
+    fn put(&self, bytes: Vec<u8>) -> Result<(), FfiError>;
 }
 
 /// The file of one message for a media player of the platform, which reads
@@ -236,11 +251,14 @@ impl Sink for HeldText {
 
 impl HeldText {
     /// Gives each part to the sink of the platform, in the order of the
-    /// render. The caller holds no lock of the handle.
-    fn give(self, sink: &dyn TextSink) {
-        for part in self.0 {
-            sink.put(part.to_vec());
+    /// render. The caller holds no lock of the handle. A part moves out
+    /// whole, thus no second copy waits for a wipe. A fault of the sink
+    /// ends the hand-over, and each part after it is zero bytes at its drop.
+    fn give(self, sink: &dyn TextSink) -> Result<(), FfiError> {
+        for mut part in self.0 {
+            sink.put(core::mem::take(&mut *part))?;
         }
+        Ok(())
     }
 }
 
@@ -659,8 +677,8 @@ pub fn open_wake_blob(table: Vec<u8>, blob: Vec<u8>, now: u64) -> WakeOutcome {
         Ok(Woken::Failed) => none(2),
         Err(_) => none(3),
     };
-    let WakeTable { mut roots, .. } = parsed;
-    zeroize::Zeroize::zeroize(&mut roots);
+    // The drop of the table wipes its roots.
+    drop(parsed);
     outcome
 }
 
@@ -1459,7 +1477,8 @@ impl MsgHandle {
 }
 
 /// A draft, as an opaque handle. The buffer behind it is zero bytes after
-/// the send and after the drop (`IMP-039`).
+/// the send, a lock, and the drop (`IMP-039`). A send after a lock is
+/// `NotFound`.
 #[derive(uniffi::Object)]
 pub struct DraftHandle(Mutex<Option<Draft>>);
 
@@ -1552,7 +1571,12 @@ fn read_draft_file(path: &str, max: usize) -> Result<Zeroizing<Vec<u8>>, FfiErro
     use std::io::Read as _;
     let file = std::fs::File::open(path).map_err(|_| FfiError::NotFound)?;
     let bound = u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1);
-    let mut plain = Zeroizing::new(Vec::new());
+    // IMP-039: a buffer that grows frees each earlier copy of the file
+    // with no wipe. The named size sets the room first. A pipe names no
+    // size, and its buffer still grows.
+    let named = file.metadata().map_or(0, |metadata| metadata.len());
+    let room = usize::try_from(named).unwrap_or(usize::MAX).min(max);
+    let mut plain = Zeroizing::new(Vec::with_capacity(room));
     file.take(bound)
         .read_to_end(&mut plain)
         .map_err(|_| FfiError::NotFound)?;
@@ -1709,6 +1733,13 @@ struct Inner {
     is_foreground: bool,
     /// The restore that runs, from its first root to its rows.
     restore: Option<RestoreJob>,
+    /// A lock ended the restore (`IMP-127`). Its status is `Failed` until
+    /// the next start.
+    restore_lost: bool,
+    /// Each media source and each draft that the platform may hold. A lock
+    /// wipes the plaintext in them (`IMP-127`).
+    media: Vec<Weak<MediaSource>>,
+    drafts: Vec<Weak<DraftHandle>>,
     /// The number of the run of the network, which each connect moves.
     run: u64,
     /// The newest challenge of each relay, from the carrier of the manifest
@@ -3935,6 +3966,21 @@ impl Inner {
         // chunk. The store keeps each one (`ATT-161`), and the run after
         // the unlock takes it from there.
         self.held_erasures.clear();
+        // IMP-127: a restore holds the backup root key, and at its end the
+        // root seed and each row. The drop wipes them, and the user starts
+        // the restore again after the unlock.
+        if self.restore.take().is_some() {
+            self.restore_lost = true;
+        }
+        // IMP-166, IMP-039: a media source holds the plaintext of a file,
+        // and a draft holds its text and its file. Each one reads nothing
+        // after this.
+        for source in self.media.drain(..).filter_map(|source| source.upgrade()) {
+            source.release();
+        }
+        for draft in self.drafts.drain(..).filter_map(|draft| draft.upgrade()) {
+            locked(&draft.0).take();
+        }
         runs
     }
 }
@@ -3992,6 +4038,18 @@ pub fn measure_argon2_floor_ms() -> u64 {
         &NoElement,
     );
     u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// The cost of a new wrap (`IMP-117`) for a device that ran the floor cost
+/// in `floor_ms`. A caller that passed no floor gets a measured one, and
+/// not the cost of a floor of zero, which is the ceiling of `IMP-175`.
+fn calibrated(floor_ms: u64) -> Cost {
+    let floor = if floor_ms == 0 {
+        measure_argon2_floor_ms()
+    } else {
+        floor_ms
+    };
+    Cost::calibrate(floor)
 }
 
 /// How long a lock waits for the tasks of the runtime to end. A task ends
@@ -4058,6 +4116,12 @@ impl Drop for Handle {
         if let Some(runtime) = locked(&self.runtime).take() {
             runtime.shutdown_background();
         }
+        // IMP-093: the hardening key is a key of the store, and a handle
+        // that the platform drops unlocked takes it with it, as a lock
+        // does. A locked handle leaves the key of another open store.
+        if locked(&self.inner).client.is_unlocked() {
+            crate::runtime::harden_clear();
+        }
     }
 }
 
@@ -4093,14 +4157,8 @@ pub fn init(
         Some(header) => Client::open(backend, element, header, now),
         None => {
             // A caller that passed no floor held a file with no header: a
-            // first launch that ended before its header. The store takes a
-            // measured floor, and not the cost of a floor of zero.
-            let floor = if config.argon2_floor_ms == 0 {
-                measure_argon2_floor_ms()
-            } else {
-                config.argon2_floor_ms
-            };
-            let cost = Cost::calibrate(floor);
+            // first launch that ended before its header.
+            let cost = calibrated(config.argon2_floor_ms);
             // The rows of that launch sit under a key that no header wraps,
             // thus they open no more, and the files go before the new store.
             drop(backend);
@@ -4179,7 +4237,7 @@ fn init_store_from(
     remove_store_files(&config.database_path)?;
     let backend = SqliteBackend::open(&config.database_path).map_err(|_| FfiError::Storage)?;
     let headers = SqliteBackend::open(&config.database_path).map_err(|_| FfiError::Storage)?;
-    let cost = Cost::calibrate(config.argon2_floor_ms);
+    let cost = calibrated(config.argon2_floor_ms);
     let mut client = Client::create_with_seed(
         backend,
         ForeignElement(element),
@@ -4229,7 +4287,7 @@ pub fn init_from_root_seed(
     }
     let backend = SqliteBackend::open(&config.database_path).map_err(|_| FfiError::Storage)?;
     let headers = SqliteBackend::open(&config.database_path).map_err(|_| FfiError::Storage)?;
-    let cost = Cost::calibrate(config.argon2_floor_ms);
+    let cost = calibrated(config.argon2_floor_ms);
     let client = Client::create_with_seed(
         backend,
         ForeignElement(element),
@@ -4322,6 +4380,9 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             dead_work: Vec::new(),
             is_foreground: false,
             restore: None,
+            restore_lost: false,
+            media: Vec::new(),
+            drafts: Vec::new(),
             run: 0,
             challenges: umbra_core::abuse::pow::ChallengeBook::default(),
             challenges_at: 0,
@@ -5090,14 +5151,6 @@ impl Handle {
         self.set_push_token(token.as_deref().map(|token| (TokenCarrier::Fcm, token)))
     }
 
-    /// Takes the endpoint of a UnifiedPush distributor, or none.
-    pub fn set_push_endpoint(&self, endpoint: Option<String>) -> Result<(), FfiError> {
-        let token = endpoint
-            .as_deref()
-            .map(|url| (TokenCarrier::UnifiedPush, url));
-        self.set_push_token(token)
-    }
-
     /// Verifies a relay manifest of Part 10 §10.5.5 under the key set that
     /// the build ships (`REL-039`), and gives its relays as a network.
     /// `shipped_epoch` is the epoch at the time of the build (`REL-045`). The
@@ -5308,6 +5361,7 @@ impl Handle {
             .get(usize::from(uses_second))
             .ok_or(FfiError::Malformed)?;
         let ingress = relay_info(guard)?;
+        let guard_id = ingress.key.relay_id;
         let candidates = network
             .relays
             .iter()
@@ -5348,33 +5402,18 @@ impl Handle {
             run = inner.run;
             // The run before ends here: a start that fails below leaves no
             // bridge of a run whose commits the new identifier refuses, and
-            // a grant of that run captures no invitation of this one.
+            // a grant of that run captures no invitation of this one. Its
+            // spawner goes too. The network of this run comes after the
+            // last step that can fail, thus a failed start leaves no
+            // handle of a runtime that the return drops.
             inner.bridge = None;
+            inner.spawner = None;
+            inner.ndr = None;
+            inner.directory = None;
             inner.pending_grants.clear();
-            inner.invitation_host.clone_from(&network.invitation_host);
-            inner.guard = Some(ingress.key.relay_id);
-            inner.bootstrap = network.is_provisional;
-            inner.relays.clone_from(&network.relays);
-            inner.report_queue_count =
-                u32::try_from(network.report_queues.len()).unwrap_or(u32::MAX);
             inner.circuits.clear();
             inner.circuits_changed = true;
             inner.me = Arc::downgrade(&self);
-            inner.spawner = Some(runtime.handle().clone());
-            inner.root_ca_path.clone_from(&network.root_ca_path);
-            inner.ndr = ndr_route(&network).map(|route| (route, tls.clone()));
-            inner.directory = network
-                .directory_relay_url
-                .as_deref()
-                .zip(network.directory_pins.as_deref())
-                .and_then(|(url, pins)| {
-                    directory::DirectoryLink::new(
-                        url,
-                        network.directory_relay_ipv4.as_deref(),
-                        pins,
-                        tls.clone(),
-                    )
-                });
             inner.transfers = None;
             inner.groups = None;
             inner.group_reading.clear();
@@ -5555,6 +5594,27 @@ impl Handle {
                 }
             }
             *bridge = Some(running);
+            inner.invitation_host.clone_from(&network.invitation_host);
+            inner.guard = Some(guard_id);
+            inner.bootstrap = network.is_provisional;
+            inner.relays.clone_from(&network.relays);
+            inner.report_queue_count =
+                u32::try_from(network.report_queues.len()).unwrap_or(u32::MAX);
+            inner.spawner = Some(runtime.handle().clone());
+            inner.root_ca_path.clone_from(&network.root_ca_path);
+            inner.ndr = ndr_route(&network).map(|route| (route, tls.clone()));
+            inner.directory = network
+                .directory_relay_url
+                .as_deref()
+                .zip(network.directory_pins.as_deref())
+                .and_then(|(url, pins)| {
+                    directory::DirectoryLink::new(
+                        url,
+                        network.directory_relay_ipv4.as_deref(),
+                        pins,
+                        tls.clone(),
+                    )
+                });
             let store = Box::new(HandleStore {
                 handle: Arc::downgrade(&self),
                 run,
@@ -6218,8 +6278,13 @@ impl Handle {
     /// An empty draft for one conversation.
     pub fn new_draft(&self, conversation: Vec<u8>) -> Result<Arc<DraftHandle>, FfiError> {
         let conversation = conversation_of(&conversation)?;
-        let draft = locked(&self.inner).client.new_draft(conversation);
-        Ok(Arc::new(DraftHandle(Mutex::new(Some(draft)))))
+        let mut inner = locked(&self.inner);
+        let draft = Arc::new(DraftHandle(Mutex::new(Some(
+            inner.client.new_draft(conversation),
+        ))));
+        inner.drafts.retain(|held| held.strong_count() > 0);
+        inner.drafts.push(Arc::downgrade(&draft));
+        Ok(draft)
     }
 
     /// Sends the file of a message of this device again, as a new message:
@@ -6317,17 +6382,23 @@ impl Handle {
 
     /// Resets the identity (Part 7 §7.7.1): a new identity root, a
     /// key-change notice to each contact at its own delay, a new device
-    /// roster, and the re-key of each group. The network runs again under
-    /// the new root. A set of more than one device takes none.
+    /// roster, and the re-key of each group. The run ends here, and the
+    /// platform starts the network again under the new root. A set of more
+    /// than one device takes none.
     pub fn reset_identity(self: Arc<Self>) -> Result<ResetCounts, FfiError> {
         let mut inner = locked(&self.inner);
         let summary = inner.client.reset_identity(unix_now_ms(), &mut OsRng)?;
-        // A circuit of the old identity carries no queue of the new one: a
-        // queue relay would see the two on one circuit.
-        inner.resume.clear();
-        // DEV-263: the re-key of each group goes to the run at once.
-        inner.pump_groups();
+        // The node of the run holds the old root, and its commits would
+        // write state of the old identity. A circuit of the old identity
+        // carries no queue of the new one either: a queue relay would see
+        // the two on one circuit. The next run sends the re-key of each
+        // group at its start (`DEV-263`).
+        inner.end_run_for_ownership();
         drop(inner);
+        if let Some(runtime) = locked(&self.runtime).take() {
+            runtime.shutdown_background();
+        }
+        locked(&self.run_done).take();
         self.changed.notify_all();
         Ok(ResetCounts {
             contacts: summary.contacts,
@@ -6429,12 +6500,14 @@ impl Handle {
         self.start_restore(key)
     }
 
-    /// Where the restore stands.
+    /// Where the restore stands. A restore that a lock ended is `Failed`.
     pub fn restore_status(&self) -> RestoreStatus {
-        locked(&self.inner)
-            .restore
-            .as_ref()
-            .map_or(RestoreStatus::Idle, |job| job.status)
+        let inner = locked(&self.inner);
+        match &inner.restore {
+            Some(job) => job.status,
+            None if inner.restore_lost => RestoreStatus::Failed,
+            None => RestoreStatus::Idle,
+        }
     }
 
     /// The rows of a restore that is ready, for [`init_restored`]. The
@@ -6456,8 +6529,7 @@ impl Handle {
     pub fn root_seed(&self, sink: Arc<dyn TextSink>) -> Result<(), FfiError> {
         let mut held = HeldText::default();
         locked(&self.inner).client.render_root_seed(&mut held)?;
-        held.give(sink.as_ref());
-        Ok(())
+        held.give(sink.as_ref())
     }
 
     /// Renders the recovery code into a sink of the platform, as the 87
@@ -6468,8 +6540,7 @@ impl Handle {
         locked(&self.inner)
             .client
             .render_recovery_code(&mut held, &mut OsRng)?;
-        held.give(sink.as_ref());
-        Ok(())
+        held.give(sink.as_ref())
     }
 
     /// Splits the social half into one share for each holder, `threshold`
@@ -6532,8 +6603,7 @@ impl Handle {
         locked(&self.inner)
             .client
             .render_held_share(conversation, &mut held)?;
-        held.give(sink.as_ref());
-        Ok(())
+        held.give(sink.as_ref())
     }
 
     /// Writes the user half of the recovery code as 49 digits of Part 4
@@ -6543,8 +6613,7 @@ impl Handle {
         locked(&self.inner)
             .client
             .render_user_half(&mut held, &mut OsRng)?;
-        held.give(sink.as_ref());
-        Ok(())
+        held.give(sink.as_ref())
     }
 
     /// Renders the text of a message into a sink of the platform.
@@ -6556,8 +6625,7 @@ impl Handle {
         // The sink runs with no lock held, as the one of `msg_file` does.
         let mut held = HeldText::default();
         locked(&self.inner).client.render(&message.0, &mut held)?;
-        held.give(sink.as_ref());
-        Ok(())
+        held.give(sink.as_ref())
     }
 
     /// Gives the file of a message to a decoder of the platform
@@ -6568,25 +6636,29 @@ impl Handle {
         message: Arc<MsgHandle>,
         sink: Arc<dyn FileSink>,
     ) -> Result<(), FfiError> {
-        let bytes = locked(&self.inner).client.file_bytes(&message.0)?;
-        // The sink runs with no lock held: a decode takes time.
-        sink.put(bytes.to_vec());
-        Ok(())
+        let mut bytes = locked(&self.inner).client.file_bytes(&message.0)?;
+        // The sink runs with no lock held: a decode takes time. The bytes
+        // move out whole, thus no second copy waits for a wipe.
+        sink.put(core::mem::take(&mut *bytes))
     }
 
     /// Opens the file of a message for a media player of the platform,
     /// which reads it in ranges (`IMP-166`). The source reads nothing after
-    /// a lock, and its copy is zero bytes after [`MediaSource::release`] or
-    /// its drop.
+    /// a lock, and its copy is zero bytes after [`MediaSource::release`], a
+    /// lock, or its drop.
     pub fn open_media(
         self: Arc<Self>,
         message: Arc<MsgHandle>,
     ) -> Result<Arc<MediaSource>, FfiError> {
-        let bytes = locked(&self.inner).client.file_bytes(&message.0)?;
-        Ok(Arc::new(MediaSource {
+        let mut inner = locked(&self.inner);
+        let bytes = inner.client.file_bytes(&message.0)?;
+        let source = Arc::new(MediaSource {
             handle: Arc::downgrade(&self),
             bytes: Mutex::new(Some(bytes)),
-        }))
+        });
+        inner.media.retain(|held| held.strong_count() > 0);
+        inner.media.push(Arc::downgrade(&source));
+        Ok(source)
     }
 
     /// Gives the preview of the file of a message to a decoder of the
@@ -6602,8 +6674,7 @@ impl Handle {
             .file_extras(&message.0)?
             .preview
             .ok_or(FfiError::NotFound)?;
-        sink.put(preview);
-        Ok(())
+        sink.put(preview)
     }
 
     /// The largest size of a received file whose download starts at once,
@@ -7368,18 +7439,40 @@ impl Handle {
     }
 
     /// Changes the passphrase of the device (`IMP-118`). The store key and
-    /// each record stay. A wrong current passphrase changes nothing.
+    /// each record stay. A wrong current passphrase changes nothing. The
+    /// cost comes from a new measure on this device (`IMP-117`), thus a
+    /// store that a restore brought from a slower device takes the cost of
+    /// this one.
     pub fn change_passphrase(&self, current: Vec<u16>, new: Vec<u16>) -> Result<(), FfiError> {
         let current = Zeroizing::new(current);
         let new = Zeroizing::new(new);
+        let (header, element) = {
+            let inner = locked(&self.inner);
+            if !inner.client.is_unlocked() {
+                return Err(FfiError::Locked);
+            }
+            (*inner.client.header(), inner.client.element().clone())
+        };
+        // The Argon2id work takes seconds. It runs with no lock of the
+        // state held, thus the tasks of the runtime continue.
+        let cost = calibrated(0);
+        let rewrapped = Client::<SqliteBackend, ForeignElement>::rewrap(
+            &header, &element, &current, &new, cost, &mut OsRng,
+        )?;
         let mut inner = locked(&self.inner);
-        let header = inner.client.rewrap(&current, &new, &mut OsRng)?;
+        // A lock, or a second change, came while the work ran.
+        if !inner.client.is_unlocked() {
+            return Err(FfiError::Locked);
+        }
+        if *inner.client.header() != header {
+            return Err(FfiError::Busy);
+        }
         // The file takes the header first. A client that held a header
         // which the file does not hold would lock the user out at the next
         // launch.
         let file = SqliteBackend::open(&self.database_path).map_err(|_| FfiError::Storage)?;
-        file.set_header(&header).map_err(|_| FfiError::Storage)?;
-        inner.client.set_header(header);
+        file.set_header(&rewrapped).map_err(|_| FfiError::Storage)?;
+        inner.client.set_header(rewrapped);
         Ok(())
     }
 
@@ -7469,6 +7562,7 @@ impl Handle {
             return Err(FfiError::Offline);
         }
         let week = week_of(epoch);
+        inner.restore_lost = false;
         inner.restore = Some(RestoreJob {
             key,
             first_week: week,
@@ -7559,8 +7653,8 @@ guard relay1.example.org"
     struct Keystore;
 
     impl SecureElementCallback for Keystore {
-        fn keyed(&self, _input: Vec<u8>) -> Vec<u8> {
-            vec![7; 32]
+        fn keyed(&self, _input: Vec<u8>) -> Result<Vec<u8>, FfiError> {
+            Ok(vec![7; 32])
         }
     }
 
@@ -7609,16 +7703,29 @@ guard relay1.example.org"
         #[derive(Default)]
         struct View(Mutex<Vec<Vec<u16>>>);
         impl TextSink for View {
-            fn put(&self, code_units: Vec<u16>) {
+            fn put(&self, code_units: Vec<u16>) -> Result<(), FfiError> {
+                // A sink that throws, as a Kotlin exception does, ends the
+                // hand-over with an error and not with a panic.
+                if code_units == [4] {
+                    return Err(FfiError::from(uniffi::UnexpectedUniFFICallbackError::new(
+                        "thrown",
+                    )));
+                }
                 locked(&self.0).push(code_units);
+                Ok(())
             }
         }
         let mut held = HeldText::default();
         Sink::put(&mut held, &[1, 2]);
         Sink::put(&mut held, &[3]);
         let view = View::default();
-        held.give(&view);
+        held.give(&view).unwrap();
         assert_eq!(*locked(&view.0), vec![vec![1, 2], vec![3]]);
+        let mut held = HeldText::default();
+        Sink::put(&mut held, &[4]);
+        Sink::put(&mut held, &[5]);
+        assert_eq!(held.give(&view), Err(FfiError::Storage));
+        assert_eq!(locked(&view.0).len(), 2);
     }
 
     #[test]
@@ -7769,6 +7876,88 @@ guard relay1.example.org"
         );
         assert!(!std::path::Path::new(&path).exists());
         worker.join().unwrap();
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_floor_of_zero_takes_a_measured_cost_and_not_the_ceiling() {
+        // IMP-117: the floor of zero is the cost of the ceiling of IMP-175,
+        // minutes for each unlock.
+        assert_eq!(Cost::calibrate(0).t, umbra_core::store::wrap::T_MAX);
+        assert!(calibrated(0).t < umbra_core::store::wrap::T_MAX);
+        assert_eq!(calibrated(60_000), Cost::calibrate(60_000));
+    }
+
+    #[test]
+    fn a_lock_ends_the_restore_and_wipes_each_draft_and_media_source() {
+        let (handle, directory) = open("lock-wipe");
+        let draft = handle.new_draft(vec![9; 16]).unwrap();
+        draft.set_text("held".encode_utf16().collect()).unwrap();
+        let source = Arc::new(MediaSource {
+            handle: Arc::downgrade(&handle),
+            bytes: Mutex::new(Some(Zeroizing::new(vec![1; 64]))),
+        });
+        {
+            let mut inner = locked(&handle.inner);
+            inner.media.push(Arc::downgrade(&source));
+            inner.restore = Some(RestoreJob {
+                key: umbra_core::identity::recovery::BackupRootKey::from_secret(
+                    umbra_crypto::secret::Secret::new([6; 32]),
+                ),
+                first_week: 3,
+                week: 3,
+                objects: Vec::new(),
+                status: RestoreStatus::Searching { weeks_back: 0 },
+                restored: None,
+            });
+        }
+        handle.lock();
+        // IMP-127: the job and its backup root key are gone, and the
+        // platform reads a failed restore and not one that still runs.
+        assert!(locked(&handle.inner).restore.is_none());
+        assert_eq!(handle.restore_status(), RestoreStatus::Failed);
+        // IMP-166, IMP-039: no plaintext stays behind the two handles.
+        assert_eq!(source.size(), 0);
+        assert_eq!(
+            draft.set_text("again".encode_utf16().collect()),
+            Err(FfiError::NotFound)
+        );
+        handle.unlock(passphrase()).unwrap();
+        assert_eq!(handle.restore_status(), RestoreStatus::Failed);
+        drop(handle);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_connect_that_fails_leaves_no_runtime_of_its_own() {
+        let (handle, directory) = open("connect-fails");
+        let network = parse_network(descriptor(), None).unwrap();
+        // A locked client fails after the runtime of the run exists.
+        handle.lock();
+        assert!(Arc::clone(&handle).connect(network).is_err());
+        {
+            let inner = locked(&handle.inner);
+            assert!(inner.spawner.is_none());
+            assert!(inner.guard.is_none());
+            assert!(inner.relays.is_empty());
+            assert!(inner.bridge.is_none());
+        }
+        drop(handle);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_reset_of_the_identity_ends_the_run() {
+        let (handle, directory) = open("reset-run");
+        let run = locked(&handle.inner).run;
+        Arc::clone(&handle).reset_identity().unwrap();
+        let inner = locked(&handle.inner);
+        // No node of the old root commits after the reset.
+        assert_ne!(inner.run, run);
+        assert!(inner.bridge.is_none());
+        assert!(inner.spawner.is_none());
+        drop(inner);
+        drop(handle);
         let _ = std::fs::remove_dir_all(&directory);
     }
 }

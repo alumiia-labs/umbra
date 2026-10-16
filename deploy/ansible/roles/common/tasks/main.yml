@@ -44,6 +44,43 @@
   run_once: true
   delegate_to: localhost
 
+# The files of a relay, its descriptor in build/, and its lines at the
+# signer and at the measurer take its name, thus a name is unique in the
+# whole network and not only on one server.
+- name: Each relay has a name of its own in the whole network
+  ansible.builtin.assert:
+    that: umbra_relay_names | unique | length == umbra_relay_names | length
+    fail_msg: >-
+      Two relays of the inventory have one name. Give each one a name of its
+      own:
+      {% for name in umbra_relay_names | unique
+         if umbra_relay_names | select('equalto', name) | list | length > 1 %}{{ name }} {% endfor %}
+  vars:
+    umbra_relay_names: "{{ groups['relays'] | map('extract', hostvars, 'relays') | flatten | map(attribute='name') | list }}"
+  run_once: true
+  delegate_to: localhost
+
+# A relay states ansible_host as its IPv4 address in its descriptor, and the
+# firewall of a gateway puts it into a set of IPv4 addresses. A name or an
+# IPv6 address there would break both. umbra_ipv6 is optional.
+- name: Each relay server has an IPv4 address, and an IPv6 address when it states one
+  ansible.builtin.assert:
+    that:
+      - hostvars[item].ansible_host is defined
+      - hostvars[item].ansible_host is match(umbra_ipv4_pattern)
+      - >-
+        hostvars[item].umbra_ipv6 is not defined
+        or (hostvars[item].umbra_ipv6 is match('^[0-9a-fA-F:.]+$')
+            and ':' in hostvars[item].umbra_ipv6)
+    fail_msg: >-
+      {{ item }}: give ansible_host as an IPv4 address, as 203.0.113.10, and
+      umbra_ipv6, when you set it, as one IPv6 address with no prefix length.
+  loop: "{{ groups['relays'] }}"
+  vars:
+    umbra_ipv4_pattern: '^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$'
+  run_once: true
+  delegate_to: localhost
+
 - name: The system is Debian
   ansible.builtin.assert:
     that: ansible_facts['distribution'] == "Debian"
@@ -54,6 +91,7 @@
     update_cache: true
     upgrade: safe
     cache_valid_time: 3600
+    lock_timeout: "{{ umbra_apt_lock_timeout }}"
 
 - name: The packages of the network are there
   ansible.builtin.apt:
@@ -67,6 +105,7 @@
       # Ansible needs it to run a task as another user than root.
       - acl
     state: present
+    lock_timeout: "{{ umbra_apt_lock_timeout }}"
 
 # A root is valid for three hours, and a wrong clock rejects it (Part 10
 # §10.5.2); a relay that serves a client needs a true clock.
@@ -93,8 +132,10 @@
     daemon_reload: true
 
 # A unit that names umbra-alert@<name>.service in its OnFailure line tells
-# the operator of its failure (the signer does).
-- name: The alert of a failed unit is there
+# the operator of its failure (the signer does). The handlers and the
+# renewal hook restart a service with umbra-restart, which checks that it
+# stays up.
+- name: The alert of a failed unit and the checked restart are there
   ansible.builtin.template:
     src: "{{ item.src }}"
     dest: "{{ item.dest }}"
@@ -102,6 +143,7 @@
   loop:
     - { src: umbra-alert.sh.j2, dest: /usr/local/sbin/umbra-alert, mode: "0755" }
     - { src: "umbra-alert@.service.j2", dest: "/etc/systemd/system/umbra-alert@.service", mode: "0644" }
+    - { src: umbra-restart.sh.j2, dest: /usr/local/sbin/umbra-restart, mode: "0755" }
 
 - name: Security updates install on their own
   ansible.builtin.copy:

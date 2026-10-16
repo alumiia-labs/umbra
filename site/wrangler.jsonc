@@ -12,6 +12,10 @@
   "routes": [
     { "pattern": "umbrachat.app", "custom_domain": true }
   ],
+  // The domain alone serves the site. A workers.dev host or a preview host
+  // would serve it under a second name.
+  "workers_dev": false,
+  "preview_urls": false,
   // The site holds no visitor data, and it writes none.
   "observability": { "enabled": false }
 }

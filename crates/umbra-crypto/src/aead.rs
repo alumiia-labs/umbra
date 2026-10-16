@@ -24,7 +24,7 @@ pub fn seal(
 ) -> Result<[u8; TAG_LEN], Error> {
     let tag = XChaCha20Poly1305::new(key.expose().into())
         .encrypt_inout_detached(&XNonce::from(*nonce), ad, buf.into())
-        .map_err(|_| Error::Queue)?;
+        .map_err(|_| Error::Length)?;
     Ok(tag.into())
 }
 
@@ -36,10 +36,10 @@ pub fn open(
     buf: &mut [u8],
     tag: &[u8],
 ) -> Result<(), Error> {
-    let tag: [u8; TAG_LEN] = tag.try_into().map_err(|_| Error::Queue)?;
+    let tag: [u8; TAG_LEN] = tag.try_into().map_err(|_| Error::Length)?;
     XChaCha20Poly1305::new(key.expose().into())
         .decrypt_inout_detached(&XNonce::from(*nonce), ad, buf.into(), &Tag::from(tag))
-        .map_err(|_| Error::Queue)
+        .map_err(|_| Error::Aead)
 }
 
 /// The nonce length of the `_ietf` functions.
@@ -54,7 +54,7 @@ pub fn seal_ietf(
 ) -> Result<[u8; TAG_LEN], Error> {
     let tag = ChaCha20Poly1305::new(key.expose().into())
         .encrypt_inout_detached(&Nonce::from(*nonce), ad, buf.into())
-        .map_err(|_| Error::Queue)?;
+        .map_err(|_| Error::Length)?;
     Ok(tag.into())
 }
 
@@ -66,10 +66,10 @@ pub fn open_ietf(
     buf: &mut [u8],
     tag: &[u8],
 ) -> Result<(), Error> {
-    let tag: [u8; TAG_LEN] = tag.try_into().map_err(|_| Error::Queue)?;
+    let tag: [u8; TAG_LEN] = tag.try_into().map_err(|_| Error::Length)?;
     ChaCha20Poly1305::new(key.expose().into())
         .decrypt_inout_detached(&Nonce::from(*nonce), ad, buf.into(), &Tag::from(tag))
-        .map_err(|_| Error::Queue)
+        .map_err(|_| Error::Aead)
 }
 
 #[cfg(test)]

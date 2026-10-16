@@ -14,6 +14,7 @@ use umbra_core::directory::{
     tree, EPOCH_SECONDS,
 };
 use umbra_crypto::{rand_core::CryptoRng, sign::SigningKey};
+use umbra_queue::params::store_time;
 
 use crate::circuits::LinkId;
 
@@ -44,7 +45,9 @@ pub struct KeptReceipt {
     pub signed: Vec<u8>,
     /// The leaves under its `batch_root`, in order.
     pub leaves: Vec<[u8; 32]>,
-    /// The time at which the book kept it.
+    /// The time at which the book kept it, at the end of its grain. A
+    /// receipt file then shows no time to the second, and a receipt leaves
+    /// at most one grain after its retention (`NET-301`, `REL-074`).
     pub at: u64,
 }
 
@@ -257,7 +260,7 @@ impl ReceiptBook {
             epoch: receipt.epoch,
             signed: signed.clone(),
             leaves: open.leaves,
-            at: now,
+            at: store_time(now),
         });
         Some(signed)
     }
@@ -351,7 +354,7 @@ impl ReceiptBook {
                 epoch: receipt.epoch,
                 signed: signed.to_vec(),
                 leaves,
-                at: now,
+                at: store_time(now),
             })
             .is_ok()
     }
@@ -574,8 +577,12 @@ mod tests {
         let unknown = ReceiptQuery { epoch: 1, ..query };
         assert_eq!(taker.answer(&unknown).found, Found::None);
 
-        // REL-074: a receipt goes after its retention.
+        // REL-074, NET-301: a receipt goes after its retention, at most one
+        // grain late, since the book holds its time to the end of its grain.
         taker.tick(&b, &b_key, later + RECEIPT_RETENTION, &mut rng);
+        assert_eq!(taker.answer(&query).found, Found::Issued);
+        let grain = umbra_queue::params::STORE_TIME_GRAIN;
+        taker.tick(&b, &b_key, later + RECEIPT_RETENTION + grain, &mut rng);
         assert_eq!(taker.answer(&query).found, Found::None);
     }
 

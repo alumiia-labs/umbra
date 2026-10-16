@@ -197,6 +197,7 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
         Core.requestSent = false
         Core.directoryNote = null
         Core.takeoverOf = null
+        Core.unverifiedOf = null
         Core.profileName { name = it }
     }
     // A reusable link, an `umbra:pub:` string, or a handle starts a request
@@ -309,6 +310,13 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                 } else if (Core.takeoverOf == pasted.trim()) {
                     // DIS-084, DIS-085: the hello goes only after a confirmation.
                     Note(UiText.get(R.string.umbra_ui_dis_084, pasted.trim()), isError = true)
+                    Spacer(Modifier.height(12.dp))
+                    SecondaryButton(stringResource(R.string.contacts_send_anyway), enabled = Core.online) {
+                        Core.sendRequest(pasted.trim(), name, note, confirmed = true)
+                    }
+                } else if (Core.unverifiedOf == pasted.trim()) {
+                    // DIS-068, DIS-070: a lookup with no proof sends only after a confirmation.
+                    Note(stringResource(R.string.contacts_lookup_unverified), isError = true)
                     Spacer(Modifier.height(12.dp))
                     SecondaryButton(stringResource(R.string.contacts_send_anyway), enabled = Core.online) {
                         Core.sendRequest(pasted.trim(), name, note, confirmed = true)

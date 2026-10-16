@@ -281,21 +281,71 @@ pub fn parse_head(body: &[u8]) -> Result<(Vec<u8>, Vec<[u8; 32]>), Error> {
     Ok((head, proof))
 }
 
-/// The body of a registration.
+/// The purpose byte of a registration challenge (`DIS-197`).
+pub const REGISTER_PURPOSE: u8 = 0x04;
+
+/// The body of a registration challenge: the label input and the key of the
+/// entry that registers (`DIS-197`). The directory encapsulates to that key.
+pub fn register_challenge_body(label_input: &[u8], entry_pk: &[u8]) -> Result<Vec<u8>, Error> {
+    let mut body = vec![REGISTER_PURPOSE];
+    put_var16(&mut body, label_input)?;
+    body.extend_from_slice(entry_pk);
+    Ok(body)
+}
+
+/// A registration challenge response: the challenge, and the version that
+/// the entry must carry (`DIS-170`). The holder answers it as the write
+/// challenge of that version, with the answer over the entry (`DIS-197`).
+pub fn parse_register_challenge(body: &[u8]) -> Result<(Vec<u8>, Purpose), Error> {
+    let challenge = body.get(..CHALLENGE_LEN).ok_or(Error::Malformed)?.to_vec();
+    let version: [u8; 4] = body
+        .get(CHALLENGE_LEN..)
+        .and_then(|rest| rest.try_into().ok())
+        .ok_or(Error::Malformed)?;
+    Ok((
+        challenge,
+        Purpose::Write {
+            version_new: u32::from_be_bytes(version),
+        },
+    ))
+}
+
+/// The body of a registration: the token, the label, the entry, the answer
+/// to the registration challenge, and the lease of a timed link.
 pub fn register_body(
     token: &[u8],
     label_input: &[u8],
     entry: &[u8],
+    answer: &[u8; 32],
     lease: Option<u32>,
 ) -> Result<Vec<u8>, Error> {
     let mut body = token.to_vec();
     put_var16(&mut body, label_input)?;
     put_var16(&mut body, entry)?;
+    body.extend_from_slice(answer);
     // DIS-172: the end of a timed link, which the directory keeps.
     if let Some(seconds) = lease {
         body.extend_from_slice(&seconds.to_be_bytes());
     }
     Ok(body)
+}
+
+/// The body of a key-set request: the `keyset_epoch` that the reader holds.
+pub fn keyset_body(keyset_epoch: u64) -> Vec<u8> {
+    keyset_epoch.to_be_bytes().to_vec()
+}
+
+/// A key-set response: each `SignedLogKeySet` after the held set, in order
+/// (`DIS-198`).
+pub fn parse_keysets(body: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
+    let mut r = Reader::new(body);
+    let count = usize::from(r.u8()?);
+    let mut sets = Vec::with_capacity(count);
+    for _ in 0..count {
+        sets.push(take_var16(&mut r)?.to_vec());
+    }
+    r.finish()?;
+    Ok(sets)
 }
 
 /// The body of a challenge request: renew or write.

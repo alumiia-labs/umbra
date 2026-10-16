@@ -8,6 +8,31 @@
     mode: "0644"
   notify: Restart umbra-relay
 
+# A relay that left the inventory leaves the manifest, and the firewall
+# closes its port. Its service stops here too. Its seed and its store stay
+# on the server (README, "Taking a relay out").
+- name: The relay units of this server
+  ansible.builtin.shell:
+    cmd: |
+      {
+        systemctl list-units --all --type=service --plain --no-legend 'umbra-relay@*'
+        ls /etc/systemd/system/multi-user.target.wants/ 2>/dev/null
+      } | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^umbra-relay@.+\.service$/) print $i }' | sort -u
+  register: umbra_relay_units
+  changed_when: false
+
+- name: A relay that the inventory does not name stops
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+  loop: >-
+    {{ umbra_relay_units.stdout_lines
+       | difference(relays | map(attribute='name')
+                           | map('regex_replace', '^', 'umbra-relay@')
+                           | map('regex_replace', '$', '.service')
+                           | list) }}
+
 - name: Each relay of this server
   ansible.builtin.include_tasks: one.yml
   loop: "{{ relays }}"

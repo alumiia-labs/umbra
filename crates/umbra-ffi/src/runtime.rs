@@ -218,8 +218,10 @@ pub enum Command {
     /// Make a new queue for a dead channel (`NET-182`).
     RotateNow(ContactId),
     /// Makes a new queue for a contact after its own delay, for an
-    /// operation that moves the queues of many contacts (`NET-180`).
-    RotateSwept(ContactId),
+    /// operation that moves the queues of many contacts (`NET-180`). The
+    /// flag sets a new renewal guard too (`NET-357`): the first request of
+    /// a revocation has it, and a request again has it not.
+    RotateSwept(ContactId, bool),
     /// The dead-channel blob of the peer gave a candidate address
     /// (`NET-190`).
     PeerMoved {
@@ -1740,8 +1742,12 @@ pub async fn run_client(
                 Command::RotateNow(contact) => {
                     let _ = node.rotate_now(&contact);
                 }
-                Command::RotateSwept(contact) => {
-                    let _ = node.rotate_swept(&contact, now, &mut rng);
+                Command::RotateSwept(contact, guard) => {
+                    let _ = if guard {
+                        node.rotate_swept(&contact, now, &mut rng)
+                    } else {
+                        node.sweep_again(&contact, now, &mut rng)
+                    };
                 }
                 Command::PeerMoved {
                     contact,

@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 3: Network Architecture
 
 **Status:** Draft
-**Version:** 0.35.0
+**Version:** 0.36.0
 **Date:** 2026-10-16
 
 ---
@@ -90,7 +90,9 @@ store a value that links the two identifiers outside of the one queue record.
 
 ### 3.2.2 Per-queue keys
 
-A queue carries three keys. All three keys are **fresh for each queue**:
+A queue carries three keys. All three keys are **fresh for each queue**. The
+notifier key of Part 8 §8.2.4 is no key of this table, and Part 8 gives its
+source:
 
 | Key | Type | Held by | Function |
 | --- | --- | --- | --- |
@@ -258,7 +260,9 @@ of a client brings one back. Thus the queues of a relay outlive its process.
   most one grain later, which `WIR-111` needs. The start of the grace of a
   previous credential, and the time of a link identifier that holds no blob
   yet, round down, thus that grace and the `INVITE_RESERVE_TTL` of
-  `WIR-508` end no later than their own. **[NET-346]** At a start a relay
+  `WIR-508` end no later than their own. The rule covers the time of a
+  link receipt of Part 10 and the time of a registration at the NDR of
+  Part 8 §8.2.7. **[NET-346]** At a start a relay
   MUST keep the newest `QUEUE_QUOTA` records of a queue whose stored records
   pass that quota: the older ones ended in the run before. A seized file then gives no
   arrival time to the second, and a live relay learns that time in each
@@ -860,12 +864,19 @@ commitment    = SHA3-256( "umbra/v1/renewal-guard" || R )
   `guard_seq` of that item. A client whose handshake with a contact ended
   MUST take the first guard of that contact that arrives under the new
   ratchet, whatever its `guard_seq`. From that guard on, the order of
-  `NET-354` holds again.
+  `NET-354` holds again. Until that guard arrives, the guard that the
+  handshake spent opens no bundle, and `NET-355` treats each bundle as a
+  record with another `R`.
 - **[NET-357]** A client MUST set a new guard for each contact when a device
   leaves its device set under Part 7 §7.7 step 2. The record of that guard
   goes at the delay that `NET-180` gives the rotation of that contact. The
   new `R` MUST reach no device that left the set, and Part 7 rule `DEV-319`
-  carries it to each device that stays.
+  carries it to each device that stays. Each revocation sets its own guard,
+  also while a rotation of another cause waits or runs. A rotation that ends
+  before the client set that guard ends nothing that the revocation owes. A
+  client that asks again for the rotation of one revocation sets no second
+  guard, and it starts no second rotation while one runs or holds its
+  grace.
 - **[NET-358]** A client MUST set the first guard of a channel that holds no
   guard of this client and whose handshake ended. The record of that guard
   goes after a delay that the client draws for that contact under `NET-181`.
@@ -1282,9 +1293,16 @@ forward cell on that circuit. §3.4.4 rule `NET-114` gives it the check.
    build under `NET-169`. A dial that fails MUST NOT hold the next one back.
    While a body waits, the relay MUST dial again 1 s after a dial that
    failed, and 15 s after a dial that gave no result. A relay MUST end a
-   circuit whose next hop gave no `EXTENDED` in `CIRCUIT_BUILD_TIMEOUT`. The
+   circuit whose next hop gave no `EXTENDED` in `CIRCUIT_BUILD_TIMEOUT` from
+   its `EXTEND`, whether the body waited for a session or not. The
    `DESTROY` of the client is a cell of the middle at that relay,
-   which it cannot read.
+   which it cannot read. A relay MUST take one `EXTEND` of a circuit with no
+   next hop. It MUST end a circuit whose second `EXTEND` arrives while the
+   first one waits, and a circuit whose `EXTEND` arrives in a bucket other
+   than `B1` (`NET-150`). It MUST hold at most `EXTEND_WAITING_MAX` bodies
+   for one relay, and a body above that count ends its circuit. Thus a
+   circuit holds at most one body of `B1` at the relay, and the bodies of one
+   relay that does not answer have a bound.
 7. **[NET-164]** A relay that receives an `EXTENDED` cell on a circuit of
    `NET-198` MUST send that body on the held circuit. **[NET-199]** That relay
    MUST send that body under its backward layer, with `X_L` of 16 zero bytes.
@@ -1333,7 +1351,8 @@ forward cell on that circuit. §3.4.4 rule `NET-114` gives it the check.
 > relay on the path cannot answer in the place of the next hop. Rules `NET-165`
 > to `NET-167` make each relay enforce the three-hop stratified path that the
 > client selects. A replayed `EXTEND` cell opens a circuit under a fresh `er`,
-> thus the replay yields no key. Part 13 bounds the cost of such a cell.
+> thus the replay yields no key. `NET-361` refuses such a cell before its key
+> agreement, and `NET-332` bounds the builds of each address.
 
 #### Steady-state cell
 
@@ -1381,7 +1400,10 @@ causes does not occur.
   `CIRCUIT_MAX_AGE`, and it builds a new circuit for what the old one
   carried. The margin covers a client clock that ticks once each second
   and the sweep period of a relay, thus no relay ends a circuit that its
-  client still sends on.
+  client still sends on. A relay measures the age of a circuit, and the
+  refill of each build budget of `NET-332`, on a clock that does not step
+  back. A step of the wall clock then ends no circuit early and holds no
+  build back.
 - **[NET-321]** A relay MUST count the cells of a circuit in each direction,
   the build cells included, and MUST end the circuit when one count passes
   `CIRCUIT_MAX_CELLS`. A client MUST stop using a circuit when one of its two
@@ -1401,14 +1423,20 @@ causes does not occur.
   with the `CircuitDestroy` of Part 6 §6.2.3, on each link of the circuit
   but the one that ended it: a link that closed for good, a `CircuitDestroy`,
   or a `DESTROY` cell of the client. A relay that gets one MUST end its part of
-  that circuit and tell the neighbor on the other side. A client that gets
-  one from its guard MUST take the circuit as lost and build again. A client
+  that circuit and tell the neighbor on the other side. The relays before
+  the one that reads a `DESTROY` cell moved it as a cell of the middle, and
+  they cannot read it. Thus a relay of layer 2 or 3 that reads one MUST tell
+  its previous hop too. An ingress relay that reads one took it from the
+  client, and it tells no client. A client that gets
+  one from its guard MUST take the circuit as lost and build again. A
+  `CircuitDestroy` that names a circuit that the client ended already names
+  no circuit of it, and the client takes no action. A client
   link that parks its session ends no circuit: the ingress relay sends the
   `CircuitPause` of Part 6 rules `WIR-541` and `WIR-542` for each circuit of
   that link, and each relay keeps its part. A client link closes for good at
   a `SessionClose`, at the end of `SESSION_RESUME_WINDOW`, at a failed count
-  check of `WIR-544`, and when it holds no circuit. A link between two relays
-  closes for good at each close.
+  check of `WIR-544`, at a fault of the peer under `WIR-542`, and when it
+  holds no circuit. A link between two relays closes for good at each close.
 
 > *Cause of `NET-322`.* Assume that a relay ends a circuit at a closed link
 > and tells no neighbor. A client whose link to the guard drops then leaves
@@ -1416,7 +1444,10 @@ causes does not occur.
 > queue relay keeps its subscription. That relay then takes each arrival as
 > delivered and sends no push under Part 8 rule `NTF-128`, for up to 4 hours.
 > A client whose chain loses a link between two relays learns nothing either,
-> and it sends into a circuit that no exit holds.
+> and it sends into a circuit that no exit holds. A client retires a circuit
+> with a `DESTROY` cell, which the queue relay alone reads. If that relay
+> told no previous hop, the relays of layers 1 and 2 would keep each retired
+> circuit until `CIRCUIT_MAX_AGE`.
 >
 > A parked session keeps each circuit for up to 4 hours by design, and the
 > `CircuitPause` keeps the property of this rule for it. The queue relay ends
@@ -1477,6 +1508,11 @@ limits, as the rules below state.
 | `LINK_BUILD_RATE` | 1 build cell each second on one client link after its burst |
 | `RELAY_LINK_BUILD_BURST` | 8 192 build cells at once on one link of a relay of the layer before |
 | `RELAY_LINK_BUILD_RATE` | 1 024 build cells each second on one such link after its burst |
+| `SOURCE_BUILD_BURST` | 256 build cells at once on the links of one address, which a relay keeps after each link of that address closed |
+| `SOURCE_BUILD_RATE` | 4 build cells each second on the links of one address after its burst |
+| `SOURCE_BUDGETS_MAX` | 65 536 addresses whose build count a relay holds at once. The addresses above it share one count |
+| `HELLO_REPLAY_MIN` | 65 536: the ephemeral keys of the last hellos that a relay keeps at least (`NET-361`) |
+| `EXTEND_WAITING_MAX` | 8 192 `EXTEND` bodies that wait for the session to one relay of the next layer (`NET-319`) |
 | `RELAY_CIRCUITS_MAX` | 524 288 circuits at one relay at once |
 | `RELAY_CONN_MAX` | 20 000 connections at once, and an operator can set another value |
 | `RELAY_CONN_PER_IP` | 32 connections of one address at once, and an operator can set another value |
@@ -1524,7 +1560,32 @@ limits, as the rules below state.
   apply to that link. A relay MUST give no answer to a build cell on a link
   that it dialed. A relay that holds no relay set, as in a test network,
   cannot tell a relay link from another link. It gives each link the
-  limits of a relay link.
+  limits of a relay link. A link takes the limits of its origin at each
+  build: a link that built a measurement candidate before its `RelayHello`
+  verified builds as a relay link after it. A relay MUST also give a build
+  cell on a client link, and on the link of a measurer, no answer when the
+  address of that link spent `SOURCE_BUILD_BURST` builds and got none back
+  at `SOURCE_BUILD_RATE`. The address is the one of `NET-331`. The count of
+  an address MUST outlive its links, thus a new connection gets no new
+  burst. A relay MAY forget a count that is full again, because a new count
+  is the same. A relay MUST hold at most `SOURCE_BUDGETS_MAX` counts, and
+  each further address shares one count.
+- **[NET-361]** A relay MUST keep the ephemeral key `e` of the `HopHello` of
+  each build that it runs a key agreement for, at least the last
+  `HELLO_REPLAY_MIN` of them. It MUST give a build cell whose `e` it keeps no
+  answer, before its build budget and before the key agreement. A client
+  draws `e` from its CSPRNG for each hello, thus no client sends one twice.
+
+> *Cause of `NET-332` and `NET-361`.* A budget of one link alone ends with its
+> link: a party that closes each link after its burst gets a fresh burst on
+> the next connection, up to `RELAY_CONN_PER_IP` links at once. A replayed
+> `HopHello` opens a circuit under a fresh `er` and yields no key, as §3.4.3
+> states. It still costs the relay the key agreement and the encapsulation
+> of the handshake, and it costs the sender nothing. The relay runs each
+> handshake on the task that serves each circuit, thus such a flood holds
+> back the cells of each client. A count of each address bounds the
+> agreements that one host forces. The set of ephemeral keys refuses a
+> repeat with no key operation.
 - **[NET-353]** A relay of layer 2 or 3 that holds a `DirectoryRoot` MUST
   answer a build cell on a link with no `RelayHello` as the build of a
   **measurement candidate**, under the limits of a client link and under
@@ -2020,7 +2081,10 @@ cell. This cover cell is bit-indistinguishable from a real `B0` delivery.
 at it on a tick of that clock. An answer, a `MSG`, a `NACK`, and a reflected
 loop cell each take one tick. The three exceptions are the `EXTENDED` cell of a
 build, the drain of `NET-037`, and the answers of an attachment circuit under
-`NET-360`.
+`NET-360`. The first tick of a clock that starts, at a new circuit or at a
+circuit whose client woke it, MUST come after a wait from the same
+exponential distribution. A first tick at once would follow the cell that
+started the clock.
 
 **[NET-360]** On a circuit that carries the attachment commands of Part 12, a
 relay MUST send the answers to the commands of one cell when it serves that
@@ -2087,6 +2151,21 @@ one circuit that fills a link end the circuits of each other client
 on it. A party that fills a link with many circuits, each below one part in
 256 of the bound, is not told from the others. A link whose peer reads
 nothing ends at the timeout of its write.
+
+**[NET-364]** A relay MUST close a link whose backlog stays above
+`LINK_DRAIN_MARK` for a whole `LINK_DRAIN_WINDOW` while the relay writes less
+than `LINK_DRAIN_RATE` to it in that window. A backlog that falls to the mark
+or below starts a new window. `LINK_DRAIN_MARK` is 1 MiB,
+`LINK_DRAIN_WINDOW` is 60 s, and `LINK_DRAIN_RATE` is 16 KiB/s. The rule
+applies to an accepted link and to a link to a relay of the next layer.
+
+> *Cause of `NET-364`.* The timeout of a write bounds one frame, and a frame
+> of a `B3` cell is 32 KiB. A peer that reads about 1.1 KiB/s ends each
+> write inside the timeout, and it holds the whole bound of its backlog for
+> as long as it likes. Each connection then holds tens of MiB of the
+> memory of the relay at almost no cost. A rate of 16 KiB/s is below each
+> mobile link that carries a session. A client whose link falls below it for
+> a minute opens a new connection and builds its circuits again.
 
 **A group-queue session is a held session.** The `GSUB` of Part 6 §6.4.5 is
 the subscription of that session, and the relay pushes each new record on it.
@@ -2360,6 +2439,36 @@ cover of §3.5.2.
 | Parameter | Value |
 | --- | --- |
 | `RELAY_LOOP_RATE` | 1 loop cell each 10 s on each live chain that the relay holds. The relay measures it from its previous loop on that chain |
+
+**The loop chain.** A relay has no client link to its own circuits, thus
+it holds circuits of its own through the layers after it. The relay is the
+client of such a chain, and the chain ends at a relay of layer 3, which sends
+each loop back under `NET-060` as it does for a client.
+
+- **[NET-363]** A relay of layer 1 or 2 that holds a relay set MUST hold one
+  loop chain through each relay of the next layer that it holds a link to.
+  The chain of a relay of layer 1 has two hops: that relay of layer 2, and a
+  relay of layer 3 that the relay draws from the relays of layer 3 with the
+  chain role. The chain of a relay of layer 2 has one hop: that relay of
+  layer 3. The relay builds the chain with the build cells of §3.4.3 in the
+  privacy mode Balanced, and each hop takes its key set at the index of its
+  own layer (`NET-106`). The relay MUST send one `LOOP` cell in bucket `B0` on
+  each chain at `RELAY_LOOP_RATE`, and it MUST count each loop that it sent
+  and each loop that came back. It MUST end a chain `CIRCUIT_AGE_MARGIN`
+  before `CIRCUIT_MAX_AGE` and `CIRCUIT_CELL_MARGIN` before
+  `CIRCUIT_MAX_CELLS`, as a client does, and it builds a new one. A chain
+  whose build passes `CIRCUIT_BUILD_TIMEOUT`, whose cell fails its check, or
+  that a relay ends waits `RELAY_LOOP_RATE` before the next build through the
+  same relay. A relay of layer 3 holds no loop chain: it sends the loops of
+  each chain back, and the pacing cover of `NET-070` covers its links.
+
+> *Cause of `NET-363`.* A relay in the middle cannot put a cell into the
+> circuit of a client, because it holds no layer of the hops after it, and
+> the endpoint drops a cell that fails its check. A loop of a relay thus
+> needs a circuit of that relay. The cells of the chain take the common
+> shape and the common mode on the links between relays, thus no relay tells
+> them from the cells of a client. A loop that does not come back names a
+> hop of the chain that drops cells (§3.6.1).
 
 This property is the structural advantage of the infrastructure model of UMBRA.
 In a stratified mixnet, the nodes can make the cover. The cover requirement *for
@@ -2683,6 +2792,15 @@ that circuit from the `delay_class` of its own `HopHello` (§3.4.3).
   mode of that circuit, before it moves the cell on or serves it. **[NET-339]**
   A relay MUST NOT release a forward cell of a circuit before an earlier
   forward cell of that circuit. A build cell and a `DESTROY` go at once.
+- **[NET-362]** A relay MUST hold at most `CIRCUIT_DELAYED_MAX` forward cells
+  of one circuit for their delay, and at most `RELAY_DELAYED_MAX` forward
+  cells in all. `CIRCUIT_DELAYED_MAX` is 1 024 cells and `RELAY_DELAYED_MAX`
+  is 131 072 cells. A cell above either bound MUST end its circuit under
+  `NET-322`, after the cells of that circuit that wait. A cell that dropped
+  with no end would break the chain of each layer after it. A relay MUST
+  drop each forward cell of a circuit whose end waits for its delayed cells.
+  An upload window of Part 12 holds 128 cells at most, thus a client of
+  ordinary use stays far under each bound.
 - The delay of the third hop is the delay of `NET-039`. The backward
   direction takes the inbound pacing of §3.5.2 and no per-hop delay.
 

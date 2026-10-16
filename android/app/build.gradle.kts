@@ -15,7 +15,7 @@ if (file("google-services.json").exists()) {
 // The semantic version of the app, the same as the Rust workspace and the
 // specification. The code grows with each one: major, minor, then patch, three
 // digits each.
-val appVersion = "0.35.0"
+val appVersion = "0.36.0"
 val (versionMajor, versionMinor, versionPatch) = appVersion.split(".").map(String::toInt)
 
 // The network file of the release, which scripts/release-network.sh writes
@@ -44,6 +44,9 @@ android {
     compileSdk {
         version = release(37)
     }
+    // scripts/android.sh builds the Rust library with this NDK too, thus
+    // each machine links one toolchain.
+    ndkVersion = "28.2.13676358"
 
     defaultConfig {
         // The store identity, which never changes once published.

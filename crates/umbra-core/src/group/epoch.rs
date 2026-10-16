@@ -80,7 +80,22 @@ const EPOCHS_VERSION_SUPPLIED: u8 = 0x02;
 
 /// Version `0x02` with the base of each epoch and the mark of a second
 /// epoch of one roster epoch (`GRP-288`).
-const EPOCHS_VERSION: u8 = 0x03;
+const EPOCHS_VERSION_BASE: u8 = 0x03;
+
+/// Version `0x03` with the alternate secret of the previous epoch
+/// (`GRP-273`).
+const EPOCHS_VERSION: u8 = 0x04;
+
+/// One record key to try, with the epoch state that gave it.
+pub struct RecordKey {
+    /// `K_rec(e, t)`.
+    pub key: Secret<32>,
+    /// Whether the key is of the previous epoch, whose records need the
+    /// current-roster check of `GRP-232`.
+    pub previous: bool,
+    /// Whether the key is of an alternate secret (`GRP-274`).
+    pub alternate: bool,
+}
 
 /// The rotations that the age of an epoch can call for between the start
 /// slots `from` and `to` (`GRP-360`, `GRP-288`). A rotator installs an
@@ -241,7 +256,7 @@ impl EpochState {
     /// Whether this state holds `K_e`: a member that joined inside the
     /// epoch holds its chain alone (`GRP-384`).
     pub fn holds_secret(&self) -> bool {
-        self.secret.expose().expose() != &[0; 32]
+        !umbra_crypto::ct_eq(self.secret.expose().expose(), &[0; 32])
     }
 
     /// The chain at the oldest slot that this state holds.
@@ -336,12 +351,16 @@ impl EpochState {
 }
 
 /// The epochs a member holds: the current one, the previous one inside
-/// its grace, and an alternate secret of the current one.
+/// its grace, an alternate secret of the current one, and the alternate of
+/// the previous one.
 #[derive(Default)]
 pub struct EpochStore {
     current: Option<EpochState>,
     previous: Option<EpochState>,
     alternate: Option<EpochState>,
+    /// GRP-273: the alternate stays for `GROUP_EPOCH_GRACE`. A member that
+    /// read the record of the lower rotator late still wrote under it.
+    previous_alternate: Option<EpochState>,
 }
 
 impl EpochStore {
@@ -402,7 +421,7 @@ impl EpochStore {
         };
         if state.epoch > current.epoch {
             self.previous = Some(current);
-            self.alternate = None;
+            self.previous_alternate = self.alternate.take();
             self.current = Some(state);
             return Ok(());
         }
@@ -411,7 +430,11 @@ impl EpochStore {
             return Err(Error::Stale);
         }
         let same = |held: &EpochState| {
-            held.holds_secret() && held.secret.expose().expose() == state.secret.expose().expose()
+            held.holds_secret()
+                && umbra_crypto::ct_eq(
+                    held.secret.expose().expose(),
+                    state.secret.expose().expose(),
+                )
         };
         // The secret that this store holds already: the record of its
         // rotator gives a supplied secret its rotator, and nothing else
@@ -511,15 +534,20 @@ impl EpochStore {
     /// The lowest roster epoch that an epoch of this store names, from
     /// which the roster keeps its history (`GRP-263`).
     pub fn oldest_roster_epoch(&self) -> Option<u32> {
-        [&self.current, &self.previous, &self.alternate]
-            .into_iter()
-            .flatten()
-            .map(|state| state.roster_epoch)
-            .min()
+        [
+            &self.current,
+            &self.previous,
+            &self.alternate,
+            &self.previous_alternate,
+        ]
+        .into_iter()
+        .flatten()
+        .map(|state| state.roster_epoch)
+        .min()
     }
 
     /// Drops the previous epoch after `GROUP_EPOCH_GRACE` (`GRP-231`) and
-    /// the alternate with it.
+    /// each alternate with it.
     pub fn expire(&mut self, now: u64) {
         if self
             .previous
@@ -529,40 +557,77 @@ impl EpochStore {
         {
             self.previous = None;
             self.alternate = None;
+            self.previous_alternate = None;
         }
     }
 
+    /// The record key of the current epoch at `slot`, under which this
+    /// member sends. A member sends under no alternate secret (`GRP-273`).
+    pub fn send_key(&mut self, slot: u32, now: u64) -> Result<Secret<32>, Error> {
+        self.current
+            .as_mut()
+            .ok_or(Error::NoPath)?
+            .record_key(slot, now)
+    }
+
     /// The record keys to try for a record of `epoch` at `slot`: the
-    /// current or the previous epoch (`GRP-250`), and the alternate of the
-    /// current epoch after it (`GRP-274`), which is the second key when the
-    /// result holds two. The flag says whether the key is of the previous
-    /// epoch, whose records need the current-roster check of `GRP-232`.
+    /// current or the previous epoch (`GRP-250`), and the alternate of that
+    /// epoch after it (`GRP-274`). Rival rotators start at different slots,
+    /// thus a slot can lie before the start of one secret and after the
+    /// start of the other. The error of the first secret stands when no
+    /// secret gives a key.
     pub fn record_keys(
         &mut self,
         epoch: u32,
         slot: u32,
         now: u64,
-    ) -> Result<Vec<(Secret<32>, bool)>, Error> {
-        let mut keys = Vec::new();
-        if let Some(current) = self.current.as_mut().filter(|c| c.epoch == epoch) {
-            keys.push((current.record_key(slot, now)?, false));
-            if let Some(alternate) = self.alternate.as_mut() {
-                if let Ok(key) = alternate.record_key(slot, now) {
-                    keys.push((key, false));
-                }
-            }
-        } else if let Some(previous) = self.previous.as_mut().filter(|p| p.epoch == epoch) {
-            keys.push((previous.record_key(slot, now)?, true));
+    ) -> Result<Vec<RecordKey>, Error> {
+        let (first, second, previous) = if self.current.as_ref().is_some_and(|c| c.epoch == epoch) {
+            (&mut self.current, &mut self.alternate, false)
+        } else if self.previous.as_ref().is_some_and(|p| p.epoch == epoch) {
+            (&mut self.previous, &mut self.previous_alternate, true)
         } else {
             return Err(Error::Stale);
+        };
+        let mut keys = Vec::new();
+        let refused = match first.as_mut().map(|state| state.record_key(slot, now)) {
+            Some(Ok(key)) => {
+                keys.push(RecordKey {
+                    key,
+                    previous,
+                    alternate: false,
+                });
+                None
+            }
+            Some(Err(error)) => Some(error),
+            None => Some(Error::Stale),
+        };
+        if let Some(Ok(key)) = second
+            .as_mut()
+            .filter(|held| held.epoch == epoch)
+            .map(|held| held.record_key(slot, now))
+        {
+            keys.push(RecordKey {
+                key,
+                previous,
+                alternate: true,
+            });
         }
-        Ok(keys)
+        match refused {
+            Some(error) if keys.is_empty() => Err(error),
+            _ => Ok(keys),
+        }
     }
 
-    /// Writes the three epoch states to their stored form.
+    /// Writes the four epoch states to their stored form.
     pub fn export(&self, w: &mut Writer) {
         w.u8(EPOCHS_VERSION);
-        for state in [&self.current, &self.previous, &self.alternate] {
+        for state in [
+            &self.current,
+            &self.previous,
+            &self.alternate,
+            &self.previous_alternate,
+        ] {
             w.flag(state.is_some());
             if let Some(state) = state {
                 state.export(w);
@@ -580,17 +645,26 @@ impl EpochStore {
     /// Reads an epoch store that [`EpochStore::export`] wrote.
     pub fn import(r: &mut Reader<'_>) -> Result<Self, Error> {
         let version = r.u8()?;
-        if ![STORED_VERSION, EPOCHS_VERSION_SUPPLIED, EPOCHS_VERSION].contains(&version) {
+        if ![
+            STORED_VERSION,
+            EPOCHS_VERSION_SUPPLIED,
+            EPOCHS_VERSION_BASE,
+            EPOCHS_VERSION,
+        ]
+        .contains(&version)
+        {
             return Err(Error::Stale);
         }
-        let mut states = [None, None, None];
-        for slot in &mut states {
+        let mut states = [None, None, None, None];
+        // A form before `EPOCHS_VERSION` holds no previous alternate.
+        let held = if version >= EPOCHS_VERSION { 4 } else { 3 };
+        for slot in states.iter_mut().take(held) {
             if r.flag()? {
                 let mut state = EpochState::import(r)?;
                 if version >= EPOCHS_VERSION_SUPPLIED {
                     state.supplied = r.flag()?;
                 }
-                if version >= EPOCHS_VERSION {
+                if version >= EPOCHS_VERSION_BASE {
                     state.repeat = r.flag()?;
                     state.base = r.option(|r| {
                         Ok(Base {
@@ -603,10 +677,10 @@ impl EpochStore {
                 *slot = Some(state);
             }
         }
-        let [mut current, previous, mut alternate] = states;
+        let [mut current, previous, mut alternate, previous_alternate] = states;
         // A form before the base: the epoch before the current one is the
         // base of it, and of its alternate.
-        if version < EPOCHS_VERSION {
+        if version < EPOCHS_VERSION_BASE {
             let base = previous.as_ref().map(EpochState::as_base);
             for state in [&mut current, &mut alternate].into_iter().flatten() {
                 state.base = base;
@@ -617,6 +691,7 @@ impl EpochStore {
             current,
             previous,
             alternate,
+            previous_alternate,
         })
     }
 
@@ -837,9 +912,11 @@ pub const fn chunk_of_rank(rank: usize, slots_per_chunk: u16) -> usize {
     }
 }
 
-/// Opens the slot of `own_index` in `slots`, verifies its tag under the
-/// pair key with the rotator, and checks the rotator's role against the
-/// owner secrets it carries (`GRP-286`, `GRP-287`, `GRP-379`).
+/// Opens the slot of `own_index` in `slots`, verifies its tag at the start
+/// slot `start_slot` of the record header under the pair key with the
+/// rotator, and checks the role of the rotator (`GRP-286`, `GRP-287`,
+/// `GRP-379`). A rotator below `admin` hands no owner credentials, thus the
+/// payload of its slot holds none.
 #[allow(clippy::too_many_arguments)]
 pub fn open_own_slot(
     slots: &[KemSlot<'_>],
@@ -847,10 +924,11 @@ pub fn open_own_slot(
     own_keys: &MemberKeys,
     group_id: &[u8; 32],
     epoch: u32,
+    start_slot: u32,
     roster_epoch: u32,
     rotator_role_at: impl Fn(u16) -> Option<Role>,
     pair_key_with: impl Fn(u16) -> Option<PairKey>,
-) -> Result<(SlotPayload, u32), Error> {
+) -> Result<SlotPayload, Error> {
     let slot = slots
         .iter()
         .find(|s| s.index == own_index)
@@ -864,21 +942,28 @@ pub fn open_own_slot(
         slot.sealed,
         &mut plain,
     )?;
-    let payload = SlotPayload::parse(plain.get(..n).ok_or(Error::Malformed)?)?;
+    let mut payload = SlotPayload::parse(plain.get(..n).ok_or(Error::Malformed)?)?;
     let rotator_role = rotator_role_at(payload.rotator).ok_or(Error::Unverified)?;
-    if !payload.own_sks.is_empty() && rotator_role < Role::Admin {
-        return Err(Error::Unverified);
-    }
     let pair_key = pair_key_with(payload.rotator).ok_or(Error::Unverified)?;
-    // The tag binds the start slot, which the record header carries; the
-    // caller passes it through `start_slot` in the header. The slot index
-    // of the record is that value.
-    let start_slot = find_start_slot(&pair_key, group_id, epoch, roster_epoch, &payload)?;
-    Ok((payload, start_slot))
+    verify_slot_tag(
+        &pair_key,
+        group_id,
+        epoch,
+        start_slot,
+        roster_epoch,
+        &payload,
+    )?;
+    // GRP-379: the role comes from the roster that stands. A rotator that
+    // a demotion took below `admin` after its rotation still served the
+    // group with the secret, and its owner credentials go.
+    if rotator_role < Role::Admin {
+        payload.own_sks.clear();
+    }
+    Ok(payload)
 }
 
-/// The record header carries `t_e` as its `slot`; a caller that holds the
-/// header verifies the tag at that slot directly.
+/// Verifies the tag of a slot at the start slot `start_slot`, which the
+/// record header carries (`GRP-287`, `GRP-383`).
 pub fn verify_slot_tag(
     pair_key: &PairKey,
     group_id: &[u8; 32],
@@ -898,20 +983,6 @@ pub fn verify_slot_tag(
         &payload.tag,
     )?;
     Ok(())
-}
-
-fn find_start_slot(
-    pair_key: &PairKey,
-    group_id: &[u8; 32],
-    epoch: u32,
-    roster_epoch: u32,
-    payload: &SlotPayload,
-) -> Result<u32, Error> {
-    // Without the header the start slot is unknown; the caller verifies
-    // with `verify_slot_tag`. This path exists for a chunked slot that
-    // arrives apart from its record, and it returns 0 to mark that.
-    let _ = (pair_key, group_id, epoch, roster_epoch, payload);
-    Ok(0)
 }
 
 /// Whether a member may rotate at `now` for a trigger it did not cause:
@@ -974,7 +1045,7 @@ mod tests {
             ))
             .unwrap();
         let keys = store.record_keys(1, t + 10, later).unwrap();
-        assert!(keys[0].1);
+        assert!(keys[0].previous);
         store.expire(later + GROUP_EPOCH_GRACE - 1);
         assert!(store.record_keys(1, t + 10, later).is_ok());
         store.expire(later + GROUP_EPOCH_GRACE);
@@ -1078,15 +1149,24 @@ mod tests {
             Carrier::Chunked { .. } => panic!("inline"),
         };
         let admin_pair = admin.pair_key(&rotator.pair_public(), &group).unwrap();
-        let (payload, _) = open_own_slot(&slots, 1, &admin, &group, 2, 4, roles, |i| {
-            (i == 0).then(|| admin.pair_key(&rotator.pair_public(), &group).unwrap())
-        })
-        .unwrap();
+        let t = out.start_slot;
+        let with_admin =
+            |i: u16| (i == 0).then(|| admin.pair_key(&rotator.pair_public(), &group).unwrap());
+        let payload = open_own_slot(&slots, 1, &admin, &group, 2, t, 4, roles, with_admin).unwrap();
         assert_eq!(payload.own_sks.len(), 2);
         assert_eq!(payload.own_sks[1].expose(), &[9; 32]);
-        verify_slot_tag(&admin_pair, &group, 2, out.start_slot, 4, &payload).unwrap();
-        assert!(verify_slot_tag(&admin_pair, &group, 2, out.start_slot + 1, 4, &payload).is_err());
-        let (plain_payload, _) = open_own_slot(&slots, 2, &plain, &group, 2, 4, roles, |i| {
+        verify_slot_tag(&admin_pair, &group, 2, t, 4, &payload).unwrap();
+        assert!(verify_slot_tag(&admin_pair, &group, 2, t + 1, 4, &payload).is_err());
+        // The open checks the tag at the start slot of the header itself.
+        assert!(open_own_slot(&slots, 1, &admin, &group, 2, t + 1, 4, roles, with_admin).is_err());
+        // GRP-379: a rotator that a demotion took below `admin` since its
+        // rotation gives the secret, and no owner credentials.
+        let demoted = |_: u16| Some(Role::Member);
+        let payload =
+            open_own_slot(&slots, 1, &admin, &group, 2, t, 4, demoted, with_admin).unwrap();
+        assert!(payload.own_sks.is_empty());
+        assert_eq!(payload.epoch_secret.expose(), out.secret.expose().expose());
+        let plain_payload = open_own_slot(&slots, 2, &plain, &group, 2, t, 4, roles, |i| {
             (i == 0).then(|| plain.pair_key(&rotator.pair_public(), &group).unwrap())
         })
         .unwrap();
@@ -1097,8 +1177,8 @@ mod tests {
         );
         // A member whose slot is absent finds none, and a wrong key opens
         // nothing.
-        assert!(open_own_slot(&slots, 9, &plain, &group, 2, 4, roles, |_| None).is_err());
-        assert!(open_own_slot(&slots, 1, &plain, &group, 2, 4, roles, |_| None).is_err());
+        assert!(open_own_slot(&slots, 9, &plain, &group, 2, t, 4, roles, |_| None).is_err());
+        assert!(open_own_slot(&slots, 1, &plain, &group, 2, t, 4, roles, |_| None).is_err());
         assert_eq!(chunk_of_rank(53, 27), 1);
         assert_eq!(chunk_of_rank(54, 27), 2);
     }
@@ -1211,6 +1291,94 @@ mod tests {
         // The same record again changes nothing.
         assert_eq!(late.install(state(2, 2, 5, now)), Err(Error::Stale));
         assert!(late.current().unwrap().is_supplied());
+    }
+
+    /// An epoch state of `epoch` under `seed` from the start slot `start`.
+    fn state_from(epoch: u32, seed: u8, rotator: u16, start: u32, now: u64) -> EpochState {
+        EpochState::new(
+            EpochSecret::from_secret(Secret::new([seed; 32])),
+            &[7; 32],
+            epoch,
+            start,
+            1,
+            rotator,
+            now,
+        )
+    }
+
+    #[test]
+    fn the_alternate_opens_a_slot_before_the_start_of_the_current_secret() {
+        // GRP-274: the rotator of the lower index started three slots
+        // after its rival. A record of the rival at a slot between the two
+        // starts opens under the alternate alone.
+        let now = 1_000 * GROUP_SLOT;
+        let t = slot_of(now);
+        let mut store = EpochStore::default();
+        store.install(state(1, 1, 0, now)).unwrap();
+        store.install(state_from(2, 2, 5, t - 6, now)).unwrap();
+        store.install(state_from(2, 3, 1, t - 3, now)).unwrap();
+        assert_eq!(store.current().unwrap().rotator(), 1);
+        let keys = store.record_keys(2, t - 4, now).unwrap();
+        assert_eq!(keys.len(), 1);
+        assert!(keys[0].alternate && !keys[0].previous);
+        let rival = state_from(2, 2, 5, t - 6, now);
+        assert_eq!(
+            keys[0].key.expose(),
+            rival.chain().record_key(t - 4).unwrap().expose()
+        );
+        // A slot before each start stays an error, and the sender never
+        // takes the alternate.
+        assert!(matches!(
+            store.record_keys(2, t - 7, now),
+            Err(Error::Stale)
+        ));
+        assert!(store.send_key(t - 4, now).is_err());
+        assert_eq!(store.record_keys(2, t, now).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn the_alternate_of_the_previous_epoch_stays_for_its_grace() {
+        // GRP-273: a member that read the record of the lower rotator late
+        // wrote under the other secret. Its records still open after the
+        // next epoch, inside the grace.
+        let now = 1_000 * GROUP_SLOT;
+        let t = slot_of(now);
+        let mut store = EpochStore::default();
+        store.install(state(1, 1, 0, now)).unwrap();
+        store.install(state(2, 2, 5, now)).unwrap();
+        store.install(state(2, 3, 1, now)).unwrap();
+        store.install(state(3, 4, 0, now)).unwrap();
+        let keys = store.record_keys(2, t, now).unwrap();
+        assert_eq!(keys.len(), 2);
+        assert!(keys.iter().all(|key| key.previous));
+        assert!(!keys[0].alternate && keys[1].alternate);
+        assert_eq!(store.oldest_roster_epoch(), Some(1));
+        // The stored form keeps it, and the grace ends it.
+        let mut w = Writer::new();
+        store.export(&mut w);
+        let bytes = w.finish();
+        let mut reader = Reader::new(&bytes);
+        let mut back = EpochStore::import(&mut reader).unwrap();
+        reader.end().unwrap();
+        assert_eq!(back.record_keys(2, t, now).unwrap().len(), 2);
+        back.expire(now + GROUP_EPOCH_GRACE);
+        assert!(matches!(back.record_keys(2, t, now), Err(Error::Stale)));
+        // A form before the previous alternate reads it as none.
+        let mut w = Writer::new();
+        w.u8(EPOCHS_VERSION_BASE);
+        for held in [store.current(), store.previous()] {
+            w.flag(true);
+            held.unwrap().export(&mut w);
+            w.flag(false);
+            w.flag(false);
+            w.flag(false);
+        }
+        w.flag(false);
+        let bytes = w.finish();
+        let mut reader = Reader::new(&bytes);
+        let mut old = EpochStore::import(&mut reader).unwrap();
+        reader.end().unwrap();
+        assert_eq!(old.record_keys(2, t, now).unwrap().len(), 1);
     }
 
     #[test]

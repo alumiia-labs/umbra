@@ -12,6 +12,7 @@ server {
     ssl_certificate_key /etc/umbra/tls/key.pem;
     ssl_protocols TLSv1.3;
 
+    server_tokens off;
     access_log off;
     error_log /dev/null crit;
     log_not_found off;

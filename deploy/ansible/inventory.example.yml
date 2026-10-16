@@ -12,6 +12,14 @@
 #          directions. An entry relay needs 1 or more. When two relays share
 #          one server, state the share of each, not the whole link.
 #
+# Each relay has a name of its own in the whole network, not only on its
+# server. Give the ansible_host of a relay server as an IPv4 address, not as
+# a name: the relay states it in its descriptor. A relay server with IPv6
+# can also state `umbra_ipv6: <one IPv6 address>`. The firewall of the
+# notification server and of the directory then lets that address in too.
+# The two services listen on IPv4 alone today, thus give their names no
+# AAAA record.
+#
 # OVH's Debian images log in as `debian`.
 all:
   vars:
@@ -21,6 +29,7 @@ all:
       hosts:
         east-1:
           ansible_host: 203.0.113.10   # Vint Hill, Virginia
+          # umbra_ipv6: 2001:db8::10   # optional
           relays:
             - { name: entry-east, role: entry, port: 443, class: 1 }
             - { name: exit-1, role: exit, port: 9443, class: 1 }

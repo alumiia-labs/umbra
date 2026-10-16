@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 1: Scope, Conventions, and Terminology
 
 **Status:** Draft
-**Version:** 0.35.0
+**Version:** 0.36.0
 **Date:** 2026-10-16
 
 ---
@@ -301,7 +301,7 @@ examples. Without the table below a maintainer finds the dependents by hand.
 | `MSG_TTL` | Part 3 §3.2.4 | Part 5 §5.5.4, Part 7 §7.5.6, Part 12 §12.7.1, Part 15 §15.1 |
 | `QUEUE_IDLE_TTL` | Part 3 §3.2.4 | Part 7 §7.5.1, Part 15 §15.1 |
 | `STORE_TIME_GRAIN` | Part 3 §3.2.4 | — |
-| `MAX_QUEUES_PER_SESSION` | Part 3 §3.2.5 | Part 2 §2.7, Part 3 §3.11, Part 8 §8.2.1, Part 15 §15.3 |
+| `MAX_QUEUES_PER_SESSION` | Part 3 §3.2.5 | Part 2 §2.7, Part 3 §3.11, Part 8 §8.2.1, Part 8 §8.4.3, Part 15 §15.3 |
 | The bucket ladder | Part 3 §3.3 | Part 5 §5.6, Part 6 §6.9, Part 3 §3.12, Part 11 §11.3.3 |
 | `CIRCUIT_MAX_AGE`, `CIRCUIT_MAX_CELLS`, `CIRCUIT_AGE_MARGIN`, `CIRCUIT_CELL_MARGIN` | Part 3 §3.4.3 | Part 2 §2.4, Part 3 §3.4.4, Part 3 §3.11.1, Part 3 §3.12, Part 6 §6.2.2, Part 6 §6.2.3, Part 6 §6.8, Part 15 §15.3 |
 | `SESSION_RESUME_WINDOW` | Part 6 §6.2.3 | Part 3 §3.4.3, Part 3 §3.8, Part 3 §3.12, Part 15 §15.3 |
@@ -457,7 +457,7 @@ side channel that the user selects, such as a QR code scan.
 | `SyncSeedUpdate` | Part 7 §7.7 | `DeviceSetControl`, type `0x05` | Client |
 | Catch-up object | Part 7 §7.5.1 | The chunk path of Part 12 §12.3.3, and `DeviceSetControl` type `0x04` carries its `FileDescriptor` | Client |
 | `NdrRequest`, `NdrResponse`, `PushToken` | Part 8 §8.2.7 | OHTTP to the NDR, Part 8 §8.2.7 | Client and NDR |
-| Notification blob | Part 8 §8.2.2 | The platform push, Part 8 §8.4 | Relay |
+| Notification blob | Part 8 §8.2.2 | The platform push, Part 8 §8.4, and the `NWAKE` of a watch, Part 8 §8.4.3 | Relay |
 | `NotifyBinding`, the `k_ntf_root` transfer | Part 8 §8.2.3 | `NBIND`, Part 6 §6.4 | Client |
 | `DirectoryEntry` | Part 9 §9.3 | The directory, Part 9 §9.3 | Client |
 | `AddressEntry` | Part 9 §9.3.3 | The directory, Part 9 §9.3.3 | Client |

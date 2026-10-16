@@ -279,12 +279,41 @@ impl<'a> HeadState<'a> {
         Ok(())
     }
 
-    /// Accepts a head under rules 5 to 12 of §9.5.2, at `device_clock`.
-    pub fn accept(&mut self, head: &SignedTreeHead<'_>, device_clock: u64) -> Result<(), Error> {
+    /// Tests a head under rules 5 to 9 and 11 of §9.5.2 at `device_clock`,
+    /// and changes nothing. A head whose signatures verify and whose
+    /// timestamp fails rule 11 is [`Freshness::Degraded`]: the degraded
+    /// read of `DIS-067` reads under it, and no rule accepts it.
+    pub fn check(&self, head: &SignedTreeHead<'_>, device_clock: u64) -> Result<Freshness, Error> {
         if head.keyset_hash != self.keyset_hash {
             return Err(Error::Unverified);
         }
         self.keyset.verify_multi(&head.preimage(), &head.sigs)?;
+        let is_old = head
+            .timestamp
+            .saturating_add(TREE_HEAD_FRESHNESS + CLOCK_SKEW)
+            < device_clock;
+        let is_ahead = head.timestamp > device_clock.saturating_add(CLOCK_SKEW);
+        Ok(if is_old || is_ahead {
+            Freshness::Degraded
+        } else {
+            Freshness::Fresh
+        })
+    }
+
+    /// Accepts a head under rules 5 to 12 of §9.5.2, at `device_clock`. A
+    /// state that retains a head accepts no larger head here: `DIS-159`
+    /// needs the consistency proof of [`HeadState::accept_extending`].
+    pub fn accept(&mut self, head: &SignedTreeHead<'_>, device_clock: u64) -> Result<(), Error> {
+        self.admit(head, device_clock, false)
+    }
+
+    fn admit(
+        &mut self,
+        head: &SignedTreeHead<'_>,
+        device_clock: u64,
+        is_extending: bool,
+    ) -> Result<(), Error> {
+        let freshness = self.check(head, device_clock)?;
         if head.tree_size < self.highest_tree_size {
             return Err(Error::Stale);
         }
@@ -300,15 +329,15 @@ impl<'a> HeadState<'a> {
         {
             return Err(Error::Unverified);
         }
-        if head
-            .timestamp
-            .saturating_add(TREE_HEAD_FRESHNESS + CLOCK_SKEW)
-            < device_clock
-        {
+        if freshness == Freshness::Degraded {
             return Err(Error::Stale);
         }
-        if head.timestamp > device_clock.saturating_add(CLOCK_SKEW) {
-            return Err(Error::Stale);
+        if !is_extending
+            && self
+                .newest()
+                .is_some_and(|newest| head.tree_size > newest.tree_size)
+        {
+            return Err(Error::Unverified);
         }
         self.highest_tree_size = head.tree_size;
         let accepted = AcceptedHead {
@@ -346,7 +375,7 @@ impl<'a> HeadState<'a> {
                 consistency,
             )?;
         }
-        self.accept(head, device_clock)
+        self.admit(head, device_clock, true)
     }
 
     /// Drops each head past `TREE_HEAD_RETAIN` (`DIS-063`).
@@ -398,6 +427,15 @@ impl<'a> HeadState<'a> {
             None => Verdict::FetchHead,
         }
     }
+}
+
+/// Whether a head that verifies passes the clock tests of rule 11.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Freshness {
+    /// The timestamp is inside `TREE_HEAD_FRESHNESS` and `CLOCK_SKEW`.
+    Fresh,
+    /// The timestamp is too old or too far ahead: the degraded read.
+    Degraded,
 }
 
 /// The outcome of a digest comparison.
@@ -571,6 +609,39 @@ mod tests {
             Err(Error::Unverified)
         );
         assert_eq!(state.at(10).unwrap().root, [10; 32]);
+    }
+
+    #[test]
+    fn a_larger_head_needs_the_proof_of_consistency_and_a_stale_one_is_degraded() {
+        let keys = signers(1);
+        let ks_bytes = keyset_bytes(&keys, 1);
+        let (keyset, _) = LogKeySet::parse(&ks_bytes).unwrap();
+        let hash = keyset.hash().unwrap();
+        let mut state = HeadState::new(keyset).unwrap();
+        let clock = 1_000_000u64;
+        let first = signed_head(&keys, &[0, 1], 1, clock - 10, hash);
+        state
+            .accept(&SignedTreeHead::parse(&first).unwrap(), clock)
+            .unwrap();
+        // DIS-159: a retained head takes no larger head without the proof.
+        let second = signed_head(&keys, &[0, 1], 2, clock - 5, hash);
+        let second = SignedTreeHead::parse(&second).unwrap();
+        assert_eq!(state.accept(&second, clock), Err(Error::Unverified));
+        assert!(state
+            .accept_extending(&second, &[[0xAB; 32]], clock)
+            .is_err());
+        assert_eq!(state.newest().unwrap().tree_size, 1);
+        // DIS-067: a head past its freshness verifies and is degraded.
+        let old = signed_head(
+            &keys,
+            &[0, 1],
+            3,
+            clock - TREE_HEAD_FRESHNESS - CLOCK_SKEW - 1,
+            hash,
+        );
+        let old = SignedTreeHead::parse(&old).unwrap();
+        assert_eq!(state.check(&old, clock), Ok(Freshness::Degraded));
+        assert_eq!(state.check(&second, clock), Ok(Freshness::Fresh));
     }
 
     #[test]

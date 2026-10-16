@@ -1,14 +1,11 @@
-# The relays of this server restart one at a time. The run stops at a
-# relay that does not come back, before it reaches the next server.
+# The relays of this server restart one at a time. The run stops at a relay
+# that does not stay up (umbra-restart), before it reaches the next server.
 - name: Restart umbra-relay
   ansible.builtin.shell:
     cmd: |
       set -eu
       systemctl daemon-reload
-      for name in {{ relays | map(attribute='name') | join(' ') }}; do
-          unit="umbra-relay@$name.service"
-          systemctl restart "$unit"
-          sleep 10
-          systemctl is-active --quiet "$unit"
-      done
+      {% for relay in relays %}
+      /usr/local/sbin/umbra-restart umbra-relay@{{ relay.name }}.service {{ relay.port }}
+      {% endfor %}
   changed_when: true

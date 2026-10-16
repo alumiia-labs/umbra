@@ -53,9 +53,11 @@ pub const T_MAX: u32 = 3_000;
 
 impl Cost {
     /// Whether a header may carry this cost: a party with the file that
-    /// raises it makes no unlock allocate without bound (`IMP-175`).
+    /// raises it makes no unlock allocate without bound. A cost below the
+    /// floor of `IMP-116` comes from no client, and no later wrap at a
+    /// passphrase change takes it (`IMP-175`).
     pub const fn is_bounded(&self) -> bool {
-        self.m_kib <= M_KIB_MAX && self.t <= T_MAX
+        self.m_kib >= M_KIB_FLOOR && self.m_kib <= M_KIB_MAX && self.t >= T_FLOOR && self.t <= T_MAX
     }
 
     /// The cost for a device that ran the floor cost in `floor_ms`
@@ -215,9 +217,12 @@ impl AutoLock {
         self.last_activity = now;
     }
 
-    /// Whether the client locks at `now`.
+    /// Whether the client locks at `now`. A reading below the last action
+    /// comes from a source that is not monotonic (`IMP-119`), and the timer
+    /// then locks: a step back of such a source never keeps the store open
+    /// above its limit.
     pub fn due(&self, now: u64) -> bool {
-        now.saturating_sub(self.last_activity) >= self.idle_limit
+        now < self.last_activity || now - self.last_activity >= self.idle_limit
     }
 }
 
@@ -259,8 +264,39 @@ pub(crate) mod tests {
         .unwrap();
         let bytes = header.encode().unwrap();
         assert_eq!(bytes.len(), 97);
-        let parsed = WrapHeader::parse(&bytes).unwrap();
-        assert_eq!(parsed, header);
+        // IMP-175: a header below the floor does not parse, and one at the
+        // floor does.
+        assert_eq!(WrapHeader::parse(&bytes), Err(Error::Malformed));
+        let floor = WrapHeader {
+            cost: Cost {
+                m_kib: M_KIB_FLOOR,
+                t: T_FLOOR,
+            },
+            ..header
+        };
+        assert_eq!(WrapHeader::parse(&floor.encode().unwrap()).unwrap(), floor);
+        for cost in [
+            Cost {
+                m_kib: M_KIB_FLOOR - 1,
+                t: T_FLOOR,
+            },
+            Cost {
+                m_kib: M_KIB_FLOOR,
+                t: T_FLOOR - 1,
+            },
+            Cost {
+                m_kib: M_KIB_MAX + 1,
+                t: T_FLOOR,
+            },
+            Cost {
+                m_kib: M_KIB_FLOOR,
+                t: T_MAX + 1,
+            },
+        ] {
+            let header = WrapHeader { cost, ..header };
+            assert!(WrapHeader::parse(&header.encode().unwrap()).is_err());
+        }
+        let parsed = header;
         assert_eq!(
             parsed.unwrap(b"correct horse", &element).unwrap().expose(),
             store_key.expose()
@@ -305,5 +341,7 @@ pub(crate) mod tests {
         assert!(!timer.due(1_000 + AUTO_LOCK_DEFAULT));
         timer.set_limit(86_400);
         assert!(timer.due(1_500 + AUTO_LOCK_MAX));
+        // A reading below the last action locks.
+        assert!(timer.due(1_499));
     }
 }

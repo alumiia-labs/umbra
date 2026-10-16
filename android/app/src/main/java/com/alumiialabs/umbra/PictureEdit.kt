@@ -110,6 +110,7 @@ fun EditablePicture(hasPicture: Boolean, onSet: (Bitmap?) -> Unit, picture: @Com
             buildList {
                 add(
                     RowEntry("image", stringResource(R.string.picture_choose_picture)) {
+                        Core.awaitsResult()
                         picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                     },
                 )

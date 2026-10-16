@@ -224,8 +224,9 @@ manifest of an hour rejects a second one for it. Thus:
   that file each hour: a relay with an `expel` line leaves the manifest,
   and a link with a `link` line takes a removal for 7 days.
   - The tool runs as the user `umbra-signer`, because it reads the seed
-    files of that user. Its unit hides the seeds of the authorities 2 to 6.
-    Its settings file, `/etc/umbra-authority/authority.conf`, holds no
+    files of that user. Its unit shows it the seeds of the authorities 0
+    and 1 alone. It hides each other file of `/var/lib/umbra-signer`, also
+    the second key directory of a rotation. Its settings file, `/etc/umbra-authority/authority.conf`, holds no
     secret.
   - The tool makes the two secrets of its report queue in
     `/var/lib/umbra-authority/secrets` at its first start, each readable by
@@ -324,6 +325,44 @@ The signer refuses to sign under keys that the chain does not end at, thus
 a mistyped `umbra_signer_keys` stops the hourly manifest rather than every
 app.
 
+## Going back to the binary before
+
+A run that brings a new binary keeps the binary before it as
+`/usr/local/bin/<name>.prev`, as `umbra-relay.prev`. A run and a renewal of
+the certificate restart a relay, the notification server, or the directory
+with `/usr/local/sbin/umbra-restart`. It waits 30 seconds, then it checks
+that the service is active, that systemd did not restart it, and that the
+service listens on its port. In a run, a check that fails stops the run
+before the next server. In a renewal, it calls `umbra-alert`.
+
+To go back on one server:
+
+```sh
+sudo install -m 0755 /usr/local/bin/umbra-relay.prev /usr/local/bin/umbra-relay
+sudo /usr/local/sbin/umbra-restart umbra-relay@<name>.service <port>
+```
+
+The next run copies `target/deploy/bin` again. Build the older commit with
+`scripts/build-linux.sh` first, or the run brings the new binary back.
+
+## Taking a relay out
+
+Delete the relay from `relays` in `inventory.yml`, then run
+`ansible-playbook site.yml`. The run takes the relay out of the manifest
+and closes its port in the firewall. Phase 2 stops and disables
+`umbra-relay@<name>` on its server. The seed, the settings, and the store
+of the relay stay on the server, in case it comes back with the same
+identity. To delete them, on that server:
+
+```sh
+sudo rm -r /etc/umbra/relays/<name> /var/lib/umbra-relay/<name> \
+    /etc/systemd/system/umbra-relay@<name>.service.d
+sudo systemctl daemon-reload
+```
+
+Until then the other relays of the server can read those files, since one
+user runs each relay of a server.
+
 ## Limits of this deployment
 
 - **The invitation host.** An invitation link is
@@ -346,6 +385,17 @@ app.
   The signer run and the certificate run hold each key with no network.
 - **A user for each relay.** The relays of one server share one user
   ("How it runs").
+- **One TLS key for each server.** Each service of a server reads the same
+  certificate and key in `/etc/umbra/tls`. A fault in one service thus
+  gives the key of the others on that server too. The certificate only
+  carries the session; the identity of a relay and the keys of a gateway
+  are in other files.
+- **SSH.** With an empty `umbra_ssh_from`, port 22 is open to all
+  addresses, behind keys alone and the bans of fail2ban. Root logs in only
+  when `ansible_user` is root.
+- **IPv6.** A relay states an IPv4 address alone, and the notification
+  server and the directory listen on IPv4 alone. The firewall of a gateway
+  lets in the `umbra_ipv6` of a relay server too, for a later IPv6 listener.
 - **The key chain before a rotation.** The signer publishes no key chain
   before the first rotation, as `REL-199` says; nginx answers 404 and logs
   nothing.
@@ -369,7 +419,9 @@ authority tool made its queue. An hour that had a manifest already gives
 `kept=same` or `kept=other`. Each relay has a line with its `class=`.
 
 The log of the authority tool shows `authority online` and, one time,
-`report queue made`. Each report of an app is one line.
+`report queue made`. A minute with new reports gives one line of totals:
+`reports of this run: opened=... counted=... not_opened=...`. The log names
+no hop of a report.
 
 To run the measurer now, and not at its timer:
 

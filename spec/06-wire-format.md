@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 6: Wire Format and Encoding
 
 **Status:** Draft
-**Version:** 0.35.0
+**Version:** 0.36.0
 **Date:** 2026-10-16
 
 ---
@@ -153,7 +153,7 @@ is between 126 and 65 535 bytes, thus the frame header is 4 bytes at each
 bucket. A client frame therefore adds 8 bytes, and a relay frame adds 4 bytes.
 
 **[WIR-499]** A sender MUST put an `UMBRA_SESSION` capsule in a frame with the
-7-bit length form of RFC 6455 §5.2, because that capsule is 47, 35, 23, or
+7-bit length form of RFC 6455 §5.2, because that capsule is 47, 43, 23, or
 15 bytes. Its frame header is 2 bytes. **[WIR-500]** A receiver MUST reject a
 frame in the 16-bit length form whose length is below 126, and a frame in the
 64-bit length form. Thus each length has one frame form.
@@ -200,7 +200,7 @@ it gives each direction of a session the frame count that a resume compares
 SessionFrame {
     session_id   [8]u8    // CSPRNG, one value for each session (§6.2.3)
     seq          [3]u8    // big-endian, the frame index in this session
-    flags        u8       // bit 0: reserved for a resend, zero in v1. bits 1-7: zero
+    flags        u8       // reserved, zero in v1: v1 defines no flag
     cell         [L]u8    // the L3 cell, 512 / 2048 / 8192 / 32768
 }
 ```
@@ -239,10 +239,11 @@ A `u24` gives 16 777 216 frames. A session between two relays carries many
 circuits, thus `CIRCUIT_MAX_CELLS` of Part 3 §3.4.3 does not bound it, and
 the sender closes the link at the last value and opens a new session.
 
-**[WIR-140]** A sender MUST send each frame one time, and it MUST set bit 0
-of `flags` to zero. **[WIR-141]** A receiver MUST
+**[WIR-140]** A sender MUST send each frame one time, and it MUST set
+`flags` to zero. **[WIR-141]** A receiver MUST
 ignore a frame whose `seq` it already accepted. **[WIR-142]** A receiver MUST
-reject a frame whose `flags` holds a non-zero value above bit 0.
+reject a frame whose `flags` is not zero. Thus each bit of `flags` is a
+reserved bit of `WIR-002`, and no implementation sends a resend flag.
 
 > *Cause.* The frame is **not** a reliability layer of its own. TLS and QUIC
 > give the ordering and the retransmission of L1, and the ARQ of Part 3 §3.7
@@ -353,7 +354,12 @@ record that arrives takes its push (Part 8 rule `NTF-128`).
 - **[WIR-542]** An ingress relay MUST park the session of a client link that
   closes with no `SessionClose` and no `SessionPause`, when that link holds
   one circuit or more. It MUST send the `CircuitPause` records at that close.
-  It MUST discard the session of a link that holds no circuit.
+  It MUST discard the session of a link that holds no circuit. It MUST also
+  discard the session of a link whose peer made a fault: a capsule that does
+  not parse, that the link does not carry under `WIR-538`, or that holds a
+  byte after its value, a session control record that does not parse, and a
+  frame that fails its check. Such a peer resumes nothing, and each circuit
+  of the link ends under `NET-322` of Part 3.
 - **[WIR-543]** An ingress relay MUST keep the circuits and the counts of a
   parked session. It cannot send a backward cell that arrives for a parked
   link. It MUST end the circuit of that cell as `NET-349` of Part 3 ends one,
@@ -619,12 +625,12 @@ party MUST NOT compute `auth` as an AEAD ciphertext.
 | `0x31` | `NID` | Relay | `notifier_id`, 32 bytes |
 | `0x32` | `NPK` | Relay | the notification key of the relay, an `UMBRA-KEM` public key of 1 216 bytes, Part 8 §8.2.3 |
 | `0x33` | `NBIND` | Recipient | the sealed `NotifyBinding` of Part 8 §8.2.3, 1 234 bytes |
-| `0x34` | `NSUB` | Notifier | —. The `queue_id` is the `notifier_id`, and the notifier key of Part 8 §8.2.4 signs `auth` |
+| `0x34` | `NSUB` | Notifier | —. The `queue_id` is the `notifier_id`, and the notifier key of Part 8 §8.2.4 makes its `auth` under §3.2.3 of Part 3 |
 | `0x35` | `NWAKE` | Relay | the blob of Part 8 §8.2.2, 69 bytes. The `queue_id` is the `notifier_id` |
 | `0x40` | `DEL` | Recipient | — |
 | `0x50` | `QUOTA` | Relay | the remaining record count of the queue, `u32`, 4 bytes |
 | `0x51` | `NACK` | Relay | `NackPayload`, 17 B, §6.4.4 |
-| `0x60` | `COVER` | Sender or recipient | zero-filled, indistinguishable from `SEND` and `MSG` |
+| `0x60` | `COVER` | Sender or recipient | zero bytes, the length of the L5 payload of a `MSG` at the bucket of the cell, from a client and from a relay; indistinguishable from `SEND` and `MSG` after L4 |
 | `0x70`–`0x7B` | Attachment commands | Uploader, downloader, or relay | Part 12 §12.3.3 gives the twelve commands and their payloads |
 | `0x90`–`0x9A` | Group-queue commands | Member, admin, or relay | §6.4.5 gives the eleven commands and their payloads |
 
@@ -719,8 +725,10 @@ of its own, such as a `MSG`, a `GMSG`, and a `COVER`.
 A `NEW` requests no parameter. The relay applies its own quota of Part 3
 §3.2.4, and `QUOTA` reports it. **[WIR-487]** A party MUST reject a command
 of `ACK`, `NKEY`, `NID`, `QUOTA`, `NACK`, `SUB`, `UNSUB`, `NSUB`, `NWAKE`,
-or `DEL` whose `payload_len` differs from the length that the table above
-gives.
+`DEL`, or `COVER` whose `payload_len` differs from the length that the table
+above gives. It MUST also reject an attachment command whose `payload_len`
+differs from the fixed length that Part 12 §12.3.3 gives it. `CNEW`, `BNEW`,
+and `CREP` have no fixed length, and their payload parse checks them.
 **[WIR-488]** A party MUST reject a `NEW` whose `payload_len` differs from 64
 plus the length of its `Admission`, and an `IDS` whose `payload_len` is not
 96.
@@ -1583,6 +1591,15 @@ the label.
   failure from `session_tag`, from `send_index`, and from the `epoch` of the
   braid frame. **[WIR-254]** A receiver MUST use `send_index` to find the hole
   that Part 7 §7.5.6 rule `DEV-097` names.
+  **[WIR-560]** A receiver MUST NOT count a hole at a `send_index` of a record
+  that opened, also in an earlier run, thus it MUST keep the indices that
+  opened in the store with the channel. It MUST NOT count a hole more than
+  `MAX_SKIP` of Part 5 §5.5.4 above the newest `send_index` that opened, or
+  more than 2 048 below it. Before the first record of a session opens, the
+  newest index counts as one below zero. No key covers the `send_index` of a
+  record that does not open, and each holder of the queue key can write such
+  a record. The two bounds keep the key requests that it draws near the
+  records of the session, and the rate of Part 11 §11.10 bounds their count.
 - **[WIR-255]** A receiver MUST reject a `version` that is not `0x02`.
 
 Part 2 §2.4 rule `THR-009` names a session identifier, a ratchet epoch, and a

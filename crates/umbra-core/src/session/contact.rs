@@ -140,11 +140,11 @@ impl Inviter {
         // prekey spends nothing.
         let held = self.prekey.as_ref().ok_or(Error::Stale)?;
         find_prekey(&pid, core::iter::once(held.id())).ok_or(Error::Unverified)?;
-        let prekey = self.prekey.take().ok_or(Error::Stale)?;
         let mut app_1 = [0u8; QUEUE_ADDRESS_LEN];
+        // WIR-503: a flight that fails keeps the prekey for the true one.
         let (mut responder, read) = Responder::read_flight1(
             identity,
-            prekey,
+            held,
             VERSION_RANGE,
             AddressType::Pairwise,
             flight,
@@ -158,6 +158,8 @@ impl Inviter {
         let mut flight2 = alloc::vec![0u8; FLIGHT2_FIXED + NONCE_LEN + PAYLOAD_OVERHEAD];
         let used = responder.flight2(&[], rng, &mut flight2, &mut NoTrace)?;
         flight2.truncate(used);
+        // CRY-089: the prekey goes with the flight 1 that it served.
+        self.prekey = None;
         self.responder = Some(responder);
         Ok((numbered(FLIGHT_2, &flight2), self.reply_to.insert(reply_to)))
     }
@@ -281,11 +283,10 @@ impl Invitee {
     ) -> Result<(SessionKeys, Vec<u8>), Error> {
         let flight = flight_of(inner, FLIGHT_2)?;
         self.initiator.read_flight2(flight, &mut [], &mut NoTrace)?;
-        let er = Responder::er_of(flight)?;
         let mut flight3 = alloc::vec![0u8; FLIGHT3_FIXED + PAYLOAD_OVERHEAD];
-        let (keys, used) =
-            self.initiator
-                .flight3(identity, &er, &[], &mut flight3, &mut NoTrace)?;
+        let (keys, used) = self
+            .initiator
+            .flight3(identity, &[], &mut flight3, &mut NoTrace)?;
         flight3.truncate(used);
         Ok((keys, numbered(FLIGHT_3, &flight3)))
     }
@@ -344,5 +345,19 @@ mod tests {
         let (_, mut flight1, _) = Invitee::accept(&bundle, &queue(20), &mut rng).unwrap();
         flight1[0] = 3;
         assert!(inviter.on_flight1(&identity, &flight1, &mut rng).is_err());
+    }
+
+    #[test]
+    fn a_flight_1_that_fails_keeps_the_prekey_for_the_true_one() {
+        let mut rng = Rng(1);
+        let identity = RootIdentity::new(Secret::new([1; 32])).pairwise_identity(&[1; 16]);
+        let (mut inviter, bundle) = Inviter::issue(&identity, queue(10), &mut rng).unwrap();
+        let (_, flight1, _) = Invitee::accept(&bundle, &queue(20), &mut rng).unwrap();
+        let mut torn = flight1.clone();
+        *torn.last_mut().unwrap() ^= 1;
+        assert!(inviter.on_flight1(&identity, &torn, &mut rng).is_err());
+        assert_eq!(inviter.awaits(), FLIGHT_1);
+        inviter.on_flight1(&identity, &flight1, &mut rng).unwrap();
+        assert_eq!(inviter.awaits(), FLIGHT_3);
     }
 }

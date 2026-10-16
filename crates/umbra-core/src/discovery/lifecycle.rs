@@ -1,10 +1,9 @@
 //! The lifecycle of a label at the directory (Part 9 §9.9, §9.9.2,
-//! §9.9.3), the takeover check at the client (§9.9.2), and the scheduled
-//! rendezvous rotation (§9.9).
+//! §9.9.3), and the takeover check at the client (§9.9.2).
 
 use alloc::vec::Vec;
 
-use super::{HANDLE_HISTORY_MAX, HANDLE_LEASE, HANDLE_RESERVE, RENDEZVOUS_ROTATE, ROTATE_GRACE};
+use super::{HANDLE_HISTORY_MAX, HANDLE_LEASE, HANDLE_RESERVE};
 use crate::Error;
 
 /// One published version of a label, as the client reads it from the log.
@@ -228,42 +227,6 @@ pub fn assess(held: &Version, between: &[Version]) -> Result<Takeover, Error> {
     Ok(Takeover::Silent)
 }
 
-/// The scheduled rendezvous rotation of one published entry (`DIS-133`
-/// to `DIS-135`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RendezvousSchedule {
-    /// The write time of the current rendezvous version.
-    pub written_at: u64,
-    /// The write time of the previous version, while its grace runs.
-    pub previous_written_at: Option<u64>,
-}
-
-impl RendezvousSchedule {
-    /// A schedule from the first write.
-    pub const fn new(written_at: u64) -> Self {
-        RendezvousSchedule {
-            written_at,
-            previous_written_at: None,
-        }
-    }
-
-    /// Whether a new rendezvous queue is due at `now`.
-    pub fn due(&self, now: u64) -> bool {
-        now.saturating_sub(self.written_at) >= RENDEZVOUS_ROTATE
-    }
-
-    /// Records the write of a new queue at `now`.
-    pub fn rotated(&mut self, now: u64) {
-        self.previous_written_at = Some(self.written_at);
-        self.written_at = now;
-    }
-
-    /// Whether the previous queue is still drained at `now`.
-    pub fn drain_previous(&self, now: u64) -> bool {
-        self.previous_written_at.is_some() && now.saturating_sub(self.written_at) < ROTATE_GRACE
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
@@ -369,16 +332,5 @@ mod tests {
         assert!(assess(&held, &[]).is_err());
         assert!(assess(&held, &restore[1..]).is_err());
         assert_eq!(assess(&restore[1], &rotation), Err(Error::Stale));
-    }
-
-    #[test]
-    fn the_rendezvous_rotates_on_schedule_and_drains_the_previous_queue() {
-        let mut s = RendezvousSchedule::new(0);
-        assert!(!s.due(RENDEZVOUS_ROTATE - 1));
-        assert!(s.due(RENDEZVOUS_ROTATE));
-        assert!(!s.drain_previous(1));
-        s.rotated(RENDEZVOUS_ROTATE);
-        assert!(s.drain_previous(RENDEZVOUS_ROTATE + ROTATE_GRACE - 1));
-        assert!(!s.drain_previous(RENDEZVOUS_ROTATE + ROTATE_GRACE));
     }
 }

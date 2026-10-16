@@ -117,7 +117,6 @@ impl ClientLink {
         let frame = SessionFrame {
             session_id: self.id,
             seq: self.next_seq,
-            resend: false,
             cell,
         };
         let used = frame_capsule(&frame, out)?;
@@ -339,7 +338,6 @@ impl RelayLink {
         let frame = SessionFrame {
             session_id: self.id,
             seq: self.next_seq,
-            resend: false,
             cell,
         };
         let used = frame_capsule(&frame, out)?;

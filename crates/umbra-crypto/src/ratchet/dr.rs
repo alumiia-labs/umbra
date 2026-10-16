@@ -103,6 +103,19 @@ struct Skipped {
     stored_at: u64,
 }
 
+impl Skipped {
+    /// A second copy, for a move into a new buffer that leaves the old one
+    /// to a wipe.
+    fn copy(&self) -> Self {
+        Skipped {
+            hk: self.hk,
+            n: self.n,
+            mk: self.mk,
+            stored_at: self.stored_at,
+        }
+    }
+}
+
 /// One party's state of one pairwise session.
 ///
 /// The field names follow the symbols of Part 5 §5.5.1 and of the Double
@@ -331,7 +344,8 @@ impl Session {
         let session_tag = reader.array()?;
         let mixed = reader.u32()?;
         let count = usize::try_from(reader.u32()?).map_err(|_| Error::Length)?;
-        // CRY-023: a stored session holds no more keys than a live one.
+        // CRY-023: `MAX_STORED` bounds a stored form, and a form above it
+        // is a fault.
         if count > MAX_STORED {
             return Err(Error::Ratchet);
         }
@@ -344,6 +358,11 @@ impl Session {
                 stored_at: reader.u64()?,
             });
         }
+        // CRY-153: a restored session holds no more keys than a live one,
+        // thus the oldest keys above `SKIPPED_CAP` go, as at a skip.
+        let excess = skipped.len().saturating_sub(SKIPPED_CAP);
+        skipped.drain(..excess);
+        skipped.spare_capacity_mut().zeroize();
         Ok(Self {
             rk,
             dh_s,
@@ -590,6 +609,7 @@ impl Session {
             out.copy_from_slice(body_ct);
             open(&mk, &body_nonce, ad, out, body_tag)?;
             self.skipped.remove(index);
+            self.wipe_spare();
             return Ok(Received {
                 ctx,
                 header,
@@ -634,6 +654,32 @@ impl Session {
     pub fn prune(&mut self, now: u64) {
         self.skipped
             .retain(|s| now.saturating_sub(s.stored_at) < SKIP_TTL);
+        self.wipe_spare();
+    }
+
+    /// Wipes the room past the held keys. A removal moves the later keys
+    /// down and leaves a copy of the last one there.
+    fn wipe_spare(&mut self) {
+        self.skipped.spare_capacity_mut().zeroize();
+    }
+
+    /// Makes room for `additional` skipped keys. The keys move to a new
+    /// buffer, and the old one is wiped, as `Vec::reserve` frees it with
+    /// the keys in it.
+    fn reserve_skipped(&mut self, additional: usize) {
+        let needed = self.skipped.len().saturating_add(additional);
+        if needed <= self.skipped.capacity() {
+            return;
+        }
+        let capacity = self
+            .skipped
+            .capacity()
+            .saturating_mul(2)
+            .clamp(needed, needed.max(SKIPPED_CAP));
+        let mut next = Vec::with_capacity(capacity);
+        next.extend(self.skipped.iter().map(Skipped::copy));
+        let mut old = core::mem::replace(&mut self.skipped, next);
+        old.zeroize();
     }
 
     /// Starts the age of each skipped key again at `now`, after a clock
@@ -666,22 +712,42 @@ impl Session {
     pub(crate) fn evict_oldest(&mut self, count: usize) -> usize {
         let count = count.min(self.skipped.len());
         self.skipped.drain(..count);
+        self.wipe_spare();
         count
     }
 
     /// The skipped key whose header key opens the header, with its index.
     /// The caller removes it once the body opens.
+    ///
+    /// The keys of one chain share one header key and sit side by side,
+    /// thus each run of one header key costs one header open.
     fn try_skipped(
         &self,
         nonce: &[u8; 12],
         ad: &[u8],
         hdr_ct: &[u8],
     ) -> Option<(usize, Header, Secret<32>)> {
-        self.skipped.iter().enumerate().find_map(|(i, s)| {
-            let hk = Secret::new(s.hk);
-            let h = open_header(&hk, nonce, ad, hdr_ct).ok()?;
-            (h.n == s.n).then(|| (i, h, Secret::new(s.mk)))
-        })
+        let mut tried: Option<&[u8; 32]> = None;
+        for (start, s) in self.skipped.iter().enumerate() {
+            if tried.is_some_and(|hk| crate::ct_eq(hk, &s.hk)) {
+                continue;
+            }
+            tried = Some(&s.hk);
+            let Ok(h) = open_header(&Secret::new(s.hk), nonce, ad, hdr_ct) else {
+                continue;
+            };
+            // The header opened, thus it names a position of this chain. No
+            // key before `start` holds this header key. A position that no
+            // key holds is a replay.
+            let (i, key) = self
+                .skipped
+                .iter()
+                .enumerate()
+                .skip(start)
+                .find(|(_, k)| k.n == h.n && crate::ct_eq(&k.hk, &s.hk))?;
+            return Some((i, h, Secret::new(key.mk)));
+        }
+        None
     }
 
     fn decrypt_header(
@@ -729,6 +795,8 @@ impl Session {
             .saturating_sub(SKIPPED_CAP)
             .min(self.skipped.len());
         self.skipped.drain(..excess);
+        self.wipe_spare();
+        self.reserve_skipped(adds);
         let mut ck = ck;
         while self.n_r < until {
             let (next, mk) = kdf_ck(&ck);
@@ -856,7 +924,7 @@ mod tests {
             rk: Secret::new([1u8; 32]),
             hk_i2r: Secret::new([2u8; 32]),
             hk_r2i: Secret::new([3u8; 32]),
-            transcript: [0u8; 32],
+            transcript: zeroize::Zeroizing::new([0u8; 32]),
             dh_initial: dh,
         };
         let a = Session::new(keys(InitialDh::Peer(er)), Role::Initiator, &mut rng).unwrap();
@@ -897,6 +965,45 @@ mod tests {
                 .session_tag,
             a.session_tag
         );
+    }
+
+    #[test]
+    fn a_restored_session_holds_no_more_skipped_keys_than_a_live_one() {
+        let (_, mut b, _) = pair(b"restore cap");
+        for n in 0..1_500u32 {
+            b.skipped.push(Skipped {
+                hk: [7; 32],
+                n,
+                mk: [8; 32],
+                stored_at: u64::from(n),
+            });
+        }
+        let mut writer = Writer::new();
+        b.export(&mut writer).unwrap();
+        let bytes = writer.finish();
+        let back = Session::restore(&mut Reader::new(&bytes)).unwrap();
+        assert_eq!(back.skipped_len(), SKIPPED_CAP);
+        // The oldest keys went.
+        assert_eq!(back.skipped_ages().next(), Some(1_500 - SKIPPED_CAP as u64));
+    }
+
+    #[test]
+    fn skipped_keys_of_several_chains_open_their_records() {
+        let (mut a, mut b, mut rng) = pair(b"chains");
+        let mut late = Vec::new();
+        for round in 0..3u8 {
+            late.push(send(&mut a, &mut rng, &[round, 0]));
+            late.push(send(&mut a, &mut rng, &[round, 1]));
+            let m = send(&mut a, &mut rng, &[round, 2]);
+            assert_eq!(recv(&mut b, &mut rng, &m).unwrap(), [round, 2]);
+            let r = send(&mut b, &mut rng, &[round]);
+            assert_eq!(recv(&mut a, &mut rng, &r).unwrap(), [round]);
+        }
+        assert_eq!(b.skipped_len(), 6);
+        for record in late.iter().rev() {
+            assert!(recv(&mut b, &mut rng, record).is_ok());
+        }
+        assert_eq!(b.skipped_len(), 0);
     }
 
     #[test]

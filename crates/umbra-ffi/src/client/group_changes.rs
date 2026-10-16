@@ -33,6 +33,9 @@ pub(super) const GROUP_SENDER: TableId = TableId(0x3B);
 /// A message of a group that the author of a change sent, with its row.
 type Authored = (MsgRef, Zeroizing<Vec<u8>>);
 
+/// A pending entry of a group, with its row.
+type Held = ([u8; 16], Zeroizing<Vec<u8>>);
+
 /// What a change of a group finds at its target.
 enum Target {
     /// The message, which the author of the change sent.
@@ -194,10 +197,68 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(batch.commit()?)
     }
 
-    /// Applies the change that waited for a message of a group that arrived
+    /// The pending entry of a change of the author of a message of a group
+    /// that arrives from `sender` now, at the index `index` (`DEV-093`).
+    /// An entry above `REF_ORPHAN_TTL` counts for nothing (`DEV-095`).
+    fn held_group_entry(
+        &self,
+        conversation: ConversationId,
+        msg_id: &[u8; 16],
+        index: u16,
+        now_ms: u64,
+    ) -> Result<Option<Held>, Error> {
+        let open = self.open_ref()?;
+        let reference = msg_ref(&open.device_set_key, msg_id);
+        let natural = [conversation.0.as_slice(), &reference].concat();
+        let row = open
+            .store
+            .row_id(PENDING, &pending_group_key(&natural, index));
+        let Some(entry) = open.store.get(PENDING, &row)?.map(Zeroizing::new) else {
+            return Ok(None);
+        };
+        let at = entry
+            .get(32..PENDING_ROW_LEN)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u64::from_be_bytes)
+            .ok_or(Error::Integrity)?;
+        if (now_ms / 1_000).saturating_sub(at) >= REF_ORPHAN_TTL {
+            return Ok(None);
+        }
+        Ok(Some((row, entry)))
+    }
+
+    /// Whether a deletion of its author waits for a message of a group that
+    /// arrives from `sender` now (`DEV-093`). The deletion came before its
+    /// target, thus the view shows nothing at that position (`DEV-102`).
+    /// The entry stays until `REF_ORPHAN_TTL`. Each replica gives the
+    /// message, and the copy of the other one stays out with it. The change
+    /// is one of that index, or of the index that a re-key of that member
+    /// moved it to.
+    pub(super) fn held_group_deletion(
+        &self,
+        conversation: ConversationId,
+        msg_id: &[u8; 16],
+        sender: u16,
+        now_ms: u64,
+    ) -> Result<bool, Error> {
+        let moved = self.group_of(conversation)?.roster().successor_of(sender);
+        for index in [Some(sender), moved].into_iter().flatten() {
+            if !self.is_same_member(conversation, sender, index)? {
+                continue;
+            }
+            let held = self.held_group_entry(conversation, msg_id, index, now_ms)?;
+            // An entry with no text is a deletion.
+            if held.is_some_and(|(_, entry)| entry.len() == PENDING_ROW_LEN) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Applies the edit that waited for a message of a group that arrived
     /// from `sender` now (`DEV-093`). The change is one of that index, or
-    /// of the index that a re-key of that member moved it to. An entry
-    /// above `REF_ORPHAN_TTL` counts for nothing (`DEV-095`).
+    /// of the index that a re-key of that member moved it to. A deletion
+    /// that waited took the message before its row (`held_group_deletion`).
     pub(super) fn take_held_group_change<R: CryptoRng + ?Sized>(
         &mut self,
         conversation: ConversationId,
@@ -212,36 +273,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if !self.is_same_member(conversation, sender, index)? {
                 continue;
             }
-            let open = self.open_mut()?;
-            let reference = msg_ref(&open.device_set_key, msg_id);
-            let natural = [conversation.0.as_slice(), &reference].concat();
-            let row = open
-                .store
-                .row_id(PENDING, &pending_group_key(&natural, index));
-            let Some(entry) = open.store.get(PENDING, &row)?.map(Zeroizing::new) else {
+            let Some((row, entry)) = self.held_group_entry(conversation, msg_id, index, now_ms)?
+            else {
                 continue;
             };
+            let text = entry.get(PENDING_ROW_LEN..).ok_or(Error::Integrity)?;
+            // An entry with no text is a deletion, and it stays.
+            if text.is_empty() {
+                continue;
+            }
+            let open = self.open_mut()?;
             let mut batch = open.store.begin();
             batch.delete(PENDING, row);
             batch.commit()?;
-            let at = entry
-                .get(32..PENDING_ROW_LEN)
-                .and_then(|bytes| bytes.try_into().ok())
-                .map(u64::from_be_bytes)
-                .ok_or(Error::Integrity)?;
-            if (now_ms / 1_000).saturating_sub(at) >= REF_ORPHAN_TTL {
-                continue;
-            }
-            let text = entry.get(PENDING_ROW_LEN..).ok_or(Error::Integrity)?;
-            // An entry with no text is a deletion, and it is terminal.
-            if text.is_empty() {
-                self.leave_placeholder(conversation, message, rng)?;
-                self.events.push_back(Event::Deleted {
-                    conversation,
-                    message,
-                });
-                return Ok(());
-            }
             self.put_group_edit(conversation, message, text, now_ms, rng)?;
         }
         Ok(())

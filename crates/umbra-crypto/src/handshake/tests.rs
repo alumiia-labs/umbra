@@ -59,7 +59,7 @@ fn run_xk(
     let mut app1 = [0u8; 64];
     let (mut resp, got) = Responder::read_flight1(
         &p.s_r,
-        prekey,
+        &prekey,
         range_r,
         AddressType::Pairwise,
         &f1[..n1],
@@ -73,10 +73,8 @@ fn run_xk(
     let mut app2 = [0u8; 64];
     let m = init.read_flight2(&f2[..n2], &mut app2, &mut NoTrace)?;
     assert_eq!(&app2[..m], b"app-two");
-
-    let er = Responder::er_of(&f2[..n2])?;
     let mut f3 = [0u8; 4096];
-    let (ki, n3) = init.flight3(&p.s_i, &er, b"", &mut f3, &mut NoTrace)?;
+    let (ki, n3) = init.flight3(&p.s_i, b"", &mut f3, &mut NoTrace)?;
     let mut app3 = [0u8; 64];
     let (kr, s_i, m3) = resp.read_flight3(&f3[..n3], &mut app3, &mut NoTrace)?;
     assert_eq!(m3, 0);
@@ -121,7 +119,7 @@ fn xk_each_side_continues_from_its_stored_form() {
     let mut init = Initiator::restore(&init.export()).unwrap();
     let (mut resp, _) = Responder::read_flight1(
         &p.s_r,
-        prekey,
+        &prekey,
         VersionRange::V1,
         AddressType::Pairwise,
         &f1[..n1],
@@ -137,11 +135,8 @@ fn xk_each_side_continues_from_its_stored_form() {
         .unwrap();
     let resp = Responder::restore(&resp.export().unwrap()).unwrap();
     init.read_flight2(&f2[..n2], &mut [], &mut NoTrace).unwrap();
-    let er = Responder::er_of(&f2[..n2]).unwrap();
     let mut f3 = [0u8; 4096];
-    let (ki, n3) = init
-        .flight3(&p.s_i, &er, b"", &mut f3, &mut NoTrace)
-        .unwrap();
+    let (ki, n3) = init.flight3(&p.s_i, b"", &mut f3, &mut NoTrace).unwrap();
     let (kr, s_i, _) = resp.read_flight3(&f3[..n3], &mut [], &mut NoTrace).unwrap();
     assert_eq!(ki.rk.expose(), kr.rk.expose());
     assert_eq!(ki.transcript, kr.transcript);
@@ -208,7 +203,7 @@ fn xk_a_changed_flight_aborts() {
     let mut app = [0u8; 64];
     let r = Responder::read_flight1(
         &p.s_r,
-        OneTimePrekey::from_seed(Secret::new([1u8; 64])),
+        &OneTimePrekey::from_seed(Secret::new([1u8; 64])),
         VersionRange::V1,
         AddressType::Pairwise,
         &bad[..n1],
@@ -221,7 +216,7 @@ fn xk_a_changed_flight_aborts() {
     bad[3 + 16 + 32 + 1184 + 7] ^= 1;
     let r = Responder::read_flight1(
         &p.s_r,
-        prekey,
+        &prekey,
         VersionRange::V1,
         AddressType::Pairwise,
         &bad[..n1],
@@ -254,7 +249,7 @@ fn xk_a_flight_3_that_does_not_verify_leaves_the_responder_for_the_true_one() {
     .unwrap();
     let (mut resp, _) = Responder::read_flight1(
         &p.s_r,
-        prekey,
+        &prekey,
         VersionRange::V1,
         AddressType::Pairwise,
         &f1[..n1],
@@ -274,11 +269,8 @@ fn xk_a_flight_3_that_does_not_verify_leaves_the_responder_for_the_true_one() {
         Some(Error::Handshake)
     );
     init.read_flight2(&f2[..n2], &mut [], &mut NoTrace).unwrap();
-    let er = Responder::er_of(&f2[..n2]).unwrap();
     let mut f3 = [0u8; 4096];
-    let (ki, n3) = init
-        .flight3(&p.s_i, &er, b"", &mut f3, &mut NoTrace)
-        .unwrap();
+    let (ki, n3) = init.flight3(&p.s_i, b"", &mut f3, &mut NoTrace).unwrap();
     // A second holder of the invitation writes a flight 3 of its own, and
     // the flight of the initiator arrives with a changed byte.
     let before = resp.export().unwrap();
@@ -325,7 +317,7 @@ fn xk_a_wrong_address_type_at_one_side_aborts() {
     let mut app = [0u8; 64];
     let r = Responder::read_flight1(
         &p.s_r,
-        prekey,
+        &prekey,
         VersionRange::V1,
         AddressType::Published,
         &f1[..n1],
@@ -360,7 +352,7 @@ fn xk_an_all_zero_ephemeral_aborts() {
     let mut app = [0u8; 64];
     let r = Responder::read_flight1(
         &p.s_r,
-        prekey,
+        &prekey,
         VersionRange::V1,
         AddressType::Pairwise,
         &f1[..n1],
@@ -368,6 +360,51 @@ fn xk_an_all_zero_ephemeral_aborts() {
         &mut NoTrace,
     );
     assert_eq!(r.err(), Some(Error::Handshake));
+}
+
+#[test]
+fn xk_a_flight_1_that_fails_keeps_the_prekey_for_the_true_one() {
+    let mut p = parties(b"keep");
+    let prekey = OneTimePrekey::generate(&mut p.rng);
+    let s1 = *prekey.encapsulation_key();
+    let inv = Invitation {
+        s: p.s_r.x25519_public(),
+        s1: &s1,
+        range_r: VersionRange::V1,
+    };
+    let mut f1 = [0u8; 4096];
+    let (init, n1) = Initiator::flight1(
+        &inv,
+        VersionRange::V1,
+        AddressType::Pairwise,
+        b"",
+        &mut p.rng,
+        &mut f1,
+        &mut NoTrace,
+    )
+    .unwrap();
+    let mut torn = f1;
+    torn[n1 - 1] ^= 1;
+    let mut app = [0u8; 64];
+    let read = |flight: &[u8], app: &mut [u8]| {
+        Responder::read_flight1(
+            &p.s_r,
+            &prekey,
+            VersionRange::V1,
+            AddressType::Pairwise,
+            flight,
+            app,
+            &mut NoTrace,
+        )
+    };
+    assert_eq!(read(&torn[..n1], &mut app).err(), Some(Error::Handshake));
+    assert!(read(&f1[..n1], &mut app).is_ok());
+    // An initiator whose flight 2 did not verify holds no `er`.
+    let mut f3 = [0u8; 4096];
+    assert_eq!(
+        init.flight3(&p.s_i, b"", &mut f3, &mut NoTrace).err(),
+        Some(Error::Handshake)
+    );
 }
 
 #[test]

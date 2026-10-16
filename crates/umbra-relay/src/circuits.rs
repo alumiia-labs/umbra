@@ -6,7 +6,7 @@
 //! The table takes no socket. Each call returns the cells to send and the
 //! bodies to serve, and the node moves them.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use umbra_crypto::{
     handshake::nk::RelayStatic, rand_core::CryptoRng, secret::Secret, x25519::StaticSecret,
@@ -47,6 +47,25 @@ pub const RELAY_LINK_BUILD_RATE: u32 = 1_024;
 /// `RELAY_CIRCUITS_MAX`: the circuits that one relay holds at once
 /// (`NET-331`).
 pub const RELAY_CIRCUITS_MAX: usize = 1 << 19;
+/// `SOURCE_BUILD_BURST`: the builds that the links of one address may send
+/// at once (`NET-332`). The count of an address outlives its links.
+pub const SOURCE_BUILD_BURST: u32 = 256;
+/// `SOURCE_BUILD_RATE`: the builds that one address gets back each second
+/// after its burst (`NET-332`).
+pub const SOURCE_BUILD_RATE: u32 = 4;
+/// The addresses whose build count the table holds at once. Each address
+/// above it shares one count, thus a party with many addresses grows no
+/// map.
+pub const SOURCE_BUDGETS_MAX: usize = 1 << 16;
+/// The key of the count that the addresses above `SOURCE_BUDGETS_MAX`
+/// share. No address of a peer cuts to it.
+const OVERFLOW_SOURCE: [u8; 16] = [0xFF; 16];
+/// `HELLO_REPLAY_MIN`: the ephemeral keys of the last hellos that a relay
+/// keeps at least, to refuse a repeat before its key agreement (`NET-361`).
+pub const HELLO_REPLAY_MIN: usize = 1 << 16;
+/// `CIRCUIT_DELAYED_MAX`: the forward cells of one circuit that wait for
+/// their per-hop delay at once (`NET-362`).
+pub const CIRCUIT_DELAYED_MAX: u32 = 1_024;
 
 /// Who holds the circuits of a link, for the share of the table that one
 /// party takes (`NET-331`). The links of one holder count together.
@@ -93,12 +112,48 @@ enum Measure {
     Open { until: u64 },
 }
 
+/// The builds that one party holds: a token bucket (`NET-332`).
+#[derive(Debug, Clone, Copy)]
+struct Tokens {
+    builds: u32,
+    refilled_at: u64,
+}
+
+impl Tokens {
+    const fn full(burst: u32, now: u64) -> Self {
+        Tokens {
+            builds: burst,
+            refilled_at: now,
+        }
+    }
+
+    /// Gives back `rate` builds for each second since the last refill, up
+    /// to `burst`. A clock that steps back gives nothing.
+    fn refill(&mut self, now: u64, burst: u32, rate: u32) {
+        let seconds = now.saturating_sub(self.refilled_at);
+        let refill = u32::try_from(seconds)
+            .unwrap_or(u32::MAX)
+            .saturating_mul(rate);
+        self.builds = self.builds.saturating_add(refill).min(burst);
+        self.refilled_at = self.refilled_at.max(now);
+    }
+}
+
+/// The circuits, the burst, and the rate of builds of a link of `origin`.
+const fn limits_of(origin: Origin) -> (u32, u32, u32) {
+    match origin {
+        Origin::Relay => (u32::MAX, RELAY_LINK_BUILD_BURST, RELAY_LINK_BUILD_RATE),
+        Origin::Client | Origin::Barred | Origin::Measurer => {
+            (LINK_CIRCUITS_MAX, LINK_BUILD_BURST, LINK_BUILD_RATE)
+        }
+    }
+}
+
 /// What one link spent of its circuits and its builds.
 #[derive(Debug, Clone, Copy)]
 struct LinkBudget {
     circuits: u32,
-    builds: u32,
-    refilled_at: u64,
+    tokens: Tokens,
     /// The circuits, the burst, and the rate of the origin of the link.
     circuits_max: u32,
     burst: u32,
@@ -107,36 +162,64 @@ struct LinkBudget {
 
 impl LinkBudget {
     const fn new(origin: Origin, now: u64) -> Self {
-        let (circuits_max, burst, rate) = match origin {
-            Origin::Relay => (u32::MAX, RELAY_LINK_BUILD_BURST, RELAY_LINK_BUILD_RATE),
-            Origin::Client | Origin::Barred | Origin::Measurer => {
-                (LINK_CIRCUITS_MAX, LINK_BUILD_BURST, LINK_BUILD_RATE)
-            }
-        };
+        let (circuits_max, burst, rate) = limits_of(origin);
         LinkBudget {
             circuits: 0,
-            builds: burst,
-            refilled_at: now,
+            tokens: Tokens::full(burst, now),
             circuits_max,
             burst,
             rate,
         }
     }
 
+    /// Takes the limits of the origin of the link now. A link that built a
+    /// measurement candidate before its `RelayHello` verified then builds
+    /// as the link of a relay.
+    fn retune(&mut self, origin: Origin) {
+        let (circuits_max, burst, rate) = limits_of(origin);
+        self.circuits_max = circuits_max;
+        self.burst = burst;
+        self.rate = rate;
+        self.tokens.builds = self.tokens.builds.min(burst);
+    }
+
+    /// Whether the link holds room for one more build at `now`.
+    fn has_room(&mut self, now: u64) -> bool {
+        self.tokens.refill(now, self.burst, self.rate);
+        self.circuits < self.circuits_max && self.tokens.builds > 0
+    }
+
     /// Takes one build at `now`, or refuses it.
+    #[cfg(test)]
     fn take(&mut self, now: u64) -> bool {
-        let seconds = now.saturating_sub(self.refilled_at);
-        let refill = u32::try_from(seconds)
-            .unwrap_or(u32::MAX)
-            .saturating_mul(self.rate);
-        self.builds = self.builds.saturating_add(refill).min(self.burst);
-        self.refilled_at = now;
-        if self.circuits >= self.circuits_max || self.builds == 0 {
+        if !self.has_room(now) {
             return false;
         }
-        self.builds -= 1;
+        self.tokens.builds -= 1;
         self.circuits += 1;
         true
+    }
+}
+
+/// The ephemeral keys of the last hellos that this relay ran a key
+/// agreement for (`NET-361`). Two sets of at most `HELLO_REPLAY_MIN` each
+/// take turns, thus the relay keeps at least the last `HELLO_REPLAY_MIN`.
+#[derive(Default)]
+struct Hellos {
+    current: HashSet<[u8; 16]>,
+    previous: HashSet<[u8; 16]>,
+}
+
+impl Hellos {
+    fn holds(&self, ephemeral: &[u8; 16]) -> bool {
+        self.current.contains(ephemeral) || self.previous.contains(ephemeral)
+    }
+
+    fn keep(&mut self, ephemeral: [u8; 16]) {
+        if self.current.len() >= HELLO_REPLAY_MIN {
+            self.previous = core::mem::take(&mut self.current);
+        }
+        self.current.insert(ephemeral);
     }
 }
 
@@ -269,9 +352,10 @@ pub enum Action {
 struct Held {
     hop: RelayHop,
     next: Option<CircuitKey>,
-    /// The next hop did not answer the `EXTEND` yet.
+    /// The circuit asked for its next hop with an `EXTEND`, and that hop
+    /// did not answer yet. The `EXTEND` can wait for the link to that hop.
     extending: bool,
-    /// The time at which the `EXTEND` went to the next hop.
+    /// The time of that `EXTEND`.
     extended_at: u64,
     /// `RelaySession_sk` at a relay of layer 3 (`NET-285`).
     session_secret: Option<StaticSecret>,
@@ -325,6 +409,14 @@ pub struct CircuitTable {
     /// The budget of each link that built a circuit here (`NET-331`,
     /// `NET-332`).
     budgets: BTreeMap<LinkId, LinkBudget>,
+    /// The address of each link, as the runtime cut it.
+    sources: BTreeMap<LinkId, [u8; 16]>,
+    /// The builds of each address (`NET-332`). A count outlives the links
+    /// of its address, thus a new connection gets no new burst. A count
+    /// that is full again leaves, because a new one is the same.
+    source_budgets: BTreeMap<[u8; 16], Tokens>,
+    /// The ephemeral keys of the last hellos (`NET-361`).
+    hellos: Hellos,
     /// The holder of each link that the node named one for.
     holders: BTreeMap<LinkId, Holder>,
     /// The circuits of each holder, and the same counts in their order.
@@ -362,6 +454,9 @@ impl CircuitTable {
             held: BTreeMap::new(),
             back: BTreeMap::new(),
             budgets: BTreeMap::new(),
+            sources: BTreeMap::new(),
+            source_budgets: BTreeMap::new(),
+            hellos: Hellos::default(),
             holders: BTreeMap::new(),
             counts: BTreeMap::new(),
             ranked: BTreeSet::new(),
@@ -391,6 +486,52 @@ impl CircuitTable {
         if self.circuits_on(link) == 0 {
             self.holders.insert(link, holder);
         }
+    }
+
+    /// Names the address of `link`, as the runtime cut it. The builds of
+    /// a client link and of the link of a measurer count against that
+    /// address too (`NET-332`).
+    pub fn set_source(&mut self, link: LinkId, source: [u8; 16]) {
+        self.sources.insert(link, source);
+    }
+
+    /// Takes one build of `link` at `now` from the budget of the link and
+    /// from the budget of its address, or refuses it (`NET-331`,
+    /// `NET-332`).
+    fn take_build(&mut self, link: LinkId, origin: Origin, now: u64) -> bool {
+        let budget = self
+            .budgets
+            .entry(link)
+            .or_insert_with(|| LinkBudget::new(origin, now));
+        budget.retune(origin);
+        if !budget.has_room(now) {
+            return false;
+        }
+        let source = match origin {
+            Origin::Client | Origin::Measurer => self.sources.get(&link).copied(),
+            Origin::Relay | Origin::Barred => None,
+        };
+        if let Some(source) = source {
+            let key = if self.source_budgets.contains_key(&source)
+                || self.source_budgets.len() < SOURCE_BUDGETS_MAX
+            {
+                source
+            } else {
+                OVERFLOW_SOURCE
+            };
+            let tokens = self
+                .source_budgets
+                .entry(key)
+                .or_insert(Tokens::full(SOURCE_BUILD_BURST, now));
+            tokens.refill(now, SOURCE_BUILD_BURST, SOURCE_BUILD_RATE);
+            if tokens.builds == 0 {
+                return false;
+            }
+            tokens.builds -= 1;
+        }
+        budget.tokens.builds -= 1;
+        budget.circuits += 1;
+        true
     }
 
     /// The holder of `link`.
@@ -554,17 +695,23 @@ impl CircuitTable {
         if named.relay_id != self.relay.relay_id {
             return Vec::new();
         }
-        let delay_mean_ms = named.delay_class.mean_ms();
-        // NET-331, NET-332: a link above its circuits or its rate of builds
-        // gets no answer, before the handshake costs this relay a key
-        // agreement.
-        let budget = self
-            .budgets
-            .entry(key.link)
-            .or_insert_with(|| LinkBudget::new(origin, now));
-        if !budget.take(now) {
+        // NET-361: a hello whose ephemeral key this relay ran an agreement
+        // for gets no answer. A repeat would cost that agreement again and
+        // give its sender no key, and it costs the sender nothing.
+        let Some(ephemeral) = named.flight1.first_chunk::<16>().copied() else {
+            return Vec::new();
+        };
+        if self.hellos.holds(&ephemeral) {
             return Vec::new();
         }
+        let delay_mean_ms = named.delay_class.mean_ms();
+        // NET-331, NET-332: a link above its circuits or its rate of builds,
+        // or an address above its rate, gets no answer, before the
+        // handshake costs this relay a key agreement.
+        if !self.take_build(key.link, origin, now) {
+            return Vec::new();
+        }
+        self.hellos.keep(ephemeral);
         let is_candidate = origin == Origin::Measurer;
         let mut reply = [0u8; REPLY_LEN];
         // A candidate ends at this relay in each layer, and it serves no
@@ -653,6 +800,22 @@ impl CircuitTable {
         if held.delay_mean_ms == 0 || held.measure != Measure::No {
             return actions;
         }
+        // NET-362: a circuit holds at most `CIRCUIT_DELAYED_MAX` cells for
+        // their delay. A cell that dropped would break the chain of its
+        // layer, thus the circuit ends.
+        let held_back = actions
+            .iter()
+            .filter(|action| {
+                matches!(
+                    action,
+                    Action::Send { .. } | Action::Serve { .. } | Action::Loop { .. }
+                )
+            })
+            .count();
+        let held_back = u32::try_from(held_back).unwrap_or(u32::MAX);
+        if held.delayed_out.saturating_add(held_back) > CIRCUIT_DELAYED_MAX {
+            return self.close(key);
+        }
         actions
             .into_iter()
             .map(|action| match action {
@@ -684,6 +847,11 @@ impl CircuitTable {
         let Some(held) = self.held.get_mut(&key) else {
             return Vec::new();
         };
+        // NET-339: the end of the circuit waits for its delayed cells, and
+        // a forward cell after that end goes nowhere.
+        if held.ending {
+            return Vec::new();
+        }
         let measure = held.measure;
         let over = match measure {
             // REL-201: the end of the session bounds the circuit, and
@@ -729,9 +897,17 @@ impl CircuitTable {
             return self.close(key);
         };
         match (measure, command) {
-            // NET-169: the client ended its build here, and the relays
-            // after this one learn it by the link (`NET-322`).
-            (_, CellCommand::Destroy) => return self.end(key, Some(key.link)),
+            // NET-169, NET-322: the client ended its circuit here. The
+            // relays before this one moved the `DESTROY` as a cell of the
+            // middle, thus they learn the end from this relay by the link.
+            // An ingress relay took it from the client itself, and the
+            // relay of a measurement circuit from its measurer: that link
+            // gets no `Destroy`. Before this, hops 1 and 2 kept a retired
+            // circuit until `CIRCUIT_MAX_AGE`.
+            (_, CellCommand::Destroy) => {
+                let from = (self.layer == 1 || measure != Measure::No).then_some(key.link);
+                return self.end(key, from);
+            }
             // REL-002: the echo of an open session, in bucket `B0` alone
             // (`REL-041`). Each other cell of that circuit drops.
             (Measure::Open { .. }, CellCommand::MeasEcho) if bucket == Bucket::B0 => {
@@ -770,14 +946,27 @@ impl CircuitTable {
             }],
             (CellCommand::Loop, 3) => vec![Action::Loop { circuit: key }],
             // NET-166: a relay of layer 3 extends no circuit.
-            (CellCommand::Extend, 1 | 2) => match HopHello::parse(content) {
-                Ok(hello) => vec![Action::Extend {
+            (CellCommand::Extend, 1 | 2) => {
+                // NET-150, NET-319: one `EXTEND` in `B1` for each circuit.
+                // A second one while the first waits for its next hop ends
+                // the circuit. Before this, each one held a copy of its body
+                // at the node until the dial opened.
+                if is_extending || bucket != BUILD_BUCKET {
+                    return self.close(key);
+                }
+                let Ok(relay_id) = HopHello::parse(content).map(|hello| hello.relay_id) else {
+                    return Vec::new();
+                };
+                if let Some(held) = self.held.get_mut(&key) {
+                    held.extending = true;
+                    held.extended_at = now;
+                }
+                vec![Action::Extend {
                     from: key,
-                    relay_id: hello.relay_id,
+                    relay_id,
                     body: body.to_vec(),
-                }],
-                Err(_) => Vec::new(),
-            },
+                }]
+            }
             _ => Vec::new(),
         }
     }
@@ -1090,6 +1279,7 @@ impl CircuitTable {
             .collect();
         self.budgets.remove(&link);
         self.holders.remove(&link);
+        self.sources.remove(&link);
         actions
     }
 
@@ -1122,12 +1312,22 @@ impl CircuitTable {
             })
             .map(|(key, _)| *key)
             .collect();
+        // NET-332: the count of an address that is full again leaves.
+        self.source_budgets.retain(|_, tokens| {
+            tokens.refill(now, SOURCE_BUILD_BURST, SOURCE_BUILD_RATE);
+            tokens.builds < SOURCE_BUILD_BURST
+        });
         aged.into_iter().flat_map(|key| self.close(key)).collect()
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
 mod tests {
     use super::*;
 
@@ -1212,5 +1412,301 @@ mod tests {
         assert!(!budget.take(now));
         budget.circuits -= 1;
         assert!(budget.take(now));
+    }
+
+    struct Rng(u64);
+    impl umbra_crypto::rand_core::TryRng for Rng {
+        type Error = core::convert::Infallible;
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+            Ok(self.try_next_u64()? as u32)
+        }
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            Ok(self.0 >> 11 ^ self.0 << 7)
+        }
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+            for byte in dst {
+                *byte = self.try_next_u64()? as u8;
+            }
+            Ok(())
+        }
+    }
+    impl umbra_crypto::rand_core::TryCryptoRng for Rng {}
+
+    use umbra_crypto::x25519::PublicKey as XPublic;
+    use umbra_onion::{
+        build::{DelayClass, Pending, HELLO_LEN},
+        layer::KeySet,
+    };
+
+    /// A relay of `layer` and its table.
+    fn relay(seed: u8, layer: u8) -> (RelayStatic, CircuitTable) {
+        let secret = StaticSecret::from([seed; 32]);
+        let relay = RelayStatic {
+            s: *XPublic::from(&secret).as_bytes(),
+            relay_id: [seed; 32],
+        };
+        let table = CircuitTable::new(
+            RelayStatic {
+                s: relay.s,
+                relay_id: relay.relay_id,
+            },
+            secret,
+            layer,
+        );
+        (relay, table)
+    }
+
+    /// The plain build cell of a hello to `relay` on `circ_id`.
+    fn build_cell(
+        relay: &RelayStatic,
+        circ_id: [u8; 16],
+        class: DelayClass,
+        rng: &mut Rng,
+    ) -> (Vec<u8>, Pending) {
+        let mut hello = [0u8; HELLO_LEN];
+        let pending = Pending::hello(relay, class, rng, &mut hello).unwrap();
+        let mut body = vec![0u8; BUILD_BUCKET.body_len()];
+        build_cell_body(CellCommand::Extend, &hello, &mut body).unwrap();
+        ([circ_id.as_slice(), &[0u8; 16], &body].concat(), pending)
+    }
+
+    /// Builds one hop at `table` on `link`, and gives the key set of that
+    /// hop.
+    fn one_hop(
+        table: &mut CircuitTable,
+        relay: &RelayStatic,
+        link: LinkId,
+        circ_id: [u8; 16],
+        class: DelayClass,
+        rng: &mut Rng,
+    ) -> KeySet {
+        let (cell, pending) = build_cell(relay, circ_id, class, rng);
+        let actions = table.on_cell(link, &cell, Origin::Relay, 100, rng);
+        let [Action::Send { cell, .. }] = &actions[..] else {
+            panic!("no answer: {actions:?}");
+        };
+        let (_, reply) = read_cell_body(&cell[32..]).unwrap();
+        let ss = pending.finish(reply).unwrap();
+        KeySet::derive(&ss, u32::from(table.layer))
+    }
+
+    /// A forward cell of `command` under the layer of `hop`, which runs the
+    /// key update of a hop 3 layer when `endpoint` holds.
+    fn sealed(
+        hop: &mut KeySet,
+        circ_id: [u8; 16],
+        bucket: Bucket,
+        command: CellCommand,
+        endpoint: bool,
+    ) -> Vec<u8> {
+        let mut body = vec![0u8; bucket.body_len()];
+        pad_body(bucket, command, &[], &mut body).unwrap();
+        let tag = hop.forward.encipher(&[0u8; 16], &mut body).unwrap();
+        if endpoint {
+            hop.forward.update(&tag);
+        }
+        [circ_id.as_slice(), &tag, &body].concat()
+    }
+
+    fn answered(actions: &[Action]) -> bool {
+        actions
+            .iter()
+            .any(|action| matches!(action, Action::Send { .. }))
+    }
+
+    #[test]
+    fn a_repeated_hello_gets_no_answer_and_costs_no_build() {
+        let (relay, mut table) = relay(0xA1, 1);
+        let mut rng = Rng(3);
+        let (cell, _) = build_cell(&relay, [1; 16], DelayClass::Fast, &mut rng);
+        assert!(answered(&table.on_cell(
+            2,
+            &cell,
+            Origin::Client,
+            100,
+            &mut rng
+        )));
+        // NET-361: the same hello on another circuit, and on another link,
+        // gets no answer before the key agreement.
+        let mut again = cell.clone();
+        again[..16].copy_from_slice(&[2; 16]);
+        assert!(table
+            .on_cell(2, &again, Origin::Client, 100, &mut rng)
+            .is_empty());
+        again[..16].copy_from_slice(&[3; 16]);
+        assert!(table
+            .on_cell(4, &again, Origin::Client, 100, &mut rng)
+            .is_empty());
+        assert_eq!(table.circuits_on(2), 1);
+        assert_eq!(table.circuits_on(4), 0);
+        // A fresh hello passes.
+        let (fresh, _) = build_cell(&relay, [4; 16], DelayClass::Fast, &mut rng);
+        assert!(answered(&table.on_cell(
+            2,
+            &fresh,
+            Origin::Client,
+            100,
+            &mut rng
+        )));
+    }
+
+    #[test]
+    fn an_address_keeps_its_build_count_across_its_links() {
+        let (relay, mut table) = relay(0xA1, 1);
+        let mut rng = Rng(5);
+        let source = [0x20; 16];
+        let mut circ = 0u32;
+        let mut build = |table: &mut CircuitTable, link: LinkId, rng: &mut Rng, now: u64| {
+            circ += 1;
+            let mut circ_id = [0u8; 16];
+            circ_id[..4].copy_from_slice(&circ.to_be_bytes());
+            let (cell, _) = build_cell(&relay, circ_id, DelayClass::Fast, rng);
+            answered(&table.on_cell(link, &cell, Origin::Client, now, rng))
+        };
+        // NET-332: four links of one address spend the burst of the address
+        // together.
+        let links = u64::from(SOURCE_BUILD_BURST / LINK_BUILD_BURST);
+        for link in 0..links {
+            table.set_source(link, source);
+            for _ in 0..LINK_BUILD_BURST {
+                assert!(build(&mut table, link, &mut rng, 100));
+            }
+        }
+        // A new connection of that address gets no new burst, and one of
+        // another address does.
+        table.set_source(50, source);
+        assert!(!build(&mut table, 50, &mut rng, 100));
+        table.set_source(51, [0x21; 16]);
+        assert!(build(&mut table, 51, &mut rng, 100));
+        // The count outlives the links of the address.
+        for link in 0..links {
+            table.link_closed(link);
+        }
+        table.link_closed(50);
+        table.set_source(52, source);
+        assert!(!build(&mut table, 52, &mut rng, 100));
+        // One second gives `SOURCE_BUILD_RATE` builds back.
+        for _ in 0..SOURCE_BUILD_RATE {
+            assert!(build(&mut table, 52, &mut rng, 101));
+        }
+        assert!(!build(&mut table, 52, &mut rng, 101));
+        // A count that is full again leaves the table at the sweep.
+        assert_eq!(table.source_budgets.len(), 2);
+        table.expire(101 + u64::from(SOURCE_BUILD_BURST));
+        assert!(table.source_budgets.is_empty());
+    }
+
+    #[test]
+    fn a_link_that_built_as_a_measurer_builds_as_a_relay_after_its_hello() {
+        let mut budget = LinkBudget::new(Origin::Measurer, 0);
+        for _ in 0..LINK_BUILD_BURST {
+            assert!(budget.take(0));
+        }
+        assert!(!budget.take(0));
+        // NET-332: the hello verified, and the link takes the limits of a
+        // relay link at its next build.
+        budget.retune(Origin::Relay);
+        assert!(budget.take(1));
+        assert_eq!(budget.circuits_max, u32::MAX);
+        assert!(budget.tokens.builds >= RELAY_LINK_BUILD_RATE - 1);
+    }
+
+    #[test]
+    fn the_hop_that_reads_a_destroy_tells_the_hop_before_it() {
+        let mut rng = Rng(7);
+        // NET-322: at layer 2 the previous hop moved the `DESTROY` as a
+        // cell of the middle, thus it learns the end by the link.
+        let (relay, mut table) = relay(0xB2, 2);
+        let mut hop = one_hop(&mut table, &relay, 1, [5; 16], DelayClass::Fast, &mut rng);
+        let cell = sealed(&mut hop, [5; 16], Bucket::B0, CellCommand::Destroy, false);
+        let actions = table.on_cell(1, &cell, Origin::Relay, 101, &mut rng);
+        assert!(actions.contains(&Action::Destroy {
+            link: 1,
+            circ_id: [5; 16]
+        }));
+        assert!(table.is_empty());
+        // An ingress relay took it from the client itself.
+        let (relay, mut table) = self::relay(0xA1, 1);
+        let mut hop = one_hop(&mut table, &relay, 2, [6; 16], DelayClass::Fast, &mut rng);
+        let cell = sealed(&mut hop, [6; 16], Bucket::B0, CellCommand::Destroy, false);
+        let actions = table.on_cell(2, &cell, Origin::Client, 101, &mut rng);
+        assert!(!actions
+            .iter()
+            .any(|action| matches!(action, Action::Destroy { .. })));
+        assert!(table.is_empty());
+    }
+
+    #[test]
+    fn a_circuit_asks_for_its_next_hop_once_and_in_b1() {
+        let mut rng = Rng(9);
+        let (relay, mut table) = relay(0xB2, 2);
+        let (next, _) = self::relay(0xC3, 3);
+        let mut hello = [0u8; HELLO_LEN];
+        let _ = Pending::hello(&next, DelayClass::Fast, &mut rng, &mut hello).unwrap();
+        let extend = |hop: &mut KeySet, circ_id: [u8; 16], bucket: Bucket| {
+            let mut body = vec![0u8; bucket.body_len()];
+            pad_body(bucket, CellCommand::Extend, &hello, &mut body).unwrap();
+            let tag = hop.forward.encipher(&[0u8; 16], &mut body).unwrap();
+            [circ_id.as_slice(), &tag, &body].concat()
+        };
+        let mut hop = one_hop(&mut table, &relay, 1, [5; 16], DelayClass::Fast, &mut rng);
+        let cell = extend(&mut hop, [5; 16], Bucket::B1);
+        let actions = table.on_cell(1, &cell, Origin::Relay, 101, &mut rng);
+        assert!(matches!(actions[..], [Action::Extend { .. }]));
+        // NET-319: a second `EXTEND` while the first waits ends the circuit.
+        let cell = extend(&mut hop, [5; 16], Bucket::B1);
+        let actions = table.on_cell(1, &cell, Origin::Relay, 101, &mut rng);
+        assert!(actions.contains(&Action::Closed {
+            circuit: CircuitKey {
+                link: 1,
+                circ_id: [5; 16]
+            }
+        }));
+        // NET-150: an `EXTEND` in another bucket ends its circuit, and its
+        // body goes nowhere.
+        let mut hop = one_hop(&mut table, &relay, 1, [6; 16], DelayClass::Fast, &mut rng);
+        let cell = extend(&mut hop, [6; 16], Bucket::B3);
+        let actions = table.on_cell(1, &cell, Origin::Relay, 101, &mut rng);
+        assert!(!actions
+            .iter()
+            .any(|action| matches!(action, Action::Extend { .. })));
+        assert!(table.is_empty());
+    }
+
+    #[test]
+    fn a_circuit_holds_a_bounded_count_of_delayed_cells_and_none_after_its_end() {
+        let mut rng = Rng(11);
+        let (relay, mut table) = relay(0xC3, 3);
+        let mut hop = one_hop(
+            &mut table,
+            &relay,
+            1,
+            [5; 16],
+            DelayClass::Private,
+            &mut rng,
+        );
+        for _ in 0..CIRCUIT_DELAYED_MAX {
+            let cell = sealed(&mut hop, [5; 16], Bucket::B0, CellCommand::Loop, true);
+            let actions = table.on_cell(1, &cell, Origin::Relay, 101, &mut rng);
+            assert!(matches!(actions[..], [Action::Delayed { .. }]));
+        }
+        // NET-362: the cell above the bound ends the circuit after the cells
+        // that wait.
+        let cell = sealed(&mut hop, [5; 16], Bucket::B0, CellCommand::Loop, true);
+        let actions = table.on_cell(1, &cell, Origin::Relay, 101, &mut rng);
+        let [Action::Delayed { action, .. }] = &actions[..] else {
+            panic!("{actions:?}");
+        };
+        assert!(matches!(**action, Action::End { .. }));
+        // NET-339: a forward cell of a circuit whose end waits goes nowhere.
+        let cell = sealed(&mut hop, [5; 16], Bucket::B0, CellCommand::Loop, true);
+        assert!(table
+            .on_cell(1, &cell, Origin::Relay, 101, &mut rng)
+            .is_empty());
+        assert!(table.holds(1, [5; 16]));
     }
 }

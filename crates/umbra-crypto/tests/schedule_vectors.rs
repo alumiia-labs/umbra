@@ -79,7 +79,7 @@ fn keys(dh: InitialDh) -> SessionKeys {
         rk: Secret::new([0x51; 32]),
         hk_i2r: Secret::new([0x52; 32]),
         hk_r2i: Secret::new([0x53; 32]),
-        transcript: [0; 32],
+        transcript: umbra_crypto::zeroize::Zeroizing::new([0; 32]),
         dh_initial: dh,
     }
 }

@@ -6,15 +6,29 @@ set -eu
 lineage="${RENEWED_LINEAGE:-/etc/letsencrypt/live/{{ umbra_fqdn }}}"
 install -o root -g umbra-tls -m 0644 "$lineage/fullchain.pem" /etc/umbra/tls/cert.pem
 install -o root -g umbra-tls -m 0640 "$lineage/privkey.pem" /etc/umbra/tls/key.pem
-# Each relay of this server runs as umbra-relay@<name>. The services
-# restart one at a time, thus the relays of one server are not down
-# together.
-for service in $(systemctl list-units --type=service --state=active --plain --no-legend 'umbra-relay@*' | awk '{print $1}') umbra-ndr umbra-directory; do
-    if systemctl is-active --quiet "$service"; then
-        systemctl restart "$service"
-        sleep 10
+# Each service of this server with its port. The services restart one at a
+# time, thus the relays of one server are not down together. A service that
+# does not stay up does not stop the others: the alert tells the operator,
+# and the hook ends with a failure, which certbot logs.
+failed=""
+for pair in{% if inventory_hostname in groups['relays'] %}{% for relay in relays %} umbra-relay@{{ relay.name }}.service:{{ relay.port }}{% endfor %}{% endif %}{% if inventory_hostname in groups['ndr'] %} umbra-ndr.service:{{ umbra_service_port }}{% endif %}{% if inventory_hostname in groups['directory'] %} umbra-directory.service:{{ umbra_service_port }}{% endif %} none:0; do
+    service="${pair%%:*}"
+    port="${pair##*:}"
+    if [ "$service" = none ] || ! systemctl is-active --quiet "$service"; then
+        continue
+    fi
+    if ! /usr/local/sbin/umbra-restart "$service" "$port"; then
+        /usr/local/sbin/umbra-alert "$service" || true
+        failed="$failed $service"
     fi
 done
 if systemctl is-active --quiet nginx; then
-    systemctl reload nginx
+    if ! systemctl reload nginx; then
+        /usr/local/sbin/umbra-alert nginx.service || true
+        failed="$failed nginx.service"
+    fi
+fi
+if [ -n "$failed" ]; then
+    logger -p daemon.err -t umbra-deploy-hook "the certificate is new, and these services did not stay up:$failed"
+    exit 1
 fi

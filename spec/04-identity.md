@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 4: Identity
 
 **Status:** Draft
-**Version:** 0.35.0
+**Version:** 0.36.0
 **Date:** 2026-10-16
 
 ---
@@ -909,6 +909,13 @@ Thus five rules apply, and they apply to each table.
    `accum` and `row_count` of each table from a scan of its rows, outside the
    unlock path, one time or more in each 24 hours that the store is open.
    **[IDN-163]** A client MUST report a difference in the manner of `IDN-039`.
+   **[IDN-195]** A client MUST run that scan over the contact table and over
+   each table that holds a handshake before the first record of a run leaves
+   under a ratchet from the store. On a difference it MUST seal no record in
+   that run, and it MUST report the difference in the manner of `IDN-039`. A
+   party with the file can put back one row of a contact from an earlier
+   state, and its ratchet would then seal under message keys that it used
+   before.
 
 The message table, the tombstone table, the contact table, the queue table, the
 verification table, and the local identity table are each under these rules.

@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 2: Threat Model and Security Goals
 
 **Status:** Draft
-**Version:** 0.35.0
+**Version:** 0.36.0
 **Date:** 2026-10-16
 
 ---
@@ -371,7 +371,7 @@ adds a trade MUST add a row to this table.
 | An accepted key-change notice ends the post-compromise healing for that contact | Part 4 §4.5.1 |
 | A backup write costs about 492 KB each day on the chunk path, and U4 counts that cost | Part 3 §3.12 |
 | A send from a device that does not own the ratchet waits for the next wake of the owner device | Part 7 §7.5.4 |
-| The client locks after 15 minutes and a locked client holds no key. Thus a locked owner device sends nothing for a linked device, reads no queue, and carries no sync record, until the unlock. v1 builds no ownership claim after `OWNER_TIMEOUT`, thus the unlock is the one bound below `OWNER_ABSENCE` | Part 7 §7.5.4, Part 8 §8.4.1, Part 14 §14.6.4 |
+| The client locks after 15 minutes and a locked client holds no key that reads a queue. Thus a locked owner device sends nothing for a linked device, reads no queue, and carries no sync record, until the unlock. v1 builds no ownership claim after `OWNER_TIMEOUT`, thus the unlock is the one bound below `OWNER_ABSENCE` | Part 7 §7.5.4, Part 8 §8.4.1, Part 14 §14.6.4 |
 | A provisional network runs on the relays of one operator. A client then builds a chain of one operator, and that operator joins the address of the client to its queues. Thus G6, G7 and G8 do not hold against that operator until the directory reaches the authority floor | Part 3 §3.4.6 |
 | The file of an attachment lives `CHUNK_TTL` of 14 days at a relay, and a message lives `MSG_TTL` of 45 days. Thus a recipient that returns after 14 days gets the message and not its file, and the uploader pays less storage | Part 12 §12.7.1 |
 | A resume sends no frame again, thus a connection that drops with a frame in flight costs each circuit of its session again. v1 ships TLS over TCP alone, thus a network with no TCP/443 carries no client | Part 3 §3.8, Part 3 §3.12, Part 6 §6.2.3 |
@@ -429,7 +429,7 @@ those rules has to check the goal again.
 | --- | --- | --- |
 | U1 | Part 3 §3.10 carriers, Part 4 §4.2.5 `IDN-015`, Part 4 §4.7.6 `IDN-054`, Part 13 §13.2.1 | A scripted first launch on a mid-tier Android device on 4G |
 | U2 | Part 3 §3.9 modes, Part 3 §3.5.2 pacing, Part 7 §7.5.1 `DEV-193`, Part 7 §7.5.4 | A two-party send, from the ratchet owner and from a peer device |
-| U3 | Part 8 §8.3 modes, Part 8 §8.4.1, Part 8 §8.4.2 | A locked and idle device, in Instant mode and in Private mode |
+| U3 | Part 8 §8.3 modes, Part 8 §8.4.1, Part 8 §8.4.2, Part 8 §8.4.3 | A locked and idle device, in Instant mode, in Direct mode, and in Private mode |
 | U4 | Part 3 §3.12 idle table, Part 3 §3.6.2 tier C, Part 3 §3.12 `NET-096` and `NET-097` and `NET-099` and `NET-100`, Part 4 §4.7.2 `IDN-080`, Part 6 §6.2.3 `WIR-361`, Part 8 §8.5 `WAKE_COALESCE_WINDOW` | A 24 h idle capture of the background bytes, in Instant mode, with the arrival count of the model day |
 | U4b | Part 3 §3.12 idle table and its Private notifications paragraph, Part 8 §8.3 modes | No target in v1. A 24 h idle capture of the background bytes at each cadence of Private mode reports the figure |
 | U5 | Part 3 §3.12 battery, Part 8 §8.4.1, Part 8 §8.8 | A 24 h idle run with no arrival, and a run with a scripted arrival count, on stock Android **and** GrapheneOS, with a power monitor |

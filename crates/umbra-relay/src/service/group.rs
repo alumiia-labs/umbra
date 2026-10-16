@@ -229,6 +229,9 @@ impl GroupService {
         let Cmd::Group(cmd) = command.cmd else {
             return Err(Reject::Rejected);
         };
+        if matches!(cmd, GroupCmd::Gnew | GroupCmd::Gsub) {
+            self.free_places(session);
+        }
         if cmd == GroupCmd::Gnew {
             return Ok((
                 vec![self.create(circuit, session, gate, accepts, command, now, rng)?],
@@ -389,6 +392,8 @@ impl GroupService {
                 accept_either(session, command, served.queue.read_pks(now))?;
                 served.subscribers.retain(|held| *held != circuit);
                 drains.end(&group_queue_id);
+                // NET-022: the place of the queue serves the next one.
+                session.unbind_queue(&group_queue_id);
                 Ok((Vec::new(), Vec::new()))
             }
             GroupCmd::Gnreg | GroupCmd::Gnunreg => {
@@ -453,6 +458,20 @@ impl GroupService {
             GroupCmd::Gnew | GroupCmd::Gids | GroupCmd::Gseq | GroupCmd::Gmsg => {
                 Err(Reject::Rejected)
             }
+        }
+    }
+
+    /// Frees each place of `session` whose group queue left the relay, by a
+    /// `GDEL` on another circuit or by the sweep (`NET-022`).
+    fn free_places(&self, session: &mut Session) {
+        let gone: Vec<[u8; 32]> = session
+            .queues()
+            .iter()
+            .filter(|id| !self.served.contains_key(*id))
+            .copied()
+            .collect();
+        for id in &gone {
+            session.unbind_queue(id);
         }
     }
 
@@ -1463,5 +1482,22 @@ mod tests {
                 .unwrap();
         }
         created(&mut relay, &read, &write, &own, now);
+    }
+
+    #[test]
+    fn a_swept_group_queue_frees_its_place_in_the_session() {
+        let now = 1_000;
+        let (mut relay, _, read, write, own) = opened(now);
+        for _ in 1..umbra_queue::params::MAX_QUEUES_PER_SESSION {
+            created(&mut relay, &read, &write, &own, now);
+        }
+        // NET-022: the sweep ends each idle queue. Before this, the session
+        // kept each place, and the next `GNEW` got `LIMIT`.
+        let later = now + GROUP_IDLE_TTL + 1;
+        relay.service.sweep(later);
+        assert!(relay.service.served.is_empty());
+        for _ in 0..umbra_queue::params::MAX_QUEUES_PER_SESSION {
+            created(&mut relay, &read, &write, &own, later);
+        }
     }
 }

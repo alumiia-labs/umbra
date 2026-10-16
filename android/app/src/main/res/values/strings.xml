@@ -784,6 +784,7 @@
     <string name="contacts_request_sent">Request sent. The contact opens when they accept.</string>
     <string name="contacts_looking_up">Looking up the entry and sending the request.</string>
     <string name="contacts_send_anyway">Send anyway</string>
+    <string name="contacts_lookup_unverified">The directory gives no proof for this result.</string>
     <string name="contacts_send_request">Send request</string>
     <string name="contacts_opening_invitation">Opening the invitation through three relays.</string>
     <string name="contacts_continue">Continue</string>
@@ -956,6 +957,7 @@
     <string name="lock_auto_lock">Auto-lock</string>
     <string name="lock_lock_now">Lock now</string>
     <string name="lock_no_message_while_locked">While UMBRA is locked, no message arrives.</string>
+    <string name="lock_message_waits_while_locked">While UMBRA is locked, an alert shows that a message waits. The message arrives at the unlock.</string>
 
     <!-- Lock: the automatic download limit. -->
     <!-- %1$d is a size in megabytes. -->
@@ -1008,6 +1010,7 @@
 
     <!-- Core: unlock and passphrase -->
     <string name="core_wrong_passphrase">That passphrase does not open this device.</string>
+    <string name="core_key_lost">This device lost the hardware key of its store, thus no passphrase opens it.</string>
     <!-- %1$s holds the technical name of the fault. -->
     <string name="core_store_not_open">The store did not open: %1$s.</string>
     <string name="core_locked">UMBRA is locked.</string>

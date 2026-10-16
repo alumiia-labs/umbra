@@ -117,8 +117,9 @@ pub struct SessionKeys {
     pub hk_i2r: Secret<32>,
     /// The header key of the responder-to-initiator direction.
     pub hk_r2i: Secret<32>,
-    /// The transcript hash at the split, for Part 7 §7.4 step 3.
-    pub transcript: [u8; 32],
+    /// The transcript hash at the split, for Part 7 §7.4 step 3. It wipes
+    /// itself, because it names the session.
+    pub transcript: Zeroizing<[u8; 32]>,
     /// The responder's flight-2 ephemeral, which is its first ratchet key.
     pub dh_initial: InitialDh,
 }
@@ -200,7 +201,7 @@ fn split(st: &State, dh_initial: InitialDh) -> SessionKeys {
         rk: st.derive(&[labels::RATCHET_ROOT]),
         hk_i2r: st.derive(&[labels::HEADER_KEY, &[0x01]]),
         hk_r2i: st.derive(&[labels::HEADER_KEY, &[0x02]]),
-        transcript: *st.h(),
+        transcript: Zeroizing::new(*st.h()),
         dh_initial,
     }
 }
@@ -212,11 +213,16 @@ pub struct Initiator {
     e1_seed: Secret<64>,
     e1_dk: DecapsulationKey<MlKem768>,
     n_hs: [u8; NONCE_LEN],
+    /// The responder's ephemeral `er` of flight 2, which `se` of flight 3
+    /// takes. It is set when flight 2 verifies.
+    er: Option<[u8; 32]>,
 }
 
 /// The version of the stored form of a handshake that waits for its next
 /// flight.
 const STORED_VERSION: u8 = 0x01;
+/// The version byte and the largest stored [`State`].
+const STORED_LEN: usize = 1 + super::STATE_STORED_LEN;
 
 impl Initiator {
     /// Writes flight 1 into `out` and returns the initiator and the length.
@@ -309,6 +315,7 @@ impl Initiator {
                 e1_seed: seed,
                 e1_dk,
                 n_hs,
+                er: None,
             },
             total,
         ))
@@ -319,7 +326,7 @@ impl Initiator {
     /// under its key, as it keeps a one-time prekey, until the handshake
     /// ends.
     pub fn export(&self) -> Zeroizing<Vec<u8>> {
-        let mut writer = crate::stored::Writer::new();
+        let mut writer = crate::stored::Writer::with_capacity(STORED_LEN + 32 + 64 + NONCE_LEN);
         writer.u8(STORED_VERSION);
         self.st.export(&mut writer);
         writer.bytes(self.e_sk.as_bytes());
@@ -346,6 +353,7 @@ impl Initiator {
             e1_seed,
             e1_dk,
             n_hs,
+            er: None,
         })
     }
 
@@ -404,20 +412,22 @@ impl Initiator {
         }
         app_out.copy_from_slice(app_in);
         self.st = read;
+        self.er = Some(er);
         Ok(app_len)
     }
 
     /// Writes flight 3 into `out` with the initiator's static identity
     /// `s_i`, and returns the session keys and the length. `out` needs
-    /// `FLIGHT3_FIXED + app_3.len() + PAYLOAD_OVERHEAD` bytes.
+    /// `FLIGHT3_FIXED + app_3.len() + PAYLOAD_OVERHEAD` bytes. An initiator
+    /// whose flight 2 did not verify has no `er` and fails.
     pub fn flight3<T: Trace>(
         mut self,
         s_i: &KeyPair,
-        er: &[u8; 32],
         app_3: &[u8],
         out: &mut [u8],
         trace: &mut T,
     ) -> Result<(SessionKeys, usize), Error> {
+        let er = &self.er.ok_or(Error::Handshake)?;
         let total = FLIGHT3_FIXED + app_3.len() + PAYLOAD_OVERHEAD;
         let out = out.get_mut(..total).ok_or(Error::Length)?;
         let st = &mut self.st;
@@ -482,10 +492,12 @@ impl Responder {
     }
 
     /// Reads flight 1 with the responder's static identity `s_r` and the
-    /// prekey that `pid` named. The prekey is consumed (`CRY-089`).
+    /// prekey that `pid` named. The call does not consume the prekey: a
+    /// flight that fails leaves it for the true one (`WIR-503`). The caller
+    /// erases the prekey after a flight that verifies (`CRY-089`).
     pub fn read_flight1<T: Trace>(
         s_r: &KeyPair,
-        prekey: OneTimePrekey,
+        prekey: &OneTimePrekey,
         range_r: VersionRange,
         address: AddressType,
         flight: &[u8],
@@ -544,7 +556,6 @@ impl Responder {
         let mut n_hs = [0u8; NONCE_LEN];
         n_hs.copy_from_slice(nonce_in);
         app_out.copy_from_slice(app_in);
-        drop(prekey);
         Ok((
             Self {
                 st,
@@ -616,7 +627,8 @@ impl Responder {
     /// its flight 2 has none.
     pub fn export(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
         let er_sk = self.er_sk.as_ref().ok_or(Error::Handshake)?;
-        let mut writer = crate::stored::Writer::new();
+        let mut writer =
+            crate::stored::Writer::with_capacity(STORED_LEN + 32 + EK_LEN + 32 + NONCE_LEN);
         writer.u8(STORED_VERSION);
         self.st.export(&mut writer);
         writer.bytes(&self.e);
@@ -698,8 +710,8 @@ impl Responder {
         Ok((keys, s_i, app_len))
     }
 
-    /// The responder's ephemeral public key `er`, which the initiator needs
-    /// for `se`; the caller takes it from flight 2's first 32 bytes.
+    /// The responder's ephemeral public key `er`: the first 32 bytes of
+    /// flight 2.
     pub fn er_of(flight2: &[u8]) -> Result<[u8; 32], Error> {
         flight2
             .get(..32)
