@@ -5,6 +5,9 @@
 *.toml text eol=lf
 *.json text eol=lf
 *.yml text eol=lf
+*.yaml text eol=lf
+# A continued RUN line with CRLF line ends does not parse.
+Dockerfile text eol=lf
 *.html text eol=lf
 # A shell script with CRLF line ends does not run on Linux or macOS.
 android/gradlew text eol=lf

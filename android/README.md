@@ -77,6 +77,17 @@ Two emulators make one conversation: the first one invites and copies the
 link, and the second one pastes it and accepts. The clipboard of an
 emulator is the clipboard of the machine.
 
+### The network in Docker
+
+Docker runs the same network with no Rust toolchain. The image builds the
+servers, and `compose.yaml` publishes the two ingress relays, 7441 and 7446.
+The state stays in a volume.
+
+```sh
+docker compose up --build       # in the root of the repository
+docker compose down -v          # stops the network and deletes its state
+```
+
 ### A phone on the local network
 
 A phone reaches the relays at the address of the machine on the local
@@ -90,7 +101,11 @@ UMBRA_DEVNET_HOST=192.168.1.254 scripts/devnet.sh
 An emulator reaches that address too, thus one build serves both. The
 firewall of the machine must let the phone in on the ports 7441 and 7446,
 the two ingress relays. The other relays take connections from the relays
-alone.
+alone. In Docker, the ports must listen on each interface:
+
+```sh
+UMBRA_DEVNET_HOST=192.168.1.254 UMBRA_DEVNET_BIND=0.0.0.0 docker compose up --build
+```
 
 ## Limits of the shell
 

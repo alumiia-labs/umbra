@@ -40,6 +40,10 @@ bash scripts/check.sh           # the full check set of each commit
 `android/README.md` gives the build of the app. `deploy/ansible/README.md`
 gives the deployment of a network.
 
+`docker compose up --build` runs a test network of seven relays on this
+machine, with no Rust toolchain. Its seeds are in the repository, thus it
+protects nothing. `android/README.md` gives its use.
+
 ## Contribute
 
 `CONTRIBUTING.md` gives the rules for an issue and for a pull request.

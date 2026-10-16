@@ -1,0 +1,34 @@
+# The test network of scripts/devnet.sh in one container. Its seeds are in
+# the repository, thus it protects nothing. Run it on a test machine alone.
+#
+#   docker compose up --build
+#
+# An emulator reaches the two ingress relays at 10.0.2.2:7441 and :7446. A
+# phone on the local network needs the address of this machine in the
+# descriptors, and a port that listens on each interface:
+#
+#   UMBRA_DEVNET_HOST=192.168.1.254 UMBRA_DEVNET_BIND=0.0.0.0 docker compose up --build
+#
+# The relays keep their queues in the volume, thus a restart ends no
+# contact. `docker compose down -v` gives an empty network.
+name: umbra-devnet
+
+services:
+  devnet:
+    build:
+      context: .
+      target: devnet
+    image: umbra-devnet
+    init: true
+    environment:
+      UMBRA_DEVNET_HOST: ${UMBRA_DEVNET_HOST:-10.0.2.2}
+    # The other relays, the NDR, and the directory take connections from
+    # inside the container alone.
+    ports:
+      - "${UMBRA_DEVNET_BIND:-127.0.0.1}:7441:7441"
+      - "${UMBRA_DEVNET_BIND:-127.0.0.1}:7446:7446"
+    volumes:
+      - devnet:/umbra/target/devnet
+
+volumes:
+  devnet:

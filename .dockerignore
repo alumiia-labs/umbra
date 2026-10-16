@@ -1,0 +1,16 @@
+# The build of the Dockerfile reads the workspace alone.
+.git
+.github
+.claude
+target
+**/target
+android
+brand
+site
+fontawesome-pro-*
+fa-pro
+deploy/ansible/build
+deploy/ansible/inventory.yml
+**/google-services.json
+**/fcm*.json
+**/__pycache__

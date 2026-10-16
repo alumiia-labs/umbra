@@ -39,11 +39,17 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-cargo build -p umbra-relay --features native
-cargo build -p umbra-ffi --features runtime --bin umbra-authority
-# Cargo builds into CARGO_TARGET_DIR when the caller sets it. The files of
-# the network stay in target/devnet.
-bin="${CARGO_TARGET_DIR:-target}/debug"
+# The image of the Dockerfile holds the binaries, and UMBRA_DEVNET_BIN names
+# their directory. With no such directory, cargo builds them.
+if [ -n "${UMBRA_DEVNET_BIN:-}" ]; then
+    bin="$UMBRA_DEVNET_BIN"
+else
+    cargo build -p umbra-relay --features native
+    cargo build -p umbra-ffi --features runtime --bin umbra-authority
+    # Cargo builds into CARGO_TARGET_DIR when the caller sets it. The files
+    # of the network stay in target/devnet.
+    bin="${CARGO_TARGET_DIR:-target}/debug"
+fi
 # Each relay keeps its queues in a file here, thus a restart of this script
 # ends no contact. Delete the directory for an empty network.
 mkdir -p target/devnet/conf
@@ -99,6 +105,11 @@ if [ -f target/devnet/fcm-service-account.json ]; then
     echo "the NDR sends to FCM"
 fi
 
+# The report queue of authority 0 dials the ingress relay at the address
+# that it lists for clients, and this machine reaches it as 127.0.0.1.
+cp tests/fixtures/devnet/authority-queue.conf target/devnet/conf/authority-queue.conf
+echo "host_alias=$host" >> target/devnet/conf/authority-queue.conf
+
 # Debian has python3 alone, and Windows often has python alone.
 if python3 -c '' 2>/dev/null; then python=python3; else python=python; fi
 
@@ -151,7 +162,7 @@ for relay in 3 5 7 2 4 1 6; do
 done
 # The report queue of authority 0, once the relays listen.
 sleep 2
-"$bin"/umbra-authority tests/fixtures/devnet/authority-queue.conf &
+"$bin"/umbra-authority target/devnet/conf/authority-queue.conf &
 pids+=($!)
 # One class test of each relay, once the relays listen (Part 10 §10.3). A
 # relay of layer 2 or 3 takes the measurer on a link with no hello.

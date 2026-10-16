@@ -38,6 +38,7 @@
 //! root_seed=<64 hex characters>           # the identity of the queue client
 //! report_seed=<64 hex characters>         # the X25519 key of the reports
 //! ca=tests/fixtures/tls/ca.pem            # the root that the relays chain to
+//! host_alias=10.0.2.2                     # dial 127.0.0.1 in place of it
 //! ```
 //!
 //! A settings file with those seeds protects nothing. A file that holds a
@@ -150,6 +151,9 @@ struct Settings {
     queue: PathBuf,
     /// The aggregators of §10.8 that this program plays, by index.
     aggregators: Vec<u8>,
+    /// An address that a relay lists for clients and that this machine
+    /// reaches as `127.0.0.1`, as the `host_alias` of a relay.
+    host_alias: Option<[u8; 4]>,
 }
 
 fn hex32(text: &str) -> Option<[u8; 32]> {
@@ -257,6 +261,10 @@ fn read_settings(path: &str) -> Option<Settings> {
                     .collect()
             })
             .unwrap_or_default(),
+        host_alias: match values.get("host_alias") {
+            Some(alias) => Some(alias.parse::<std::net::Ipv4Addr>().ok()?.octets()),
+            None => None,
+        },
     })
 }
 
@@ -342,10 +350,15 @@ fn info(relay: &ListedRelay) -> RelayInfo {
     }
 }
 
-fn dial_of(relay: &ListedRelay) -> Dial {
+fn dial_of(relay: &ListedRelay, host_alias: Option<[u8; 4]>) -> Dial {
+    let addr_v4 = if host_alias == Some(relay.addr_v4) {
+        [127, 0, 0, 1]
+    } else {
+        relay.addr_v4
+    };
     Dial {
         host: relay.host.clone(),
-        addr_v4: Some(relay.addr_v4),
+        addr_v4: Some(addr_v4),
         addr_v6: None,
         port: relay.port,
     }
@@ -382,7 +395,7 @@ fn relays_of(settings: &Settings) -> Result<Network, &'static str> {
         .collect();
     Ok(Network {
         guard: info(guard),
-        dial: dial_of(guard),
+        dial: dial_of(guard, settings.host_alias),
         chain,
         removed: set.removed_links,
     })
@@ -393,7 +406,7 @@ fn relays_of(settings: &Settings) -> Result<Network, &'static str> {
 /// under load refused pays with a proof of work (`ABU-014`, `ABU-048`).
 async fn challenges(settings: &Settings) -> Option<ChallengeBook> {
     let set = relay_set(settings).ok()?;
-    let dial = dial_of(guard_of(&set).ok()?);
+    let dial = dial_of(guard_of(&set).ok()?, settings.host_alias);
     let bundle = native::fetch_challenges(&dial, tls_of(settings).ok()?)
         .await
         .ok()?;

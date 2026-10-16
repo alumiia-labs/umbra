@@ -93,7 +93,7 @@ async fn probe(
     }
     let (commands, runtime_commands) = mpsc::unbounded_channel();
     let (runtime_updates, mut updates) = mpsc::unbounded_channel();
-    let dial: Dial = dial_of(a);
+    let dial: Dial = dial_of(a, settings.host_alias);
     let run = tokio::spawn(run_client(
         node,
         dial,
