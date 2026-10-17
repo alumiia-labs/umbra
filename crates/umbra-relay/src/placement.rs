@@ -95,6 +95,7 @@ impl Placement {
         for (relay_id, (dial, _)) in &self.queue_relays {
             pushes.entry(*relay_id).or_insert_with(|| dial.clone());
         }
+
         pushes
     }
 }
@@ -112,6 +113,7 @@ pub fn placement(
     let unverified = |_| PlacementError::Unverified;
     let keyset_bytes = keyset;
     let (keyset, _) = DirectoryKeySet::parse(keyset).map_err(unverified)?;
+
     // The operator of a relay gives it the manifest from its own disk, thus
     // no shipped epoch bounds the age of it.
     let mut consensus = Consensus::new(keyset, 0).map_err(unverified)?;
@@ -121,20 +123,24 @@ pub fn placement(
         .epoch_start_unix
         .saturating_add(CONSENSUS_VALIDITY)
         .saturating_add(CLOCK_SKEW);
+
     // The signatures of the root cover the list, and `RelaySet::accept`
     // below verifies them.
     let measurer_trust = MeasurerTrust {
         keyset: keyset_bytes.to_vec(),
         revoked: root.revoked,
     };
+
     let set = RelaySet::accept(&mut consensus, &manifest, &BlocList::v1(), device_clock)
         .map_err(unverified)?;
+
     // REL-147: a part of the set passes each proof. It would give this
     // relay a next layer, a previous layer, and an address set that each
     // lack a relay. A part thus places no relay.
     if !set.is_whole {
         return Err(PlacementError::Partial);
     }
+
     let own = set
         .relays
         .iter()
@@ -143,6 +149,7 @@ pub fn placement(
     if own.ntor_pk != *ntor_pk {
         return Err(PlacementError::OtherKey);
     }
+
     let layer = layer_of(own);
     let next = set
         .relays
@@ -150,18 +157,21 @@ pub fn placement(
         .filter(|relay| relay.candidate.chain && layer_of(relay) == layer.saturating_add(1))
         .map(|relay| (relay.candidate.relay_id, dial_of(relay)))
         .collect();
+
     let chain_keys = set
         .relays
         .iter()
         .filter(|relay| relay.candidate.chain && layer_of(relay) > layer)
         .map(|relay| (relay.candidate.relay_id, (layer_of(relay), relay.ntor_pk)))
         .collect();
+
     let previous = set
         .relays
         .iter()
         .filter(|relay| relay.candidate.chain && layer_of(relay).saturating_add(1) == layer)
         .map(|relay| relay.candidate.relay_id)
         .collect();
+
     let addresses = set
         .relays
         .iter()
@@ -171,29 +181,34 @@ pub fn placement(
             v4.into_iter().chain(v6)
         })
         .collect();
+
     let replicas = set
         .relays
         .iter()
         .filter(|relay| relay.has_attachment_role && relay.candidate.relay_id != *relay_id)
         .map(|relay| (relay.candidate.relay_id, dial_of(relay)))
         .collect();
+
     let queue_relays = set
         .relays
         .iter()
         .filter(|relay| layer_of(relay) == 3 && relay.candidate.relay_id != *relay_id)
         .map(|relay| (relay.candidate.relay_id, (dial_of(relay), relay.ntor_pk)))
         .collect();
+
     let carriers = set
         .relays
         .iter()
         .filter(|relay| relay.candidate.ingress)
         .map(|relay| (relay.candidate.relay_id, dial_of(relay)))
         .collect();
+
     let identities = set
         .relays
         .iter()
         .map(|relay| (relay.candidate.relay_id, relay.identity_pk.clone()))
         .collect();
+
     Ok(Placement {
         layer,
         next,
@@ -227,19 +242,24 @@ mod tests {
     use umbra_crypto::{rand_core, secret::Secret, sign::SigningKey};
 
     struct Rng(u8);
+
     impl rand_core::TryRng for Rng {
         type Error = core::convert::Infallible;
+
         fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
             Ok(0)
         }
+
         fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
             Ok(0)
         }
+
         fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
             dst.fill(self.0);
             Ok(())
         }
     }
+
     impl rand_core::TryCryptoRng for Rng {}
 
     /// The entry of the relay `seed`, and what its settings hold of it.
@@ -251,6 +271,7 @@ mod tests {
         } else {
             roles::QUEUE | roles::CHAIN
         };
+
         let descriptor = RelayDescriptor {
             relay_id: [0; 32],
             identity_pk: &[],
@@ -273,12 +294,14 @@ mod tests {
             &mut Rng(seed),
         )
         .unwrap();
+
         let listing = Listing {
             descriptor: &descriptor,
             operator_id: [seed; 32],
             class: 2,
             is_ingress,
         };
+
         let entry = entry_of(
             &listing,
             Admission::Placed {
@@ -287,6 +310,7 @@ mod tests {
             },
         )
         .unwrap();
+
         let relay_id = RelayEntry::parse(&entry).unwrap().descriptor.relay_id;
         (entry, relay_id, [seed; 32])
     }
@@ -309,6 +333,7 @@ mod tests {
         )
         .unwrap();
         let keyset = keyset_bytes(&keys, 1).unwrap();
+
         let place = |relay_id: &[u8; 32], key: &[u8; 32]| {
             placement(&manifest, &keyset, relay_id, key, 700 * 3_600)
         };
@@ -321,6 +346,7 @@ mod tests {
         assert_eq!(placed[0].layer, 1);
         assert_eq!(count_of(1), 1);
         assert!(count_of(2) > 0 && count_of(3) > 0);
+
         for place in &placed {
             // A relay dials each relay of the next layer, and no other one.
             let expected = match place.layer {
@@ -328,6 +354,7 @@ mod tests {
                 layer => count_of(layer + 1),
             };
             assert_eq!(place.next.len(), expected);
+
             assert_eq!(place.epoch, 700);
             // NET-332: the relays that dial this one are the layer before.
             let before = match place.layer {
@@ -335,14 +362,17 @@ mod tests {
                 layer => count_of(layer - 1),
             };
             assert_eq!(place.previous.len(), before);
+
             // NET-334: the set gives the address of each of its relays.
             assert_eq!(place.addresses.len(), relays.len());
             assert!(place.valid_until > 700 * 3_600);
+
             // REL-066: a `MeasurerCert` verifies under the key set of the
             // root, with its revoked list.
             assert_eq!(place.measurer_trust.keyset, keyset);
             assert!(place.measurer_trust.revoked.is_empty());
         }
+
         let of_layer_2 = placed.iter().position(|p| p.layer == 2).unwrap();
         let (_, id_of_2, _) = &relays[of_layer_2];
         assert!(placed[0].next.contains_key(id_of_2));
@@ -351,6 +381,7 @@ mod tests {
         let (_, relay_id, key) = &relays[2];
         assert_eq!(place(&[9; 32], key), Err(PlacementError::NotListed));
         assert_eq!(place(relay_id, &[0xEE; 32]), Err(PlacementError::OtherKey));
+
         let other_keys: Vec<SigningKey> = (0..7u8)
             .map(|index| SigningKey::from_seed(Secret::new([0xC0 + index; 32])))
             .collect();
@@ -379,6 +410,7 @@ mod tests {
         )
         .unwrap();
         let keyset = keyset_bytes(&keys, 1).unwrap();
+
         let (_, relay_id, key) = &relays[0];
         assert!(placement(&whole, &keyset, relay_id, key, 700 * 3_600).is_ok());
 

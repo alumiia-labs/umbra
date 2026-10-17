@@ -252,6 +252,7 @@ const KNOWN_LINES: [&str; 31] = [
 #[cfg(unix)]
 fn warn_of_open_file(path: &str) {
     use std::os::unix::fs::PermissionsExt;
+
     let is_open = std::fs::metadata(path).is_ok_and(|file| file.permissions().mode() & 0o004 != 0);
     if is_open {
         eprintln!("each user of this machine can read the settings file, which holds secrets");
@@ -267,9 +268,11 @@ fn dial_of(value: &str) -> Option<Dial> {
     let host = parts.next()?.to_owned();
     let address: std::net::Ipv4Addr = parts.next()?.parse().ok()?;
     let port = parts.next()?.parse().ok()?;
+
     if parts.next().is_some() {
         return None;
     }
+
     Some(Dial {
         host,
         addr_v4: Some(address.octets()),
@@ -284,8 +287,10 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
     // The text holds the two secrets of the relay, thus `Zeroizing` wipes
     // it when this call ends.
     let text = Zeroizing::new(std::fs::read_to_string(path).ok()?);
+
     let mut values: BTreeMap<&str, &str> = BTreeMap::new();
     let mut next = BTreeMap::new();
+
     // A line that starts with `#` is a comment, thus the output of `keygen`
     // pastes as it is.
     for line in text
@@ -294,20 +299,24 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
     {
         let (key, value) = line.split_once('=')?;
+
         // Before this, the relay said nothing of a line that it does not
         // know. A wrong letter in `store=` then left the queues in RAM.
         if !KNOWN_LINES.contains(&key) {
             eprintln!("the settings file holds a line that this relay does not know: {key}");
         }
+
         if key != "next" {
             values.insert(key, value);
             continue;
         }
+
         let mut parts = value.split(',');
         let relay_id = hex32(parts.next()?)?;
         let host = parts.next()?.to_owned();
         let address: std::net::Ipv4Addr = parts.next()?.parse().ok()?;
         let port = parts.next()?.parse().ok()?;
+
         next.insert(
             relay_id,
             Dial {
@@ -318,11 +327,13 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
             },
         );
     }
+
     let static_secret = StaticSecret::from(*secret32(values.get("static_secret")?)?);
     let identity = match values.get("identity_seed") {
         Some(seed) => Some(SigningKey::from_seed(Secret::new(*secret32(seed)?))),
         None => None,
     };
+
     // The identity key gives the identifier (`REL-049`). A settings file
     // with the two lines must not name another one.
     let derived = identity
@@ -332,13 +343,16 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
         Some(text) => Some(hex32(text)?),
         None => None,
     };
+
     if derived.is_some() && written.is_some() && derived != written {
         return None;
     }
+
     let relay = RelayStatic {
         s: *XPublic::from(&static_secret).as_bytes(),
         relay_id: derived.or(written)?,
     };
+
     // The manifest gives the layer and the next hops, and the settings file
     // then gives neither.
     let placed = match (values.get("manifest"), values.get("keyset")) {
@@ -351,11 +365,13 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .ok()?
                 .as_secs();
+
             let path = std::path::Path::new(manifest);
             let manifest = std::fs::read(path).ok()?;
             let keyset = std::fs::read(keyset).ok()?;
             let place =
                 |manifest: &[u8]| placement(manifest, &keyset, &relay.relay_id, &relay.s, now);
+
             let placed = match place(&manifest) {
                 Ok(placed) => (placed, manifest),
                 Err(cause) => {
@@ -375,6 +391,7 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
                     mended
                 }
             };
+
             // REL-035: a root past its validity still gives the place of
             // this relay, because the relay fetches the next one only when
             // it runs. A client takes no such root, thus the operator
@@ -382,12 +399,15 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
             if now > placed.0.valid_until {
                 eprintln!("the manifest is past its validity, and no client takes it");
             }
+
             Some(placed)
         }
         (None, None) => None,
         _ => return None,
     };
+
     let (placed, manifest) = placed.unzip();
+
     let manifest_source = match (values.get("manifest"), values.get("keyset"), &manifest) {
         (Some(path), Some(keyset), Some(_)) => Some(ManifestSource {
             path: std::path::PathBuf::from(path),
@@ -402,6 +422,7 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
         }),
         _ => None,
     };
+
     let layer = match &placed {
         Some(placed) => placed.layer,
         None if !takes_place => 0,
@@ -411,12 +432,14 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
             .ok()
             .filter(|l| (1..=3).contains(l))?,
     };
+
     let is_placed = placed.is_some();
     // NET-332: a relay of layer 1 or 2 with no identity key sends no hello.
     // The next layer takes no circuit of a relay that it cannot name.
     if is_placed && identity.is_none() && layer < 3 {
         eprintln!("no identity_seed line: the next layer takes no circuit of this relay");
     }
+
     let measurer_trust = placed.as_ref().map(|placed| placed.measurer_trust.clone());
     let loop_relays = placed
         .as_ref()
@@ -426,6 +449,7 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
         Some(placed) => (Some(placed.previous.clone()), placed.addresses.clone()),
         None => (None, std::collections::BTreeSet::new()),
     };
+
     let (mut next, mut replicas, queue_relays, carriers, identities) = match placed {
         Some(placed) => (
             placed.next,
@@ -442,27 +466,34 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
             BTreeMap::new(),
         ),
     };
+
     // ABU-102: a challenge goes on the same one-shot connection as a copy.
     for (relay_id, dial) in &carriers {
         replicas.entry(*relay_id).or_insert_with(|| dial.clone());
     }
+
     let carriers = carriers.into_keys().collect();
+
     // WIR-526: a deposit goes on the same one-shot connection as a copy.
     for (relay_id, (dial, _)) in &queue_relays {
         replicas.entry(*relay_id).or_insert_with(|| dial.clone());
     }
+
     // A relay that the manifest lists at the alias of this machine is on
     // this machine.
     let host_alias = match values.get("host_alias") {
         Some(alias) => Some(alias.parse::<std::net::Ipv4Addr>().ok()?.octets()),
         None => None,
     };
+
     umbra_relay::server::dial_at_alias(&mut replicas, host_alias);
     umbra_relay::server::dial_at_alias(&mut next, host_alias);
+
     let queue_keys = queue_relays
         .into_iter()
         .map(|(relay_id, (_, key))| (relay_id, key))
         .collect();
+
     Some(Settings {
         listen: (*values.get("listen")?).to_owned(),
         cert: (*values.get("cert")?).to_owned(),
@@ -553,13 +584,16 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
 fn keygen() -> ExitCode {
     let mut identity_seed = Zeroizing::new([0u8; 32]);
     let mut static_secret = Zeroizing::new([0u8; 32]);
+
     if getrandom::fill(identity_seed.as_mut_slice()).is_err()
         || getrandom::fill(static_secret.as_mut_slice()).is_err()
     {
         eprintln!("the operating system gave no random bytes");
         return ExitCode::from(1);
     }
+
     let identity = SigningKey::from_seed(Secret::new(*identity_seed));
+
     // `Zeroizing` wipes the hex form of each secret after its line.
     println!(
         "identity_seed={}",
@@ -587,10 +621,12 @@ fn sign_descriptor(settings: &Settings, out: &str) -> ExitCode {
         );
         return ExitCode::from(2);
     };
+
     if std::fs::write(out, bytes).is_err() {
         eprintln!("the descriptor file does not write");
         return ExitCode::from(1);
     }
+
     ExitCode::SUCCESS
 }
 
@@ -602,11 +638,13 @@ fn declared_store_gib(role_bits: u8, chunk_capacity: u64) -> u32 {
     if role_bits & roles::ATTACHMENT == 0 {
         return 0;
     }
+
     u32::try_from(chunk_capacity >> 30).unwrap_or(u32::MAX)
 }
 
 fn signed_descriptor(settings: &Settings) -> Option<Vec<u8>> {
     let identity = settings.identity.as_ref()?;
+
     let [name, address, port]: [&str; 3] = settings
         .public
         .as_deref()?
@@ -614,8 +652,10 @@ fn signed_descriptor(settings: &Settings) -> Option<Vec<u8>> {
         .collect::<Vec<_>>()
         .try_into()
         .ok()?;
+
     let mut host = [0u8; HOST_LEN];
     host.get_mut(..name.len())?.copy_from_slice(name.as_bytes());
+
     let fact = |name: &str| settings.facts.get(name).map(String::as_str);
     let mut role_bits = 0u8;
     for role in fact("roles")?.split(',') {
@@ -627,10 +667,12 @@ fn signed_descriptor(settings: &Settings) -> Option<Vec<u8>> {
             _ => return None,
         };
     }
+
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_secs();
+
     RelayDescriptor {
         relay_id: [0; 32],
         identity_pk: &[],
@@ -663,12 +705,14 @@ fn descriptor(settings: &Settings) -> ExitCode {
         eprintln!("the settings file needs a line: public=<host>,<IPv4 address>,<port>");
         return ExitCode::from(2);
     };
+
     // The facts that a client tests before it puts two relays into one
     // chain (Part 3 §3.4.6). The operator of a relay declares them.
     let facts = ["operator", "country", "asn", "prefix"]
         .iter()
         .filter_map(|name| Some(format!(" {name}={}", settings.facts.get(*name)?)))
         .collect::<String>();
+
     if ["operator", "country", "asn"]
         .iter()
         .any(|name| !settings.facts.contains_key(*name))
@@ -676,12 +720,14 @@ fn descriptor(settings: &Settings) -> ExitCode {
         eprintln!("the settings file needs the lines: operator=, country=, asn=");
         return ExitCode::from(2);
     }
+
     println!(
         "relay {host} {address} {port} {} {} layer={}{facts}",
         to_hex(&settings.config.relay.s),
         to_hex(&settings.config.relay.relay_id),
         settings.config.layer,
     );
+
     ExitCode::SUCCESS
 }
 
@@ -703,6 +749,7 @@ fn main() -> ExitCode {
             }
         }
     };
+
     std::thread::Builder::new()
         .stack_size(STACK_BYTES)
         .spawn(work)
@@ -714,6 +761,7 @@ fn main() -> ExitCode {
 async fn run() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
+
     let path = match arguments.as_slice() {
         ["keygen"] => return keygen(),
         ["descriptor", path] | ["sign-descriptor", path, _] | [path] => *path,
@@ -725,8 +773,10 @@ async fn run() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+
     let takes_place = !matches!(arguments.as_slice(), ["sign-descriptor", ..]);
     warn_of_open_file(path);
+
     // The `descriptor` form prints the layer of a relay that the manifest
     // places. The line of a relay comes before the first manifest that lists
     // it. The form thus also reads a settings file whose manifest gives no
@@ -738,15 +788,18 @@ async fn run() -> ExitCode {
         eprintln!("the settings file does not parse");
         return ExitCode::from(2);
     };
+
     match arguments.as_slice() {
         ["descriptor", _] => return descriptor(&settings),
         ["sign-descriptor", _, out] => return sign_descriptor(&settings, out),
         _ => {}
     }
+
     let Some(tls) = tls_acceptor(&settings.cert, &settings.key) else {
         eprintln!("the certificate or the key does not load");
         return ExitCode::from(2);
     };
+
     let Ok(listener) = TcpListener::bind(&settings.listen).await else {
         eprintln!("the listen address does not bind");
         return ExitCode::from(1);
@@ -760,6 +813,7 @@ async fn run() -> ExitCode {
         eprintln!("the TLS client configuration does not build");
         return ExitCode::from(1);
     };
+
     // The public half of the identity, for the network record of a client.
     println!(
         "relay_id={} static_key={} layer={} listen={}",
@@ -768,6 +822,7 @@ async fn run() -> ExitCode {
         settings.config.layer,
         settings.listen,
     );
+
     let mut store: Box<dyn RelayStore> = match &settings.store {
         Some(path) => match SqliteStore::open(path) {
             Ok(store) => Box::new(store),
@@ -781,10 +836,12 @@ async fn run() -> ExitCode {
             Box::new(MemoryStore::default())
         }
     };
+
     let Ok(loaded) = store.load() else {
         eprintln!("the store does not load");
         return ExitCode::from(1);
     };
+
     // REL-073: the receipts of RECEIPT_RETENTION outgrow RAM on a busy relay.
     let shelf = match &settings.store {
         Some(path) => match SqliteShelf::open(&format!("{path}.receipts")) {
@@ -796,33 +853,41 @@ async fn run() -> ExitCode {
         },
         None => None,
     };
+
     println!(
         "queues={} invitations={}",
         loaded.queues.len(),
         loaded.invitations.len()
     );
+
     run_relay(
         {
             let mut node = RelayNode::restored(settings.config, loaded);
             node.set_queue_relays(settings.queue_keys);
+
             if let Some(shelf) = shelf {
                 node.set_receipt_shelf(Box::new(shelf));
             }
+
             // ABU-057, ABU-102: the identity key signs the challenge of each
             // period, and the carriers of the manifest serve it.
             if let Some(identity) = settings.identity {
                 node.set_challenge_signer(identity, settings.carriers);
             }
+
             node.set_relay_identities(settings.identities);
             if let Some(trust) = settings.measurer_trust {
                 node.set_measurer_trust(trust);
             }
+
             // REL-174: a relay outside the layer before names no peer.
             if let Some(previous) = settings.previous {
                 node.set_previous_layer(previous);
             }
+
             // NET-069: the loop chains of a relay of layer 1 or 2.
             node.set_loop_relays(&settings.loop_relays);
+
             node
         },
         listener,
@@ -869,6 +934,7 @@ async fn run() -> ExitCode {
         },
     )
     .await;
+
     // A relay serves until a signal ends it, thus a return is a fault: the
     // listener failed, or the store took no commit. A supervisor restarts
     // it on this status.
@@ -898,6 +964,7 @@ mod tests {
             std::process::id(),
             relay_roles.replace(',', "-"),
         ));
+
         let text = format!(
             "listen=127.0.0.1:0\ncert=cert.pem\nkey=key.pem\n\
              identity_seed={seed}\nstatic_secret={secret}\n\
@@ -908,6 +975,7 @@ mod tests {
             family = "33".repeat(32),
             capacity = 8u64 << 30,
         );
+
         std::fs::write(&path, text).unwrap();
         let settings = read_settings(path.to_str().unwrap(), false);
         let _ = std::fs::remove_file(&path);
@@ -924,6 +992,7 @@ mod tests {
                 let chain = RelayDescriptor::parse(&chain).unwrap();
                 assert_eq!(chain.roles & roles::ATTACHMENT, 0);
                 assert_eq!(chain.chunk_store_gib, 0);
+
                 // ATT-087: a relay with the role declares its store.
                 let exit = descriptor_of("queue,chain,attachment");
                 let exit = RelayDescriptor::parse(&exit).unwrap();

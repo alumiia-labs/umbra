@@ -159,14 +159,17 @@ impl LinkWriter {
     /// slack above it, or when its connection ended.
     fn queue(&self, capsule: Vec<u8>) -> bool {
         let len = capsule.len();
+
         // The count rises before the send, thus the writing task never
         // lowers it below zero.
         let held = self.queued.fetch_add(len, Ordering::Relaxed);
         let bound = self.limit.saturating_add(BACKLOG_SLACK);
+
         if held.saturating_add(len) > bound || self.sender.send(capsule).is_err() {
             self.queued.fetch_sub(len, Ordering::Relaxed);
             return false;
         }
+
         true
     }
 }
@@ -324,6 +327,7 @@ impl Adopted {
         if self.replaced.contains(&connection) {
             return None;
         }
+
         Some(self.names.get(&connection).copied().unwrap_or(connection))
     }
 
@@ -331,9 +335,11 @@ impl Adopted {
     /// none for a connection that a resume replaced.
     fn closed(&mut self, connection: LinkId) -> Option<LinkId> {
         self.open.remove(&connection);
+
         if self.replaced.remove(&connection) {
             return None;
         }
+
         match self.names.remove(&connection) {
             Some(name) => {
                 self.serves.remove(&name);
@@ -351,6 +357,7 @@ impl Adopted {
             self.names.remove(&before);
             self.replaced.insert(before);
         }
+
         self.names.insert(connection, name);
         self.serves.insert(name, connection);
     }
@@ -375,33 +382,42 @@ pub async fn run_node(
 ) {
     let mut rng = OsRng;
     let mut writers: BTreeMap<LinkId, LinkWriter> = BTreeMap::new();
+
     // NET-349: the node reads the backlog of a link before it frames a cell.
     let gauges = Gauges::default();
     node.set_backlog(Box::new(gauges.clone()));
+
     // NET-320, NET-332: a step of the wall clock ends no circuit early and
     // holds no build back.
     node.use_monotonic_clock();
+
     let mut adopted = Adopted::default();
+
     // NET-035, NET-036: the next tick of each paced circuit, and the same
     // ticks in their order. A tick reads the circuits that are due alone.
     // An entry of the heap whose time the map no longer holds is stale.
     let mut next_tick: BTreeMap<CircuitKey, tokio::time::Instant> = BTreeMap::new();
     let mut ticks: BinaryHeap<Reverse<(tokio::time::Instant, CircuitKey)>> = BinaryHeap::new();
+
     let draw_wait = move |rng: &mut OsRng| {
         let mut draw = [0u8; 4];
         let _ = rng.try_fill_bytes(&mut draw);
         let wait = exponential(pacing_mean_ms, u32::from_le_bytes(draw));
         Duration::from_millis(wait.max(1))
     };
+
     let mut clock =
         tokio::time::interval(Duration::from_millis((pacing_mean_ms / 20).clamp(1, 50)));
+
     // The periods run on a clock that never steps back, thus a change of the
     // wall clock holds no sweep and no push back.
     let mut last_sweep = tokio::time::Instant::now();
     let mut last_push_tick = last_sweep;
+
     // ABU-057: the first challenge at the start, and a new one at each
     // period.
     let mut last_challenge: Option<tokio::time::Instant> = None;
+
     loop {
         let outputs = tokio::select! {
             input = inputs.recv() => match input {
@@ -428,6 +444,7 @@ pub async fn run_node(
                         eprintln!("the relay set gives this relay another layer, and the relay stops");
                         return;
                     }
+
                     let placed = *placed;
                     node.set_next_layer(placed.next_layer);
                     node.set_previous_layer(placed.previous_layer);
@@ -436,6 +453,7 @@ pub async fn run_node(
                     node.set_carriers(placed.carriers);
                     node.set_measurer_trust(placed.measurer_trust);
                     node.set_loop_relays(&placed.loop_relays);
+
                     // REL-174: the link of a relay that left the layer
                     // before closes.
                     node.close_strangers(unix_now())
@@ -443,10 +461,12 @@ pub async fn run_node(
                 Some(Input::Dialed { link, relay_id, writer }) => {
                     gauges.insert(link, &writer);
                     writers.insert(link, writer);
+
                     let mut session_id = [0u8; 8];
                     let mut secret = [0u8; 32];
                     let _ = rng.try_fill_bytes(&mut session_id);
                     let _ = rng.try_fill_bytes(&mut secret);
+
                     node.dialed(link, relay_id, session_id, Secret::new(secret), unix_now(), &mut rng)
                 }
                 Some(Input::Capsule { link, bytes }) => match adopted.name_of(link) {
@@ -501,6 +521,7 @@ pub async fn run_node(
                 let now = unix_now();
                 let instant = tokio::time::Instant::now();
                 let mut outputs = Vec::new();
+
                 // NET-035, NET-036: a Poisson clock for each circuit, which
                 // no arrival moves. The first tick of a new or woken clock
                 // is a draw too: a tick at once would follow the cell that
@@ -514,47 +535,58 @@ pub async fn run_node(
                         ticks.push(Reverse((at, circuit)));
                     }
                 }
+
                 while let Some(Reverse((at, circuit))) = ticks.peek().copied() {
                     if at > instant {
                         break;
                     }
+
                     ticks.pop();
                     if next_tick.get(&circuit) != Some(&at) {
                         continue;
                     }
+
                     // A circuit that ended or paused leaves the clock, and
                     // a wake puts it back.
                     if !node.is_paced(&circuit) {
                         next_tick.remove(&circuit);
                         continue;
                     }
+
                     outputs.extend(node.pacing_tick(&circuit, now, &mut rng));
                     let next = instant + draw_wait(&mut rng);
                     next_tick.insert(circuit, next);
                     ticks.push(Reverse((next, circuit)));
                 }
+
                 // NET-037: the next step of each drain.
                 outputs.extend(node.drain_tick(now, &mut rng));
+
                 // Part 3 §3.9: each forward cell whose per-hop delay ended.
                 outputs.extend(node.release_delayed(clock_ms(), now, &mut rng));
+
                 // NTF-049, NTF-066: the end of a coalescing window and
                 // each re-push, once each second.
                 if instant.duration_since(last_push_tick) >= Duration::from_secs(1) {
                     last_push_tick = instant;
                     outputs.extend(node.push_tick(now, &mut rng));
                 }
+
                 if instant.duration_since(last_sweep) >= Duration::from_secs(SWEEP_PERIOD) {
                     last_sweep = instant;
                     outputs.extend(node.sweep(now, &mut rng));
                 }
+
                 let period = Duration::from_secs(POW_CHALLENGE_PERIOD);
                 if last_challenge.is_none_or(|at| instant.duration_since(at) >= period) {
                     last_challenge = Some(instant);
                     outputs.extend(node.issue_challenge(now, &mut rng));
                 }
+
                 outputs
             }
         };
+
         // NET-298: the changes of a call commit before an output of it
         // leaves. A commit writes to the disk, thus it runs on a thread for
         // blocking work, and the runtime threads serve the sockets meanwhile.
@@ -573,9 +605,11 @@ pub async fn run_node(
                 }
             }
         }
+
         if let Some(bundle) = node.take_challenge_bundle(unix_now()) {
             let _ = requests.send(Request::Challenges(bundle));
         }
+
         for output in outputs {
             match output {
                 Output::Send { link, capsule } => {
@@ -613,12 +647,13 @@ pub async fn run_node(
                 }
             }
         }
+
         node.flushed();
     }
 }
 
-/// The pushes of chunk copies that run at once. It stays
-/// below `RELAY_CONN_PER_IP`, thus an ingress relay that holds a role of
+/// The pushes of chunk copies that run at once. It stays below
+/// `RELAY_CONN_PER_IP`, thus an ingress relay that holds a role of
 /// the pushes takes each one of one pushing relay (`NET-334`). Relays that
 /// share one address can pass that cap together, and a copy it refuses is
 /// one that the sample of the uploader finds (`ATT-113`).
@@ -690,14 +725,17 @@ impl Lane {
         let Ok(mut state) = self.0.lock() else {
             return false;
         };
+
         state.waiting.push_back(capsule);
         while state.waiting.len() > LANE_HELD {
             state.waiting.pop_front();
         }
+
         if state.workers < LANE_WORKERS && state.workers < state.waiting.len() {
             state.workers += 1;
             return true;
         }
+
         false
     }
 
@@ -713,10 +751,12 @@ impl Lane {
         let Ok(mut state) = self.0.lock() else {
             return true;
         };
+
         if state.waiting.is_empty() {
             state.workers = state.workers.saturating_sub(1);
             return true;
         }
+
         false
     }
 
@@ -735,11 +775,13 @@ impl Lane {
         let Ok(state) = self.0.lock() else {
             return (None, CONNECT_TIME_AFTER_FAILURE);
         };
+
         let time = if state.failures == 0 {
             CONNECT_TIME
         } else {
             CONNECT_TIME_AFTER_FAILURE
         };
+
         (state.closed_until, time)
     }
 
@@ -748,11 +790,13 @@ impl Lane {
         let Ok(mut state) = self.0.lock() else {
             return;
         };
+
         if opened {
             state.failures = 0;
             state.closed_until = None;
             return;
         }
+
         let doubled = LANE_HOLD_OFF.saturating_mul(1u32 << state.failures.min(16));
         state.failures = state.failures.saturating_add(1);
         state.closed_until = Some(now + doubled.min(LANE_HOLD_OFF_MAX));
@@ -770,6 +814,7 @@ async fn connect_push(
     let mut mask = [0u8; 4];
     let _ = rng.try_fill_bytes(&mut key);
     let _ = rng.try_fill_bytes(&mut mask);
+
     let plan = Plan::Only(Wire::Tcp);
     native::connect(target, tls, plan, key, mask, time)
         .await
@@ -794,28 +839,34 @@ async fn run_lane(
         if lane.rests() {
             return;
         }
+
         let (closed_until, time) = lane.budget();
         if let Some(until) = closed_until {
             tokio::time::sleep_until(until).await;
         }
+
         let target = routes
             .lock()
             .ok()
             .and_then(|held| held.replicas.get(&relay_id).cloned());
+
         // ATT-105: a relay that the set names no more gets nothing.
         let Some(target) = target else {
             lane.close();
             return;
         };
+
         let connection = connect_push(&target, tls.clone(), time).await;
         lane.connected(connection.is_some(), tokio::time::Instant::now());
         let Some(mut connection) = connection else {
             continue;
         };
+
         for _ in 0..LANE_BATCH {
             let Some(capsule) = lane.take() else {
                 break;
             };
+
             let sent = tokio::time::timeout(PUSH_TIMEOUT, connection.send(&capsule)).await;
             if !matches!(sent, Ok(Ok(()))) {
                 break;
@@ -839,6 +890,7 @@ async fn push_copy(
     let (_, time) = lane.budget();
     let connection = connect_push(&target, tls, time).await;
     lane.connected(connection.is_some(), tokio::time::Instant::now());
+
     if let Some(mut connection) = connection {
         let _ = connection.send(&capsule).await;
     }
@@ -886,6 +938,7 @@ impl DrainWatch {
             self.above = None;
             return false;
         }
+
         match self.above {
             None => self.above = Some((now, written)),
             Some((since, at_start)) if now.duration_since(since) >= LINK_DRAIN_WINDOW => {
@@ -937,7 +990,6 @@ pub struct OhttpForward {
     pub tls: Arc<rustls::ClientConfig>,
 }
 
-/// What a relay carries over HTTPS beside the upgrade: the manifest of
 /// The limits of the connections of one relay (Part 3 `NET-333` to
 /// `NET-335`).
 #[derive(Debug, Clone, Copy)]
@@ -1059,6 +1111,7 @@ impl Place {
         if *count >= max {
             return None;
         }
+
         *count += 1;
         Some(Place(counts.clone(), ip))
     }
@@ -1088,6 +1141,7 @@ impl Drop for Held {
     }
 }
 
+/// What a relay carries over HTTPS beside the upgrade: the manifest of
 /// Part 3 §3.10, the OHTTP relay role of Part 8 §8.2, and the route of the
 /// pushes of its own queues.
 #[derive(Default)]
@@ -1159,12 +1213,15 @@ fn manifest_epoch(bytes: &[u8], now: u64) -> Option<(u64, bool)> {
     use umbra_core::directory::{
         manifest::RelayManifest, root::DirectoryRoot, CLOCK_SKEW, CONSENSUS_VALIDITY,
     };
+
     let manifest = RelayManifest::parse(bytes).ok()?;
     let root = DirectoryRoot::parse(manifest.root).ok()?;
+
     let ends = root
         .epoch_start_unix
         .saturating_add(CONSENSUS_VALIDITY)
         .saturating_add(CLOCK_SKEW);
+
     Some((root.epoch, now <= ends))
 }
 
@@ -1175,9 +1232,11 @@ fn is_newer(fresh: &[u8], held: Option<&[u8]>, now: u64) -> bool {
     let Some((epoch, holds)) = manifest_epoch(fresh, now) else {
         return false;
     };
+
     let held_epoch = held
         .and_then(|held| manifest_epoch(held, now))
         .map(|(e, _)| e);
+
     holds && held_epoch.is_none_or(|held| epoch >= held)
 }
 
@@ -1198,12 +1257,14 @@ async fn fetch_keychain_into(
     let chain = native::fetch_keychain(dial, tls).await.ok()?;
     umbra_core::directory::keychain::links(&chain).ok()?;
     let held = carried.keychain.lock().ok()?.clone();
+
     if held.as_deref() != Some(chain.as_slice()) {
         let _ = write_atomically(&keychain_path(source), &chain);
         if let Ok(mut slot) = carried.keychain.lock() {
             *slot = Some(chain.clone());
         }
     }
+
     Some(chain)
 }
 
@@ -1221,16 +1282,20 @@ async fn fetch_manifest_into(
     let Ok(fresh) = native::fetch_manifest(dial, tls.clone()).await else {
         return;
     };
+
     let held = std::fs::read(&source.path).ok();
     if held.as_deref() == Some(fresh.as_slice()) || !is_newer(&fresh, held.as_deref(), now) {
         return;
     }
+
     let Some(keyset) = source.keyset() else {
         return;
     };
+
     let placed = |keyset: &[u8]| {
         crate::placement::placement(&fresh, keyset, &source.relay_id, &source.s, now).is_ok()
     };
+
     let part = source.path.with_extension("part");
     if !placed(&keyset) {
         // REL-200: a manifest under another key set takes the key chain of
@@ -1238,28 +1303,35 @@ async fn fetch_manifest_into(
         let Some(chain) = chain else {
             return;
         };
+
         let Ok(next) = umbra_core::directory::keychain::advance(&keyset, &chain) else {
             return;
         };
+
         if next == keyset || !placed(&next) {
             return;
         }
+
         // The manifest waits beside its file first, thus a stop between
         // the two renames leaves a pair that a start can mend.
         if std::fs::write(&part, &fresh).is_err() {
             eprintln!("relay: the manifest of the new key set does not write");
             return;
         }
+
         if !write_atomically(&source.keyset_path, &next) {
             eprintln!("relay: the key set file does not write; a rotation waits");
             return;
         }
+
         if let Ok(mut held) = source.keyset.lock() {
             *held = next;
         }
+
         let _ = std::fs::rename(&part, &source.path);
         return;
     }
+
     if std::fs::write(&part, &fresh).is_ok() {
         let _ = std::fs::rename(&part, &source.path);
     }
@@ -1292,6 +1364,7 @@ pub fn dial_at_alias(dials: &mut BTreeMap<[u8; 32], Dial>, alias: Option<[u8; 4]
     let Some(alias) = alias else {
         return;
     };
+
     for dial in dials.values_mut() {
         if dial.addr_v4 == Some(alias) {
             dial.addr_v4 = Some([127, 0, 0, 1]);
@@ -1314,14 +1387,17 @@ async fn adopt(
     if let Ok(mut held) = carried.relay_addresses.lock() {
         *held = placed.addresses.clone();
     }
+
     let mut next_hops = placed.next.clone();
     let mut replicas = placed.pushes();
     dial_at_alias(&mut next_hops, carried.host_alias);
     dial_at_alias(&mut replicas, carried.host_alias);
+
     if let Ok(mut held) = routes.lock() {
         held.next_hops = next_hops;
         held.replicas = replicas;
     }
+
     let _ = node.send(Input::Placed(Box::new(Placed::of(placed)))).await;
 }
 
@@ -1338,6 +1414,7 @@ async fn reload_manifest(
     let Some(source) = carried.manifest_source.as_ref() else {
         return;
     };
+
     // The chain of the last run serves until a fetch gives a newer one.
     if let Ok(chain) = std::fs::read(keychain_path(source)) {
         if umbra_core::directory::keychain::links(&chain).is_ok() {
@@ -1346,9 +1423,11 @@ async fn reload_manifest(
             }
         }
     }
+
     let mut reads: u32 = 0;
     loop {
         tokio::time::sleep(MANIFEST_READ_PERIOD).await;
+
         if let Some(dial) = &source.fetch {
             if reads.is_multiple_of(MANIFEST_FETCH_EVERY) {
                 let now = std::time::SystemTime::now()
@@ -1358,12 +1437,15 @@ async fn reload_manifest(
             }
             reads = reads.wrapping_add(1);
         }
+
         let Ok(fresh) = std::fs::read(&source.path) else {
             continue;
         };
+
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |at| at.as_secs());
+
         let served = carried
             .manifest
             .lock()
@@ -1371,27 +1453,29 @@ async fn reload_manifest(
                 held.as_deref() == Some(fresh.as_slice()) || !is_newer(&fresh, held.as_deref(), now)
             })
             .unwrap_or(true);
+
         if served {
             continue;
         }
+
         let Some(keyset) = source.keyset() else {
             continue;
         };
+
         let Ok(placed) =
             crate::placement::placement(&fresh, &keyset, &source.relay_id, &source.s, now)
         else {
             continue;
         };
+
         adopt(&carried, &placed, &routes, &node).await;
+
         if let Ok(mut held) = carried.manifest.lock() {
             *held = Some(fresh);
         }
     }
 }
 
-/// Forwards one encapsulated request to the gateway and gives its answer
-/// back (`NTF-127`). The relay reads no byte of either, it keeps neither,
-/// and the gateway sees this relay alone.
 /// The path of the receipt query of an authority (Part 10 `REL-179`).
 pub const RECEIPT_PATH: &str = "/receipt";
 
@@ -1411,21 +1495,25 @@ async fn answer_receipt_query<S>(
         .manifest_source
         .as_ref()
         .and_then(ManifestSource::keyset);
+
     let query = match (request, keyset.as_deref()) {
         (Ok(request), Some(keyset)) if request.method == "POST" => DirectoryKeySet::parse(keyset)
             .ok()
             .and_then(|(set, _)| ReceiptQuery::verify(&request.body, &set).ok()),
         _ => None,
     };
+
     let Some(query) = query else {
         let _ = https::respond(stream, 403, "text/plain", &[]).await;
         return;
     };
+
     let (reply, answer) = oneshot::channel();
     let answer = match node.send(Input::ReceiptQuery { query, reply }).await {
         Ok(()) => answer.await.ok(),
         Err(_) => None,
     };
+
     respond_answer(stream, answer).await;
 }
 
@@ -1465,24 +1553,31 @@ async fn answer_stat_query<S>(
         .manifest_source
         .as_ref()
         .and_then(ManifestSource::keyset);
+
     let query = match (request, keyset.as_deref()) {
         (Ok(request), Some(keyset)) if request.method == "POST" => DirectoryKeySet::parse(keyset)
             .ok()
             .and_then(|(set, _)| StatQuery::verify(&request.body, &set).ok()),
         _ => None,
     };
+
     let Some(query) = query else {
         let _ = https::respond(stream, 403, "text/plain", &[]).await;
         return;
     };
+
     let (reply, answer) = oneshot::channel();
     let answer = match node.send(Input::StatQuery { query, reply }).await {
         Ok(()) => answer.await.ok(),
         Err(_) => None,
     };
+
     respond_answer(stream, answer).await;
 }
 
+/// Forwards one encapsulated request to the gateway and gives its answer
+/// back (`NTF-127`). The relay reads no byte of either, it keeps neither,
+/// and the gateway sees this relay alone.
 async fn relay_ohttp<S>(
     stream: &mut S,
     inbound: &mut Vec<u8>,
@@ -1510,6 +1605,7 @@ async fn relay_ohttp<S>(
         .map(|(_, body)| body),
         _ => None,
     };
+
     let _ = match answer {
         Some(body) => https::respond(stream, 200, "message/ohttp-res", &body).await,
         None => https::respond(stream, 502, "text/plain", &[]).await,
@@ -1551,9 +1647,11 @@ pub async fn serve_connection_until<S>(
 {
     let mut inbound: Vec<u8> = Vec::with_capacity(4_096);
     let mut chunk = vec![0u8; 16_384];
+
     // NET-335: a POST reads its request and gets its answer by the deadline
     // and a grace for the answer, thus a peer that stalls holds no slot.
     let post_end = deadline + POST_GRACE;
+
     let request = loop {
         if inbound.starts_with(format!("POST {OHTTP_PATH} ").as_bytes()) {
             let limits = (OHTTP_REQUEST_MAX, OHTTP_RESPONSE_MAX);
@@ -1564,6 +1662,7 @@ pub async fn serve_connection_until<S>(
             .await;
             return;
         }
+
         if inbound.starts_with(format!("POST {DIRECTORY_PATH} ").as_bytes()) {
             let limits = (DIRECTORY_REQUEST_MAX, DIRECTORY_RESPONSE_MAX);
             let _ = tokio::time::timeout_at(
@@ -1578,6 +1677,7 @@ pub async fn serve_connection_until<S>(
             .await;
             return;
         }
+
         if inbound.starts_with(format!("POST {RECEIPT_PATH} ").as_bytes()) {
             let _ = tokio::time::timeout_at(
                 post_end,
@@ -1586,6 +1686,7 @@ pub async fn serve_connection_until<S>(
             .await;
             return;
         }
+
         if inbound.starts_with(format!("POST {STAT_PATH} ").as_bytes()) {
             let _ = tokio::time::timeout_at(
                 post_end,
@@ -1594,6 +1695,7 @@ pub async fn serve_connection_until<S>(
             .await;
             return;
         }
+
         if native::asks_challenges(&inbound) && inbound.windows(4).any(|w| w == b"\r\n\r\n") {
             let bundle = carried
                 .challenges
@@ -1601,6 +1703,7 @@ pub async fn serve_connection_until<S>(
                 .map(|held| held.clone())
                 .unwrap_or_default();
             let head = native::manifest_response_head(bundle.len());
+
             // NET-335: a peer that reads nothing holds the task no longer
             // than a POST.
             let _ = tokio::time::timeout_at(post_end, async {
@@ -1611,6 +1714,7 @@ pub async fn serve_connection_until<S>(
             .await;
             return;
         }
+
         if native::asks_keychain(&inbound) && inbound.windows(4).any(|w| w == b"\r\n\r\n") {
             // REL-199: the key chain, or 404 before the first rotation.
             let chain = carried
@@ -1618,6 +1722,7 @@ pub async fn serve_connection_until<S>(
                 .lock()
                 .map(|held| held.clone())
                 .unwrap_or_default();
+
             let _ = tokio::time::timeout_at(post_end, async {
                 match &chain {
                     Some(bytes) => {
@@ -1634,6 +1739,7 @@ pub async fn serve_connection_until<S>(
             .await;
             return;
         }
+
         if native::asks_manifest(&inbound) && inbound.windows(4).any(|w| w == b"\r\n\r\n") {
             let manifest = carried
                 .manifest
@@ -1656,6 +1762,7 @@ pub async fn serve_connection_until<S>(
             .await;
             return;
         }
+
         match upgrade::parse_request(&inbound) {
             Ok(Some((request, used))) => {
                 inbound.drain(..used);
@@ -1664,11 +1771,13 @@ pub async fn serve_connection_until<S>(
             Ok(None) if inbound.len() <= 8_192 => {}
             _ => return,
         }
+
         match tokio::time::timeout_at(deadline, stream.read(&mut chunk)).await {
             Ok(Ok(n)) if n > 0 => inbound.extend_from_slice(chunk.get(..n).unwrap_or(&[])),
             _ => return,
         }
     };
+
     if stream
         .write_all(upgrade::response(&request.key).as_bytes())
         .await
@@ -1676,6 +1785,7 @@ pub async fn serve_connection_until<S>(
     {
         return;
     }
+
     // A TLS stream can hold a written record in its session until the next
     // write. The peer sends nothing before this answer, thus the flush.
     if stream.flush().await.is_err() {
@@ -1688,11 +1798,14 @@ pub async fn serve_connection_until<S>(
         writer,
         source,
     };
+
     if node.send(opened).await.is_err() {
         return;
     }
+
     let mut capsule = vec![0u8; MAX_CAPSULE];
     let written = AtomicUsize::new(0);
+
     // The two directions run side by side. A peer writes its capsules
     // before it reads, as a client run does. A write of this relay that
     // stopped each read would then wait for that peer while the peer waits
@@ -1714,18 +1827,21 @@ pub async fn serve_connection_until<S>(
                     Err(_) => return,
                 }
             }
+
             match reader.read(&mut chunk).await {
                 Ok(n) if n > 0 => inbound.extend_from_slice(chunk.get(..n).unwrap_or(&[])),
                 _ => return,
             }
         }
     };
+
     let writes = async {
         while let Some(bytes) = outbound.recv().await {
             let mut frame = vec![0u8; websocket::frame_len(bytes.len(), false)];
             let Ok(used) = websocket::encode(&bytes, None, &mut frame) else {
                 return;
             };
+
             // A peer that reads nothing holds no task: the write ends at
             // its bound, and the link closes. With no flush, the TLS session
             // can hold the last capsule until the next one.
@@ -1733,16 +1849,19 @@ pub async fn serve_connection_until<S>(
                 writer.write_all(frame.get(..used).unwrap_or(&[])).await?;
                 writer.flush().await
             };
+
             if !matches!(
                 tokio::time::timeout(LINK_WRITE_TIMEOUT, write).await,
                 Ok(Ok(()))
             ) {
                 return;
             }
+
             queued.fetch_sub(bytes.len(), Ordering::Relaxed);
             written.fetch_add(bytes.len(), Ordering::Relaxed);
         }
     };
+
     // NET-364: a link whose backlog drains too slowly ends.
     let watch = async {
         let mut drain = DrainWatch::default();
@@ -1758,12 +1877,14 @@ pub async fn serve_connection_until<S>(
             }
         }
     };
+
     // The end of one direction ends the connection.
     tokio::select! {
         () = reads => {}
         () = writes => {}
         () = watch => {}
     }
+
     let _ = node.send(Input::Closed { link }).await;
 }
 
@@ -1775,11 +1896,13 @@ pub fn tls_acceptor(cert_path: &str, key_path: &str) -> Option<TlsAcceptor> {
         .collect::<Result<_, _>>()
         .ok()?;
     let key = PrivateKeyDer::from_pem_file(key_path).ok()?;
+
     let mut config =
         rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
             .with_no_client_auth()
             .with_single_cert(certs, key)
             .ok()?;
+
     // A relay link resumes no TLS session and takes no early data: the
     // relay issues no ticket and keeps no session.
     config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
@@ -1809,6 +1932,7 @@ pub async fn accept_loop(
     // The connections of the address of each relay of the set, inside
     // `LINK_OPEN_TIMEOUT`.
     let per_peer: PerIp = Arc::new(Mutex::new(BTreeMap::new()));
+
     loop {
         // NET-333: an accept that fails ends no relay. It writes no line,
         // because the cause can come from a peer at will.
@@ -1816,10 +1940,12 @@ pub async fn accept_loop(
             tokio::time::sleep(ACCEPT_RETRY).await;
             continue;
         };
+
         // NET-333: a relay at its cap closes a new connection at once.
         if open.load(Ordering::Relaxed) >= limits.max_connections {
             continue;
         }
+
         // NET-334: one address holds at most its share. A relay of the set
         // opens connections for its pushes, thus its address holds more of
         // them, in a count of its own, until `LINK_OPEN_TIMEOUT`. A push
@@ -1834,9 +1960,11 @@ pub async fn accept_loop(
                 .relay_addresses
                 .lock()
                 .is_ok_and(|relays| relays.contains(&ip));
+
         let counted = limits.per_ip_max > 0 && !is_exempt;
         let mut place = None;
         let mut peer_place = None;
+
         if counted && is_peer {
             let max = limits
                 .per_ip_max
@@ -1851,8 +1979,10 @@ pub async fn accept_loop(
             };
             place = Some(taken);
         }
+
         open.fetch_add(1, Ordering::Relaxed);
         let held = Held { open: open.clone() };
+
         let handshakes = handshakes.clone();
         let shaking = shaking.clone();
         let shaking_nets = shaking_nets.clone();
@@ -1863,13 +1993,16 @@ pub async fn accept_loop(
         let carried = carried.clone();
         let this_link = link;
         link = link.saturating_add(2);
+
         // NET-335: one deadline from the accept covers the TLS handshake and
         // the request.
         let accepted_at = tokio::time::Instant::now();
         let deadline = accepted_at + limits.handshake_timeout;
+
         tokio::spawn(async move {
             let _held = held;
             let mut place = place;
+
             // NET-335: a connection takes no handshake before its whole
             // `ClientHello`. The relay reads it with no key operation, and
             // one that is not whole at RELAY_FIRST_BYTES_TIMEOUT ends. A set
@@ -1882,10 +2015,12 @@ pub async fn accept_loop(
             let Ok(Ok(start)) = tokio::time::timeout_at(first, hello).await else {
                 return;
             };
+
             // NET-335: one address and one network run at most their share
             // of the handshakes.
             let mut mine = None;
             let mut ours = None;
+
             if !is_exempt && limits.handshakes_per_ip > 0 {
                 let max = if is_peer {
                     limits
@@ -1899,6 +2034,7 @@ pub async fn accept_loop(
                 };
                 mine = Some(taken);
             }
+
             if !is_exempt && !is_peer && limits.handshakes_per_net > 0 {
                 let Some(taken) =
                     Place::take(&shaking_nets, net_key(ip), limits.handshakes_per_net)
@@ -1907,6 +2043,7 @@ pub async fn accept_loop(
                 };
                 ours = Some(taken);
             }
+
             // NET-335: a bound holds the TLS handshakes that run at once,
             // thus a flood of them costs the relay a fixed amount of work.
             // A connection above the bound waits for a place until its
@@ -1916,21 +2053,26 @@ pub async fn accept_loop(
             else {
                 return;
             };
+
             // The rest of the handshake is one flight of each side, and a
             // peer that holds its own back gives the place up at
             // RELAY_HANDSHAKE_END_TIMEOUT.
             let end = deadline.min(tokio::time::Instant::now() + limits.handshake_end_timeout);
             let accepted =
                 tokio::time::timeout_at(end, start.into_stream(tls.config().clone())).await;
+
             drop(permit);
             drop(mine);
             drop(ours);
+
             let Ok(Ok(stream)) = accepted else {
                 return;
             };
+
             let serve =
                 serve_connection_until(stream, this_link, node, carried, deadline, Some(source));
             tokio::pin!(serve);
+
             if let Some(until_open) = peer_place {
                 // NET-334: the address of a relay of the set holds its
                 // larger count until the time of the `Open` and the hello
@@ -1944,12 +2086,14 @@ pub async fn accept_loop(
                     () = &mut serve => return,
                     () = tokio::time::sleep_until(window) => {}
                 }
+
                 drop(until_open);
                 let Some(taken) = Place::take(&per_ip, source, limits.per_ip_max) else {
                     return;
                 };
                 place = Some(taken);
             }
+
             serve.await;
             drop(place);
         });
@@ -1970,6 +2114,7 @@ pub async fn dial_next(
     let mut mask = [0u8; 4];
     let _ = rng.try_fill_bytes(&mut key);
     let _ = rng.try_fill_bytes(&mut mask);
+
     let plan = Plan::Only(Wire::Tcp);
     let Ok(mut connection) =
         native::connect(&target, tls, plan, key, mask, Duration::from_secs(10)).await
@@ -1978,19 +2123,23 @@ pub async fn dial_next(
         let _ = node.send(Input::DialFailed { relay_id }).await;
         return;
     };
+
     let (writer, mut outbound, queued) = LinkWriter::new(RELAY_LINK_BACKLOG);
     let opened = Input::Dialed {
         link,
         relay_id,
         writer,
     };
+
     if node.send(opened).await.is_err() {
         return;
     }
+
     // NET-364: the next hop drains the backlog of its link too.
     let mut drain = DrainWatch::default();
     let mut check = tokio::time::interval(DRAIN_CHECK);
     let mut written = 0usize;
+
     loop {
         tokio::select! {
             received = connection.recv() => match received {
@@ -2020,6 +2169,7 @@ pub async fn dial_next(
             }
         }
     }
+
     let _ = node.send(Input::Closed { link }).await;
 }
 
@@ -2047,20 +2197,24 @@ pub async fn run_relay(
     let carried_challenges = carried.clone();
     let (inputs, node_inputs) = mpsc::channel::<Input>(1_024);
     let (requests, mut node_requests) = mpsc::unbounded_channel::<Request>();
+
     // A newer manifest moves the routes of the dialer while the relay runs.
     let routes = Arc::new(Mutex::new(Routes {
         next_hops: next_hops.clone(),
         replicas,
     }));
+
     tokio::spawn(reload_manifest(
         carried.clone(),
         client_tls.clone(),
         routes.clone(),
         inputs.clone(),
     ));
+
     // NET-167: the relays that the dialer reaches are the next layer.
     node.set_next_layer(next_hops.keys().copied().collect());
     let node_task = tokio::spawn(run_node(node, node_inputs, requests, pacing_mean_ms, store));
+
     // ABU-099: the keys of the issuer come from the log, on a thread of
     // their own, since each read blocks.
     let reader = carried
@@ -2068,6 +2222,7 @@ pub async fn run_relay(
         .lock()
         .ok()
         .and_then(|mut held| held.take());
+
     if let Some(reader) = reader {
         let key_inputs = inputs.clone();
         tokio::task::spawn_blocking(move || crate::issuer_keys::keep_reading(reader, key_inputs));
@@ -2080,6 +2235,7 @@ pub async fn run_relay(
         let pushes_running = Arc::new(tokio::sync::Semaphore::new(PUSHES_RUNNING));
         let ndr_pushes_held = Arc::new(tokio::sync::Semaphore::new(NDR_PUSHES_HELD));
         let mut lanes: BTreeMap<[u8; 32], Arc<Lane>> = BTreeMap::new();
+
         // Each relay of the next layer gets a link at the start, thus the
         // first circuit of a client does not wait for a dial.
         for (relay_id, target) in &next_hops {
@@ -2093,6 +2249,7 @@ pub async fn run_relay(
             ));
             link = link.saturating_add(2);
         }
+
         while let Some(request) = node_requests.recv().await {
             match request {
                 Request::Dial(relay_id) => {
@@ -2114,6 +2271,7 @@ pub async fn run_relay(
                         .lock()
                         .ok()
                         .and_then(|held| held.replicas.get(&relay_id).cloned());
+
                     if let Some(target) = target {
                         // The lanes of the relays that left the set go.
                         if !lanes.contains_key(&relay_id) {
@@ -2121,13 +2279,16 @@ pub async fn run_relay(
                                 lanes.retain(|id, _| held.replicas.contains_key(id));
                             }
                         }
+
                         let lane = lanes.entry(relay_id).or_default().clone();
+
                         // A chunk copy is large and slow, and a deposit or a
                         // challenge is small: each kind has its places.
                         let is_copy = matches!(
                             umbra_wire::capsule::parse(&capsule),
                             Ok((umbra_wire::capsule::CapsuleType::Replica, _, _))
                         );
+
                         if !is_copy {
                             // WIR-526: the deposits and the challenges of one
                             // relay wait in its lane.
@@ -2138,16 +2299,20 @@ pub async fn run_relay(
                             }
                             continue;
                         }
+
                         let Ok(held) = pushes_held.clone().try_acquire_owned() else {
                             continue;
                         };
+
                         let running = pushes_running.clone();
                         let tls = client_tls.clone();
+
                         tokio::spawn(async move {
                             let _held = held;
                             let Ok(_running) = running.acquire_owned().await else {
                                 return;
                             };
+
                             let copy = push_copy(target, tls, capsule, lane);
                             let _ = tokio::time::timeout(PUSH_TIMEOUT, copy).await;
                         });
@@ -2162,11 +2327,13 @@ pub async fn run_relay(
                     let Some((route, tls)) = carried_ndr.clone() else {
                         continue;
                     };
+
                     // A push above the bound goes nowhere, and the re-push
                     // of NTF-066 sends it again.
                     let Ok(held) = ndr_pushes_held.clone().try_acquire_owned() else {
                         continue;
                     };
+
                     let inputs = dial_inputs.clone();
                     tokio::spawn(async move {
                         let _held = held;
@@ -2185,6 +2352,7 @@ pub async fn run_relay(
             }
         }
     });
+
     // The node task ends when the store fails or when a newer relay set
     // gives the relay another layer, and the relay ends with it.
     tokio::select! {
@@ -2209,6 +2377,7 @@ mod tests {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
+
         runtime.block_on(async {
             let (mut near, mut far) = tokio::io::duplex(4_096);
             respond_answer(&mut near, answer).await;
@@ -2225,10 +2394,12 @@ mod tests {
         assert!(lane.queue(vec![0]));
         assert!(lane.queue(vec![1]));
         assert!(!lane.queue(vec![2]));
+
         // One more than `LANE_HELD` drops the oldest that waits.
         for index in 3..=LANE_HELD {
             assert!(!lane.queue(index.to_be_bytes().to_vec()));
         }
+
         assert_eq!(lane.take(), Some(vec![1]));
         assert_eq!(lane.take(), Some(vec![2]));
         assert!(!lane.rests());
@@ -2237,6 +2408,7 @@ mod tests {
         // lane holds nothing back.
         let now = tokio::time::Instant::now();
         assert_eq!(lane.budget(), (None, CONNECT_TIME));
+
         // One that does not open gives the next try a short time, after a
         // wait that doubles up to `LANE_HOLD_OFF_MAX`.
         lane.connected(false, now);
@@ -2244,11 +2416,14 @@ mod tests {
             lane.budget(),
             (Some(now + LANE_HOLD_OFF), CONNECT_TIME_AFTER_FAILURE)
         );
+
         lane.connected(false, now);
         assert_eq!(lane.budget().0, Some(now + 2 * LANE_HOLD_OFF));
+
         for _ in 0..40 {
             lane.connected(false, now);
         }
+
         assert_eq!(lane.budget().0, Some(now + LANE_HOLD_OFF_MAX));
         lane.connected(true, now);
         assert_eq!(lane.budget(), (None, CONNECT_TIME));
@@ -2259,6 +2434,7 @@ mod tests {
         assert_eq!(empty.take(), Some(vec![7]));
         assert!(empty.rests());
         assert!(empty.queue(vec![8]));
+
         // A relay that left the set takes nothing more.
         empty.close();
         assert!(empty.queue(vec![9]));
@@ -2271,21 +2447,25 @@ mod tests {
         let start = tokio::time::Instant::now();
         let at = |seconds: u64| start + Duration::from_secs(seconds);
         let full = LINK_DRAIN_MARK + 1;
+
         // NET-364: a backlog below its mark ends nothing.
         let mut watch = DrainWatch::default();
         assert!(!watch.too_slow(at(0), LINK_DRAIN_MARK, 0));
         assert!(!watch.too_slow(at(600), LINK_DRAIN_MARK, 0));
+
         // A peer that reads about 1 KiB/s above the mark ends at the end
         // of its window, and not before.
         assert!(!watch.too_slow(at(600), full, 0));
         assert!(!watch.too_slow(at(659), full, 59 << 10));
         assert!(watch.too_slow(at(660), full, 60 << 10));
+
         // A peer that reads `LINK_DRAIN_RATE` keeps its link window after
         // window.
         let mut watch = DrainWatch::default();
         assert!(!watch.too_slow(at(0), full, 0));
         assert!(!watch.too_slow(at(60), full, LINK_DRAIN_MIN));
         assert!(!watch.too_slow(at(120), full, 2 * LINK_DRAIN_MIN));
+
         // A backlog that fell below the mark starts a new window.
         assert!(!watch.too_slow(at(130), LINK_DRAIN_MARK, 2 * LINK_DRAIN_MIN));
         assert!(!watch.too_slow(at(131), full, 2 * LINK_DRAIN_MIN));
@@ -2301,6 +2481,7 @@ mod tests {
         assert_ne!(address_key(v4(1)), address_key(v4(2)));
         assert_eq!(net_key(v4(1)), net_key(v4(2)));
         assert_ne!(net_key(v4(1)), net_key(IpAddr::from([203, 0, 114, 1])));
+
         // One host holds each IPv6 address below its first 64 bits, and
         // the network is the first 48 bits.
         let v6 = |subnet: u16, host: u16| IpAddr::from([0x2001, 0xdb8, 0x1, subnet, 0, 0, 0, host]);
@@ -2311,6 +2492,7 @@ mod tests {
             net_key(v6(1, 1)),
             net_key(IpAddr::from([0x2001, 0xdb8, 0x2, 1, 0, 0, 0, 1]))
         );
+
         // An IPv4 address and the IPv6 address that maps it are one.
         let mapped = IpAddr::from([0, 0, 0, 0, 0, 0xffff, 0xcb00, 0x7101]).to_canonical();
         assert_eq!(address_key(mapped), address_key(v4(1)));
@@ -2353,10 +2535,12 @@ mod tests {
         // for a record that its socket did not take.
         let held = tokio::io::BufWriter::with_capacity(64 * CAPSULE_LEN, server);
         tokio::spawn(serve_connection(held, 7, inputs, Arc::default()));
+
         let key = [5u8; 16];
         peer.write_all(upgrade::request("relay.example", &key).as_bytes())
             .await
             .unwrap();
+
         let wait = Duration::from_secs(5);
         let mut inbound = Vec::new();
         let upgraded = async {
@@ -2371,30 +2555,37 @@ mod tests {
                 }
             }
         };
+
         tokio::time::timeout(wait, upgraded)
             .await
             .expect("the answer to the upgrade stayed in the stream");
+
         let Some(Input::Opened { writer, .. }) = node.recv().await else {
             panic!("the connection did not open");
         };
+
         // One capsule with no capsule after it, as the answer to a build
         // cell is.
         assert!(writer.queue(vec![2u8; CAPSULE_LEN]));
+
         let mut out = vec![0u8; 2 * CAPSULE_LEN];
         let taken = async {
             loop {
                 if let Some((len, _)) = websocket::decode(&inbound, false, &mut out).unwrap() {
                     break len;
                 }
+
                 let mut chunk = [0u8; 1_024];
                 let n = peer.read(&mut chunk).await.unwrap();
                 assert!(n > 0, "the relay closed the stream");
                 inbound.extend_from_slice(&chunk[..n]);
             }
         };
+
         let len = tokio::time::timeout(wait, taken)
             .await
             .expect("the last capsule stayed in the stream");
+
         assert_eq!(out[..len], [2u8; CAPSULE_LEN]);
     }
 
@@ -2406,10 +2597,12 @@ mod tests {
         // The stream holds four capsules in each direction.
         let (mut peer, server) = tokio::io::duplex(4 * CAPSULE_LEN);
         tokio::spawn(serve_connection(server, 7, inputs, Arc::default()));
+
         let key = [5u8; 16];
         peer.write_all(upgrade::request("relay.example", &key).as_bytes())
             .await
             .unwrap();
+
         let mut inbound = Vec::new();
         loop {
             let mut chunk = [0u8; 1_024];
@@ -2420,6 +2613,7 @@ mod tests {
                 break;
             }
         }
+
         let Some(Input::Opened { writer, .. }) = node.recv().await else {
             panic!("the connection did not open");
         };
@@ -2429,6 +2623,7 @@ mod tests {
         for _ in 0..CAPSULES {
             assert!(writer.queue(vec![2u8; CAPSULE_LEN]));
         }
+
         // The peer sends more than the stream takes before it reads. The
         // relay reads each capsule while its own write waits.
         let sends = async {
@@ -2438,6 +2633,7 @@ mod tests {
                     .unwrap();
             }
         };
+
         let takes = async {
             let mut taken = 0;
             while taken < CAPSULES {
@@ -2450,6 +2646,7 @@ mod tests {
                 }
             }
         };
+
         let both = async { tokio::join!(sends, takes) };
         tokio::time::timeout(Duration::from_secs(5), both)
             .await
@@ -2463,6 +2660,7 @@ mod tests {
                     inbound.drain(..used);
                     break len;
                 }
+
                 let mut chunk = [0u8; 4_096];
                 let n = peer.read(&mut chunk).await.unwrap();
                 assert!(n > 0, "the relay closed the stream");

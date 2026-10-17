@@ -149,6 +149,7 @@ impl Guard {
         if !self.seen.insert(key) {
             return;
         }
+
         self.seen_order.push_back(key);
         if self.seen_order.len() > REPLAYS_HELD {
             if let Some(oldest) = self.seen_order.pop_front() {
@@ -167,10 +168,12 @@ impl Guard {
             self.new_handles = 0;
             self.new_by_relay.clear();
         }
+
         let of_relay = self.new_by_relay.entry(relay).or_insert(0);
         if self.new_handles >= all || *of_relay >= one {
             return false;
         }
+
         *of_relay = of_relay.saturating_add(1);
         self.new_handles = self.new_handles.saturating_add(1);
         true
@@ -201,6 +204,7 @@ impl Guard {
             }
             None => false,
         };
+
         if pushed {
             self.born.insert(handle, (at, true));
         } else {
@@ -222,10 +226,12 @@ impl Guard {
             self.window = window;
             self.pushed.clear();
         }
+
         let count = self.pushed.entry(handle).or_insert(0);
         if *count >= PUSHES_PER_WINDOW {
             return false;
         }
+
         *count = count.saturating_add(1);
         true
     }
@@ -237,6 +243,7 @@ impl Guard {
             self.moved
                 .retain(|_, (_, at)| now.saturating_sub(*at) < MOVED_HELD);
         }
+
         for change in changes {
             match change {
                 NdrChange::Registered { handle, held } => {
@@ -310,6 +317,7 @@ impl SqliteNdrStore {
         fault(connection.pragma_update(None, "secure_delete", "ON"))?;
         fault(connection.pragma_update(None, "journal_mode", "WAL"))?;
         fault(connection.pragma_update(None, "synchronous", "FULL"))?;
+
         fault(connection.execute_batch(
             "CREATE TABLE IF NOT EXISTS registrations (
                 handle        BLOB PRIMARY KEY,
@@ -320,6 +328,7 @@ impl SqliteNdrStore {
                 pushed        INTEGER NOT NULL DEFAULT 0
             ) WITHOUT ROWID;",
         ))?;
+
         let has_column = |name: &str| {
             fault(connection.query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('registrations') WHERE name = ?1",
@@ -328,12 +337,14 @@ impl SqliteNdrStore {
             ))
             .map(|count| count > 0)
         };
+
         // A file of an earlier build holds no time of registration.
         if !has_column("registered_at")? {
             fault(connection.execute_batch(
                 "ALTER TABLE registrations ADD COLUMN registered_at INTEGER NOT NULL DEFAULT 0;",
             ))?;
         }
+
         // Nor does it hold the mark of a push. Its rows lived through an
         // earlier run, thus each counts as one that took a push, and a
         // flood takes the place of none of them.
@@ -342,6 +353,7 @@ impl SqliteNdrStore {
                 "ALTER TABLE registrations ADD COLUMN pushed INTEGER NOT NULL DEFAULT 1;",
             ))?;
         }
+
         Ok(SqliteNdrStore { connection })
     }
 }
@@ -362,6 +374,7 @@ impl NdrStore for SqliteNdrStore {
                 row.get::<_, i64>(5)?,
             ))
         }))?;
+
         // A row of an earlier build lives its full time from this start.
         let now = store_time(unix_now());
         let mut out = Vec::new();
@@ -378,6 +391,7 @@ impl NdrStore for SqliteNdrStore {
                 },
             ));
         }
+
         Ok(out)
     }
 
@@ -385,6 +399,7 @@ impl NdrStore for SqliteNdrStore {
         if changes.is_empty() {
             return Ok(());
         }
+
         let transaction = fault(self.connection.transaction())?;
         for change in changes {
             match change {
@@ -414,6 +429,7 @@ impl NdrStore for SqliteNdrStore {
                 ))?,
             };
         }
+
         fault(transaction.commit())?;
         fault(
             self.connection
@@ -476,6 +492,7 @@ impl State {
                 guard.pushed(handle);
             }
         }
+
         State {
             guard,
             ..State::new(Ndr::restore(held), store)
@@ -486,6 +503,7 @@ impl State {
     /// and each later one.
     fn commit(&mut self, changes: &[NdrChange], now: u64) -> Option<()> {
         self.guard.note(changes, now);
+
         if self.store.commit(changes).is_err() {
             eprintln!("the store took no commit, and the NDR serves nothing more");
             self.broken = true;
@@ -500,6 +518,7 @@ impl State {
         if self.broken {
             return None;
         }
+
         let out = run(&mut self.ndr);
         let changes = self.ndr.take_changes();
         self.commit(&changes, unix_now())?;
@@ -523,6 +542,7 @@ impl State {
         if self.broken {
             return None;
         }
+
         let (handle, registers) = match NdrRequest::parse(plain) {
             Ok(NdrRequest::Register { handle, .. }) => (handle, true),
             Ok(NdrRequest::Unregister { handle, .. } | NdrRequest::Push { handle, .. }) => {
@@ -530,13 +550,16 @@ impl State {
             }
             Err(_) => return Some((NdrResponse::Refused, None)),
         };
+
         // The key of a request binds its bytes to the handle that it names.
         let key = sha3_256(&[&handle[..], &digest[..]]);
         if self.guard.repeats(&key) {
             return Some((NdrResponse::Refused, None));
         }
+
         let before = self.ndr.len();
         let (answer, delivery) = self.ndr.handle(plain, now);
+
         if registers && self.ndr.len() > before {
             // The handle is new. It stays when its minute admits it and the
             // NDR holds room, or a place that no push ever used.
@@ -547,6 +570,7 @@ impl State {
                     None => stays = false,
                 }
             }
+
             if !stays {
                 // It leaves again, and the store sees neither change.
                 self.ndr.gone(handle);
@@ -554,14 +578,17 @@ impl State {
                 return Some((NdrResponse::Refused, None));
             }
         }
+
         let changes = self.ndr.take_changes();
         self.commit(&changes, now)?;
+
         // The count takes a push whose token opened and no other one. A
         // party that holds no `k_tok` thus uses up no push of a handle.
         if let Some(delivery) = &delivery {
             if !self.guard.admits_push(delivery.handle, now) {
                 return Some((NdrResponse::Refused, None));
             }
+
             // The store keeps the first push of a registration, thus a
             // restart keeps its place at the bound.
             if self.ndr.took_push(&delivery.handle) {
@@ -569,11 +596,13 @@ impl State {
                 self.commit(&pushed, now)?;
             }
         }
+
         // A push that goes to the provider and a request that changed a
         // registration proved a right, and their bytes pass no second time.
         if delivery.is_some() || (answer == NdrResponse::Taken && !changes.is_empty()) {
             self.guard.remember(key);
         }
+
         Some((answer, delivery))
     }
 
@@ -585,6 +614,7 @@ impl State {
         if self.guard.moved_since(&handle, mark) {
             return Some(false);
         }
+
         self.step(|ndr| ndr.gone(handle)).map(|()| true)
     }
 }
@@ -596,6 +626,7 @@ async fn deliver(delivery: &Delivery, fcm: Option<&Fcm>) -> Sent {
     let Ok(target) = core::str::from_utf8(&delivery.target) else {
         return Sent::Refused;
     };
+
     match (delivery.carrier, fcm) {
         (TokenCarrier::Fcm, Some(fcm)) => fcm.send(target, &delivery.blob, delivery.ttl).await,
         _ => Sent::Refused,
@@ -613,30 +644,36 @@ async fn serve(
     let Ok(request) = https::read_request(&mut stream, &mut inbound, REQUEST_MAX).await else {
         return;
     };
+
     if request.method != "POST" || request.path != GATEWAY_PATH {
         let _ = https::respond(&mut stream, 404, "text/plain", &[]).await;
         return;
     }
+
     let Ok((plain, key)) = ohttp::decapsulate_request(gateway.key_id, &gateway.pair, &request.body)
     else {
         let _ = https::respond(&mut stream, 400, "text/plain", &[]).await;
         return;
     };
+
     // The request of a push holds `k_tok`. It serves the one step below, and
     // `Zeroizing` wipes it before the wait for the provider (§8.2.1).
     let plain = Zeroizing::new(plain);
     let digest = sha3_256(&[&request.body[..]]);
+
     let stepped = match state.lock() {
         Ok(mut state) => state
             .request(digest, &plain, relay, unix_now())
             .map(|served| (served, state.guard.moves)),
         Err(_) => None,
     };
+
     drop(plain);
     let Some(((mut answer, delivery), mark)) = stepped else {
         let _ = https::respond(&mut stream, 502, "text/plain", &[]).await;
         return;
     };
+
     if let Some(delivery) = delivery {
         match deliver(&delivery, fcm.as_deref()).await {
             // NTF-125: the provider named the target gone. A handle that
@@ -658,9 +695,11 @@ async fn serve(
             Sent::Refused => answer = NdrResponse::Refused,
         }
     }
+
     let Ok(sealed) = ohttp::encapsulate_response(&key, &answer.encode(), &mut OsRng) else {
         return;
     };
+
     let _ = https::respond(&mut stream, 200, "message/ohttp-res", &sealed).await;
 }
 
@@ -677,6 +716,7 @@ pub async fn run_ndr(
     let fcm = fcm.map(Arc::new);
     let held = store.load()?;
     let state = Arc::new(Mutex::new(State::restored(held, store)));
+
     // NTF-138: a registration that no `NREG` renewed leaves, at the start
     // and each hour after it.
     let sweeping = state.clone();
@@ -688,8 +728,10 @@ pub async fn run_ndr(
             tokio::time::sleep(SWEEP_EVERY).await;
         }
     });
+
     let gateway = Arc::new(gateway);
     let held = Arc::new(tokio::sync::Semaphore::new(CONNECTION_MAX));
+
     loop {
         // An accept that fails ends no NDR: a restart would empty the
         // memory of the requests. It writes no line, because the cause can
@@ -698,21 +740,25 @@ pub async fn run_ndr(
             tokio::time::sleep(ACCEPT_RETRY).await;
             continue;
         };
+
         // A peer that stalls holds no task past its time, and the server
         // holds a bounded count of them (`NET-335`).
         let Ok(permit) = held.clone().try_acquire_owned() else {
             continue;
         };
+
         // The address of the OHTTP relay, for the count of its new handles.
         // The NDR holds it for one minute and writes it nowhere.
         let relay = match address.ip().to_canonical() {
             std::net::IpAddr::V4(v4) => v4.to_ipv6_mapped().octets(),
             std::net::IpAddr::V6(v6) => v6.octets(),
         };
+
         let tls = tls.clone();
         let gateway = gateway.clone();
         let state = state.clone();
         let fcm = fcm.clone();
+
         tokio::spawn(async move {
             let _permit = permit;
             let _ = tokio::time::timeout(CONNECTION_TIME, async move {
@@ -738,6 +784,7 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join("ndr.db");
         let path = path.to_str().unwrap();
+
         {
             let old = Connection::open(path).unwrap();
             old.execute_batch(
@@ -760,6 +807,7 @@ mod tests {
             )
             .unwrap();
         }
+
         // NTF-138: the row of the earlier build lives its full time from
         // this start. It lived through a run, thus it counts as one that
         // took a push.
@@ -768,6 +816,7 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert!(loaded[0].1.registered_at + 60 >= unix_now());
         assert!(loaded[0].1.pushed);
+
         let mut held = Held {
             nonce: [4; 24],
             ct_token: vec![5; 40],
@@ -775,6 +824,7 @@ mod tests {
             registered_at: 1_700_000_000,
             pushed: false,
         };
+
         store
             .commit(&[NdrChange::Registered {
                 handle: [8; HANDLE_LEN],
@@ -782,6 +832,7 @@ mod tests {
             }])
             .unwrap();
         drop(store);
+
         // NET-301: a new row keeps the time of its NREG to the end of its
         // grain, and no push marks it yet.
         let mut again = SqliteNdrStore::open(path).unwrap();
@@ -789,14 +840,17 @@ mod tests {
         held.registered_at = store_time(held.registered_at);
         assert_ne!(held.registered_at, 1_700_000_000);
         assert!(loaded.contains(&([8; HANDLE_LEN], held.clone())));
+
         again
             .commit(&[NdrChange::Pushed {
                 handle: [8; HANDLE_LEN],
             }])
             .unwrap();
+
         held.pushed = true;
         assert!(again.load().unwrap().contains(&([8; HANDLE_LEN], held)));
         drop(again);
+
         let _ = std::fs::remove_dir_all(&directory);
     }
 
@@ -825,9 +879,11 @@ mod tests {
         let mut rng = OsRng;
         let set = HandleSet::assign(&[[seed; 32]], &[], &[], 0, &mut rng).unwrap();
         let group = &set.groups()[0];
+
         let mut plain = [0u8; PUSH_TOKEN_MAX];
         let n = encode_token(TokenCarrier::Fcm, b"fcm-token", &mut plain).unwrap();
         let registration = group.registration(&plain[..n], [4; 24]).unwrap();
+
         let register = encode(&NdrRequest::Register {
             handle: group.handle,
             nonce: registration.nonce,
@@ -835,18 +891,21 @@ mod tests {
             removal_hash: sha3_256(&[&[9u8; 32]]),
             prior: Secret::new([9; 32]),
         });
+
         let push = encode(&NdrRequest::Push {
             handle: group.handle,
             k_tok: Secret::new(*group.k_tok.expose()),
             ttl: 60,
             blob: [6; BLOB_LEN],
         });
+
         let other_key = encode(&NdrRequest::Push {
             handle: group.handle,
             k_tok: Secret::new([0; 32]),
             ttl: 60,
             blob: [6; BLOB_LEN],
         });
+
         (group.handle, register, push, other_key)
     }
 
@@ -875,6 +934,7 @@ mod tests {
         let (_, register, push, _) = device(1);
         let taken = state.request_from([1; 32], &register, NOW).unwrap();
         assert_eq!(taken.0, NdrResponse::Taken);
+
         // The encapsulated bytes of the push come two times: the first
         // one opens the token, and the second one reaches no provider.
         let (answer, delivery) = state.request_from([2; 32], &push, NOW).unwrap();
@@ -883,6 +943,7 @@ mod tests {
         let (answer, delivery) = state.request_from([2; 32], &push, NOW + 1).unwrap();
         assert_eq!(answer, NdrResponse::Refused);
         assert!(delivery.is_none());
+
         // The same push under a new encapsulation is a new request.
         let (answer, delivery) = state.request_from([3; 32], &push, NOW + 1).unwrap();
         assert_eq!(answer, NdrResponse::Taken);
@@ -898,18 +959,22 @@ mod tests {
         state
             .request_from([0xA1; 32], &other_register, NOW)
             .unwrap();
+
         let start = NOW - NOW % WAKE_COALESCE_WINDOW;
         let mut digest = [0u8; 32];
+
         for sent in 0..PUSHES_PER_WINDOW {
             digest[0] = u8::try_from(sent).unwrap();
             let (answer, delivery) = state.request(digest, &push, RELAY, start).unwrap();
             assert_eq!(answer, NdrResponse::Taken);
             assert!(delivery.is_some());
         }
+
         // One more inside the window goes to no provider.
         let (answer, delivery) = state.request_from([0xB0; 32], &push, start + 1).unwrap();
         assert_eq!(answer, NdrResponse::Refused);
         assert!(delivery.is_none());
+
         // A push that opens no token counts for no handle, thus a party
         // with no `k_tok` uses up no push of the other handle.
         for sent in 0..=PUSHES_PER_WINDOW {
@@ -917,11 +982,13 @@ mod tests {
             let (answer, _) = state.request(digest, &other_key, RELAY, start + 1).unwrap();
             assert_eq!(answer, NdrResponse::Refused);
         }
+
         // Another handle has a count of its own, and so has the next window.
         let (answer, _) = state
             .request_from([0xB1; 32], &other_push, start + 1)
             .unwrap();
         assert_eq!(answer, NdrResponse::Taken);
+
         let next = start + WAKE_COALESCE_WINDOW;
         let (answer, delivery) = state.request_from([0xB2; 32], &push, next).unwrap();
         assert_eq!(answer, NdrResponse::Taken);
@@ -936,21 +1003,25 @@ mod tests {
         let (_, second, second_push, _) = device(2);
         let (_, third, third_push, _) = device(3);
         let (_, fourth, fourth_push, _) = device(4);
+
         let taken = |state: &mut State, digest: u8, plain: &[u8], now: u64| {
             state.request_from([digest; 32], plain, now).unwrap().0
         };
+
         assert_eq!(taken(&mut state, 1, &first, NOW), NdrResponse::Taken);
         assert_eq!(taken(&mut state, 2, &second, NOW + 1), NdrResponse::Taken);
         assert_eq!(
             taken(&mut state, 3, &first_push, NOW + 1),
             NdrResponse::Taken
         );
+
         // One more handle at the bound takes the place of the oldest
         // registration that took no push. The first one took a push, thus
         // the second one leaves, in the NDR and in its store.
         assert_eq!(taken(&mut state, 4, &third, NOW + 2), NdrResponse::Taken);
         assert_eq!(state.ndr.len(), 2);
         assert_eq!(state.store.load().unwrap().len(), 2);
+
         assert_eq!(
             taken(&mut state, 5, &second_push, NOW + 2),
             NdrResponse::Gone
@@ -959,15 +1030,18 @@ mod tests {
             taken(&mut state, 6, &third_push, NOW + 2),
             NdrResponse::Taken
         );
+
         // Each registration took a push now: the NDR refuses one more
         // handle, and neither the NDR nor its store holds it.
         assert_eq!(taken(&mut state, 7, &fourth, NOW + 3), NdrResponse::Refused);
         assert_eq!(state.ndr.len(), 2);
         assert_eq!(state.store.load().unwrap().len(), 2);
+
         assert_eq!(
             taken(&mut state, 8, &fourth_push, NOW + 3),
             NdrResponse::Gone
         );
+
         // NTF-124: a held handle moves at the bound too.
         assert_eq!(taken(&mut state, 9, &first, NOW + 4), NdrResponse::Taken);
         assert_eq!(state.ndr.len(), 2);
@@ -980,6 +1054,7 @@ mod tests {
         assert!(held.iter().all(|(_, registration)| registration.pushed));
         let mut again = State::restored(held, Box::new(MemoryNdrStore::default()));
         again.registrations_max = 2;
+
         assert_eq!(
             taken(&mut again, 10, &fourth, NOW + 5),
             NdrResponse::Refused
@@ -1006,6 +1081,7 @@ mod tests {
             digest += 1;
             state.request([digest; 32], plain, relay, now).unwrap().0
         };
+
         // One OHTTP relay brings its count of new handles, and no more.
         assert_eq!(
             taken(&mut state, &registers[0], RELAY, minute),
@@ -1019,6 +1095,7 @@ mod tests {
             taken(&mut state, &registers[2], RELAY, minute),
             NdrResponse::Refused
         );
+
         // Another relay has a count of its own, inside the count of all.
         assert_eq!(
             taken(&mut state, &registers[2], other_relay, minute + 1),
@@ -1028,6 +1105,7 @@ mod tests {
             taken(&mut state, &registers[3], other_relay, minute + 2),
             NdrResponse::Refused
         );
+
         assert_eq!(state.ndr.len(), 3);
         assert_eq!(state.store.load().unwrap().len(), 3);
         // NTF-124: a held handle moves above the count: it is no new one.
@@ -1035,6 +1113,7 @@ mod tests {
             taken(&mut state, &registers[0], RELAY, minute + 3),
             NdrResponse::Taken
         );
+
         // The next minute gives each count back.
         assert_eq!(
             taken(&mut state, &registers[3], RELAY, minute + 60),
@@ -1050,6 +1129,7 @@ mod tests {
         assert!(state.request_from([2; 32], &push, NOW).unwrap().1.is_some());
         let held = state.guard.seen.len();
         assert_eq!(held, 2);
+
         // Bytes that parse as no request and a push under another key take
         // no place. A push for a handle that the NDR does not hold takes
         // none too. Before this, such requests flushed the places, and a
@@ -1058,22 +1138,27 @@ mod tests {
         for sent in 0..40u8 {
             let digest = [0x80 + sent; 32];
             let junk = [sent; NDR_REQUEST_LEN];
+
             assert_eq!(
                 state.request_from(digest, &junk, NOW).unwrap().0,
                 NdrResponse::Refused
             );
+
             assert!(state
                 .request_from(digest, &other_key, NOW)
                 .unwrap()
                 .1
                 .is_none());
+
             assert!(state
                 .request_from(digest, &absent_push, NOW)
                 .unwrap()
                 .1
                 .is_none());
         }
+
         assert_eq!(state.guard.seen.len(), held);
+
         // The kept push still repeats.
         let (answer, delivery) = state.request_from([2; 32], &push, NOW + 1).unwrap();
         assert_eq!(answer, NdrResponse::Refused);
@@ -1085,6 +1170,7 @@ mod tests {
         let mut state = state();
         let (handle, register, push, _) = device(1);
         state.request_from([1; 32], &register, NOW).unwrap();
+
         // A push starts, and the device moves its handle to another token
         // while the push is at the provider.
         assert!(state.request_from([2; 32], &push, NOW).unwrap().1.is_some());
@@ -1093,10 +1179,12 @@ mod tests {
             state.request_from([3; 32], &register, NOW).unwrap().0,
             NdrResponse::Taken
         );
+
         // NTF-125: the provider names the token before the move gone, and
         // the registration of the token after it stays.
         assert_eq!(state.provider_gone(handle, mark), Some(false));
         assert_eq!(state.ndr.len(), 1);
+
         // A push that starts after the move drops it.
         assert_eq!(state.provider_gone(handle, state.guard.moves), Some(true));
         assert!(state.ndr.is_empty());

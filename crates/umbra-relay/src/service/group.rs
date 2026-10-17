@@ -1,7 +1,7 @@
 //! The group queues of one relay (Part 3 §3.2.7, Part 6 §6.4.5): the
-//! eleven commands `GNEW`, `GPOST`, `GSUB`, `GUNSUB`, `GKEY`, `GDEL`,
-//! `GNREG`, and `GNUNREG`, with the answer of each one and the `GMSG` that
-//! goes to each circuit that subscribed.
+//! client commands `GNEW`, `GPOST`, `GSUB`, `GUNSUB`, `GKEY`, `GDEL`,
+//! `GNREG`, and `GNUNREG`, the answers `GIDS` and `GSEQ`, and the `GMSG`
+//! that goes to each circuit that subscribed.
 //!
 //! The relay holds no member list and no per-reader cursor (`NET-227`,
 //! `NET-228`). A reader names its own `from_seq` at each `GSUB`.
@@ -118,11 +118,14 @@ fn gmsg_of<R: CryptoRng + ?Sized>(
     let bucket = BUCKETS
         .into_iter()
         .find(|bucket| bucket.group_record() == record.len())?;
+
     let mut payload = vec![0u8; bucket.l5_payload()];
     encode_gmsg(seq, record, bucket, &mut payload).ok()?;
+
     let mut corr_id = [0u8; 16];
     // WIR-495: a command that the relay starts draws its own corr_id.
     rng.fill_bytes(&mut corr_id);
+
     let command = Command {
         cmd: Cmd::Group(GroupCmd::Gmsg),
         corr_id,
@@ -130,8 +133,10 @@ fn gmsg_of<R: CryptoRng + ?Sized>(
         auth: [0; 32],
         payload: &payload,
     };
+
     let mut encoded = vec![0u8; command.len()];
     command.encode(&mut encoded).ok()?;
+
     Some(Outbound { bucket, encoded })
 }
 
@@ -143,6 +148,7 @@ fn accept_either(
     keys: ([u8; 32], Option<[u8; 32]>),
 ) -> Result<(), Reject> {
     let (current, previous) = keys;
+
     match session.accept(command, &current) {
         Ok(()) => Ok(()),
         Err(refused) => match previous {
@@ -168,6 +174,7 @@ impl GroupService {
             let restored = GroupQueue::restore(&mut reader, stored.records.clone())
                 .ok()
                 .filter(|queue| queue.id() == *group_queue_id);
+
             let Some(queue) = restored else {
                 // NET-302, NET-303: a queue that serves no one leaves the
                 // file too.
@@ -176,8 +183,10 @@ impl GroupService {
                 });
                 continue;
             };
+
             service.served.insert(*group_queue_id, Served::new(queue));
         }
+
         service
     }
 
@@ -229,24 +238,29 @@ impl GroupService {
         let Cmd::Group(cmd) = command.cmd else {
             return Err(Reject::Rejected);
         };
+
         if matches!(cmd, GroupCmd::Gnew | GroupCmd::Gsub) {
             self.free_places(session);
         }
+
         if cmd == GroupCmd::Gnew {
             return Ok((
                 vec![self.create(circuit, session, gate, accepts, command, now, rng)?],
                 Vec::new(),
             ));
         }
+
         // WIR-317: an unknown group queue and a failed auth give one reason.
         let group_queue_id = command.queue_id;
         let served = self
             .served
             .get_mut(&group_queue_id)
             .ok_or(Reject::Rejected)?;
+
         match cmd {
             GroupCmd::Gpost => {
                 accept_either(session, command, served.queue.write_pks(now))?;
+
                 // WIR-370: a post fills the record row of one bucket.
                 // WIR-408, WIR-409: the relay reads the version and the kind
                 // of the record, and refuses one that the table does not hold.
@@ -256,11 +270,14 @@ impl GroupService {
                     .any(|bucket| bucket.group_record() == payload.len());
                 let is_known = payload.first() == Some(&umbra_wire::group::record::VERSION)
                     && matches!(payload.get(1), Some(0x01 | 0x02));
+
                 if !fills_bucket || !is_known {
                     return Err(Reject::Rejected);
                 }
+
                 // WIR-374: a post carries no admission.
                 let posted = served.queue.post(command.payload, now)?;
+
                 if posted.fresh {
                     self.changes.push(StoreChange::GroupRecord {
                         group_queue_id,
@@ -270,24 +287,29 @@ impl GroupService {
                             bytes: command.payload.to_vec(),
                         },
                     });
+
                     if let Some(through_seq) = posted.dropped_through {
                         self.changes.push(StoreChange::GroupTrimmed {
                             group_queue_id,
                             through_seq,
                         });
                     }
+
                     self.head_changed(group_queue_id);
                 }
+
                 let served = self
                     .served
                     .get_mut(&group_queue_id)
                     .ok_or(Reject::Rejected)?;
+
                 let mut replies = vec![answer(
                     circuit,
                     command,
                     Cmd::Group(GroupCmd::Gseq),
                     &Self::gseq(command.corr_id, posted.seq)?,
                 )];
+
                 let mut is_due = false;
                 if posted.fresh {
                     // WIR-388: each session that subscribed takes the record.
@@ -301,6 +323,7 @@ impl GroupService {
                             });
                         }
                     }
+
                     // NTF-096: each registration takes its digest. NTF-098:
                     // one that the gap holds back goes at the end of the gap.
                     // The clock looks at the queue until the gap of this
@@ -314,16 +337,21 @@ impl GroupService {
                             .and_modify(|held| *held = (*held).max(end))
                             .or_insert(end);
                     }
+
                     is_due = !served.waiting.is_empty();
                 }
+
                 if is_due {
                     self.waiting.insert(group_queue_id);
                 }
+
                 Ok((replies, self.release(now)))
             }
             GroupCmd::Gsub => {
                 accept_either(session, command, served.queue.read_pks(now))?;
+
                 let from_seq = parse_gsub(command.payload).map_err(|_| Reject::Rejected)?;
+
                 // NET-237, NET-349: a backlog above the threshold is a
                 // drain. The relay reads the bound from the lengths of the
                 // records before it copies one of them.
@@ -347,7 +375,9 @@ impl GroupService {
                 } else {
                     None
                 };
+
                 session.bind_queue(group_queue_id)?;
+
                 // NET-250: a `GSUB` is activity of the queue.
                 served.queue.touch(now);
                 self.changes.push(StoreChange::GroupQueue {
@@ -358,13 +388,16 @@ impl GroupService {
                         writer.finish().to_vec()
                     },
                 });
+
                 let served = self
                     .served
                     .get_mut(&group_queue_id)
                     .ok_or(Reject::Rejected)?;
+
                 if !served.subscribers.contains(&circuit) {
                     served.subscribers.push(circuit);
                 }
+
                 if let Some(left) = named {
                     drains.hold(Drain {
                         queue_id: group_queue_id,
@@ -374,7 +407,9 @@ impl GroupService {
                     });
                     return Ok((Vec::new(), Vec::new()));
                 }
+
                 drains.end(&group_queue_id);
+
                 // WIR-387: each retained record above `from_seq`, in order.
                 Ok((
                     served
@@ -398,30 +433,38 @@ impl GroupService {
             }
             GroupCmd::Gnreg | GroupCmd::Gnunreg => {
                 accept_either(session, command, served.queue.read_pks(now))?;
+
                 // WIR-401: the version of the registration.
                 GroupNotifyRegistration::parse(command.payload).map_err(|_| Reject::Rejected)?;
+
                 let address: [u8; QUEUE_ADDRESS_LEN] = command
                     .payload
                     .get(1..)
                     .and_then(|bytes| bytes.try_into().ok())
                     .ok_or(Reject::Rejected)?;
+
                 let sender_id = sender_id_of(&address);
+
                 if cmd == GroupCmd::Gnreg {
                     // A registration that the queue holds already is no new
                     // one, and it counts for no circuit.
                     let is_new = !served.notify.contains_key(&sender_id);
                     let made = served.registered_by.entry(circuit).or_insert(0);
+
                     if is_new && *made >= GNREG_PER_CIRCUIT {
                         return Err(Reject::Limit);
                     }
+
                     // NET-252: the count bound answers with `LIMIT`.
                     served
                         .digests
                         .register(sender_id, now)
                         .map_err(|_| Reject::Limit)?;
+
                     if is_new {
                         *made = made.saturating_add(1);
                     }
+
                     served.notify.insert(sender_id, address);
                 } else {
                     served.digests.unregister(&sender_id);
@@ -433,25 +476,32 @@ impl GroupService {
             GroupCmd::Gkey => {
                 session.accept(command, &served.queue.own_pk())?;
                 let keys = GkeyPayload::parse(command.payload).map_err(|_| Reject::Rejected)?;
+
                 served
                     .queue
                     .rotate(keys.read_pk, keys.write_pk, keys.own_pk, now);
+
                 self.head_changed(group_queue_id);
+
                 Ok((Vec::new(), Vec::new()))
             }
             GroupCmd::Gdel => {
                 session.accept(command, &served.queue.own_pk())?;
+
                 // NET-022: the place of the queue serves the next one.
                 session.unbind_queue(&group_queue_id);
                 drains.end(&group_queue_id);
+
                 // NET-244, NET-245: the records, the notifiers, and the
                 // identifier leave together.
                 if let Some(served) = self.served.remove(&group_queue_id) {
                     drop(served.queue.delete());
                 }
+
                 self.forget(&group_queue_id);
                 self.changes
                     .push(StoreChange::GroupQueueDeleted { group_queue_id });
+
                 Ok((Vec::new(), Vec::new()))
             }
             // A relay does not take the commands that it sends.
@@ -490,14 +540,17 @@ impl GroupService {
         rng: &mut R,
     ) -> Result<Reply, Reject> {
         let new = GnewPayload::parse(command.payload).map_err(|_| Reject::Rejected)?;
+
         // NET-260: the creator authorizes its own `GNEW` under the owner
         // credential of the payload, as a `NEW` goes under `QR_auth_pk`.
         session.accept(command, &new.own_pk)?;
         session.room()?;
         gate.admit(&new.admission, accepts, now)?;
+
         let mut group_queue_id = [0u8; 32];
         rng.fill_bytes(&mut group_queue_id);
         session.bind_queue(group_queue_id)?;
+
         self.served.insert(
             group_queue_id,
             Served::new(GroupQueue::new(
@@ -508,7 +561,9 @@ impl GroupService {
                 now,
             )),
         );
+
         self.head_changed(group_queue_id);
+
         Ok(answer(
             circuit,
             command,
@@ -522,6 +577,7 @@ impl GroupService {
         GseqPayload { corr_id, seq }
             .encode(&mut payload)
             .map_err(|_| Reject::Busy)?;
+
         Ok(payload)
     }
 
@@ -534,11 +590,14 @@ impl GroupService {
             Tick::Post(at) => (served.digests.on_post(at), true),
             Tick::Clock(at) => (served.digests.tick(at), false),
         };
+
         let held_back = is_post && due.len() < served.digests.len();
+
         for digest in due {
             let count = served.waiting.entry(digest.queue).or_insert(0);
             *count = count.saturating_add(digest.post_count);
         }
+
         held_back
     }
 
@@ -551,10 +610,12 @@ impl GroupService {
         if self.handed.0 != now {
             self.handed = (now, 0);
         }
+
         let mut left = DIGESTS_PER_SECOND.saturating_sub(self.handed.1);
         if left == 0 || self.waiting.is_empty() {
             return Vec::new();
         }
+
         let order: Vec<[u8; 32]> = match self.turn {
             Some(turn) => self
                 .waiting
@@ -564,26 +625,31 @@ impl GroupService {
                 .collect(),
             None => self.waiting.iter().copied().collect(),
         };
+
         let share = (left / order.len().max(1)).max(1);
         let mut out = Vec::new();
         // The last group queue that took a digest in the turns of the
         // shares.
         let mut last = None;
+
         for (is_share, limit) in [(true, share), (false, usize::MAX)] {
             for group_queue_id in &order {
                 let Some(served) = self.served.get_mut(group_queue_id) else {
                     continue;
                 };
+
                 let mut turn_left = limit.min(left);
                 if is_share && turn_left > 0 && !served.waiting.is_empty() {
                     last = Some(*group_queue_id);
                 }
+
                 while turn_left > 0 {
                     let Some((sender_id, post_count)) = served.waiting.pop_first() else {
                         break;
                     };
                     turn_left = turn_left.saturating_sub(1);
                     left = left.saturating_sub(1);
+
                     // NTF-099: the digest names no record and no member.
                     if let Some(queue) = served.notify.get(&sender_id) {
                         out.push(DigestDue {
@@ -595,12 +661,14 @@ impl GroupService {
                 }
             }
         }
+
         let served = &self.served;
         self.waiting.retain(|group_queue_id| {
             served
                 .get(group_queue_id)
                 .is_some_and(|served| !served.waiting.is_empty())
         });
+
         // Before this, the turn moved by one group queue at each call. With
         // more group queues than digests of one second, the same ones then
         // took each turn, and the others waited for them all.
@@ -622,6 +690,7 @@ impl GroupService {
                 }
             }
         }
+
         self.gapped.retain(|_, end| *end > now);
         self.release(now)
     }
@@ -639,17 +708,22 @@ impl GroupService {
         let Some(served) = self.served.get(&drain.queue_id) else {
             return (Vec::new(), true);
         };
+
         let mut out = Vec::new();
         let mut sent = 0usize;
+
         for stored in served.queue.since(drain.after) {
             if stored.seq >= drain.end {
                 break;
             }
+
             if sent >= room {
                 return (out, false);
             }
+
             drain.after = stored.seq;
             drain.left = drain.left.saturating_sub(stored.bytes.len());
+
             if let Some(outbound) = gmsg_of(drain.queue_id, stored.seq, &stored.bytes, rng) {
                 sent = sent.saturating_add(outbound.encoded.len());
                 out.push(outbound);
@@ -692,7 +766,9 @@ impl GroupService {
                     through_seq,
                 });
             }
+
             Self::digests_of(served, Tick::Clock(now));
+
             let digests = &served.digests;
             // NTF-102: the address leaves with its registration.
             served
@@ -701,11 +777,14 @@ impl GroupService {
             served
                 .waiting
                 .retain(|sender_id, _| digests.holds(sender_id));
+
             if !served.waiting.is_empty() {
                 self.waiting.insert(*group_queue_id);
             }
         }
+
         self.changes.append(&mut trimmed);
+
         // NET-249: a queue with no post and no subscription leaves.
         let idle: Vec<[u8; 32]> = self
             .served
@@ -713,12 +792,14 @@ impl GroupService {
             .filter(|(_, served)| served.queue.idle(now))
             .map(|(group_queue_id, _)| *group_queue_id)
             .collect();
+
         for group_queue_id in idle {
             self.served.remove(&group_queue_id);
             self.forget(&group_queue_id);
             self.changes
                 .push(StoreChange::GroupQueueDeleted { group_queue_id });
         }
+
         self.digest_tick(now)
     }
 }
@@ -744,28 +825,33 @@ mod tests {
         x25519::{PublicKey as XPublic, StaticSecret},
     };
     use umbra_queue::params::{GROUP_IDLE_TTL, GROUP_WRITE_GRACE};
-    use umbra_wire::bucket::Bucket;
     use umbra_wire::{
         address::QueueAddress,
         admission::Admission,
+        bucket::Bucket,
         group::{split_gmsg, NOTIFY_REGISTRATION_LEN},
     };
 
     struct Rng(u8);
+
     impl umbra_crypto::rand_core::TryRng for Rng {
         type Error = core::convert::Infallible;
+
         fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
             Ok(u32::from(self.0))
         }
+
         fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
             Ok(u64::from(self.0))
         }
+
         fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
             self.0 = self.0.wrapping_add(1);
             dst.fill(self.0);
             Ok(())
         }
     }
+
     impl umbra_crypto::rand_core::TryCryptoRng for Rng {}
 
     const CIRCUIT: CircuitKey = CircuitKey {
@@ -818,6 +904,7 @@ mod tests {
             let key = CommandAuthKey::derive(auth_sk, &self.relay_pk).unwrap();
             let mut corr_id = [0u8; 16];
             corr_id[..2].copy_from_slice(&self.corr.to_be_bytes());
+
             let mut command = Command {
                 cmd: Cmd::Group(cmd),
                 corr_id,
@@ -825,8 +912,10 @@ mod tests {
                 auth: [0; 32],
                 payload,
             };
+
             command.sign(&key, b"").unwrap();
             let accepts = Accepts::CrossRelay(&self.issuer);
+
             self.service.handle(
                 circuit,
                 &mut self.session,
@@ -879,6 +968,7 @@ mod tests {
             StaticSecret::from([12u8; 32]),
             StaticSecret::from([13u8; 32]),
         );
+
         let mut relay = Relay::new();
         let id = created(&mut relay, &read, &write, &own, now);
         (relay, id, read, write, own)
@@ -902,9 +992,11 @@ mod tests {
         .encode(&mut payload)
         .unwrap();
         payload.truncate(used);
+
         let (replies, _) = relay
             .send(CIRCUIT, GroupCmd::Gnew, [0; 32], &payload, own, now)
             .unwrap();
+
         let (gids, _) = Command::parse(&replies[0].outbound.encoded, Bucket::B0).unwrap();
         assert_eq!(gids.cmd, Cmd::Group(GroupCmd::Gids));
         gids.payload.try_into().unwrap()
@@ -916,9 +1008,11 @@ mod tests {
         for index in 0..count {
             let mut sender_id = [0x70u8; 32];
             sender_id[..2].copy_from_slice(&index.to_be_bytes());
+
             let mut circ_id = [0x60u8; 16];
             circ_id[..2].copy_from_slice(&(index / u16::from(GNREG_PER_CIRCUIT)).to_be_bytes());
             let circuit = CircuitKey { link: 5, circ_id };
+
             relay
                 .send(
                     circuit,
@@ -944,8 +1038,10 @@ mod tests {
         let (replies, due) = relay
             .send(CIRCUIT, GroupCmd::Gpost, id, &first, &write, now)
             .unwrap();
+
         assert_eq!(replies.len(), 1);
         assert!(due.is_empty());
+
         let (gseq, _) = Command::parse(&replies[0].outbound.encoded, Bucket::B0).unwrap();
         assert_eq!(gseq.cmd, Cmd::Group(GroupCmd::Gseq));
         assert_eq!(GseqPayload::parse(gseq.payload).unwrap().seq, 1);
@@ -955,8 +1051,10 @@ mod tests {
         let (replies, _) = relay
             .send(OTHER, GroupCmd::Gsub, id, &from_seq, &read, now)
             .unwrap();
+
         assert_eq!(replies.len(), 1);
         assert_eq!(replies[0].circuit, OTHER);
+
         let (gmsg, _) = Command::parse(&replies[0].outbound.encoded, Bucket::B0).unwrap();
         assert_eq!(gmsg.cmd, Cmd::Group(GroupCmd::Gmsg));
         assert_eq!(
@@ -969,12 +1067,15 @@ mod tests {
         let (replies, _) = relay
             .send(CIRCUIT, GroupCmd::Gpost, id, &second, &write, now)
             .unwrap();
+
         assert_eq!(replies.len(), 2);
         assert_eq!(replies[1].circuit, OTHER);
+
         let (replies, _) = relay
             .send(CIRCUIT, GroupCmd::Gpost, id, &second, &write, now)
             .unwrap();
         assert_eq!(replies.len(), 1);
+
         let (gseq, _) = Command::parse(&replies[0].outbound.encoded, Bucket::B0).unwrap();
         assert_eq!(GseqPayload::parse(gseq.payload).unwrap().seq, 2);
 
@@ -983,12 +1084,15 @@ mod tests {
         relay
             .send(OTHER, GroupCmd::Gunsub, id, &[], &read, now)
             .unwrap();
+
         from_seq.copy_from_slice(&1u32.to_be_bytes());
         let (replies, _) = relay
             .send(OTHER, GroupCmd::Gsub, id, &from_seq, &read, now)
             .unwrap();
         assert_eq!(replies.len(), 1);
+
         relay.service.circuit_closed(&OTHER);
+
         let (replies, _) = relay
             .send(CIRCUIT, GroupCmd::Gpost, id, &record(3), &write, now)
             .unwrap();
@@ -1000,6 +1104,7 @@ mod tests {
         let now = 1_000;
         let (mut relay, id, read, write, own) = opened(now);
         let next = StaticSecret::from([0x31u8; 32]);
+
         let mut payload = [0u8; 96];
         GkeyPayload {
             read_pk: public(&read),
@@ -1008,19 +1113,23 @@ mod tests {
         }
         .encode(&mut payload)
         .unwrap();
+
         relay
             .send(CIRCUIT, GroupCmd::Gkey, id, &payload, &own, now)
             .unwrap();
+
         // WIR-522: the owner key takes no grace, thus an admin that left
         // its role and holds the old one deletes nothing.
         assert_eq!(
             relay.send(CIRCUIT, GroupCmd::Gdel, id, &[], &own, now + 1),
             Err(Reject::Rejected)
         );
+
         assert_eq!(
             relay.send(CIRCUIT, GroupCmd::Gkey, id, &payload, &own, now + 1),
             Err(Reject::Rejected)
         );
+
         relay
             .send(CIRCUIT, GroupCmd::Gdel, id, &[], &next, now + 2)
             .unwrap();
@@ -1034,6 +1143,7 @@ mod tests {
             StaticSecret::from([21u8; 32]),
             StaticSecret::from([22u8; 32]),
         );
+
         let mut payload = [0u8; 96];
         GkeyPayload {
             read_pk: public(&fresh_read),
@@ -1042,19 +1152,23 @@ mod tests {
         }
         .encode(&mut payload)
         .unwrap();
+
         relay
             .send(CIRCUIT, GroupCmd::Gkey, id, &payload, &own, now)
             .unwrap();
+
         // The previous writer key holds inside its grace and not after it.
         let inside = now + GROUP_WRITE_GRACE - 1;
         relay
             .send(CIRCUIT, GroupCmd::Gpost, id, &record(1), &write, inside)
             .unwrap();
+
         let after = now + GROUP_WRITE_GRACE;
         assert_eq!(
             relay.send(CIRCUIT, GroupCmd::Gpost, id, &record(2), &write, after),
             Err(Reject::Rejected)
         );
+
         relay
             .send(
                 CIRCUIT,
@@ -1065,6 +1179,7 @@ mod tests {
                 after,
             )
             .unwrap();
+
         // The previous reader key has a grace of its own.
         let mut from_seq = [0u8; 4];
         from_seq.copy_from_slice(&0u32.to_be_bytes());
@@ -1076,7 +1191,9 @@ mod tests {
         relay
             .send(CIRCUIT, GroupCmd::Gdel, id, &[], &own, after)
             .unwrap();
+
         assert!(relay.service.is_empty());
+
         assert_eq!(
             relay.send(
                 CIRCUIT,
@@ -1098,6 +1215,7 @@ mod tests {
         relay
             .send(CIRCUIT, GroupCmd::Gpost, id, &first, &write, now)
             .unwrap();
+
         let fresh = StaticSecret::from([0x21u8; 32]);
         let mut payload = [0u8; 96];
         GkeyPayload {
@@ -1113,6 +1231,7 @@ mod tests {
         for change in relay.service.take_changes() {
             store.apply(&change);
         }
+
         assert_eq!(store.group_queues.len(), 1);
 
         // A second run of the relay reads it, and the reader of the epoch
@@ -1120,11 +1239,13 @@ mod tests {
         let mut second = Relay::new();
         second.service = GroupService::restore(&store);
         assert_eq!(second.service.len(), 1);
+
         let from_seq = [0u8; 4];
         let (replies, _) = second
             .send(OTHER, GroupCmd::Gsub, id, &from_seq, &read, now + 1)
             .unwrap();
         assert_eq!(replies.len(), 1);
+
         let (gmsg, _) = Command::parse(&replies[0].outbound.encoded, Bucket::B0).unwrap();
         assert_eq!(
             split_gmsg(gmsg.payload, Bucket::B0).unwrap(),
@@ -1144,6 +1265,7 @@ mod tests {
         second
             .send(CIRCUIT, GroupCmd::Gdel, id, &[], &own, now + 1)
             .unwrap();
+
         for change in second.service.take_changes() {
             store.apply(&change);
         }
@@ -1158,20 +1280,25 @@ mod tests {
         relay
             .send(CIRCUIT, GroupCmd::Gnreg, id, &registration(5), &read, now)
             .unwrap();
+
         let (_, due) = relay
             .send(CIRCUIT, GroupCmd::Gpost, id, &record(1), &write, now)
             .unwrap();
+
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].id, id);
         assert_eq!(due[0].post_count, 1);
+
         // NTF-097: a second record inside the gap holds its digest back.
         let (_, due) = relay
             .send(CIRCUIT, GroupCmd::Gpost, id, &record(2), &write, now + 1)
             .unwrap();
         assert!(due.is_empty());
+
         let due = relay.service.sweep(now + 11);
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].post_count, 1);
+
         // The registration leaves at a `GNUNREG`.
         relay
             .send(
@@ -1183,10 +1310,12 @@ mod tests {
                 now + 11,
             )
             .unwrap();
+
         let (_, due) = relay
             .send(CIRCUIT, GroupCmd::Gpost, id, &record(3), &write, now + 30)
             .unwrap();
         assert!(due.is_empty());
+
         // NET-249: the idle life takes the queue.
         relay.service.sweep(now + 30 + GROUP_IDLE_TTL);
         assert!(relay.service.is_empty());
@@ -1199,27 +1328,33 @@ mod tests {
         relay
             .send(CIRCUIT, GroupCmd::Gnreg, id, &registration(5), &read, now)
             .unwrap();
+
         let (_, due) = relay
             .send(CIRCUIT, GroupCmd::Gpost, id, &record(1), &write, now)
             .unwrap();
         assert_eq!(due.len(), 1);
+
         let (_, due) = relay
             .send(CIRCUIT, GroupCmd::Gpost, id, &record(2), &write, now + 3)
             .unwrap();
         assert!(due.is_empty());
+
         // NTF-098: the tick of each second gives it at the end of the gap,
         // and one time.
         assert!(relay
             .service
             .digest_tick(now + GROUP_DIGEST_MIN_GAP - 1)
             .is_empty());
+
         let due = relay.service.digest_tick(now + GROUP_DIGEST_MIN_GAP);
         assert_eq!(due.len(), 1);
         assert_eq!((due[0].id, due[0].post_count), (id, 1));
+
         assert!(relay
             .service
             .digest_tick(now + GROUP_DIGEST_MIN_GAP + 1)
             .is_empty());
+
         // A post inside the gap of that digest moves the time until which
         // the clock looks at the queue. Its digest goes at the end of its
         // own gap, and it waits for no other post and no sweep.
@@ -1227,9 +1362,11 @@ mod tests {
             .send(CIRCUIT, GroupCmd::Gpost, id, &record(3), &write, now + 12)
             .unwrap();
         assert!(due.is_empty());
+
         for at in 13..2 * GROUP_DIGEST_MIN_GAP {
             assert!(relay.service.digest_tick(now + at).is_empty());
         }
+
         let due = relay.service.digest_tick(now + 2 * GROUP_DIGEST_MIN_GAP);
         assert_eq!(due.len(), 1);
         assert_eq!((due[0].id, due[0].post_count), (id, 1));
@@ -1247,8 +1384,10 @@ mod tests {
                 .send(OTHER, GroupCmd::Gpost, id, &record(index), &write, at)
                 .unwrap();
         }
+
         let at = now + 200;
         let from_seq = 3u32;
+
         // NET-237, NET-349: the `GSUB` gives no `GMSG` and copies no record.
         let (replies, _) = relay
             .send(
@@ -1261,6 +1400,7 @@ mod tests {
             )
             .unwrap();
         assert!(replies.is_empty());
+
         let next = relay.service.served[&id].queue.next_seq();
         let named = relay.service.served[&id].queue.since(from_seq).count();
         let held = relay.drains.of(&id).unwrap().clone();
@@ -1271,20 +1411,24 @@ mod tests {
         // Each step gives the next records, about the room that it has.
         let mut drain = held;
         let mut taken = Vec::new();
+
         loop {
             let (records, ended) =
                 relay
                     .service
                     .drain_step(&mut drain, 2 * record(0).len(), &mut relay.rng);
+
             for outbound in &records {
                 let (command, _) = Command::parse(&outbound.encoded, outbound.bucket).unwrap();
                 assert_eq!(command.cmd, Cmd::Group(GroupCmd::Gmsg));
                 let (seq, _) = split_gmsg(command.payload, outbound.bucket).unwrap();
                 taken.push(seq);
             }
+
             if ended {
                 break;
             }
+
             assert_eq!(records.len(), 2);
         }
         assert_eq!(taken, (from_seq + 1..next).collect::<Vec<u32>>());
@@ -1320,7 +1464,9 @@ mod tests {
                 )
                 .unwrap();
         }
+
         assert!(relay.service.served[&id].subscribers.contains(&CIRCUIT));
+
         assert_eq!(
             relay.send(
                 CIRCUIT,
@@ -1332,8 +1478,10 @@ mod tests {
             ),
             Err(Reject::Limit)
         );
+
         assert!(!relay.service.served[&id].subscribers.contains(&CIRCUIT));
         assert!(relay.drains.is_empty());
+
         let (replies, _) = relay
             .send(
                 OTHER,
@@ -1361,6 +1509,7 @@ mod tests {
             service.served.insert(id, served);
             ids.push(id);
         }
+
         // Each group queue holds one digest that waits, in each second.
         let wait = |service: &mut GroupService| {
             for id in &ids {
@@ -1369,12 +1518,15 @@ mod tests {
                 service.waiting.insert(*id);
             }
         };
+
         wait(&mut service);
         let first = service.release(now);
         assert_eq!(first.len(), DIGESTS_PER_SECOND);
+
         wait(&mut service);
         let second = service.release(now + 1);
         assert_eq!(second.len(), DIGESTS_PER_SECOND);
+
         // The group queues that the first second left take the first turns
         // of the next one. Before this, the same ones took each second.
         let served: BTreeSet<[u8; 32]> = first.iter().chain(&second).map(|due| due.id).collect();
@@ -1397,6 +1549,7 @@ mod tests {
                 )
                 .unwrap();
         }
+
         // One more from that circuit answers with `LIMIT`, and a
         // registration that the queue holds already is no new one.
         assert_eq!(
@@ -1410,14 +1563,17 @@ mod tests {
             ),
             Err(Reject::Limit)
         );
+
         relay
             .send(CIRCUIT, GroupCmd::Gnreg, id, &registration(0), &read, now)
             .unwrap();
+
         // Another circuit has a count of its own, and so has a circuit
         // that takes the place of one that ended.
         relay
             .send(OTHER, GroupCmd::Gnreg, id, &registration(0x40), &read, now)
             .unwrap();
+
         relay.service.circuit_closed(&CIRCUIT);
         relay
             .send(
@@ -1446,18 +1602,22 @@ mod tests {
             .send(CIRCUIT, GroupCmd::Gpost, large, &record(1), &write, now)
             .unwrap();
         assert_eq!(due.len(), DIGESTS_PER_SECOND);
+
         // A post of the small group inside that second waits too.
         let (_, due) = relay
             .send(CIRCUIT, GroupCmd::Gpost, small, &record(1), &write, now)
             .unwrap();
         assert!(due.is_empty());
+
         assert!(relay.service.digest_tick(now).is_empty());
+
         // The next second gives each group that waits its share. The small
         // one thus takes each digest of its own, whatever the count of the
         // large one.
         let due = relay.service.digest_tick(now + 1);
         assert_eq!(due.len(), DIGESTS_PER_SECOND);
         assert_eq!(due.iter().filter(|digest| digest.id == small).count(), 3);
+
         // The large one takes the others in the seconds after it, and it
         // loses none.
         let due = relay.service.digest_tick(now + 2);
@@ -1475,12 +1635,14 @@ mod tests {
         relay
             .send(CIRCUIT, GroupCmd::Gdel, id, &[], &own, now)
             .unwrap();
+
         for _ in 0..=umbra_queue::params::MAX_QUEUES_PER_SESSION {
             let id = created(&mut relay, &read, &write, &own, now);
             relay
                 .send(CIRCUIT, GroupCmd::Gdel, id, &[], &own, now)
                 .unwrap();
         }
+
         created(&mut relay, &read, &write, &own, now);
     }
 
@@ -1491,11 +1653,13 @@ mod tests {
         for _ in 1..umbra_queue::params::MAX_QUEUES_PER_SESSION {
             created(&mut relay, &read, &write, &own, now);
         }
+
         // NET-022: the sweep ends each idle queue. Before this, the session
         // kept each place, and the next `GNEW` got `LIMIT`.
         let later = now + GROUP_IDLE_TTL + 1;
         relay.service.sweep(later);
         assert!(relay.service.served.is_empty());
+
         for _ in 0..umbra_queue::params::MAX_QUEUES_PER_SESSION {
             created(&mut relay, &read, &write, &own, later);
         }

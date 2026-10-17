@@ -72,10 +72,12 @@ fn hex32(text: &str) -> Option<[u8; 32]> {
     if text.len() != 64 {
         return None;
     }
+
     let mut out = [0u8; 32];
     for (index, byte) in out.iter_mut().enumerate() {
         *byte = u8::from_str_radix(text.get(index * 2..index * 2 + 2)?, 16).ok()?;
     }
+
     Some(out)
 }
 
@@ -94,6 +96,7 @@ struct Admitted {
 fn read_relay(value: &str) -> Option<Admitted> {
     let [file, operator, class, role]: [&str; 4] =
         value.split(',').collect::<Vec<_>>().try_into().ok()?;
+
     Some(Admitted {
         descriptor: std::fs::read(file).ok()?,
         // An opaque value for each beneficial control (`REL-128`).
@@ -132,9 +135,11 @@ fn measurer_cert(settings: &str, key_file: &Path, out: &Path) -> Result<(), &'st
         .and_then(hex32)
         .ok_or("the settings file needs a line: seed=<64 hex characters>")?;
     let keys = keys_of(&seed);
+
     let text =
         std::fs::read_to_string(key_file).map_err(|_| "the measurer key file does not read")?;
     let text = text.trim();
+
     let mut public = Vec::with_capacity(text.len() / 2);
     for index in (0..text.len()).step_by(2) {
         let pair = text
@@ -144,15 +149,18 @@ fn measurer_cert(settings: &str, key_file: &Path, out: &Path) -> Result<(), &'st
             u8::from_str_radix(pair, 16).map_err(|_| "the measurer key file does not parse")?,
         );
     }
+
     let mut measurer_id = [0u8; 16];
     OsRng
         .try_fill_bytes(&mut measurer_id)
         .map_err(|_| "no random value")?;
+
     let epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| "the clock is before 1970")?
         .as_secs()
         / EPOCH_SECONDS;
+
     let signers: Vec<(u8, &SigningKey)> = (0u8..).zip(keys.iter()).take(2).collect();
     let cert = issue_cert(
         measurer_id,
@@ -163,12 +171,15 @@ fn measurer_cert(settings: &str, key_file: &Path, out: &Path) -> Result<(), &'st
         &mut OsRng,
     )
     .map_err(|_| "the certificate does not issue")?;
+
     std::fs::write(out, &cert).map_err(|_| "the certificate file does not write")?;
+
     println!(
         "measurer_id={} not_after={}",
         to_hex(&measurer_id),
         epoch.saturating_add(CERT_EPOCHS)
     );
+
     Ok(())
 }
 
@@ -180,6 +191,7 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
     let mut report_queues = Vec::new();
     let mut expelled: Vec<[u8; 32]> = Vec::new();
     let mut removed: Vec<LinkRemoval> = Vec::new();
+
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
         match line.split_once('=') {
             Some(("seed", value)) => seed = hex32(value),
@@ -218,6 +230,7 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
             _ => return Err("the settings file does not parse"),
         }
     }
+
     let seed = seed.ok_or("the settings file needs a line: seed=<64 hex characters>")?;
     let keys = keys_of(&seed);
 
@@ -226,6 +239,7 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
         .map_err(|_| "the clock is before 1970")?
         .as_secs();
     let epoch = now / EPOCH_SECONDS;
+
     // REL-188: the dense-subgraph search over the removed links of their
     // life expels each relay that it peels.
     let live: Vec<LinkRemoval> = removed
@@ -233,6 +247,7 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
         .filter(|removal| removal.epoch <= epoch && removal.epoch + LINK_REMOVAL_EPOCHS >= epoch)
         .copied()
         .collect();
+
     for relay in peel(&live) {
         println!("relay {} expelled by the link-fault search", to_hex(&relay));
         expelled.push(relay);
@@ -245,6 +260,7 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
         let relay_id = RelayDescriptor::parse(&relay.descriptor)
             .map_err(|_| "a descriptor does not parse")?
             .relay_id;
+
         let Some(class) = verified_class(&relay_id, relay.class, &results) else {
             println!(
                 "relay {} failed the class test of C0 and is not listed",
@@ -252,12 +268,14 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
             );
             continue;
         };
+
         let listing = Listing {
             descriptor: &relay.descriptor,
             operator_id: relay.operator_id,
             class,
             is_ingress: relay.is_ingress,
         };
+
         let entry = entry_of(
             &listing,
             Admission::Placed {
@@ -266,11 +284,13 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
             },
         )
         .map_err(|_| "a descriptor does not verify, or its class is above the declared one")?;
+
         let read = RelayEntry::parse(&entry).map_err(|_| "an entry does not verify")?;
         if expelled.contains(&read.descriptor.relay_id) {
             println!("relay {} expelled", to_hex(&read.descriptor.relay_id));
             continue;
         }
+
         println!(
             "relay {} layer={} class={} host={}",
             to_hex(&read.descriptor.relay_id),
@@ -278,8 +298,10 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
             read.class,
             read.descriptor.host_str(),
         );
+
         entries.push(entry);
     }
+
     let manifest = sign_manifest(
         &keys,
         &[0, 1, 2, 3, 4, 5, 6],
@@ -290,15 +312,18 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
         &mut OsRng,
     )
     .map_err(|_| "the manifest does not build")?;
+
     // REL-167: the report queue of each authority that wrote one.
     let mut signed_queues = Vec::new();
     for (index, file) in &report_queues {
         let Ok(held) = std::fs::read(file) else {
             continue;
         };
+
         let (address, report_pk) = held
             .split_at_checked(QUEUE_ADDRESS_LEN)
             .ok_or("a report queue file does not parse")?;
+
         let queue = ReportQueue {
             authority_index: *index,
             epoch,
@@ -309,21 +334,25 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
                 .try_into()
                 .map_err(|_| "a report queue file does not parse")?,
         };
+
         let key = keys
             .get(usize::from(*index))
             .ok_or("no authority of that index")?;
+
         signed_queues.push(
             queue
                 .sign(key, &mut OsRng)
                 .map_err(|_| "a report queue does not sign")?,
         );
     }
+
     // REL-183: each removed link of its life, under each key. One link
     // keeps its newest removal, thus a renewed removal stays in force.
     removed.sort_by(|one, other| {
         (one.relay_a, one.relay_b, other.epoch).cmp(&(other.relay_a, other.relay_b, one.epoch))
     });
     removed.dedup_by(|one, other| one.relay_a == other.relay_a && one.relay_b == other.relay_b);
+
     let signers: Vec<(u8, &SigningKey)> = (0u8..).zip(keys.iter()).collect();
     let mut signed_removals = Vec::new();
     for removal in removed
@@ -336,6 +365,7 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
                 .map_err(|_| "a link removal does not sign")?,
         );
     }
+
     let manifest = if signed_queues.is_empty() && signed_removals.is_empty() {
         manifest
     } else {
@@ -345,10 +375,12 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
         parsed.removals = signed_removals.iter().map(Vec::as_slice).collect();
         parsed.encode().map_err(|_| "the manifest does not build")?
     };
+
     let keyset = keyset_bytes(&keys, KEYSET_EPOCH).map_err(|_| "the key set does not build")?;
     std::fs::write(out.join("manifest.bin"), &manifest)
         .and_then(|()| std::fs::write(out.join("keyset.bin"), &keyset))
         .map_err(|_| "the output directory does not take a file")?;
+
     println!(
         "epoch={epoch} manifest={} bytes keyset={} bytes report_queues={} removed_links={}",
         manifest.len(),
@@ -383,6 +415,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+
     let done = std::thread::Builder::new()
         .stack_size(STACK_BYTES)
         .spawn(work)

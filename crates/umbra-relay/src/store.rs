@@ -250,6 +250,7 @@ impl Loaded {
             }
             StoreChange::Spent { epoch, nonce } => {
                 self.spent.insert((*epoch, *nonce));
+
                 let floor = epoch.saturating_sub(1);
                 self.spent.retain(|(held, _)| *held >= floor);
             }

@@ -66,16 +66,19 @@ async fn a_client_upgrades_opens_a_session_and_builds_one_hop() {
         s: relay.s,
         relay_id: relay.relay_id,
     };
+
     let node = RelayNode::new(Config {
         relay,
         static_secret,
         layer: 1,
         chunk_capacity: 1 << 26,
     });
+
     let (inputs, node_inputs) = mpsc::channel(64);
     let (requests, _node_requests) = mpsc::unbounded_channel();
     let store = Box::new(MemoryStore::default());
     tokio::spawn(run_node(node, node_inputs, requests, 1_000, store));
+
     let (mut client, server) = tokio::io::duplex(1 << 16);
     tokio::spawn(serve_connection(server, 2, inputs, Default::default()));
 
@@ -100,6 +103,7 @@ async fn a_client_upgrades_opens_a_session_and_builds_one_hop() {
     let mut buffer = vec![0u8; 4_096];
     let (mut link, used) = ClientLink::open([3; 8], Secret::new([4; 32]), &mut buffer).unwrap();
     assert!(used < 126);
+
     write_frame(&mut client, &buffer[..used]).await;
 
     // One hop of a build.
@@ -107,21 +111,27 @@ async fn a_client_upgrades_opens_a_session_and_builds_one_hop() {
     let mut hello = [0u8; HELLO_LEN];
     let pending =
         Pending::hello(&relay_for_client, DelayClass::Fast, &mut OsRng, &mut hello).unwrap();
+
     let mut body = vec![0u8; BUILD_BUCKET.body_len()];
     build_cell_body(CellCommand::Extend, &hello, &mut body).unwrap();
+
     let tag = build.seal(&mut body).unwrap();
     let cell = [build.circ_id().as_slice(), &tag, &body].concat();
+
     let used = link.send(&cell, &mut buffer).unwrap();
     write_frame(&mut client, &buffer[..used]).await;
 
     let answer = read_frame(&mut client, &mut inbound).await;
     let (_, value, _) = capsule::parse(&answer).unwrap();
     let cell = link.receive(value).unwrap().unwrap().to_vec();
+
     let (parsed, _) = Cell::parse(&cell).unwrap();
     let mut body = parsed.body.to_vec();
     build.open(parsed.tag, &mut body).unwrap();
+
     let (command, reply) = read_cell_body(&body).unwrap();
     assert_eq!(command, CellCommand::Extended);
+
     build.push(&pending.finish(reply).unwrap()).unwrap();
     assert_eq!(build.built(), 1);
 }

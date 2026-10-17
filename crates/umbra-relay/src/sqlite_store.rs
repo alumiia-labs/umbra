@@ -106,6 +106,7 @@ impl SqliteStore {
         // A `QUOTA` leaves after its commit, thus the commit reaches the
         // disk before it returns (`NET-298`).
         fault(connection.pragma_update(None, "synchronous", "FULL"))?;
+
         let version: i64 =
             fault(connection.query_row("PRAGMA user_version", [], |row| row.get(0)))?;
         let is_new = fault(
@@ -114,14 +115,17 @@ impl SqliteStore {
                 .optional(),
         )?
         .is_none();
+
         // Version 1 holds the pairwise queues alone, and version 2 adds the
         // group queues. The schema below adds tables and takes nothing
         // away, thus those files open here and keep what they hold.
         if !is_new && !(1..=SCHEMA_VERSION).contains(&version) {
             return Err(StoreFault);
         }
+
         fault(connection.execute_batch(SCHEMA))?;
         fault(connection.pragma_update(None, "user_version", SCHEMA_VERSION))?;
+
         Ok(SqliteStore { connection })
     }
 }
@@ -134,7 +138,9 @@ impl RelayStore for SqliteStore {
              DELETE FROM group_records
                 WHERE group_queue_id NOT IN (SELECT group_queue_id FROM group_queues);",
         ))?;
+
         let mut loaded = Loaded::default();
+
         let mut queues = fault(
             self.connection
                 .prepare("SELECT recipient_id, head FROM queues"),
@@ -142,12 +148,14 @@ impl RelayStore for SqliteStore {
         let rows = fault(queues.query_map([], |row| {
             Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
         }))?;
+
         for row in rows {
             let (recipient_id, head) = fault(row)?;
             let queue = StoredQueue {
                 head,
                 records: Vec::new(),
             };
+
             loaded.queues.insert(id(recipient_id)?, queue);
         }
 
@@ -162,6 +170,7 @@ impl RelayStore for SqliteStore {
                 row.get::<_, Vec<u8>>(3)?,
             ))
         }))?;
+
         for row in rows {
             let (recipient_id, seq, accepted_at, bytes) = fault(row)?;
             // NET-303: a record that does not read makes its queue one that
@@ -170,9 +179,11 @@ impl RelayStore for SqliteStore {
             let Ok(recipient_id) = id::<32>(recipient_id) else {
                 continue;
             };
+
             let Some(queue) = loaded.queues.get_mut(&recipient_id) else {
                 continue;
             };
+
             match (u32::try_from(seq), unsigned(accepted_at)) {
                 (Ok(seq), Ok(accepted_at)) => queue.records.push(Stored {
                     seq,
@@ -190,6 +201,7 @@ impl RelayStore for SqliteStore {
         let rows = fault(group_queues.query_map([], |row| {
             Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
         }))?;
+
         for row in rows {
             let (group_queue_id, head) = fault(row)?;
             loaded.group_queues.insert(
@@ -213,14 +225,17 @@ impl RelayStore for SqliteStore {
                 row.get::<_, Vec<u8>>(3)?,
             ))
         }))?;
+
         for row in rows {
             let (group_queue_id, seq, accepted_at, bytes) = fault(row)?;
             let Ok(group_queue_id) = id::<32>(group_queue_id) else {
                 continue;
             };
+
             let Some(queue) = loaded.group_queues.get_mut(&group_queue_id) else {
                 continue;
             };
+
             match (u32::try_from(seq), unsigned(accepted_at)) {
                 (Ok(seq), Ok(accepted_at)) => queue.records.push(Stored {
                     seq,
@@ -243,6 +258,7 @@ impl RelayStore for SqliteStore {
                 row.get::<_, Option<Vec<u8>>>(3)?,
             ))
         }))?;
+
         for row in rows {
             let (link_id, recipient_id, at, blob) = fault(row)?;
             let held = StoredInvitation {
@@ -260,6 +276,7 @@ impl RelayStore for SqliteStore {
         let rows = fault(spent.query_map([], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
         }))?;
+
         for row in rows {
             let (epoch, nonce) = fault(row)?;
             // A row that does not read spends nothing.
@@ -284,14 +301,17 @@ impl RelayStore for SqliteStore {
                 row.get::<_, Vec<u8>>(7)?,
             ))
         }))?;
+
         for row in rows {
             let (chunk_id, class, cred_pk, read_pk, registered_at, renewed_at, erase_at, bytes) =
                 fault(row)?;
+
             let class = match class {
                 1 => Class::Attachment,
                 2 => Class::Backup,
                 _ => return Err(StoreFault),
             };
+
             let held = HeldChunk {
                 class,
                 credentials: Credentials {
@@ -303,8 +323,10 @@ impl RelayStore for SqliteStore {
                 renewed_at: unsigned(renewed_at)?,
                 erase_at: unsigned(erase_at)?,
             };
+
             loaded.chunks.insert(id(chunk_id)?, held);
         }
+
         Ok(loaded)
     }
 
@@ -312,8 +334,10 @@ impl RelayStore for SqliteStore {
         if changes.is_empty() {
             return Ok(());
         }
+
         let transaction = fault(self.connection.transaction())?;
         let mut deleted = false;
+
         for change in changes {
             match change {
                 StoreChange::Queue { recipient_id, head } => fault(transaction.execute(
@@ -469,7 +493,9 @@ impl RelayStore for SqliteStore {
                 }
             };
         }
+
         fault(transaction.commit())?;
+
         if deleted {
             // The log holds the old pages of a deleted row until a
             // checkpoint truncates it.
@@ -478,6 +504,7 @@ impl RelayStore for SqliteStore {
                     .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(())),
             )?;
         }
+
         Ok(())
     }
 }
@@ -545,6 +572,7 @@ impl SqliteShelf {
         // A crash loses at most the last receipts, which no client needs.
         fault(connection.pragma_update(None, "synchronous", "NORMAL"))?;
         fault(connection.execute_batch(RECEIPT_SCHEMA))?;
+
         Ok(SqliteShelf {
             connection,
             max_bytes: RECEIPT_FILE_MAX,
@@ -565,7 +593,9 @@ impl SqliteShelf {
                     .query_row(pragma, [], |row| row.get::<_, i64>(0)),
             )?)
         };
+
         let pages = read("PRAGMA page_count")?.saturating_sub(read("PRAGMA freelist_count")?);
+
         Ok(pages.saturating_mul(read("PRAGMA page_size")?))
     }
 
@@ -573,10 +603,12 @@ impl SqliteShelf {
     /// most `TRIM_STEPS` transactions of `TRIM_BATCH` receipts.
     fn trim(&mut self) -> Result<(), StoreFault> {
         let mut trimmed = false;
+
         for _ in 0..TRIM_STEPS {
             if self.used_bytes()? <= self.max_bytes {
                 break;
             }
+
             // The last receipt of the batch, or each one when the file
             // holds less than a batch.
             let last: i64 = fault(
@@ -589,11 +621,13 @@ impl SqliteShelf {
                     .optional(),
             )?
             .unwrap_or(i64::MAX);
+
             let transaction = fault(self.connection.transaction())?;
             fault(transaction.execute("DELETE FROM receipt_leaves WHERE receipt <= ?1", [last]))?;
             let gone = fault(transaction.execute("DELETE FROM receipts WHERE id <= ?1", [last]))?;
             fault(transaction.commit())?;
             trimmed = true;
+
             // A file that is above its bound with no receipt has nothing
             // more to give.
             if gone == 0 {
@@ -613,6 +647,7 @@ impl SqliteShelf {
         let transaction = fault(self.connection.transaction())?;
         let leaves: Vec<u8> = kept.leaves.iter().flatten().copied().collect();
         let epoch = signed(kept.epoch)?;
+
         fault(transaction.execute(
             "INSERT INTO receipts (issued, epoch, at, signed, leaves) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
@@ -623,7 +658,9 @@ impl SqliteShelf {
                 leaves
             ],
         ))?;
+
         let id = transaction.last_insert_rowid();
+
         {
             let mut insert = fault(transaction.prepare(
                 "INSERT OR IGNORE INTO receipt_leaves (epoch, leaf, receipt) VALUES (?1, ?2, ?3)",
@@ -632,6 +669,7 @@ impl SqliteShelf {
                 fault(insert.execute(params![epoch, leaf_key(leaf), id]))?;
             }
         }
+
         fault(transaction.commit())
     }
 
@@ -646,9 +684,11 @@ impl SqliteShelf {
                 )
                 .optional(),
         )?;
+
         if old.is_none() {
             return Ok(());
         }
+
         let transaction = fault(self.connection.transaction())?;
         fault(transaction.execute(
             "DELETE FROM receipt_leaves WHERE receipt IN (SELECT id FROM receipts WHERE at < ?1)",
@@ -656,6 +696,7 @@ impl SqliteShelf {
         ))?;
         fault(transaction.execute("DELETE FROM receipts WHERE at < ?1", [floor]))?;
         fault(transaction.commit())?;
+
         fault(
             self.connection
                 .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(())),
@@ -670,6 +711,7 @@ impl SqliteShelf {
              WHERE l.epoch = ?1 AND l.leaf = ?2
              ORDER BY r.issued DESC, r.id",
         ))?;
+
         let rows = fault(
             query.query_map(params![signed(epoch)?, leaf_key(leaf)], |row| {
                 Ok((
@@ -681,6 +723,7 @@ impl SqliteShelf {
                 ))
             }),
         )?;
+
         let mut found = Vec::new();
         for row in rows {
             let (issued, epoch, at, signed, leaves) = fault(row)?;
@@ -688,6 +731,7 @@ impl SqliteShelf {
             if !rest.is_empty() {
                 return Err(StoreFault);
             }
+
             let leaves = whole.to_vec();
             found.push(KeptReceipt {
                 issued: issued != 0,
@@ -697,6 +741,7 @@ impl SqliteShelf {
                 at: unsigned(at)?,
             });
         }
+
         Ok(found)
     }
 
@@ -706,6 +751,7 @@ impl SqliteShelf {
             [i64::from(issued)],
             |row| row.get(0),
         ))?;
+
         usize::try_from(count).map_err(|_| StoreFault)
     }
 }
@@ -714,6 +760,7 @@ impl ReceiptShelf for SqliteShelf {
     fn keep(&mut self, kept: KeptReceipt) -> Result<(), StoreFault> {
         self.put(&kept)?;
         self.since_check = self.since_check.saturating_add(1);
+
         if self.since_check >= SIZE_CHECK_EVERY {
             self.since_check = 0;
             // A fault leaves the rows, and the next check trims them.
@@ -750,6 +797,7 @@ mod tests {
         let path = file("receipts-bound.db");
         let mut shelf = SqliteShelf::open(&path).unwrap();
         shelf.set_max_bytes(1 << 20);
+
         let kept = |index: u32| KeptReceipt {
             issued: true,
             epoch: 7,
@@ -764,20 +812,24 @@ mod tests {
                 .collect(),
             at: u64::from(index),
         };
+
         // Each full window takes about 60 kB with its index, thus 256 of
         // them pass the bound many times.
         for index in 0..256 {
             shelf.keep(kept(index)).unwrap();
         }
+
         let (issued, _) = shelf.held();
         assert!(issued < 256, "{issued}");
         assert!(shelf.used_bytes().unwrap() <= 1 << 20);
+
         // The newest receipt stays, and the oldest one left.
         let leaf = |index: u32| {
             let mut bytes = [0u8; 32];
             bytes[..4].copy_from_slice(&index.to_be_bytes());
             bytes
         };
+
         assert!(shelf.find(7, &leaf(0)).is_empty());
         assert_eq!(shelf.find(7, &leaf(255)).len(), 1);
     }
@@ -792,6 +844,7 @@ mod tests {
             leaves: (0..4u8).map(|i| [fill.wrapping_add(i); 32]).collect(),
             at,
         };
+
         {
             let mut shelf = SqliteShelf::open(&path).unwrap();
             shelf.keep(kept(false, 7, 10, 100)).unwrap();
@@ -799,6 +852,7 @@ mod tests {
             shelf.keep(kept(true, 8, 10, 300)).unwrap();
             assert_eq!(shelf.held(), (2, 1));
         }
+
         // A restart keeps each receipt.
         let mut shelf = SqliteShelf::open(&path).unwrap();
         let found = shelf.find(7, &[13; 32]);
@@ -808,10 +862,12 @@ mod tests {
         assert!(!found[1].issued);
         assert_eq!(found[1].leaves.len(), 4);
         assert!(shelf.find(9, &[13; 32]).is_empty());
+
         shelf.erase_before(250);
         assert_eq!(shelf.held(), (1, 0));
         assert!(shelf.find(7, &[13; 32]).is_empty());
         assert_eq!(shelf.find(8, &[11; 32]).len(), 1);
+
         let rows: i64 = shelf
             .connection
             .query_row("SELECT COUNT(*) FROM receipt_leaves", [], |row| row.get(0))
@@ -844,6 +900,7 @@ mod tests {
             blob,
             at: 50,
         };
+
         vec![
             StoreChange::Queue {
                 recipient_id: [1; 32],
@@ -969,6 +1026,7 @@ mod tests {
     fn file(name: &str) -> String {
         let directory = std::env::temp_dir().join(format!("umbra-relay-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
+
         let path = directory.join(name);
         let _ = std::fs::remove_file(&path);
         path.to_str().unwrap().to_owned()
@@ -979,6 +1037,7 @@ mod tests {
         let path = file("model.db");
         let mut model = MemoryStore::default();
         let mut store = SqliteStore::open(&path).unwrap();
+
         // The changes go in several commits, as the calls of a node give
         // them.
         for batch in changes().chunks(4) {
@@ -992,21 +1051,25 @@ mod tests {
         let mut again = SqliteStore::open(&path).unwrap();
         let loaded = again.load().unwrap();
         assert_eq!(loaded, model.load().unwrap());
+
         assert_eq!(loaded.queues[&[1; 32]].head, [1, 2]);
         assert_eq!(loaded.queues[&[1; 32]].records.len(), 1);
         assert_eq!(loaded.queues[&[2; 32]].records.len(), 1);
         assert_eq!(loaded.invitations.len(), 1);
+
         // A group queue and its records come back, and a `GDEL` leaves
         // neither (`NET-245`).
         assert_eq!(loaded.group_queues.len(), 1);
         assert_eq!(loaded.group_queues[&[4; 32]].head, [4]);
         assert_eq!(loaded.group_queues[&[4; 32]].records.len(), 1);
         assert_eq!(loaded.group_queues[&[4; 32]].records[0].seq, 2);
+
         // The chunks come back with their class and their renewal, and a
         // `CDEL` leaves none (`ATT-191`).
         assert_eq!(loaded.chunks.len(), 2);
         assert_eq!(loaded.chunks[&[6; 32]].erase_at, 1_500);
         assert_eq!(loaded.chunks[&[7; 32]].class, Class::Backup);
+
         // ABU-114: the spent nonces of the two newest epochs stay.
         assert_eq!(
             loaded.spent.iter().copied().collect::<Vec<_>>(),
@@ -1019,6 +1082,7 @@ mod tests {
         let path = file("bad-row.db");
         let mut store = SqliteStore::open(&path).unwrap();
         store.commit(&changes()).unwrap();
+
         store
             .connection
             .execute(
@@ -1033,11 +1097,13 @@ mod tests {
                 [[9u8; 32].as_slice()],
             )
             .unwrap();
+
         // NET-303: the queue of that record parses no more, the other one
         // stays, and a record of no queue leaves the file.
         let loaded = store.load().unwrap();
         assert!(loaded.queues[&[1; 32]].head.is_empty());
         assert_eq!(loaded.queues[&[2; 32]].records.len(), 1);
+
         let orphans: i64 = store
             .connection
             .query_row(
@@ -1055,18 +1121,22 @@ mod tests {
         let mut store = SqliteStore::open(&path).unwrap();
         let held = chunk(Class::Attachment, 0xC9);
         let marker = held.bytes.clone();
+
         store
             .commit(&[StoreChange::Chunk {
                 chunk_id: [1; 32],
                 held,
             }])
             .unwrap();
+
         let holds = |path: &str| {
             let mut bytes = std::fs::read(path).unwrap();
             bytes.extend(std::fs::read(format!("{path}-wal")).unwrap_or_default());
             bytes.windows(64).any(|window| window == &marker[..64])
         };
+
         assert!(holds(&path));
+
         store
             .commit(&[StoreChange::ChunkDeleted { chunk_id: [1; 32] }])
             .unwrap();
@@ -1098,10 +1168,12 @@ mod tests {
                 )
                 .unwrap();
         }
+
         let mut store = SqliteStore::open(&path).unwrap();
         let loaded = store.load().unwrap();
         assert_eq!(loaded.queues.len(), 1);
         assert!(loaded.group_queues.is_empty());
+
         // The file now takes a group queue.
         store
             .commit(&[StoreChange::GroupQueue {
@@ -1134,6 +1206,7 @@ mod tests {
             accepted_at: 10,
             bytes: marker.clone(),
         };
+
         store
             .commit(&[
                 StoreChange::Queue {
@@ -1146,12 +1219,15 @@ mod tests {
                 },
             ])
             .unwrap();
+
         let holds = |path: &str| {
             let mut bytes = std::fs::read(path).unwrap();
             bytes.extend(std::fs::read(format!("{path}-wal")).unwrap_or_default());
             bytes.windows(64).any(|window| window == &marker[..64])
         };
+
         assert!(holds(&path));
+
         store
             .commit(&[StoreChange::Acked {
                 recipient_id: [1; 32],
@@ -1165,6 +1241,7 @@ mod tests {
     fn a_failed_commit_leaves_no_part_of_it() {
         let path = file("atomic.db");
         let mut store = SqliteStore::open(&path).unwrap();
+
         let record = Stored {
             seq: 1,
             accepted_at: 10,
@@ -1185,6 +1262,7 @@ mod tests {
                 record,
             },
         ];
+
         assert_eq!(store.commit(&twice), Err(StoreFault));
         assert_eq!(store.load().unwrap(), Loaded::default());
     }
