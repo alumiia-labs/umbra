@@ -39,6 +39,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+
 # The image of the Dockerfile holds the binaries, and UMBRA_DEVNET_BIN names
 # their directory. With no such directory, cargo builds them.
 if [ -n "${UMBRA_DEVNET_BIN:-}" ]; then
@@ -50,9 +51,11 @@ else
     # of the network stay in target/devnet.
     bin="${CARGO_TARGET_DIR:-target}/debug"
 fi
+
 # Each relay keeps its queues in a file here, thus a restart of this script
 # ends no contact. Delete the directory for an empty network.
 mkdir -p target/devnet/conf
+
 # A run that ended with no trap, as a killed shell does, leaves its signing
 # loop, which then signs over the manifest of this run with its own
 # settings. The loop of the last run stops here.
@@ -67,6 +70,7 @@ if ! [[ "$host" =~ ^[A-Za-z0-9.-]+$ ]]; then
     echo "UMBRA_DEVNET_HOST is an IPv4 address or a host name: $host" >&2
     exit 1
 fi
+
 for relay in 1 2 3 4 5 6 7; do
     sed "s/10\.0\.2\.2/$host/g" "tests/fixtures/devnet/relay$relay.conf" \
         > "target/devnet/conf/relay$relay.conf"
@@ -77,6 +81,7 @@ for relay in 1 2 3 4 5 6 7; do
     "$bin"/umbra-relay sign-descriptor \
         "target/devnet/conf/relay$relay.conf" "target/devnet/relay$relay.desc"
 done
+
 # The manifest holds the present epoch, thus each start signs a new one. It
 # carries the report queue of authority 0 once that queue exists.
 cp tests/fixtures/devnet/authority.conf target/devnet/conf/authority.conf
@@ -86,6 +91,7 @@ echo "verdicts=target/devnet/verdicts.txt" >> target/devnet/conf/authority.conf
 # Each relay takes the class that the class tests of the measurer verify.
 echo "results=target/devnet/measure-results.txt" >> target/devnet/conf/authority.conf
 "$bin"/umbra-test-authority target/devnet/conf/authority.conf target/devnet
+
 # The relays and the debug build of the Android app hold the key set of the
 # repository. The seed of the authorities gives the same one at each start.
 cmp -s target/devnet/keyset.bin tests/fixtures/devnet/keyset.bin || {
@@ -111,18 +117,26 @@ cp tests/fixtures/devnet/authority-queue.conf target/devnet/conf/authority-queue
 echo "host_alias=$host" >> target/devnet/conf/authority-queue.conf
 
 # Debian has python3 alone, and Windows often has python alone.
-if python3 -c '' 2>/dev/null; then python=python3; else python=python; fi
+if python3 -c '' 2>/dev/null; then
+    python=python3
+else
+    python=python
+fi
 
 # The debug build pins the gateway key of the NDR (`NTF-127`), and the seed
 # of ndr.conf gives the same one at each start.
-"$bin"/umbra-ndr key-config "$ndr_conf"     | "$python" -c "import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read().strip()))"     | cmp -s - tests/fixtures/devnet/ndr-key-config.bin || {
+"$bin"/umbra-ndr key-config "$ndr_conf" \
+    | "$python" -c "import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read().strip()))" \
+    | cmp -s - tests/fixtures/devnet/ndr-key-config.bin || {
     echo "the NDR key differs from tests/fixtures/devnet/ndr-key-config.bin"
     exit 1
 }
 
 # The debug build pins the directory (`DIS-163`), and the seeds of
 # directory.conf give the same keys at each start.
-"$bin"/umbra-directory pins tests/fixtures/devnet/directory.conf     | "$python" -c "import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read().strip()))"     | cmp -s - tests/fixtures/devnet/directory-pins.bin || {
+"$bin"/umbra-directory pins tests/fixtures/devnet/directory.conf \
+    | "$python" -c "import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read().strip()))" \
+    | cmp -s - tests/fixtures/devnet/directory-pins.bin || {
     echo "the directory keys differ from tests/fixtures/devnet/directory-pins.bin"
     exit 1
 }
@@ -132,8 +146,10 @@ if python3 -c '' 2>/dev/null; then python=python3; else python=python; fi
 if [ ! -f target/devnet/measurer/measurer.seed ]; then
     "$bin"/umbra-measurer keygen target/devnet/measurer
 fi
+
 "$bin"/umbra-test-authority measurer-cert target/devnet/conf/authority.conf \
     target/devnet/measurer/measurer.pub target/devnet/measurer/measurer.cert
+
 cat > target/devnet/conf/measurer.conf <<EOF
 key=target/devnet/measurer/measurer.seed
 cert=target/devnet/measurer/measurer.cert
@@ -150,6 +166,7 @@ EOF
 
 pids=()
 trap 'kill "${pids[@]}" 2>/dev/null || true' EXIT INT TERM
+
 # The queue relays start first, thus each dial of a lower layer finds a port
 # that accepts.
 "$bin"/umbra-ndr "$ndr_conf" &
@@ -160,10 +177,12 @@ for relay in 3 5 7 2 4 1 6; do
     "$bin"/umbra-relay "target/devnet/conf/relay$relay.conf" &
     pids+=($!)
 done
+
 # The report queue of authority 0, once the relays listen.
 sleep 2
 "$bin"/umbra-authority target/devnet/conf/authority-queue.conf &
 pids+=($!)
+
 # One class test of each relay, once the relays listen (Part 10 §10.3). A
 # relay of layer 2 or 3 takes the measurer on a link with no hello.
 (
@@ -175,13 +194,18 @@ pids+=($!)
     fi
 ) &
 pids+=($!)
+
 # The authorities sign a new manifest each 30 minutes, and each relay reads
 # the file again and serves it. A client then sees no clock gap after an
 # hour of the network. The first new one follows the report queue.
 (
-    until [ -f target/devnet/report-queue.bin ]; do sleep 2; done
+    until [ -f target/devnet/report-queue.bin ]; do
+        sleep 2
+    done
+
     "$bin"/umbra-test-authority target/devnet/conf/authority.conf target/devnet >/dev/null &&
         echo "the manifest names the report queue"
+
     while sleep 1800; do
         "$bin"/umbra-test-authority target/devnet/conf/authority.conf target/devnet >/dev/null ||
             echo "the new manifest failed"
@@ -189,4 +213,5 @@ pids+=($!)
 ) &
 pids+=($!)
 echo $! > target/devnet/signer.pid
+
 wait

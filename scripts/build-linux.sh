@@ -11,6 +11,7 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 toolchain="$(sed -n 's/^channel = "\(.*\)"/\1/p' "$root/rust-toolchain.toml")"
+
 # The compiler is inside the trust boundary (Part 14 §14.5.1), thus a
 # digest pins the image, and not a tag that can move. A new toolchain takes
 # a new digest: docker buildx imagetools inspect rust:<version>-bookworm.
@@ -21,8 +22,10 @@ if [ "$toolchain" != "$image_toolchain" ]; then
     echo "Pin the digest of rust:${toolchain}-bookworm in this script." >&2
     exit 1
 fi
+
 out="$root/target/deploy/bin"
 mkdir -p "$out" "$root/target/deploy/cargo-home"
+
 # The build runs as the user of this shell, thus target/deploy is not
 # owned by root. Such a build cannot write over the files of a build as root.
 if [ -n "$(find "$root/target/deploy" ! -user "$(id -u)" -print -quit)" ]; then
@@ -44,9 +47,11 @@ docker run --rm \
             -p umbra-relay --features native \
             --bin umbra-relay --bin umbra-ndr --bin umbra-directory --bin umbra-signer \
             --bin umbra-measurer
+
         # The authority tool is a queue client, thus it is of the client crate.
         CARGO_TARGET_DIR=/src/target/deploy/cargo cargo build --release --locked \
             -p umbra-ffi --features runtime --bin umbra-authority
+
         for bin in umbra-relay umbra-ndr umbra-directory umbra-signer umbra-measurer \
             umbra-authority; do
             install -m 0755 "/src/target/deploy/cargo/release/$bin" "/src/target/deploy/bin/$bin"

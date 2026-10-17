@@ -88,9 +88,11 @@ def check_app(problems: list[str]) -> list[str]:
     lines = []
     source = entries(RES / "values", problems)
     total = sum(1 for entry in source.values() if entry.translatable)
+
     for folder in sorted(RES.iterdir()):
         if not folder.is_dir() or not LANGUAGE.match(folder.name):
             continue
+
         where = folder.name
         translated = entries(folder, problems)
         for key, entry in translated.items():
@@ -106,15 +108,18 @@ def check_app(problems: list[str]) -> list[str]:
                 continue
             if entry.kind == "plurals" and "other" not in entry.texts:
                 problems.append(f"{where}: {key} has no 'other' form")
+
             want = placeholders(next(iter(base.texts.values())))
             if entry.kind == "plurals":
                 want = placeholders(base.texts.get("other", ""))
+
             for quantity, text in entry.texts.items():
                 label = f"{key}[{quantity}]" if quantity else key
                 if not text.strip():
                     problems.append(f"{where}: {label} is empty")
                 if unescaped(text):
                     problems.append(f"{where}: {label} has an apostrophe or a quote with no backslash")
+
                 got = placeholders(text)
                 # A plural form may leave out the count, as "one file".
                 if entry.kind == "plurals" and quantity != "other":
@@ -122,6 +127,7 @@ def check_app(problems: list[str]) -> list[str]:
                         problems.append(f"{where}: {label} has {got}, and the source has {want}")
                 elif got != want:
                     problems.append(f"{where}: {label} has {got}, and the source has {want}")
+
         done = sum(1 for key in translated if key in source and source[key].translatable)
         lines.append(f"app {where}: {done} of {total} strings")
     return lines
@@ -131,17 +137,21 @@ def check_site(problems: list[str]) -> list[str]:
     lines = []
     source = json.loads((LOCALES / "en.json").read_text(encoding="utf-8"))
     total = sum(1 for key in source if not key.startswith("_"))
+
     for path in sorted(LOCALES.glob("*.json")):
         if path.stem == "en":
             continue
+
         where = f"site {path.name}"
         if not SITE_CODE.fullmatch(path.stem):
             problems.append(f"{where}: the name is no language code, as de or pt-BR")
+
         try:
             text = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as fault:
             problems.append(f"{where}: {fault}")
             continue
+
         for key, value in text.items():
             if key not in source:
                 problems.append(f"{where}: {key} is not in en.json")
@@ -149,10 +159,12 @@ def check_site(problems: list[str]) -> list[str]:
                 problems.append(f"{where}: {key} is not text")
             elif re.search(r"<[A-Za-z/!]|\{\{", value):
                 problems.append(f"{where}: {key} holds markup")
+
         if text.get("_dir", "ltr") not in ("ltr", "rtl"):
             problems.append(f"{where}: _dir is not ltr or rtl")
         if "_language" not in text:
             problems.append(f"{where}: no _language, the name of the language in itself")
+
         done = sum(1 for key in text if key in source and not key.startswith("_"))
         lines.append(f"{where}: {done} of {total} texts")
     return lines
@@ -161,6 +173,7 @@ def check_site(problems: list[str]) -> list[str]:
 def main() -> int:
     problems: list[str] = []
     lines = check_app(problems) + check_site(problems)
+
     for line in lines:
         print(line)
     for problem in problems:

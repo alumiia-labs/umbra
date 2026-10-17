@@ -56,10 +56,12 @@ def main() -> int:
     problems = []
     locales = sorted(glob.glob(os.path.join(RES, "values*")))
     locales = [folder for folder in locales if strings_of(folder)]
+
     source = ""
     for path in glob.glob(os.path.join(SOURCES, "**", "*.kt"), recursive=True):
         with open(path, encoding="utf-8") as handle:
             source += handle.read()
+
     names = [resource_name(rule) for rule in RULES]
     # The strings of each rule: the name of the rule, and each name with a
     # suffix, over all the locales.
@@ -73,6 +75,7 @@ def main() -> int:
                 problems.append(f"{os.path.basename(folder)}: {name} names no rule")
             for base in known:
                 family[base].add(name)
+
     for rule, base in zip(RULES, names):
         if rule in SUFFIX_ONLY:
             if not family[base]:
@@ -87,8 +90,10 @@ def main() -> int:
                     problems.append(f"{os.path.basename(folder)}: no string for {name}")
             if not re.search(r"R\.string\." + name + r"\b", source):
                 problems.append(f"no source reads {name}")
+
     for rule in sorted(SUFFIX_ONLY - set(RULES)):
         problems.append(f"SUFFIX_ONLY names {rule}, which RULES does not hold")
+
     for problem in problems:
         print(problem)
     print(f"rules: {len(RULES)}  locales: {len(locales)}  problems: {len(problems)}")

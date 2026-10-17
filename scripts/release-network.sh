@@ -19,15 +19,19 @@ for file in keyset.bin ndr-key-config.hex directory-pins.hex network.properties;
         exit 1
     fi
 done
+
 if ! command -v xxd > /dev/null; then
     echo "xxd is missing: install it (the package xxd or vim-common)" >&2
     exit 1
 fi
+
 mkdir -p "$assets"
+
 # The four files go to a directory beside the assets first and take their
 # names at the end. Thus a run that stops leaves no half set for a build.
 stage="$(mktemp -d "$assets/.stage.XXXXXX")"
 trap 'rm -rf "$stage"' EXIT
+
 # A hex file with another character in it stops the run; xxd would pass
 # over that character and write a shorter key.
 unhex() {
@@ -40,9 +44,11 @@ unhex() {
     printf '%s' "$text" | xxd -r -p > "$2"
     [ -s "$2" ]
 }
+
 cp "$build/keyset.bin" "$stage/umbra-keyset.bin"
 unhex "$build/ndr-key-config.hex" "$stage/umbra-ndr-key.bin"
 unhex "$build/directory-pins.hex" "$stage/umbra-directory-pins.bin"
+
 # REL-045: the epoch that the build ships, one hour of Unix time each. The
 # app refuses each manifest of an epoch before it. It is the epoch of the
 # manifest that the last run of the playbook brought back, which is never
@@ -56,14 +62,18 @@ if [ -s "$build/manifest" ] \
     && [ "$(xxd -p -s 3 -l 1 "$build/manifest")" = "01" ]; then
     epoch=$(( 16#$(xxd -p -s 4 -l 8 "$build/manifest") ))
 fi
+
 hour=$(( $(date +%s) / 3600 ))
 if [ "$epoch" -le 0 ] || [ "$epoch" -gt "$hour" ]; then
     epoch=$(( hour - 1 ))
 fi
+
 grep -v '^shipped_epoch=' "$build/network.properties" > "$stage/umbra-network.properties"
 printf 'shipped_epoch=%s\n' "$epoch" >> "$stage/umbra-network.properties"
 echo "shipped_epoch=$epoch"
+
 for file in umbra-keyset.bin umbra-ndr-key.bin umbra-directory-pins.bin umbra-network.properties; do
     mv "$stage/$file" "$assets/$file"
 done
+
 ls -l "$assets"

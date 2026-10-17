@@ -115,6 +115,7 @@ def render() -> str:
 def main(argv: list[str]) -> int:
     text = render()
     path = VECTORS / "PROVENANCE.md"
+
     if "--check" in argv:
         current = path.read_text(encoding="utf-8") if path.exists() else ""
         if current != text:
@@ -122,6 +123,7 @@ def main(argv: list[str]) -> int:
             return 1
         print("PROVENANCE.md is current")
         return 0
+
     path.write_text(text, encoding="utf-8", newline="\n")
     print(f"wrote {path.relative_to(ROOT).as_posix()}")
     return 0

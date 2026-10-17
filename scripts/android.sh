@@ -22,6 +22,7 @@ if [ -z "${ANDROID_NDK_HOME:-}" ]; then
     ANDROID_NDK_HOME="$sdk/ndk/$ndk_version"
     export ANDROID_NDK_HOME
 fi
+
 if [ ! -d "$ANDROID_NDK_HOME" ]; then
     echo "No NDK at $ANDROID_NDK_HOME. Install that version with the SDK manager." >&2
     exit 1
@@ -40,12 +41,14 @@ cargo ndk -t arm64-v8a -t x86_64 --platform 29 -o "$app/jniLibs" \
 
 # The generator reads the metadata of a host library.
 cargo rustc -p umbra-ffi --lib --features bindings --crate-type cdylib
+
 host_debug="${CARGO_TARGET_DIR:-target}/debug"
 case "$(uname -s)" in
     MINGW* | MSYS* | CYGWIN*) host_library="$host_debug/umbra_ffi.dll" ;;
     Darwin) host_library="$host_debug/libumbra_ffi.dylib" ;;
     *) host_library="$host_debug/libumbra_ffi.so" ;;
 esac
+
 cargo run -q -p umbra-ffi --features bindgen --bin uniffi-bindgen -- \
     generate --library "$host_library" --language kotlin --no-format \
     --out-dir "$app/kotlin-generated"

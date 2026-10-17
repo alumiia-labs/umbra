@@ -99,12 +99,14 @@ def graph(target: str, edges: str) -> dict[Crate, set[Crate | None]]:
     edge kinds. The parent None is a crate of the workspace."""
     out = run("cargo", "tree", "--target", target, "-e", edges, "--no-dedupe",
               "--prefix", "depth", "--format", "{p}")
+
     crates: dict[Crate, set[Crate | None]] = {}
     stack: list[tuple[int, Crate | None]] = []
     for line in out.splitlines():
         m = re.match(r"^(\d+)(\S+) v(\S+)", line.strip())
         if not m:
             continue
+
         depth = int(m.group(1))
         crate = None if m.group(2) in WORKSPACE else (m.group(2), m.group(3))
         while stack and stack[-1][0] >= depth:
@@ -153,6 +155,7 @@ def platform(reg: dict[str, str], charged: set[Crate], package: str, features: s
     crate that a default graph charges to R1 or R2."""
     out = run("cargo", "tree", "-p", package, "--features", features, "--target", target,
               "-e", "normal,no-proc-macro", "--no-dedupe", "--prefix", "depth", "--format", "{p}")
+
     stack: list[tuple[int, str]] = []
     reached: dict[Crate, set[str]] = {}
     root_of = {root: name for name, roots, _ in SUBSYSTEMS for root in roots}
@@ -160,14 +163,17 @@ def platform(reg: dict[str, str], charged: set[Crate], package: str, features: s
         m = re.match(r"^(\d+)(\S+) v(\S+)", line.strip())
         if not m:
             continue
+
         depth, name, ver = int(m.group(1)), m.group(2), m.group(3)
         while stack and stack[-1][0] >= depth:
             stack.pop()
         stack.append((depth, name))
+
         if name in WORKSPACE or (reg.get(name) in ("R1", "R2") and (name, ver) in charged):
             continue
         subs = {root_of[n] for _, n in stack if n in root_of}
         reached.setdefault((name, ver), set()).update(subs)
+
     order = [name for name, _, _ in SUBSYSTEMS] + ["Other"]
     by_sub: dict[str, list] = {name: [] for name in order}
     for (name, ver), subs in sorted(reached.items()):
@@ -182,6 +188,7 @@ def render() -> str:
     rustc = run("rustc", "--version").strip()
     cargo = run("cargo", "--version").strip()
     today = dt.date.today().isoformat()
+
     lines = [
         "# Dependencies",
         "",
@@ -193,6 +200,7 @@ def render() -> str:
         f"- Toolchain: `{rustc}`, `{cargo}`",
         "",
     ]
+
     charged: set[Crate] = set()
     twice: dict[Crate, set[str]] = {}
     for target in TARGETS:
@@ -200,12 +208,15 @@ def render() -> str:
         full = graph(target, "normal,build")
         charges = charge(linked, reg)
         charged.update(crate for crate, r in charges.items() if r in ("R1", "R2"))
+
         for name, vers in duplicates(full).items():
             for ver in vers:
                 twice.setdefault((name, ver), set()).add(charges.get((name, ver), "build"))
+
         by_reg: dict[str, list[tuple[str, str]]] = {"R1": [], "R2": [], "R3": [], "build": []}
         for crate in sorted(full):
             by_reg[charges.get(crate, "build")].append(crate)
+
         lines += [f"## `{target}`", ""]
         lines += ["| Register | Count | Cap | Result |", "| --- | --- | --- | --- |"]
         for r in ("R1", "R2", "R3", "build"):
@@ -214,6 +225,7 @@ def render() -> str:
             result = "n/a" if cap is None else ("PASS" if n <= cap else "FAIL")
             lines.append(f"| {r} | {n} | {cap if cap is not None else 'none'} | {result} |")
         lines.append("")
+
         for r in ("R1", "R2", "R3", "build"):
             if not by_reg[r]:
                 continue
@@ -221,12 +233,14 @@ def render() -> str:
             lines.append("")
             lines += [f"- `{name}` {ver}" for name, ver in by_reg[r]]
             lines.append("")
+
     caps = {name: cap for name, _, cap in SUBSYSTEMS}
     for package, features, target, r3_cap in PLATFORM:
         by_sub = platform(reg, charged, package, features, target)
         for name, vers in duplicates([c for crates in by_sub.values() for c in crates]).items():
             for ver in vers:
                 twice.setdefault((name, ver), set()).add("R3")
+
         total = sum(len(v) for v in by_sub.values())
         lines += [f"## Platform build: `{package}` with `{features}`, `{target}`", ""]
         lines += ["| Subsystem | Count | Cap | Result |", "| --- | --- | --- | --- |"]
@@ -239,12 +253,14 @@ def render() -> str:
             res = "n/a" if cap is None else ("PASS" if len(crates) <= cap else "FAIL")
             lines.append(f"| {sub} | {len(crates)} | {cap if cap is not None else 'none'} | {res} |")
         lines.append("")
+
         for sub, crates in by_sub.items():
             if not crates:
                 continue
             lines += [f"### {sub}", ""]
             lines += [f"- `{name}` {ver}" for name, ver in crates]
             lines.append("")
+
     # Part 14 §14.2.7: a duplicate version is a dated debt in the skip list.
     skip = skips()
     lines += ["## Duplicate versions", ""]
@@ -258,6 +274,7 @@ def render() -> str:
             date = skip.get((name, ver))
             lines.append(f"| `{name}` | {ver} | {', '.join(sorted(regs))} | {date or 'none'} |")
         lines.append("")
+
     return "\n".join(lines) + "\n"
 
 
@@ -268,8 +285,10 @@ def skip_faults(text: str) -> list[str]:
     by_name: dict[str, list[str]] = {}
     for (name, _), date in listed.items():
         by_name.setdefault(name, []).append(date)
+
     faults = [f"{name}: {dates.count('none')} versions have no skip entry in deny.toml"
               for name, dates in sorted(by_name.items()) if dates.count("none") > 1]
+
     today = dt.date.today()
     for (name, ver), date in sorted(skips().items()):
         if date is None:
@@ -278,30 +297,37 @@ def skip_faults(text: str) -> list[str]:
             faults.append(f"skip entry {name}@{ver} of {date} is older than {SKIP_DAYS} days")
         if (name, ver) not in listed:
             faults.append(f"skip entry {name}@{ver} names no duplicate of the graph")
+
     return faults
 
 
 def main(argv: list[str]) -> int:
     text = render()
     path = ROOT / "DEPENDENCIES.md"
+
     if "--check" in argv:
         current = path.read_text(encoding="utf-8") if path.exists() else ""
-        # the date and the commit change at each commit; compare the rest
+
+        # The date and the commit change at each commit, thus compare the rest.
         strip = lambda s: re.sub(r"^- (Date|Commit): .*$", "", s, flags=re.M)
         if strip(current) != strip(text):
             print("DEPENDENCIES.md is stale; run scripts/deps.py")
             return 1
+
         # IMP-005, IMP-009: a register or a subsystem over its cap fails.
         if "| FAIL |" in text:
             print("a register or a subsystem is over its cap")
             return 1
+
         # Part 14 §14.2.7: each duplicate has a skip entry of 90 days at most.
         faults = skip_faults(text)
         if faults:
             print("\n".join(faults))
             return 1
+
         print("DEPENDENCIES.md is current")
         return 0
+
     path.write_text(text, encoding="utf-8", newline="\n")
     print(f"wrote {path.name}")
     return 0

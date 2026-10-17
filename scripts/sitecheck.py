@@ -57,6 +57,7 @@ def header_problems(where: str, headers: dict[str, str]) -> list[str]:
     for directive in CSP:
         if directive not in policy:
             problems.append(f"{where}: the Content-Security-Policy has no {directive}")
+
     for name, part in HEADERS.items():
         if part not in headers.get(name, "").lower():
             problems.append(f"{where}: no {name} with {part}")
@@ -88,11 +89,14 @@ def check_headers(problems: list[str]) -> None:
     if every is None:
         problems.append("_headers: no rule for /*, which holds the headers of each page")
         return
+
     problems.extend(header_problems("_headers /*", every))
+
     for path, headers in rules.items():
         for name in ["content-security-policy", *HEADERS]:
             if "!" + name in headers and name not in headers:
                 problems.append(f"_headers {path}: drops {name}")
+
         cache = headers.get("cache-control")
         if cache is not None and "no-transform" not in cache.lower():
             problems.append(f"_headers {path}: a Cache-Control with no no-transform")
@@ -113,6 +117,7 @@ class Document(HTMLParser):
             self.fault(f"IDN-120: a <{tag}> element")
         if tag == "style":
             self.in_style = True
+
         for key, value in attrs:
             key = key.lower()
             value = (value or "").strip()
@@ -160,11 +165,13 @@ def main() -> None:
     for path in documents:
         name = path.relative_to(SITE).as_posix()
         Document(name, problems).feed(path.read_text(encoding="utf-8"))
+
     # A browser runs a script of an SVG image that it opens as a document.
     for path in sorted(SITE.rglob("*.svg")):
         Document(path.relative_to(SITE).as_posix(), problems).feed(path.read_text(encoding="utf-8"))
     for path in sorted(SITE.rglob("*.js")) + sorted(SITE.rglob("*.mjs")):
         problems.append(f"{path.relative_to(SITE).as_posix()}: IDN-120: a script file")
+
     check_headers(problems)
 
     links = SITE / ".well-known" / "assetlinks.json"
@@ -176,6 +183,7 @@ def main() -> None:
                  and t.get("package_name") == PACKAGE]
         if not named:
             problems.append(f"assetlinks.json: IDN-122: no statement names {PACKAGE}")
+
         for target in named:
             prints = target.get("sha256_cert_fingerprints") or []
             if not prints:
@@ -197,9 +205,11 @@ def main() -> None:
 
     if "--live" in sys.argv[1:]:
         import urllib.request
+
         origin = sys.argv[sys.argv.index("--live") + 1].rstrip("/")
         codes = sorted(path.stem for path in (ROOT / "site" / "locales").glob("*.json")
                        if path.stem != "en")
+
         for path in ["/i", "/no-such-page"] + [f"/{code}/i" for code in codes]:
             request = urllib.request.Request(origin + path, headers={
                 "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0",
@@ -214,6 +224,7 @@ def main() -> None:
             except OSError as error:
                 problems.append(f"{origin}{path}: no answer: {error}")
                 continue
+
             Document(f"{origin}{path}", problems).feed(body)
             problems.extend(header_problems(
                 f"{origin}{path}", {name.lower(): value for name, value in headers.items()}))
