@@ -37,6 +37,7 @@ impl Writer {
         if needed <= self.0.capacity() {
             return;
         }
+
         let capacity = needed.max(self.0.capacity().saturating_mul(2)).max(64);
         let mut next = Zeroizing::new(Vec::with_capacity(capacity));
         next.extend_from_slice(&self.0);
@@ -209,6 +210,7 @@ mod tests {
             writer.u32(i);
         }
         let bytes = writer.finish();
+
         let mut reader = Reader::new(&bytes);
         for i in 0..1_000u32 {
             assert_eq!(reader.u32().unwrap(), i);

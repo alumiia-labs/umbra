@@ -91,6 +91,7 @@ mod tests {
                 quic_after_ms: TCP_HEAD_START_MS
             }
         );
+
         cache.record("home", Wire::Quic, 100);
         assert_eq!(cache.plan("home", 200), Plan::Only(Wire::Quic));
         assert!(matches!(cache.plan("office", 200), Plan::Race { .. }));
@@ -98,8 +99,10 @@ mod tests {
             cache.plan("home", 100 + WINNER_TTL),
             Plan::Race { .. }
         ));
+
         cache.record("home", Wire::Tcp, 500);
         assert_eq!(cache.lookup("home", 600), Some(Wire::Tcp));
+
         cache.forget("home");
         assert_eq!(cache.lookup("home", 600), None);
     }

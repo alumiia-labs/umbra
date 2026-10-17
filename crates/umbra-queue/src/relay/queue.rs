@@ -109,11 +109,13 @@ impl Queue {
             })
         };
         let mut queue = head().map_err(|_| Reject::Rejected)?;
+
         records.sort_by_key(|record| record.seq);
         let in_range = |record: &Stored| record.seq > queue.last_ack && record.seq < queue.next_seq;
         if !records.iter().all(in_range) {
             return Err(Reject::Rejected);
         }
+
         // NET-346: the store rounds a time up (`NET-301`), thus it can hold
         // a record that `MSG_TTL` already ended in RAM while a later one
         // took its place. The oldest above the quota are those records.
@@ -150,6 +152,7 @@ impl Queue {
         if self.records.len() >= QUEUE_QUOTA {
             return Err(Reject::Limit);
         }
+
         let seq = self.next_seq;
         self.next_seq = self.next_seq.checked_add(1).ok_or(Reject::Busy)?;
         self.records.push(Stored {
@@ -213,6 +216,7 @@ impl Queue {
         if seq <= self.last_ack {
             return;
         }
+
         self.last_ack = seq;
         self.records.retain(|r| r.seq > seq);
     }
@@ -228,8 +232,8 @@ impl Queue {
         now.saturating_sub(self.last_activity) >= QUEUE_IDLE_TTL
     }
 
-    /// Stores the notifier credential of an `NKEY` and returns the
-    /// `notifier_id` the relay drew for it.
+    /// Stores the notifier credential of an `NKEY` with the `notifier_id`
+    /// that the relay drew for it.
     pub fn set_notifier(&mut self, notifier_pk: [u8; 32], notifier_id: [u8; 32]) {
         self.notifier = Some((notifier_pk, notifier_id));
     }
@@ -300,9 +304,11 @@ mod tests {
         assert_eq!(q.send(b"b", 1_001).unwrap(), 2);
         assert_eq!(q.send(b"c", 1_002).unwrap(), 3);
         assert_eq!(q.pending().count(), 3);
+
         q.ack(2);
         let left: Vec<u32> = q.pending().map(|r| r.seq).collect();
         assert_eq!(left, vec![3]);
+
         q.ack(1);
         assert_eq!(q.len(), 1);
         assert_eq!(q.send(b"d", 1_003).unwrap(), 4);
@@ -314,14 +320,17 @@ mod tests {
         for i in 0..6u8 {
             q.send(&[i], 1_000).unwrap();
         }
+
         let seqs =
             |q: &Queue, after: u32| -> Vec<u32> { q.pending_after(after).map(|r| r.seq).collect() };
+
         // NET-349: a relay steps through a backlog from the last record
         // that left.
         assert_eq!(seqs(&q, 0), [1, 2, 3, 4, 5, 6]);
         assert_eq!(seqs(&q, 4), [5, 6]);
         assert!(seqs(&q, 6).is_empty());
         assert!(seqs(&q, u32::MAX).is_empty());
+
         // An `ACK` above the place of a drain takes its records out of it.
         q.ack(3);
         assert_eq!(seqs(&q, 1), [4, 5, 6]);
@@ -338,11 +347,13 @@ mod tests {
                 bytes: vec![0],
             });
         }
+
         q.next_seq = u32::try_from(QUEUE_QUOTA + 2).unwrap();
         let records = q.records.clone();
         let mut writer = Writer::new();
         q.export_head(&mut writer);
         let head = writer.finish();
+
         let back = Queue::restore(&mut Reader::new(&head), records).unwrap();
         assert_eq!(back.len(), QUEUE_QUOTA);
         assert_eq!(back.pending().next().unwrap().seq, 2);
@@ -354,14 +365,19 @@ mod tests {
         for i in 0..QUEUE_QUOTA {
             q.send(&[0], 1_000 + i as u64).unwrap();
         }
+
         assert_eq!(q.remaining(), 0);
         assert_eq!(q.send(&[0], 2_000), Err(Reject::Limit));
+
         q.expire(1_000 + MSG_TTL + 10);
         assert_eq!(q.len(), QUEUE_QUOTA - 11);
+
         assert!(!q.idle(1_000 + QUEUE_QUOTA as u64 + QUEUE_IDLE_TTL - 2));
         assert!(q.idle(1_000 + QUEUE_QUOTA as u64 + QUEUE_IDLE_TTL));
+
         q.subscribe(true, 5_000_000);
         assert!(!q.idle(5_000_000 + QUEUE_IDLE_TTL - 1));
+
         q.set_notifier([7; 32], [8; 32]);
         assert_eq!(q.notifier().unwrap().1, [8; 32]);
         assert!(!q.delete().is_empty());

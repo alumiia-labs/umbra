@@ -76,17 +76,21 @@ struct Fixed(B32);
 
 impl TryRng for Fixed {
     type Error = Infallible;
+
     fn try_next_u32(&mut self) -> Result<u32, Infallible> {
         Ok(0)
     }
+
     fn try_next_u64(&mut self) -> Result<u64, Infallible> {
         Ok(0)
     }
+
     fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Infallible> {
         dst.copy_from_slice(&self.0[..dst.len()]);
         Ok(())
     }
 }
+
 impl TryCryptoRng for Fixed {}
 
 #[test]
@@ -94,6 +98,7 @@ fn acvp_key_generation() {
     let prompt = json("acvp/ML-DSA-keyGen-FIPS204/prompt.json");
     let expected = json("acvp/ML-DSA-keyGen-FIPS204/expectedResults.json");
     let mut count = 0;
+
     for g in groups_65(&prompt) {
         let eg = expected["testGroups"]
             .as_array()
@@ -101,6 +106,7 @@ fn acvp_key_generation() {
             .iter()
             .find(|e| e["tgId"] == g["tgId"])
             .expect("expected group");
+
         for (t, e) in g["tests"]
             .as_array()
             .unwrap()
@@ -111,6 +117,7 @@ fn acvp_key_generation() {
             let sk = SigningKey::<MlDsa65>::from_seed(&Seed::from(
                 <[u8; 32]>::try_from(hex(field(t, "seed"))).unwrap(),
             ));
+
             let vk = sk.expanded_key().verifying_key();
             assert_eq!(vk.to_bytes().as_slice(), hex(field(e, "pk")));
             assert_eq!(
@@ -120,6 +127,7 @@ fn acvp_key_generation() {
             count += 1;
         }
     }
+
     assert_eq!(count, 25);
 }
 
@@ -127,14 +135,17 @@ fn acvp_key_generation() {
 fn acvp_signature_generation() {
     let v = json("acvp/ML-DSA-sigGen-FIPS204/internalProjection.json");
     let (mut count, mut skipped) = (0, 0);
+
     for g in groups_65(&v) {
         if g["preHash"] == "preHash" {
             skipped += g["tests"].as_array().unwrap().len();
             continue;
         }
+
         let deterministic = g["deterministic"].as_bool().unwrap();
         let external = g["signatureInterface"] == "external";
         let external_mu = g["externalMu"].as_bool().unwrap_or(false);
+
         for t in g["tests"].as_array().unwrap() {
             let sk = sk_from_expanded(&hex(field(t, "sk")));
             let rnd = if deterministic {
@@ -142,6 +153,7 @@ fn acvp_signature_generation() {
             } else {
                 b32(&hex(field(t, "rnd")))
             };
+
             let sig = if external_mu {
                 if deterministic {
                     sk.sign_mu_deterministic(&hex(field(t, "mu")).as_slice().try_into().unwrap())
@@ -163,6 +175,7 @@ fn acvp_signature_generation() {
             } else {
                 sk.sign_internal(&[&hex(field(t, "message"))], &rnd)
             };
+
             assert_eq!(
                 sig.encode().as_slice(),
                 hex(field(t, "signature")),
@@ -172,6 +185,7 @@ fn acvp_signature_generation() {
             count += 1;
         }
     }
+
     assert_eq!(count, 90);
     assert_eq!(skipped, 30);
 }
@@ -180,13 +194,16 @@ fn acvp_signature_generation() {
 fn acvp_signature_verification() {
     let v = json("acvp/ML-DSA-sigVer-FIPS204/internalProjection.json");
     let (mut count, mut skipped) = (0, 0);
+
     for g in groups_65(&v) {
         if g["preHash"] == "preHash" {
             skipped += g["tests"].as_array().unwrap().len();
             continue;
         }
+
         let external = g["signatureInterface"] == "external";
         let external_mu = g["externalMu"].as_bool().unwrap_or(false);
+
         for t in g["tests"].as_array().unwrap() {
             let vk = vk_from_bytes(&hex(field(t, "pk")));
             let passed = match sig_from_bytes(&hex(field(t, "signature"))) {
@@ -205,6 +222,7 @@ fn acvp_signature_verification() {
                     }
                 }
             };
+
             assert_eq!(
                 passed,
                 t["testPassed"].as_bool().unwrap(),
@@ -215,6 +233,7 @@ fn acvp_signature_verification() {
             count += 1;
         }
     }
+
     assert_eq!(count, 45);
     assert_eq!(skipped, 15);
 }

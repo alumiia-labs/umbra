@@ -26,6 +26,7 @@ pub struct RecoveryShare {
 impl RecoveryShare {
     fn check(&self) -> Result<(), Error> {
         let index = self.share[0];
+
         if self.threshold < 2 || self.count < self.threshold || index == 0 || index > self.count {
             return Err(Error::Malformed);
         }
@@ -35,6 +36,7 @@ impl RecoveryShare {
     /// Writes the body.
     pub fn encode(&self) -> Result<[u8; RECOVERY_SHARE_LEN], Error> {
         self.check()?;
+
         let mut out = [0u8; RECOVERY_SHARE_LEN];
         let mut w = Writer::new(&mut out);
         w.u8(0x01)?;
@@ -51,6 +53,7 @@ impl RecoveryShare {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let out = RecoveryShare {
             set_id: r.array()?,
             threshold: r.u8()?,
@@ -78,12 +81,15 @@ mod tests {
         };
         let bytes = share.encode().unwrap();
         assert_eq!(RecoveryShare::parse(&bytes).unwrap(), share);
+
         let mut bad = share;
         bad.share[0] = 6;
         assert!(bad.encode().is_err());
+
         let mut low = share;
         low.threshold = 1;
         assert!(low.encode().is_err());
+
         assert!(RecoveryShare::parse(&bytes[..35]).is_err());
     }
 }

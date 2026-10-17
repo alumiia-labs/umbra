@@ -90,6 +90,7 @@ mod tests {
         let mut out = [0u8; LEN];
         assert_eq!(nack.encode(&mut out).unwrap(), LEN);
         assert_eq!(NackPayload::parse(&out).unwrap(), nack);
+
         out[16] = 0x06;
         assert!(NackPayload::parse(&out).is_err());
         out[16] = 0x00;

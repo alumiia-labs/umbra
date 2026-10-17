@@ -117,9 +117,11 @@ impl<'a> GnewPayload<'a> {
         let write_pk = r.array()?;
         let own_pk = r.array()?;
         let (admission, used) = Admission::parse(r.rest())?;
+
         if used != bytes.len().saturating_sub(96) {
             return Err(Error::Malformed);
         }
+
         Ok(GnewPayload {
             read_pk,
             write_pk,
@@ -185,6 +187,7 @@ pub fn encode_gmsg(
     if record.len() != bucket.group_record() {
         return Err(Error::Malformed);
     }
+
     let mut w = Writer::new(out);
     w.u32(seq)?;
     w.put(record)?;
@@ -196,6 +199,7 @@ pub fn split_gmsg(payload: &[u8], bucket: Bucket) -> Result<(u32, &[u8]), Error>
     if payload.len() != bucket.l5_payload() {
         return Err(Error::Malformed);
     }
+
     let mut r = Reader::new(payload);
     let seq = r.u32()?;
     Ok((seq, r.rest()))
@@ -258,6 +262,7 @@ impl GroupNotifyRegistration {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         Ok(GroupNotifyRegistration {
             queue: QueueAddress::parse(r.rest())?,
         })
@@ -334,6 +339,7 @@ mod tests {
         for b in 0x9Bu8..=0x9F {
             assert!(GroupCmd::from_byte(b).is_err());
         }
+
         assert_eq!(GroupCmd::Gpost.fixed_payload_len(Bucket::B1), Some(1_926));
         assert_eq!(GroupCmd::Gmsg.fixed_payload_len(Bucket::B1), Some(1_930));
 
@@ -344,6 +350,7 @@ mod tests {
             Bucket::B1.l5_payload()
         );
         assert_eq!(split_gmsg(&msg, Bucket::B1).unwrap(), (42, &record[..]));
+
         assert!(encode_gmsg(42, &record, Bucket::B2, &mut msg).is_err());
         assert!(split_gmsg(&msg, Bucket::B2).is_err());
     }

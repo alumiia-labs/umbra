@@ -49,16 +49,19 @@ impl ReceiptHold {
     /// the next opportunity (`NET-056`).
     pub fn take_batch(&mut self, now: u64) -> Vec<[u8; 16]> {
         self.discard_stale(now);
+
         let mut oldest: Vec<Held> = self
             .held
             .iter()
             .filter(|h| now.saturating_sub(h.at) >= RECEIPT_MIN_DELAY)
             .copied()
             .collect();
+
         // The identifier breaks a tie, thus the choice is the same on each
         // run.
         oldest.sort_unstable_by_key(|h| (h.at, h.target));
         oldest.truncate(RECEIPT_BATCH_MAX);
+
         let mut ready: Vec<[u8; 16]> = oldest.iter().map(|h| h.target).collect();
         ready.sort_unstable();
         self.held.retain(|h| !ready.contains(&h.target));
@@ -94,11 +97,13 @@ mod tests {
         }
         hold.push([1; 16], 1_000);
         assert_eq!(hold.len(), 12);
+
         assert!(hold.take_batch(1_000 + RECEIPT_MIN_DELAY - 1).is_empty());
         let batch = hold.take_batch(1_000 + RECEIPT_MIN_DELAY);
         assert_eq!(batch.len(), RECEIPT_BATCH_MAX);
         assert!(batch.windows(2).all(|w| w[0] < w[1]));
         assert_eq!(hold.len(), 3);
+
         assert_eq!(hold.discard_stale(1_000 + RECEIPT_MAX_HOLD), 3);
         assert!(hold.is_empty());
     }
@@ -111,10 +116,12 @@ mod tests {
         for i in 0..12u8 {
             hold.push([i; 16], 1_010 + u64::from(i));
         }
+
         let batch = hold.take_batch(2_000 + RECEIPT_MIN_DELAY);
         assert_eq!(batch.len(), RECEIPT_BATCH_MAX);
         assert!(batch.windows(2).all(|w| w[0] < w[1]));
         assert_eq!(batch.last(), Some(&[0xFF; 16]));
+
         // The newest wait, and not the highest.
         assert!(!batch.contains(&[8; 16]));
         let rest = hold.take_batch(2_000 + RECEIPT_MIN_DELAY);

@@ -15,6 +15,7 @@ pub const RECOVERY_T: u32 = 3;
 pub fn argon2id(password: &[u8], salt: &[u8], m_kib: u32, t: u32) -> Result<Secret<32>, Error> {
     let params = Params::new(m_kib, t, 1, Some(32)).map_err(|_| Error::Length)?;
     let kdf = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+
     let mut out = Secret::<32>::zeroed();
     kdf.hash_password_into(password, salt, out.expose_mut())
         .map_err(|_| Error::Length)?;

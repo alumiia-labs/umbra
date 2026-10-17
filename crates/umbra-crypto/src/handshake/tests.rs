@@ -73,6 +73,7 @@ fn run_xk(
     let mut app2 = [0u8; 64];
     let m = init.read_flight2(&f2[..n2], &mut app2, &mut NoTrace)?;
     assert_eq!(&app2[..m], b"app-two");
+
     let mut f3 = [0u8; 4096];
     let (ki, n3) = init.flight3(&p.s_i, b"", &mut f3, &mut NoTrace)?;
     let mut app3 = [0u8; 64];
@@ -116,6 +117,7 @@ fn xk_each_side_continues_from_its_stored_form() {
         &mut NoTrace,
     )
     .unwrap();
+
     let mut init = Initiator::restore(&init.export()).unwrap();
     let (mut resp, _) = Responder::read_flight1(
         &p.s_r,
@@ -127,20 +129,24 @@ fn xk_each_side_continues_from_its_stored_form() {
         &mut NoTrace,
     )
     .unwrap();
+
     // A responder before its flight 2 has no stored form.
     assert!(resp.export().is_err());
     let mut f2 = [0u8; 4096];
     let n2 = resp
         .flight2(b"", &mut p.rng, &mut f2, &mut NoTrace)
         .unwrap();
+
     let resp = Responder::restore(&resp.export().unwrap()).unwrap();
     init.read_flight2(&f2[..n2], &mut [], &mut NoTrace).unwrap();
     let mut f3 = [0u8; 4096];
     let (ki, n3) = init.flight3(&p.s_i, b"", &mut f3, &mut NoTrace).unwrap();
     let (kr, s_i, _) = resp.read_flight3(&f3[..n3], &mut [], &mut NoTrace).unwrap();
+
     assert_eq!(ki.rk.expose(), kr.rk.expose());
     assert_eq!(ki.transcript, kr.transcript);
     assert_eq!(s_i, p.s_i.x25519_public());
+
     // A form that a byte of the version changes does not read.
     let mut changed = Initiator::flight1(
         &inv,
@@ -168,6 +174,7 @@ fn xk_ranges_that_differ_still_agree_and_a_bad_pair_aborts() {
     )
     .unwrap();
     assert_eq!(ki.transcript, kr.transcript);
+
     let err = run_xk(
         &mut p,
         VersionRange { min: 2, max: 2 },
@@ -197,7 +204,8 @@ fn xk_a_changed_flight_aborts() {
         &mut NoTrace,
     )
     .unwrap();
-    // a changed mode byte aborts before any hash
+
+    // A changed mode byte aborts before any hash.
     let mut bad = f1;
     bad[2] = 0x02;
     let mut app = [0u8; 64];
@@ -211,7 +219,8 @@ fn xk_a_changed_flight_aborts() {
         &mut NoTrace,
     );
     assert_eq!(r.err(), Some(Error::Handshake));
-    // a changed byte of the ML-KEM ciphertext fails the flight tag
+
+    // A changed byte of the ML-KEM ciphertext fails the flight tag.
     let mut bad = f1;
     bad[3 + 16 + 32 + 1184 + 7] ^= 1;
     let r = Responder::read_flight1(
@@ -247,6 +256,7 @@ fn xk_a_flight_3_that_does_not_verify_leaves_the_responder_for_the_true_one() {
         &mut NoTrace,
     )
     .unwrap();
+
     let (mut resp, _) = Responder::read_flight1(
         &p.s_r,
         &prekey,
@@ -257,10 +267,12 @@ fn xk_a_flight_3_that_does_not_verify_leaves_the_responder_for_the_true_one() {
         &mut NoTrace,
     )
     .unwrap();
+
     let mut f2 = [0u8; 4096];
     let n2 = resp
         .flight2(b"", &mut p.rng, &mut f2, &mut NoTrace)
         .unwrap();
+
     // A flight 2 with a changed byte moves no state of the initiator.
     let mut bad = f2;
     bad[40] ^= 1;
@@ -269,8 +281,10 @@ fn xk_a_flight_3_that_does_not_verify_leaves_the_responder_for_the_true_one() {
         Some(Error::Handshake)
     );
     init.read_flight2(&f2[..n2], &mut [], &mut NoTrace).unwrap();
+
     let mut f3 = [0u8; 4096];
     let (ki, n3) = init.flight3(&p.s_i, b"", &mut f3, &mut NoTrace).unwrap();
+
     // A second holder of the invitation writes a flight 3 of its own, and
     // the flight of the initiator arrives with a changed byte.
     let before = resp.export().unwrap();
@@ -287,6 +301,7 @@ fn xk_a_flight_3_that_does_not_verify_leaves_the_responder_for_the_true_one() {
             .is_err());
     }
     assert_eq!(*resp.export().unwrap(), *before);
+
     let (kr, s_i, _) = resp.read_flight3(&f3[..n3], &mut [], &mut NoTrace).unwrap();
     assert_eq!(ki.rk.expose(), kr.rk.expose());
     assert_eq!(ki.transcript, kr.transcript);
@@ -314,6 +329,7 @@ fn xk_a_wrong_address_type_at_one_side_aborts() {
         &mut NoTrace,
     )
     .unwrap();
+
     let mut app = [0u8; 64];
     let r = Responder::read_flight1(
         &p.s_r,
@@ -348,6 +364,7 @@ fn xk_an_all_zero_ephemeral_aborts() {
         &mut NoTrace,
     )
     .unwrap();
+
     f1[3 + 16..3 + 16 + 32].fill(0);
     let mut app = [0u8; 64];
     let r = Responder::read_flight1(
@@ -383,6 +400,7 @@ fn xk_a_flight_1_that_fails_keeps_the_prekey_for_the_true_one() {
         &mut NoTrace,
     )
     .unwrap();
+
     let mut torn = f1;
     torn[n1 - 1] ^= 1;
     let mut app = [0u8; 64];
@@ -397,8 +415,10 @@ fn xk_a_flight_1_that_fails_keeps_the_prekey_for_the_true_one() {
             &mut NoTrace,
         )
     };
+
     assert_eq!(read(&torn[..n1], &mut app).err(), Some(Error::Handshake));
     assert!(read(&f1[..n1], &mut app).is_ok());
+
     // An initiator whose flight 2 did not verify holds no `er`.
     let mut f3 = [0u8; 4096];
     assert_eq!(
@@ -431,7 +451,7 @@ fn nk_round_trip_and_tamper() {
     let ss_c = client.read_flight2(&f2, &mut NoTrace).unwrap();
     assert_eq!(ss_c.expose(), ss_r.expose());
 
-    // a different relay_id at the relay fails the flight tag
+    // A different `relay_id` at the relay fails the flight tag.
     let other = nk::RelayStatic {
         s: relay.s,
         relay_id: [8u8; 32],
@@ -440,7 +460,8 @@ fn nk_round_trip_and_tamper() {
         nk::Relay::read_flight1(&other, &s_sk, &f1, &mut NoTrace).err(),
         Some(Error::Handshake)
     );
-    // a changed flight 2 fails at the client
+
+    // A changed flight 2 fails at the client.
     let client = nk::Client::flight1(&relay, &mut rng, &mut f1, &mut NoTrace).unwrap();
     let hop = nk::Relay::read_flight1(&relay, &s_sk, &f1, &mut NoTrace).unwrap();
     let _ = hop.flight2(&mut rng, &mut f2, &mut NoTrace).unwrap();
@@ -462,10 +483,12 @@ fn nk_a_flight_with_a_byte_after_its_tag_is_refused() {
     let mut f1 = [0u8; nk::FLIGHT1_LEN + 1];
     let client =
         nk::Client::flight1(&relay, &mut rng, &mut f1[..nk::FLIGHT1_LEN], &mut NoTrace).unwrap();
+
     assert_eq!(
         nk::Relay::read_flight1(&relay, &s_sk, &f1, &mut NoTrace).err(),
         Some(Error::Length)
     );
+
     let hop = nk::Relay::read_flight1(&relay, &s_sk, &f1[..nk::FLIGHT1_LEN], &mut NoTrace).unwrap();
     let mut f2 = [0u8; nk::FLIGHT2_LEN + 1];
     let _ = hop

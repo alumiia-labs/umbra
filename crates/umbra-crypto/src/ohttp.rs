@@ -37,6 +37,7 @@ fn header(key_id: u8) -> [u8; HEADER_LEN] {
     let [k0, k1] = UmbraKem::KEM_ID.to_be_bytes();
     let [d0, d1] = Sha3_256::KDF_ID.to_be_bytes();
     let [a0, a1] = hpke::AEAD_ID.to_be_bytes();
+
     for (slot, byte) in out.iter_mut().zip([key_id, k0, k1, d0, d1, a0, a1]) {
         *slot = byte;
     }
@@ -59,6 +60,7 @@ pub fn encode_key_config(key_id: u8, public: &PublicKey) -> [u8; KEY_CONFIG_LEN]
         head.get(3..).unwrap_or_default(),
         &[],
     ];
+
     let mut out = [0u8; KEY_CONFIG_LEN];
     let mut at = 0usize;
     for part in parts {
@@ -75,15 +77,18 @@ pub fn parse_key_config(bytes: &[u8]) -> Result<(u8, PublicKey), Error> {
     if bytes.len() != KEY_CONFIG_LEN {
         return Err(Error::Length);
     }
+
     let key_id = *bytes.first().ok_or(Error::Length)?;
     let expected = header(key_id);
     let pk_end = 3 + PUBLIC_KEY_LEN;
+
     let is_suite = bytes.get(..3) == expected.get(..3)
         && bytes.get(pk_end..pk_end + 2) == Some(&4u16.to_be_bytes()[..])
         && bytes.get(pk_end + 2..) == expected.get(3..);
     if !is_suite {
         return Err(Error::Length);
     }
+
     let public = PublicKey::from_bytes(bytes.get(3..pk_end).ok_or(Error::Length)?)?;
     Ok((key_id, public))
 }
@@ -102,6 +107,7 @@ impl ResponseKey {
         let mut key = Secret::<32>::zeroed();
         kdf.expand(b"key", key.expose_mut())
             .map_err(|_| Error::Length)?;
+
         let mut aead_nonce = [0u8; 12];
         kdf.expand(b"nonce", &mut aead_nonce)
             .map_err(|_| Error::Length)?;
@@ -119,9 +125,11 @@ pub fn encapsulate_request<R: CryptoRng + ?Sized>(
     let head = header(key_id);
     let (enc, mut context) =
         hpke::setup_sender::<UmbraKem, Sha3_256, R>(public, &request_info(&head), rng)?;
+
     let sealed = context.seal(&[], request)?;
     let mut secret = Secret::<32>::zeroed();
     context.export(RESPONSE_LABEL, secret.expose_mut())?;
+
     let out = [head.as_slice(), &enc, &sealed].concat();
     Ok((out, ResponseKey { secret, enc }))
 }
@@ -137,13 +145,16 @@ pub fn decapsulate_request(
     if bytes.get(..HEADER_LEN) != Some(head.as_slice()) {
         return Err(Error::Length);
     }
+
     let enc_end = HEADER_LEN + CIPHERTEXT_LEN;
     let enc = bytes.get(HEADER_LEN..enc_end).ok_or(Error::Length)?;
     let sealed = bytes.get(enc_end..).ok_or(Error::Length)?;
+
     let mut context = hpke::setup_recipient::<UmbraKem, Sha3_256>(pair, enc, &request_info(&head))?;
     let request = context.open(&[], sealed)?;
     let mut secret = Secret::<32>::zeroed();
     context.export(RESPONSE_LABEL, secret.expose_mut())?;
+
     Ok((
         request,
         ResponseKey {
@@ -161,6 +172,7 @@ pub fn encapsulate_response<R: CryptoRng + ?Sized>(
 ) -> Result<Vec<u8>, Error> {
     let mut nonce = [0u8; RESPONSE_NONCE_LEN];
     rng.fill_bytes(&mut nonce);
+
     let (aead_key, aead_nonce) = key.keys(&nonce)?;
     let mut body = response.to_vec();
     let tag = aead::seal_ietf(&aead_key, &aead_nonce, &[], &mut body)?;
@@ -173,6 +185,7 @@ pub fn decapsulate_response(key: &ResponseKey, bytes: &[u8]) -> Result<Vec<u8>, 
     let rest = bytes.get(RESPONSE_NONCE_LEN..).ok_or(Error::Length)?;
     let split = rest.len().checked_sub(aead::TAG_LEN).ok_or(Error::Length)?;
     let (body, tag) = rest.split_at(split);
+
     let (aead_key, aead_nonce) = key.keys(nonce)?;
     let mut plain = body.to_vec();
     aead::open_ietf(&aead_key, &aead_nonce, &[], &mut plain, tag)?;
@@ -219,9 +232,11 @@ mod tests {
         let gateway = KeyPair::generate(&mut rng);
         let (sealed, _) = encapsulate_request(3, gateway.public(), b"request", &mut rng).unwrap();
         assert!(decapsulate_request(4, &gateway, &sealed).is_err());
+
         let mut suite = sealed.clone();
         suite[6] ^= 1;
         assert!(decapsulate_request(3, &gateway, &suite).is_err());
+
         let mut body = sealed;
         let last = body.len() - 1;
         body[last] ^= 1;

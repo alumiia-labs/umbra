@@ -84,6 +84,7 @@ impl NdrRequest<'_> {
         if *self.handle() == WATCH_HANDLE {
             return Err(Error::Malformed);
         }
+
         let mut w = Writer::new(out);
         match self {
             NdrRequest::Register {
@@ -96,6 +97,7 @@ impl NdrRequest<'_> {
                 if ct_token.len() > CT_TOKEN_MAX || ct_token.len() < 17 {
                     return Err(Error::Capacity);
                 }
+
                 w.u8(KIND_REGISTER)?;
                 w.put(handle)?;
                 w.put(nonce)?;
@@ -131,12 +133,14 @@ impl NdrRequest<'_> {
         if bytes.len() != NDR_REQUEST_LEN {
             return Err(Error::Malformed);
         }
+
         let mut r = Reader::new(bytes);
         let kind = r.u8()?;
         let handle = r.array::<HANDLE_LEN>()?;
         if handle == WATCH_HANDLE {
             return Err(Error::Malformed);
         }
+
         let request = match kind {
             KIND_REGISTER => {
                 let nonce = r.array::<24>()?;
@@ -144,6 +148,7 @@ impl NdrRequest<'_> {
                 if !(17..=CT_TOKEN_MAX).contains(&len) {
                     return Err(Error::Malformed);
                 }
+
                 let ct_token = r.take(len)?;
                 let removal_hash = r.array::<32>()?;
                 let prior = Secret::new(r.array::<32>()?);
@@ -167,6 +172,7 @@ impl NdrRequest<'_> {
             },
             _ => return Err(Error::Malformed),
         };
+
         r.finish_zero()?;
         Ok(request)
     }
@@ -188,6 +194,7 @@ pub fn encode_token(carrier: TokenCarrier, target: &[u8], out: &mut [u8]) -> Res
     if target.is_empty() || target.len() >= PUSH_TOKEN_MAX {
         return Err(Error::Capacity);
     }
+
     let mut w = Writer::new(out);
     w.u8(carrier as u8)?;
     w.put(target)?;
@@ -202,6 +209,7 @@ pub fn parse_token(bytes: &[u8]) -> Result<(TokenCarrier, &[u8]), Error> {
         0x02 => TokenCarrier::Fcm,
         _ => return Err(Error::Malformed),
     };
+
     let target = r.rest();
     let printable = target.iter().all(|b| (0x21..0x7F).contains(b));
     if target.is_empty() || !printable {
@@ -238,6 +246,7 @@ impl NdrResponse {
         if bytes.len() != NDR_RESPONSE_LEN {
             return Err(Error::Malformed);
         }
+
         let mut r = Reader::new(bytes);
         let status = match r.u8()? {
             0x00 => NdrResponse::Taken,
@@ -245,6 +254,7 @@ impl NdrResponse {
             0x02 => NdrResponse::Gone,
             _ => return Err(Error::Malformed),
         };
+
         r.finish_zero()?;
         Ok(status)
     }
@@ -286,6 +296,7 @@ mod tests {
             back.encode(&mut again).unwrap();
             assert_eq!(out, again);
         }
+
         let mut out = [0u8; NDR_REQUEST_LEN];
         requests[0].encode(&mut out).unwrap();
         let NdrRequest::Register { ct_token, .. } = NdrRequest::parse(&out).unwrap() else {
@@ -303,13 +314,17 @@ mod tests {
         }
         .encode(&mut out)
         .unwrap();
+
         let mut padded = out;
         padded[NDR_REQUEST_LEN - 1] = 1;
         assert!(NdrRequest::parse(&padded).is_err());
+
         let mut kind = out;
         kind[0] = 0x04;
         assert!(NdrRequest::parse(&kind).is_err());
+
         assert!(NdrRequest::parse(&out[..NDR_REQUEST_LEN - 1]).is_err());
+
         let too_long = [0u8; CT_TOKEN_MAX + 1];
         let register = NdrRequest::Register {
             handle: [1; 16],
@@ -328,6 +343,7 @@ mod tests {
         let (carrier, target) = parse_token(&out[..n]).unwrap();
         assert_eq!(carrier, TokenCarrier::Fcm);
         assert_eq!(target, b"fcm-token");
+
         // NTF-123: the carrier `0x01` is reserved, with any target.
         let n = encode_token(
             TokenCarrier::UnifiedPush,
@@ -336,6 +352,7 @@ mod tests {
         )
         .unwrap();
         assert!(parse_token(&out[..n]).is_err());
+
         assert!(parse_token(&[0x03, b'x']).is_err());
         assert!(parse_token(&[0x02, b' ']).is_err());
         assert!(parse_token(&[0x02]).is_err());
@@ -352,6 +369,7 @@ mod tests {
             blob: [6; BLOB_LEN],
         };
         assert_eq!(push.encode(&mut out), Err(Error::Malformed));
+
         NdrRequest::Unregister {
             handle: [1; HANDLE_LEN],
             removal: Secret::new([4; 32]),
@@ -359,6 +377,7 @@ mod tests {
         .encode(&mut out)
         .unwrap();
         assert!(NdrRequest::parse(&out).is_ok());
+
         out[1..=HANDLE_LEN].fill(0);
         assert!(NdrRequest::parse(&out).is_err());
     }

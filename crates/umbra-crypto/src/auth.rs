@@ -33,6 +33,7 @@ impl CommandAuthKey {
         if !shared.was_contributory() {
             return Err(Error::Key);
         }
+
         let kdf = Hkdf::<Sha3_256>::new(None, shared.as_bytes());
         let mut key = Secret::<32>::zeroed();
         let _ = kdf.expand(labels::CMD_AUTH, key.expose_mut());
@@ -81,6 +82,7 @@ pub fn session_resume_auth(
     mac.update(&sent.to_be_bytes());
     mac.update(&received.to_be_bytes());
     let full = mac.finalize().into_bytes();
+
     let mut out = [0u8; RESUME_AUTH_LEN];
     if let Some(head) = full.get(..RESUME_AUTH_LEN) {
         out.copy_from_slice(head);
@@ -129,8 +131,10 @@ mod tests {
         let client_pk = *XPublic::from(&client).as_bytes();
         let at_client = CommandAuthKey::derive(&client, &relay_pk).unwrap();
         let at_relay = CommandAuthKey::derive(&relay, &client_pk).unwrap();
+
         let corr = [7u8; 16];
         let auth = at_client.mac(&corr, &[b"header", b"payload"]);
+
         at_relay
             .verify(&corr, &[b"header", b"payload"], &auth)
             .unwrap();

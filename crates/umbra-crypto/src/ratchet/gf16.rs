@@ -25,6 +25,7 @@ pub const fn mul(a: u16, b: u16) -> u16 {
     let mut a = a as u32;
     let mut b = b;
     let mut i = 0;
+
     while i < 16 {
         // Add a when the low bit of b is set, then shift a up and reduce.
         let take = 0u32.wrapping_sub((b & 1) as u32);

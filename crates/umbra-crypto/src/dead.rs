@@ -26,6 +26,7 @@ impl DeadChannel {
             .x25519_secret()
             .diffie_hellman(&XPublic::from(*peer_x25519_pk));
         contributory(&ss)?;
+
         let (mut out, _) = Hkdf::<Sha3_256>::extract(Some(labels::DEAD_CHANNEL), ss.as_bytes());
         let mut prk = Zeroizing::new([0u8; 32]);
         prk.copy_from_slice(&out);
@@ -37,6 +38,7 @@ impl DeadChannel {
         let mut out = Secret::new([0u8; 32]);
         let week = week.to_be_bytes();
         let info: [&[u8]; 3] = [&[tag], &week, writer_pk];
+
         // A 32-byte key is the hash length, and a 32-byte output is inside
         // the bound of HKDF, thus neither call fails.
         if let Ok(kdf) = Hkdf::<Sha3_256>::from_prk(&*self.prk) {
@@ -79,6 +81,7 @@ mod tests {
         let at_bob = DeadChannel::new(&bob, &alice.x25519_public()).unwrap();
         let a = alice.x25519_public();
         let b = bob.x25519_public();
+
         assert_eq!(at_alice.handle(&a, 7), at_bob.handle(&a, 7));
         assert_eq!(
             at_alice.blob_key(&b, 7).expose(),
@@ -90,6 +93,7 @@ mod tests {
             at_alice.read_secret(&a, 7).expose(),
             at_alice.blob_key(&a, 7).expose()
         );
+
         // A third party with another key derives another secret.
         let eve = DeadChannel::new(&pair(3), &bob.x25519_public()).unwrap();
         assert_ne!(eve.handle(&a, 7), at_bob.handle(&a, 7));

@@ -57,6 +57,7 @@ fn build() -> Value {
         let w = width.bytes();
         let mut all = vec![0u8; code.n() * w];
         material.encode(width, &mut all).unwrap();
+
         let chunks: Vec<Value> = (0..code.n())
             .map(|i| {
                 json!({
@@ -66,6 +67,7 @@ fn build() -> Value {
                 })
             })
             .collect();
+
         // CRY-083: a loss pattern that drops r chunks, spread over data and
         // parity positions.
         let dropped: Vec<usize> = (0..code.r).map(|i| (i * 7 + 2) % code.n()).collect();
@@ -75,7 +77,9 @@ fn build() -> Value {
                 col.put(i, &all[i * w..(i + 1) * w]).unwrap();
             }
         }
+
         assert_eq!(col.rebuild().unwrap().0, material.0);
+
         widths.push(json!({
             "width": w, "k": code.k, "r": code.r, "n": code.n(),
             "pq_frame_len": width.frame_len(),

@@ -74,16 +74,19 @@ pub fn seal(
     if inner.len() > inner_capacity(bucket) {
         return Err(Error::Capacity);
     }
+
     let out = out.get_mut(..record_len).ok_or(Error::Capacity)?;
     let mut w = Writer::new(out);
     w.u8(VERSION)?;
     w.put(&nonce)?;
+
     let start = w.position();
     w.u16(u16::try_from(inner.len()).map_err(|_| Error::Capacity)?)?;
     w.u8(kind as u8)?;
     w.put(inner)?;
     w.zeros(w.remaining().saturating_sub(TAG_LEN))?;
     let end = w.position();
+
     let (plain, tag_out) = out
         .get_mut(start..)
         .ok_or(Error::Capacity)?
@@ -106,25 +109,30 @@ pub fn open(
     if record.len() != bucket.l6_record() {
         return Err(Error::Malformed);
     }
+
     let mut r = Reader::new(record);
     if r.u8()? != VERSION {
         return Err(Error::Malformed);
     }
+
     let nonce: [u8; 12] = r.array()?;
     let ct = r.rest();
     let plain_len = ct.len().checked_sub(TAG_LEN).ok_or(Error::Malformed)?;
     let (body, tag) = ct.split_at(plain_len);
     let plain = out.get_mut(..plain_len).ok_or(Error::Capacity)?;
     plain.copy_from_slice(body);
+
     // WIR-032: a tag that does not verify is the same error as a record
     // that does not parse.
     key.open(&nonce, VERSION, sender_id, plain, tag)
         .map_err(|_| Error::Malformed)?;
+
     let mut p = Reader::new(plain);
     let true_len = usize::from(p.u16()?);
     let kind = L6Kind::from_byte(p.u8()?)?;
     p.take(true_len)?;
     p.finish_zero()?;
+
     // Move the inner record to the front of `out` for the caller.
     plain.copy_within(PLAIN_PREFIX..PLAIN_PREFIX.saturating_add(true_len), 0);
     Ok((kind, true_len))
@@ -141,6 +149,7 @@ pub fn msg_from_send(
     if send_payload.len() != bucket.l6_record() {
         return Err(Error::Malformed);
     }
+
     let mut w = Writer::new(out);
     w.u32(seq)?;
     w.put(send_payload)?;
@@ -152,6 +161,7 @@ pub fn split_msg(payload: &[u8], bucket: Bucket) -> Result<(u32, &[u8]), Error> 
     if payload.len() != bucket.l5_payload() {
         return Err(Error::Malformed);
     }
+
     let mut r = Reader::new(payload);
     let seq = r.u32()?;
     Ok((seq, r.rest()))
@@ -204,6 +214,7 @@ impl<'a> RenewalRecord<'a> {
         let mut r = Reader::new(bytes);
         let guard_seq = r.u32()?;
         let secret: &[u8; 32] = r.take(32)?.try_into().map_err(|_| Error::Malformed)?;
+
         let proof = if guard_seq == 0 {
             if secret != &[0u8; 32] {
                 return Err(Error::Malformed);
@@ -212,6 +223,7 @@ impl<'a> RenewalRecord<'a> {
         } else {
             Some((guard_seq, secret))
         };
+
         Ok(RenewalRecord {
             proof,
             bundle: r.rest(),
@@ -241,6 +253,7 @@ mod tests {
         let mut out = vec![0u8; with.len()];
         assert_eq!(with.encode(&mut out).unwrap(), 42);
         assert!(RenewalRecord::parse(&out).unwrap() == with);
+
         let none = RenewalRecord {
             proof: None,
             bundle: b"bundle",
@@ -248,10 +261,12 @@ mod tests {
         none.encode(&mut out).unwrap();
         assert_eq!(&out[..RENEWAL_PROOF_LEN], &[0u8; RENEWAL_PROOF_LEN]);
         assert!(RenewalRecord::parse(&out).unwrap() == none);
+
         // WIR-552: a counter of zero with a secret is no form.
         out[10] = 1;
         assert!(RenewalRecord::parse(&out).is_err());
         assert!(RenewalRecord::parse(&out[..35]).is_err());
+
         let zero = RenewalRecord {
             proof: Some((0, &secret)),
             bundle: b"bundle",
@@ -278,14 +293,17 @@ mod tests {
                 .unwrap(),
                 bucket.l6_record()
             );
+
             let mut msg = vec![0u8; bucket.l5_payload()];
             msg_from_send(7, &send, bucket, &mut msg).unwrap();
             let (seq, record) = split_msg(&msg, bucket).unwrap();
             assert_eq!(seq, 7);
+
             let mut out = vec![0u8; bucket.l6_record()];
             let (kind, len) = open(&key, &[2; 32], record, bucket, &mut out).unwrap();
             assert_eq!(kind, L6Kind::Ratchet);
             assert_eq!(&out[..len], &inner[..]);
+
             let too_big = vec![0u8; inner_capacity(bucket) + 1];
             assert!(seal(
                 &key,
@@ -314,9 +332,11 @@ mod tests {
             &mut send,
         )
         .unwrap();
+
         let mut out = vec![0u8; 400];
         let (kind, len) = open(&key, &[2; 32], &send, Bucket::B0, &mut out).unwrap();
         assert_eq!((kind, &out[..len]), (L6Kind::NotifyDigest, &b"short"[..]));
+
         let mut bad = send.clone();
         bad[0] = 0x02;
         assert!(open(&key, &[2; 32], &bad, Bucket::B0, &mut out).is_err());
@@ -341,6 +361,7 @@ mod tests {
             &mut send,
         )
         .unwrap();
+
         let mut out = vec![0u8; 400];
         // WIR-032: a wrong version, a changed byte under the tag, and a
         // wrong sender.
@@ -348,6 +369,7 @@ mod tests {
         version[0] = 0x02;
         let mut changed = send.clone();
         changed[20] ^= 1;
+
         for (record, sender) in [(&version, [2u8; 32]), (&changed, [2; 32]), (&send, [9; 32])] {
             assert_eq!(
                 open(&key, &sender, record, Bucket::B0, &mut out),

@@ -57,11 +57,13 @@ impl PublicKey {
         if bytes.len() != PUBLIC_KEY_LEN {
             return Err(Error::Length);
         }
+
         let (x, m) = bytes.split_at(32);
         let x: [u8; 32] = x.try_into().map_err(|_| Error::Length)?;
         let m: Key<EncapsulationKey<MlKem768>> = Array::try_from(m).map_err(|_| Error::Length)?;
         let m = EncapsulationKey::<MlKem768>::new(&m).map_err(|_| Error::Key)?;
         let x = x25519_dalek::PublicKey::from(x);
+
         // A point of low order gives the all-zero output under each clamped
         // scalar. The hybrid would then rest on ML-KEM alone with no error
         // at the encapsulation (`CRY-014`). The key fails here.
@@ -92,6 +94,7 @@ impl KeyPair {
         let mut dz = [0u8; 64];
         rng.fill_bytes(&mut dz);
         let kp = Self::from_seeds(Secret::new(x), Secret::new(dz));
+
         // The arrays are `Copy`, thus the wipe is of these two and not of
         // an argument.
         x.zeroize();
@@ -107,6 +110,7 @@ impl KeyPair {
         let mut seed = Seed::from(*dz.expose());
         let m_dk = DecapsulationKey::<MlKem768>::from_seed(seed);
         seed.zeroize();
+
         let pk = PublicKey {
             x: x25519_dalek::PublicKey::from(&x_sk),
             m: m_dk.encapsulation_key().clone(),
@@ -144,6 +148,7 @@ impl KeyPair {
         if !ss_x.was_contributory() {
             return Err(Error::Kem);
         }
+
         let ct_m: MlCiphertext<MlKem768> = Array::try_from(ct_m).map_err(|_| Error::Kem)?;
         let mut ss_m = self.m_dk.decapsulate(&ct_m);
         let ss = combine(&ss_m, ss_x.as_bytes(), &ct_m, &pub_x, &self.pk);
@@ -216,6 +221,7 @@ fn finish(
     ss_m: &[u8],
 ) -> (Ciphertext, SharedSecret) {
     let ss = combine(ss_m, ss_x, &ct_m, pub_x.as_bytes(), pk);
+
     let mut ct = [0u8; CIPHERTEXT_LEN];
     let (x, m) = ct.split_at_mut(32);
     x.copy_from_slice(pub_x.as_bytes());
@@ -291,6 +297,7 @@ mod tests {
         let kp = KeyPair::generate(&mut rng);
         let pk = PublicKey::from_bytes(&kp.public().to_bytes()).expect("pk");
         assert_eq!(pk.to_bytes(), kp.public().to_bytes());
+
         let (ct, _) = encapsulate(&pk, &mut rng);
         assert_eq!(Ciphertext::from_bytes(ct.as_bytes()).expect("ct"), ct);
         assert_eq!(PublicKey::from_bytes(&[0u8; 5]).err(), Some(Error::Length));

@@ -105,6 +105,7 @@ pub fn tls_config_with_roots(roots_der: &[Vec<u8>]) -> Result<Arc<ClientConfig>,
 /// The same configuration under each certificate of a PEM file.
 pub fn tls_config_with_root_file(path: &str) -> Result<Arc<ClientConfig>, NativeError> {
     use rustls::pki_types::{pem::PemObject, CertificateDer};
+
     let mut roots = RootCertStore::empty();
     let found = CertificateDer::pem_file_iter(path).map_err(|_| Error::Refused)?;
     for certificate in found {
@@ -116,14 +117,17 @@ pub fn tls_config_with_root_file(path: &str) -> Result<Arc<ClientConfig>, Native
 fn tls_config_under(roots: RootCertStore) -> Result<Arc<ClientConfig>, NativeError> {
     let mut provider = aws_lc_rs::default_provider();
     provider.kx_groups = vec![kx_group::X25519MLKEM768, kx_group::X25519];
+
     // The GREASE placeholder needs one HPKE suite and a throwaway key.
     let suite = hpke::DH_KEM_X25519_HKDF_SHA256_AES_128;
     let (placeholder, _) = suite.generate_key_pair()?;
+
     // ECH fixes the versions to TLS 1.3 alone, which IMP-068 asks for.
     let mut config = ClientConfig::builder_with_provider(Arc::new(provider))
         .with_ech(EchMode::Grease(EchGreaseConfig::new(suite, placeholder)))?
         .with_root_certificates(roots)
         .with_no_client_auth();
+
     config.resumption = Resumption::disabled();
     config.enable_early_data = false;
     Ok(Arc::new(config))
@@ -168,6 +172,7 @@ async fn connect_tcp(dial: &Dial) -> Result<TcpStream, NativeError> {
         } else {
             TcpStream::connect(addr).await
         };
+
         match connected {
             Ok(tcp) => return Ok(tcp),
             Err(error) => failed = error.into(),
@@ -277,14 +282,17 @@ async fn fetch_carried(
     let mut stream = tokio_rustls::TlsConnector::from(config)
         .connect(name, tcp)
         .await?;
+
     let request = format!(
         "GET {path} HTTP/1.1\r\nHost: {}\r\nAccept: application/octet-stream\r\n\
          Connection: close\r\n\r\n",
         dial.host
     );
+
     stream.write_all(request.as_bytes()).await?;
     // A TLS stream can hold a written record until its flush.
     stream.flush().await?;
+
     let mut inbound = Vec::with_capacity(65_536);
     let mut chunk = vec![0u8; 16_384];
     loop {
@@ -294,11 +302,13 @@ async fn fetch_carried(
         if n == 0 {
             break;
         }
+
         inbound.extend_from_slice(chunk.get(..n).unwrap_or(&[]));
         if inbound.len() > max {
             return Err(Error::Refused.into());
         }
     }
+
     read_carried(&inbound)
 }
 
@@ -319,8 +329,10 @@ fn read_carried(inbound: &[u8]) -> Result<Vec<u8>, NativeError> {
     if !status.starts_with("HTTP/1.1 200") {
         return Err(Error::Refused.into());
     }
+
     let body = inbound.get(head_end.saturating_add(4)..).unwrap_or(&[]);
     let mut is_whole = false;
+
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
             continue;
@@ -329,6 +341,7 @@ fn read_carried(inbound: &[u8]) -> Result<Vec<u8>, NativeError> {
         if name.eq_ignore_ascii_case("Transfer-Encoding") {
             return Err(Error::Refused.into());
         }
+
         if name.eq_ignore_ascii_case("Content-Length") {
             if value.trim().parse::<usize>().ok() != Some(body.len()) {
                 return Err(Error::Refused.into());
@@ -336,9 +349,11 @@ fn read_carried(inbound: &[u8]) -> Result<Vec<u8>, NativeError> {
             is_whole = true;
         }
     }
+
     if !is_whole {
         return Err(Error::Refused.into());
     }
+
     Ok(body.to_vec())
 }
 
@@ -365,11 +380,13 @@ impl TcpLink {
         let name = ServerName::try_from(dial.host.clone()).map_err(|_| Error::Refused)?;
         let connector = tokio_rustls::TlsConnector::from(config);
         let mut stream = connector.connect(name, tcp).await?;
+
         stream
             .write_all(upgrade::request(&dial.host, &key).as_bytes())
             .await?;
         // A TLS stream can hold a written record until its flush.
         stream.flush().await?;
+
         let mut inbound = Vec::with_capacity(4_096);
         let mut chunk = [0u8; 2_048];
         let used = loop {
@@ -377,6 +394,7 @@ impl TcpLink {
             if n == 0 {
                 return Err(Error::Refused.into());
             }
+
             inbound.extend_from_slice(chunk.get(..n).unwrap_or(&[]));
             if let Some(used) = upgrade::parse_response(&inbound, &key)? {
                 break used;
@@ -385,6 +403,7 @@ impl TcpLink {
                 return Err(Error::Refused.into());
             }
         };
+
         inbound.drain(..used);
         Ok(TcpLink {
             stream,
@@ -413,6 +432,7 @@ impl TcpLink {
         let mut frame = vec![0u8; websocket::frame_len(capsule.len(), true)];
         let n = websocket::encode(capsule, Some(&mask), &mut frame)?;
         frame.truncate(n);
+
         self.stream.write_all(&frame).await?;
         self.stream.flush().await?;
         Ok(())
@@ -427,11 +447,13 @@ impl TcpLink {
                 out.truncate(len);
                 return Ok(out);
             }
+
             let mut chunk = [0u8; 4_096];
             let n = self.stream.read(&mut chunk).await?;
             if n == 0 {
                 return Err(Error::Refused.into());
             }
+
             self.inbound
                 .extend_from_slice(chunk.get(..n).unwrap_or(&[]));
         }
@@ -476,13 +498,16 @@ impl TcpReader {
                 self.inbound.drain(..consumed.saturating_add(used));
                 return Ok(self.scratch.get(..len).unwrap_or(&[]).to_vec());
             }
+
             self.inbound.drain(..consumed);
             consumed = 0;
+
             let mut chunk = [0u8; 16_384];
             let n = self.stream.read(&mut chunk).await?;
             if n == 0 {
                 return Err(Error::Refused.into());
             }
+
             self.inbound
                 .extend_from_slice(chunk.get(..n).unwrap_or(&[]));
         }
@@ -509,6 +534,7 @@ impl TcpWriter {
                 self.mask[2] ^ c[2],
                 self.mask[3] ^ c[3],
             ];
+
             let start = frames.len();
             let len = websocket::frame_len(capsule.len(), true);
             frames.resize(start.saturating_add(len), 0);
@@ -519,6 +545,7 @@ impl TcpWriter {
             )?;
             frames.truncate(start.saturating_add(n));
         }
+
         self.stream.write_all(&frames).await?;
         self.stream.flush().await?;
         Ok(())
@@ -540,18 +567,22 @@ impl QuicLink {
         // No caller dials QUIC in v1, thus the dial takes the first address
         // alone and has no turn to the second family.
         let addr = socket_addrs(dial).next().ok_or(Error::Refused)?;
+
         let mut tls = (*config).clone();
         tls.alpn_protocols = vec![QUIC_ALPN.to_vec()];
         let quic_config = quinn::crypto::rustls::QuicClientConfig::try_from(tls)
             .map_err(|e| NativeError::Quic(e.to_string()))?;
         let client_config = quinn::ClientConfig::new(Arc::new(quic_config));
+
         let bind: SocketAddr = if addr.is_ipv6() {
             "[::]:0".parse().map_err(|_| Error::Refused)?
         } else {
             "0.0.0.0:0".parse().map_err(|_| Error::Refused)?
         };
+
         let mut endpoint = quinn::Endpoint::client(bind)?;
         endpoint.set_default_client_config(client_config);
+
         let connecting = endpoint
             .connect(addr, &dial.host)
             .map_err(|e| NativeError::Quic(e.to_string()))?;
@@ -562,6 +593,7 @@ impl QuicLink {
             .open_bi()
             .await
             .map_err(|e| NativeError::Quic(e.to_string()))?;
+
         Ok(QuicLink {
             _connection: connection,
             send,
@@ -586,6 +618,7 @@ impl QuicLink {
             if let Some(capsule) = take_capsule(&mut self.inbound) {
                 return Ok(capsule);
             }
+
             let mut chunk = [0u8; 4_096];
             let n = self
                 .recv
@@ -595,6 +628,7 @@ impl QuicLink {
                 .ok_or(Error::Refused)?;
             self.inbound
                 .extend_from_slice(chunk.get(..n).unwrap_or(&[]));
+
             if self.inbound.len() > MAX_CAPSULE.saturating_mul(2) {
                 return Err(Error::Malformed.into());
             }
@@ -658,6 +692,7 @@ pub async fn connect(
             .await
             .map(|l| Link::Tcp(Box::new(l)))
     };
+
     let quic = |after: u64| {
         let config = config.clone();
         async move {
@@ -665,6 +700,7 @@ pub async fn connect(
             QuicLink::connect(dial, config).await.map(Link::Quic)
         }
     };
+
     let raced = async {
         match plan {
             Plan::Only(Wire::Tcp) => tcp.await,
@@ -675,6 +711,7 @@ pub async fn connect(
                 tokio::pin!(quic);
                 let mut tcp_done: Option<NativeError> = None;
                 let mut quic_done: Option<NativeError> = None;
+
                 loop {
                     tokio::select! {
                         r = &mut tcp, if tcp_done.is_none() => match r {
@@ -686,6 +723,7 @@ pub async fn connect(
                             Err(e) => quic_done = Some(e),
                         },
                     }
+
                     if tcp_done.is_some() && quic_done.is_some() {
                         return Err(tcp_done.take().unwrap_or(NativeError::Timeout));
                     }
@@ -693,6 +731,7 @@ pub async fn connect(
             }
         }
     };
+
     timeout(overall, raced)
         .await
         .map_err(|_| NativeError::Timeout)?
@@ -712,16 +751,20 @@ mod tests {
             &mut first,
         )
         .unwrap();
+
         let capsule = first.get(..n).unwrap();
         let mut inbound = capsule.to_vec();
         inbound.extend_from_slice(capsule.get(..n - 1).unwrap());
+
         // The caller parses what it takes, thus the header stays.
         let taken = take_capsule(&mut inbound).unwrap();
         assert_eq!(taken, capsule);
         assert!(umbra_wire::capsule::parse(&taken).is_ok());
+
         // A capsule that is not whole waits for the rest of the stream.
         assert_eq!(take_capsule(&mut inbound), None);
         assert_eq!(inbound.len(), n - 1);
+
         inbound.extend_from_slice(capsule.get(n - 1..).unwrap());
         assert_eq!(take_capsule(&mut inbound).unwrap(), capsule);
         assert!(inbound.is_empty());
@@ -731,13 +774,17 @@ mod tests {
     fn a_carried_body_that_the_close_alone_ends_is_refused() {
         let whole = format!("{}{}", manifest_response_head(2), "ok");
         assert_eq!(read_carried(whole.as_bytes()).unwrap(), b"ok");
+
         // A cut connection gives the same bytes as a whole answer here.
         let open = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nok";
         assert!(read_carried(open).is_err());
+
         let short = format!("{}{}", manifest_response_head(9), "ok");
         assert!(read_carried(short.as_bytes()).is_err());
+
         let chunked = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n";
         assert!(read_carried(chunked).is_err());
+
         let absent = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
         assert!(read_carried(absent).is_err());
     }
@@ -754,8 +801,10 @@ mod tests {
         assert_eq!(both.len(), 2);
         assert!(both.first().unwrap().is_ipv4());
         assert!(both.last().unwrap().is_ipv6());
+
         dial.addr_v4 = None;
         assert!(socket_addrs(&dial).next().unwrap().is_ipv6());
+
         dial.addr_v6 = None;
         assert_eq!(socket_addrs(&dial).next(), None);
     }
@@ -766,22 +815,28 @@ mod tests {
         let Ok(listener) = tokio::net::TcpListener::bind("[::1]:0").await else {
             return;
         };
+
         let port = listener.local_addr().unwrap().port();
-        // Nothing listens at the IPv4 loopback on that port.
+        // The port must be free at the IPv4 loopback, thus a dial there is
+        // refused.
         if std::net::TcpListener::bind(("127.0.0.1", port)).is_err() {
             return;
         }
+
         let mut dial = Dial {
             host: "relay.example".into(),
             addr_v4: Some([127, 0, 0, 1]),
             addr_v6: Some(std::net::Ipv6Addr::LOCALHOST.octets()),
             port,
         };
+
         let tcp = connect_tcp(&dial).await.unwrap();
         assert!(tcp.peer_addr().unwrap().is_ipv6());
+
         // With one family alone, the refusal is the answer.
         dial.addr_v6 = None;
         assert!(matches!(connect_tcp(&dial).await, Err(NativeError::Io(_))));
+
         dial.addr_v4 = None;
         assert!(matches!(
             connect_tcp(&dial).await,

@@ -93,6 +93,7 @@ mod tests {
         let nonce = [3u8; 12];
         let mut buf = *b"queue record";
         let tag = key.seal(&nonce, 1, &[2u8; 32], &mut buf).unwrap();
+
         let mut wrong = buf;
         assert!(key.open(&nonce, 2, &[2u8; 32], &mut wrong, &tag).is_err());
         let mut wrong = buf;
@@ -100,6 +101,7 @@ mod tests {
         let other = QueueKey::derive(&Secret::new([1u8; 32]), &[9u8; 32]);
         let mut wrong = buf;
         assert!(other.open(&nonce, 1, &[2u8; 32], &mut wrong, &tag).is_err());
+
         key.open(&nonce, 1, &[2u8; 32], &mut buf, &tag).unwrap();
         assert_eq!(&buf, b"queue record");
     }

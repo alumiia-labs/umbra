@@ -16,7 +16,7 @@ umbra-wire = { version = "0.37.0", path = "../umbra-wire" }
 # Register R1 of Part 14 §14.2.1: AES-256 and POLYVAL serve the onion layer
 # only (Part 5 §5.1 row 5). The `zeroize` feature erases the key schedule
 # that each step of a layer makes, when that step ends (`NET-208`).
-aes ={ version = "0.9", default-features = false, features = ["zeroize"] }
+aes = { version = "0.9", default-features = false, features = ["zeroize"] }
 ctr = { version = "0.10", default-features = false, features = ["zeroize"] }
 polyval = { version = "0.7", default-features = false, features = ["zeroize"] }
 hkdf = { version = "0.13.0", default-features = false }

@@ -165,6 +165,7 @@ mod tests {
             47
         );
         assert_eq!(out, payload);
+
         assert!(open(other.kem(), &GROUP, 2, 7, &sealed, &mut out).is_err());
         assert!(open(member.kem(), &GROUP, 2, 8, &sealed, &mut out).is_err());
         assert!(open(member.kem(), &GROUP, 3, 7, &sealed, &mut out).is_err());

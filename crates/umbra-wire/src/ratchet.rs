@@ -57,16 +57,19 @@ impl<'a> RatchetRecord<'a> {
         if r.u8()? != VERSION {
             return Err(Error::Malformed);
         }
+
         let ctx = Ctx {
             session_tag: r.array()?,
             send_index: r.u16()?,
         };
+
         let hdr_nonce = r.array()?;
         let hdr_ct = r.take(HDR_CT_LEN)?;
         let frame_len = usize::from(r.u8()?);
         if !FRAME_LENS.contains(&frame_len) {
             return Err(Error::Malformed);
         }
+
         let pq_frame = if frame_len == 0 {
             None
         } else {
@@ -94,11 +97,13 @@ impl<'a> RatchetRecord<'a> {
                 chunk: r.take(width.bytes())?,
             })
         };
+
         let body_nonce = r.array()?;
         let body_ct = r.rest();
         if body_ct.len() < BODY_TAG_LEN {
             return Err(Error::Malformed);
         }
+
         Ok(RatchetRecord {
             ctx,
             hdr_nonce,
@@ -117,9 +122,11 @@ impl<'a> RatchetRecord<'a> {
         w.put(&self.ctx.session_tag)?;
         w.u16(self.ctx.send_index)?;
         w.put(&self.hdr_nonce)?;
+
         if self.hdr_ct.len() != HDR_CT_LEN {
             return Err(Error::Malformed);
         }
+
         w.put(self.hdr_ct)?;
         match self.pq_frame {
             None => w.u8(0)?,
@@ -138,6 +145,7 @@ impl<'a> RatchetRecord<'a> {
                 w.put(f.chunk)?;
             }
         }
+
         w.put(&self.body_nonce)?;
         w.put(self.body_ct)?;
         Ok(w.position())
@@ -175,6 +183,7 @@ mod tests {
         let n = record(None).encode(&mut out).unwrap();
         assert_eq!(n, 86 + 20);
         assert_eq!(RatchetRecord::parse(&out[..n]).unwrap(), record(None));
+
         for (width, chunk) in [
             (Width::W32, &[7u8; 128][..32]),
             (Width::W64, &[7u8; 128][..64]),
@@ -191,6 +200,7 @@ mod tests {
             assert_eq!(n, 106 + usize::from(width.frame_len()));
             assert_eq!(RatchetRecord::parse(&out[..n]).unwrap(), rec);
         }
+
         // A parity chunk at index 36 of the 64-byte width (WIR-298).
         let parity = PqFrame {
             epoch: 255,
@@ -212,16 +222,20 @@ mod tests {
             chunk: &[7; 64],
         };
         let n = record(Some(frame)).encode(&mut out).unwrap();
+
         let mut bad = out.clone();
         bad[73] = 68;
         assert!(RatchetRecord::parse(&bad[..n]).is_err());
+
         let mut bad = out.clone();
         bad[79] = 0;
         bad[80] = 41;
         assert!(RatchetRecord::parse(&bad[..n]).is_err());
+
         let mut bad = out.clone();
         bad[0] = 0x01;
         assert!(RatchetRecord::parse(&bad[..n]).is_err());
+
         let mut bad = out.clone();
         bad[78] = 0x05;
         assert!(RatchetRecord::parse(&bad[..n]).is_err());
@@ -229,6 +243,7 @@ mod tests {
         assert!(RatchetRecord::parse(&bad[..n]).is_err());
         bad[78] = 0x07;
         assert!(RatchetRecord::parse(&bad[..n]).is_err());
+
         assert!(RatchetRecord::parse(&out[..n - 5]).is_err());
     }
 

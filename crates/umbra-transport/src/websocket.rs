@@ -46,11 +46,13 @@ pub fn encode(
     if payload.is_empty() || payload.len() > 65_535 {
         return Err(Error::Malformed);
     }
+
     let total = frame_len(payload.len(), mask.is_some());
     let out = out.get_mut(..total).ok_or(Error::Capacity)?;
     let (head, rest) = out.split_at_mut(header_len(payload.len()));
     let mask_bit = if mask.is_some() { 0x80 } else { 0 };
     let len = u16::try_from(payload.len()).map_err(|_| Error::Malformed)?;
+
     match u8::try_from(len).ok().filter(|short| *short < 126) {
         // A session capsule takes the 7-bit length form of RFC 6455 §5.2.
         Some(short) => head.copy_from_slice(&[FIN_BINARY, short | mask_bit]),
@@ -59,6 +61,7 @@ pub fn encode(
             head.copy_from_slice(&[FIN_BINARY, 126 | mask_bit, len[0], len[1]]);
         }
     }
+
     match mask {
         Some(key) => {
             let (key_out, body) = rest.split_at_mut(MASK_LEN);
@@ -68,6 +71,7 @@ pub fn encode(
         }
         None => rest.copy_from_slice(payload),
     }
+
     Ok(total)
 }
 
@@ -83,18 +87,22 @@ pub fn decode(
     let Some(head) = bytes.get(..SHORT_HEADER_LEN) else {
         return Ok(None);
     };
+
     let (b0, b1) = (
         head.first().copied().unwrap_or(0),
         head.get(1).copied().unwrap_or(0),
     );
+
     // FIN set, no reserved bit, binary opcode, and no 64-bit length form.
     if b0 != FIN_BINARY || b1 & 0x7F == 127 {
         return Err(Error::Malformed);
     }
+
     let masked = b1 & 0x80 != 0;
     if masked != from_client {
         return Err(Error::Malformed);
     }
+
     let len = if b1 & 0x7F == 126 {
         let Some(wide) = bytes.get(2..HEADER_LEN) else {
             return Ok(None);
@@ -111,17 +119,21 @@ pub fn decode(
     } else {
         usize::from(b1 & 0x7F)
     };
+
     if len == 0 {
         return Err(Error::Malformed);
     }
+
     let total = frame_len(len, masked);
     let Some(frame) = bytes.get(..total) else {
         return Ok(None);
     };
+
     let body_at = header_len(len) + if masked { MASK_LEN } else { 0 };
     let body = frame.get(body_at..).ok_or(Error::Malformed)?;
     let dst = out.get_mut(..len).ok_or(Error::Capacity)?;
     dst.copy_from_slice(body);
+
     if masked {
         let mut key = [0u8; MASK_LEN];
         key.copy_from_slice(
@@ -164,6 +176,7 @@ mod tests {
             assert_eq!(decode(&plain, false, &mut out).unwrap(), Some((len, n)));
             assert_eq!(out, payload);
         }
+
         // A session capsule is below 126 bytes and takes the short header.
         for len in [15usize, 35, 47] {
             let payload = vec![0xA5u8; len];
@@ -175,12 +188,15 @@ mod tests {
             assert_eq!(out, payload);
             assert_eq!(decode(&frame[..1], true, &mut out).unwrap(), None);
         }
+
         let mut frame = vec![0u8; 200];
         assert!(encode(&[], None, &mut frame).is_err());
+
         // The 16-bit form with a short length is not canonical.
         let mut wide = vec![0x82, 126, 0, 47];
         wide.extend_from_slice(&[0u8; 47]);
         assert!(decode(&wide, false, &mut [0u8; 64]).is_err());
+
         let mut bad = vec![0u8; frame_len(530, false)];
         encode(&[0u8; 530], None, &mut bad).unwrap();
         bad[0] = 0x02;

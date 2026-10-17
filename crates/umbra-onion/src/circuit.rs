@@ -65,6 +65,7 @@ impl Circuit {
                 hop.forward.update(&left);
             }
         }
+
         self.sent = self.sent.saturating_add(1);
         Ok(left)
     }
@@ -86,6 +87,7 @@ impl Circuit {
                 *tag = left;
             }
         }
+
         self.sent = self.sent.saturating_add(1);
         Ok(tags)
     }
@@ -102,12 +104,15 @@ impl Circuit {
             }
             left = hop.backward.decipher(&left, body)?;
         }
+
         if !bool::from(left.ct_eq(&[0u8; BLOCK])) {
             return Err(Error::Rejected);
         }
+
         if let Some(last) = self.hops.last_mut() {
             last.backward.update(&hop3_input);
         }
+
         self.received = self.received.saturating_add(1);
         Ok(())
     }
@@ -160,6 +165,7 @@ impl CircuitBuild {
         for hop in self.hops.iter_mut().flatten() {
             left = hop.backward.decipher(&left, body)?;
         }
+
         if bool::from(left.ct_eq(&[0u8; BLOCK])) {
             Ok(())
         } else {
@@ -275,6 +281,7 @@ impl RelayHop {
                 if !bool::from(x_l.ct_eq(&[0u8; BLOCK])) {
                     return Err(Error::Rejected);
                 }
+
                 self.keys.forward.update(tag);
                 Ok([0u8; BLOCK])
             }
@@ -356,6 +363,7 @@ mod tests {
             for hop in relays.iter_mut() {
                 tag = hop.forward(&tag, &mut body).unwrap();
             }
+
             assert_eq!(body, [round; 2_016]);
             assert_eq!(tag, [0; 16]);
 
@@ -364,6 +372,7 @@ mod tests {
             for hop in relays.iter_mut().rev() {
                 tag = hop.backward(&tag, &mut reply).unwrap();
             }
+
             client.open(&tag, &mut reply).unwrap();
             assert_eq!(reply, [0x50 + round; 2_016]);
         }
@@ -377,6 +386,7 @@ mod tests {
         let mut body = [1u8; 480];
         let tag = client.seal(&mut body).unwrap();
         let saved = (tag, body);
+
         let tag = chain[0].forward(&tag, &mut body).unwrap();
         body[7] ^= 1;
         let tag = chain[1].forward(&tag, &mut body).unwrap();
@@ -388,6 +398,7 @@ mod tests {
         for hop in chain.iter_mut() {
             tag = hop.forward(&tag, &mut body).unwrap();
         }
+
         let (mut tag, mut body) = saved;
         let mut failed = false;
         for hop in chain.iter_mut() {
@@ -410,9 +421,11 @@ mod tests {
         ];
         let mut body = [0u8; 480];
         client.seal(&mut body).unwrap();
+
         // Hops 1 and 2 move their chaining value only; hop 3 replaces keys.
         assert_ne!(client.forward_keys(1).unwrap().fingerprint(), before[0]);
         assert_ne!(client.forward_keys(3).unwrap().fingerprint(), before[2]);
+
         // The relay reaches the same key set after the same cell.
         let mut cell = [0u8; 480];
         let mut c = Circuit::new(&secrets(), [9; 16]);

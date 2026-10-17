@@ -71,7 +71,9 @@ impl<'a> Admission<'a> {
         if !self.kind.body_len_ok(self.body.len()) {
             return Err(Error::Malformed);
         }
+
         let len = u16::try_from(self.body.len()).map_err(|_| Error::Malformed)?;
+
         let mut w = Writer::new(out);
         w.u8(self.kind as u8)?;
         w.u16(len)?;
@@ -88,6 +90,7 @@ impl<'a> Admission<'a> {
         if !kind.body_len_ok(len) {
             return Err(Error::Malformed);
         }
+
         let body = r.take(len)?;
         Ok((Admission { kind, body }, r.position()))
     }
@@ -108,17 +111,20 @@ mod tests {
         let mut out = [0u8; 400];
         assert_eq!(Admission::NONE.encode(&mut out).unwrap(), 3);
         assert_eq!(Admission::parse(&out[..3]).unwrap(), (Admission::NONE, 3));
+
         let pow = Admission {
             kind: AdmissionKind::Pow,
             body: &[1; 69],
         };
         assert_eq!(pow.encode(&mut out).unwrap(), 72);
         assert_eq!(Admission::parse(&out[..80]).unwrap().1, 72);
+
         let bad = Admission {
             kind: AdmissionKind::Pow,
             body: &[1; 68],
         };
         assert!(bad.encode(&mut out).is_err());
+
         out[0] = 0x02;
         assert!(Admission::parse(&out).is_err());
         out[0] = 0x01;

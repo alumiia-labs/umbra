@@ -29,6 +29,7 @@ pub async fn call<R: CryptoRng + ?Sized>(
 ) -> Result<Vec<u8>, NativeError> {
     let (sealed, key) = ohttp::encapsulate_request(route.key_id, &route.gateway, request, rng)
         .map_err(|_| Error::Refused)?;
+
     let (status, body) = https::post(
         &route.relay,
         "message/ohttp-req",
@@ -39,8 +40,10 @@ pub async fn call<R: CryptoRng + ?Sized>(
         DIRECTORY_WAIT,
     )
     .await?;
+
     if status != 200 {
         return Err(Error::Refused.into());
     }
+
     Ok(ohttp::decapsulate_response(&key, &body).map_err(|_| Error::Refused)?)
 }

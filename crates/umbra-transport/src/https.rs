@@ -34,21 +34,24 @@ pub struct Url {
 }
 
 impl Url {
-    /// Reads an `https` URL of printable ASCII. A URL with user facts, a
-    /// fragment, or another scheme is refused.
+    /// Reads an `https` URL of printable ASCII. A URL with user information
+    /// (`@`), a fragment (`#`), or another scheme is refused.
     pub fn parse(text: &str) -> Option<Url> {
         let rest = text.strip_prefix("https://")?;
         if !text.bytes().all(|b| (0x21..0x7F).contains(&b)) || text.contains(['@', '#']) {
             return None;
         }
+
         let (authority, path) = match rest.find('/') {
             Some(at) => rest.split_at(at),
             None => (rest, "/"),
         };
+
         let (host, port) = match authority.rsplit_once(':') {
             Some((host, port)) => (host, port.parse().ok()?),
             None => (authority, 443),
         };
+
         let is_host = !host.is_empty()
             && host
                 .bytes()
@@ -95,6 +98,7 @@ async fn post_now(
     let mut stream = tokio_rustls::TlsConnector::from(config)
         .connect(name, tcp)
         .await?;
+
     let mut head = format!(
         "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: {content_type}\r\n\
          Content-Length: {}\r\nConnection: close\r\n",
@@ -106,10 +110,12 @@ async fn post_now(
         head.push_str(&format!("{name}: {value}\r\n"));
     }
     head.push_str("\r\n");
+
     stream.write_all(head.as_bytes()).await?;
     stream.write_all(body).await?;
     // A TLS stream can hold a written record until its flush.
     stream.flush().await?;
+
     let mut inbound = Vec::with_capacity(1_024);
     let mut chunk = vec![0u8; 16_384];
     loop {
@@ -120,11 +126,13 @@ async fn post_now(
         if n == 0 {
             break;
         }
+
         inbound.extend_from_slice(chunk.get(..n).unwrap_or(&[]));
         if inbound.len() > limit.saturating_add(HEAD_MAX) {
             return Err(Error::Refused.into());
         }
     }
+
     read_response(&inbound)
 }
 
@@ -135,10 +143,12 @@ async fn connect_any(url: &Url) -> Result<TcpStream, NativeError> {
     if let Some(address) = url.address {
         return Ok(TcpStream::connect((address, url.port)).await?);
     }
+
     let mut attempts = tokio::task::JoinSet::new();
     for addr in tokio::net::lookup_host((url.host.as_str(), url.port)).await? {
         attempts.spawn(TcpStream::connect(addr));
     }
+
     let mut last = None;
     while let Some(joined) = attempts.join_next().await {
         match joined {
@@ -163,6 +173,7 @@ fn read_response(inbound: &[u8]) -> Result<(u16, Vec<u8>), NativeError> {
         .ok_or(Error::Refused)?;
     let head =
         core::str::from_utf8(inbound.get(..head_end).unwrap_or(&[])).map_err(|_| Error::Refused)?;
+
     let mut lines = head.split("\r\n");
     let status = lines
         .next()
@@ -170,17 +181,21 @@ fn read_response(inbound: &[u8]) -> Result<(u16, Vec<u8>), NativeError> {
         .and_then(|rest| rest.get(..3))
         .and_then(|code| code.parse::<u16>().ok())
         .ok_or(Error::Refused)?;
+
     let body = inbound.get(head_end.saturating_add(4)..).unwrap_or(&[]);
+
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
             continue;
         };
+
         if name.eq_ignore_ascii_case("Transfer-Encoding") {
             if !value.trim().eq_ignore_ascii_case("chunked") {
                 return Err(Error::Refused.into());
             }
             return Ok((status, dechunk(body)?));
         }
+
         if name.eq_ignore_ascii_case("Content-Length") {
             if value.trim().parse::<usize>().ok() != Some(body.len()) {
                 return Err(Error::Refused.into());
@@ -188,6 +203,7 @@ fn read_response(inbound: &[u8]) -> Result<(u16, Vec<u8>), NativeError> {
             return Ok((status, body.to_vec()));
         }
     }
+
     if matches!(status, 204 | 304) && body.is_empty() {
         return Ok((status, Vec::new()));
     }
@@ -208,13 +224,16 @@ fn dechunk(mut rest: &[u8]) -> Result<Vec<u8>, NativeError> {
         let digits = line.split(';').next().unwrap_or("").trim();
         let size = usize::from_str_radix(digits, 16).map_err(|_| Error::Refused)?;
         rest = rest.get(line_end.saturating_add(2)..).unwrap_or(&[]);
+
         if size == 0 {
             return Ok(out);
         }
+
         let end = size.checked_add(2).ok_or(Error::Refused)?;
         if rest.get(size..end) != Some(b"\r\n".as_slice()) {
             return Err(Error::Refused.into());
         }
+
         out.extend_from_slice(rest.get(..size).unwrap_or(&[]));
         rest = rest.get(end..).unwrap_or(&[]);
     }
@@ -244,6 +263,7 @@ pub fn parse_request(inbound: &[u8], limit: usize) -> Result<Option<Request>, Er
             Ok(None)
         };
     };
+
     let head =
         core::str::from_utf8(inbound.get(..head_end).unwrap_or(&[])).map_err(|_| Error::Refused)?;
     let mut lines = head.split("\r\n");
@@ -252,6 +272,7 @@ pub fn parse_request(inbound: &[u8], limit: usize) -> Result<Option<Request>, Er
     else {
         return Err(Error::Refused);
     };
+
     let mut length = 0usize;
     let mut headers = Vec::new();
     for line in lines {
@@ -266,9 +287,11 @@ pub fn parse_request(inbound: &[u8], limit: usize) -> Result<Option<Request>, Er
             length = value.trim().parse().map_err(|_| Error::Refused)?;
         }
     }
+
     if length > limit {
         return Err(Error::Refused);
     }
+
     let body_start = head_end.saturating_add(4);
     let Some(body) = inbound.get(body_start..body_start.saturating_add(length)) else {
         return Ok(None);
@@ -292,6 +315,7 @@ pub async fn read_request<S: AsyncRead + Unpin>(
         if let Some(request) = parse_request(inbound, limit)? {
             return Ok(request);
         }
+
         match stream.read(&mut chunk).await {
             Ok(n) if n > 0 => inbound.extend_from_slice(chunk.get(..n).unwrap_or(&[])),
             _ => return Err(Error::Refused),
@@ -315,11 +339,13 @@ pub async fn respond<S: AsyncWrite + Unpin>(
         503 => "Service Unavailable",
         _ => "Bad Gateway",
     };
+
     let head = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\n\
          Content-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
+
     stream.write_all(head.as_bytes()).await?;
     stream.write_all(body).await?;
     stream.shutdown().await
@@ -343,6 +369,7 @@ mod tests {
         );
         assert_eq!(Url::parse("https://127.1.0.1").unwrap().path, "/");
         assert_eq!(Url::parse("https://a.example/").unwrap().port, 443);
+
         for bad in [
             "http://a.example/",
             "https://user@a.example/",
@@ -365,6 +392,7 @@ mod tests {
         assert_eq!(request.body, b"hello");
         assert_eq!(request.headers[0], ("host".into(), "x".into()));
         assert!(parse_request(full, 4).is_err());
+
         let chunked = b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
         assert!(parse_request(chunked, 64).is_err());
         assert!(parse_request(&[b'a'; HEAD_MAX + 1], 64).is_err());
@@ -376,16 +404,20 @@ mod tests {
         assert_eq!(read_response(ok).unwrap(), (201, b"ok".to_vec()));
         let gone = b"HTTP/1.1 410 Gone\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n";
         assert_eq!(read_response(gone).unwrap(), (410, Vec::new()));
+
         let chunks = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
             4;x=y\r\n{\"a\"\r\na\r\n:\"token\"}\n\r\n0\r\nX-T: 1\r\n\r\n";
         assert_eq!(
             read_response(chunks).unwrap(),
             (200, b"{\"a\":\"token\"}\n".to_vec())
         );
+
         let torn = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n9\r\nok\r\n";
         assert!(read_response(torn).is_err());
+
         let other = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\nok";
         assert!(read_response(other).is_err());
+
         let short = b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\nok";
         assert!(read_response(short).is_err());
     }
@@ -397,11 +429,13 @@ mod tests {
         assert!(read_response(open).is_err());
         let empty = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n";
         assert!(read_response(empty).is_err());
+
         // A status with no body needs no framing.
         let none = b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n";
         assert_eq!(read_response(none).unwrap(), (204, Vec::new()));
         let filled = b"HTTP/1.1 204 No Content\r\n\r\nok";
         assert!(read_response(filled).is_err());
+
         let zero = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
         assert_eq!(read_response(zero).unwrap(), (200, Vec::new()));
     }

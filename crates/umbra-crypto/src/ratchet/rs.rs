@@ -57,6 +57,7 @@ impl Matrix {
         for i in 0..k {
             inv.set(i, i, 1);
         }
+
         for col in 0..k {
             let pivot = (col..k).find(|&r| a.at(r, col) != 0).ok_or(Error::Length)?;
             if pivot != col {
@@ -69,11 +70,13 @@ impl Matrix {
                     inv.set(pivot, c, x);
                 }
             }
+
             let scale = gf16::inv(a.at(col, col));
             for c in 0..k {
                 a.set(col, c, gf16::mul(a.at(col, c), scale));
                 inv.set(col, c, gf16::mul(inv.at(col, c), scale));
             }
+
             for r in 0..k {
                 if r == col {
                     continue;
@@ -117,6 +120,7 @@ impl Code {
             }
             return;
         }
+
         // G[i] = V[i] · V_top⁻¹
         let x = gf16::pow(gf16::GENERATOR, i as u32);
         for (c, cell) in out.iter_mut().enumerate().take(self.k) {
@@ -145,8 +149,10 @@ impl Code {
         if !w.is_multiple_of(2) || data.len() != self.k * w || parity.len() != self.r * w {
             return Err(Error::Length);
         }
+
         let inv_top = self.vandermonde_top().inverse()?;
         let mut coeff = [0u16; MAX_K];
+
         for p in 0..self.r {
             self.row(&inv_top, self.k + p, &mut coeff);
             for sym in 0..w / 2 {
@@ -177,11 +183,13 @@ impl Code {
         {
             return Err(Error::Length);
         }
+
         for (i, &p) in positions.iter().enumerate() {
             if p >= self.n() || positions.iter().skip(i + 1).any(|&q| q == p) {
                 return Err(Error::Length);
             }
         }
+
         // The rows of G at the received positions, then their inverse.
         let inv_top = self.vandermonde_top().inverse()?;
         let mut sub = Matrix::zero(self.k);
@@ -192,7 +200,9 @@ impl Code {
                 sub.set(i, c, v);
             }
         }
+
         let inv = sub.inverse()?;
+
         for sym in 0..w / 2 {
             for m in 0..self.k {
                 let mut acc = 0u16;
@@ -238,7 +248,8 @@ mod tests {
             let data: alloc_free::Vec = (0..k * w).map(|i| (i * 7 + 3) as u8).collect();
             let mut parity = alloc_free::zeros(r * w);
             code.encode(w, &data, &mut parity).unwrap();
-            // drop the first r data chunks, take every parity chunk
+
+            // Drop the first r data chunks, and take every parity chunk.
             let mut positions = alloc_free::Positions::new();
             let mut received = alloc_free::zeros(k * w);
             let mut at = 0;
@@ -252,6 +263,7 @@ mod tests {
                 received[at..at + w].copy_from_slice(&parity[p * w..(p + 1) * w]);
                 at += w;
             }
+
             let mut out = alloc_free::zeros(k * w);
             code.decode(w, positions.as_slice(), &received, &mut out)
                 .unwrap();
@@ -273,12 +285,13 @@ mod tests {
         );
     }
 
-    /// Fixed-capacity helpers, because the crate has no allocator.
+    /// Fixed-capacity helpers that need no heap.
     mod alloc_free {
         pub struct Vec {
             buf: [u8; 512],
             len: usize,
         }
+
         impl core::iter::FromIterator<u8> for Vec {
             fn from_iter<I: IntoIterator<Item = u8>>(it: I) -> Self {
                 let mut v = Self {
@@ -292,29 +305,36 @@ mod tests {
                 v
             }
         }
+
         impl core::ops::Deref for Vec {
             type Target = [u8];
+
             fn deref(&self) -> &[u8] {
                 &self.buf[..self.len]
             }
         }
+
         impl core::ops::DerefMut for Vec {
             fn deref_mut(&mut self) -> &mut [u8] {
                 &mut self.buf[..self.len]
             }
         }
+
         impl Vec {
             pub fn as_slice(&self) -> &[u8] {
                 self
             }
         }
+
         pub fn zeros(n: usize) -> Vec {
             core::iter::repeat_n(0u8, n).collect()
         }
+
         pub struct Positions {
             buf: [usize; 96],
             len: usize,
         }
+
         impl Positions {
             pub fn new() -> Self {
                 Self {
@@ -322,10 +342,12 @@ mod tests {
                     len: 0,
                 }
             }
+
             pub fn push(&mut self, p: usize) {
                 self.buf[self.len] = p;
                 self.len += 1;
             }
+
             pub fn as_slice(&self) -> &[usize] {
                 &self.buf[..self.len]
             }

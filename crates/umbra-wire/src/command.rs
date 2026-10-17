@@ -230,17 +230,20 @@ impl<'a> Command<'a> {
         if r.u8()? != VERSION {
             return Err(Error::Malformed);
         }
+
         let cmd = Cmd::from_byte(r.u8()?)?;
         let corr_id = r.array()?;
         let queue_id = r.array()?;
         let auth = r.array()?;
         let payload_len = usize::from(r.u16()?);
+
         if cmd
             .fixed_payload_len(bucket)
             .is_some_and(|fixed| fixed != payload_len)
         {
             return Err(Error::Malformed);
         }
+
         let payload = r.take(payload_len)?;
         Ok((
             Command {
@@ -278,6 +281,7 @@ impl<'a> Command<'a> {
         let len_bytes = u16::try_from(self.payload.len())
             .map_err(|_| Error::Capacity)?
             .to_be_bytes();
+
         self.auth = key.mac(
             &self.corr_id,
             &self.authorized_parts(&cmd_byte, &len_bytes, bind),
@@ -291,6 +295,7 @@ impl<'a> Command<'a> {
         let len_bytes = u16::try_from(self.payload.len())
             .map_err(|_| Error::Malformed)?
             .to_be_bytes();
+
         key.verify(
             &self.corr_id,
             &self.authorized_parts(&cmd_byte, &len_bytes, bind),
@@ -361,6 +366,7 @@ pub fn blob_bucket(blob_len: usize) -> Option<Bucket> {
         .into_iter()
         .find(|bucket| LINK_ID_LEN + 2 + blob_len <= bucket.l6_record())
 }
+
 /// The length of an `NPK` payload: the `UMBRA-KEM` public key of the relay.
 pub const NPK_LEN: usize = 1_216;
 /// The length of an `NBIND` payload: the HPKE encapsulation of 1 120 bytes,
@@ -400,6 +406,7 @@ impl<'a> NewPayload<'a> {
         if used != bytes.len().saturating_sub(64) {
             return Err(Error::Malformed);
         }
+
         Ok(NewPayload {
             qr_auth_pk,
             qs_auth_pk,
@@ -459,12 +466,14 @@ mod tests {
         let blob = vec![7u8; 1_400];
         let bucket = blob_bucket(blob.len()).unwrap();
         assert_eq!(bucket, Bucket::B1);
+
         let put = iput_payload(&[9; LINK_ID_LEN], &blob, bucket).unwrap();
         assert_eq!(Some(put.len()), Cmd::Iput.fixed_payload_len(bucket));
         assert_eq!(
             iput_parse(&put).unwrap(),
             ([9; LINK_ID_LEN], blob.as_slice())
         );
+
         let given = iblob_payload(&blob, bucket).unwrap();
         assert_eq!(iblob_parse(&given).unwrap(), blob.as_slice());
 
@@ -497,14 +506,17 @@ mod tests {
             payload: &[0, 0, 0, 7],
         };
         cmd.sign(&client, b"").unwrap();
+
         let mut out = vec![0u8; cmd.len() + 3];
         let n = cmd.encode(&mut out).unwrap();
         assert_eq!(n, 88);
+
         let (back, used) = Command::parse(&out, Bucket::B0).unwrap();
         assert_eq!(used, 88);
         assert_eq!(back.cmd, Cmd::Ack);
         back.verify(&relay, b"").unwrap();
         assert!(back.verify(&relay, b"x").is_err());
+
         out[1] = 0x40;
         assert!(Command::parse(&out, Bucket::B0).is_err());
         out[1] = 0x20;
@@ -525,6 +537,7 @@ mod tests {
                 payload: &send,
             };
             assert_eq!(cmd.len(), bucket.command_area() - 4);
+
             let msg = vec![0u8; bucket.l5_payload()];
             let cmd = Command {
                 cmd: Cmd::Msg,
@@ -532,9 +545,11 @@ mod tests {
                 ..cmd
             };
             assert_eq!(cmd.len(), bucket.command_area());
+
             let mut out = vec![0u8; cmd.len()];
             cmd.encode(&mut out).unwrap();
             assert!(Command::parse(&out, bucket).is_ok());
+
             let wrong = Bucket::ALL.into_iter().find(|b| *b != bucket).unwrap();
             assert!(Command::parse(&out, wrong).is_err());
         }
@@ -551,6 +566,7 @@ mod tests {
         assert_eq!(new.encode(&mut out).unwrap(), NEW_NONE_LEN);
         assert_eq!(NewPayload::parse(&out[..67]).unwrap().qs_auth_pk, [2; 32]);
         assert!(NewPayload::parse(&out[..68]).is_err());
+
         let ids = IdsPayload {
             recipient_id: [3; 32],
             sender_id: [4; 32],
@@ -558,6 +574,7 @@ mod tests {
         };
         assert_eq!(ids.encode(&mut out).unwrap(), IDS_LEN);
         assert_eq!(IdsPayload::parse(&out[..96]).unwrap(), ids);
+
         assert_eq!(Cmd::Quota.fixed_payload_len(Bucket::B0), Some(4));
         assert_eq!(Cmd::Nkey.fixed_payload_len(Bucket::B0), Some(32));
         assert_eq!(Cmd::Nsub.fixed_payload_len(Bucket::B0), Some(0));
@@ -572,6 +589,7 @@ mod tests {
         ] {
             assert!(Cmd::from_byte(b).is_err(), "{b:#x}");
         }
+
         for b in [0x03u8, 0x07, 0x34, 0x35, 0x70, 0x7B, 0x90, 0x9A] {
             assert_eq!(Cmd::from_byte(b).unwrap().to_byte(), b);
         }
@@ -591,15 +609,18 @@ mod tests {
             command.encode(&mut out).unwrap();
             out
         };
+
         // A CGET carries no payload, and a CVFY carries a 16-byte nonce.
         assert!(Command::parse(&encode(0x73, &[]), Bucket::B0).is_ok());
         assert!(Command::parse(&encode(0x73, &[0]), Bucket::B0).is_err());
         assert!(Command::parse(&encode(0x78, &[0; 16]), Bucket::B0).is_ok());
         assert!(Command::parse(&encode(0x78, &[0; 17]), Bucket::B0).is_err());
+
         // A CPUT carries one chunk, at any bucket.
         let chunk = vec![0u8; crate::descriptor::CHUNK_SIZE as usize];
         assert!(Command::parse(&encode(0x72, &chunk), Bucket::B3).is_ok());
         assert!(Command::parse(&encode(0x72, &chunk[1..]), Bucket::B3).is_err());
+
         // A CNEW carries an `Admission` of its own length.
         assert_eq!(Cmd::Attachment(0x70).fixed_payload_len(Bucket::B0), None);
         assert_eq!(Cmd::Attachment(0x76).fixed_payload_len(Bucket::B0), None);

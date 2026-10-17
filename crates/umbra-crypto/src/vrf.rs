@@ -32,6 +32,7 @@ const CHALLENGE_LEN: usize = 16;
 fn point_from_bytes(bytes: &[u8; 32]) -> Result<EdwardsPoint, Error> {
     let compressed = CompressedEdwardsY(*bytes);
     let point = compressed.decompress().ok_or(Error::Key)?;
+
     // A non-canonical y encoding decodes to a point that compresses
     // differently.
     if point.compress() != compressed {
@@ -49,6 +50,7 @@ fn encode_to_curve(salt: &[u8; 32], alpha: &[u8]) -> Result<EdwardsPoint, Error>
         h.update(alpha);
         h.update([ctr, 0x00]);
         let hash: [u8; 64] = h.finalize().into();
+
         if let Some(point) = CompressedEdwardsY(part::<0, 32, 64>(&hash)).decompress() {
             let cleared = point.mul_by_cofactor();
             if !cleared.is_identity() {
@@ -115,11 +117,14 @@ impl SecretKey {
         x_bytes[0] &= 248;
         x_bytes[31] &= 127;
         x_bytes[31] |= 64;
+
         let x = Scalar::from_bytes_mod_order(x_bytes);
         let nonce_seed = part::<32, 32, 64>(&hashed);
         let public = (x * B).compress().to_bytes();
+
         hashed.zeroize();
         x_bytes.zeroize();
+
         SecretKey {
             x,
             nonce_seed,
@@ -137,12 +142,14 @@ impl SecretKey {
         let h_point = encode_to_curve(&self.public, alpha)?;
         let h_string = h_point.compress();
         let gamma = self.x * h_point;
+
         let mut k_hash = Sha512::new();
         k_hash.update(self.nonce_seed);
         k_hash.update(h_string.as_bytes());
         let mut k_bytes: [u8; 64] = k_hash.finalize().into();
         let mut k = Scalar::from_bytes_mod_order_wide(&k_bytes);
         k_bytes.zeroize();
+
         let u = k * B;
         let v = k * h_point;
         let y = match point_from_bytes(&self.public) {
@@ -152,11 +159,14 @@ impl SecretKey {
                 return Err(fault);
             }
         };
+
         let c = challenge([&y, &h_point, &gamma, &u, &v]);
         let s = k + c * self.x;
+
         // The nonce with the public proof gives the secret key, thus it
         // goes before the proof leaves.
         k.zeroize();
+
         let mut pi = [0u8; PROOF_LEN];
         if let Some(part) = pi.get_mut(..32) {
             part.copy_from_slice(gamma.compress().as_bytes());
@@ -209,6 +219,7 @@ impl PublicKey {
         let h_point = encode_to_curve(&self.bytes, alpha)?;
         let u = s * B - c * self.point;
         let v = s * h_point - c * gamma;
+
         let expected = challenge([&self.point, &h_point, &gamma, &u, &v]);
         if bool::from(expected.to_bytes().ct_eq(&c.to_bytes())) {
             Ok(gamma_to_hash(&gamma))
@@ -269,9 +280,11 @@ mod tests {
             let proof = key.prove(&alpha).unwrap();
             assert_eq!(proof[..], hex(pi)[..]);
             assert_eq!(key.hash(&alpha).unwrap()[..], hex(beta)[..]);
+
             let public = PublicKey::from_bytes(key.public()).unwrap();
             assert_eq!(public.verify(&alpha, &proof).unwrap()[..], hex(beta)[..]);
             assert_eq!(proof_to_hash(&proof).unwrap()[..], hex(beta)[..]);
+
             let mut wrong_alpha = alpha.clone();
             wrong_alpha.push(1);
             assert!(public.verify(&wrong_alpha, &proof).is_err());
@@ -286,6 +299,7 @@ mod tests {
         // The identity is a low-order point.
         let identity = EdwardsPoint::default().compress().to_bytes();
         assert_eq!(PublicKey::from_bytes(&identity), Err(Error::Key));
+
         // y = p + 1 is a non-canonical encoding of the point with y = 1.
         let mut non_canonical = [0u8; 32];
         non_canonical[0] = 0xEE;
@@ -294,6 +308,7 @@ mod tests {
         }
         non_canonical[31] = 0x7F;
         assert_eq!(PublicKey::from_bytes(&non_canonical), Err(Error::Key));
+
         let key = SecretKey::from_seed(&Secret::new([5; 32]));
         let mut pi = key.prove(b"x").unwrap();
         pi[48..].copy_from_slice(&[0xFF; 32]);

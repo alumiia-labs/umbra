@@ -2,7 +2,8 @@
 //!
 //! This crate holds the six primitives of Part 5 §5.1, the `UMBRA-KEM`
 //! combiner of §5.3, the key hierarchy of §5.2, the group keys of §5.8, and
-//! the randomness hardening of §5.9. It has no dependency inside the workspace and no `std`.
+//! the randomness hardening of §5.9. It has no dependency inside the
+//! workspace and no `std`.
 //!
 //! Each secret is a newtype that zeroizes on drop and has no `Debug`, no
 //! `Clone`, and no `Serialize` (Part 14 §14.4). A keypair is one type, never

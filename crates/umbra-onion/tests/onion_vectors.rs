@@ -38,14 +38,18 @@ fn hex(b: &[u8]) -> String {
 }
 
 struct Rng(u8);
+
 impl umbra_crypto::rand_core::TryRng for Rng {
     type Error = core::convert::Infallible;
+
     fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
         Ok(0)
     }
+
     fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
         Ok(0)
     }
+
     fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
         for (i, b) in dst.iter_mut().enumerate() {
             *b = self.0.wrapping_add((i % 251) as u8);
@@ -54,6 +58,7 @@ impl umbra_crypto::rand_core::TryRng for Rng {
         Ok(())
     }
 }
+
 impl umbra_crypto::rand_core::TryCryptoRng for Rng {}
 
 const SECRETS: [[u8; 32]; HOPS] = [[0x31; 32], [0x32; 32], [0x33; 32]];
@@ -90,6 +95,7 @@ fn cells_at_each_bucket() -> Value {
             let t = hop.forward(tags.last().unwrap(), &mut body).unwrap();
             tags.push(t);
         }
+
         assert_eq!(body, payload);
         // WIR-159: the length is the same at each hop.
         assert_eq!(sealed.len(), bucket.body_len());
@@ -103,6 +109,7 @@ fn cells_at_each_bucket() -> Value {
             let t = hop.backward(back_tags.last().unwrap(), &mut back).unwrap();
             back_tags.push(t);
         }
+
         let backward_sealed = back.clone();
         client.open(back_tags.last().unwrap(), &mut back).unwrap();
         assert_eq!(back, reply);
@@ -143,6 +150,7 @@ fn known_answer_cells() -> Value {
     let mut client = Circuit::new(&secrets(), CIRC_ID);
     let mut chain = relays();
     let mut cells = Vec::new();
+
     for label in ["forward", "forward after one chaining step"] {
         let mut body = [0u8; 480];
         let tag = client.seal(&mut body).unwrap();
@@ -153,18 +161,22 @@ fn known_answer_cells() -> Value {
         }
         cells.push(json!({ "case": label, "tag": hex(&tag), "body_head": hex(&body[..32]) }));
     }
+
     let mut body = [0u8; 480];
     let mut t = [0u8; 16];
     for hop in chain.iter_mut().rev() {
         t = hop.backward(&t, &mut body).unwrap();
     }
+
     let sealed = body;
     client.open(&t, &mut body).unwrap();
     cells.push(json!({ "case": "backward", "tag": hex(&t), "body_head": hex(&sealed[..32]) }));
+
     // The hop 3 key set moved at each cell above; this cell is after those
     // updates on both sides.
     let hop3_after = client.forward_keys(3).unwrap().fingerprint();
     assert_eq!(hop3_after, chain[2].forward_keys().fingerprint());
+
     let mut body = [0u8; 480];
     let tag = client.seal(&mut body).unwrap();
     cells.push(json!({ "case": "forward after key updates", "tag": hex(&tag), "body_head": hex(&body[..32]),
@@ -180,6 +192,7 @@ fn key_set_after_max_cells() -> Value {
         RelayHop::new(&secrets()[0], 1, Position::Middle),
         RelayHop::new(&secrets()[1], 2, Position::Middle),
     ];
+
     let mut body = [0u8; 480];
     for _ in 0..CIRCUIT_MAX_CELLS {
         let mut t = client.seal(&mut body).unwrap();
@@ -188,8 +201,10 @@ fn key_set_after_max_cells() -> Value {
         }
         endpoint.forward(&t, &mut body).unwrap();
     }
+
     let client_fp = client.forward_keys(3).unwrap().fingerprint();
     assert_eq!(client_fp, endpoint.forward_keys().fingerprint());
+
     let hop1 = client.forward_keys(1).unwrap();
     json!({
         "cells": CIRCUIT_MAX_CELLS,
@@ -223,6 +238,7 @@ fn build_exchange() -> Value {
     let at_relay = answer(&relay, &s_sk, &hello, &mut Rng(2), &mut reply).unwrap();
     let at_client = pending.finish(&reply).unwrap();
     assert_eq!(at_relay.expose(), at_client.expose());
+
     json!({
         "relay_static_sk": hex(&[0x41; 32]), "relay_id": hex(&[0x42; 32]),
         "rng": "byte i of each fill is (seed + i mod 251) mod 256; the seed starts at 1 for the client and 2 for the relay and rises by one at each fill",

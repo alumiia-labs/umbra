@@ -63,6 +63,7 @@ impl KeySet {
             &[labels::ONION_HOP, &hop_index.to_be_bytes()],
             t.as_flattened_mut(),
         );
+
         let [f0, f1, f2, f3, f4, f5, b0, b1, b2, b3, b4, b5, tweak] = &*t;
         KeySet {
             forward: HopKeys::from_blocks([f0, f1, f2, f3, f4, f5], *tweak),
@@ -146,15 +147,19 @@ impl HopKeys {
     /// Returns `Y_L`.
     pub fn encipher(&mut self, x_l: &[u8; BLOCK], body: &mut [u8]) -> Result<[u8; BLOCK], Error> {
         Self::check_body(body)?;
+
         let mut s = *x_l;
         xor_into(&mut s, &self.chain);
         xor_into(&mut s, &self.tweak);
+
         let mut s_block = s.into();
         Aes256::new(self.prp.expose().into()).encrypt_block(&mut s_block);
         let s: [u8; BLOCK] = s_block.into();
         self.stream(&s, body);
+
         let mut y_l = s;
         xor_into(&mut y_l, &self.polyval(body));
+
         self.chain = y_l;
         Ok(y_l)
     }
@@ -163,14 +168,17 @@ impl HopKeys {
     /// Returns `X_L`, which the next layer takes as its `Y_L`.
     pub fn decipher(&mut self, y_l: &[u8; BLOCK], body: &mut [u8]) -> Result<[u8; BLOCK], Error> {
         Self::check_body(body)?;
+
         let mut s = *y_l;
         xor_into(&mut s, &self.polyval(body));
         self.stream(&s, body);
+
         let mut x_block = s.into();
         Aes256::new(self.prp.expose().into()).decrypt_block(&mut x_block);
         let mut x_l: [u8; BLOCK] = x_block.into();
         xor_into(&mut x_l, &self.chain);
         xor_into(&mut x_l, &self.tweak);
+
         self.chain = *y_l;
         Ok(x_l)
     }
@@ -184,6 +192,7 @@ impl HopKeys {
         // 96 bytes are inside the HKDF bound, thus expand cannot fail.
         let _ = kdf.expand(labels::ONION_HOP_UPDATE, u.as_flattened_mut());
         let [u0, u1, u2, u3, u4, u5] = &*u;
+
         let fresh = HopKeys::from_blocks([u0, u1, u2, u3, u4, u5], self.tweak);
         self.chain.zeroize();
         *self = fresh;
@@ -215,9 +224,11 @@ mod tests {
         assert_eq!(x_l, [0; 16]);
         assert_eq!(body, [0x42u8; 480]);
         assert_eq!(sender.forward.chain(), receiver.forward.chain());
+
         // The chain moved, thus a replay of the same cell fails.
         let y_l2 = sender.forward.encipher(&[0; 16], &mut body).unwrap();
         assert_ne!(y_l, y_l2);
+
         let mut replay = body;
         let x_l = receiver.forward.decipher(&y_l2, &mut replay).unwrap();
         assert_eq!(x_l, [0; 16]);
@@ -232,6 +243,7 @@ mod tests {
         let mut t = [0u8; 208];
         kdf.expand_multi_info(&[labels::ONION_HOP, &1u32.to_be_bytes()], &mut t)
             .unwrap();
+
         let print = |from: usize| {
             umbra_crypto::hash::sha3_256(&[
                 &t[from..from + 32],
@@ -269,10 +281,12 @@ mod tests {
         let mut sender = keys();
         let mut body = [0x42u8; 480];
         let y_l = sender.forward.encipher(&[0; 16], &mut body).unwrap();
+
         let mut receiver = keys();
         let mut bad = body;
         bad[100] ^= 1;
         assert_ne!(receiver.forward.decipher(&y_l, &mut bad).unwrap(), [0; 16]);
+
         let mut receiver = keys();
         let mut bad_tag = y_l;
         bad_tag[3] ^= 1;
@@ -292,6 +306,7 @@ mod tests {
                 .fingerprint(),
             set.forward.fingerprint()
         );
+
         let mut a = keys();
         let mut b = keys();
         let before = a.forward.fingerprint();
@@ -300,6 +315,7 @@ mod tests {
         assert_ne!(a.forward.fingerprint(), before);
         assert_eq!(a.forward.fingerprint(), b.forward.fingerprint());
         assert_eq!(a.forward.tweak(), set.forward.tweak());
+
         assert!(a.forward.encipher(&[0; 16], &mut [0u8; 15]).is_err());
         assert!(a.forward.encipher(&[0; 16], &mut []).is_err());
     }

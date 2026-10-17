@@ -38,6 +38,7 @@ impl<'a> EditBody<'a> {
         if self.new_body.is_empty() {
             return Err(Error::Malformed);
         }
+
         let mut w = Writer::new(out);
         w.u8(0x01)?;
         w.put(&self.target)?;
@@ -50,10 +51,12 @@ impl<'a> EditBody<'a> {
         if bytes.len() < 18 {
             return Err(Error::Malformed);
         }
+
         let mut r = Reader::new(bytes);
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let target = r.array()?;
         let new_body = core::str::from_utf8(r.rest()).map_err(|_| Error::Malformed)?;
         Ok(EditBody { target, new_body })
@@ -104,6 +107,7 @@ impl DeleteBody {
         {
             return Err(Error::Malformed);
         }
+
         let mut w = Writer::new(out);
         w.u8(0x01)?;
         w.u8(self.scope as u8)?;
@@ -119,28 +123,34 @@ impl DeleteBody {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let scope = match r.u8()? {
             0x01 => DeleteScope::OwnDevices,
             0x02 => DeleteScope::OtherParty,
             0x03 => DeleteScope::Conversation,
             _ => return Err(Error::Malformed),
         };
+
         let rest = r.remaining();
         if !rest.is_multiple_of(16) {
             return Err(Error::Malformed);
         }
+
         let k = rest / 16;
         if k == 0 || k > DELETE_BATCH_MAX {
             return Err(Error::Malformed);
         }
+
         // WIR-559: the deletion of a conversation names one bound.
         if scope == DeleteScope::Conversation && k != 1 {
             return Err(Error::Malformed);
         }
+
         let mut targets = Vec::with_capacity(k);
         for _ in 0..k {
             targets.push(r.array()?);
         }
+
         if !strictly_increasing(&targets) {
             return Err(Error::Malformed);
         }
@@ -171,6 +181,7 @@ mod tests {
         assert!(EditBody::parse(&out[..17]).is_err());
         out[17] = 0xFF;
         assert!(EditBody::parse(&out[..18]).is_err());
+
         assert_eq!(
             crate::bucket::Bucket::B0.text_default_chunk() - 17,
             EDIT_B0_MAX
@@ -188,14 +199,17 @@ mod tests {
         assert_eq!(DeleteBody::parse(&out[..34]).unwrap(), del);
         assert!(DeleteBody::parse(&out[..33]).is_err());
         assert!(DeleteBody::parse(&out[..2]).is_err());
+
         let mut swapped = out;
         swapped[2..18].copy_from_slice(&[2; 16]);
         swapped[18..34].copy_from_slice(&[1; 16]);
         assert!(DeleteBody::parse(&swapped[..34]).is_err());
         swapped[18..34].copy_from_slice(&[2; 16]);
         assert!(DeleteBody::parse(&swapped[..34]).is_err());
+
         out[1] = 0x03;
         assert!(DeleteBody::parse(&out[..34]).is_err());
+
         let big = DeleteBody {
             scope: DeleteScope::OwnDevices,
             targets: (0..10u8).map(|i| [i; 16]).collect(),
@@ -213,12 +227,14 @@ mod tests {
         assert_eq!(whole.encode(&mut out).unwrap(), 18);
         assert_eq!(&out[..2], &[0x01, 0x03]);
         assert_eq!(DeleteBody::parse(&out[..18]).unwrap(), whole);
+
         // WIR-559: a second target is no bound.
         let two = DeleteBody {
             scope: DeleteScope::Conversation,
             targets: vec![[1; 16], [2; 16]],
         };
         assert!(two.encode(&mut out).is_err());
+
         out[18..34].copy_from_slice(&[2; 16]);
         assert!(DeleteBody::parse(&out[..34]).is_err());
     }

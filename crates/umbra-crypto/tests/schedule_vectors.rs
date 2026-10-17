@@ -57,12 +57,15 @@ impl Rng {
 
 impl TryRng for Rng {
     type Error = Infallible;
+
     fn try_next_u32(&mut self) -> Result<u32, Infallible> {
         Ok(0)
     }
+
     fn try_next_u64(&mut self) -> Result<u64, Infallible> {
         Ok(0)
     }
+
     fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Infallible> {
         let mut hasher = Shake256::default();
         hasher.update(&self.seed);
@@ -72,6 +75,7 @@ impl TryRng for Rng {
         Ok(())
     }
 }
+
 impl TryCryptoRng for Rng {}
 
 fn keys(dh: InitialDh) -> SessionKeys {
@@ -101,6 +105,7 @@ impl Run {
             } else {
                 (&mut self.responder, &mut self.initiator)
             };
+
             let mut record = vec![0u8; sender.overhead_with_frame() + 4];
             let len = sender
                 .send(b"text", true, self.now, &mut self.rng, &mut record)
@@ -110,6 +115,7 @@ impl Run {
                 .receive(&record[..len], self.now, &mut self.rng, &mut plain)
                 .unwrap();
             assert_eq!(&plain[..opened.len], b"text");
+
             let slot = usize::from(!from_initiator);
             let chain_start = self.last_dh[slot] != Some(opened.header.dh_pk);
             self.last_dh[slot] = Some(opened.header.dh_pk);
@@ -161,6 +167,7 @@ fn build() -> Value {
     // Phase 1: a few records each way; both epochs stay incomplete.
     run.send(true, 5);
     run.send(false, 5);
+
     // T passes inside the incomplete epochs.
     run.now += EPOCH_SECONDS;
     run.send(true, 5);

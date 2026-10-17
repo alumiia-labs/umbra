@@ -110,6 +110,7 @@ pub fn encode_request(kind: Kind, body: &[u8]) -> Result<Vec<u8>, Error> {
     if body.len() > DIR_REQUEST_LEN - REQUEST_HEAD {
         return Err(Error::Malformed);
     }
+
     let mut out = vec![0u8; DIR_REQUEST_LEN];
     let mut w = Writer::new(&mut out);
     w.u8(VERSION)?;
@@ -124,10 +125,12 @@ pub fn parse_request(bytes: &[u8]) -> Result<(Kind, &[u8]), Error> {
     if bytes.len() != DIR_REQUEST_LEN {
         return Err(Error::Malformed);
     }
+
     let mut r = Reader::new(bytes);
     if r.u8()? != VERSION {
         return Err(Error::Malformed);
     }
+
     let kind = Kind::from_byte(r.u8()?)?;
     let len = usize::from(r.u16()?);
     let body = r.take(len)?;
@@ -142,6 +145,7 @@ pub fn encode_response(status: Status, body: &[u8]) -> Result<Vec<u8>, Error> {
         .into_iter()
         .find(|size| need <= *size)
         .ok_or(Error::Malformed)?;
+
     let mut out = vec![0u8; size];
     let mut w = Writer::new(&mut out);
     w.u8(VERSION)?;
@@ -158,14 +162,17 @@ pub fn parse_response(bytes: &[u8]) -> Result<(Status, &[u8]), Error> {
     if !DIR_RESPONSE_SIZES.contains(&bytes.len()) {
         return Err(Error::Malformed);
     }
+
     let mut r = Reader::new(bytes);
     if r.u8()? != VERSION {
         return Err(Error::Malformed);
     }
+
     let status = Status::from_byte(r.u8()?)?;
     let len = usize::try_from(r.u32()?).map_err(|_| Error::Malformed)?;
     let body = r.take(len)?;
     r.finish_zero()?;
+
     let need = len.saturating_add(RESPONSE_HEAD);
     let smallest = DIR_RESPONSE_SIZES.into_iter().find(|size| need <= *size);
     if smallest != Some(bytes.len()) {
@@ -208,6 +215,7 @@ mod tests {
         let mut bad = request.clone();
         bad[DIR_REQUEST_LEN - 1] = 1;
         assert!(parse_request(&bad).is_err());
+
         assert!(encode_request(Kind::Issue, &vec![0; DIR_REQUEST_LEN]).is_err());
 
         let small = encode_response(Status::Done, &[1; 100]).unwrap();
@@ -215,6 +223,7 @@ mod tests {
         let large = encode_response(Status::Done, &vec![2; 10_000]).unwrap();
         assert_eq!(large.len(), 32_768);
         assert_eq!(parse_response(&large).unwrap().1.len(), 10_000);
+
         assert_eq!(
             parse_response(&encode_response(Status::Stale, &[]).unwrap()).unwrap(),
             (Status::Stale, &[][..])
@@ -230,11 +239,13 @@ mod tests {
             wide.resize(size, 0);
             assert!(parse_response(&wide).is_err());
         }
+
         // The largest body of the first size, and the first body of the
         // second size.
         let edge = encode_response(Status::Done, &vec![3; 4_090]).unwrap();
         assert_eq!(edge.len(), 4_096);
         assert_eq!(parse_response(&edge).unwrap().1.len(), 4_090);
+
         let next = encode_response(Status::Done, &vec![3; 4_091]).unwrap();
         assert_eq!(next.len(), 32_768);
         assert_eq!(parse_response(&next).unwrap().1.len(), 4_091);

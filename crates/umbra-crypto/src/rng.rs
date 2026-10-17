@@ -63,17 +63,20 @@ impl<'a, R: TryCryptoRng> HardenedRng<'a, R> {
     fn block(&mut self, out: &mut [u8]) -> Result<(), <R as TryRng>::Error> {
         let mut fresh = Secret::<32>::zeroed();
         self.inner.try_fill_bytes(fresh.expose_mut())?;
+
         let mut mac = self.mac.clone();
         mac.update(fresh.expose());
         mac.update(self.context);
         mac.update(&self.call);
         mac.update(&self.counter.to_be_bytes());
         self.counter = self.counter.wrapping_add(1);
+
         let mut tag = mac.finalize().into_bytes();
         let n = out.len().min(tag.len());
         if let (Some(dst), Some(src)) = (out.get_mut(..n), tag.get(..n)) {
             dst.copy_from_slice(src);
         }
+
         // The tag is the random value itself, which becomes a key or a
         // nonce of the caller.
         tag.zeroize();
@@ -121,16 +124,20 @@ struct Never;
 
 impl TryRng for Never {
     type Error = Infallible;
+
     fn try_next_u32(&mut self) -> Result<u32, Infallible> {
         Ok(0)
     }
+
     fn try_next_u64(&mut self) -> Result<u64, Infallible> {
         Ok(0)
     }
+
     fn try_fill_bytes(&mut self, _dst: &mut [u8]) -> Result<(), Infallible> {
         Ok(())
     }
 }
+
 impl TryCryptoRng for Never {}
 
 #[cfg(test)]
@@ -154,9 +161,11 @@ mod tests {
         let mut x = [0u8; 70];
         let mut y = [0u8; 70];
         let mut z = [0u8; 70];
+
         HardenedRng::new(&mut a, &key, b"ctx", [0; CALL_LEN]).fill_bytes(&mut x);
         HardenedRng::new(&mut b, &key, b"ctx", [0; CALL_LEN]).fill_bytes(&mut y);
         HardenedRng::new(&mut c, &key, b"other", [0; CALL_LEN]).fill_bytes(&mut z);
+
         assert_eq!(x, y);
         assert_ne!(x, z);
         assert_ne!(&x[..32], &x[32..64]);

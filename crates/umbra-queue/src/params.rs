@@ -27,6 +27,7 @@ pub const fn store_time(seconds: u64) -> u64 {
 pub const fn store_grace_time(seconds: u64) -> u64 {
     seconds / STORE_TIME_GRAIN * STORE_TIME_GRAIN
 }
+
 /// `MSG_TTL`.
 pub const MSG_TTL: u64 = 45 * 86_400;
 /// `QUEUE_IDLE_TTL`.

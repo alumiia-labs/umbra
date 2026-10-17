@@ -45,6 +45,7 @@ impl<'a> ReactionBody<'a> {
         if self.emoji.is_empty() || self.emoji.len() > REACTION_MAX_BYTES {
             return Err(Error::Malformed);
         }
+
         let mut w = Writer::new(out);
         w.u8(0x01)?;
         w.put(&self.target)?;
@@ -60,18 +61,22 @@ impl<'a> ReactionBody<'a> {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let target = r.array()?;
         let action = match r.u8()? {
             0x01 => ReactionAction::Add,
             0x02 => ReactionAction::Remove,
             _ => return Err(Error::Malformed),
         };
+
         let len = usize::from(r.u8()?);
         if len == 0 || len > REACTION_MAX_BYTES {
             return Err(Error::Malformed);
         }
+
         let emoji = core::str::from_utf8(r.take(len)?).map_err(|_| Error::Malformed)?;
         r.finish()?;
+
         Ok(ReactionBody {
             target,
             action,
@@ -105,11 +110,13 @@ impl TypingState {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let state = match r.u8()? {
             0x01 => TypingState::Started,
             0x02 => TypingState::Stopped,
             _ => return Err(Error::Malformed),
         };
+
         r.finish()?;
         Ok(state)
     }
@@ -151,14 +158,17 @@ impl ReceiptBody {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let count = usize::from(r.u8()?);
         if count == 0 || count > RECEIPT_BATCH_MAX {
             return Err(Error::Malformed);
         }
+
         let mut targets = Vec::with_capacity(count);
         for _ in 0..count {
             targets.push(r.array()?);
         }
+
         r.finish()?;
         let out = ReceiptBody { targets };
         out.check()?;
@@ -171,6 +181,7 @@ pub fn encode_timer(seconds: u32, out: &mut [u8]) -> Result<usize, Error> {
     if !TIMER_VALUES.contains(&seconds) {
         return Err(Error::Malformed);
     }
+
     let mut w = Writer::new(out);
     w.u8(0x01)?;
     w.u32(seconds)?;
@@ -183,8 +194,10 @@ pub fn parse_timer(bytes: &[u8]) -> Result<u32, Error> {
     if r.u8()? != 0x01 {
         return Err(Error::Malformed);
     }
+
     let seconds = r.u32()?;
     r.finish()?;
+
     if TIMER_VALUES.contains(&seconds) {
         Ok(seconds)
     } else {
@@ -211,6 +224,7 @@ impl ForwardPolicy {
         if self.seq == 0 {
             return Err(Error::Malformed);
         }
+
         let mut w = Writer::new(out);
         w.u8(0x01)?;
         w.u32(self.seq)?;
@@ -224,6 +238,7 @@ impl ForwardPolicy {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let seq = r.u32()?;
         let prohibits = match r.u8()? {
             0x00 => false,
@@ -231,6 +246,7 @@ impl ForwardPolicy {
             _ => return Err(Error::Malformed),
         };
         r.finish()?;
+
         if seq == 0 {
             return Err(Error::Malformed);
         }
@@ -260,6 +276,7 @@ mod tests {
         let n = r.encode(&mut out).unwrap();
         assert_eq!(n, 19 + 4);
         assert_eq!(ReactionBody::parse(&out[..n]).unwrap(), r);
+
         let long: String = "a".repeat(64);
         let max = ReactionBody {
             emoji: &long,
@@ -267,6 +284,7 @@ mod tests {
         };
         let n = max.encode(&mut out).unwrap();
         assert_eq!(n, 83);
+
         let over: String = "a".repeat(65);
         assert!(ReactionBody {
             emoji: &over,
@@ -274,6 +292,7 @@ mod tests {
         }
         .encode(&mut out)
         .is_err());
+
         out[17] = 0x03;
         assert!(ReactionBody::parse(&out[..n]).is_err());
     }
@@ -283,14 +302,17 @@ mod tests {
         let mut out = [0u8; 200];
         assert_eq!(TypingState::Started.encode(&mut out).unwrap(), 2);
         assert_eq!(TypingState::parse(&out[..2]).unwrap(), TypingState::Started);
+
         out[1] = 0x00;
         assert!(TypingState::parse(&out[..2]).is_err());
+
         let receipt = ReceiptBody {
             targets: (0..9u8).map(|i| [i; 16]).collect(),
         };
         let n = receipt.encode(&mut out).unwrap();
         assert_eq!(n, 146);
         assert_eq!(ReceiptBody::parse(&out[..n]).unwrap(), receipt);
+
         assert!(ReceiptBody {
             targets: (0..10u8).map(|i| [i; 16]).collect()
         }
@@ -306,10 +328,12 @@ mod tests {
         }
         .encode(&mut out)
         .is_err());
+
         for v in TIMER_VALUES {
             let n = encode_timer(v, &mut out).unwrap();
             assert_eq!(parse_timer(&out[..n]).unwrap(), v);
         }
+
         assert!(encode_timer(4_337, &mut out).is_err());
     }
 
@@ -322,7 +346,9 @@ mod tests {
             assert_eq!(n, FORWARD_POLICY_LEN);
             assert_eq!(ForwardPolicy::parse(&out[..n]).unwrap(), policy);
         }
+
         assert_eq!(out[..6], [1, 0, 0, 0, 7, 1]);
+
         // WIR-555: no other version, no counter of 0, no other flag, and no
         // other length.
         assert!(ForwardPolicy::parse(&[2, 0, 0, 0, 7, 1]).is_err());
@@ -330,6 +356,7 @@ mod tests {
         assert!(ForwardPolicy::parse(&[1, 0, 0, 0, 7, 2]).is_err());
         assert!(ForwardPolicy::parse(&[1, 0, 0, 0, 7]).is_err());
         assert!(ForwardPolicy::parse(&[1, 0, 0, 0, 7, 1, 0]).is_err());
+
         let none = ForwardPolicy {
             seq: 0,
             prohibits: true,

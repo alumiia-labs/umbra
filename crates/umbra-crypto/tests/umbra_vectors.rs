@@ -67,6 +67,7 @@ fn build() -> (Value, Value) {
     let (ct, ss) = kem::encapsulate_deterministic(kp.public(), Secret::new(EK_X), Secret::new(M));
     let mut zero_x = *ct.as_bytes();
     zero_x[..32].fill(0);
+
     let kem_v = json!({
         "note": "UMBRA-KEM of Part 5 §5.3. Self-generated; not independently confirmed.",
         "x_sk": hex(&X_SK), "d": hex(&D), "z": hex(&Z),
@@ -76,6 +77,7 @@ fn build() -> (Value, Value) {
         "ss": hex(ss.expose()),
         "negative_all_zero_pub_x": { "ct": hex(&zero_x), "result": "reject" },
     });
+
     let root = RootIdentity::new(Secret::new(ROOT));
     let hier_v = json!({
         "note": "Key hierarchy of Part 5 §5.2 from one RootIdentity. Self-generated; not independently confirmed.",
@@ -93,6 +95,7 @@ fn build() -> (Value, Value) {
             { "j": 0, "r": 1, "key": keypair_json(&root.handle_key(0, 1)) },
         ],
     });
+
     (kem_v, hier_v)
 }
 
@@ -130,6 +133,7 @@ fn kem_vector_holds() {
         b[32..].copy_from_slice(&unhex(v["z"].as_str().unwrap()));
         Secret::new(b)
     });
+
     assert_eq!(hex(&kp.public().to_bytes()), v["pk"]);
     let pk = PublicKey::from_bytes(&unhex(v["pk"].as_str().unwrap())).unwrap();
     let (ct, ss) = kem::encapsulate_deterministic(
@@ -139,6 +143,7 @@ fn kem_vector_holds() {
     );
     assert_eq!(hex(ct.as_bytes()), v["ct"]);
     assert_eq!(hex(ss.expose()), v["ss"]);
+
     // CRY-044: Encap and Decap agree for one (pk, sk) pair and one ct.
     assert_eq!(hex(kp.decapsulate(&ct).unwrap().expose()), v["ss"]);
     // CRY-046: the all-zero pub_X negative case.

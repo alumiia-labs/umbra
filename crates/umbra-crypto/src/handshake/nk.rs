@@ -74,17 +74,20 @@ impl Client {
         let mut st = init(relay);
         let (e_out, rest) = out.split_at_mut(32);
         let (e1_out, tag_out) = rest.split_at_mut(EK_LEN);
+
         // 1. e
         let e_sk = ReusableSecret::random_from_rng(rng);
         let e = XPublic::from(&e_sk);
         e_out.copy_from_slice(e.as_bytes());
         st.mix_hash(e.as_bytes());
         st.trace(trace, "1.1 e");
+
         // 2. es
         let es = e_sk.diffie_hellman(&XPublic::from(relay.s));
         contributory(&es)?;
         st.mix_key(es.as_bytes());
         st.trace(trace, "1.2 es");
+
         // 3. e1
         let mut seed = Secret::<64>::zeroed();
         rng.fill_bytes(seed.expose_mut());
@@ -94,9 +97,11 @@ impl Client {
         e1_out.copy_from_slice(&e1_dk.encapsulation_key().to_bytes());
         st.mix_hash(e1_out);
         st.trace(trace, "1.3 e1");
+
         // 4. tag1
         tag_out.copy_from_slice(&st.seal(&mut [])?);
         st.trace(trace, "1.4 tag1");
+
         Ok(Self { st, e_sk, e1_dk })
     }
 
@@ -111,24 +116,30 @@ impl Client {
         if flight.len() != FLIGHT2_LEN {
             return Err(Error::Length);
         }
+
         let (er, rest) = flight.split_at(32);
         let (ekem1, tag2) = rest.split_at(CT_LEN);
         let st = &mut self.st;
+
         let er: [u8; 32] = er.try_into().map_err(|_| Error::Length)?;
         st.mix_hash(&er);
         st.trace(trace, "2.1 er");
+
         let ee = self.e_sk.diffie_hellman(&XPublic::from(er));
         contributory(&ee)?;
         st.mix_key(ee.as_bytes());
         st.trace(trace, "2.2 ee");
+
         let ct: ml_kem::Ciphertext<MlKem768> = Array::try_from(ekem1).map_err(|_| Error::Length)?;
         let mut ss2 = self.e1_dk.decapsulate(&ct);
         st.mix_hash(ekem1);
         st.mix_key(&ss2);
         ss2.zeroize();
         st.trace(trace, "2.3 ekem1");
+
         st.open(&mut [], tag2)?;
         st.trace(trace, "2.4 tag2");
+
         let ss_hop = split(st);
         st.trace(trace, "2.5 split");
         Ok(ss_hop)
@@ -154,21 +165,27 @@ impl Relay {
         if flight.len() != FLIGHT1_LEN {
             return Err(Error::Length);
         }
+
         let (e, rest) = flight.split_at(32);
         let (e1, tag1) = rest.split_at(EK_LEN);
         let mut st = init(relay);
+
         let e: [u8; 32] = e.try_into().map_err(|_| Error::Length)?;
         st.mix_hash(&e);
         st.trace(trace, "1.1 e");
+
         let es = s_sk.diffie_hellman(&XPublic::from(e));
         contributory(&es)?;
         st.mix_key(es.as_bytes());
         st.trace(trace, "1.2 es");
+
         let e1: [u8; EK_LEN] = e1.try_into().map_err(|_| Error::Length)?;
         st.mix_hash(&e1);
         st.trace(trace, "1.3 e1");
+
         st.open(&mut [], tag1)?;
         st.trace(trace, "1.4 tag1");
+
         Ok(Self { st, e, e1 })
     }
 
@@ -198,15 +215,18 @@ impl Relay {
         let (er_out, rest) = out.split_at_mut(32);
         let (ekem1_out, tag_out) = rest.split_at_mut(CT_LEN);
         let st = &mut self.st;
+
         let er_sk = StaticSecret::random_from_rng(rng);
         let er = XPublic::from(&er_sk);
         er_out.copy_from_slice(er.as_bytes());
         st.mix_hash(er.as_bytes());
         st.trace(trace, "2.1 er");
+
         let ee = er_sk.diffie_hellman(&XPublic::from(self.e));
         contributory(&ee)?;
         st.mix_key(ee.as_bytes());
         st.trace(trace, "2.2 ee");
+
         let e1 =
             EncapsulationKey::<MlKem768>::new(&Array::from(self.e1)).map_err(|_| Error::Key)?;
         let (ekem1, mut ss2) = e1.encapsulate_with_rng(rng);
@@ -215,8 +235,10 @@ impl Relay {
         st.mix_key(&ss2);
         ss2.zeroize();
         st.trace(trace, "2.3 ekem1");
+
         tag_out.copy_from_slice(&st.seal(&mut [])?);
         st.trace(trace, "2.4 tag2");
+
         let ss_hop = split(st);
         st.trace(trace, "2.5 split");
         Ok((ss_hop, er_sk))

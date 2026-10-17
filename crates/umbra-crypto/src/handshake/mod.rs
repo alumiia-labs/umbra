@@ -71,6 +71,7 @@ impl VersionRange {
         if v < self.min || v < other.min {
             return Err(Error::Handshake);
         }
+
         Ok(v)
     }
 }
@@ -145,6 +146,7 @@ impl State {
         hasher.update(labels::HANDSHAKE_CK);
         hasher.update(name);
         let ck: [u8; 32] = hasher.finalize().into();
+
         Self {
             ck: Secret::new(ck),
             h: ck,
@@ -165,12 +167,14 @@ impl State {
         let mut t = Secret::<64>::zeroed();
         // 64 bytes is inside the HKDF bound, thus expand cannot fail.
         let _ = hk.expand(labels::HANDSHAKE_CK, t.expose_mut());
+
         // Each half goes straight into a buffer that wipes itself.
         let mut ck = Secret::<32>::zeroed();
         let mut k = Secret::<32>::zeroed();
         let (ck_part, k_part) = t.expose().split_at(32);
         ck.expose_mut().copy_from_slice(ck_part);
         k.expose_mut().copy_from_slice(k_part);
+
         self.ck = ck;
         self.k = Some(k);
         self.n = 0;
@@ -181,6 +185,7 @@ impl State {
         if self.n == u64::MAX {
             return Err(Error::Handshake);
         }
+
         let mut b = [0u8; 12];
         b[4..].copy_from_slice(&self.n.to_be_bytes());
         Ok(Nonce::from(b))
@@ -201,6 +206,7 @@ impl State {
             .encrypt_inout_detached(&nonce, &self.h, buf.into())
             .map_err(|_| Error::Handshake)?;
         self.n += 1;
+
         let tag: [u8; TAG_LEN] = tag.into();
         self.mix_hash_ct(buf, &tag);
         Ok(tag)
@@ -211,6 +217,7 @@ impl State {
     pub(crate) fn open(&mut self, buf: &mut [u8], tag: &[u8]) -> Result<(), Error> {
         let nonce = self.nonce()?;
         let tag: [u8; TAG_LEN] = tag.try_into().map_err(|_| Error::Handshake)?;
+
         // h must absorb the ciphertext bytes, thus hash them before the
         // in-place decryption overwrites them, but commit only on success.
         let mut hasher = Sha3_256::new();
@@ -218,9 +225,11 @@ impl State {
         hasher.update(&*buf);
         hasher.update(tag);
         let next_h: [u8; 32] = hasher.finalize().into();
+
         self.cipher()?
             .decrypt_inout_detached(&nonce, &self.h, buf.into(), &Tag::from(tag))
             .map_err(|_| Error::Handshake)?;
+
         self.n += 1;
         self.h = next_h;
         Ok(())
@@ -266,6 +275,7 @@ pub(crate) fn contributory(ss: &x25519_dalek::SharedSecret) -> Result<(), Error>
 /// to that position (`CRY-011`, `CRY-056`). Every entry is compared.
 pub fn find_prekey<'a>(pid: &[u8; 16], ids: impl Iterator<Item = &'a [u8; 16]>) -> Option<usize> {
     use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
+
     let mut found = Choice::from(0u8);
     let mut index = 0u32;
     for (i, id) in ids.enumerate() {
@@ -273,6 +283,7 @@ pub fn find_prekey<'a>(pid: &[u8; 16], ids: impl Iterator<Item = &'a [u8; 16]>) 
         index = u32::conditional_select(&index, &(i as u32), hit);
         found |= hit;
     }
+
     if bool::from(found) {
         Some(index as usize)
     } else {

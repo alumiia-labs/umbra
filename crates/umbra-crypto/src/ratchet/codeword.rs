@@ -140,6 +140,7 @@ impl Width {
         if index >= code.k {
             return Ok(Kind::Parity);
         }
+
         let start = index * self.bytes();
         Ok(if start < HEADER_LEN {
             Kind::Header
@@ -167,14 +168,17 @@ impl Material {
     pub fn new(ek: &[u8; 1184], ct: &[u8; 1088]) -> Self {
         let mut m = [0u8; MATERIAL_LEN];
         let (ek_vector, rho) = ek.split_at(EK_VECTOR_LEN);
+
         let mut hash = Sha3_256::new();
         hash.update(ek_vector);
         hash.update(rho);
         let h: [u8; 32] = hash.finalize().into();
+
         let (header, rest) = m.split_at_mut(HEADER_LEN);
         let (h_rho, h_hash) = header.split_at_mut(32);
         h_rho.copy_from_slice(rho);
         h_hash.copy_from_slice(&h);
+
         let (ekv, rest) = rest.split_at_mut(EK_VECTOR_LEN);
         ekv.copy_from_slice(ek_vector);
         rest.copy_from_slice(ct);
@@ -188,6 +192,7 @@ impl Material {
         let (header, rest) = self.0.split_at(HEADER_LEN);
         let (rho, h_hash) = header.split_at(32);
         let (ek_vector, _) = rest.split_at(EK_VECTOR_LEN);
+
         let mut hash = Sha3_256::new();
         hash.update(ek_vector);
         hash.update(rho);
@@ -195,6 +200,7 @@ impl Material {
         if !bool::from(subtle::ConstantTimeEq::ct_eq(&h[..], h_hash)) {
             return Err(Error::Kem);
         }
+
         let mut ek = [0u8; 1184];
         let (v, r) = ek.split_at_mut(EK_VECTOR_LEN);
         v.copy_from_slice(ek_vector);
@@ -226,10 +232,12 @@ impl Material {
         let code = width.code();
         let w = width.bytes();
         let out = out.get_mut(..w).ok_or(Error::Length)?;
+
         if index < code.k {
             out.copy_from_slice(window(&self.0, index * w, w)?);
             return Ok(());
         }
+
         // A parity chunk needs the whole code; encode into a stack buffer.
         let mut all = [0u8; MAX_N * 128];
         self.encode(width, &mut all)?;
@@ -275,6 +283,7 @@ impl Collector {
         if index >= code.n() || chunk.len() != w {
             return Err(Error::Length);
         }
+
         if let Some(slot) = self.held.get_mut(index) {
             if !*slot {
                 *slot = true;
@@ -322,9 +331,11 @@ impl Collector {
         if !self.complete() {
             return Err(Error::Length);
         }
+
         let mut positions = [0usize; MAX_K];
         let mut received = [0u8; MAX_K * 128];
         let mut taken = 0;
+
         for (index, &h) in self.held.iter().enumerate().take(code.n()) {
             if !h || taken == code.k {
                 continue;
@@ -339,6 +350,7 @@ impl Collector {
             )?);
             taken += 1;
         }
+
         let mut out = [0u8; MATERIAL_LEN];
         code.decode(
             w,
@@ -386,18 +398,21 @@ mod tests {
         assert_eq!(w64.kind_at(36).unwrap(), Kind::Parity);
         assert_eq!(w64.kind_at(40).unwrap(), Kind::Parity);
         assert!(w64.kind_at(41).is_err());
+
         let w32 = Width::W32;
         assert_eq!(w32.kind_at(2).unwrap(), Kind::Ek);
         assert_eq!(w32.kind_at(38).unwrap(), Kind::Ct1);
         assert_eq!(w32.kind_at(68).unwrap(), Kind::Ct2);
         assert_eq!(w32.kind_at(72).unwrap(), Kind::Parity);
+
         let w128 = Width::W128;
         assert_eq!(w128.kind_at(0).unwrap(), Kind::Header);
-        // ct1 begins at byte 1 216, inside chunk 9, whose first byte is ek
+        // `ct1` begins at byte 1 216, inside chunk 9, whose first byte is `ek`.
         assert_eq!(w128.kind_at(9).unwrap(), Kind::Ek);
         assert_eq!(w128.kind_at(10).unwrap(), Kind::Ct1);
         assert_eq!(w128.kind_at(17).unwrap(), Kind::Ct2);
         assert_eq!(w128.kind_at(18).unwrap(), Kind::Parity);
+
         assert_eq!(Width::from_frame_len(71).unwrap(), Width::W64);
         assert!(Width::from_frame_len(68).is_err());
         assert!(Kind::from_byte(5).is_err());
@@ -412,8 +427,9 @@ mod tests {
             let w = width.bytes();
             let mut all = [0u8; MAX_N * 128];
             m.encode(width, &mut all).unwrap();
+
             let mut col = Collector::new(width);
-            // drop r chunks spread over data and parity
+            // Drop r chunks spread over data and parity.
             let dropped: [usize; 9] = [0, 1, 7, code.k - 1, code.k, code.k + 1, 3, 5, code.n() - 1];
             let mut done = false;
             for index in 0..code.n() {
@@ -422,11 +438,13 @@ mod tests {
                 }
                 done = col.put(index, &all[index * w..(index + 1) * w]).unwrap();
             }
+
             assert!(done);
             let rebuilt = col.rebuild().unwrap();
             assert_eq!(rebuilt.0, m.0, "{width:?}");
             assert_eq!(rebuilt.encapsulation_key().unwrap()[..8], m.0[64..72]);
-            // one chunk from chunk() equals the same chunk of encode()
+
+            // One chunk from `chunk()` equals the same chunk of `encode()`.
             let mut one = [0u8; 128];
             m.chunk(width, code.k, &mut one).unwrap();
             assert_eq!(one[..w], all[code.k * w..(code.k + 1) * w]);

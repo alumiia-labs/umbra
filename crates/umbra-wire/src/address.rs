@@ -44,12 +44,14 @@ impl QueueAddress {
         if r.u8()? != VERSION {
             return Err(Error::Malformed);
         }
+
         let out = QueueAddress {
             relay_id: r.array()?,
             sender_id: r.array()?,
             qs_auth_sk: Secret::new(r.array()?),
             qe: Secret::new(r.array()?),
         };
+
         r.finish()?;
         Ok(out)
     }
@@ -75,9 +77,11 @@ mod tests {
         };
         let mut out = [0u8; LEN];
         assert_eq!(address.encode(&mut out).unwrap(), LEN);
+
         let back = QueueAddress::parse(&out).unwrap();
         assert_eq!(back.sender_id, [2; 32]);
         assert_eq!(back.qe.expose(), &[4; 32]);
+
         out[0] = 0x02;
         assert!(QueueAddress::parse(&out).is_err());
         out[0] = 0x01;

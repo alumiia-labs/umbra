@@ -87,12 +87,14 @@ impl Arq {
         matches!(self.state, Delivery::Queued) && self.attempts < SEND_MAX_ATTEMPTS
     }
 
-    /// Records one send at `now`. Fails the record at `SEND_MAX_ATTEMPTS`
-    /// when this send was the last one allowed.
+    /// Records one send at `now`. After the last send that
+    /// `SEND_MAX_ATTEMPTS` allows, the next [`Arq::may_send`] or
+    /// [`Arq::tick`] fails the record.
     pub fn sent(&mut self, now: u64) {
         if self.first_send.is_none() {
             self.first_send = Some(now);
         }
+
         self.attempts = self.attempts.saturating_add(1);
     }
 
@@ -118,6 +120,7 @@ impl Arq {
         if !matches!(self.state, Delivery::Queued) {
             return;
         }
+
         if matches!(reason, Reject::Rejected | Reject::Version) {
             self.state = Delivery::Failed(FailCause::Permanent(reason));
         }
@@ -148,6 +151,7 @@ impl Arq {
         if !matches!(self.state, Delivery::Queued) {
             return;
         }
+
         if self
             .first_send
             .is_some_and(|first| now.saturating_sub(first) >= SEND_GIVE_UP)
@@ -183,8 +187,10 @@ mod tests {
             assert!(a.may_send(u64::from(i)));
             a.sent(u64::from(i));
         }
+
         assert!(!a.may_send(100));
         assert_eq!(a.state(), Delivery::Failed(FailCause::Attempts));
+
         a.resend_by_user();
         assert!(a.may_send(200));
         a.sent(200);
@@ -195,6 +201,7 @@ mod tests {
         b.sent(0);
         b.rejected(Reject::Limit);
         assert!(b.may_send(1));
+
         b.rejected(Reject::Rejected);
         assert_eq!(
             b.state(),
@@ -206,6 +213,7 @@ mod tests {
         c.accepted();
         c.rejected(Reject::Rejected);
         assert_eq!(c.state(), Delivery::Accepted);
+
         c.read();
         assert_eq!(c.state(), Delivery::Read);
         assert!(!c.may_send(1));
@@ -219,6 +227,7 @@ mod tests {
         a.sent(200);
         assert!(!a.may_send(201));
         assert_eq!(a.state(), Delivery::Failed(FailCause::Attempts));
+
         // NET-220: the 7 days run from the first send of the record, and
         // not from the first send of this run.
         let mut b = Arq::resumed(1, Some(100));
@@ -226,6 +235,7 @@ mod tests {
         b.sent(100 + SEND_GIVE_UP - 1);
         assert!(!b.may_send(100 + SEND_GIVE_UP));
         assert_eq!(b.state(), Delivery::Failed(FailCause::GiveUp));
+
         // A record that no run sent starts as a new one.
         let mut c = Arq::resumed(0, None);
         assert!(c.may_send(u64::MAX));
