@@ -42,9 +42,9 @@ packet sizes, and endpoints. A1 also drops, delays, replays, and injects bytes
 on a link that A1 holds. A1 cannot decrypt a record in transit, and A1 cannot
 forge a record that an UMBRA key authenticates.
 
-**In scope.** **[THR-001]** UMBRA MUST prevent A1 from learning the content or the recipient.
-**[THR-002]** UMBRA MUST also prevent A1 from learning the number of different conversations
-or the identity of a correspondent.
+**In scope.** **[THR-001]** UMBRA MUST prevent A1 from learning the content or
+the recipient. **[THR-002]** UMBRA MUST also prevent A1 from learning the number
+of different conversations or the identity of a correspondent.
 
 A1 learns that the device of the user connected to an UMBRA relay. A1 also
 learns how much data moved and at what time. The traffic-shaping policy in Part
@@ -71,11 +71,11 @@ it reads the client IP address. Part 15 §15.1 holds that row and Part 15 §15.3
 records the residual. Each other position holds a random identifier and a
 ciphertext only.
 
-**[THR-004]** UMBRA MUST make sure that the logs of a relay cannot
-link a sender to a recipient. **[THR-005]** If an adversary compromises *one relay*, that
-adversary MUST NOT get the content of a conversation. **[THR-006]** If an adversary
-compromises *one relay*, that adversary MUST NOT get the identities of the
-participants.
+**[THR-004]** UMBRA MUST make sure that the logs of a relay cannot link a sender
+to a recipient. **[THR-005]** If an adversary compromises *one relay*, that
+adversary MUST NOT get the content of a conversation. **[THR-006]** If an
+adversary compromises *one relay*, that adversary MUST NOT get the identities of
+the participants.
 
 ### A3 — Colluding relay operators
 
@@ -87,22 +87,27 @@ injects a cell at each relay that A3 holds. The rugged-PRP construction of Part
 **Partially in scope.** An adversary can control **all** the relays in a chain.
 That adversary then learns that a client at IP address X delivered to queue Q.
 UMBRA decreases the probability of this condition with the path-selection
-constraints in Part 10. **[THR-007]** A client MUST select the relays of one chain from
-different organizations in different jurisdictions. The selection algorithm
-applies weights, thus no operator can increase its share of the paths at a low
-cost.
+constraints in Part 10. **[THR-007]** A client MUST select the relays of one
+chain from different organizations in different jurisdictions. The selection
+algorithm applies weights, thus no operator can increase its share of the paths
+at a low cost.
 
 **The bootstrap exception.** `THR-007` has two exceptions, and Part 3 §3.4.6
-holds both. Rule `NET-200` lets hop 2 share a jurisdiction bloc with one
-end of the chain when the relay set holds fewer than three blocs. Rules
-`NET-340`, `NET-350` and `NET-351` let a client build a chain of one
-operator, in one bloc, and at one provider, while the signed directory is
-provisional. That is the state of a network that one operator starts. In
+holds both.
+
+- Rule `NET-200` lets hop 2 share a jurisdiction bloc with one end of the
+  chain when the relay set holds fewer than three blocs.
+- Rules `NET-340`, `NET-350` and `NET-351` let a client build a chain of one
+  operator, in one bloc, and at one provider, while the signed directory is
+  provisional.
+
+The second exception is the state of a network that one operator starts. In
 that state A2 and A3 are one party. The operator of the network runs each
 hop, and it joins the address of a client to the queues of that client.
+
 The client shows the state and each such circuit to the user. The exception
-ends at the first key set at the authority floor. The trade table of
-§2.4 and Part 15 §15.3 each hold its row.
+ends at the first key set at the authority floor. The trade table of §2.4 and
+Part 15 §15.3 each hold its row.
 
 UMBRA does **not** claim security against an adversary that controls the
 majority of the relay capacity. Part 15 quantifies that residual risk.
@@ -162,12 +167,17 @@ and the task snapshot service. A7 reads each byte that the client gives to a
 platform interface. A7 cannot open the encrypted store of Part 14 §14.6.4, and
 A7 cannot decrypt a record in transit.
 
-Android is the v1 platform, and Part 1 §1.1 defers the web client. On
-the web client of Part 14 §14.7, when it ships, A7 is the browser, the browser profile and its sync to the
-account of the user at the browser vendor, each other extension that the user
-installed, and the download location. This section keeps the abstract term
-*the platform*, because the rule below binds each platform, and each platform
-that a later version adds.
+Android is the v1 platform, and Part 1 §1.1 defers the web client. On the web
+client of Part 14 §14.7, when it ships, A7 is:
+
+- the browser;
+- the browser profile and its sync to the account of the user at the browser
+  vendor;
+- each other extension that the user installed;
+- the download location.
+
+This section keeps the abstract term *the platform*, because the rule below
+binds each platform, and each platform that a later version adds.
 
 **[THR-015]** A web client MUST NOT run as a page that a host serves, because
 trust assumption 4 of §2.6 fails for such a page at each load. Part 14 §14.7
@@ -214,17 +224,19 @@ realizes the goal.
 | G11 | **Membership privacy** — no relay learns the membership of a private group | A2, A5 † | Part 11 |
 | G13 | **No compellable identity data** — infrastructure operators hold no data that identifies a user | A5 † | Parts 3, 10, 15 |
 
-> † This goal holds only to the limit that Part 15 states. For G7 and G11 the
-> limit is an active A2 or an active A3, and Part 15 §15.3 gives it. For G11 the
-> group-queue relay also holds a bounded view. It learns the member count of a
-> group at each rotation, the count of reader sessions and writer sessions, and
-> the time and the bucket of each record. It learns no identity and no
-> membership list. Part 3 §3.11 states that view, and Part 15 §15.3 records it.
-> For G13 the
-> limit is the ingress relay, which sees a client IP address because it carries
-> the connection. Part 15 §15.1 holds that row, and Part 15 §15.3 records the
-> residual. No protocol removes that address from the party that carries the
-> packet.
+> † This goal holds only to the limit that Part 15 states.
+>
+> - For G7 and G11 the limit is an active A2 or an active A3, and
+>   Part 15 §15.3 gives it.
+> - For G11 the group-queue relay also holds a bounded view. It learns the
+>   member count of a group at each rotation, the count of reader sessions and
+>   writer sessions, and the time and the bucket of each record. It learns no
+>   identity and no membership list. Part 3 §3.11 states that view, and
+>   Part 15 §15.3 records it.
+> - For G13 the limit is the ingress relay, which sees a client IP address
+>   because it carries the connection. Part 15 §15.1 holds that row, and
+>   Part 15 §15.3 records the residual. No protocol removes that address from
+>   the party that carries the packet.
 
 > **Note on the goal numbers.** This table has no G12. The number G12 is
 > reserved, and no goal uses it. Censorship resistance is not a goal, and §2.5
@@ -233,11 +245,11 @@ realizes the goal.
 
 ## 2.4 Usability goals
 
-These goals are **normative**. **[THR-008]** A conformant implementation MUST meet each
-goal of the table below. A protocol that users abandon protects no person. This
-specification states the goals as measurable targets, thus a test can show
-conformance. §2.4.2 gives the sociality goals, and rule `THR-014` binds an
-implementation to them in the same manner.
+These goals are **normative**. **[THR-008]** A conformant implementation MUST
+meet each goal of the table below. A protocol that users abandon protects no
+person. This specification states the goals as measurable targets, thus a test
+can show conformance. §2.4.2 gives the sociality goals, and rule `THR-014` binds
+an implementation to them in the same manner.
 
 | # | Goal | Target |
 | --- | --- | --- |
@@ -264,13 +276,12 @@ implementation to them in the same manner.
 > **U9 has a design consequence.** UMBRA cannot collect two-sided debug logs,
 > because such logs destroy metadata resistance. This limit is the cause of the
 > unable-to-decrypt class of failures in Matrix, which has continued since 2017.
-> **[THR-009]** Thus the wire format MUST carry sufficient in-band context for a receiver to
-> **classify a failure alone**. This context is the session identifier, the
-> ratchet epoch, and the message index. The receiver then sends the key
-> request of Part 6 §6.6.11 to the sender on the existing pairwise queue, with
-> no user action. Part 6 §6.5
-> carries the three values in the `ctx` field and the braid frame of a ratchet
-> record, outside the header ciphertext.
+> **[THR-009]** Thus the wire format MUST carry sufficient in-band context for a
+> receiver to **classify a failure alone**. This context is the session
+> identifier, the ratchet epoch, and the message index. The receiver then sends
+> the key request of Part 6 §6.6.11 to the sender on the existing pairwise
+> queue, with no user action. Part 6 §6.5 carries the three values in the `ctx`
+> field and the braid frame of a ratchet record, outside the header ciphertext.
 >
 > **U3 has two scopes, and Part 8 §8.3 is the cause.** Private mode wakes the
 > device on a fixed clock, and a message arrival does not change that clock.
@@ -303,16 +314,18 @@ implementation to them in the same manner.
 > key (Part 14 rule `IMP-127`). The owner device of Part 7 §7.5.4 then sends
 > no record for a linked device, reads no pairwise queue, and carries no
 > sync record to another device of the set. A linked device that composes
-> waits for the unlock of the owner. The ownership claim of Part 7 §7.3.1
-> is the designed bound: a device claims after `OWNER_TIMEOUT` of 90 s, at
-> most `OWNER_CLAIM_RATE` times each day. v1 builds no claim of that scope
-> (Part 7 rule `DEV-287`), thus in v1 the wait has no bound but the
-> unlock. An owner that is gone for `OWNER_ABSENCE` of 24 h is absent, and
-> a linked device then takes the set over under Part 7 §7.7. The second
-> clause of U2 thus covers an unlocked
-> owner alone. In Instant mode a locked client still shows which
-> conversation waits, under Part 8 rule `NTF-136`, and U3 measures that
-> alert. Part 15 §15.3 holds the row.
+> waits for the unlock of the owner.
+>
+> The ownership claim of Part 7 §7.3.1 is the designed bound: a device claims
+> after `OWNER_TIMEOUT` of 90 s, at most `OWNER_CLAIM_RATE` times each day.
+> v1 builds no claim of that scope (Part 7 rule `DEV-287`), thus in v1 the
+> wait has no bound but the unlock. An owner that is gone for `OWNER_ABSENCE`
+> of 24 h is absent, and a linked device then takes the set over under
+> Part 7 §7.7. The second clause of U2 thus covers an unlocked owner alone.
+>
+> In Instant mode a locked client still shows which conversation waits, under
+> Part 8 rule `NTF-136`, and U3 measures that alert. Part 15 §15.3 holds the
+> row.
 >
 > **U4b names no target in v1.** A Private wake of Part 8 §8.3 opens
 > each queue-relay session of the model day, because the client cannot know
@@ -344,8 +357,8 @@ the conflict explicitly and names the resolution. A silent trade of a U-goal for
 a G-goal is prohibited, and the reverse trade is also prohibited. Each trade
 appears in the text of this specification.
 
-The table below names each trade that this specification states. **[THR-010]** A revision that
-adds a trade MUST add a row to this table.
+The table below names each trade that this specification states. **[THR-010]** A
+revision that adds a trade MUST add a row to this table.
 
 | Trade | Where the text states it |
 | --- | --- |
@@ -444,10 +457,10 @@ those rules has to check the goal again.
 | S2 | Part 9 §9.4, Part 9 §9.6, Part 8 §8.2.6 | A typed handle at a fresh install, timed in the same manner as S1 |
 | S3 | Part 6 §6.6.7 `WIR-358`, Part 4 §4.3.1 | A three-party introduction, timed from the request to the shown offer |
 
-**[THR-011]** A revision that adds a usability goal or a sociality goal MUST add
-a row to this table.
-**[THR-012]** A revision that changes a rule of a row MUST measure that goal
-again.
+- **[THR-011]** A revision that adds a usability goal or a sociality goal MUST
+  add a row to this table.
+- **[THR-012]** A revision that changes a rule of a row MUST measure that goal
+  again.
 
 > *Cause.* Part 14 gives the assurance program of the cryptography and it gives
 > no test plan for a usability goal. Without this table, a rule in one part
@@ -533,9 +546,8 @@ lists them, thus a reader can check them and does not have to find them.
 4. **The client binary that the user runs is the binary that the auditor
    examined.** v1 gives no method to check this assumption (Part 14 §14.8,
    Part 15 §15.5). If the assumption fails, all the other guarantees become
-   void. A web page that a host serves fails this
-   assumption at each load, and Part 14 §14.7 gives the deferred web client
-   a form that holds it.
+   void. A web page that a host serves fails this assumption at each load,
+   and Part 14 §14.7 gives the deferred web client a form that holds it.
 5. **The user verifies a contact out-of-band a minimum of one time** for a
    conversation with serious consequences after a compromise. Part 4 §4.5.2
    makes the ceremony one QR scan or one six-digit code, and UMBRA cannot make

@@ -21,9 +21,9 @@ UnifiedPush.
 Thus the design goal of UMBRA is **not** to hide from the push provider that a
 build carries. The goal is this:
 
-> **[NTF-001]** **One infrastructure party MUST NOT hold a passive database of push-token
-> bindings.** That prohibition covers a binding to a queue, to a contact, and to
-> a messaging identity.
+> **[NTF-001]** **One infrastructure party MUST NOT hold a passive database of
+> push-token bindings.** That prohibition covers a binding to a queue, to a
+> contact, and to a messaging identity.
 
 That wording is deliberate. Instant notification delivery makes a live
 correlation point. The queue relay knows `(handle_i, k_tok_i)` for a queue. The
@@ -60,29 +60,31 @@ threat model and its own trust boundary.
 - The NDR holds the FCM service account, and it posts to FCM alone. **A queue
   relay does not touch a provider credential.**
 - The NDR stores `(handle, ct_token)` pairs only. It does not hold `k_tok`.
-- **[NTF-002]** The hop from the queue relay to the NDR MUST use Oblivious HTTP (RFC 9458) or
-  a second mix hop. Thus the NDR cannot learn which relay holds a given handle.
-  Without this hop, the NDR learns that the relays R1 and R2 serve the token T,
-  which shows the relay set of the user. **[NTF-115]** The OHTTP of that hop
-  MUST use the HPKE of AUX-6, and its key configuration and its request header
-  MUST carry the suite identifiers of Part 5 §5.4 in place of the registry
-  values of RFC 9180.
+- **[NTF-002]** The hop from the queue relay to the NDR MUST use Oblivious HTTP
+  (RFC 9458) or a second mix hop. Thus the NDR cannot learn which relay holds a
+  given handle. Without this hop, the NDR learns that the relays R1 and R2 serve
+  the token T, which shows the relay set of the user.
+
+  **[NTF-115]** The OHTTP of that hop MUST use the HPKE of AUX-6, and its key
+  configuration and its request header MUST carry the suite identifiers of
+  Part 5 §5.4 in place of the registry values of RFC 9180.
+
   **[NTF-126]** The inner message of that OHTTP MUST be one `NdrRequest` of
-  §8.2.7 and its response one `NdrResponse`, with no Binary HTTP around
-  them. The request label MUST be `"message/umbra-ndr request"` and the
-  response label `"message/umbra-ndr response"` in place of the
-  `message/bhttp` labels of RFC 9458 §4.3 and §4.4, as RFC 9458 §4.6 permits
-  for another media type. The key configuration of the gateway MUST list one
-  suite, the UMBRA suite.
-  **[NTF-127]** A client build and the settings of a queue relay MUST pin
-  the route to the NDR: the URL of the OHTTP relay, the key id, and the key
+  §8.2.7 and its response one `NdrResponse`, with no Binary HTTP around them.
+  The request label MUST be `"message/umbra-ndr request"` and the response
+  label `"message/umbra-ndr response"` in place of the `message/bhttp` labels
+  of RFC 9458 §4.3 and §4.4, as RFC 9458 §4.6 permits for another media type.
+  The key configuration of the gateway MUST list one suite, the UMBRA suite.
+
+  **[NTF-127]** A client build and the settings of a queue relay MUST pin the
+  route to the NDR: the URL of the OHTTP relay, the key id, and the key
   configuration of the gateway. A party MUST NOT take that key from a fetch
   that no signature covers, because an OHTTP relay that handed its own key
-  would read each request. A relay with the OHTTP relay role MUST forward
-  each request to the gateway without a change, MUST keep no request and no
+  would read each request. A relay with the OHTTP relay role MUST forward each
+  request to the gateway without a change, MUST keep no request and no
   response, and MUST write no log line that names a sender. The reference
-  relay serves the role at `POST /ohttp` beside its WebSocket upgrade, and
-  the reference NDR serves the gateway at `POST /gateway`.
+  relay serves the role at `POST /ohttp` beside its WebSocket upgrade, and the
+  reference NDR serves the gateway at `POST /gateway`.
 
 ### 8.2.1 Token blinding
 
@@ -95,12 +97,12 @@ ct_token_i = XChaCha20-Poly1305(k_tok_i, nonce, push_token, ad = handle_i)
 ```
 
 **[NTF-031]** A device in Instant mode MUST make one `k_tok` and one `handle`
-for each group of at most `MAX_QUEUES_PER_HANDLE` queues. A queue in Direct
-mode takes `WATCH_HANDLE` of `NTF-143` and no group. **[NTF-032]** A device MUST NOT put more
-than `MAX_QUEUES_PER_HANDLE` queues under one handle. **[NTF-033]** A device
-MUST set `MAX_QUEUES_PER_HANDLE` equal to the `MAX_QUEUES_PER_SESSION` of Part 3
-§3.2.5, which is 8. **[NTF-034]** A device MUST divide its queues across handles
-again at each rotation of NTF-007.
+for each group of at most `MAX_QUEUES_PER_HANDLE` queues. A queue in Direct mode
+takes `WATCH_HANDLE` of `NTF-143` and no group. **[NTF-032]** A device MUST NOT
+put more than `MAX_QUEUES_PER_HANDLE` queues under one handle. **[NTF-033]** A
+device MUST set `MAX_QUEUES_PER_HANDLE` equal to the `MAX_QUEUES_PER_SESSION` of
+Part 3 §3.2.5, which is 8. **[NTF-034]** A device MUST divide its queues across
+handles again at each rotation of NTF-007.
 
 > *Cause.* One `k_tok` and one `handle` for each **relay** is the alternative.
 > §8.2.4 gives each queue its own `notifier_id`, thus a queue relay would hold a
@@ -152,10 +154,10 @@ plaintext (24 B):
     flags          1 B    bit 0 urgent, bit 1 digest, bits 2-7 reserved
 ```
 
-**[NTF-003]** Implementations MUST NOT emit a variable-length payload. **[NTF-004]** Implementations MUST
-NOT put a field that carries content outside the AEAD envelope. Four of the
-eight "end-to-end encrypted" applications in the PETS 2024 study made that
-error.
+**[NTF-003]** Implementations MUST NOT emit a variable-length payload.
+**[NTF-004]** Implementations MUST NOT put a field that carries content outside
+the AEAD envelope. Four of the eight "end-to-end encrypted" applications in the
+PETS 2024 study made that error.
 
 The fields `ver` and `epoch` are outside the ciphertext, because a receiver
 needs `epoch` to select the key of §8.2.3. **[NTF-035]** An implementation MUST
@@ -183,14 +185,14 @@ k_epoch = HKDF-SHA3-256(k_ntf_root, salt = epoch_be32, info = "umbra/v1/ntf")
    where epoch = floor(unix_time / 86400)
 ```
 
-The device holds `k_ntf_root` and derives the key of each epoch of the window
-of `NTF-075` from it. That window is the epoch of its clock, the one before
-it, and the one after it. The method needs no state negotiation. It gives no forward secrecy
-inside the life of one root, because each epoch key derives from the root that
-the device holds. The rotation of `NTF-007` bounds that life at 7 days. The
-wake table of `NTF-135` holds each root in use outside `K_store`. Thus a party
-that seizes an Android device in Instant mode opens each blob of those roots
-that it recorded before.
+The device holds `k_ntf_root` and derives the key of each epoch of the window of
+`NTF-075` from it. That window is the epoch of its clock, the one before it, and
+the one after it. The method needs no state negotiation. It gives no forward
+secrecy inside the life of one root, because each epoch key derives from the
+root that the device holds. The rotation of `NTF-007` bounds that life at 7
+days. The wake table of `NTF-135` holds each root in use outside `K_store`. Thus
+a party that seizes an Android device in Instant mode opens each blob of those
+roots that it recorded before.
 
 **The acceptance window.** The relay and the device hold two clocks, and Part
 1 §1.9 lets them differ by `CLOCK_SKEW`. Thus a blob can name the epoch before
@@ -239,6 +241,7 @@ NotifyBinding {                   // 98 bytes, sealed under NBIND
   `"umbra/v1/ntf"` as the HPKE info and the `RecipientId` of the queue as the
   associated data, and MUST send it as the `NBIND` of that queue. The payload
   is the encapsulation, then the ciphertext with its tag, which is 1 234 bytes.
+
   **[NTF-114]** A queue relay MUST seal the blobs of that queue under the
   fields of the binding, and it MUST NOT hold a binding after the queue is
   deleted or after the rotation of `NTF-007` replaces it. It MUST send a
@@ -257,11 +260,14 @@ NotifyBinding {                   // 98 bytes, sealed under NBIND
   > the next subscription of the queue takes it. The relay cannot push at
   > the end of a subscription in its place. `NET-048` and `NET-050` of Part 3
   > make a client hold each `ACK` for `RECEIPT_MIN_DELAY` and forbid a flush
-  > when the client leaves. The end of a circuit carries no cause. Thus
-  > the relay cannot tell an orderly end from a lost link. A push at each
-  > end would wake a device for a record that it holds. A wake session is
-  > shorter than the `ACK` floor, thus that wake would cause the next push
-  > too. A reason field in the `CircuitDestroy` of Part 6 §6.2.3, which lets
+  > when the client leaves.
+  >
+  > The end of a circuit carries no cause. Thus the relay cannot tell an
+  > orderly end from a lost link. A push at each end would wake a device for a
+  > record that it holds. A wake session is shorter than the `ACK` floor, thus
+  > that wake would cause the next push too.
+  >
+  > A reason field in the `CircuitDestroy` of Part 6 §6.2.3, which lets
   > the queue relay tell a lost link from an orderly close, is a planned
   > change of a later version. v1 does not carry it. Part 15 §15.3 holds the
   > row.
@@ -281,22 +287,23 @@ requirement, and the push payload stays small.
 ### 8.2.4 Separate notifier credentials
 
 A queue carries a notifier keypair of its own (`NKEY`), which returns a
-different `notifier_id`. The holder of that credential can watch the queue
-for arrivals (§8.4.3), and it **cannot read a message and cannot acknowledge
-a message**. **[NTF-005]** A party
-MUST NOT be able to derive the notifier ID from the `RecipientId` of the queue.
-**[NTF-006]** A party MUST NOT be able to derive the notifier ID from the `SenderId` of the
-queue.
+different `notifier_id`. The holder of that credential can watch the queue for
+arrivals (§8.4.3), and it **cannot read a message and cannot acknowledge a
+message**. **[NTF-005]** A party MUST NOT be able to derive the notifier ID from
+the `RecipientId` of the queue. **[NTF-006]** A party MUST NOT be able to derive
+the notifier ID from the `SenderId` of the queue.
 
 The notifier key is an X25519 key pair. Its secret is
 `HKDF-SHA3-256(k_ntf_root, salt = RecipientId, info = "umbra/v1/ntf-notifier")`,
-with the `k_ntf_root` of the handle group of the queue. Thus the key
-rotates with that root under `NTF-007`, and the store holds no copy of it.
-The notifier key is no queue key of Part 3 §3.2.2, and `NET-009` to
-`NET-014` do not apply to it. A queue relay that holds the binding of the
-queue holds `k_ntf_root`, thus it can derive the notifier key of each queue
-of that handle group. That relay links those queues through the handle
-already (`NTF-031`), thus the derivation links no more.
+with the `k_ntf_root` of the handle group of the queue. Thus the key rotates
+with that root under `NTF-007`, and the store holds no copy of it.
+
+The notifier key is no queue key of Part 3 §3.2.2, and `NET-009` to `NET-014`
+do not apply to it. A queue relay that holds the binding of the queue holds
+`k_ntf_root`, thus it can derive the notifier key of each queue of that handle
+group. That relay links those queues through the handle already (`NTF-031`),
+thus the derivation links no more.
+
 The relay draws a fresh `notifier_id` at each `NKEY`, and it ends the
 credential before it.
 
@@ -326,10 +333,9 @@ name a rendezvous queue. That queue address is public, thus a crawl of the
 directory holds it. Part 9 rule `DIS-014` polls that queue through a different
 relay chain from the pairwise queues. The rules below give its wake.
 
-- **[NTF-043]** In Instant mode, a client MUST register a rendezvous queue
-  under a notification handle of its own.
-  **[NTF-044]** A client MUST NOT put a rendezvous queue and a pairwise queue
-  under one `(handle, k_tok)` of §8.2.1.
+- **[NTF-043]** In Instant mode, a client MUST register a rendezvous queue under
+  a notification handle of its own. **[NTF-044]** A client MUST NOT put a
+  rendezvous queue and a pairwise queue under one `(handle, k_tok)` of §8.2.1.
 - **[NTF-045]** In Private mode, a client MUST NOT register a rendezvous queue
   with the Notification Delivery Relay. **[NTF-046]** In Private mode, a client
   MUST drain each rendezvous queue at least one time in each 24 h. The client
@@ -338,13 +344,12 @@ relay chain from the pairwise queues. The rules below give its wake.
 - **[NTF-047]** In Off mode, a client MUST drain each rendezvous queue at each
   foreground session.
 
-A drain costs one transport handshake of about 6 000 bytes, one circuit build
-of 12 576 bytes, and two `B0` cells, which is 19 696 bytes. A daily drain is
-about 0.59 MB each month. Part 3 §3.12 does not count it, because a published
-handle is an opt-in surface, and the margin of that table covers it. A hello in
-Instant mode is one push wake, and it is rare, thus that table adds no row for
-it. Part 2 §2.4.2 goal S1 sets the
-latency of each mode.
+A drain costs one transport handshake of about 6 000 bytes, one circuit build of
+12 576 bytes, and two `B0` cells, which is 19 696 bytes. A daily drain is about
+0.59 MB each month. Part 3 §3.12 does not count it, because a published handle
+is an opt-in surface, and the margin of that table covers it. A hello in Instant
+mode is one push wake, and it is rare, thus that table adds no row for it.
+Part 2 §2.4.2 goal S1 sets the latency of each mode.
 
 > *Cause.* Part 9 §9.6 defines the hello. Without a rule that drains the queue
 > that receives it, a contact request waits for a foreground session. The
@@ -359,9 +364,9 @@ latency of each mode.
 ### 8.2.7 The requests of the NDR
 
 §8.2.1 names a registration and a push, and this section gives their formats.
-The NDR takes three requests. `NDR_REQUEST_LEN` is 640 bytes and `PUSH_TOKEN_MAX` is 512 bytes. Each
-request travels inside the OHTTP of `NTF-002`, and the
-NDR answers each with a response of 16 bytes.
+The NDR takes three requests. `NDR_REQUEST_LEN` is 640 bytes and
+`PUSH_TOKEN_MAX` is 512 bytes. Each request travels inside the OHTTP of
+`NTF-002`, and the NDR answers each with a response of 16 bytes.
 
 ```
 NdrRequest {                      // NDR_REQUEST_LEN = 640 bytes
@@ -383,31 +388,32 @@ PushToken   { carrier u8, target }         // the plaintext of ct_token, at most
   bytes, and the NDR MUST refuse a request whose padding is not zero. Thus
   the OHTTP relay cannot tell a registration from a push by its length.
 - **[NTF-123]** The plaintext of `ct_token` MUST be a `PushToken`: carrier
-  `0x02` is FCM and its target is the registration token. The
-  target MUST be printable ASCII. Carrier `0x01` is reserved, and no
-  version serves it. The value does not return for another carrier. A device MUST NOT register carrier `0x01`.
+  `0x02` is FCM and its target is the registration token. The target MUST be
+  printable ASCII. Carrier `0x01` is reserved, and no version serves it. The
+  value does not return for another carrier. A device MUST NOT register carrier
+  `0x01`.
 - **[NTF-124]** A device MUST draw a fresh 32-byte removal secret for the
   first registration of a handle, and each later registration of that
   handle MUST take `SHA3-256("umbra/v1/ndr-removal" || prior)` as its
   removal secret, where `prior` is the secret of the registration before
   it. The device sends the `SHA3-256` of the secret as `removal_hash`, and
   it carries the secret that it holds for the handle in `prior` in each
-  request. The NDR MUST drop a registration at an `NUNREG` whose `removal`
-  opens it, MUST answer `taken` to an `NUNREG` for a handle that it does not
-  hold, and MUST refuse any other `NUNREG`. The NDR MUST take an `NREG` for a
+  request.
+
+  The NDR MUST drop a registration at an `NUNREG` whose `removal` opens it,
+  MUST answer `taken` to an `NUNREG` for a handle that it does not hold, and
+  MUST refuse any other `NUNREG`. The NDR MUST take an `NREG` for a
   handle that it holds only when `prior` opens that registration. A secret
   opens a registration when its `SHA3-256`, or the `SHA3-256` of the next
   secret of the chain, equals the `removal_hash` held: the second form
   repeats a move whose answer the device did not see.
 
   > *Cause.* Without the chain, an answer that the network loses leaves the
-  > device with a request that the NDR refuses at each later try: a first
-  > `NREG` that landed, an `NUNREG` that landed, or a move that landed. The
-  > chain of
-  > secrets makes each request safe to send again. The NDR reads each
-  > secret in `prior` and can compute the chain, but a queue relay reads
-  > the handle alone and never a secret, and no party that reads the hashes
-  > alone moves a handle.
+  > device with a request that the NDR refuses at each later try: a first `NREG`
+  > that landed, an `NUNREG` that landed, or a move that landed. The chain of
+  > secrets makes each request safe to send again. The NDR reads each secret in
+  > `prior` and can compute the chain, but a queue relay reads the handle alone
+  > and never a secret, and no party that reads the hashes alone moves a handle.
 - **[NTF-125]** The NDR MUST bound the `ttl` of an `NPUSH` at
   `PUSH_TTL_MESSAGE`, and it MUST answer `gone` and drop the registration
   when the provider names the target gone. It MUST answer `gone` to an
@@ -447,10 +453,9 @@ own work with the four limits below, and it holds them in memory alone.
   of the registrations. One OHTTP relay that a flood passes through
   leaves the devices behind each other relay their part.
 - The NDR takes at most 16 pushes for one handle inside one
-  `WAKE_COALESCE_WINDOW`, which is two for each of the
-  `MAX_QUEUES_PER_HANDLE` queues. The window of a relay and the window of
-  the NDR start at different times. It refuses a push above the bound, and
-  that push goes to no provider.
+  `WAKE_COALESCE_WINDOW`, which is two for each of the `MAX_QUEUES_PER_HANDLE`
+  queues. The window of a relay and the window of the NDR start at different
+  times. It refuses a push above the bound, and that push goes to no provider.
 - The NDR holds the hash of each of the last 262 144 requests that proved a
   right, over the handle and the encapsulated bytes. A request that
   repeats one does nothing. A request proves a right when it is a push
@@ -460,31 +465,32 @@ own work with the four limits below, and it holds them in memory alone.
   the hash of each request that the gateway opens lets any party push the
   hash of a kept `NPUSH` out with requests that do nothing.
 
-> *Residual.* A flood of first `NREG` requests at the rate above takes the
-> place of the oldest registrations that took no push. A device that
-> registered long before and got no push is among them. A queue relay that
-> pushes for that device gets the answer `gone` and drops its binding under
-> `NTF-125`. Thus the device gets no push until the rotation of `NTF-007`
-> gives it a new handle, inside 7 days. A restart of the NDR takes each registration for one
-> that took no push, and it empties the memory of the requests. So does a
-> party that brings 262 144 requests that prove a right. Each one is a push
-> under a `k_tok`, or a new handle under the rate above, which is more than
-> three hours for all of them. A kept `NPUSH` that passes again after either
-> is one push of its handle under the bound of 16 in one window, until the
-> rotation of `NTF-007` ends its `k_tok`. v1 puts no admission on a first
-> `NREG`. That admission is a planned change of a later version.
+> *Residual.* A flood of first `NREG` requests at the rate above takes the place
+> of the oldest registrations that took no push. A device that registered long
+> before and got no push is among them. A queue relay that pushes for that
+> device gets the answer `gone` and drops its binding under `NTF-125`. Thus the
+> device gets no push until the rotation of `NTF-007` gives it a new handle,
+> inside 7 days.
+>
+> A restart of the NDR takes each registration for one that took
+> no push, and it empties the memory of the requests. So does a party that
+> brings 262 144 requests that prove a right. Each one is a push under a
+> `k_tok`, or a new handle under the rate above, which is more than three hours
+> for all of them. A kept `NPUSH` that passes again after either is one push of
+> its handle under the bound of 16 in one window, until the rotation of
+> `NTF-007` ends its `k_tok`. v1 puts no admission on a first `NREG`. That
+> admission is a planned change of a later version.
 
-- **[NTF-130]** The NDR MUST send an FCM push through the HTTP v1 API of
-  FCM as a data message with no `notification` field: the one data field
-  `b` holds the blob in base64url with no padding, `android.priority` is
-  `HIGH`, and `android.ttl` is the expiry of the push in seconds. The NDR
-  MUST take a status 404 from FCM whose error body names the error code
-  `UNREGISTERED` as the answer that the token is gone. FCM gives a 404 for
-  other faults too, as for a project that does not exist. Such an answer
-  MUST drop no registration. The
-  NDR MUST sign the assertion of its access token with the key of the service
-  account of the deployment, and it MUST NOT give that account or its token
-  to any other party.
+- **[NTF-130]** The NDR MUST send an FCM push through the HTTP v1 API of FCM as
+  a data message with no `notification` field: the one data field `b` holds the
+  blob in base64url with no padding, `android.priority` is `HIGH`, and
+  `android.ttl` is the expiry of the push in seconds. The NDR MUST take a status
+  404 from FCM whose error body names the error code `UNREGISTERED` as the
+  answer that the token is gone. FCM gives a 404 for other faults too, as for a
+  project that does not exist. Such an answer MUST drop no registration. The NDR
+  MUST sign the assertion of its access token with the key of the service
+  account of the deployment, and it MUST NOT give that account or its token to
+  any other party.
 
 > *Cause of `NTF-124`.* A queue relay knows each handle of its queues. A
 > removal or a replacement that needed the handle alone would let that relay
@@ -554,21 +560,25 @@ and the arrival of a message does not change that schedule. Thus the wake time
 carries **no information** about a message arrival.
 
 **The floor of the cadence.** Two bounds set the floor of the cadence, and no
-platform push ceiling is one of them. The first bound is Doze. §8.4.1 states
-that Doze limits `setExactAndAllowWhileIdle` to one call in each 9 min, thus a
-fixed clock shorter than 9 min needs a foreground service that the user can
-see. The second bound is the U5 battery row of Part 3 §3.12. Part 3 §3.6.2
-derives about 9.1 mWh for each radio promotion, and the fixed term of U5 in
-Part 2 §2.4 permits 0.308 Wh in each day with no arrival. A 20 min cadence
-makes 72 wakes in each day. If each wake promoted the radio, the cost is
-72 × 9.1 mWh, which is about 0.655 Wh, and that is more than twice the U5 fixed
-term. A 30 min cadence makes 48 wakes, which is about 0.437 Wh under the same
-model. The carrier of Private mode holds no connection between two ticks.
-Thus each tick promotes the radio, and the model above is its cost and not
-an upper bound only. **The figure of 0.655 Wh is a
-model and not a measurement.** Part 3 §3.12 states the same figure as the
-Private row of its battery table, and §8.8 repeats it as the upper bound. Part
-2 §2.4 scopes U5 to Instant mode, thus U5 does not measure the Private column.
+platform push ceiling is one of them.
+
+1. **Doze.** §8.4.1 states that Doze limits `setExactAndAllowWhileIdle` to one
+   call in each 9 min, thus a fixed clock shorter than 9 min needs a
+   foreground service that the user can see.
+2. **The U5 battery row of Part 3 §3.12.** Part 3 §3.6.2 derives about
+   9.1 mWh for each radio promotion, and the fixed term of U5 in Part 2 §2.4
+   permits 0.308 Wh in each day with no arrival. A 20 min cadence makes 72
+   wakes in each day. If each wake promoted the radio, the cost is
+   72 × 9.1 mWh, which is about 0.655 Wh, and that is more than twice the U5
+   fixed term. A 30 min cadence makes 48 wakes, which is about 0.437 Wh under
+   the same model.
+
+The carrier of Private mode holds no connection between two ticks. Thus each
+tick promotes the radio, and the model above is its cost and not an upper
+bound only. **The figure of 0.655 Wh is a model and not a measurement.**
+Part 3 §3.12 states the same figure as the Private row of its battery table,
+and §8.8 repeats it as the upper bound. Part 2 §2.4 scopes U5 to Instant mode,
+thus U5 does not measure the Private column.
 
 **[NTF-087]** An implementation MUST measure the wake cost of the fixed clock
 on a mid-range Android device, with a power monitor, before a revision re-tunes
@@ -592,14 +602,15 @@ again at each change of its ingress relay pair. The phase is the offset of the
 wake inside the interval. One phase across two networks links the two, and Part
 15 §15.3 states that residual.
 
-**[NTF-009]** The UI MUST show the trade in one honest line, and **[NTF-010]**
-the UI MUST NOT hide Private mode. **[NTF-011]** Onboarding MUST NOT ask the
-user to select a threat model. **[NTF-082]** The settings MUST offer the
-high-risk configuration, which is Private notifications with the content
-preview off: one screen holds the two controls, and a shortcut that sets both
-adds nothing that the user cannot do. **[NTF-083]** A build MUST ship Instant mode with the content
-preview off as the default of each Profile. That default applies to each build
-that holds FCM, and `NTF-140` gives the mode of a build with no FCM.
+- **[NTF-009]** The UI MUST show the trade in one honest line, and
+  **[NTF-010]** the UI MUST NOT hide Private mode.
+- **[NTF-011]** Onboarding MUST NOT ask the user to select a threat model.
+- **[NTF-082]** The settings MUST offer the high-risk configuration, which is
+  Private notifications with the content preview off: one screen holds the two
+  controls, and a shortcut that sets both adds nothing that the user cannot do.
+- **[NTF-083]** A build MUST ship Instant mode with the content preview off as
+  the default of each Profile. That default applies to each build that holds
+  FCM, and `NTF-140` gives the mode of a build with no FCM.
 
 > *Cause.* A user at the first launch cannot weigh a threat model, and U1 of
 > Part 2 §2.4 permits no security decision before the inbox. Thus onboarding
@@ -625,30 +636,30 @@ the poll below carry the wakes.
 - Declare `specialUse`, and **do not declare `dataSync`**. Android 15 limits
   `dataSync` to 6 hours in 24 hours, and it then throws a
   `RemoteServiceException`.
-- Implement `Service.onTimeout()` and call `stopSelf()`. **[NTF-012]** **A client MUST NOT
-  hold the push-wake session longer than 6 s.** Part 3 §3.12 derives that
-  bound from the U4 idle background budget. That bound is a ceiling, and Part 3
-  §3.12 models a wake of 3 s.
-- **[NTF-013]** **A client MUST NOT build a spare circuit in a push-wake session.** Part 3
-  §3.12 gives the cause, which is the same U4 budget. A wake needs one circuit,
-  because no interactive send waits on a rotation.
+- Implement `Service.onTimeout()` and call `stopSelf()`. **[NTF-012]** **A
+  client MUST NOT hold the push-wake session longer than 6 s.** Part 3 §3.12
+  derives that bound from the U4 idle background budget. That bound is a
+  ceiling, and Part 3 §3.12 models a wake of 3 s.
+- **[NTF-013]** **A client MUST NOT build a spare circuit in a push-wake
+  session.** Part 3 §3.12 gives the cause, which is the same U4 budget. A wake
+  needs one circuit, because no interactive send waits on a rotation.
 - Track the budget of 6 h in 24 h as a local counter with no telemetry. Thus the
   client can detect starvation.
-- **[NTF-014]** A high-priority FCM message MUST always cause a notification that the user can
-  see. If it does not, the 7-day behavioral heuristic of Google silently
-  downgrades the application to normal priority and breaks the delivery in Doze.
+- **[NTF-014]** A high-priority FCM message MUST always cause a notification
+  that the user can see. If it does not, the 7-day behavioral heuristic of
+  Google silently downgrades the application to normal priority and breaks the
+  delivery in Doze.
 
-A **persistent socket** is the second carrier of Instant mode, behind the
-same Rust trait. It needs no Notification Delivery Relay and no provider,
-thus it is the carrier of Direct mode and of a device that holds no FCM. The poll of `NTF-131`
-is the third.
+A **persistent socket** is the second carrier of Instant mode, behind the same
+Rust trait. It needs no Notification Delivery Relay and no provider, thus it is
+the carrier of Direct mode and of a device that holds no FCM. The poll of
+`NTF-131` is the third.
 
 - **[NTF-116]** A client that carries its wakes over a persistent socket MUST
   hold that socket in a `specialUse` foreground service, with a notice that the
-  user can see for the whole time. That notice is no message, thus its
-  channel MUST show no badge on the icon of the application. Android
-  closes the sockets of an application a short time after it leaves the
-  screen, and a test on an
+  user can see for the whole time. That notice is no message, thus its channel
+  MUST show no badge on the icon of the application. Android closes the sockets
+  of an application a short time after it leaves the screen, and a test on an
   emulator of API 35 showed the close after 45 seconds. The 6 s bound of
   `NTF-012` applies to a push-wake session, and it does not apply to this
   service.
@@ -693,25 +704,24 @@ after 15 minutes with no action of the user. A locked client holds no
 section delivers a record to it. The **wake key** lets it open the blob of
 §8.2.2 all the same, and show which conversation waits.
 
-- **[NTF-135]** An Android client in Instant mode or in Direct mode MUST hold
-  a **wake table**
-  outside `K_store`: each `k_ntf_root` that a binding of §8.2.3 uses, and
-  each `queue_alias` with the conversation of its queue. It MUST seal the
-  table under a key of the platform keystore that needs no user
-  authentication, and it MUST write the table again while it is open, after
-  each change of a binding and when it leaves the foreground. A queue that
-  raises no alert, as the queue of a conversation that Part 7 `DEV-331` mutes
-  with no end, names 16 bytes `0xFF` in the place of its conversation. The
-  table MUST hold the end of each other mute for the `queue_alias` of its
-  conversation, and a locked client MUST show no alert for such an alias
-  before that end. A client MUST write the table again after each change of
-  a mute and of a notification setting.
-- **[NTF-136]** A locked client MUST open each blob of a push or of a watch
-  with that table under
-  `NTF-075` to `NTF-079`. It MUST show that a message waits in the
-  conversation of `queue_alias`, grouped under `NTF-089`, with no text of a
-  message and no name of a contact. It MUST NOT fetch or acknowledge the
-  record, which stays at the relay until the unlock.
+- **[NTF-135]** An Android client in Instant mode or in Direct mode MUST hold a
+  **wake table** outside `K_store`: each `k_ntf_root` that a binding of §8.2.3
+  uses, and each `queue_alias` with the conversation of its queue. It MUST seal
+  the table under a key of the platform keystore that needs no user
+  authentication, and it MUST write the table again while it is open, after each
+  change of a binding and when it leaves the foreground.
+
+  A queue that raises no alert, as the queue of a conversation that Part 7
+  `DEV-331` mutes with no end, names 16 bytes `0xFF` in the place of its
+  conversation. The table MUST hold the end of each other mute for the
+  `queue_alias` of its conversation, and a locked client MUST show no alert for
+  such an alias before that end. A client MUST write the table again after each
+  change of a mute and of a notification setting.
+- **[NTF-136]** A locked client MUST open each blob of a push or of a watch with
+  that table under `NTF-075` to `NTF-079`. It MUST show that a message waits in
+  the conversation of `queue_alias`, grouped under `NTF-089`, with no text of a
+  message and no name of a contact. It MUST NOT fetch or acknowledge the record,
+  which stays at the relay until the unlock.
 - **[NTF-137]** A client MUST delete the wake table and its keystore key at a
   local wipe of Part 7 `DEV-008`, and when the mode changes to Private mode
   or Off mode. A change between Instant mode and Direct mode keeps them.
@@ -734,8 +744,10 @@ clock of 30 minutes, and a message arrival does not change that clock.
   registration at the NDR and its wake table when it enters the mode
   (`NTF-137`). A tick of a locked client MUST do nothing. The reference
   Android build uses an alarm that Doze permits and that needs no exact-alarm
-  permission, at the 30 min cadence. **[NTF-039]** A client MUST NOT carry a
-  fixed-cadence wake over a high-priority FCM message.
+  permission, at the 30 min cadence.
+
+  **[NTF-039]** A client MUST NOT carry a fixed-cadence wake over a
+  high-priority FCM message.
 - **[NTF-040]** A client on a platform that gives it no such timer MUST show
   that Private mode is not available on that build. **[NTF-041]** That client
   MUST NOT show Private mode as active.
@@ -793,19 +805,21 @@ platform.
 
 - **[NTF-065]** A queue relay MUST set the push expiry to `PUSH_TTL_MESSAGE` for
   a message push. **[NTF-086]** A queue relay MUST set the same
-  `PUSH_TTL_MESSAGE` for a digest push. It MUST NOT give a push a field
-  outside the blob that differs by the kind of the push. The `digest` flag
-  travels inside the AEAD of the blob of §8.2.2 alone. A device that opens a
-  blob bounds its staleness itself, from `relay_ts` of the blob. A device
-  MAY drop the alert of a digest whose `relay_ts` is older than one hour.
-  The drain of the wake still finds each record. The expiry is
+  `PUSH_TTL_MESSAGE` for a digest push. It MUST NOT give a push a field outside
+  the blob that differs by the kind of the push. The `digest` flag travels
+  inside the AEAD of the blob of §8.2.2 alone.
+
+  A device that opens a blob bounds its staleness itself, from `relay_ts` of
+  the blob. A device MAY drop the alert of a digest whose `relay_ts` is older
+  than one hour. The drain of the wake still finds each record. The expiry is
   the FCM `ttl`.
+
   **[NTF-066]** If no drain of a handle follows a push inside
-  `REPUSH_INTERVAL`, the queue relay MUST hand one more push. The rule
-  covers a message push and a digest push alike, and the push that
-  `NTF-049` hands at the end of a window. The interval runs from that
-  push. A re-push carries no `digest` flag. **[NTF-067]** A
-  queue relay MUST NOT hand more than `REPUSH_MAX` re-pushes for one message.
+  `REPUSH_INTERVAL`, the queue relay MUST hand one more push. The rule covers a
+  message push and a digest push alike, and the push that `NTF-049` hands at
+  the end of a window. The interval runs from that push. A re-push carries no
+  `digest` flag. **[NTF-067]** A queue relay MUST NOT hand more than
+  `REPUSH_MAX` re-pushes for one message.
 - **[NTF-068]** At each session open, and at each session resume, a client MUST
   run the peek of Part 3 §3.7 item 4 on each queue of that session. Thus a
   push that expired at the provider loses no message.
@@ -816,12 +830,12 @@ platform.
 | `REPUSH_INTERVAL` | 1 h. The queue relay measures it from the hand-off of the previous push for that handle |
 | `REPUSH_MAX` | 3 re-pushes for one message |
 
-> *Cause.* An expiry of 3 600 seconds with no re-push loses the wake of a
-> device that is off for longer. The message then waits for the next
-> foreground session. The blob of §8.2.2 holds no content, thus a longer expiry exposes
-> 69 bytes under an epoch key and nothing more. The re-push bounds the wait at
-> `REPUSH_INTERVAL` for a device that is reachable, and the peek covers a
-> device that is not.
+> *Cause.* An expiry of 3 600 seconds with no re-push loses the wake of a device
+> that is off for longer. The message then waits for the next foreground
+> session. The blob of §8.2.2 holds no content, thus a longer expiry exposes 69
+> bytes under an epoch key and nothing more. The re-push bounds the wait at
+> `REPUSH_INTERVAL` for a device that is reachable, and the peek covers a device
+> that is not.
 >
 > *Cause of the one expiry.* The alternative is a shorter expiry for a digest
 > push than for a message push. The `NPUSH` carries `ttl` in the clear to
@@ -854,10 +868,13 @@ of an `NPUSH`, and the client opens it with the wake table of `NTF-135`.
   signer of the deniable authenticator. The watch MUST run on a link of its
   own and on circuits of its own, with at most `MAX_QUEUES_PER_SESSION`
   watches on one circuit (Part 3 `NET-022`). It MUST hold no key of
-  `K_store`, and it MUST end at the unlock. A queue relay MUST accept an
-  `NSUB` only under the notifier credential that the queue holds, and a
-  watch MUST end with its circuit and at the next `NKEY` of the queue. A
-  client MUST NOT start a watch whose table gives no session: an ingress
+  `K_store`, and it MUST end at the unlock.
+
+  A queue relay MUST accept an `NSUB` only under the notifier credential that
+  the queue holds, and a watch MUST end with its circuit and at the next
+  `NKEY` of the queue.
+
+  A client MUST NOT start a watch whose table gives no session: an ingress
   relay with no address, a relay entry that does not parse, or a root
   certificate that does not read. A watch that can start no new session
   MUST end and tell the platform, and the platform tells the user under
@@ -904,25 +921,27 @@ of an `NPUSH`, and the client opens it with the wake table of `NTF-135`.
 > lock.
 
 > *Residual.* The watch carries no cover traffic of Part 3 §3.6, thus the
-> ingress relay sees the time of each wake at the address of the device. It
-> does not learn the account or the queue. A queue relay learns that a queue
-> is watched, and one circuit of a watch shows it at most
-> `MAX_QUEUES_PER_SESSION` notifier identifiers, which is the bound of a
-> transport session. A record that arrives while no watch of its queue
-> lives takes its wake at the next `NSUB` (`NTF-146`). The relay holds that
-> mark in memory alone, thus a restart of the relay before that `NSUB`
-> loses the wake, and the unlock shows the record. A client that leaves
-> Direct mode for Private mode or Off mode binds no queue, thus the queue
-> relay keeps each binding under `WATCH_HANDLE`. Such a binding gives no
-> `NPUSH` under `NTF-143`, and no watch starts in those modes, thus it
+> ingress relay sees the time of each wake at the address of the device. It does
+> not learn the account or the queue. A queue relay learns that a queue is
+> watched, and one circuit of a watch shows it at most `MAX_QUEUES_PER_SESSION`
+> notifier identifiers, which is the bound of a transport session.
+>
+> A record that arrives while no watch of its queue lives takes its wake at
+> the next `NSUB` (`NTF-146`). The relay holds that mark in memory alone,
+> thus a restart of the relay before that `NSUB` loses the wake, and the
+> unlock shows the record.
+>
+> A client that leaves Direct mode for Private mode or Off mode binds no queue,
+> thus the queue relay keeps each binding under `WATCH_HANDLE`. Such a binding
+> gives no `NPUSH` under `NTF-143`, and no watch starts in those modes, thus it
 > wakes nothing. The next mode that binds, or the end of the queue under
 > `NTF-114`, replaces it. Part 15 §15.3 holds the rows.
 
 ## 8.5 Coalescing and groups
 
 FCM permits 5 000 messages in one hour to one device. A conversation that makes
-one push for each record uses that budget. A busy one breaks the notifications of each other conversation
-on the device.
+one push for each record uses that budget. A busy one breaks the notifications
+of each other conversation on the device.
 
 **The coalescing applies to each handle.** A queue relay sees queues and
 handles, and it does not see the conversation class. Thus the window below
@@ -934,13 +953,12 @@ digest alike.
 | `WAKE_COALESCE_WINDOW` | 10 s. The queue relay measures it from the moment that it hands a push for a handle to the Notification Delivery Relay |
 
 - **[NTF-048]** A queue relay MUST NOT hand a second push for one handle to the
-  Notification Delivery Relay inside `WAKE_COALESCE_WINDOW`. **[NTF-049]** If
-  an event arrives inside the window, the queue relay MUST hand one push at the
-  end of the window, unless a drain of the handle or a later push for it came
-  first: that one push covers each event before it. **[NTF-050]** A revision
-  that changes
-  `WAKE_COALESCE_WINDOW` MUST derive the U3 target and the idle table of Part 3
-  §3.12 again.
+  Notification Delivery Relay inside `WAKE_COALESCE_WINDOW`. **[NTF-049]** If an
+  event arrives inside the window, the queue relay MUST hand one push at the end
+  of the window, unless a drain of the handle or a later push for it came first:
+  that one push covers each event before it. **[NTF-050]** A revision that
+  changes `WAKE_COALESCE_WINDOW` MUST derive the U3 target and the idle table of
+  Part 3 §3.12 again.
 - **[NTF-019]** A queue relay MUST apply the window to each handle, whatever
   the class of the conversation behind it. **[NTF-018]** A group above
   `GROUP_ALL_NOTIFY_MAX` members MUST NOT make one alert for each record at the
@@ -990,44 +1008,49 @@ queue with each replica of the group queue. The group-queue relay writes a
 notify queue pushes as for any queue. Part 6 §6.4.5 gives the commands
 `GNREG` and `GNUNREG`.
 
-- **[NTF-090]** A client in Instant mode or in Direct mode MUST make one
-  notify queue for each group at `mentions` or `all`, on each device. Part 7 §7.5.9 gives the
-  setting. **[NTF-091]** A client MUST put a group notify queue under a
-  notification handle that holds no pairwise queue and no rendezvous queue.
+- **[NTF-090]** A client in Instant mode or in Direct mode MUST make one notify
+  queue for each group at `mentions` or `all`, on each device. Part 7 §7.5.9
+  gives the setting. **[NTF-091]** A client MUST put a group notify queue under
+  a notification handle that holds no pairwise queue and no rendezvous queue.
+
   **[NTF-092]** A client MAY put the notify queues of several groups under one
   handle. A client SHOULD place the notify queues of different groups at
-  different queue relays and under different handles while its count of
-  handles permits it. It shares a handle or a relay between two groups
-  only when that count does not permit it. One queue relay that holds the notify queues of
-  several groups on one session learns that one client is in groups at each
-  of the depositing relays. With two of those relays it joins one
-  member across two groups. Part 15 §15.3 holds that residual.
+  different queue relays and under different handles while its count of handles
+  permits it. It shares a handle or a relay between two groups only when that
+  count does not permit it.
+
+  One queue relay that holds the notify queues of several groups on one session
+  learns that one client is in groups at each of the depositing relays. With two
+  of those relays it joins one member across two groups. Part 15 §15.3 holds
+  that residual.
 - **[NTF-093]** A client MUST register the `QueueAddress` of the notify queue
   with each replica of the group queue by `GNREG`. **[NTF-094]** A
   registration MUST NOT carry a member index, a pseudonym, or a device
   identifier. **[NTF-095]** A group-queue relay MUST NOT link a registration
   to a reader session or to a writer session.
 - **[NTF-096]** A group-queue relay MUST write one `NotifyDigest` as a `SEND`
-  into each registered notify queue when it accepts a `GPOST`. **[NTF-097]**
-  A group-queue relay MUST NOT write a second digest to one registration
-  inside `GROUP_DIGEST_MIN_GAP`. **[NTF-098]** If a record arrives inside the
-  gap, the group-queue relay MUST write one digest at the end of the gap.
-  **[NTF-099]** A group-queue relay MUST NOT write a digest that names a
-  record, a member index, or a sequence number. The relay writes its
-  `GroupQueueId` in `group_queue_id`, and it writes the count of records
-  since the previous digest in `post_count`.
+  into each registered notify queue when it accepts a `GPOST`. **[NTF-097]** A
+  group-queue relay MUST NOT write a second digest to one registration inside
+  `GROUP_DIGEST_MIN_GAP`. **[NTF-098]** If a record arrives inside the gap, the
+  group-queue relay MUST write one digest at the end of the gap. **[NTF-099]** A
+  group-queue relay MUST NOT write a digest that names a record, a member index,
+  or a sequence number. The relay writes its `GroupQueueId` in `group_queue_id`,
+  and it writes the count of records since the previous digest in `post_count`.
+
   The digest travels to the queue relay of the notify queue as an
-  `UMBRA_DEPOSIT` of Part 6 rule `WIR-526`. That relay learns the address of
-  the group-queue relay that deposits into the queue, thus it learns that the
-  queue is a notify queue and which relay holds its group queue; it learns no
-  group and no member. Part 15 §15.3 holds that residual.
+  `UMBRA_DEPOSIT` of Part 6 rule `WIR-526`. That relay learns the address of the
+  group-queue relay that deposits into the queue, thus it learns that the queue
+  is a notify queue and which relay holds its group queue; it learns no group
+  and no member. Part 15 §15.3 holds that residual.
 - **[NTF-100]** A group-queue relay MUST hold a registration in memory only.
   **[NTF-101]** A group-queue relay MUST NOT hold more than
   `GROUP_NOTIFIER_MAX` registrations for one group queue. Part 3 §3.2.7 owns
   that constant. **[NTF-102]** A group-queue relay MUST discard a registration
   7 days plus `CLOCK_SKEW` after the `GNREG` that made it. **[NTF-103]** A
   group-queue relay MUST discard a registration at a `GNUNREG` that names its
-  queue. A group-queue relay takes at most 4 new registrations for one group
+  queue.
+
+  A group-queue relay takes at most 4 new registrations for one group
   queue from one circuit. It refuses a further `GNREG` of that circuit
   for that queue with `LIMIT`. A device holds one notify queue for a group,
   and two while it rotates that queue under `NTF-105`. Thus a party that
@@ -1080,21 +1103,21 @@ reader session, because a registration carries neither. Part 15 §15.3 states
 that residual, and Part 11 §11.5 gives the full list of what a group-queue
 relay learns.
 
-> *Cause.* The group queue of Part 3 §3.2.7 holds the records of a group at
-> a relay that cannot push, thus a group needs a carrier of its own. The
-> notify queue is that carrier. The gap is the value of `WAKE_COALESCE_WINDOW`, thus a busy
-> group costs no more pushes than a busy pairwise queue.
+> *Cause.* The group queue of Part 3 §3.2.7 holds the records of a group at a
+> relay that cannot push, thus a group needs a carrier of its own. The notify
+> queue is that carrier. The gap is the value of `WAKE_COALESCE_WINDOW`, thus a
+> busy group costs no more pushes than a busy pairwise queue.
 
 ## 8.6 The web client
 
-Part 1 §1.1 defers the web client of Part 14 §14.7, and the two rules
-of this section bind it when it ships. It holds a live session while its browser runs,
+Part 1 §1.1 defers the web client of Part 14 §14.7, and the two rules of this
+section bind it when it ships. It holds a live session while its browser runs,
 and that session carries each arrival. **[NTF-110]** A web client MUST NOT
 register a push token with the NDR, and it MUST NOT hold a registration of
-§8.5.2 of its own. **[NTF-111]** A web client MUST take each arrival
-from its live session, and it MUST show an alert through the notification API
-of the browser while the browser runs. The phone of the user carries the
-notification of the device set at each other time, under §8.4.1.
+§8.5.2 of its own. **[NTF-111]** A web client MUST take each arrival from its
+live session, and it MUST show an alert through the notification API of the
+browser while the browser runs. The phone of the user carries the notification
+of the device set at each other time, under §8.4.1.
 
 > *Cause.* Web Push needs a push service that the browser vendor operates, and
 > a subscription there is a durable identifier at a party that Part 15 §15.1
@@ -1103,8 +1126,8 @@ notification of the device set at each other time, under §8.4.1.
 
 ## 8.7 Residual leak — normative statement
 
-**[NTF-027]** This text is normative, and it MUST appear in the security documentation that
-the user reads:
+**[NTF-027]** This text is normative, and it MUST appear in the security
+documentation that the user reads:
 
 > In Instant mode on a device with FCM, Google learns that a given Google
 > account has UMBRA installed. Google also learns the exact time and the count
@@ -1112,6 +1135,7 @@ the user reads:
 > same to Google, thus Google does not learn which one is a group message.
 > Over many messages, the push times of two accounts that write to each
 > other can show Google that the two accounts talk.
+>
 > In Direct mode, in Private mode, and in Off mode UMBRA holds no push
 > token, and Google learns from the push path no time and no count. In
 > Direct mode a locked UMBRA shows that a message waits, and the first relay
@@ -1141,18 +1165,18 @@ the user reads:
 
 > *Cause of `NTF-029`.* A pin of an NDR by the user is the alternative. A
 > deployment operates one NDR (Part 10 §10.10), thus the user has no second NDR
-> to pin. The carrier also forbids one: on FCM the holder of the service
-> account of the project of the build alone can wake the app, thus an NDR of a
-> third party cannot serve that build. The pin of the build keeps the
-> property: the choice of relays gives no party a route to the push token. A
-> version that lets a third party operate an NDR beside the one of the deployment gives the
-> user the choice between the two, and §10.10 then enters that NDR in the
-> relay reputation.
+> to pin. The carrier also forbids one: on FCM the holder of the service account
+> of the project of the build alone can wake the app, thus an NDR of a third
+> party cannot serve that build. The pin of the build keeps the property: the
+> choice of relays gives no party a route to the push token. A version that lets
+> a third party operate an NDR beside the one of the deployment gives the user
+> the choice between the two, and §10.10 then enters that NDR in the relay
+> reputation.
 
-> *Cause of `NTF-109`.* FCM gives a service account to each registered
-> project, thus a deployment can operate the full notification path. The NDR stays a separate trust role with its own
-> attestation track, and Part 10 §10.10 gives the cause that keeps it out of
-> the relay reputation.
+> *Cause of `NTF-109`.* FCM gives a service account to each registered project,
+> thus a deployment can operate the full notification path. The NDR stays a
+> separate trust role with its own attestation track, and Part 10 §10.10 gives
+> the cause that keeps it out of the relay reputation.
 
 ## 8.8 Estimated cost
 
@@ -1174,15 +1198,18 @@ the cadence that sets it.
 
 **The promotion row and the battery row.** Part 3 §3.12 derives the battery
 cost, and these two rows repeat that derivation. Part 3 §3.6.2 gives about
-9.1 mWh for each radio promotion, and U5 names a battery of 15.4 Wh. Instant
-mode makes one wake for each background arrival, which is 9.1 mWh. The model
-day of Part 3 §3.12 holds 184 arrivals, which is 1.67 Wh and 10.9 % of that
-battery. With no arrival Instant mode makes no wake. Private mode makes one
-wake for each interval of §8.3. At a 30 min interval that count is 48 wakes,
-which is 0.44 Wh and 2.8 %. At a 20 min interval that count is 72 wakes, which
-is 0.66 Wh and 4.3 %. The two Private figures count one promotion for each
-wake, which is the upper bound of §8.3, and `NTF-087` puts a measurement
-before a revision re-tunes the cadence.
+9.1 mWh for each radio promotion, and U5 names a battery of 15.4 Wh.
+
+- **Instant mode** makes one wake for each background arrival, which is
+  9.1 mWh. The model day of Part 3 §3.12 holds 184 arrivals, which is 1.67 Wh
+  and 10.9 % of that battery. With no arrival Instant mode makes no wake.
+- **Private mode** makes one wake for each interval of §8.3. At a 30 min
+  interval that count is 48 wakes, which is 0.44 Wh and 2.8 %. At a 20 min
+  interval that count is 72 wakes, which is 0.66 Wh and 4.3 %.
+
+The two Private figures count one promotion for each wake, which is the upper
+bound of §8.3, and `NTF-087` puts a measurement before a revision re-tunes the
+cadence.
 
 **The cheaper mode depends on the arrival count, and this table states that
 plainly.** Private mode at 30 min costs less battery than Instant mode above 48

@@ -14,9 +14,9 @@ Two demands pull in opposite directions:
   person. This applies to a relay, to a contact, and to a government. The
   strongest form of this property is an identity with no global identifier.
 - **Discoverability.** Ordinary persons want other persons to find them. A
-  "message me" link and a handle make a messenger social and not clinical. A reconnection with a contact that lost your address does
-  the same. Matrix does this correctly, and designs without identifiers give it
-  up.
+  "message me" link and a handle make a messenger social and not clinical. A
+  reconnection with a contact that lost your address does the same. Matrix does
+  this correctly, and designs without identifiers give it up.
 
 UMBRA solves this problem with a **layered identity**. There is one root secret,
 three different public faces, and a one-way derivation between them. The user
@@ -54,9 +54,9 @@ No field in an UMBRA message contains it. No field comes from it in a
 recoverable form, and no field is a commitment to it.
 
 - **[IDN-001]** A device MUST NOT send the Root Identity to a relay.
-- **[IDN-002]** A device MUST transfer the Root Identity to a different device of the same
-  user only on the device-link channel. Part 7 gives that channel, which is an
-  in-person flow or an authenticated side-channel flow.
+- **[IDN-002]** A device MUST transfer the Root Identity to a different device
+  of the same user only on the device-link channel. Part 7 gives that channel,
+  which is an in-person flow or an authenticated side-channel flow.
 - **[IDN-003]** The client MUST let the user recover the Root Identity from its
   **root seed**, which the client exports as `RecoveryDigits` of type `0x0004`
   of §4.7.7. The seed holds 256 bits of entropy.
@@ -109,10 +109,11 @@ stranger start contact. To publish a Public Address is an explicit, informed,
 and revocable act, and it is off by default. A publication writes the
 `AddressEntry` of Part 9 §9.3.3, and §4.3.3 gives the request path.
 
-**[IDN-004]** A user MAY hold more than one Public Address at the index `j`. The addresses of
-one user are mutually unlinkable. **[IDN-005]** A user MAY hold a professional address and a
-personal address. **[IDN-006]** A user MAY retire an address and move to the index `j+1`. That
-move does not cause the loss of the root identity.
+**[IDN-004]** A user MAY hold more than one Public Address at the index `j`. The
+addresses of one user are mutually unlinkable. **[IDN-005]** A user MAY hold a
+professional address and a personal address. **[IDN-006]** A user MAY retire an
+address and move to the index `j+1`. That move does not cause the loss of the
+root identity.
 
 §4.2.5 binds one **Profile** to each index `j`. The client makes Profile 0 at
 the first launch, and Profile 0 has no directory entry. Publication stays an
@@ -156,11 +157,11 @@ Cryptographic unlinkability is not behavioral unlinkability. A published address
 is a fixed point, and a party can monitor it over time. Thus UMBRA has three
 requirements:
 
-1. **Separate infrastructure.** **[IDN-007]** A client MUST put the inbound request queues of
-   a Public Address on different relays from a pairwise queue. **[IDN-008]** A client MUST
-   also put them in different transport sessions from a pairwise queue. **[IDN-009]** The
-   public address of a user MUST NOT decide which relays hold the pairwise
-   inboxes of that user.
+1. **Separate infrastructure.** **[IDN-007]** A client MUST put the inbound
+   request queues of a Public Address on different relays from a pairwise queue.
+   **[IDN-008]** A client MUST also put them in different transport sessions
+   from a pairwise queue. **[IDN-009]** The public address of a user MUST NOT
+   decide which relays hold the pairwise inboxes of that user.
 
    > *Rationale.* The Account ID of Session is a permanent X25519 public key.
    > That key selects a swarm of 5 to 7 nodes deterministically. A swarm
@@ -174,11 +175,12 @@ requirements:
    does not use the public address for that conversation again. The public layer
    is a doorbell and not a mailbox.
 
-3. **An honest UI.** **[IDN-010]** At the moment of publication, the interface MUST state that
-   a published address is a persistent identifier. **[IDN-011]** The interface MUST also state
-   that a party can monitor such an address over time. **[IDN-012]** The interface MUST also
-   state that pairwise invitations do not have this property. **[IDN-013]** Implementations
-   MUST NOT show the two paths as equal in privacy.
+3. **An honest UI.** **[IDN-010]** At the moment of publication, the interface
+   MUST state that a published address is a persistent identifier. **[IDN-011]**
+   The interface MUST also state that a party can monitor such an address over
+   time. **[IDN-012]** The interface MUST also state that pairwise invitations
+   do not have this property. **[IDN-013]** Implementations MUST NOT show the
+   two paths as equal in privacy.
 
 ### 4.2.4 Handle — optional human-readable name
 
@@ -190,10 +192,10 @@ A handle resolves to the handle key and to the rendezvous queue of Part 9
 §9.3. It does not resolve to the Public Address string of §4.2.3, and Part 9
 §9.3.3 indexes that string under its own label.
 
-Handles help usability only. They are not authoritative. **[IDN-014]** The client MUST tell
-the user to verify a handle out of band before a security-relevant decision.
-Part 9 gives the directory, its transparency log, and its defenses against
-enumeration.
+Handles help usability only. They are not authoritative. **[IDN-014]** The
+client MUST tell the user to verify a handle out of band before a
+security-relevant decision. Part 9 gives the directory, its transparency log,
+and its defenses against enumeration.
 
 **The handle key.** A directory entry of Part 9 §9.3 holds a public key
 `HK_pub`. That key is the public half of a handle key, which the client derives
@@ -237,11 +239,10 @@ gives the takeover warning that a lost handle causes.
 
 > *Cause.* Without a derivation of `HK_pub`, a client that lost each device
 > holds no private half. That client cannot answer the renewal challenge of
-> Part 9 §9.9.1. The derivation from
-> the root identity with a rotation counter recovers the key from a stale
-> backup. The separate label keeps `HK_pub` unlinkable to `PublicAddressKey_j`.
-> Thus a crawl of the directory does not link a handle to a Public Address
-> string that a person shared elsewhere.
+> Part 9 §9.9.1. The derivation from the root identity with a rotation counter
+> recovers the key from a stale backup. The separate label keeps `HK_pub`
+> unlinkable to `PublicAddressKey_j`. Thus a crawl of the directory does not
+> link a handle to a Public Address string that a person shared elsewhere.
 
 ### 4.2.5 Profile — the name and the picture of a Public Address
 
@@ -261,8 +262,8 @@ holds more than one Profile, and the unlinkability of those Profiles comes from
 **Profile 0 exists at the first launch.** The client makes Profile 0 without a
 user action. Profile 0 has the index `j = 0`, a generated picture, no name, and
 no directory entry. U1 permits a maximum of 6 taps to the first message, and U1
-prohibits a security decision before the inbox is reachable. **[IDN-015]** Thus the client
-MUST NOT show a setup screen for a Profile.
+prohibits a security decision before the inbox is reachable. **[IDN-015]** Thus
+the client MUST NOT show a setup screen for a Profile.
 
 **Publication stays opt-in.** A Profile does not enter the Part 9 directory
 until the user publishes a handle for that Profile. §4.2.3 makes publication an
@@ -293,16 +294,16 @@ color  = PALETTE[ SHA3-256("umbra/v1/avatar-color" || PublicAddressKey_j.pk)
 4. The picture is a function of the Public Address. Two contacts that hold that
    address can already link, thus the picture gives those contacts no new fact.
 
-`PALETTE_SIZE` is 12. **[IDN-016]** The palette MUST give a sufficient contrast ratio in a
-light theme and in a dark theme. A letter and a color give about 400
+`PALETTE_SIZE` is 12. **[IDN-016]** The palette MUST give a sufficient contrast
+ratio in a light theme and in a dark theme. A letter and a color give about 400
 combinations, and that count is too small to be a fingerprint. The low entropy
 is a requirement here, and it is not a limit.
 
 #### The selected picture
 
-**[IDN-017]** A user MAY select a picture in place of the generated picture. That picture goes
-in the encrypted blob of Part 9 §9.3.1, and Part 9 §9.3.1 gives the re-encode
-rule.
+**[IDN-017]** A user MAY select a picture in place of the generated picture.
+That picture goes in the encrypted blob of Part 9 §9.3.1, and Part 9 §9.3.1
+gives the re-encode rule.
 
 > **This is a trade, and Part 2 §2.4 requires the text to state it.** A selected
 > picture is the same bytes at each party that resolves the Profile. Thus two
@@ -334,8 +335,8 @@ is local, and it needs no relay and no directory.
 
 #### A contact gets no pushed Profile
 
-**[IDN-021]** A client MUST NOT dispatch a Profile as a fan-out to its contacts. **[IDN-022]** A client MUST
-NOT emit a cell whose only content is a Profile.
+**[IDN-021]** A client MUST NOT dispatch a Profile as a fan-out to its contacts.
+**[IDN-022]** A client MUST NOT emit a cell whose only content is a Profile.
 
 > *Cause 1, the contact count.* A fan-out of about 150 cells inside one short
 > window is an event that the Part 3 §3.12 budget does not produce. Part 10
@@ -351,8 +352,8 @@ NOT emit a cell whose only content is a Profile.
 
 A party that reaches the user through a Public Address gets the Profile from the
 Part 9 §9.3.1 blob. That party gets the Profile one time, at the moment of
-contact. That party holds the
-link fragment already, thus the fetch adds no event.
+contact. That party holds the link fragment already, thus the fetch adds no
+event.
 
 A party that reaches the user through a one-time invitation (§4.3.1) gets no
 Profile by default. That path is authenticated out of band, thus the two parties
@@ -376,13 +377,13 @@ https://<invitation-host>/i#<fragment>
               || RelayRef of the relay that holds the blob (Part 12 §12.3.2)
 ```
 
-The **invitation host** is one host that the project operates, and the
-client package names it. It needs no host name of its own: it MAY be the
-domain of the network itself, and a link is then
-`https://<domain>/i#<fragment>`. The **invitation landing document** is the document
-that the host serves at `/i`. That document tells a party without the client
-where to get the client. A browser does not send a fragment, thus the host
-learns the open and not the invitation.
+The **invitation host** is one host that the project operates, and the client
+package names it. It needs no host name of its own: it MAY be the domain of the
+network itself, and a link is then `https://<domain>/i#<fragment>`. The
+**invitation landing document** is the document that the host serves at `/i`.
+That document tells a party without the client where to get the client. A
+browser does not send a fragment, thus the host learns the open and not the
+invitation.
 
 - **[IDN-120]** The landing document MUST hold no script. **[IDN-121]** The
   landing document MUST NOT reference a resource on a second host.
@@ -407,10 +408,9 @@ alphabet in a fragment, and the string is 91 characters.
 The relay that the `RelayRef` names stores an **encrypted blob** that it cannot
 read. The blob key comes from
 `HKDF("umbra/v1/invite-blob" || SHA3-256(link_fragment))`, which is
-`HKDF-SHA3-256(salt = "", ikm = SHA3-256(fragment), info =
-"umbra/v1/invite-blob", L = 32)`. Part 5 §5.11
-holds that label. That key is different from the link ID
-that the relay knows, thus a seized relay gives only ciphertext.
+`HKDF-SHA3-256(salt = "", ikm = SHA3-256(fragment), info = "umbra/v1/invite-blob", L = 32)`.
+Part 5 §5.11 holds that label. That key is different from the link ID that the
+relay knows, thus a seized relay gives only ciphertext.
 
 ```
 InvitationBlob {                  // the object the relay stores under the link ID
@@ -447,8 +447,8 @@ prevents redirection to a different queue.
 **First-access lock.** The first fetch locks the queue with the authorization
 key of the party that fetched it. If an observer fetches the blob, the
 connection of the intended recipient fails. Thus a passive link-interception
-attack becomes an event that **the two parties detect**. **[IDN-023]** Implementations MUST
-implement this lock for one-time invitations.
+attack becomes an event that **the two parties detect**. **[IDN-023]**
+Implementations MUST implement this lock for one-time invitations.
 
 **The commands.** Part 6 §6.4 gives five commands for this path. The inviter
 makes the queue of the invitation with a `NEW`, and it asks the relay of that
@@ -511,11 +511,12 @@ value. The link and the `umbra:pub:` string name one `AddressEntry` of Part 9
 A stranger looks up `@alice`, or pastes `umbra:pub:…`, and sends a contact
 request.
 
-- **[IDN-130]** A client MUST accept a pasted `umbra:pub:` string and a link
-  of §4.3.2 as the start of a contact request. **[IDN-132]** The client MUST
-  look that address up under Part 9 §9.3.3. **[IDN-131]** Before the client sends the hello of Part
-  9 §9.6, it MUST check that `SHA3-256(address_pk)[0..20]` equals the address.
-  Part 2 §2.4.2 goal S1 sets the tap count and the latency of that path.
+- **[IDN-130]** A client MUST accept a pasted `umbra:pub:` string and a link of
+  §4.3.2 as the start of a contact request. **[IDN-132]** The client MUST look
+  that address up under Part 9 §9.3.3. **[IDN-131]** Before the client sends the
+  hello of Part 9 §9.6, it MUST check that `SHA3-256(address_pk)[0..20]` equals
+  the address. Part 2 §2.4.2 goal S1 sets the tap count and the latency of that
+  path.
 
 A request to a Public Address ends with one `Admission` of Part 13 §13.2,
 inside the hello. The addressee client verifies a cross-relay token of Part 13
@@ -562,13 +563,13 @@ and the two parties thus hash one string.
 
 Requirements:
 
-- **[IDN-025]** A key change MUST cause a **blocking notice in the conversation**. A passive
-  banner is not sufficient. The research on safety-number verification shows
-  clearly that users ignore passive indicators.
-- **[IDN-026]** The verification state MUST apply to each pairwise identity. **[IDN-027]** The state MUST
-  continue through a queue rotation, a relay change, and a device link. A user
-  that verified Bob does not verify Bob again after Bob adds a tablet
-  (usability goal U7).
+- **[IDN-025]** A key change MUST cause a **blocking notice in the
+  conversation**. A passive banner is not sufficient. The research on
+  safety-number verification shows clearly that users ignore passive indicators.
+- **[IDN-026]** The verification state MUST apply to each pairwise identity.
+  **[IDN-027]** The state MUST continue through a queue rotation, a relay
+  change, and a device link. A user that verified Bob does not verify Bob again
+  after Bob adds a tablet (usability goal U7).
 - **[IDN-175]** A client MUST keep the verification state as the pairwise
   identity public key of the contact that the user verified. The contact
   counts as verified only while that key is equal to the key that the
@@ -577,9 +578,9 @@ Requirements:
 - **[IDN-176]** A scan or an entry of a safety number that is equal to the
   number of the device, by its digits alone, MUST set the same state as a
   confirmed short code. A number that is not equal MUST set nothing.
-- **[IDN-028]** The UI MUST NOT imply that unverified conversations are insecure. Such
-  conversations are protected against each adversary but an active
-  man-in-the-middle at the first contact.
+- **[IDN-028]** The UI MUST NOT imply that unverified conversations are
+  insecure. Such conversations are protected against each adversary but an
+  active man-in-the-middle at the first contact.
 
 ### 4.5.1 The key-change notice
 
@@ -588,11 +589,11 @@ or after a deliberate replacement. The client tells each contact with a
 **key-change notice**.
 
 A `PairwiseIdentity_c` holds an X25519 keypair and an ML-KEM-768 keypair
-(§4.2.2). The X25519 public key is the key that a contact holds and
-verifies (§4.5). The ML-KEM-768 half is derived and reserved. No handshake
-of v1 uses a static ML-KEM key, and Part 5 §5.4.4 states that the
-authentication of the handshake is classical. **Neither keypair signs data.** Thus a key-change notice carries no
-signature, and the ratchet of the session that carries it gives the
+(§4.2.2). The X25519 public key is the key that a contact holds and verifies
+(§4.5). The ML-KEM-768 half is derived and reserved. No handshake of v1 uses a
+static ML-KEM key, and Part 5 §5.4.4 states that the authentication of the
+handshake is classical. **Neither keypair signs data.** Thus a key-change notice
+carries no signature, and the ratchet of the session that carries it gives the
 authentication. Part 5 §5.7 keeps the deniability of the channel for that
 reason.
 
@@ -613,14 +614,14 @@ uses it: the safety number, the short code, and the handshake take
 the X25519 key alone. The field keeps its place for a later version that
 gives the handshake a static KEM.
 
-1. **[IDN-055]** A client MUST send a key-change notice inside the established pairwise
-   ratchet session with that contact. **[IDN-056]** A client MUST NOT send it on a new
-   session or on a group channel.
-2. **[IDN-057]** A client MUST NOT sign a key-change notice. **[IDN-058]** A client MUST NOT carry a
-   signature over the new keys inside the notice.
-3. **[IDN-059]** A receiver MUST accept a key-change notice only from the receiving chain of
-   that session. The ratchet direction gives that authorization, and Part 6
-   §6.6.1 uses the same basis for an edit.
+1. **[IDN-055]** A client MUST send a key-change notice inside the established
+   pairwise ratchet session with that contact. **[IDN-056]** A client MUST NOT
+   send it on a new session or on a group channel.
+2. **[IDN-057]** A client MUST NOT sign a key-change notice. **[IDN-058]** A
+   client MUST NOT carry a signature over the new keys inside the notice.
+3. **[IDN-059]** A receiver MUST accept a key-change notice only from the
+   receiving chain of that session. The ratchet direction gives that
+   authorization, and Part 6 §6.6.1 uses the same basis for an edit.
 4. **[IDN-060]** A receiver that accepts a notice MUST take `new_x25519_pk` as
    the pairwise identity public key of that contact. It MUST check the
    static key of the peer in each later handshake with that contact against
@@ -628,16 +629,16 @@ gives the handshake a static KEM.
    transcript of Part 5 §5.4.8 binds that static key, thus a substituted key
    gives a handshake failure and not a silent loss. The transcript has no
    field for a static ML-KEM key, thus `new_mlkem_pk` enters no transcript.
-5. **[IDN-061]** A receiver MUST show the blocking notice of §4.5, and IDN-025 states that
-   rule. **[IDN-062]** A receiver MUST NOT apply the new keys before the user answers that
-   prompt.
-6. **[IDN-063]** A client MUST send one key-change notice to each contact with an
-   independent randomized delay for each contact. **[IDN-064]** A client MUST draw that delay
-   from an exponential distribution with a mean of `SWEEP_SPREAD`. Part 7 §7.5.6
-   gives that parameter.
-7. **[IDN-065]** A client MUST NOT broadcast one statement about a new key to more than one
-   contact. Part 9 §9.7 gives the cause, which is that one such statement is a
-   perfect linker against G9.
+5. **[IDN-061]** A receiver MUST show the blocking notice of §4.5, and IDN-025
+   states that rule. **[IDN-062]** A receiver MUST NOT apply the new keys before
+   the user answers that prompt.
+6. **[IDN-063]** A client MUST send one key-change notice to each contact with
+   an independent randomized delay for each contact. **[IDN-064]** A client MUST
+   draw that delay from an exponential distribution with a mean of
+   `SWEEP_SPREAD`. Part 7 §7.5.6 gives that parameter.
+7. **[IDN-065]** A client MUST NOT broadcast one statement about a new key to
+   more than one contact. Part 9 §9.7 gives the cause, which is that one such
+   statement is a perfect linker against G9.
 
 > **This is a trade, and Part 2 §2.4 requires the text to state it.** The notice
 > carries no signature, thus the ratchet of the session is the only
@@ -708,38 +709,45 @@ value needs one. Part 5 §5.11 holds the two labels.
 - **[IDN-145]** A client MUST draw a fresh nonce for each ceremony.
   **[IDN-146]** A client MUST NOT show a code from an earlier ceremony.
 - **The pairing of two commits.** A commit with a zero `answers` field is a
-  **start**, and each other commit is an **answer**. **[IDN-170]** A client
-  that gets a start MUST end the ceremony that it holds, draw a fresh nonce,
-  and send an answer that names that start. A client MUST send that answer,
-  and the reveal after it, only for an action of its own user. One such
-  action is a start of that user that waits for its answer under `IDN-172`.
-  The other is that the user starts or accepts a ceremony with that contact
-  after the start arrived. A start
-  that arrives with no such action MUST wait for the user. The client
+  **start**, and each other commit is an **answer**. **[IDN-170]** A client that
+  gets a start MUST end the ceremony that it holds, draw a fresh nonce, and send
+  an answer that names that start.
+
+  A client MUST send that answer, and the reveal after it, only for an action
+  of its own user. There are two such actions:
+
+  - a start of that user that waits for its answer under `IDN-172`;
+  - the user starts or accepts a ceremony with that contact after the start
+    arrived.
+
+  A start that arrives with no such action MUST wait for the user. The client
   MUST NOT answer that start. The client MUST NOT reveal a nonce for that
-  start. A later start of
-  the peer replaces the one that waits. A start that waits for the user
-  lapses 10 minutes after its arrival, and with the run of the client
-  (`IDN-174`). An action of the user after that time starts a ceremony of
-  its own and answers no start. Two persons compare a code while they talk,
-  thus a start of an earlier day belongs to no comparison. Its answer
-  would leave the user with a view that waits for a code that no peer
-  completes. One action of the user gives one
-  answer or one start, and one ceremony takes one commit of the peer. A
-  client whose ceremony holds a commit of the peer MUST NOT answer a later
-  start from that ceremony. It MUST end that ceremony at such a start. It
-  MUST tell the user that the ceremony ended. It MUST NOT take a
-  confirmation of `IDN-147` for its code. It MUST hold the new start for the
-  next action of the user. Thus a peer gets one reveal, and one guess at the code, for each
-  action of the user, and it gets none without one. **[IDN-171]** A client MUST take
-  an answer only while it holds a start of its own with no commit of the
-  peer, and only when `answers` is equal to the commit of that start. It MUST
-  drop each other answer. **[IDN-172]** A client that gets a start while its
-  own start has no answer MUST compare the two commits as byte strings. It
-  MUST drop the start of the peer when its own commit is the lower one, and
-  it MUST obey `IDN-170` when its own commit is the higher one. Thus two
-  starts that cross give one ceremony, and the two clients select the same
-  one.
+  start. A later start of the peer replaces the one that waits.
+
+  A start that waits for the user lapses 10 minutes after its arrival, and with
+  the run of the client (`IDN-174`). An action of the user after that time
+  starts a ceremony of its own and answers no start. Two persons compare a
+  code while they talk, thus a start of an earlier day belongs to no
+  comparison. Its answer would leave the user with a view that waits for a
+  code that no peer completes.
+
+  One action of the user gives one answer or one start, and one ceremony takes
+  one commit of the peer. A client whose ceremony holds a commit of the peer
+  MUST NOT answer a later start from that ceremony. It MUST end that ceremony
+  at such a start. It MUST tell the user that the ceremony ended. It MUST NOT
+  take a confirmation of `IDN-147` for its code. It MUST hold the new start for
+  the next action of the user. Thus a peer gets one reveal, and one guess at
+  the code, for each action of the user, and it gets none without one.
+
+  **[IDN-171]** A client MUST take an answer only while it holds a start of its
+  own with no commit of the peer, and only when `answers` is equal to the
+  commit of that start. It MUST drop each other answer.
+
+  **[IDN-172]** A client that gets a start while its own start has no answer
+  MUST compare the two commits as byte strings. It MUST drop the start of the
+  peer when its own commit is the lower one, and it MUST obey `IDN-170` when
+  its own commit is the higher one. Thus two starts that cross give one
+  ceremony, and the two clients select the same one.
 - **[IDN-173]** A `VerifyReveal` that `IDN-144` rejects MUST NOT end the
   ceremony. The reveal of a ceremony that a later start replaced can arrive
   late, and it gives an adversary nothing: the commit that the client holds
@@ -752,12 +760,12 @@ value needs one. Part 5 §5.11 holds the two labels.
   that state from the exchange alone. The exchange gives two clients one
   number, and the comparison between two persons is the verification.
 
-> *Cause of the `answers` field.* A `VerifyCommit` that holds the commit
-> alone gives an exchange with no end. A user that starts two times in a row
-> gets the answer to the first start while the second start waits. The client cannot tell that answer from
-> a new start of the peer, and each of the two clients starts again at each
-> commit of the other one, without an end. The field names the start, thus a
-> late answer pairs with nothing and the client drops it.
+> *Cause of the `answers` field.* A `VerifyCommit` that holds the commit alone
+> gives an exchange with no end. A user that starts two times in a row gets the
+> answer to the first start while the second start waits. The client cannot tell
+> that answer from a new start of the peer, and each of the two clients starts
+> again at each commit of the other one, without an end. The field names the
+> start, thus a late answer pairs with nothing and the client drops it.
 
 > *Cause.* An active adversary at the first contact holds two channels, one to
 > each party, and two pairwise key sets. That adversary needs the two codes to
@@ -785,18 +793,20 @@ record. That construction detects a change to a record. It does not detect the
 removal of a record, and it does not detect a substitution between two records.
 Thus five rules apply, and they apply to each table.
 
-1. **[IDN-029]** The associated data of each record MUST hold the table identifier and the
-   surrogate row identifier. Thus a party cannot move a record from one row into
-   another row. From record version `0x02` on, the associated data MUST also
-   hold that version and the owner column of the row, in the layout of Part 14
-   §14.6.4. Thus a party cannot move a row from one owner to another, and a
-   record of version `0x01` does not open as one of version `0x02`. Part 14
-   rule `IMP-130` gives the one pass that moves a store of version `0x01`.
-2. **[IDN-030]** A `row_id` MUST be unique inside its table. **[IDN-031]** A client MUST reject a table that
-   holds two live rows with one `row_id`. **[IDN-032]** A client MUST report that condition in
-   the same manner as a MAC mismatch.
-3. **[IDN-033]** Each table MUST carry a **table MAC**. The MAC covers the contents of each
-   live row, and it does not cover the row count alone:
+1. **[IDN-029]** The associated data of each record MUST hold the table
+   identifier and the surrogate row identifier. Thus a party cannot move a
+   record from one row into another row. From record version `0x02` on, the
+   associated data MUST also hold that version and the owner column of the row,
+   in the layout of Part 14 §14.6.4. Thus a party cannot move a row from one
+   owner to another, and a record of version `0x01` does not open as one of
+   version `0x02`. Part 14 rule `IMP-130` gives the one pass that moves a store
+   of version `0x01`.
+2. **[IDN-030]** A `row_id` MUST be unique inside its table. **[IDN-031]** A
+   client MUST reject a table that holds two live rows with one `row_id`.
+   **[IDN-032]** A client MUST report that condition in the same manner as a MAC
+   mismatch.
+3. **[IDN-033]** Each table MUST carry a **table MAC**. The MAC covers the
+   contents of each live row, and it does not cover the row count alone:
 
    ```
    K_tab     = HKDF-SHA3-256( salt = empty, ikm = K_store,
@@ -828,23 +838,26 @@ Thus five rules apply, and they apply to each table.
    `owner_flag_i` is `0x01` and `owner_i` is the 16 bytes of the owner
    column, or `owner_flag_i` is `0x00` and `owner_i` is empty for a row with
    no owner. Thus the scan of `IDN-162` finds a row whose owner column a
-   party changed or emptied. A table MAC of one version does not verify
-   as one of the other version. A client MUST use the form of the record
-   version of its store for each table. Part 14 rule `IMP-130` gives the
-   one batch that moves each MAC of a store from the first form to the
-   second. `K_store` is the at-rest master key of Part 5
-   §5.2, and Part 14 §14.6.4 wraps it. **[IDN-034]** A client MUST derive
-   `K_tab` from `K_store` under the label `"umbra/v1/table-mac"`. **[IDN-035]**
-   A client MUST NOT write `K_tab` to storage. Part 5 §5.11 holds the label.
+   party changed or emptied. A table MAC of one version does not verify as
+   one of the other version. A client MUST use the form of the record version
+   of its store for each table. Part 14 rule `IMP-130` gives the one batch
+   that moves each MAC of a store from the first form to the second.
 
-   - **[IDN-066]** A client MUST compute `row_tag_i` over the record tag of the live row.
-     **[IDN-067]** A client MUST NOT compute it over the plaintext of the row.
-   - **[IDN-068]** A client MUST update `accum` incrementally. At a change to one row, the
-     client XORs the old `row_tag` out and XORs the new `row_tag` in. Thus one
-     commit batch costs work in the number of changed rows, and IDN-037 holds.
-   - **[IDN-069]** A client MUST use the two prefix bytes `0x01` and `0x02` above. The two
-     HMAC uses take different input, thus they need different domain
-     separation.
+   `K_store` is the at-rest master key of Part 5 §5.2, and Part 14 §14.6.4
+   wraps it. **[IDN-034]** A client MUST derive `K_tab` from `K_store` under
+   the label `"umbra/v1/table-mac"`. **[IDN-035]** A client MUST NOT write
+   `K_tab` to storage. Part 5 §5.11 holds the label.
+
+   - **[IDN-066]** A client MUST compute `row_tag_i` over the record tag of the
+     live row. **[IDN-067]** A client MUST NOT compute it over the plaintext of
+     the row.
+   - **[IDN-068]** A client MUST update `accum` incrementally. At a change to
+     one row, the client XORs the old `row_tag` out and XORs the new `row_tag`
+     in. Thus one commit batch costs work in the number of changed rows, and
+     IDN-037 holds.
+   - **[IDN-069]** A client MUST use the two prefix bytes `0x01` and `0x02`
+     above. The two HMAC uses take different input, thus they need different
+     domain separation.
 
    > *Cause.* The alternative is a MAC that covers `table_id`, `row_count`, and
    > `commit_counter` only. Under that MAC an attacker replaces the ciphertext
@@ -861,39 +874,41 @@ Thus five rules apply, and they apply to each table.
    > cannot cancel one term against another.
    >
    > *Cause of the derivation.* The alternative holds `K_tab` in the platform
-   > keystore as an HMAC-SHA256 key with no user authentication, entangled
-   > with a secure-element key. The keystore of every v1
-   > platform does not hold an HMAC key that the table needs without a
-   > platform limit, thus the key is in software. A client changes a
-   > table only while it holds `K_store`, because each record key derives from
-   > `K_store`.
-   > Thus a key that derives from `K_store` gives the same detection against
-   > a party without the unlocked store. The MAC is HMAC-SHA3-256, which
-   > is the MAC of Part 5, because a software key has no keystore limit on the
-   > hash.
-4. **[IDN-036]** A client MUST update the table MAC at each commit batch. **[IDN-037]** A client MUST NOT
-   compute a table MAC by a scan of a table at the unlock. **[IDN-038]** A client MUST verify
-   each table MAC at the unlock.
+   > keystore as an HMAC-SHA256 key with no user authentication, entangled with
+   > a secure-element key. The keystore of every v1 platform does not hold an
+   > HMAC key that the table needs without a platform limit, thus the key is in
+   > software. A client changes a table only while it holds `K_store`, because
+   > each record key derives from `K_store`. Thus a key that derives from
+   > `K_store` gives the same detection against a party without the unlocked
+   > store. The MAC is HMAC-SHA3-256, which is the MAC of Part 5, because a
+   > software key has no keystore limit on the hash.
+4. **[IDN-036]** A client MUST update the table MAC at each commit batch.
+   **[IDN-037]** A client MUST NOT compute a table MAC by a scan of a table at
+   the unlock. **[IDN-038]** A client MUST verify each table MAC at the unlock.
    **[IDN-193]** The set of tables MUST carry a MAC of the same form, under
    `table_id = 0x00`: one `row_tag` for each table that the store holds, with
-   the `table_id` of that table as `row_id` and 16 zero bytes as
-   `record_tag`. At the unlock the client MUST verify that MAC, and that its
-   `accum` and `row_count` equal those of the tables whose MAC the client
-   read. A store of an earlier build holds no set MAC, and the client writes
-   it at its next commit together with a mark in the local identity table. A
-   client that holds that mark and finds no set MAC MUST treat the store as
-   a MAC mismatch under `IDN-039`. In a store of record version `0x02` the
-   set MAC takes the second form of rule 3. Its `table_id` is
-   `0x00 || 0x02`, it has no owner, and the `record_tag` of each table is
-   the first 16 bytes of the `table_mac` of that table. The client MUST write that set
-   MAC in each commit batch that changes a table, in the transaction of that
-   batch. Thus one table that a party puts back to an earlier state, with
-   its rows and its MAC row, fails at the unlock. Its `table_mac` is not the
-   one that the set MAC read. The form of the set MAC is also the mark of
-   the record version of the store (Part 14 `IMP-130`). A client finds the
-   version by the form under which the set MAC verifies, and it verifies
-   each table MAC under the form of that version alone. A store with a table
-   and no set MAC is a store of version `0x01`.
+   the `table_id` of that table as `row_id` and 16 zero bytes as `record_tag`.
+   At the unlock the client MUST verify that MAC, and that its `accum` and
+   `row_count` equal those of the tables whose MAC the client read.
+
+   A store of an earlier build holds no set MAC, and the client writes it at
+   its next commit together with a mark in the local identity table. A client
+   that holds that mark and finds no set MAC MUST treat the store as a MAC
+   mismatch under `IDN-039`.
+
+   In a store of record version `0x02` the set MAC takes the second form of
+   rule 3. Its `table_id` is `0x00 || 0x02`, it has no owner, and the
+   `record_tag` of each table is the first 16 bytes of the `table_mac` of that
+   table. The client MUST write that set MAC in each commit batch that changes
+   a table, in the transaction of that batch. Thus one table that a party puts
+   back to an earlier state, with its rows and its MAC row, fails at the
+   unlock. Its `table_mac` is not the one that the set MAC read.
+
+   The form of the set MAC is also the mark of the record version of the store
+   (Part 14 `IMP-130`). A client finds the version by the form under which the
+   set MAC verifies, and it verifies each table MAC under the form of that
+   version alone. A store with a table and no set MAC is a store of version
+   `0x01`.
 
    > *Cause.* Each table MAC covers the rows of its own table. A party with
    > the file that deleted the MAC row of a table and each row of it left
@@ -901,14 +916,15 @@ Thus five rules apply, and they apply to each table.
    > row. The set MAC names each table, thus that deletion fails at the
    > unlock. The mark sits beside the root seed, thus a party that drops the
    > mark drops the identity.
-5. **[IDN-039]** If a table MAC does not match at the unlock, the client MUST tell the user.
-   **[IDN-040]** The client MUST NOT continue silently.
+5. **[IDN-039]** If a table MAC does not match at the unlock, the client MUST
+   tell the user. **[IDN-040]** The client MUST NOT continue silently.
 6. The check at the unlock reads the stored `accum`, and `IDN-037` keeps a scan
    out of that path. Thus a changed row shows only when a scan compares the
    rows with `accum`. **[IDN-162]** After the unlock, a client MUST compute
    `accum` and `row_count` of each table from a scan of its rows, outside the
    unlock path, one time or more in each 24 hours that the store is open.
    **[IDN-163]** A client MUST report a difference in the manner of `IDN-039`.
+
    **[IDN-195]** A client MUST run that scan over the contact table and over
    each table that holds a handshake before the first record of a run leaves
    under a ratchet from the store. On a difference it MUST seal no record in
@@ -1004,9 +1020,8 @@ exactly 3, and with a parallelism of 1. Part 5 §5.11 holds the label.
 
 > *Cause of `IDN-177`.* A restore holds the code and nothing else, thus each
 > input of the KDF must be a constant. A floor for `m` or for `t` is not
-> sufficient. A fixed salt
-> gives an attacker no table across users, because the code carries 256
-> random bits and no dictionary covers it.
+> sufficient. A fixed salt gives an attacker no table across users, because the
+> code carries 256 random bits and no dictionary covers it.
 
 Recovery is a rare operation, and it can accept 365 ms or more. Thus the KDF is
 deliberately expensive.
@@ -1020,13 +1035,13 @@ export the code as 64 hexadecimal characters. That format has the worst
 measured results for human transcription.
 
 **[IDN-042]** Mainstream builds MAY give platform-cloud backup of the Recovery
-Code through Android Block Store. **[IDN-043]** Such backup
-MUST be an explicit opt-in with a plain warning. **[IDN-044]** The warning MUST
-state that the backup makes a recovery dependency. That dependency is on the
-Google account of the user. **[IDN-045]** The warning
-MUST also name the legal process of that platform. **[IDN-046]** De-Googled
-builds, F-Droid builds, direct-download builds, and the high-risk configuration
-MUST default to local self-custody recovery only.
+Code through Android Block Store. **[IDN-043]** Such backup MUST be an explicit
+opt-in with a plain warning. **[IDN-044]** The warning MUST state that the
+backup makes a recovery dependency. That dependency is on the Google account of
+the user. **[IDN-045]** The warning MUST also name the legal process of that
+platform. **[IDN-046]** De-Googled builds, F-Droid builds, direct-download
+builds, and the high-risk configuration MUST default to local self-custody
+recovery only.
 
 ### 4.7.2 Encrypted backup
 
@@ -1040,12 +1055,12 @@ as opaque blobs**. The backup holds these items:
 - the text history
 - media, which is opt-in and has a size limit
 
-The **local identity table** holds the pairwise salts of §4.2.2. That table
-also holds the group roster seed `GroupRosterSeed_g` of each group, and the
-three group keys of Part 11 §11.9.1 (the roster key, the pair key, and the KEM
-key) derive from that seed. The client makes each of these values from the
-device CSPRNG, thus the root seed alone does not rebuild them. The local
-identity table is not history. **[IDN-047]** A retention limit MUST NOT remove an entry from
+The **local identity table** holds the pairwise salts of §4.2.2. That table also
+holds the group roster seed `GroupRosterSeed_g` of each group, and the three
+group keys of Part 11 §11.9.1 (the roster key, the pair key, and the KEM key)
+derive from that seed. The client makes each of these values from the device
+CSPRNG, thus the root seed alone does not rebuild them. The local identity table
+is not history. **[IDN-047]** A retention limit MUST NOT remove an entry from
 that table.
 
 **Requirements on the blob:**
@@ -1107,32 +1122,30 @@ that table.
   **[IDN-115]** A client MUST record the `FileDescriptor` of that file as one
   `BackupEntry`. **[IDN-096]** A client MUST use level `0x01` for a backup
   object above `BACKUP_DESC_REFS` data chunks. Part 12 rules `ATT-072` and
-  `ATT-073` do not apply to a backup object. **[IDN-097]** A client MUST put
-  the latest full object at entry 0, and then each later delta in write order.
-  **[IDN-098]** A
-  client MUST write the root again after each object write, under Part 12 rule
-  `ATT-138`. **[IDN-099]** After a full write succeeds, a client MUST send
-  `CDEL` for each object that the new root does not name. **[IDN-100]** A
-  client MUST NOT send `CDEL` for the root of an earlier epoch.
-- **The restore.** **[IDN-101]** At a restore, the client MUST fetch the root
-  of the current epoch, and then of each earlier epoch. **[IDN-116]** The
-  client MUST stop when a root opens under its `backup_key_epoch`, or after
+  `ATT-073` do not apply to a backup object. **[IDN-097]** A client MUST put the
+  latest full object at entry 0, and then each later delta in write order.
+  **[IDN-098]** A client MUST write the root again after each object write,
+  under Part 12 rule `ATT-138`. **[IDN-099]** After a full write succeeds, a
+  client MUST send `CDEL` for each object that the new root does not name.
+  **[IDN-100]** A client MUST NOT send `CDEL` for the root of an earlier epoch.
+- **The restore.** **[IDN-101]** At a restore, the client MUST fetch the root of
+  the current epoch, and then of each earlier epoch. **[IDN-116]** The client
+  MUST stop when a root opens under its `backup_key_epoch`, or after
   `BACKUP_LOOKBACK` epochs. §4.8 sets that value to 26. **[IDN-102]** A client
-  MUST apply the
-  full object of entry 0 and then each delta in entry order. **[IDN-103]** A
-  client MUST reject a root whose `sealed` field does not open, and it MUST
-  treat that epoch as empty.
+  MUST apply the full object of entry 0 and then each delta in entry order.
+  **[IDN-103]** A client MUST reject a root whose `sealed` field does not open,
+  and it MUST treat that epoch as empty.
 
-  > *Cause.* A handle and a write credential alone give
-  > a backup no read credential, no content key, no structure, and no relay.
-  > A relay stores an opaque chunk under a chunk identifier, thus a backup
-  > needs the shape of a chunk. The root is one chunk, and `BACKUP_ROOT_ENTRIES`
-  > of 31 holds one full object and the 30 daily deltas of one
-  > `BACKUP_FULL_INTERVAL`. `BACKUP_DESC_REFS` of 7 keeps an entry inside 980
-  > bytes. At level `0x01` one entry addresses 7 × 271 = 1 897 data chunks,
-  > which is about 62 MB. That figure is the ceiling of one backup object, and
-  > it bounds the opt-in media. Part 12 §12.3.2 gives the null reference that
-  > the second `RelayRef` of a backup ref holds.
+  > *Cause.* A handle and a write credential alone give a backup no read
+  > credential, no content key, no structure, and no relay. A relay stores an
+  > opaque chunk under a chunk identifier, thus a backup needs the shape of a
+  > chunk. The root is one chunk, and `BACKUP_ROOT_ENTRIES` of 31 holds one full
+  > object and the 30 daily deltas of one `BACKUP_FULL_INTERVAL`.
+  > `BACKUP_DESC_REFS` of 7 keeps an entry inside 980 bytes. At level `0x01` one
+  > entry addresses 7 × 271 = 1 897 data chunks, which is about 62 MB. That
+  > figure is the ceiling of one backup object, and it bounds the opt-in media.
+  > Part 12 §12.3.2 gives the null reference that the second `RelayRef` of a
+  > backup ref holds.
 - **The backup object.** A backup object carries rows of the local store of
   Part 14 §14.6.4, each under its surrogate identifier and in its
   plaintext. `K_store` derives from the root seed (Part 5 §5.2), and the
@@ -1164,23 +1177,29 @@ that table.
   **[IDN-178]** A client MUST write each backup object in the layout above.
   **[IDN-179]** A full object MUST hold each row that the restore needs and
   no delete. A delta MUST hold each such row that changed and each such row
-  that left since the object before it. **[IDN-180]** A client MUST NOT put
-  in a backup object a row that holds a state of this device alone: a push
-  registration of Part 8, a push token, the ingress pin of Part 10, the
-  dead-channel state of Part 3 §3.2.6, the device set and the sync channels
-  of Part 7 (`DEV-291`), or the wrap of the store. A restored device makes
-  each of them again. **[IDN-186]** A file stays on the device, and a backup
-  object MUST carry the state of each file as one that waits for a tap
-  (Part 14 `IMP-167`), or as one that failed when no descriptor names it. A
-  restored device then fetches the file of a record, sent or received, from
-  its descriptor while the chunks live. **[IDN-181]** A reader MUST reject an
-  object with a `version` other than `0x01`, a `kind` other than the two
-  values, a full object with a delete or a `base_at` other than 0, or bytes
-  after the last row. **[IDN-182]** A restore MUST apply the full object
-  and then each delta in the order of the root, each row in object order: a
-  put replaces the row, and a delete removes it. **[IDN-183]** A restore
-  MUST mark the channel of each restored contact stale under Part 3 rule
-  `NET-325`, and the renewal of Part 3 §3.2.6 gives each one a new session.
+  that left since the object before it.
+
+  **[IDN-180]** A client MUST NOT put in a backup object a row that holds a
+  state of this device alone: a push registration of Part 8, a push token,
+  the ingress pin of Part 10, the dead-channel state of Part 3 §3.2.6, the
+  device set and the sync channels of Part 7 (`DEV-291`), or the wrap of the
+  store. A restored device makes each of them again.
+
+  **[IDN-186]** A file stays on the device, and a backup object MUST carry the
+  state of each file as one that waits for a tap (Part 14 `IMP-167`), or as
+  one that failed when no descriptor names it. A restored device then fetches
+  the file of a record, sent or received, from its descriptor while the chunks
+  live.
+
+  **[IDN-181]** A reader MUST reject an object with a `version` other than
+  `0x01`, a `kind` other than the two values, a full object with a delete or a
+  `base_at` other than 0, or bytes after the last row. **[IDN-182]** A restore
+  MUST apply the full object and then each delta in the order of the root,
+  each row in object order: a put replaces the row, and a delete removes it.
+  **[IDN-183]** A restore MUST mark the channel of each restored contact stale
+  under Part 3 rule `NET-325`, and the renewal of Part 3 §3.2.6 gives each one
+  a new session.
+
   **[IDN-194]** A backup object MUST carry the renewal guard of each contact
   in the row of that contact: the `guard_seq` and the secret `R` of Part 3
   rule `NET-354`. The bundle of each renewal of a restored device carries
@@ -1195,18 +1214,18 @@ that table.
   > *Cause.* A short `BACKUP_LOOKBACK`, or a backup object with no retention
   > value, fails a late restore. With 8 weekly epochs, a user that loses a
   > device and restores 10 weeks later computes no handle that names a stored
-  > object. Without a retention value, no rule makes the relay hold that
-  > object. U10 needs 99 % of users to
-  > recover the identity, the contacts, and the queue state. The two values
-  > above give a user 180 days, and IDN-074 keeps them in agreement.
+  > object. Without a retention value, no rule makes the relay hold that object.
+  > U10 needs 99 % of users to recover the identity, the contacts, and the queue
+  > state. The two values above give a user 180 days, and IDN-074 keeps them in
+  > agreement.
 
 - **The backup travels on the chunk path of Part 12 §12.3.3.** **[IDN-075]** A
   client MUST divide a backup object into chunks of `CHUNK_SIZE`. **[IDN-117]**
   A client MUST write those chunks under the attachment commands of that
-  section, with `BNEW` as the registration. **[IDN-076]** A client MUST write each chunk to
-  `BACKUP_REPLICAS` relays under different operators. Part 3 rule `NET-344`
-  relaxes that bound in a provisional directory. **[IDN-077]** A client
-  MUST send a backup chunk on the separate connection of Part 12 §12.8.
+  section, with `BNEW` as the registration. **[IDN-076]** A client MUST write
+  each chunk to `BACKUP_REPLICAS` relays under different operators. Part 3 rule
+  `NET-344` relaxes that bound in a provisional directory. **[IDN-077]** A
+  client MUST send a backup chunk on the separate connection of Part 12 §12.8.
 
   > *Cause.* The alternative is a backup write in a scheduled `B0` cover slot.
   > Part 3 §3.6.2 gives a 2 h foreground day about 360 such slots, and Part 6
@@ -1259,26 +1278,25 @@ of 3-of-5, and delivers the shares over **existing pairwise queues**.
 share. **[IDN-085]** A client MUST NOT put a value from which a party derives
 `C_user` in a share.
 
-> *Cause, and the goal that it protects.* The alternative is a split of the
-> full Recovery Code. §4.7.1 derives `BackupRootKey` from that code, and §4.7.2
+> *Cause, and the goal that it protects.* The alternative is a split of the full
+> Recovery Code. §4.7.1 derives `BackupRootKey` from that code, and §4.7.2
 > derives `backup_handle_epoch` from `BackupRootKey`. Thus three share holders
-> reconstruct the code, compute the handle, fetch the object from the
-> relay, and open it. That object holds the `RootIdentity`, the local identity
-> table, and the history. §5.2 of Part 5 states that the local identity table is
-> the one object that links the pairwise salts and the group roster seeds of a
-> user. Goal G9 of Part 2 §2.3 holds against
-> **colluding contacts**, thus three contacts that take an account defeat a
-> stated goal. The share holders are authenticated contacts. That is a
-> usability statement and it is not a security argument.
+> reconstruct the code, compute the handle, fetch the object from the relay, and
+> open it. That object holds the `RootIdentity`, the local identity table, and
+> the history. §5.2 of Part 5 states that the local identity table is the one
+> object that links the pairwise salts and the group roster seeds of a user.
+> Goal G9 of Part 2 §2.3 holds against **colluding contacts**, thus three
+> contacts that take an account defeat a stated goal. The share holders are
+> authenticated contacts. That is a usability statement and it is not a security
+> argument.
 >
 > With the split, three share holders hold `C_social` and 128 bits of unknown
 > `C_user`. A recovery needs the two halves together.
 
 **Where `C_user` lives.** The user holds `C_user` as the `RecoveryDigits` of
-§4.7.7. §4.7.1 IDN-042 also lets a mainstream build put `C_user` in
-Android Block Store. **[IDN-086]** If a client puts
-`C_user` in a platform-cloud item, that client MUST NOT put a share of
-`C_social` in that same item.
+§4.7.7. §4.7.1 IDN-042 also lets a mainstream build put `C_user` in Android
+Block Store. **[IDN-086]** If a client puts `C_user` in a platform-cloud item,
+that client MUST NOT put a share of `C_social` in that same item.
 
 > Thus neither set alone recovers the account. A platform account gives
 > `C_user`, and three contacts give `C_social`. Part 15 §15.1 holds the two
@@ -1353,29 +1371,38 @@ again.
 
 ### 4.7.6 Recovery UX rules (normative)
 
-- **[IDN-051]** **A security-setup screen MUST NOT block the message list.** Signal #9632
-  (2020) blocked users from the messages until the users made a PIN.
-- **[IDN-052]** The client MUST let a user dismiss a recovery prompt. **[IDN-053]** After **two** dismissals
-  the client MUST NOT prompt again, and only the settings screen offers the
-  operation. Signal #14666 (2026) records weekly backup prompts that a user
-  cannot dismiss. The reporter correctly predicted that users "eventually give
-  in."
+- **[IDN-051]** **A security-setup screen MUST NOT block the message list.**
+  Signal #9632 (2020) blocked users from the messages until the users made a
+  PIN.
+- **[IDN-052]** The client MUST let a user dismiss a recovery prompt.
+  **[IDN-053]** After **two** dismissals the client MUST NOT prompt again, and
+  only the settings screen offers the operation. Signal #14666 (2026) records
+  weekly backup prompts that a user cannot dismiss. The reporter correctly
+  predicted that users "eventually give in."
 - Element #15416 records a related tension. Users that delay the recovery setup
   lose all their data, and then they "abandon and foreswear" the platform.
-  Silent cloud escrow does not solve this tension. The solution has three parts.
-  The parts are progressive prompts that a user can dismiss, optional
-  platform-cloud backup for mainstream users, and social recovery. The social
-  recovery serves the users that lose a written code.
-- **[IDN-054]** Onboarding MUST NOT block on the confirmation of the recovery code if that
-  block moves the time-to-first-message past the U1 target.
+  Silent cloud escrow does not solve this tension. The solution has three
+  parts:
+
+  - progressive prompts that a user can dismiss;
+  - optional platform-cloud backup for mainstream users;
+  - social recovery, which serves the users that lose a written code.
+- **[IDN-054]** Onboarding MUST NOT block on the confirmation of the recovery
+  code if that block moves the time-to-first-message past the U1 target.
 
 ### 4.7.7 The recovery digits
 
-A user holds four secrets as digits. The root seed of `IDN-003`, the Recovery Code of §4.7.1, the user
-half `C_user` of §4.7.3, and a share of `C_social` of §4.7.3 are each a string
-of decimal digits. Without a tag, no value tells a screen which secret the
-user typed. The encoding below tags each
-one, and a checksum catches a transcription error before a 3-second KDF runs.
+A user holds four secrets as digits. Each of these is a string of decimal
+digits:
+
+- the root seed of `IDN-003`;
+- the Recovery Code of §4.7.1;
+- the user half `C_user` of §4.7.3;
+- a share of `C_social` of §4.7.3.
+
+Without a tag, no value tells a screen which secret the user typed. The encoding
+below tags each one, and a checksum catches a transcription error before a
+3-second KDF runs.
 
 ```
 RecoveryDigits {
@@ -1392,10 +1419,9 @@ digits = the bytes of RecoveryDigits as one big-endian integer, in decimal,
          with leading zeros to the fixed width of the type, in groups of five
 ```
 
-The Recovery Code is 36 bytes and 87 digits, and so is the root seed: its
-`type` tells the two apart. `C_user` is 20 bytes and 49
-digits. A share is 21 bytes and 51 digits. A screen reads the first digits,
-decodes `type`, and knows the width.
+The Recovery Code is 36 bytes and 87 digits, and so is the root seed: its `type`
+tells the two apart. `C_user` is 20 bytes and 49 digits. A share is 21 bytes and
+51 digits. A screen reads the first digits, decodes `type`, and knows the width.
 
 - **[IDN-149]** A client MUST export each of the four secrets as
   `RecoveryDigits` in decimal, in groups of five digits. **[IDN-150]** A client
