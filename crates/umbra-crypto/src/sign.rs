@@ -54,6 +54,7 @@ impl SigningKey {
             .sign_randomized(message, b"", rng)
             .map_err(|_| Error::Rng)?;
         let sig = Signature(sig);
+
         // A fault during signing gives a signature that leaks the key, thus
         // the check runs before any byte leaves this function (§5.12).
         self.verifying_key().verify(message, &sig)?;
@@ -124,12 +125,14 @@ mod tests {
         let mut rng = TestRng::new(b"sign");
         let sk = SigningKey::generate(&mut rng).unwrap();
         let vk = sk.verifying_key();
+
         let sig = sk.sign(b"umbra/v1/group-grant hello", &mut rng).unwrap();
         vk.verify(b"umbra/v1/group-grant hello", &sig).unwrap();
         assert_eq!(
             vk.verify(b"umbra/v1/group-grant hellp", &sig),
             Err(Error::Signature)
         );
+
         let vk2 = VerifyingKey::from_bytes(&vk.to_bytes()).unwrap();
         assert_eq!(vk2, vk);
         let sig2 = Signature::from_bytes(&sig.to_bytes()).unwrap();

@@ -96,6 +96,7 @@ impl EpochSecret {
         let mut write = Secret::<32>::zeroed();
         let _ = kdf.expand(labels::GROUP_READ, read.expose_mut());
         let _ = kdf.expand(labels::GROUP_WRITE, write.expose_mut());
+
         // Part 11 §11.3.1 defines each key as the clamped bytes.
         // `StaticSecret` clamps at each use and holds the bytes as given,
         // thus the clamp runs here, and an admit carries the clamped form.
@@ -194,6 +195,7 @@ impl ChainState {
     /// one this state holds.
     pub fn slot_key(&self, slot: u32) -> Result<Secret<32>, Error> {
         self.steps_to(slot)?;
+
         let mut key = Secret::new(*self.key.expose());
         let mut at = self.slot;
         while at < slot {
@@ -209,6 +211,7 @@ impl ChainState {
     /// error.
     pub fn advance(&mut self, slot: u32) -> Result<(), Error> {
         self.steps_to(slot)?;
+
         while self.slot < slot {
             self.key = next_slot_key(&self.key);
             self.slot = self.slot.saturating_add(1);
@@ -222,6 +225,7 @@ impl ChainState {
     /// record and keeps its window where it is.
     pub fn record_key(&self, slot: u32) -> Result<Secret<32>, Error> {
         self.steps_to(slot)?;
+
         let mut key = Secret::new(*self.key.expose());
         let mut at = self.slot;
         while at < slot {
@@ -301,6 +305,7 @@ mod tests {
     fn the_chain_runs_forward_only() {
         let mut state = secret().start(&GROUP, 1, 100);
         let key_at_103 = state.record_key(103).unwrap();
+
         state.advance(102).unwrap();
         assert_eq!(state.slot(), 102);
         assert_eq!(state.record_key(103).unwrap().expose(), key_at_103.expose());
@@ -353,16 +358,19 @@ mod tests {
         for bytes in [held.read_secret(), held.write_secret()] {
             assert_eq!(*bytes.expose(), crate::kem::clamp(*bytes.expose()));
         }
+
         // The bytes before the clamp, as an earlier client sent them.
         let kdf = Hkdf::<Sha3_256>::new(None, secret().expose().expose());
         let mut read = Secret::<32>::zeroed();
         let mut write = Secret::<32>::zeroed();
         kdf.expand(labels::GROUP_READ, read.expose_mut()).unwrap();
         kdf.expand(labels::GROUP_WRITE, write.expose_mut()).unwrap();
+
         assert_eq!(
             held.read_public(),
             *XPublic::from(&StaticSecret::from(*read.expose())).as_bytes()
         );
+
         let joined = Credentials::from_secrets(&read, &write);
         assert_eq!(joined.read_public(), held.read_public());
         assert_eq!(joined.write_public(), held.write_public());

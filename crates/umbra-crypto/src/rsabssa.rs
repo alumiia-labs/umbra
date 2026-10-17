@@ -65,6 +65,7 @@ impl<const LIMBS: usize> PublicKey<LIMBS> {
         if n.first().is_none_or(|b| b & 0x80 == 0) {
             return Err(Error::Key);
         }
+
         let n_uint = Uint::<LIMBS>::from_be_slice(n);
         let odd = Option::from(Odd::new(n_uint)).ok_or(Error::Key)?;
         let nonzero = Option::from(NonZero::new(n_uint)).ok_or(Error::Key)?;
@@ -101,6 +102,7 @@ impl<const LIMBS: usize> PublicKey<LIMBS> {
         if bytes.len() != Self::MODULUS_LEN {
             return Err(Error::Length);
         }
+
         let x = Uint::<LIMBS>::from_be_slice(bytes);
         if !self.below_modulus(&x) {
             return Err(Error::Signature);
@@ -132,6 +134,7 @@ impl<const LIMBS: usize> SecretKey<LIMBS> {
         if d.len() != PublicKey::<LIMBS>::MODULUS_LEN {
             return Err(Error::Length);
         }
+
         let d = Uint::<LIMBS>::from_be_slice(d);
         Ok(SecretKey { public, d })
     }
@@ -149,6 +152,7 @@ impl<const LIMBS: usize> SecretKey<LIMBS> {
         if self.public.public_op(&s) != m {
             return Err(Error::Signature);
         }
+
         Ok(i2osp(&s))
     }
 }
@@ -195,6 +199,7 @@ mod keygen {
                 let mut mac = self.mac.clone();
                 mac.update(&self.counter.to_be_bytes());
                 self.counter = self.counter.wrapping_add(1);
+
                 let block = mac.finalize().into_bytes();
                 let n = chunk.len().min(block.len());
                 if let (Some(to), Some(from)) = (chunk.get_mut(..n), block.get(..n)) {
@@ -222,8 +227,10 @@ mod keygen {
             let mac = <Hmac<Sha3_256> as KeyInit>::new_from_slice(&key);
             key.zeroize();
             let mac = mac.map_err(|_| Error::Key)?;
+
             let mut stream = SeedStream { mac, counter: 0 };
             let e = U2048::from_u32(EXPONENT);
+
             loop {
                 let mut p: U1024 = random_prime(&mut stream, Flavor::Any, 1_024);
                 let mut q: U1024 = random_prime(&mut stream, Flavor::Any, 1_024);
@@ -232,24 +239,28 @@ mod keygen {
                     .wrapping_sub(&U1024::ONE)
                     .concatenating_mul(&q.wrapping_sub(&U1024::ONE));
                 let distinct = p != q;
-                // The primes and the order go at each turn of the loop,
-                // the turn that returns among them.
+
+                // Wipe the primes and the order at each turn of the loop,
+                // also at the turn that returns.
                 p.zeroize();
                 q.zeroize();
                 let order = Option::<NonZero<Uint<LIMBS_2048>>>::from(NonZero::new(phi));
                 phi.zeroize();
+
                 if !distinct || n.bits() != 2_048 {
                     continue;
                 }
                 let Some(mut order) = order else {
                     continue;
                 };
+
                 // 65 537 must have an inverse modulo the order.
                 let inverse = Option::<U2048>::from(e.invert_mod(&order));
                 order.zeroize();
                 let Some(mut d) = inverse else {
                     continue;
                 };
+
                 let mut d_bytes = d.to_be_bytes();
                 d.zeroize();
                 let key = Self::from_parts(n.to_be_bytes().as_ref(), d_bytes.as_ref());
@@ -300,12 +311,14 @@ fn pss_encode(msg: &[u8], salt: &[u8; SALT_LEN], em_len: usize) -> Vec<u8> {
     let db_len = em_len.saturating_sub(HASH_LEN + 1);
     let mut db = alloc::vec![0u8; db_len];
     let ps_len = db_len.saturating_sub(SALT_LEN + 1);
+
     if let Some(marker) = db.get_mut(ps_len) {
         *marker = 0x01;
     }
     if let Some(tail) = db.get_mut(ps_len + 1..) {
         tail.copy_from_slice(salt);
     }
+
     let mask = mgf1(&h, db_len);
     for (b, m) in db.iter_mut().zip(&mask) {
         *b ^= m;
@@ -313,6 +326,7 @@ fn pss_encode(msg: &[u8], salt: &[u8; SALT_LEN], em_len: usize) -> Vec<u8> {
     if let Some(first) = db.first_mut() {
         *first &= 0x7F;
     }
+
     let mut em = db;
     em.extend_from_slice(&h);
     em.push(0xBC);
@@ -324,17 +338,20 @@ fn pss_verify(msg: &[u8], em: &[u8]) -> Result<(), Error> {
     if em.len() < HASH_LEN + SALT_LEN + 2 || em.last() != Some(&0xBC) {
         return Err(Error::Signature);
     }
+
     let db_len = em.len().saturating_sub(HASH_LEN + 1);
     let masked_db = em.get(..db_len).ok_or(Error::Signature)?;
     let h = em.get(db_len..db_len + HASH_LEN).ok_or(Error::Signature)?;
     if masked_db.first().is_none_or(|b| b & 0x80 != 0) {
         return Err(Error::Signature);
     }
+
     let mask = mgf1(h, db_len);
     let mut db: Vec<u8> = masked_db.iter().zip(&mask).map(|(a, b)| a ^ b).collect();
     if let Some(first) = db.first_mut() {
         *first &= 0x7F;
     }
+
     let ps_len = db_len.saturating_sub(SALT_LEN + 1);
     let ps_ok = db
         .get(..ps_len)
@@ -342,6 +359,7 @@ fn pss_verify(msg: &[u8], em: &[u8]) -> Result<(), Error> {
     if !ps_ok || db.get(ps_len) != Some(&0x01) {
         return Err(Error::Signature);
     }
+
     let salt = db.get(ps_len + 1..).ok_or(Error::Signature)?;
     if bool::from(m_prime_hash(msg, salt).ct_eq(h)) {
         Ok(())
@@ -364,6 +382,7 @@ pub fn blind_with<const LIMBS: usize>(
     if !bool::from(m.invert_mod(&pk.n).is_some()) {
         return Err(Error::Signature);
     }
+
     let inverse = Option::from(r.invert_mod(&pk.n)).ok_or(Error::Rng)?;
     let x = pk.public_op(r);
     let z = (pk.form(&m) * pk.form(&x)).retrieve();
@@ -379,6 +398,7 @@ pub fn blind<const LIMBS: usize, R: TryCryptoRng + ?Sized>(
 ) -> Result<(Vec<u8>, BlindInverse<LIMBS>), Error> {
     let mut salt = [0u8; SALT_LEN];
     rng.try_fill_bytes(&mut salt).map_err(|_| Error::Rng)?;
+
     // `random_integer_uniform(1, n)` by rejection. A reduction modulo `n`
     // would favor the low values, and the issuer could then tell a true
     // blind from a false one. The top bit of `n` is set, thus a draw passes
@@ -388,6 +408,7 @@ pub fn blind<const LIMBS: usize, R: TryCryptoRng + ?Sized>(
         rng.try_fill_bytes(&mut bytes).map_err(|_| Error::Rng)?;
         let mut r = Uint::<LIMBS>::from_be_slice(&bytes);
         bytes.zeroize();
+
         if pk.below_modulus(&r) && bool::from(r.is_nonzero()) {
             if let Ok(out) = blind_with(pk, msg, &salt, &r) {
                 r.zeroize();
@@ -477,17 +498,21 @@ mod tests {
         let msg = field("msg");
         let salt: [u8; SALT_LEN] = field("salt").try_into().unwrap();
         assert_eq!(pss_encode(&msg, &salt, 512), field("encoded_msg"));
+
         let inv = U4096::from_be_slice(&field("inv"));
         let r = Option::<U4096>::from(inv.invert_mod(&pk.n)).unwrap();
         let (blinded, inverse) = blind_with(pk, &msg, &salt, &r).unwrap();
         assert_eq!(blinded, field("blinded_msg"));
         assert_eq!(i2osp(&inverse.0), field("inv"));
+
         let blind_sig = sk.blind_sign(&blinded).unwrap();
         assert_eq!(blind_sig, field("blind_sig"));
         let sig = finalize(pk, &msg, &blind_sig, &inverse).unwrap();
         assert_eq!(sig, field("sig"));
+
         verify(pk, &msg, &sig).unwrap();
         assert!(verify(pk, b"other", &sig).is_err());
+
         let mut bad = sig.clone();
         bad[100] ^= 1;
         assert!(verify(pk, &msg, &bad).is_err());
@@ -503,6 +528,7 @@ mod tests {
         let sig = finalize(sk.public(), b"token input", &blind_sig, &inverse).unwrap();
         verify(sk.public(), b"token input", &sig).unwrap();
         assert!(finalize(sk.public(), b"other", &blind_sig, &inverse).is_err());
+
         let mut even = field("n");
         even[511] &= 0xFE;
         assert!(PublicKey::<LIMBS_4096>::from_modulus(&even).is_err());

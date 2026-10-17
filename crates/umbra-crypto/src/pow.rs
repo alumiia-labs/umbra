@@ -93,6 +93,7 @@ pub fn verify(
     builder()
         .verify_bytes(&challenge, solution)
         .map_err(|_| Error::Auth)?;
+
     if passes(&challenge, solution, effort) {
         Ok(())
     } else {
@@ -114,9 +115,11 @@ mod tests {
         verify(&verifier, &seed, &nonce, 2, &solution).unwrap();
         assert!(verify(&verifier, &[3; 32], &nonce, 2, &solution).is_err());
         assert!(verify(&[4; 32], &seed, &nonce, 2, &solution).is_err());
+
         let mut bad = solution;
         bad[0] ^= 1;
         assert!(verify(&verifier, &seed, &nonce, 2, &bad).is_err());
+
         // Effort 0 passes on any solution; effort in the string changes
         // the puzzle, thus a solution at 2 does not verify at 3.
         assert!(passes(&[0; 96], &[0; 16], 0));
@@ -171,6 +174,7 @@ mod tests {
                 builder().verify_bytes(&challenge, &h16(e)).unwrap();
             }
         }
+
         let mut rng = crate::test_rng::TestRng::new(b"pow-dump");
         let (nonce, solution) = solve(&[9; 32], &[8; 32], 5, 500, &mut rng).unwrap();
         assert_eq!(nonce, h16("0d5b3e3fe15d1772b5a97b1a32f0d244"));

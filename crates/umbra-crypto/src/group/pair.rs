@@ -76,6 +76,7 @@ impl PairKey {
         if !shared.was_contributory() {
             return Err(Error::Key);
         }
+
         // Both members must order the two keys the same way, thus the order
         // comes from the bytes and not from the roles.
         let (low, high) = if own_public <= peer_public {
@@ -83,6 +84,7 @@ impl PairKey {
         } else {
             (peer_public, own_public)
         };
+
         let kdf = Hkdf::<Sha3_256>::new(None, shared.as_bytes());
         let mut key = Secret::<32>::zeroed();
         let _ = kdf.expand_multi_info(&[labels::GROUP_TAG, group_id, low, high], key.expose_mut());
@@ -217,23 +219,30 @@ mod tests {
         let (ab, _) = pair();
         let hash = app_hash(b"hi");
         let base = ab.record_tag(&fields(&hash));
+
         let mut f = fields(&hash);
         f.epoch += 1;
         assert_ne!(ab.record_tag(&f), base);
+
         let mut f = fields(&hash);
         f.slot += 1;
         assert_ne!(ab.record_tag(&f), base);
+
         let mut f = fields(&hash);
         f.sender_index += 1;
         assert_ne!(ab.record_tag(&f), base);
+
         let mut f = fields(&hash);
         f.counter += 1;
         assert_ne!(ab.record_tag(&f), base);
+
         let mut f = fields(&hash);
         f.roster_epoch += 1;
         assert_ne!(ab.record_tag(&f), base);
+
         let other = app_hash(b"ho");
         assert_ne!(ab.record_tag(&fields(&other)), base);
+
         assert!(ab.verify_record_tag(&fields(&hash), &base[..11]).is_err());
         let mut bad = base;
         bad[0] ^= 1;
@@ -253,6 +262,7 @@ mod tests {
         };
         let tag = ab.epoch_tag(&f);
         assert!(ba.verify_epoch_tag(&f, &tag).is_ok());
+
         let other = Secret::new([6; 32]);
         let g = EpochTag {
             epoch_secret: &other,

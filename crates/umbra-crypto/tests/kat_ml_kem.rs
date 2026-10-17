@@ -83,6 +83,7 @@ fn acvp_key_generation() {
     let prompt = json("acvp/ML-KEM-keyGen-FIPS203/prompt.json");
     let expected = json("acvp/ML-KEM-keyGen-FIPS203/expectedResults.json");
     let mut count = 0;
+
     for g in groups_768(&prompt, None) {
         let eg = expected["testGroups"]
             .as_array()
@@ -90,6 +91,7 @@ fn acvp_key_generation() {
             .iter()
             .find(|e| e["tgId"] == g["tgId"])
             .expect("expected group");
+
         for (t, e) in g["tests"]
             .as_array()
             .unwrap()
@@ -106,6 +108,7 @@ fn acvp_key_generation() {
             count += 1;
         }
     }
+
     assert_eq!(count, 25);
 }
 
@@ -113,6 +116,7 @@ fn acvp_key_generation() {
 fn acvp_encapsulation() {
     let v = json("acvp/ML-KEM-encapDecap-FIPS203/internalProjection.json");
     let mut count = 0;
+
     for g in groups_768(&v, Some("encapsulation")) {
         for t in g["tests"].as_array().unwrap() {
             let ek = ek_from_bytes(&hex(field(t, "ek"))).expect("ek");
@@ -122,6 +126,7 @@ fn acvp_encapsulation() {
             count += 1;
         }
     }
+
     assert_eq!(count, 25);
 }
 
@@ -129,6 +134,7 @@ fn acvp_encapsulation() {
 fn acvp_decapsulation_with_implicit_rejection() {
     let v = json("acvp/ML-KEM-encapDecap-FIPS203/internalProjection.json");
     let mut count = 0;
+
     for g in groups_768(&v, Some("decapsulation")) {
         for t in g["tests"].as_array().unwrap() {
             let dk = dk_from_expanded(&hex(field(t, "dk"))).expect("dk");
@@ -137,6 +143,7 @@ fn acvp_decapsulation_with_implicit_rejection() {
             count += 1;
         }
     }
+
     assert_eq!(count, 10);
 }
 
@@ -144,6 +151,7 @@ fn acvp_decapsulation_with_implicit_rejection() {
 fn acvp_key_checks() {
     let v = json("acvp/ML-KEM-encapDecap-FIPS203/internalProjection.json");
     let mut count = 0;
+
     for g in groups_768(&v, Some("encapsulationKeyCheck")) {
         for t in g["tests"].as_array().unwrap() {
             let ok = ek_from_bytes(&hex(field(t, "ek"))).is_ok();
@@ -151,6 +159,7 @@ fn acvp_key_checks() {
             count += 1;
         }
     }
+
     for g in groups_768(&v, Some("decapsulationKeyCheck")) {
         for t in g["tests"].as_array().unwrap() {
             let ok = dk_from_expanded(&hex(field(t, "dk"))).is_ok();
@@ -158,6 +167,7 @@ fn acvp_key_checks() {
             count += 1;
         }
     }
+
     assert_eq!(count, 20);
 }
 
@@ -165,6 +175,7 @@ fn acvp_key_checks() {
 /// hex (the intermediate file also lists coefficient arrays) is skipped.
 fn kv(text: &str) -> std::collections::HashMap<String, Vec<u8>> {
     let mut out = std::collections::HashMap::new();
+
     for line in text.lines() {
         if let Some((k, v)) = line.split_once(" = ") {
             let v = v.trim();
@@ -173,6 +184,7 @@ fn kv(text: &str) -> std::collections::HashMap<String, Vec<u8>> {
             }
         }
     }
+
     out
 }
 
@@ -180,6 +192,7 @@ fn kv(text: &str) -> std::collections::HashMap<String, Vec<u8>> {
 fn cctv_strcmp() {
     let v = kv(&read("cctv/ML-KEM/strcmp/ML-KEM-768.txt"));
     let dk = dk_from_expanded(&v["dk"]).expect("dk");
+
     assert_eq!(dk.decapsulate(&ct(&v["c"])).as_slice(), v["K"]);
 }
 
@@ -191,9 +204,11 @@ fn cctv_encaps_decaps(rel: &str) {
     let v = kv(&read(rel));
     let dk = dk_from_expanded(&v["dk"]).expect("dk");
     assert_eq!(dk.encapsulation_key().to_bytes().as_slice(), v["ek"]);
+
     let (c, k) = dk
         .encapsulation_key()
         .encapsulate_deterministic(&m32(&v["m"]));
+
     assert_eq!(c.as_slice(), v["c"]);
     assert_eq!(k.as_slice(), v["K"]);
     assert_eq!(dk.decapsulate(&c).as_slice(), v["K"]);
@@ -213,9 +228,11 @@ fn cctv_intermediate_end_values() {
 fn cctv_modulus_rejects_every_unreduced_key() {
     let text = read("cctv/ML-KEM/modulus/ML-KEM-768.txt");
     let mut count = 0;
+
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         assert!(ek_from_bytes(&hex(line.trim())).is_err(), "line {count}");
         count += 1;
     }
+
     assert_eq!(count, 780);
 }

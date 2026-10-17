@@ -38,6 +38,7 @@ impl RootIdentity {
     fn hybrid(&self, info: &[&[u8]]) -> KeyPair {
         let mut t = Secret::<96>::zeroed();
         self.expand(info, t.expose_mut());
+
         // Each seed goes straight into a buffer that wipes itself.
         let (x_part, dz_part) = t.expose().split_at(32);
         let mut x = Secret::<32>::zeroed();
@@ -99,6 +100,7 @@ mod tests {
         assert_eq!(a.storage_key().expose(), b.storage_key().expose());
         assert_ne!(a.storage_key().expose(), a.device_set_key().expose());
         assert_ne!(a.storage_key().expose(), root(2).storage_key().expose());
+
         let pk1 = a.pairwise_identity(&[9u8; 16]).public().to_bytes();
         let pk2 = b.pairwise_identity(&[9u8; 16]).public().to_bytes();
         let pk3 = a.pairwise_identity(&[8u8; 16]).public().to_bytes();

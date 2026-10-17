@@ -102,6 +102,7 @@ fn build() -> Value {
     let mut body: Vec<u8> = tags.iter().flat_map(|t| t.iter().copied()).collect();
     body.extend_from_slice(app);
     let plaintext = body.clone();
+
     let nonce = [0x0a; 12];
     let record_key = state.record_key(slot).unwrap();
     let tag = seal_record(&record_key, &nonce, &GROUP_ID, EPOCH, slot, &mut body).unwrap();
@@ -135,6 +136,7 @@ fn build() -> Value {
     payload.extend_from_slice(&epoch_tag);
     payload.push(0);
     assert_eq!(payload.len(), 47);
+
     let ek_x = [0x11; 32];
     let m = [0x22; 32];
     let (ct, shared) = kem::encapsulate_deterministic(
@@ -142,8 +144,10 @@ fn build() -> Value {
         Secret::new(ek_x),
         Secret::new(m),
     );
+
     let mut sealed = vec![0u8; sealed_len(payload.len())];
     slot::seal_with(&ct, &shared, &GROUP_ID, EPOCH, 1, &payload, &mut sealed).unwrap();
+
     let mut opened = vec![0u8; payload.len()];
     slot::open(members[1].kem(), &GROUP_ID, EPOCH, 1, &sealed, &mut opened).unwrap();
     assert_eq!(opened, payload);

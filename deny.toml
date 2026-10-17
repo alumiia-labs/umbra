@@ -21,11 +21,11 @@ version = 2
 # LGPL-3.0-only covers equix and hashx alone, which Part 13 §13.8 names; the
 # LGPL combines into the AGPL-3.0-only workspace under GPLv3 §13.
 allow = ["MIT", "Apache-2.0", "BSD-3-Clause", "Unicode-3.0", "AGPL-3.0-only", "LGPL-3.0-only"]
-# The platform graph of register R3 (Part 14 §14.2.3) adds three licences,
+# The platform graph of register R3 (Part 14 §14.2.3) adds three licenses,
 # each for the named crates alone. MPL-2.0 is file-level copyleft: UMBRA
 # changes no uniffi file, and MPL-2.0 §3.3 lets it combine into the AGPL.
 # ISC and CDLA-Permissive-2.0 are permissive. `check.sh` checks the
-# licences of that graph, and the default graph never reaches these crates.
+# licenses of that graph, and the default graph never reaches these crates.
 unused-license-exception = "allow"
 exceptions = [
     { allow = ["MPL-2.0"], crate = "uniffi" },
@@ -73,30 +73,30 @@ allow = [
   { crate = "base64ct" },                # R2, under argon2
   { crate = "blake2" },                  # R2, under argon2
   { crate = "password-hash" },           # R2, under argon2
-  { crate = "sha2" },                   # R2, AUX-2 and AUX-3
-  { crate = "crypto-bigint" },          # R2, AUX-1
-  { crate = "crypto-primes" },          # R2, AUX-1, the RSA keys of an issuer
-  { crate = "equix" },                  # R2, AUX-8
-  { crate = "hashx" },                  # R2, under equix
-  { crate = "arrayvec" },               # R2, under equix
-  { crate = "fixed-capacity-vec" },     # R2, under hashx
-  { crate = "generic-array" },          # R2, under the blake2 of hashx
-  { crate = "thiserror" },              # R2, under equix
-  { crate = "thiserror-impl" },         # build, under thiserror
-  { crate = "visibility" },             # build, under equix
-  { crate = "version_check" },          # build, under generic-array
-  { crate = "precis-profiles" },        # R2, AUX-10
-  { crate = "precis-core" },            # R2, under precis-profiles
-  { crate = "unicode-normalization" },  # R2, under precis-core
-  { crate = "tinyvec" },                # R2, under unicode-normalization
-  { crate = "precis-tools" },           # build, the table generator of precis
-  { crate = "ucd-parse" },              # build, under precis-tools
-  { crate = "regex" },                  # build, under precis-tools
-  { crate = "regex-lite" },             # build, under ucd-parse
-  { crate = "regex-automata" },         # build, under regex
-  { crate = "regex-syntax" },           # build, under regex
-  { crate = "aho-corasick" },           # build, under regex
-  { crate = "memchr" },                 # build, under regex
+  { crate = "sha2" },                    # R2, AUX-2 and AUX-3
+  { crate = "crypto-bigint" },           # R2, AUX-1
+  { crate = "crypto-primes" },           # R2, AUX-1, the RSA keys of an issuer
+  { crate = "equix" },                   # R2, AUX-8
+  { crate = "hashx" },                   # R2, under equix
+  { crate = "arrayvec" },                # R2, under equix
+  { crate = "fixed-capacity-vec" },      # R2, under hashx
+  { crate = "generic-array" },           # R2, under the blake2 of hashx
+  { crate = "thiserror" },               # R2, under equix
+  { crate = "thiserror-impl" },          # build, under thiserror
+  { crate = "visibility" },              # build, under equix
+  { crate = "version_check" },           # build, under generic-array
+  { crate = "precis-profiles" },         # R2, AUX-10
+  { crate = "precis-core" },             # R2, under precis-profiles
+  { crate = "unicode-normalization" },   # R2, under precis-core
+  { crate = "tinyvec" },                 # R2, under unicode-normalization
+  { crate = "precis-tools" },            # build, the table generator of precis
+  { crate = "ucd-parse" },               # build, under precis-tools
+  { crate = "regex" },                   # build, under precis-tools
+  { crate = "regex-lite" },              # build, under ucd-parse
+  { crate = "regex-automata" },          # build, under regex
+  { crate = "regex-syntax" },            # build, under regex
+  { crate = "aho-corasick" },            # build, under regex
+  { crate = "memchr" },                  # build, under regex
   { crate = "aes" },                     # R1, the onion layer only
   { crate = "block-buffer" },            # R1
   { crate = "cfg-if" },                  # R1

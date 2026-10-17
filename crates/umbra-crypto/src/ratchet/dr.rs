@@ -209,12 +209,15 @@ pub struct NoBraid<'a, R: ?Sized> {
 
 impl<R: CryptoRng + ?Sized> StepHooks for NoBraid<'_, R> {
     type Rng = R;
+
     fn rng(&mut self) -> &mut R {
         self.rng
     }
+
     fn before_receive_chain(&mut self, _: &Header, _: Option<&[u8]>) -> Option<(u32, Secret<32>)> {
         None
     }
+
     fn before_send_chain(&mut self) -> Option<(u32, Secret<32>)> {
         None
     }
@@ -264,6 +267,7 @@ fn dh(secret: &StaticSecret, public: &[u8; 32]) -> Result<Secret<32>, Error> {
     if !shared.was_contributory() {
         return Err(Error::Ratchet);
     }
+
     let mut output = Secret::<32>::zeroed();
     output.expose_mut().copy_from_slice(shared.as_bytes());
     Ok(output)
@@ -316,6 +320,7 @@ impl Session {
         writer.u16(self.send_index);
         writer.bytes(&self.session_tag);
         writer.u32(self.mixed);
+
         writer.u32(u32::try_from(self.skipped.len()).map_err(|_| Error::Length)?);
         for skipped in &self.skipped {
             writer.bytes(&skipped.hk);
@@ -343,12 +348,14 @@ impl Session {
         let send_index = reader.u16()?;
         let session_tag = reader.array()?;
         let mixed = reader.u32()?;
+
         let count = usize::try_from(reader.u32()?).map_err(|_| Error::Length)?;
         // CRY-023: `MAX_STORED` bounds a stored form, and a form above it
         // is a fault.
         if count > MAX_STORED {
             return Err(Error::Ratchet);
         }
+
         let mut skipped = Vec::with_capacity(count);
         for _ in 0..count {
             skipped.push(Skipped {
@@ -358,11 +365,13 @@ impl Session {
                 stored_at: reader.u64()?,
             });
         }
+
         // CRY-153: a restored session holds no more keys than a live one,
         // thus the oldest keys above `SKIPPED_CAP` go, as at a skip.
         let excess = skipped.len().saturating_sub(SKIPPED_CAP);
         skipped.drain(..excess);
         skipped.spare_capacity_mut().zeroize();
+
         Ok(Self {
             rk,
             dh_s,
@@ -396,6 +405,7 @@ impl Session {
             dh_initial,
             ..
         } = keys;
+
         let mut tag_hash = Sha3_256::new();
         tag_hash.update(labels::SESSION_TAG);
         tag_hash.update(rk.expose());
@@ -449,6 +459,7 @@ impl Session {
                 }
             }
         };
+
         Ok(session)
     }
 
@@ -583,6 +594,7 @@ impl Session {
         hooks: &mut H,
     ) -> Result<Received<'a>, Error> {
         let ctx = Self::peek_ctx(record)?;
+
         // The sender picks the length of a record, thus each split checks
         // it and a short record is one error, never a panic.
         let (head, rest) = record.split_at_checked(5).ok_or(Error::Length)?;
@@ -617,12 +629,14 @@ impl Session {
                 len: pt_len,
             });
         }
+
         let (header, ratchet) = self.decrypt_header(&hdr_nonce, head, hdr_ct)?;
         // A record below the chain that no skipped key names is a replay:
         // it moves no chain.
         if !ratchet && header.n < self.n_r {
             return Err(Error::Ratchet);
         }
+
         if ratchet {
             // `MAX_SKIP` bounds the keys that the chain that ends leaves.
             // A chain that lost more records than that keeps its first
@@ -635,11 +649,13 @@ impl Session {
             let frame_of_step = (frame_len > 0).then_some(frame);
             self.dh_ratchet(&header, frame_of_step, hooks)?;
         }
+
         self.skip(header.n, now)?;
         let ck = self.ck_r.take().ok_or(Error::Ratchet)?;
         let (ck_next, mk) = kdf_ck(&ck);
         self.ck_r = Some(ck_next);
         self.n_r = self.n_r.checked_add(1).ok_or(Error::Ratchet)?;
+
         out.copy_from_slice(body_ct);
         open(&mk, &body_nonce, ad, out, body_tag)?;
         Ok(Received {
@@ -671,11 +687,13 @@ impl Session {
         if needed <= self.skipped.capacity() {
             return;
         }
+
         let capacity = self
             .skipped
             .capacity()
             .saturating_mul(2)
             .clamp(needed, needed.max(SKIPPED_CAP));
+
         let mut next = Vec::with_capacity(capacity);
         next.extend(self.skipped.iter().map(Skipped::copy));
         let mut old = core::mem::replace(&mut self.skipped, next);
@@ -761,6 +779,7 @@ impl Session {
                 return Ok((h, false));
             }
         }
+
         let h = open_header(&self.nhk_r, nonce, ad, hdr_ct)?;
         Ok((h, true))
     }
@@ -772,6 +791,7 @@ impl Session {
         let Some(ck) = self.ck_r.take() else {
             return Ok(());
         };
+
         let hk = match self.hk_r.as_ref() {
             Some(h) => Secret::new(*h.expose()),
             None => {
@@ -779,10 +799,12 @@ impl Session {
                 return Ok(());
             }
         };
+
         if until.saturating_sub(self.n_r) > MAX_SKIP {
             self.ck_r = Some(ck);
             return Err(Error::Ratchet);
         }
+
         // CRY-153: a key past SKIP_TTL goes at each skip, and at the cap
         // the oldest keys go, in one step, thus a peer that skipped many
         // records costs the oldest of them and no later record.
@@ -797,6 +819,7 @@ impl Session {
         self.skipped.drain(..excess);
         self.wipe_spare();
         self.reserve_skipped(adds);
+
         let mut ck = ck;
         while self.n_r < until {
             let (next, mk) = kdf_ck(&ck);
@@ -809,6 +832,7 @@ impl Session {
             ck = next;
             self.n_r += 1;
         }
+
         self.ck_r = Some(ck);
         Ok(())
     }
@@ -829,6 +853,7 @@ impl Session {
         if let Some((epoch, secret)) = hooks.before_receive_chain(header, frame) {
             self.mix_root(epoch, &secret);
         }
+
         let (root_key, ck_r, nhk_r) = kdf_rk(&self.rk, &dh(&self.dh_s, &header.dh_pk)?);
         self.rk = root_key;
         self.ck_r = Some(ck_r);
@@ -837,6 +862,7 @@ impl Session {
         if let Some((epoch, secret)) = hooks.before_send_chain() {
             self.mix_root(epoch, &secret);
         }
+
         self.dh_s = StaticSecret::random_from_rng(hooks.rng());
         let (root_key, ck_s, nhk_s) = kdf_rk(&self.rk, &dh(&self.dh_s, &header.dh_pk)?);
         self.rk = root_key;
@@ -890,6 +916,7 @@ fn open_header(
     let mut pt = [0u8; 40];
     pt.copy_from_slice(ct);
     open(hk, nonce, ad, &mut pt, tag)?;
+
     let (pk, tail) = pt.split_at(32);
     let (pn, n) = tail.split_at(4);
     let mut dh_pk = [0u8; 32];
@@ -957,6 +984,7 @@ mod tests {
             let r1 = send(&mut b, &mut rng, &[round, 3]);
             assert_eq!(recv(&mut a, &mut rng, &r1).unwrap(), [round, 3]);
         }
+
         assert_eq!(a.ctx().send_index, 10);
         assert_eq!(b.ctx().send_index, 5);
         assert_eq!(
@@ -978,10 +1006,12 @@ mod tests {
                 stored_at: u64::from(n),
             });
         }
+
         let mut writer = Writer::new();
         b.export(&mut writer).unwrap();
         let bytes = writer.finish();
         let back = Session::restore(&mut Reader::new(&bytes)).unwrap();
+
         assert_eq!(back.skipped_len(), SKIPPED_CAP);
         // The oldest keys went.
         assert_eq!(back.skipped_ages().next(), Some(1_500 - SKIPPED_CAP as u64));
@@ -999,10 +1029,12 @@ mod tests {
             let r = send(&mut b, &mut rng, &[round]);
             assert_eq!(recv(&mut a, &mut rng, &r).unwrap(), [round]);
         }
+
         assert_eq!(b.skipped_len(), 6);
         for record in late.iter().rev() {
             assert!(recv(&mut b, &mut rng, record).is_ok());
         }
+
         assert_eq!(b.skipped_len(), 0);
     }
 
@@ -1014,14 +1046,18 @@ mod tests {
         let m2 = send(&mut a, &mut rng, b"m2");
         assert_eq!(recv(&mut b, &mut rng, &m2).unwrap(), b"m2");
         assert_eq!(b.skipped_len(), 2);
+
         let r0 = send(&mut b, &mut rng, b"r0");
         assert_eq!(recv(&mut a, &mut rng, &r0).unwrap(), b"r0");
-        let m3 = send(&mut a, &mut rng, b"m3"); // new chain after the step
+
+        // A new chain starts after the step.
+        let m3 = send(&mut a, &mut rng, b"m3");
         assert_eq!(recv(&mut b, &mut rng, &m3).unwrap(), b"m3");
         assert_eq!(recv(&mut b, &mut rng, &m0).unwrap(), b"m0");
         assert_eq!(recv(&mut b, &mut rng, &m1).unwrap(), b"m1");
         assert_eq!(b.skipped_len(), 0);
-        // a replay fails: the key is gone
+
+        // A replay fails, because the key is gone.
         assert_eq!(recv(&mut b, &mut rng, &m1).err(), Some(Error::Ratchet));
     }
 
@@ -1031,12 +1067,13 @@ mod tests {
         let mut out = vec![0u8; Session::overhead(39) + 4];
         let frame = [7u8; 39];
         let n = a.send(b"text", Some(&frame), &mut rng, &mut out).unwrap();
-        let mut rec = out[..n].to_vec();
+        let rec = out[..n].to_vec();
         let mut pt = vec![0u8; 8];
         let r = b.receive(&rec, 0, &mut rng, &mut pt).unwrap();
         assert_eq!(r.pq_frame, Some(&frame[..]));
         assert_eq!(&pt[..r.len], b"text");
-        rec[90] ^= 1; // inside the frame
+
+        // A changed byte inside the frame fails the record.
         let (mut a2, mut b2, mut rng2) = pair(b"tamper");
         let n = a2.send(b"text", Some(&frame), &mut rng2, &mut out).unwrap();
         let mut rec2 = out[..n].to_vec();
@@ -1045,7 +1082,6 @@ mod tests {
             b2.receive(&rec2, 0, &mut rng2, &mut pt).err(),
             Some(Error::Ratchet)
         );
-        let _ = rec;
     }
 
     #[test]
@@ -1067,6 +1103,7 @@ mod tests {
         let mut out = vec![0u8; 8];
         b.receive(&m, 100, &mut rng, &mut out).unwrap();
         assert_eq!(b.skipped_len(), 1);
+
         b.prune(100 + SKIP_TTL - 1);
         assert_eq!(b.skipped_len(), 1);
         b.prune(100 + SKIP_TTL);
@@ -1081,11 +1118,13 @@ mod tests {
         let mut out = vec![0u8; 8];
         b.receive(&m, 100, &mut rng, &mut out).unwrap();
         assert_eq!(b.skipped_len(), 1);
+
         // The device clock jumps forward by more than `SKIP_TTL`. The age
         // starts again at the new time, thus the next skip drops no key.
         let jumped = 100 + 2 * SKIP_TTL;
         assert!(b.clock_moved(jumped));
         assert!(!b.clock_moved(jumped));
+
         let _ = send(&mut a, &mut rng, b"lost");
         let next = send(&mut a, &mut rng, b"next");
         b.receive(&next, jumped, &mut rng, &mut out).unwrap();
@@ -1093,6 +1132,7 @@ mod tests {
         let r = b.receive(&late, jumped, &mut rng, &mut out).unwrap();
         assert_eq!(&out[..r.len], b"late");
         assert_eq!(b.skipped_len(), 1);
+
         // A clock that jumps backward ends no key early, and the key lives
         // one period from the new time and no more.
         assert!(b.clock_moved(50));
@@ -1107,12 +1147,14 @@ mod tests {
         let (mut a, mut b, mut rng) = pair(b"lost chain");
         let m0 = send(&mut a, &mut rng, b"m0");
         assert_eq!(recv(&mut b, &mut rng, &m0).unwrap(), b"m0");
+
         // The relay drops more than `MAX_SKIP` records of one chain.
         let first_lost = send(&mut a, &mut rng, b"first lost");
         for _ in 0..(MAX_SKIP + 3) {
             let _ = send(&mut a, &mut rng, b"x");
         }
         let last_lost = send(&mut a, &mut rng, b"last lost");
+
         // The next chain of the peer names all of them in `pn`. The step
         // runs, and the chain that ended keeps its first `MAX_SKIP` keys.
         let r0 = send(&mut b, &mut rng, b"r0");
@@ -1125,6 +1167,7 @@ mod tests {
             recv(&mut b, &mut rng, &last_lost).err(),
             Some(Error::Ratchet)
         );
+
         // The session continues in both directions.
         let r1 = send(&mut b, &mut rng, b"r1");
         assert_eq!(recv(&mut a, &mut rng, &r1).unwrap(), b"r1");

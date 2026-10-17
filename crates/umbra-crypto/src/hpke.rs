@@ -94,6 +94,7 @@ type Expand = fn(&[u8], &[u8], &[u8], &[u8], &mut [u8]) -> Result<(), Error>;
 fn suite_id<K: KemSuite, H: KdfHash>() -> [u8; 10] {
     let aead_id = K::AEAD_ID;
     let mut out = *b"HPKE\0\0\0\0\0\0";
+
     if let Some(s) = out.get_mut(4..6) {
         s.copy_from_slice(&K::KEM_ID.to_be_bytes());
     }
@@ -113,6 +114,7 @@ fn labeled_extract<H: KdfHash>(suite: &[u8], salt: &[u8], label: &[u8], ikm: &[u
     labeled.extend_from_slice(suite);
     labeled.extend_from_slice(label);
     labeled.extend_from_slice(ikm);
+
     let (mut prk, _) = SimpleHkdf::<H>::extract(Some(salt), &labeled);
     let out = prk.to_vec();
     prk.zeroize();
@@ -164,6 +166,7 @@ impl Context {
         context.push(MODE_BASE);
         context.extend_from_slice(&psk_id_hash);
         context.extend_from_slice(&info_hash);
+
         // The wrapper wipes the secret on each path out of the call.
         let secret = Zeroizing::new(labeled_extract::<H>(
             &suite,
@@ -171,12 +174,14 @@ impl Context {
             b"secret",
             b"",
         ));
+
         let mut key = Secret::<KEY_LEN>::zeroed();
         labeled_expand::<H>(&suite, &secret, b"key", &context, key.expose_mut())?;
         let mut base_nonce = [0u8; NONCE_LEN];
         labeled_expand::<H>(&suite, &secret, b"base_nonce", &context, &mut base_nonce)?;
         let mut exporter = alloc::vec![0u8; <H as OutputSizeUser>::output_size()];
         labeled_expand::<H>(&suite, &secret, b"exp", &context, &mut exporter)?;
+
         Ok(Context {
             key,
             base_nonce,
@@ -203,6 +208,7 @@ impl Context {
         let tag = ChaCha20Poly1305::new(self.key.expose().into())
             .encrypt_inout_detached(&Nonce::from(nonce), aad, out.as_mut_slice().into())
             .map_err(|_| Error::Length)?;
+
         out.extend_from_slice(&tag);
         self.seq = self.seq.checked_add(1).ok_or(Error::Length)?;
         Ok(out)
@@ -213,12 +219,14 @@ impl Context {
         if sealed.len() < TAG_LEN {
             return Err(Error::Length);
         }
+
         let split = sealed.len().saturating_sub(TAG_LEN);
         let mut out = sealed.get(..split).ok_or(Error::Length)?.to_vec();
         let tag: [u8; TAG_LEN] = sealed
             .get(split..)
             .and_then(|t| t.try_into().ok())
             .ok_or(Error::Length)?;
+
         let nonce = self.nonce();
         ChaCha20Poly1305::new(self.key.expose().into())
             .decrypt_inout_detached(
@@ -228,6 +236,7 @@ impl Context {
                 &Tag::from(tag),
             )
             .map_err(|_| Error::Aead)?;
+
         self.seq = self.seq.checked_add(1).ok_or(Error::Length)?;
         Ok(out)
     }
@@ -357,6 +366,7 @@ mod tests {
         let sk_r = StaticSecret::from(<[u8; 32]>::try_from(field("skRm")).unwrap());
         let pk_r: [u8; 32] = field("pkRm").try_into().unwrap();
         assert_eq!(XPublic::from(&sk_r).to_bytes()[..], pk_r[..]);
+
         let info = field("info");
         let mut rng = crate::test_rng::TestRng::new(b"unused");
         let (enc, mut sender) =
@@ -365,6 +375,7 @@ mod tests {
         assert_eq!(sender.key.expose()[..], field("key")[..]);
         assert_eq!(sender.base_nonce[..], field("base_nonce")[..]);
         assert_eq!(sender.exporter, field("exporter_secret"));
+
         let mut recipient = setup_recipient::<DhKemX25519, Sha256>(&sk_r, &enc, &info).unwrap();
         // The vector encrypts at sequence numbers 0, 1, 2, 4, 255, and 256.
         for (i, seq) in [0u64, 1, 2, 4, 255, 256].into_iter().enumerate() {
@@ -382,6 +393,7 @@ mod tests {
                 .unwrap();
             assert_eq!(pt, field(&alloc::format!("pt{i}")));
         }
+
         for i in 0..3 {
             let mut out = [0u8; 32];
             sender
@@ -389,6 +401,7 @@ mod tests {
                 .unwrap();
             assert_eq!(out[..], field(&alloc::format!("exported_value{i}"))[..]);
         }
+
         // The shared secret alone gives the same schedule.
         let ss = Secret::new(<[u8; 32]>::try_from(field("shared_secret")).unwrap());
         let again = Context::from_shared_secret::<DhKemX25519, Sha256>(&ss, &info).unwrap();
@@ -417,6 +430,7 @@ mod tests {
         assert!(open(&pair, b"umbra/v1/ntf-root", b"x", &sealed).is_err());
         assert!(open(&other, b"umbra/v1/ntf-root", b"aad", &sealed).is_err());
         assert!(open(&pair, b"umbra/v1/ntf-root", b"aad", &sealed[..100]).is_err());
+
         // A context carries a sequence, thus two seals differ and open in
         // order only.
         let (enc, mut s) =
@@ -425,9 +439,11 @@ mod tests {
         let c0 = s.seal(b"", b"zero").unwrap();
         let c1 = s.seal(b"", b"one").unwrap();
         assert!(r.open(b"", &c1).is_err());
+
         let mut r = setup_recipient::<UmbraKem, Sha3_256>(&pair, &enc, b"i").unwrap();
         assert_eq!(r.open(b"", &c0).unwrap(), b"zero");
         assert_eq!(r.open(b"", &c1).unwrap(), b"one");
+
         let mut a = [0u8; 16];
         let mut b = [0u8; 16];
         s.export(b"ctx", &mut a).unwrap();

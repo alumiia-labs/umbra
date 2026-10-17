@@ -63,12 +63,15 @@ impl Recorder {
 
 impl TryRng for Recorder {
     type Error = Infallible;
+
     fn try_next_u32(&mut self) -> Result<u32, Infallible> {
         Ok(0)
     }
+
     fn try_next_u64(&mut self) -> Result<u64, Infallible> {
         Ok(0)
     }
+
     fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Infallible> {
         let mut h = Shake256::default();
         h.update(&self.seed);
@@ -79,6 +82,7 @@ impl TryRng for Recorder {
         Ok(())
     }
 }
+
 impl TryCryptoRng for Recorder {}
 
 #[derive(Default)]
@@ -127,6 +131,7 @@ fn xk_transcript(range_i: VersionRange, range_r: VersionRange) -> Value {
         &mut tr_i,
     )
     .unwrap();
+
     let mut buf = [0u8; 64];
     let (mut resp, _) = Responder::read_flight1(
         &s_r,
@@ -138,12 +143,15 @@ fn xk_transcript(range_i: VersionRange, range_r: VersionRange) -> Value {
         &mut tr_r,
     )
     .unwrap();
+
     let mut f2 = [0u8; 4096];
     let n2 = resp.flight2(app.1, &mut rng_r, &mut f2, &mut tr_r).unwrap();
     init.read_flight2(&f2[..n2], &mut buf, &mut tr_i).unwrap();
+
     let mut f3 = [0u8; 4096];
     let (ki, n3) = init.flight3(&s_i, app.2, &mut f3, &mut tr_i).unwrap();
     let (kr, _, _) = resp.read_flight3(&f3[..n3], &mut buf, &mut tr_r).unwrap();
+
     assert_eq!(ki.rk.expose(), kr.rk.expose());
     // CRY-104: one h at the two parties after flight 1.
     assert_eq!(tr_i.0[6]["h"], tr_r.0[6]["h"]);
@@ -188,7 +196,9 @@ fn xk_bad_mode() -> Value {
         &mut umbra_crypto::handshake::NoTrace,
     )
     .unwrap();
+
     f1[2] = 0x02;
+
     let mut buf = [0u8; 64];
     let mut tr = Steps::default();
     let r = Responder::read_flight1(
@@ -205,6 +215,7 @@ fn xk_bad_mode() -> Value {
         tr.0.is_empty(),
         "the responder aborts before MixHash(prologue)"
     );
+
     json!({ "flight1": hex(&f1[..n1]), "result": "abort before MixHash(prologue)", "responder_steps": [] })
 }
 
@@ -216,6 +227,7 @@ fn nk_transcript() -> Value {
     };
     let (mut rng_c, mut rng_r) = (Recorder::new(b"nk-client"), Recorder::new(b"nk-relay"));
     let (mut tr_c, mut tr_r) = (Steps::default(), Steps::default());
+
     let mut f1 = [0u8; nk::FLIGHT1_LEN];
     let client = nk::Client::flight1(&relay, &mut rng_c, &mut f1, &mut tr_c).unwrap();
     let hop = nk::Relay::read_flight1(&relay, &s_sk, &f1, &mut tr_r).unwrap();
@@ -223,6 +235,7 @@ fn nk_transcript() -> Value {
     let ss_r = hop.flight2(&mut rng_r, &mut f2, &mut tr_r).unwrap();
     let ss_c = client.read_flight2(&f2, &mut tr_c).unwrap();
     assert_eq!(ss_c.expose(), ss_r.expose());
+
     json!({
         "relay": { "s_sk": hex(&[0x44; 32]), "ntor_pk": hex(&relay.s), "relay_id": hex(&relay.relay_id) },
         "client_draws_in_order": { "note": "e_sk 32, e1 seed d||z 64", "values": rng_c.draws },

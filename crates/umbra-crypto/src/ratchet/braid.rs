@@ -57,7 +57,7 @@ struct Braid {
     role: Role,
     width: Width,
 
-    // own strand
+    // The own strand.
     epoch: u32,
     own_dk: Option<DecapsulationKey<MlKem768>>,
     material: Option<Material>,
@@ -69,7 +69,7 @@ struct Braid {
     /// mix at the next advance.
     own_secret: Option<Secret<32>>,
 
-    // peer strand
+    // The peer strand.
     peer_epoch: u32,
     collector: Option<Collector>,
     peer_ek: Option<(u32, [u8; 1184])>,
@@ -137,6 +137,7 @@ impl Braid {
             if *target_epoch != target {
                 return Err(Error::Ratchet);
             }
+
             let peer_ek = EncapsulationKey::<MlKem768>::new(&Array::from(*peer_ek))
                 .map_err(|_| Error::Key)?;
             let (ciphertext, mut shared) = peer_ek.encapsulate_with_rng(rng);
@@ -181,6 +182,7 @@ impl Braid {
         let code = width.code();
         let len = FRAME_FIXED + width.bytes();
         let out = out.get_mut(..len).ok_or(Error::Length)?;
+
         let (head, chunk) = out.split_at_mut(FRAME_FIXED);
         let index = self.next_chunk;
         let kind = width.kind_at(index)? as u8;
@@ -195,6 +197,7 @@ impl Braid {
             index_bytes[0],
             index_bytes[1],
         ]);
+
         material.chunk(width, index, chunk)?;
         // After the last chunk the sender returns to the first (CRY-131).
         self.next_chunk = (index + 1) % code.n();
@@ -224,20 +227,25 @@ impl Braid {
             // A late chunk of an epoch the peer left; nothing to rebuild.
             return Ok(epoch);
         }
+
         if epoch > self.peer_epoch {
             self.peer_epoch = epoch;
             self.collector = Some(Collector::new(width));
         }
+
         let collector = self.collector.as_mut().ok_or(Error::Ratchet)?;
         if collector.width() != width {
             return Err(Error::Ratchet);
         }
+
         let already_done = collector.complete();
         let done = collector.put(index, chunk)?;
+
         if done && !already_done {
             let material = collector.rebuild()?;
             let ek = material.encapsulation_key()?;
             self.peer_ek = Some((epoch, ek));
+
             let ct = material.ciphertext();
             if ct.iter().any(|b| *b != 0) && is_target_of(self.role, self.epoch, epoch) {
                 let dk = self.own_dk.as_ref().ok_or(Error::Ratchet)?;
@@ -291,6 +299,7 @@ impl<R: CryptoRng + ?Sized> StepHooks for Hooks<'_, R> {
                 None
             };
         };
+
         let head = frame.get(..4)?;
         let chain_epoch = u32::from_be_bytes(head.try_into().ok()?);
         let (target, _) = self.braid.peer_secret.as_ref()?;
@@ -306,6 +315,7 @@ impl<R: CryptoRng + ?Sized> StepHooks for Hooks<'_, R> {
         // secret of the epoch that completed.
         let next = self.braid.next_epoch(self.now)?;
         let completed = self.braid.epoch;
+
         // CRY-149: the secret stays until the mix takes it, thus an advance
         // that fails keeps it for the next chain start.
         self.braid.start_epoch(next, self.now, self.rng).ok()?;
@@ -328,6 +338,7 @@ pub fn bound_skipped(ratchets: &mut [&mut Ratchet], bound: usize) -> Vec<usize> 
     if excess == 0 {
         return Vec::new();
     }
+
     // The age of each key with the place of its ratchet. The sort puts the
     // oldest first, and two keys of one age go in the order of the places.
     let mut ages: Vec<(u64, usize)> = Vec::with_capacity(total);
@@ -335,12 +346,14 @@ pub fn bound_skipped(ratchets: &mut [&mut Ratchet], bound: usize) -> Vec<usize> 
         ages.extend(ratchet.session.skipped_ages().map(|age| (age, place)));
     }
     ages.sort_unstable();
+
     let mut drops: Vec<usize> = alloc::vec![0; ratchets.len()];
     for (_, place) in ages.iter().take(excess) {
         if let Some(count) = drops.get_mut(*place) {
             *count = count.saturating_add(1);
         }
     }
+
     let mut changed = Vec::new();
     for (place, (ratchet, count)) in ratchets.iter_mut().zip(drops).enumerate() {
         if count > 0 {
@@ -393,6 +406,7 @@ impl Braid {
         } else {
             Role::Responder
         };
+
         let width = Width::from_byte(reader.u8()?)?;
         let epoch = reader.u32()?;
         let own_dk = reader
@@ -408,6 +422,7 @@ impl Braid {
         let collector = reader.option(Collector::restore)?;
         let peer_ek = reader.option(|r| Ok((r.u32()?, r.array()?)))?;
         let peer_secret = reader.option(|r| Ok((r.u32()?, Secret::new(r.array()?))))?;
+
         Ok(Braid {
             role,
             width,
@@ -440,6 +455,7 @@ impl Ratchet {
             .skipped_len()
             .saturating_mul(96)
             .saturating_add(16 * 1_024);
+
         let mut writer = Writer::with_capacity(capacity);
         writer.u8(STORED_VERSION);
         self.session.export(&mut writer)?;
@@ -453,9 +469,11 @@ impl Ratchet {
         if reader.u8()? != STORED_VERSION {
             return Err(Error::Length);
         }
+
         let session = Session::restore(&mut reader)?;
         let braid = Braid::restore(&mut reader)?;
         reader.end()?;
+
         Ok(Self { session, braid })
     }
 
@@ -484,6 +502,7 @@ impl Ratchet {
             peer_ek: None,
             peer_secret: None,
         };
+
         if role == Role::Initiator {
             braid.start_epoch(1, now, rng)?;
         }
@@ -556,6 +575,7 @@ impl Ratchet {
         if chain_start && has_epoch && !frame_allowed {
             return Err(Error::Length);
         }
+
         let mut frame = [0u8; FRAME_FIXED + 128];
         let frame = if has_epoch && frame_allowed {
             let len = self.braid.frame(&mut frame)?;
@@ -563,7 +583,9 @@ impl Ratchet {
         } else {
             None
         };
+
         let len = self.session.send(plaintext, frame, rng, out)?;
+
         // §5.5.3: `N` counts each record of the epoch, with a frame or not,
         // and both limits run from the first record, which carries the
         // first chunk (CRY-146).
@@ -590,6 +612,7 @@ impl Ratchet {
         let before = self.export()?;
         let mut unframed = false;
         let mut opened = self.receive_once(record, now, rng, out, false, &mut unframed);
+
         // CRY-148: a step on a record with no frame took no mix while a
         // secret waited. The step runs again with the mix, and the body
         // opens under one of the two chains alone.
@@ -601,6 +624,7 @@ impl Ratchet {
                 }
             }
         }
+
         // Bytes that `export` just wrote restore, and the first fault is
         // the one that the caller gets.
         if opened.is_err() {
@@ -608,6 +632,7 @@ impl Ratchet {
                 *self = back;
             }
         }
+
         opened
     }
 
@@ -632,6 +657,7 @@ impl Ratchet {
             *unframed = hooks.unframed;
             received?
         };
+
         // CRY-092: a frame with a fault costs the braid epoch and not the
         // record. The body opened, thus the message is authentic, and the
         // peer alone wrote the frame. The collector takes no chunk of such
@@ -751,6 +777,7 @@ mod tests {
             a = stored_and_read_again(&a);
             b = stored_and_read_again(&b);
         }
+
         assert!(a.epoch() >= 2, "initiator epoch {}", a.epoch());
         assert!(a.mixed() >= 1);
         assert_eq!(a.mixed(), b.mixed());
@@ -762,8 +789,10 @@ mod tests {
         let late = send(&mut a, &mut rng, b"late", 0);
         let first = send(&mut a, &mut rng, b"first", 1);
         assert_eq!(recv(&mut b, &mut rng, &first, 1).unwrap(), b"first");
+
         let mut b = stored_and_read_again(&b);
         assert_eq!(recv(&mut b, &mut rng, &late, 2).unwrap(), b"late");
+
         // The key served one record, in the stored form too.
         let mut b = stored_and_read_again(&b);
         assert!(recv(&mut b, &mut rng, &late, 3).is_err());
@@ -777,6 +806,7 @@ mod tests {
         let first = send(&mut a, &mut rng, b"first", 0);
         let second = send(&mut a, &mut rng, b"second", 1);
         let third = send(&mut a, &mut rng, b"third", 2);
+
         for record in [&first, &third] {
             let before = b.export().unwrap();
             let mut changed = record.clone();
@@ -786,6 +816,7 @@ mod tests {
             assert_eq!(*b.export().unwrap(), *before);
             assert!(recv(&mut b, &mut rng, record, 3).is_ok());
         }
+
         assert_eq!(recv(&mut b, &mut rng, &second, 4).unwrap(), b"second");
     }
 
@@ -796,16 +827,19 @@ mod tests {
         let mut frame = [0u8; FRAME_FIXED + 64];
         frame[..4].copy_from_slice(&a.epoch().to_be_bytes());
         frame[4] = 0xFF;
+
         let mut record = vec![0u8; a.overhead_with_frame() + 5];
         let n = a
             .session
             .send(b"first", Some(&frame), &mut rng, &mut record)
             .unwrap();
+
         let mut out = vec![0u8; n];
         let opened = b.receive(&record[..n], 0, &mut rng, &mut out).unwrap();
         assert_eq!(&out[..opened.len], b"first");
         assert_eq!(opened.peer_epoch, None);
         assert_eq!(b.peer_epoch(), 0);
+
         // The session continues, and the braid heals on the frames that
         // follow.
         let mut now = 1u64;
@@ -821,10 +855,12 @@ mod tests {
         let late = send(&mut a, &mut rng, b"late", 0);
         let first = send(&mut a, &mut rng, b"first", 1);
         assert_eq!(recv(&mut b, &mut rng, &first, 1).unwrap(), b"first");
+
         // The clock jumps past the life of a skipped key. The ratchet takes
         // the movement, and the stored form holds the new age.
         let jumped = 1 + 2 * crate::ratchet::dr::SKIP_TTL;
         assert!(b.clock_moved(jumped));
+
         let mut b = stored_and_read_again(&b);
         // The next skip drops each key past its age, and this one stays.
         let _ = send(&mut a, &mut rng, b"lost", jumped);
@@ -843,24 +879,31 @@ mod tests {
             send(&mut a1, &mut rng, b"old 0", 0),
             send(&mut a1, &mut rng, b"old 1", 0),
         ];
+
         let m = send(&mut a1, &mut rng, b"m", 0);
         assert_eq!(recv(&mut b1, &mut rng, &m, 10).unwrap(), b"m");
+
         let middle = [
             send(&mut a2, &mut rng, b"middle 0", 0),
             send(&mut a2, &mut rng, b"middle 1", 0),
         ];
+
         let m = send(&mut a2, &mut rng, b"m", 0);
         assert_eq!(recv(&mut b2, &mut rng, &m, 20).unwrap(), b"m");
+
         let new = send(&mut a1, &mut rng, b"new", 0);
         let m = send(&mut a1, &mut rng, b"m", 0);
         assert_eq!(recv(&mut b1, &mut rng, &m, 30).unwrap(), b"m");
         assert_eq!((b1.skipped_len(), b2.skipped_len()), (3, 2));
+
         // A bound that the device keeps changes nothing.
         assert!(bound_skipped(&mut [&mut b1, &mut b2], 5).is_empty());
+
         // A bound of two keeps the two newest keys. The two keys of time 10
         // go and one key of time 20. The result names each session.
         assert_eq!(bound_skipped(&mut [&mut b1, &mut b2], 2), [0, 1]);
         assert_eq!((b1.skipped_len(), b2.skipped_len()), (1, 1));
+
         assert!(recv(&mut b1, &mut rng, &old[0], 40).is_err());
         assert!(recv(&mut b1, &mut rng, &old[1], 40).is_err());
         assert!(recv(&mut b2, &mut rng, &middle[0], 40).is_err());
@@ -869,6 +912,7 @@ mod tests {
             b"middle 1"
         );
         assert_eq!(recv(&mut b1, &mut rng, &new, 40).unwrap(), b"new");
+
         // The result does not name a session that lost no key.
         let lost = send(&mut a2, &mut rng, b"lost", 0);
         let m = send(&mut a2, &mut rng, b"m", 0);
@@ -882,9 +926,11 @@ mod tests {
         let (a, _, _) = pair(b"fault", Width::W64);
         let bytes = a.export().unwrap();
         assert!(Ratchet::restore(&bytes[..bytes.len() - 1]).is_err());
+
         let mut long = bytes.to_vec();
         long.push(0);
         assert!(Ratchet::restore(&long).is_err());
+
         let mut version = bytes.to_vec();
         version[0] = 0x02;
         assert!(Ratchet::restore(&version).is_err());
@@ -896,20 +942,24 @@ mod tests {
         let mut now = 0u64;
         assert_eq!(a.epoch(), 1);
         assert_eq!(b.epoch(), 0);
+
         // 41 records each way carry a full codeword; the responder then
         // starts its first epoch at its next chain start.
         converse(&mut a, &mut b, &mut rng, 1, 45, &mut now);
         assert_eq!(a.peer_epoch(), 0);
         assert_eq!(b.peer_epoch(), 1);
+
         converse(&mut a, &mut b, &mut rng, 1, 1, &mut now);
         assert_eq!(b.epoch(), 1);
-        // the initiator rebuilds R.1, completes I.1, and advances at the
-        // next chain start once N records passed
+
+        // The initiator rebuilds R.1, completes I.1, and advances at the
+        // next chain start after N records.
         converse(&mut a, &mut b, &mut rng, 3, 45, &mut now);
         assert!(a.epoch() >= 2, "initiator epoch {}", a.epoch());
         assert!(b.epoch() >= 1);
-        // many more rounds: the root key mix stays synchronized, thus every
-        // record still opens
+
+        // Over many more rounds the root key mix stays synchronized, thus
+        // every record still opens.
         converse(&mut a, &mut b, &mut rng, 12, 45, &mut now);
         assert!(a.epoch() >= 4, "initiator epoch {}", a.epoch());
         assert!(b.epoch() >= 3, "responder epoch {}", b.epoch());
@@ -924,7 +974,7 @@ mod tests {
             for i in 0..12u8 {
                 let m = send(&mut a, &mut rng, &[round, i], now);
                 counter += 1;
-                // drop every 11th record; the code absorbs 3 of 21 per epoch
+                // Drop every 11th record. The code absorbs 3 of 21 per epoch.
                 if !counter.is_multiple_of(11) {
                     assert_eq!(recv(&mut b, &mut rng, &m, now).unwrap(), [round, i]);
                 }
@@ -1012,7 +1062,7 @@ mod tests {
             Some(Error::Length)
         );
         assert!(a.send(b"x", true, 0, &mut rng, &mut out).is_ok());
-        // inside a chain a record may go without a frame
+        // Inside a chain, a record can go without a frame.
         assert!(a.send(b"y", false, 0, &mut rng, &mut out).is_ok());
     }
 
@@ -1020,7 +1070,7 @@ mod tests {
     fn the_time_limit_inside_an_incomplete_epoch_keeps_the_epoch_number() {
         let (mut a, mut b, mut rng) = pair(b"time", Width::W64);
         let mut now = 0u64;
-        // a few records, then seven days pass inside epoch 1
+        // A few records go, and then seven days pass inside epoch 1.
         converse(&mut a, &mut b, &mut rng, 2, 3, &mut now);
         now += EPOCH_SECONDS;
         converse(&mut a, &mut b, &mut rng, 2, 3, &mut now);

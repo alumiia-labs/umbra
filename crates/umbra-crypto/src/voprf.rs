@@ -39,6 +39,7 @@ const CONTEXT: &[u8] = b"OPRFV1-\x01-ristretto255-SHA512";
 fn expand_message_xmd(parts: &[&[u8]], dst_parts: &[&[u8]]) -> [u8; 64] {
     let dst_len = dst_parts.iter().map(|p| p.len()).sum::<usize>();
     let dst_len_byte = [u8::try_from(dst_len).unwrap_or(u8::MAX)];
+
     let mut h = Sha512::new();
     h.update([0u8; 128]);
     for part in parts {
@@ -50,6 +51,7 @@ fn expand_message_xmd(parts: &[&[u8]], dst_parts: &[&[u8]]) -> [u8; 64] {
     }
     h.update(dst_len_byte);
     let b0: [u8; 64] = h.finalize().into();
+
     let mut h = Sha512::new();
     h.update(b0);
     h.update([1u8]);
@@ -99,6 +101,7 @@ fn composite_scalars(pk: &[u8; 32], c: &[[u8; 32]], d: &[[u8; 32]]) -> Vec<Scala
     h.update(seed_dst);
     h.update(CONTEXT);
     let seed: [u8; 64] = h.finalize().into();
+
     c.iter()
         .zip(d)
         .enumerate()
@@ -132,6 +135,7 @@ fn challenge(
     let a1 = z.compress().to_bytes();
     let a2 = t2.compress().to_bytes();
     let a3 = t3.compress().to_bytes();
+
     hash_to_scalar(
         &[
             &len_prefix(pk),
@@ -188,6 +192,7 @@ impl ServerKey {
         rng.try_fill_bytes(&mut wide).map_err(|_| Error::Rng)?;
         let secret = Scalar::from_bytes_mod_order_wide(&wide);
         wide.zeroize();
+
         if secret == Scalar::ZERO {
             return Err(Error::Rng);
         }
@@ -224,6 +229,7 @@ impl ServerKey {
         rng.try_fill_bytes(&mut wide).map_err(|_| Error::Rng)?;
         let mut r = Scalar::from_bytes_mod_order_wide(&wide);
         wide.zeroize();
+
         let evaluation = self.evaluate_with(blinded, r);
         r.zeroize();
         evaluation
@@ -239,6 +245,7 @@ impl ServerKey {
         let batch = self.evaluate_batch_with(core::slice::from_ref(blinded), r);
         r.zeroize();
         let batch = batch?;
+
         let element = batch.elements.first().copied().ok_or(Error::Length)?;
         Ok(Evaluation {
             element,
@@ -257,6 +264,7 @@ impl ServerKey {
         rng.try_fill_bytes(&mut wide).map_err(|_| Error::Rng)?;
         let mut r = Scalar::from_bytes_mod_order_wide(&wide);
         wide.zeroize();
+
         let batch = self.evaluate_batch_with(blinded, r);
         r.zeroize();
         batch
@@ -272,6 +280,7 @@ impl ServerKey {
             r.zeroize();
             return Err(Error::Length);
         }
+
         let blinded_points = blinded
             .iter()
             .map(element_from_bytes)
@@ -283,10 +292,12 @@ impl ServerKey {
                 return Err(fault);
             }
         };
+
         let elements: Vec<[u8; 32]> = blinded_points
             .iter()
             .map(|p| (self.secret * p).compress().to_bytes())
             .collect();
+
         let scalars = composite_scalars(&self.public, blinded, &elements);
         let m = scalars
             .iter()
@@ -297,9 +308,11 @@ impl ServerKey {
         let t3 = r * m;
         let c = challenge(&self.public, &m, &z, &t2, &t3);
         let s = r - c * self.secret;
+
         // The proof scalar with the public proof gives the server key
         // (`s = r − c·k`), thus it goes before the proof leaves.
         r.zeroize();
+
         let mut proof = [0u8; PROOF_LEN];
         if let Some(head) = proof.get_mut(..32) {
             head.copy_from_slice(&c.to_bytes());
@@ -360,6 +373,7 @@ impl BlindState {
         rng.try_fill_bytes(&mut wide).map_err(|_| Error::Rng)?;
         let blind = Scalar::from_bytes_mod_order_wide(&wide);
         wide.zeroize();
+
         Self::blind_with(input, blind)
     }
 
@@ -368,6 +382,7 @@ impl BlindState {
         if blind == Scalar::ZERO {
             return Err(Error::Rng);
         }
+
         let element = (blind * hash_to_group(&[input])).compress().to_bytes();
         Ok((
             BlindState {
@@ -436,6 +451,7 @@ pub fn verify_proof_batch(
     if blinded.is_empty() || blinded.len() != elements.len() {
         return Err(Error::Length);
     }
+
     let pk_point = element_from_bytes(pk)?;
     let blinded_points = blinded
         .iter()
@@ -445,6 +461,7 @@ pub fn verify_proof_batch(
         .iter()
         .map(element_from_bytes)
         .collect::<Result<Vec<_>, _>>()?;
+
     let c_bytes: [u8; 32] = proof
         .get(..32)
         .and_then(|b| b.try_into().ok())
@@ -455,6 +472,7 @@ pub fn verify_proof_batch(
         .ok_or(Error::Length)?;
     let c = scalar_from_bytes(&c_bytes)?;
     let s = scalar_from_bytes(&s_bytes)?;
+
     let scalars = composite_scalars(pk, blinded, elements);
     let m = scalars
         .iter()
@@ -466,6 +484,7 @@ pub fn verify_proof_batch(
         .fold(RistrettoPoint::default(), |acc, (di, ei)| acc + di * ei);
     let t2 = s * G + c * pk_point;
     let t3 = s * m + c * z;
+
     let expected = challenge(pk, &m, &z, &t2, &t3);
     if bool::from(expected.to_bytes().ct_eq(&c_bytes)) {
         Ok(())
@@ -518,8 +537,10 @@ mod tests {
             key.public()[..],
             hex("c803e2cc6b05fc15064549b5920659ca4a77b2cca6f04f6b357009335476ad4e")[..]
         );
+
         let blind = scalar("64d37aed22a27f5191de1c1d69fadb899d8862b58eb4220029e036ec4c1f6706");
         let r = scalar("222a5e897cf59db8145db8d16e597e8facb80ae7d4e26d9881aa6f61d645fc0e");
+
         let cases = [
             (
                 "00",
@@ -554,9 +575,11 @@ mod tests {
                 state.finalize(&evaluation, other.public()),
                 Err(Error::Auth)
             );
+
             let mut bad = evaluation;
             bad.proof[40] ^= 1;
             assert_eq!(state.finalize(&bad, key.public()), Err(Error::Auth));
+
             let mut forged = evaluation;
             forged.element = other.evaluate_with(&element, r).unwrap().element;
             assert_eq!(state.finalize(&forged, key.public()), Err(Error::Auth));
@@ -577,6 +600,7 @@ mod tests {
             scalar("222a5e897cf59db8145db8d16e597e8facb80ae7d4e26d9881aa6f61d645fc0e"),
         ];
         let r = scalar("419c4f4f5052c53c45f3da494d2b67b220d02118e0857cdbcf037f9ea84bbe0c");
+
         let states: Vec<(BlindState, [u8; 32])> = inputs
             .iter()
             .zip(blinds)
@@ -587,6 +611,7 @@ mod tests {
             blinded[1][..],
             hex("90a0145ea9da29254c3a56be4fe185465ebb3bf2a1801f7124bbbadac751e654")[..]
         );
+
         let batch = key.evaluate_batch_with(&blinded, r).unwrap();
         assert_eq!(
             batch.elements[1][..],
@@ -597,6 +622,7 @@ mod tests {
             hex("cc203910175d786927eeb44ea847328047892ddf8590e723c37205cb74600b0a5ab5337c8eb4ceae0494c2cf89529dcf94572ed267473d567aeed6ab873dee08")[..]
         );
         verify_proof_batch(key.public(), &blinded, &batch.elements, &batch.proof).unwrap();
+
         let outputs: Vec<[u8; 64]> = states
             .iter()
             .zip(&batch.elements)
@@ -610,6 +636,7 @@ mod tests {
             outputs[1][..],
             hex("8a9a2f3c7f085b65933594309041fc1898d42d0858e59f90814ae90571a6df60356f4610bf816f27afdd84f47719e480906d27ecd994985890e5f539e7ea74b6")[..]
         );
+
         // A swapped element fails the one proof.
         let swapped = [batch.elements[1], batch.elements[0]];
         assert!(verify_proof_batch(key.public(), &blinded, &swapped, &batch.proof).is_err());
@@ -624,6 +651,7 @@ mod tests {
         let out = state.finalize(&evaluation, key.public()).unwrap();
         assert_eq!(out, key.evaluate_direct(b"@alice#1234"));
         assert_ne!(out, key.evaluate_direct(b"@alice#1235"));
+
         let again = ServerKey::from_bytes(&key.to_bytes()).unwrap();
         assert_eq!(again.public(), key.public());
     }

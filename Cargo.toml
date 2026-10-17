@@ -19,15 +19,15 @@ expect_used = "deny"
 indexing_slicing = "deny"
 panic = "deny"
 
-# A proof of work of Part 13 takes seconds in a build with no optimization,
-# thus a debug build and each test optimize the two crates of Equi-X.
 # The tests run real key exchanges, Argon2, and TLS. With no optimization of
-# the dependencies the socket tests of the client take about 20 minutes, and
+# the dependencies, the socket tests of the client take about 20 minutes, and
 # their time bounds fail on a loaded machine. The crates of this workspace
 # keep no optimization, thus a change to them builds fast.
 [profile.dev.package."*"]
 opt-level = 2
 
+# A proof of work of Part 13 takes seconds in a build with no optimization.
+# Thus a debug build and each test optimize the two crates of Equi-X.
 [profile.dev.package.equix]
 opt-level = 3
 

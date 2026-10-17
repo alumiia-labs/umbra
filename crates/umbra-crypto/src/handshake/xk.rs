@@ -244,6 +244,7 @@ impl Initiator {
         if app_1.len() > MAX_APP_LEN {
             return Err(Error::Length);
         }
+
         let total = FLIGHT1_FIXED + NONCE_LEN + app_1.len() + PAYLOAD_OVERHEAD;
         let out = out.get_mut(..total).ok_or(Error::Length)?;
         let mut st = init(
@@ -254,6 +255,7 @@ impl Initiator {
             &invitation.s,
             invitation.s1,
         );
+
         let (head, rest) = out.split_at_mut(3);
         head.copy_from_slice(&[range_i.min, range_i.max, MODE]);
 
@@ -262,6 +264,7 @@ impl Initiator {
         pid_out.copy_from_slice(&prekey_id(invitation.s1));
         st.mix_hash(pid_out);
         st.trace(trace, "1.0 pid");
+
         // 1. e
         let e_sk = StaticSecret::random_from_rng(rng);
         let e = XPublic::from(&e_sk);
@@ -269,11 +272,13 @@ impl Initiator {
         e_out.copy_from_slice(e.as_bytes());
         st.mix_hash(e.as_bytes());
         st.trace(trace, "1.1 e");
+
         // 2. es
         let es = e_sk.diffie_hellman(&XPublic::from(invitation.s));
         contributory(&es)?;
         st.mix_key(es.as_bytes());
         st.trace(trace, "1.2 es");
+
         // 3. e1
         let mut seed = Secret::<64>::zeroed();
         rng.fill_bytes(seed.expose_mut());
@@ -282,6 +287,7 @@ impl Initiator {
         e1_out.copy_from_slice(&e1_dk.encapsulation_key().to_bytes());
         st.mix_hash(e1_out);
         st.trace(trace, "1.3 e1");
+
         // 4. skem1
         let s1 = EncapsulationKey::<MlKem768>::new(&Array::from(*invitation.s1))
             .map_err(|_| Error::Key)?;
@@ -292,10 +298,12 @@ impl Initiator {
         st.mix_key(&ss1);
         ss1.zeroize();
         st.trace(trace, "1.4 skem1");
+
         // 5. tag1
         let (tag1_out, rest) = rest.split_at_mut(TAG_LEN);
         tag1_out.copy_from_slice(&st.seal(&mut [])?);
         st.trace(trace, "1.5 tag1");
+
         // 6. payload1
         let mut n_hs = [0u8; NONCE_LEN];
         rng.fill_bytes(&mut n_hs);
@@ -341,11 +349,13 @@ impl Initiator {
         if reader.u8()? != STORED_VERSION {
             return Err(Error::Length);
         }
+
         let st = State::restore(&mut reader)?;
         let e_sk = StaticSecret::from(reader.array::<32>()?);
         let e1_seed = Secret::new(reader.array::<64>()?);
         let n_hs = reader.array()?;
         reader.end()?;
+
         let e1_dk = decapsulation_key(&e1_seed);
         Ok(Self {
             st,
@@ -375,20 +385,24 @@ impl Initiator {
             .checked_sub(NONCE_LEN + PAYLOAD_OVERHEAD)
             .ok_or(Error::Length)?;
         let app_out = app_out.get_mut(..app_len).ok_or(Error::Length)?;
+
         let (er, rest) = flight.split_at(32);
         let (ekem1, rest) = rest.split_at(CT_LEN);
         let (tag2, payload) = rest.split_at(TAG_LEN);
         let mut read = self.st.copy();
         let st = &mut read;
+
         // 1. er
         let er: [u8; 32] = er.try_into().map_err(|_| Error::Length)?;
         st.mix_hash(&er);
         st.trace(trace, "2.1 er");
+
         // 2. ee
         let ee = self.e_sk.diffie_hellman(&XPublic::from(er));
         contributory(&ee)?;
         st.mix_key(ee.as_bytes());
         st.trace(trace, "2.2 ee");
+
         // 3. ekem1
         let ct: ml_kem::Ciphertext<MlKem768> = Array::try_from(ekem1).map_err(|_| Error::Length)?;
         let mut ss2 = self.e1_dk.decapsulate(&ct);
@@ -396,9 +410,11 @@ impl Initiator {
         st.mix_key(&ss2);
         ss2.zeroize();
         st.trace(trace, "2.3 ekem1");
+
         // 4. tag2
         st.open(&mut [], tag2)?;
         st.trace(trace, "2.4 tag2");
+
         // 5. payload2
         let (ct, tag) = payload.split_at(payload_len - PAYLOAD_OVERHEAD);
         let mut buf = [0u8; NONCE_LEN + MAX_APP_LEN];
@@ -406,10 +422,12 @@ impl Initiator {
         buf.copy_from_slice(ct);
         st.open(buf, tag)?;
         st.trace(trace, "2.5 payload2");
+
         let (nonce_in, app_in) = buf.split_at(NONCE_LEN);
         if !bool::from(subtle::ConstantTimeEq::ct_eq(nonce_in, &self.n_hs[..])) {
             return Err(Error::Handshake);
         }
+
         app_out.copy_from_slice(app_in);
         self.st = read;
         self.er = Some(er);
@@ -431,26 +449,31 @@ impl Initiator {
         let total = FLIGHT3_FIXED + app_3.len() + PAYLOAD_OVERHEAD;
         let out = out.get_mut(..total).ok_or(Error::Length)?;
         let st = &mut self.st;
+
         // 1. s_ct
         let (s_ct, rest) = out.split_at_mut(32 + TAG_LEN);
         let (s_pt, s_tag) = s_ct.split_at_mut(32);
         s_pt.copy_from_slice(&s_i.x25519_public());
         s_tag.copy_from_slice(&st.seal(s_pt)?);
         st.trace(trace, "3.1 s_ct");
+
         // 2. se
         let se = s_i.x25519_secret().diffie_hellman(&XPublic::from(*er));
         contributory(&se)?;
         st.mix_key(se.as_bytes());
         st.trace(trace, "3.2 se");
+
         // 3. tag3
         let (tag3, rest) = rest.split_at_mut(TAG_LEN);
         tag3.copy_from_slice(&st.seal(&mut [])?);
         st.trace(trace, "3.3 tag3");
+
         // 4. payload3
         let (pt, tag) = rest.split_at_mut(app_3.len());
         pt.copy_from_slice(app_3);
         tag.copy_from_slice(&st.seal(pt)?);
         st.trace(trace, "3.4 payload3");
+
         // 5. split
         let keys = split(st, InitialDh::Peer(*er));
         st.trace(trace, "3.5 split");
@@ -481,11 +504,13 @@ impl Responder {
         if flight.len() < FLIGHT1_FIXED + NONCE_LEN + PAYLOAD_OVERHEAD {
             return Err(Error::Length);
         }
+
         let (head, rest) = flight.split_at(3);
         let (&min, &max, &mode) = match head {
             [a, b, c] => (a, b, c),
             _ => return Err(Error::Length),
         };
+
         let mut pid = [0u8; PID_LEN];
         pid.copy_from_slice(rest.get(..PID_LEN).ok_or(Error::Length)?);
         Ok((VersionRange { min, max }, mode, pid))
@@ -513,6 +538,7 @@ impl Responder {
         if !bool::from(subtle::ConstantTimeEq::ct_eq(&pid[..], &prekey.id[..])) {
             return Err(Error::Handshake);
         }
+
         let payload_len = flight.len() - FLIGHT1_FIXED;
         let app_len = payload_len - NONCE_LEN - PAYLOAD_OVERHEAD;
         let app_out = app_out.get_mut(..app_len).ok_or(Error::Length)?;
@@ -528,30 +554,37 @@ impl Responder {
 
         st.mix_hash(pid_b);
         st.trace(trace, "1.0 pid");
+
         let e: [u8; 32] = e.try_into().map_err(|_| Error::Length)?;
         st.mix_hash(&e);
         st.trace(trace, "1.1 e");
+
         let es = s_r.x25519_secret().diffie_hellman(&XPublic::from(e));
         contributory(&es)?;
         st.mix_key(es.as_bytes());
         st.trace(trace, "1.2 es");
+
         let e1: [u8; EK_LEN] = e1.try_into().map_err(|_| Error::Length)?;
         st.mix_hash(&e1);
         st.trace(trace, "1.3 e1");
+
         let ct: ml_kem::Ciphertext<MlKem768> = Array::try_from(skem1).map_err(|_| Error::Length)?;
         let mut ss1 = prekey.dk.decapsulate(&ct);
         st.mix_hash(skem1);
         st.mix_key(&ss1);
         ss1.zeroize();
         st.trace(trace, "1.4 skem1");
+
         st.open(&mut [], tag1)?;
         st.trace(trace, "1.5 tag1");
+
         let (ct, tag) = payload.split_at(payload_len - PAYLOAD_OVERHEAD);
         let mut buf = [0u8; NONCE_LEN + MAX_APP_LEN];
         let buf = buf.get_mut(..ct.len()).ok_or(Error::Length)?;
         buf.copy_from_slice(ct);
         st.open(buf, tag)?;
         st.trace(trace, "1.6 payload1");
+
         let (nonce_in, app_in) = buf.split_at(NONCE_LEN);
         let mut n_hs = [0u8; NONCE_LEN];
         n_hs.copy_from_slice(nonce_in);
@@ -580,9 +613,11 @@ impl Responder {
         if app_2.len() > MAX_APP_LEN {
             return Err(Error::Length);
         }
+
         let total = FLIGHT2_FIXED + NONCE_LEN + app_2.len() + PAYLOAD_OVERHEAD;
         let out = out.get_mut(..total).ok_or(Error::Length)?;
         let st = &mut self.st;
+
         // 1. er
         let er_sk = StaticSecret::random_from_rng(rng);
         let er = XPublic::from(&er_sk);
@@ -590,11 +625,13 @@ impl Responder {
         er_out.copy_from_slice(er.as_bytes());
         st.mix_hash(er.as_bytes());
         st.trace(trace, "2.1 er");
+
         // 2. ee
         let ee = er_sk.diffie_hellman(&XPublic::from(self.e));
         contributory(&ee)?;
         st.mix_key(ee.as_bytes());
         st.trace(trace, "2.2 ee");
+
         // 3. ekem1
         let e1 =
             EncapsulationKey::<MlKem768>::new(&Array::from(self.e1)).map_err(|_| Error::Key)?;
@@ -605,10 +642,12 @@ impl Responder {
         st.mix_key(&ss2);
         ss2.zeroize();
         st.trace(trace, "2.3 ekem1");
+
         // 4. tag2
         let (tag2, rest) = rest.split_at_mut(TAG_LEN);
         tag2.copy_from_slice(&st.seal(&mut [])?);
         st.trace(trace, "2.4 tag2");
+
         // 5. payload2
         let (pt, tag) = rest.split_at_mut(NONCE_LEN + app_2.len());
         {
@@ -618,6 +657,7 @@ impl Responder {
         }
         tag.copy_from_slice(&st.seal(pt)?);
         st.trace(trace, "2.5 payload2");
+
         self.er_sk = Some(er_sk);
         Ok(total)
     }
@@ -644,12 +684,14 @@ impl Responder {
         if reader.u8()? != STORED_VERSION {
             return Err(Error::Length);
         }
+
         let st = State::restore(&mut reader)?;
         let e = reader.array()?;
         let e1 = reader.array()?;
         let er_sk = StaticSecret::from(reader.array::<32>()?);
         let n_hs = reader.array()?;
         reader.end()?;
+
         Ok(Self {
             st,
             e,
@@ -681,29 +723,35 @@ impl Responder {
             .checked_sub(PAYLOAD_OVERHEAD)
             .ok_or(Error::Length)?;
         let app_out = app_out.get_mut(..app_len).ok_or(Error::Length)?;
+
         let mut read = self.st.copy();
         let st = &mut read;
         let (s_ct, rest) = flight.split_at(32 + TAG_LEN);
         let (tag3, payload) = rest.split_at(TAG_LEN);
+
         // 1. s_ct
         let (s_enc, s_tag) = s_ct.split_at(32);
         let mut s_i = [0u8; 32];
         s_i.copy_from_slice(s_enc);
         st.open(&mut s_i, s_tag)?;
         st.trace(trace, "3.1 s_ct");
+
         // 2. se
         let se = er_sk.diffie_hellman(&XPublic::from(s_i));
         contributory(&se)?;
         st.mix_key(se.as_bytes());
         st.trace(trace, "3.2 se");
+
         // 3. tag3
         st.open(&mut [], tag3)?;
         st.trace(trace, "3.3 tag3");
+
         // 4. payload3
         let (ct, tag) = payload.split_at(app_len);
         app_out.copy_from_slice(ct);
         st.open(app_out, tag)?;
         st.trace(trace, "3.4 payload3");
+
         // 5. split
         let keys = split(st, InitialDh::Own(er_sk.clone()));
         st.trace(trace, "3.5 split");
