@@ -39,6 +39,7 @@ pub fn seal_blob(
     nonce: [u8; NONCE_LEN],
 ) -> Result<Vec<u8>, Error> {
     QueueAddress::parse(address)?;
+
     let mut blob = Zeroizing::new(Vec::with_capacity(BLOB_LEN));
     blob.push(BLOB_VERSION);
     blob.extend_from_slice(&nonce);
@@ -57,12 +58,14 @@ pub fn open_blob(blob_key: &Secret<32>, chunk: &[u8]) -> Result<Zeroizing<Vec<u8
     if blob.len() != BLOB_LEN || blob.first() != Some(&BLOB_VERSION) {
         return Err(Error::Malformed);
     }
+
     let nonce: [u8; NONCE_LEN] = blob
         .get(1..1 + NONCE_LEN)
         .and_then(|bytes| bytes.try_into().ok())
         .ok_or(Error::Malformed)?;
     let body = blob.get(1 + NONCE_LEN..).ok_or(Error::Malformed)?;
     let (sealed, tag) = body.split_at(ADDRESS_LEN);
+
     let mut address = Zeroizing::new(sealed.to_vec());
     aead::open(blob_key, &nonce, &[], &mut address, tag)?;
     QueueAddress::parse(&address)?;

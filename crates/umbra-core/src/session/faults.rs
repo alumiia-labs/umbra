@@ -113,6 +113,7 @@ impl LinkFaults {
             count.builds.saturating_add(count.loops_sent),
             count.failed_builds.saturating_add(count.loops_lost),
         );
+
         let forced = self.forced.entry(epoch).or_default();
         *forced = forced.saturating_add(1);
         if *forced == FORCED_REPEAT {
@@ -135,6 +136,7 @@ impl LinkFaults {
             if !self.reported.insert((report.epoch, report.hops)) {
                 continue;
             }
+
             if self.due.len() >= DUE_MAX {
                 self.due.pop_front();
             }
@@ -146,6 +148,7 @@ impl LinkFaults {
         if !self.reported.insert((epoch, *chain)) {
             return;
         }
+
         if self.due.len() >= DUE_MAX {
             self.due.pop_front();
         }
@@ -173,20 +176,24 @@ impl LinkFaults {
                 count.waiting.pop_front();
                 count.loops_lost = count.loops_lost.saturating_add(1);
             }
+
             if *held < epoch && count.waiting.is_empty() {
                 closed.push((*held, *chain));
             }
         }
+
         for key in closed {
             let Some(count) = self.counts.remove(&key) else {
                 continue;
             };
+
             let at_rate = u32::from(count.loops_lost) * 100
                 >= u32::from(count.loops_sent) * u32::from(LOOP_FAULT_RATE);
             if count.loops_sent >= LOOP_FAULT_MIN && at_rate {
                 self.report(key.0, &key.1, count.loops_sent, count.loops_lost, now);
             }
         }
+
         // The reports and the counts of forced replacements older than the
         // epoch before this one name no epoch that an authority takes
         // (`REL-170`).
@@ -210,11 +217,13 @@ impl LinkFaults {
             reports_waiting: u16::try_from(self.due.len()).unwrap_or(u16::MAX),
             ..FaultSummary::default()
         };
+
         for count in self.counts.values() {
             summary.loops_sent = summary.loops_sent.saturating_add(count.loops_sent);
             summary.loops_back = summary.loops_back.saturating_add(count.loops_back);
             summary.loops_lost = summary.loops_lost.saturating_add(count.loops_lost);
         }
+
         summary
     }
 
@@ -255,6 +264,7 @@ mod tests {
         fresh.absorb(transfer);
         assert_eq!(fresh.due().map(|report| report.hops), Some(A));
     }
+
     const B: Chain = [[1; 32], [4; 32], [5; 32]];
     const T0: u64 = 1_700_000_000 - 1_700_000_000 % EPOCH_SECONDS;
 
@@ -272,6 +282,7 @@ mod tests {
                 faults.loop_back(&B, T0 + i * 60 + 5);
             }
         }
+
         faults.tick(T0 + 1_000);
         assert!(faults.due().is_none(), "the epoch runs");
         faults.tick(T0 + EPOCH_SECONDS + 10);

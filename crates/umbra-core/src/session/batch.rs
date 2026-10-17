@@ -80,6 +80,7 @@ impl Batcher {
         if Range::of(cmd) != self.range || encoded.len() > largest {
             return Err(Error::Malformed);
         }
+
         self.ready.push_back(encoded);
         Ok(())
     }
@@ -96,8 +97,10 @@ impl Batcher {
             if content.len().saturating_add(next.len()) > bucket.command_area() {
                 break;
             }
+
             content.extend(self.ready.pop_front().unwrap_or_default());
         }
+
         Some((bucket, content))
     }
 }
@@ -111,11 +114,13 @@ pub fn unpack(content: &[u8], bucket: Bucket) -> Result<Vec<Command<'_>>, Error>
         commands.push(command);
         rest = rest.get(used..).ok_or(Error::Malformed)?;
     }
+
     let mut ranges = commands.iter().map(|c| Range::of(c.cmd));
     let first = ranges.next();
     if ranges.any(|range| Some(range) != first) {
         return Err(Error::Malformed);
     }
+
     Ok(commands)
 }
 

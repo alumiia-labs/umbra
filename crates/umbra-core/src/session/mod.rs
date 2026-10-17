@@ -290,6 +290,7 @@ mod tests {
         else {
             panic!("{events:?}");
         };
+
         assert_eq!(queue_id, bob.inbound().recipient_id());
         // A channel of the first stored form holds no flag of a previous
         // queue before its ratchet, and no window of the indices that

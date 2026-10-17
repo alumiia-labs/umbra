@@ -214,6 +214,7 @@ impl Outbound {
             .filter(|bucket| *bucket >= floor)
             .find(|bucket| inner.len() <= bucket.l7_record())
             .ok_or(Error::NoPath)?;
+
         let mut payload = alloc::vec![0u8; bucket.l6_record()];
         queue::seal(
             &self.queue_key,
@@ -224,6 +225,7 @@ impl Outbound {
             bucket,
             &mut payload,
         )?;
+
         Ok(Sealed {
             bucket,
             payload,
@@ -327,6 +329,7 @@ impl Inbound {
         if acked == 0 {
             return Ok(None);
         }
+
         signed(
             Cmd::Ack,
             self.recipient_id,
@@ -373,6 +376,7 @@ impl Inbound {
         if !self.cursor.receive(seq, now) {
             return Ok(Opened::Duplicate);
         }
+
         let mut inner = alloc::vec![0u8; bucket.l6_record()];
         match queue::open(&self.queue_key, &self.sender_id, record, bucket, &mut inner) {
             Ok((kind, len)) => {
@@ -498,6 +502,7 @@ impl Inbound {
         let Some(point) = self.cursor.ack_point(now) else {
             return Ok(None);
         };
+
         let encoded = signed(
             Cmd::Ack,
             self.recipient_id,
@@ -608,6 +613,7 @@ impl OpenedWindow {
             self.bits = [0; OPENED_WORDS];
             return;
         }
+
         let words = usize::from(by / 64);
         let bits = u32::from(by % 64);
         let old = self.bits;
@@ -637,6 +643,7 @@ impl OpenedWindow {
             self.set(0);
             return;
         };
+
         // The index counts modulo 65 536 (`WIR-251`), thus the nearer of
         // the two directions names its place.
         let ahead = index.wrapping_sub(newest);
@@ -661,6 +668,7 @@ impl OpenedWindow {
         if self.contains(index) {
             return false;
         }
+
         // Before the first record opened, the session starts at zero.
         let newest = self.newest.unwrap_or(u16::MAX);
         let ahead = index.wrapping_sub(newest);
@@ -707,6 +715,7 @@ impl PairwiseChannel {
             }
             None => writer.u8(0),
         }
+
         writer.var(&self.ratchet.export()?)?;
         self.opened.export(&mut writer);
         Ok(writer.finish())
@@ -719,6 +728,7 @@ impl PairwiseChannel {
         if !matches!(version, 0x01 | 0x02 | STORED_VERSION) {
             return Err(Error::Malformed);
         }
+
         let outbound = Outbound::restore(&mut reader)?;
         let inbound = Inbound::restore(&mut reader)?;
         let previous = match version {
@@ -735,6 +745,7 @@ impl PairwiseChannel {
             _ => OpenedWindow::default(),
         };
         reader.end()?;
+
         Ok(PairwiseChannel {
             ratchet,
             outbound,
@@ -751,7 +762,9 @@ impl PairwiseChannel {
         if !matches!(reader.u8()?, 0x01 | 0x02 | STORED_VERSION) {
             return Err(Error::Malformed);
         }
+
         let outbound = Outbound::restore(&mut reader)?;
+
         let mut writer = Writer::new();
         outbound.export(&mut writer);
         Ok(writer.finish())
@@ -775,6 +788,7 @@ impl PairwiseChannel {
         if self.previous.is_some() {
             return Err(Error::Malformed);
         }
+
         self.previous = Some(core::mem::replace(&mut self.inbound, inbound));
         Ok(())
     }
@@ -812,6 +826,7 @@ impl PairwiseChannel {
         if self.inbound.recipient_id() == queue {
             return Some(&mut self.inbound);
         }
+
         self.previous
             .as_mut()
             .filter(|inbound| inbound.recipient_id() == queue)
@@ -974,6 +989,7 @@ impl PairwiseChannel {
                 })
             }
         };
+
         let ctx = umbra_crypto::ratchet::dr::Session::peek_ctx(&inner).ok();
         let mut app = alloc::vec![0u8; bucket.l7_record()];
         match self.ratchet.receive(&inner, now, rng, &mut app) {
