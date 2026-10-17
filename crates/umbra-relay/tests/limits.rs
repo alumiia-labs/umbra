@@ -1,6 +1,7 @@
 //! The connection limits of a relay (Part 3 `NET-333` to `NET-335`): a
-//! relay at its cap closes a new connection at once, and a peer that sends
-//! no handshake in time is closed at the deadline.
+//! relay at its cap closes a new connection at once, and it closes a peer
+//! that sends no handshake in time at the deadline.
+
 #![cfg(feature = "native")]
 #![allow(
     clippy::unwrap_used,
@@ -14,8 +15,7 @@ use std::{sync::Arc, time::Duration};
 
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
-    net::TcpStream,
+    net::{TcpListener, TcpStream},
     sync::mpsc,
 };
 use umbra_relay::server::{accept_loop, tls_acceptor, Carried, ConnectionLimits};
@@ -42,6 +42,7 @@ async fn a_relay_at_its_cap_closes_a_new_connection_and_a_silent_one_at_the_dead
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (node, _inputs) = mpsc::channel(8);
+
     let carried = Arc::new(Carried {
         limits: ConnectionLimits {
             max_connections: 2,
@@ -50,15 +51,18 @@ async fn a_relay_at_its_cap_closes_a_new_connection_and_a_silent_one_at_the_dead
         },
         ..Carried::default()
     });
+
     let tls = tls_acceptor(&fixture("leaf.pem"), &fixture("leaf.key")).unwrap();
     tokio::spawn(accept_loop(listener, tls, node, carried));
 
     let mut first = TcpStream::connect(address).await.unwrap();
     let mut second = TcpStream::connect(address).await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
+
     // NET-333: the third connection goes above the cap of two.
     let mut third = TcpStream::connect(address).await.unwrap();
     assert!(closes(&mut third, Duration::from_millis(500)).await);
+
     // NET-335: the two that sent no TLS hello end at the deadline, and
     // each one gives its place back.
     assert!(closes(&mut first, Duration::from_secs(3)).await);
@@ -72,6 +76,7 @@ async fn a_set_of_silent_sockets_holds_no_handshake_back() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (node, _inputs) = mpsc::channel(8);
+
     let manifest = vec![0x4D; 96];
     let carried = Arc::new(Carried {
         manifest: std::sync::Mutex::new(Some(manifest.clone())),
@@ -83,6 +88,7 @@ async fn a_set_of_silent_sockets_holds_no_handshake_back() {
         },
         ..Carried::default()
     });
+
     let tls = tls_acceptor(&fixture("leaf.pem"), &fixture("leaf.key")).unwrap();
     tokio::spawn(accept_loop(listener, tls, node, carried));
 
@@ -94,13 +100,16 @@ async fn a_set_of_silent_sockets_holds_no_handshake_back() {
     for _ in 0..4 {
         silent.push(TcpStream::connect(address).await.unwrap());
     }
+
     tokio::time::sleep(Duration::from_millis(200)).await;
+
     let dial = Dial {
         host: "localhost".to_owned(),
         addr_v4: Some([127, 0, 0, 1]),
         addr_v6: None,
         port: address.port(),
     };
+
     let trust = native::tls_config_with_root_file(&fixture("ca.pem")).unwrap();
     // The handshake ends long before the first silent socket does, thus it
     // waited for none of them. The bound is one of the test and not of the
@@ -112,7 +121,9 @@ async fn a_set_of_silent_sockets_holds_no_handshake_back() {
     .await
     .expect("a handshake with no wait for the silent sockets")
     .unwrap();
+
     assert_eq!(fetched, manifest);
+
     for stream in &mut silent {
         assert!(!closes(stream, Duration::from_millis(50)).await);
     }
@@ -123,6 +134,7 @@ async fn a_socket_that_sent_no_whole_hello_takes_no_handshake() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (node, _inputs) = mpsc::channel(8);
+
     let manifest = vec![0x4D; 96];
     let carried = Arc::new(Carried {
         manifest: std::sync::Mutex::new(Some(manifest.clone())),
@@ -134,6 +146,7 @@ async fn a_socket_that_sent_no_whole_hello_takes_no_handshake() {
         },
         ..Carried::default()
     });
+
     let tls = tls_acceptor(&fixture("leaf.pem"), &fixture("leaf.key")).unwrap();
     tokio::spawn(accept_loop(listener, tls, node, carried));
 
@@ -150,13 +163,16 @@ async fn a_socket_that_sent_no_whole_hello_takes_no_handshake() {
             .unwrap();
         stalled.push(stream);
     }
+
     tokio::time::sleep(Duration::from_millis(200)).await;
+
     let dial = Dial {
         host: "localhost".to_owned(),
         addr_v4: Some([127, 0, 0, 1]),
         addr_v6: None,
         port: address.port(),
     };
+
     let trust = native::tls_config_with_root_file(&fixture("ca.pem")).unwrap();
     let fetched = tokio::time::timeout(
         Duration::from_secs(15),
@@ -165,6 +181,7 @@ async fn a_socket_that_sent_no_whole_hello_takes_no_handshake() {
     .await
     .expect("a handshake with no wait for the stalled sockets")
     .unwrap();
+
     assert_eq!(fetched, manifest);
 }
 
@@ -173,6 +190,7 @@ async fn a_socket_with_no_whole_hello_ends_at_the_first_bytes_timeout() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (node, _inputs) = mpsc::channel(8);
+
     let carried = Arc::new(Carried {
         limits: ConnectionLimits {
             handshake_timeout: Duration::from_secs(60),
@@ -181,14 +199,17 @@ async fn a_socket_with_no_whole_hello_ends_at_the_first_bytes_timeout() {
         },
         ..Carried::default()
     });
+
     let tls = tls_acceptor(&fixture("leaf.pem"), &fixture("leaf.key")).unwrap();
     tokio::spawn(accept_loop(listener, tls, node, carried));
+
     // A socket that sent nothing and one that sent a part of a hello both
     // end at RELAY_FIRST_BYTES_TIMEOUT, long before the deadline of a
     // handshake.
     let mut silent = TcpStream::connect(address).await.unwrap();
     let mut partial = TcpStream::connect(address).await.unwrap();
     partial.write_all(&[0x16, 0x03, 0x01]).await.unwrap();
+
     assert!(closes(&mut silent, Duration::from_secs(20)).await);
     assert!(closes(&mut partial, Duration::from_secs(20)).await);
 }
@@ -203,6 +224,7 @@ async fn one_address_holds_its_connections_and_the_address_of_a_relay_holds_more
         loopback_exempt: false,
         ..ConnectionLimits::default()
     };
+
     // NET-334: the third connection of one address closes at once. No test
     // reached this cap before: each one runs on the loopback address,
     // which the cap did not count.
@@ -216,11 +238,14 @@ async fn one_address_holds_its_connections_and_the_address_of_a_relay_holds_more
         });
         let tls = tls_acceptor(&fixture("leaf.pem"), &fixture("leaf.key")).unwrap();
         tokio::spawn(accept_loop(listener, tls, node, carried));
+
         let mut first = TcpStream::connect(address).await.unwrap();
         let _second = TcpStream::connect(address).await.unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
+
         let mut third = TcpStream::connect(address).await.unwrap();
         assert!(closes(&mut third, Duration::from_millis(500)).await);
+
         // A place that its connection gave back serves the next one.
         assert!(closes(&mut first, Duration::from_secs(10)).await);
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -233,18 +258,22 @@ async fn one_address_holds_its_connections_and_the_address_of_a_relay_holds_more
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (node, mut inputs) = mpsc::channel(64);
+
     // A handshake of a machine under load takes its time.
     let limits = ConnectionLimits {
         handshake_timeout: Duration::from_secs(5),
         ..limits
     };
+
     let carried = Arc::new(Carried {
         limits,
         relay_addresses: std::sync::Mutex::new([address.ip()].into()),
         ..Carried::default()
     });
+
     let tls = tls_acceptor(&fixture("leaf.pem"), &fixture("leaf.key")).unwrap();
     tokio::spawn(accept_loop(listener, tls, node, carried));
+
     // The node of this test holds each link open: it keeps what the link
     // sent it, the writer of the link among it.
     tokio::spawn(async move {
@@ -253,12 +282,14 @@ async fn one_address_holds_its_connections_and_the_address_of_a_relay_holds_more
             held.push(input);
         }
     });
+
     let dial = Dial {
         host: "localhost".to_owned(),
         addr_v4: Some([127, 0, 0, 1]),
         addr_v6: None,
         port: address.port(),
     };
+
     let connect = || {
         let plan = umbra_transport::race::Plan::Only(umbra_transport::race::Wire::Tcp);
         native::connect(
@@ -270,17 +301,21 @@ async fn one_address_holds_its_connections_and_the_address_of_a_relay_holds_more
             Duration::from_secs(20),
         )
     };
+
     // Three links upgrade: more than the two of another address.
     let mut links = Vec::new();
     for _ in 0..3 {
         links.push(connect().await.unwrap());
     }
+
     let held = 2 * ConnectionLimits::PEER_PART;
     let mut silent = Vec::new();
     for _ in 3..held {
         silent.push(TcpStream::connect(address).await.unwrap());
     }
+
     tokio::time::sleep(Duration::from_millis(200)).await;
+
     let mut above = TcpStream::connect(address).await.unwrap();
     assert!(closes(&mut above, Duration::from_millis(500)).await);
 
@@ -292,9 +327,11 @@ async fn one_address_holds_its_connections_and_the_address_of_a_relay_holds_more
     let mut open = 0;
     for link in &mut links {
         let read = tokio::time::timeout(Duration::from_millis(500), link.recv()).await;
+
         if read.is_err() {
             open += 1;
         }
     }
+
     assert_eq!(open, 2);
 }

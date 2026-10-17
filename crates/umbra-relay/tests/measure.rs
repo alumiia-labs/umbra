@@ -86,6 +86,7 @@ fn relay_at(
         s: *XPublic::from(&static_secret).as_bytes(),
         relay_id: [0x10 + layer; 32],
     };
+
     let target = Target {
         relay_id: held.relay_id,
         ntor_pk: held.s,
@@ -102,22 +103,26 @@ fn relay_at(
         family_id: [0; 32],
         capacity_class: 3,
     };
+
     let mut node = RelayNode::new(Config {
         relay: held,
         static_secret,
         layer,
         chunk_capacity: 0,
     });
+
     node.set_measurer_trust(MeasurerTrust {
         keyset: keyset_bytes(authorities, 1).unwrap(),
         revoked: revoked.to_vec(),
     });
+
     // A relay of layer 2 or 3 that holds a relay set takes a build of a
     // link with no hello as a measurement candidate alone (`NET-353`).
     if layer > 1 {
         node.set_relay_identities([([0x99; 32], vec![0u8; 4])].into());
         node.set_previous_layer([[0x99; 32]].into());
     }
+
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(run_relay(
         node,
@@ -130,6 +135,7 @@ fn relay_at(
         Box::new(MemoryStore::default()),
         Carried::default(),
     ));
+
     Target {
         dial: Dial {
             port,
@@ -157,18 +163,22 @@ async fn a_relay_passes_a_class_that_the_loopback_holds_and_fails_one_far_above_
     let key = seeded(0x70);
     let cert = cert(&authorities, &key, [0x4D; 16]);
     let tls = native::tls_config_with_root_file(CA).unwrap();
+
     for layer in [1u8, 3] {
         let target = relay(layer, &authorities, &[]).await;
+
         // The C0 test at one part in 100: 2.25 Mbit/s of cells for 2 s, and
         // the relay passes at 1 Mbit/s of echoes.
         let low = Plan::of(0, Duration::from_secs(2), 2, 100).unwrap();
         let outcome = measure(&target, &cert, &key, low, tls.clone())
             .await
             .unwrap();
+
         assert!(outcome.passed, "{outcome:?}");
         // Each cell of the slot came back but those in flight at its end.
         assert!(outcome.echoed <= outcome.sent, "{outcome:?}");
         assert!(outcome.echoed * 10 >= outcome.sent * 9, "{outcome:?}");
+
         // The C3 test at its full rate: 2 250 Mbit/s of cells, which a
         // test build on loopback does not carry, and a pass at 1 000 Mbit/s
         // of echoes. The measurer and the relay stay inside their bounds,
@@ -179,6 +189,7 @@ async fn a_relay_passes_a_class_that_the_loopback_holds_and_fails_one_far_above_
             .unwrap();
         assert!(!outcome.passed, "{outcome:?}");
         assert!(outcome.echoed > 0, "{outcome:?}");
+
         // The session of the first test ended with its circuits, thus the
         // relay opened the second one. A third one opens after both.
         let outcome = measure(&target, &cert, &key, low, tls.clone())
@@ -197,6 +208,7 @@ async fn a_measurer_behind_its_rate_reads_the_echoes_of_its_slot() {
     let cert = cert(&authorities, &key, [0x4D; 16]);
     let tls = native::tls_config_with_root_file(CA).unwrap();
     let target = relay_at(wide_listener(8 << 20), 1, &authorities, &[]);
+
     // The C3 test at its full rate, which a test build does not send: the
     // measurer holds a batch ready at each turn of the slot, and no write
     // waits. The echoes that the relay sent in the slot count.
@@ -204,11 +216,13 @@ async fn a_measurer_behind_its_rate_reads_the_echoes_of_its_slot() {
     let outcome = measure(&target, &cert, &key, high, tls.clone())
         .await
         .unwrap();
+
     assert!(!outcome.passed, "{outcome:?}");
     assert!(outcome.echoed > 0, "{outcome:?}");
     // One echo for each batch of 128 cells is the count of a measurer that
     // reads between its batches alone.
     assert!(outcome.echoed * 32 >= outcome.sent, "{outcome:?}");
+
     // The relay takes the next session after that one (`REL-202`).
     let low = Plan::of(0, Duration::from_secs(1), 2, 100).unwrap();
     let outcome = measure(&target, &cert, &key, low, tls).await.unwrap();
@@ -222,6 +236,7 @@ async fn a_relay_that_opens_no_session_gives_no_result() {
     let cert = cert(&authorities, &key, [0x4D; 16]);
     let tls = native::tls_config_with_root_file(CA).unwrap();
     let plan = Plan::of(0, Duration::from_secs(1), 2, 100).unwrap();
+
     // REL-104: the root of the relay revoked the measurer. The relay gives
     // no sign, and the measurer writes no result for a relay that it did
     // not measure.
@@ -230,6 +245,7 @@ async fn a_relay_that_opens_no_session_gives_no_result() {
         measure(&target, &cert, &key, plan, tls.clone()).await,
         Err(MeasureError::NoSession)
     );
+
     // The key of another measurer under this certificate.
     let target = relay(1, &authorities, &[]).await;
     assert_eq!(
@@ -253,11 +269,13 @@ async fn the_full_rate_of_a_class_test_on_loopback() {
     let cert = cert(&authorities, &key, [0x4D; 16]);
     let tls = native::tls_config_with_root_file(CA).unwrap();
     let target = relay(3, &authorities, &[]).await;
+
     for class in [0u8, 1] {
         let plan = Plan::of(class, Duration::from_secs(5), 4, 1).unwrap();
         let outcome = measure(&target, &cert, &key, plan, tls.clone())
             .await
             .unwrap();
+
         println!(
             "class C{class}: sent {} cells, echoed {} cells, {} Mbit/s of echoes, passed={}",
             outcome.sent,

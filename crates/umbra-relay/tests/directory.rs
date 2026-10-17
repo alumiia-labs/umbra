@@ -89,6 +89,7 @@ async fn a_token_registers_a_handle_that_a_lookup_reads_under_a_signed_head() {
         .iter()
         .map(|s| s.verifying_key().to_bytes())
         .collect();
+
     let mut keyset = vec![0u8; KEYSET_LEN];
     let used = LogKeySet {
         keyset_epoch: 1,
@@ -97,6 +98,7 @@ async fn a_token_registers_a_handle_that_a_lookup_reads_under_a_signed_head() {
     .encode(&mut keyset)
     .unwrap();
     keyset.truncate(used);
+
     let directory = Directory::new(
         DirectoryKeys {
             voprf_seed: Secret::new([1; 32]),
@@ -110,6 +112,7 @@ async fn a_token_registers_a_handle_that_a_lookup_reads_under_a_signed_head() {
         username_case_mapped,
     )
     .unwrap();
+
     let directory_pk = *directory.voprf_public();
     let vrf_key = vrf::PublicKey::from_bytes(directory.vrf_public()).unwrap();
 
@@ -134,12 +137,14 @@ async fn a_token_registers_a_handle_that_a_lookup_reads_under_a_signed_head() {
         }),
         ..Carried::default()
     };
+
     tokio::spawn(accept_loop(
         relay_listener,
         tls_acceptor(&fixture("leaf.pem"), &fixture("leaf.key")).unwrap(),
         node,
         Arc::new(carried),
     ));
+
     let client = Client {
         route: DirectoryRoute {
             relay: Url::parse(&format!("https://localhost:{relay_port}{DIRECTORY_PATH}")).unwrap(),
@@ -170,13 +175,16 @@ async fn a_token_registers_a_handle_that_a_lookup_reads_under_a_signed_head() {
             .unwrap(),
     )
     .public();
+
     let (state, body) = dirclient::issue_request(epoch, &issuer_pk, 1, &mut OsRng).unwrap();
     let issued = client.send(Kind::Issue, &body).await.unwrap();
+
     // The same request again takes the answer of the first one, with the
     // same bytes and the same proof. The issuer signs nothing a second
     // time, and the token is the same token (ABU-110).
     let again = client.send(Kind::Issue, &body).await.unwrap();
     assert_eq!(again, issued);
+
     let token = dirclient::issue_finish(&state, &issued, &issuer_pk).unwrap();
     let token = dirclient::token_bytes(&token[0]).unwrap();
 
@@ -194,16 +202,20 @@ async fn a_token_registers_a_handle_that_a_lookup_reads_under_a_signed_head() {
         }),
         version: 0,
     };
+
     let mut encoded = vec![0u8; DIRECTORY_ENTRY_MAX];
     let used = entry.encode(&mut encoded).unwrap();
     encoded.truncate(used);
+
     // DIS-197: the registration challenge proves the key of the entry.
     let body = dirclient::register_challenge_body(input, &hk.public().to_bytes()).unwrap();
     let challenge = client.send(Kind::Challenge, &body).await.unwrap();
     let (challenge, purpose) = dirclient::parse_register_challenge(&challenge).unwrap();
+
     let ans =
         umbra_core::discovery::challenge::answer(purpose, &hk, input, &challenge, Some(&encoded))
             .unwrap();
+
     let register = dirclient::register_body(&token, input, &encoded, &ans, None).unwrap();
     client.send(Kind::Register, &register).await.unwrap();
 
@@ -212,8 +224,10 @@ async fn a_token_registers_a_handle_that_a_lookup_reads_under_a_signed_head() {
     let (blind, body) =
         dirclient::evaluate_request(input, &directory_pk, epoch_number(now()), None, &mut OsRng)
             .unwrap();
+
     let evaluated = client.send(Kind::Evaluate, &body).await.unwrap();
     let search_key = dirclient::evaluate_finish(&blind, &evaluated, &directory_pk).unwrap();
+
     let mut waited = 0;
     let found = loop {
         let looked = client.send(Kind::Lookup, &search_key).await.unwrap();
@@ -222,22 +236,26 @@ async fn a_token_registers_a_handle_that_a_lookup_reads_under_a_signed_head() {
         let (set, _) = LogKeySet::parse(&keyset).unwrap();
         let mut heads = HeadState::new(set).unwrap();
         heads.accept(&head, now()).unwrap();
+
         let accepted = AcceptedHead {
             tree_size: head.tree_size,
             root: head.root,
             timestamp: head.timestamp,
             accepted_at: now(),
         };
+
         if let Some(found) = proof
             .verify_handle(input, &search_key, &vrf_key, &accepted)
             .unwrap()
         {
             break found;
         }
+
         assert!(waited < 30, "the handle does not show");
         waited += 1;
         tokio::time::sleep(Duration::from_millis(500)).await;
     };
+
     assert_eq!(found.hk_pub, hk.public().to_bytes());
     assert_eq!(found.version, 0);
 }
