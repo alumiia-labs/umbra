@@ -74,6 +74,7 @@ fun AddContactScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                 Spacer(Modifier.height(10.dp))
                 Note(stringResource(R.string.contacts_invitation_needs_connection))
             }
+
             Spacer(Modifier.height(12.dp))
             Row(
                 Modifier
@@ -87,6 +88,7 @@ fun AddContactScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                 Spacer(Modifier.width(16.dp))
                 Text(stringResource(R.string.contacts_use_invitation_instead))
             }
+
             // The group of Part 11 starts beside the contacts.
             Row(
                 Modifier
@@ -100,6 +102,7 @@ fun AddContactScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                 Spacer(Modifier.width(16.dp))
                 Text(stringResource(R.string.contacts_new_private_group))
             }
+
             // Part 9: a link for many people, and a name to look up.
             if (Core.ownsChannels) {
                 OpenRow("link", stringResource(R.string.contacts_reusable_link)) { push(Screen.PublicLinks) }
@@ -120,6 +123,7 @@ fun YourInvitationScreen(onBack: () -> Unit) {
                 stringResource(R.string.contacts_invitation_expires),
             )
             Spacer(Modifier.height(16.dp))
+
             val link = Core.invitation
             if (link == null) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -133,6 +137,7 @@ fun YourInvitationScreen(onBack: () -> Unit) {
                 }
                 return@Column
             }
+
             Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { QrCode(link) }
             Spacer(Modifier.height(16.dp))
             Text(
@@ -147,6 +152,7 @@ fun YourInvitationScreen(onBack: () -> Unit) {
                     .border(1.dp, Palette.Divider, RoundedCornerShape(16.dp))
                     .padding(16.dp),
             )
+
             Spacer(Modifier.height(12.dp))
             PrimaryButton(stringResource(R.string.contacts_share_invitation)) { share(context, link) }
             Spacer(Modifier.height(8.dp))
@@ -167,6 +173,7 @@ fun QrCode(link: String, description: String = stringResource(R.string.contacts_
         )
         QRCodeWriter().encode(link, BarcodeFormat.QR_CODE, 0, 0, hints)
     }
+
     Canvas(
         Modifier
             .size(220.dp)
@@ -193,6 +200,7 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
     var name by remember { mutableStateOf("") }
     var note by remember { mutableStateOf("") }
     val focus = LocalFocusManager.current
+
     LaunchedEffect(Unit) {
         Core.requestSent = false
         Core.directoryNote = null
@@ -200,12 +208,14 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
         Core.unverifiedOf = null
         Core.profileName { name = it }
     }
+
     // A reusable link, an `umbra:pub:` string, or a handle starts a request
     // (Part 4 §4.3.3). An invitation link opens as before.
     val isRequest = isRequestTarget(pasted)
     // A link that another app gave, which no tap of the user took yet. Each
     // app of the device can give one, thus it starts no lookup by itself.
     var given by remember { mutableStateOf<String?>(null) }
+
     // A tapped or shared link fills the field, and it waits for a tap.
     LaunchedEffect(Core.linkedInvitation) {
         Core.linkedInvitation?.let {
@@ -214,6 +224,7 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
         }
         Core.linkedInvitation = null
     }
+
     val open = { link: String ->
         Core.fault = null
         if (isRequestTarget(link)) {
@@ -223,13 +234,16 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             isWaiting = true
         }
     }
+
     // The scanner gives the link of a code to this view.
     LaunchedEffect(Core.scannedInvitation) {
         Core.scannedInvitation?.let(open)
         Core.scannedInvitation = null
     }
+
     // A contact or a fault ends the wait. The naming view opens by itself.
     LaunchedEffect(Core.fault) { if (Core.fault != null) isWaiting = false }
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.contacts_use_invitation), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
@@ -243,6 +257,7 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                 }
                 Spacer(Modifier.height(16.dp))
             }
+
             // An invitation is no message text, thus a composable field holds it.
             OutlinedTextField(
                 value = pasted,
@@ -258,6 +273,7 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                 modifier = Modifier.fillMaxWidth(),
             )
             Spacer(Modifier.height(12.dp))
+
             if (isRequest) {
                 // Part 9 §9.3.1: a profile link shows the name and the
                 // welcome text of its holder before the request.
@@ -269,6 +285,7 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                         Core.previewContact(pasted.trim()) { preview = it }
                     }
                 }
+
                 preview?.let { shown ->
                     ProfilePreview(shown)
                     Spacer(Modifier.height(12.dp))
@@ -281,6 +298,7 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                     }
                     Spacer(Modifier.height(12.dp))
                 }
+
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it.take(32) },
@@ -298,6 +316,7 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                     keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
                     modifier = Modifier.fillMaxWidth(),
                 )
+
                 Spacer(Modifier.height(12.dp))
                 if (Core.requestSent) {
                     Note(stringResource(R.string.contacts_request_sent))
@@ -328,6 +347,7 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                         Core.sendRequest(pasted.trim(), name, note)
                     }
                 }
+
                 Core.directoryNote?.let {
                     Spacer(Modifier.height(12.dp))
                     Note(it, isError = true)
@@ -347,6 +367,7 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                     pasted = ""
                 }
             }
+
             Core.fault?.let {
                 Spacer(Modifier.height(12.dp))
                 Note(it, isError = true)
@@ -388,7 +409,8 @@ private fun ProfilePreview(preview: uniffi.umbra_ffi.ContactPreview) {
 /** Whether a text names a reusable link, a Public Address, or a handle. */
 fun isRequestTarget(text: String): Boolean {
     val trimmed = text.trim()
-    return trimmed.startsWith("umbra://p/") || trimmed.startsWith("umbra:pub:") ||
+    return trimmed.startsWith("umbra://p/") ||
+        trimmed.startsWith("umbra:pub:") ||
         trimmed.startsWith("umbra://h/") ||
         (trimmed.startsWith("@") && trimmed.contains("#"))
 }
@@ -397,6 +419,7 @@ fun isRequestTarget(text: String): Boolean {
 fun NameContactScreen(conversation: Conversation, onDone: () -> Unit) {
     // A request gave a name, which the user keeps or changes.
     var name by remember { mutableStateOf(Core.suggestedName.orEmpty().also { Core.suggestedName = null }) }
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.contacts_new_contact), onBack = onDone)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
@@ -476,5 +499,6 @@ fun copySensitive(context: Context, text: String, label: String = UiText.get(R.s
     clip.description.extras = PersistableBundle().apply {
         putBoolean("android.content.extra.IS_SENSITIVE", true)
     }
+
     context.getSystemService(ClipboardManager::class.java).setPrimaryClip(clip)
 }

@@ -98,6 +98,7 @@ private fun SectionLabel(text: String) {
 @Composable
 private fun TakeoverWarning(label: String) {
     if (label !in Core.directoryWarnings) return
+
     Spacer(Modifier.height(12.dp))
     Note(stringResource(R.string.discovery_takeover_warning, label), isError = true)
 }
@@ -106,6 +107,7 @@ private fun TakeoverWarning(label: String) {
 @Composable
 private fun LimitOffer(label: String) {
     if (label !in Core.entriesAtLimit) return
+
     Spacer(Modifier.height(12.dp))
     Note(stringResource(R.string.discovery_limit_reached))
     Spacer(Modifier.height(8.dp))
@@ -128,6 +130,7 @@ private fun DirectoryState(working: String) {
             Text(working)
         }
     }
+
     Core.directoryNote?.let {
         Spacer(Modifier.height(12.dp))
         Note(it, isError = true)
@@ -137,6 +140,7 @@ private fun DirectoryState(working: String) {
 /** The time until the end of a timed link, in the largest whole unit. */
 private fun remaining(expiresAt: ULong): String {
     if (expiresAt == 0uL) return UiText.get(R.string.common_no_end)
+
     val left = expiresAt.toLong() - System.currentTimeMillis() / 1_000
     return when {
         left <= 0 -> UiText.get(R.string.discovery_ending)
@@ -155,15 +159,18 @@ private fun shortLink(link: String): String = link.removePrefix("umbra://p/")
 @Composable
 fun PublicLinksScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
     var period by remember { mutableStateOf(0uL) }
+
     LaunchedEffect(Unit) {
         Core.directoryNote = null
         Core.readDirectory()
     }
+
     // A new link opens its own view.
     LaunchedEffect(Core.madeLink) {
         Core.madeLink?.let { push(Screen.PublicLinkView(it)) }
         Core.madeLink = null
     }
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.discovery_reusable_links), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
@@ -183,6 +190,7 @@ fun PublicLinksScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                 }
                 HorizontalDivider(color = Palette.Divider)
             }
+
             Spacer(Modifier.height(14.dp))
             PrimaryButton(
                 stringResource(R.string.discovery_create_link),
@@ -197,6 +205,7 @@ fun PublicLinksScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             Spacer(Modifier.height(8.dp))
             // IDN-010 to IDN-013: a published address against an invitation.
             Note(UiText.get(R.string.umbra_ui_idn_010))
+
             if (Core.publicLinks.isNotEmpty()) {
                 Spacer(Modifier.height(20.dp))
                 SectionLabel(stringResource(R.string.discovery_your_links))
@@ -217,8 +226,10 @@ fun PublicLinkScreen(id: List<Byte>, onBack: () -> Unit) {
     val context = LocalContext.current
     val link = Core.publicLinks.firstOrNull { it.id.toList() == id }
     var isRetiring by remember { mutableStateOf(false) }
+
     // A retired link leaves the list, and its view closes.
     LaunchedEffect(link == null) { if (link == null) onBack() }
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.discovery_reusable_link), onBack = onBack)
         link ?: return@Column
@@ -232,6 +243,7 @@ fun PublicLinkScreen(id: List<Byte>, onBack: () -> Unit) {
             MonoBox(link.link)
             TakeoverWarning(link.link)
             LimitOffer(link.link)
+
             Spacer(Modifier.height(12.dp))
             val shareLink = stringResource(R.string.common_share_link)
             val umbraLink = stringResource(R.string.common_umbra_link)
@@ -258,10 +270,12 @@ fun HandleScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     var name by remember { mutableStateOf("") }
     val focus = LocalFocusManager.current
+
     LaunchedEffect(Unit) {
         Core.directoryNote = null
         Core.readDirectory()
     }
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.common_your_handle), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
@@ -292,6 +306,7 @@ fun HandleScreen(onBack: () -> Unit) {
                     Core.claimHandle(name)
                 }
                 DirectoryState(stringResource(R.string.discovery_publishing_handle))
+
                 Spacer(Modifier.height(14.dp))
                 // Part 9 §9.3: the residual leak that the part states.
                 Note(stringResource(R.string.discovery_handle_listed))
@@ -302,6 +317,7 @@ fun HandleScreen(onBack: () -> Unit) {
                 Headline(handle)
                 TakeoverWarning(handle)
                 LimitOffer(handle)
+
                 Spacer(Modifier.height(16.dp))
                 // Part 9 §9.3.1: the link carries the key of the profile, and
                 // the bare handle carries none.
@@ -322,10 +338,12 @@ fun HandleScreen(onBack: () -> Unit) {
                     }
                     Spacer(Modifier.height(8.dp))
                 }
+
                 val umbraHandle = stringResource(R.string.discovery_umbra_handle)
                 SecondaryButton(stringResource(R.string.discovery_copy_handle)) {
                     copySensitive(context, handle, umbraHandle)
                 }
+
                 Spacer(Modifier.height(24.dp))
                 // Part 9 §9.9: a new key and a new rendezvous queue at one tap.
                 QuietButton(stringResource(R.string.discovery_reset_contact_requests)) { Core.rotateHandleKey() }
@@ -343,6 +361,7 @@ fun HandleScreen(onBack: () -> Unit) {
 @Composable
 fun ProfileScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
     LaunchedEffect(Unit) { Core.readDirectory() }
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.discovery_profile), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
@@ -367,6 +386,7 @@ private fun ProfileFields() {
     var picture by remember { mutableStateOf(ByteArray(0)) }
     var saved by remember { mutableStateOf("" to "") }
     val focus = LocalFocusManager.current
+
     LaunchedEffect(Unit) {
         Core.profile { held, text, image ->
             name = held
@@ -375,12 +395,14 @@ private fun ProfileFields() {
             saved = held to text
         }
     }
+
     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
         EditablePicture(
             hasPicture = picture.isNotEmpty(),
             onSet = { square -> Core.setProfilePicture(square) { picture = it } },
         ) { ProfilePicture(picture, name.ifEmpty { stringResource(R.string.discovery_me) }, EDITABLE_PICTURE_SIZE) }
     }
+
     Spacer(Modifier.height(20.dp))
     OutlinedTextField(
         value = name,
@@ -398,6 +420,7 @@ private fun ProfileFields() {
         maxLines = 4,
         modifier = Modifier.fillMaxWidth(),
     )
+
     Spacer(Modifier.height(12.dp))
     PrimaryButton(
         stringResource(R.string.common_save),
@@ -416,10 +439,12 @@ private fun ProfileFields() {
 fun RequestsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     LaunchedEffect(Unit) { Core.readDirectory() }
+
     // The last request leaves the list, and the view closes.
     LaunchedEffect(Core.contactRequests.isEmpty()) {
         if (Core.contactRequests.isEmpty()) onBack()
     }
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.discovery_contact_requests), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState())) {
@@ -455,6 +480,7 @@ private fun RequestRow(context: Context, request: ContactRequestInfo) {
                 )
             }
         }
+
         if (request.note.isNotBlank()) {
             Spacer(Modifier.height(8.dp))
             Text(request.note, style = MaterialTheme.typography.bodyMedium)
@@ -472,6 +498,7 @@ private fun RequestRow(context: Context, request: ContactRequestInfo) {
 fun RequestsPrompt(push: (Screen) -> Unit) {
     val count = Core.contactRequests.size
     if (count == 0) return
+
     Row(
         Modifier
             .fillMaxWidth()

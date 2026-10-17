@@ -77,6 +77,7 @@ sealed interface Screen {
     data object Handle : Screen
     data object Profile : Screen
     data object Requests : Screen
+
     /** A conversation, at its end or at the message `target`. */
     data class Chat(val conversation: Conversation, val target: List<Byte>? = null) : Screen
 
@@ -172,9 +173,12 @@ private fun OpenApp() {
     var stack by remember { mutableStateOf(listOf<Screen>()) }
     val push: (Screen) -> Unit = { stack = stack + it }
     val pop: () -> Unit = { stack = stack.dropLast(1) }
+
     BackHandler(enabled = stack.isNotEmpty(), onBack = pop)
+
     // The keyboard of one view has no field in the next one.
     HideKeyboardOn(stack.lastOrNull())
+
     // A tapped or shared invitation link opens the view of the link above
     // the open views. Another app can send one, and Back leads to the view
     // that the user left.
@@ -196,6 +200,7 @@ private fun OpenApp() {
         )
         return
     }
+
     val top = stack.lastOrNull()
     Column(Modifier.fillMaxSize()) {
         if (top !is Screen.VerifyCode) VerifyPrompt(push)
@@ -241,7 +246,11 @@ private fun OpenApp() {
             else -> {
                 val chat = Core.chats.firstOrNull { it.conversation == top.contact }
                 // The list loads again after a lock or a new run.
-                if (chat == null) LaunchedEffect(Unit) { pop() } else ContactView(top, chat, stack, pop, push) { stack = it }
+                if (chat == null) {
+                    LaunchedEffect(Unit) { pop() }
+                } else {
+                    ContactView(top, chat, stack, pop, push) { stack = it }
+                }
             }
         }
     }
@@ -326,8 +335,10 @@ private fun UnlockScreen() {
     var isRestoring by remember { mutableStateOf(false) }
     var isJoining by remember { mutableStateOf(false) }
     val isOpening = Core.phase == Core.Phase.Opening
+
     // The field is gone while the store opens, and its keyboard goes too.
     HideKeyboardOn(isOpening)
+
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
         // The block starts at one height in each state, thus nothing jumps
         // when the field gives way to the progress bar.
@@ -377,9 +388,11 @@ private fun UnlockScreen() {
                     first?.let { Core.open(context, it) }
                     return@PrimaryButton
                 }
+
                 val second = confirm.take()
                 mismatch = first == null || second == null || !first.contentEquals(second)
                 second?.fill('\u0000')
+
                 if (mismatch) {
                     first?.fill('\u0000')
                 } else {
@@ -437,7 +450,7 @@ private fun TabsScreen(tab: Tab, onTab: (Tab) -> Unit, push: (Screen) -> Unit) {
             for (entry in Tab.entries) {
                 val isSelected = entry == tab
                 // The press shade fills the third of the bar that the item
-                // holds, square and against its neighbours.
+                // holds, square and against its neighbors.
                 Column(
                     Modifier
                         .weight(1f)
@@ -508,6 +521,7 @@ private fun ConnectionNote() {
             )
         }
     }
+
     if (Core.connection?.admissionSurge == true) {
         LinearProgressIndicator(
             modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 12.dp).height(3.dp),
@@ -515,6 +529,7 @@ private fun ConnectionNote() {
             trackColor = Palette.Pressed,
         )
     }
+
     for (line in lines) {
         Box(Modifier.padding(start = 20.dp, end = 20.dp, top = 12.dp)) {
             Note(line, isError = line == fault)
@@ -532,12 +547,14 @@ private fun ChatsTab(push: (Screen) -> Unit) {
         RosterForkPrompt()
         HeldDeletionsPrompt()
         RequestsPrompt(push)
+
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.weight(1f)) { TabTitle(stringResource(R.string.main_tab_chats)) }
             Box(Modifier.padding(end = 8.dp, top = 8.dp)) {
                 IconAction("magnifying-glass", stringResource(R.string.common_search)) { push(Screen.Search(null)) }
             }
         }
+
         var notice by remember { mutableStateOf<String?>(null) }
         LaunchedEffect(notice) {
             if (notice != null) {
@@ -548,14 +565,17 @@ private fun ChatsTab(push: (Screen) -> Unit) {
         notice?.let {
             Box(Modifier.padding(start = 20.dp, end = 20.dp, bottom = 8.dp)) { Note(it) }
         }
+
         var acting by remember { mutableStateOf<Chat?>(null) }
         var muting by remember { mutableStateOf<Chat?>(null) }
         var deleting by remember { mutableStateOf<Chat?>(null) }
         var deletingHere by remember { mutableStateOf<Chat?>(null) }
         var deletingAll by remember { mutableStateOf<Chat?>(null) }
+
         // DEV-334: a conversation with a contact also goes for everyone. A
         // group offers the deletion for the own devices alone.
         val onDelete = { chat: Chat -> if (chat.isGroup) deletingHere = chat else deleting = chat }
+
         acting?.let { chat -> ChatOptions(chat, push, { muting = it }, onDelete) { acting = null } }
         muting?.let { chat -> MuteOptions(chat) { muting = null } }
         deleting?.let { chat ->
@@ -568,6 +588,7 @@ private fun ChatsTab(push: (Screen) -> Unit) {
                 onDismiss = { deleting = null },
             )
         }
+
         deletingHere?.let { chat ->
             ActionSheet(
                 stringResource(R.string.main_delete_on_my_devices_q),
@@ -587,6 +608,7 @@ private fun ChatsTab(push: (Screen) -> Unit) {
                 onDismiss = { deletingHere = null },
             )
         }
+
         deletingAll?.let { chat ->
             ActionSheet(
                 stringResource(R.string.chat_delete_for_everyone_question),
@@ -604,6 +626,7 @@ private fun ChatsTab(push: (Screen) -> Unit) {
                 onDismiss = { deletingAll = null },
             )
         }
+
         // A group with no message still shows: the user made it, and its
         // creation is the act that put it here.
         val withMessages = Core.chats.filter { it.preview != null || it.isGroup }
@@ -611,6 +634,7 @@ private fun ChatsTab(push: (Screen) -> Unit) {
             EmptyState(stringResource(R.string.main_no_conversations))
             return
         }
+
         LazyColumn {
             items(withMessages, key = { it.conversation.key }) { chat ->
                 ChatRow(chat, onOpen = { push(Screen.Chat(chat.conversation)) }, onOptions = { acting = chat })
@@ -646,7 +670,9 @@ private fun ChatOptions(
                 RowEntry("bell-slash", stringResource(R.string.main_mute)) { onMute(chat) }
             },
         )
-        if (chat.unread > 0) add(RowEntry("check", stringResource(R.string.main_mark_as_read)) { Core.markRead(chat.conversation) })
+        if (chat.unread > 0) {
+            add(RowEntry("check", stringResource(R.string.main_mark_as_read)) { Core.markRead(chat.conversation) })
+        }
         if (chat.isGroup) {
             add(RowEntry("circle-info", stringResource(R.string.main_group_details)) { push(Screen.GroupDetails(chat.conversation)) })
         } else {
@@ -655,6 +681,7 @@ private fun ChatOptions(
         }
         add(RowEntry("trash-can", stringResource(R.string.main_delete_conversation)) { onDelete(chat) })
     }
+
     ActionSheet(chat.title, entries, onDismiss = onDismiss)
 }
 
@@ -663,6 +690,7 @@ private fun ChatOptions(
 private fun MuteOptions(chat: Chat, onDismiss: () -> Unit) {
     fun after(ms: Long) = (System.currentTimeMillis() + ms).toULong()
     val hour = 3_600_000L
+
     ActionSheet(
         stringResource(R.string.main_mute_title, chat.title),
         listOf(
@@ -682,11 +710,10 @@ private fun mutedLabel(context: android.content.Context, untilMs: ULong): String
     } else {
         UiText.get(
             R.string.main_muted_until,
-            android.text.format.DateUtils.formatDateTime(
+            DateUtils.formatDateTime(
                 context,
                 untilMs.toLong(),
-                android.text.format.DateUtils.FORMAT_SHOW_TIME or android.text.format.DateUtils.FORMAT_SHOW_DATE or
-                    android.text.format.DateUtils.FORMAT_ABBREV_MONTH,
+                DateUtils.FORMAT_SHOW_TIME or DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_ABBREV_MONTH,
             ),
         )
     }
@@ -781,6 +808,7 @@ private fun ContactsTab(push: (Screen) -> Unit) {
             EmptyState(stringResource(R.string.main_no_contacts))
             return
         }
+
         LazyColumn {
             items(byName, key = { it.conversation.key }) { chat ->
                 Row(
@@ -822,6 +850,7 @@ private fun SettingsTab(push: (Screen) -> Unit) {
         // itself is the icon of the bar.
         SettingRow("lock", stringResource(R.string.main_app_lock), stringResource(R.string.main_app_lock_detail)) { push(Screen.AppLock) }
         SettingRow("bell", stringResource(R.string.common_notifications), Modes.mode(LocalContext.current).label) { push(Screen.Notifications) }
+
         var isChoosingLook by remember { mutableStateOf(false) }
         SettingRow("circle-half-stroke", stringResource(R.string.main_appearance), Appearances.choice.label) { isChoosingLook = true }
         if (isChoosingLook) {
@@ -837,6 +866,7 @@ private fun SettingsTab(push: (Screen) -> Unit) {
                 onDismiss = { isChoosingLook = false },
             )
         }
+
         SettingRow(
             "comment",
             stringResource(R.string.main_typing_indicators),
@@ -844,6 +874,7 @@ private fun SettingsTab(push: (Screen) -> Unit) {
         ) {
             Core.turnTyping(!Core.typingEnabled)
         }
+
         // DEV-020: the setting states its trade where the user sets it.
         var isChoosingAge by remember { mutableStateOf(false) }
         SettingRow("clock", stringResource(R.string.main_keep_history), historyLabel(Core.historyAge)) { isChoosingAge = true }
@@ -860,6 +891,7 @@ private fun SettingsTab(push: (Screen) -> Unit) {
                 onDismiss = { isChoosingAge = false },
             )
         }
+
         // DEV-202: a draft on the other devices is text that no one sent.
         if (Core.devices.size > 1) {
             SettingRow(
@@ -870,9 +902,11 @@ private fun SettingsTab(push: (Screen) -> Unit) {
                 Core.turnDraftSync(!Core.draftSync)
             }
         }
+
         SettingRow("download", stringResource(R.string.main_automatic_download), autoDownloadLabel(Core.autoDownloadLimit, Core.autoDownloadWifiOnly)) {
             push(Screen.AutoDownload)
         }
+
         val context = LocalContext.current
         LaunchedEffect(Unit) { Core.readBackup() }
         val backupAt = Core.lastBackupAt
@@ -881,6 +915,7 @@ private fun SettingsTab(push: (Screen) -> Unit) {
         } else {
             stringResource(R.string.main_last_backup, timeLabel(context, backupAt * 1_000))
         }
+
         // The recovery code and the backups belong to the device that owns
         // the channels (Part 7 §7.7).
         if (Core.ownsChannels) {
@@ -894,6 +929,7 @@ private fun SettingsTab(push: (Screen) -> Unit) {
                 stringResource(R.string.main_reset_identity_detail),
             ) { push(Screen.ResetIdentity) }
         }
+
         // DEV-008: a device leaves each set by an explicit local wipe.
         var isErasing by remember { mutableStateOf(false) }
         SettingRow(
@@ -909,11 +945,11 @@ private fun SettingsTab(push: (Screen) -> Unit) {
                 onDismiss = { isErasing = false },
             )
         }
+
         LaunchedEffect(Unit) { Core.readDevices() }
     }
 }
 
-/** The line of the devices row: the count of the other devices. */
 /** The periods of the history that the settings offer, in seconds. */
 private val HISTORY_AGES = listOf(86_400L, 30L * 86_400, 365L * 86_400, -1L)
 
@@ -925,6 +961,7 @@ private fun historyLabel(seconds: Long): String = when {
     else -> UiText.get(R.string.main_history_forever)
 }
 
+/** The line of the devices row: the count of the other devices. */
 private fun devicesLabel(count: Int): String = when (count) {
     0, 1 -> UiText.get(R.string.main_no_other_device)
     else -> UiText.plural(R.plurals.main_other_devices, count - 1, count - 1)
@@ -977,6 +1014,7 @@ val uniffi.umbra_ffi.MsgInfo.shownAtMs: Long
  */
 fun timeLabel(context: android.content.Context, atMs: Long): String {
     if (atMs == 0L) return ""
+
     val flags = if (DateUtils.isToday(atMs)) {
         DateUtils.FORMAT_SHOW_TIME
     } else {

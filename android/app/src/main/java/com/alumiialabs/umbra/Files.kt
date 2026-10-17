@@ -85,6 +85,7 @@ const val CAPTION_MAX = 1_024
 fun utf8Length(chars: CharArray): Int {
     var length = 0
     var i = 0
+
     while (i < chars.size) {
         val c = chars[i]
         length += when {
@@ -98,6 +99,7 @@ fun utf8Length(chars: CharArray): Int {
         }
         i++
     }
+
     return length
 }
 
@@ -132,6 +134,7 @@ object Files {
     fun describe(context: Context, source: Uri): Picked {
         var name: String? = null
         var size = -1L
+
         context.contentResolver.query(
             source,
             arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE),
@@ -144,6 +147,7 @@ object Files {
                 if (!cursor.isNull(1)) size = cursor.getLong(1)
             }
         }
+
         return Picked(name?.let(::fileName), size, context.contentResolver.getType(source))
     }
 
@@ -156,6 +160,7 @@ object Files {
             .filter { !it.isISOControl() }
             .trim()
         if (clean.isEmpty() || clean == "." || clean == "..") return null
+
         var cut = clean
         while (cut.toByteArray(Charsets.UTF_8).size > 255) cut = cut.dropLast(1)
         return cut
@@ -192,6 +197,7 @@ object Files {
         } catch (unreadable: Exception) {
             null
         } ?: return false
+
         return throughPipe(input) { path ->
             draft.attachFile(path, classOf(picked.mime), 0u, 0u, 0u, picked.name, null)
         }
@@ -205,6 +211,7 @@ object Files {
      */
     private fun throughPipe(input: java.io.InputStream, attach: (String) -> Unit): Boolean {
         val (read, write) = ParcelFileDescriptor.createPipe()
+
         // The core reads to the end of the pipe, thus a second thread writes.
         val writer = kotlin.concurrent.thread {
             val chunk = ByteArray(64 * 1_024)
@@ -224,6 +231,7 @@ object Files {
                 chunk.fill(0)
             }
         }
+
         return try {
             attach("/proc/self/fd/${read.fd}")
             true
@@ -252,6 +260,7 @@ object Files {
             try {
                 extractor.setDataSource(context, source, null)
                 muxer = MediaMuxer(memory, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+
                 val tracks = HashMap<Int, Int>()
                 var width = 0
                 var height = 0
@@ -262,6 +271,7 @@ object Files {
                     val format = extractor.getTrackFormat(index)
                     val mime = format.getString(MediaFormat.KEY_MIME) ?: continue
                     if (!mime.startsWith("video/") && !mime.startsWith("audio/")) continue
+
                     if (mime.startsWith("video/")) {
                         width = format.getInteger(MediaFormat.KEY_WIDTH)
                         height = format.getInteger(MediaFormat.KEY_HEIGHT)
@@ -275,24 +285,29 @@ object Files {
                     if (format.containsKey(MediaFormat.KEY_MAX_INPUT_SIZE)) {
                         largest = maxOf(largest, format.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE))
                     }
+
                     tracks[index] = muxer.addTrack(format)
                     extractor.selectTrack(index)
                 }
                 if (width == 0 || height == 0) return -1
+
                 // The rotation lives in the track header, which the copy writes
                 // new, thus the muxer takes it again.
                 muxer.setOrientationHint(rotation)
                 muxer.start()
+
                 val buffer = ByteBuffer.allocate(largest)
                 val info = MediaCodec.BufferInfo()
                 var copied = 0L
                 while (true) {
                     val size = extractor.readSampleData(buffer, 0)
                     if (size < 0) break
+
                     // The copy lives in RAM, thus it ends at the first
                     // sample above `MAX_FILE_SIZE`, and not after the last.
                     copied += size
                     if (copied > MAX_FILE_SIZE) return -1
+
                     val flags = if (extractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0) {
                         MediaCodec.BUFFER_FLAG_KEY_FRAME
                     } else {
@@ -303,10 +318,12 @@ object Files {
                     extractor.advance()
                 }
                 muxer.stop()
+
                 val bytes = Os.fstat(memory).st_size
                 blankPlatformVersion(memory, bytes)
                 blankTimes(memory, bytes)
                 if (bytes > MAX_FILE_SIZE) return -1
+
                 val (shownW, shownH) = if (rotation % 180 == 0) width to height else height to width
                 val seconds = (micros / 1_000_000).coerceIn(0, 65_535)
                 val preview = videoThumbnail(context, source)
@@ -322,6 +339,7 @@ object Files {
                         preview,
                     )
                 }
+
                 return if (isGiven) bytes else -1
             } catch (unreadable: Exception) {
                 return -1
@@ -379,15 +397,19 @@ object Files {
         try {
             val micros = transcodeAudio(context, source, memory)
             if (micros < 0) return -1
+
             val bytes = Os.fstat(memory).st_size
             if (bytes == 0L || bytes > MAX_FILE_SIZE) return -1
+
             blankPlatformVersion(memory, bytes)
             blankTimes(memory, bytes)
+
             val seconds = ((micros + 500_000) / 1_000_000).coerceIn(1, 65_535)
             Os.lseek(memory, 0, android.system.OsConstants.SEEK_SET)
             val isGiven = throughPipe(java.io.FileInputStream(memory)) { path ->
                 draft.attachFile(path, CLASS_AUDIO, 0u, 0u, seconds.toInt().toUShort(), audioName(picked.name), null)
             }
+
             return if (isGiven) bytes else -1
         } finally {
             // The stream of the pipe closed the memory file when it ended.
@@ -402,6 +424,7 @@ object Files {
     /** The name of a picked audio file after the re-encode: its type is MP4. */
     private fun audioName(name: String?): String? {
         name ?: return null
+
         val stem = name.substringBeforeLast('.', name).ifEmpty { name }
         return fileName("$stem.m4a")
     }
@@ -415,8 +438,10 @@ object Files {
     private fun blankTimes(memory: java.io.FileDescriptor, size: Long) {
         var at = 0L
         val header = ByteArray(16)
+
         while (at + 8 <= size) {
             if (!readFully(memory, header, 0, 8, at)) return
+
             var boxSize = ByteBuffer.wrap(header, 0, 4).int.toLong() and 0xFFFF_FFFFL
             val type = String(header, 4, 4, Charsets.US_ASCII)
             var headerSize = 8
@@ -428,6 +453,7 @@ object Files {
                 boxSize = size - at
             }
             if (boxSize < headerSize || at + boxSize > size) return
+
             if (type == "moov") {
                 if (boxSize > Int.MAX_VALUE) return
                 val moov = ByteArray(boxSize.toInt())
@@ -436,6 +462,7 @@ object Files {
                 Os.pwrite(memory, moov, 0, moov.size, at)
                 return
             }
+
             at += boxSize
         }
     }
@@ -443,10 +470,12 @@ object Files {
     /** Zeroes the times of each `mvhd`, `tkhd`, and `mdhd` in a run of boxes. */
     private fun blankTimesIn(bytes: ByteArray, from: Int, to: Int) {
         var at = from
+
         while (at + 8 <= to) {
             val boxSize = ByteBuffer.wrap(bytes, at, 4).int
             val type = String(bytes, at + 4, 4, Charsets.US_ASCII)
             if (boxSize < 8 || at + boxSize > to) return
+
             when (type) {
                 "trak", "mdia" -> blankTimesIn(bytes, at + 8, at + boxSize)
                 "mvhd", "tkhd", "mdhd" -> {
@@ -457,6 +486,7 @@ object Files {
                     if (at + 12 + width <= at + boxSize) bytes.fill(0, at + 12, at + 12 + width)
                 }
             }
+
             at += boxSize
         }
     }
@@ -468,6 +498,7 @@ object Files {
             if (got <= 0) return false
             read += got
         }
+
         return true
     }
 
@@ -480,6 +511,7 @@ object Files {
     private fun blankPlatformVersion(memory: java.io.FileDescriptor, size: Long) {
         val version = Build.VERSION.RELEASE.toByteArray(Charsets.US_ASCII)
         if (version.isEmpty()) return
+
         val span = minOf(size, 1L shl 20).toInt()
         val start = size - span
         val tail = ByteArray(span)
@@ -489,10 +521,13 @@ object Files {
             if (count <= 0) return
             read += count
         }
+
         val key = "com.android.version".toByteArray(Charsets.US_ASCII)
         if (indexOf(tail, key, 0) < 0) return
+
         val list = indexOf(tail, "ilst".toByteArray(Charsets.US_ASCII), 0)
         if (list < 0) return
+
         // A `data` atom of a UTF-8 value: the type 1, the locale 0, then the text.
         val header = "data".toByteArray(Charsets.US_ASCII) + byteArrayOf(0, 0, 0, 1, 0, 0, 0, 0)
         var at = indexOf(tail, header, list)
@@ -512,6 +547,7 @@ object Files {
             for (j in needle.indices) if (haystack[i + j] != needle[j]) continue@outer
             return i
         }
+
         return -1
     }
 
@@ -530,6 +566,7 @@ object Files {
             (picture.height * scale).toInt().coerceAtLeast(1),
             true,
         )
+
         try {
             for (quality in intArrayOf(60, 45, 30, 20)) {
                 val out = java.io.ByteArrayOutputStream()
@@ -538,6 +575,7 @@ object Files {
                 if (bytes.size <= PREVIEW_MAX) return bytes
                 bytes.fill(0)
             }
+
             return null
         } finally {
             if (small !== picture) small.recycle()
@@ -600,12 +638,14 @@ class CoreDataSource(private val source: MediaSource) : MediaDataSource() {
 
     override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int {
         if (size == 0) return 0
+
         val bytes = try {
             source.readAt(position.toULong(), size.toUInt())
         } catch (locked: Exception) {
             return -1
         }
         if (bytes.isEmpty()) return -1
+
         System.arraycopy(bytes, 0, buffer, offset, bytes.size)
         bytes.fill(0)
         return bytes.size
@@ -627,6 +667,7 @@ fun firstFrame(source: MediaSource): ImageBitmap? {
             FRAME_SIDE_MAX,
             FRAME_SIDE_MAX,
         ) ?: return null
+
         val longest = maxOf(frame.width, frame.height)
         val shown = if (longest > FRAME_SIDE_MAX) {
             val scale = FRAME_SIDE_MAX.toFloat() / longest
@@ -635,6 +676,7 @@ fun firstFrame(source: MediaSource): ImageBitmap? {
         } else {
             frame
         }
+
         shown.asImageBitmap()
     } catch (unreadable: Throwable) {
         // A frame with no memory is an `Error`, and it ends no thread.
@@ -657,8 +699,10 @@ fun VideoTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
     val height = file.pixelH.toInt().coerceAtLeast(1)
     val ratio = (width.toFloat() / height).coerceIn(0.5f, 2f)
     val isHeld = state == FILE_READY || line.info.outgoing
+
     // A video that did not come yet shows the thumbnail of its record.
     val frame = if (isHeld) Core.frame(line) else if (file.hasPreview) Core.preview(line) else null
+
     Box(
         modifier
             .width(if (ratio >= 1f) 240.dp else 200.dp)
@@ -675,6 +719,7 @@ fun VideoTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
                 modifier = Modifier.fillMaxSize().alpha(if (state == FILE_READY) 1f else 0.55f),
             )
         }
+
         if (isHeld) {
             Box(
                 Modifier.size(48.dp).background(Color.Black.copy(alpha = 0.5f), CircleShape),
@@ -690,6 +735,7 @@ fun VideoTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
         } else {
             TransferMark(file, lostLabel(line))
         }
+
         val duration = Files.duration(file.mediaSeconds.toInt())
         // The time line of a sent video holds its progress.
         val share = if (line.info.outgoing) null else progressOf(file)
@@ -715,6 +761,7 @@ fun VideoTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
 fun TransferMark(file: MsgFile, lost: String? = null) {
     val context = LocalContext.current
     val state = file.state.toInt()
+
     if (lost != null) {
         Text(
             lost,
@@ -726,6 +773,7 @@ fun TransferMark(file: MsgFile, lost: String? = null) {
         )
         return
     }
+
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Box(
             Modifier.size(48.dp).background(Color.Black.copy(alpha = 0.55f), CircleShape),
@@ -739,6 +787,7 @@ fun TransferMark(file: MsgFile, lost: String? = null) {
                 else -> FaIcon("download", label = stringResource(R.string.files_download), size = 18.dp, tint = Color.White)
             }
         }
+
         if (state == FILE_HELD) {
             Spacer(Modifier.height(6.dp))
             Text(
@@ -768,6 +817,7 @@ fun isExpired(line: Line): Boolean = lostLabel(line) != null
 fun lostLabel(line: Line): String? {
     val state = line.info.file?.state?.toInt() ?: return null
     if (line.info.outgoing) return null
+
     val isOld = System.currentTimeMillis() - line.info.sentAtMs.toLong() > CHUNK_TTL_MS
     return when {
         (state == FILE_GONE || state == FILE_FAILED || state == FILE_HELD) && isOld -> UiText.get(R.string.files_expired)
@@ -780,6 +830,7 @@ fun lostLabel(line: Line): String? {
 fun progressOf(file: MsgFile): Int? {
     val total = file.total.toLong()
     if (total == 0L) return null
+
     return (file.done.toLong() * 100 / total).toInt().coerceIn(0, 99)
 }
 
@@ -792,6 +843,7 @@ fun FileTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val state = file.state.toInt()
     val progress = progressOf(file)
+
     Row(modifier.width(260.dp), verticalAlignment = Alignment.CenterVertically) {
         Box(
             Modifier.size(44.dp).background(Palette.Pressed, CircleShape),
@@ -805,7 +857,9 @@ fun FileTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
             }
             FaIcon(icon, size = 18.dp, tint = Palette.Action)
         }
+
         Spacer(Modifier.width(12.dp))
+
         Column(Modifier.weight(1f)) {
             Text(
                 file.name ?: stringResource(R.string.common_file),
@@ -814,6 +868,7 @@ fun FileTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
+
             val size = Files.size(context, file.size.toLong())
             // A size before the download is the padded size, thus it says
             // "about".
@@ -823,6 +878,7 @@ fun FileTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
                 size
             }
             val lost = lostLabel(line)
+
             Text(
                 when {
                     // The time line of a sent file holds its progress.
@@ -836,6 +892,7 @@ fun FileTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
                 style = MaterialTheme.typography.labelSmall,
                 color = Palette.TextSecondary,
             )
+
             if (progress != null) {
                 Spacer(Modifier.height(4.dp))
                 LinearProgressIndicator(
@@ -860,6 +917,7 @@ fun VideoScreen(line: Line, onBack: () -> Unit) {
         Viewer.isOpen = true
         onDispose { Viewer.isOpen = false }
     }
+
     val player = remember { MediaPlayer() }
     var isReady by remember { mutableStateOf(false) }
     var isPlaying by remember { mutableStateOf(false) }
@@ -867,6 +925,7 @@ fun VideoScreen(line: Line, onBack: () -> Unit) {
     var length by remember { mutableFloatStateOf(1f) }
     var ratio by remember { mutableFloatStateOf(16f / 9f) }
     var failed by remember { mutableStateOf(false) }
+
     DisposableEffect(line.key) {
         var isGone = false
         Core.openMedia(line) { source ->
@@ -877,6 +936,7 @@ fun VideoScreen(line: Line, onBack: () -> Unit) {
                 if (source == null) failed = true
                 return@openMedia
             }
+
             val data = CoreDataSource(source)
             try {
                 player.setDataSource(data)
@@ -898,11 +958,13 @@ fun VideoScreen(line: Line, onBack: () -> Unit) {
                 failed = true
             }
         }
+
         onDispose {
             isGone = true
             player.release()
         }
     }
+
     LaunchedEffect(isPlaying) {
         while (isPlaying) {
             position = try {
@@ -913,12 +975,14 @@ fun VideoScreen(line: Line, onBack: () -> Unit) {
             delay(250)
         }
     }
+
     Box(
         Modifier
             .fillMaxSize()
             .background(Color.Black)
             .press(role = Role.Button, label = if (isPlaying) stringResource(R.string.files_pause) else stringResource(R.string.files_play)) {
                 if (!isReady) return@press
+
                 if (player.isPlaying) {
                     player.pause()
                     isPlaying = false
@@ -947,6 +1011,7 @@ fun VideoScreen(line: Line, onBack: () -> Unit) {
             },
             modifier = Modifier.fillMaxWidth().aspectRatio(ratio),
         )
+
         if (failed) {
             Text(stringResource(R.string.files_video_not_playable), color = Color.White)
         } else if (isReady && !isPlaying) {
@@ -955,6 +1020,7 @@ fun VideoScreen(line: Line, onBack: () -> Unit) {
                 contentAlignment = Alignment.Center,
             ) { FaIcon("play", label = stringResource(R.string.files_play), size = 24.dp, tint = Color.White) }
         }
+
         Row(
             Modifier
                 .align(Alignment.TopStart)
@@ -971,6 +1037,7 @@ fun VideoScreen(line: Line, onBack: () -> Unit) {
                 contentAlignment = Alignment.Center,
             ) { FaIcon("arrow-left", label = stringResource(R.string.common_back), size = 20.dp, tint = Color.White) }
         }
+
         if (isReady) {
             Row(
                 Modifier
@@ -1026,13 +1093,16 @@ fun rememberSave(): (Line) -> Unit {
     val context = LocalContext.current
     var target by remember { mutableStateOf<Line?>(null) }
     var warning by remember { mutableStateOf<Line?>(null) }
+
     val launcher = rememberLauncherForActivityResult(SaveDocument()) { uri ->
         val line = target
         target = null
+
         if (uri != null && line != null) {
             Core.saveFile(context, line, uri) { Toast.makeText(context, UiText.get(R.string.files_saved), Toast.LENGTH_SHORT).show() }
         }
     }
+
     val start = { line: Line ->
         line.info.file?.let { file ->
             target = line
@@ -1040,6 +1110,7 @@ fun rememberSave(): (Line) -> Unit {
             launcher.launch(Files.suggestedName(file) to Files.typeOf(file))
         }
     }
+
     warning?.let { line ->
         ActionSheet(
             stringResource(R.string.files_save_title),
@@ -1054,6 +1125,7 @@ fun rememberSave(): (Line) -> Unit {
             onDismiss = { warning = null },
         )
     }
+
     return { line ->
         val warned = context.getSharedPreferences(FILE_PREFS, Context.MODE_PRIVATE).getBoolean(SAVE_WARNED, false)
         if (warned) start(line) else warning = line
@@ -1072,10 +1144,12 @@ fun MediaScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             lines = loaded.filter { it.info.file != null && !it.info.deleted }.reversed()
         }
     }
+
     val save = rememberSave()
     val all = lines.orEmpty()
     val media = all.filter { it.info.file?.mimeClass == CLASS_IMAGE || it.info.file?.mimeClass == CLASS_VIDEO }
     val files = all - media.toSet()
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.common_media_and_files), onBack = onBack)
         androidx.compose.foundation.lazy.LazyColumn(
@@ -1092,6 +1166,7 @@ fun MediaScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                     )
                 }
             }
+
             items(media.chunked(3).size) { row ->
                 Row(
                     Modifier.fillMaxWidth().padding(horizontal = 2.dp),
@@ -1100,6 +1175,7 @@ fun MediaScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                     for (line in media.chunked(3)[row]) {
                         MediaCell(line, Modifier.weight(1f)) {
                             val file = line.info.file ?: return@MediaCell
+
                             when {
                                 isExpired(line) -> Unit
                                 file.state.toInt() == FILE_FAILED || file.state.toInt() == FILE_HELD ->
@@ -1115,6 +1191,7 @@ fun MediaScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                 }
                 Spacer(Modifier.height(2.dp))
             }
+
             if (files.isNotEmpty()) {
                 item {
                     Text(
@@ -1125,9 +1202,11 @@ fun MediaScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                     )
                 }
             }
+
             items(files.size) { index ->
                 val line = files[index]
                 val file = line.info.file ?: return@items
+
                 Box(
                     Modifier
                         .fillMaxWidth()
@@ -1149,6 +1228,7 @@ fun MediaScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
 @Composable
 private fun MediaCell(line: Line, modifier: Modifier, onOpen: () -> Unit) {
     val file = line.info.file ?: return
+
     val isHeld = file.state.toInt() == FILE_READY || line.info.outgoing
     val isVideo = file.mimeClass == CLASS_VIDEO
     val image = when {
@@ -1156,6 +1236,7 @@ private fun MediaCell(line: Line, modifier: Modifier, onOpen: () -> Unit) {
         isVideo -> Core.frame(line)
         else -> Core.image(line)
     }
+
     Box(
         modifier
             .aspectRatio(1f)
@@ -1168,6 +1249,7 @@ private fun MediaCell(line: Line, modifier: Modifier, onOpen: () -> Unit) {
         } else {
             FaIcon(if (isVideo) "film" else "image", size = 20.dp, tint = Palette.TextSecondary)
         }
+
         if (isVideo) {
             Text(
                 Files.duration(file.mediaSeconds.toInt()),

@@ -34,6 +34,7 @@ class DeliveryService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+
         // A lock or a change to Off that came before this start ends the
         // service here: a stop before `startForeground` ends the process.
         val watches = !Core.wantsCarrier() && Core.wantsWatch(this)
@@ -41,8 +42,10 @@ class DeliveryService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+
         Core.carrierRuns(this, true)
         if (watches) Watcher.start(this)
+
         // A process that the platform starts again holds a locked client.
         // In Direct mode that client holds its watch, thus the platform
         // starts the service again; in each other mode it takes no record.

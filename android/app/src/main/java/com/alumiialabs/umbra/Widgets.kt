@@ -128,15 +128,16 @@ class PlatformFieldState {
         private set
 
     /**
-     * Shows the characters of a passphrase field, or hides them again. The input type
-     * stays a password, thus the keyboard still learns nothing (IMP-057);
-     * only the dots go.
+     * Shows the characters of a passphrase field, or hides them again. The
+     * input type stays a password, thus the keyboard still learns nothing
+     * (IMP-057). Only the dots go.
      */
     fun toggleShown() = show(!isShown)
 
     private fun show(shown: Boolean) {
         if (isShown == shown) return
         isShown = shown
+
         val field = view ?: return
         val (start, end) = field.selectionStart to field.selectionEnd
         field.transformationMethod = if (shown) null else PasswordTransformationMethod.getInstance()
@@ -156,6 +157,7 @@ class PlatformFieldState {
      */
     private fun wipe(editable: android.text.Editable) {
         if (editable.isEmpty()) return
+
         // The zeros are no text of the user, thus no party learns of them.
         isWiping = true
         try {
@@ -163,6 +165,7 @@ class PlatformFieldState {
         } finally {
             isWiping = false
         }
+
         editable.clear()
     }
 
@@ -190,11 +193,14 @@ class PlatformFieldState {
     fun take(): CharArray? {
         val editable = view?.editableText ?: return null
         if (editable.isEmpty()) return null
+
         val chars = CharArray(editable.length)
         TextUtils.getChars(editable, 0, editable.length, chars, 0)
+
         wipe(editable)
         // The next passphrase of a field that stays shows as dots again.
         show(false)
+
         return chars
     }
 }
@@ -236,6 +242,7 @@ fun PlatformInput(
 ) {
     val textColor = Palette.Text.toArgb()
     val hintColor = Palette.TextSecondary.toArgb()
+
     AndroidView(
         modifier = modifier,
         factory = { context ->
@@ -295,13 +302,16 @@ fun PlatformInput(
 fun styleAsApp(view: TextView, mono: Boolean = false) {
     val context = view.context
     view.typeface = context.resources.getFont(if (mono) R.font.roboto_mono else R.font.roboto)
+
     val action = Palette.Action.toArgb()
     view.highlightColor = Palette.Container.toArgb()
+
     val density = context.resources.displayMetrics.density
     view.textCursorDrawable = GradientDrawable().apply {
         setColor(action)
         setSize((2 * density).toInt(), 0)
     }
+
     view.textSelectHandle?.mutate()?.let {
         it.setTint(action)
         view.setTextSelectHandle(it)
@@ -356,6 +366,7 @@ fun PlatformText(
 ) {
     val argb = color.toArgb()
     val linkArgb = Palette.Action.toArgb()
+
     AndroidView(
         modifier = modifier,
         factory = { context ->
@@ -368,6 +379,7 @@ fun PlatformText(
             view.setTextColor(argb)
             view.setTextSize(TypedValue.COMPLEX_UNIT_SP, sizeSp)
             view.maxLines = maxLines
+
             val links = if (showsLinks && prefix.isEmpty()) Links.ranges(chars) else emptyList()
             if (links.isNotEmpty()) {
                 // NET-146: a link shows as a link, and a tap on the message
@@ -404,7 +416,7 @@ fun Modifier.subline(): Modifier = padding(horizontal = 3.dp)
 
 /**
  * The press shade of each row: square, and across the whole width that the
- * row holds, thus it meets the shade of its neighbours as the shade of a tab
+ * row holds, thus it meets the shade of its neighbors as the shade of a tab
  * does. The content of a row starts `PressInset` inside the shade, 20 dp
  * from the edge of the screen.
  */
@@ -419,6 +431,7 @@ val PressInset = 20.dp
 @Composable
 fun Modifier.press(role: Role? = null, label: String? = null, onClick: () -> Unit): Modifier {
     val source = remember { MutableInteractionSource() }
+
     return pressShade(source).clickable(
         interactionSource = source,
         indication = null,
@@ -432,6 +445,7 @@ fun Modifier.press(role: Role? = null, label: String? = null, onClick: () -> Uni
 @Composable
 fun Modifier.pressToggle(isOn: Boolean, onChange: (Boolean) -> Unit): Modifier {
     val source = remember { MutableInteractionSource() }
+
     return pressShade(source).toggleable(
         value = isOn,
         interactionSource = source,
@@ -449,6 +463,7 @@ private fun Modifier.pressShade(source: MutableInteractionSource): Modifier {
         if (isPressed) snap() else tween(durationMillis = 260),
         label = "press shade",
     )
+
     // The shade lies above the content, as the press shade of a tab does.
     return drawWithContent {
         drawContent()
@@ -470,6 +485,7 @@ fun Modifier.pressShadeInColumn(): Modifier = layout { measurable, constraints -
             maxWidth = constraints.maxWidth + extra,
         ),
     )
+
     layout(placeable.width - extra, placeable.height) { placeable.place(-PressInset.roundToPx(), 0) }
 }
 
@@ -488,6 +504,7 @@ private fun Modifier.outsetStart(by: Dp): Modifier = layout { measurable, constr
             maxWidth = constraints.maxWidth + extra,
         ),
     )
+
     layout(placeable.width - extra, placeable.height) { placeable.place(-extra, 0) }
 }
 
@@ -562,6 +579,7 @@ fun InlineButton(
 fun Note(text: String, isError: Boolean = false) {
     val ground = if (isError) Palette.ErrorGround else Palette.Incoming
     val ink = if (isError) Palette.Error else Palette.Text
+
     Row(
         Modifier
             .fillMaxWidth()
@@ -623,6 +641,7 @@ fun Avatar(chat: Chat, size: Int = 44) {
         )
         return
     }
+
     // A group with no name shows the icon of a group and no letter.
     val icon = if (chat.isGroup && chat.name.isEmpty()) "user-group" else null
     LetterAvatar(chat.name, chat.conversation.hashCode(), size, icon)
@@ -637,6 +656,7 @@ fun ProfilePicture(picture: ByteArray?, name: String, size: Int) {
     // DIS-176: the picture of a peer is bytes of a stranger. The decode has
     // a bound and a thread of its own, and a picture that does not decode
     // shows the generated one.
+    //
     // A new read of a list gives new arrays of the same bytes. The key
     // compares the bytes, thus such a read starts no decode and shows no
     // letter for the time of one.
@@ -647,11 +667,13 @@ fun ProfilePicture(picture: ByteArray?, name: String, size: Int) {
             withContext(Dispatchers.Default) { Photos.profileImage(it) }
         }
     }
+
     val shown = image
     if (shown == null) {
         LetterAvatar(name, name.hashCode(), size)
         return
     }
+
     androidx.compose.foundation.Image(
         shown,
         contentDescription = null,
@@ -671,6 +693,7 @@ private class PictureKey(private val bytes: ByteArray?) {
 fun LetterAvatar(name: String, seed: Int, size: Int = 44, icon: String? = null) {
     val ground = Palette.Avatars[(seed and 0x7FFFFFFF) % Palette.Avatars.size]
     val letter = firstLetter(name)
+
     Box(
         Modifier.size(size.dp).clip(CircleShape).background(ground),
         contentAlignment = Alignment.Center,
@@ -679,6 +702,7 @@ fun LetterAvatar(name: String, seed: Int, size: Int = 44, icon: String? = null) 
             FaIcon(icon, size = (size * 0.46f).dp, tint = Palette.Text)
             return@Box
         }
+
         // The letter takes its size from the circle and not from the font
         // scale of the system. Its line box is the glyph alone: the line
         // height of the theme is taller than a small circle, and the letter
@@ -705,6 +729,7 @@ fun LetterAvatar(name: String, seed: Int, size: Int = 44, icon: String? = null) 
 @Composable
 fun BrandBar(onConnection: () -> Unit, onProfile: () -> Unit) {
     val context = LocalContext.current
+
     Row(
         Modifier.fillMaxWidth().padding(start = 12.dp, end = 8.dp, top = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -887,13 +912,22 @@ fun PressOver(
         ) { content() }
         return
     }
+
     Box(
         modifier.semantics(mergeDescendants = true) {
             if (onClick != null) {
                 role = Role.Button
-                onClick(null) { onClick(); true }
+                onClick(null) {
+                    onClick()
+                    true
+                }
             }
-            if (onLongClick != null) onLongClick(longLabel) { onLongClick(); true }
+            if (onLongClick != null) {
+                onLongClick(longLabel) {
+                    onLongClick()
+                    true
+                }
+            }
         },
     ) {
         content()
@@ -916,6 +950,7 @@ fun PressOver(
 @Composable
 fun Modifier.pressLong(onClick: () -> Unit, onLongClick: () -> Unit): Modifier {
     val source = remember { MutableInteractionSource() }
+
     return pressShade(source).combinedClickable(
         interactionSource = source,
         indication = null,
@@ -981,6 +1016,7 @@ fun SwitchMark(isOn: Boolean, enabled: Boolean = true) {
     // outlines of the app in the place of a solid track.
     val offset by animateDpAsState(if (isOn) 20.dp else 0.dp, label = "switch")
     val tint = if (isOn) Palette.Action else Palette.Outline
+
     Box(
         Modifier
             .alpha(if (enabled) 1f else 0.4f)
@@ -992,7 +1028,6 @@ fun SwitchMark(isOn: Boolean, enabled: Boolean = true) {
         Box(Modifier.offset(x = offset).size(18.dp).background(tint, CircleShape))
     }
 }
-
 
 /** An icon that acts. The touch target is 48 dp, and the label is for a screen reader. */
 @Composable
@@ -1021,6 +1056,7 @@ fun Headline(title: String, body: String? = null) {
  */
 fun firstLetter(name: String): String {
     if (name.isEmpty()) return "?"
+
     val end = name.offsetByCodePoints(0, 1)
     return name.substring(0, end).uppercase()
 }

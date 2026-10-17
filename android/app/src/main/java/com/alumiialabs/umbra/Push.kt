@@ -26,11 +26,13 @@ object Push {
     fun opened(context: Context) {
         // Part 8 §8.3: Private mode and Off hold no token.
         if (!isAvailable(context) || Modes.mode(context) != NotifyMode.Instant) return
+
         val preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
         preferences.getString(WAITING_TOKEN, null)?.let { waiting ->
             Core.setFcmToken(waiting)
             preferences.edit().remove(WAITING_TOKEN).apply()
         }
+
         // The manifest turns the start of Firebase by itself off, thus a
         // device makes a token in Instant mode alone (`NTF-045`).
         FirebaseMessaging.getInstance().isAutoInitEnabled = true
@@ -48,9 +50,11 @@ object Push {
      */
     fun closed(context: Context) {
         if (!isAvailable(context)) return
+
         val preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
         preferences.edit().remove(WAITING_TOKEN).apply()
         if (!preferences.getBoolean(TOKEN_HELD, true)) return
+
         val firebase = FirebaseMessaging.getInstance()
         firebase.isAutoInitEnabled = false
         firebase.deleteToken().addOnSuccessListener {
@@ -64,6 +68,7 @@ object Push {
     /** Firebase gave a new token. A locked client takes it at the unlock. */
     fun tokenChanged(context: Context, token: String) {
         if (Modes.mode(context) != NotifyMode.Instant) return
+
         if (Core.isOpen()) {
             Core.setFcmToken(token)
         } else {
@@ -98,6 +103,7 @@ class PushService : FirebaseMessagingService() {
         // alert. An open client writes the table at each change of a block
         // and of an alert setting, thus the table decides for it too.
         val isSilent = WakeStore.isSilent(conversation)
+
         if (Core.isOpen()) {
             // A view on the screen shows the message itself. The alert of
             // the record takes the place of this one, or ends it.
@@ -105,6 +111,7 @@ class PushService : FirebaseMessagingService() {
             Core.wake(app)
             return
         }
+
         if (isSilent) return
         Notifier.waiting(app, conversation)
     }
@@ -112,6 +119,7 @@ class PushService : FirebaseMessagingService() {
     /** The conversation of a blob that the wake table opens, or none. */
     private fun waiting(app: android.content.Context, encoded: String?): Conversation? {
         if (Modes.mode(app) != NotifyMode.Instant) return null
+
         val blob = encoded?.let {
             runCatching { Base64.decode(it, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP) }
                 .getOrNull()

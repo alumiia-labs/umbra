@@ -52,6 +52,7 @@ import uniffi.umbra_ffi.LinkStatus
 fun RosterForkPrompt() {
     val fork = Core.rosterForks.firstOrNull() ?: return
     val name = fork.label.ifEmpty { stringResource(R.string.devices_a_removed_device) }
+
     Column(
         Modifier
             .fillMaxWidth()
@@ -85,6 +86,7 @@ fun RosterForkPrompt() {
 fun HeldDeletionsPrompt() {
     val count = Core.heldDeletions
     if (count == 0) return
+
     Column(
         Modifier
             .fillMaxWidth()
@@ -105,6 +107,7 @@ fun HeldDeletionsPrompt() {
 @Composable
 fun DevicesScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
     LaunchedEffect(Unit) { Core.readDevices() }
+
     // DEV-315: a take-over waits for a run that read the sync channel, thus
     // its row can come while the view shows.
     LaunchedEffect(Core.ownsChannels) {
@@ -113,6 +116,7 @@ fun DevicesScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             Core.readTakeOver()
         }
     }
+
     var removing by remember { mutableStateOf<Device?>(null) }
     removing?.let { device ->
         // DEV-119, DEV-120: the deletions of that device since the last
@@ -123,6 +127,7 @@ fun DevicesScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             0 -> ""
             else -> " " + pluralStringResource(R.plurals.devices_removal_deletions, deletions, deletions)
         }
+
         // Part 7 DEV-137 and DEV-138: the two limits of a removal, in
         // those words.
         ActionSheet(
@@ -139,6 +144,7 @@ fun DevicesScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             onDismiss = { removing = null },
         )
     }
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.devices_linked_devices), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState())) {
@@ -167,6 +173,7 @@ fun DevicesScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                     }
                 }
             }
+
             if (Core.canTakeOver) {
                 EntryRow(
                     RowEntry("triangle-exclamation", stringResource(R.string.devices_owning_device_lost_question)) {
@@ -174,6 +181,7 @@ fun DevicesScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                     },
                 )
             }
+
             Column(Modifier.padding(20.dp)) {
                 if (Core.ownsChannels) {
                     PrimaryButton(stringResource(R.string.devices_link_a_device)) { push(Screen.LinkDevice) }
@@ -196,6 +204,7 @@ fun TakeOverScreen(onBack: () -> Unit) {
     var isRunning by remember { mutableStateOf(false) }
     var isRefused by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { Core.takeOverCount { count = it } }
+
     digits?.let { held ->
         SecretDigitsScreen(
             stringResource(R.string.devices_new_recovery_code),
@@ -206,11 +215,13 @@ fun TakeOverScreen(onBack: () -> Unit) {
         }
         return
     }
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.devices_owning_device_lost), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
             Text(stringResource(R.string.devices_takeover_intro))
             Spacer(Modifier.height(12.dp))
+
             val lines = buildList {
                 count?.let { held ->
                     val contacts = UiText.plural(
@@ -235,6 +246,7 @@ fun TakeOverScreen(onBack: () -> Unit) {
             for (line in lines) {
                 Text("· $line", color = Palette.TextSecondary, modifier = Modifier.padding(bottom = 6.dp))
             }
+
             Spacer(Modifier.height(16.dp))
             if (isRefused) {
                 Note(stringResource(R.string.devices_takeover_not_lost), isError = true)
@@ -298,6 +310,7 @@ fun LinkDeviceScreen(onBack: () -> Unit) {
     DisposableEffect(Unit) {
         onDispose { if (Core.linkStatus !is LinkStatus.Linked) Core.cancelLink() }
     }
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.devices_link_a_device), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
@@ -375,6 +388,7 @@ fun LinkDeviceScreen(onBack: () -> Unit) {
                     Progress()
                 }
             }
+
             Core.fault?.let {
                 Spacer(Modifier.height(16.dp))
                 Note(it, isError = true)
@@ -396,10 +410,12 @@ fun JoinForm(onCancel: () -> Unit) {
     var isPasting by remember { mutableStateOf(false) }
     var pasted by remember { mutableStateOf("") }
     DisposableEffect(Unit) { onDispose { held?.fill('\u0000') } }
+
     val code = Core.joinCode
     val note = Core.joinNote
     // The keyboard of the passphrase has no field in the scanner.
     HideKeyboardOn(held != null)
+
     Column(Modifier.fillMaxWidth()) {
         when {
             code != null -> {

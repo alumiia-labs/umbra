@@ -35,6 +35,7 @@ object Watcher : WatchListener {
         this.app = app
         worker.execute {
             if (watch != null) return@execute
+
             val table = WakeStore.readWatch(app)
             watch = table?.let {
                 try {
@@ -45,6 +46,7 @@ object Watcher : WatchListener {
                     it.fill(0)
                 }
             }
+
             if (watch != null) {
                 Notifier.refreshCarrier(app)
             } else if (!Core.isOpen()) {
@@ -71,8 +73,10 @@ object Watcher : WatchListener {
             val app = app ?: return
             // An open client takes the record over its own run.
             if (Core.isOpen()) return
+
             val conversation = WakeStore.openBlob(app, blob)
             if (WakeStore.isSilent(conversation)) return
+
             Notifier.waiting(app, conversation)
         } catch (fault: Exception) {
             if (BuildConfig.DEBUG) android.util.Log.w("umbra-watch", "a wake failed", fault)
@@ -93,6 +97,7 @@ object Watcher : WatchListener {
                     it.destroy()
                 }
                 watch = null
+
                 if (!Core.isOpen()) {
                     DeliveryService.stop(app)
                     Notifier.locked(app)

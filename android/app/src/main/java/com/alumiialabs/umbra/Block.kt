@@ -103,6 +103,7 @@ fun BlockedLine(chat: Chat) {
             }
         }
     }
+
     val text = line ?: return
     Box(Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 8.dp)) {
         Text(

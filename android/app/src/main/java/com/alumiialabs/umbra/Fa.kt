@@ -62,6 +62,7 @@ object Fa {
     private fun parse(name: String, svg: String): ImageVector {
         val (width, height) = viewBox.find(svg)?.destructured
             ?: error("the icon $name has no view box")
+
         // A path of Font Awesome 7 draws up to BLEED units outside its view
         // box, as the shackle of the lock does, and a vector of Compose
         // clips at its viewport. Thus the viewport takes that margin on each
@@ -76,6 +77,7 @@ object Fa {
             viewportWidth = viewWidth,
             viewportHeight = viewHeight,
         )
+
         builder.addGroup(translationX = BLEED, translationY = BLEED)
         for (found in path.findAll(svg)) {
             builder.addPath(
@@ -84,6 +86,7 @@ object Fa {
             )
         }
         builder.clearGroup()
+
         return builder.build()
     }
 }
@@ -103,6 +106,7 @@ fun FaIcon(
     val context = LocalContext.current
     val vector = remember(name) { Fa.icon(context, name) }
     val (nudgeX, nudgeY) = Fa.nudge[name] ?: (0f to 0f)
+
     Icon(
         vector,
         contentDescription = label,

@@ -65,14 +65,14 @@ class Conversation(val id: ByteArray) {
         get() = id.joinToString("") { "%02x".format(it) }
 }
 
+/** `TYPING_TTL` of Part 6 §6.6.9, in milliseconds. */
+const val TYPING_TTL_MS = 15_000L
+
 /**
  * One message of a conversation view. The text stays a `CharArray`. `quote`
  * is the text of the message that this one answers. An answer to a message
  * that this device does not hold has `isReply` and no quote.
  */
-/** `TYPING_TTL` of Part 6 §6.6.9, in milliseconds. */
-const val TYPING_TTL_MS = 15_000L
-
 class Line(
     val handle: MsgHandle,
     val text: CharArray,
@@ -113,13 +113,13 @@ fun fileWord(file: uniffi.umbra_ffi.MsgFile): String = when (file.mimeClass) {
     else -> file.name ?: UiText.get(R.string.common_file)
 }
 
+/** The end of a mute with no end (Part 7 `DEV-332`). */
+val MUTE_FOREVER: ULong = ULong.MAX_VALUE
+
 /**
  * One row of the chat list and of the contact list. The name is a label of
  * the user. The preview is message text, thus it stays a `CharArray`.
  */
-/** The end of a mute with no end (Part 7 `DEV-332`). */
-val MUTE_FOREVER: ULong = ULong.MAX_VALUE
-
 class Chat(
     val conversation: Conversation,
     val name: String,
@@ -205,6 +205,7 @@ object Core {
             linkFault != null -> LinkState.Down
             else -> LinkState.Connecting
         }
+
     var invitation by mutableStateOf<String?>(null)
     val chats = mutableStateListOf<Chat>()
 
@@ -238,6 +239,7 @@ object Core {
         private set
 
     private val main = Handler(Looper.getMainLooper())
+
     // The keys of ML-DSA and ML-KEM take a deep stack, as the tokio runtime
     // of the network gives its own threads.
     private val worker = Executors.newSingleThreadExecutor { Thread(null, it, "umbra-core", 16L shl 20) }
@@ -254,6 +256,7 @@ object Core {
 
     /** The lock waits for no call of the worker (`IMP-127`). */
     private val lockWorker = Executors.newSingleThreadExecutor { Thread(null, it, "umbra-lock", 16L shl 20) }
+
     private var handle: Handle? = null
 
     /** The handle of an unlock that failed. The next unlock takes it, thus one store opens one time. */
@@ -305,6 +308,7 @@ object Core {
     private var carrierHolds = false
     private var lastTouchMs = 0L
     private var retryDelayMs = FIRST_RETRY_MS
+
     private const val TOUCH_GAP_MS = 10_000L
 
     /** How long a run stands after the last view left, in Private mode and in Off. */
@@ -324,11 +328,13 @@ object Core {
         val app = context.applicationContext
         phase = Phase.Opening
         fault = null
+
         worker.execute {
             // UniFFI has no `CharArray` type, thus this list is the one copy
             // that the collector frees (`IMP-124`).
             val units = unitsOf(passphrase)
             passphrase.fill('\u0000')
+
             var unlocked: Handle? = null
             try {
                 val opened = handle ?: waiting ?: launch(app, units).also { waiting = it }
@@ -362,18 +368,22 @@ object Core {
     private fun begin(app: Context, opened: Handle) {
         handle = opened
         waiting = null
+
         // The store holds each contact, thus the list needs no network.
         val stored = summaries(opened)
         val idleSeconds = opened.autoLockSeconds().toLong()
         val downloadLimit = opened.autoDownloadLimit()
         val downloadWifiOnly = opened.autoDownloadUnmeteredOnly()
+
         // IMP-168: the core knows the cost of the network before a record
         // arrives.
         watchNetwork(app)
         opened.setMetered(isMetered(app))
+
         val backupAt = opened.lastBackupAt()?.toLong()
         val owns = opened.ownsChannels()
         drain(opened, app)
+
         main.post {
             chats.clear()
             chats.addAll(stored)
@@ -385,9 +395,11 @@ object Core {
             restoreNote = null
             phase = Phase.Open
             mode = Modes.mode(app)
+
             // NTF-142: the open client takes each record over its own run.
             Watcher.stop()
             if (carrierHolds) Notifier.refreshCarrier(app)
+
             // The store is open before the network starts: the fetch of the
             // manifest waits for a carrier, and the list does not wait for
             // it. A network that does not start leaves the store open, and
@@ -437,6 +449,7 @@ object Core {
         val app = context.applicationContext
         val changed = mode != now
         mode = now
+
         if (now == NotifyMode.Off) {
             if (carrierHolds) DeliveryService.stop(app)
         } else if (carrierHolds && changed && isVisible) {
@@ -444,6 +457,7 @@ object Core {
         } else {
             holdCarrier(app)
         }
+
         leftScreen()
     }
 
@@ -513,6 +527,7 @@ object Core {
                 main.post { onDone(null) }
                 return@call
             }
+
             main.post {
                 canTakeOver = false
                 connect(app, force = true)
@@ -531,6 +546,7 @@ object Core {
         val forks = client.rosterForks()
         val holes = client.historyHoles()
         val held = client.heldDeletions().toInt()
+
         main.post {
             heldDeletions = held
             removedFromSet = removed
@@ -621,6 +637,7 @@ object Core {
             work.run()
         }, "umbra-directory", 16L shl 20)
     }
+
     private const val MAINTAIN_MS = 5 * 60_000L
     private var maintains = false
 
@@ -631,6 +648,7 @@ object Core {
         val requests = client.contactRequests()
         val warnings = client.directoryWarnings()
         val full = client.entriesAtLimit()
+
         main.post {
             directoryWarnings.clear()
             directoryWarnings.addAll(warnings)
@@ -647,6 +665,7 @@ object Core {
 
     private fun directory(action: (Handle) -> Unit) {
         val client = handle ?: return
+
         directoryBusy = true
         directoryNote = null
         directoryWorker.execute {
@@ -718,6 +737,7 @@ object Core {
                     return@directory
                 }
             }
+
             client.setProfilePicture(picture)
             main.post {
                 onPicture(picture)
@@ -775,6 +795,7 @@ object Core {
         requestSent = false
         takeoverOf = null
         unverifiedOf = null
+
         directory { client ->
             client.setProfileName(name)
             try {
@@ -820,6 +841,7 @@ object Core {
 
     private fun scheduleMaintenance(app: Context) {
         if (maintains) return
+
         maintains = true
         main.postDelayed(object : Runnable {
             override fun run() {
@@ -827,6 +849,7 @@ object Core {
                     maintains = false
                     return
                 }
+
                 maintainDirectory()
                 // NTF-135: a run rotates roots and makes queues, thus the
                 // table follows each change within one round.
@@ -854,6 +877,7 @@ object Core {
         fault = null
         linkStatus = LinkStatus.Preparing
         val label = deviceLabel(context)
+
         call { client ->
             try {
                 client.startLink(label)
@@ -908,12 +932,14 @@ object Core {
         val app = context.applicationContext
         fault = null
         joinNote = UiText.get(R.string.core_connecting)
+
         worker.execute {
             // IMP-124: the wait below lasts minutes, thus the passphrase waits
             // in an array that this call overwrites, and each list lives for
             // one call.
             val held = passphrase.copyOf()
             passphrase.fill('\u0000')
+
             var opened: Handle? = null
             try {
                 dropWaiting()
@@ -926,14 +952,17 @@ object Core {
                 } finally {
                     units.clear()
                 }
+
                 val network = BuildNetwork.network(app, first)
                 if (network == null) {
                     dropStore(app, first)
                     joinFailed(UiText.get(R.string.core_no_network))
                     return@execute
                 }
+
                 first.connect(network)
                 first.joinLink(ticket, deviceLabel(app))
+
                 val deadline = System.currentTimeMillis() + JOIN_WAIT_MS
                 var failure: String? = null
                 var isReady = false
@@ -955,20 +984,24 @@ object Core {
                         is LinkStatus.Failed -> failure = UiText.get(R.string.common_link_failed)
                         else -> Unit
                     }
+
                     if (!isReady && failure == null) {
                         if (System.currentTimeMillis() > deadline) failure = UiText.get(R.string.common_link_failed)
                         Thread.sleep(500)
                     }
                 }
+
                 if (failure != null) {
                     dropStore(app, first)
                     joinFailed(failure)
                     return@execute
                 }
+
                 val linked = first.takeLinked()
                 first.disconnect()
                 first.close()
                 opened = null
+
                 val database = File(app.filesDir, "umbra.db")
                 val back = withUnits(held) { units ->
                     initLinked(
@@ -979,6 +1012,7 @@ object Core {
                     )
                 }
                 held.fill('\u0000')
+
                 main.post {
                     joinNote = null
                     joinCode = null
@@ -1017,8 +1051,7 @@ object Core {
         main.post { lastBackupAt = at }
     }
 
-    /** The recovery code as digits, in an array that the caller wipes. */
-    /** The user half of the recovery code as its 49 digits (Part 4 §4.7.7). */
+    /** The user half of the recovery code as its 49 digits (Part 4 §4.7.7), in an array that the caller wipes. */
     fun userHalf(onLoaded: (CharArray) -> Unit) = call { client ->
         val sink = CharSink()
         client.userHalf(sink)
@@ -1077,6 +1110,7 @@ object Core {
         val app = context.applicationContext
         fault = null
         restoreNote = UiText.get(R.string.core_looking_for_backup)
+
         worker.execute {
             // IMP-124: the wait below lasts minutes, thus the passphrase waits
             // in an array that this call overwrites, and each list lives for
@@ -1086,6 +1120,7 @@ object Core {
             val code = unitsOf(digits)
             digits.fill('\u0000')
             val shareUnits = shares.map { share -> unitsOf(share).also { share.fill('\u0000') } }
+
             try {
                 // IDN-151 to IDN-154: the check and the type come first, and a
                 // wrong type names both types. A restore with shares takes the
@@ -1098,6 +1133,7 @@ object Core {
                     3 to R.string.core_digits_share,
                     4 to R.string.core_digits_root_seed,
                 )
+
                 // IDN-003: the root seed makes a store with the identity alone.
                 if (kind == 4 && shareUnits.isEmpty()) {
                     try {
@@ -1118,6 +1154,7 @@ object Core {
                     }
                     return@execute
                 }
+
                 if (kind != wanted) {
                     restoreFailed(
                         if (kind == 0) {
@@ -1133,10 +1170,12 @@ object Core {
                     )
                     return@execute
                 }
+
                 if (shareUnits.any { recoveryDigitsKind(it).toInt() != 3 }) {
                     restoreFailed(UiText.get(R.string.core_share_no_check))
                     return@execute
                 }
+
                 var opened: Handle? = null
                 try {
                     dropWaiting()
@@ -1149,12 +1188,14 @@ object Core {
                     } finally {
                         units.clear()
                     }
+
                     val network = BuildNetwork.network(app, first)
                     if (network == null) {
                         dropStore(app, first)
                         restoreFailed(UiText.get(R.string.core_no_network))
                         return@execute
                     }
+
                     first.connect(network)
                     if (shareUnits.isEmpty()) {
                         first.restoreBackup(code)
@@ -1163,6 +1204,7 @@ object Core {
                     }
                     code.clear()
                     shareUnits.forEach { it.clear() }
+
                     val deadline = System.currentTimeMillis() + RESTORE_WAIT_MS
                     var failure: String? = null
                     var isReady = false
@@ -1179,20 +1221,24 @@ object Core {
                                 }
                             else -> Unit
                         }
+
                         if (!isReady && failure == null) {
                             if (System.currentTimeMillis() > deadline) failure = UiText.get(R.string.core_backup_not_down)
                             Thread.sleep(250)
                         }
                     }
+
                     if (failure != null) {
                         dropStore(app, first)
                         restoreFailed(failure)
                         return@execute
                     }
+
                     val restored = first.takeRestored()
                     first.disconnect()
                     first.close()
                     opened = null
+
                     val database = File(app.filesDir, "umbra.db")
                     val back = withUnits(held) { units ->
                         initRestored(
@@ -1226,6 +1272,7 @@ object Core {
     private fun dropStore(app: Context, opened: Handle) {
         opened.disconnect()
         opened.close()
+
         for (suffix in listOf("", "-wal", "-shm", "-journal")) {
             File(app.filesDir, "umbra.db$suffix").delete()
         }
@@ -1252,6 +1299,7 @@ object Core {
             }
             handle = null
             waiting = null
+
             // NTF-137: the wake table lies outside the store.
             runCatching { WakeStore.delete(app) }
             (app.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager)
@@ -1296,6 +1344,7 @@ object Core {
     /** One thread drains the event stream, and it gives the clock to Rust. */
     private fun drain(opened: Handle, app: Context) {
         if (draining) return
+
         draining = true
         thread(name = "umbra-events", isDaemon = true) {
             while (true) {
@@ -1308,6 +1357,7 @@ object Core {
                     event.destroy()
                     continue
                 }
+
                 main.post { apply(event, app) }
             }
         }
@@ -1550,6 +1600,7 @@ object Core {
                 linkStatus = LinkStatus.Idle
                 main.removeCallbacks(dropRun)
                 phase = Phase.Locked
+
                 // A locked client holds no key that reads a queue, thus the
                 // carrier ends, and the user learns it. A service that did
                 // not start yet ends itself at its start. In Direct mode
@@ -1673,6 +1724,7 @@ object Core {
     fun touched() {
         val now = SystemClock.elapsedRealtime()
         if (now - lastTouchMs < TOUCH_GAP_MS) return
+
         lastTouchMs = now
         call { it.touch() }
     }
@@ -1689,6 +1741,7 @@ object Core {
             resultLock = null
             resultUntilMs = 0L
         }
+
         // The setting "Immediately" locks when the last view leaves.
         // NTF-135: the client writes the table before a lock can take the keys.
         val resultGraceMs = resultUntilMs - SystemClock.elapsedRealtime()
@@ -1708,6 +1761,7 @@ object Core {
                 main.postDelayed(later, resultGraceMs)
             }
         }
+
         leftScreen()
         if (nowVisible && phase == Phase.Open) {
             // NTF-084: three blobs in a row did not open in this session.
@@ -1767,18 +1821,21 @@ object Core {
     fun refreshWake(context: Context) {
         val app = context.applicationContext
         if (!holdsWakeTable(app)) return
+
         call { client -> writeWake(app, client) }
     }
 
     /** One write of the tables. `WakeStore` checks the mode at the write itself. */
     private fun writeWake(app: Context, client: Handle) {
         if (!holdsWakeTable(app)) return
+
         // A lock that came first leaves the tables of the last write.
         val table = try {
             client.wakeTable()
         } catch (locked: FfiException) {
             return
         }
+
         // A run that named no relay yet gives no watch table, and the one of
         // the last write stays.
         val watch = if (Modes.mode(app) == NotifyMode.Direct) {
@@ -1790,6 +1847,7 @@ object Core {
         } else {
             null
         }
+
         try {
             WakeStore.write(app, table)
             watch?.let { WakeStore.writeWatch(app, it) }
@@ -1916,6 +1974,7 @@ object Core {
     fun readDraft(conversation: Conversation, onDraft: (CharArray) -> Unit) = call { client ->
         val units = client.draft(conversation.id)
         if (units.isEmpty()) return@call
+
         val chars = CharArray(units.size) { units[it].toInt().toChar() }
         main.post { onDraft(chars) }
     }
@@ -1988,6 +2047,7 @@ object Core {
     private fun watchNetwork(context: Context) {
         if (isWatchingNetwork) return
         val manager = context.getSystemService(android.net.ConnectivityManager::class.java) ?: return
+
         isWatchingNetwork = true
         manager.registerDefaultNetworkCallback(
             object : android.net.ConnectivityManager.NetworkCallback() {
@@ -2013,11 +2073,13 @@ object Core {
      */
     fun changePassphrase(current: CharArray, new: CharArray, onResult: (String?) -> Unit) {
         val client = handle ?: return onResult(UiText.get(R.string.core_locked))
+
         worker.execute {
             val currentUnits = current.map { it.code.toUShort() }
             val newUnits = new.map { it.code.toUShort() }
             current.fill('\u0000')
             new.fill('\u0000')
+
             val failure = try {
                 client.changePassphrase(currentUnits, newUnits)
                 null
@@ -2026,6 +2088,7 @@ object Core {
             } catch (other: FfiException) {
                 UiText.get(R.string.core_passphrase_not_changed, other.javaClass.simpleName)
             }
+
             main.post { onResult(failure) }
         }
     }
@@ -2047,6 +2110,7 @@ object Core {
                 main.post { onDone(null) }
                 return@call
             }
+
             client.disconnect()
             main.post {
                 connect(app, force = true)
@@ -2070,10 +2134,12 @@ object Core {
             if (isWake) wakeWaits = true else runDropped = false
             return
         }
+
         isStarting = true
         isWakeSession = isWake
         wakeWaits = false
         runDropped = false
+
         on(networkWorker) { client ->
             val network = BuildNetwork.network(app, client)
             if (network == null) {
@@ -2088,12 +2154,14 @@ object Core {
                 }
                 return@on
             }
+
             // The fetch can wait 20 s for each carrier, and Private mode
             // and Off drop their run 30 s after the last view left.
             if (!isWake && runDropped) {
                 startDropped(app)
                 return@on
             }
+
             try {
                 // NET-100: a push wake is a session of 6 s at most.
                 if (isWake) client.connectWake(network) else client.connect(network)
@@ -2107,6 +2175,7 @@ object Core {
                 }
                 throw failure
             }
+
             // The drop came while the run started, and its disconnect ran
             // before the run stood. The run ends here.
             if (!isWake && runDropped) {
@@ -2114,6 +2183,7 @@ object Core {
                 startDropped(app)
                 return@on
             }
+
             // A run starts in the foreground tier, thus it takes the state
             // of this moment.
             client.setForeground(isVisible)
@@ -2129,6 +2199,7 @@ object Core {
         isStarting = false
         val waited = wakeWaits
         wakeWaits = false
+
         if (phase == Phase.Open && !online) {
             if (wantsNetwork()) connect(app) else if (waited) connect(app, isWake = true)
         }
@@ -2303,6 +2374,7 @@ object Core {
                     return@call
                 }
             }
+
             client.setContactPicture(conversation.id, picture)
             picture.fill(0)
             refreshChats()
@@ -2343,6 +2415,7 @@ object Core {
     fun startVerification(conversation: Conversation) {
         endVerification()
         val client = handle ?: return
+
         worker.execute {
             try {
                 client.startVerification(conversation.id)
@@ -2393,6 +2466,7 @@ object Core {
     /** Part 7 `DEV-334`: the deletion of the own devices, and a request to the contact. */
     fun deleteConversationForEveryone(conversation: Conversation, onBusy: () -> Unit) {
         val client = handle ?: return
+
         worker.execute {
             try {
                 client.deleteConversationForEveryone(conversation.id)
@@ -2413,6 +2487,7 @@ object Core {
     fun send(conversation: Conversation, text: CharArray, replyTo: MsgHandle? = null) {
         // The names of the contacts, read on the main thread.
         val titles = chats.associate { it.conversation.id.toList() to it.title }
+
         call { client ->
             // GRP-334: an @name of a member of a group names that member.
             val mentions = try {
@@ -2432,6 +2507,7 @@ object Core {
                 text.fill('\u0000')
                 throw failure
             }
+
             val units = text.map { it.code.toUShort() }
             text.fill('\u0000')
             client.newDraft(conversation.id).use { draft ->
@@ -2440,6 +2516,7 @@ object Core {
                 if (mentions.isNotEmpty()) draft.setMentions(mentions)
                 client.sendDraft(draft).destroy()
             }
+
             main.post { revision++ }
             refreshChats()
         }
@@ -2521,6 +2598,7 @@ object Core {
                 putCaption(draft, caption)
                 client.sendDraft(draft).destroy()
             }
+
             main.post { revision++ }
             refreshChats()
         }
@@ -2549,6 +2627,7 @@ object Core {
         val app = context.applicationContext
         on(mediaWorker) { client ->
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return@on
+
             // ATT `MAX_FILE_SIZE`: the size that the provider names refuses
             // a video before the remux copies one sample.
             val named = runCatching { Files.describe(app, source).size }.getOrDefault(-1L)
@@ -2557,6 +2636,7 @@ object Core {
                 main.post { fault = UiText.get(R.string.core_video_not_open) }
                 return@on
             }
+
             val draft = client.newDraft(conversation.id)
             val bytes = Files.attachVideo(app, source, draft)
             if (bytes < 0) {
@@ -2565,6 +2645,7 @@ object Core {
                 main.post { fault = UiText.get(R.string.core_video_not_open) }
                 return@on
             }
+
             putCaption(draft, caption)
             offer(client, PendingSend(conversation, draft, bytes, isOriginal = false))
         }
@@ -2575,6 +2656,7 @@ object Core {
         val app = context.applicationContext
         on(mediaWorker) { client ->
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return@on
+
             val picked = Files.describe(app, source)
             val draft = client.newDraft(conversation.id)
             val bytes = Files.attachAudio(app, source, picked, draft)
@@ -2584,6 +2666,7 @@ object Core {
                 main.post { fault = UiText.get(R.string.core_audio_not_open) }
                 return@on
             }
+
             putCaption(draft, caption)
             offer(client, PendingSend(conversation, draft, bytes, isOriginal = false))
         }
@@ -2607,9 +2690,11 @@ object Core {
             fault = UiText.get(R.string.core_recording_short)
             return
         }
+
         // IMP-172: a lock that overtakes the send leaves no recording in
         // the memory. `attachVoice` closes the file of a draft that exists.
         val client = handle ?: return recording.discard()
+
         worker.execute {
             val draft = try {
                 client.newDraft(conversation.id)
@@ -2617,6 +2702,7 @@ object Core {
                 recording.discard()
                 return@execute
             }
+
             try {
                 val bytes = Files.attachVoice(recording, seconds, draft)
                 if (bytes < 0) {
@@ -2643,6 +2729,7 @@ object Core {
                 main.post { fault = UiText.get(R.string.core_file_too_big) }
                 return@on
             }
+
             val draft = client.newDraft(conversation.id)
             if (!Files.attachDocument(app, source, picked, draft)) {
                 draft.destroy()
@@ -2650,6 +2737,7 @@ object Core {
                 main.post { fault = UiText.get(R.string.core_file_not_open) }
                 return@on
             }
+
             putCaption(draft, caption)
             offer(client, PendingSend(conversation, draft, picked.size, Files.isMediaOriginal(picked.mime)))
         }
@@ -2665,6 +2753,7 @@ object Core {
             }
             return
         }
+
         client.sendDraft(pending.draft).destroy()
         pending.draft.destroy()
         main.post { revision++ }
@@ -2674,6 +2763,7 @@ object Core {
     /** The user took the draft that waits. */
     fun confirmSend(pending: PendingSend) {
         if (pending.isTaken) return
+
         pending.isTaken = true
         if (pendingSend === pending) pendingSend = null
         call { client ->
@@ -2714,6 +2804,7 @@ object Core {
                 main.post { fault = UiText.get(R.string.core_place_no_file) }
                 return@on
             }
+
             // The core cannot open the descriptor of a document provider a
             // second time, thus its bytes go through a pipe, in pieces.
             val (read, write) = android.os.ParcelFileDescriptor.createPipe()
@@ -2736,6 +2827,7 @@ object Core {
                     chunk.fill(0)
                 }
             }
+
             var written = false
             try {
                 client.saveFile(line.handle, "/proc/self/fd/${write.fd}")
@@ -2749,6 +2841,7 @@ object Core {
                     runCatching { android.provider.DocumentsContract.deleteDocument(app.contentResolver, target) }
                 }
             }
+
             main.post { if (copied) onSaved() else fault = UiText.get(R.string.core_file_not_saved) }
         }
     }
@@ -2769,6 +2862,7 @@ object Core {
      */
     fun frame(line: Line): androidx.compose.ui.graphics.ImageBitmap? {
         images[line.key]?.let { return it }
+
         if (decoding.add(line.key)) {
             call { client ->
                 val frame = try {
@@ -2790,7 +2884,6 @@ object Core {
         return null
     }
 
-    /** Asks again for the file of a message that did not arrive. */
     /** Whether a relay named the queue of the contact full (Part 14 §14.9.2). */
     fun queueFull(conversation: Conversation, onLoaded: (Boolean) -> Unit) = call { client ->
         val isFull = client.queueFull(conversation.id)
@@ -2801,7 +2894,10 @@ object Core {
     fun forward(message: MsgHandle, to: Conversation, onDone: () -> Unit) = call { client ->
         client.forward(message, to.id)
         refreshChats()
-        main.post { revision++; onDone() }
+        main.post {
+            revision++
+            onDone()
+        }
     }
 
     fun resendFile(message: MsgHandle) = call { client ->
@@ -2809,6 +2905,7 @@ object Core {
         main.post { revision++ }
     }
 
+    /** Asks again for the file of a message that did not arrive. */
     fun fetchFile(message: MsgHandle) = call { client ->
         client.fetchFile(message)
         main.post { revision++ }
@@ -2821,6 +2918,7 @@ object Core {
      */
     fun image(line: Line): androidx.compose.ui.graphics.ImageBitmap? {
         images[line.key]?.let { return it }
+
         if (decoding.add(line.key)) {
             call { client ->
                 val decoder = Photos.Decoder()
@@ -2850,6 +2948,7 @@ object Core {
      */
     fun preview(line: Line): androidx.compose.ui.graphics.ImageBitmap? {
         previews[line.key]?.let { return it }
+
         if (decoding.add(listOf<Byte>(0x70) + line.key)) {
             call { client ->
                 val decoder = Photos.Decoder()
@@ -2935,6 +3034,7 @@ object Core {
                     sink.chars = CharArray(0)
                 }
             }
+
             val quote = info.replyTo?.let { target ->
                 val quoted = CharSink()
                 // A target of a kind with no text gives an empty quote.
@@ -2943,15 +3043,18 @@ object Core {
                 } catch (noText: FfiException) {
                     quoted.chars = CharArray(0)
                 }
+
                 val of = client.msgInfo(target)
                 // The quote of a file is a word of the interface, or its name.
                 val quotedFile = of.file
                 if (quotedFile != null && !of.deleted) quoted.chars = fileWord(quotedFile).toCharArray()
                 Quoted(target.key().toList(), of.outgoing, quoted.chars, of.sender)
             }
+
             val poll = if (info.poll && !info.deleted) client.pollView(message) else null
             Line(message, sink.chars, info, quote, client.reactions(message), poll)
         }
+
         main.post { onLoaded(lines) }
     }
 
@@ -3019,10 +3122,12 @@ object Core {
         searchQuery?.fill('\u0000')
         searchQuery = query.copyOf()
         searchScope = scope
+
         val units = query.map { it.code.toUShort() }
         val turn = ++searchTurns
         call { client ->
             if (turn != searchTurns) return@call
+
             val options = uniffi.umbra_ffi.FfiSearchOptions(
                 scope?.id,
                 limits.order.toUByte(),
@@ -3038,6 +3143,7 @@ object Core {
                     } catch (noText: FfiException) {
                         sink.chars = CharArray(0)
                     }
+
                     val info = client.msgInfo(message)
                     // A match in the name of a file marks nothing, and a
                     // file with no caption shows as its kind.
@@ -3056,6 +3162,7 @@ object Core {
                     )
                 }
             }
+
             main.post { if (turn == searchTurns) onFound(found) }
         }
     }
@@ -3126,11 +3233,13 @@ object Core {
                 sink.chars = CharArray(0)
             }
         }
+
         val group = if (client.isGroup(summary.conversation)) {
             client.groupInfo(summary.conversation)
         } else {
             null
         }
+
         Chat(
             conversation = Conversation(summary.conversation),
             name = summary.name,
@@ -3173,6 +3282,7 @@ object Core {
             pictures.remove(key)
             return null
         }
+
         val hash = bytes.contentHashCode()
         pictures[key]?.let { (held, image) -> if (held == hash) return image }
         val image = Photos.profileImage(bytes) ?: return null
@@ -3185,6 +3295,7 @@ object Core {
     /** Runs a call of the client on one thread of the core, and shows its fault. */
     private fun on(thread: java.util.concurrent.Executor, action: (Handle) -> Unit) {
         val client = handle ?: return
+
         thread.execute {
             try {
                 action(client)

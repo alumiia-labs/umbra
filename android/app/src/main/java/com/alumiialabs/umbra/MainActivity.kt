@@ -32,6 +32,7 @@ class MainActivity : ComponentActivity() {
         Notifier.makeChannels(this)
         // NTF-052: a network change draws a new phase of the Private clock.
         Modes.watchNetwork(this)
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             // With no permission the app shows no alert, and it takes each
             // record all the same.
@@ -41,12 +42,14 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             setRecentsScreenshotEnabled(false)
         }
+
         val content = ComposeView(this).apply { setContent { NoPersonalizedLearning { UmbraApp() } } }
+        // The cover is a platform view and no composable, because the
+        // platform takes the snapshot before a recomposition can run.
         cover = View(this).apply { visibility = View.GONE }
         paintWindow(Appearances.isDark)
         lifecycleScope.launch { snapshotFlow { Appearances.isDark }.collect(::paintWindow) }
-        // The cover is a platform view and no composable, because the
-        // platform takes the snapshot before a recomposition can run.
+
         val root = FrameLayout(this)
         // No autofill service reads a view of the app. A service that sees
         // the passphrase field offers to keep the passphrase in an account
@@ -58,6 +61,7 @@ class MainActivity : ComponentActivity() {
         root.addView(content, MATCH_PARENT, MATCH_PARENT)
         root.addView(cover, MATCH_PARENT, MATCH_PARENT)
         setContentView(root)
+
         if (savedInstanceState == null) takeInvitation(intent)
     }
 
@@ -82,6 +86,7 @@ class MainActivity : ComponentActivity() {
         val clear = Color.TRANSPARENT
         val style = if (isDark) SystemBarStyle.dark(clear) else SystemBarStyle.light(clear, clear)
         enableEdgeToEdge(style, style)
+
         val ground = Palette.Surface.toArgb()
         window.setBackgroundDrawable(ColorDrawable(ground))
         cover.setBackgroundColor(ground)
@@ -111,6 +116,7 @@ class MainActivity : ComponentActivity() {
             null
         } ?: return
         if (text.length > LINK_TEXT_MAX) return
+
         val link = INVITATION_LINK.find(text)?.value
             ?: REUSABLE_LINK.find(text)?.value
             ?: PROFILE_LINK.find(text)?.takeIf { isHandleName(it.groupValues[1]) }?.value
@@ -143,6 +149,7 @@ class MainActivity : ComponentActivity() {
          */
         private fun isHandleName(name: String): Boolean {
             if (name.toByteArray(Charsets.UTF_8).size > 32) return false
+
             return name.codePoints().allMatch { point ->
                 when (Character.getType(point).toByte()) {
                     Character.CONTROL, Character.FORMAT, Character.SURROGATE, Character.PRIVATE_USE,

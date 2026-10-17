@@ -49,9 +49,11 @@ private val TimerChoices = listOf(
  * The words of one period. A period other than "Off" also goes inside a
  * sentence, thus its words need no change of case.
  */
-fun timerLabel(seconds: UInt): String =
-    TimerChoices.firstOrNull { it.first == seconds }?.second?.let { UiText.get(it) }
-        ?: UiText.plural(R.plurals.timer_seconds, seconds.toInt(), seconds.toLong())
+fun timerLabel(seconds: UInt): String {
+    val labelId = TimerChoices.firstOrNull { it.first == seconds }?.second
+        ?: return UiText.plural(R.plurals.timer_seconds, seconds.toInt(), seconds.toLong())
+    return UiText.get(labelId)
+}
 
 /** Who set a timer, for the row of the change (`DEV-206`). */
 fun timerAuthor(chat: Chat, isOutgoing: Boolean): String = when {
@@ -76,10 +78,11 @@ fun timerPreview(seconds: UInt): String =
         UiText.get(R.string.timer_preview, timerLabel(seconds))
     }
 
-/** The row of a timer change in a conversation, centred as a notice. */
+/** The row of a timer change in a conversation, centered as a notice. */
 @Composable
 fun TimerLine(line: Line, chat: Chat) {
     val seconds = line.info.timer ?: return
+
     Box(Modifier.fillMaxWidth().padding(vertical = 6.dp), contentAlignment = Alignment.Center) {
         Row(
             Modifier
@@ -115,6 +118,7 @@ fun DisappearingScreen(chat: Chat, onBack: () -> Unit) {
         }
     }
     val context = LocalContext.current
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.common_disappearing_messages), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {

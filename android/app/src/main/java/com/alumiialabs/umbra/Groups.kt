@@ -45,6 +45,7 @@ private const val GROUP_NAME_MAX = 64
 fun NewGroupScreen(onBack: () -> Unit, onMade: (Conversation) -> Unit) {
     var name by remember { mutableStateOf("") }
     var isMaking by remember { mutableStateOf(false) }
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.group_new_private_group), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
@@ -77,17 +78,17 @@ fun NewGroupScreen(onBack: () -> Unit, onMade: (Conversation) -> Unit) {
     }
 }
 
-/**
- * What this device holds of a group.
- */
+/** What this device holds of a group. */
 @Composable
 fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
     var members by remember { mutableStateOf(listOf<FfiGroupMember>()) }
     LaunchedEffect(chat.conversation.label, chat.members) {
         Core.groupMembers(chat.conversation) { members = it }
     }
+
     // GRP-310: an admin alone brings a contact in.
     val isAdmin = members.any { it.isSelf && it.role >= FfiRole.ADMIN }
+
     var timer by remember { mutableStateOf<UInt?>(null) }
     var alert by remember { mutableStateOf<UByte?>(null) }
     var noForward by remember { mutableStateOf<Boolean?>(null) }
@@ -96,6 +97,7 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
         Core.timer(chat.conversation) { timer = it.seconds }
         Core.alertSetting(chat.conversation) { alert = it }
     }
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.group_details), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
@@ -117,6 +119,7 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             FactRow("user-group", stringResource(R.string.group_members), chat.members.toString())
             FactRow("file-lines", stringResource(R.string.group_identifier), chat.conversation.label)
             Spacer(Modifier.height(8.dp))
+
             // The members, an invitation, and the way out.
             EntryRow(
                 RowEntry("user-group", stringResource(R.string.group_members_and_roles)) {
@@ -128,6 +131,7 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                     push(Screen.Media(chat.conversation))
                 },
             )
+
             alert?.let {
                 EntryRow(
                     RowEntry("bell", stringResource(R.string.common_notifications), alertLabel(it)) {
@@ -135,6 +139,7 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                     },
                 )
             }
+
             // DEV-248: an admin alone sets the timer of a group.
             timer?.let {
                 if (chat.isMember && isAdmin) {
@@ -147,6 +152,7 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                     FactRow("clock", stringResource(R.string.common_disappearing_messages), timerLabel(it))
                 }
             }
+
             // DEV-325: an admin alone sets the forward policy of a group.
             noForward?.let {
                 if (chat.isMember && isAdmin) {
@@ -160,6 +166,7 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                     FactRow("share-nodes", stringResource(R.string.group_forwarding), stringResource(R.string.common_off))
                 }
             }
+
             if (chat.isMember) {
                 if (isAdmin) {
                     EntryRow(
@@ -174,10 +181,12 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                     },
                 )
             }
+
             val waiting = Core.groupJoiners.filter { it.groupId.toList() == chat.groupId.toList() }
             for (joiner in waiting) {
                 JoinerRow(joiner)
             }
+
             if (chat.isLapsed) {
                 Spacer(Modifier.height(12.dp))
                 Note(stringResource(R.string.group_lapsed_note))
@@ -211,7 +220,10 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
 @Composable
 private fun JoinerRow(joiner: FfiGroupOffer) {
     val name = Core.chats
-        .firstOrNull { it.conversation.id.contentEquals(joiner.from) }?.title ?: stringResource(R.string.common_a_contact)
+        .firstOrNull { it.conversation.id.contentEquals(joiner.from) }
+        ?.title
+        ?: stringResource(R.string.common_a_contact)
+
     Row(
         Modifier.fillMaxWidth().padding(vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -240,7 +252,9 @@ private fun JoinerRow(joiner: FfiGroupOffer) {
         }
         if (!joiner.isAdded || isStuck) {
             Spacer(Modifier.width(12.dp))
-            InlineButton(if (isStuck) stringResource(R.string.common_try_again) else stringResource(R.string.group_let_in)) { Core.admitJoiner(joiner) }
+            InlineButton(
+                if (isStuck) stringResource(R.string.common_try_again) else stringResource(R.string.group_let_in),
+            ) { Core.admitJoiner(joiner) }
         }
     }
 }
@@ -260,7 +274,9 @@ private fun roleLabel(role: FfiRole): String = when (role) {
  */
 private fun memberName(member: FfiGroupMember): String {
     if (member.isSelf) return UiText.get(R.string.common_you)
+
     val contact = member.contact ?: return UiText.get(R.string.common_member_number, member.index.toInt())
+
     return Core.chats.firstOrNull { it.conversation.id.contentEquals(contact) }?.title
         ?: UiText.get(R.string.common_member_number, member.index.toInt())
 }
@@ -275,8 +291,10 @@ fun GroupMembersScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
     LaunchedEffect(chat.conversation.label, chat.members) {
         Core.groupMembers(chat.conversation) { members = it }
     }
+
     val own = members.firstOrNull { it.isSelf }
     val mayRemove = own != null && own.role >= FfiRole.ADMIN && !chat.isClosed
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.group_members_title, members.size), onBack = onBack)
         LazyColumn {
@@ -322,6 +340,7 @@ private fun MemberRow(member: FfiGroupMember, removable: Boolean, onRemove: () -
     } else {
         row.padding(horizontal = 20.dp)
     }
+
     Row(
         pressable.padding(vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -335,6 +354,7 @@ private fun MemberRow(member: FfiGroupMember, removable: Boolean, onRemove: () -
         } else {
             LetterAvatar(memberName(member), member.index.toInt(), size = 44)
         }
+
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
             Text(memberName(member), style = MaterialTheme.typography.titleMedium)
@@ -362,8 +382,8 @@ private val RoleChoices = listOf(
 private val OwnerChoice = FfiRole.OWNER to R.string.group_role_owner_detail
 
 /**
- * The role of one member, and the way to its removal. A
- * removal reaches a member below `moderator` (`GRP-382`).
+ * The role of one member, and the way to its removal. A removal reaches a
+ * member below `moderator` (`GRP-382`).
  */
 @Composable
 fun MemberRoleScreen(
@@ -378,6 +398,7 @@ fun MemberRoleScreen(
     var chosen by remember { mutableStateOf(role) }
     val choices = if (ownRole == FfiRole.OWNER) RoleChoices + OwnerChoice else RoleChoices
     var isSaving by remember { mutableStateOf(false) }
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.group_member_role), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
@@ -388,6 +409,7 @@ fun MemberRoleScreen(
             Spacer(Modifier.height(16.dp))
             Text(name, style = MaterialTheme.typography.headlineMedium)
             Spacer(Modifier.height(8.dp))
+
             for ((choice, detail) in choices) {
                 Row(
                     Modifier
@@ -413,6 +435,7 @@ fun MemberRoleScreen(
                 }
                 HorizontalDivider(color = Palette.Divider)
             }
+
             Spacer(Modifier.height(16.dp))
             PrimaryButton(stringResource(R.string.group_save_role), enabled = chosen != role && !isSaving) {
                 isSaving = true
@@ -430,8 +453,8 @@ fun MemberRoleScreen(
 }
 
 /**
- * The removal of one member. The group starts a new epoch in
- * the same action, thus the member reads no later record (`GRP-264`).
+ * The removal of one member. The group starts a new epoch in the same
+ * action, thus the member reads no later record (`GRP-264`).
  */
 @Composable
 fun RemoveMemberScreen(
@@ -442,6 +465,7 @@ fun RemoveMemberScreen(
     onDone: () -> Unit,
 ) {
     var isRemoving by remember { mutableStateOf(false) }
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.group_membership), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
@@ -460,8 +484,8 @@ fun RemoveMemberScreen(
 }
 
 /**
- * The way out of a group. An owner leaves only after it gave
- * the role to another member (`GRP-051`).
+ * The way out of a group. An owner leaves only after it gave the role to
+ * another member (`GRP-051`).
  */
 @Composable
 fun LeaveGroupScreen(chat: Chat, onBack: () -> Unit, onLeft: () -> Unit) {
@@ -469,10 +493,12 @@ fun LeaveGroupScreen(chat: Chat, onBack: () -> Unit, onLeft: () -> Unit) {
     LaunchedEffect(chat.conversation.label) {
         Core.groupMembers(chat.conversation) { members = it }
     }
+
     var isLeaving by remember { mutableStateOf(false) }
     val own = members.firstOrNull { it.isSelf }
     val owners = members.count { it.role == FfiRole.OWNER }
     val lastOwner = own?.role == FfiRole.OWNER && owners <= 1
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.common_leave_group), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
@@ -495,20 +521,20 @@ fun LeaveGroupScreen(chat: Chat, onBack: () -> Unit, onLeft: () -> Unit) {
     }
 }
 
-/**
- * The contacts of this device, one of which
- * takes an offer of the group.
- */
+/** The contacts of this device, one of which takes an offer of the group. */
 @Composable
 fun InviteToGroupScreen(chat: Chat, onBack: () -> Unit) {
     var invited by remember { mutableStateOf(setOf<List<Byte>>()) }
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.group_invite_contact), onBack = onBack)
+
         val contacts = Core.chats.filter { !it.isGroup }
         if (contacts.isEmpty()) {
             EmptyState(stringResource(R.string.group_no_contacts))
             return
         }
+
         LazyColumn {
             items(contacts, key = { it.conversation.key }) { contact ->
                 val isInvited = contact.conversation.id.toList() in invited
@@ -550,7 +576,10 @@ fun InviteToGroupScreen(chat: Chat, onBack: () -> Unit) {
 fun IntroductionPrompt() {
     val intro = Core.introductions.firstOrNull() ?: return
     val from = Core.chats
-        .firstOrNull { it.conversation.id.contentEquals(intro.from) }?.title ?: stringResource(R.string.common_a_contact)
+        .firstOrNull { it.conversation.id.contentEquals(intro.from) }
+        ?.title
+        ?: stringResource(R.string.common_a_contact)
+
     Column(
         Modifier
             .fillMaxWidth()
@@ -568,6 +597,7 @@ fun IntroductionPrompt() {
                 modifier = Modifier.subline(),
             )
         }
+
         Spacer(Modifier.height(8.dp))
         Row {
             if (intro.isOffer) {
@@ -604,9 +634,13 @@ fun GroupOfferPrompt() {
         }
         return
     }
+
     val offer = Core.groupOffers.firstOrNull() ?: return
     val from = Core.chats
-        .firstOrNull { it.conversation.id.contentEquals(offer.from) }?.title ?: stringResource(R.string.common_a_contact)
+        .firstOrNull { it.conversation.id.contentEquals(offer.from) }
+        ?.title
+        ?: stringResource(R.string.common_a_contact)
+
     Column(
         Modifier
             .fillMaxWidth()

@@ -55,6 +55,7 @@ object BuildNetwork {
     private fun ipv4(text: String): ByteArray? {
         val parts = text.trim().split('.')
         if (parts.size != 4) return null
+
         val octets = parts.map { it.toIntOrNull()?.takeIf { value -> value in 0..255 } ?: return null }
         return octets.map { it.toByte() }.toByteArray()
     }
@@ -71,6 +72,7 @@ object BuildNetwork {
         val carriers = properties.getProperty("carriers").orEmpty()
             .split(';')
             .mapNotNull { endpoint(it) }
+
         Pinned(
             keyset = assets.open(KEYSET).use { it.readBytes() },
             ndrKey = assets.open(NDR_KEY).use { it.readBytes() },
@@ -110,6 +112,7 @@ object BuildNetwork {
                 continue
             }
             if (next.contentEquals(held)) continue
+
             val verified = try {
                 client.networkOfManifest(manifest, next, pins.shippedEpoch, pins.invitationHost, null)
             } catch (refused: FfiException) {
@@ -117,6 +120,7 @@ object BuildNetwork {
             }
             return next to verified
         }
+
         return null
     }
 
@@ -124,6 +128,7 @@ object BuildNetwork {
     private fun writeWhole(file: File, bytes: ByteArray) {
         val part = File(file.parentFile, file.name + ".part")
         part.writeBytes(bytes)
+
         if (!part.renameTo(file)) {
             file.delete()
             part.renameTo(file)
@@ -139,11 +144,13 @@ object BuildNetwork {
     fun network(context: Context, client: Handle): Network? {
         val pins = pinned(context) ?: return null
         val kept = File(context.filesDir, MANIFEST)
+
         // REL-200: the newer of the set of the last rotation that this
-        // device took and the one the build ships; a damaged file gives
+        // device took and the one the build ships. A damaged file gives
         // way to the shipped set.
         val heldFile = File(context.filesDir, HELD_KEYSET)
         val keyset = newestKeySet(heldFile.takeIf { it.exists() }?.readBytes(), pins.keyset)
+
         // NET-318: one carrier after the other, and the web roots vouch for
         // each; the manifest carries its own signatures, thus a carrier needs
         // no trust. A carrier whose manifest does not verify gives its turn
@@ -156,7 +163,9 @@ object BuildNetwork {
             }
         }
         val held = sequence { kept.takeIf { it.exists() }?.readBytes()?.let { yield(it) } }
-        for ((manifest, isFresh) in fresh.map { it to true } + held.map { it to false }) {
+        val candidates = fresh.map { it to true } + held.map { it to false }
+
+        for ((manifest, isFresh) in candidates) {
             val verified = try {
                 client.networkOfManifest(manifest, keyset, pins.shippedEpoch, pins.invitationHost, null)
             } catch (unverified: FfiException.Unverified) {
@@ -172,6 +181,7 @@ object BuildNetwork {
             } catch (refused: FfiException) {
                 continue
             }
+
             if (isFresh) writeWhole(kept, manifest)
             isClockCorrected = verified.isClockCorrected
             isProvisional = verified.isProvisional
@@ -186,6 +196,7 @@ object BuildNetwork {
                 directoryRelayIpv4 = pins.directoryRelay.second,
             )
         }
+
         return null
     }
 

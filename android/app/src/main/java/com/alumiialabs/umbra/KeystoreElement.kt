@@ -59,10 +59,12 @@ class KeystoreElement(
             isKeyLost = false
             return it
         }
+
         if (!mayCreate) {
             isKeyLost = true
             throw KeyStoreException("the key of the store is gone")
         }
+
         isKeyLost = false
         val hasStrongBox =
             context.packageManager.hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE)
@@ -76,6 +78,7 @@ class KeystoreElement(
                 // plain `ProviderException` above it on another.
             }
         }
+
         return generate(inStrongBox = false)
     }
 
@@ -84,6 +87,7 @@ class KeystoreElement(
             .setIsStrongBoxBacked(inStrongBox)
             .setUnlockedDeviceRequired(true)
             .build()
+
         val generator = KeyGenerator.getInstance(ALGORITHM, PROVIDER)
         generator.init(spec)
         return generator.generateKey()

@@ -104,21 +104,25 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
     var lines by remember { mutableStateOf(emptyList<Line>()) }
     val listState = rememberLazyListState()
     val conversation = chat.conversation
+
     // WIR-273: the records of one thread show together, under their root.
     var threadOf by remember(conversation) { mutableStateOf<List<Byte>?>(null) }
     BackHandler(enabled = threadOf != null) { threadOf = null }
+
     // The count of the messages that the user did not see, at the moment the
     // view opened. The read marker moves at once, and the line stays where
     // it was for this visit.
     val unseenAtOpen = remember(conversation) { chat.unread }
     var newFrom by remember(conversation) { mutableStateOf<ULong?>(null) }
     var isPlaced by remember(conversation) { mutableStateOf(false) }
+
     // Whether the list follows its end at the next load. A user at the end
     // stays there when a message comes or when the newest bubble grows, by a
     // reaction or an edit. A user who reads further up stays there. A send of
     // this user leads to the end.
     var followsEnd by remember(conversation) { mutableStateOf(false) }
     var jumpsAtNextLoad by remember(conversation) { mutableStateOf(false) }
+
     LaunchedEffect(conversation, Core.revision) {
         Core.load(conversation) { loaded ->
             if (!isPlaced) {
@@ -134,14 +138,18 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
             }
             lines = loaded
         }
+
         // The user looks at the conversation, thus each message is seen.
         Core.markRead(conversation)
     }
+
     LaunchedEffect(lines) {
         if (lines.isEmpty()) return@LaunchedEffect
+
         // The item before each message is the chip of the view, and an
         // offset above each height means the end of the list.
         val toEnd = suspend { listState.scrollToItem(lines.lastIndex + 1, END_OF_LIST) }
+
         if (!isPlaced) {
             isPlaced = true
             // A visit that starts with new messages starts at the line.
@@ -151,6 +159,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
             toEnd()
         }
     }
+
     // The keyboard takes the lower part of the list, over several frames.
     // The list moves by each height that it loses, thus the messages that
     // the user looked at stay above the keyboard, as in each messenger.
@@ -162,23 +171,29 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
             if (lost > 0) listState.scrollBy(lost.toFloat())
         }
     }
+
     val readUpTo = lines.indexOfLast { it.info.outgoing && it.info.delivery.toInt() == READ }
     val replyCounts = remember(lines) { lines.mapNotNull { it.threadKey }.groupingBy { it }.eachCount() }
     val composer = rememberPlatformField()
+
     // Part 6 §6.6.9: the text of the field starts and ends a typing state.
     LaunchedEffect(conversation) {
         composer.onChange = { if (!chat.isGroup) Core.typing(conversation, !composer.isEmpty) }
     }
-    // The message under the finger, and the message that the composer answers.
+
+    // The message under the finger, the message whose links show, the message
+    // to forward, and the message that the composer answers.
     var chosen by remember(conversation) { mutableStateOf<Line?>(null) }
     var linksOf by remember(conversation) { mutableStateOf<Line?>(null) }
     var forwarding by remember(conversation) { mutableStateOf<Line?>(null) }
     var answered by remember(conversation) { mutableStateOf<Line?>(null) }
+
     // The message that a jump from an answer shows for a moment.
     var flashed by remember(conversation) { mutableStateOf<List<Byte>?>(null) }
     val scope = rememberCoroutineScope()
     val jumpTo = { target: List<Byte> ->
         val at = lines.indexOfFirst { it.key == target }
+
         if (at >= 0) {
             scope.launch {
                 // The first item of the list is the chip of the view.
@@ -189,13 +204,16 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
             }
         }
     }
+
     // A result of a search opens the conversation at its message. The view
     // puts itself at its end first, thus the jump waits for one frame.
     var isAtTarget by remember(conversation, target) { mutableStateOf(false) }
     LaunchedEffect(target, lines.isNotEmpty()) {
         if (target == null || isAtTarget || lines.isEmpty()) return@LaunchedEffect
+
         val at = lines.indexOfFirst { it.key == target }
         if (at < 0) return@LaunchedEffect
+
         isAtTarget = true
         androidx.compose.runtime.withFrameNanos { }
         listState.scrollToItem(at + 1)
@@ -203,15 +221,18 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
         delay(1_500)
         flashed = null
     }
+
     val context = LocalContext.current
+
     // The message whose text the composer changes.
     var edited by remember(conversation) { mutableStateOf<Line?>(null) }
-    // The message that the user wants to delete, and a word for a user who
-    // deletes faster than the rate limit permits.
+
+    // The message that the user wants to delete.
     var deleting by remember(conversation) { mutableStateOf<Line?>(null) }
     // DEV-127: each of the two deletions has a confirmation of its own.
     var deletingOwn by remember(conversation) { mutableStateOf<Line?>(null) }
     var deletingAll by remember(conversation) { mutableStateOf<Line?>(null) }
+
     // Part 11 §11.9.6: the role of this member, the epochs of the moderators,
     // a remove that waits for its second confirmation, and each hidden
     // message that the user opened.
@@ -221,6 +242,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
     var modNotes by remember(conversation) { mutableStateOf(emptyList<FfiModNote>()) }
     var rosterNotes by remember(conversation) { mutableStateOf(emptyList<FfiRosterNote>()) }
     var removing by remember(conversation) { mutableStateOf<Line?>(null) }
+
     // Part 4 §4.5.1: a new key of the contact waits for the answer.
     var keyChange by remember(conversation) { mutableStateOf<FfiKeyChange?>(null) }
     // IMP-082: the records to a full queue stay queued, and the chat says why.
@@ -231,11 +253,13 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
     LaunchedEffect(conversation, Core.revision) {
         if (!chat.isGroup) Core.keyChange(conversation) { keyChange = it }
     }
+
     // Part 3 `NET-355`: a request for a new connection waits for the answer.
     var asksRenewal by remember(conversation) { mutableStateOf(false) }
     LaunchedEffect(conversation, Core.revision) {
         if (!chat.isGroup) Core.renewalAsk(conversation) { asksRenewal = it }
     }
+
     val revealed = remember(conversation) { mutableStateListOf<List<Byte>>() }
     LaunchedEffect(conversation, Core.revision) {
         if (chat.isGroup) {
@@ -253,11 +277,13 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
         // NET-103: a pairwise conversation takes the note of a delivery gap.
         Core.rosterNotes(conversation) { rosterNotes = it }
     }
+
     var notice by remember(conversation) { mutableStateOf<String?>(null) }
     val save = rememberSave()
     // The sheet of the plus: a photo, a video, or a file.
     var isAttaching by remember(conversation) { mutableStateOf(false) }
-    // A voice message under way. A recording that the view leaves goes.
+
+    // A voice message under way. The view discards a recording when it closes.
     var recording by remember(conversation) { mutableStateOf<VoiceRecording?>(null) }
     DisposableEffect(conversation) {
         onDispose {
@@ -265,12 +291,14 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
             VoicePlayer.stop()
         }
     }
+
     val startRecording = {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             val made = VoiceRecording(context)
             if (made.start()) recording = made else notice = UiText.get(R.string.chat_microphone_did_not_start)
         }
     }
+
     // A recording ends when the app leaves the screen, because the platform
     // gives it no sound in the background.
     val owner = LocalLifecycleOwner.current
@@ -281,6 +309,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
         owner.lifecycle.addObserver(watcher)
         onDispose { owner.lifecycle.removeObserver(watcher) }
     }
+
     // Part 7 §7.5.3: the draft comes back at the open, and it stays when
     // the view closes or the app leaves the screen. An edit is no draft.
     LaunchedEffect(conversation) {
@@ -299,9 +328,11 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
             if (edited == null) Core.keepDraft(conversation, composer.copy())
         }
     }
+
     val askMicrophone = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { allowed ->
         if (allowed) startRecording() else notice = UiText.get(R.string.chat_no_microphone_access)
     }
+
     // A send that did not start says why in this view.
     LaunchedEffect(Core.fault) {
         Core.fault?.let {
@@ -315,6 +346,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
             notice = null
         }
     }
+
     forwarding?.let { line ->
         ActionSheet(
             stringResource(R.string.chat_forward_to),
@@ -326,6 +358,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
             onDismiss = { forwarding = null },
         )
     }
+
     linksOf?.let { line ->
         ActionSheet(
             stringResource(R.string.chat_links),
@@ -337,6 +370,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
             onDismiss = { linksOf = null },
         )
     }
+
     chosen?.let { line ->
         val entries = if (line.info.deleted) {
             // DEV-105: the user can clear a placeholder.
@@ -377,6 +411,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                         },
                     )
                 }
+
                 val file = line.info.file
                 if (file == null) {
                     add(RowEntry("copy", stringResource(R.string.chat_copy_text)) { copyMessage(context, line.text) })
@@ -393,6 +428,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                 if (file != null && line.info.outgoing && file.state.toInt() == FILE_READY) {
                     add(RowEntry("rotate", stringResource(R.string.chat_send_again)) { Core.resendFile(line.handle) })
                 }
+
                 // GRP-085: a hide is the first act of a moderator, and a
                 // remove asks again (GRP-086).
                 if (chat.isGroup && (ownRole ?: FfiRole.MEMBER) >= FfiRole.MODERATOR) {
@@ -409,9 +445,11 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                     }
                     add(RowEntry("ban", stringResource(R.string.common_remove_for_everyone)) { removing = line })
                 }
+
                 add(RowEntry("trash-can", stringResource(R.string.common_delete)) { deleting = line })
             }
         }
+
         ActionSheet(
             stringResource(R.string.common_message),
             entries,
@@ -430,6 +468,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
             onDismiss = { chosen = null },
         )
     }
+
     // ATT-083, ATT-084: a large file names its cost, and the user can drop
     // it. ATT-157: an original says that it keeps its metadata.
     Core.pendingSend?.takeIf { it.conversation == conversation }?.let { pending ->
@@ -440,6 +479,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
             if (pending.bytes < 0) add(stringResource(R.string.chat_file_has_no_size))
             if (pending.isOriginal) add(UiText.get(R.string.umbra_ui_att_157))
         }
+
         ActionSheet(
             if (pending.bytes > 0) {
                 stringResource(R.string.chat_send_size_question, Files.size(context, pending.bytes))
@@ -451,6 +491,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
             onDismiss = { Core.cancelSend() },
         )
     }
+
     removing?.let { line ->
         ActionSheet(
             stringResource(R.string.chat_remove_this_message_question),
@@ -460,6 +501,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
             onDismiss = { removing = null },
         )
     }
+
     deleting?.let { line ->
         // DEV-127, DEV-128: two labels, and neither looks the safer one.
         val entries = buildList {
@@ -467,8 +509,10 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
             // A contact takes a deletion for a message of this device alone.
             if (line.info.outgoing) add(RowEntry("trash-can", stringResource(R.string.chat_delete_for_everyone)) { deletingAll = line })
         }
+
         ActionSheet(stringResource(R.string.chat_delete_this_message_question), entries, onDismiss = { deleting = null })
     }
+
     deletingOwn?.let { line ->
         ActionSheet(
             stringResource(R.string.chat_delete_on_my_devices_question),
@@ -483,6 +527,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
             onDismiss = { deletingOwn = null },
         )
     }
+
     deletingAll?.let { line ->
         ActionSheet(
             stringResource(R.string.chat_delete_for_everyone_question),
@@ -513,6 +558,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
             onDismiss = { deletingAll = null },
         )
     }
+
     Column(Modifier.fillMaxSize()) {
         // The name leads to the details of the contact, and that view holds
         // each action of a conversation. The search sits beside it.
@@ -539,17 +585,20 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
             actions = { IconAction("magnifying-glass", stringResource(R.string.common_search)) { push(Screen.Search(chat.conversation)) } },
         )
         BlockedLine(chat)
+
         // GRP-199, GRP-200: the line ends at the first answer of a relay.
         if (chat.isUnreachable) {
             Box(Modifier.padding(start = 20.dp, end = 20.dp, top = 8.dp)) {
                 Note(UiText.get(R.string.umbra_ui_grp_199))
             }
         }
+
         if (isQueueFull) {
             Box(Modifier.padding(start = 20.dp, end = 20.dp, top = 8.dp)) {
                 Note(UiText.get(R.string.umbra_ui_imp_082))
             }
         }
+
         // GRP-050, GRP-070, GRP-089: each change of a group shows at its time.
         val notes = remember(modNotes, rosterNotes, memberNames) { chatNotes(modNotes, rosterNotes, memberNames) }
         LazyColumn(
@@ -576,18 +625,22 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                     }
                 }
             }
+
             itemsIndexed(lines) { index, line ->
                 // A thread shows its root and its replies alone.
                 if (threadOf != null && line.key != threadOf && line.threadKey != threadOf) return@itemsIndexed
+
                 val before = lines.getOrNull(index - 1)
                 if (before == null || !isSameDay(before.info.storedAtMs, line.info.storedAtMs)) {
                     DayLabel(line.info.storedAtMs.toLong())
                 }
                 if (!line.info.outgoing && line.info.storedAtMs == newFrom) NewLabel()
+
                 // GRP-089: each moderation epoch shows at its time.
                 if (index == 0) {
                     for (note in notes.filter { it.atMs < line.info.storedAtMs }) NoteLine(note)
                 }
+
                 // DEV-207: a timer change is a row of the conversation.
                 if (line.info.timer != null) {
                     TimerLine(line, chat)
@@ -640,6 +693,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                         }
                     },
                 )
+
                 // WIR-273: a root names its replies, and a tap opens them.
                 val replies = replyCounts[line.key] ?: 0
                 if (replies > 0 && threadOf == null) {
@@ -652,9 +706,11 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                             .press(role = Role.Button) { threadOf = line.key },
                     )
                 }
+
                 // The contact saw each message up to this one. The mark
                 // sits under it and under no other, as a read marker does.
                 if (index == readUpTo) ReadMark(chat)
+
                 val next = lines.getOrNull(index + 1)
                 for (note in notes) {
                     if (note.atMs >= line.info.storedAtMs && (next == null || note.atMs < next.info.storedAtMs)) {
@@ -663,9 +719,11 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                 }
             }
         }
+
         notice?.let {
             Box(Modifier.padding(horizontal = 12.dp)) { Note(it) }
         }
+
         // DEV-126: the limits of an edit show while the user edits. They go
         // at the confirmation and at the cancel, and they wait for no relay.
         if (edited != null) {
@@ -677,22 +735,27 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                 )
             }
         }
+
         // An answer and an edit start with the keyboard open, as a user
         // expects it.
         LaunchedEffect(answered, edited) { if (answered != null || edited != null) composer.focus() }
+
         // WIR-535: the text of the composer goes with a file as its
         // caption. A caption above CAPTION_MAX stays in the composer, and
         // the file does not go.
         val takeCaption = takeCaption@{
             val chars = composer.take() ?: CharArray(0)
+
             if (utf8Length(chars) > CAPTION_MAX) {
                 composer.set(chars)
                 chars.fill('\u0000')
                 notice = UiText.get(R.string.chat_caption_too_long)
                 return@takeCaption null
             }
+
             chars
         }
+
         val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { picked ->
             if (picked != null) {
                 Core.sendPhoto(context, conversation, picked, takeCaption() ?: return@rememberLauncherForActivityResult)
@@ -717,6 +780,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                 jumpsAtNextLoad = true
             }
         }
+
         if (isAttaching) {
             // The pickers of the platform give this app the picked item alone,
             // and no access to the gallery or to the files.
@@ -748,8 +812,10 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                     add(RowEntry("chart-bar", stringResource(R.string.chat_poll)) { push(Screen.NewPoll(conversation)) })
                 }
             }
+
             ActionSheet(stringResource(R.string.common_attach), entries, onDismiss = { isAttaching = false })
         }
+
         // GRP-210: a group whose two relays hold it no more takes no new
         // message, and the composer would promise one. A group that
         // removed this device takes none either.
@@ -769,19 +835,23 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
             chat.isGroup && ownRole == FfiRole.OBSERVER -> stringResource(R.string.chat_role_observer)
             else -> null
         }
+
         if (stopped != null) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
                 Note(stopped)
             }
             return@Column
         }
+
         // IDN-025: a key change blocks the conversation until the answer.
         keyChange?.let { pending ->
             KeyChangePanel(chat, pending)
             return@Column
         }
+
         // NET-355: the question blocks nothing, and the composer stays.
         if (asksRenewal) RenewalPanel(chat)
+
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
             // The send button stays beside the line of the text.
@@ -798,6 +868,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                     // The words stay for the time of the exit.
                     val header = remember { mutableStateOf("reply" to "") }
                     val quoted = remember { mutableStateOf(CharArray(0)) }
+
                     // A reply in a group names the member who wrote the message.
                     answered?.let {
                         header.value = "reply" to when {
@@ -811,12 +882,14 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                         header.value = "pen" to stringResource(R.string.chat_edit_message)
                         quoted.value = CharArray(0)
                     }
+
                     ComposerHeader(header.value.first, header.value.second, quoted.value) {
                         if (edited != null) composer.clear()
                         answered = null
                         edited = null
                     }
                 }
+
                 val active = recording
                 if (active != null) {
                     RecordingBar(
@@ -838,6 +911,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                             .press(role = Role.Button, label = stringResource(R.string.common_attach)) { isAttaching = true },
                         contentAlignment = Alignment.Center,
                     ) { FaIcon("plus", label = stringResource(R.string.common_attach), size = 18.dp, tint = Palette.TextSecondary) }
+
                     Box(
                         Modifier
                             .weight(1f)
@@ -856,12 +930,15 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                     }
                 }
             }
+
             Spacer(Modifier.width(8.dp))
+
             // An empty composer records a voice message in the place of a
             // send. An answer and an edit take a text.
             val offersVoice = recording == null && composer.isEmpty && answered == null && edited == null &&
                 Files.canSendVideo
             val sendLabel = stringResource(if (offersVoice) R.string.chat_record_voice_message else R.string.common_send)
+
             Box(
                 Modifier
                     .size(48.dp)
@@ -875,6 +952,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                             jumpsAtNextLoad = true
                             return@clickable
                         }
+
                         if (offersVoice) {
                             val state = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
                             if (state == PackageManager.PERMISSION_GRANTED) {
@@ -884,6 +962,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                             }
                             return@clickable
                         }
+
                         composer.take()?.let { text ->
                             val target = edited
                             if (target != null) {
@@ -892,6 +971,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                                 Core.send(conversation, text, answered?.handle)
                                 jumpsAtNextLoad = true
                             }
+
                             answered = null
                             edited = null
                         }
@@ -904,6 +984,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                     offersVoice -> "microphone"
                     else -> "paper-plane"
                 }
+
                 FaIcon(icon, label = sendLabel, size = 18.dp, tint = Palette.OnAction)
             }
         }
@@ -920,6 +1001,7 @@ private fun copyMessage(context: Context, text: CharArray) {
     clip.description.extras = PersistableBundle().apply {
         putBoolean("android.content.extra.IS_SENSITIVE", true)
     }
+
     context.getSystemService(ClipboardManager::class.java).setPrimaryClip(clip)
 }
 
@@ -927,6 +1009,7 @@ private fun isSameDay(a: ULong, b: ULong): Boolean {
     val day = DateUtils.DAY_IN_MILLIS
     val zone = java.util.TimeZone.getDefault()
     val dayOf = { at: Long -> (at + zone.getOffset(at)) / day }
+
     return dayOf(a.toLong()) == dayOf(b.toLong())
 }
 
@@ -938,6 +1021,7 @@ private fun DayLabel(atMs: Long) {
     } else {
         DateUtils.formatDateTime(context, atMs, DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_SHOW_WEEKDAY)
     }
+
     Box(Modifier.fillMaxWidth().padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
         Text(label, style = MaterialTheme.typography.labelSmall, color = Palette.TextSecondary)
     }
@@ -974,6 +1058,7 @@ private fun Bubble(
     quoteAuthor: String? = null,
 ) {
     val isOutgoing = line.info.outgoing
+
     // A slide to the right answers the message. The bubble follows the
     // finger a short way, and it springs back at the release.
     val slide = remember { Animatable(0f) }
@@ -981,21 +1066,25 @@ private fun Bubble(
     val haptics = LocalHapticFeedback.current
     val reach = with(LocalDensity.current) { SLIDE_REACH.toPx() }
     val isPast = slide.value >= reach * SLIDE_POINT
+
     // The tick tells the finger that a release now starts the answer.
     LaunchedEffect(isPast) {
         if (isPast) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
     }
+
     val drag = rememberDraggableState { delta ->
         // The finger moves more than the bubble, thus the end feels firm.
         val next = (slide.value + delta * 0.55f).coerceIn(0f, reach)
         scope.launch { slide.snapTo(next) }
     }
+
     // A jump to a message shows it for a moment, and the mark fades.
     val flash by animateColorAsState(
         if (isFlashed) Palette.Action.copy(alpha = 0.22f) else Color.Transparent,
         tween(durationMillis = if (isFlashed) 120 else 700),
         label = "jump flash",
     )
+
     Box(
         Modifier.fillMaxWidth().draggable(
             state = drag,
@@ -1020,6 +1109,7 @@ private fun Bubble(
                 scaleY = 0.6f + 0.4f * progress
             },
         )
+
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1122,13 +1212,16 @@ private fun BubbleContent(
     quoteAuthor: String? = null,
 ) {
     val isOutgoing = line.info.outgoing
+
     // Part 11 §11.9.6: a hidden message shows its placeholder until a tap.
     val isHidden = line.info.moderation == MOD_HIDE && !isRevealed
     val isGone = line.info.deleted || isHidden
+
     // A photo and a video fill the bubble to a thin rim, as each messenger
     // shows one. A file sits in a bubble as a text does.
     val shownClass = line.info.file?.mimeClass
     val isPhoto = !line.info.deleted && (shownClass == CLASS_IMAGE || shownClass == CLASS_VIDEO)
+
     Column(
         modifier = Modifier
             .background(if (isOutgoing) Palette.Container else Palette.Incoming)
@@ -1146,6 +1239,7 @@ private fun BubbleContent(
                 modifier = Modifier.align(Alignment.Start).padding(bottom = 2.dp),
             )
         }
+
         if (isHidden) {
             Row(Modifier.align(Alignment.Start), verticalAlignment = Alignment.CenterVertically) {
                 FaIcon("eye", size = 13.dp, tint = Palette.TextSecondary)
@@ -1182,6 +1276,7 @@ private fun BubbleContent(
                 modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
             )
         }
+
         // The text starts at the left edge, and the time sits at the right.
         val file = line.info.file
         if (!isGone && file != null) {
@@ -1226,6 +1321,7 @@ private fun BubbleContent(
             }
             PlatformText(line.text, Palette.Text, modifier = Modifier.align(Alignment.Start), showsLinks = true)
         }
+
         Spacer(Modifier.height(2.dp))
         val clock = DateUtils.formatDateTime(
             LocalContext.current,
@@ -1368,6 +1464,7 @@ fun forwardPreview(prohibits: Boolean): String =
 private fun ForwardLine(line: Line, chat: Chat) {
     val prohibits = line.info.forwardPolicy ?: return
     val who = timerAuthor(chat, line.info.outgoing)
+
     Box(Modifier.fillMaxWidth().padding(vertical = 6.dp), contentAlignment = Alignment.Center) {
         Row(
             Modifier

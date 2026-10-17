@@ -27,12 +27,14 @@ object Links {
                 at++
                 continue
             }
+
             var end = at
             while (end < chars.size && !chars[end].isWhitespace()) end++
             while (end > at + scheme.length && chars[end - 1] in TRAILING) end--
             if (end > at + scheme.length) out.add(at until end)
             at = end.coerceAtLeast(at + 1)
         }
+
         return out
     }
 
@@ -54,8 +56,10 @@ object Links {
             Core.linkedInvitation = url
             return
         }
+
         try {
-            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            val view = Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(view)
         } catch (missing: ActivityNotFoundException) {
             // No browser: the sheet showed the URL, and the user can copy it.
         }
