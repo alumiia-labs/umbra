@@ -92,7 +92,7 @@ pub struct CircuitSession {
     watched: VecDeque<([u8; 16], u64)>,
 }
 
-/// How many `SUB` commands a session watches for a `NACK`.
+/// How many `SUB` and `GSUB` commands a session watches for a `NACK`.
 const WATCHED_SUBS: usize = 256;
 
 impl CircuitSession {
@@ -160,12 +160,15 @@ impl CircuitSession {
             if used != encoded.len() {
                 return Err(Error::Malformed);
             }
+
             (command.cmd, command.corr_id)
         };
         if self.pending.contains_key(&corr_id) {
             return Err(Error::Stale);
         }
+
         self.batcher.push(cmd, encoded)?;
+
         // A relay gives these no answer but a `NACK`, thus nothing waits
         // for one. A `NACK` of one of them names no command here, and
         // `WIR-323` drops it: the records of a lost `ACK` come again. A
@@ -195,6 +198,7 @@ impl CircuitSession {
         if awaits {
             self.pending.insert(corr_id, handle);
         }
+
         // A `SUB` has no answer, and a `NACK` of it names its queue as gone.
         // A `GSUB` has none either, and a `NACK` of it sends it again under
         // the credentials of the epoch before (`GRP-398`).
@@ -205,6 +209,7 @@ impl CircuitSession {
             }
             return Ok(true);
         }
+
         Ok(awaits)
     }
 
@@ -219,6 +224,7 @@ impl CircuitSession {
             auth: [0; 32],
             payload: &payload,
         };
+
         let mut encoded = alloc::vec![0u8; cover.len()];
         cover.encode(&mut encoded)?;
         self.batcher.push(Cmd::Cover, encoded)
@@ -234,6 +240,7 @@ impl CircuitSession {
         let (head, body) = cell.split_at_mut(32);
         pad_body(bucket, command, content, body)?;
         let tag = self.circuit.seal(body).map_err(|_| Error::Unverified)?;
+
         let (circ_id, tag_out) = head.split_at_mut(16);
         circ_id.copy_from_slice(&self.circuit.circ_id());
         tag_out.copy_from_slice(&tag);
@@ -245,6 +252,7 @@ impl CircuitSession {
         let Some((bucket, content)) = self.batcher.next_cell() else {
             return Ok(None);
         };
+
         self.seal_cell(bucket, CellCommand::Data, &content)
             .map(Some)
     }
@@ -273,6 +281,7 @@ impl CircuitSession {
             .circuit
             .seal_with_tags(body)
             .map_err(|_| Error::Unverified)?;
+
         let (circ_id, tag_out) = head.split_at_mut(16);
         circ_id.copy_from_slice(&self.circuit.circ_id());
         tag_out.copy_from_slice(&tags[0]);
@@ -287,11 +296,13 @@ impl CircuitSession {
         if *parsed.circ_id != self.circuit.circ_id() {
             return Err(Error::Unverified);
         }
+
         let mut body = parsed.body.to_vec();
         self.circuit
             .open(parsed.tag, &mut body)
             .map_err(|_| Error::Unverified)?;
         let (command, content) = unpad_body(&body)?;
+
         // NET-060: a loop of this client came back (REL-163).
         if command == CellCommand::Loop {
             return Ok(alloc::vec![Event::LoopReturned]);
@@ -300,6 +311,7 @@ impl CircuitSession {
             // A padding cell carries no command.
             return Ok(Vec::new());
         }
+
         let mut events = Vec::new();
         for command in unpack(content, bucket)? {
             if let Some(event) = self.event_of(&command, bucket)? {
@@ -326,6 +338,7 @@ impl CircuitSession {
                 if nack.corr_id != command.corr_id {
                     return Ok(None);
                 }
+
                 // WIR-323: a NACK that names no command of this session.
                 let watched = self
                     .watched

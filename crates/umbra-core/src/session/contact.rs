@@ -80,6 +80,7 @@ impl Inviter {
         let mut encoded = alloc::vec![0u8; bundle.len()];
         let used = bundle.encode(&mut encoded)?;
         encoded.truncate(used);
+
         Ok((
             Inviter {
                 prekey: Some(prekey),
@@ -140,6 +141,7 @@ impl Inviter {
         // prekey spends nothing.
         let held = self.prekey.as_ref().ok_or(Error::Stale)?;
         find_prekey(&pid, core::iter::once(held.id())).ok_or(Error::Unverified)?;
+
         let mut app_1 = [0u8; QUEUE_ADDRESS_LEN];
         // WIR-503: a flight that fails keeps the prekey for the true one.
         let (mut responder, read) = Responder::read_flight1(
@@ -154,10 +156,12 @@ impl Inviter {
         if read.app_len != QUEUE_ADDRESS_LEN {
             return Err(Error::Malformed);
         }
+
         let reply_to = QueueAddress::parse(&app_1)?;
         let mut flight2 = alloc::vec![0u8; FLIGHT2_FIXED + NONCE_LEN + PAYLOAD_OVERHEAD];
         let used = responder.flight2(&[], rng, &mut flight2, &mut NoTrace)?;
         flight2.truncate(used);
+
         // CRY-089: the prekey goes with the flight 1 that it served.
         self.prekey = None;
         self.responder = Some(responder);
@@ -171,6 +175,7 @@ impl Inviter {
         let (Some(responder), Some(reply_to)) = (&self.responder, &self.reply_to) else {
             return Ok(None);
         };
+
         let state = responder.export()?;
         let mut out = Zeroizing::new(alloc::vec![0u8; QUEUE_ADDRESS_LEN]);
         reply_to.encode(&mut out)?;
@@ -218,6 +223,7 @@ impl Invitee {
         if bundle.responder_kem_ek.len() != EK_LEN {
             return Err(Error::Malformed);
         }
+
         Ok(())
     }
 
@@ -240,6 +246,7 @@ impl Invitee {
             s1,
             range_r: VersionRange { min, max },
         };
+
         let mut app_1 = [0u8; QUEUE_ADDRESS_LEN];
         own_queue.encode(&mut app_1)?;
         let mut flight1 =
@@ -254,6 +261,7 @@ impl Invitee {
             &mut NoTrace,
         )?;
         flight1.truncate(used);
+
         Ok((
             Invitee { initiator },
             numbered(FLIGHT_1, &flight1),
