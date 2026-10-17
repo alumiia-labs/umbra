@@ -9,3 +9,7 @@ target/
 # The deployment: the filled inventory and what the servers gave back.
 deploy/ansible/inventory.yml
 deploy/ansible/build/
+# The settings of one server for compose.yaml, and what the Helm chart's
+# collect script gave back.
+/.env
+deploy/helm/build/

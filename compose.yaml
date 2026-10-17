@@ -1,34 +1,251 @@
-# The test network of scripts/devnet.sh in one container. Its seeds are in
-# the repository, thus it protects nothing. Run it on a test machine alone.
+# The UMBRA network on Docker: the services of deploy/ansible, one server at
+# a time. Each server runs this file with its own .env, which names the
+# services of that server in COMPOSE_PROFILES:
 #
-#   docker compose up --build
+#   relay1, relay2   up to two relays
+#   ndr              the notification server
+#   directory        the directory and the issuer
+#   signer           the signer, the manifest carrier, the authority tool,
+#                    and the measurer
+#   tls              the certificate of the server, from Let's Encrypt
 #
-# An emulator reaches the two ingress relays at 10.0.2.2:7441 and :7446. A
-# phone on the local network needs the address of this machine in the
-# descriptors, and a port that listens on each interface:
+#   cp deploy/docker/server.env.example .env    # then fill it in
+#   docker compose build
+#   docker compose run --rm init
+#   docker compose up -d
 #
-#   UMBRA_DEVNET_HOST=192.168.1.254 UMBRA_DEVNET_BIND=0.0.0.0 docker compose up --build
+# deploy/docker/README.md gives each step of a new network. The test
+# network of scripts/devnet.sh is compose.devnet.yaml.
 #
-# The relays keep their queues in the volume, thus a restart ends no
-# contact. `docker compose down -v` gives an empty network.
-name: umbra-devnet
+# Each service uses the network of the host, as the systemd units of
+# deploy/ansible do: a relay states the address of the host, it sees the
+# address of each client and each relay, and the firewall of the host
+# applies. Each state directory is under UMBRA_ROOT on the host.
+name: umbra
+
+x-hardened: &hardened
+  image: ${UMBRA_IMAGE:-umbra-servers}
+  init: true
+  restart: unless-stopped
+  network_mode: host
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  # Docker mounts a tmpfs of mode 0755 at a restart unless a mode is given.
+  tmpfs:
+    - /run/umbra:mode=1777
+    - /tmp:mode=1777
+  logging:
+    driver: json-file
+    # A relay sees client addresses, thus its log stays small and short.
+    options: { max-size: 20m, max-file: "3" }
+  depends_on:
+    init:
+      condition: service_completed_successfully
+
+x-relay: &relay
+  <<: *hardened
+  user: "10001:10001"
+  group_add: ["10000"]
+  ulimits:
+    nofile: 65536
+
+x-relay-env: &relay-env
+  UMBRA_OPERATOR: ${UMBRA_OPERATOR:-umbra-project}
+  UMBRA_COUNTRY: ${UMBRA_COUNTRY:-US}
+  UMBRA_ASN: ${UMBRA_ASN:-}
+  UMBRA_FAMILY: ${UMBRA_FAMILY:-}
+  UMBRA_PUBLIC_HOST: ${UMBRA_FQDN:-}
+  UMBRA_PUBLIC_ADDRESS: ${UMBRA_ADDRESS:-}
+  UMBRA_SIGNER: ${UMBRA_SIGNER:-}
+  UMBRA_CHUNK_CAPACITY: ${UMBRA_CHUNK_CAPACITY:-1073741824}
+  UMBRA_OHTTP_GATEWAY: ${UMBRA_OHTTP_GATEWAY:-}
+  UMBRA_DIRECTORY_GATEWAY: ${UMBRA_DIRECTORY_GATEWAY:-}
+  UMBRA_NDR_ROUTE: ${UMBRA_NDR_ROUTE:-}
+  UMBRA_NDR_KEY_CONFIG: ${UMBRA_NDR_KEY_CONFIG:-}
+  UMBRA_DIRECTORY_ROUTE: ${UMBRA_DIRECTORY_ROUTE:-}
+  UMBRA_DIRECTORY_PINS: ${UMBRA_DIRECTORY_PINS:-}
+  UMBRA_TRUST: ${UMBRA_TRUST:-}
 
 services:
-  devnet:
+  # The directories of each service and their owners, as root, before each
+  # other service of the server starts.
+  init:
+    image: ${UMBRA_IMAGE:-umbra-servers}
     build:
       context: .
-      target: devnet
-    image: umbra-devnet
-    init: true
-    environment:
-      UMBRA_DEVNET_HOST: ${UMBRA_DEVNET_HOST:-10.0.2.2}
-    # The other relays, the NDR, and the directory take connections from
-    # inside the container alone.
-    ports:
-      - "${UMBRA_DEVNET_BIND:-127.0.0.1}:7441:7441"
-      - "${UMBRA_DEVNET_BIND:-127.0.0.1}:7446:7446"
+      target: servers
+    user: "0:0"
+    network_mode: none
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER, DAC_OVERRIDE]
+    security_opt: [no-new-privileges:true]
+    command: ["init", "/srv/umbra"]
     volumes:
-      - devnet:/umbra/target/devnet
+      - ${UMBRA_ROOT:-/srv/umbra}:/srv/umbra
 
-volumes:
-  devnet:
+  certbot:
+    profiles: [tls]
+    image: certbot/certbot:v5.8.0@sha256:f70ad0adbb7e117f0fe42a63c553f28ea451edabc0148757b6efcd9735acaa20
+    restart: unless-stopped
+    network_mode: host
+    entrypoint: ["sh", "/umbra/certbot.sh"]
+    environment:
+      UMBRA_FQDN: ${UMBRA_FQDN:-}
+    volumes:
+      - ${UMBRA_ROOT:-/srv/umbra}/letsencrypt:/etc/letsencrypt
+      - ${UMBRA_ROOT:-/srv/umbra}/tls:/etc/umbra/tls
+      # The Helm chart runs the same script.
+      - ./deploy/helm/umbra/files/certbot.sh:/umbra/certbot.sh:ro
+    depends_on:
+      init:
+        condition: service_completed_successfully
+
+  relay1:
+    <<: *relay
+    profiles: [relay1]
+    command: ["relay"]
+    environment:
+      <<: *relay-env
+      UMBRA_RELAY_NAME: ${RELAY1_NAME:-}
+      UMBRA_RELAY_ROLE: ${RELAY1_ROLE:-}
+      UMBRA_RELAY_CLASS: ${RELAY1_CLASS:-}
+      UMBRA_PUBLIC_PORT: ${RELAY1_PORT:-443}
+      UMBRA_RESTART_DELAY: "0"
+    mem_reservation: ${RELAY1_MEMORY_HIGH:-1200m}
+    mem_limit: ${RELAY1_MEMORY_MAX:-1400m}
+    volumes:
+      - ${UMBRA_ROOT:-/srv/umbra}/relay1:/var/lib/umbra
+      - ${UMBRA_ROOT:-/srv/umbra}/tls:/etc/umbra/tls:ro
+      - ${UMBRA_ROOT:-/srv/umbra}/network:/etc/umbra/network:ro
+
+  relay2:
+    <<: *relay
+    profiles: [relay2]
+    command: ["relay"]
+    environment:
+      <<: *relay-env
+      UMBRA_RELAY_NAME: ${RELAY2_NAME:-}
+      UMBRA_RELAY_ROLE: ${RELAY2_ROLE:-}
+      UMBRA_RELAY_CLASS: ${RELAY2_CLASS:-}
+      UMBRA_PUBLIC_PORT: ${RELAY2_PORT:-9443}
+      # The two relays of a server never start again together.
+      UMBRA_RESTART_DELAY: "120"
+    mem_reservation: ${RELAY2_MEMORY_HIGH:-1200m}
+    mem_limit: ${RELAY2_MEMORY_MAX:-1400m}
+    volumes:
+      - ${UMBRA_ROOT:-/srv/umbra}/relay2:/var/lib/umbra
+      - ${UMBRA_ROOT:-/srv/umbra}/tls:/etc/umbra/tls:ro
+      - ${UMBRA_ROOT:-/srv/umbra}/network:/etc/umbra/network:ro
+
+  ndr:
+    <<: *hardened
+    profiles: [ndr]
+    user: "10002:10002"
+    group_add: ["10000"]
+    command: ["ndr"]
+    environment:
+      UMBRA_LISTEN_PORT: ${UMBRA_SERVICE_PORT:-8443}
+      UMBRA_RESTART_DELAY: "240"
+      UMBRA_TRUST: ${UMBRA_TRUST:-}
+    mem_reservation: ${UMBRA_SERVICE_MEMORY_HIGH:-448m}
+    mem_limit: ${UMBRA_SERVICE_MEMORY_MAX:-512m}
+    volumes:
+      - ${UMBRA_ROOT:-/srv/umbra}/ndr:/var/lib/umbra
+      - ${UMBRA_ROOT:-/srv/umbra}/tls:/etc/umbra/tls:ro
+      - ${UMBRA_ROOT:-/srv/umbra}/secrets/fcm.json:/etc/umbra/fcm.json:ro
+
+  directory:
+    <<: *hardened
+    profiles: [directory]
+    user: "10003:10003"
+    group_add: ["10000"]
+    command: ["directory"]
+    environment:
+      UMBRA_LISTEN_PORT: ${UMBRA_SERVICE_PORT:-8443}
+      UMBRA_RESTART_DELAY: "240"
+    mem_reservation: ${UMBRA_SERVICE_MEMORY_HIGH:-448m}
+    mem_limit: ${UMBRA_SERVICE_MEMORY_MAX:-512m}
+    volumes:
+      - ${UMBRA_ROOT:-/srv/umbra}/directory:/var/lib/umbra
+      - ${UMBRA_ROOT:-/srv/umbra}/tls:/etc/umbra/tls:ro
+
+  # The seven authority keys. The signer reaches no network: it reads the
+  # descriptors, the reports, and the class tests from files, and it writes
+  # the manifest for the carrier below. A measurer certificate goes the same
+  # way.
+  signer:
+    <<: *hardened
+    profiles: [signer]
+    network_mode: none
+    user: "10004:10004"
+    command: ["signer"]
+    environment:
+      UMBRA_OPERATOR: ${UMBRA_OPERATOR:-umbra-project}
+      UMBRA_RELAYS: ${UMBRA_RELAYS:-}
+      UMBRA_REVOKED_MEASURERS: ${UMBRA_REVOKED_MEASURERS:-}
+      UMBRA_SIGNER_KEYS: /var/lib/umbra-signer/${UMBRA_SIGNER_KEYS_DIR:-keys}
+      UMBRA_MEASURER_CERT_EPOCHS: ${UMBRA_MEASURER_CERT_EPOCHS:-24}
+    mem_reservation: ${UMBRA_SIGNER_MEMORY_HIGH:-448m}
+    mem_limit: ${UMBRA_SIGNER_MEMORY_MAX:-512m}
+    volumes:
+      - ${UMBRA_ROOT:-/srv/umbra}/signer:/var/lib/umbra-signer
+      - ${UMBRA_ROOT:-/srv/umbra}/authority-keys:/var/lib/umbra-authority-keys
+      - ${UMBRA_ROOT:-/srv/umbra}/www:/var/www/umbra/.well-known/umbra
+      - ${UMBRA_ROOT:-/srv/umbra}/descriptors:/etc/umbra-signer/descriptors:ro
+      - ${UMBRA_ROOT:-/srv/umbra}/authority:/var/lib/umbra-authority:ro
+      - ${UMBRA_ROOT:-/srv/umbra}/measurer:/var/lib/umbra-measurer:ro
+      - ${UMBRA_ROOT:-/srv/umbra}/measurer/cert:/var/lib/umbra-measurer/cert
+
+  # The HTTPS carrier of the manifest (Part 3 §3.10), with no log.
+  manifest:
+    <<: *hardened
+    profiles: [signer]
+    user: "10004:10004"
+    group_add: ["10000"]
+    command: ["manifest"]
+    environment:
+      UMBRA_LISTEN_PORT: "443"
+    mem_limit: 256m
+    volumes:
+      - ${UMBRA_ROOT:-/srv/umbra}/www:/var/www/umbra/.well-known/umbra:ro
+      - ${UMBRA_ROOT:-/srv/umbra}/tls:/etc/umbra/tls:ro
+
+  # The tool signs as authority 0 and as the aggregators 0 and 1. It reaches
+  # the network, thus it sees those two seeds alone: the signer copies them
+  # to a directory of their own.
+  authority:
+    <<: *hardened
+    profiles: [signer]
+    user: "10004:10004"
+    command: ["authority"]
+    environment:
+      UMBRA_SIGNER_KEYS: /var/lib/umbra-signer/keys
+      UMBRA_TRUST: ${UMBRA_TRUST:-}
+    mem_reservation: ${UMBRA_SERVICE_MEMORY_HIGH:-448m}
+    mem_limit: ${UMBRA_SERVICE_MEMORY_MAX:-512m}
+    volumes:
+      - ${UMBRA_ROOT:-/srv/umbra}/authority:/var/lib/umbra-authority
+      - ${UMBRA_ROOT:-/srv/umbra}/www:/var/www/umbra/.well-known/umbra:ro
+      - ${UMBRA_ROOT:-/srv/umbra}/authority-keys:/var/lib/umbra-signer/keys:ro
+
+  # The class test of each relay one time in each 7 days (Part 10 §10.3). It
+  # runs as a user of its own, which reads no authority key.
+  measurer:
+    <<: *hardened
+    profiles: [signer]
+    user: "10005:10005"
+    command: ["measurer"]
+    environment:
+      UMBRA_RELAYS: ${UMBRA_RELAYS:-}
+      UMBRA_MEASURER_CAPACITY: ${UMBRA_MEASURER_CAPACITY:-500}
+      UMBRA_TRUST: ${UMBRA_TRUST:-}
+    ulimits:
+      nofile: 4096
+    mem_reservation: ${UMBRA_SERVICE_MEMORY_HIGH:-448m}
+    mem_limit: ${UMBRA_SERVICE_MEMORY_MAX:-512m}
+    volumes:
+      - ${UMBRA_ROOT:-/srv/umbra}/measurer:/var/lib/umbra-measurer
+      - ${UMBRA_ROOT:-/srv/umbra}/measurer/cert:/var/lib/umbra-measurer/cert:ro
+      - ${UMBRA_ROOT:-/srv/umbra}/www:/var/www/umbra/.well-known/umbra:ro
+      - ${UMBRA_ROOT:-/srv/umbra}/descriptors:/etc/umbra-signer/descriptors:ro

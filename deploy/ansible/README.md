@@ -2,7 +2,9 @@
 
 These playbooks install the launch network on Debian: four servers at
 OVHcloud US, over three sites. A server can run two relays; the inventory
-lists the relays of each server.
+lists the relays of each server. The same network runs in containers:
+`deploy/docker/README.md` gives Docker Compose, and `deploy/helm/README.md`
+gives Kubernetes.
 
 | Server | Site | Runs |
 |---|---|---|

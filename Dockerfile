@@ -1,8 +1,10 @@
 # syntax=docker/dockerfile:1
-# The server binaries of UMBRA, and the test network of scripts/devnet.sh.
+# The server image of UMBRA, and the test network of scripts/devnet.sh.
 #
-#   docker build --target servers -t umbra-servers .   # the binaries alone
-#   docker compose up --build                          # the test network
+#   docker compose build                               # the server image
+#   docker compose -f compose.devnet.yaml up --build   # the test network
+#
+# deploy/docker/README.md gives the deployment of the server image.
 #
 # The compiler is inside the trust boundary (Part 14 §14.5.1), thus a digest
 # pins each image, and the toolchain is the one of rust-toolchain.toml. A new
@@ -25,15 +27,21 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         install -m 0755 "target/release/$bin" "/out/$bin"; \
     done
 
-# The binaries on a small base, under a user with no privilege.
+# The binaries on a small base, under a user with no privilege. curl
+# fetches the first manifest of a relay, and nginx serves the manifest of
+# the signer.
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS servers
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates curl nginx-light \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --create-home --home-dir /umbra --shell /usr/sbin/nologin umbra
 COPY --from=build /out/ /usr/local/bin/
+COPY deploy/docker/umbra-entry.sh /usr/local/bin/umbra-entry
+# A checkout on Windows can give the script CRLF line ends.
+RUN sed -i 's/\r$//' /usr/local/bin/umbra-entry && chmod 0755 /usr/local/bin/umbra-entry
 USER umbra
 WORKDIR /umbra
+ENTRYPOINT ["umbra-entry"]
 
 # The test network: seven relays, the NDR, the directory, the authority, and
 # the measurer in one container. Its seeds are in the repository, thus it

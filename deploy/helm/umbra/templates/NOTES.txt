@@ -1,0 +1,18 @@
+The UMBRA network starts on {{ len .Values.servers }} servers.
+{{- if not .Values.network.keyset }}
+
+This is the first install. Each relay signs its descriptor and waits for
+the key set; the signer makes the authority keys. Collect the public values,
+then upgrade with them:
+
+  bash deploy/helm/collect.sh {{ .Release.Namespace }}
+  helm upgrade {{ .Release.Name }} deploy/helm/umbra -n {{ .Release.Namespace }} \
+      -f <your values> -f deploy/helm/build/network-values.yaml
+
+Back up {{ .Values.root }}/signer on the signer node offline now.
+{{- else }}
+
+Check the signer:
+
+  kubectl -n {{ .Release.Namespace }} logs deploy/signer
+{{- end }}

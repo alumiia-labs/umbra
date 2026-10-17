@@ -80,12 +80,12 @@ emulator is the clipboard of the machine.
 ### The network in Docker
 
 Docker runs the same network with no Rust toolchain. The image builds the
-servers, and `compose.yaml` publishes the two ingress relays, 7441 and 7446.
+servers, and `compose.devnet.yaml` publishes the two ingress relays, 7441 and 7446.
 The state stays in a volume.
 
 ```sh
-docker compose up --build       # in the root of the repository
-docker compose down -v          # stops the network and deletes its state
+docker compose -f compose.devnet.yaml up --build   # in the root of the repository
+docker compose -f compose.devnet.yaml down -v      # stops the network and deletes its state
 ```
 
 ### A phone on the local network
@@ -104,7 +104,7 @@ the two ingress relays. The other relays take connections from the relays
 alone. In Docker, the ports must listen on each interface:
 
 ```sh
-UMBRA_DEVNET_HOST=192.168.1.254 UMBRA_DEVNET_BIND=0.0.0.0 docker compose up --build
+UMBRA_DEVNET_HOST=192.168.1.254 UMBRA_DEVNET_BIND=0.0.0.0 \n    docker compose -f compose.devnet.yaml up --build
 ```
 
 ## Limits of the shell

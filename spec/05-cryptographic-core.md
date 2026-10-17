@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 5: Cryptographic Core
 
 **Status:** Draft
-**Version:** 0.36.2
+**Version:** 0.37.0
 **Date:** 2026-10-16
 
 ---

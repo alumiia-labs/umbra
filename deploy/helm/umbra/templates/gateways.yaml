@@ -1,0 +1,91 @@
+{{- /* The notification server (Part 8 §8.2) and the directory with the
+       issuer (Parts 9 and 13), each on the node of its server. Only the
+       relays reach their port; the firewall of the node closes it to each
+       other address. */ -}}
+{{- $services := list
+      (dict "name" "ndr" "uid" 10002 "server" .Values.ndr.server "dir" "ndr")
+      (dict "name" "directory" "uid" 10003 "server" .Values.directory.server "dir" "directory") }}
+{{- range $service := $services }}
+{{- $server := include "umbra.server" (list $ $service.server) | fromJson }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $service.name }}
+  labels:
+    {{- include "umbra.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $service.name }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ $.Release.Name }}
+      app.kubernetes.io/component: {{ $service.name }}
+  template:
+    metadata:
+      labels:
+        {{- include "umbra.labels" $ | nindent 8 }}
+        app.kubernetes.io/component: {{ $service.name }}
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      nodeSelector:
+        kubernetes.io/hostname: {{ include "umbra.node" $server }}
+      securityContext:
+        supplementalGroups: [10000]
+      initContainers:
+        {{- include "umbra.init" $ | nindent 8 }}
+      containers:
+        - name: {{ $service.name }}
+          image: {{ include "umbra.serverImage" (list $ $server) }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          args: [{{ $service.name | quote }}]
+          env:
+            - { name: UMBRA_LISTEN_PORT, value: {{ $.Values.servicePort | quote }} }
+            # The relays of the same node start again before it.
+            - { name: UMBRA_RESTART_DELAY, value: "240" }
+            {{- include "umbra.trustEnv" $ | nindent 12 }}
+          ports:
+            - name: gateway
+              containerPort: {{ $.Values.servicePort }}
+          readinessProbe:
+            tcpSocket:
+              port: {{ $.Values.servicePort }}
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: {{ $.Values.memory.service.request }}
+            limits:
+              memory: {{ $.Values.memory.service.limit }}
+          securityContext:
+            {{- include "umbra.security" (dict "uid" $service.uid) | nindent 12 }}
+          volumeMounts:
+            {{- include "umbra.baseMounts" $ | nindent 12 }}
+            - name: root
+              mountPath: /var/lib/umbra
+              subPath: {{ $service.dir }}
+            - name: root
+              mountPath: /etc/umbra/tls
+              subPath: tls
+              readOnly: true
+            {{- if eq $service.name "ndr" }}
+            - name: fcm
+              mountPath: /etc/umbra/fcm.json
+              subPath: fcm.json
+              readOnly: true
+            {{- end }}
+            {{- include "umbra.trustMount" $ | nindent 12 }}
+      volumes:
+        {{- include "umbra.volumes" $ | nindent 8 }}
+        {{- if eq $service.name "ndr" }}
+        - name: fcm
+          secret:
+            secretName: {{ $.Values.ndr.fcmSecret }}
+            # Only this container mounts it, under a user with no root.
+            defaultMode: 0444
+        {{- end }}
+{{- end }}

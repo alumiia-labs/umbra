@@ -16,3 +16,6 @@ android/gradlew text eol=lf
 # The vector corpora keep the bytes whose hash PROVENANCE.md records, on
 # each platform.
 tests/vectors/** text eol=lf
+# The scripts and templates of a container run on Linux.
+deploy/docker/** text eol=lf
+deploy/helm/** text eol=lf

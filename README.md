@@ -38,11 +38,13 @@ bash scripts/check.sh           # the full check set of each commit
 ```
 
 `android/README.md` gives the build of the app. `deploy/ansible/README.md`
-gives the deployment of a network.
+gives the deployment of a network on Debian servers. The same network runs
+in Docker (`compose.yaml`, `deploy/docker/README.md`) and on Kubernetes
+(the Helm chart in `deploy/helm/umbra`).
 
-`docker compose up --build` runs a test network of seven relays on this
-machine, with no Rust toolchain. Its seeds are in the repository, thus it
-protects nothing. `android/README.md` gives its use.
+`docker compose -f compose.devnet.yaml up --build` runs a test network of
+seven relays on this machine, with no Rust toolchain. Its seeds are in the
+repository, thus it protects nothing. `android/README.md` gives its use.
 
 ## Contribute
 

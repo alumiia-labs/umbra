@@ -1,0 +1,114 @@
+# The settings of the whole network. They match
+# deploy/ansible/group_vars/all.yml and inventory.example.yml.
+
+# The server image of the Dockerfile (target servers). The tag defaults to
+# the appVersion of the chart.
+image:
+  repository: umbra-servers
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# The domain under which each server gets a name: <server name>.<domain>.
+# Point an A record at each server first.
+domain: umbrachat.app
+
+# The host of an invitation link (Part 4 §4.3.1). Empty gives the domain.
+invitationHost: ""
+
+# The one operator, and the family of its relays: 64 hex characters, made one
+# time with `openssl rand -hex 32` and kept.
+operator: umbra-project
+family: ""
+# The country of a relay (Part 10 §10.6.3) and the autonomous system of the
+# provider (OVH: 16276). A server can state its own.
+country: US
+asn: 0
+
+# The state of each service, on the node of its server. Back up
+# <root>/signer offline on the signer node.
+root: /srv/umbra
+
+# The servers. Each one is a node of the cluster (`node`, the value of the
+# label kubernetes.io/hostname; the name when it is empty), with an IPv4
+# address that its relays state. Each relay has a name of its own in the
+# whole network, a role (entry, middle, or exit), a port, and a class: 0, 1,
+# 2 or 3 for 100, 250, 500 or 1000 Mbit/s. An entry relay takes port 443 and
+# class 1 or more. A server can take `imageTag`, thus a new image goes to one
+# server at a time.
+servers:
+  - name: east-1
+    node: ""
+    address: 203.0.113.10
+    relays:
+      - { name: entry-east, role: entry, port: 443, class: 1 }
+      - { name: exit-1, role: exit, port: 9443, class: 1 }
+  - name: east-2
+    address: 203.0.113.11
+    country: CA
+    relays:
+      - { name: middle, role: middle, port: 443, class: 1 }
+      - { name: exit-3, role: exit, port: 9443, class: 1 }
+  - name: west-1
+    address: 203.0.113.20
+    relays:
+      - { name: entry-west, role: entry, port: 443, class: 1 }
+      - { name: exit-2, role: exit, port: 9443, class: 1 }
+  - name: signer-west-1
+    address: 203.0.113.21
+    relays: []
+
+# The server of each service. The app reaches the notification server and
+# the directory through an entry relay on another server (Part 8 NTF-002).
+ndr:
+  server: east-1
+  # The name of a Secret with the key `fcm.json`: the service account file of
+  # the Firebase project.
+  fcmSecret: umbra-fcm
+directory:
+  server: west-1
+signer:
+  server: signer-west-1
+  # The key directory under <root>/signer. A rotation moves it.
+  keysDir: keys
+  # Revoked measurer certificates (Part 10 REL-105).
+  #   - { id: "<32 hex characters>", not_after: <epoch> }
+  revokedMeasurers: []
+measurer:
+  # The rate of the plan of the signer server, in Mbit/s.
+  capacity: 500
+  certEpochs: 24
+
+# The port of the notification server and of the directory. Only the relay
+# servers reach it.
+servicePort: 8443
+# The bytes that each exit relay holds for files (Part 12), in memory.
+chunkCapacity: 1073741824
+
+# The public values that the first install gives back. deploy/helm/collect.sh
+# writes them into a values file for the next `helm upgrade`.
+network:
+  # base64 of keyset.bin of the signer.
+  keyset: ""
+  # The hex lines of `umbra-entry ndr key-config` and `umbra-entry directory pins`.
+  ndrKeyConfig: ""
+  directoryPins: ""
+  # base64 of the signed descriptor of each relay, by name.
+  descriptors: {}
+
+# The certificate of each server, from Let's Encrypt: a certbot pod on each
+# node answers on port 80. With false, put cert.pem and key.pem in
+# <root>/tls on each node yourself (root:10000, 0644 and 0640).
+certbot: true
+certbotImage: certbot/certbot:v5.8.0@sha256:f70ad0adbb7e117f0fe42a63c553f28ea451edabc0148757b6efcd9735acaa20
+
+# A PEM of a test CA that the services trust in place of the web roots.
+# A deployment leaves it empty.
+trust: ""
+
+# The memory of each service: the request, and the limit at which the
+# kernel stops it.
+memory:
+  relay: { request: 512Mi, limit: 1400Mi }
+  exit: { request: 1Gi, limit: 2500Mi }
+  service: { request: 128Mi, limit: 512Mi }
+  signer: { request: 64Mi, limit: 512Mi }

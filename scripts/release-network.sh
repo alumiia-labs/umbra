@@ -6,15 +6,16 @@
 # value is public. Run it after the first `ansible-playbook site.yml`. Then
 # build the release app. The release build fails without these files.
 #
-#   bash scripts/release-network.sh
+#   bash scripts/release-network.sh                     # deploy/ansible/build
+#   bash scripts/release-network.sh deploy/helm/build   # deploy/helm/collect.sh
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-build="$root/deploy/ansible/build"
+build="${1:-$root/deploy/ansible/build}"
 assets="$root/android/app/src/release/assets"
 for file in keyset.bin ndr-key-config.hex directory-pins.hex network.properties; do
     if [ ! -s "$build/$file" ]; then
-        echo "missing $build/$file: run ansible-playbook site.yml first" >&2
+        echo "missing $build/$file: run ansible-playbook site.yml or deploy/helm/collect.sh first" >&2
         exit 1
     fi
 done

@@ -1,0 +1,12 @@
+# The UMBRA network on Kubernetes: the services of deploy/ansible on the
+# nodes of a cluster, one node for each server. deploy/helm/README.md gives
+# the steps.
+apiVersion: v2
+name: umbra
+description: The UMBRA relay network, its notification server, directory, and signer
+type: application
+version: 0.37.0
+appVersion: "0.37.0"
+home: https://umbrachat.app
+sources:
+  - https://github.com/alumiia-labs/umbra

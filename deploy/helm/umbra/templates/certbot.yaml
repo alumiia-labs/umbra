@@ -1,0 +1,77 @@
+{{- /* The certificate of each server, from Let's Encrypt: certbot answers
+       the challenge on port 80 of the node, renews twice a day, and writes
+       each new certificate to <root>/tls. Each service starts again with
+       it. */ -}}
+{{- if .Values.certbot }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-certbot
+  labels:
+    {{- include "umbra.labels" . | nindent 4 }}
+data:
+  certbot.sh: |
+    {{- .Files.Get "files/certbot.sh" | nindent 4 }}
+{{- range $server := .Values.servers }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: certbot-{{ $server.name }}
+  labels:
+    {{- include "umbra.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: certbot
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ $.Release.Name }}
+      umbra.app/certbot: {{ $server.name }}
+  template:
+    metadata:
+      labels:
+        {{- include "umbra.labels" $ | nindent 8 }}
+        app.kubernetes.io/component: certbot
+        umbra.app/certbot: {{ $server.name }}
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      nodeSelector:
+        kubernetes.io/hostname: {{ include "umbra.node" $server }}
+      initContainers:
+        {{- include "umbra.init" $ | nindent 8 }}
+      containers:
+        - name: certbot
+          image: {{ $.Values.certbotImage }}
+          command: ["sh", "/umbra/certbot.sh"]
+          env:
+            - { name: UMBRA_FQDN, value: {{ printf "%s.%s" $server.name $.Values.domain | quote }} }
+          # Certbot answers on port 80 and writes files for other users.
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+              add: [NET_BIND_SERVICE, CHOWN, FOWNER, DAC_OVERRIDE]
+          resources:
+            requests:
+              memory: 32Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - { name: root, mountPath: /etc/letsencrypt, subPath: letsencrypt }
+            - { name: root, mountPath: /etc/umbra/tls, subPath: tls }
+            - { name: script, mountPath: /umbra, readOnly: true }
+      volumes:
+        - name: root
+          hostPath:
+            path: {{ $.Values.root }}
+            type: DirectoryOrCreate
+        - name: script
+          configMap:
+            name: {{ $.Release.Name }}-certbot
+{{- end }}
+{{- end }}
