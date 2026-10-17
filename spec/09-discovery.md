@@ -121,22 +121,28 @@ profile directly.
 - **[DIS-175]** The directory MUST keep the sealed blob of a live label beside
   it, and the log MUST NOT commit the blob. The holder writes the blob under a
   blob challenge (purpose `0x03` of §9.10) whose answer binds the blob bytes,
-  and §9.9.3 gives its derivation. An empty blob drops it. A lookup MUST return the blob of the label that
-  it proves, and no blob for a tombstone.
+  and §9.9.3 gives its derivation. An empty blob drops it. A lookup MUST
+  return the blob of the label that it proves, and no blob for a tombstone.
 - **[DIS-176]** The plaintext of the blob MUST be `0x01 || name_len u8 ||
   name || welcome_len u16 || welcome || picture_len u16 || picture`: UTF-8 of
   at most 32 bytes, UTF-8 of at most `WELCOME_MAX` bytes, and a JPEG of at most
-  `PICTURE_MAX` bytes or nothing. A client MUST read the pixel size of the
-  picture before it decodes it. A client MUST decode the picture to at most
-  1 024 pixels on each side. `PICTURE_MAX` bounds the bytes of a JPEG and not
-  its canvas (Part 14 rule `IMP-166`). A client MUST take the pixel size from
-  the frame header of the JPEG, with no decoder. A client MUST treat each of
-  two pictures as another form. The first is a picture that holds no baseline,
-  extended, or progressive frame header before its first scan. The second is a
-  picture whose frame header names a side of zero or a side above 1 024 pixels.
-  The re-encode of `DIS-001` writes no such picture. **[DIS-177]** A client
-  MUST reject each other form, and a blob that does not open under the fragment
-  shows no profile.
+  `PICTURE_MAX` bytes or nothing.
+
+  `PICTURE_MAX` bounds the bytes of a JPEG and not its canvas (Part 14 rule
+  `IMP-166`). Thus the picture has these rules:
+
+  - A client MUST read the pixel size of the picture before it decodes it.
+  - A client MUST take the pixel size from the frame header of the JPEG, with
+    no decoder.
+  - A client MUST decode the picture to at most 1 024 pixels on each side.
+  - A client MUST treat each of two pictures as another form. The first is a
+    picture that holds no baseline, extended, or progressive frame header
+    before its first scan. The second is a picture whose frame header names a
+    side of zero or a side above 1 024 pixels. The re-encode of `DIS-001`
+    writes no such picture.
+
+  **[DIS-177]** A client MUST reject each other form, and a blob that does not
+  open under the fragment shows no profile.
 - **[DIS-178]** A tombstone MUST take the blob with it, whether the holder
   wrote it or the lease lapsed.
 - **[DIS-179]** The link MUST be `umbra://h/<name>%23<discriminator>#<fragment>`,
@@ -148,24 +154,24 @@ profile directly.
 
 > *Cause.* The sealed blob needs a place that a lookup reaches. The directory
 > holds the label already, and it answers each lookup through OHTTP, thus it
-> adds no party. It learns the length of a sealed blob
-> and the time of a write, and it holds no key. The answer binds the blob,
-> thus a replay of an answer writes no other blob.
+> adds no party. It learns the length of a sealed blob and the time of a
+> write, and it holds no key. The answer binds the blob, thus a replay of an
+> answer writes no other blob.
 
 This design prevents the outcome of 77 million scraped profile photos.
 
 The blob holds the selected picture of a Profile (Part 4 §4.2.5). Three rules
 apply to that picture.
 
-1. **[DIS-001]** A client MUST re-encode a selected picture before it stores that picture in
-   the blob. **[DIS-002]** The re-encode MUST remove each metadata field.
+1. **[DIS-001]** A client MUST re-encode a selected picture before it stores
+   that picture in the blob. **[DIS-002]** The re-encode MUST remove each metadata field.
    **[DIS-003]** The re-encode MUST hold the result inside the `B2` bucket of
    8 KiB.
 2. **[DIS-004]** If the user selects one picture for two Profiles, the client
    MUST warn. **[DIS-005]** The client MUST get an explicit confirmation. Part 4
    §4.2.5 gives the cross-Profile rules and the rule for a reused name.
-3. **[DIS-006]** A client MUST NOT put a pet-avatar (§9.8) in the blob. A pet-avatar is local
-   state, and no party receives it.
+3. **[DIS-006]** A client MUST NOT put a pet-avatar (§9.8) in the blob. A
+   pet-avatar is local state, and no party receives it.
 
 > *Cause.* Image metadata carries GPS coordinates. A picture above `B2` becomes
 > a Part 12 attachment, and an attachment has a different metadata profile. A
@@ -204,8 +210,8 @@ starts from that form.
 
 > *Cause.* A handle with no normalization gives the VOPRF the bytes that the
 > user typed. A `name` in NFD and the same `name` in NFC then give two
-> directory indexes, and a lookup of the one misses the other. Signal avoids the problem with an ASCII grammar, and UMBRA keeps a
-> Unicode `name`. The profile maps two renderings to one string, and it rejects
+> directory indexes, and a lookup of the one misses the other. Signal avoids
+> the problem with an ASCII grammar, and UMBRA keeps a Unicode `name`. The profile maps two renderings to one string, and it rejects
 > a control character. A confusable pair stays, because no profile removes it.
 > DIS-016 makes a handle no verified identity, and §9.8 gives the petname that
 > the user trusts instead.
@@ -231,8 +237,8 @@ label = VOPRF over ( "umbra/v1/address-index" || address )
 
 An `AddressEntry` is 1 369 bytes. The label prefix keeps the address label
 space apart from the handle label space of §9.3.1 under one VOPRF key. Part 5
-§5.11 holds that label. A handle label is the VOPRF over the canonical handle alone,
-thus no address label equals a handle label.
+§5.11 holds that label. A handle label is the VOPRF over the canonical handle
+alone, thus no address label equals a handle label.
 
 - **[DIS-103]** A client MUST NOT publish an `AddressEntry` without an explicit
   act of the user for that Public Address. Part 4 §4.2.3 makes a publication an
@@ -309,18 +315,20 @@ UMBRA uses the KEYTRANS **combined tree**. That structure is a VRF-blinded
 Merkle prefix tree. A snapshot of that tree goes into a left-balanced
 append-only log tree, with HMAC commitments and a binary-ladder search.
 
-**[DIS-007]** **The VRF inputs MUST be `(label || version)`, and not `label` alone.** This
-rule is not negotiable. A fixed tree position for each user gives the CONIKS
+**[DIS-007]** **The VRF inputs MUST be `(label || version)`, and not `label`
+alone.** This rule is not negotiable. A fixed tree position for each user gives the CONIKS
 tracing vulnerability. In that vulnerability, the sibling in your own inclusion
 proof shows when your neighbor rotates a key. That leak continues forever, and
 it continues after that neighbor removes you.
 
 More requirements:
 
-- **[DIS-008]** The tree MUST use a **fresh tree-wide nonce at each epoch** (CONIKS §3.1).
-- **[DIS-009]** The leaf MUST commit to the **handle string** and not to the index. Thus a VRF
-  key that an attacker chooses cannot collide two handles.
-- **[DIS-010]** There MUST be a maximum of **one update for each label in each epoch**.
+- **[DIS-008]** The tree MUST use a **fresh tree-wide nonce at each epoch**
+  (CONIKS §3.1).
+- **[DIS-009]** The leaf MUST commit to the **handle string** and not to the
+  index. Thus a VRF key that an attacker chooses cannot collide two handles.
+- **[DIS-010]** There MUST be a maximum of **one update for each label in each
+  epoch**.
 
 **The layout.** The KEYTRANS draft leaves the byte layout to its profile, and
 this section gives the profile of UMBRA. Each hash is SHA3-256.
@@ -338,16 +346,19 @@ log_leaf_e   = H( 0x00 || nonce_e || prefix_root_e )
 log_node     = H( 0x01 || left || right )
 ```
 
-The **prefix tree** is a binary tree over the bits of `index`, the most
-significant bit first. A leaf sits at the first depth `d` where no other leaf
-shares its first `d` bits. `prefix(index, d)` is `index` with each bit from
-position `d` on cleared. The prefix tree holds each version of each label that
-the log ever took, thus it only grows. The **log tree** is the left-balanced
-tree of Part 10 §10.5.3 over one `log_leaf_e` for each epoch `e`, and
-`tree_size` of §9.5.2 counts those leaves. `opening` is 32 bytes from the
-CSPRNG of the log operator. `entry` is the encoded `DirectoryEntry`,
-`AddressEntry`, or `IssuerKeyEntry` of Part 13 §13.5. Part
-5 §5.11 holds the label.
+The terms of the layout:
+
+- The **prefix tree** is a binary tree over the bits of `index`, the most
+  significant bit first. A leaf sits at the first depth `d` where no other
+  leaf shares its first `d` bits. The prefix tree holds each version of each
+  label that the log ever took, thus it only grows.
+- `prefix(index, d)` is `index` with each bit from position `d` on cleared.
+- The **log tree** is the left-balanced tree of Part 10 §10.5.3 over one
+  `log_leaf_e` for each epoch `e`. `tree_size` of §9.5.2 counts those leaves.
+- `opening` is 32 bytes from the CSPRNG of the log operator.
+- `entry` is the encoded `DirectoryEntry`, `AddressEntry`, or
+  `IssuerKeyEntry` of Part 13 §13.5.
+- Part 5 §5.11 holds the label `"umbra/v1/log-commit"`.
 
 - **[DIS-145]** The VRF input of a version MUST be `search_key || BE32(version)`,
   where `search_key` is the VOPRF output over the label input. Thus the
@@ -460,23 +471,36 @@ of them. The freshness bound below limits an equivocation to one week.
 
 **The bootstrap deployment.** A network starts with one operator, as Part 3
 `NET-340` states for the relays and Part 10 `REL-126` for the relay
-directory. The v1 reference directory is one process that holds
-the three signer keys and runs both auditors. It signs each head under signer
-index `0`. It makes the two auditor signatures itself after it runs the checks
-of `DIS-161` on its own update. Under that deployment the
-paragraph above does not hold. One order to the operator of that process, or
-one break-in at its host, signs a split view under three valid signatures. A
-client cannot tell that head from an honest one. The rules of this
-section stay as they are. A client verifies 2 of 3, and it holds each head
-against the one before it under `DIS-159` and `DIS-160`. The gossip of
-§9.5.3 still compares the heads of two clients. What the deployment lacks is
-the independence of the signers, and no rule of a client gives that. The
-`LogKeySet` carries no count of independent signers, thus a client shows no
-provisional state for the log as it does for the relay directory. The
-deployment ends when two auditors under other control do two things. They run
-the checks of `DIS-049` and `DIS-161` on the update set of the operator. They
-sign with keys that the operator does not hold. The rotation of `DIS-064` then
-moves the key set to their keys.
+directory. The v1 reference directory is one process that holds the three
+signer keys and runs both auditors. It signs each head under signer index `0`.
+It makes the two auditor signatures itself after it runs the checks of
+`DIS-161` on its own update.
+
+Under that deployment, the claim that no one legal order can make a split view
+does not hold. One order to the
+operator of that process, or one break-in at its host, signs a split view
+under three valid signatures. A client cannot tell that head from an honest
+one.
+
+The rules of this section stay as they are:
+
+- A client verifies 2 of 3.
+- A client holds each head against the one before it under `DIS-159` and
+  `DIS-160`.
+- The gossip of §9.5.3 still compares the heads of two clients.
+
+What the deployment lacks is the independence of the signers, and no rule of a
+client gives that. The `LogKeySet` carries no count of independent signers,
+thus a client shows no provisional state for the log as it does for the relay
+directory.
+
+The deployment ends when two auditors under other control do two things:
+
+1. They run the checks of `DIS-049` and `DIS-161` on the update set of the
+   operator.
+2. They sign with keys that the operator does not hold.
+
+The rotation of `DIS-064` then moves the key set to their keys.
 
 The `contactMonitoring` mode is untenable in UMBRA. The contacts are mutually
 pseudonymous, thus no party can depend on them to monitor the labels of each
@@ -649,8 +673,8 @@ a client in that state, because two signers suffice. The loss of two does.
 
 > *Cause.* A rule that accepts only a tree head that all three signers
 > co-signed in 7 days fails closed. One auditor outage, one dispute, or one
-> legal order then stops each handle lookup after seven days. §9.4.1 says that the directory degrades gracefully and does
-> not fail closed. The deployment of Signal runs two auditors in one
+> legal order then stops each handle lookup after seven days. §9.4.1 says that
+> the directory degrades gracefully and does not fail closed. The deployment of Signal runs two auditors in one
 > jurisdiction, which shows how hard three funded auditors in three
 > jurisdictions are to keep. A 2-of-3 acceptance keeps the property that no
 > one legal order makes a split view, and it survives the loss of one signer.
@@ -695,9 +719,10 @@ survives an adversary that controls the full view of the client of the
 directory.
 
 > *Cause.* Part 6 §6.4.2 rule 6 fills the L6 record to a fixed length, thus no
-> spare byte of an ordinary message holds a hash. Part 15 §15.4 names this gossip as the answer
-> to directory equivocation, and Part 10 rule `REL-008` requires the same
-> mechanism for the consensus root. The record of Part 6 §6.6.4 serves the two.
+> spare byte of an ordinary message holds a hash. Part 15 §15.4 names this
+> gossip as the answer to directory equivocation, and Part 10 rule `REL-008`
+> requires the same mechanism for the consensus root. The record of Part 6
+> §6.6.4 serves the two.
 
 ### 9.5.4 Ciphersuite, and the one place UMBRA is not post-quantum
 
@@ -708,8 +733,8 @@ directory.
 | Commitments | HMAC-SHA3-256 with a random 32-byte opening |
 | **Index blinding** | **ECVRF-EDWARDS25519-SHA512-TAI (RFC 9381) — classically secure only** |
 
-**[DIS-012]** **An implementation MUST state this limit in its user-facing documentation.**
-Part 15 §15.2.6 records the same limit as a residual risk. A harvested log and a
+**[DIS-012]** **An implementation MUST state this limit in its user-facing
+documentation.** Part 15 §15.2.6 records the same limit as a residual risk. A harvested log and a
 future cryptographically relevant quantum computer together **de-blind the full
 historical directory**.
 
@@ -771,14 +796,16 @@ name and the picture of the sender, and in the place of the welcome text the
 note that the sender wrote with the request. A receiver MUST show the name,
 the picture, and the note as claims of the sender (§9.8), and it MUST read a
 profile that does not parse as a bare name of at most 32 bytes.
-**[DIS-201]** A client MUST
-reject a profile plaintext whose name holds a control character (Unicode
-general category Cc), U+2028, U+2029, or a bidirectional format character
-(U+061C, U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069). The same rule
-holds for the welcome text and the note, which can hold U+000A as a line
-break. A client MUST NOT write such a plaintext, and a bare name of
-`DIS-180` passes the same test. Such a character moves or hides the text
-around it, thus a stranger could show a name that reads as another one.
+
+**[DIS-201]** A client MUST reject a profile plaintext whose name holds a
+control character (Unicode general category Cc), U+2028, U+2029, or a
+bidirectional format character (U+061C, U+200E, U+200F, U+202A to U+202E,
+U+2066 to U+2069). The same rule holds for the welcome text and the note,
+which can hold U+000A as a line break. A client MUST NOT write such a
+plaintext, and a bare name of `DIS-180` passes the same test. Such a character
+moves or hides the text around it, thus a stranger could show a name that
+reads as another one.
+
 **[DIS-181]** A client MUST seal each hello record in bucket `B3` of Part 6
 §6.9, whatever the hello holds. A picture and a note change the length of a
 hello, and a relay of the rendezvous queue would read that length. A request
@@ -789,18 +816,17 @@ from a pasted string or from a reusable link of Part 4 §4.3.2. Step 1 then
 looks up the `AddressEntry` of §9.3.3, and it gets `(address_pk, rendezvous)`.
 **[DIS-110]** A client MUST encapsulate that hello to `address_pk`. Part 13
 §13.4 derives the proof-of-work seed from `address_pk`. Steps 3 to 5 do not
-change. Part 8
-§8.2.6 gives the drain of the rendezvous queue at the addressee, and Part 2
-§2.4.2 goal S1 sets the latency.
+change. Part 8 §8.2.6 gives the drain of the rendezvous queue at the
+addressee, and Part 2 §2.4.2 goal S1 sets the latency.
 
 **[DIS-013]** **After the upgrade, a contact from a handle MUST be bit-for-bit
 indistinguishable from a contact from a QR code.**
 
-**[DIS-014]** The client MUST poll the rendezvous queue through a **different relay chain**
-from the pairwise queues. **[DIS-015]** The client MUST also poll that queue on a **different
-schedule**. Thus a relay that sees the
-polling of a handle queue cannot correlate that polling with the conversation
-traffic of the same user.
+**[DIS-014]** The client MUST poll the rendezvous queue through a **different
+relay chain** from the pairwise queues. **[DIS-015]** The client MUST also poll
+that queue on a **different schedule**. Thus a relay that sees the polling of a
+handle queue cannot correlate that polling with the conversation traffic of
+the same user.
 
 > *Implementation note.* The reference client reads its rendezvous queues on
 > circuits that carry no other queue, no handshake record, and no group
@@ -824,8 +850,8 @@ X25519 keypair and an ML-KEM-768 keypair only, and neither keypair signs data.
 The ratchet of the existing session authenticates the notice, in the same manner
 as it authenticates an edit (Part 6 §6.6.1).
 
-Each contact receives a different record on a different chain. **[DIS-023]** A client MUST
-send one notice for each contact. **[DIS-024]** A client MUST NOT reuse one
+Each contact receives a different record on a different chain. **[DIS-023]** A
+client MUST send one notice for each contact. **[DIS-024]** A client MUST NOT reuse one
 authenticated object across two contacts. Part 4 §4.5.1 rule 6 gives the delay
 that separates the sends.
 
@@ -842,33 +868,38 @@ Each contact has three names:
 | **Handle** | yes | yes | **no** | secondary, always with its origin |
 | **Petname** (the user assigns it) | no | yes | yes | **prominently** |
 
-**[DIS-016]** **A handle MUST NOT render as a verified identity.** The documentation of Signal
-states that key transparency "does not verify the identity of the user who
-controls a particular phone number or username." A handle proves that *this key
+**[DIS-016]** **A handle MUST NOT render as a verified identity.** The
+documentation of Signal states that key transparency "does not verify the
+identity of the user who controls a particular phone number or username." A handle proves that *this key
 is consistently published for this string*. A handle proves nothing about the
 party that holds the key.
 
 The user assigns the petname when the user accepts the contact. That moment also
 gives the user a natural point to do the out-of-band confirmation.
 
-**The pet-avatar.** **[DIS-017]** The viewer MAY also assign a picture to a contact. The
-client shows that picture to the viewer only. **[DIS-018]** **A client MUST NOT send a
-pet-avatar to any party.** A pet-avatar is mutable state under Part 7 §7.5.3,
+**The pet-avatar.** **[DIS-017]** The viewer MAY also assign a picture to a
+contact. The client shows that picture to the viewer only. **[DIS-018]** **A
+client MUST NOT send a pet-avatar to any party.** A pet-avatar is mutable state under Part 7 §7.5.3,
 thus the devices of one user converge on one value. §9.3.1 rule 3 keeps a
 pet-avatar out of the encrypted profile blob.
 
 **[DIS-195]** A client MUST take a pet-avatar from a picker that gives the
-client the one picture that the user selected. The client MUST crop that
-picture to one square: the square that the user selects, or the center square
-when the user selects none. It MUST scale the square to 256 pixels or less on
-each side. It MUST encode the result anew as a JPEG of at most
-`PET_AVATAR_MAX` bytes, and that encode MUST remove each metadata field. A
-client MUST apply the bounds of `DIS-176` to a pet-avatar before it decodes
-one. **[DIS-196]** A client MUST hold a pet-avatar under the record
-encryption of Part 14 §14.6.4, and it MUST NOT write the selected picture or
-the result to a file outside the store. Part 7 rules `DEV-327` and `DEV-328`
-give the sync item and the backup. A contact with no pet-avatar shows a
-letter on a color, which the client makes on the device.
+client the one picture that the user selected. Then:
+
+1. The client MUST crop that picture to one square: the square that the user
+   selects, or the center square when the user selects none.
+2. It MUST scale the square to 256 pixels or less on each side.
+3. It MUST encode the result anew as a JPEG of at most `PET_AVATAR_MAX` bytes,
+   and that encode MUST remove each metadata field.
+
+A client MUST apply the bounds of `DIS-176` to a pet-avatar before it decodes
+one.
+
+**[DIS-196]** A client MUST hold a pet-avatar under the record encryption of
+Part 14 §14.6.4, and it MUST NOT write the selected picture or the result to a
+file outside the store. Part 7 rules `DEV-327` and `DEV-328` give the sync item
+and the backup. A contact with no pet-avatar shows a letter on a color, which
+the client makes on the device.
 
 > *Cause.* The picture is private data of the viewer: it can show the face of
 > the contact. Image metadata carries a place and a time. The bound of
@@ -877,19 +908,21 @@ letter on a color, which the client makes on the device.
 
 The pet-avatar stands beside the petname. The viewer names the contact, and the
 viewer pictures the contact. Part 4 §4.2.5 gives the Profile, which holds the
-value that the contact selected. **[DIS-019]** The client MUST show the two values apart.
+value that the contact selected. **[DIS-019]** The client MUST show the two
+values apart.
 
 ### 9.8.1 Verification UX
 
 **This subsection covers a handle key in the §9.5 transparency log. It does not
-cover a pairwise identity key.** **[DIS-025]** A client MUST apply Part 4 §4.5.1 to a
-pairwise identity key, and IDN-025 makes that notice blocking.
+cover a pairwise identity key.** **[DIS-025]** A client MUST apply Part 4
+§4.5.1 to a pairwise identity key, and IDN-025 makes that notice blocking.
 
 - **Automatic verification is the default, and it is silent.**
-- A **handle** key-change warning fires **only** when the transparency log cannot
-  prove that the publication of the change was consistent. **[DIS-020]** A warning MUST NOT
-  fire at each rotation of a handle key. **[DIS-021]** A warning MUST state the concrete next
-  action. **[DIS-022]** A warning MUST NOT show a fingerprint.
+- A **handle** key-change warning fires **only** when the transparency log
+  cannot prove that the publication of the change was consistent.
+  **[DIS-020]** A warning MUST NOT fire at each rotation of a handle key.
+  **[DIS-021]** A warning MUST state the concrete next action. **[DIS-022]** A
+  warning MUST NOT show a fingerprint.
 - The manual fallback is a **short comparison code in the SAS style**. The
   manual fallback is not a long fingerprint.
 
@@ -927,8 +960,7 @@ holds nothing worth a second crawl.
 > it reads the hello count and the hello times of the entry for as long as the
 > address stands. A rotation that waits for a user action does not bound that
 > time. Part 15 §15.3 states that residual, and the schedule bounds it to one
-> period. The cost is
-> one `NEW` and one directory write in each period.
+> period. The cost is one `NEW` and one directory write in each period.
 
 ### 9.9.1 The lease renewal challenge
 
@@ -1008,6 +1040,22 @@ takeover is not a rotation.
   label version between the held and the resolved `version`.
   **[DIS-080]** If that count is above `HANDLE_HISTORY_MAX`, the client MUST
   show the takeover warning.
+- **[DIS-081]** If a tombstone version lies between the two, the client MUST
+  compare the `HK_pub` before it with the `HK_pub` after it.
+  **[DIS-082]** If the two differ, the client MUST show the takeover warning.
+- **[DIS-083]** A client MUST NOT apply `DIS-020` to the takeover warning.
+  **[DIS-084]** The takeover warning MUST state that a different party now
+  holds the handle.
+- **[DIS-085]** Under the takeover warning, a client MUST NOT send the hello
+  of §9.6 step 2 without an explicit user confirmation.
+
+> *Cause.* A tombstone with no reservation lets a second party register the
+> label at once. The log proves that publication consistent, thus `DIS-020`
+> keeps the client silent. A contact that holds a pet name for the handle then
+> sends a hello to the second party. The reservation equals `BACKUP_TTL`,
+> because a backup that a relay still holds is a backup that a user can still
+> restore. The zero-byte tombstone gives the client a version to find, and the
+> version scan is bounded because a rotation is rare.
 
 A lookup opens the newest version alone. The `Version` request of §9.10
 opens one older version under the newest head:
@@ -1041,23 +1089,6 @@ VersionProof {                    // the answer of a Version request, §9.10
 > *Cause.* A lookup opens the newest version alone. Without the `Version`
 > request, a client cannot read the versions between a held key and a
 > resolved one, and `DIS-079` needs them.
-- **[DIS-081]** If a tombstone version lies between the two, the client MUST
-  compare the `HK_pub` before it with the `HK_pub` after it.
-  **[DIS-082]** If the two differ, the client MUST show the takeover warning.
-- **[DIS-083]** A client MUST NOT apply `DIS-020` to the takeover warning.
-  **[DIS-084]** The takeover warning MUST state that a different party now
-  holds the handle.
-- **[DIS-085]** Under the takeover warning, a client MUST NOT send the hello
-  of §9.6 step 2 without an explicit user confirmation.
-
-> *Cause.* A tombstone with no reservation lets a second party register the
-> label at once. The log proves that publication consistent, thus `DIS-020`
-> keeps the client silent. A contact that holds a pet name for the handle then
-> sends a hello to the second party. The
-> reservation equals `BACKUP_TTL`, because a backup that a relay still holds is
-> a backup that a user can still restore. The zero-byte tombstone gives the
-> client a version to find, and the version scan is bounded because a rotation
-> is rare.
 
 ### 9.9.3 The write authorization
 
@@ -1126,10 +1157,10 @@ write. `DIS-094`, `DIS-097` and `DIS-100` give the same for an entry. Part 5
 > Without `DIS-197`, a party with a token registers a lapsed label under the
 > published key of its last holder and with a queue of its own. The key is
 > the same, thus `DIS-081` shows no takeover, and each contact sends its
-> hello to that queue.
-> §9.9.2 then shows that user as a takeover. The
-> challenge above is the challenge of §9.9.1 under a second label, with the
-> entry hash in the answer. Thus a directory that relays a challenge to the
+> hello to that queue. §9.9.2 then shows that user as a takeover.
+>
+> The challenge above is the challenge of §9.9.1 under a second label, with
+> the entry hash in the answer. Thus a directory that relays a challenge to the
 > holder cannot swap the entry after the answer. A lapsed lease needs no
 > challenge, because the directory writes the tombstone and no other party
 > does.
@@ -1181,11 +1212,23 @@ DirResponse {                     // padded to the smallest DIR_RESPONSE_SIZES v
 | `0x0A` KeySet | `keyset_epoch u64` that the client holds | `count u8`, then `count` times `len u16` and a `SignedLogKeySet` of §9.5.2 (`DIS-198`) |
 | `0x10` Issue | Part 13 §13.9 | Part 13 §13.9 |
 
-The label input is the canonical handle of §9.3.2 for a handle, the input of
-§9.3.3 for an address, and the input of Part 13 §13.5 for an issuer key. The
-directory computes the search key from it under its own key. Thus each request
-of a holder shows its label input to the directory, which holds that input in
-the record of the label in any case; only the evaluation of a lookup hides it.
+The label input is one of these:
+
+- the canonical handle of §9.3.2 for a handle;
+- the input of §9.3.3 for an address;
+- the input of Part 13 §13.5 for an issuer key.
+
+The directory computes the search key from it under its own key. Thus each
+request of a holder shows its label input to the directory. The directory holds
+that input in the record of the label in any case. Only the evaluation of a
+lookup hides it.
+
+> *Cause.* The shape follows the Notification Delivery Relay of Part 8 §8.2,
+> which already runs one request type through an ingress relay in OHTTP. The
+> padding hides the kind of a request from the relay. A lookup shows the search
+> key to the directory, which names a registered handle, and a write shows its
+> label, because the directory must bind the write to it. OHTTP keeps the
+> asking party apart from both.
 
 - **[DIS-164]** A directory MUST evaluate a blinded element for a lookup only
   with an `Admission` of a first-party token of Part 13 §13.3.2 or of a
@@ -1193,10 +1236,11 @@ the record of the label in any case; only the evaluation of a lookup hides it.
   solution MUST be `SHA3-256("umbra/v1/lookup-pow" || BE32(epoch) ||
   blinded)`, where `epoch` is the epoch of Part 13 §13.6 of the directory or
   the one before it, and its `verifier_id` MUST be
-  `SHA3-256("umbra/v1/lookup-pow-verifier" || pk)`, where `pk` is the VOPRF key of the directory. A solution thus
-  serves one blinded element, and a second request with that element gains
-  nothing, because it gets the same element back.
-  **[DIS-200]** A directory MUST hold the seed of each solution that it
+  `SHA3-256("umbra/v1/lookup-pow-verifier" || pk)`, where `pk` is the VOPRF
+  key of the directory. A solution thus serves one blinded element, and a
+  second request with that element gains nothing, because it gets the same
+  element back.
+- **[DIS-200]** A directory MUST hold the seed of each solution that it
   took for this epoch and the one before it, and it MUST refuse a solution
   whose seed it holds before it verifies that solution. A second request
   then costs the directory no Equi-X check, no evaluation, and no proof.
@@ -1222,33 +1266,29 @@ the record of the label in any case; only the evaluation of a lookup hides it.
 - **[DIS-171]** A holder MAY write the tombstone form of §9.3 under the
   challenge of §9.9.3 to retire its entry before its lease ends.
   `HANDLE_RESERVE` holds for such a tombstone as for a lapsed lease.
-- **[DIS-172]** A registration MAY end with `lease`, in seconds. The
-  directory MUST then end the lease of the label at the time of the
-  registration plus `lease`, and no renewal and no write MUST move that end.
-  The end holds through a tombstone. A write under the reserve challenge of
-  `DIS-075` before the end takes a lease that stops at the end. The directory
-  MUST refuse such a write after the end. A registration after `HANDLE_RESERVE`
-  is a new one, and it takes no end from the label before it.
-  The label then takes the tombstone of a lapsed lease under `DIS-073`. A
+- **[DIS-172]** A registration MAY end with `lease`, in seconds. Then:
+  - The directory MUST end the lease of the label at the time of the
+    registration plus `lease`, and no renewal and no write MUST move that end.
+  - The end holds through a tombstone. A write under the reserve challenge of
+    `DIS-075` before the end takes a lease that stops at the end. The
+    directory MUST refuse such a write after the end.
+  - A registration after `HANDLE_RESERVE` is a new one, and it takes no end
+    from the label before it.
+
+  At the end, the label takes the tombstone of a lapsed lease under `DIS-073`. A
   reusable link of a limited period is an address that registers so, thus it
-  ends while its holder is off. **[DIS-173]** A directory MUST refuse a
-  `lease` below `LEASE_MIN` or above `HANDLE_LEASE` as malformed.
-  **[DIS-174]** A holder MUST drop each hello that reaches the rendezvous
+  ends while its holder is off.
+- **[DIS-173]** A directory MUST refuse a `lease` below `LEASE_MIN` or above
+  `HANDLE_LEASE` as malformed.
+- **[DIS-174]** A holder MUST drop each hello that reaches the rendezvous
   queue of a timed entry after its end, and it MUST end that queue at its
   next upkeep.
 
 > *Cause.* A timed link that ends by the tombstone write of its holder alone
 > depends on the phone of that holder. A phone that is off at the end leaves
-> the link open, possibly for days. The directory already writes the tombstone of a lapsed lease, and
-> a lease with an end moves that work to it. A requester that read the entry
+> the link open, possibly for days. The directory already writes the
+> tombstone of a lapsed lease, and a lease with an end moves that work to it. A requester that read the entry
 > before its end still holds its queue, thus the holder drops such a hello.
-
-> *Cause.* The shape follows the Notification
-> Delivery Relay of Part 8 §8.2, which already runs one request type through
-> an ingress relay in OHTTP. The padding hides the kind of a request from the
-> relay. A lookup shows the search key to the directory, which names a
-> registered handle, and a write shows its label, because the directory must
-> bind the write to it. OHTTP keeps the asking party apart from both.
 
 ## 9.11 Parameters
 
