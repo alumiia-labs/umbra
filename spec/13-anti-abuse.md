@@ -99,6 +99,7 @@ list above gates a queue creation.
   > rendezvous path and the handle directory no fallback. The two doors of
   > §13.1 then stay locked for a new install. Thus the rule binds each
   > verifier whose row names §13.8.
+
 - **[ABU-016]** An issuer MUST NOT need an identifier from a client to issue a
   token batch. **[ABU-017]** A deployment MUST publish the attestation that it
   uses for an issuance. **[ABU-018]** A deployment MUST NOT use a hardware
@@ -457,6 +458,7 @@ The object is 3 387 bytes. The signature covers
 > no path, and the signature of the relay makes the carrier a courier only.
 > A carrier that withholds a challenge denies the admission of a proof of
 > work at that relay; a token of §13.3 still admits.
+
 - **[ABU-067]** A verifier other than a relay or an addressee client MUST
   return its newest challenge with each admission rejection. An admission
   rejection is a rejection of a request that carries no accepted `Admission`.
@@ -623,7 +625,6 @@ IssueResponse {
 A batch of 256 tokens costs about 7 minutes of a phone under that rule. Thus a
 token that a user buys with time costs what the puzzle of one relay costs at
 its maximum. Path 3 does not undercut the valve of §13.8.
-
 
 This method gives the same unlinkability between the payer and the traffic as
 Chaumian ecash. It also gives **no custody, no token economics, and no

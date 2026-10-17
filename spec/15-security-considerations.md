@@ -369,7 +369,6 @@ proof for an update, and no independent party rebuilds a release. Trust
 assumption 4 of Part 2 §2.6 thus rests on the release signer and on the
 store. §15.1 holds the row of the app stores.
 
-
 ## 15.6 Legal and governance requirements
 
 **Closed-world routing.** A relay speaks UMBRA only, to a client and to
@@ -381,7 +380,6 @@ A secret software-modification power exists in the United Kingdom under a
 technical capability notice, and in Australia under TOLA. No rule of this
 part makes a modified release impossible, and §15.5 states that v1 does not
 make it detectable.
-
 
 ### 15.6.1 Funding
 

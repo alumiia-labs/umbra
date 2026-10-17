@@ -371,7 +371,6 @@ proof-lines for each implementation-line. At that rate, the verification of a
 protocol core is a commitment of multiple engineer-years. libcrux spent that
 effort and reached only 58.4 % checked coverage.
 
-
 ## 14.6 Platform delivery
 
 ### 14.6.1 FFI
@@ -528,6 +527,7 @@ lock fails.
   > writes `sent_at`, and Part 6 `WIR-076` makes it advisory. A time on the
   > screen is no security decision, and the two bounds keep a wrong clock
   > of a peer from a time that no record could have.
+
 - **[IMP-129]** A conversation identifier on the surface MUST be the surrogate
   of §14.6.4 under the store key, and it MUST NOT be a queue identifier. Thus
   the owner column of a message row names no queue to a party that reads the
@@ -1134,6 +1134,7 @@ through each batch of the pass and through the mark (`IDN-068`).
   > conversation. A download at arrival shows them the arrival alone. The
   > default keeps each photo and each document at arrival, and a large video
   > waits.
+
 - **[IMP-168]** A client MUST let the user limit the automatic download to a
   network that the platform does not mark as metered. With that limit on, a
   file that arrives on a metered network MUST wait as a file above the limit
@@ -1153,6 +1154,7 @@ through each batch of the pass and through the mark (`IDN-068`).
   > *Cause.* A recorder of the platform writes to a file by default, and a
   > file under the cache of the app outlives a crash. A recording that stays
   > after a lock is a plaintext that the lock of `IMP-161` does not reach.
+
 - **[IMP-164]** A deletion of a message MUST erase its rows in the tables
   `0x0F`, `0x10` and `0x11` in the batch that takes the message, and for a
   file that this device uploaded it MUST then send the `CDEL` of `ATT-161`
@@ -1518,7 +1520,6 @@ runs is the binary that the auditor examined*. v1 gives no method to check
 that assumption. The release build pins its toolchain (§14.5.1) and holds
 `Cargo.lock`. No independent party rebuilds a release, and the project runs
 no binary transparency log. Part 15 §15.5 states the result.
-
 
 ## 14.9 Degraded states and the interface
 

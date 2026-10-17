@@ -458,6 +458,7 @@ read_sk    := HKDF-SHA3-256("umbra/v1/chunk-read", file_key, chunk_index_be32)
    > `chunk_id` that an honest upload later picks, and the honest upload then
    > fails or overwrites. The registration is first-come, and `CHUNK_TTL`
    > releases it.
+
 4. **[ATT-040]** A relay MUST authorize `CPUT` and `CDEL` against `cred_pk`
    only. **[ATT-041]** A relay MUST authorize `CGET` and `CRNW` against
    `read_pk` only. **[ATT-180]** A relay MUST authorize `CREP` and `CVFY`
@@ -493,6 +494,7 @@ read_sk    := HKDF-SHA3-256("umbra/v1/chunk-read", file_key, chunk_index_be32)
    > party still reads. `CHUNK_LIFE_MAX` bounds each renewal, thus a renewal
    > cannot keep a chunk for ever. An uploader that wants a chunk gone sends
    > `CDEL`, and a renewal does not override that command.
+
 9. **[ATT-048]** A client MUST send an attachment command on the separate
    connection of §12.8.
 10. **The backup class.** A `BNEW` registers a **backup-class chunk**, and a
