@@ -54,6 +54,7 @@ pub fn split_path(path: &[u8]) -> Result<Vec<&[u8]>, Error> {
         entries.push(rest.get(2..2 + len).ok_or(Error::Malformed)?);
         rest = rest.get(2 + len..).ok_or(Error::Malformed)?;
     }
+
     Ok(entries)
 }
 
@@ -92,6 +93,7 @@ impl Member {
         if sha3_256(&[kem_pk]) != self.kem_pk_hash {
             return Err(Error::Unverified);
         }
+
         self.kem_pk = Some(kem_pk.to_vec());
         Ok(())
     }
@@ -101,6 +103,7 @@ impl Member {
         if sha3_256(&[roster_pk]) != self.roster_pk_hash {
             return Err(Error::Unverified);
         }
+
         self.roster_pk = Some(roster_pk.to_vec());
         Ok(())
     }
@@ -261,6 +264,7 @@ impl Roster {
         );
         let mut history = BTreeMap::new();
         history.insert(0, (alloc::vec![index], now));
+
         Roster {
             group_id,
             epoch_index: 0,
@@ -299,6 +303,7 @@ impl Roster {
         if snapshot.entries.len() > GROUP_MAX {
             return Err(Error::Malformed);
         }
+
         let mut members = BTreeMap::new();
         let mut highest = None;
         for entry in &snapshot.entries {
@@ -317,6 +322,7 @@ impl Roster {
                 return Err(Error::Malformed);
             }
         }
+
         for key in &snapshot.keys {
             members
                 .get_mut(&key.index)
@@ -326,6 +332,7 @@ impl Roster {
         if members.values().any(|m| m.kem_pk.is_none()) {
             return Err(Error::Unverified);
         }
+
         let active: Vec<u16> = members.keys().copied().collect();
         let mut history = BTreeMap::new();
         history.insert(snapshot.roster_epoch, (active, now));
@@ -350,6 +357,7 @@ impl Roster {
             rates: RosterRates::partial(slot_of(now)),
             rival_seen: false,
         };
+
         roster.verify_path(snapshot.path, creator_roster_pk)?;
         Ok(roster)
     }
@@ -390,9 +398,6 @@ impl Roster {
         self.rates.is_whole()
     }
 
-    /// Verifies the authority path: each granting epoch in chain order,
-    /// under a roster key the path or the creator gave (`GRP-062`,
-    /// `GRP-326`). The grantee roster keys the path carries are kept.
     /// Verifies the authority path of a snapshot in chain order
     /// (`GRP-326`, `GRP-399`). The creator starts as `owner`. Each grant
     /// needs a granter at `admin` or above at that point of the path, and
@@ -411,6 +416,7 @@ impl Roster {
             member.set_roster_pk(creator_roster_pk)?;
             creator = Some(member.index);
         }
+
         let mut grants = Vec::new();
         for bytes in split_path(path)? {
             let control = GroupControl::parse(bytes)?;
@@ -419,12 +425,14 @@ impl Roster {
             }
             grants.push(GrantingEpoch::parse(control.payload)?);
         }
+
         grants.sort_by_key(|grant| grant.chain.epoch_index);
         if grants.windows(2).any(|pair| {
             pair.first().map(|g| g.chain.epoch_index) == pair.get(1).map(|g| g.chain.epoch_index)
         }) {
             return Err(Error::Malformed);
         }
+
         // The role and the key hash of each index that the path names.
         let mut state: BTreeMap<u16, (Role, [u8; 32])> = self
             .members
@@ -436,6 +444,7 @@ impl Roster {
         // its own key and not under the key of an entry there.
         let creator_index = creator.unwrap_or(0);
         state.insert(creator_index, (Role::Owner, creator_hash));
+
         for grant in &grants {
             if grant.chain.group_id != self.group_id {
                 return Err(Error::Unverified);
@@ -446,6 +455,7 @@ impl Roster {
                 return Err(Error::Unverified);
             }
             grant.verify(&granter_hash)?;
+
             match state.get_mut(&grant.grantee_index) {
                 Some((role, hash)) => {
                     if *hash != grant.grantee_roster_pk_hash
@@ -466,6 +476,7 @@ impl Roster {
                 }
             }
         }
+
         // GRP-399: the path backs a role holder by its key and its role. An
         // entry with keys of its own at the index of a creator that left, or
         // of a grantee, has no grant behind it.
@@ -477,6 +488,7 @@ impl Roster {
         if !self.members.values().all(backed) {
             return Err(Error::Unverified);
         }
+
         Ok(())
     }
 
@@ -500,6 +512,7 @@ impl Roster {
         if granter.role < Role::Admin {
             return Err(Error::Unverified);
         }
+
         // GRP-316: the epoch carries the key of its granter, and the roster
         // entry binds it by its hash.
         epoch.verify(&granter.roster_pk_hash)?;
@@ -648,6 +661,7 @@ impl Roster {
         {
             return Ok(None);
         }
+
         let hash = control.epoch_hash();
         let by_maker = sender == undo.maker;
         // The same object from the same maker is a copy. A plain epoch
@@ -668,11 +682,13 @@ impl Roster {
         {
             return Err(Error::Stale);
         }
+
         // The object applies to the roster before the head. GRP-381: each
         // check of it runs here, before it counts as a successor.
         let displaced_maker = undo.maker;
         let mut candidate = undo.before.clone();
         let applied = candidate.apply_inner(control, sender, slot, now)?;
+
         if by_maker {
             // GRP-072 to GRP-074: a signed object names its maker, and a
             // plain one names nobody.
@@ -682,6 +698,7 @@ impl Roster {
             )
             .then_some(sender);
             self.show_fork(chain.previous_epoch_hash, named);
+
             // GRP-070: a re-key stands over each other successor of its
             // maker. A signature is random, thus a holder of the old keys
             // could grind another object to a lower hash and undo the
@@ -697,6 +714,7 @@ impl Roster {
                 return Err(Error::Stale);
             }
         }
+
         // The object comes first: it stands on the roster before the head,
         // and the head goes.
         let old = core::mem::replace(self, candidate);
@@ -713,6 +731,7 @@ impl Roster {
             maker: displaced_maker,
             hash: old.chain_hash,
         });
+
         Ok(Some(applied))
     }
 
@@ -738,6 +757,7 @@ impl Roster {
         if control.control_type != ControlType::Rekey {
             return None;
         }
+
         let record = RekeyRecord::parse(control.payload).ok()?;
         let held = self
             .successors
@@ -829,6 +849,7 @@ impl Roster {
                 roster_epoch,
             });
         }
+
         let mut before: Option<&Vec<u16>> = None;
         for (epoch, (active, _)) in self.history.range(roster_epoch..) {
             if let Some(previous) = before {
@@ -845,6 +866,7 @@ impl Roster {
             }
             before = Some(active);
         }
+
         triggers
     }
 
@@ -862,8 +884,10 @@ impl Roster {
         self.history.retain(|epoch, (_, at)| {
             *epoch >= floor || now.saturating_sub(*at) < umbra_queue::params::GROUP_RETENTION
         });
+
         let oldest = self.history.keys().next().copied().unwrap_or(current);
         self.successors.retain(|_, (_, epoch)| *epoch >= oldest);
+
         if let Some(undo) = self.undo.as_mut() {
             undo.before.retain_history(now, keep_from);
         }
@@ -886,6 +910,7 @@ impl Roster {
         let Ok(next) = self.next_index() else {
             return false;
         };
+
         index == next
             || self
                 .open_index
@@ -905,6 +930,7 @@ impl Roster {
         {
             return Err(Error::Unverified);
         }
+
         Ok(())
     }
 
@@ -959,6 +985,7 @@ impl Roster {
         {
             return Err(Error::NoPath);
         }
+
         Ok(())
     }
 
@@ -991,6 +1018,7 @@ impl Roster {
         self.head_rekey = None;
         self.epoch_index = self.epoch_index.saturating_add(1);
         self.chain_hash = hash;
+
         let active: Vec<u16> = self.active().map(|m| m.index).collect();
         self.history.insert(self.epoch_index, (active, now));
     }
@@ -1012,10 +1040,12 @@ impl Roster {
             active: true,
         };
         member.set_kem_pk(keys.kem_pk)?;
+
         self.members.insert(index, member);
         self.highest_index = Some(index);
         // GRP-320: the index of this object is the index of the group.
         self.open_index = None;
+
         Ok(())
     }
 
@@ -1047,6 +1077,7 @@ impl Roster {
                 return Ok(applied);
             }
         }
+
         let extends = chain.as_ref().is_some_and(|chain| {
             chain.epoch_index == self.epoch_index.saturating_add(1)
                 && chain.previous_epoch_hash == self.chain_hash
@@ -1054,6 +1085,7 @@ impl Roster {
         let before = extends.then(|| self.detached());
         let epoch = self.epoch_index;
         let applied = self.apply_inner(control, sender, slot, now)?;
+
         if let Some(before) = before {
             if self.epoch_index != epoch {
                 self.undo = Some(alloc::boxed::Box::new(Undo {
@@ -1062,6 +1094,7 @@ impl Roster {
                 }));
             }
         }
+
         Ok(applied)
     }
 
@@ -1074,229 +1107,291 @@ impl Roster {
     ) -> Result<Applied, Error> {
         let hash = control.epoch_hash();
         match control.control_type {
-            ControlType::PlainEpoch => {
-                let epoch = PlainEpoch::parse(control.payload)?;
-                self.check_chain(epoch.chain.epoch_index, &epoch.chain.previous_epoch_hash)?;
-                if epoch.chain.group_id != self.group_id {
-                    return Err(Error::Unverified);
-                }
-                let sender_role = self
-                    .members
-                    .get(&sender)
-                    .filter(|m| m.active)
-                    .map(|m| m.role)
-                    .ok_or(Error::Unverified)?;
-                let applied = match epoch.op {
-                    PlainOp::Add { index, keys } => {
-                        if sender_role < Role::Admin
-                            || !self.index_fits(index)
-                            || self.active_count() >= GROUP_MAX
-                        {
-                            return Err(Error::Unverified);
-                        }
-                        Self::check_keys(&keys)?;
-                        self.rate(sender, RateKind::Epoch, slot)?;
-                        self.note_successor(epoch.chain.previous_epoch_hash, sender, hash, false)?;
-                        self.insert_member(index, &keys, Role::Member)?;
-                        Applied::Added(index)
-                    }
-                    PlainOp::Remove { index } => {
-                        if sender_role < Role::Admin {
-                            return Err(Error::Unverified);
-                        }
-                        let target = self
-                            .members
-                            .get(&index)
-                            .filter(|m| m.active)
-                            .ok_or(Error::Unverified)?;
-                        if target.role > Role::Member {
-                            return Err(Error::Unverified);
-                        }
-                        self.rate(sender, RateKind::Epoch, slot)?;
-                        self.note_successor(epoch.chain.previous_epoch_hash, sender, hash, false)?;
-                        if let Some(m) = self.members.get_mut(&index) {
-                            m.active = false;
-                        }
-                        Applied::Removed(Trigger {
-                            excluded: Some(index),
-                            roster_epoch: self.epoch_index.saturating_add(1),
-                        })
-                    }
-                    PlainOp::SelfRemoval => {
-                        self.rate(sender, RateKind::Epoch, slot)?;
-                        self.note_successor(epoch.chain.previous_epoch_hash, sender, hash, false)?;
-                        if let Some(m) = self.members.get_mut(&sender) {
-                            m.active = false;
-                        }
-                        Applied::Removed(Trigger {
-                            excluded: Some(sender),
-                            roster_epoch: self.epoch_index.saturating_add(1),
-                        })
-                    }
-                };
-                self.commit(hash, now);
-                Ok(applied)
-            }
+            ControlType::PlainEpoch => self.apply_plain(control.payload, sender, hash, slot, now),
             ControlType::GrantingEpoch => {
-                let epoch = GrantingEpoch::parse(control.payload)?;
-                self.check_chain(epoch.chain.epoch_index, &epoch.chain.previous_epoch_hash)?;
-                if epoch.chain.group_id != self.group_id || epoch.granter_index != sender {
-                    return Err(Error::Unverified);
-                }
-                self.check_granting_signature(&epoch)?;
-                if epoch.granter_index == epoch.grantee_index {
-                    return Err(Error::Unverified);
-                }
-                let granter_role = self
-                    .members
-                    .get(&sender)
-                    .map(|m| m.role)
-                    .ok_or(Error::Unverified)?;
-                let grantee = self
-                    .members
-                    .get(&epoch.grantee_index)
-                    .filter(|m| m.active)
-                    .ok_or(Error::Unverified)?;
-                if !Self::may_change(granter_role, grantee.role, epoch.role) {
-                    return Err(Error::Unverified);
-                }
-                let holders = self.active().filter(|m| m.role >= Role::Moderator).count();
-                if epoch.role >= Role::Moderator
-                    && grantee.role < Role::Moderator
-                    && holders >= ROLE_HOLDER_MAX
-                {
-                    return Err(Error::Unverified);
-                }
-                if grantee.role == Role::Owner
-                    && epoch.role < Role::Owner
-                    && self.owner_count() <= OWNER_MIN
-                {
-                    return Err(Error::Unverified);
-                }
-                self.check_grantee_key(&epoch)?;
-                // GRP-167: an epoch that takes a role away counts against
-                // no rate of the grants.
-                let kind = if epoch.role >= Role::Moderator {
-                    RateKind::Grant
-                } else {
-                    RateKind::Demotion
-                };
-                self.rate(sender, kind, slot)?;
-                self.note_successor(epoch.chain.previous_epoch_hash, sender, hash, true)?;
-                if let Some(m) = self.members.get_mut(&epoch.grantee_index) {
-                    m.role = epoch.role;
-                }
-                self.commit(hash, now);
-                Ok(Applied::Granted {
-                    index: epoch.grantee_index,
-                    role: epoch.role,
-                })
+                self.apply_granting(control.payload, sender, hash, slot, now)
             }
             ControlType::ModerationEpoch => {
-                let epoch = ModerationEpoch::parse(control.payload)?;
-                self.check_chain(epoch.chain.epoch_index, &epoch.chain.previous_epoch_hash)?;
-                if epoch.chain.group_id != self.group_id || epoch.actor_index != sender {
-                    return Err(Error::Unverified);
-                }
-                if epoch.actions.is_empty() || epoch.actions.len() > MOD_ACTION_MAX {
-                    return Err(Error::Malformed);
-                }
-                let actor = self
-                    .members
-                    .get(&sender)
-                    .filter(|m| m.active)
-                    .ok_or(Error::Unverified)?;
-                if actor.role < Role::Moderator || actor.role != epoch.actor_role {
-                    return Err(Error::Unverified);
-                }
-                epoch.verify(&actor.roster_pk_hash)?;
-                self.rate(sender, RateKind::Epoch, slot)?;
-                self.note_successor(epoch.chain.previous_epoch_hash, sender, hash, true)?;
-                self.commit(hash, now);
-                Ok(Applied::Moderated {
-                    actor_role: epoch.actor_role,
-                    actions: epoch.actions,
-                })
+                self.apply_moderation(control.payload, sender, hash, slot, now)
             }
-            ControlType::Rekey => {
-                let record = RekeyRecord::parse(control.payload)?;
-                if record.chain_is_zero() {
-                    return Err(Error::Malformed);
-                }
-                if record.chain.group_id != self.group_id || record.old_index != sender {
-                    return Err(Error::Unverified);
-                }
-                let predecessor = record.chain.previous_epoch_hash;
-                if let Some(head) = self.head_rekey.filter(|head| {
-                    head.old_index == record.old_index
-                        && head.predecessor == predecessor
-                        && record.chain.epoch_index == self.epoch_index
-                }) {
-                    return self.replace_rekey(&record, head, hash, slot);
-                }
-                let old = self
-                    .members
-                    .get(&record.old_index)
-                    .ok_or(Error::Unverified)?;
-                let (old_key, is_active, role) = (old.roster_pk_hash, old.active, old.role);
-                // The chain moved past the re-key that this one rivals, thus
-                // the fork shows and nothing changes. The fork names the
-                // maker, thus the signature comes first (GRP-072): a record
-                // that any holder of the slot key built names nobody.
-                if self
-                    .successors
-                    .get(&(predecessor, sender))
-                    .is_some_and(|(held, _)| *held != hash)
-                {
-                    record.verify(&old_key)?;
-                    self.show_fork(predecessor, Some(sender));
-                    return Err(Error::Stale);
-                }
-                self.check_chain(record.chain.epoch_index, &predecessor)?;
-                if !is_active {
-                    return Err(Error::Unverified);
-                }
-                record.verify(&old_key)?;
-                // GRP-366: one index leaves and one enters, thus a group
-                // of `GROUP_MAX` members takes a re-key.
-                if !self.index_fits(record.new_index) || self.active_count() > GROUP_MAX {
-                    return Err(Error::Unverified);
-                }
-                Self::check_keys(&record.new_keys)?;
-                self.rate(
-                    sender,
-                    RateKind::Rekey {
-                        new_index: record.new_index,
-                    },
-                    slot,
-                )?;
-                // Two re-keys for one old index and one predecessor: the
-                // lower hash wins, and the fork shows (GRP-369).
-                self.note_successor(record.chain.previous_epoch_hash, sender, hash, true)?;
-                if let Some(m) = self.members.get_mut(&record.old_index) {
-                    m.active = false;
-                }
-                self.insert_member(record.new_index, &record.new_keys, role)?;
-                self.commit(hash, now);
-                self.head_rekey = Some(HeadRekey {
-                    predecessor,
-                    old_index: record.old_index,
-                    new_index: record.new_index,
-                });
-                self.moves.insert(record.old_index, record.new_index);
-                let trigger = Trigger {
-                    excluded: Some(record.old_index),
-                    roster_epoch: self.epoch_index,
-                };
-                Ok(Applied::Rekeyed {
-                    old: record.old_index,
-                    new: record.new_index,
-                    trigger,
-                    replaced: false,
-                })
-            }
+            ControlType::Rekey => self.apply_rekey(control.payload, sender, hash, slot, now),
             _ => Err(Error::Malformed),
         }
+    }
+
+    /// Applies a plain epoch: an add, a removal, or a self-removal.
+    fn apply_plain(
+        &mut self,
+        payload: &[u8],
+        sender: u16,
+        hash: [u8; 32],
+        slot: u32,
+        now: u64,
+    ) -> Result<Applied, Error> {
+        let epoch = PlainEpoch::parse(payload)?;
+        self.check_chain(epoch.chain.epoch_index, &epoch.chain.previous_epoch_hash)?;
+        if epoch.chain.group_id != self.group_id {
+            return Err(Error::Unverified);
+        }
+
+        let sender_role = self
+            .members
+            .get(&sender)
+            .filter(|m| m.active)
+            .map(|m| m.role)
+            .ok_or(Error::Unverified)?;
+
+        let applied = match epoch.op {
+            PlainOp::Add { index, keys } => {
+                if sender_role < Role::Admin
+                    || !self.index_fits(index)
+                    || self.active_count() >= GROUP_MAX
+                {
+                    return Err(Error::Unverified);
+                }
+                Self::check_keys(&keys)?;
+
+                self.rate(sender, RateKind::Epoch, slot)?;
+                self.note_successor(epoch.chain.previous_epoch_hash, sender, hash, false)?;
+                self.insert_member(index, &keys, Role::Member)?;
+                Applied::Added(index)
+            }
+            PlainOp::Remove { index } => {
+                if sender_role < Role::Admin {
+                    return Err(Error::Unverified);
+                }
+                let target = self
+                    .members
+                    .get(&index)
+                    .filter(|m| m.active)
+                    .ok_or(Error::Unverified)?;
+                if target.role > Role::Member {
+                    return Err(Error::Unverified);
+                }
+
+                self.rate(sender, RateKind::Epoch, slot)?;
+                self.note_successor(epoch.chain.previous_epoch_hash, sender, hash, false)?;
+                if let Some(m) = self.members.get_mut(&index) {
+                    m.active = false;
+                }
+                Applied::Removed(Trigger {
+                    excluded: Some(index),
+                    roster_epoch: self.epoch_index.saturating_add(1),
+                })
+            }
+            PlainOp::SelfRemoval => {
+                self.rate(sender, RateKind::Epoch, slot)?;
+                self.note_successor(epoch.chain.previous_epoch_hash, sender, hash, false)?;
+                if let Some(m) = self.members.get_mut(&sender) {
+                    m.active = false;
+                }
+                Applied::Removed(Trigger {
+                    excluded: Some(sender),
+                    roster_epoch: self.epoch_index.saturating_add(1),
+                })
+            }
+        };
+
+        self.commit(hash, now);
+        Ok(applied)
+    }
+
+    /// Applies a granting epoch, which changes the role of one member.
+    fn apply_granting(
+        &mut self,
+        payload: &[u8],
+        sender: u16,
+        hash: [u8; 32],
+        slot: u32,
+        now: u64,
+    ) -> Result<Applied, Error> {
+        let epoch = GrantingEpoch::parse(payload)?;
+        self.check_chain(epoch.chain.epoch_index, &epoch.chain.previous_epoch_hash)?;
+        if epoch.chain.group_id != self.group_id || epoch.granter_index != sender {
+            return Err(Error::Unverified);
+        }
+        self.check_granting_signature(&epoch)?;
+        if epoch.granter_index == epoch.grantee_index {
+            return Err(Error::Unverified);
+        }
+
+        let granter_role = self
+            .members
+            .get(&sender)
+            .map(|m| m.role)
+            .ok_or(Error::Unverified)?;
+        let grantee = self
+            .members
+            .get(&epoch.grantee_index)
+            .filter(|m| m.active)
+            .ok_or(Error::Unverified)?;
+        if !Self::may_change(granter_role, grantee.role, epoch.role) {
+            return Err(Error::Unverified);
+        }
+        let holders = self.active().filter(|m| m.role >= Role::Moderator).count();
+        if epoch.role >= Role::Moderator
+            && grantee.role < Role::Moderator
+            && holders >= ROLE_HOLDER_MAX
+        {
+            return Err(Error::Unverified);
+        }
+        if grantee.role == Role::Owner
+            && epoch.role < Role::Owner
+            && self.owner_count() <= OWNER_MIN
+        {
+            return Err(Error::Unverified);
+        }
+        self.check_grantee_key(&epoch)?;
+
+        // GRP-167: an epoch that takes a role away counts against
+        // no rate of the grants.
+        let kind = if epoch.role >= Role::Moderator {
+            RateKind::Grant
+        } else {
+            RateKind::Demotion
+        };
+        self.rate(sender, kind, slot)?;
+        self.note_successor(epoch.chain.previous_epoch_hash, sender, hash, true)?;
+
+        if let Some(m) = self.members.get_mut(&epoch.grantee_index) {
+            m.role = epoch.role;
+        }
+        self.commit(hash, now);
+        Ok(Applied::Granted {
+            index: epoch.grantee_index,
+            role: epoch.role,
+        })
+    }
+
+    /// Applies a moderation epoch. The group applies its actions.
+    fn apply_moderation(
+        &mut self,
+        payload: &[u8],
+        sender: u16,
+        hash: [u8; 32],
+        slot: u32,
+        now: u64,
+    ) -> Result<Applied, Error> {
+        let epoch = ModerationEpoch::parse(payload)?;
+        self.check_chain(epoch.chain.epoch_index, &epoch.chain.previous_epoch_hash)?;
+        if epoch.chain.group_id != self.group_id || epoch.actor_index != sender {
+            return Err(Error::Unverified);
+        }
+        if epoch.actions.is_empty() || epoch.actions.len() > MOD_ACTION_MAX {
+            return Err(Error::Malformed);
+        }
+
+        let actor = self
+            .members
+            .get(&sender)
+            .filter(|m| m.active)
+            .ok_or(Error::Unverified)?;
+        if actor.role < Role::Moderator || actor.role != epoch.actor_role {
+            return Err(Error::Unverified);
+        }
+        epoch.verify(&actor.roster_pk_hash)?;
+
+        self.rate(sender, RateKind::Epoch, slot)?;
+        self.note_successor(epoch.chain.previous_epoch_hash, sender, hash, true)?;
+        self.commit(hash, now);
+        Ok(Applied::Moderated {
+            actor_role: epoch.actor_role,
+            actions: epoch.actions,
+        })
+    }
+
+    /// Applies a re-key on the chain, or a rival of the re-key at the head.
+    fn apply_rekey(
+        &mut self,
+        payload: &[u8],
+        sender: u16,
+        hash: [u8; 32],
+        slot: u32,
+        now: u64,
+    ) -> Result<Applied, Error> {
+        let record = RekeyRecord::parse(payload)?;
+        if record.chain_is_zero() {
+            return Err(Error::Malformed);
+        }
+        if record.chain.group_id != self.group_id || record.old_index != sender {
+            return Err(Error::Unverified);
+        }
+
+        let predecessor = record.chain.previous_epoch_hash;
+        if let Some(head) = self.head_rekey.filter(|head| {
+            head.old_index == record.old_index
+                && head.predecessor == predecessor
+                && record.chain.epoch_index == self.epoch_index
+        }) {
+            return self.replace_rekey(&record, head, hash, slot);
+        }
+
+        let old = self
+            .members
+            .get(&record.old_index)
+            .ok_or(Error::Unverified)?;
+        let (old_key, is_active, role) = (old.roster_pk_hash, old.active, old.role);
+
+        // The chain moved past the re-key that this one rivals, thus
+        // the fork shows and nothing changes. The fork names the
+        // maker, thus the signature comes first (GRP-072): a record
+        // that any holder of the slot key built names nobody.
+        if self
+            .successors
+            .get(&(predecessor, sender))
+            .is_some_and(|(held, _)| *held != hash)
+        {
+            record.verify(&old_key)?;
+            self.show_fork(predecessor, Some(sender));
+            return Err(Error::Stale);
+        }
+
+        self.check_chain(record.chain.epoch_index, &predecessor)?;
+        if !is_active {
+            return Err(Error::Unverified);
+        }
+        record.verify(&old_key)?;
+
+        // GRP-366: one index leaves and one enters, thus a group
+        // of `GROUP_MAX` members takes a re-key.
+        if !self.index_fits(record.new_index) || self.active_count() > GROUP_MAX {
+            return Err(Error::Unverified);
+        }
+        Self::check_keys(&record.new_keys)?;
+        self.rate(
+            sender,
+            RateKind::Rekey {
+                new_index: record.new_index,
+            },
+            slot,
+        )?;
+
+        // Two re-keys for one old index and one predecessor: the
+        // lower hash wins, and the fork shows (GRP-369).
+        self.note_successor(record.chain.previous_epoch_hash, sender, hash, true)?;
+
+        if let Some(m) = self.members.get_mut(&record.old_index) {
+            m.active = false;
+        }
+        self.insert_member(record.new_index, &record.new_keys, role)?;
+        self.commit(hash, now);
+        self.head_rekey = Some(HeadRekey {
+            predecessor,
+            old_index: record.old_index,
+            new_index: record.new_index,
+        });
+        self.moves.insert(record.old_index, record.new_index);
+
+        let trigger = Trigger {
+            excluded: Some(record.old_index),
+            roster_epoch: self.epoch_index,
+        };
+        Ok(Applied::Rekeyed {
+            old: record.old_index,
+            new: record.new_index,
+            trigger,
+            replaced: false,
+        })
     }
 
     /// A rival of the re-key at the head of the chain: the same old index
@@ -1316,6 +1411,7 @@ impl Roster {
         if hash == self.chain_hash {
             return Err(Error::Stale);
         }
+
         let old = self
             .members
             .get(&record.old_index)
@@ -1325,6 +1421,7 @@ impl Roster {
             return Err(Error::Unverified);
         }
         Self::check_keys(&record.new_keys)?;
+
         // GRP-076: each of the two counts on the roster before the head,
         // as the one that came first did. A rival above a rate is no
         // re-key at a member that reads it first, thus it is none here.
@@ -1337,7 +1434,9 @@ impl Roster {
                 return Err(Error::Unverified);
             }
         }
+
         self.show_fork(head.predecessor, Some(record.old_index));
+
         // GRP-369: the head re-key of this roster epoch had a rival. The
         // mark of an earlier copy of the pair keeps its count.
         let is_marked = self.replaced.is_some_and(|replaced| {
@@ -1352,14 +1451,17 @@ impl Roster {
             });
             self.rival_seen = true;
         }
+
         if hash > self.chain_hash {
             return Err(Error::Stale);
         }
+
         // The count of the re-key that stands runs from the slot of its
         // own record, at each member alike.
         if let Some(rates) = rates {
             self.rates = rates;
         }
+
         let role = self
             .members
             .get(&head.new_index)
@@ -1376,12 +1478,14 @@ impl Roster {
             active: true,
         };
         member.set_kem_pk(record.new_keys.kem_pk)?;
+
         self.members.insert(head.new_index, member);
         self.chain_hash = hash;
         self.successors.insert(
             (head.predecessor, record.old_index),
             (hash, self.epoch_index),
         );
+
         // An epoch-key record of this roster epoch can hold a slot for the
         // keys that lost, thus the rival is a trigger (GRP-368). The group
         // sets the count when its epoch is of this roster epoch.
@@ -1419,6 +1523,7 @@ impl Roster {
         w.bytes(&self.chain_hash);
         w.u32(self.admission_epoch);
         w.option(self.highest_index.as_ref(), |w, index| w.u16(*index));
+
         w.u32(count(self.members.len())?);
         for member in self.members.values() {
             w.u16(member.index);
@@ -1434,6 +1539,7 @@ impl Roster {
                 let _ = w.var(key);
             });
         }
+
         w.u32(count(self.history.len())?);
         for (roster_epoch, (active, at)) in &self.history {
             w.u32(*roster_epoch);
@@ -1443,6 +1549,7 @@ impl Roster {
                 w.u16(*index);
             }
         }
+
         w.u32(count(self.successors.len())?);
         for ((predecessor, maker), (hash, epoch)) in &self.successors {
             w.bytes(predecessor);
@@ -1450,11 +1557,13 @@ impl Roster {
             w.bytes(hash);
             w.u32(*epoch);
         }
+
         w.u32(count(self.forks.len())?);
         for fork in &self.forks {
             w.bytes(&fork.predecessor);
             w.option(fork.named.as_ref(), |w, index| w.u16(*index));
         }
+
         w.option(self.head_rekey.as_ref(), |w, head| {
             w.bytes(&head.predecessor);
             w.u16(head.old_index);
@@ -1465,6 +1574,7 @@ impl Roster {
             w.u16(*old);
             w.u16(*new);
         }
+
         match &self.undo {
             Some(undo) => {
                 w.flag(true);
@@ -1475,6 +1585,7 @@ impl Roster {
             }
             None => w.flag(false),
         }
+
         w.option(self.replaced.as_ref(), |w, replaced| {
             w.u32(replaced.roster_epoch);
             w.u16(replaced.new_index);
@@ -1483,6 +1594,7 @@ impl Roster {
         });
         w.option(self.open_index.as_ref(), |w, index| w.u16(*index));
         self.rates.export(w)?;
+
         Ok(())
     }
 
@@ -1499,11 +1611,13 @@ impl Roster {
         {
             return Err(Error::Stale);
         }
+
         let group_id = r.array()?;
         let epoch_index = r.u32()?;
         let chain_hash = r.array()?;
         let admission_epoch = r.u32()?;
         let highest_index = r.option(Reader::u16)?;
+
         let mut members = BTreeMap::new();
         for _ in 0..r.u32()? {
             let member = Member {
@@ -1518,6 +1632,7 @@ impl Roster {
             };
             members.insert(member.index, member);
         }
+
         let mut history = BTreeMap::new();
         for _ in 0..r.u32()? {
             let roster_epoch = r.u32()?;
@@ -1528,6 +1643,7 @@ impl Roster {
             }
             history.insert(roster_epoch, (active, at));
         }
+
         let mut successors = BTreeMap::new();
         for _ in 0..r.u32()? {
             let predecessor: [u8; 32] = r.array()?;
@@ -1542,6 +1658,7 @@ impl Roster {
             };
             successors.insert((predecessor, maker), (hash, epoch));
         }
+
         let mut forks = Vec::new();
         for _ in 0..r.u32()? {
             forks.push(Fork {
@@ -1549,6 +1666,7 @@ impl Roster {
                 named: r.option(Reader::u16)?,
             });
         }
+
         let mut head_rekey = None;
         let mut moves = BTreeMap::new();
         let mut undo = None;
@@ -1569,6 +1687,7 @@ impl Roster {
                 moves.insert(old, new);
             }
         }
+
         if version >= ROSTER_VERSION_UNDO && r.flag()? {
             let maker = r.u16()?;
             let before = Roster::import(&mut Reader::new(r.var()?))?;
@@ -1577,6 +1696,7 @@ impl Roster {
             }
             undo = Some(alloc::boxed::Box::new(Undo { before, maker }));
         }
+
         let mut replaced = None;
         let mut open_index = None;
         let mut rates = RosterRates::default();
@@ -1592,6 +1712,7 @@ impl Roster {
             open_index = r.option(Reader::u16)?;
             rates = RosterRates::import(r, version >= ROSTER_VERSION)?;
         }
+
         // GRP-076: a form before the marks of the rates counted nothing, or
         // it counted from a snapshot with no mark of it. The roster read no
         // object after the one at its head. Thus each object that it did
@@ -1602,6 +1723,7 @@ impl Roster {
                 .map_or(0, |(_, at): &(Vec<u16>, u64)| *at);
             rates = rates.since(slot_of(head));
         }
+
         Ok(Roster {
             group_id,
             epoch_index,
@@ -1640,6 +1762,7 @@ impl Roster {
                 grant.grantee_index,
             ));
         }
+
         let mut needed = alloc::collections::BTreeSet::new();
         let mut work: Vec<(u16, u32)> = self
             .active()
@@ -1659,8 +1782,10 @@ impl Roster {
                 work.push((*granter, *epoch));
             }
         }
+
         let mut kept: Vec<usize> = needed.into_iter().collect();
         kept.sort_by_key(|position| parsed.get(*position).map(|(epoch, _, _)| *epoch));
+
         let mut path = Vec::new();
         for position in &kept {
             let bytes = grants.get(*position).ok_or(Error::Malformed)?;
@@ -1668,6 +1793,7 @@ impl Roster {
             path.extend_from_slice(&len.to_be_bytes());
             path.extend_from_slice(bytes);
         }
+
         Ok((path, kept))
     }
 
@@ -1910,6 +2036,7 @@ pub(crate) mod tests {
         assert_eq!(roster.apply(&control, 0, 10).unwrap(), Applied::Added(1));
         assert_eq!(roster.epoch_index(), 1);
         assert_eq!(roster.active_at(1).unwrap(), &[0, 1]);
+
         // A replay is stale, and a wrong index or a non-admin sender fails.
         assert_eq!(roster.apply(&control, 0, 11), Err(Error::Stale));
         let bad_index = add_control(&roster, &carol, 5);
@@ -1941,6 +2068,7 @@ pub(crate) mod tests {
         );
         assert!(roster.member(1).unwrap().roster_pk.is_none());
         assert_eq!(roster.owner_count(), 2);
+
         let demote = grant_control(&roster, &bob, 1, &creator, 0, Role::Member);
         assert_eq!(
             roster.apply(&GroupControl::parse(&demote).unwrap(), 1, 14),
@@ -1951,6 +2079,7 @@ pub(crate) mod tests {
             roster.apply(&GroupControl::parse(&forged).unwrap(), 2, 14),
             Err(Error::Unverified)
         );
+
         // The new owner signs under a key that this roster never held, and
         // its epoch verifies against the hash of its entry.
         let by_bob = grant_control(&roster, &bob, 1, &carol, 2, Role::Observer);
@@ -2010,12 +2139,14 @@ pub(crate) mod tests {
         roster
             .apply(&GroupControl::parse(&first).unwrap(), 0, 1)
             .unwrap();
+
         // The second names the same predecessor: stale by index, and the
         // fork check runs on the chain position.
         let mut back = Roster::genesis([7; 32], entry_of(&creator, 0, Role::Owner), 0);
         back.apply(&GroupControl::parse(&first).unwrap(), 0, 1)
             .unwrap();
         assert!(back.forks().is_empty());
+
         let mut again = Roster::genesis([7; 32], entry_of(&creator, 0, Role::Owner), 0);
         again
             .note_successor(
@@ -2070,6 +2201,7 @@ pub(crate) mod tests {
         let mut roster = Roster::genesis([7; 32], entry_of(&member(1), 0, Role::Owner), 0);
         let kem = bob.kem().public().to_bytes();
         let hash = sha3_256(&[&bob.roster().verifying_key().to_bytes()]);
+
         // GRP-237: a pair key of low order gives no pair key with any
         // member, and each sender would stop at its entry.
         let low = plain_control(
@@ -2087,6 +2219,7 @@ pub(crate) mod tests {
             roster.apply(&GroupControl::parse(&low).unwrap(), 0, 1),
             Err(Error::Unverified)
         );
+
         // GRP-308: a KEM key that does not decode takes no slot, and each
         // rotator would stop at its entry. The X25519 half is of low order.
         let mut undecoded = kem;
@@ -2106,6 +2239,7 @@ pub(crate) mod tests {
             roster.apply(&GroupControl::parse(&bad).unwrap(), 0, 1),
             Err(Error::Unverified)
         );
+
         // GRP-381: an epoch that failed counts as no successor.
         let add = add_control(&roster, &bob, 1);
         roster
@@ -2148,6 +2282,7 @@ pub(crate) mod tests {
         };
         assert_eq!(roster.apply(&control, 1, 2), Err(Error::Unverified));
         assert!(roster.member(1).unwrap().active);
+
         let good = rekey_control(&roster, &bob, 1, 9);
         assert!(matches!(
             roster
@@ -2170,6 +2305,7 @@ pub(crate) mod tests {
         roster
             .apply(&GroupControl::parse(&add).unwrap(), 0, 3)
             .unwrap();
+
         // GRP-072: the fork names its maker, thus the signature comes
         // first. Any holder of the slot key builds a record under index 1
         // with a signature that does not verify, and it shows nothing.
@@ -2180,6 +2316,7 @@ pub(crate) mod tests {
         let refused = roster.apply(&GroupControl::parse(&forged).unwrap(), 1, 4);
         assert!(refused.is_err() && refused != Err(Error::Stale));
         assert!(roster.forks().is_empty());
+
         // GRP-410: the true rival came after the chain moved past the
         // re-key. The fork shows and names index 1, and nothing changes.
         let head = *roster.chain_hash();
@@ -2211,11 +2348,13 @@ pub(crate) mod tests {
                 .unwrap();
         }
         assert_eq!(roster.active_count(), GROUP_MAX);
+
         let full = add_control(&roster, &bob, 500);
         assert_eq!(
             roster.apply_at(&GroupControl::parse(&full).unwrap(), 0, 20, 2),
             Err(Error::Unverified)
         );
+
         // GRP-366: one index leaves and one enters.
         let rekey = rekey_control(&roster, &bob, 7, 9);
         assert!(matches!(
@@ -2249,6 +2388,7 @@ pub(crate) mod tests {
         let mut b = base.clone();
         b.apply(&leave, 1, 2).unwrap();
         let _ = b.apply(&rekey, 1, 3);
+
         // The stored form between the two keeps the order.
         let mut c = base.clone();
         c.apply(&leave, 1, 2).unwrap();
@@ -2263,10 +2403,12 @@ pub(crate) mod tests {
             assert_eq!(roster.epoch_index(), base.epoch_index() + 1);
             assert!(!roster.member(1).unwrap().active);
         }
+
         let set = |roster: &Roster| roster.active().map(|m| m.index).collect::<Vec<_>>();
         assert_eq!(set(&a), set(&b));
         assert_eq!(set(&a), set(&c));
         assert_eq!(a.successor_of(1), b.successor_of(1));
+
         // An object that fails its checks is no second successor, and it
         // shows no fork (GRP-381).
         let mut d = base.clone();
@@ -2297,6 +2439,7 @@ pub(crate) mod tests {
             assert_eq!(live.chain_hash(), late.chain_hash());
             first
         };
+
         // The creator adds a member and removes it again, 60 objects in
         // one slot, and the next one of that slot is above the rate.
         let dave = member(4);
@@ -2315,6 +2458,7 @@ pub(crate) mod tests {
         }
         let above = add_control(&head, &dave, index);
         assert_eq!(both(&above, 0, 900), Err(Error::Unverified));
+
         // An older slot opens no second window, another member is inside
         // its own rate, and the next slot takes the object.
         assert_eq!(both(&above, 0, 899), Err(Error::Unverified));
@@ -2347,6 +2491,7 @@ pub(crate) mod tests {
         let fifth = rekey_control(&head, &keys, at, 30);
         assert_eq!(both(&fifth, at, 903), Err(Error::Unverified));
         both(&fifth, at, 902 + RATE_DAY_SLOTS).unwrap();
+
         // A maker asks before it posts.
         assert!(!head.rate_allows(at, RateKind::Rekey { new_index: 99 }, 903));
         assert!(head.rate_allows(at, RateKind::Epoch, 903));
@@ -2363,6 +2508,7 @@ pub(crate) mod tests {
         roster
             .apply(&GroupControl::parse(&leave).unwrap(), 1, 200)
             .unwrap();
+
         // GRP-357: the two epochs since epoch 2 lost one index each.
         assert_eq!(
             roster.triggers_since(2),
@@ -2388,9 +2534,11 @@ pub(crate) mod tests {
         assert!(roster.active_at(0).is_none());
         assert_eq!(roster.active_at(3).unwrap(), &[0, 1]);
         assert_eq!(roster.triggers_since(3).len(), 1);
+
         // The head and the set before it stay under each bound.
         roster.retain_history(later, u32::MAX);
         assert!(roster.active_at(3).is_some() && roster.active_at(4).is_some());
+
         // A successor of an epoch that went leaves with it, and the newer
         // ones stay.
         assert_eq!(roster.successors.len(), 2);
@@ -2472,6 +2620,7 @@ pub(crate) mod tests {
         } else {
             (second, first)
         };
+
         let mut roster = base.clone();
         roster.apply(&high, 1, 2).unwrap();
         assert!(roster.rekey_replaced().is_none());
@@ -2479,6 +2628,7 @@ pub(crate) mod tests {
             roster.apply(&low, 1, 3).unwrap(),
             Applied::Rekeyed { replaced: true, .. }
         ));
+
         // GRP-369: the mark of the rival, and one epoch of its roster epoch
         // that came before it.
         let epoch = roster.epoch_index();
@@ -2506,6 +2656,7 @@ pub(crate) mod tests {
         assert_eq!(back.triggers_since(epoch).len(), 1);
         assert_eq!(back.rates, roster.rates);
         assert_eq!(back.successors, roster.successors);
+
         // The next epoch of that roster epoch answers the rival, and no
         // third one has room.
         back.note_rotation(epoch);
@@ -2525,6 +2676,7 @@ pub(crate) mod tests {
         assert_eq!(old.head_rekey(), roster.head_rekey());
         assert_eq!(old.head_maker(), roster.head_maker());
         assert!(old.rekey_replaced().is_none());
+
         // GRP-076: it counted nothing, thus it knows no window that stands
         // at the time of its head.
         assert_eq!(old.rates, RosterRates::partial(slot_of(3)));
@@ -2548,9 +2700,11 @@ pub(crate) mod tests {
         } else {
             (second, first)
         };
+
         let mut loser_first = base.clone();
         loser_first.apply_at(&high, 1, 50, 2).unwrap();
         loser_first.apply_at(&low, 1, 53, 3).unwrap();
+
         let mut winner_first = base.clone();
         winner_first.apply_at(&low, 1, 53, 2).unwrap();
         assert!(winner_first.rekey_replaced().is_none());
@@ -2559,9 +2713,11 @@ pub(crate) mod tests {
         assert_eq!(winner_first.rekey_replaced(), loser_first.rekey_replaced());
         assert_eq!(winner_first.chain_hash(), loser_first.chain_hash());
         assert_eq!(winner_first.forks(), loser_first.forks());
+
         // GRP-076: the count of the re-key runs from the slot of the record
         // that stands, in each order.
         assert_eq!(winner_first.rates, loser_first.rates);
+
         // A second copy of the record that lost keeps the count of the
         // mark.
         winner_first.rival_after_rotation(1, false);
@@ -2582,11 +2738,13 @@ pub(crate) mod tests {
         roster.open_next_index();
         assert!(roster.index_is_open());
         assert_eq!(roster.build_index(), Err(Error::NoPath));
+
         let mut w = Writer::new();
         roster.export(&mut w).unwrap();
         let bytes = w.finish();
         let mut roster = Roster::import(&mut Reader::new(&bytes)).unwrap();
         assert_eq!(roster.build_index(), Err(Error::NoPath));
+
         // The add of another member gives the index.
         let mut ahead = three();
         let add = add_control(&ahead, &member(4), 3);
@@ -2623,6 +2781,7 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(roster.head_maker(), Some(1));
         assert!(!roster.member(1).unwrap().active);
+
         let grant = grant_control(&roster, &member(2), 1, &member(3), 2, Role::Admin);
         let head = *roster.chain_hash();
         assert_eq!(
@@ -2631,6 +2790,7 @@ pub(crate) mod tests {
         );
         assert_eq!(*roster.chain_hash(), head);
         assert_eq!(roster.member(2).unwrap().role, Role::Member);
+
         // The new keys of the member grant as before.
         let grant = grant_control(&roster, &member(9), 3, &member(3), 2, Role::Moderator);
         roster
@@ -2684,9 +2844,11 @@ pub(crate) mod tests {
                 out
             };
             let grant = GroupControl::parse(&grant).unwrap();
+
             let mut a = base.clone();
             a.apply(&rekey, 1, 3).unwrap();
             assert_eq!(a.apply(&grant, 1, 4), Err(Error::Stale));
+
             let mut b = base.clone();
             b.apply(&grant, 1, 3).unwrap();
             assert!(matches!(
@@ -2694,6 +2856,7 @@ pub(crate) mod tests {
                 Applied::Rekeyed { old: 1, new: 3, .. }
             ));
             assert_eq!(b.take_displaced().unwrap().maker, 1);
+
             for roster in [&a, &b] {
                 assert_eq!(*roster.chain_hash(), rekey.epoch_hash());
                 assert_eq!(roster.forks().len(), 1);
@@ -2713,22 +2876,26 @@ pub(crate) mod tests {
             assert_eq!(result, Err(Error::Unverified));
             assert_eq!(*roster.chain_hash(), head);
         };
+
         // GRP-063: an admin gives no `owner` and takes no role of an owner.
         let to_owner = grant_control(&roster, &member(2), 1, &member(3), 2, Role::Owner);
         refused(&mut roster, &to_owner, 1);
         let demote = grant_control(&roster, &member(2), 1, &member(1), 0, Role::Member);
         refused(&mut roster, &demote, 1);
+
         // No granter grants itself, up or down.
         let up = grant_control(&roster, &member(2), 1, &member(2), 1, Role::Owner);
         refused(&mut roster, &up, 1);
         let down = grant_control(&roster, &member(2), 1, &member(2), 1, Role::Member);
         refused(&mut roster, &down, 1);
+
         // An owner does each of them for another member.
         let by_owner = grant_control(&roster, &member(1), 0, &member(3), 2, Role::Owner);
         roster
             .apply_at(&GroupControl::parse(&by_owner).unwrap(), 0, 6, 6)
             .unwrap();
         assert_eq!(roster.owner_count(), 2);
+
         // An admin still gives and takes the roles below `owner`.
         let by_admin = grant_control(&roster, &member(2), 1, &member(1), 0, Role::Admin);
         refused(&mut roster, &by_admin, 1);
@@ -2813,11 +2980,13 @@ pub(crate) mod tests {
             from_entries(&roster, entries.clone(), &with_fake, &path).err(),
             Some(Error::Unverified)
         );
+
         // The same with no path at all.
         assert_eq!(
             from_entries(&roster, entries, &with_fake, &[]).err(),
             Some(Error::Unverified)
         );
+
         // A grantee whose entry holds keys other than the grant names.
         let mut entries = roster.entries();
         entries[0].roster_pk_hash = sha3_256(&[&fake.roster().verifying_key().to_bytes()]);

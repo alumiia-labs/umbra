@@ -64,6 +64,7 @@ impl LinkTicket {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let ticket = LinkTicket {
             nonce: r.array()?,
             commit: r.array()?,
@@ -150,10 +151,12 @@ impl LinkOffer {
         if commit(bytes) != ticket.commit {
             return Err(Error::Unverified);
         }
+
         let mut r = Reader::new(bytes);
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let link_pk = PublicKey::from_bytes(r.take(PUBLIC_KEY_LEN)?)?;
         r.finish()?;
         Ok(LinkOffer { link_pk })
@@ -202,12 +205,14 @@ impl LinkHello {
         if self.roster_pk.len() != VERIFYING_KEY_LEN {
             return Err(Error::Malformed);
         }
+
         let mut body = Zeroizing::new(alloc::vec![0u8; HELLO_BODY_LEN]);
         let mut w = Writer::new(&mut body);
         w.put(&self.device_id)?;
         w.put(&self.device_pk.to_bytes())?;
         w.put(&self.roster_pk)?;
         w.put(&self.label)?;
+
         let mut seal_nonce = [0u8; aead::NONCE_LEN];
         rng.fill_bytes(&mut seal_nonce);
         let tag = aead::seal(
@@ -216,6 +221,7 @@ impl LinkHello {
             labels::LINK_HELLO,
             &mut body,
         )?;
+
         let mut out = Vec::with_capacity(HELLO_LEN);
         out.push(0x01);
         out.extend_from_slice(self.ct.as_bytes());
@@ -236,11 +242,13 @@ impl LinkHello {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let ct = Ciphertext::from_bytes(r.take(CIPHERTEXT_LEN)?)?;
         let seal_nonce: [u8; aead::NONCE_LEN] = r.array()?;
         let tag = r.take(aead::TAG_LEN)?;
         let mut body = Zeroizing::new(r.take(HELLO_BODY_LEN)?.to_vec());
         r.finish()?;
+
         let ss = Secret::new(*link_key.decapsulate(&ct)?.expose());
         aead::open(
             &hello_key(&ss, nonce),
@@ -250,6 +258,7 @@ impl LinkHello {
             tag,
         )
         .map_err(|_| Error::Unverified)?;
+
         let mut r = Reader::new(&body);
         let hello = LinkHello {
             device_id: r.array()?,
@@ -338,6 +347,7 @@ impl LinkSecret {
         let mut nonce = [0u8; aead::NONCE_LEN];
         rng.fill_bytes(&mut nonce);
         let tag = aead::seal(&self.seal_key(), &nonce, labels::LINK_PROVISION, &mut body)?;
+
         let mut out = Vec::with_capacity(nonce.len() + tag.len() + body.len());
         out.extend_from_slice(&nonce);
         out.extend_from_slice(&tag);
@@ -360,6 +370,7 @@ impl LinkSecret {
                 .ok_or(Error::Malformed)?
                 .to_vec(),
         );
+
         aead::open(
             &self.seal_key(),
             &nonce,
@@ -368,6 +379,7 @@ impl LinkSecret {
             tag,
         )
         .map_err(|_| Error::Unverified)?;
+
         Provision::parse(&body)
     }
 }
@@ -401,6 +413,7 @@ impl Provision {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let from_device = r.array()?;
         let len = usize::try_from(r.u32()?).map_err(|_| Error::Malformed)?;
         let snapshot = r.take(len)?.to_vec();
@@ -436,6 +449,7 @@ impl DeviceIdentity {
         rng.fill_bytes(&mut kem_dz);
         let mut roster_seed = [0u8; 32];
         rng.fill_bytes(&mut roster_seed);
+
         DeviceIdentity {
             device_id,
             label: label_bytes(label),
@@ -538,6 +552,7 @@ pub fn label_bytes(label: &str) -> [u8; LABEL_LEN] {
     while !label.is_char_boundary(end) {
         end -= 1;
     }
+
     if let (Some(to), Some(from)) = (out.get_mut(..end), label.as_bytes().get(..end)) {
         to.copy_from_slice(from);
     }
@@ -558,6 +573,7 @@ pub fn sign_roster<R: TryCryptoRng + ?Sized>(
     rng: &mut R,
 ) -> Result<Vec<u8>, Error> {
     let sig = key.sign(&roster.preimage()?, rng)?.to_bytes();
+
     let signed = super::roster::Roster {
         sig: &sig,
         ..roster.clone()
@@ -610,11 +626,14 @@ mod tests {
     use crate::devset::roster::Roster;
 
     struct Rng(u64);
+
     impl umbra_crypto::rand_core::TryRng for Rng {
         type Error = core::convert::Infallible;
+
         fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
             Ok(self.try_next_u64()? as u32)
         }
+
         fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
             self.0 = self
                 .0
@@ -622,6 +641,7 @@ mod tests {
                 .wrapping_add(1442695040888963407);
             Ok(self.0)
         }
+
         fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
             for b in dst {
                 *b = (self.try_next_u64()? >> 33) as u8;
@@ -629,6 +649,7 @@ mod tests {
             Ok(())
         }
     }
+
     impl umbra_crypto::rand_core::TryCryptoRng for Rng {}
 
     #[test]
@@ -656,6 +677,7 @@ mod tests {
             link_pk: KeyPair::generate(&mut rng).public().clone(),
         };
         assert!(LinkOffer::parse(&other.encode(), &scanned).is_err());
+
         let identity = DeviceIdentity::generate("Tablet", &mut rng);
         let (ct, ss) = LinkSecret::encapsulate(&offer, &mut rng);
         let hello = LinkHello {
@@ -669,6 +691,7 @@ mod tests {
         assert_eq!(hello_bytes.len(), HELLO_LEN);
         // The label is not in the clear.
         assert!(!hello_bytes.windows(6).any(|w| w == b"Tablet"));
+
         let joined = LinkSecret::new(ss, &scanned.nonce, &offer_bytes, &hello_bytes);
 
         // The existing device reads the hello: the same code. A hello under
@@ -692,6 +715,7 @@ mod tests {
         };
         let sealed = offered.seal(&provision, &mut rng).unwrap();
         assert_eq!(joined.open(&sealed).unwrap(), provision);
+
         let stranger = LinkSecret::new(
             Secret::new([9; 32]),
             &ticket.nonce,
@@ -706,12 +730,14 @@ mod tests {
         let mut rng = Rng(8);
         let identity = DeviceIdentity::generate("Phone of Dana, a long name that is cut", &mut rng);
         assert_eq!(label_text(&identity.label).len(), LABEL_LEN);
+
         let back = DeviceIdentity::parse(&identity.encode()).unwrap();
         assert_eq!(back.device_id, identity.device_id);
         assert_eq!(
             back.device_key().public().to_bytes(),
             identity.device_key().public().to_bytes()
         );
+
         let keys = EntryKeys::of(&identity);
         let genesis = Roster {
             epoch: 0,

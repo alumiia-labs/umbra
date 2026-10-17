@@ -44,6 +44,7 @@ impl EditState {
         if self.revisions >= EDIT_MAX {
             return Err(Error::Stale);
         }
+
         self.revisions = self.revisions.saturating_add(1);
         self.high_water = Some(position);
         Ok(())
@@ -55,6 +56,7 @@ impl EditState {
         if self.tombstoned || self.high_water.is_some_and(|mark| position <= mark) {
             return Err(Error::Stale);
         }
+
         self.revisions = self.revisions.saturating_add(1);
         self.high_water = Some(position);
         Ok(())
@@ -110,6 +112,7 @@ impl PendingTable {
             .filter(|k| k.conversation == key.conversation)
             .copied()
             .collect();
+
         if in_conversation.len() >= REF_ORPHAN_MAX {
             if let Some(oldest) = in_conversation
                 .iter()
@@ -118,6 +121,7 @@ impl PendingTable {
                 self.entries.remove(oldest);
             }
         }
+
         self.entries.insert(key, pending);
     }
 
@@ -159,6 +163,7 @@ impl DeleteRate {
         {
             return false;
         }
+
         self.last = Some(now);
         true
     }
@@ -217,11 +222,13 @@ mod tests {
         state.edit(5, 1_100).unwrap();
         assert_eq!(state.edit(5, 1_101), Err(Error::Stale));
         assert_eq!(state.edit(4, 1_101), Err(Error::Stale));
+
         for p in 6..=12u64 {
             state.edit(p, 1_200).unwrap();
         }
         assert_eq!(state.revisions(), EDIT_MAX);
         assert_eq!(state.edit(13, 1_200), Err(Error::Stale));
+
         let mut late = EditState::new(1_000);
         assert_eq!(late.edit(1, 1_000 + EDIT_WINDOW + 1), Err(Error::Stale));
         late.edit_forwarded(1).unwrap();
@@ -237,6 +244,7 @@ mod tests {
             origin: 0,
             target: [2; 16],
         };
+
         table.hold(
             key,
             Pending {
@@ -248,6 +256,7 @@ mod tests {
         assert_eq!(table.len(), 1);
         table.expire(10 + REF_ORPHAN_TTL);
         assert!(table.is_empty());
+
         for i in 0..REF_ORPHAN_MAX as u32 + 1 {
             table.hold(
                 PendingKey { origin: i, ..key },
@@ -258,6 +267,7 @@ mod tests {
                 },
             );
         }
+
         assert_eq!(table.len(), REF_ORPHAN_MAX);
         assert!(table.take(&PendingKey { origin: 0, ..key }).is_none());
         assert!(table.take(&PendingKey { origin: 1, ..key }).is_some());

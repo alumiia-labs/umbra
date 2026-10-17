@@ -56,6 +56,7 @@ impl<'a> HelloBody<'a> {
         w.u16(u16::try_from(self.bundle.len()).map_err(|_| Error::Malformed)?)?;
         let n = self.bundle.encode(w.tail())?;
         let mut at = w.position().saturating_add(n);
+
         let mut w = Writer::new(out.get_mut(at..).ok_or(Error::Malformed)?);
         w.u16(u16::try_from(self.profile.len()).map_err(|_| Error::Malformed)?)?;
         w.put(self.profile)?;
@@ -72,11 +73,13 @@ impl<'a> HelloBody<'a> {
         let bundle = Bundle::parse(r.take(bundle_len)?)?;
         let profile_len = usize::from(r.u16()?);
         let profile = r.take(profile_len)?;
+
         let rest = r.rest();
         let (admission, used) = Admission::parse(rest)?;
         if used != rest.len() || admission.kind == AdmissionKind::None {
             return Err(Error::Malformed);
         }
+
         Ok(HelloBody {
             bundle,
             profile,
@@ -104,13 +107,16 @@ pub fn seal<R: CryptoRng + ?Sized>(
 ) -> Result<Vec<u8>, Error> {
     let pk = PublicKey::from_bytes(entry_pk)?;
     let (ct, ss) = kem::encapsulate(&pk, rng);
+
     let mut nonce = [0u8; 24];
     rng.fill_bytes(&mut nonce);
+
     let mut out = alloc::vec![0u8; HEADER_LEN + body.len() + aead::TAG_LEN];
     let mut w = Writer::new(&mut out);
     w.u8(VERSION)?;
     w.put(ct.as_bytes())?;
     w.put(&nonce)?;
+
     let n = body.encode(w.tail())?;
     let end = HEADER_LEN.saturating_add(n);
     let plain = out.get_mut(HEADER_LEN..end).ok_or(Error::Malformed)?;
@@ -128,15 +134,18 @@ pub fn open(entry_key: &KeyPair, envelope: &[u8]) -> Result<Vec<u8>, Error> {
     if r.u8()? != VERSION {
         return Err(Error::Malformed);
     }
+
     let ct_bytes = r.take(CIPHERTEXT_LEN)?;
     let nonce: [u8; 24] = r.array()?;
     let rest = r.rest();
     if rest.len() < aead::TAG_LEN {
         return Err(Error::Malformed);
     }
+
     let split = rest.len().saturating_sub(aead::TAG_LEN);
     let mut plain = rest.get(..split).ok_or(Error::Malformed)?.to_vec();
     let tag = rest.get(split..).ok_or(Error::Malformed)?;
+
     let ct = Ciphertext::from_bytes(ct_bytes)?;
     let ss = entry_key.decapsulate(&ct)?;
     let entry_pk = entry_key.public().to_bytes();
@@ -230,15 +239,18 @@ mod tests {
                 body: &[9; 69],
             },
         };
+
         let mut rng = Rng(11);
         let envelope = seal(&hk.public().to_bytes(), &body, &mut rng).unwrap();
         assert_eq!(envelope.len(), HEADER_LEN + body.len() + aead::TAG_LEN);
+
         let plain = open(&hk, &envelope).unwrap();
         let back = HelloBody::parse(&plain).unwrap();
         assert_eq!(back.profile, b"Alice");
         assert_eq!(back.bundle.relay_bundle, b"relays");
         assert_eq!(back.admission.kind, AdmissionKind::Pow);
         assert!(open(&other, &envelope).is_err());
+
         let mut corrupt = envelope.clone();
         corrupt[HEADER_LEN + 3] ^= 1;
         assert!(open(&hk, &corrupt).is_err());

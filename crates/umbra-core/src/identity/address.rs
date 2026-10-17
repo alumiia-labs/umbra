@@ -37,10 +37,12 @@ pub fn base32(bytes: &[u8]) -> String {
             out.push(char::from(ALPHABET.get(idx).copied().unwrap_or(b'0')));
         }
     }
+
     if bits > 0 {
         let idx = ((acc << (5 - bits)) & 31) as usize;
         out.push(char::from(ALPHABET.get(idx).copied().unwrap_or(b'0')));
     }
+
     out
 }
 
@@ -63,6 +65,7 @@ pub fn base32_decode(text: &str, out: &mut [u8]) -> Result<(), Error> {
     if text.chars().count() != needed {
         return Err(Error::Malformed);
     }
+
     let mut acc: u32 = 0;
     let mut bits = 0u32;
     let mut at = 0usize;
@@ -77,10 +80,12 @@ pub fn base32_decode(text: &str, out: &mut [u8]) -> Result<(), Error> {
             at += 1;
         }
     }
+
     // The spare low bits of the last character are zero in canonical form.
     if acc & ((1 << bits) - 1) != 0 {
         return Err(Error::Malformed);
     }
+
     Ok(())
 }
 
@@ -144,6 +149,7 @@ pub fn safety_number(own_pk: &[u8], peer_pk: &[u8]) -> String {
     let (lo, hi) = canonical_pair(own_pk, peer_pk);
     let digest = sha3_256(&[lo, hi]);
     let digits = decimal(&digest, 60);
+
     let mut out = String::with_capacity(72);
     for (i, group) in digits.as_bytes().chunks(5).enumerate() {
         if i > 0 {
@@ -168,11 +174,13 @@ pub fn decimal(bytes: &[u8], width: usize) -> String {
         }
         digits.push(b'0' + rem as u8);
     }
+
     while digits.len() < width {
         digits.push(b'0');
     }
     digits.truncate(width);
     digits.reverse();
+
     // The value can be a secret of Part 4 §4.7.7, thus the work copy goes.
     umbra_crypto::zeroize::Zeroize::zeroize(&mut number);
     String::from_utf8(digits).unwrap_or_default()
@@ -209,6 +217,7 @@ mod tests {
         assert_eq!(parse(&link_string(&address)).unwrap(), address);
         check(&address, &pk).unwrap();
         assert!(check(&address, &[8u8; 1216]).is_err());
+
         let upper = s.to_uppercase().replace("UMBRA:PUB:", "umbra:pub:");
         assert_eq!(parse(&upper).unwrap(), address);
         assert!(parse("umbra:pub:7f3ck2mq9x4vhn8dpwr5esa1").is_err());
@@ -223,6 +232,7 @@ mod tests {
         assert_eq!(n, safety_number(&b, &a));
         assert_eq!(n.len(), 60 + 11);
         assert_eq!(n.split(' ').count(), 12);
+
         assert_eq!(decimal(&[0, 0, 255], 5), "00255");
         assert_eq!(decimal(&[1, 0], 3), "256");
         assert!(avatar_color(&a) < PALETTE_SIZE);

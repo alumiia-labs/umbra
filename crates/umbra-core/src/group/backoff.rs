@@ -23,6 +23,7 @@ fn ln_inverse_1024(random: u32) -> u64 {
     const FRACTION: [u64; 16] = [
         0, 90, 174, 254, 330, 402, 470, 536, 599, 659, 717, 773, 827, 879, 929, 977,
     ];
+
     let value = u64::from(random).saturating_add(1);
     let bits = 64 - value.leading_zeros();
     let top = bits.saturating_sub(1);
@@ -31,6 +32,7 @@ fn ln_inverse_1024(random: u32) -> u64 {
     } else {
         (value << (4 - top)) & 0x0F
     };
+
     let log2_value = u64::from(top).saturating_mul(1024)
         + FRACTION
             .get(usize::try_from(mantissa).unwrap_or(0))
@@ -59,11 +61,13 @@ mod tests {
     fn the_delay_is_exponential_in_shape_and_follows_the_role() {
         assert_eq!(exponential(60, u32::MAX), 0);
         assert!(exponential(60, 0) > 60 * 20);
+
         // The median of an exponential is mean × ln 2.
         let median = exponential(60, u32::MAX / 2);
         assert!((40..=44).contains(&median), "median {median}");
         let quarter = exponential(60, u32::MAX / 4 * 3);
         assert!((16..=19).contains(&quarter), "quarter {quarter}");
+
         assert!(
             rotation_delay(Role::Admin, u32::MAX / 2) < rotation_delay(Role::Member, u32::MAX / 2)
         );

@@ -67,6 +67,7 @@ fn ln(mut x: f64) -> f64 {
         x *= 2.0;
         k -= 1;
     }
+
     let y = (x - 1.0) / (x + 1.0);
     let y2 = y * y;
     let mut term = y;
@@ -75,6 +76,7 @@ fn ln(mut x: f64) -> f64 {
         sum += term / f64::from(2 * i + 1);
         term *= y2;
     }
+
     f64::from(k) * core::f64::consts::LN_2 + 2.0 * sum
 }
 
@@ -96,9 +98,11 @@ mod tests {
         }
         let mean = total / n;
         assert!(mean > SWEEP_SPREAD * 85 / 100 && mean < SWEEP_SPREAD * 115 / 100);
+
         assert_eq!(exponential(u64::MAX, 100), 0);
         assert!(exponential(0, 100) > 3_000);
         assert!((ln(core::f64::consts::E) - 1.0).abs() < 1e-9);
+
         let notice = PendingNotice {
             new_x25519_pk: [1; 32],
             new_mlkem_pk: alloc::vec![2; 1_184],

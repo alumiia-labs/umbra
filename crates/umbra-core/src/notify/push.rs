@@ -21,8 +21,11 @@ pub struct Push {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct HandleState {
+    /// The time of the last push to the NDR.
     last_handoff: Option<u64>,
+    /// A push that waits for the end of the window, with its digest flag.
     pending: Option<bool>,
+    /// The time of the first push that no drain followed.
     undrained_since: Option<u64>,
     repushes: u32,
 }
@@ -54,6 +57,7 @@ impl PushScheduler {
             undrained_since: None,
             repushes: 0,
         });
+
         let inside = state
             .last_handoff
             .is_some_and(|at| now.saturating_sub(at) < WAKE_COALESCE_WINDOW);
@@ -62,6 +66,7 @@ impl PushScheduler {
             state.pending = Some(state.pending.unwrap_or(true) && digest);
             return None;
         }
+
         // This push carries the wake of each arrival before it, thus the
         // end of the last window has nothing more to hand.
         state.pending = None;
@@ -102,6 +107,7 @@ impl PushScheduler {
                 due.push(Self::push(*handle, digest, false));
                 continue;
             }
+
             let repush_due = state.undrained_since.is_some()
                 && state.repushes < REPUSH_MAX
                 && state
@@ -113,6 +119,7 @@ impl PushScheduler {
                 due.push(Self::push(*handle, false, true));
             }
         }
+
         // A handle with no push to come holds no state: an arrival makes it
         // again, thus the scheduler holds the handles of live work alone.
         self.handles.retain(|_, state| {
@@ -122,6 +129,7 @@ impl PushScheduler {
                     .last_handoff
                     .is_some_and(|at| now.saturating_sub(at) < WAKE_COALESCE_WINDOW)
         });
+
         due
     }
 
@@ -149,6 +157,7 @@ mod tests {
         let first = s.on_arrival(h, true, 100).unwrap();
         assert_eq!(first.ttl, PUSH_TTL_MESSAGE);
         assert!(first.digest);
+
         assert!(s.on_arrival(h, true, 105).is_none());
         assert!(s.on_arrival(h, false, 106).is_none());
         assert!(s.tick(109).is_empty());
@@ -157,6 +166,7 @@ mod tests {
         assert!(!end[0].digest);
         assert_eq!(end[0].ttl, PUSH_TTL_MESSAGE);
         assert!(s.tick(111).is_empty());
+
         // Another handle has its own window.
         assert!(s.on_arrival([2; 16], false, 111).is_some());
     }
@@ -167,6 +177,7 @@ mod tests {
         let h = [1u8; 16];
         s.on_arrival(h, false, 0).unwrap();
         assert!(s.tick(REPUSH_INTERVAL - 1).is_empty());
+
         let mut count = 0;
         let mut t = REPUSH_INTERVAL;
         while count < 5 {
@@ -179,6 +190,7 @@ mod tests {
             t += REPUSH_INTERVAL;
         }
         assert_eq!(count, REPUSH_MAX);
+
         // A drain ends the re-push; a new arrival starts it again.
         s.on_arrival(h, false, t + 1).unwrap();
         s.on_drain(&h);
@@ -193,6 +205,7 @@ mod tests {
         let h = [1u8; 16];
         s.on_arrival(h, false, 0).unwrap();
         assert!(s.on_arrival(h, false, 1).is_none());
+
         // The device drains both records before the window ends.
         s.on_drain(&h);
         assert!(s.tick(WAKE_COALESCE_WINDOW).is_empty());
@@ -206,6 +219,7 @@ mod tests {
         let h = [1u8; 16];
         s.on_arrival(h, false, 0).unwrap();
         assert!(s.on_arrival(h, false, 5).is_none());
+
         // No tick ran at the end of the window. The next arrival gives one
         // push at once, and the tick that follows hands no second one.
         s.on_arrival(h, false, WAKE_COALESCE_WINDOW + 2).unwrap();
@@ -219,6 +233,7 @@ mod tests {
         let h = [1u8; 16];
         s.on_arrival(h, false, 0).unwrap();
         s.on_drain(&h);
+
         // An arrival after the drain and inside the window waits for its
         // end, and no drain follows the push of the end.
         assert!(s.on_arrival(h, false, 5).is_none());
@@ -227,6 +242,7 @@ mod tests {
         assert!(!end[0].repush);
         assert!(s.tick(2 * WAKE_COALESCE_WINDOW).is_empty());
         assert!(s.holds(&h));
+
         assert!(s
             .tick(WAKE_COALESCE_WINDOW + REPUSH_INTERVAL - 1)
             .is_empty());

@@ -76,12 +76,14 @@ impl BackupObject {
         if self.kind == KIND_FULL && self.base_at != 0 {
             return Err(Error::Malformed);
         }
+
         let mut writer = Writer::new();
         writer.u8(OBJECT_VERSION);
         writer.u8(self.kind);
         writer.u64(self.written_at);
         writer.u64(self.base_at);
         writer.u32(u32::try_from(self.rows.len()).map_err(|_| Error::Malformed)?);
+
         for row in &self.rows {
             match row {
                 BackupRow::Put {
@@ -113,6 +115,7 @@ impl BackupObject {
                 }
             }
         }
+
         Ok(writer.finish())
     }
 
@@ -122,15 +125,18 @@ impl BackupObject {
         if reader.u8()? != OBJECT_VERSION {
             return Err(Error::Malformed);
         }
+
         let kind = reader.u8()?;
         if kind != KIND_FULL && kind != KIND_DELTA {
             return Err(Error::Malformed);
         }
+
         let written_at = reader.u64()?;
         let base_at = reader.u64()?;
         if kind == KIND_FULL && base_at != 0 {
             return Err(Error::Malformed);
         }
+
         let count = reader.u32()?;
         let mut rows = Vec::new();
         for _ in 0..count {
@@ -157,6 +163,7 @@ impl BackupObject {
             });
         }
         reader.end()?;
+
         Ok(BackupObject {
             kind,
             written_at,
@@ -229,6 +236,7 @@ mod tests {
             ..delta
         };
         assert!(wrong.encode().is_err());
+
         let mut bytes = bytes.to_vec();
         bytes.push(0);
         assert!(BackupObject::parse(&bytes).is_err());

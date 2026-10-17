@@ -141,6 +141,7 @@ fn is_presence(app: &[u8]) -> bool {
     if message.kind != AppKind::GroupControl {
         return false;
     }
+
     GroupControl::parse(message.body).is_ok_and(|control| {
         control.control_type == ControlType::Presence
             && control.payload == [crate::group::send::PRESENCE_VERSION]
@@ -152,6 +153,7 @@ fn is_rekey(app: &[u8]) -> bool {
     let Ok(message) = AppMessage::parse(app, Channel::Group) else {
         return false;
     };
+
     message.kind == AppKind::GroupControl
         && GroupControl::parse(message.body)
             .is_ok_and(|control| control.control_type == ControlType::Rekey)
@@ -163,6 +165,7 @@ fn is_roster_object(app: &[u8]) -> bool {
     let Ok(message) = AppMessage::parse(app, Channel::Group) else {
         return false;
     };
+
     message.kind == AppKind::GroupControl
         && GroupControl::parse(message.body).is_ok_and(|control| {
             matches!(
@@ -214,6 +217,7 @@ const RECEIVER_VERSION: u8 = 0x02;
 /// The holes that one sender keeps in one epoch. A gap above it leaves its
 /// oldest holes, whose records then count as repeats, and the gap shows.
 const HOLES_MAX: usize = 256;
+
 /// `HOLES_MAX` as a counter distance.
 const HOLES_MAX_COUNTER: u32 = 256;
 
@@ -245,29 +249,34 @@ impl Receiver {
     pub fn export(&self, w: &mut Writer) -> Result<(), Error> {
         w.u8(RECEIVER_VERSION);
         w.u16(self.own_index);
+
         w.u32(count(self.counters.len())?);
         for ((sender, epoch), counter) in &self.counters {
             w.u16(*sender);
             w.u32(*epoch);
             w.u32(*counter);
         }
+
         w.u32(count(self.held.len())?);
         for held in &self.held {
             w.u8(bucket_byte(held.bucket));
             w.u64(held.arrived_at);
             w.var(&held.bytes)?;
         }
+
         w.u32(count(self.gaps.len())?);
         for (sender, since) in &self.gaps {
             w.u16(*sender);
             w.u64(*since);
         }
+
         w.u32(count(self.holes.len())?);
         for (sender, epoch, counter) in &self.holes {
             w.u16(*sender);
             w.u32(*epoch);
             w.u32(*counter);
         }
+
         Ok(())
     }
 
@@ -277,13 +286,16 @@ impl Receiver {
         if version != STORED_VERSION && version != RECEIVER_VERSION {
             return Err(Error::Stale);
         }
+
         let own_index = r.u16()?;
+
         let mut counters = BTreeMap::new();
         for _ in 0..r.u32()? {
             let sender = r.u16()?;
             let epoch = r.u32()?;
             counters.insert((sender, epoch), r.u32()?);
         }
+
         let mut held = Vec::new();
         for _ in 0..r.u32()? {
             let bucket = *Bucket::ALL
@@ -297,16 +309,19 @@ impl Receiver {
                 opened: false,
             });
         }
+
         let mut gaps = BTreeMap::new();
         for _ in 0..r.u32()? {
             gaps.insert(r.u16()?, r.u64()?);
         }
+
         let mut holes = BTreeSet::new();
         if version == RECEIVER_VERSION {
             for _ in 0..r.u32()? {
                 holes.insert((r.u16()?, r.u32()?, r.u32()?));
             }
         }
+
         Ok(Receiver {
             own_index,
             counters,
@@ -342,6 +357,7 @@ impl Receiver {
                 body: record.body.to_vec(),
             });
         }
+
         let keys = match ctx.epochs.record_keys(record.epoch, record.slot, now) {
             Ok(keys) => keys,
             Err(Error::Stale) => {
@@ -350,6 +366,7 @@ impl Receiver {
             }
             Err(e) => return Err(e),
         };
+
         let mut opened: Option<(Vec<u8>, bool, bool)> = None;
         for key in &keys {
             let mut out = alloc::vec![0u8; bucket.group_record()];
@@ -359,9 +376,11 @@ impl Receiver {
                 break;
             }
         }
+
         // One error covers the open, the tag, and the parse (GRP-251).
         let (plain_bytes, previous_epoch, under_alternate) = opened.ok_or(Error::Unverified)?;
         let roster_epoch = Self::roster_epoch_of(&plain_bytes)?;
+
         if roster_epoch > ctx.roster.epoch_index() {
             self.hold(bytes, bucket, now, true);
             return Ok(Outcome::Held);
@@ -369,6 +388,7 @@ impl Receiver {
         if roster_epoch < ctx.roster.admission_epoch() {
             return Err(Error::Stale);
         }
+
         let roster = ctx.roster;
         let plain = ContentPlain::parse(&plain_bytes, |re| {
             roster
@@ -377,6 +397,7 @@ impl Receiver {
         })?;
         let sender = plain.sender_index;
         let rekey = is_rekey(plain.app);
+
         if sender == self.own_index {
             // GRP-369: a re-key under the index of this member that another
             // holder of its keys made. A record holds no tag for its own
@@ -397,6 +418,7 @@ impl Receiver {
                 repeated: false,
             });
         }
+
         // The sender must be in the current roster (GRP-257, GRP-232). A
         // rival of the re-key at the head of the chain comes from the index
         // that re-key excluded, at the roster epoch before it (GRP-369).
@@ -406,6 +428,7 @@ impl Receiver {
                 .head_rekey()
                 .is_some_and(|head| head.old_index == sender)
             && before_head;
+
         // GRP-070: a second roster object from the maker of the head, at
         // the roster epoch before it. A head that removed its maker, by a
         // self-removal or a re-key, would drop it here. One order of
@@ -417,6 +440,7 @@ impl Receiver {
         if !is_active && !is_rival && !is_second {
             return Err(Error::Unverified);
         }
+
         let rank = roster
             .rank_at(roster_epoch, self.own_index)
             .ok_or(Error::Unverified)?;
@@ -424,6 +448,7 @@ impl Receiver {
             .tags
             .tag_for(rank, self.own_index)
             .ok_or(Error::Unverified)?;
+
         // GRP-245: the pair key of an index that left the active set stays
         // out of the cache, and this one check derives it.
         let derived;
@@ -434,6 +459,7 @@ impl Receiver {
             derived = ctx.own.pair_key(&peer.pair_pk, roster.group_id())?;
             &derived
         };
+
         key.verify_record_tag(
             &RecordTag {
                 group_id: roster.group_id(),
@@ -446,6 +472,7 @@ impl Receiver {
             },
             &tag,
         )?;
+
         // GRP-217: a sparse record is a presence record or nothing, and
         // GRP-395 keeps it out of the counter of its sender.
         if matches!(plain.tags, Tags::Sparse(_)) {
@@ -454,6 +481,7 @@ impl Receiver {
             }
             return Ok(Outcome::Presence { sender });
         }
+
         // An observer reads the group and posts nothing to it. Its roster
         // objects, its key exchange, and the deletion of its own earlier
         // messages still apply (§11.9).
@@ -463,11 +491,13 @@ impl Receiver {
         if is_observer && !observer_may_post(plain.app) {
             return Err(Error::Unverified);
         }
+
         // GRP-273: a member other than its supplier writes under the
         // supplied secret, thus the group holds that secret.
         if under_alternate && !previous_epoch {
             ctx.epochs.confirm_alternate(sender);
         }
+
         let epoch = record.epoch;
         let mut repeated = false;
         let last = self.counters.entry((sender, epoch)).or_insert(0);
@@ -483,10 +513,12 @@ impl Receiver {
             for missing in from..plain.counter {
                 self.holes.insert((sender, epoch, missing));
             }
+
             // The holes of an epoch before the previous one name records
             // that no key opens any more (GRP-250).
             let floor = epoch.saturating_sub(1);
             self.holes.retain(|(_, held, _)| *held >= floor);
+
             let mut of_sender: Vec<(u16, u32, u32)> = self
                 .holes
                 .range((sender, epoch, 0)..=(sender, epoch, u32::MAX))
@@ -513,6 +545,7 @@ impl Receiver {
             }
             repeated = true;
         }
+
         let has_hole = self
             .holes
             .range((sender, 0, 0)..=(sender, u32::MAX, u32::MAX))
@@ -523,6 +556,7 @@ impl Receiver {
         } else {
             self.gaps.remove(&sender);
         }
+
         // GRP-369: two holders of the keys of one index each count on their
         // own, thus a rival re-key can come under a counter that the other
         // one passed. The roster knows a re-key again by its hash.
@@ -545,16 +579,18 @@ impl Receiver {
             arrived_at: now,
             opened,
         });
+
         // A receiver holds a record before any tag check, thus a writer of
         // the queue could fill the list. At the bound of the count or of
         // the bytes, the oldest record that no key opened leaves. After
         // those, the oldest record leaves. Each one counts for the gap of
         // GRP-254.
         loop {
-            let bytes: usize = self.held.iter().map(|held| held.bytes.len()).sum();
-            if self.held.len() <= HELD_MAX && bytes <= HELD_BYTES_MAX {
+            let held_bytes: usize = self.held.iter().map(|held| held.bytes.len()).sum();
+            if self.held.len() <= HELD_MAX && held_bytes <= HELD_BYTES_MAX {
                 break;
             }
+
             let last = self.held.len().saturating_sub(1);
             let gone = self
                 .held
@@ -640,6 +676,7 @@ impl Receiver {
                 Err(_) => {}
             }
         }
+
         out
     }
 
@@ -662,6 +699,7 @@ impl Receiver {
             };
             now.saturating_sub(h.arrived_at) < wait
         });
+
         before.saturating_sub(self.held.len())
     }
 
@@ -791,6 +829,7 @@ mod tests {
         assert!(
             matches!(outcome, Outcome::Content { sender: 0, counter: 1, repeated: false, app, .. } if app == b"app bytes")
         );
+
         // GRP-206: the counter identifies no record, thus a copy comes
         // back with its mark, and the store drops it by its `msg_id`.
         assert!(matches!(
@@ -801,6 +840,7 @@ mod tests {
                 ..
             }
         ));
+
         // A corrupt byte fails as one error.
         let mut bad = record.clone();
         bad[40] ^= 1;
@@ -808,6 +848,7 @@ mod tests {
             rx.receive(&bad, Bucket::B1, &mut ctx, now + 7),
             Err(Error::Unverified)
         );
+
         // A gap shows after the timeout.
         let _skip = sender
             .build(
@@ -860,6 +901,7 @@ mod tests {
         bob_roster
             .apply(&GroupControl::parse(&add_bob).unwrap(), 0, 1)
             .unwrap();
+
         // Alice adds Carol; Bob has not read that yet.
         let add_carol = add_control(&alice_roster, &carol, 2);
         alice_roster
@@ -883,6 +925,7 @@ mod tests {
                 now,
             )
             .unwrap();
+
         let mut bob_pairs = PairCache::default();
         let mut rx = Receiver::new(1);
         let mut ctx = Context {
@@ -897,6 +940,7 @@ mod tests {
         );
         assert_eq!(rx.held_count(), 1);
         assert!(rx.needs_other_replica(now));
+
         // The roster arrives, and the held record resolves.
         bob_roster
             .apply(&GroupControl::parse(&add_carol).unwrap(), 0, 3)
@@ -910,12 +954,14 @@ mod tests {
         let resolved = rx.retry_held(&mut ctx, now + 1);
         assert_eq!(resolved.len(), 1);
         assert_eq!(rx.held_count(), 0);
+
         // A held record past the wait is discarded and counted.
         rx.hold(&record, Bucket::B1, now, true);
         assert_eq!(
             rx.expire_held(now + GROUP_ROSTER_WAIT, bob_epochs.epoch()),
             1
         );
+
         // At the bound a record that no key opened leaves before one that
         // waits for its roster, and each one that leaves counts (GRP-254).
         rx.hold(&record, Bucket::B1, now, true);
@@ -926,6 +972,7 @@ mod tests {
         assert!(rx.held[0].opened);
         assert_eq!(rx.take_evicted(), 1);
         assert_eq!(rx.take_evicted(), 0);
+
         // The bytes have a bound too: a record of `B3` is 32 KiB.
         let large = alloc::vec![0u8; Bucket::B3.group_record()];
         for _ in 0..HELD_MAX {

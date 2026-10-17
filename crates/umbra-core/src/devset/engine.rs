@@ -146,6 +146,7 @@ fn class_of(inner: &[u8], scope: u8) -> Result<Class, Error> {
         Channel::Pairwise
     };
     let message = AppMessage::parse(inner, channel)?;
+
     // DEV-174: a wrapper takes the class of its inner kind.
     Ok(match message.kind.class() {
         Class::Inner => RichRecord::parse(message.body, channel)?.inner_kind.class(),
@@ -159,6 +160,7 @@ impl SyncEngine {
         if peers.len() >= MAX_DEVICES || peers.contains(&own) {
             return Err(Error::Malformed);
         }
+
         Ok(SyncEngine {
             own,
             lamport: 0,
@@ -202,6 +204,7 @@ impl SyncEngine {
         if self.peers.len().saturating_add(1) >= MAX_DEVICES || peer == self.own {
             return Err(Error::NoPath);
         }
+
         self.peers.entry(peer).or_default();
         Ok(())
     }
@@ -255,6 +258,7 @@ impl SyncEngine {
         if is_far && self.owner != Some(*source) {
             return Err(Error::Unverified);
         }
+
         Ok(self.lamport.max(lamport))
     }
 
@@ -262,6 +266,7 @@ impl SyncEngine {
     /// from the item that it carries (`DEV-308`).
     fn context_at(&mut self, lamport: u64, expires_in: u32) -> CausalContext {
         self.counter = self.counter.saturating_add(1);
+
         let mut vector: Vec<(DeviceId, u64)> = self
             .peers
             .iter()
@@ -269,6 +274,7 @@ impl SyncEngine {
             .collect();
         vector.push((self.own, self.counter));
         vector.sort_unstable();
+
         CausalContext {
             lamport,
             vector,
@@ -301,6 +307,7 @@ impl SyncEngine {
         ) {
             return Err(Error::Malformed);
         }
+
         let record = SyncedRecord {
             context: self.context(expires_in)?,
             origin,
@@ -309,6 +316,7 @@ impl SyncEngine {
         let mut body = alloc::vec![0u8; inner.len().saturating_add(256)];
         let used = record.encode(&mut body)?;
         body.truncate(used);
+
         self.retain(msg_ref, now);
         Ok(Published {
             counter: self.counter,
@@ -337,6 +345,7 @@ impl SyncEngine {
         let mut body = alloc::vec![0u8; key.len().saturating_add(value.len()).saturating_add(256)];
         let used = mutable.encode(&mut body)?;
         body.truncate(used);
+
         self.put_mutable((item, key.to_vec()), (self.lamport, self.own));
         self.retain(slot_ref, now);
         Ok(Published {
@@ -371,6 +380,7 @@ impl SyncEngine {
         let mut body = alloc::vec![0u8; key.len().saturating_add(value.len()).saturating_add(256)];
         let used = mutable.encode(&mut body)?;
         body.truncate(used);
+
         self.retain(slot_ref, now);
         Ok(Published {
             counter: self.counter,
@@ -389,6 +399,7 @@ impl SyncEngine {
         if counter == 0 || counter > self.counter {
             return Err(Error::Malformed);
         }
+
         let mut vector: Vec<(DeviceId, u64)> = self
             .peers
             .iter()
@@ -396,6 +407,7 @@ impl SyncEngine {
             .collect();
         vector.push((self.own, counter));
         vector.sort_unstable();
+
         let void = MutableItem {
             context: CausalContext {
                 lamport: self.lamport,
@@ -435,6 +447,7 @@ impl SyncEngine {
         if counter != peer.contiguous.saturating_add(1) && peer.ahead.len() >= SYNC_AHEAD_MAX {
             return Err(Error::NoPath);
         }
+
         peer.ahead.insert(counter);
         while peer.ahead.remove(&peer.contiguous.saturating_add(1)) {
             peer.contiguous = peer.contiguous.saturating_add(1);
@@ -452,6 +465,7 @@ impl SyncEngine {
         if !self.peers.contains_key(source) {
             return Err(Error::Unverified);
         }
+
         match DeviceSetBody::parse(body)? {
             DeviceSetBody::Record(_) => {
                 let record = SyncedRecord::parse(body)?;
@@ -462,6 +476,7 @@ impl SyncEngine {
                 ) {
                     return Err(Error::Malformed);
                 }
+
                 let lamport = self.take_lamport(source, record.context.lamport)?;
                 // A record below the watermark is one that the device
                 // pruned or declined. It needs no resend.
@@ -469,10 +484,12 @@ impl SyncEngine {
                 if !self.take_counter(source, counter, now)? {
                     return Ok(Taken::Duplicate);
                 }
+
                 self.lamport = lamport;
                 if declined {
                     return Ok(Taken::Declined);
                 }
+
                 Ok(Taken::Record {
                     origin: record.origin,
                     counter,
@@ -480,6 +497,7 @@ impl SyncEngine {
                     expires_in: record.context.expires_in,
                 })
             }
+
             DeviceSetBody::MutableState(_) => {
                 let item = MutableItem::parse(body)?;
                 let counter = item.context.counter_of(source).ok_or(Error::Malformed)?;
@@ -487,12 +505,14 @@ impl SyncEngine {
                 if !self.take_counter(source, counter, now)? {
                     return Ok(Taken::Duplicate);
                 }
+
                 self.lamport = lamport;
                 // DEV-069: the place of a record that the source holds no
                 // more. The device takes the counter, and no item applies.
                 if item.item == ITEM_VOID {
                     return Ok(Taken::Void);
                 }
+
                 let slot = (item.item, item.key.to_vec());
                 let offered = (item.context.lamport, item.writer);
                 // DEV-270: the higher Lamport counter, then the lower writer.
@@ -504,6 +524,7 @@ impl SyncEngine {
                 if !wins {
                     return Ok(Taken::Superseded);
                 }
+
                 self.put_mutable(slot, offered);
                 Ok(Taken::Mutable {
                     item: item.item,
@@ -513,6 +534,7 @@ impl SyncEngine {
                     writer: item.writer,
                 })
             }
+
             control @ DeviceSetBody::Control { .. } => {
                 if let Some(counter) = control.sync_ack() {
                     let peer = self.peers.get_mut(source).ok_or(Error::Unverified)?;
@@ -520,11 +542,13 @@ impl SyncEngine {
                     if counter > self.counter {
                         return Err(Error::Unverified);
                     }
+
                     peer.log.acknowledged(counter);
                     peer.resent_to = peer.log.acked();
                     peer.resending = peer.log.to_resend().next().is_some();
                     return Ok(Taken::Acknowledged);
                 }
+
                 let DeviceSetBody::Control {
                     control_type,
                     payload,
@@ -549,6 +573,7 @@ impl SyncEngine {
             let Some(counter) = peer.acks.due(now) else {
                 continue;
             };
+
             let payload = counter.to_be_bytes();
             let body = DeviceSetBody::Control {
                 control_type: ControlType::SyncAck,
@@ -559,6 +584,7 @@ impl SyncEngine {
             out.push((*device, bytes.get(..used).ok_or(Error::Malformed)?.to_vec()));
             peer.acks.sent();
         }
+
         Ok(out)
     }
 
@@ -579,16 +605,19 @@ impl SyncEngine {
         if !state.resending {
             return None;
         }
+
         let floor = state.resent_to;
         let next = state
             .log
             .to_resend()
             .find(|retained| retained.counter > floor)
             .map(|retained| (retained.msg_ref, retained.counter));
+
         match next {
             Some((_, counter)) => state.resent_to = counter,
             None => state.resending = false,
         }
+
         next
     }
 
@@ -660,6 +689,7 @@ impl SyncEngine {
         if self.deliveries <= MUTABLE_HELD.saturating_add(MUTABLE_SLACK) {
             return;
         }
+
         let is_delivery = |key: &(u8, Vec<u8>)| key.0 == super::sync::ITEM_DELIVERY;
         let mut lamports: Vec<u64> = self
             .mutable
@@ -670,6 +700,7 @@ impl SyncEngine {
         lamports.sort_unstable();
         let excess = lamports.len().saturating_sub(MUTABLE_HELD);
         let floor = lamports.get(excess).copied().unwrap_or(0);
+
         self.mutable
             .retain(|key, (lamport, _)| !is_delivery(key) || *lamport >= floor);
         self.deliveries = self.mutable.keys().filter(|key| is_delivery(key)).count();
@@ -682,6 +713,7 @@ impl SyncEngine {
         if self.mutable.insert(slot, winner).is_none() && is_delivery {
             self.deliveries = self.deliveries.saturating_add(1);
         }
+
         self.trim_mutable();
     }
 
@@ -713,6 +745,7 @@ impl SyncEngine {
         w.bytes(&self.own);
         w.u64(self.lamport);
         w.u64(self.counter);
+
         w.u8(u8::try_from(self.peers.len()).map_err(|_| Error::Malformed)?);
         for (device, peer) in &self.peers {
             w.bytes(device);
@@ -726,7 +759,9 @@ impl SyncEngine {
             w.u64(peer.resent_to);
             w.u8(u8::from(peer.resending));
         }
+
         self.watermarks.export(&mut w);
+
         w.u32(u32::try_from(self.mutable.len()).map_err(|_| Error::Malformed)?);
         for ((item, key), (lamport, writer)) in &self.mutable {
             w.u8(*item);
@@ -734,6 +769,7 @@ impl SyncEngine {
             w.u64(*lamport);
             w.bytes(writer);
         }
+
         Ok(w.finish().to_vec())
     }
 
@@ -743,6 +779,7 @@ impl SyncEngine {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let own: DeviceId = r.array()?;
         let lamport = r.u64()?;
         let counter = r.u64()?;
@@ -750,6 +787,7 @@ impl SyncEngine {
         if count >= MAX_DEVICES {
             return Err(Error::Malformed);
         }
+
         let mut peers = BTreeMap::new();
         for _ in 0..count {
             let device: DeviceId = r.array()?;
@@ -775,7 +813,9 @@ impl SyncEngine {
                 },
             );
         }
+
         let watermarks = Watermarks::restore(&mut r)?;
+
         let mut mutable = BTreeMap::new();
         for _ in 0..bounded(r.u32()?)? {
             let item = r.u8()?;
@@ -785,10 +825,12 @@ impl SyncEngine {
             mutable.insert((item, key), (lamport, writer));
         }
         r.end()?;
+
         let deliveries = mutable
             .keys()
             .filter(|(item, _)| *item == super::sync::ITEM_DELIVERY)
             .count();
+
         Ok(SyncEngine {
             own,
             lamport,
@@ -802,8 +844,8 @@ impl SyncEngine {
     }
 }
 
-/// Rejects an application kind that a sync channel does not carry, for a
-/// caller that holds the parsed message.
+/// Whether a sync channel carries an application kind, for a caller that
+/// holds the parsed message.
 pub fn carried_on_sync(kind: AppKind) -> bool {
     !matches!(kind.class(), Class::PeerSignal | Class::Ephemeral)
 }
@@ -859,10 +901,12 @@ mod tests {
         let third = phone
             .publish(&message(AppKind::Text, 3), ORIGIN, [3; 16], 0, 6)
             .unwrap();
+
         let mut late = SyncEngine::new(LAPTOP, &[PHONE]).unwrap();
         late.start_peer_at(&PHONE, 2);
         late.receive(&PHONE, &third.body, 7).unwrap();
         assert_eq!(late.missing(&PHONE), None);
+
         // With no start point, the two earlier records are a hole.
         let mut blind = SyncEngine::new(LAPTOP, &[PHONE]).unwrap();
         blind.receive(&PHONE, &third.body, 7).unwrap();
@@ -876,17 +920,20 @@ mod tests {
         let (mut phone, _) = pair();
         let delivery = crate::devset::sync::ITEM_DELIVERY;
         phone.put_mutable((1, alloc::vec![0]), (0, PHONE));
+
         let count = MUTABLE_HELD + MUTABLE_SLACK + 1;
         for at in 0..count {
             let key = u32::try_from(at).unwrap().to_be_bytes().to_vec();
             phone.put_mutable((delivery, key), (u64::try_from(at).unwrap() + 1, PHONE));
         }
+
         assert!(phone.holds_mutable(1, &[0]));
         assert!(!phone.holds_mutable(delivery, &0u32.to_be_bytes()));
         let newest = u32::try_from(count - 1).unwrap().to_be_bytes();
         assert!(phone.holds_mutable(delivery, &newest));
         assert_eq!(phone.mutable.len(), MUTABLE_HELD + 1);
         assert_eq!(phone.deliveries, MUTABLE_HELD);
+
         let back = SyncEngine::restore(&phone.export().unwrap()).unwrap();
         assert_eq!(back, phone);
     }
@@ -904,10 +951,12 @@ mod tests {
             .publish_mutable(1, &[3; 32], &[1], [3; 16], 7)
             .unwrap();
         laptop.receive(&PHONE, &first.body, 8).unwrap();
+
         for engine in [&phone, &laptop] {
             let back = SyncEngine::restore(&engine.export().unwrap()).unwrap();
             assert_eq!(&back, engine);
         }
+
         // The laptop holds counter 1 after a restart, thus the record is a
         // duplicate there.
         let mut back = SyncEngine::restore(&laptop.export().unwrap()).unwrap();
@@ -915,6 +964,7 @@ mod tests {
             back.receive(&PHONE, &first.body, 9).unwrap(),
             Taken::Duplicate
         );
+
         assert!(SyncEngine::restore(&[0x02]).is_err());
     }
 
@@ -962,6 +1012,7 @@ mod tests {
             Taken::Acknowledged
         );
         assert_eq!(phone.next_resend(&LAPTOP), None);
+
         // The tablet acknowledged nothing, thus its copy stays.
         phone.new_queue(&TABLET);
         assert!(phone.resending());
@@ -990,6 +1041,7 @@ mod tests {
             }
         }
         assert_eq!(laptop.missing(&PHONE), Some((2, 2)));
+
         let acks = laptop.acknowledgments(100).unwrap();
         let body = DeviceSetBody::parse(&acks[0].1).unwrap();
         assert_eq!(body.sync_ack(), Some(1), "the point stays below the hole");
@@ -998,6 +1050,7 @@ mod tests {
         assert_eq!(phone.next_resend(&LAPTOP), Some(([1; 16], 2)));
         laptop.receive(&PHONE, &bodies[1], 102).unwrap();
         assert_eq!(laptop.missing(&PHONE), None);
+
         let acks = laptop.acknowledgments(102 + SYNC_ACK_MAX_DELAY).unwrap();
         let body = DeviceSetBody::parse(&acks[0].1).unwrap();
         assert_eq!(body.sync_ack(), Some(u64::from(SYNC_ACK_BATCH) + 1));
@@ -1021,6 +1074,7 @@ mod tests {
         let from_laptop = laptop
             .publish_mutable(1, b"conversation", b"read to 9", [7; 16], 10)
             .unwrap();
+
         // The two writes hold one Lamport counter, thus the lower device wins.
         assert_eq!(
             laptop.receive(&PHONE, &from_phone.body, 11).unwrap(),
@@ -1043,12 +1097,14 @@ mod tests {
         // the tablet, and not by the device of the tablet.
         let (mut phone2, mut laptop2) = pair();
         let mut tablet = SyncEngine::new(TABLET, &[PHONE, LAPTOP]).unwrap();
+
         let a = phone2
             .publish_mutable(1, b"conversation", b"read to 5", [7; 16], 10)
             .unwrap();
         let b = laptop2
             .publish_mutable(1, b"conversation", b"read to 9", [7; 16], 10)
             .unwrap();
+
         let Taken::Mutable {
             lamport, writer, ..
         } = tablet.receive(&PHONE, &a.body, 11).unwrap()
@@ -1059,6 +1115,7 @@ mod tests {
             tablet.receive(&LAPTOP, &b.body, 11).unwrap(),
             Taken::Superseded
         );
+
         let relay = tablet
             .relay_mutable(
                 1,
@@ -1070,6 +1127,7 @@ mod tests {
                 12,
             )
             .unwrap();
+
         assert!(matches!(
             laptop2.receive(&TABLET, &relay.body, 13).unwrap(),
             Taken::Mutable { writer: PHONE, .. }
@@ -1099,9 +1157,11 @@ mod tests {
             let text = message(AppKind::Text, tag);
             bodies.push(phone.publish(&text, ORIGIN, [tag; 16], 0, 10).unwrap());
         }
+
         laptop.receive(&PHONE, &bodies[0].body, 11).unwrap();
         laptop.receive(&PHONE, &bodies[2].body, 11).unwrap();
         assert_eq!(laptop.missing(&PHONE), Some((2, 2)));
+
         let lamport = phone.lamport;
         let void = phone.void(2).unwrap();
         // The void takes no counter and no Lamport value of its own.
@@ -1109,6 +1169,7 @@ mod tests {
         assert_eq!(laptop.receive(&PHONE, &void, 12).unwrap(), Taken::Void);
         assert_eq!(laptop.missing(&PHONE), None);
         assert!(!laptop.holds_mutable(ITEM_VOID, &[]));
+
         let acks = laptop.acknowledgments(12 + SYNC_ACK_MAX_DELAY).unwrap();
         assert_eq!(
             DeviceSetBody::parse(&acks[0].1).unwrap().sync_ack(),
@@ -1116,6 +1177,7 @@ mod tests {
         );
         phone.receive(&LAPTOP, &acks[0].1, 13).unwrap();
         assert_eq!(phone.next_resend(&LAPTOP), None);
+
         // A second copy is a duplicate, and a void names a sent counter.
         assert_eq!(laptop.receive(&PHONE, &void, 14).unwrap(), Taken::Duplicate);
         assert!(phone.void(0).is_err());
@@ -1139,6 +1201,7 @@ mod tests {
         // The device did not take the counter, thus no acknowledgment covers
         // it.
         assert!(laptop.acknowledgments(u64::MAX).unwrap().is_empty());
+
         // The same holds for a conversation record.
         let record = phone
             .publish(&message(AppKind::Text, 1), ORIGIN, [1; 16], 0, 10)
@@ -1148,6 +1211,7 @@ mod tests {
             Error::Stale,
             "the counter of the writer is at its end"
         );
+
         let mut far = SyncEngine::new(PHONE, &[LAPTOP, TABLET]).unwrap();
         far.lamport = SYNC_LAMPORT_LEAD + 1;
         let record = far
@@ -1157,6 +1221,7 @@ mod tests {
             laptop.receive(&PHONE, &record.body, 11),
             Err(Error::Unverified)
         );
+
         // A value at the bound is a count of writes, and the device takes
         // it.
         let mut near = SyncEngine::new(PHONE, &[LAPTOP, TABLET]).unwrap();
@@ -1169,6 +1234,7 @@ mod tests {
             Taken::Record { .. }
         ));
         assert_eq!(laptop.lamport, SYNC_LAMPORT_LEAD);
+
         // A write of the laptop then wins over the item of each device.
         let later = laptop
             .publish_mutable(1, b"conversation", b"y", [7; 16], 12)
@@ -1202,6 +1268,7 @@ mod tests {
             ));
         }
         assert_eq!(phone.lamport, 2 * SYNC_LAMPORT_LEAD);
+
         // The phone still rejects a value above the bound from a device
         // that owns no channel.
         laptop.lamport = phone.lamport + SYNC_LAMPORT_LEAD;
@@ -1224,6 +1291,7 @@ mod tests {
             tablet.receive(&PHONE, &relayed.body, 15),
             Err(Error::Unverified)
         );
+
         // DEV-275: the phone owns the channels, and its record seeds the
         // Lamport counter of the tablet.
         tablet.set_owner(Some(PHONE));
@@ -1232,12 +1300,14 @@ mod tests {
             Taken::Record { .. }
         ));
         assert_eq!(tablet.lamport, phone.lamport);
+
         // A void of the phone carries its Lamport counter too.
         let mut behind = SyncEngine::new(TABLET, &[PHONE]).unwrap();
         behind.set_owner(Some(PHONE));
         let void = phone.void(relayed.counter).unwrap();
         assert_eq!(behind.receive(&PHONE, &void, 16).unwrap(), Taken::Void);
         assert_eq!(behind.lamport, phone.lamport);
+
         // A write of the tablet then wins on the phone, inside the bound.
         let later = tablet
             .publish_mutable(1, b"conversation", b"y", [7; 16], 17)
@@ -1246,6 +1316,7 @@ mod tests {
             phone.receive(&TABLET, &later.body, 18).unwrap(),
             Taken::Mutable { .. }
         ));
+
         // The stored form holds no owner, and the caller names it again.
         let mut again = SyncEngine::restore(&tablet.export().unwrap()).unwrap();
         assert_eq!(again.owner, None);
@@ -1258,17 +1329,20 @@ mod tests {
         let (_, mut laptop) = pair();
         let peer = laptop.peers.get_mut(&PHONE).unwrap();
         peer.ahead = (2..2 + SYNC_AHEAD_MAX as u64).collect();
+
         // A record above the hole waits for its resend.
         assert_eq!(
             laptop.take_counter(&PHONE, 1_000_000, 5),
             Err(Error::NoPath)
         );
         assert!(laptop.take_counter(&PHONE, 2, 5).is_ok_and(|taken| !taken));
+
         // The device takes the record that fills the hole, and the stored
         // engine opens again.
         assert!(laptop.take_counter(&PHONE, 1, 5).unwrap());
         assert_eq!(laptop.missing(&PHONE), None);
         assert!(laptop.take_counter(&PHONE, 1_000_000, 5).unwrap());
+
         let back = SyncEngine::restore(&laptop.export().unwrap()).unwrap();
         assert_eq!(back, laptop);
     }
@@ -1282,6 +1356,7 @@ mod tests {
         let new = phone
             .publish(&message(AppKind::Text, 2), ORIGIN, [2; 16], 0, 20)
             .unwrap();
+
         // The laptop linked with the live scope after the first record.
         laptop.watermarks_mut().set_live(&[(PHONE, 1)]);
         assert_eq!(
@@ -1292,6 +1367,7 @@ mod tests {
             laptop.receive(&PHONE, &new.body, 31).unwrap(),
             Taken::Record { .. }
         ));
+
         let acks = laptop.acknowledgments(31 + SYNC_ACK_MAX_DELAY).unwrap();
         assert_eq!(
             DeviceSetBody::parse(&acks[0].1).unwrap().sync_ack(),
@@ -1317,6 +1393,7 @@ mod tests {
         };
         let mut body = alloc::vec![0u8; rich.len()];
         rich.encode(channel, &mut body).unwrap();
+
         let app = AppMessage {
             kind: AppKind::Rich,
             msg_id: [9; 16],
@@ -1331,16 +1408,19 @@ mod tests {
     #[test]
     fn a_wrapper_holds_the_rules_of_the_channel_of_its_conversation() {
         use crate::devset::sync::{SCOPE_GROUP, SCOPE_PAIRWISE};
+
         // A kind that a pairwise channel alone carries, in a wrapper: it
         // syncs for a pairwise conversation, and for no group.
         let address = [0u8; umbra_wire::address::LEN];
         let pairwise_only = wrapped(AppKind::QueueAddress, &address, &[], Channel::Pairwise);
         assert!(class_of(&pairwise_only, SCOPE_PAIRWISE).is_ok());
         assert!(class_of(&pairwise_only, SCOPE_GROUP).is_err());
+
         // A mention is a field of a group alone.
         let mention = wrapped(AppKind::Text, b"hello", &[[5; 16]], Channel::Group);
         assert!(class_of(&mention, SCOPE_GROUP).is_ok());
         assert!(class_of(&mention, SCOPE_PAIRWISE).is_err());
+
         // The engine takes each one under the origin of its record.
         let (mut phone, mut laptop) = pair();
         let group = Origin {
@@ -1384,6 +1464,7 @@ mod tests {
         }
         assert!(phone.needs_catch_up(&LAPTOP));
         assert!(phone.interactive(&LAPTOP, 60));
+
         let floor = phone.retained_floor();
         phone.expire(50 + SYNC_MAX_AGE);
         assert!(phone.retained_floor() > floor);

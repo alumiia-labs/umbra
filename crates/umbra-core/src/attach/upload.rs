@@ -85,6 +85,7 @@ impl ChunkUpload {
         {
             return Err(Error::Stale);
         }
+
         self.registrations.push(ReplicaTarget {
             relay_id,
             storage_token,
@@ -103,6 +104,7 @@ impl ChunkUpload {
         if self.registrations.len() < replicas {
             return Err(Error::Stale);
         }
+
         self.registrations.first().ok_or(Error::Stale)
     }
 
@@ -119,10 +121,12 @@ impl ChunkUpload {
         if !self.put_done || self.rep_done {
             return Err(Error::Stale);
         }
+
         let targets: Vec<ReplicaTarget> = self.registrations.iter().skip(1).copied().collect();
         if targets.is_empty() {
             return Err(Error::Stale);
         }
+
         self.rep_done = true;
         Ok(CrepPayload { targets })
     }
@@ -139,6 +143,7 @@ impl ChunkUpload {
         if !self.is_placed() {
             return Err(Error::Stale);
         }
+
         let mut refs = Vec::new();
         for group in self.registrations.chunks(3) {
             let first = group.first().ok_or(Error::Stale)?;
@@ -154,6 +159,7 @@ impl ChunkUpload {
                 replicas: [hint(1), hint(2)],
             });
         }
+
         Ok(refs)
     }
 
@@ -184,6 +190,7 @@ mod tests {
     fn an_upload_registers_puts_once_replicates_and_names_its_refs() {
         let mut up = ChunkUpload::new([1; 32], StaticSecret::from([2; 32]));
         assert!(up.put_target(REPLICAS).is_err());
+
         up.register([10; 32], [11; 32]).unwrap();
         assert!(up.register([10; 32], [12; 32]).is_err());
         up.register([20; 32], [21; 32]).unwrap();
@@ -192,17 +199,20 @@ mod tests {
         assert_eq!(up.put_target(REPLICAS).unwrap().storage_token, [11; 32]);
         up.put_done(REPLICAS).unwrap();
         assert!(up.register([40; 32], [41; 32]).is_err());
+
         let crep = up.crep().unwrap();
         assert_eq!(crep.targets.len(), 2);
         assert_eq!(crep.targets[0].relay_id, [20; 32]);
         assert_eq!(crep.targets[1].storage_token, [31; 32]);
         assert!(up.crep().is_err());
+
         let refs = up.chunk_refs().unwrap();
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].relay_id, [10; 32]);
         assert_eq!(refs[0].cred_pk, up.cred_pk());
         assert_eq!(refs[0].replicas[0], seal::relay_hint(&[20; 32]));
         assert_eq!(refs[0].replicas[1], seal::relay_hint(&[30; 32]));
+
         up.replace_replica(&[30; 32], [40; 32], [41; 32]);
         assert_eq!(up.relays().count(), 3);
         assert_eq!(
@@ -243,6 +253,7 @@ mod tests {
         };
         assert!(distinct_operators(&[relay(1), relay(2), relay(3)]));
         assert!(!distinct_operators(&[relay(1), relay(2), relay(1)]));
+
         let mut counter = 0u32;
         let mut random = |bound: u32| {
             counter = counter.wrapping_add(7);

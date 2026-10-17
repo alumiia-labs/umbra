@@ -67,6 +67,7 @@ pub fn ladder(newest: Option<u32>) -> Vec<(u32, bool)> {
     let mut steps = Vec::new();
     let mut present_below: Option<u64> = None;
     let mut absent_at = u64::from(u32::MAX) + 1;
+
     for power in 0..=32u32 {
         let version = (1u64 << power) - 1;
         if version > u64::from(u32::MAX) {
@@ -80,10 +81,12 @@ pub fn ladder(newest: Option<u32>) -> Vec<(u32, bool)> {
             break;
         }
     }
+
     while let Some(low) = present_below {
         if absent_at - low <= 1 {
             break;
         }
+
         let middle = low + (absent_at - low) / 2;
         steps.push((middle, is_present(middle)));
         if is_present(middle) {
@@ -92,6 +95,7 @@ pub fn ladder(newest: Option<u32>) -> Vec<(u32, bool)> {
             absent_at = middle;
         }
     }
+
     steps
         .into_iter()
         .filter_map(|(version, present)| u32::try_from(version).ok().map(|v| (v, present)))
@@ -140,17 +144,20 @@ impl LookupProof {
             .as_ref()
             .map_or(0, |(_, entry)| 34 + entry.len());
         let len = 1 + 8 + 64 + 1 + self.log_path.len() * 33 + 5 + 1 + steps_len + opened_len;
+
         let mut out = alloc::vec![0u8; len];
         let mut w = Writer::new(&mut out);
         w.u8(VERSION)?;
         w.put(&self.tree_size.to_be_bytes())?;
         w.put(&self.nonce)?;
         w.put(&self.prefix_root)?;
+
         w.u8(u8::try_from(self.log_path.len()).map_err(|_| Error::Malformed)?)?;
         for step in &self.log_path {
             w.u8(u8::from(step.sibling_right))?;
             w.put(&step.sibling)?;
         }
+
         w.u8(u8::from(self.newest.is_some()))?;
         w.u32(self.newest.unwrap_or(0))?;
         w.u8(u8::try_from(self.steps.len()).map_err(|_| Error::Malformed)?)?;
@@ -158,11 +165,13 @@ impl LookupProof {
             w.put(&step.vrf_proof)?;
             step.prefix.write(&mut w)?;
         }
+
         if let Some((opening, entry)) = &self.opened {
             w.put(opening)?;
             w.u16(u16::try_from(entry.len()).map_err(|_| Error::Malformed)?)?;
             w.put(entry)?;
         }
+
         Ok(out)
     }
 
@@ -172,13 +181,16 @@ impl LookupProof {
         if r.u8()? != VERSION {
             return Err(Error::Malformed);
         }
+
         let tree_size = u64::from_be_bytes(r.array()?);
         let nonce = r.array()?;
         let prefix_root = r.array()?;
+
         let path_len = usize::from(r.u8()?);
         if path_len > LOG_PATH_MAX {
             return Err(Error::Malformed);
         }
+
         let mut log_path = Vec::with_capacity(path_len);
         for _ in 0..path_len {
             let sibling_right = match r.u8()? {
@@ -191,6 +203,7 @@ impl LookupProof {
                 sibling_right,
             });
         }
+
         let found = match r.u8()? {
             0 => false,
             1 => true,
@@ -200,10 +213,12 @@ impl LookupProof {
         if !found && version != 0 {
             return Err(Error::Malformed);
         }
+
         let step_count = usize::from(r.u8()?);
         if step_count > LADDER_MAX {
             return Err(Error::Malformed);
         }
+
         let mut steps = Vec::with_capacity(step_count);
         for _ in 0..step_count {
             steps.push(LadderStep {
@@ -211,6 +226,7 @@ impl LookupProof {
                 prefix: PrefixProof::read(&mut r)?,
             });
         }
+
         let opened = if found {
             let opening = r.array()?;
             let entry_len = usize::from(r.u16()?);
@@ -221,6 +237,7 @@ impl LookupProof {
         } else {
             None
         };
+
         r.finish()?;
         Ok(LookupProof {
             tree_size,
@@ -248,6 +265,7 @@ impl LookupProof {
         if self.tree_size != head.tree_size || self.tree_size == 0 {
             return Err(Error::Unverified);
         }
+
         let leaf = epoch_leaf(&self.nonce, &self.prefix_root);
         verify_newest(&leaf, &self.log_path, &head.root)?;
 
@@ -255,6 +273,7 @@ impl LookupProof {
         if expected.len() != self.steps.len() {
             return Err(Error::Unverified);
         }
+
         let mut newest_commitment = None;
         for ((version, present), step) in expected.into_iter().zip(&self.steps) {
             let output = vrf_key.verify(&vrf_input(search_key, version), &step.vrf_proof)?;
@@ -264,10 +283,12 @@ impl LookupProof {
             if found.is_some() != present {
                 return Err(Error::Unverified);
             }
+
             if Some(version) == self.newest {
                 newest_commitment = found;
             }
         }
+
         match (&self.opened, newest_commitment) {
             (Some((opening, entry)), Some(held)) if commitment(opening, entry) == held => {
                 Ok(Some(entry))
@@ -289,10 +310,12 @@ impl LookupProof {
         let Some(bytes) = self.verify(search_key, vrf_key, head)? else {
             return Ok(None);
         };
+
         let entry = DirectoryEntry::parse(bytes)?;
         if entry.handle != canonical_handle || Some(entry.version) != self.newest {
             return Err(Error::Unverified);
         }
+
         Ok(Some(entry))
     }
 }
@@ -335,17 +358,20 @@ impl VersionProof {
             + 32
             + 2
             + self.entry.len();
+
         let mut out = alloc::vec![0u8; len];
         let mut w = Writer::new(&mut out);
         w.u8(VERSION)?;
         w.put(&self.tree_size.to_be_bytes())?;
         w.put(&self.nonce)?;
         w.put(&self.prefix_root)?;
+
         w.u8(u8::try_from(self.log_path.len()).map_err(|_| Error::Malformed)?)?;
         for step in &self.log_path {
             w.u8(u8::from(step.sibling_right))?;
             w.put(&step.sibling)?;
         }
+
         w.u32(self.version)?;
         w.put(&self.step.vrf_proof)?;
         self.step.prefix.write(&mut w)?;
@@ -361,13 +387,16 @@ impl VersionProof {
         if r.u8()? != VERSION {
             return Err(Error::Malformed);
         }
+
         let tree_size = u64::from_be_bytes(r.array()?);
         let nonce = r.array()?;
         let prefix_root = r.array()?;
+
         let path_len = usize::from(r.u8()?);
         if path_len > LOG_PATH_MAX {
             return Err(Error::Malformed);
         }
+
         let mut log_path = Vec::with_capacity(path_len);
         for _ in 0..path_len {
             let sibling_right = match r.u8()? {
@@ -380,16 +409,19 @@ impl VersionProof {
                 sibling_right,
             });
         }
+
         let version = r.u32()?;
         let step = LadderStep {
             vrf_proof: r.array()?,
             prefix: PrefixProof::read(&mut r)?,
         };
+
         let opening = r.array()?;
         let entry_len = usize::from(r.u16()?);
         if entry_len > ENTRY_MAX {
             return Err(Error::Malformed);
         }
+
         let entry = r.take(entry_len)?.to_vec();
         r.finish()?;
         Ok(VersionProof {
@@ -416,8 +448,10 @@ impl VersionProof {
         if self.version != version || self.tree_size != head.tree_size || self.tree_size == 0 {
             return Err(Error::Unverified);
         }
+
         let leaf = epoch_leaf(&self.nonce, &self.prefix_root);
         verify_newest(&leaf, &self.log_path, &head.root)?;
+
         let output = vrf_key.verify(&vrf_input(search_key, version), &self.step.vrf_proof)?;
         let held = self
             .step
@@ -509,6 +543,7 @@ impl LogOperator {
         if self.staged.contains_key(search_key) {
             return None;
         }
+
         match self.newest.get(search_key) {
             Some(held) => held.checked_add(1),
             None => Some(0),
@@ -527,10 +562,12 @@ impl LogOperator {
         if entry.len() > ENTRY_MAX || self.staged.contains_key(search_key) {
             return Err(Error::Stale);
         }
+
         let version = match self.newest.get(search_key) {
             Some(held) => held.checked_add(1).ok_or(Error::NoPath)?,
             None => 0,
         };
+
         self.staged
             .insert(search_key.to_vec(), Stored { opening, entry });
         Ok(version)
@@ -555,8 +592,10 @@ impl LogOperator {
         if self.used_nonces.contains(&nonce) {
             return Err(Error::Stale);
         }
+
         let kept = self.tree.take_cache();
         let mut indexes = Vec::with_capacity(self.staged.len());
+
         match self.open_epoch(nonce, &mut indexes, check) {
             Ok((update, versions, prefix_root, frontier, newest_path)) => {
                 self.used_nonces.insert(nonce);
@@ -566,6 +605,7 @@ impl LogOperator {
                     self.newest.insert(search_key.clone(), version);
                     self.stored.insert((search_key, version), stored);
                 }
+
                 self.epochs.push((nonce, prefix_root));
                 self.log_nodes.push(epoch_leaf(&nonce, &prefix_root));
                 self.log_frontier = frontier;
@@ -603,16 +643,19 @@ impl LogOperator {
             added.push((index, leaf_commitment));
             versions.push(version);
         }
+
         let prefix_root = self.tree.seal(&nonce);
         let mut frontier = self.log_frontier.clone();
         let newest_path = frontier.push_proving(epoch_leaf(&nonce, &prefix_root));
         let log_root = frontier.root().ok_or(Error::NoPath)?;
+
         let update = EpochUpdate {
             tree_size: frontier.size(),
             nonce,
             added,
             log_root,
         };
+
         check(&update)?;
         Ok((update, versions, prefix_root, frontier, newest_path))
     }
@@ -631,6 +674,7 @@ impl LogOperator {
                 prefix: self.tree.prove(&nonce, &index),
             });
         }
+
         let opened = newest
             .and_then(|version| self.stored.get(&(search_key.to_vec(), version)))
             .map(|stored| (stored.opening, stored.entry.clone()));
@@ -653,8 +697,10 @@ impl LogOperator {
             .stored
             .get(&(search_key.to_vec(), version))
             .ok_or(Error::NoPath)?;
+
         let vrf_proof = self.vrf.prove(&vrf_input(search_key, version))?;
         let index = index_of(&vrf::proof_to_hash(&vrf_proof)?);
+
         Ok(VersionProof {
             tree_size: self.log_nodes.len() as u64,
             nonce,
@@ -706,16 +752,19 @@ impl Auditor {
         if update.tree_size != expected_size || self.used_nonces.contains(&update.nonce) {
             return Err(Error::Unverified);
         }
+
         let mut tree = self.tree.clone();
         for (index, leaf_commitment) in &update.added {
             tree.insert(*index, *leaf_commitment)
                 .map_err(|_| Error::Unverified)?;
         }
+
         let mut log = self.log.clone();
         log.push(epoch_leaf(&update.nonce, &tree.root(&update.nonce)));
         if log.root() != Some(update.log_root) {
             return Err(Error::Unverified);
         }
+
         Ok((
             AuditStep {
                 tree,
@@ -803,10 +852,12 @@ mod tests {
         for n in 0..20u8 {
             log.stage(&[n; 64], alloc::vec![n; 40], [n; 32]).unwrap();
         }
+
         assert!(
             log.stage(&[1; 64], alloc::vec![9; 40], [9; 32]).is_err(),
             "one update in an epoch"
         );
+
         log.close_epoch([0xA0; 32]).unwrap();
         for round in 1..=3u8 {
             assert_eq!(
@@ -816,6 +867,7 @@ mod tests {
             );
             log.close_epoch([0xA0 + round; 32]).unwrap();
         }
+
         assert!(
             log.close_epoch([0xA0; 32]).is_err(),
             "the nonce of an epoch is fresh"
@@ -851,6 +903,7 @@ mod tests {
                 .unwrap();
             log.close_epoch([0xB0 + round; 32]).unwrap();
         }
+
         let head = head_of(&log);
         let key = vrf_key(&log);
         for version in 0..3u32 {
@@ -860,21 +913,25 @@ mod tests {
                 proof.verify(&[1; 64], version, &key, &head).unwrap(),
                 [u8::try_from(version).unwrap(); 30].as_slice()
             );
+
             // The proof names its version and its label.
             assert!(proof.verify(&[1; 64], version + 1, &key, &head).is_err());
             assert!(proof.verify(&[2; 64], version, &key, &head).is_err());
         }
+
         assert!(log.version(&[1; 64], 3).is_err());
 
         // Another entry under the opening of this version fails.
         let mut forged = log.version(&[1; 64], 1).unwrap();
         forged.entry = alloc::vec![0x41; 30];
         assert!(forged.verify(&[1; 64], 1, &key, &head).is_err());
+
         // The proof of the version of another label fails at its index.
         let mut moved = log.version(&[2; 64], 1).unwrap();
         moved.opening = [1; 32];
         moved.entry = alloc::vec![1; 30];
         assert!(moved.verify(&[1; 64], 1, &key, &head).is_err());
+
         // A head of another epoch does not take the proof.
         let proof = log.version(&[1; 64], 0).unwrap();
         let mut older = head;
@@ -929,6 +986,7 @@ mod tests {
             assert_eq!(auditor.audit(&update).unwrap(), log.head().unwrap().1);
             heads.push(log.head().unwrap());
         }
+
         let (first_size, first_root) = heads[1];
         let (last_size, last_root) = heads[5];
         let proof = log.consistency(first_size).unwrap();

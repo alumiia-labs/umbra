@@ -41,6 +41,7 @@ impl CausalContext {
         {
             return Err(Error::Malformed);
         }
+
         let mut w = Writer::new(out);
         w.u8(0x01)?;
         w.put(&self.lamport.to_be_bytes())?;
@@ -59,11 +60,13 @@ impl CausalContext {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let lamport = u64::from_be_bytes(r.array()?);
         let count = usize::from(r.u8()?);
         if count > super::MAX_DEVICES {
             return Err(Error::Malformed);
         }
+
         let mut vector = Vec::with_capacity(count);
         let mut last: Option<DeviceId> = None;
         for _ in 0..count {
@@ -74,6 +77,7 @@ impl CausalContext {
             last = Some(id);
             vector.push((id, u64::from_be_bytes(r.array()?)));
         }
+
         let expires_in = r.u32()?;
         r.finish()?;
         Ok(CausalContext {
@@ -103,6 +107,7 @@ pub const SCOPE_GROUP: u8 = 0x02;
 pub fn group_subject(set_key: &umbra_crypto::secret::Secret<32>, group_id: &[u8; 32]) -> [u8; 32] {
     umbra_crypto::hash::sha3_256(&[set_key.expose(), &[SCOPE_GROUP], group_id])
 }
+
 /// The author of a synced record: the user, on a device of the set.
 pub const AUTHOR_USER: u8 = 0x00;
 /// The author of a synced record: the other party of the conversation.
@@ -169,6 +174,7 @@ impl IdentityEntry {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let entry = IdentityEntry {
             salt: r.array()?,
             conversation: r.array()?,
@@ -220,14 +226,17 @@ impl ChannelEntry {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let (salt, conversation, peer_static) = (r.array()?, r.array()?, r.array()?);
         let outbound = Zeroizing::new(r.take(CHANNEL_END_LEN)?.to_vec());
         let guard_seq = r.u32()?;
         let guard_secret = Zeroizing::new(r.array()?);
         r.finish()?;
+
         if guard_seq == 0 && *guard_secret != [0; 32] {
             return Err(Error::Malformed);
         }
+
         Ok(ChannelEntry {
             salt,
             conversation,
@@ -243,10 +252,11 @@ impl ChannelEntry {
 /// names the conversation, and the author of the record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Origin {
-    /// [`SCOPE_PAIRWISE`].
+    /// [`SCOPE_PAIRWISE`] or [`SCOPE_GROUP`].
     pub scope: u8,
     /// For a pairwise conversation, the SHA3-256 of the public key of its
-    /// pairwise identity: the subject of a claim of scope `0x01`.
+    /// pairwise identity: the subject of a claim of scope `0x01`. For a
+    /// group, the [`group_subject`].
     pub subject: [u8; 32],
     /// [`AUTHOR_USER`] or [`AUTHOR_PEER`].
     pub author: u8,
@@ -271,6 +281,7 @@ impl<'a> SyncedRecord<'a> {
         w.u8(0x03)?;
         let n = self.context.encode(w.tail())?;
         let at = w.position().saturating_add(n);
+
         let mut w = Writer::new(out.get_mut(at..).ok_or(Error::Malformed)?);
         w.u8(self.origin.scope)?;
         w.put(&self.origin.subject)?;
@@ -286,6 +297,7 @@ impl<'a> SyncedRecord<'a> {
         if r.u8()? != 0x03 {
             return Err(Error::Malformed);
         }
+
         let context_len = context_len_at(r.rest())?;
         let mut r = Reader::new(bytes.get(1..).ok_or(Error::Malformed)?);
         let context = CausalContext::parse(r.take(context_len)?)?;
@@ -294,10 +306,12 @@ impl<'a> SyncedRecord<'a> {
             subject: r.array()?,
             author: r.u8()?,
         };
+
         // DEV-292, DEV-296: two scopes and two authors.
         if !matches!(origin.scope, SCOPE_PAIRWISE | SCOPE_GROUP) || origin.author > AUTHOR_PEER {
             return Err(Error::Malformed);
         }
+
         let inner_len = usize::try_from(r.u32()?).map_err(|_| Error::Malformed)?;
         let inner = r.take(inner_len)?;
         r.finish()?;
@@ -315,6 +329,7 @@ pub fn restamp_expires_in(body: &mut [u8], expires_in: u32) -> Result<(), Error>
     if body.first() != Some(&0x03) {
         return Err(Error::Malformed);
     }
+
     let end = context_len_at(body.get(1..).ok_or(Error::Malformed)?)?.saturating_add(1);
     body.get_mut(end.saturating_sub(4)..end)
         .ok_or(Error::Malformed)?
@@ -354,6 +369,7 @@ impl<'a> MutableItem<'a> {
         w.u8(0x01)?;
         let n = self.context.encode(w.tail())?;
         let at = w.position().saturating_add(n);
+
         let mut w = Writer::new(out.get_mut(at..).ok_or(Error::Malformed)?);
         w.put(&self.writer)?;
         w.u8(self.item)?;
@@ -370,6 +386,7 @@ impl<'a> MutableItem<'a> {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let context_len = context_len_at(r.rest())?;
         let mut r = Reader::new(bytes.get(1..).ok_or(Error::Malformed)?);
         let context = CausalContext::parse(r.take(context_len)?)?;
@@ -578,6 +595,7 @@ impl AckBatch {
         if self.pending == 0 {
             return None;
         }
+
         let batch = self.pending >= SYNC_ACK_BATCH;
         let period = self
             .period_start
@@ -630,6 +648,7 @@ impl InteractiveBucket {
         let refill = u32::try_from(elapsed / 60)
             .unwrap_or(u32::MAX)
             .saturating_mul(SYNC_INTERACTIVE_RATE);
+
         if refill > 0 {
             self.tokens = self
                 .tokens
@@ -646,6 +665,7 @@ impl InteractiveBucket {
         if self.tokens == 0 {
             return false;
         }
+
         self.tokens -= 1;
         true
     }
@@ -673,6 +693,7 @@ mod tests {
         let n = ctx.encode(&mut out).unwrap();
         assert_eq!(CausalContext::parse(&out[..n]).unwrap(), ctx);
         assert_eq!(ctx.counter_of(&[2; 16]), Some(7));
+
         let bad = CausalContext {
             vector: vec![([2; 16], 7), ([1; 16], 4)],
             ..ctx
@@ -699,6 +720,7 @@ mod tests {
         let mut out = [0u8; 200];
         let n = rec.encode(&mut out).unwrap();
         assert_eq!(SyncedRecord::parse(&out[..n]).unwrap(), rec);
+
         // DEV-243: a resend carries the period that remains then.
         restamp_expires_in(&mut out[..n], 42).unwrap();
         assert_eq!(
@@ -706,12 +728,14 @@ mod tests {
             42
         );
         assert_eq!(SyncedRecord::parse(&out[..n]).unwrap().inner, rec.inner);
+
         let entry = IdentityEntry {
             salt: [5; 16],
             conversation: [6; 32],
         };
         assert_eq!(IdentityEntry::parse(&entry.encode()).unwrap(), entry);
         assert!(IdentityEntry::parse(&entry.encode()[..48]).is_err());
+
         // DEV-319: the item of a channel, with a guard and with none.
         let channel = ChannelEntry {
             salt: [5; 16],
@@ -730,6 +754,7 @@ mod tests {
         assert!(ChannelEntry::parse(&none).is_err());
         none[213..].copy_from_slice(&[0; 32]);
         assert_eq!(ChannelEntry::parse(&none).unwrap().guard_seq, 0);
+
         // DEV-292: a scope or an author that the layout does not name.
         let other_scope = SyncedRecord {
             origin: Origin {
@@ -740,6 +765,7 @@ mod tests {
         };
         let n = other_scope.encode(&mut out).unwrap();
         assert!(SyncedRecord::parse(&out[..n]).is_err());
+
         let item = MutableItem {
             context: ctx.clone(),
             writer: [1; 16],
@@ -750,6 +776,7 @@ mod tests {
         let n = item.encode(&mut out).unwrap();
         let back = MutableItem::parse(&out[..n]).unwrap();
         assert_eq!(back, item);
+
         let newer = MutableItem {
             context: CausalContext { lamport: 4, ..ctx },
             ..item.clone()

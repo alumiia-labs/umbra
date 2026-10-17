@@ -45,10 +45,12 @@ fn frame_size(bytes: &[u8]) -> Option<(u16, u16)> {
     // The start marker takes two bytes. Each turn then takes one byte at
     // least, thus the length of the picture bounds the walk.
     let mut rest = bytes.get(2..)?;
+
     loop {
         let [0xFF, marker, after @ ..] = rest else {
             return None;
         };
+
         match *marker {
             // A fill byte before a marker.
             0xFF => rest = rest.get(1..)?,
@@ -63,6 +65,7 @@ fn frame_size(bytes: &[u8]) -> Option<(u16, u16)> {
                 let [high, low, ..] = after else {
                     return None;
                 };
+
                 // The length counts its own two bytes.
                 let len = usize::from(u16::from_be_bytes([*high, *low]));
                 let segment = after.get(2..len)?;
@@ -76,6 +79,7 @@ fn frame_size(bytes: &[u8]) -> Option<(u16, u16)> {
                         u16::from_be_bytes([*w0, *w1]),
                     ));
                 }
+
                 rest = after.get(len..)?;
             }
         }
@@ -88,6 +92,7 @@ fn frame_size(bytes: &[u8]) -> Option<(u16, u16)> {
 /// not the canvas, thus this check reads the size here, before any decoder.
 fn is_picture(bytes: &[u8]) -> bool {
     let side = |side: u16| (1..=PICTURE_SIDE_MAX).contains(&side);
+
     bytes.len() <= PICTURE_MAX
         && bytes.starts_with(&[0xFF, 0xD8, 0xFF])
         && bytes.ends_with(&[0xFF, 0xD9])
@@ -140,6 +145,7 @@ impl<'a> ProfilePlain<'a> {
     /// u16 || welcome || picture_len u16 || picture` (`DIS-176`).
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
         self.check()?;
+
         let mut w = Writer::new();
         w.u8(PROFILE_VERSION);
         w.u8(u8::try_from(self.name.len()).map_err(|_| Error::Malformed)?);
@@ -157,6 +163,7 @@ impl<'a> ProfilePlain<'a> {
         if r.u8()? != PROFILE_VERSION {
             return Err(Error::Malformed);
         }
+
         let name_len = usize::from(r.u8()?);
         let name = core::str::from_utf8(r.take(name_len)?).map_err(|_| Error::Malformed)?;
         let welcome_len = usize::from(r.u16()?);
@@ -164,11 +171,13 @@ impl<'a> ProfilePlain<'a> {
         let picture_len = usize::from(r.u16()?);
         let picture = r.take(picture_len)?;
         r.end()?;
+
         let plain = ProfilePlain {
             name,
             welcome,
             picture,
         };
+
         plain.check()?;
         Ok(plain)
     }
@@ -196,20 +205,24 @@ mod tests {
         assert_eq!(frame_size(&jpeg(0xC0, 480, 640)), Some((480, 640)));
         assert!(is_picture(&jpeg(0xC0, PICTURE_SIDE_MAX, PICTURE_SIDE_MAX)));
         assert!(is_picture(&jpeg(0xC2, 1, 1)));
+
         // A side above the bound, and a side of zero.
         assert!(!is_picture(&jpeg(0xC0, PICTURE_SIDE_MAX + 1, 16)));
         assert!(!is_picture(&jpeg(0xC2, 16, PICTURE_SIDE_MAX + 1)));
         assert!(!is_picture(&jpeg(0xC0, 0xFFFF, 0xFFFF)));
         assert!(!is_picture(&jpeg(0xC0, 0, 16)));
         assert!(!is_picture(&jpeg(0xC0, 16, 0)));
+
         // A lossless frame, and no frame header at all.
         assert!(!is_picture(&jpeg(0xC3, 16, 16)));
         assert!(!is_picture(&[0xFF, 0xD8, 0xFF, 0xE0, 0xFF, 0xD9]));
         assert!(!is_picture(&[0xFF, 0xD8, 0xFF, 0xD9]));
+
         // A frame header after the scan started is none.
         let mut late = alloc::vec![0xFF, 0xD8, 0xFF, 0xDA, 0x00, 0x02];
         late.extend(&jpeg(0xC0, 16, 16)[8..]);
         assert!(!is_picture(&late));
+
         // A segment that names more bytes than the picture holds, a length
         // below its own two bytes, and a frame header cut short.
         assert!(!is_picture(&[
@@ -221,6 +234,7 @@ mod tests {
         assert!(!is_picture(&[
             0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x04, 0x08, 0x00, 0xFF, 0xD9
         ]));
+
         // Fill bytes before a marker change nothing.
         let mut filled = alloc::vec![0xFF, 0xD8, 0xFF, 0xFF, 0xFF];
         filled.extend(&jpeg(0xC0, 16, 16)[8..]);
@@ -236,13 +250,16 @@ mod tests {
         };
         let bytes = plain.encode().unwrap();
         assert_eq!(ProfilePlain::parse(&bytes).unwrap(), plain);
+
         // A stray byte, another version, and a picture that is no JPEG.
         let mut stray = bytes.clone();
         stray.push(0);
         assert!(ProfilePlain::parse(&stray).is_err());
+
         let mut other = bytes.clone();
         other[0] = 2;
         assert!(ProfilePlain::parse(&other).is_err());
+
         let long = "a".repeat(PROFILE_NAME_MAX + 1);
         assert!(ProfilePlain {
             name: &long,
@@ -251,6 +268,7 @@ mod tests {
         }
         .encode()
         .is_err());
+
         assert!(ProfilePlain {
             name: "",
             welcome: "",
@@ -258,6 +276,7 @@ mod tests {
         }
         .encode()
         .is_err());
+
         let jpeg = jpeg(0xC0, 96, 96);
         let with_picture = ProfilePlain {
             name: "",
@@ -275,6 +294,7 @@ mod tests {
             picture: &[],
         };
         assert_eq!(ProfilePlain::parse(&note.encode().unwrap()).unwrap(), note);
+
         for name in [
             "Da\nna",
             "Dana\u{202E}",
@@ -289,15 +309,18 @@ mod tests {
                 picture: &[],
             };
             assert!(barred.encode().is_err());
+
             // A blob that a stranger wrote with such a name does not parse.
             let mut bytes = alloc::vec![PROFILE_VERSION, name.len() as u8];
             bytes.extend_from_slice(name.as_bytes());
             bytes.extend_from_slice(&[0, 0, 0, 0]);
             assert!(ProfilePlain::parse(&bytes).is_err());
         }
+
         for welcome in ["a\rb", "a\u{200F}b", "a\u{0000}b", "a\tb"] {
             assert!(!is_plain_note(welcome));
         }
+
         const { assert!(PROFILE_BLOB_MAX < umbra_wire::directory::DIR_REQUEST_LEN - 128) };
     }
 }

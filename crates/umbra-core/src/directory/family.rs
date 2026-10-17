@@ -54,6 +54,7 @@ impl<'a> FamilyCert<'a> {
         {
             return Err(Error::Malformed);
         }
+
         let mut w = Writer::new(out);
         w.u8(0x01)?;
         w.put(&self.family_name)?;
@@ -66,6 +67,7 @@ impl<'a> FamilyCert<'a> {
         for s in &self.sigs {
             w.put(s)?;
         }
+
         Ok(w.position())
     }
 
@@ -75,25 +77,30 @@ impl<'a> FamilyCert<'a> {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let family_name = r.array()?;
         let count = usize::from(r.u16()?);
         if count == 0 || count > FAMILY_MAX {
             return Err(Error::Malformed);
         }
+
         let mut members = Vec::with_capacity(count);
         for _ in 0..count {
             members.push(r.array()?);
         }
         let valid_after = u64::from_be_bytes(r.array()?);
+
         let sig_count = usize::from(r.u8()?);
         if sig_count != count {
             return Err(Error::Malformed);
         }
+
         let mut sigs = Vec::with_capacity(count);
         for _ in 0..count {
             sigs.push(r.take(SIGNATURE_LEN)?);
         }
         r.finish()?;
+
         Ok(FamilyCert {
             family_name,
             members,
@@ -114,6 +121,7 @@ impl<'a> FamilyCert<'a> {
         if identity_keys.len() != self.members.len() || !self.members.contains(relay_id) {
             return Err(Error::Unverified);
         }
+
         let preimage = self.preimage();
         for ((member, key), sig) in self.members.iter().zip(identity_keys).zip(&self.sigs) {
             if sha3_256(&[key]) != *member {
@@ -121,6 +129,7 @@ impl<'a> FamilyCert<'a> {
             }
             VerifyingKey::from_bytes(key)?.verify(&preimage, &Signature::from_bytes(sig)?)?;
         }
+
         Ok(())
     }
 }

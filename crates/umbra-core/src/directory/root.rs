@@ -31,6 +31,7 @@ pub(crate) fn read_sigs<'a>(r: &mut Reader<'a>) -> Result<Vec<AuthoritySig<'a>>,
     if !(SIGNATURES_NEEDED..=AUTHORITY_COUNT).contains(&count) {
         return Err(Error::Malformed);
     }
+
     let mut sigs = Vec::with_capacity(count);
     let mut last: Option<u8> = None;
     for _ in 0..count {
@@ -112,16 +113,19 @@ impl<'a> DirectoryKeySet<'a> {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let keyset_epoch = u64::from_be_bytes(r.array()?);
         let count = usize::from(r.u8()?);
         if count != AUTHORITY_COUNT {
             return Err(Error::Malformed);
         }
+
         let independent_count = r.u8()?;
         let mut keys = Vec::with_capacity(count);
         for _ in 0..count {
             keys.push(r.take(VERIFYING_KEY_LEN)?);
         }
+
         Ok((
             DirectoryKeySet {
                 keyset_epoch,
@@ -160,6 +164,7 @@ impl<'a> DirectoryKeySet<'a> {
                 valid = valid.saturating_add(1);
             }
         }
+
         if valid >= SIGNATURES_NEEDED {
             Ok(())
         } else {
@@ -180,9 +185,11 @@ impl<'a> DirectoryKeySet<'a> {
         if next.keyset_epoch != self.keyset_epoch.saturating_add(1) {
             return Err(Error::Unverified);
         }
+
         let mut r = Reader::new(signed.get(used..).ok_or(Error::Malformed)?);
         let sigs = read_sigs(&mut r)?;
         r.finish()?;
+
         let mut preimage = Vec::with_capacity(64);
         preimage.extend_from_slice(labels::DIRECTORY_KEYSET);
         preimage.push(0x01);
@@ -241,6 +248,7 @@ impl<'a> DirectoryRoot<'a> {
         if self.revoked.len() > MEASURER_REVOKE_MAX {
             return Err(Error::Malformed);
         }
+
         let mut w = Writer::new(out);
         w.u8(0x01)?;
         w.put(&self.epoch.to_be_bytes())?;
@@ -264,14 +272,17 @@ impl<'a> DirectoryRoot<'a> {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let epoch = u64::from_be_bytes(r.array()?);
         let epoch_start_unix = u64::from_be_bytes(r.array()?);
         if epoch_start_unix != epoch.saturating_mul(EPOCH_SECONDS) {
             return Err(Error::Malformed);
         }
+
         let root = r.array()?;
         let keyset_hash = r.array()?;
         let bloc_hash = r.array()?;
+
         let revoked_count = usize::from(r.u8()?);
         if revoked_count > MEASURER_REVOKE_MAX {
             return Err(Error::Malformed);
@@ -280,8 +291,10 @@ impl<'a> DirectoryRoot<'a> {
         for _ in 0..revoked_count {
             revoked.push(r.array()?);
         }
+
         let sigs = read_sigs(&mut r)?;
         r.finish()?;
+
         Ok(DirectoryRoot {
             epoch,
             epoch_start_unix,
@@ -401,7 +414,9 @@ impl<'a> Consensus<'a> {
         {
             return Err(Error::Stale);
         }
+
         self.keyset.verify_multi(&root.preimage(), &root.sigs)?;
+
         // REL-035: not older than the validity plus the skew.
         let is_stale = self.client_clock(device_clock).is_some_and(|clock| {
             clock.saturating_sub(root.epoch_start_unix)
@@ -423,6 +438,7 @@ impl<'a> Consensus<'a> {
         if is_ahead {
             self.correction = Some(correction(root.epoch_start_unix, device_clock));
         }
+
         self.highest_epoch = root.epoch;
         self.accepted = Some(root);
     }

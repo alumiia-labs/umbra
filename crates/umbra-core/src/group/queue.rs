@@ -46,6 +46,7 @@ pub fn select_pair(candidates: &[Candidate]) -> Result<Pair, Error> {
             }
         }
     }
+
     for (i, a) in candidates.iter().enumerate() {
         for b in candidates.iter().skip(i.saturating_add(1)) {
             if a.operator_id != b.operator_id {
@@ -56,6 +57,7 @@ pub fn select_pair(candidates: &[Candidate]) -> Result<Pair, Error> {
             }
         }
     }
+
     Err(Error::NoPath)
 }
 
@@ -125,6 +127,7 @@ impl Replicas {
         if r.u8()? != STORED_VERSION {
             return Err(Error::Stale);
         }
+
         let mut refs = [ReplicaRef {
             relay_id: [0; 32],
             group_queue_id: [0; 32],
@@ -133,6 +136,7 @@ impl Replicas {
         let mut cursors = [0u32; GROUP_REPLICAS];
         let mut newest_epoch_key = [None; GROUP_REPLICAS];
         let mut reachable = [false; GROUP_REPLICAS];
+
         for index in 0..GROUP_REPLICAS {
             let reference = ReplicaRef {
                 relay_id: r.array()?,
@@ -142,6 +146,7 @@ impl Replicas {
             let cursor = r.u32()?;
             let newest = r.option(Reader::u32)?;
             let up = r.flag()?;
+
             if let Some(slot) = refs.get_mut(index) {
                 *slot = reference;
             }
@@ -155,6 +160,7 @@ impl Replicas {
                 *slot = up;
             }
         }
+
         Ok(Replicas {
             refs,
             cursors,
@@ -207,22 +213,25 @@ impl Replicas {
     }
 
     /// A record at `seq` arrived from replica `which`; an epoch-key record
-    /// moves the newest-epoch-key mark (`GRP-207`). A `seq` above the jump
-    /// that the rate of the queue allows moves nothing (`GRP-202`). One
-    /// false value from a replica would else leave the cursor at the top of
-    /// the range. Each later subscription there would then give no record.
-    /// The reader then asks from the cursor that stands, and a record that
-    /// it holds already is a copy.
+    /// moves the newest-epoch-key mark (`GRP-207`).
+    ///
+    /// A `seq` above the jump that the rate of the queue allows moves
+    /// nothing (`GRP-202`). Without this check, one false value from a
+    /// replica puts the cursor at the top of the range, and each later
+    /// subscription there gives no record. With it, the reader asks again
+    /// from the current cursor and drops a record it holds already as a copy.
     pub fn arrived(&mut self, which: usize, seq: u32, epoch_key: bool) {
         let cursor = self.cursor(which);
         if seq > cursor.saturating_add(CURSOR_JUMP_MAX) {
             return;
         }
+
         if let Some(cursor) = self.cursors.get_mut(which) {
             if seq > *cursor {
                 *cursor = seq;
             }
         }
+
         if epoch_key {
             if let Some(mark) = self.newest_epoch_key.get_mut(which) {
                 *mark = Some(mark.map_or(seq, |m| m.max(seq)));
@@ -309,20 +318,24 @@ mod tests {
         assert_eq!(r.pick(false), 0);
         assert_eq!(r.other(), 1);
         assert!(r.may_post());
+
         r.arrived(0, 20, true);
         assert_eq!(r.cursor(0), 20);
         assert!(r.may_post());
+
         r.arrived(0, 25, true);
         r.cursors[0] = 22;
         r.set_reachable(1, false);
         assert!(!r.may_post());
         r.arrived(0, 25, false);
         assert!(r.may_post());
+
         // GRP-202: one false `seq` leaves the cursor where it was.
         r.arrived(0, u32::MAX, false);
         assert_eq!(r.cursor(0), 25);
         r.arrived(0, 25 + CURSOR_JUMP_MAX, false);
         assert_eq!(r.cursor(0), 25 + CURSOR_JUMP_MAX);
+
         r.set_reachable(0, false);
         assert!(r.unreachable());
         assert_eq!(r.targets(), alloc::vec![[1; 32], [3; 32]]);
@@ -334,10 +347,12 @@ mod tests {
         assert_eq!(replicas.pick(true), 1);
         assert_eq!(replicas.other(), 0);
         assert_eq!(replicas.pick(true), 0);
+
         let mut w = Writer::new();
         replicas.export(&mut w);
         let mut bytes = w.finish().to_vec();
         assert!(Replicas::import(&mut Reader::new(&bytes)).is_ok());
+
         // The last byte is the replica of the last session.
         let last = bytes.len() - 1;
         bytes[last] = 7;

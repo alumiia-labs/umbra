@@ -19,7 +19,7 @@ use super::{
     path::Candidate,
     removal::{LinkRemoval, LINK_REMOVALS_MAX},
     report::{ReportQueue, REPORT_QUEUES_MAX, REPORT_QUEUE_LEN},
-    root::{Consensus, DirectoryRoot},
+    root::{Consensus, DirectoryKeySet, DirectoryRoot},
     tree::{self, Step},
 };
 use crate::Error;
@@ -74,6 +74,7 @@ impl<'a> RelayManifest<'a> {
                 .map(|removal| removal.len())
                 .sum::<usize>()
         };
+
         1 + 2 + self.root.len() + 2 + entries + queues + removals
     }
 
@@ -101,6 +102,7 @@ impl<'a> RelayManifest<'a> {
                 w.put(&step.sibling)?;
             }
         }
+
         // The count is absent with no queue and no removal, thus a manifest
         // with none keeps the bytes of an earlier build.
         if !self.queues.is_empty() || !self.removals.is_empty() {
@@ -115,6 +117,7 @@ impl<'a> RelayManifest<'a> {
                 w.put(queue)?;
             }
         }
+
         if !self.removals.is_empty() {
             if self.removals.len() > LINK_REMOVALS_MAX {
                 return Err(Error::Malformed);
@@ -127,6 +130,7 @@ impl<'a> RelayManifest<'a> {
                 w.put(removal)?;
             }
         }
+
         Ok(out)
     }
 
@@ -136,8 +140,10 @@ impl<'a> RelayManifest<'a> {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let root_len = usize::from(r.u16()?);
         let root = r.take(root_len)?;
+
         let entry_count = usize::from(r.u16()?);
         // A count that the bytes cannot hold must not size an allocation.
         if entry_count > r.remaining() / (ENTRY_LEN + 1) {
@@ -164,6 +170,7 @@ impl<'a> RelayManifest<'a> {
             }
             entries.push(ProvenEntry { entry, proof });
         }
+
         let mut queues = Vec::new();
         if r.remaining() > 0 {
             let count = usize::from(r.u8()?);
@@ -174,6 +181,7 @@ impl<'a> RelayManifest<'a> {
                 queues.push(r.take(REPORT_QUEUE_LEN)?);
             }
         }
+
         let mut removals = Vec::new();
         if r.remaining() > 0 {
             let count = usize::from(r.u16()?);
@@ -195,6 +203,7 @@ impl<'a> RelayManifest<'a> {
             }
         }
         r.finish()?;
+
         Ok(RelayManifest {
             root,
             entries,
@@ -272,10 +281,12 @@ impl RelaySet {
         if root.bloc_hash != blocs.hash()? {
             return Err(Error::Unverified);
         }
+
         // The root comes first: a carrier must not make a client verify the
         // signature of each entry under a root that no authority signed.
         consensus.verify(&root, device_clock)?;
         let (epoch, merkle_root, digest) = (root.epoch, root.root, root.digest());
+
         // The consensus takes the root after the last entry, because a
         // manifest with a bad entry must leave the consensus as it was.
         let mut relays: Vec<ListedRelay> = Vec::with_capacity(manifest.entries.len());
@@ -284,17 +295,20 @@ impl RelaySet {
         for proven in &manifest.entries {
             tree::verify(proven.entry, &proven.proof, &merkle_root)?;
             leaves.push(tree::leaf(proven.entry));
+
             let entry = RelayEntry::parse(proven.entry)?;
             let descriptor = &entry.descriptor;
             if last_id.is_some_and(|last| last >= descriptor.relay_id) {
                 return Err(Error::Malformed);
             }
             last_id = Some(descriptor.relay_id);
+
             // REL-148: an entry that starts after the epoch of the root
             // goes, and the manifest stays.
             if descriptor.valid_after > epoch {
                 continue;
             }
+
             relays.push(ListedRelay {
                 candidate: Candidate::from_entry(&entry, blocs),
                 ntor_pk: descriptor.ntor_pk,
@@ -308,46 +322,16 @@ impl RelaySet {
                 class: entry.class,
             });
         }
+
         // The proofs say that each entry is a leaf. The root over the
         // entries in their order says that no leaf is absent. A leaf and a
         // node hash under two prefixes (`REL-053`), thus no other list of
         // leaves gives the signed root.
         let is_whole = tree::root(&leaves) == Some(merkle_root);
-        // REL-168: a queue that fails goes, and the manifest stays. No root
-        // covers a queue, thus a carrier can repeat one or show an older
-        // one of the same authority. Each authority counts one time, with
-        // the queue of its highest epoch.
-        let mut report_queues: Vec<ReportQueue> = Vec::new();
-        for bytes in &manifest.queues {
-            let Ok(queue) = ReportQueue::verify(bytes, consensus.keyset(), epoch) else {
-                continue;
-            };
-            let held = report_queues
-                .iter_mut()
-                .find(|held| held.authority_index == queue.authority_index);
-            match held {
-                Some(held) if held.epoch < queue.epoch => *held = queue,
-                Some(_) => {}
-                None => report_queues.push(queue),
-            }
-        }
-        // REL-184: a removal that fails or ended goes, and the manifest
-        // stays. A link that the list holds already costs no second
-        // verification.
-        let mut removed_links: Vec<LinkRemoval> = Vec::new();
-        for bytes in &manifest.removals {
-            let is_held = LinkRemoval::link_of(bytes).is_some_and(|(relay_a, relay_b)| {
-                removed_links
-                    .iter()
-                    .any(|held| held.relay_a == relay_a && held.relay_b == relay_b)
-            });
-            if is_held {
-                continue;
-            }
-            if let Ok(removal) = LinkRemoval::verify(bytes, consensus.keyset(), epoch) {
-                removed_links.push(removal);
-            }
-        }
+
+        let report_queues = newest_queues(&manifest.queues, consensus.keyset(), epoch);
+        let removed_links = verified_removals(&manifest.removals, consensus.keyset(), epoch);
+
         consensus.commit(root, device_clock);
         Ok(RelaySet {
             epoch,
@@ -359,6 +343,57 @@ impl RelaySet {
             removed_links,
         })
     }
+}
+
+/// The report queues of a manifest that verify under `keyset`.
+///
+/// REL-168: a queue that fails goes, and the manifest stays. No root covers
+/// a queue, thus a carrier can repeat one or show an older one of the same
+/// authority. Each authority counts one time, with the queue of its highest
+/// epoch.
+fn newest_queues(queues: &[&[u8]], keyset: &DirectoryKeySet<'_>, epoch: u64) -> Vec<ReportQueue> {
+    let mut report_queues: Vec<ReportQueue> = Vec::new();
+    for bytes in queues {
+        let Ok(queue) = ReportQueue::verify(bytes, keyset, epoch) else {
+            continue;
+        };
+        let held = report_queues
+            .iter_mut()
+            .find(|held| held.authority_index == queue.authority_index);
+        match held {
+            Some(held) if held.epoch < queue.epoch => *held = queue,
+            Some(_) => {}
+            None => report_queues.push(queue),
+        }
+    }
+    report_queues
+}
+
+/// The removed links of a manifest that verify under `keyset`.
+///
+/// REL-184: a removal that fails or ended goes, and the manifest stays. A
+/// link that the list holds already costs no second verification.
+fn verified_removals(
+    removals: &[&[u8]],
+    keyset: &DirectoryKeySet<'_>,
+    epoch: u64,
+) -> Vec<LinkRemoval> {
+    let mut removed_links: Vec<LinkRemoval> = Vec::new();
+    for bytes in removals {
+        let is_held = LinkRemoval::link_of(bytes).is_some_and(|(relay_a, relay_b)| {
+            removed_links
+                .iter()
+                .any(|held| held.relay_a == relay_a && held.relay_b == relay_b)
+        });
+        if is_held {
+            continue;
+        }
+
+        if let Ok(removal) = LinkRemoval::verify(bytes, keyset, epoch) {
+            removed_links.push(removal);
+        }
+    }
+    removed_links
 }
 
 #[cfg(test)]

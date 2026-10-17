@@ -50,6 +50,7 @@ pub fn unpad(last: &[u8]) -> Result<&[u8], Error> {
     if last.get(end) != Some(&MARKER) {
         return Err(Error::Malformed);
     }
+
     last.get(..end).ok_or(Error::Malformed)
 }
 
@@ -63,6 +64,7 @@ pub fn unpad_file(padded: &mut Vec<u8>) -> Result<(), Error> {
     if padded.is_empty() || !padded.len().is_multiple_of(SEGMENT_SIZE) {
         return Err(Error::Malformed);
     }
+
     let start = padded.len().saturating_sub(SEGMENT_SIZE);
     let tail_len = unpad(padded.get(start..).ok_or(Error::Malformed)?)?.len();
     padded.truncate(start.saturating_add(tail_len));
@@ -76,6 +78,7 @@ pub fn pad_handle_object(sealed: &[u8]) -> Result<Vec<u8>, Error> {
     if sealed.len() < TAG_LEN || sealed.len() >= CHUNK_SIZE {
         return Err(Error::Malformed);
     }
+
     Ok(pad(sealed, CHUNK_SIZE))
 }
 
@@ -84,10 +87,12 @@ pub fn unpad_handle_object(chunk: &[u8]) -> Result<&[u8], Error> {
     if chunk.len() != CHUNK_SIZE {
         return Err(Error::Malformed);
     }
+
     let sealed = unpad(chunk)?;
     if sealed.len() < TAG_LEN {
         return Err(Error::Malformed);
     }
+
     Ok(sealed)
 }
 
@@ -102,6 +107,7 @@ mod tests {
         assert_eq!(segment_count(SEGMENT_SIZE - 1), 1);
         assert_eq!(segment_count(SEGMENT_SIZE), 2);
         assert_eq!(segment_count(SEGMENT_SIZE + 1), 2);
+
         for len in [
             0usize,
             1,
@@ -132,9 +138,11 @@ mod tests {
     fn a_handle_object_is_one_chunk_with_a_tag_at_the_minimum() {
         assert!(pad_handle_object(&[1; 15]).is_err());
         assert!(pad_handle_object(&[1; CHUNK_SIZE]).is_err());
+
         let chunk = pad_handle_object(&[7; 40]).unwrap();
         assert_eq!(chunk.len(), CHUNK_SIZE);
         assert_eq!(unpad_handle_object(&chunk).unwrap(), &[7; 40]);
+
         let short = pad(&[7; 10], CHUNK_SIZE);
         assert!(unpad_handle_object(&short).is_err());
         assert!(unpad_handle_object(&chunk[..100]).is_err());

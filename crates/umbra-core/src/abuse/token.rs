@@ -63,6 +63,7 @@ impl TokenChallenge {
     pub fn to_bytes(&self) -> [u8; CHALLENGE_LEN] {
         let mut out = [0u8; CHALLENGE_LEN];
         let mut w = Writer::new(&mut out);
+        // The buffer holds each field, thus no write fails.
         let _ = w.u16(self.token_type);
         let _ = w.u32(self.epoch);
         let _ = w.put(&self.redemption_context);
@@ -119,6 +120,7 @@ impl Token {
         if authenticator_len(self.token_type) != Some(self.authenticator.len()) {
             return Err(Error::Malformed);
         }
+
         let mut w = Writer::new(out);
         w.put(&self.input())?;
         w.put(&self.authenticator)?;
@@ -135,6 +137,7 @@ impl Token {
         let token_key_id = r.array()?;
         let authenticator = r.take(auth_len)?.to_vec();
         r.finish()?;
+
         Ok(Token {
             token_type,
             nonce,
@@ -153,6 +156,7 @@ fn token_input(
 ) -> [u8; TOKEN_HEAD] {
     let mut out = [0u8; TOKEN_HEAD];
     let mut w = Writer::new(&mut out);
+    // The buffer holds each field, thus no write fails.
     let _ = w.u16(token_type);
     let _ = w.put(nonce);
     let _ = w.put(challenge_digest);
@@ -180,6 +184,7 @@ impl FirstPartyRequest {
         if count == 0 || count > BATCH_MAX || challenge.token_type != TYPE_FIRST_PARTY {
             return Err(Error::Malformed);
         }
+
         let challenge_digest = challenge.digest();
         let token_key_id = token_key_id(issuer_pk);
         let mut states = Vec::with_capacity(count);
@@ -195,6 +200,7 @@ impl FirstPartyRequest {
             nonces.push(nonce);
             blinded.push(element);
         }
+
         Ok((
             FirstPartyRequest {
                 states,
@@ -223,6 +229,7 @@ impl FirstPartyRequest {
     ) -> Result<Vec<Token>, Error> {
         let blinded = self.blinded();
         voprf::verify_proof_batch(issuer_pk, &blinded, &batch.elements, &batch.proof)?;
+
         self.states
             .iter()
             .zip(&self.nonces)
@@ -274,6 +281,7 @@ impl FirstPartyIssuer {
         if blinded.is_empty() || blinded.len() > BATCH_MAX {
             return Err(Error::Malformed);
         }
+
         Ok(self.key.evaluate_batch(blinded, rng)?)
     }
 
@@ -282,6 +290,7 @@ impl FirstPartyIssuer {
         if token.token_type != TYPE_FIRST_PARTY || token.token_key_id != self.key_id {
             return Err(Error::Unverified);
         }
+
         let expected = self.key.evaluate_direct(&token.input());
         if ct_eq(&expected, &token.authenticator) {
             Ok(())
@@ -312,6 +321,7 @@ impl CrossRelayRequest {
         if count == 0 || count > BATCH_MAX || challenge.token_type != TYPE_CROSS_RELAY {
             return Err(Error::Malformed);
         }
+
         let challenge_digest = challenge.digest();
         let token_key_id = token_key_id(issuer_pk.modulus());
         let mut inverses = Vec::with_capacity(count);
@@ -329,6 +339,7 @@ impl CrossRelayRequest {
             nonces.push(nonce);
             blinded.push(msg);
         }
+
         Ok((
             CrossRelayRequest {
                 inverses,
@@ -351,6 +362,7 @@ impl CrossRelayRequest {
         if blind_sigs.len() != self.inverses.len() {
             return Err(Error::Malformed);
         }
+
         self.inverses
             .iter()
             .zip(&self.inputs)
@@ -374,6 +386,7 @@ pub fn issue_cross_relay(key: &SecretKey2048, blinded: &[Vec<u8>]) -> Result<Vec
     if blinded.is_empty() || blinded.len() > BATCH_MAX {
         return Err(Error::Malformed);
     }
+
     blinded.iter().map(|msg| Ok(key.blind_sign(msg)?)).collect()
 }
 
@@ -385,6 +398,7 @@ pub fn verify_cross_relay(issuer_pk: &PublicKey2048, token: &Token) -> Result<()
     {
         return Err(Error::Unverified);
     }
+
     rsabssa::verify(issuer_pk, &token.input(), &token.authenticator)?;
     Ok(())
 }

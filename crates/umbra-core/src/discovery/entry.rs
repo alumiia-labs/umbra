@@ -66,9 +66,11 @@ impl DirectoryEntry {
         if self.handle.is_empty() || self.handle.len() > NAME_MAX + 11 {
             return Err(Error::Malformed);
         }
+
         if (self.hk_pub == [0; ENTRY_PK_LEN]) != self.rendezvous.is_none() {
             return Err(Error::Malformed);
         }
+
         let mut w = Writer::new(out);
         w.u8(u8::try_from(self.handle.len()).map_err(|_| Error::Malformed)?)?;
         w.put(&self.handle)?;
@@ -83,6 +85,7 @@ impl DirectoryEntry {
                 w.position()
             }
         };
+
         let mut w = Writer::new(out.get_mut(at..).ok_or(Error::Malformed)?);
         w.u32(self.version)?;
         Ok(at.saturating_add(w.position()))
@@ -95,6 +98,7 @@ impl DirectoryEntry {
         if len == 0 || len > NAME_MAX + 11 {
             return Err(Error::Malformed);
         }
+
         let handle = r.take(len)?.to_vec();
         let hk_pub: [u8; ENTRY_PK_LEN] = r.array()?;
         let queue = r.take(address::LEN)?;
@@ -105,9 +109,11 @@ impl DirectoryEntry {
         };
         let version = r.u32()?;
         r.finish()?;
+
         if (hk_pub == [0; ENTRY_PK_LEN]) != rendezvous.is_none() {
             return Err(Error::Malformed);
         }
+
         Ok(DirectoryEntry {
             handle,
             hk_pub,
@@ -150,6 +156,7 @@ impl AddressEntry {
         if (self.address_pk == [0; ENTRY_PK_LEN]) != self.rendezvous.is_none() {
             return Err(Error::Malformed);
         }
+
         let mut w = Writer::new(out);
         w.put(&self.address)?;
         w.put(&self.address_pk)?;
@@ -163,6 +170,7 @@ impl AddressEntry {
                 w.position()
             }
         };
+
         let mut w = Writer::new(out.get_mut(at..).ok_or(Error::Malformed)?);
         w.u32(self.version)?;
         Ok(at.saturating_add(w.position()))
@@ -173,6 +181,7 @@ impl AddressEntry {
         if bytes.len() != ADDRESS_ENTRY_LEN {
             return Err(Error::Malformed);
         }
+
         let mut r = Reader::new(bytes);
         let address = r.array()?;
         let address_pk: [u8; ENTRY_PK_LEN] = r.array()?;
@@ -184,9 +193,11 @@ impl AddressEntry {
         };
         let version = r.u32()?;
         r.finish()?;
+
         if (address_pk == [0; ENTRY_PK_LEN]) != rendezvous.is_none() {
             return Err(Error::Malformed);
         }
+
         Ok(AddressEntry {
             address,
             address_pk,
@@ -227,10 +238,12 @@ pub(crate) mod tests {
         assert_eq!(back.version, 3);
         assert!(!back.is_tombstone());
         assert!(DirectoryEntry::parse(&out[..n - 1]).is_err());
+
         let tomb = DirectoryEntry::tombstone(b"@alice#1234".to_vec(), 4);
         let n = tomb.encode(&mut out).unwrap();
         let back = DirectoryEntry::parse(&out[..n]).unwrap();
         assert!(back.is_tombstone());
+
         // A zero key with a live queue is neither form.
         let mixed = DirectoryEntry {
             handle: b"@a#12".to_vec(),
@@ -256,6 +269,7 @@ pub(crate) mod tests {
         let back = AddressEntry::parse(&out[..ADDRESS_ENTRY_LEN]).unwrap();
         back.check().unwrap();
         assert!(AddressEntry::parse(&out).is_err());
+
         let wrong = AddressEntry {
             address: [1; 20],
             ..back

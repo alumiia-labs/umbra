@@ -40,6 +40,7 @@ pub fn steps(previous: &Roster<'_>, applied: &Roster<'_>) -> Vec<Step> {
     if new.is_empty() {
         return Vec::new();
     }
+
     let mut out = Vec::new();
     for device in &new {
         out.push(Step::DeleteSyncChannels(*device));
@@ -54,6 +55,7 @@ pub fn steps(previous: &Roster<'_>, applied: &Roster<'_>) -> Vec<Step> {
         out.push(Step::ShowDeletionsFrom(*device));
         out.push(Step::ClaimSubjectsOf(*device));
     }
+
     out
 }
 
@@ -113,6 +115,7 @@ mod tests {
             revoked: vec![[2; 16]],
             ..before.clone()
         };
+
         let steps = steps(&before, &after);
         assert_eq!(steps.len(), 7);
         assert_eq!(steps[0], Step::DeleteSyncChannels([2; 16]));

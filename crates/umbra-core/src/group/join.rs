@@ -35,6 +35,7 @@ impl JoinKeys {
         let mut seed = Secret::<32>::zeroed();
         rng.try_fill_bytes(seed.expose_mut())
             .map_err(|_| Error::Unverified)?;
+
         let keys = MemberKeys::from_seed(&seed);
         Ok(JoinKeys { seed, keys })
     }
@@ -56,6 +57,7 @@ impl JoinKeys {
             group_id,
             keys: self.wire_keys(&kem_pk),
         };
+
         let mut payload = alloc::vec![0u8; 1_400];
         let n = record.encode(&mut payload)?;
         wrap(ControlType::Join, payload.get(..n).ok_or(Error::Malformed)?)
@@ -82,6 +84,7 @@ pub fn add_epoch(roster: &Roster, join: &JoinRecord<'_>) -> Result<Vec<u8>, Erro
         return Err(Error::Unverified);
     }
     Roster::check_keys(&join.keys)?;
+
     let epoch = PlainEpoch {
         chain: Chain {
             group_id: *roster.group_id(),
@@ -93,6 +96,7 @@ pub fn add_epoch(roster: &Roster, join: &JoinRecord<'_>) -> Result<Vec<u8>, Erro
             keys: join.keys.clone(),
         },
     };
+
     let mut payload = alloc::vec![0u8; 1_400];
     let n = epoch.encode(&mut payload)?;
     wrap(
@@ -146,6 +150,7 @@ pub fn admit(
             descriptor,
         })),
     };
+
     // 36 bytes of header, the fixed body, and the descriptor.
     let mut payload = alloc::vec![0u8; descriptor.len().saturating_add(ADMIT_FIXED + 64)];
     let n = invitation.encode(&mut payload)?;
@@ -206,6 +211,7 @@ pub fn accept_admit(
     let InvitationStage::Admit(admit) = &invitation.stage else {
         return Err(Error::Malformed);
     };
+
     let InvitationAdmit {
         index,
         epoch,
@@ -218,21 +224,26 @@ pub fn accept_admit(
         replicas,
         ..
     } = admit.as_ref();
+
     if snapshot.group_id != invitation.group_id || snapshot.roster_epoch != *roster_epoch {
         return Err(Error::Unverified);
     }
+
     let roster = Roster::from_snapshot(snapshot, add_record_hash, creator_roster_pk, now)?;
     if !roster.member(*index).is_some_and(|m| m.active) {
         return Err(Error::Unverified);
     }
+
     // GRP-224: the age of the epoch runs from its start, and the key of the
     // joiner starts at or after it.
     if t_join < t_e {
         return Err(Error::Malformed);
     }
+
     let chain = ChainState::from_slot_key(*epoch, *t_join, Secret::new(*slot_key));
     let credentials = Credentials::from_secrets(&Secret::new(*read_sk), &Secret::new(*write_sk));
     let epoch_state = EpochState::from_chain(chain, *epoch, *t_e, *roster_epoch, credentials, now);
+
     Ok(Admitted {
         roster,
         epoch: epoch_state,
@@ -267,6 +278,7 @@ pub fn rekey_record<R: TryCryptoRng + ?Sized>(
             previous_epoch_hash: [0; 32],
         }
     };
+
     let old_pk = old.roster().verifying_key().to_bytes();
     let kem_pk = new.keys.kem().public().to_bytes();
     let mut record = RekeyRecord {
@@ -281,9 +293,11 @@ pub fn rekey_record<R: TryCryptoRng + ?Sized>(
         new_keys: new.wire_keys(&kem_pk),
         sig: &[],
     };
+
     let preimage = record.preimage();
     let sig = old.roster().sign(&preimage, rng)?.to_bytes();
     record.sig = &sig;
+
     let mut payload = alloc::vec![0u8; 8_000];
     let n = record.encode(&mut payload)?;
     wrap(
@@ -302,9 +316,11 @@ impl KeyRequestRate {
     /// Whether a request may go at `now`, and records it if so.
     pub fn allow(&mut self, now: u64) -> bool {
         self.sent.retain(|at| now.saturating_sub(*at) < 86_400);
+
         if self.sent.len() >= usize::try_from(KEY_REQUEST_RATE).unwrap_or(usize::MAX) {
             return false;
         }
+
         self.sent.push(now);
         true
     }
@@ -328,6 +344,7 @@ mod tests {
         let mut roster = Roster::genesis(group, entry_of(&creator, 0, Role::Owner), 0);
         let mut rng = Rng(1);
         let joiner = JoinKeys::make(&mut rng).unwrap();
+
         let join_bytes = joiner.join_record(group).unwrap();
         let control = GroupControl::parse(&join_bytes).unwrap();
         assert_eq!(control.control_type, ControlType::Join);
@@ -343,6 +360,7 @@ mod tests {
         let slot = admit_slot(120, 100);
         assert_eq!(slot, 120);
         assert_eq!(admit_slot(90, 100), 100);
+
         let replicas = [
             ReplicaRef {
                 relay_id: [1; 32],
@@ -394,6 +412,7 @@ mod tests {
             keys,
             path: &[],
         };
+
         let admitted = accept_admit(&invitation, &snapshot, &add_hash, &creator_pk, 50)
             .unwrap()
             .for_seed(&joiner.seed)
@@ -405,6 +424,7 @@ mod tests {
         assert_eq!(admitted.epoch.start_slot(), 100);
         assert_eq!(admitted.epoch.chain().slot(), slot);
         assert_eq!(admitted.roster.active_count(), 2);
+
         // The joiner's chain agrees with the admin's from the join slot on.
         let mut joiner_chain = ChainState::from_slot_key(3, slot, chain.slot_key(slot).unwrap());
         joiner_chain.advance(slot).unwrap();
@@ -413,11 +433,13 @@ mod tests {
             chain.record_key(125).unwrap().expose()
         );
         assert!(joiner_chain.record_key(119).is_err());
+
         let wrong = RosterSnapshot {
             chain_hash: [0; 32],
             ..snapshot
         };
         assert!(accept_admit(&invitation, &wrong, &add_hash, &creator_pk, 50).is_err());
+
         // GRP-326: the entry at the index of the admit holds the keys of
         // the joiner. An admit with the index of another member fails.
         let other = GroupInvitation {
@@ -456,6 +478,7 @@ mod tests {
                 .for_seed(&joiner.seed)
                 .is_ok()
         );
+
         // GRP-320: an admin builds no add for a pair key of low order.
         let kem = joiner.keys.kem().public().to_bytes();
         let low = JoinRecord {
@@ -490,6 +513,7 @@ mod tests {
         roster
             .apply(&GroupControl::parse(&add).unwrap(), 0, 1)
             .unwrap();
+
         let mut rng = Rng(4);
         let fresh = JoinKeys::make(&mut rng).unwrap();
         let record = rekey_record(&old, &fresh, &roster, 1, true, &mut rng).unwrap();
@@ -501,9 +525,11 @@ mod tests {
         ));
         assert!(!roster.member(1).unwrap().active);
         assert_eq!(roster.member(2).unwrap().role, Role::Member);
+
         let pairwise = rekey_record(&old, &fresh, &roster, 1, false, &mut rng).unwrap();
         let control = GroupControl::parse(&pairwise).unwrap();
         assert!(RekeyRecord::parse(control.payload).unwrap().chain_is_zero());
+
         let mut rate = KeyRequestRate::default();
         for _ in 0..KEY_REQUEST_RATE {
             assert!(rate.allow(0));

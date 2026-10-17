@@ -66,6 +66,7 @@ impl Cost {
     pub fn calibrate(floor_ms: u64) -> Self {
         let per_pass = (floor_ms / u64::from(T_FLOOR)).max(1);
         let passes = u32::try_from(TARGET_MS.div_ceil(per_pass)).unwrap_or(u32::MAX);
+
         Cost {
             m_kib: M_KIB_FLOOR,
             t: passes.clamp(T_FLOOR, T_MAX),
@@ -95,12 +96,14 @@ fn wrap_key(
     element: &impl SecureElement,
 ) -> Result<Secret<32>, Error> {
     let a = kdf::argon2id(passphrase, salt, cost.m_kib, cost.t)?;
+
     // IMP-061: S, and then K_wrap, take the inputs of §14.6.4 and no other.
     let mut input = Secret::<WRAP_INPUT_LEN>::zeroed();
     let (label_part, a_part) = input.expose_mut().split_at_mut(labels::AT_REST_WRAP.len());
     label_part.copy_from_slice(labels::AT_REST_WRAP);
     a_part.copy_from_slice(a.expose());
     let s = Secret::new(element.keyed(input.expose())?);
+
     let kdf = Hkdf::<Sha3_256>::new(Some(a.expose()), s.expose());
     let mut key = Secret::<32>::zeroed();
     // 32 bytes is below the HKDF bound, thus expand cannot fail.
@@ -123,6 +126,7 @@ impl WrapHeader {
         let key = wrap_key(passphrase, cost, &salt, element)?;
         let mut wrapped = *store_key.expose();
         let tag = aead::seal(&key, &nonce, labels::AT_REST_WRAP, &mut wrapped)?;
+
         Ok(WrapHeader {
             cost,
             salt,
@@ -149,6 +153,7 @@ impl WrapHeader {
             &self.tag,
         )
         .map_err(|_| Error::Unverified)?;
+
         Ok(store_key)
     }
 
@@ -172,6 +177,7 @@ impl WrapHeader {
         if r.u8()? != VERSION {
             return Err(Error::Malformed);
         }
+
         let header = WrapHeader {
             cost: Cost {
                 m_kib: r.u32()?,
@@ -183,9 +189,11 @@ impl WrapHeader {
             tag: r.array()?,
         };
         r.finish()?;
+
         if !header.cost.is_bounded() {
             return Err(Error::Malformed);
         }
+
         Ok(header)
     }
 }
@@ -264,6 +272,7 @@ pub(crate) mod tests {
         .unwrap();
         let bytes = header.encode().unwrap();
         assert_eq!(bytes.len(), 97);
+
         // IMP-175: a header below the floor does not parse, and one at the
         // floor does.
         assert_eq!(WrapHeader::parse(&bytes), Err(Error::Malformed));
@@ -275,6 +284,7 @@ pub(crate) mod tests {
             ..header
         };
         assert_eq!(WrapHeader::parse(&floor.encode().unwrap()).unwrap(), floor);
+
         for cost in [
             Cost {
                 m_kib: M_KIB_FLOOR - 1,
@@ -296,6 +306,7 @@ pub(crate) mod tests {
             let header = WrapHeader { cost, ..header };
             assert!(WrapHeader::parse(&header.encode().unwrap()).is_err());
         }
+
         let parsed = header;
         assert_eq!(
             parsed.unwrap(b"correct horse", &element).unwrap().expose(),
@@ -305,6 +316,7 @@ pub(crate) mod tests {
             parsed.unwrap(b"wrong horse", &element).err(),
             Some(Error::Unverified)
         );
+
         // A copy of the file on another device holds another element key.
         let other = SoftwareElement([9; 32]);
         assert!(parsed.unwrap(b"correct horse", &other).is_err());
@@ -341,6 +353,7 @@ pub(crate) mod tests {
         assert!(!timer.due(1_000 + AUTO_LOCK_DEFAULT));
         timer.set_limit(86_400);
         assert!(timer.due(1_500 + AUTO_LOCK_MAX));
+
         // A reading below the last action locks.
         assert!(timer.due(1_499));
     }

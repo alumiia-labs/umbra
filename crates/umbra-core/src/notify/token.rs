@@ -1,6 +1,6 @@
-//! The token blinding of Part 8 §8.2.1, the handle groups, the rotation
-//! of §8.2.5, and the Notification Delivery Relay that holds
-//! `(handle, ct_token)` and decrypts a token transiently at the dispatch.
+//! The token blinding of Part 8 §8.2.1, the handle groups, and the
+//! rotation of §8.2.5. The NDR holds `(handle, ct_token)` and opens a
+//! token only for one dispatch (see [`super::ndr`]).
 
 use alloc::vec::Vec;
 
@@ -46,9 +46,11 @@ impl HandleGroup {
         let mut handle = [0u8; HANDLE_LEN];
         rng.try_fill_bytes(&mut handle)
             .map_err(|_| Error::Unverified)?;
+
         let mut k_tok = Secret::<32>::zeroed();
         rng.try_fill_bytes(k_tok.expose_mut())
             .map_err(|_| Error::Unverified)?;
+
         Ok(HandleGroup {
             handle,
             k_tok,
@@ -64,6 +66,7 @@ impl HandleGroup {
         let mut ct = push_token.to_vec();
         let tag = aead::seal(&self.k_tok, &nonce, &self.handle, &mut ct)?;
         ct.extend_from_slice(&tag);
+
         Ok(Registration {
             handle: self.handle,
             nonce,
@@ -113,6 +116,7 @@ impl HandleSet {
                 rng,
             )?);
         }
+
         for queue in rendezvous {
             groups.push(HandleGroup::new(
                 HandleClass::Rendezvous,
@@ -121,6 +125,7 @@ impl HandleSet {
                 rng,
             )?);
         }
+
         for chunk in digest.chunks(MAX_QUEUES_PER_HANDLE) {
             groups.push(HandleGroup::new(
                 HandleClass::Digest,
@@ -129,6 +134,7 @@ impl HandleSet {
                 rng,
             )?);
         }
+
         Ok(HandleSet { groups })
     }
 
@@ -164,9 +170,11 @@ impl HandleSet {
         let old = self.groups.get(index).ok_or(Error::Malformed)?;
         let fresh = HandleGroup::new(old.class, old.queues.clone(), now, rng)?;
         let old_handle = old.handle;
+
         if let Some(slot) = self.groups.get_mut(index) {
             *slot = fresh;
         }
+
         Ok(old_handle)
     }
 
@@ -197,10 +205,12 @@ mod tests {
         assert_eq!(set.groups()[2].class, HandleClass::Rendezvous);
         assert_eq!(set.groups()[3].class, HandleClass::Digest);
         assert_ne!(set.groups()[0].handle, set.groups()[1].handle);
+
         assert_eq!(
             set.group_of(&[9; 32]).unwrap().handle,
             set.groups()[1].handle
         );
+
         assert!(set.rotation_candidate(ROTATE_INTERVAL - 1).is_none());
         assert_eq!(set.rotation_candidate(ROTATE_INTERVAL), Some(0));
         let old = set.rotate(0, ROTATE_INTERVAL, &mut rng).unwrap();

@@ -19,43 +19,50 @@ impl SpendSet {
         if token_epoch != epoch && token_epoch != epoch.wrapping_sub(1) {
             return Err(Error::Stale);
         }
+
         let index = match self.slot_of(token_epoch) {
             Some(index) => index,
-            None => {
-                // A slot keeps its nonces until a new epoch needs its place
-                // (`ABU-114`). Thus a clock that steps far ahead and back
-                // again spends no nonce a second time, unless a spend at the
-                // far epoch took that place. The slot of the next epoch
-                // stays, and a slot outside the live epochs takes the new
-                // one: the free slot first, then the one farthest from the
-                // clock.
-                let live = epoch.saturating_sub(1)..=epoch.saturating_add(1);
-                let distance = |held: u32| held.abs_diff(epoch);
-                let free = self.epochs.iter().position(Option::is_none);
-                let farthest = self
-                    .epochs
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(at, slot)| slot.as_ref().map(|(held, _)| (at, *held)))
-                    .filter(|(_, held)| !live.contains(held))
-                    .max_by_key(|(_, held)| distance(*held))
-                    .map(|(at, _)| at);
-                let index = free.or(farthest).ok_or(Error::Stale)?;
-                if let Some(slot) = self.epochs.get_mut(index) {
-                    *slot = None;
-                }
-                index
-            }
+            None => self.clear_slot(epoch)?,
         };
         let (_, set) = self
             .epochs
             .get_mut(index)
             .ok_or(Error::Stale)?
             .get_or_insert_with(|| (token_epoch, BTreeSet::new()));
+
         if !set.insert(nonce) {
             return Err(Error::Stale);
         }
         Ok(())
+    }
+
+    /// Empties the slot that a new epoch takes at the current `epoch`, and
+    /// returns its index.
+    ///
+    /// A slot keeps its nonces until a new epoch needs its place
+    /// (`ABU-114`). Thus a clock that steps far ahead and back again spends
+    /// no nonce a second time, unless a spend at the far epoch took that
+    /// place. The slot of the next epoch stays, and a slot outside the live
+    /// epochs takes the new one: the free slot first, then the one farthest
+    /// from the clock.
+    fn clear_slot(&mut self, epoch: u32) -> Result<usize, Error> {
+        let live = epoch.saturating_sub(1)..=epoch.saturating_add(1);
+        let distance = |held: u32| held.abs_diff(epoch);
+        let free = self.epochs.iter().position(Option::is_none);
+        let farthest = self
+            .epochs
+            .iter()
+            .enumerate()
+            .filter_map(|(at, slot)| slot.as_ref().map(|(held, _)| (at, *held)))
+            .filter(|(_, held)| !live.contains(held))
+            .max_by_key(|(_, held)| distance(*held))
+            .map(|(at, _)| at);
+        let index = free.or(farthest).ok_or(Error::Stale)?;
+
+        if let Some(slot) = self.epochs.get_mut(index) {
+            *slot = None;
+        }
+        Ok(index)
     }
 
     fn slot_of(&self, token_epoch: u32) -> Option<usize> {

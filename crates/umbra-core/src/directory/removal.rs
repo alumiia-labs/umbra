@@ -79,6 +79,7 @@ impl LinkRemoval {
         if signers.len() > AUTHORITY_COUNT || unordered {
             return Err(Error::Malformed);
         }
+
         let preimage = self.preimage();
         let mut out = self.body().to_vec();
         out.push(u8::try_from(signers.len()).map_err(|_| Error::Malformed)?);
@@ -86,6 +87,7 @@ impl LinkRemoval {
             out.push(*index);
             out.extend_from_slice(&key.sign(&preimage, rng)?.to_bytes());
         }
+
         Ok(out)
     }
 
@@ -107,6 +109,7 @@ impl LinkRemoval {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let removal = LinkRemoval {
             epoch: u64::from_be_bytes(r.array()?),
             relay_a: r.array()?,
@@ -114,6 +117,7 @@ impl LinkRemoval {
         };
         let sigs = read_sigs(&mut r)?;
         r.finish()?;
+
         if removal.relay_a >= removal.relay_b {
             return Err(Error::Malformed);
         }
@@ -122,6 +126,7 @@ impl LinkRemoval {
         {
             return Err(Error::Stale);
         }
+
         keyset.verify_multi(&removal.preimage(), &sigs)?;
         Ok(removal)
     }
@@ -158,35 +163,40 @@ pub fn peel(removals: &[LinkRemoval]) -> Vec<[u8; 32]> {
         .collect();
     edges.sort_unstable();
     edges.dedup();
+
     let mut expelled = Vec::new();
-    loop {
-        let mut degree: alloc::collections::BTreeMap<[u8; 32], usize> =
-            alloc::collections::BTreeMap::new();
-        for (one, other) in &edges {
-            for relay in [one, other] {
-                let held = degree.entry(*relay).or_insert(0);
-                *held = held.saturating_add(1);
-            }
-        }
-        // The map is in `relay_id` order, thus the first of the most is
-        // the lower one.
-        let Some((top, count)) = degree.iter().fold(
-            None::<(&[u8; 32], usize)>,
-            |best, (relay, count)| match best {
-                Some((_, held)) if held >= *count => best,
-                _ => Some((relay, *count)),
-            },
-        ) else {
-            break;
-        };
+    while let Some((top, count)) = most_removed(&edges) {
         if count < LINK_FAULT_DEGREE {
             break;
         }
-        let top = *top;
+
         edges.retain(|(one, other)| *one != top && *other != top);
         expelled.push(top);
     }
     expelled
+}
+
+/// The relay that holds the most links of `edges`, and its count. At a tie,
+/// the lower `relay_id` wins.
+fn most_removed(edges: &[([u8; 32], [u8; 32])]) -> Option<([u8; 32], usize)> {
+    let mut degree: alloc::collections::BTreeMap<[u8; 32], usize> =
+        alloc::collections::BTreeMap::new();
+    for (one, other) in edges {
+        for relay in [one, other] {
+            let held = degree.entry(*relay).or_insert(0);
+            *held = held.saturating_add(1);
+        }
+    }
+
+    // The map is in `relay_id` order, and only a higher count replaces the
+    // best. Thus the first of the most is the lower one.
+    let mut best: Option<([u8; 32], usize)> = None;
+    for (relay, count) in &degree {
+        if best.is_none_or(|(_, held)| held < *count) {
+            best = Some((*relay, *count));
+        }
+    }
+    best
 }
 
 #[cfg(test)]

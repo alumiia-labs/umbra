@@ -38,8 +38,7 @@ pub const REPUSH_INTERVAL: u64 = 3_600;
 pub const REPUSH_MAX: u32 = 3;
 /// `GROUP_DIGEST_MIN_GAP`, in seconds.
 pub const GROUP_DIGEST_MIN_GAP: u64 = 10;
-/// The retention of a notify registration (`NTF-102`), in
-/// seconds.
+/// The retention of a notify registration (`NTF-102`), in seconds.
 pub const REGISTRATION_TTL: u64 = 7 * 86_400 + crate::directory::CLOCK_SKEW;
 /// The most registrations one group queue holds.
 pub const REGISTRATION_MAX: usize = umbra_queue::params::GROUP_NOTIFIER_MAX;
@@ -65,6 +64,7 @@ pub const fn epoch_of(now: u64) -> u32 {
 pub fn seeded_pair(label: &[u8], seed: &[u8; 32]) -> umbra_crypto::kem::KeyPair {
     use umbra_crypto::zeroize::Zeroizing;
     use umbra_crypto::{hash::sha3_256, secret::Secret};
+
     // The seeds of the key leave no copy on the stack.
     let x = Zeroizing::new(sha3_256(&[label, b"/x", seed]));
     let d = Zeroizing::new(sha3_256(&[label, b"/d", seed]));
@@ -73,5 +73,6 @@ pub fn seeded_pair(label: &[u8], seed: &[u8; 32]) -> umbra_crypto::kem::KeyPair 
     for (slot, byte) in dz.iter_mut().zip(d.iter().chain(z.iter())) {
         *slot = *byte;
     }
+
     umbra_crypto::kem::KeyPair::from_seeds(Secret::new(*x), Secret::new(*dz))
 }
