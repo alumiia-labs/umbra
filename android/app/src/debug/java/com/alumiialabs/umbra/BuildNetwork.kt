@@ -86,6 +86,7 @@ object BuildNetwork {
             descriptorFile(context).delete()
             return true
         }
+
         return try {
             parseNetwork(descriptor, null)
             descriptorFile(context).writeText(descriptor)
@@ -102,11 +103,13 @@ object BuildNetwork {
     @Synchronized
     fun network(context: Context, client: Handle): Network? {
         imported(context)?.let { return parseNetwork(it, null) }
+
         // The TLS stack of the Rust side reads a file, and an asset is none.
         val authority = File(context.filesDir, AUTHORITY)
         context.assets.open(AUTHORITY).use { source ->
             authority.outputStream().use { source.copyTo(it) }
         }
+
         val keyset = context.assets.open(KEYSET).use { it.readBytes() }
         val kept = File(context.filesDir, MANIFEST)
         val fresh = try {
@@ -114,6 +117,7 @@ object BuildNetwork {
         } catch (offline: FfiException) {
             null
         }
+
         // The fresh manifest first, and then the one of the last run. The
         // file takes a manifest that verified alone (`NET-318`).
         for (manifest in listOfNotNull(fresh, kept.takeIf { it.exists() }?.readBytes())) {
@@ -130,9 +134,11 @@ object BuildNetwork {
             } catch (refused: FfiException) {
                 continue
             }
+
             if (manifest === fresh) kept.writeBytes(manifest)
             isClockCorrected = verified.isClockCorrected
             isProvisional = verified.isProvisional
+
             // NTF-127: the build pins the route to the NDR.
             val ndrKey = context.assets.open(NDR_KEY).use { it.readBytes() }
             // DIS-163: the build pins the directory.
@@ -146,6 +152,7 @@ object BuildNetwork {
                 directoryRelayIpv4 = CARRIER_ADDRESS,
             )
         }
+
         return null
     }
 
@@ -157,11 +164,13 @@ object BuildNetwork {
         var pasted by remember { mutableStateOf("") }
         var note by remember { mutableStateOf<String?>(null) }
         var isImported by remember { mutableStateOf(imported(context) != null) }
+
         Column(Modifier.padding(top = 24.dp)) {
             TextButton(onClick = { isOpen = !isOpen }) {
                 Text(if (isImported) "Test network: imported" else "Test network: local")
             }
             if (!isOpen) return@Column
+
             OutlinedTextField(
                 value = pasted,
                 onValueChange = { pasted = it },

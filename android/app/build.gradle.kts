@@ -13,8 +13,8 @@ if (file("google-services.json").exists()) {
 }
 
 // The semantic version of the app, the same as the Rust workspace and the
-// specification. The code grows with each one: major, minor, then patch, three
-// digits each.
+// specification. The version code grows with each one: major, minor, then
+// patch, three digits each.
 val appVersion = "0.37.0"
 val (versionMajor, versionMinor, versionPatch) = appVersion.split(".").map(String::toInt)
 
@@ -44,6 +44,7 @@ android {
     compileSdk {
         version = release(37)
     }
+
     // scripts/android.sh builds the Rust library with this NDK too, thus
     // each machine links one toolchain.
     ndkVersion = "28.2.13676358"
@@ -51,27 +52,33 @@ android {
     defaultConfig {
         // The store identity, which never changes once published.
         applicationId = "com.alumiialabs.umbra"
+
         // The NDK build of scripts/android.sh links against this level.
         minSdk = 29
         targetSdk = 36
         versionCode = versionMajor * 1_000_000 + versionMinor * 1_000 + versionPatch
         versionName = appVersion
+
         // Part 14 §14.6.2: a release ships arm64-v8a alone. The debug type
         // adds the ABI of an emulator.
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
+
         // IDN-123: the App Link of an invitation. A debug build names its
         // invitation host with -Pumbra.invitationHost; the default is the
         // host of the devnet, which no party serves. The release type takes
         // the host of its network file in its place.
         manifestPlaceholders["invitationHost"] =
             (project.findProperty("umbra.invitationHost") as String?) ?: "invite.umbra.test"
+
         // The IPv4 address of the machine of scripts/devnet.sh, which the
         // debug build dials. The default serves an emulator. A phone on the
         // local network takes -Pumbra.devnetHost=<address of that machine>.
         val devnetHost = (project.findProperty("umbra.devnetHost") as String?) ?: "10.0.2.2"
-        require(devnetHost.split('.').let { parts -> parts.size == 4 && parts.all { it.toIntOrNull() in 0..255 } }) {
+        val devnetParts = devnetHost.split('.')
+        val isIpv4 = devnetParts.size == 4 && devnetParts.all { it.toIntOrNull() in 0..255 }
+        require(isIpv4) {
             "umbra.devnetHost takes an IPv4 address"
         }
         buildConfigField("String", "DEVNET_HOST", "\"$devnetHost\"")
@@ -104,14 +111,14 @@ android {
                 )
             }
         }
+
         release {
             // IDN-123: the App Link names the host that the app reads from
             // the same file at its start. With no file the name is one that
             // no party can serve, and `checkReleaseNetwork` ends the build.
             manifestPlaceholders["invitationHost"] =
                 releaseInvitationHost.ifEmpty { "release-network-absent.invalid" }
-            // R8 drops the code that the app never calls, and the resources
-            // that nothing names; proguard-rules.pro keeps the Rust bindings.
+
             // -Pumbra.releaseTest=true gives the release type the ABI of an
             // emulator and the debug signing key. Thus an emulator runs the
             // code and the network that ship, before a release key exists.
@@ -124,6 +131,9 @@ android {
             } else if (releaseStoreFile.isNotEmpty()) {
                 signingConfig = signingConfigs.getByName("release")
             }
+
+            // R8 drops the code that the app never calls, and the resources
+            // that nothing names. proguard-rules.pro keeps the Rust bindings.
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
@@ -160,9 +170,11 @@ val checkReleaseNetwork = tasks.register("checkReleaseNetwork") {
     val isPresent = releaseNetworkFile.isFile
     val host = releaseInvitationHost
     val epoch = releaseShippedEpoch
+
     inputs.property("isPresent", isPresent)
     inputs.property("host", host)
     inputs.property("epoch", epoch)
+
     doLast {
         val problems = buildList {
             if (!isPresent) {
@@ -178,11 +190,13 @@ val checkReleaseNetwork = tasks.register("checkReleaseNetwork") {
                 }
             }
         }
+
         if (problems.isNotEmpty()) {
             throw GradleException("The release has no network:\n  " + problems.joinToString("\n  "))
         }
     }
 }
+
 tasks.matching { it.name == "preReleaseBuild" }.configureEach { dependsOn(checkReleaseNetwork) }
 
 // The debug build trusts the test authority of the repository and dials the
@@ -210,10 +224,13 @@ abstract class CopyTestAuthority : DefaultTask() {
     fun copy() {
         val target = output.get().file("devnet-ca.pem").asFile
         authority.get().asFile.copyTo(target, overwrite = true)
+
         val keys = output.get().file("devnet-keyset.bin").asFile
         keyset.get().asFile.copyTo(keys, overwrite = true)
+
         val ndr = output.get().file("devnet-ndr-key.bin").asFile
         ndrKey.get().asFile.copyTo(ndr, overwrite = true)
+
         val directory = output.get().file("devnet-directory-pins.bin").asFile
         directoryPins.get().asFile.copyTo(directory, overwrite = true)
     }
@@ -244,13 +261,14 @@ dependencies {
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.compose.ui)
     // The QR code of an invitation link and of a safety number. The core of
-    // ZXing writes and reads a code, and CameraX gives the frames.
+    // ZXing writes and reads a code.
     implementation(libs.zxing.core)
     // The FCM carrier of Part 8 §8.4.1.
     implementation(platform(libs.firebase.bom))
     implementation(libs.firebase.messaging)
     // The poll of a build with no Firebase app.
     implementation(libs.androidx.work)
+    // CameraX gives the frames of the QR scan.
     implementation(libs.androidx.camera.camera2)
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.view)

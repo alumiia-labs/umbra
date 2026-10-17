@@ -60,6 +60,7 @@ object WakeStore {
     private fun key(): SecretKey {
         val keystore = KeyStore.getInstance(PROVIDER).apply { load(null) }
         (keystore.getKey(ALIAS, null) as? SecretKey)?.let { return it }
+
         val spec = KeyGenParameterSpec.Builder(
             ALIAS,
             KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
@@ -68,6 +69,7 @@ object WakeStore {
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
             .setKeySize(256)
             .build()
+
         val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, PROVIDER)
         generator.init(spec)
         return generator.generateKey()
@@ -81,6 +83,7 @@ object WakeStore {
     @Synchronized
     fun write(context: Context, table: ByteArray) {
         if (!holdsTable(context)) return
+
         val hash = MessageDigest.getInstance("SHA-256").digest(table)
         if (hash.contentEquals(written) && file(context).exists()) return
         if (seal(file(context), table)) written = hash
@@ -96,6 +99,7 @@ object WakeStore {
             deleteWatch(context)
             return
         }
+
         val hash = MessageDigest.getInstance("SHA-256").digest(table)
         if (hash.contentEquals(watchWritten) && watchFile(context).exists()) return
         if (seal(watchFile(context), table)) watchWritten = hash
@@ -105,9 +109,11 @@ object WakeStore {
         val cipher = Cipher.getInstance(TRANSFORM)
         cipher.init(Cipher.ENCRYPT_MODE, key())
         val sealed = cipher.iv + cipher.doFinal(table)
+
         val part = File(target.path + ".part")
         part.writeBytes(sealed)
         if (part.renameTo(target)) return true
+
         part.delete()
         return false
     }
@@ -136,6 +142,7 @@ object WakeStore {
         try {
             val sealed = target.readBytes()
             if (sealed.size <= NONCE_LEN) return null
+
             val keystore = KeyStore.getInstance(PROVIDER).apply { load(null) }
             val key = keystore.getKey(ALIAS, null) as? SecretKey ?: return null
             val cipher = Cipher.getInstance(TRANSFORM)
@@ -154,6 +161,7 @@ object WakeStore {
         file(context).delete()
         File(file(context).path + ".part").delete()
         deleteWatch(context)
+
         runCatching {
             KeyStore.getInstance(PROVIDER).apply { load(null) }.deleteEntry(ALIAS)
         }
@@ -171,23 +179,27 @@ object WakeStore {
     fun openBlob(context: Context, blob: ByteArray): Conversation? {
         if (!holdsTable(context)) return null
         val table = read(context) ?: return null
+
         val outcome = try {
             openWakeBlob(table, blob, (System.currentTimeMillis() / 1_000).toULong())
         } finally {
             table.fill(0)
         }
+
         // NTF-076: a blob outside the window ran no open, thus it counts
         // toward no failure.
         when (outcome.status.toInt()) {
             0 -> opened(context)
             2 -> failed(context)
         }
+
         return outcome.conversation?.let(::Conversation)
     }
 
     /**
-     * The wake table names a blocked contact, a conversation with its
-     * alerts off, and a sync channel with 16 bytes of 0xFF (`ABU-029`).
+     * Whether the conversation is the silent name of 16 bytes of 0xFF
+     * (`ABU-029`). The wake table gives it to a blocked contact, a
+     * conversation with its alerts off, and a sync channel.
      */
     fun isSilent(conversation: Conversation?) = conversation != null &&
         conversation.id.size == SILENT_ID_LEN && conversation.id.all { it == SILENT_BYTE }
@@ -205,6 +217,7 @@ object WakeStore {
     fun failed(context: Context) {
         val preferences = preferences(context)
         val count = preferences.getInt(FAILURES, 0) + 1
+
         val editor = preferences.edit().putInt(FAILURES, count)
         if (count >= FAIL_MAX) editor.putBoolean(CLOCK, true).putBoolean(RENEW, true)
         editor.apply()

@@ -70,7 +70,14 @@ fun ContactDetailsScreen(chat: Chat, onBack: () -> Unit, onMessage: () -> Unit, 
             EntryRow(RowEntry("pen", stringResource(R.string.verify_edit_name)) { push(Screen.EditName(chat.conversation)) })
             HorizontalDivider(color = Palette.Divider)
             EntryRow(
-                RowEntry("shield-check", if (chat.isVerified) stringResource(R.string.verify_verify_again) else stringResource(R.string.verify_verify_contact)) {
+                RowEntry(
+                    "shield-check",
+                    if (chat.isVerified) {
+                        stringResource(R.string.verify_verify_again)
+                    } else {
+                        stringResource(R.string.verify_verify_contact)
+                    },
+                ) {
                     push(Screen.Verify(chat.conversation))
                 },
             )
@@ -86,6 +93,7 @@ fun ContactDetailsScreen(chat: Chat, onBack: () -> Unit, onMessage: () -> Unit, 
                     push(Screen.ConversationSettings(chat.conversation))
                 },
             )
+
             // Part 6 §6.6.7: an introduction asks the other contact first.
             var isIntroducing by remember { mutableStateOf(false) }
             var introduced by remember { mutableStateOf<String?>(null) }
@@ -107,6 +115,7 @@ fun ContactDetailsScreen(chat: Chat, onBack: () -> Unit, onMessage: () -> Unit, 
                     onDismiss = { isIntroducing = false },
                 )
             }
+
             // Part 4 §4.7.3: a piece of the recovery of this contact.
             var held by remember { mutableStateOf<uniffi.umbra_ffi.FfiHeldShare?>(null) }
             LaunchedEffect(chat.conversation, Core.revision) { Core.heldShare(chat.conversation) { held = it } }
@@ -116,19 +125,28 @@ fun ContactDetailsScreen(chat: Chat, onBack: () -> Unit, onMessage: () -> Unit, 
                     RowEntry(
                         "key",
                         stringResource(R.string.verify_recovery_share),
-                        stringResource(R.string.verify_share_piece, share.index.toInt(), share.count.toInt(), share.threshold.toInt()),
+                        stringResource(
+                            R.string.verify_share_piece,
+                            share.index.toInt(),
+                            share.count.toInt(),
+                            share.threshold.toInt(),
+                        ),
                     ) {
                         push(Screen.HeldShare(chat.conversation))
                     },
                 )
             }
+
             HorizontalDivider(color = Palette.Divider)
             var isBlocked by remember { mutableStateOf(false) }
             LaunchedEffect(chat.conversation, Core.revision) {
                 Core.isBlocked(chat.conversation) { isBlocked = it }
             }
             EntryRow(
-                RowEntry("ban", if (isBlocked) stringResource(R.string.common_unblock) else stringResource(R.string.common_block)) {
+                RowEntry(
+                    "ban",
+                    if (isBlocked) stringResource(R.string.common_unblock) else stringResource(R.string.common_block),
+                ) {
                     push(Screen.BlockContact(chat.conversation))
                 },
             )
@@ -145,6 +163,7 @@ fun ConversationSettingsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) ->
     var mode by remember { mutableStateOf<Int?>(null) }
     var isChoosingMode by remember { mutableStateOf(false) }
     var forward by remember { mutableStateOf<ForwardRules?>(null) }
+
     // DEV-326: the limit of the policy shows when the user turns it on.
     var forwardNotice by remember { mutableStateOf(false) }
     LaunchedEffect(forwardNotice) {
@@ -153,15 +172,18 @@ fun ConversationSettingsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) ->
             forwardNotice = false
         }
     }
+
     LaunchedEffect(chat.conversation, Core.revision) { Core.forwardRules(chat.conversation) { forward = it } }
     LaunchedEffect(chat.conversation) { Core.privacyMode(chat.conversation) { mode = it } }
     LaunchedEffect(chat.conversation) { Core.receipts(chat.conversation) { receipts = it } }
     LaunchedEffect(chat.conversation, Core.revision) { Core.alertSetting(chat.conversation) { alert = it } }
     LaunchedEffect(chat.conversation, Core.revision) { Core.timer(chat.conversation) { timer = it.seconds } }
+
     val change = { next: Receipts ->
         receipts = next
         Core.setReceipts(chat.conversation, next)
     }
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.common_conversation_settings), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
@@ -181,14 +203,20 @@ fun ConversationSettingsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) ->
                 )
                 HorizontalDivider(color = Palette.Divider)
             }
+
             // Part 3 §3.9, NET-081: the mode is a control of speed and of
             // timing cover. A group takes the mode of the device.
             if (!chat.isGroup) {
                 mode?.let {
-                    EntryRow(RowEntry("hourglass-half", stringResource(R.string.verify_delivery_speed), modeLabel(it)) { isChoosingMode = true })
+                    EntryRow(
+                        RowEntry("hourglass-half", stringResource(R.string.verify_delivery_speed), modeLabel(it)) {
+                            isChoosingMode = true
+                        },
+                    )
                     HorizontalDivider(color = Palette.Divider)
                 }
             }
+
             // The switches stay in one group, below the rows that open a screen.
             receipts?.let { now ->
                 ToggleRow(stringResource(R.string.verify_delivery_receipts), now.delivery) { change(Receipts(it, now.read)) }
@@ -196,6 +224,7 @@ fun ConversationSettingsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) ->
                 ToggleRow(stringResource(R.string.verify_read_receipts), now.read) { change(Receipts(now.delivery, it)) }
                 HorizontalDivider(color = Palette.Divider)
             }
+
             // DEV-321: the user prohibits the forward of the messages of
             // the user. A group has its switch in the group details.
             if (!chat.isGroup) {
@@ -207,12 +236,14 @@ fun ConversationSettingsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) ->
                     }
                 }
             }
+
             if (forwardNotice) {
                 Spacer(Modifier.height(12.dp))
                 Note(UiText.get(R.string.umbra_ui_dev_326))
             }
         }
     }
+
     if (isChoosingMode) {
         ActionSheet(
             title = stringResource(R.string.verify_delivery_speed),
@@ -249,6 +280,7 @@ private fun VerifiedMark() {
 fun VerifyScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
     var number by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(chat.conversation) { Core.safetyNumber(chat.conversation) { number = it } }
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.verify_verify_contact), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
@@ -261,12 +293,21 @@ fun VerifyScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                 }
                 Spacer(Modifier.height(20.dp))
             }
+
             // IDN-140: the scan is the first way, and the short code the second.
-            PrimaryButton(stringResource(R.string.verify_scan_code_of, chat.title)) { push(Screen.ScanSafetyNumber(chat.conversation)) }
+            PrimaryButton(stringResource(R.string.verify_scan_code_of, chat.title)) {
+                push(Screen.ScanSafetyNumber(chat.conversation))
+            }
             Spacer(Modifier.height(8.dp))
-            SecondaryButton(stringResource(R.string.verify_compare_short_code)) { push(Screen.VerifyCode(chat.conversation, starts = true)) }
+            SecondaryButton(stringResource(R.string.verify_compare_short_code)) {
+                push(Screen.VerifyCode(chat.conversation, starts = true))
+            }
             Spacer(Modifier.height(8.dp))
-            EntryRow(RowEntry("key", stringResource(R.string.verify_full_safety_number)) { push(Screen.SafetyNumber(chat.conversation)) })
+            EntryRow(
+                RowEntry("key", stringResource(R.string.verify_full_safety_number)) {
+                    push(Screen.SafetyNumber(chat.conversation))
+                },
+            )
         }
     }
 }
@@ -291,6 +332,7 @@ fun VerifyCodeScreen(chat: Chat, starts: Boolean, onBack: () -> Unit) {
     val code = Core.verifyCode?.takeIf { it.first == conversation }?.second
     val isDone = Core.verifiedNow == conversation
     val failure = Core.verifyFault?.takeIf { it.first == conversation }?.second
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.verify_title, chat.title), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
@@ -358,11 +400,13 @@ fun SafetyNumberScreen(chat: Chat, onBack: () -> Unit) {
     val context = LocalContext.current
     var number by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(chat.conversation) { Core.safetyNumber(chat.conversation) { number = it } }
+
     Column(Modifier.fillMaxSize()) {
         BackBar(chat.title, onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
             Headline(stringResource(R.string.verify_safety_number))
             Spacer(Modifier.height(16.dp))
+
             val groups = number?.split(' ').orEmpty()
             Column(
                 Modifier
@@ -377,6 +421,7 @@ fun SafetyNumberScreen(chat: Chat, onBack: () -> Unit) {
                     Text(row.joinToString("  "), fontFamily = Fonts.Mono, fontSize = 17.sp)
                 }
             }
+
             Spacer(Modifier.height(16.dp))
             // The number is a public value of the two devices, thus it is
             // no sensitive clip.
@@ -398,6 +443,7 @@ fun SafetyNumberScreen(chat: Chat, onBack: () -> Unit) {
 fun VerifyPrompt(push: (Screen) -> Unit) {
     val (conversation, _) = Core.verifyCode ?: return
     val chat = Core.chats.firstOrNull { it.conversation == conversation } ?: return
+
     Row(
         Modifier
             .fillMaxWidth()

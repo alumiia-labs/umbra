@@ -1,14 +1,22 @@
 # The Android app
 
 A thin Kotlin and Compose shell over `umbra-ffi`. Each network, ratchet,
-queue, onion, and store function stays on the Rust side. The shell holds the
-views, the keystore adapter of Part 14 §14.6.4, and the platform rules of
-Part 14 §14.6.6.
+queue, onion, and store function stays on the Rust side.
+
+The shell holds:
+
+- the views;
+- the keystore adapter of Part 14 §14.6.4;
+- the platform rules of Part 14 §14.6.6.
 
 ## Build
 
-Needs: Android Studio, which brings the JDK and the SDK, the NDK, `cargo-ndk`,
-and the Rust targets `aarch64-linux-android` and `x86_64-linux-android`.
+The build needs these tools:
+
+- Android Studio, which brings the JDK and the SDK;
+- the NDK;
+- `cargo-ndk`;
+- the Rust targets `aarch64-linux-android` and `x86_64-linux-android`.
 
 ```sh
 sdkmanager "ndk;28.2.13676358" "platforms;android-37.0"
@@ -27,19 +35,26 @@ them again. Run the script again after each change of `umbra-ffi`.
 
 A release takes its network from the deployment (`deploy/ansible`). Run
 `bash scripts/release-network.sh` from the repo root first. It writes four
-files to `app/src/release/assets`: the key set of the directory, the key of
-the notification server, the pins of the directory, and
-`umbra-network.properties`. The release build reads two values of that last
-file:
+files to `app/src/release/assets`:
+
+1. the key set of the directory;
+2. the key of the notification server;
+3. the pins of the directory;
+4. `umbra-network.properties`.
+
+The release build reads two values of `umbra-network.properties`:
 
 - `invitation_host`, the host of the App Link of an invitation (`IDN-123`);
 - `shipped_epoch`, the epoch that the build ships (Part 10 `REL-045`). The
   app refuses each manifest of an epoch before it.
 
-The release build fails when the file is absent, or when the epoch is absent
-or zero. It also fails when the host is no host name or is the host of the
-devnet. Run the script again before each release, thus the epoch is a recent
-one.
+The release build fails in these conditions:
+
+- The file is absent.
+- The epoch is absent or zero.
+- The host is no host name, or is the host of the devnet.
+
+Run the script again before each release, thus the epoch is a recent one.
 
 A release ships the `arm64-v8a` library alone. The `x86_64` library is for
 the emulator, and the debug build alone holds it.
@@ -47,16 +62,20 @@ the emulator, and the debug build alone holds it.
 ## Icons
 
 The app reads its icons at run time from SVG files of Font Awesome. The
-repository holds the Free set in `app/src/main/assets/fa`, under CC BY 4.0. An
-icon of `app/src/main/assets/fa-pro` wins over the same name in the Free set.
-Git ignores that folder, because a Pro file must not sit in a public
-repository.
+repository holds the Free set in `app/src/main/assets/fa`, under CC BY 4.0.
 
-The app uses the `light` style of Pro when that folder holds it. For a new
-icon, copy `svgs/light/<name>.svg` of the Pro package into `fa-pro`, and copy the Free file of that name into `fa`. A Free file
-names "Font Awesome Free" in its first comment. An icon that the Free set does
-not hold takes the Free file of a near icon under its name, as `shield-check`
-takes `shield-halved`.
+An icon of `app/src/main/assets/fa-pro` wins over the same name in the Free
+set. Git ignores that folder, because a Pro file must not sit in a public
+repository. The app uses the `light` style of Pro when that folder holds it.
+
+To add a new icon:
+
+1. Copy `svgs/light/<name>.svg` of the Pro package into `fa-pro`.
+2. Copy the Free file of that name into `fa`. A Free file names "Font
+   Awesome Free" in its first comment.
+
+An icon that the Free set does not hold takes the Free file of a near icon
+under its name, as `shield-check` takes `shield-halved`.
 
 ## Run against a local network
 
@@ -69,19 +88,23 @@ adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 
 The debug build trusts the test authority of `tests/fixtures/tls` and dials
 10.0.2.2, which is the machine of the developer as an emulator sees it. The
-secrets of that network are in the repository, thus it protects nothing. The
-release build holds the network of `scripts/release-network.sh` alone
+secrets of that network are in the repository, thus it protects nothing.
+
+The release build holds the network of `scripts/release-network.sh` alone
 ("Release build" above).
 
-Two emulators make one conversation: the first one invites and copies the
-link, and the second one pastes it and accepts. The clipboard of an
-emulator is the clipboard of the machine.
+Two emulators make one conversation:
+
+1. The first emulator invites and copies the link.
+2. The second emulator pastes the link and accepts.
+
+The clipboard of an emulator is the clipboard of the machine.
 
 ### The network in Docker
 
 Docker runs the same network with no Rust toolchain. The image builds the
-servers, and `compose.devnet.yaml` publishes the two ingress relays, 7441 and 7446.
-The state stays in a volume.
+servers, and `compose.devnet.yaml` publishes the two ingress relays, 7441
+and 7446. The state stays in a volume.
 
 ```sh
 docker compose -f compose.devnet.yaml up --build   # in the root of the repository
@@ -98,13 +121,17 @@ UMBRA_DEVNET_HOST=192.168.1.254 scripts/devnet.sh
 ./gradlew :app:assembleDebug -Pumbra.devnetHost=192.168.1.254   # in android/
 ```
 
-An emulator reaches that address too, thus one build serves both. The
-firewall of the machine must let the phone in on the ports 7441 and 7446,
-the two ingress relays. The other relays take connections from the relays
-alone. In Docker, the ports must listen on each interface:
+An emulator reaches that address too, thus one build serves both.
+
+The firewall of the machine must let the phone in on the ports 7441 and
+7446, the two ingress relays. The other relays take connections from the
+relays alone.
+
+In Docker, the ports must listen on each interface:
 
 ```sh
-UMBRA_DEVNET_HOST=192.168.1.254 UMBRA_DEVNET_BIND=0.0.0.0 \n    docker compose -f compose.devnet.yaml up --build
+UMBRA_DEVNET_HOST=192.168.1.254 UMBRA_DEVNET_BIND=0.0.0.0 \
+    docker compose -f compose.devnet.yaml up --build
 ```
 
 ## Limits of the shell

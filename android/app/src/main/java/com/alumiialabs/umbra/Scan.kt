@@ -92,6 +92,7 @@ fun ScanInvitationScreen(onBack: () -> Unit) {
 @Composable
 fun ScanSafetyNumberScreen(chat: Chat, onBack: () -> Unit) {
     var isMatch by remember { mutableStateOf<Boolean?>(null) }
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.scan_verify, chat.title), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
@@ -163,6 +164,7 @@ fun Scanner(onText: (String) -> Unit) {
             FaIcon("qrcode", size = 40.dp, tint = Palette.Action)
         }
     }
+
     if (!isAllowed) {
         Spacer(Modifier.height(12.dp))
         Note(stringResource(R.string.scan_no_camera), isError = true)
@@ -185,6 +187,7 @@ private fun CameraFrames(onText: (String) -> Unit) {
         }
     }
     var isStreaming by remember { mutableStateOf(false) }
+
     // The activity keeps a turn of the device, thus the camera takes the
     // new rotation of the display here.
     var bound by remember { mutableStateOf<Pair<Preview, ImageAnalysis>?>(null) }
@@ -196,30 +199,37 @@ private fun CameraFrames(onText: (String) -> Unit) {
             frames.targetRotation = rotation
         }
     }
+
     DisposableEffect(owner) {
         val main = Handler(Looper.getMainLooper())
         val isFound = AtomicBoolean(false)
         var isLeft = false
         val providers = backCameraProvider(context)
+
         providers.addListener({
             // The start of the camera can end after the user left the view.
             if (isLeft) return@addListener
+
             val picture = Preview.Builder().build().also { it.surfaceProvider = preview.surfaceProvider }
             val frames = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build()
+
             frames.setAnalyzer(analysis) { image ->
                 val text = image.use(::qrText)
                 // One code serves one scan.
                 if (text != null && isFound.compareAndSet(false, true)) main.post { deliver(text) }
             }
+
             val provider = providers.get()
             provider.unbindAll()
             provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, picture, frames)
             bound = picture to frames
         }, ContextCompat.getMainExecutor(context))
+
         val watcher = Observer<PreviewView.StreamState> { isStreaming = it == PreviewView.StreamState.STREAMING }
         preview.previewStreamState.observe(owner, watcher)
+
         onDispose {
             isLeft = true
             preview.previewStreamState.removeObserver(watcher)
@@ -227,6 +237,7 @@ private fun CameraFrames(onText: (String) -> Unit) {
             analysis.shutdown()
         }
     }
+
     // A preview with no frame is black. The ground of the frame shows until
     // the first picture is there.
     AndroidView({ preview }, Modifier.fillMaxSize().alpha(if (isStreaming) 1f else 0f))
@@ -248,6 +259,7 @@ private fun backCameraProvider(context: Context): ListenableFuture<ProcessCamera
             .build()
         ProcessCameraProvider.configureInstance(config)
     }
+
     return ProcessCameraProvider.getInstance(context)
 }
 
@@ -263,6 +275,7 @@ private fun qrText(image: ImageProxy): String? {
     val source = PlanarYUVLuminanceSource(
         bytes, plane.rowStride, image.height, 0, 0, image.width, image.height, false,
     )
+
     return try {
         QRCodeReader().decode(BinaryBitmap(HybridBinarizer(source)), qrHints).text
     } catch (none: NotFoundException) {

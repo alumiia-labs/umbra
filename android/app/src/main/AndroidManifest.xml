@@ -73,6 +73,7 @@
                 <data android:mimeType="text/plain" />
             </intent-filter>
         </activity>
+
         <!-- Part 8 §8.4.1: `specialUse`, and never `dataSync`, which the
              platform ends after 6 hours in 24. -->
         <service
@@ -83,15 +84,18 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="An end-to-end encrypted messenger holds one connection to its relay, thus a message arrives with no push provider." />
         </service>
+
         <!-- Part 8 §8.3: the fixed clock of Private mode. -->
         <receiver
             android:name=".PrivateClock"
             android:exported="false" />
+
         <!-- NTF-045: Firebase makes no token by itself. Instant mode turns
              the token on, and each other mode deletes it (Push.kt). -->
         <meta-data
             android:name="firebase_messaging_auto_init_enabled"
             android:value="false" />
+
         <!-- Part 8 §8.4.1: the FCM carrier. A build with no Firebase app
              gets no event here. -->
         <service

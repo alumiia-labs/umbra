@@ -61,6 +61,7 @@ object RecoveryPrompt {
 
     fun isDue(context: Context): Boolean {
         if (isHiddenNow) return false
+
         val preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
         return !preferences.getBoolean(SEEN, false) && preferences.getInt(DISMISSED, 0) < 2
     }
@@ -73,7 +74,9 @@ object RecoveryPrompt {
 
     fun seen(context: Context) {
         context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
-            .edit().putBoolean(SEEN, true).apply()
+            .edit()
+            .putBoolean(SEEN, true)
+            .apply()
         isHiddenNow = true
     }
 }
@@ -85,6 +88,7 @@ fun RecoveryPromptLine(push: (Screen) -> Unit) {
     // The code of a linked device is the code of the device that owns the
     // backup, and the prompt shows there.
     if (!RecoveryPrompt.isDue(context) || !Core.ownsChannels) return
+
     Row(
         Modifier
             .fillMaxWidth()
@@ -120,6 +124,7 @@ fun RecoveryPromptLine(push: (Screen) -> Unit) {
 fun RecoveryCodeScreen(onBack: () -> Unit, push: (Screen) -> Unit = {}) {
     val context = LocalContext.current
     var digits by remember { mutableStateOf<CharArray?>(null) }
+
     LaunchedEffect(Unit) {
         Core.recoveryCode { digits = it }
         RecoveryPrompt.seen(context)
@@ -132,6 +137,7 @@ fun RecoveryCodeScreen(onBack: () -> Unit, push: (Screen) -> Unit = {}) {
             digits?.fill('\u0000')
         }
     }
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.common_recovery_code), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
@@ -146,11 +152,13 @@ fun RecoveryCodeScreen(onBack: () -> Unit, push: (Screen) -> Unit = {}) {
             ) {
                 if (shown != null) DigitRows(shown)
             }
+
             Spacer(Modifier.height(16.dp))
             Note(backupLine(context, Core.lastBackupAt))
             Spacer(Modifier.height(8.dp))
             // IMP-050: the backup of the platform holds nothing of UMBRA.
             Note(UiText.get(R.string.umbra_ui_imp_050))
+
             Spacer(Modifier.height(16.dp))
             EntryRow(
                 RowEntry("user-group", stringResource(R.string.recovery_with_contacts)) { push(Screen.SocialRecovery) },
@@ -177,6 +185,7 @@ fun SecretDigitsScreen(title: String, note: String, onBack: () -> Unit, load: ((
             digits?.fill('\u0000')
         }
     }
+
     Column(Modifier.fillMaxSize()) {
         BackBar(title, onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
@@ -209,8 +218,10 @@ fun SocialRecoveryScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
     var given by remember { mutableStateOf(emptyList<uniffi.umbra_ffi.FfiGivenShare>()) }
     var isSent by remember { mutableStateOf(false) }
     LaunchedEffect(isSent) { Core.sharesGiven { given = it } }
+
     val count = chosen.size
     val needed = threshold.coerceIn(2, maxOf(2, count))
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.recovery_with_contacts), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
@@ -222,6 +233,7 @@ fun SocialRecoveryScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                     pluralStringResource(R.plurals.recovery_pieces_restore, needed, needed) + " " +
                     UiText.get(R.string.umbra_ui_idn_087),
             )
+
             if (given.isNotEmpty()) {
                 val aContact = stringResource(R.string.common_a_contact)
                 val names = given.map { share ->
@@ -240,12 +252,16 @@ fun SocialRecoveryScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                     modifier = Modifier.subline(),
                 )
             }
+
             Spacer(Modifier.height(8.dp))
             for (chat in contacts) {
                 val key = chat.conversation.id.toList()
-                ToggleRow(chat.title, key in chosen) { on -> if (on) chosen.add(key) else chosen.remove(key) }
+                ToggleRow(chat.title, key in chosen) { on ->
+                    if (on) chosen.add(key) else chosen.remove(key)
+                }
                 HorizontalDivider(color = Palette.Divider)
             }
+
             if (count >= 2) {
                 Text(
                     stringResource(R.string.recovery_pieces_needed),
@@ -268,6 +284,7 @@ fun SocialRecoveryScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                     }
                 }
             }
+
             Spacer(Modifier.height(16.dp))
             PrimaryButton(stringResource(R.string.recovery_send_pieces), enabled = count >= 2) {
                 val holders = contacts.filter { it.conversation.id.toList() in chosen }.map { it.conversation }
@@ -296,6 +313,7 @@ private fun backupLine(context: Context, atSeconds: Long?): String =
 @Composable
 private fun DigitRows(digits: CharArray) {
     val ink = Palette.Text.toArgb()
+
     AndroidView(
         factory = { context ->
             TextView(context).apply {
@@ -307,6 +325,7 @@ private fun DigitRows(digits: CharArray) {
         update = { view ->
             view.setTextColor(ink)
             view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+
             var group = 0
             for (at in digits.indices) {
                 if (digits[at] == ' ' || digits[at] == '\n') {
@@ -314,6 +333,7 @@ private fun DigitRows(digits: CharArray) {
                     digits[at] = if (group % 3 == 0) '\n' else ' '
                 }
             }
+
             view.setText(digits, 0, digits.size)
         },
     )
@@ -329,17 +349,20 @@ fun RestoreForm(onCancel: () -> Unit) {
     val context = LocalContext.current
     val passphrase = rememberPlatformField()
     val code = rememberPlatformField()
+
     // Part 4 §4.7.3: the user half and the shares of contacts, in the place
     // of the whole code.
     var withShares by remember { mutableStateOf(false) }
     var shareCount by remember { mutableStateOf(3) }
     val shares = remember { List(8) { PlatformFieldState() } }
     val isRunning = Core.restoreNote != null
+
     Column(Modifier.fillMaxWidth()) {
         if (isRunning) {
             Text(Core.restoreNote.orEmpty(), color = Palette.TextSecondary)
             return@Column
         }
+
         FramedPlatformField(
             code,
             stringResource(if (withShares) R.string.recovery_user_half else R.string.common_recovery_code),
@@ -358,6 +381,7 @@ fun RestoreForm(onCancel: () -> Unit) {
                 InlineButton(stringResource(R.string.recovery_add_share)) { shareCount++ }
             }
         }
+
         Spacer(Modifier.height(12.dp))
         FramedPlatformField(passphrase, stringResource(R.string.common_new_passphrase), isPassphrase = true)
         Spacer(Modifier.height(14.dp))
@@ -365,6 +389,7 @@ fun RestoreForm(onCancel: () -> Unit) {
             val digits = code.take()
             val phrase = passphrase.take()
             val taken = if (withShares) shares.take(shareCount).mapNotNull { it.take() } else emptyList()
+
             if (digits != null && phrase != null) {
                 Core.restore(context, phrase, digits, taken)
             } else {
@@ -373,6 +398,7 @@ fun RestoreForm(onCancel: () -> Unit) {
                 taken.forEach { it.fill('\u0000') }
             }
         }
+
         Spacer(Modifier.height(8.dp))
         SecondaryButton(
             stringResource(if (withShares) R.string.recovery_use_recovery_code else R.string.recovery_use_shares),
@@ -394,24 +420,28 @@ fun ResetIdentityScreen(onBack: () -> Unit) {
     var isAsking by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<String?>(null) }
     var fault by remember { mutableStateOf<String?>(null) }
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.common_reset_identity), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
             Text(stringResource(R.string.recovery_reset_intro))
             Spacer(Modifier.height(12.dp))
-            for (line in listOf(
+            val changes = listOf(
                 stringResource(R.string.recovery_reset_new_key),
                 stringResource(R.string.recovery_reset_groups),
                 stringResource(R.string.recovery_reset_links_end),
                 stringResource(R.string.recovery_reset_messages_stay),
-            )) {
+            )
+            for (line in changes) {
                 Text("· $line", color = Palette.TextSecondary, modifier = Modifier.padding(bottom = 6.dp))
             }
+
             Spacer(Modifier.height(16.dp))
             result?.let {
                 Note(it)
                 return@Column
             }
+
             fault?.let {
                 Note(it, isError = true)
                 Spacer(Modifier.height(12.dp))
@@ -424,13 +454,18 @@ fun ResetIdentityScreen(onBack: () -> Unit) {
             }
         }
     }
+
     if (isAsking) {
         ActionSheet(
             stringResource(R.string.recovery_reset_question),
             listOf(
                 RowEntry("rotate", stringResource(R.string.common_reset_identity)) {
                     Core.resetIdentity(context) { done ->
-                        if (done == null) fault = UiText.get(R.string.recovery_remove_other_devices) else result = done
+                        if (done == null) {
+                            fault = UiText.get(R.string.recovery_remove_other_devices)
+                        } else {
+                            result = done
+                        }
                     }
                 },
             ),

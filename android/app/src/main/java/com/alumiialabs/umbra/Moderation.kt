@@ -70,6 +70,7 @@ private fun roleName(role: UByte): String = when (role.toInt()) {
 fun rosterNoteText(note: FfiRosterNote, names: Map<UShort, String>): String {
     val who = names[note.index] ?: UiText.get(R.string.common_member_number, note.index.toInt())
     val isYou = who == YOU
+
     return when (note.kind.toInt()) {
         1 -> UiText.get(R.string.mod_joined, who)
         2 -> if (isYou) UiText.get(R.string.mod_you_left) else UiText.get(R.string.mod_no_longer, who)
@@ -96,13 +97,20 @@ private val NOBODY: UShort = 0xFFFFu
 val YOU: String get() = UiText.get(R.string.common_you)
 
 /** The notes of a group, in the order of time. */
-fun chatNotes(mods: List<FfiModNote>, roster: List<FfiRosterNote>, names: Map<UShort, String>): List<ChatNote> =
-    (mods.map { ChatNote(it.atMs, modNoteText(it), "ban") } +
-        roster.map { ChatNote(it.atMs, rosterNoteText(it, names), if (it.kind.toInt() >= 5) "triangle-exclamation" else "user-group") })
+fun chatNotes(mods: List<FfiModNote>, roster: List<FfiRosterNote>, names: Map<UShort, String>): List<ChatNote> {
+    val modNotes = mods.map { ChatNote(it.atMs, modNoteText(it), "ban") }
+    val rosterNotes = roster.map {
+        // A fork and the later kinds are warnings.
+        val icon = if (it.kind.toInt() >= 5) "triangle-exclamation" else "user-group"
+        ChatNote(it.atMs, rosterNoteText(it, names), icon)
+    }
+
+    return (modNotes + rosterNotes)
         .filter { it.text.isNotEmpty() }
         .sortedBy { it.atMs }
+}
 
-/** One change of the group in the conversation, centred as a notice. */
+/** One change of the group in the conversation, centered as a notice. */
 @Composable
 fun NoteLine(note: ChatNote) {
     val text = note.text

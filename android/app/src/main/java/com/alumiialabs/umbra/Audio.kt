@@ -35,19 +35,23 @@ fun transcodeAudio(context: Context, source: Uri, memory: FileDescriptor): Long 
     var decoder: MediaCodec? = null
     var encoder: MediaCodec? = null
     var muxer: MediaMuxer? = null
+
     try {
         extractor.setDataSource(context, source, null)
         val track = (0 until extractor.trackCount).firstOrNull { index ->
             extractor.getTrackFormat(index).getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true
         } ?: return -1
         extractor.selectTrack(track)
+
         val input = extractor.getTrackFormat(track)
         val made = MediaCodec.createDecoderByType(input.getString(MediaFormat.KEY_MIME)!!)
         decoder = made
         made.configure(input, null, null, 0)
         made.start()
+
         val mux = MediaMuxer(memory, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
         muxer = mux
+
         return Transcoder(extractor, made, mux) { rate, channels ->
             val format = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, rate, channels)
             format.setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
@@ -70,11 +74,13 @@ fun transcodeAudio(context: Context, source: Uri, memory: FileDescriptor): Long 
             }
             codec?.release()
         }
+
         try {
             muxer?.release()
         } catch (stopped: IllegalStateException) {
             // A muxer that did not start has nothing to release.
         }
+
         extractor.release()
     }
 }
@@ -104,6 +110,7 @@ private class Transcoder(
         var decoded = false
         var encoded = false
         var pcmEnded = false
+
         while (!encoded) {
             if (!extracted) extracted = feedDecoder()
             if (!decoded) decoded = drainDecoder()
@@ -113,6 +120,7 @@ private class Transcoder(
             if (pending != null) feedEncoder(pending!!)
             encoded = drainEncoder()
         }
+
         return lastUs
     }
 
@@ -120,11 +128,13 @@ private class Transcoder(
         val index = decoder.dequeueInputBuffer(CODEC_WAIT_US)
         if (index < 0) return false
         val buffer = decoder.getInputBuffer(index) ?: return false
+
         val size = extractor.readSampleData(buffer, 0)
         if (size < 0) {
             decoder.queueInputBuffer(index, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
             return true
         }
+
         decoder.queueInputBuffer(index, 0, size, extractor.sampleTime, 0)
         extractor.advance()
         return false
@@ -133,12 +143,14 @@ private class Transcoder(
     /** Takes one buffer of PCM, and gives whether the decoder ended. */
     private fun drainDecoder(): Boolean {
         if (pending != null) return false
+
         val index = decoder.dequeueOutputBuffer(info, CODEC_WAIT_US)
         if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
             start(decoder.outputFormat)
             return false
         }
         if (index < 0) return false
+
         val ended = info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
         if (info.size > 0) {
             if (encoder == null) start(decoder.outputFormat)
@@ -148,21 +160,27 @@ private class Transcoder(
             // The PCM goes on, thus the output buffer can go back now.
             pending = ByteBuffer.allocate(info.size).order(ByteOrder.nativeOrder()).put(output).also { it.flip() }
         }
+
         decoder.releaseOutputBuffer(index, false)
         return ended
     }
 
     private fun start(format: MediaFormat) {
         if (encoder != null) return
+
         rate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
         channels = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
         // AAC of the platform takes one or two channels.
         require(channels in 1..2) { "channels" }
+
         // The encoder reads 16-bit PCM. A decoder that gives another form,
         // such as float samples of a 32-bit file, would encode noise.
         if (format.containsKey(MediaFormat.KEY_PCM_ENCODING)) {
-            require(format.getInteger(MediaFormat.KEY_PCM_ENCODING) == android.media.AudioFormat.ENCODING_PCM_16BIT) { "pcm" }
+            require(
+                format.getInteger(MediaFormat.KEY_PCM_ENCODING) == android.media.AudioFormat.ENCODING_PCM_16BIT,
+            ) { "pcm" }
         }
+
         encoder = encoderFor(rate, channels)
     }
 
@@ -170,6 +188,7 @@ private class Transcoder(
         val codec = encoder ?: return
         val index = codec.dequeueInputBuffer(CODEC_WAIT_US)
         if (index < 0) return
+
         val buffer = codec.getInputBuffer(index)!!
         buffer.clear()
         val size = minOf(buffer.remaining(), pcm.remaining())
@@ -177,10 +196,12 @@ private class Transcoder(
         slice.limit(slice.position() + size)
         buffer.put(slice)
         pcm.position(pcm.position() + size)
+
         // 16-bit PCM: two bytes for each sample of each channel.
         val presentationUs = framesIn * 1_000_000L / rate
         framesIn += size / (2 * channels)
         codec.queueInputBuffer(index, 0, size, presentationUs, 0)
+
         if (!pcm.hasRemaining()) pending = null
     }
 
@@ -188,6 +209,7 @@ private class Transcoder(
         val codec = encoder ?: return true
         val index = codec.dequeueInputBuffer(CODEC_WAIT_US)
         if (index < 0) return false
+
         codec.queueInputBuffer(index, 0, 0, framesIn * 1_000_000L / rate, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
         return true
     }
@@ -195,6 +217,7 @@ private class Transcoder(
     /** Moves the encoded frames to the muxer, and gives whether they ended. */
     private fun drainEncoder(): Boolean {
         val codec = encoder ?: return false
+
         val index = codec.dequeueOutputBuffer(info, CODEC_WAIT_US)
         if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
             track = muxer.addTrack(codec.outputFormat)
@@ -202,6 +225,7 @@ private class Transcoder(
             return false
         }
         if (index < 0) return false
+
         val ended = info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
         val isConfig = info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0
         if (info.size > 0 && !isConfig && track >= 0) {
@@ -211,6 +235,7 @@ private class Transcoder(
             muxer.writeSampleData(track, output, info)
             lastUs = maxOf(lastUs, info.presentationTimeUs)
         }
+
         codec.releaseOutputBuffer(index, false)
         if (ended && track >= 0) muxer.stop()
         return ended

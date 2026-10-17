@@ -74,6 +74,7 @@ object Appearances {
     private fun tellPlatform(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
         val manager = context.getSystemService(UiModeManager::class.java) ?: return
+
         manager.setApplicationNightMode(
             when (choice) {
                 Appearance.System -> UiModeManager.MODE_NIGHT_AUTO
@@ -100,6 +101,7 @@ object Palette {
 
     /** The text and the icons on a ground of [Action]. */
     val OnAction get() = pick(0xFFFFFFFF, 0xFF10291C)
+
     val Container get() = pick(0xFFDCECDF, 0xFF25392D)
     val Incoming get() = pick(0xFFE9EEE3, 0xFF202924)
     val Outline get() = pick(0xFFB4BFB3, 0xFF4B5852)
@@ -107,6 +109,7 @@ object Palette {
 
     /** The shade of a row or a tab under a finger, above its content. */
     val Pressed get() = pick(0x14202B25, 0x1FE4EAE5)
+
     val Error get() = pick(0xFF963A36, 0xFFF0A49E)
 
     /** The ground of a note of an error. */
@@ -130,7 +133,8 @@ object Palette {
 
 private fun colors(isDark: Boolean): ColorScheme {
     val base = if (isDark) darkColorScheme() else lightColorScheme()
-    // Each color that a part of Material reads, thus no color of the
+
+    // Set each color that a part of Material reads, thus no color of the
     // default scheme shows.
     return base.copy(
         primary = Palette.Action,

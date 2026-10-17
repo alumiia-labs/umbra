@@ -24,6 +24,7 @@ object Notifier {
     private const val LOCKED_ID = 2
     private const val PUSH_ID = 3
     private const val REQUEST_ID = 4
+
     // The platform keeps the settings of a channel that exists, thus the
     // channel with no badge takes a new identifier, and the old one leaves.
     private const val CARRIER_CHANNEL = "connection"
@@ -56,11 +57,13 @@ object Notifier {
             // app shows no count for it.
             setShowBadge(false)
         }
+
         val messages = NotificationChannel(
             MESSAGE_CHANNEL,
             context.getString(R.string.notify_channel_messages),
             NotificationManager.IMPORTANCE_HIGH,
         )
+
         manager(context).createNotificationChannels(listOf(carrier, messages))
         // A service whose notice still stands on the old channel keeps it,
         // and a later start deletes it.
@@ -100,6 +103,7 @@ object Notifier {
                 LinkState.Down -> R.string.connection_offline
             }
         }
+
         // The notice names the state alone: the user knows the app.
         return Notification.Builder(context, CARRIER_CHANNEL)
             .setSmallIcon(R.drawable.ic_stat_umbra)
@@ -109,7 +113,7 @@ object Notifier {
             .build()
     }
 
-    /** The service runs on, and its notice follows the state of the client and of its link. */
+    /** Shows the current state of the client and of its link in the notice of the service. */
     fun refreshCarrier(context: Context) {
         manager(context).notify(CARRIER_ID, carrier(context))
     }
@@ -145,6 +149,7 @@ object Notifier {
             text?.fill('\u0000')
             return
         }
+
         // NTF-119: the system setting that shows all content ignores the
         // public version, thus a locked device gets the bare alert.
         val shows = (title != null || (text != null && text.isNotEmpty())) && !isDeviceLocked(context)
@@ -159,6 +164,7 @@ object Notifier {
             .setVisibility(Notification.VISIBILITY_PRIVATE)
             .setPublicVersion(lockScreen(context))
             .build()
+
         val id = conversation.hashCode()
         // NTF-018: the alert of the conversation takes the place of the alert
         // of its push, thus one message shows one alert.
@@ -167,6 +173,7 @@ object Notifier {
         synchronized(withContent) {
             if (shows) withContent[id] = conversation.label else withContent.remove(id)
         }
+
         if (shows) watchScreen(context)
         manager(context).notify(MESSAGE_TAG, id, alert)
         text?.fill('\u0000')
@@ -187,9 +194,11 @@ object Notifier {
             if (watchesScreen) return
             watchesScreen = true
         }
+
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) = hideContent(app)
         }
+
         val filter = IntentFilter(Intent.ACTION_SCREEN_OFF)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             app.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
@@ -201,10 +210,13 @@ object Notifier {
     private fun hideContent(context: Context) {
         val shown = synchronized(withContent) { HashMap(withContent).also { withContent.clear() } }
         if (shown.isEmpty()) return
+
         val manager = manager(context)
         val active = manager.activeNotifications.filter { it.tag == MESSAGE_TAG }.map { it.id }.toSet()
+
         for ((id, group) in shown) {
             if (id !in active) continue
+
             val bare = Notification.Builder(context, MESSAGE_CHANNEL)
                 .setSmallIcon(R.drawable.ic_stat_umbra)
                 .setContentTitle(context.getString(R.string.common_new_message))
@@ -228,6 +240,7 @@ object Notifier {
      */
     fun pushed(context: Context, conversation: Conversation? = null) {
         if (!mayPost(context)) return
+
         synchronized(pushOwed) { pushOwed.add(conversation?.key) }
         val alert = Notification.Builder(context, MESSAGE_CHANNEL)
             .setSmallIcon(R.drawable.ic_stat_umbra)
@@ -250,12 +263,14 @@ object Notifier {
         synchronized(pushOwed) {
             if (!pushOwed.remove(conversation.key) || pushOwed.isNotEmpty()) return
         }
+
         manager(context).cancel(MESSAGE_TAG, PUSH_ID)
     }
 
     /** A contact request arrived. The line names no sender. */
     fun request(context: Context) {
         if (!mayPost(context)) return
+
         val alert = Notification.Builder(context, MESSAGE_CHANNEL)
             .setSmallIcon(R.drawable.ic_stat_umbra)
             .setContentTitle(context.getString(R.string.notify_new_contact_request))
@@ -273,6 +288,7 @@ object Notifier {
      */
     fun locked(context: Context) {
         if (!mayPost(context)) return
+
         val notice = Notification.Builder(context, CARRIER_CHANNEL)
             .setSmallIcon(R.drawable.ic_stat_umbra)
             .setContentTitle(context.getString(R.string.notify_locked))
@@ -287,6 +303,7 @@ object Notifier {
     fun clear(context: Context) {
         synchronized(pushOwed) { pushOwed.clear() }
         synchronized(withContent) { withContent.clear() }
+
         val manager = manager(context)
         manager.activeNotifications
             .filter { it.tag == MESSAGE_TAG || it.id == LOCKED_ID }

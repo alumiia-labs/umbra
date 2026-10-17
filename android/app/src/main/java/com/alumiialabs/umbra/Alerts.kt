@@ -47,6 +47,7 @@ fun AlertsScreen(chat: Chat, onBack: () -> Unit) {
     var chosen by remember { mutableStateOf<UByte?>(null) }
     LaunchedEffect(chat.conversation) { Core.alertSetting(chat.conversation) { chosen = it } }
     val choices = if (chat.isGroup) listOf(ALERT_ALL, ALERT_MENTIONS, ALERT_NONE) else listOf(ALERT_ALL, ALERT_NONE)
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.common_notifications), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {

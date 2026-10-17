@@ -47,7 +47,6 @@ import uniffi.umbra_ffi.MsgFile
 /** The media class of an image in a descriptor (Part 12 §12.3). */
 const val CLASS_IMAGE: UByte = 1u
 
-/** The states of the file of a message, as the core gives them. */
 /** The longest side of a picture of a peer that the app decodes, in pixels. */
 private const val PEER_PICTURE_SIDE_MAX = 1_024
 
@@ -74,6 +73,7 @@ private const val PICTURE_QUALITY_TOP = 95
 /** The longest side of a picked image in the crop view, in pixels. */
 private const val CROP_SIDE_MAX = 2_048
 
+/** The states of the file of a message, as the core gives them. */
 const val FILE_UPLOADING = 1
 const val FILE_WANTED = 2
 const val FILE_READY = 3
@@ -95,13 +95,6 @@ private const val PHOTO_BYTES_MAX = 2 * 1_024 * 1_024
 private const val SHOWN_SIDE_MAX = 1_280
 
 object Photos {
-    /**
-     * Re-encodes a picked image and gives it to a draft (`ATT-155`,
-     * `ATT-156`). The decoder applies the orientation, and the new JPEG holds
-     * no metadata field: no place, no device, no time. The bytes go to the
-     * core through a pipe, thus the device holds no file of them
-     * (`IMP-160`, `IMP-165`).
-     */
     /** The side of the largest picture, in pixels (`DIS-195`). */
     val PICTURE_SIDE_MAX = PICTURE_SIDES.first()
 
@@ -146,6 +139,7 @@ object Photos {
             for (side in PICTURE_SIDES) {
                 // A small crop gets no larger side than it holds.
                 if (side > square.width && side != PICTURE_SIDES.last()) continue
+
                 // Steps of a half keep each pixel an average of the pixels
                 // above it. One long step skips most of them, and its edges
                 // alias, which costs bytes and shows as noise.
@@ -155,17 +149,23 @@ object Photos {
                 }
                 val scaled = Bitmap.createScaledBitmap(step, side, side, true)
                 made += scaled
+
                 // A transparent pixel becomes white and not black.
                 val flat = Bitmap.createBitmap(side, side, Bitmap.Config.ARGB_8888)
                 made += flat
                 flat.eraseColor(android.graphics.Color.WHITE)
                 android.graphics.Canvas(flat).drawBitmap(scaled, 0f, 0f, null)
+
                 val (quality, bytes) = bestFit(flat) ?: continue
                 if (quality >= PICTURE_QUALITY_FLOOR) {
                     fallback?.fill(0)
                     return bytes
                 }
-                if (fallback == null) fallback = bytes else bytes.fill(0)
+                if (fallback == null) {
+                    fallback = bytes
+                } else {
+                    bytes.fill(0)
+                }
             }
             return fallback
         } catch (fault: Throwable) {
@@ -183,6 +183,7 @@ object Photos {
         var low = PICTURE_QUALITY_MIN
         var high = PICTURE_QUALITY_TOP
         var best: Pair<Int, ByteArray>? = null
+
         while (low <= high) {
             val quality = (low + high) / 2
             val out = ByteArrayOutputStream()
@@ -197,9 +198,17 @@ object Photos {
                 high = quality - 1
             }
         }
+
         return best
     }
 
+    /**
+     * Re-encodes a picked image and gives it to a draft (`ATT-155`,
+     * `ATT-156`). The decoder applies the orientation, and the new JPEG holds
+     * no metadata field: no place, no device, no time. The bytes go to the
+     * core through a pipe, thus the device holds no file of them
+     * (`IMP-160`, `IMP-165`).
+     */
     fun attach(context: Context, source: Uri, draft: DraftHandle): Boolean {
         val bitmap = try {
             ImageDecoder.decodeBitmap(ImageDecoder.createSource(context.contentResolver, source)) { decoder, info, _ ->
@@ -216,6 +225,7 @@ object Photos {
         } catch (unreadable: Exception) {
             return false
         }
+
         var encoded = ByteArray(0)
         for (quality in intArrayOf(85, 70, 55, 40)) {
             encoded.fill(0)
@@ -224,6 +234,7 @@ object Photos {
             encoded = out.toByteArray()
             if (encoded.size <= PHOTO_BYTES_MAX) break
         }
+
         val (width, height) = bitmap.width to bitmap.height
         // ATT-194: the record carries a thumbnail of the re-encoded photo.
         val preview = Files.thumbnail(bitmap)
@@ -232,6 +243,7 @@ object Photos {
             encoded.fill(0)
             return false
         }
+
         val (read, write) = ParcelFileDescriptor.createPipe()
         // The core reads to the end of the pipe, thus a second thread writes.
         val writer = thread {
@@ -243,6 +255,7 @@ object Photos {
                 encoded.fill(0)
             }
         }
+
         return try {
             draft.attachFile(
                 "/proc/self/fd/${read.fd}",
@@ -317,12 +330,14 @@ object Photos {
      */
     fun profileImage(bytes: ByteArray): ImageBitmap? {
         if (bytes.size > PICTURE_MAX) return null
+
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         try {
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
         } catch (fault: Throwable) {
             return null
         }
+
         if (maxOf(bounds.outWidth, bounds.outHeight) > PEER_PICTURE_SIDE_MAX) return null
         return bounded(bytes, PEER_PICTURE_SIDE_MAX)
     }
@@ -340,6 +355,7 @@ fun PhotoTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
     val height = file.pixelH.toInt().coerceAtLeast(1)
     // A very tall or a very wide image keeps a shape that a bubble can hold.
     val ratio = (width.toFloat() / height).coerceIn(0.5f, 2f)
+
     // The sender holds its photo in each state. The press of the bubble
     // starts a failed transfer again, and it opens a photo that is there.
     val isHeld = state == FILE_READY || line.info.outgoing
@@ -347,6 +363,7 @@ fun PhotoTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
     // A photo that did not come yet shows the thumbnail of its record.
     val preview = if (image == null && file.hasPreview) Core.preview(line) else null
     val canRetry = state == FILE_FAILED
+
     Box(
         modifier
             .width(if (ratio >= 1f) 240.dp else 200.dp)
@@ -363,7 +380,9 @@ fun PhotoTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.matchParentSize().alpha(if (state == FILE_READY) 1f else 0.55f),
             )
-            if (canRetry) FaIcon("rotate", label = stringResource(R.string.photo_send_again), size = 22.dp, tint = Palette.Text)
+            if (canRetry) {
+                FaIcon("rotate", label = stringResource(R.string.photo_send_again), size = 22.dp, tint = Palette.Text)
+            }
         } else if (preview != null) {
             Image(
                 preview,
@@ -408,12 +427,14 @@ fun PhotoScreen(line: Line, chat: Chat, onBack: () -> Unit) {
         Viewer.isOpen = true
         onDispose { Viewer.isOpen = false }
     }
+
     var scale by androidx.compose.runtime.remember { androidx.compose.runtime.mutableFloatStateOf(1f) }
     var offset by androidx.compose.runtime.remember {
         androidx.compose.runtime.mutableStateOf(androidx.compose.ui.geometry.Offset.Zero)
     }
     var showsBar by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(true) }
     val image = Core.image(line)
+
     Box(
         Modifier
             .fillMaxSize()
@@ -449,6 +470,7 @@ fun PhotoScreen(line: Line, chat: Chat, onBack: () -> Unit) {
                 },
             )
         }
+
         if (showsBar) {
             Row(
                 Modifier

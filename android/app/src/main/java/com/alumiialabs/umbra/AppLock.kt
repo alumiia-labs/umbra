@@ -35,7 +35,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 
-/** `IMP-119` caps the idle time at 30 minutes. */
+/** The idle times before the lock. `IMP-119` caps the idle time at 30 minutes. */
 private val AutoLockChoices = listOf<Pair<Long, Pair<Int, Int?>>>(
     0L to (R.string.lock_immediately to R.string.lock_when_you_leave),
     5 * 60L to (R.string.lock_5_minutes to null),
@@ -55,6 +55,7 @@ private fun autoLockLabel(seconds: Long): String = when (seconds) {
 @Composable
 fun AppLockScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
     val context = LocalContext.current
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.lock_app_lock), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
@@ -69,8 +70,10 @@ fun AppLockScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                 },
             )
             HorizontalDivider(color = Palette.Divider)
+
             Spacer(Modifier.height(14.dp))
             SecondaryButton(stringResource(R.string.lock_lock_now)) { Core.lock(context) }
+
             Spacer(Modifier.height(14.dp))
             // A fact that a user cannot know, and that decides the choice
             // above. Instant and Direct mode show that a message waits.
@@ -90,6 +93,7 @@ fun AppLockScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
 @Composable
 fun AutoLockScreen(onBack: () -> Unit) {
     var chosen by remember { mutableStateOf(Core.autoLockSeconds) }
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.lock_auto_lock), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
@@ -120,6 +124,7 @@ fun AutoLockScreen(onBack: () -> Unit) {
                 }
                 HorizontalDivider(color = Palette.Divider)
             }
+
             Spacer(Modifier.height(14.dp))
             PrimaryButton(stringResource(R.string.common_save)) {
                 Core.setAutoLock(chosen)
@@ -163,6 +168,7 @@ fun autoDownloadLabel(bytes: ULong, wifiOnly: Boolean): String {
 fun AutoDownloadScreen(onBack: () -> Unit) {
     var chosen by remember { mutableStateOf(Core.autoDownloadLimit) }
     var wifiOnly by remember { mutableStateOf(Core.autoDownloadWifiOnly) }
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.lock_automatic_download), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
@@ -182,6 +188,7 @@ fun AutoDownloadScreen(onBack: () -> Unit) {
                 }
                 HorizontalDivider(color = Palette.Divider)
             }
+
             // IMP-168: on mobile data each file waits for a tap, and the
             // files below the limit come when Wi-Fi comes.
             Row(
@@ -196,11 +203,13 @@ fun AutoDownloadScreen(onBack: () -> Unit) {
                 SwitchMark(isOn = wifiOnly, enabled = chosen != 0uL)
             }
             HorizontalDivider(color = Palette.Divider)
+
             Spacer(Modifier.height(14.dp))
             PrimaryButton(stringResource(R.string.common_save)) {
                 Core.setAutoDownload(chosen, wifiOnly)
                 onBack()
             }
+
             Spacer(Modifier.height(14.dp))
             // A fact that a user cannot know, and that decides the choice above.
             Note(stringResource(R.string.lock_download_note))
@@ -221,7 +230,7 @@ fun RadioMark(isChosen: Boolean) {
     }
 }
 
-/** Each field gives a `CharArray`, as the unlock field does. */
+/** The change of the passphrase. Each field gives a `CharArray`, as the unlock field does. */
 @Composable
 fun ChangePassphraseScreen(onBack: () -> Unit) {
     val current = rememberPlatformField()
@@ -229,6 +238,7 @@ fun ChangePassphraseScreen(onBack: () -> Unit) {
     val confirm = rememberPlatformField()
     var fault by remember { mutableStateOf<String?>(null) }
     var isWorking by remember { mutableStateOf(false) }
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.common_change_passphrase), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
@@ -237,6 +247,7 @@ fun ChangePassphraseScreen(onBack: () -> Unit) {
             FramedPlatformField(new, stringResource(R.string.common_new_passphrase), isPassphrase = true)
             Spacer(Modifier.height(14.dp))
             FramedPlatformField(confirm, stringResource(R.string.lock_confirm_new_passphrase), isPassphrase = true)
+
             Spacer(Modifier.height(14.dp))
             PrimaryButton(
                 stringResource(if (isWorking) R.string.lock_changing else R.string.common_change_passphrase),
@@ -245,11 +256,13 @@ fun ChangePassphraseScreen(onBack: () -> Unit) {
                 val old = current.take()
                 val first = new.take()
                 val second = confirm.take()
+
                 fault = when {
                     old == null || first == null || second == null -> UiText.get(R.string.lock_fill_three_fields)
                     !first.contentEquals(second) -> UiText.get(R.string.lock_passphrases_differ)
                     else -> null
                 }
+
                 if (fault == null && old != null && first != null) {
                     isWorking = true
                     Core.changePassphrase(old, first) { failure ->
@@ -263,10 +276,12 @@ fun ChangePassphraseScreen(onBack: () -> Unit) {
                 }
                 second?.fill('\u0000')
             }
+
             fault?.let {
                 Spacer(Modifier.height(12.dp))
                 Note(it, isError = true)
             }
+
             Spacer(Modifier.height(12.dp))
             Note(stringResource(R.string.lock_no_reset))
         }
