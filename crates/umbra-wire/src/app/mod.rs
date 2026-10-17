@@ -218,12 +218,14 @@ impl<'a> AppMessage<'a> {
         if r.u8()? != VERSION {
             return Err(Error::Malformed);
         }
+
         let kind = AppKind::from_byte(r.u8()?)?;
         let msg_id = r.array()?;
         let sent_at = u64::from_be_bytes(r.array()?);
         let body_len = usize::try_from(r.u32()?).map_err(|_| Error::Malformed)?;
         let body = r.take(body_len)?;
         r.finish()?;
+
         check_body(kind, body, channel)?;
         Ok(AppMessage {
             kind,
@@ -318,23 +320,29 @@ mod tests {
         let mut out = vec![0u8; msg.len()];
         assert_eq!(msg.encode(&mut out).unwrap(), 36);
         assert_eq!(AppMessage::parse(&out, Channel::Pairwise).unwrap(), msg);
+
         out[31] = 0xFF;
         assert!(AppMessage::parse(&out, Channel::Pairwise).is_err());
+
         out[31] = b'h';
         out[1] = 0x12;
         assert!(AppMessage::parse(&out, Channel::Pairwise).is_err());
+
         // A kind that the table does not list fails (`WIR-433`).
         for unlisted in [0x0E, 0x0F, 0x11, 0x3A] {
             out[1] = unlisted;
             assert!(AppMessage::parse(&out, Channel::Group).is_err());
         }
+
         // A recovery share of a wrong length, and one on a group queue
         // (`IDN-187`).
         out[1] = 0x0D;
         assert!(AppMessage::parse(&out, Channel::Pairwise).is_err());
         assert!(AppMessage::parse(&out, Channel::Group).is_err());
+
         out[1] = 0x36;
         assert!(AppMessage::parse(&out, Channel::Pairwise).is_err());
+
         out[0] = 0x01;
         assert!(AppMessage::parse(&out, Channel::Pairwise).is_err());
     }
@@ -351,6 +359,7 @@ mod tests {
             };
             let mut out = vec![0u8; msg.len()];
             msg.encode(&mut out).unwrap();
+
             // WIR-555: the length, on a pairwise channel and in a group.
             for channel in [Channel::Pairwise, Channel::Group] {
                 assert_eq!(AppMessage::parse(&out, channel).is_ok(), is_taken);
@@ -366,11 +375,14 @@ mod tests {
                 let _ = k.class();
             }
         }
+
         assert!(AppKind::from_byte(0x12).is_err());
         assert!(AppKind::from_byte(0x0F).is_err());
+
         let a = msg_ref(&Secret::new([1; 32]), &[2; 16]);
         let b = msg_ref(&Secret::new([3; 32]), &[2; 16]);
         assert_ne!(a, b);
+
         assert!(strictly_increasing(&[[1; 16], [2; 16]]));
         assert!(!strictly_increasing(&[[2; 16], [2; 16]]));
     }

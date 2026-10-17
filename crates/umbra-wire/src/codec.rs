@@ -137,6 +137,7 @@ impl<'a> Writer<'a> {
         if v > 0x00FF_FFFF {
             return Err(Error::Malformed);
         }
+
         let b = v.to_be_bytes();
         self.put(&[b[1], b[2], b[3]])
     }
@@ -186,6 +187,7 @@ mod tests {
         assert!(r.finish().is_err());
         assert_eq!(r.u32().unwrap(), 4);
         assert!(r.u8().is_err());
+
         r.finish().unwrap();
     }
 

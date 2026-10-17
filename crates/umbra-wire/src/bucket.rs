@@ -218,12 +218,14 @@ mod tests {
             assert_eq!(b.content_plain(), plain);
             assert_eq!(b.tags_and_app(), tags);
         }
+
         assert_eq!(Bucket::B0.group_text(3), Some(269));
         assert_eq!(Bucket::B0.group_text(25), Some(5));
         assert_eq!(Bucket::B0.group_text(120), None);
         assert_eq!(Bucket::B1.group_text(120), Some(401));
         assert_eq!(Bucket::B2.group_text(500), Some(1_985));
         assert_eq!(Bucket::B3.group_text(500), Some(26_561));
+
         // The modal 350-byte text takes B1 up to 124 members.
         assert_eq!(
             Bucket::fitting(350, |b| b.group_text(124)),
@@ -233,6 +235,7 @@ mod tests {
             Bucket::fitting(350, |b| b.group_text(125)),
             Some(Bucket::B2)
         );
+
         assert_eq!(Bucket::from_cell_len(2_048), Some(Bucket::B1));
         assert_eq!(Bucket::from_cell_len(2_047), None);
     }

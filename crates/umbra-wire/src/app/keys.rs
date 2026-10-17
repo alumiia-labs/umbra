@@ -83,9 +83,11 @@ impl KeyRequest {
             KeyScope::GroupEpoch => u32::from(u16::MAX) + 1,
             KeyScope::RosterSnapshot => 0,
         };
+
         if self.index > bound {
             return Err(Error::Malformed);
         }
+
         Ok(())
     }
 
@@ -101,12 +103,14 @@ impl KeyRequest {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let out = KeyRequest {
             scope: KeyScope::from_byte(r.u8()?)?,
             id: r.array()?,
             epoch: r.u32()?,
             index: r.u32()?,
         };
+
         out.check()?;
         Ok(out)
     }
@@ -114,6 +118,7 @@ impl KeyRequest {
     /// Writes the request.
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, Error> {
         self.check()?;
+
         let mut w = Writer::new(out);
         self.put(&mut w)?;
         Ok(w.position())
@@ -146,6 +151,7 @@ impl<'a> KeySupply<'a> {
         if !self.body.is_empty() {
             return Err(Error::Malformed);
         }
+
         let mut w = Writer::new(out);
         self.request.put(&mut w)?;
         w.u8(self.status as u8)?;
@@ -164,8 +170,10 @@ impl<'a> KeySupply<'a> {
         if body_len != 0 {
             return Err(Error::Malformed);
         }
+
         let body = r.take(body_len)?;
         r.finish()?;
+
         Ok(KeySupply {
             request,
             status,
@@ -189,6 +197,7 @@ impl<'a> KeyChangeNotice<'a> {
         if self.new_mlkem_pk.len() != 1_184 {
             return Err(Error::Malformed);
         }
+
         let mut w = Writer::new(out);
         w.u8(0x01)?;
         w.put(&self.new_x25519_pk)?;
@@ -201,10 +210,12 @@ impl<'a> KeyChangeNotice<'a> {
         if bytes.len() != KEY_CHANGE_LEN {
             return Err(Error::Malformed);
         }
+
         let mut r = Reader::new(bytes);
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         Ok(KeyChangeNotice {
             new_x25519_pk: r.array()?,
             new_mlkem_pk: r.take(1_184)?,
@@ -251,16 +262,19 @@ impl DigestBody {
         if bytes.len() != DIGEST_LEN {
             return Err(Error::Malformed);
         }
+
         let mut r = Reader::new(bytes);
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let source = match r.u8()? {
             0x01 => DigestSource::TreeHead,
             0x02 => DigestSource::ConsensusRoot,
             0x03 => DigestSource::ReleaseLog,
             _ => return Err(Error::Malformed),
         };
+
         Ok(DigestBody {
             source,
             epoch: u64::from_be_bytes(r.array()?),
@@ -295,6 +309,7 @@ mod tests {
             };
             assert_eq!(req.encode(&mut out).unwrap(), REQUEST_LEN);
             assert_eq!(KeyRequest::parse(&out[..42]).unwrap(), req);
+
             for status in [
                 SupplyStatus::Posted,
                 SupplyStatus::NotHeld,
@@ -309,6 +324,7 @@ mod tests {
                 assert_eq!(KeySupply::parse(&out[..45]).unwrap(), sup);
             }
         }
+
         // WIR-523: scope 0x02 names a member as 1 plus its index, and no
         // index above the member range; scope 0x03 names none.
         let carried = KeyRequest {
@@ -318,19 +334,23 @@ mod tests {
             index: 1,
         };
         assert!(carried.encode(&mut out).is_ok());
+
         let beyond = KeyRequest {
             index: u32::from(u16::MAX) + 2,
             ..carried
         };
         assert!(beyond.encode(&mut out).is_err());
+
         let bad = KeyRequest {
             scope: KeyScope::RosterSnapshot,
             index: 1,
             ..carried
         };
         assert!(bad.encode(&mut out).is_err());
+
         out[1] = 0x04;
         assert!(KeySupply::parse(&out[..45]).is_err());
+
         out[1] = 0x01;
         out[42] = 0x04;
         assert!(KeySupply::parse(&out[..45]).is_err());
@@ -351,11 +371,14 @@ mod tests {
             body: b"x",
         };
         assert!(full.encode(&mut out).is_err());
+
         let empty = KeySupply { body: b"", ..full };
         assert_eq!(empty.encode(&mut out).unwrap(), SUPPLY_LEN);
+
         // The same supply from a peer, with a body_len of 1 and one byte.
         out[44] = 1;
         assert!(KeySupply::parse(&out[..46]).is_err());
+
         out[44] = 0;
         assert!(KeySupply::parse(&out[..45]).is_ok());
     }
@@ -370,6 +393,7 @@ mod tests {
         assert_eq!(notice.encode(&mut out).unwrap(), KEY_CHANGE_LEN);
         assert_eq!(KeyChangeNotice::parse(&out[..1_217]).unwrap(), notice);
         assert!(KeyChangeNotice::parse(&out[..1_216]).is_err());
+
         let digest = DigestBody {
             source: DigestSource::ReleaseLog,
             epoch: 9,
@@ -378,6 +402,7 @@ mod tests {
         assert_eq!(digest.encode(&mut out).unwrap(), DIGEST_LEN);
         assert_eq!(DigestBody::parse(&out[..42]).unwrap(), digest);
         assert!(DigestBody::parse(&out[..43]).is_err());
+
         out[1] = 0x04;
         assert!(DigestBody::parse(&out[..42]).is_err());
     }

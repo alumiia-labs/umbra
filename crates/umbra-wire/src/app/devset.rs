@@ -84,6 +84,7 @@ impl<'a> DeviceSetBody<'a> {
                 if *control_type == ControlType::SyncAck && payload.len() != 8 {
                     return Err(Error::Malformed);
                 }
+
                 w.u8(SubKind::Control as u8)?;
                 w.u8(0x01)?;
                 w.u8(*control_type as u8)?;
@@ -107,11 +108,13 @@ impl<'a> DeviceSetBody<'a> {
                 if r.u8()? != 0x01 {
                     return Err(Error::Malformed);
                 }
+
                 let control_type = ControlType::from_byte(r.u8()?)?;
                 let payload = r.rest();
                 if control_type == ControlType::SyncAck && payload.len() != 8 {
                     return Err(Error::Malformed);
                 }
+
                 Ok(DeviceSetBody::Control {
                     control_type,
                     payload,
@@ -154,10 +157,12 @@ mod tests {
         let back = DeviceSetBody::parse(&out[..11]).unwrap();
         assert_eq!(back.sync_ack(), Some(9));
         assert!(DeviceSetBody::parse(&out[..10]).is_err());
+
         out[2] = 0x06;
         assert!(DeviceSetBody::parse(&out[..11]).is_err());
         out[0] = 0x04;
         assert!(DeviceSetBody::parse(&out[..11]).is_err());
+
         let state = DeviceSetBody::MutableState(b"state");
         let n = state.encode(&mut out).unwrap();
         assert_eq!(DeviceSetBody::parse(&out[..n]).unwrap(), state);

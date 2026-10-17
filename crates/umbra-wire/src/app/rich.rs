@@ -92,10 +92,12 @@ impl<'a> RichRecord<'a> {
         if bytes.len() < 41 {
             return Err(Error::Malformed);
         }
+
         let mut r = Reader::new(bytes);
         if r.u8()? != VERSION {
             return Err(Error::Malformed);
         }
+
         let reply_target = r.array()?;
         let thread_root = r.array()?;
         let forward_depth = r.u8()?;
@@ -103,14 +105,17 @@ impl<'a> RichRecord<'a> {
         if mention_count > MENTION_MAX {
             return Err(Error::Malformed);
         }
+
         let mut mentions = Vec::with_capacity(mention_count);
         for _ in 0..mention_count {
             mentions.push(r.array()?);
         }
+
         let inner_kind = AppKind::from_byte(r.u8()?)?;
         let inner_len = usize::try_from(r.u32()?).map_err(|_| Error::Malformed)?;
         let inner_body = r.take(inner_len)?;
         r.finish()?;
+
         let out = RichRecord {
             reply_target,
             thread_root,
@@ -119,6 +124,7 @@ impl<'a> RichRecord<'a> {
             inner_kind,
             inner_body,
         };
+
         out.check(channel)?;
         Ok(out)
     }
@@ -186,6 +192,7 @@ mod tests {
             assert_eq!(n, rec.len());
             assert_eq!(RichRecord::parse(&out[..n], channel).unwrap(), rec);
         }
+
         assert_eq!(crate::bucket::Bucket::B0.text_default_chunk() - FIXED, 115);
     }
 
@@ -197,21 +204,25 @@ mod tests {
             ..plain()
         };
         assert!(nested.encode(Channel::Group, &mut out).is_err());
+
         let many = RichRecord {
             mentions: (0..17u8).map(|i| [i; 16]).collect(),
             ..plain()
         };
         assert!(many.encode(Channel::Group, &mut out).is_err());
+
         let repeated = RichRecord {
             mentions: vec![[1; 16], [1; 16]],
             ..plain()
         };
         assert!(repeated.encode(Channel::Group, &mut out).is_err());
+
         let out_of_order = RichRecord {
             mentions: vec![[2; 16], [1; 16]],
             ..plain()
         };
         assert!(out_of_order.encode(Channel::Group, &mut out).is_err());
+
         let mention_pairwise = RichRecord {
             mentions: vec![[1; 16]],
             ..plain()
@@ -219,22 +230,26 @@ mod tests {
         assert!(mention_pairwise
             .encode(Channel::Pairwise, &mut out)
             .is_err());
+
         let root_pairwise = RichRecord {
             reply_target: [1; 16],
             thread_root: [2; 16],
             ..plain()
         };
         assert!(root_pairwise.encode(Channel::Pairwise, &mut out).is_err());
+
         let root_no_reply = RichRecord {
             thread_root: [2; 16],
             ..plain()
         };
         assert!(root_no_reply.encode(Channel::Group, &mut out).is_err());
+
         let n = plain().encode(Channel::Group, &mut out).unwrap();
         out[0] = 0x01;
         assert!(RichRecord::parse(&out[..n], Channel::Group).is_err());
         out[0] = 0x02;
         assert!(RichRecord::parse(&out[..n + 1], Channel::Group).is_err());
+
         assert_ne!(
             mention_id(&[1; 32], &[2; 32]),
             mention_id(&[3; 32], &[2; 32])
@@ -254,6 +269,7 @@ mod tests {
         let n = plain().encode(Channel::Group, &mut out).unwrap();
         out[n - 1] = 0xFF;
         assert!(RichRecord::parse(&out[..n], Channel::Group).is_err());
+
         assert!(RichRecord::parse(&out[..n], Channel::Pairwise).is_err());
         // WIR-362: an inner verification commit of a wrong length.
         let short_commit = RichRecord {
@@ -262,6 +278,7 @@ mod tests {
             ..plain()
         };
         assert!(short_commit.encode(Channel::Pairwise, &mut out).is_err());
+
         // A queue address is a record of a pairwise channel alone.
         let address = RichRecord {
             inner_kind: AppKind::QueueAddress,
@@ -269,6 +286,7 @@ mod tests {
             ..plain()
         };
         assert!(address.encode(Channel::Group, &mut out).is_err());
+
         // WIR-163: a wrapper carries no control record.
         let control = RichRecord {
             inner_kind: AppKind::GroupControl,

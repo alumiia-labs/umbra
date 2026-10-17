@@ -70,6 +70,7 @@ impl<'a> Cell<'a> {
     /// Splits a cell whose length is one of the four buckets.
     pub fn parse(bytes: &'a [u8]) -> Result<(Self, Bucket), Error> {
         let bucket = Bucket::from_cell_len(bytes.len()).ok_or(Error::Malformed)?;
+
         let (circ_id, rest) = bytes.split_at(16);
         let (tag, body) = rest.split_at(16);
         let circ_id = circ_id.try_into().map_err(|_| Error::Malformed)?;
@@ -94,6 +95,7 @@ pub fn pad_body(
     if command == CellCommand::Padding && !content.is_empty() {
         return Err(Error::Malformed);
     }
+
     let mut w = Writer::new(body);
     w.u8(command as u8)?;
     w.put(content)?;
@@ -108,14 +110,18 @@ pub fn unpad_body(body: &[u8]) -> Result<(CellCommand, &[u8]), Error> {
     if Bucket::from_cell_len(body.len().saturating_add(CELL_OVERHEAD)).is_none() {
         return Err(Error::Malformed);
     }
+
     let mut r = Reader::new(body);
     let command = CellCommand::from_byte(r.u8()?)?;
     let rest = r.rest();
+
     let marker = rest.iter().rposition(|b| *b != 0).ok_or(Error::Malformed)?;
     if rest.get(marker) != Some(&PAD_MARKER) {
         return Err(Error::Malformed);
     }
+
     let content = rest.get(..marker).ok_or(Error::Malformed)?;
+
     // The rest of a `PADDING` body is padding (§6.3), thus one form of it
     // exists and it carries no content.
     if command == CellCommand::Padding && !content.is_empty() {
@@ -145,6 +151,7 @@ mod tests {
             let (cmd, back) = unpad_body(&body).unwrap();
             assert_eq!(cmd, CellCommand::Data);
             assert_eq!(back, &content[..]);
+
             assert!(pad_body(
                 bucket,
                 CellCommand::Data,
@@ -152,6 +159,7 @@ mod tests {
                 &mut body
             )
             .is_err());
+
             pad_body(bucket, CellCommand::Padding, &[], &mut body).unwrap();
             assert_eq!(unpad_body(&body).unwrap(), (CellCommand::Padding, &[][..]));
         }
@@ -164,16 +172,20 @@ mod tests {
         let mut trailing = body.clone();
         *trailing.last_mut().unwrap() = 1;
         assert!(unpad_body(&trailing).is_err());
+
         let mut no_marker = body.clone();
         no_marker[2] = 0;
         assert!(unpad_body(&no_marker).is_err());
+
         let mut bad_cmd = body.clone();
         bad_cmd[0] = 0x09;
         assert!(unpad_body(&bad_cmd).is_err());
+
         // An application kind at the command offset is rejected (WIR-096).
         bad_cmd[0] = 0x33;
         assert!(unpad_body(&bad_cmd).is_err());
         assert!(unpad_body(&body[..479]).is_err());
+
         let all_zero = vec![0u8; Bucket::B0.body_len()];
         assert!(unpad_body(&all_zero).is_err());
     }
@@ -182,10 +194,12 @@ mod tests {
     fn a_padding_cell_with_content_is_rejected() {
         let mut body = vec![0u8; Bucket::B0.body_len()];
         assert!(pad_body(Bucket::B0, CellCommand::Padding, b"x", &mut body).is_err());
+
         // The same bytes from a peer: 00, content, the marker, zero bytes.
         pad_body(Bucket::B0, CellCommand::Loop, b"x", &mut body).unwrap();
         body[0] = 0x00;
         assert!(unpad_body(&body).is_err());
+
         pad_body(Bucket::B0, CellCommand::Padding, &[], &mut body).unwrap();
         assert_eq!(unpad_body(&body).unwrap(), (CellCommand::Padding, &[][..]));
     }

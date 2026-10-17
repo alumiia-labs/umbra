@@ -103,6 +103,7 @@ pub fn parse_on(bytes: &[u8], link: Link) -> Result<(CapsuleType, &[u8], usize),
     if !kind.passes_on(link) {
         return Err(Error::Malformed);
     }
+
     Ok((kind, value, used))
 }
 
@@ -110,6 +111,7 @@ pub fn parse_on(bytes: &[u8], link: Link) -> Result<(CapsuleType, &[u8], usize),
 pub fn encode(kind: CapsuleType, value: &[u8], out: &mut [u8]) -> Result<usize, Error> {
     check_value_len(kind, value.len())?;
     let len = u32::try_from(value.len()).map_err(|_| Error::Capacity)?;
+
     let mut w = Writer::new(out);
     // The 2-byte form carries prefix 01, and the 4-byte form prefix 10.
     w.u16(0x4000 | kind as u16)?;
@@ -126,11 +128,13 @@ pub fn parse(bytes: &[u8]) -> Result<(CapsuleType, &[u8], usize), Error> {
     if kind_raw >> 14 != 0b01 {
         return Err(Error::Malformed);
     }
+
     let kind = CapsuleType::from_value(u64::from(kind_raw & 0x3FFF))?;
     let len_raw = r.u32()?;
     if len_raw >> 30 != 0b10 {
         return Err(Error::Malformed);
     }
+
     let len = usize::try_from(len_raw & 0x3FFF_FFFF).map_err(|_| Error::Malformed)?;
     check_value_len(kind, len)?;
     let value = r.take(len)?;
@@ -205,6 +209,7 @@ mod tests {
             let mut out = vec![0u8; frame.len() + HEADER_LEN];
             let n = encode(CapsuleType::Cell, &frame, &mut out).unwrap();
             assert_eq!(n, out.len());
+
             assert_eq!(&out[..2], &[0x4B, 0x52]);
             let (kind, value, used) = parse(&out).unwrap();
             assert_eq!(kind, CapsuleType::Cell);
@@ -218,10 +223,12 @@ mod tests {
         let frame = vec![5u8; 524];
         let mut out = vec![0u8; 530];
         encode(CapsuleType::Cell, &frame, &mut out).unwrap();
+
         // A type of 0x0B59, the first value that WIR-218 does not allocate.
         let mut bad = out.clone();
         bad[1] = 0x59;
         assert!(parse(&bad).is_err());
+
         // 0x0B54 to 0x0B58 are allocated: each one parses at its length.
         for (kind, len) in [
             (CapsuleType::Replica, REPLICA_LEN),
@@ -234,6 +241,7 @@ mod tests {
             encode(kind, &vec![0u8; len], &mut held).unwrap();
             assert_eq!(parse(&held).unwrap().0, kind);
         }
+
         // WIR-538: a receipt and a relay hello, each of its correct length,
         // at a relay on a client link and at a client. The same two pass on
         // a link between two relays.
@@ -246,27 +254,33 @@ mod tests {
             assert!(parse_on(&held, Link::Client).is_err());
             assert_eq!(parse_on(&held, Link::Relays).unwrap().0, kind);
         }
+
         // Each other capsule passes on a client link.
         assert_eq!(parse_on(&out, Link::Client).unwrap().0, CapsuleType::Cell);
+
         // A type in the 4-byte form.
         let mut bad = vec![0x80, 0x00, 0x0B, 0x52];
         bad.extend_from_slice(&out[2..]);
         assert!(parse(&bad).is_err());
+
         // A length in the 2-byte form.
         let mut bad = out[..2].to_vec();
         bad.extend_from_slice(&[0x42, 0x0C]);
         bad.extend_from_slice(&frame);
         assert!(parse(&bad).is_err());
+
         // A cell capsule of length 525.
         let mut bad = vec![0u8; 531];
         assert!(encode(CapsuleType::Cell, &vec![5u8; 525], &mut bad).is_err());
         bad[..6].copy_from_slice(&[0x4B, 0x52, 0x80, 0x00, 0x02, 0x0D]);
         assert!(parse(&bad).is_err());
+
         // A SessionResume of length 41.
         let mut bad = vec![0u8; 47];
         bad[..6].copy_from_slice(&[0x4B, 0x53, 0x80, 0x00, 0x00, 0x29]);
         bad[6] = 0x02;
         assert!(crate::session::SessionControl::parse(parse(&bad).unwrap().1).is_err());
+
         // A truncated value.
         assert!(parse(&out[..529]).is_err());
     }

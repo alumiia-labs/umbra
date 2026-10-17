@@ -104,6 +104,7 @@ impl<'a> GroupControl<'a> {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         Ok(GroupControl {
             control_type: ControlType::from_byte(r.u8()?)?,
             payload: r.rest(),
@@ -199,6 +200,7 @@ impl<'a> MemberKeys<'a> {
         if self.kem_pk.len() != KEM_PK_LEN {
             return Err(Error::Malformed);
         }
+
         w.put(&self.pair_pk)?;
         w.put(&self.roster_pk_hash)?;
         w.put(self.kem_pk)
@@ -237,10 +239,12 @@ impl<'a> JoinRecord<'a> {
         if bytes.len() != JOIN_LEN {
             return Err(Error::Malformed);
         }
+
         let mut r = Reader::new(bytes);
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         Ok(JoinRecord {
             group_id: r.array()?,
             keys: MemberKeys::read(&mut r)?,
@@ -295,6 +299,7 @@ impl<'a> PlainEpoch<'a> {
             }
             PlainOp::SelfRemoval => w.u8(0x03)?,
         }
+
         Ok(w.position())
     }
 
@@ -304,6 +309,7 @@ impl<'a> PlainEpoch<'a> {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let chain = Chain::read(&mut r)?;
         let op = match r.u8()? {
             0x01 => PlainOp::Add {
@@ -314,6 +320,7 @@ impl<'a> PlainEpoch<'a> {
             0x03 => PlainOp::SelfRemoval,
             _ => return Err(Error::Malformed),
         };
+
         r.finish()?;
         Ok(PlainEpoch { chain, op })
     }
@@ -376,6 +383,7 @@ impl<'a> GrantingEpoch<'a> {
     /// Writes the epoch.
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, Error> {
         self.check()?;
+
         let mut w = Writer::new(out);
         w.u8(0x01)?;
         self.chain.put(&mut w)?;
@@ -394,6 +402,7 @@ impl<'a> GrantingEpoch<'a> {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let chain = Chain::read(&mut r)?;
         let granter_index = r.u16()?;
         let grantee_index = r.u16()?;
@@ -402,6 +411,7 @@ impl<'a> GrantingEpoch<'a> {
         let granter_roster_pk = r.take(VERIFYING_KEY_LEN)?;
         let sig = r.take(SIGNATURE_LEN)?;
         r.finish()?;
+
         let out = GrantingEpoch {
             chain,
             granter_index,
@@ -411,6 +421,7 @@ impl<'a> GrantingEpoch<'a> {
             granter_roster_pk,
             sig,
         };
+
         out.check()?;
         Ok(out)
     }
@@ -427,6 +438,7 @@ fn verify_signer(
     if sha3_256(&[roster_pk]) != *roster_pk_hash {
         return Err(Error::Malformed);
     }
+
     let key = VerifyingKey::from_bytes(roster_pk)?;
     let sig = Signature::from_bytes(sig)?;
     key.verify(preimage, &sig)?;
@@ -505,6 +517,7 @@ impl<'a> ModerationEpoch<'a> {
     /// Writes the epoch.
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, Error> {
         self.check()?;
+
         let mut w = Writer::new(out);
         w.u8(0x01)?;
         self.chain.put(&mut w)?;
@@ -516,6 +529,7 @@ impl<'a> ModerationEpoch<'a> {
             w.put(&a.target)?;
             w.u16(a.author_hint)?;
         }
+
         w.put(self.actor_roster_pk)?;
         w.put(self.sig)?;
         Ok(w.position())
@@ -527,6 +541,7 @@ impl<'a> ModerationEpoch<'a> {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let chain = Chain::read(&mut r)?;
         let actor_index = r.u16()?;
         let actor_role = Role::from_byte(r.u8()?)?;
@@ -534,6 +549,7 @@ impl<'a> ModerationEpoch<'a> {
         if count == 0 || count > MOD_ACTION_MAX {
             return Err(Error::Malformed);
         }
+
         let mut actions = Vec::with_capacity(count);
         for _ in 0..count {
             actions.push(ModAction {
@@ -542,9 +558,11 @@ impl<'a> ModerationEpoch<'a> {
                 author_hint: r.u16()?,
             });
         }
+
         let actor_roster_pk = r.take(VERIFYING_KEY_LEN)?;
         let sig = r.take(SIGNATURE_LEN)?;
         r.finish()?;
+
         let out = ModerationEpoch {
             chain,
             actor_index,
@@ -553,6 +571,7 @@ impl<'a> ModerationEpoch<'a> {
             actor_roster_pk,
             sig,
         };
+
         out.check()?;
         Ok(out)
     }
@@ -643,6 +662,7 @@ impl<'a> GroupInvitation<'a> {
         let mut w = Writer::new(out);
         w.u8(0x01)?;
         w.put(&self.group_id)?;
+
         match &self.stage {
             InvitationStage::Offer {
                 name,
@@ -654,7 +674,9 @@ impl<'a> GroupInvitation<'a> {
                 {
                     return Err(Error::Malformed);
                 }
+
                 let name_len = u8::try_from(name.len()).map_err(|_| Error::Malformed)?;
+
                 w.u8(0x01)?;
                 w.u16(u16::try_from(3_905 + name.len()).map_err(|_| Error::Malformed)?)?;
                 w.u8(name_len)?;
@@ -675,6 +697,7 @@ impl<'a> GroupInvitation<'a> {
                     replicas,
                     descriptor,
                 } = admit.as_ref();
+
                 w.u8(0x02)?;
                 w.u16(
                     u16::try_from(ADMIT_FIXED + descriptor.len()).map_err(|_| Error::Malformed)?,
@@ -693,6 +716,7 @@ impl<'a> GroupInvitation<'a> {
                     w.put(&rep.group_queue_id)?;
                     w.u32(rep.seq_of_add)?;
                 }
+
                 w.u16(u16::try_from(descriptor.len()).map_err(|_| Error::Malformed)?)?;
                 w.put(descriptor)?;
             }
@@ -706,11 +730,13 @@ impl<'a> GroupInvitation<'a> {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let group_id = r.array()?;
         let stage_byte = r.u8()?;
         let body_len = usize::from(r.u16()?);
         let body = r.take(body_len)?;
         r.finish()?;
+
         let mut b = Reader::new(body);
         let stage = match stage_byte {
             0x01 => {
@@ -718,6 +744,7 @@ impl<'a> GroupInvitation<'a> {
                 if body_len != 3_905 + name_len {
                     return Err(Error::Malformed);
                 }
+
                 let name = core::str::from_utf8(b.take(name_len)?).map_err(|_| Error::Malformed)?;
                 InvitationStage::Offer {
                     name,
@@ -737,6 +764,7 @@ impl<'a> GroupInvitation<'a> {
                 if usize::from(b.u8()?) != REPLICAS {
                     return Err(Error::Malformed);
                 }
+
                 let mut replicas = [ReplicaRef {
                     relay_id: [0; 32],
                     group_queue_id: [0; 32],
@@ -749,10 +777,12 @@ impl<'a> GroupInvitation<'a> {
                         seq_of_add: b.u32()?,
                     };
                 }
+
                 let desc_len = usize::from(b.u16()?);
                 if body_len != ADMIT_FIXED + desc_len {
                     return Err(Error::Malformed);
                 }
+
                 InvitationStage::Admit(Box::new(InvitationAdmit {
                     index,
                     epoch,
@@ -768,6 +798,7 @@ impl<'a> GroupInvitation<'a> {
             }
             _ => return Err(Error::Malformed),
         };
+
         b.finish()?;
         Ok(GroupInvitation { group_id, stage })
     }
@@ -802,11 +833,13 @@ impl<'a> SnapshotNotice<'a> {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let group_id = r.array()?;
         let roster_epoch = r.u32()?;
         let desc_len = usize::from(r.u16()?);
         let descriptor = r.take(desc_len)?;
         r.finish()?;
+
         Ok(SnapshotNotice {
             group_id,
             roster_epoch,
@@ -885,11 +918,13 @@ impl<'a> RosterSnapshot<'a> {
             }
             true
         }
+
         if !ordered(self.entries.iter().map(|e| e.index))
             || !ordered(self.keys.iter().map(|k| k.index))
         {
             return Err(Error::Malformed);
         }
+
         for key in &self.keys {
             let entry = self
                 .entries
@@ -906,6 +941,7 @@ impl<'a> RosterSnapshot<'a> {
     /// Writes the snapshot.
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, Error> {
         self.check()?;
+
         let mut w = Writer::new(out);
         w.u8(0x01)?;
         w.put(&self.group_id)?;
@@ -919,11 +955,13 @@ impl<'a> RosterSnapshot<'a> {
             w.put(&e.roster_pk_hash)?;
             w.put(&e.kem_pk_hash)?;
         }
+
         w.u16(u16::try_from(self.keys.len()).map_err(|_| Error::Malformed)?)?;
         for k in &self.keys {
             w.u16(k.index)?;
             w.put(k.kem_pk)?;
         }
+
         w.u32(u32::try_from(self.path.len()).map_err(|_| Error::Malformed)?)?;
         w.put(self.path)?;
         Ok(w.position())
@@ -935,13 +973,16 @@ impl<'a> RosterSnapshot<'a> {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let group_id = r.array()?;
         let roster_epoch = r.u32()?;
         let chain_hash = r.array()?;
+
         let entry_count = usize::from(r.u16()?);
         if entry_count.saturating_mul(MEMBER_ENTRY_LEN) > r.remaining() {
             return Err(Error::Malformed);
         }
+
         let mut entries = Vec::with_capacity(entry_count);
         for _ in 0..entry_count {
             entries.push(GroupMemberEntry {
@@ -952,10 +993,12 @@ impl<'a> RosterSnapshot<'a> {
                 kem_pk_hash: r.array()?,
             });
         }
+
         let key_count = usize::from(r.u16()?);
         if key_count.saturating_mul(MEMBER_KEM_KEY_LEN) > r.remaining() {
             return Err(Error::Malformed);
         }
+
         let mut keys = Vec::with_capacity(key_count);
         for _ in 0..key_count {
             keys.push(MemberKemKey {
@@ -963,9 +1006,11 @@ impl<'a> RosterSnapshot<'a> {
                 kem_pk: r.take(KEM_PK_LEN)?,
             });
         }
+
         let path_len = usize::try_from(r.u32()?).map_err(|_| Error::Malformed)?;
         let path = r.take(path_len)?;
         r.finish()?;
+
         let out = RosterSnapshot {
             group_id,
             roster_epoch,
@@ -974,6 +1019,7 @@ impl<'a> RosterSnapshot<'a> {
             keys,
             path,
         };
+
         out.check()?;
         Ok(out)
     }
@@ -1017,6 +1063,7 @@ impl<'a> RekeyRecord<'a> {
         if sha3_256(&[self.old_roster_pk]) != *expected_old_hash {
             return Err(Error::Malformed);
         }
+
         let key = VerifyingKey::from_bytes(self.old_roster_pk)?;
         let sig = Signature::from_bytes(self.sig)?;
         key.verify(&self.preimage(), &sig)?;
@@ -1034,6 +1081,7 @@ impl<'a> RekeyRecord<'a> {
         if self.old_roster_pk.len() != VERIFYING_KEY_LEN || self.sig.len() != SIGNATURE_LEN {
             return Err(Error::Malformed);
         }
+
         let mut w = Writer::new(out);
         w.u8(0x01)?;
         self.chain.put(&mut w)?;
@@ -1050,10 +1098,12 @@ impl<'a> RekeyRecord<'a> {
         if bytes.len() != REKEY_LEN {
             return Err(Error::Malformed);
         }
+
         let mut r = Reader::new(bytes);
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         Ok(RekeyRecord {
             chain: Chain::read(&mut r)?,
             old_index: r.u16()?,
@@ -1094,19 +1144,24 @@ mod tests {
     }
 
     struct Rng(u8);
+
     impl umbra_crypto::rand_core::TryRng for Rng {
         type Error = core::convert::Infallible;
+
         fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
             Ok(0)
         }
+
         fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
             Ok(0)
         }
+
         fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
             dst.fill(self.0);
             Ok(())
         }
     }
+
     impl umbra_crypto::rand_core::TryCryptoRng for Rng {}
 
     #[test]
@@ -1119,6 +1174,7 @@ mod tests {
         assert_eq!(join.encode(&mut out).unwrap(), JOIN_LEN);
         assert_eq!(JoinRecord::parse(&out[..JOIN_LEN]).unwrap(), join);
         assert!(JoinRecord::parse(&out[..JOIN_LEN - 1]).is_err());
+
         let add = PlainEpoch {
             chain: chain(),
             op: PlainOp::Add {
@@ -1128,6 +1184,7 @@ mod tests {
         };
         let n = add.encode(&mut out).unwrap();
         assert_eq!(PlainEpoch::parse(&out[..n]).unwrap(), add);
+
         let leave = PlainEpoch {
             chain: chain(),
             op: PlainOp::SelfRemoval,
@@ -1137,11 +1194,13 @@ mod tests {
         assert_eq!(PlainEpoch::parse(&out[..n]).unwrap(), leave);
         out[69] = 0x04;
         assert!(PlainEpoch::parse(&out[..n]).is_err());
+
         let wrapped = GroupControl {
             control_type: ControlType::PlainEpoch,
             payload: &out[..n],
         };
         assert_eq!(wrapped.epoch_hash(), sha3_256(&[&out[..n]]));
+
         assert!(ControlType::from_byte(0x01).is_err());
         assert!(ControlType::from_byte(0x0A).is_err());
     }
@@ -1167,24 +1226,29 @@ mod tests {
             .unwrap()
             .to_bytes();
         epoch.sig = &sig;
+
         let mut out = vec![0u8; 6_000];
         let n = epoch.encode(&mut out).unwrap();
         let back = GrantingEpoch::parse(&out[..n]).unwrap();
+
         // GRP-317: the carried key must match the hash of the entry.
         back.verify(&granter_hash).unwrap();
         assert!(back.verify(&sha3_256(&[&grantee_pk])).is_err());
+
         // A key of another signer under the right hash fails the signature.
         let swapped = GrantingEpoch {
             granter_roster_pk: &grantee_pk,
             ..back.clone()
         };
         assert!(swapped.verify(&sha3_256(&[&grantee_pk])).is_err());
+
         // A demotion carries the key of the signer as each grant does.
         let demote = GrantingEpoch {
             role: Role::Member,
             ..epoch.clone()
         };
         assert_eq!(demote.encode(&mut out).unwrap(), n);
+
         let short = GrantingEpoch {
             granter_roster_pk: &granter_pk[..100],
             ..epoch.clone()
@@ -1208,18 +1272,22 @@ mod tests {
             .unwrap()
             .to_bytes();
         moderation.sig = &sig;
+
         let n = moderation.encode(&mut out).unwrap();
         let back = ModerationEpoch::parse(&out[..n]).unwrap();
         back.verify(&granter_hash).unwrap();
+
         // The hint is not in the preimage, thus a changed hint still verifies.
         let mut hinted = back.clone();
         hinted.actions[0].author_hint = 3;
         hinted.verify(&granter_hash).unwrap();
+
         let too_many = ModerationEpoch {
             actions: vec![moderation.actions[0]; 21],
             ..moderation.clone()
         };
         assert!(too_many.encode(&mut out).is_err());
+
         assert!(parse_presence(&PRESENCE).is_ok());
         assert!(parse_presence(&[0x02]).is_err());
     }
@@ -1238,6 +1306,7 @@ mod tests {
         let n = offer.encode(&mut out).unwrap();
         assert_eq!(n, 36 + 3_905 + 7);
         assert_eq!(GroupInvitation::parse(&out[..n]).unwrap(), offer);
+
         let rep = ReplicaRef {
             relay_id: [3; 32],
             group_queue_id: [4; 32],
@@ -1261,9 +1330,11 @@ mod tests {
         let n = admit.encode(&mut out).unwrap();
         assert_eq!(n, 36 + ADMIT_FIXED + 257);
         assert_eq!(GroupInvitation::parse(&out[..n]).unwrap(), admit);
+
         out[33] = 0x03;
         assert!(GroupInvitation::parse(&out[..n]).is_err());
         out[33] = 0x02;
+
         // The replica count byte sits after the three keys.
         out[36 + 114] = 3;
         assert!(GroupInvitation::parse(&out[..n]).is_err());
@@ -1293,8 +1364,10 @@ mod tests {
         let mut out = vec![0u8; snap.len()];
         assert_eq!(snap.encode(&mut out).unwrap(), 77 + 99 + 1_218);
         assert_eq!(RosterSnapshot::parse(&out).unwrap(), snap);
+
         out[77 + 99 + 2] ^= 1;
         assert!(RosterSnapshot::parse(&out).is_err());
+
         let orphan = RosterSnapshot {
             keys: vec![MemberKemKey {
                 index: 1,
@@ -1320,12 +1393,15 @@ mod tests {
         };
         let sig = old.sign(&rekey.preimage(), &mut Rng(3)).unwrap().to_bytes();
         rekey.sig = &sig;
+
         let mut out = vec![0u8; REKEY_LEN];
         assert_eq!(rekey.encode(&mut out).unwrap(), REKEY_LEN);
+
         let back = RekeyRecord::parse(&out).unwrap();
         assert!(back.chain_is_zero());
         back.verify(&sha3_256(&[&old_pk])).unwrap();
         assert!(back.verify(&[0; 32]).is_err());
+
         // A changed old_index fails the signature (WIR-481).
         out[69] ^= 1;
         assert!(RekeyRecord::parse(&out)

@@ -24,6 +24,7 @@ impl RenewalGuard {
         if self.guard_seq == 0 {
             return Err(Error::Malformed);
         }
+
         let mut out = [0u8; RENEWAL_GUARD_LEN];
         let mut w = Writer::new(&mut out);
         w.u8(0x01)?;
@@ -38,11 +39,13 @@ impl RenewalGuard {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let out = RenewalGuard {
             guard_seq: r.u32()?,
             commitment: r.array()?,
         };
         r.finish()?;
+
         if out.guard_seq == 0 {
             return Err(Error::Malformed);
         }
@@ -64,9 +67,11 @@ mod tests {
         let bytes = guard.encode().unwrap();
         assert_eq!(RenewalGuard::parse(&bytes).unwrap(), guard);
         assert!(RenewalGuard::parse(&bytes[..36]).is_err());
+
         let mut zero = bytes;
         zero[1..5].copy_from_slice(&[0; 4]);
         assert!(RenewalGuard::parse(&zero).is_err());
+
         let none = RenewalGuard {
             guard_seq: 0,
             ..guard

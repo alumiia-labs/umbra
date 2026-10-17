@@ -42,6 +42,7 @@ impl<'a> ContactShare<'a> {
     /// Writes the record.
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, Error> {
         self.check()?;
+
         let mut w = Writer::new(out);
         w.u8(0x01)?;
         w.u8(self.share_type as u8)?;
@@ -58,17 +59,20 @@ impl<'a> ContactShare<'a> {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let share_type = match r.u8()? {
             0x01 => ShareType::Request,
             0x02 => ShareType::Grant,
             0x03 => ShareType::Offer,
             _ => return Err(Error::Malformed),
         };
+
         let name_len = usize::from(r.u8()?);
         let name = core::str::from_utf8(r.take(name_len)?).map_err(|_| Error::Malformed)?;
         let body_len = usize::from(r.u16()?);
         let body = r.take(body_len)?;
         r.finish()?;
+
         let out = ContactShare {
             share_type,
             name,
@@ -99,6 +103,7 @@ mod tests {
         };
         let n = request.encode(&mut out).unwrap();
         assert_eq!(ContactShare::parse(&out[..n]).unwrap(), request);
+
         let grant = ContactShare {
             share_type: ShareType::Grant,
             name: "Carol",
@@ -106,18 +111,21 @@ mod tests {
         };
         let n = grant.encode(&mut out).unwrap();
         assert_eq!(ContactShare::parse(&out[..n]).unwrap(), grant);
+
         let bad = ContactShare {
             share_type: ShareType::Request,
             name: "Carol",
             body: b"x",
         };
         assert!(bad.encode(&mut out).is_err());
+
         let bad = ContactShare {
             share_type: ShareType::Offer,
             name: "Carol",
             body: b"",
         };
         assert!(bad.encode(&mut out).is_err());
+
         out[1] = 0x04;
         assert!(ContactShare::parse(&out[..n]).is_err());
     }

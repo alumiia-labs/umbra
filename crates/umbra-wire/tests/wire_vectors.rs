@@ -89,19 +89,24 @@ fn hex(b: &[u8]) -> String {
 }
 
 struct Rng(u8);
+
 impl umbra_crypto::rand_core::TryRng for Rng {
     type Error = core::convert::Infallible;
+
     fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
         Ok(0)
     }
+
     fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
         Ok(0)
     }
+
     fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
         dst.fill(self.0);
         Ok(())
     }
 }
+
 impl umbra_crypto::rand_core::TryCryptoRng for Rng {}
 
 const GROUP_ID: [u8; 32] = [0x67; 32];
@@ -112,6 +117,7 @@ fn framing() -> Value {
         let mut body = vec![0u8; bucket.body_len()];
         pad_body(bucket, CellCommand::Data, b"content", &mut body).unwrap();
         assert_eq!(unpad_body(&body).unwrap().1, b"content");
+
         let mut cell = vec![0x11u8; 32];
         cell.extend_from_slice(&body);
         let frame = SessionFrame {
@@ -131,13 +137,16 @@ fn framing() -> Value {
             "body_tail": hex(&body[body.len() - 4..]),
         }));
     }
+
     // WIR-295: a type of 0x0B59, a 4-byte type, a 2-byte length, a length of 525.
     let mut bad = vec![0x4B, 0x59, 0x80, 0, 2, 0x0C];
     bad.extend_from_slice(&[0u8; 524]);
     assert!(capsule::parse(&bad).is_err());
+
     // The same bytes under 0x0B52 parse, thus the type alone rejects them.
     bad[1] = 0x52;
     assert!(capsule::parse(&bad).is_ok());
+
     // WIR-538: a receipt and a relay hello of the correct length, on a
     // client link and on a link between two relays.
     for (kind, len) in [
@@ -152,6 +161,7 @@ fn framing() -> Value {
             kind
         );
     }
+
     assert!(capsule::parse(&[0x80, 0, 0x0B, 0x52, 0x80, 0, 2, 0x0C]).is_err());
     assert!(capsule::parse(&[0x4B, 0x52, 0x42, 0x0C]).is_err());
     let mut bad = vec![0x4B, 0x52, 0x80, 0, 2, 0x0D];
@@ -175,6 +185,7 @@ fn framing() -> Value {
     let circuit_pause = SessionControl::CircuitPause {
         circ_id: [0x44; 16],
     };
+
     for (name, op) in [
         ("open", open),
         ("resume", resume),
@@ -190,6 +201,7 @@ fn framing() -> Value {
         capsule::encode(CapsuleType::Session, &buf[..n], &mut caps).unwrap();
         ops.push(json!({ "op": name, "capsule": hex(&caps) }));
     }
+
     let parsed = SessionControl::parse(&{
         let mut b = [0u8; 37];
         SessionControl::resume(&secret, id, 1, 5, 7)
@@ -198,6 +210,7 @@ fn framing() -> Value {
         b
     })
     .unwrap();
+
     assert_eq!(parsed.verify_resume(&secret, &id, 0).unwrap(), (1, 5, 7));
     assert!(parsed.verify_resume(&secret, &id, 1).is_err());
     json!({ "cells": cells, "session_ops": ops, "session_secret": hex(&[0x33; 32]) })
@@ -213,6 +226,7 @@ fn ratchet_records() -> Value {
         (Some((7, Kind::Parity, 36, 64)), 2),
         (Some((7, Kind::Header, 0, 128)), 3),
     ];
+
     for (frame, send_index) in cases {
         let chunk = vec![0x44u8; frame.map_or(0, |f| f.3)];
         let rec = RatchetRecord {
@@ -231,9 +245,11 @@ fn ratchet_records() -> Value {
             body_nonce: [0x99; 12],
             body_ct: &[0xAA; 24],
         };
+
         let mut buf = vec![0u8; 300];
         let n = rec.encode(&mut buf).unwrap();
         assert_eq!(RatchetRecord::parse(&buf[..n]).unwrap(), rec);
+
         out.push(json!({
             "pq_frame_len": frame.map_or(0, |f| f.3 + 7),
             "epoch": frame.map(|f| f.0),
@@ -243,6 +259,7 @@ fn ratchet_records() -> Value {
             "record": hex(&buf[..n]),
         }));
     }
+
     // WIR-299: a pq_frame_len of 68, an index of 41 at width 64, a version of
     // 0x01, and a kind of 0x05.
     let mut buf = vec![0u8; 300];
@@ -262,12 +279,14 @@ fn ratchet_records() -> Value {
         body_nonce: [0; 12],
         body_ct: &[0; 16],
     };
+
     let n = base.encode(&mut buf).unwrap();
     for (offset, value) in [(73usize, 68u8), (80, 41), (0, 0x01), (78, 0x05)] {
         let mut bad = buf[..n].to_vec();
         bad[offset] = value;
         assert!(RatchetRecord::parse(&bad).is_err());
     }
+
     json!(out)
 }
 
@@ -287,8 +306,10 @@ fn queue_records() -> Value {
             &mut send,
         )
         .unwrap();
+
         let mut msg = vec![0u8; bucket.l5_payload()];
         queue::msg_from_send(9, &send, bucket, &mut msg).unwrap();
+
         let send_cmd = Command {
             cmd: Cmd::Send,
             corr_id: [0x04; 16],
@@ -301,12 +322,15 @@ fn queue_records() -> Value {
             payload: &msg,
             ..send_cmd
         };
+
         // WIR-098 to WIR-100: both payload_len values, one bucket.
         assert_eq!(send_cmd.len(), bucket.command_area() - 4);
         assert_eq!(msg_cmd.len(), bucket.command_area());
+
         let mut plain = vec![0u8; bucket.l6_record()];
         let (kind, len) = queue::open(&key, &[0x02; 32], &send, bucket, &mut plain).unwrap();
         assert_eq!((kind, len), (L6Kind::Ratchet, inner.len()));
+
         out.push(json!({
             "bucket": bucket.cell_len(),
             "send_payload_len": send.len(),
@@ -339,20 +363,24 @@ fn renewal_records(key: &QueueKey) -> Value {
         proof: None,
         bundle: &bundle,
     };
+
     let mut with_proof = vec![0u8; proved.len()];
     proved.encode(&mut with_proof).unwrap();
     let mut no_proof = vec![0u8; bare.len()];
     bare.encode(&mut no_proof).unwrap();
+
     assert_eq!(with_proof.len(), RENEWAL_PROOF_LEN + bundle.len());
     assert!(RenewalRecord::parse(&with_proof).unwrap() == proved);
     assert!(RenewalRecord::parse(&no_proof).unwrap() == bare);
     assert!(no_proof[..RENEWAL_PROOF_LEN].iter().all(|b| *b == 0));
+
     // A counter of zero with one nonzero byte of the secret, and a record
     // that is shorter than the proof.
     let mut bad = no_proof.clone();
     bad[RENEWAL_PROOF_LEN - 1] = 1;
     assert!(RenewalRecord::parse(&bad).is_err());
     assert!(RenewalRecord::parse(&with_proof[..RENEWAL_PROOF_LEN - 1]).is_err());
+
     // The record under the queue end-to-end layer, as kind 0x06.
     let mut send = vec![0u8; Bucket::B0.l6_record()];
     queue::seal(
@@ -365,9 +393,11 @@ fn renewal_records(key: &QueueKey) -> Value {
         &mut send,
     )
     .unwrap();
+
     let mut plain = vec![0u8; Bucket::B0.l6_record()];
     let (kind, len) = queue::open(key, &[0x02; 32], &send, Bucket::B0, &mut plain).unwrap();
     assert_eq!((kind, &plain[..len]), (L6Kind::Renewal, &with_proof[..]));
+
     json!({
         "with_proof": hex(&with_proof),
         "no_proof": hex(&no_proof),
@@ -385,6 +415,7 @@ fn edit_and_delete() -> Value {
     let n = edit_max.encode(&mut buf).unwrap();
     assert_eq!(n + 30, Bucket::B0.app_default_chunk());
     let edit_hex = hex(&buf[..n]);
+
     let del = DeleteBody {
         scope: DeleteScope::OtherParty,
         targets: (0..9u8).map(|i| [i; 16]).collect(),
@@ -392,21 +423,25 @@ fn edit_and_delete() -> Value {
     let n = del.encode(&mut buf).unwrap();
     assert_eq!(n, 146);
     let del_hex = hex(&buf[..n]);
+
     // WIR-102 rejections.
     assert!(EditBody::parse(&[1; 17]).is_err());
     let mut bad_utf8 = [1u8; 18];
     bad_utf8[17] = 0xFF;
     assert!(EditBody::parse(&bad_utf8).is_err());
+
     assert!(DeleteBody::parse(&[1, 2]).is_err());
     let mut ten = vec![1u8, 2];
     for i in 0..10u8 {
         ten.extend_from_slice(&[i; 16]);
     }
     assert!(DeleteBody::parse(&ten).is_err());
+
     let mut swapped = vec![1u8, 2];
     swapped.extend_from_slice(&[2; 16]);
     swapped.extend_from_slice(&[1; 16]);
     assert!(DeleteBody::parse(&swapped).is_err());
+
     let mut repeated = vec![1u8, 2];
     repeated.extend_from_slice(&[1; 16]);
     repeated.extend_from_slice(&[1; 16]);
@@ -442,6 +477,7 @@ fn edit_and_delete() -> Value {
         AppMessage::parse(&out, Channel::Group).unwrap();
         out
     };
+
     let group_text = message(AppKind::Text, 0x12, b"first");
     let edit = EditBody {
         target: [0x12; 16],
@@ -463,20 +499,24 @@ fn edit_and_delete() -> Value {
     };
     let n = reply.encode(Channel::Group, &mut buf).unwrap();
     let reply_before = message(AppKind::Rich, 0x18, &buf[..n]);
+
     let edit = EditBody {
         target: [0x18; 16],
         new_body: "second",
     };
     let n = edit.encode(&mut buf).unwrap();
     let reply_edit = message(AppKind::Edit, 0x19, &buf[..n]);
+
     let edited = RichRecord {
         inner_body: edit.new_body.as_bytes(),
         ..reply.clone()
     };
     let n = edited.encode(Channel::Group, &mut buf).unwrap();
     let reply_after = message(AppKind::Rich, 0x18, &buf[..n]);
+
     let after = AppMessage::parse(&reply_after, Channel::Group).unwrap();
     let after = RichRecord::parse(after.body, Channel::Group).unwrap();
+
     assert_eq!(after.reply_target, reply.reply_target);
     assert_eq!(after.thread_root, reply.thread_root);
     assert_eq!(after.mentions, reply.mentions);
@@ -512,6 +552,7 @@ fn group_records() -> Value {
     };
     let mut app = vec![0u8; text.len()];
     text.encode(&mut app).unwrap();
+
     let hash = app_hash(&app);
     let fields = RecordTag {
         group_id: &GROUP_ID,
@@ -522,6 +563,7 @@ fn group_records() -> Value {
         roster_epoch: 1,
         app_hash: &hash,
     };
+
     let mut tags = vec![0u8; 36];
     for j in 1..3 {
         let key = members[0]
@@ -529,6 +571,7 @@ fn group_records() -> Value {
             .unwrap();
         tags[j * 12..(j + 1) * 12].copy_from_slice(&key.record_tag(&fields));
     }
+
     let plain = ContentPlain {
         sender_index: 0,
         counter: 1,
@@ -536,8 +579,10 @@ fn group_records() -> Value {
         tags: Tags::Dense(&tags),
         app: &app,
     };
+
     let bucket = Bucket::fitting(app.len(), |b| b.group_app(3)).unwrap();
     assert_eq!(bucket, Bucket::B1);
+
     let mut rec3 = vec![0u8; bucket.group_record()];
     seal_content(
         &plain,
@@ -550,17 +595,20 @@ fn group_records() -> Value {
         &mut rec3,
     )
     .unwrap();
+
     let parsed = GroupQueueRecord::parse(&rec3, bucket).unwrap();
     let mut buf = vec![0u8; bucket.content_plain()];
     let len =
         umbra_wire::group::record::open_content(&parsed, &record_key, &GROUP_ID, &mut buf).unwrap();
     let back = ContentPlain::parse(&buf[..len], |_| Some(3)).unwrap();
+
     // WIR-467: the named receiver rejects a changed tag and an unknown sender.
     let key_1 = members[1]
         .pair_key(&members[0].pair_public(), &GROUP_ID)
         .unwrap();
     let tag_1 = back.tags.tag_for(1, 1).unwrap();
     key_1.verify_record_tag(&fields, &tag_1).unwrap();
+
     let mut changed = tag_1;
     changed[0] ^= 1;
     assert!(key_1.verify_record_tag(&fields, &changed).is_err());
@@ -578,6 +626,7 @@ fn group_records() -> Value {
     };
     let bucket500 = Bucket::fitting(app.len(), |b| b.group_app(500)).unwrap();
     assert_eq!(bucket500, Bucket::B2);
+
     let mut rec500 = vec![0u8; bucket500.group_record()];
     seal_content(
         &plain500,
@@ -597,6 +646,7 @@ fn group_records() -> Value {
         control_type: ControlType::Presence,
         payload: &PRESENCE,
     };
+
     let mut control_bytes = [0u8; 3];
     control.encode(&mut control_bytes).unwrap();
     AppMessage {
@@ -607,6 +657,7 @@ fn group_records() -> Value {
     }
     .encode(&mut presence_app)
     .unwrap();
+
     let sparse = ContentPlain {
         sender_index: 2,
         counter: 1,
@@ -614,6 +665,7 @@ fn group_records() -> Value {
         tags: Tags::Sparse(vec![(0, [0x0e; 12])]),
         app: &presence_app,
     };
+
     let mut sparse_plain = vec![0u8; Bucket::B0.content_plain()];
     sparse.encode(Bucket::B0, &mut sparse_plain).unwrap();
 
@@ -635,38 +687,47 @@ fn group_records() -> Value {
                 })
             })
             .unwrap_or([0; 12]);
+
         let payload = SlotPayload {
             rotator: 1,
             epoch_secret: Secret::new(*epoch_secret.expose().expose()),
             tag,
             own_sks: (0..own).map(|i| Secret::new([0x70 + i; 32])).collect(),
         };
+
         let mut payload_bytes = vec![0u8; payload.len()];
         payload.encode(&mut payload_bytes).unwrap();
+
         let (ct, ss) = kem::encapsulate_deterministic(
             member.kem().public(),
             Secret::new([0x11 + index as u8; 32]),
             Secret::new([0x22 + index as u8; 32]),
         );
+
         let mut s = vec![0u8; slot::sealed_len(payload_bytes.len())];
         slot::seal_with(&ct, &ss, &GROUP_ID, 2, index as u16, &payload_bytes, &mut s).unwrap();
         sealed.push(s);
     }
+
     for (index, s) in sealed.iter().enumerate() {
         slots.push(KemSlot {
             index: index as u16,
             sealed: s,
         });
     }
+
     let body = EpochKeyBody {
         roster_epoch: 1,
         slot_count: 3,
         carrier: Carrier::Inline(slots),
     };
+
     let ek_bucket = Bucket::fitting(7 + 1_249 + 2 * 1_185, |b| Some(b.group_body())).unwrap();
     assert_eq!(ek_bucket, Bucket::B2);
+
     let mut ek_body = vec![0u8; ek_bucket.group_body()];
     body.encode(ek_bucket, &mut ek_body).unwrap();
+
     let ek_record = GroupQueueRecord {
         kind: umbra_wire::group::record::RecordKind::EpochKey,
         epoch: 2,
@@ -674,14 +735,18 @@ fn group_records() -> Value {
         nonce: [0; 12],
         body: &ek_body,
     };
+
     let mut ek_bytes = vec![0u8; ek_bucket.group_record()];
     ek_record.encode(ek_bucket, &mut ek_bytes).unwrap();
+
     let roles = |i: u16| match i {
         0 => Some(2),
         1 | 2 => Some(0),
         _ => None,
     };
+
     let parsed_body = EpochKeyBody::parse(&ek_body, roles).unwrap();
+
     if let Carrier::Inline(list) = &parsed_body.carrier {
         let mut opened = vec![0u8; 47];
         slot::open(
@@ -693,12 +758,14 @@ fn group_records() -> Value {
             &mut opened,
         )
         .unwrap();
+
         let payload = SlotPayload::parse(&opened).unwrap();
         assert_eq!(
             payload.epoch_secret.expose(),
             epoch_secret.expose().expose()
         );
     }
+
     // The segment of the slot at rank 299 at 27 slots per chunk is segment 11.
     let sizes = vec![1_185usize; 500];
     let per_chunk = EpochKeyBody::slots_per_chunk(&sizes, 32_634).unwrap();
@@ -713,12 +780,14 @@ fn group_records() -> Value {
     };
     let mut gkey_bytes = [0u8; 96];
     gkey.encode(&mut gkey_bytes).unwrap();
+
     let gseq = GseqPayload {
         corr_id: [0x7c; 16],
         seq: 42,
     };
     let mut gseq_bytes = [0u8; 20];
     gseq.encode(&mut gseq_bytes).unwrap();
+
     let gpost = Command {
         cmd: Cmd::Group(umbra_wire::group::GroupCmd::Gpost),
         corr_id: [0x7c; 16],
@@ -726,8 +795,10 @@ fn group_records() -> Value {
         auth: [0x7e; 32],
         payload: &rec3,
     };
+
     let mut gpost_bytes = vec![0u8; gpost.len()];
     gpost.encode(&mut gpost_bytes).unwrap();
+
     assert!(Command::parse(&gpost_bytes, Bucket::B1).is_ok());
     assert!(Command::parse(&gpost_bytes, Bucket::B2).is_err());
 
@@ -779,6 +850,7 @@ fn group_controls() -> Value {
     .encode(&mut buf)
     .unwrap();
     out.insert("plain_add".into(), json!(hex(&buf[..n])));
+
     for (name, op) in [
         ("plain_remove", PlainOp::Remove { index: 4 }),
         ("plain_self_removal", PlainOp::SelfRemoval),
@@ -804,11 +876,13 @@ fn group_controls() -> Value {
         .unwrap()
         .to_bytes();
     grant.sig = &sig;
+
     let n = grant.encode(&mut buf).unwrap();
     GrantingEpoch::parse(&buf[..n])
         .unwrap()
         .verify(&sha3_256(&[&granter_pk]))
         .unwrap();
+
     out.insert("granting".into(), json!(hex(&buf[..n])));
 
     let mut moderation = ModerationEpoch {
@@ -828,11 +902,13 @@ fn group_controls() -> Value {
         .unwrap()
         .to_bytes();
     moderation.sig = &sig;
+
     let n = moderation.encode(&mut buf).unwrap();
     ModerationEpoch::parse(&buf[..n])
         .unwrap()
         .verify(&sha3_256(&[&granter_pk]))
         .unwrap();
+
     out.insert("moderation".into(), json!(hex(&buf[..n])));
 
     out.insert("presence".into(), json!(hex(&PRESENCE)));
@@ -848,6 +924,7 @@ fn group_controls() -> Value {
     .encode(&mut buf)
     .unwrap();
     out.insert("invitation_offer".into(), json!(hex(&buf[..n])));
+
     let rep = ReplicaRef {
         relay_id: [0x87; 32],
         group_queue_id: [0x88; 32],
@@ -893,17 +970,20 @@ fn group_controls() -> Value {
     };
     let sig = old.sign(&rekey.preimage(), &mut Rng(3)).unwrap().to_bytes();
     rekey.sig = &sig;
+
     let n = rekey.encode(&mut buf).unwrap();
     RekeyRecord::parse(&buf[..n])
         .unwrap()
         .verify(&sha3_256(&[&old_pk]))
         .unwrap();
+
     let mut changed = buf[..n].to_vec();
     changed[69] ^= 1;
     assert!(RekeyRecord::parse(&changed)
         .unwrap()
         .verify(&sha3_256(&[&old_pk]))
         .is_err());
+
     out.insert("rekey".into(), json!(hex(&buf[..n])));
 
     // WIR-471: a snapshot at 3 members in one segment, and the segment
@@ -917,6 +997,7 @@ fn group_controls() -> Value {
         roster_pk_hash: [0xc8 + i as u8; 32],
         kem_pk_hash: sha3_256(&[kem_pk]),
     };
+
     let snapshot = RosterSnapshot {
         group_id: GROUP_ID,
         roster_epoch: 3,
@@ -934,11 +1015,13 @@ fn group_controls() -> Value {
             .collect(),
         path: &[],
     };
+
     let mut snapshot_bytes = vec![0u8; snapshot.len()];
     let n = snapshot.encode(&mut snapshot_bytes).unwrap();
     assert_eq!(n, 4_028);
     assert!(n <= segment);
     assert_eq!(RosterSnapshot::parse(&snapshot_bytes).unwrap(), snapshot);
+
     out.insert("roster_snapshot_3".into(), json!(hex(&snapshot_bytes)));
     let full = RosterSnapshot {
         entries: vec![entry(0, Role::Member, &kem_pks[0]); 500],
@@ -951,12 +1034,15 @@ fn group_controls() -> Value {
         ],
         ..snapshot.clone()
     };
+
     assert_eq!(full.len(), 658_577);
     assert_eq!(full.len().div_ceil(segment), 21);
+
     out.insert(
         "roster_snapshot_group_max".into(),
         json!({ "members": 500, "len": full.len(), "segment_size": segment, "segments": 21 }),
     );
+
     // WIR-480.
     for b in [0x00u8, 0x01, 0x0A] {
         assert!(ControlType::from_byte(b).is_err());
@@ -993,6 +1079,7 @@ fn app_bodies() -> Value {
     };
     let n = poll.encode(&mut buf).unwrap();
     assert_eq!(n, 1_420);
+
     put("poll_max", n, &buf);
     let n = PollVote {
         target: [0x92; 16],
@@ -1020,16 +1107,20 @@ fn app_bodies() -> Value {
     .encode(&mut buf)
     .unwrap();
     put("reaction", n, &buf);
+
     let n = TypingState::Stopped.encode(&mut buf).unwrap();
     put("typing_stopped", n, &buf);
+
     let n = ReceiptBody {
         targets: (0..9u8).map(|i| [0x94 + i; 16]).collect(),
     }
     .encode(&mut buf)
     .unwrap();
     put("receipt_9", n, &buf);
+
     let n = encode_timer(TIMER_VALUES[8], &mut buf).unwrap();
     put("timer_90d", n, &buf);
+
     // WIR-555: the two flags of a forward policy.
     for (name, policy) in [
         (
@@ -1050,6 +1141,7 @@ fn app_bodies() -> Value {
         let n = policy.encode(&mut buf).unwrap();
         assert_eq!(n, FORWARD_POLICY_LEN);
         assert_eq!(ForwardPolicy::parse(&buf[..n]).unwrap(), policy);
+
         // A flag outside the two values, and a counter of 0.
         let mut odd = buf[..n].to_vec();
         odd[5] = 0x02;
@@ -1057,6 +1149,7 @@ fn app_bodies() -> Value {
         odd[5] = 0x01;
         odd[1..5].fill(0);
         assert!(ForwardPolicy::parse(&odd).is_err());
+
         put(name, n, &buf);
     }
 
@@ -1068,6 +1161,7 @@ fn app_bodies() -> Value {
     .encode(&mut buf)
     .unwrap();
     put("digest", n, &buf);
+
     let request = KeyRequest {
         scope: KeyScope::GroupEpoch,
         id: GROUP_ID,
@@ -1076,6 +1170,7 @@ fn app_bodies() -> Value {
     };
     let n = request.encode(&mut buf).unwrap();
     put("key_request_group", n, &buf);
+
     let n = KeySupply {
         request,
         status: SupplyStatus::Posted,
@@ -1128,6 +1223,7 @@ fn app_bodies() -> Value {
     .encode(&mut buf)
     .unwrap();
     put("new_payload", n, &buf);
+
     let n = IdsPayload {
         recipient_id: [0x9c; 32],
         sender_id: [0x9d; 32],
@@ -1136,6 +1232,7 @@ fn app_bodies() -> Value {
     .encode(&mut buf)
     .unwrap();
     put("ids_payload", n, &buf);
+
     let n = NackPayload {
         corr_id: [0x9f; 16],
         reason: Reason::Admission,
@@ -1152,6 +1249,7 @@ fn app_bodies() -> Value {
     };
     let n = msg.encode(&mut buf).unwrap();
     put("app_text", n, &buf);
+
     // WIR-304 and WIR-096.
     let mut bad = buf[..n].to_vec();
     bad[30] = 0xFF;
@@ -1174,6 +1272,7 @@ fn app_bodies() -> Value {
         thread_root: [0x91; 16],
         ..reply.clone()
     };
+
     for (name, record, channel) in [
         ("rich_plain", &plain, Channel::Pairwise),
         ("rich_reply", &reply, Channel::Pairwise),
@@ -1183,6 +1282,7 @@ fn app_bodies() -> Value {
         assert_eq!(&RichRecord::parse(&buf[..n], channel).unwrap(), record);
         put(name, n, &buf);
     }
+
     // An inner text that is not UTF-8 is malformed inside a wrapper too.
     let n = plain.encode(Channel::Pairwise, &mut buf).unwrap();
     buf[n - 1] = 0xFF;
@@ -1219,6 +1319,7 @@ fn app_bodies() -> Value {
     // typing state, and a receipt at 1 target.
     let emoji64 = "👍🏽".repeat(8);
     assert_eq!(emoji64.len(), 64);
+
     for (name, emoji) in [
         ("reaction_1_byte", "x"),
         ("reaction_64_bytes", emoji64.as_str()),
@@ -1232,8 +1333,10 @@ fn app_bodies() -> Value {
         assert_eq!(ReactionBody::parse(&buf[..n]).unwrap(), reaction);
         put(name, n, &buf);
     }
+
     let n = TypingState::Started.encode(&mut buf).unwrap();
     put("typing_started", n, &buf);
+
     let n = ReceiptBody {
         targets: vec![[0x94; 16]],
     }
@@ -1314,6 +1417,7 @@ fn app_bodies() -> Value {
         assert_eq!(KeySupply::parse(&buf[..n]).unwrap(), supply);
         put(name, n, &buf);
     }
+
     // A supply with a body is malformed (WIR-332).
     buf[44] = 1;
     assert!(KeySupply::parse(&buf[..46]).is_err());
@@ -1350,6 +1454,7 @@ fn app_bodies() -> Value {
     assert_eq!(back.name, attachment.name);
     assert_eq!(back.caption, attachment.caption);
     put("attachment_name_caption", n, &buf);
+
     // WIR-532: a trailer that carries nothing is malformed. A name with a
     // bidirectional format character reads with none, and no sender writes
     // one.
@@ -1357,18 +1462,22 @@ fn app_bodies() -> Value {
     assert!(AttachmentBody::parse(&bare).is_ok());
     bare.extend_from_slice(&[0, 0, 0]);
     assert!(AttachmentBody::parse(&bare).is_err());
+
     let mut turned = buf[..257].to_vec();
     turned.push(7);
     turned.extend_from_slice("a\u{202E}b.c".as_bytes());
     turned.extend_from_slice(&[0, 0]);
+
     let read = AttachmentBody::parse(&turned).unwrap();
     assert_eq!(read.name.as_deref(), Some("ab.c"));
+
     let written = AttachmentBody {
         descriptor: read.descriptor,
         name: Some("a\u{202E}b.c".into()),
         preview: None,
         caption: None,
     };
+
     assert!(written.encode(&mut [0u8; 300]).is_err());
 
     let share = RecoveryShare {
@@ -1379,6 +1488,7 @@ fn app_bodies() -> Value {
     };
     let bytes = share.encode().unwrap();
     assert_eq!(RecoveryShare::parse(&bytes).unwrap(), share);
+
     put("recovery_share", bytes.len(), &bytes);
 
     let notice = KeyChangeNotice {
@@ -1388,6 +1498,7 @@ fn app_bodies() -> Value {
     let n = notice.encode(&mut buf).unwrap();
     assert_eq!(n, 1_217);
     assert_eq!(KeyChangeNotice::parse(&buf[..n]).unwrap(), notice);
+
     put("key_change", n, &buf);
 
     // The renewal guard of §6.6.12 and its rejection cases (`WIR-551`,
@@ -1400,22 +1511,27 @@ fn app_bodies() -> Value {
     assert_eq!(bytes.len(), RENEWAL_GUARD_LEN);
     assert_eq!(RenewalGuard::parse(&bytes).unwrap(), guard);
     assert!(RenewalGuard::parse(&bytes[..RENEWAL_GUARD_LEN - 1]).is_err());
+
     let mut zero = bytes;
     zero[1..5].copy_from_slice(&[0; 4]);
     assert!(RenewalGuard::parse(&zero).is_err());
+
     let mut version = bytes;
     version[0] = 0x02;
     assert!(RenewalGuard::parse(&version).is_err());
+
     let message = AppMessage {
         kind: AppKind::RenewalGuard,
         msg_id: [0xb7; 16],
         sent_at: 0,
         body: &bytes,
     };
+
     let mut record = vec![0u8; message.len()];
     assert_eq!(message.encode(&mut record).unwrap(), 67);
     assert!(AppMessage::parse(&record, Channel::Pairwise).is_ok());
     assert!(AppMessage::parse(&record, Channel::Group).is_err());
+
     put("renewal_guard", bytes.len(), &bytes);
 
     // The payloads of an IPUT and of an IBLOB at B0, with the zero fill.
@@ -1423,12 +1539,15 @@ fn app_bodies() -> Value {
     assert_eq!(iput.len(), Bucket::B0.l6_record());
     assert_eq!(iput_parse(&iput).unwrap(), ([0xaa; 24], &b"invitation"[..]));
     put("iput_payload_b0", iput.len(), &iput);
+
     let iblob = iblob_payload(b"invitation", Bucket::B0).unwrap();
     assert_eq!(iblob_parse(&iblob).unwrap(), b"invitation");
     put("iblob_payload_b0", iblob.len(), &iblob);
+
     let mut bad = iblob.clone();
     *bad.last_mut().unwrap() = 1;
     assert!(iblob_parse(&bad).is_err());
+
     Value::Object(out)
 }
 
@@ -1442,12 +1561,14 @@ fn directory_envelopes() -> Value {
         (directory::Kind::Lookup, &[0xb0u8; 32][..])
     );
     assert!(request[36..].iter().all(|b| *b == 0));
+
     let mut responses = Vec::new();
     for (body_len, size) in [(32usize, 4_096usize), (4_091, 32_768), (32_763, 98_304)] {
         let body = vec![0xb1u8; body_len];
         let response = directory::encode_response(directory::Status::Done, &body).unwrap();
         assert_eq!(response.len(), size);
         assert_eq!(directory::parse_response(&response).unwrap().1, &body[..]);
+
         // The same body in a larger size is not the response of that body.
         if let Some(larger) = directory::DIR_RESPONSE_SIZES
             .into_iter()
@@ -1457,6 +1578,7 @@ fn directory_envelopes() -> Value {
             wide.resize(larger, 0);
             assert!(directory::parse_response(&wide).is_err());
         }
+
         responses.push(json!({
             "body_len": body_len, "len": size, "head": hex(&response[..8]),
         }));

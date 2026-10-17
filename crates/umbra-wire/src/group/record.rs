@@ -68,7 +68,9 @@ impl<'a> GroupQueueRecord<'a> {
         if self.kind == RecordKind::EpochKey && self.nonce != [0; 12] {
             return Err(Error::Malformed);
         }
+
         let body_len = u16::try_from(self.body.len()).map_err(|_| Error::Capacity)?;
+
         let mut w = Writer::new(out);
         w.u8(VERSION)?;
         w.u8(self.kind as u8)?;
@@ -85,10 +87,12 @@ impl<'a> GroupQueueRecord<'a> {
         if bytes.len() != bucket.group_record() {
             return Err(Error::Malformed);
         }
+
         let mut r = Reader::new(bytes);
         if r.u8()? != VERSION {
             return Err(Error::Malformed);
         }
+
         let kind = RecordKind::from_byte(r.u8()?)?;
         let epoch = r.u32()?;
         let slot = r.u32()?;
@@ -96,10 +100,12 @@ impl<'a> GroupQueueRecord<'a> {
         if kind == RecordKind::EpochKey && nonce != [0; 12] {
             return Err(Error::Malformed);
         }
+
         let body_len = usize::from(r.u16()?);
         if body_len != bucket.group_record().saturating_sub(GROUP_RECORD_FIXED) {
             return Err(Error::Malformed);
         }
+
         let body = r.take(body_len)?;
         r.finish()?;
         Ok(GroupQueueRecord {
@@ -172,10 +178,12 @@ impl<'a> ContentPlain<'a> {
     pub fn encode(&self, bucket: Bucket, out: &mut [u8]) -> Result<usize, Error> {
         let total = bucket.content_plain();
         let out = out.get_mut(..total).ok_or(Error::Capacity)?;
+
         let mut w = Writer::new(out);
         w.u16(self.sender_index)?;
         w.u32(self.counter)?;
         w.u32(self.roster_epoch)?;
+
         match &self.tags {
             Tags::Dense(bytes) => {
                 if bytes.len() % TAG_LEN != 0 {
@@ -193,12 +201,14 @@ impl<'a> ContentPlain<'a> {
                     if last.is_some_and(|l| l >= *index) {
                         return Err(Error::Malformed);
                     }
+
                     last = Some(*index);
                     w.u16(*index)?;
                     w.put(tag)?;
                 }
             }
         }
+
         w.u16(u16::try_from(self.app.len()).map_err(|_| Error::Capacity)?)?;
         w.put(self.app)?;
         w.zeros(w.remaining())?;
@@ -218,6 +228,7 @@ impl<'a> ContentPlain<'a> {
         let roster_epoch = r.u32()?;
         let mode = r.u8()?;
         let tag_count = r.u16()?;
+
         let tags = match mode {
             0x01 => {
                 if active_members(roster_epoch) != Some(tag_count) {
@@ -232,6 +243,7 @@ impl<'a> ContentPlain<'a> {
                 if count.saturating_mul(2 + TAG_LEN) > r.remaining() {
                     return Err(Error::Malformed);
                 }
+
                 let mut entries = Vec::with_capacity(count);
                 let mut last: Option<u16> = None;
                 for _ in 0..tag_count {
@@ -239,6 +251,7 @@ impl<'a> ContentPlain<'a> {
                     if last.is_some_and(|l| l >= index) {
                         return Err(Error::Malformed);
                     }
+
                     last = Some(index);
                     entries.push((index, r.array()?));
                 }
@@ -246,9 +259,11 @@ impl<'a> ContentPlain<'a> {
             }
             _ => return Err(Error::Malformed),
         };
+
         let app_len = usize::from(r.u16()?);
         let app = r.take(app_len)?;
         r.finish_zero()?;
+
         Ok(ContentPlain {
             sender_index,
             counter,
@@ -274,11 +289,13 @@ pub fn seal_content(
 ) -> Result<usize, Error> {
     let record_len = bucket.group_record();
     let out = out.get_mut(..record_len).ok_or(Error::Capacity)?;
+
     let (_, body) = out.split_at_mut(GROUP_RECORD_FIXED);
     let (plaintext, tag_out) = body.split_at_mut(bucket.content_plain());
     plain.encode(bucket, plaintext)?;
     let tag = chain::seal_record(record_key, &nonce, group_id, epoch, slot, plaintext)?;
     tag_out.copy_from_slice(&tag);
+
     let mut w = Writer::new(out);
     w.u8(VERSION)?;
     w.u8(RecordKind::Content as u8)?;
@@ -300,14 +317,17 @@ pub fn open_content(
     if record.kind != RecordKind::Content {
         return Err(Error::Malformed);
     }
+
     let plain_len = record
         .body
         .len()
         .checked_sub(chain::RECORD_TAG_LEN)
         .ok_or(Error::Malformed)?;
+
     let (ct, tag) = record.body.split_at(plain_len);
     let out = out.get_mut(..plain_len).ok_or(Error::Capacity)?;
     out.copy_from_slice(ct);
+
     chain::open_record(
         record_key,
         &record.nonce,
@@ -372,6 +392,7 @@ impl<'a> EpochKeyBody<'a> {
                 if slots.len() != usize::from(self.slot_count) {
                     return Err(Error::Malformed);
                 }
+
                 w.u8(0x01)?;
                 w.u16(self.slot_count)?;
                 let mut last: Option<u16> = None;
@@ -379,6 +400,7 @@ impl<'a> EpochKeyBody<'a> {
                     if last.is_some_and(|l| l >= s.index) {
                         return Err(Error::Malformed);
                     }
+
                     last = Some(s.index);
                     w.u16(s.index)?;
                     w.put(s.sealed)?;
@@ -391,6 +413,7 @@ impl<'a> EpochKeyBody<'a> {
                 if *slots_per_chunk == 0 {
                     return Err(Error::Malformed);
                 }
+
                 w.u8(0x02)?;
                 w.u16(self.slot_count)?;
                 w.u16(*slots_per_chunk)?;
@@ -398,6 +421,7 @@ impl<'a> EpochKeyBody<'a> {
                 w.put(descriptor)?;
             }
         }
+
         w.zeros(w.remaining())?;
         Ok(total)
     }
@@ -410,6 +434,7 @@ impl<'a> EpochKeyBody<'a> {
         let roster_epoch = r.u32()?;
         let carrier_byte = r.u8()?;
         let slot_count = r.u16()?;
+
         let carrier = match carrier_byte {
             0x01 => {
                 // The remaining length bounds the count before any allocation
@@ -418,6 +443,7 @@ impl<'a> EpochKeyBody<'a> {
                 if count.saturating_mul(slot_len(0)) > r.remaining() {
                     return Err(Error::Malformed);
                 }
+
                 let mut slots = Vec::with_capacity(count);
                 let mut last: Option<u16> = None;
                 for _ in 0..slot_count {
@@ -425,11 +451,13 @@ impl<'a> EpochKeyBody<'a> {
                     if last.is_some_and(|l| l >= index) {
                         return Err(Error::Malformed);
                     }
+
                     last = Some(index);
                     let own = own_count(index).ok_or(Error::Malformed)?;
                     if own != 0 && own != REPLICAS {
                         return Err(Error::Malformed);
                     }
+
                     let sealed = r.take(slot_len(own).saturating_sub(2))?;
                     slots.push(KemSlot { index, sealed });
                 }
@@ -440,6 +468,7 @@ impl<'a> EpochKeyBody<'a> {
                 if slots_per_chunk == 0 {
                     return Err(Error::Malformed);
                 }
+
                 let desc_len = usize::from(r.u16()?);
                 Carrier::Chunked {
                     slots_per_chunk,
@@ -448,7 +477,9 @@ impl<'a> EpochKeyBody<'a> {
             }
             _ => return Err(Error::Malformed),
         };
+
         r.finish_zero()?;
+
         Ok(EpochKeyBody {
             roster_epoch,
             slot_count,
@@ -470,6 +501,7 @@ impl<'a> EpochKeyBody<'a> {
                 break;
             }
         }
+
         u16::try_from(best).ok().filter(|n| *n > 0)
     }
 }
@@ -504,6 +536,7 @@ impl SlotPayload {
         if own_count != 0 && own_count != REPLICAS {
             return Err(Error::Malformed);
         }
+
         let mut w = Writer::new(out);
         w.u16(self.rotator)?;
         w.put(self.epoch_secret.expose())?;
@@ -525,10 +558,12 @@ impl SlotPayload {
         if own_count != 0 && own_count != REPLICAS {
             return Err(Error::Malformed);
         }
+
         let mut own_sks = Vec::with_capacity(usize::from(own_count));
         for _ in 0..own_count {
             own_sks.push(umbra_crypto::secret::Secret::new(r.array()?));
         }
+
         r.finish()?;
         Ok(SlotPayload {
             rotator,
@@ -567,13 +602,16 @@ mod tests {
         let mut out = vec![0u8; Bucket::B0.group_record()];
         let n = seal_content(&plain, &key, [7; 12], &GROUP, 1, 100, Bucket::B0, &mut out).unwrap();
         assert_eq!(n, 390);
+
         let record = GroupQueueRecord::parse(&out, Bucket::B0).unwrap();
         assert_eq!(record.kind, RecordKind::Content);
         assert_eq!(record.slot, 100);
+
         let mut buf = vec![0u8; Bucket::B0.content_plain()];
         let len = open_content(&record, &key, &GROUP, &mut buf).unwrap();
         let back = ContentPlain::parse(&buf[..len], |_| Some(3)).unwrap();
         assert_eq!(back, plain);
+
         assert!(ContentPlain::parse(&buf[..len], |_| Some(4)).is_err());
         assert_eq!(back.tags.tag_for(1, 1), Some([0; 12]));
         assert!(GroupQueueRecord::parse(&out, Bucket::B1).is_err());
@@ -594,11 +632,13 @@ mod tests {
         let back = ContentPlain::parse(&buf, |_| None).unwrap();
         assert_eq!(back.tags.tag_for(0, 4), Some([4; 12]));
         assert_eq!(back.tags.tag_for(0, 2), None);
+
         let bad = ContentPlain {
             tags: Tags::Sparse(vec![(4, [4; 12]), (1, [1; 12])]),
             ..plain.clone()
         };
         assert!(bad.encode(Bucket::B0, &mut buf).is_err());
+
         // A non-zero fill byte is rejected (WIR-407).
         plain.encode(Bucket::B0, &mut buf).unwrap();
         *buf.last_mut().unwrap() = 1;
@@ -615,6 +655,7 @@ mod tests {
         buf[11] = 0xFF;
         buf[12] = 0xFF;
         assert!(ContentPlain::parse(&buf, |_| None).is_err());
+
         // An inline carrier that names 65 535 slots in a B0 body.
         let mut buf = vec![0u8; Bucket::B0.group_body()];
         buf[4] = 0x01;
@@ -627,6 +668,7 @@ mod tests {
     fn the_epoch_key_body_holds_the_slot_sizes() {
         assert_eq!(slot_len(0), 1_185);
         assert_eq!(slot_len(2), 1_249);
+
         let plain_slot = vec![9u8; slot_len(0) - 2];
         let admin_slot = vec![8u8; slot_len(2) - 2];
         let body = EpochKeyBody {
@@ -650,6 +692,7 @@ mod tests {
         let mut buf = vec![0u8; Bucket::B2.group_body()];
         body.encode(Bucket::B2, &mut buf).unwrap();
         assert_eq!(7 + 2 * 1_249 + 1_185, 3_690);
+
         let roles = |i: u16| {
             if i < 2 {
                 Some(2)
@@ -660,13 +703,16 @@ mod tests {
             }
         };
         assert_eq!(EpochKeyBody::parse(&buf, roles).unwrap(), body);
+
         // The wrong own_count for an index breaks the slot boundaries.
         assert!(EpochKeyBody::parse(&buf, |_| Some(0)).is_err());
         // 27 plain slots fit B3 inline, and 28 do not (WIR-423).
         assert!(7 + 27 * slot_len(0) <= Bucket::B3.group_body());
         assert!(7 + 28 * slot_len(0) > Bucket::B3.group_body());
+
         let sizes = vec![slot_len(0) - 2 + 2; 500];
         assert_eq!(EpochKeyBody::slots_per_chunk(&sizes, 32_634), Some(27));
+
         let chunked = EpochKeyBody {
             roster_epoch: 1,
             slot_count: 500,
@@ -678,6 +724,7 @@ mod tests {
         let mut buf = vec![0u8; Bucket::B0.group_body()];
         chunked.encode(Bucket::B0, &mut buf).unwrap();
         assert_eq!(EpochKeyBody::parse(&buf, |_| None).unwrap(), chunked);
+
         buf[7] = 0;
         buf[8] = 0;
         assert!(EpochKeyBody::parse(&buf, |_| None).is_err());

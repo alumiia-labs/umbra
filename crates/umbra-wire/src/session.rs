@@ -34,6 +34,7 @@ impl<'a> SessionFrame<'a> {
     /// Writes the frame and returns its length.
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, Error> {
         Bucket::from_cell_len(self.cell.len()).ok_or(Error::Malformed)?;
+
         let mut w = Writer::new(out);
         w.put(&self.session_id)?;
         w.u24(self.seq)?;
@@ -52,8 +53,10 @@ impl<'a> SessionFrame<'a> {
         if r.u8()? != 0 {
             return Err(Error::Malformed);
         }
+
         let cell = r.rest();
         let bucket = Bucket::from_cell_len(cell.len()).ok_or(Error::Malformed)?;
+
         Ok((
             SessionFrame {
                 session_id,
@@ -224,6 +227,7 @@ impl SessionControl {
             },
             _ => return Err(Error::Malformed),
         };
+
         r.finish()?;
         Ok(out)
     }
@@ -282,9 +286,11 @@ mod tests {
         let mut out = vec![0u8; 524];
         assert_eq!(frame.encode(&mut out).unwrap(), 524);
         assert_eq!(out[11], 0);
+
         let (back, bucket) = SessionFrame::parse(&out).unwrap();
         assert_eq!(bucket, Bucket::B0);
         assert_eq!(back.seq, 0x0A_0B_0C);
+
         // WIR-142: each bit of `flags` is reserved, bit 0 too.
         for flags in [0x01, 0x02, 0x80] {
             out[11] = flags;
@@ -312,16 +318,19 @@ mod tests {
         assert_eq!(n, 37);
         let parsed = SessionControl::parse(&buf[..37]).unwrap();
         assert_eq!(parsed.verify_resume(&secret, &id, 0).unwrap(), (1, 5, 6));
+
         // A repeated count and a changed auth bit both fail (WIR-297).
         assert!(parsed.verify_resume(&secret, &id, 1).is_err());
         buf[36] ^= 1;
         let bad = SessionControl::parse(&buf[..37]).unwrap();
         assert!(bad.verify_resume(&secret, &id, 0).is_err());
+
         // The `auth` covers the two frame counts.
         buf[36] ^= 1;
         buf[16] ^= 1;
         let moved = SessionControl::parse(&buf[..37]).unwrap();
         assert!(moved.verify_resume(&secret, &id, 0).is_err());
+
         assert!(SessionControl::parse(&buf[..29]).is_err());
 
         let close = SessionControl::Close { session_id: id };

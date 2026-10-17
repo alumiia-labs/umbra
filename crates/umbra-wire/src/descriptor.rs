@@ -112,6 +112,7 @@ impl FileDescriptor {
         if !self.padded_size.is_multiple_of(CHUNK_SIZE) {
             return Err(Error::Malformed);
         }
+
         let mut w = Writer::new(out);
         w.u8(0x01)?;
         w.u8(self.level as u8)?;
@@ -141,11 +142,13 @@ impl FileDescriptor {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let level = match r.u8()? {
             0x00 => Level::Data,
             0x01 => Level::Manifest,
             _ => return Err(Error::Malformed),
         };
+
         let file_key = Secret::new(r.array()?);
         let file_nonce = r.array()?;
         let commit = r.array()?;
@@ -156,14 +159,17 @@ impl FileDescriptor {
         if !padded_size.is_multiple_of(CHUNK_SIZE) {
             return Err(Error::Malformed);
         }
+
         let mime_class = r.u8()?;
         let pixel_w = r.u16()?;
         let pixel_h = r.u16()?;
+
         // The remaining length bounds the count before any allocation.
         let ref_count = usize::try_from(ref_count).map_err(|_| Error::Malformed)?;
         if ref_count.checked_mul(CHUNK_REF_LEN) != Some(r.remaining()) {
             return Err(Error::Malformed);
         }
+
         let mut refs = Vec::with_capacity(ref_count);
         for _ in 0..ref_count {
             refs.push(ChunkRef {
@@ -173,6 +179,7 @@ impl FileDescriptor {
                 replicas: [r.array()?, r.array()?],
             });
         }
+
         r.finish()?;
         Ok(FileDescriptor {
             level,
@@ -236,6 +243,7 @@ impl<'a> AttachmentBody<'a> {
             .ok_or(Error::Malformed)?;
         let (head, rest) = body.split_at_checked(end).ok_or(Error::Malformed)?;
         let descriptor = FileDescriptor::parse(head)?;
+
         if rest.is_empty() {
             return Ok(AttachmentBody {
                 descriptor,
@@ -244,11 +252,13 @@ impl<'a> AttachmentBody<'a> {
                 caption: None,
             });
         }
+
         let mut r = Reader::new(rest);
         let name_len = usize::from(r.u8()?);
         let name = r.take(name_len)?;
         let preview_len = usize::from(r.u16()?);
         let preview = r.take(preview_len)?;
+
         let caption = if r.remaining() == 0 {
             None
         } else {
@@ -261,11 +271,13 @@ impl<'a> AttachmentBody<'a> {
             Some(caption)
         };
         r.finish()?;
+
         // WIR-532: a trailer that carries nothing is a second encoding of a
         // body that ends after the descriptor.
         if name.is_empty() && preview.is_empty() && caption.is_none() {
             return Err(Error::Malformed);
         }
+
         let name = if name.is_empty() {
             None
         } else {
@@ -277,6 +289,7 @@ impl<'a> AttachmentBody<'a> {
             // What stays after the marks can be empty, `.`, or `..`.
             is_file_name(&name).then_some(name)
         };
+
         let preview = if preview.is_empty() {
             None
         } else {
@@ -319,14 +332,17 @@ impl<'a> AttachmentBody<'a> {
         if self.name.is_none() && self.preview.is_none() && self.caption.is_none() {
             return Ok(at);
         }
+
         if self.caption.is_some_and(|caption| !is_caption(caption)) {
             return Err(Error::Malformed);
         }
+
         // WIR-532: a sender writes no name with a bidirectional format
         // character, although a parser reads one.
         if self.name.as_deref().is_some_and(|name| !is_file_name(name)) {
             return Err(Error::Malformed);
         }
+
         let is_picture = matches!(self.descriptor.mime_class, class::IMAGE | class::VIDEO);
         if self
             .preview
@@ -334,6 +350,7 @@ impl<'a> AttachmentBody<'a> {
         {
             return Err(Error::Malformed);
         }
+
         let name = self.name.as_deref().map_or(&[][..], str::as_bytes);
         let preview = self.preview.unwrap_or(&[]);
         let tail = out.get_mut(at..).ok_or(Error::Malformed)?;
@@ -437,6 +454,7 @@ mod tests {
         assert_eq!(back.refs, vec![one]);
         assert_eq!(back.pixel_h, 480);
         assert!(FileDescriptor::parse(&out[..256]).is_err());
+
         out[131] = 1;
         assert!(FileDescriptor::parse(&out).is_err());
     }
@@ -491,23 +509,24 @@ mod tests {
         // takes no preview.
         let mut photo = one_ref_descriptor();
         photo.mime_class = class::IMAGE;
-        let hash = &[0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3, 0xFF, 0xD9];
+        let thumbnail = &[0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3, 0xFF, 0xD9];
         let shown = AttachmentBody {
             descriptor: photo,
             name: None,
-            preview: Some(hash),
+            preview: Some(thumbnail),
             caption: None,
         };
         let mut out = vec![0u8; shown.len()];
         shown.encode(&mut out).unwrap();
         assert_eq!(
             AttachmentBody::parse(&out).unwrap().preview,
-            Some(&hash[..])
+            Some(&thumbnail[..])
         );
+
         let wrong = AttachmentBody {
             descriptor: one_ref_descriptor(),
             name: None,
-            preview: Some(hash),
+            preview: Some(thumbnail),
             caption: None,
         };
         let mut out = vec![0u8; wrong.len()];
@@ -533,6 +552,7 @@ mod tests {
         let mut empty = out[..257 + 3].to_vec();
         empty.extend_from_slice(&[0, 0]);
         assert!(AttachmentBody::parse(&empty).is_err());
+
         let long = "a".repeat(CAPTION_MAX + 1);
         let over = AttachmentBody {
             descriptor: one_ref_descriptor(),
@@ -542,6 +562,7 @@ mod tests {
         };
         let mut out = vec![0u8; over.len()];
         assert!(over.encode(&mut out).is_err());
+
         let mut bad = captioned_bytes();
         let end = bad.len();
         bad[end - 1] = 0xFF;
@@ -587,10 +608,12 @@ mod tests {
             let mut out = vec![0u8; body.len()];
             assert!(body.encode(&mut out).is_err(), "{bad:?}");
         }
+
         // A parser rejects each one too.
         for bad in ["a/b", "a\\b", "a\nb", "a\u{7f}", ".", ".."] {
             assert!(AttachmentBody::parse(&named_bytes(bad)).is_err(), "{bad:?}");
         }
+
         assert!(is_file_name("été – notes.txt"));
         let long = "a".repeat(FILE_NAME_MAX + 1);
         assert!(!is_file_name(&long));
@@ -626,6 +649,7 @@ mod tests {
             let mut out = vec![0u8; body.len()];
             assert!(body.encode(&mut out).is_err(), "{bad:?}");
         }
+
         // A name in a script that runs from right to left holds none.
         assert!(is_file_name("تقرير.pdf"));
         assert!(is_file_name("דוח 2026.pdf"));
@@ -647,12 +671,14 @@ mod tests {
             let mut out = vec![0u8; back.len()];
             assert_eq!(back.encode(&mut out).unwrap(), 257 + 3 + 13);
         }
+
         // What stays after the marks is no name: the body has none.
         for left in ["\u{200E}", ".\u{202E}", ".\u{200F}.\u{2069}"] {
             let stored = named_bytes(left);
             let back = AttachmentBody::parse(&stored).unwrap();
             assert_eq!(back.name, None, "{left:?}");
         }
+
         // A name with no such character comes back as the bytes hold it.
         let back_bytes = named_bytes("דוח 2026.pdf");
         let back = AttachmentBody::parse(&back_bytes).unwrap();
@@ -670,9 +696,11 @@ mod tests {
         let mut out = vec![0u8; bare.len()];
         assert_eq!(bare.encode(&mut out).unwrap(), 257);
         assert!(AttachmentBody::parse(&out).is_ok());
+
         // A name_len of zero and a preview_len of zero, with no caption.
         out.extend_from_slice(&[0, 0, 0]);
         assert!(AttachmentBody::parse(&out).is_err());
+
         // The same empty part before a caption is a complete trailer.
         assert!(AttachmentBody::parse(&captioned_bytes()).is_ok());
     }

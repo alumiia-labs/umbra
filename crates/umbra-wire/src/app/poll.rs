@@ -67,13 +67,16 @@ impl<'a> Poll<'a> {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let flags = r.u8()?;
         if flags & !0x03 != 0 {
             return Err(Error::Malformed);
         }
+
         let open_seconds = r.u32()?;
         let q_len = usize::from(r.u8()?);
         let question = core::str::from_utf8(r.take(q_len)?).map_err(|_| Error::Malformed)?;
+
         let option_count = usize::from(r.u8()?);
         let mut options = Vec::with_capacity(option_count.min(OPTION_MAX));
         for _ in 0..option_count {
@@ -81,6 +84,7 @@ impl<'a> Poll<'a> {
             options.push(core::str::from_utf8(r.take(len)?).map_err(|_| Error::Malformed)?);
         }
         r.finish()?;
+
         let out = Poll {
             multiple: flags & 0x01 != 0,
             hidden: flags & 0x02 != 0,
@@ -135,10 +139,12 @@ impl PollVote {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let target = r.array()?;
         let count = usize::from(r.u8()?);
         let choices = r.take(count)?.to_vec();
         r.finish()?;
+
         let out = PollVote { target, choices };
         out.check(poll.multiple, poll.options.len())?;
         Ok(out)
@@ -171,6 +177,7 @@ mod tests {
         let mut out = [0u8; 2_000];
         let n = poll().encode(&mut out).unwrap();
         assert_eq!(Poll::parse(&out[..n]).unwrap(), poll());
+
         let q: String = "q".repeat(QUESTION_MAX);
         let o: String = "o".repeat(OPTION_TEXT_MAX);
         let big = Poll {
@@ -183,6 +190,7 @@ mod tests {
         let n = big.encode(&mut out).unwrap();
         assert_eq!(n, 1_420);
         assert_eq!(Poll::parse(&out[..n]).unwrap(), big);
+
         let vote = PollVote {
             target: [1; 16],
             choices: vec![0, 2],
@@ -200,17 +208,20 @@ mod tests {
             ..poll()
         };
         assert!(one.encode(&mut out).is_err());
+
         let long_q = "q".repeat(201);
         let bad = Poll {
             question: &long_q,
             ..poll()
         };
         assert!(bad.encode(&mut out).is_err());
+
         let empty = Poll {
             options: vec!["a", ""],
             ..poll()
         };
         assert!(empty.encode(&mut out).is_err());
+
         for choices in [vec![3], vec![1, 1], vec![2, 1], vec![]] {
             let v = PollVote {
                 target: [1; 16],
@@ -218,6 +229,7 @@ mod tests {
             };
             assert!(v.encode(&poll(), &mut out).is_err());
         }
+
         let single = Poll {
             multiple: false,
             ..poll()
@@ -227,6 +239,7 @@ mod tests {
             choices: vec![0, 1],
         };
         assert!(v.encode(&single, &mut out).is_err());
+
         let n = poll().encode(&mut out).unwrap();
         out[1] = 0x04;
         assert!(Poll::parse(&out[..n]).is_err());
