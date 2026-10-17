@@ -60,7 +60,11 @@ private const val OPEN_MIN = 300L
 private const val OPEN_MAX = 2_592_000L
 
 /** The units of a custom period, with their seconds. */
-private val PeriodUnits = listOf(R.string.poll_unit_minutes to 60L, R.string.poll_unit_hours to 3_600L, R.string.poll_unit_days to 86_400L)
+private val PeriodUnits = listOf(
+    R.string.poll_unit_minutes to 60L,
+    R.string.poll_unit_hours to 3_600L,
+    R.string.poll_unit_days to 86_400L,
+)
 
 /** The poll composer: a question, 2 to 12 options, and the rules of the vote. */
 @Composable
@@ -70,6 +74,7 @@ fun NewPollScreen(chat: Chat, onBack: () -> Unit) {
     var multiple by remember { mutableStateOf(false) }
     var period by remember { mutableStateOf(0u) }
     var hidden by remember { mutableStateOf(false) }
+
     // A period that the user sets: a count and a unit.
     var isCustom by remember { mutableStateOf(false) }
     var count by remember { mutableStateOf("") }
@@ -78,8 +83,10 @@ fun NewPollScreen(chat: Chat, onBack: () -> Unit) {
     // WIR-557: a period inside the two bounds.
     val isInBounds = custom in OPEN_MIN..OPEN_MAX
     val openSeconds = if (isCustom) custom.coerceIn(0L, OPEN_MAX).toUInt() else period
+
     val filled = options.map { it.trim() }.filter { it.isNotEmpty() }
     val isReady = question.isNotBlank() && filled.size >= 2 && (!isCustom || isInBounds)
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.poll_new_poll), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
@@ -91,6 +98,7 @@ fun NewPollScreen(chat: Chat, onBack: () -> Unit) {
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
                 modifier = Modifier.fillMaxWidth(),
             )
+
             Spacer(Modifier.height(12.dp))
             options.forEachIndexed { index, option ->
                 Row(Modifier.padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -111,9 +119,11 @@ fun NewPollScreen(chat: Chat, onBack: () -> Unit) {
             if (options.size < OPTION_MAX) {
                 InlineButton(stringResource(R.string.poll_add_option)) { options.add("") }
             }
+
             Spacer(Modifier.height(8.dp))
             ToggleRow(stringResource(R.string.poll_more_than_one_answer), multiple) { multiple = it }
             HorizontalDivider(color = Palette.Divider)
+
             Text(
                 stringResource(R.string.poll_ends),
                 style = MaterialTheme.typography.labelLarge,
@@ -138,6 +148,7 @@ fun NewPollScreen(chat: Chat, onBack: () -> Unit) {
                     Text(stringResource(title))
                 }
             }
+
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -150,6 +161,7 @@ fun NewPollScreen(chat: Chat, onBack: () -> Unit) {
                 Spacer(Modifier.width(14.dp))
                 Text(stringResource(R.string.poll_custom))
             }
+
             if (isCustom) {
                 Row(Modifier.padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     OutlinedTextField(
@@ -175,6 +187,7 @@ fun NewPollScreen(chat: Chat, onBack: () -> Unit) {
                         ) { Text(stringResource(title), style = MaterialTheme.typography.labelLarge) }
                     }
                 }
+
                 Text(
                     stringResource(R.string.poll_period_bounds),
                     style = MaterialTheme.typography.bodySmall,
@@ -182,12 +195,14 @@ fun NewPollScreen(chat: Chat, onBack: () -> Unit) {
                     modifier = Modifier.padding(bottom = 8.dp).subline(),
                 )
             }
+
             HorizontalDivider(color = Palette.Divider)
             // A count that stays hidden needs an end.
             if (isCustom || period != 0u) {
                 ToggleRow(stringResource(R.string.poll_hide_results_until_end), hidden) { hidden = it }
                 HorizontalDivider(color = Palette.Divider)
             }
+
             Spacer(Modifier.height(16.dp))
             PrimaryButton(stringResource(R.string.common_send), enabled = isReady) {
                 Core.sendPoll(chat.conversation, question.trim(), filled, multiple, hidden, openSeconds)
@@ -221,6 +236,7 @@ fun PollContent(line: Line, poll: FfiPoll, modifier: Modifier = Modifier) {
     val canVote = !poll.closed && !line.info.deleted
     val top = poll.counts.maxOrNull()?.takeIf { it > 0u } ?: 1u
     val chosen = poll.mine.map { it.toUByte() }
+
     Column(modifier.widthIn(min = 240.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             FaIcon("chart-bar", size = 14.dp, tint = Palette.TextSecondary)
@@ -231,13 +247,16 @@ fun PollContent(line: Line, poll: FfiPoll, modifier: Modifier = Modifier) {
                 color = Palette.TextSecondary,
             )
         }
+
         Spacer(Modifier.height(6.dp))
         Text(poll.question, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
         Spacer(Modifier.height(8.dp))
+
         poll.options.forEachIndexed { index, option ->
             val choice = index.toUByte()
             val isMine = choice in chosen
             val count = poll.counts.getOrNull(index)
+
             Column(
                 Modifier
                     .fillMaxWidth()
@@ -271,6 +290,7 @@ fun PollContent(line: Line, poll: FfiPoll, modifier: Modifier = Modifier) {
                         )
                     }
                 }
+
                 if (count != null) {
                     Spacer(Modifier.height(4.dp))
                     Box(
@@ -290,6 +310,7 @@ fun PollContent(line: Line, poll: FfiPoll, modifier: Modifier = Modifier) {
                 }
             }
         }
+
         Spacer(Modifier.height(4.dp))
         Text(
             pollFooter(poll),
@@ -319,6 +340,7 @@ private fun pollFooter(poll: FfiPoll): String {
     val voters = poll.voters.toInt()
     // GRP-148: the count is what this device holds.
     val votes = UiText.plural(R.plurals.poll_votes_on_device, voters, voters)
+
     val end = when {
         poll.closed -> UiText.get(R.string.poll_ended)
         poll.closesAt == 0uL -> null
@@ -328,5 +350,6 @@ private fun pollFooter(poll: FfiPoll): String {
         )
     }
     val hidden = if (poll.hidden && !poll.closed) UiText.get(R.string.poll_results_at_end) else null
+
     return listOfNotNull(votes, hidden, end).joinToString(" · ")
 }

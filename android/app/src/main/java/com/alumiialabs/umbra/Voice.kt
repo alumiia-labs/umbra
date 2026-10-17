@@ -62,6 +62,7 @@ class VoiceRecording @RequiresApi(Build.VERSION_CODES.R) constructor(context: Co
     // member runs there too.
     @SuppressLint("NewApi")
     val memory: java.io.FileDescriptor = Os.memfd_create("umbra-voice", 0)
+
     private val recorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         MediaRecorder(context)
     } else {
@@ -91,12 +92,14 @@ class VoiceRecording @RequiresApi(Build.VERSION_CODES.R) constructor(context: Co
         recorder.setAudioSamplingRate(48_000)
         recorder.setAudioEncodingBitRate(32_000)
         recorder.setMaxDuration(VOICE_MAX_SECONDS * 1_000)
+
         recorder.setOnInfoListener { _, what, _ ->
             if (what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_DURATION_REACHED) {
                 endedAt = startedAt + VOICE_MAX_SECONDS * 1_000L
                 isAtLimit = true
             }
         }
+
         recorder.setOutputFile(memory)
         recorder.prepare()
         recorder.start()
@@ -117,6 +120,7 @@ class VoiceRecording @RequiresApi(Build.VERSION_CODES.R) constructor(context: Co
      */
     fun end() {
         if (isEnded) return
+
         if (endedAt == 0L) endedAt = SystemClock.elapsedRealtime()
         isWhole = try {
             recorder.stop()
@@ -126,6 +130,7 @@ class VoiceRecording @RequiresApi(Build.VERSION_CODES.R) constructor(context: Co
             // sample has no file.
             isAtLimit
         }
+
         recorder.release()
         isEnded = true
     }
@@ -136,10 +141,12 @@ class VoiceRecording @RequiresApi(Build.VERSION_CODES.R) constructor(context: Co
      */
     fun finish(): Int {
         end()
+
         if (!isWhole) {
             closeMemory()
             return -1
         }
+
         // The bubble shows the time that the bar showed.
         return ((endedAt - startedAt) / 1_000).toInt().coerceIn(1, VOICE_MAX_SECONDS)
     }
@@ -155,6 +162,7 @@ class VoiceRecording @RequiresApi(Build.VERSION_CODES.R) constructor(context: Co
             recorder.release()
             isEnded = true
         }
+
         closeMemory()
     }
 
@@ -181,6 +189,7 @@ object VoicePlayer {
         private set
     var lengthMs by mutableIntStateOf(0)
         private set
+
     private var player: MediaPlayer? = null
 
     /** Plays a voice message, or pauses it, or plays it on from its place. */
@@ -191,16 +200,19 @@ object VoicePlayer {
             isPlaying = held.isPlaying
             return
         }
+
         stop()
         val wanted = line.key
         key = wanted
         lengthMs = (line.info.file?.mediaSeconds?.toInt() ?: 0) * 1_000
+
         Core.openMedia(line) { source ->
             if (source == null || key != wanted) {
                 source?.release()
                 if (key == wanted) stop()
                 return@openMedia
             }
+
             val made = MediaPlayer()
             player = made
             val data = CoreDataSource(source)
@@ -212,6 +224,7 @@ object VoicePlayer {
                         .build(),
                 )
                 made.setDataSource(data)
+
                 made.setOnPreparedListener {
                     if (player !== it) return@setOnPreparedListener
                     lengthMs = it.duration.coerceAtLeast(1)
@@ -224,6 +237,7 @@ object VoicePlayer {
                     if (this.player === player) stop()
                     true
                 }
+
                 made.prepareAsync()
             } catch (unplayable: Exception) {
                 data.close()
@@ -235,11 +249,13 @@ object VoicePlayer {
     /** Moves the message that plays to a part of its length. */
     fun seek(line: Line, fraction: Float) {
         val target = (fraction.coerceIn(0f, 1f) * lengthMs).toInt()
+
         if (key != line.key) {
             toggle(line)
             positionMs = target
             return
         }
+
         positionMs = target
         try {
             player?.seekTo(target)
@@ -278,12 +294,14 @@ fun VoiceTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
     val state = file.state.toInt()
     val progress = progressOf(file)
     val isHeld = VoicePlayer.key == line.key
+
     LaunchedEffect(isHeld, VoicePlayer.isPlaying) {
         while (isHeld && VoicePlayer.isPlaying) {
             VoicePlayer.tick()
             delay(200)
         }
     }
+
     Row(modifier.width(240.dp), verticalAlignment = Alignment.CenterVertically) {
         Box(
             Modifier.size(44.dp).background(Palette.Pressed, CircleShape),
@@ -309,6 +327,7 @@ fun VoiceTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+
             val shown = when {
                 progress != null -> progress / 100f
                 isHeld && VoicePlayer.lengthMs > 0 -> VoicePlayer.positionMs.toFloat() / VoicePlayer.lengthMs
@@ -331,6 +350,7 @@ fun VoiceTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
                     Modifier
                 },
             )
+
             Text(
                 buildString {
                     val seconds = if (isHeld && VoicePlayer.positionMs > 0) {
@@ -339,6 +359,7 @@ fun VoiceTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
                         file.mediaSeconds.toInt()
                     }
                     append(Files.duration(seconds))
+
                     when {
                         progress != null && !line.info.outgoing -> append(" · ").append(stringResource(R.string.voice_percent, progress))
                         state == FILE_WANTED -> append(" · ").append(stringResource(R.string.voice_receiving))
@@ -363,6 +384,7 @@ private fun TimeLine(fraction: Float, showsMark: Boolean, modifier: Modifier = M
         val middle = size.height / 2
         val at = size.width * fraction.coerceIn(0f, 1f)
         val stroke = 3.dp.toPx()
+
         drawLine(track, Offset(0f, middle), Offset(size.width, middle), stroke)
         drawLine(played, Offset(0f, middle), Offset(at, middle), stroke)
         if (showsMark) drawCircle(played, radius = 5.dp.toPx(), center = Offset(at, middle))
@@ -376,12 +398,14 @@ private fun TimeLine(fraction: Float, showsMark: Boolean, modifier: Modifier = M
 @Composable
 fun RecordingBar(recording: VoiceRecording, onDiscard: () -> Unit, modifier: Modifier = Modifier) {
     var elapsed by remember { mutableIntStateOf(0) }
+
     LaunchedEffect(recording) {
         while (true) {
             elapsed = (recording.elapsedMs() / 1_000).toInt().coerceAtMost(VOICE_MAX_SECONDS)
             delay(250)
         }
     }
+
     Row(modifier, verticalAlignment = Alignment.CenterVertically) {
         Box(
             Modifier
@@ -391,6 +415,7 @@ fun RecordingBar(recording: VoiceRecording, onDiscard: () -> Unit, modifier: Mod
                 .press(role = Role.Button, label = stringResource(R.string.voice_discard_recording), onClick = onDiscard),
             contentAlignment = Alignment.Center,
         ) { FaIcon("trash-can", label = stringResource(R.string.voice_discard_recording), size = 18.dp, tint = Palette.TextSecondary) }
+
         val isRecording = !recording.isEnded && !recording.isAtLimit
         Box(Modifier.size(8.dp).background(if (isRecording) Palette.Error else Palette.TextSecondary, CircleShape))
         Spacer(Modifier.width(10.dp))

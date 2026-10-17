@@ -63,15 +63,18 @@ private val ORDERS = listOf(
     Choice(R.string.search_newest, "clock", 1),
     Choice(R.string.search_oldest, "hourglass-half", 2),
 )
+
 private val SIDES = listOf(
     Choice(R.string.search_from_anyone, "user-group", 0),
     Choice(R.string.search_from_you, "paper-plane", 1),
     Choice(R.string.search_from_others, "comment", 2),
 )
+
 private val KINDS = listOf(
     Choice(R.string.search_all_messages, "comment", 0),
     Choice(R.string.search_files, "file", 1),
 )
+
 private val AGES = listOf(
     Choice(R.string.search_any_time, "clock", 0),
     Choice(R.string.search_last_7_days, "clock", 7),
@@ -96,9 +99,11 @@ fun SearchScreen(scope: Conversation?, onBack: () -> Unit, push: (Screen) -> Uni
     var age by remember { mutableIntStateOf(0) }
     // The names of the members of each group that a result is from.
     var members by remember { mutableStateOf(emptyMap<Conversation, Map<UShort, String>>()) }
+
     val listState = rememberLazyListState()
     // A new query or a new limit gives a new list, which starts at its top.
     LaunchedEffect(found) { listState.scrollToItem(0) }
+
     val run = {
         val query = field.copy()
         if (query.all(Char::isWhitespace)) {
@@ -109,6 +114,7 @@ fun SearchScreen(scope: Conversation?, onBack: () -> Unit, push: (Screen) -> Uni
         }
         query.fill('\u0000')
     }
+
     // The user leaves the search, thus the index and the query go. A tap on
     // a result keeps both: Back from the conversation shows the results.
     val leave = {
@@ -116,23 +122,28 @@ fun SearchScreen(scope: Conversation?, onBack: () -> Unit, push: (Screen) -> Uni
         onBack()
     }
     BackHandler(onBack = leave)
+
     LaunchedEffect(Unit) {
         Core.searchQueryOf(scope)?.let { field.set(it) }
         field.onChange = { typed++ }
         field.focus()
     }
+
     // A message that came, changed, or went is in the next build.
     LaunchedEffect(Core.revision) {
         if (!isFirstBuild) delay(REBUILD_WAIT_MS)
         isFirstBuild = false
         Core.searchBuild { run() }
     }
+
     // A query in the time of a build reads the part that is ready.
     LaunchedEffect(typed, order, side, kind, age) { run() }
+
     LaunchedEffect(found) {
         val groups = found.orEmpty().map { it.conversation }.distinct().filter { conversation ->
             conversation !in members && Core.chats.any { it.conversation == conversation && it.isGroup }
         }
+
         for (group in groups) {
             Core.groupMembers(group) { loaded ->
                 members = members + (
@@ -142,10 +153,11 @@ fun SearchScreen(scope: Conversation?, onBack: () -> Unit, push: (Screen) -> Uni
                         }
                         member.index to (title ?: UiText.get(R.string.common_member_number, member.index.toInt()))
                     }
-                    )
+                )
             }
         }
     }
+
     Column(Modifier.fillMaxSize()) {
         Row(
             Modifier.fillMaxWidth().padding(start = 4.dp, end = 16.dp, top = 8.dp, bottom = 4.dp),
@@ -155,6 +167,7 @@ fun SearchScreen(scope: Conversation?, onBack: () -> Unit, push: (Screen) -> Uni
             Spacer(Modifier.width(4.dp))
             PlatformInput(field, stringResource(R.string.common_search), isPassphrase = false, modifier = Modifier.weight(1f))
         }
+
         Row(
             Modifier
                 .fillMaxWidth()
@@ -167,6 +180,7 @@ fun SearchScreen(scope: Conversation?, onBack: () -> Unit, push: (Screen) -> Uni
             LimitChip(stringResource(R.string.search_show), KINDS, kind) { kind = it }
             LimitChip(stringResource(R.string.search_date), AGES, age) { age = it }
         }
+
         val results = found
         when {
             results == null -> Unit
@@ -190,6 +204,7 @@ private fun LimitChip(title: String, choices: List<Choice>, current: Int, onPick
     val chosen = choices.firstOrNull { it.value == current } ?: choices.first()
     // A limit that is not the default shows in the color of a selection.
     val isSet = chosen !== choices.first()
+
     Box(
         Modifier
             .clip(CircleShape)
@@ -204,6 +219,7 @@ private fun LimitChip(title: String, choices: List<Choice>, current: Int, onPick
             maxLines = 1,
         )
     }
+
     if (isOpen) {
         val selected = stringResource(R.string.search_selected)
         val labels = choices.map { stringResource(it.label) }
@@ -222,7 +238,9 @@ private fun LimitChip(title: String, choices: List<Choice>, current: Int, onPick
 /** The name of the sender of a result. */
 private fun senderOf(result: Core.Found, chat: Chat?, names: Map<UShort, String>?): String = when {
     result.isOutgoing -> UiText.get(R.string.common_you)
-    chat?.isGroup == true -> result.sender?.let { names?.get(it) ?: UiText.get(R.string.common_member_number, it.toInt()) } ?: chat.title
+    chat?.isGroup == true -> result.sender
+        ?.let { names?.get(it) ?: UiText.get(R.string.common_member_number, it.toInt()) }
+        ?: chat.title
     else -> chat?.title.orEmpty()
 }
 
@@ -230,6 +248,7 @@ private fun senderOf(result: Core.Found, chat: Chat?, names: Map<UShort, String>
 private fun ResultRow(result: Core.Found, showsChat: Boolean, names: Map<UShort, String>?) {
     val chat = Core.chats.firstOrNull { it.conversation == result.conversation }
     val sender = senderOf(result, chat, names)
+
     Row(
         Modifier.fillMaxWidth().padding(horizontal = PressInset, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -256,10 +275,11 @@ private fun ResultRow(result: Core.Found, showsChat: Boolean, names: Map<UShort,
                     color = Palette.TextSecondary,
                 )
             }
+
             // The contact of a conversation of two is its title, thus the
             // line repeats no name for it.
-            val names = showsChat && (result.isOutgoing || chat?.isGroup == true)
-            Snippet(result, if (names) stringResource(R.string.search_sender_prefix, sender) else "", Modifier.subline())
+            val showsSender = showsChat && (result.isOutgoing || chat?.isGroup == true)
+            Snippet(result, if (showsSender) stringResource(R.string.search_sender_prefix, sender) else "", Modifier.subline())
         }
     }
 }
@@ -272,6 +292,7 @@ private fun ResultRow(result: Core.Found, showsChat: Boolean, names: Map<UShort,
 private fun Snippet(result: Core.Found, prefix: String, modifier: Modifier = Modifier) {
     val color = Palette.TextSecondary.toArgb()
     val markColor = Palette.Action.toArgb()
+
     AndroidView(
         modifier = modifier,
         factory = { context ->
@@ -284,11 +305,13 @@ private fun Snippet(result: Core.Found, prefix: String, modifier: Modifier = Mod
         },
         update = { view ->
             view.setTextColor(color)
+
             val text = result.text
             // A long text starts a little before its match. A pair of
             // surrogates stays whole.
             var from = if (result.start > SNIPPET_LEAD + 4) result.start - SNIPPET_LEAD else 0
             if (from in 1 until text.size && text[from].isLowSurrogate()) from++
+
             val lead = prefix.length + if (from > 0) 1 else 0
             val shown = CharArray(lead + text.size - from)
             prefix.toCharArray(shown, 0, 0, prefix.length)
@@ -297,6 +320,7 @@ private fun Snippet(result: Core.Found, prefix: String, modifier: Modifier = Mod
                 val char = text[at]
                 shown[lead + at - from] = if (char == '\n' || char == '\r') ' ' else char
             }
+
             val line = SpannableStringBuilder(CharBuffer.wrap(shown))
             val start = result.start - from + lead
             val end = result.end - from + lead
@@ -304,6 +328,7 @@ private fun Snippet(result: Core.Found, prefix: String, modifier: Modifier = Mod
                 line.setSpan(ForegroundColorSpan(markColor), start, end, 0)
                 line.setSpan(StyleSpan(Typeface.BOLD), start, end, 0)
             }
+
             view.text = line
             shown.fill('\u0000')
         },

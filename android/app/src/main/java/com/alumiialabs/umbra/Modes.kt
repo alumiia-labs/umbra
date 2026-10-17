@@ -69,6 +69,8 @@ object Modes {
     private const val MODE = "mode"
     private const val PREVIEW = "preview"
     private const val PHASE = "phase"
+
+    /** Whether the callback of the network is in place. */
     private var isWatching = false
 
     /** The fixed clock of Private mode (§8.3). */
@@ -86,6 +88,7 @@ object Modes {
         val held = preferences(context).getString(MODE, null)?.let { name ->
             NotifyMode.entries.firstOrNull { it.name == name }
         } ?: NotifyMode.Instant
+
         return if (held == NotifyMode.Instant && !Push.isAvailable(context)) NotifyMode.Direct else held
     }
 
@@ -110,6 +113,7 @@ object Modes {
         val app = context.applicationContext
         // The carrier and the run with no view follow the mode.
         Core.modeIs(app, mode(app))
+
         when (mode(app)) {
             NotifyMode.Instant -> {
                 cancelClock(app)
@@ -165,6 +169,7 @@ object Modes {
     fun ingressChanged(context: Context) {
         val app = context.applicationContext
         if (mode(app) != NotifyMode.Private) return
+
         drawPhase(app)
         scheduleClock(app)
     }
@@ -183,6 +188,7 @@ object Modes {
         val period = PRIVATE_PERIOD_MS
         var next = now - now % period + phase
         if (next <= now) next += period
+
         val alarms = context.getSystemService(AlarmManager::class.java)
         // An inexact alarm needs no permission, and its batching is no
         // function of an arrival.
@@ -201,6 +207,7 @@ object Modes {
     fun watchNetwork(context: Context) {
         if (isWatching) return
         isWatching = true
+
         val app = context.applicationContext
         app.getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(
             object : ConnectivityManager.NetworkCallback() {
@@ -219,6 +226,7 @@ object Modes {
 class PrivateClock : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (Modes.mode(context) != NotifyMode.Private) return
+
         if (Core.isOpen()) Core.wake(context)
         Modes.scheduleClock(context)
     }
@@ -230,6 +238,7 @@ fun NotificationsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     var mode by remember { mutableStateOf(Modes.mode(context)) }
     var preview by remember { mutableStateOf(Modes.preview(context)) }
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.common_notifications), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
@@ -260,6 +269,7 @@ fun NotificationsScreen(onBack: () -> Unit) {
                 }
                 HorizontalDivider(color = Palette.Divider)
             }
+
             // NTF-082: the two controls of the high-risk configuration sit
             // on this one screen.
             ToggleRow(stringResource(R.string.modes_show_sender_and_text), preview) {

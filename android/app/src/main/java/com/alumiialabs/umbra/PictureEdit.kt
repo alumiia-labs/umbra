@@ -76,6 +76,7 @@ fun EditablePicture(hasPicture: Boolean, onSet: (Bitmap?) -> Unit, picture: @Com
     val scope = rememberCoroutineScope()
     var isChoosing by remember { mutableStateOf(false) }
     var cropping by remember { mutableStateOf<Bitmap?>(null) }
+
     // The picker gives this app the picked image alone (DIS-195).
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { picked ->
         if (picked != null) {
@@ -85,6 +86,7 @@ fun EditablePicture(hasPicture: Boolean, onSet: (Bitmap?) -> Unit, picture: @Com
             }
         }
     }
+
     Box(
         Modifier.press(role = Role.Button, label = stringResource(R.string.picture_edit_picture)) { isChoosing = true },
     ) {
@@ -104,6 +106,7 @@ fun EditablePicture(hasPicture: Boolean, onSet: (Bitmap?) -> Unit, picture: @Com
                 .padding(horizontal = 10.dp, vertical = 3.dp),
         )
     }
+
     if (isChoosing) {
         ActionSheet(
             stringResource(R.string.picture_picture),
@@ -119,6 +122,7 @@ fun EditablePicture(hasPicture: Boolean, onSet: (Bitmap?) -> Unit, picture: @Com
             onDismiss = { isChoosing = false },
         )
     }
+
     cropping?.let { image ->
         CropDialog(
             image,
@@ -146,6 +150,7 @@ private fun CropDialog(image: Bitmap, onDone: (Bitmap) -> Unit, onCancel: () -> 
             image.recycle()
         }
     }
+
     Dialog(
         onDismissRequest = onCancel,
         properties = DialogProperties(
@@ -162,21 +167,25 @@ private fun CropDialog(image: Bitmap, onDone: (Bitmap) -> Unit, onCancel: () -> 
         val shown = remember(image) { image.asImageBitmap() }
         val width = image.width.toFloat()
         val height = image.height.toFloat()
+
         BoxWithConstraints(Modifier.fillMaxSize().background(Color.Black)) {
             val frame = with(LocalDensity.current) { (minOf(maxWidth, maxHeight) - CROP_MARGIN * 2).toPx() }
+
             // The frame shows no pixel outside the image, and no zoom makes
             // a square smaller than the largest picture.
             val scaleMin = frame / minOf(width, height)
             val scaleMax = maxOf(scaleMin, frame / Photos.PICTURE_SIDE_MAX)
             var scale by remember(frame) { mutableFloatStateOf(scaleMin) }
+
             // The point of the image at the center of the frame.
             var centerX by remember(frame) { mutableFloatStateOf(width / 2) }
             var centerY by remember(frame) { mutableFloatStateOf(height / 2) }
-            fun hold() {
+            fun keepFrameInside() {
                 val half = frame / scale / 2
                 centerX = centerX.coerceIn(half, width - half)
                 centerY = centerY.coerceIn(half, height - half)
             }
+
             Canvas(
                 Modifier.fillMaxSize().pointerInput(frame) {
                     detectTransformGestures { centroid, pan, zoom, _ ->
@@ -184,10 +193,11 @@ private fun CropDialog(image: Bitmap, onDone: (Bitmap) -> Unit, onCancel: () -> 
                         // The point under the fingers stays under them.
                         val heldX = centerX + (centroid.x - middle.x) / scale
                         val heldY = centerY + (centroid.y - middle.y) / scale
+
                         scale = (scale * zoom).coerceIn(scaleMin, scaleMax)
                         centerX = heldX - (centroid.x - middle.x) / scale - pan.x / scale
                         centerY = heldY - (centroid.y - middle.y) / scale - pan.y / scale
-                        hold()
+                        keepFrameInside()
                     }
                 },
             ) {
@@ -201,6 +211,7 @@ private fun CropDialog(image: Bitmap, onDone: (Bitmap) -> Unit, onCancel: () -> 
                     dstSize = IntSize((width * scale).toInt(), (height * scale).toInt()),
                     filterQuality = FilterQuality.High,
                 )
+
                 val hole = Rect(middle, frame / 2)
                 val shade = Path().apply {
                     fillType = PathFillType.EvenOdd
@@ -210,6 +221,7 @@ private fun CropDialog(image: Bitmap, onDone: (Bitmap) -> Unit, onCancel: () -> 
                 drawPath(shade, Color.Black.copy(alpha = 0.6f))
                 drawCircle(Color.White, radius = frame / 2, center = middle, style = Stroke(1.5.dp.toPx()))
             }
+
             Row(
                 Modifier
                     .align(Alignment.TopStart)
@@ -219,11 +231,15 @@ private fun CropDialog(image: Bitmap, onDone: (Bitmap) -> Unit, onCancel: () -> 
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Box(
-                    Modifier.size(48.dp).clip(CircleShape).press(role = Role.Button, label = stringResource(R.string.common_cancel), onClick = onCancel),
+                    Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .press(role = Role.Button, label = stringResource(R.string.common_cancel), onClick = onCancel),
                     contentAlignment = Alignment.Center,
                 ) { FaIcon("xmark", label = stringResource(R.string.common_cancel), size = 20.dp, tint = Color.White) }
                 Spacer(Modifier.weight(1f))
             }
+
             Text(
                 stringResource(R.string.common_done),
                 style = MaterialTheme.typography.labelLarge,

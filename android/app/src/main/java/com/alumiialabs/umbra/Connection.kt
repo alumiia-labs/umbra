@@ -57,6 +57,7 @@ fun ConnectionStatus(onOpen: () -> Unit) {
         LinkState.Connecting -> stringResource(R.string.connection_connecting)
         LinkState.Down -> stringResource(R.string.connection_offline)
     }
+
     // The press shade is square and fills the height of the bar, as the lock
     // button beside it does.
     Row(
@@ -79,6 +80,7 @@ private fun StatusDot(state: LinkState) {
         LinkState.Connecting -> Palette.Waiting
         LinkState.Down -> Palette.Error
     }
+
     val pulse = rememberInfiniteTransition(label = "connecting")
     val faded by pulse.animateFloat(
         initialValue = 1f,
@@ -86,6 +88,7 @@ private fun StatusDot(state: LinkState) {
         animationSpec = infiniteRepeatable(tween(durationMillis = 800), RepeatMode.Reverse),
         label = "dot",
     )
+
     Box(
         Modifier
             .size(8.dp)
@@ -103,12 +106,14 @@ fun ConnectionScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val connection = Core.connection
     val state = Core.linkState
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.common_connection), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
             Spacer(Modifier.height(12.dp))
             HeroIcon("wifi")
             Spacer(Modifier.height(20.dp))
+
             val circuits = connection?.circuits.orEmpty()
             Headline(
                 when (state) {
@@ -128,6 +133,7 @@ fun ConnectionScreen(onBack: () -> Unit) {
                 },
             )
             Spacer(Modifier.height(10.dp))
+
             connection?.ingress?.let {
                 FactRow("globe", stringResource(R.string.connection_ingress_relay), place(it))
                 HorizontalDivider(color = Palette.Divider)
@@ -136,6 +142,7 @@ fun ConnectionScreen(onBack: () -> Unit) {
                 FactRow("globe", stringResource(R.string.connection_standby_relay), place(it))
                 HorizontalDivider(color = Palette.Divider)
             }
+
             circuits.forEachIndexed { index, hops ->
                 // NET-343: a chain of one operator under a provisional directory.
                 val shared = connection?.oneOperator?.getOrNull(index) == true
@@ -150,6 +157,7 @@ fun ConnectionScreen(onBack: () -> Unit) {
                     oneBloc -> UiText.get(R.string.umbra_ui_net_201)
                     else -> null
                 }
+
                 FactRow(
                     "route",
                     stringResource(R.string.connection_circuit_number, index + 1),
@@ -157,6 +165,7 @@ fun ConnectionScreen(onBack: () -> Unit) {
                 )
                 HorizontalDivider(color = Palette.Divider)
             }
+
             val epoch = connection?.directoryEpoch?.toLong() ?: 0L
             FactRow(
                 "file-lines",
@@ -168,6 +177,7 @@ fun ConnectionScreen(onBack: () -> Unit) {
                 },
             )
             HorizontalDivider(color = Palette.Divider)
+
             // Part 8 §8.2: the carrier, and what the relays and the NDR hold.
             var push by remember { mutableStateOf<uniffi.umbra_ffi.PushStatus?>(null) }
             LaunchedEffect(state) { Core.pushStatus { push = it } }
@@ -191,6 +201,7 @@ fun ConnectionScreen(onBack: () -> Unit) {
                 )
                 HorizontalDivider(color = Palette.Divider)
             }
+
             // Part 10 §10.4.2: the loops of this device, and its reports.
             var faults by remember { mutableStateOf<uniffi.umbra_ffi.LinkFaultStatus?>(null) }
             LaunchedEffect(state) { Core.linkFaultStatus { faults = it } }
@@ -210,6 +221,7 @@ fun ConnectionScreen(onBack: () -> Unit) {
                 )
                 HorizontalDivider(color = Palette.Divider)
             }
+
             // DIS-034, REL-161: a contact holds another view of a log.
             var warnings by remember { mutableStateOf(emptyList<uniffi.umbra_ffi.GossipWarningInfo>()) }
             LaunchedEffect(state) { Core.gossipWarnings { warnings = it } }
@@ -224,6 +236,7 @@ fun ConnectionScreen(onBack: () -> Unit) {
                     isError = true,
                 )
             }
+
             Spacer(Modifier.height(16.dp))
             SecondaryButton(stringResource(R.string.connection_reconnect)) { Core.connect(context, force = true) }
             Spacer(Modifier.height(24.dp))
