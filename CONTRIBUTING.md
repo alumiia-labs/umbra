@@ -116,8 +116,8 @@ in the same manner.
 
 ## Versions
 
-One version applies to the app, the crates, the specification, and the web
-site. `AGENTS.md` lists each place.
+One version applies to the app, the crates, the specification, the web site,
+and the Helm chart. `AGENTS.md` lists each place.
 
 - Increase the version in the commit that makes the change.
 - Run `cargo check` after the change. This command updates `Cargo.lock`.

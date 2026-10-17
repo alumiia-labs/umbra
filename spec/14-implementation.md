@@ -28,10 +28,13 @@ umbra/
 
 The dependency direction is strictly downward. A cycle is a build failure.
 
-Two crates of the layout do not exist in the reference implementation today.
-`umbra-web` waits for the web client, which is deferred (Part 1 §1.1), and `umbra-simd` waits
-for a SIMD path, which no crate needs yet. Thus each crate of the workspace
-forbids `unsafe` today, and the exception below has no crate to apply to.
+Two crates of the layout do not exist in the reference implementation today:
+
+- `umbra-web` waits for the web client, which is deferred (Part 1 §1.1).
+- `umbra-simd` waits for a SIMD path, which no crate needs yet.
+
+Thus each crate of the workspace forbids `unsafe` today, and the exception
+below has no crate to apply to.
 
 ## 14.2 Dependency policy
 
@@ -44,9 +47,9 @@ the third register carries a rule.**
 | **R2** auxiliary | The nine auxiliary primitives of Part 5 §5.1 | **30** more transitive crates above the R1 graph |
 | **R3** platform | Transport, storage, async runtime, FFI, and build tooling | No number in v1. §14.2.3 gives the rule |
 
-The combined cap for R1 and R2 is **70** transitive crates. **[IMP-002]** A change MUST name
-the register that it charges. **[IMP-003]** A claim that a change costs no crate MUST name
-that register too.
+The combined cap for R1 and R2 is **70** transitive crates. **[IMP-002]** A
+change MUST name the register that it charges. **[IMP-003]** A claim that a
+change costs no crate MUST name that register too.
 
 > *The cause for two caps, and not for one raised cap.* One cap over a graph
 > near 70 hides which register grew. The value of the message-core cap is that
@@ -58,9 +61,8 @@ that register too.
 ### 14.2.1 Register R1: the message core
 
 The trial figure is **37 crates** on `aarch64-linux-android`. It is 35 crates
-on `no_std` and on `wasm32`. That graph is
-about 65k LOC, and it has no open OSV or RustSec advisory at the pinned
-versions.
+on `no_std` and on `wasm32`. That graph is about 65k LOC, and it has no open
+OSV or RustSec advisory at the pinned versions.
 
 **The figure of 37 comes from a trial resolution outside this repository.**
 `DEPENDENCIES.md` holds the measurement of this repository, which the script
@@ -81,9 +83,9 @@ of §14.2.4 writes.
 
 Part 5 §5.1 registers nine auxiliary primitives. The table below gives the
 likely pure-Rust crate for each one. **Each count in the last column is an
-estimate.** `DEPENDENCIES.md` holds the measured counts. A count is the number of
-crates that the row adds above the R1 graph. A crate that two rows share counts
-one time.
+estimate.** `DEPENDENCIES.md` holds the measured counts. A count is the number
+of crates that the row adds above the R1 graph. A crate that two rows share
+counts one time.
 
 | # | Primitive | Likely pure-Rust crate | New crates (estimate) |
 | --- | --- | --- | --- |
@@ -98,10 +100,10 @@ one time.
 | AUX-9 | Additive secret sharing with Laplace noise | in-workspace, PrivEx-S2 | **0–1** |
 | AUX-10 | The `UsernameCaseMapped` profile of RFC 8265 (Part 9 §9.3.2) | `precis-profiles`, `precis-core`, `unicode-normalization`, `tinyvec`; the table generator `precis-tools` and its parsers are build-only | **4** |
 
-The low column sums to 13, and the high column sums to 25. Thus the estimate for
-R1 and R2 together is 50 to 62 crates, against the combined cap of 70.
-`DEPENDENCIES.md` holds the measured count. AUX-1
-alone takes half of the R2 cap.
+The low column sums to 13, and the high column sums to 25. Thus the estimate
+for R1 and R2 together is 50 to 62 crates, against the combined cap of 70.
+`DEPENDENCIES.md` holds the measured count. AUX-1 alone takes half of the R2
+cap.
 
 The cap of 30 is a real limit, and four decisions make it reachable. Each
 decision is already in another Part:
@@ -117,16 +119,18 @@ decision is already in another Part:
 4. **Write the PrivEx-S2 construction directly.** Part 10 §10.8 states this
    decision, and it prohibits a `draft-ietf-ppm-dap` dependency.
 
-**[IMP-005]** If the measured R2 count is more than 30, the maintainers MUST NOT tag a
-release. **[IMP-006]** Those maintainers MUST first remove a primitive, or MUST first revise
-this section with a written cause. §14.2.5 gives the removal candidates.
+**[IMP-005]** If the measured R2 count is more than 30, the maintainers MUST
+NOT tag a release. **[IMP-006]** Those maintainers MUST first remove a
+primitive, or MUST first revise this section with a written cause. §14.2.5
+gives the removal candidates.
 
 ### 14.2.3 Register R3: the platform subsystems
 
 R3 holds the transport stack, the storage stack, the async runtime, the UniFFI
-surface, and the build tooling. §14.2.8 names the transport stack. Each of
-them sits behind a feature that is off by default, thus the default graph
-holds no R3 crate, and `DEPENDENCIES.md` measures R3 on the two platform
+surface, and the build tooling. §14.2.8 names the transport stack.
+
+Each of them sits behind a feature that is off by default, thus the default
+graph holds no R3 crate. `DEPENDENCIES.md` measures R3 on the two platform
 builds: the Android library with `bindings`, and the relay server with
 `native`.
 
@@ -158,8 +162,8 @@ as `IMP-006` asks of R2.
 > it, and MPL-2.0 §3.3 permits the combination with AGPL-3.0. `deny.toml`
 > allows each of them for the named crates alone.
 
-**[IMP-008]** At the first measurement, the maintainers MUST publish the R3 count. **[IMP-009]** Those
-maintainers MUST set the R3 cap in the same change.
+**[IMP-008]** At the first measurement, the maintainers MUST publish the R3
+count. **[IMP-009]** Those maintainers MUST set the R3 cap in the same change.
 
 ### 14.2.4 Measurement: the party, the trigger, and the artifact
 
@@ -168,9 +172,11 @@ The figures of §14.2.2 and §14.2.5 are estimates of changes that the
 repository has not made, and those sections mark each one as an estimate.
 
 **The maintainers of the reference implementation measure the three counts.**
-The trigger is the first commit that adds the workspace `Cargo.toml` file. **[IMP-010]** That
-commit MUST also add a `DEPENDENCIES.md` file at the root of the repository. A
-build script generates that file, and no person maintains it by hand.
+The trigger is the first commit that adds the workspace `Cargo.toml` file.
+**[IMP-010]** That commit MUST also add a `DEPENDENCIES.md` file at the root of
+the repository. A build script generates that file, and no person maintains it
+by hand.
+
 **[IMP-011]** `DEPENDENCIES.md` MUST hold five items:
 
 1. The R1 count, the R2 count, and the R3 count, for each target triple.
@@ -182,10 +188,11 @@ build script generates that file, and no person maintains it by hand.
 The three target triples are `aarch64-linux-android`,
 `x86_64-unknown-linux-gnu`, and `wasm32-unknown-unknown`.
 
-**[IMP-012]** The maintainers MUST publish `DEPENDENCIES.md` before the first tagged release.
-**[IMP-013]** The maintainers MUST NOT tag a release without that file. **[IMP-014]** A CI job MUST generate
-that file again at each commit. **[IMP-015]** That job MUST fail the build on a difference
-against the committed file.
+**[IMP-012]** The maintainers MUST publish `DEPENDENCIES.md` before the first
+tagged release. **[IMP-013]** The maintainers MUST NOT tag a release without
+that file. **[IMP-014]** A CI job MUST generate that file again at each commit.
+**[IMP-015]** That job MUST fail the build on a difference against the
+committed file.
 
 ### 14.2.5 Removal candidates
 
@@ -211,8 +218,8 @@ examine a primitive removal after them.
 - **`libcrux`** — its formal-verification claim does not cover the ARM64 and
   NEON backend. That backend is 792 LOC, and it is 100 % admitted. It "needs
   proofs" for the runtime safety and for the correctness. UMBRA ships Android
-  first, thus the target is ARM64. If a deployment needs a
-  verified ML-KEM later, that deployment forces the portable backend on mobile.
+  first, thus the target is ARM64. If a deployment needs a verified ML-KEM
+  later, that deployment forces the portable backend on mobile.
 - **`liboqs-rust`** — the maintainers state that it is not for production use.
   Its only public audit excluded the algorithm implementations deliberately.
 - **`ring`** as the rustls provider — it gives no `X25519MLKEM768` key share
@@ -241,8 +248,8 @@ examine a primitive removal after them.
   database.
 - A CI job generates `DEPENDENCIES.md` again, and compares it against the
   committed file. A difference **fails the build**.
-- **A cooling-off window of 14 to 30 days** for an update that is not a security
-  update.
+- **A cooling-off window of 14 to 30 days** for an update that is not a
+  security update.
 
 > In August 2026 the `arrayref`, `internment`, and `append-only-vec` compromise
 > injected a typosquatted `proc-macro1`. The `build.rs` of that crate executed a
@@ -296,8 +303,8 @@ client build does not.
   workspace also carries `unsafe_code = "forbid"` in `[workspace.lints.rust]`.
   This is the real enforcement. It is a compiler error and not a suggestion.
 - The one exception is `umbra-simd`. That crate uses `#![deny(unsafe_code)]`
-  with explicit `#[allow]` sites. **[IMP-016]** That crate MUST give byte-identical output to
-  the portable path.
+  with explicit `#[allow]` sites. **[IMP-016]** That crate MUST give
+  byte-identical output to the portable path.
 - Examine a full removal of runtime SIMD detection on mobile. That removal drops
   `cpufeatures` and `libc`. It removes 672 `unsafe` tokens, and it gives a
   uniform graph of 35 crates across the three targets. Keep the detection only if
@@ -319,11 +326,11 @@ client build does not.
   that let a caller give a public key that did not match. The layered identity
   of UMBRA is the exact shape where such a mismatch is easy to write.
 - `encapsulate` consumes `self`.
-- **[IMP-017]** **Key material, a passphrase, and message plaintext MUST NOT be a Kotlin
-  `String` or `ByteArray`.** Each of these is an opaque UniFFI handle. The one
-  exception is passphrase entry. Take a `CharArray` and not a `String`, because
-  a `String` is immutable and the JVM can intern it. Copy the array into Rust
-  immediately, and then overwrite the array.
+- **[IMP-017]** **Key material, a passphrase, and message plaintext MUST NOT be
+  a Kotlin `String` or `ByteArray`.** Each of these is an opaque UniFFI handle.
+  The one exception is passphrase entry. Take a `CharArray` and not a `String`,
+  because a `String` is immutable and the JVM can intern it. Copy the array into
+  Rust immediately, and then overwrite the array.
 
 ## 14.5 Assurance
 
@@ -370,7 +377,6 @@ UMBRA **rejects Verus, Creusot, Prusti, and hax for v1**. Verus measures about 5
 proof-lines for each implementation-line. At that rate, the verification of a
 protocol core is a commitment of multiple engineer-years. libcrux spent that
 effort and reached only 58.4 % checked coverage.
-
 
 ## 14.6 Platform delivery
 
@@ -448,22 +454,26 @@ holds no copy of it outside the store (`IMP-160`).
 one time for each decode, into a sink of the platform. This is an exception to
 `IMP-037`, and it has a cause: the image decoder and the media player of the
 platform read a byte array or a stream, and a decoder inside the core would
-hand over pixels, which are the same plaintext. The core MUST overwrite its
-copy after the call. A media player reads a video in ranges, thus the core
-MAY hold one copy of the file in its memory for the time that the player is
-open, and give each range that the player asks for. The core MUST overwrite
-that copy when the player closes and at a lock, and MUST refuse each range
-after a lock.
-A picture that a peer made is a profile picture of Part 9 rule `DIS-176` or a
-picture of a contact request. The platform MUST decode such a picture to at
-most 1 024 pixels on each side. It MUST read the size of the picture
-before it decodes one pixel. A JPEG of a few kilobytes can name a very large
-canvas, and a decode of that canvas ends the process.
-The preview of Part 6 rule `WIR-533` MAY cross the surface as bytes in both
-directions, under the same terms: it is a picture, as the file is. The platform MUST overwrite the array when the decode
-ends, MUST NOT write the bytes to a file or to a platform cache, and MUST drop
-each decoded image at a lock. The exception covers a file alone: a text, a
-passphrase and key material stay under `IMP-037`.
+hand over pixels, which are the same plaintext.
+
+- The core MUST overwrite its copy after the call.
+- A media player reads a video in ranges, thus the core MAY hold one copy of
+  the file in its memory for the time that the player is open, and give each
+  range that the player asks for. The core MUST overwrite that copy when the
+  player closes and at a lock, and MUST refuse each range after a lock.
+- A picture that a peer made is a profile picture of Part 9 rule `DIS-176` or
+  a picture of a contact request. The platform MUST decode such a picture to
+  at most 1 024 pixels on each side. It MUST read the size of the picture
+  before it decodes one pixel. A JPEG of a few kilobytes can name a very large
+  canvas, and a decode of that canvas ends the process.
+- The preview of Part 6 rule `WIR-533` MAY cross the surface as bytes in both
+  directions, under the same terms: it is a picture, as the file is.
+- The platform MUST overwrite the array when the decode ends, MUST NOT write
+  the bytes to a file or to a platform cache, and MUST drop each decoded image
+  at a lock.
+
+The exception covers a file alone: a text, a passphrase and key material stay
+under `IMP-037`.
 
 **[IMP-038]** `Draft` and `MsgRef` MUST be opaque UniFFI object handles.
 **[IMP-039]** An implementation MUST zeroize the buffer behind a `Draft` when
@@ -479,7 +489,7 @@ lock fails.
   Kotlin wrapper of the app MUST fill that list from a `CharArray`, and it
   MUST overwrite the `CharArray` after the call. The list is an object on the
   JVM heap for the length of the call, and so is the buffer that UniFFI
-  lowers each value through in either direction; Part 15 §15.3 holds that
+  lowers each value through in either direction. Part 15 §15.3 holds that
   residual.
 - **[IMP-125]** The secure-element step of §14.6.4 MUST cross as one callback
   that takes the input of the keyed function and returns its 32 bytes. The
@@ -487,10 +497,11 @@ lock fails.
   bytes. The Rust side MUST overwrite the returned value after it derives
   `K_wrap`. The Android adapter computes the value into a buffer that it
   overwrites, and the copy that it returns stays on the JVM heap until the
-  collector frees it; Part 15 §15.3 holds that residual. The adapter MUST
-  NOT make a new key for a store that exists, because a new key opens
-  nothing. The client MUST then show that the key is lost, and not that the
-  passphrase is wrong.
+  collector frees it. Part 15 §15.3 holds that residual.
+
+  The adapter MUST NOT make a new key for a store that exists, because a new
+  key opens nothing. The client MUST then show that the key is lost, and not
+  that the passphrase is wrong.
 - **[IMP-126]** A record that waits for the send path MUST sit in the store
   under the record encryption of §14.6.4, in a table of its own. A lock MUST
   clear the queue in RAM, and an unlock MUST fill it again from that table.
@@ -501,14 +512,17 @@ lock fails.
 
 - **[IMP-127]** A lock MUST stop the network runtime, and the runtime MUST
   drop its state at that stop. That state holds ratchet keys, queue keys, and
-  circuit keys, and a locked client holds no key of the store in RAM. The hardening
-  secret `K_rng_harden` of `IMP-093` is a key of the store too, and it
-  leaves RAM at the lock with each other key. A restore of Part 4 §4.7.2
-  that runs holds the backup root key, and at its end the root seed and the
-  rows of the backup. It MUST end at the lock, and the user starts it again
-  after the unlock. The watch of Part 8 `NTF-142`
-  runs after the lock in a runtime of its own. It holds the watch table of
-  `NTF-145` and the keys of its own circuits, and no key of the store.
+  circuit keys, and a locked client holds no key of the store in RAM. The
+  hardening secret `K_rng_harden` of `IMP-093` is a key of the store too, and
+  it leaves RAM at the lock with each other key.
+
+  A restore of Part 4 §4.7.2 that runs holds the backup root key, and at its
+  end the root seed and the rows of the backup. It MUST end at the lock, and
+  the user starts it again after the unlock.
+
+  The watch of Part 8 `NTF-142` runs after the lock in a runtime of its own.
+  It holds the watch table of `NTF-145` and the keys of its own circuits, and
+  no key of the store.
 - **[IMP-128]** A client MUST order a conversation view by the time of its own
   store of each message. It MUST NOT order the view by `sent_at`, because that
   value comes from the peer, and a peer could thus put a message before an
@@ -516,18 +530,20 @@ lock fails.
 - **[IMP-181]** A client SHOULD show the `sent_at` of a message as its time.
   It MUST show the store time in its place when `sent_at` is after the store
   time, or earlier than the store time less `MSG_TTL`. The time that a
-  message shows MUST NOT change the order of `IMP-128`. The store time of a
-  row that the snapshot of a link carries is the store time on the device
-  that made the snapshot. A synced record of Part 7 §7.5.3 and a record of a
-  catch-up object carry no store time of their source, thus the store time
-  of such a row is the time at which this device stores it, and `sent_at`
-  shows the time of the message under the bounds above.
+  message shows MUST NOT change the order of `IMP-128`.
+
+  The store time of a row that the snapshot of a link carries is the store
+  time on the device that made the snapshot. A synced record of Part 7 §7.5.3
+  and a record of a catch-up object carry no store time of their source, thus
+  the store time of such a row is the time at which this device stores it,
+  and `sent_at` shows the time of the message under the bounds above.
 
   > *Cause.* A locked client stores each record at the unlock (`IMP-127`),
   > thus a store time shows the unlock and not the message. The sender
   > writes `sent_at`, and Part 6 `WIR-076` makes it advisory. A time on the
   > screen is no security decision, and the two bounds keep a wrong clock
   > of a peer from a time that no record could have.
+
 - **[IMP-129]** A conversation identifier on the surface MUST be the surrogate
   of §14.6.4 under the store key, and it MUST NOT be a queue identifier. Thus
   the owner column of a message row names no queue to a party that reads the
@@ -547,13 +563,16 @@ lock fails.
   of the message that it reports, or from the move of the read marker of
   `IMP-139`, to the slot that carries it (`NET-053`). It MUST erase the rows
   of a batch after a relay answered the record of the slot that carried
-  that batch, and not at the moment it made the batch or wrote its cell. A slot
-  that an acknowledgment took, and a run that ends before the `QUOTA`
+  that batch, and not at the moment it made the batch or wrote its cell.
+
+  A slot that an acknowledgment took, and a run that ends before the `QUOTA`
   of that record, leave the batch in the store. A relay that refuses the
-  record with `REJECTED` or `VERSION` ends the batch too, because that
-  record goes no more (`NET-217`). A kind that the user turns off MUST erase each held receipt of that
-  kind for that contact. The move of the read marker is the one source of a
-  read receipt, thus a notification gives none (`NET-043`).
+  record with `REJECTED` or `VERSION` ends the batch too, because that record
+  goes no more (`NET-217`).
+
+  A kind that the user turns off MUST erase each held receipt of that kind for
+  that contact. The move of the read marker is the one source of a read
+  receipt, thus a notification gives none (`NET-043`).
 - **[IMP-147]** A receipt is no message of a conversation, and a client MUST
   NOT store it as one. A receipt MUST change the delivery state of a message
   only when this device sent that message in the conversation of the peer
@@ -597,11 +616,12 @@ lock fails.
   record key (`DEV-099`, `DEV-100`). The row keeps its direction, its
   conversation, and its store time, thus the placeholder stands at the
   position of the message. A deletion for the devices of one user, on a
-  device set of one device, erases the row and sends nothing. Each deletion
-  MUST also drop each copy of the record, and of an edit of it, that waits
-  for another device of the set: the body for a resend, the copy that waits
-  for its publish, and a send that waits in RAM. The resend sends a void in
-  its place (Part 7 `DEV-069`).
+  device set of one device, erases the row and sends nothing.
+
+  Each deletion MUST also drop each copy of the record, and of an edit of it,
+  that waits for another device of the set: the body for a resend, the copy
+  that waits for its publish, and a send that waits in RAM. The resend sends
+  a void in its place (Part 7 `DEV-069`).
 - **[IMP-152]** A deletion request of this device is a record that waits for
   the send path as each other record does (`DEV-112`). It holds a raw
   `msg_id` under `WIR-070`. A client MUST show it in no view and in no
@@ -671,15 +691,16 @@ detaches a JVM thread at each callback, and the documentation of UniFFI itself
 calls that "a heavy operation."
 
 Pin the exact UniFFI version. Treat an increment as a change that blocks a
-release. Run a full Kotlin regression after an increment. UniFFI is before 1.0, and it shipped breaking changes across 0.29 to
-0.32.
+release. Run a full Kotlin regression after an increment. UniFFI is before
+1.0, and it shipped breaking changes across 0.29 to 0.32.
 
 ### 14.6.2 Android
 
 - Pin NDK **r28 or newer** in CI. Thus the 16 KB page alignment is automatic.
 - Ship `arm64-v8a` only for v1.
-- CI has two hard gates. **[IMP-021]** `llvm-objdump -p libumbra.so | grep LOAD` MUST show
-  `align 2**14` or higher. **[IMP-022]** `zipalign -v -c -P 16 4` MUST pass.
+- CI has two hard gates. **[IMP-021]** `llvm-objdump -p libumbra.so | grep
+  LOAD` MUST show `align 2**14` or higher. **[IMP-022]**
+  `zipalign -v -c -P 16 4` MUST pass.
 - If a build has to use NDK r27 or older, inject `-Wl,-z,max-page-size=16384
   -Wl,-z,common-page-size=16384` through RUSTFLAGS explicitly. `cargo-ndk` does
   not do this for you.
@@ -688,28 +709,40 @@ release. Run a full Kotlin regression after an increment. UniFFI is before 1.0, 
 ### 14.6.3 Deferred platforms
 
 iOS, the web client of §14.7, and a native desktop shell are outside the v1
-scope. Android is the v1 client platform (Part 1 §1.1), and v1 has no
-desktop client. §14.7 stays in this part as the design of the web client. Each
-rule of it binds that client when it ships and binds no v1
-conformance claim. The core keeps the UniFFI annotations and holds no platform
-assumption, thus a later platform adds a shell and no core change. An iOS
-version has to revisit four items: the notification extension of Part 8, the
-secure-element entanglement of §14.6.4, the file protection and the backup
-exclusion of §14.6.6, and the reproducible build of a static library. A native desktop shell reuses the extension bundle of
-§14.7 in a thin native window, with a code signature of its platform.
+scope. Android is the v1 client platform (Part 1 §1.1), and v1 has no desktop
+client.
+
+§14.7 stays in this part as the design of the web client. Each rule of it
+binds that client when it ships and binds no v1 conformance claim.
+
+The core keeps the UniFFI annotations and holds no platform assumption, thus a
+later platform adds a shell and no core change. An iOS version has to revisit
+four items:
+
+1. the notification extension of Part 8;
+2. the secure-element entanglement of §14.6.4;
+3. the file protection and the backup exclusion of §14.6.6;
+4. the reproducible build of a static library.
+
+A native desktop shell reuses the extension bundle of §14.7 in a thin native
+window, with a code signature of its platform.
 
 ### 14.6.4 Storage and keys
 
 **At rest**, UMBRA follows the shipped construction of Molly with three
-changes. The secure element computes a keyed function. The AEAD is
-**XChaCha20-Poly1305**, and not CBC with HMAC. The
-record layer below encrypts each record on its own.
+changes:
+
+1. The secure element computes a keyed function.
+2. The AEAD is **XChaCha20-Poly1305**, and not CBC with HMAC.
+3. The record layer below encrypts each record on its own.
+
+The steps:
 
 - Argon2id, calibrated to **about 3 s for each try** on a mid-range device,
   turns the passphrase into the 32-byte value `a`.
 - The secure element entangles `a` with a key that it holds. The device makes
-  that key **in StrongBox**, and the key never leaves it. Thus a brute force attack has to run on the seized device, at the speed
-  of the secure element.
+  that key **in StrongBox**, and the key never leaves it. Thus a brute force
+  attack has to run on the seized device, at the speed of the secure element.
 - The result wraps the storage master key `K_store` of Part 5 §5.2.
 - The client holds `K_store` in RAM after the unlock. Thus the client pays the
   3-second cost at each unlock, and not at each launch.
@@ -764,44 +797,49 @@ WrapHeader {                      // 97 bytes
   the passes until one try takes about 3 s. A device that needs more than 3 s
   at the floor keeps the floor. The header carries the two values, thus a
   restore on a faster device opens the store and the next passphrase change
-  calibrates again. **[IMP-175]** A client MUST refuse a header whose memory
-  is above four times the floor, or whose passes are above 3 000, before it
-  runs Argon2id: a party with the file that raises the two values would
-  otherwise make each unlock allocate without bound. It MUST also refuse a
-  header whose memory or passes are below the floor of `IMP-116`. No client
-  writes such a header, thus it is a fault of the file, and no wrap at a
-  later passphrase change takes its cost.
+  calibrates again.
+- **[IMP-175]** A client MUST refuse a header whose memory is above four times
+  the floor, or whose passes are above 3 000, before it runs Argon2id: a party
+  with the file that raises the two values would otherwise make each unlock
+  allocate without bound. It MUST also refuse a header whose memory or passes
+  are below the floor of `IMP-116`. No client writes such a header, thus it is
+  a fault of the file, and no wrap at a later passphrase change takes its
+  cost.
 - **[IMP-118]** A passphrase change MUST wrap the same `K_store` under a new
   `salt_pw` and a new `nonce_w`. It MUST NOT change `K_store`, because each
   record key derives from it.
 - **[IMP-119]** A client MUST NOT let the user set an auto-lock above 30
-  minutes of idle time, and the default MUST be 15 minutes. The idle time
-  is a duration of Part 1 rule `SCP-018`. A client MUST count it from the
-  last action of the user on a monotonic source that counts the sleep of the
-  device. The device clock MUST have no part in it. A change of the device
-  clock neither shortens nor lengthens the idle time. A client MUST NOT lock
-  because the device clock moved. Thus no step of the
-  device clock keeps a store open above its limit. No such step asks the user
-  for the passphrase in the middle of use. The reference client reads the
-  time since boot, which counts the sleep, at the last action and at each
-  tick. On a platform where it cannot read that time it counts on a
-  monotonic source that stops in a sleep. The client then locks late by the
-  length of each sleep, and never early.
-  **[IMP-140]** A client MUST keep that setting in the store, under the record
-  encryption of this section. A client MAY offer a lock at the moment the
-  application leaves the screen, and it MUST then keep an idle limit too, for
-  a device that stays on the screen with no action. A picker or a save view
-  of the platform that the application opens for its own result takes the
-  screen. That lock then waits for the result, for 2 minutes at most, because
-  a lock in between loses the picked file or the save.
+  minutes of idle time, and the default MUST be 15 minutes.
+
+  The idle time is a duration of Part 1 rule `SCP-018`. A client MUST count it
+  from the last action of the user on a monotonic source that counts the
+  sleep of the device. The device clock MUST have no part in it. A change of
+  the device clock neither shortens nor lengthens the idle time. A client MUST
+  NOT lock because the device clock moved. Thus no step of the device clock
+  keeps a store open above its limit. No such step asks the user for the
+  passphrase in the middle of use.
+
+  The reference client reads the time since boot, which counts the sleep, at
+  the last action and at each tick. On a platform where it cannot read that
+  time it counts on a monotonic source that stops in a sleep. The client then
+  locks late by the length of each sleep, and never early.
+- **[IMP-140]** A client MUST keep that setting in the store, under the record
+  encryption of this section.
+
+  A client MAY offer a lock at the moment the application leaves the screen,
+  and it MUST then keep an idle limit too, for a device that stays on the
+  screen with no action. A picker or a save view of the platform that the
+  application opens for its own result takes the screen. That lock then waits
+  for the result, for 2 minutes at most, because a lock in between loses the
+  picked file or the save.
 - **[IMP-141]** A client MUST ask for the current passphrase before a
   passphrase change. It MUST write the new header beside the database before
   it uses that header, because a client that holds a header which the file
   does not hold locks the user out at the next launch.
 
 **The database** uses `rusqlite` with the `bundled` feature, which is plain
-SQLite. The application adds XChaCha20-Poly1305 for each record, with a key for
-each record from HKDF-SHA3-256. UMBRA does **not** use
+SQLite. The application adds XChaCha20-Poly1305 for each record, with a key
+for each record from HKDF-SHA3-256. UMBRA does **not** use
 `bundled-sqlcipher-vendored-openssl`. That feature brings in OpenSSL to give
 cryptography that UMBRA links for other functions.
 
@@ -827,20 +865,24 @@ row_id  <- HMAC-SHA3-256( K_row, table_id || natural_key )[0..16]
   §5.11 holds the label.
 - **[IMP-121]** A row MAY carry one more indexed column, which is the `row_id`
   of the row that owns it, such as the conversation of a message. A client
-  MUST NOT index on another value. From record version `0x02` on, the
-  associated data of a record holds the owner column, as the block below
-  gives it. A client MUST open each record under the owner that its column
-  names. A read of the rows of one owner MUST open each row under that
-  owner. Thus a row that a party with the file moved to another owner does not
-  open. No caller of the store reads it as a row of that owner. The
-  row tag of Part 4 `IDN-033` reads the owner column too, thus the scan of
+  MUST NOT index on another value.
+
+  From record version `0x02` on, the associated data of a record holds the
+  owner column, as the block below gives it. A client MUST open each record
+  under the owner that its column names. A read of the rows of one owner MUST
+  open each row under that owner. Thus a row that a party with the file moved
+  to another owner does not open. No caller of the store reads it as a row of
+  that owner.
+
+  The row tag of Part 4 `IDN-033` reads the owner column too, thus the scan of
   `IDN-162` finds a row that a party hid from each owner. A row whose
-  plaintext holds no owner, such as a row of table `0x15`, has its owner
-  from this binding alone. The owner column of record version `0x01` sat
-  outside the associated data. Thus the plaintext of a row that names its
-  owner MUST still name it. A client MUST reject a row whose plaintext names
-  another owner. That check is the one that covers a row which a
-  party moved before the pass of `IMP-130`.
+  plaintext holds no owner, such as a row of table `0x15`, has its owner from
+  this binding alone.
+
+  The owner column of record version `0x01` sat outside the associated data.
+  Thus the plaintext of a row that names its owner MUST still name it. A
+  client MUST reject a row whose plaintext names another owner. That check is
+  the one that covers a row which a party moved before the pass of `IMP-130`.
 
 ```
 record_salt <- 16 bytes from the CSPRNG, stored beside the record
@@ -874,34 +916,36 @@ in the two versions, and `K_rec` is the same.
 - **[IMP-041]** A client that discards a record key under Part 7 MUST overwrite
   `record_salt` with zero bytes. Rules `DEV-099` and `DEV-210` of Part 7
   discard that key. Thus no party derives the key again from `K_store`.
-  **[IMP-122]** A client MUST NOT open a record whose `record_salt` is zero
+- **[IMP-122]** A client MUST NOT open a record whose `record_salt` is zero
   bytes. The record tag stays in the row. The table MAC of Part 4 §4.6 reads
   that tag with each bit inverted for a record with a zero salt. Thus the MAC
-  changes at a discard, and the client writes it in the deletion batch
-  of the discard. A zero salt that the client did not write then fails the scan
-  of `IDN-162`. Without the inversion a party with the file would hide
-  a row from each view with no change of a MAC.
+  changes at a discard, and the client writes it in the deletion batch of the
+  discard. A zero salt that the client did not write then fails the scan of
+  `IDN-162`. Without the inversion a party with the file would hide a row from
+  each view with no change of a MAC.
 - **[IMP-123]** A client MUST write the rows of a commit batch and the table
   MAC of each table that the batch changed in one transaction of the
   database. A crash between the two would leave a table that fails its MAC
   with no attacker.
-- A **deletion batch** is a tombstone batch of Part 7 §7.5.6, a retention purge
-  of §7.5.2, or a timer expiry of §7.5.8. **[IMP-042]** A client
-  MUST open the database with `PRAGMA secure_delete=ON`. **[IMP-043]** After a
-  client applies a deletion batch, it MUST run `PRAGMA wal_checkpoint(TRUNCATE)`.
-  Part 6 §6.8 rule `WIR-356` gives the test that checks the raw file.
+- A **deletion batch** is a tombstone batch of Part 7 §7.5.6, a retention
+  purge of §7.5.2, or a timer expiry of §7.5.8. **[IMP-042]** A client MUST
+  open the database with `PRAGMA secure_delete=ON`. **[IMP-043]** After a
+  client applies a deletion batch, it MUST run
+  `PRAGMA wal_checkpoint(TRUNCATE)`. Part 6 §6.8 rule `WIR-356` gives the test
+  that checks the raw file.
 
 > *Cause.* Part 7 rule `DEV-099` tells a device to discard the record key. A
 > record key from `K_store`, the table identifier, and the row identifier
 > only does not permit that. A key that a client derives again from a master
-> key that it still holds is not discarded. The random salt beside the record makes the
-> key of one record a value that an overwrite destroys. `secure_delete`
+> key that it still holds is not discarded. The random salt beside the record
+> makes the key of one record a value that an overwrite destroys. `secure_delete`
 > overwrites a freed page with zero bytes. The checkpoint moves each frame out
 > of the write-ahead log and truncates that log. Without the two, a deleted
 > record stays in a free page or in the log until SQLite reuses the space.
 
-**[IMP-024]** A client MUST store the keyed form of `msg_id` that Part 6 §6.6 gives. **[IMP-025]** A client
-MUST NOT store the raw value. Part 6 §6.6 gives the derivation and the cause.
+**[IMP-024]** A client MUST store the keyed form of `msg_id` that Part 6 §6.6
+gives. **[IMP-025]** A client MUST NOT store the raw value. Part 6 §6.6 gives
+the derivation and the cause.
 
 **A hardware keystore is a wrapping oracle and a keyed-function oracle. It is
 not a home for the keys of UMBRA.** StrongBox supports RSA-2048, AES, ECDSA and
@@ -929,10 +973,13 @@ ECDH P-256, HMAC-SHA256, and 3DES only. It has no X25519 and no ML-KEM.
 **The state of the client between two runs.** A platform ends a run of the
 network with no notice. Android closes the sockets of an application a short
 time after it leaves the screen. Thus the store holds the state that a run
-needs to continue each contact: the two queue ends of each channel, the
-cursor of the inbound queue, the Double Ratchet session with its skipped
-keys, and the braid. It also holds each invitation that waits for its
-flight 1, with its one-time prekey.
+needs to continue each contact:
+
+- the two queue ends of each channel;
+- the cursor of the inbound queue;
+- the Double Ratchet session with its skipped keys;
+- the braid;
+- each invitation that waits for its flight 1, with its one-time prekey.
 
 **[IMP-169]** A client MUST keep a handshake of Part 5 §5.4 that waits for its
 next flight in the store: the invitee from flight 1 to flight 2, with its
@@ -1050,37 +1097,43 @@ writes a record, before that write:
 1. For each table, the client opens each record of version `0x01` and seals
    it again under version `0x02`. The new seal uses a fresh `record_salt`, a
    fresh `nonce` (`IMP-040`), and the owner that the column of the record
-   names. It leaves a
-   record that is of version `0x02` already, and a record with a zero salt.
+   names. It leaves a record that is of version `0x02` already, and a record
+   with a zero salt.
+
    It commits the records of one table in one batch or more, each with the
    table MAC of the first form (`IMP-123`). Thus a pass that a platform ends
    leaves a store of version `0x01` that verifies at the unlock, with some
-   records of version `0x02`. The next pass takes the rest. The client
-   MUST read one row at a time. It MUST NOT hold a table in RAM, because one
-   row of table `0x10` is a whole file. A batch holds at most 4 MiB of
-   sealed records and at most 256 records. A record above 4 MiB is a
-   batch of its own. The client holds one record in the clear for the time
-   of its seal, and it overwrites that plaintext when the seal ends.
+   records of version `0x02`. The next pass takes the rest.
+
+   The client MUST read one row at a time. It MUST NOT hold a table in RAM,
+   because one row of table `0x10` is a whole file. A batch holds at most
+   4 MiB of sealed records and at most 256 records. A record above 4 MiB is a
+   batch of its own. The client holds one record in the clear for the time of
+   its seal, and it overwrites that plaintext when the seal ends.
 2. In one last transaction the client writes the MAC of each table and the
    set MAC in the second form of Part 4 `IDN-033` and `IDN-193`. That
    transaction is the mark of version `0x02`.
 
 Before the mark a client MUST read a record of each of the two versions. After
-the mark a client MUST NOT open a record of version `0x01`. Such a record
-is a fault of the file, and the client reports it in the manner of Part 4
-`IDN-039`. No path leads back. A set MAC of the first form does not verify the
-table MACs of the second form. A table MAC of the first form does
-not cover a record that the pass sealed again. A table that did not match
-its `accum` before the pass MUST NOT match it after. The client carries the
-difference into the `accum` of the second form. Thus the scan of `IDN-162`
-reports after the pass what it would have reported before. The pass reads
-each row, thus it sees that difference itself. A client that runs the pass
-at the unlock MUST report a table that did not match in the manner of
-`IDN-039` when the pass ends, and not only at the later scan. A party can put
-back the MACs of the first form, to pass a record of version `0x01` with a
-changed owner column through the pass. That party shows in this way, unless it
-puts back the full file. Part 4 §4.6 states that one residual, which is a
-full file of version `0x01` that a party puts back.
+the mark a client MUST NOT open a record of version `0x01`. Such a record is a
+fault of the file, and the client reports it in the manner of Part 4
+`IDN-039`. No path leads back.
+
+A set MAC of the first form does not verify the table MACs of the second form.
+A table MAC of the first form does not cover a record that the pass sealed
+again. A table that did not match its `accum` before the pass MUST NOT match
+it after. The client carries the difference into the `accum` of the second
+form. Thus the scan of `IDN-162` reports after the pass what it would have
+reported before.
+
+The pass reads each row, thus it sees that difference itself. A client that
+runs the pass at the unlock MUST report a table that did not match in the
+manner of `IDN-039` when the pass ends, and not only at the later scan.
+
+A party can put back the MACs of the first form, to pass a record of version
+`0x01` with a changed owner column through the pass. That party shows in this
+way, unless it puts back the full file. Part 4 §4.6 states that one residual,
+which is a full file of version `0x01` that a party puts back.
 
 A pass that a fault of the storage ends, such as a full disk, is no sign of a
 party with the file. The client MUST NOT report it in the manner of
@@ -1104,9 +1157,10 @@ through each batch of the pass and through the mark (`IDN-068`).
   platform media store. A client MUST put the file of a draft into the store
   at the send, before the first chunk leaves. Thus an upload continues after
   a new start with no second read of the source, which the platform can
-  take away. **[IMP-161]** A lock MUST take each file job out of the memory,
-  because a job holds its file in the clear, and an unlock MUST make the jobs
-  again from the store.
+  take away.
+- **[IMP-161]** A lock MUST take each file job out of the memory, because a
+  job holds its file in the clear, and an unlock MUST make the jobs again from
+  the store.
 - **[IMP-162]** The record of a file holds its descriptor (Part 6 §6.6 kind
   `0x02`), and the descriptor exists when the relays hold each chunk. Thus a
   client MUST store the message with no descriptor at the send, MUST NOT
@@ -1134,6 +1188,7 @@ through each batch of the pass and through the mark (`IDN-068`).
   > conversation. A download at arrival shows them the arrival alone. The
   > default keeps each photo and each document at arrival, and a large video
   > waits.
+
 - **[IMP-168]** A client MUST let the user limit the automatic download to a
   network that the platform does not mark as metered. With that limit on, a
   file that arrives on a metered network MUST wait as a file above the limit
@@ -1153,17 +1208,19 @@ through each batch of the pass and through the mark (`IDN-068`).
   > *Cause.* A recorder of the platform writes to a file by default, and a
   > file under the cache of the app outlives a crash. A recording that stays
   > after a lock is a plaintext that the lock of `IMP-161` does not reach.
+
 - **[IMP-164]** A deletion of a message MUST erase its rows in the tables
   `0x0F`, `0x10` and `0x11` in the batch that takes the message, and for a
   file that this device uploaded it MUST then send the `CDEL` of `ATT-161`
   for each chunk to each relay of that chunk. The credentials of those
-  chunks outlive the message for that purpose alone. The copy in table `0x55`
-  stays after the batch, across each lock and each new start. It stays until
-  each relay answered the `CDEL` or until `CHUNK_LIFE_MAX` of Part 12
-  passed since the upload, and the client then erases it. That copy holds
-  `chunk_id`, `cred_sk` and the relays of each chunk, and neither the file
-  key nor a name of the conversation. A `CDEL` whose answer a lock or a new
-  start lost goes again in the next run.
+  chunks outlive the message for that purpose alone.
+
+  The copy in table `0x55` stays after the batch, across each lock and each
+  new start. It stays until each relay answered the `CDEL` or until
+  `CHUNK_LIFE_MAX` of Part 12 passed since the upload, and the client then
+  erases it. That copy holds `chunk_id`, `cred_sk` and the relays of each
+  chunk, and neither the file key nor a name of the conversation. A `CDEL`
+  whose answer a lock or a new start lost goes again in the next run.
 - **[IMP-159]** A client MUST keep the highest epoch of a `DirectoryRoot`
   that it verified in the settings table, and it MUST give the larger of
   that value and the shipped epoch of `REL-045` to the consensus at each
@@ -1209,11 +1266,11 @@ through each batch of the pass and through the mark (`IDN-068`).
   that `msg_id`.
 
 The high-water mark of `DEV-089` rests on the sender-chain position of a
-record. The v1 node gives the store a record and no position,
-thus the store applies each edit in the order of its arrival. Each queue
-delivers in order, and the one device that reads a pairwise queue publishes
-each edit on the sync channels in the order that it took it, thus the order
-holds but for a late resend of an earlier edit.
+record. The v1 node gives the store a record and no position, thus the store
+applies each edit in the order of its arrival. Each queue delivers in order,
+and the one device that reads a pairwise queue publishes each edit on the sync
+channels in the order that it took it. Thus the order holds but for a late
+resend of an earlier edit.
 
 `IMP-169` and `IMP-170` keep a handshake between its flight 1 and its flight 3
 in the store, thus a run that ends inside that window loses no handshake.
@@ -1223,9 +1280,9 @@ in the store, thus a run that ends inside that window loses no handshake.
 **[IMP-029]** Relay reputation MUST come from the mechanisms of Part 10 §10.3
 and Part 10 §10.4 only. Those sections give the class tests of the
 authorities and the negative link reputation, and Part 10 rule `REL-077`
-keeps a client from signing a report. **[IMP-030]** Relay reputation MUST NOT come from device
-attestation. **[IMP-031]** Relay reputation MUST NOT come from a "genuine device"
-proof.
+keeps a client from signing a report. **[IMP-030]** Relay reputation MUST NOT
+come from device attestation. **[IMP-031]** Relay reputation MUST NOT come from
+a "genuine device" proof.
 
 Quarkslab (2026-08-11) showed a Frida-hooked relay of a genuine attestation
 chain, from a clean oracle device, with no compromise of the secure hardware. If
@@ -1238,14 +1295,20 @@ that the attack used.
 
 Part 2 §2.2 gives adversary A7, which is the platform of an honest device and
 the software that shares that device. Each rule below names one platform
-interface, and it states what the client gives to that interface. A **platform
-store** is a location that the client does not encrypt under §14.6.4. The
-platform media store, the platform backup, the task snapshot, and the clipboard
-are platform stores.
+interface, and it states what the client gives to that interface.
+
+A **platform store** is a location that the client does not encrypt under
+§14.6.4. These are platform stores:
+
+- the platform media store;
+- the platform backup;
+- the task snapshot;
+- the clipboard.
 
 **Each social affordance stays.** A user can save a file, copy a message, and
 take a screenshot. Each of those is an explicit user action, and no rule below
 removes one. Part 2 rule `THR-013` names those actions as its one exception.
+
 The reference client offers no screenshot block for a conversation. A block
 binds the device of the user alone, and the other party can take a screenshot
 all the same, thus the block tells the user of a protection that it does not
@@ -1273,9 +1336,9 @@ screenshot.
 > *Cause.* Android sets `allowBackup` to true when no manifest states a value,
 > and a library manifest can set it. A restored container on a new handset is
 > a store that no key opens. §14.6.4 entangles the storage master key with a
-> secure-element key that never leaves the device. Thus the platform
-> backup gives a copy to a party that Part 15 §15.1 did not list, and it gives
-> the user nothing.
+> secure-element key that never leaves the device. Thus the platform backup
+> gives a copy to a party that Part 15 §15.1 did not list, and it gives the
+> user nothing.
 
 **The task snapshot.**
 
@@ -1323,11 +1386,15 @@ read. An index in a file is a second copy of each message. Thus the index
 sits in memory alone, and the client builds it from the store after an
 unlock.
 
-The reference client folds each text: no case, no accent, and one space for
-each run of white space. It indexes each group of three bytes of the folded
-text. Thus a query finds a part of a word, a part of a sentence, and a text in
-a script with no spaces. A word of 5 characters or more takes one spelling
-error, and a word of 8 characters or more takes two.
+The reference client does these steps:
+
+1. It folds each text: no case, no accent, and one space for each run of white
+   space.
+2. It indexes each group of three bytes of the folded text. Thus a query finds
+   a part of a word, a part of a sentence, and a text in a script with no
+   spaces.
+3. It takes one spelling error in a word of 5 characters or more, and two in a
+   word of 8 characters or more.
 
 - **[IMP-176]** A client MUST hold the search index in memory alone. It MUST
   NOT write the index, a part of it, or a value that it made from a message
@@ -1341,13 +1408,16 @@ error, and a word of 8 characters or more takes two.
   timer, or the end of the history period removed is no result. A text that
   an edit replaced is no match.
 - **[IMP-179]** A client MUST give no more than `SEARCH_RESULTS_MAX` = 200
-  results for one query. The default order MUST be: the exact text of the
-  query first, then each word of the query in any order, then a word with a
-  spelling error. In each of the three the newest message comes first. A
-  client MAY offer an order by age alone, the newest first or the oldest
-  first. A client MAY limit a query to one conversation, to one sending
-  side, to the messages with a file, and to an age. Each limit MUST read the
-  row of the store, as `IMP-178` requires for the text.
+  results for one query. The default order MUST be:
+  1. the exact text of the query;
+  2. each word of the query in any order;
+  3. a word with a spelling error.
+
+  In each of the three the newest message comes first. A client MAY offer an
+  order by age alone, the newest first or the oldest first. A client MAY limit
+  a query to one conversation, to one sending side, to the messages with a
+  file, and to an age. Each limit MUST read the row of the store, as `IMP-178`
+  requires for the text.
 - **[IMP-180]** A client MUST NOT write a query to the store or to a file,
   and it MUST keep no list of earlier queries. It MUST erase the query from
   memory when the search view closes and at a lock. A search MUST NOT send a
@@ -1358,23 +1428,25 @@ error, and a word of 8 characters or more takes two.
 > writes and how often a word repeats, to a party that holds the file and no
 > key. A row of the index that outlives its message keeps words of a message
 > that a timer removed. `IMP-178` makes the store the one authority: an index
-> that is late is only a list of candidates. A measurement on 2026-10-13 gave
-> 0.6 s for the build of 100 000 messages on a desktop processor, about
-> 42 MiB of memory, and 1 ms to 10 ms for a query.
+> that is late is only a list of candidates.
+>
+> A measurement on 2026-10-13 gave 0.6 s for the build of 100 000 messages on
+> a desktop processor, about 42 MiB of memory, and 1 ms to 10 ms for a query.
 
 ## 14.7 The web client
 
 **The web client is deferred.** Part 1 §1.1 puts it outside v1, as it puts
-iOS, and no v1 build holds it. This section keeps the design,
-and each rule of it binds the web client when it ships. The web client is
-the same
-Rust core, compiled to `wasm32-unknown-unknown`, in a browser extension. This
-section gives its form, its role in the device set, its transport, its
-storage, its randomness and notifications, and its build. Each rule of this
-specification binds the web client, except where a rule below names an
-exemption and its cause. The performance question is not a cause: the measured
-mean slowdown of WebAssembly is 1.45 to 1.55 times, and ML-KEM-768
-encapsulation takes 29 µs natively.
+iOS, and no v1 build holds it. This section keeps the design, and each rule of
+it binds the web client when it ships.
+
+The web client is the same Rust core, compiled to `wasm32-unknown-unknown`, in
+a browser extension. This section gives its form, its role in the device set,
+its transport, its storage, its randomness and notifications, and its build.
+
+Each rule of this specification binds the web client, except where a rule
+below names an exemption and its cause. The performance question is not a
+cause: the measured mean slowdown of WebAssembly is 1.45 to 1.55 times, and
+ML-KEM-768 encapsulation takes 29 µs natively.
 
 ### 14.7.1 The form: an extension, and not a hosted page
 
@@ -1519,7 +1591,6 @@ that assumption. The release build pins its toolchain (§14.5.1) and holds
 `Cargo.lock`. No independent party rebuilds a release, and the project runs
 no binary transparency log. Part 15 §15.5 states the result.
 
-
 ## 14.9 Degraded states and the interface
 
 Part 2 §2.4 sets goals that assume an interface. U1 assumes a first launch
@@ -1568,24 +1639,24 @@ its condition, its end, and the one line that the client shows.
 **The route view.** Part 3 rules `NET-201`, `NET-343` and `NET-350` require a
 display of each circuit, and this paragraph gives it. The client holds a
 connection view that the user reaches from the settings. The view lists the
-pinned ingress relay and the standby relay, each with its host and its country.
-It then lists one row for each circuit that the client holds. The row
-of a circuit names the country code of each hop in the order of the chain,
-as "DE → NL → SE". A row gains one of the two strings below after the
-countries, with a separator.
+pinned ingress relay and the standby relay, each with its host and its
+country. It then lists one row for each circuit that the client holds. The row
+of a circuit names the country code of each hop in the order of the chain, as
+"DE → NL → SE". A row gains one of the two strings below after the countries,
+with a separator.
 
 | Rule | Identifier | The string | The condition |
 | --- | --- | --- | --- |
 | `NET-343` | `umbra.ui.net-343` | "one operator" | Two hops of the circuit share an operator or a family |
 | `NET-201` | `umbra.ui.net-201` | "one jurisdiction" | Two hops of the circuit share a jurisdiction bloc, under `NET-200` or under `NET-350`, and the row does not already carry the string of `NET-343` |
 
-The line of the `provisional directory` state above names the state. The string
-of `NET-343` on each row names what it means for a circuit: one
+The line of the `provisional directory` state above names the state. The
+string of `NET-343` on each row names what it means for a circuit: one
 operator runs two ends of it. A circuit of one autonomous system, one prefix
 or one server under `NET-350` and `NET-351` exists only in a provisional
-network. There the row carries "one operator" already. The route view shows
-no relay identity beyond the host of the two pins, and it is a display and
-no control.
+network. There the row carries "one operator" already. The route view shows no
+relay identity beyond the host of the two pins, and it is a display and no
+control.
 
 - **[IMP-077]** A client MUST show each current degraded state in one line at
   the top of the message list. **[IMP-078]** A client MUST NOT show a degraded
@@ -1596,16 +1667,20 @@ no control.
   the table without a row in Part 2 §2.4.
 - **[IMP-082]** In the `recipient queue full` state, a client MUST keep the
   record `queued`. The relay holds `QUEUE_QUOTA` records of Part 3 §3.2.4, and
-  the sender holds the rest. The record goes again after `HOLD_RETRY` of 15
-  minutes, and each later wait is twice the wait before it. The bounds of
-  Part 3 rules `NET-219` and `NET-220` apply. At the bound the record
-  goes to `failed` with the full queue as its cause, and the state of this
-  rule ends for it. A `QUOTA` that names room ends the state, and each held
-  record goes at once. The full state of a conversation is the memory of
-  one run. The wait of a held record is in the store (table `0x0A`), and
-  the count of its sends is in the row of its send queue (table `0x07`).
-  Thus a new run, an unlock, and a new process send no held record before
-  its time, and the two bounds count across them.
+  the sender holds the rest.
+  - The record goes again after `HOLD_RETRY` of 15 minutes, and each later
+    wait is twice the wait before it.
+  - The bounds of Part 3 rules `NET-219` and `NET-220` apply. At the bound the
+    record goes to `failed` with the full queue as its cause, and the state of
+    this rule ends for it.
+  - A `QUOTA` that names room ends the state, and each held record goes at
+    once.
+
+  The full state of a conversation is the memory of one run. The wait of a
+  held record is in the store (table `0x0A`), and the count of its sends is in
+  the row of its send queue (table `0x07`). Thus a new run, an unlock, and a
+  new process send no held record before its time, and the two bounds count
+  across them.
 
 > *Cause.* Part 9 names a degraded read, Part 10 names a provisional
 > directory, Part 8 names a missing carrier, and Part 13 names a progress
@@ -1618,9 +1693,9 @@ no control.
 ### 14.9.3 The interface strings
 
 Rules of this specification require the interface to show a string. Examples
-are `NTF-009`, `ABU-040`, `IMP-050`, and the lines of the table
-above. A translation that drops such a string breaks the rule in that locale.
-The test of `IMP-086` finds that fault.
+are `NTF-009`, `ABU-040`, `IMP-050`, and the lines of the table above. A
+translation that drops such a string breaks the rule in that locale. The test
+of `IMP-086` finds that fault.
 
 - **[IMP-083]** Each string that a rule of this specification requires the
   interface to show MUST carry a stable message identifier. **[IMP-084]** That
@@ -1645,16 +1720,16 @@ the platform half.
 
 - **[IMP-090]** A client MUST take each CSPRNG output from the platform source,
   which is `getrandom` on Android and `crypto.getRandomValues` on the web
-  client of §14.7.
-  **[IMP-091]** A client MUST NOT hold a userspace generator that it seeds one
-  time. **[IMP-092]** A relay MUST take each CSPRNG output from `getrandom` of
-  its kernel.
+  client of §14.7. **[IMP-091]** A client MUST NOT hold a userspace generator
+  that it seeds one time. **[IMP-092]** A relay MUST take each CSPRNG output
+  from `getrandom` of its kernel.
 - **[IMP-093]** A client MUST apply the hardening of Part 5 §5.9 to each value
   that the platform source gives. The hardening secret `K_rng_harden` of Part 5
   §5.2 lives in the encrypted store of §14.6.4. Thus a platform generator that
-  fails after the first launch shows no raw output on the wire. A client
-  holds `K_rng_harden` in RAM from the unlock to the lock and at no other
-  time (`IMP-127`). Thus a locked client, and a client before its first
+  fails after the first launch shows no raw output on the wire.
+
+  A client holds `K_rng_harden` in RAM from the unlock to the lock and at no
+  other time (`IMP-127`). Thus a locked client, and a client before its first
   unlock, draws each value from the platform source alone. A locked client
   runs no network runtime, thus it makes no key of a session and no
   identifier of a queue in that state.
