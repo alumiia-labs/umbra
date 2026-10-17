@@ -145,6 +145,7 @@ fn wait_for<T>(handle: &Handle, mut pick: impl FnMut(FfiEvent) -> Option<T>) -> 
         let Some(event) = handle.wait_event(500) else {
             continue;
         };
+
         // A stop by the application is no fault of the network, and an
         // aged circuit ends a run with nothing failed (NET-320).
         if let FfiEvent::Offline { cause } = event {
@@ -242,6 +243,7 @@ fn start_relays_with(
             None => Box::new(MemoryStore::default()),
         };
         let node = RelayNode::restored(config, store.load().unwrap());
+
         // A relay dials each relay of the next layer.
         let next_hops: BTreeMap<_, _> = (0..LAYERS.len())
             .filter(|next| LAYERS[*next] == layer + 1)
@@ -470,6 +472,7 @@ fn two_apps_meet_and_talk_through_the_exported_surface() {
         FfiEvent::Invitation { link } => Some(link),
         _ => None,
     });
+
     // IDN-159: the fragment is 91 characters of base64url.
     assert_eq!(link.len(), format!("https://{HOST}/i#").len() + 91);
     bob.accept(link.clone()).unwrap();
@@ -504,6 +507,7 @@ fn two_apps_meet_and_talk_through_the_exported_surface() {
     let (conversation, message) = wait_for_message(&bob);
     assert_eq!(conversation, bob_conversation);
     assert_eq!(rendered(&bob, message), "hello bob");
+
     // The list of Bob shows one conversation with one message that he did
     // not see, under the name that he gave. The name and the marker live
     // in his store alone.
@@ -555,12 +559,14 @@ fn two_apps_meet_and_talk_through_the_exported_surface() {
     });
     assert!(bob.summaries().unwrap()[0].verified);
     assert!(!alice.summaries().unwrap()[0].verified);
+
     // A confirmation with no ceremony is refused.
     bob.confirm_verification(bob_conversation.clone()).unwrap();
     wait_for(&bob, |event| match event {
         FfiEvent::VerificationRefused { .. } => Some(()),
         _ => None,
     });
+
     // A scanned number that matches verifies, and a wrong one does not.
     assert!(!alice
         .verify_by_number(alice_conversation.clone(), "12345 67890".into())
@@ -679,6 +685,7 @@ fn fake_fcm(
                     https::respond(&mut stream, 200, "application/json", answer.as_bytes()).await;
                 continue;
             }
+
             let body = String::from_utf8(request.body).unwrap();
             let blob = body
                 .split(r#""b":""#)
@@ -829,6 +836,7 @@ fn a_message_to_a_locked_app_in_direct_mode_wakes_its_watch() {
     std::fs::create_dir_all(&directory).unwrap();
     let alice = launch(&directory, "alice.db", 1);
     let bob = launch(&directory, "bob.db", 2);
+
     // NTF-139, NTF-142: Direct mode holds no push token, and it binds each
     // queue for the watch.
     alice.set_watch(true).unwrap();
@@ -850,6 +858,7 @@ fn a_message_to_a_locked_app_in_direct_mode_wakes_its_watch() {
         if !table.is_empty() {
             break table;
         }
+
         assert!(started.elapsed() < STEP, "{:?}", alice.push_state());
         std::thread::sleep(Duration::from_millis(50));
     };
@@ -871,8 +880,10 @@ fn a_message_to_a_locked_app_in_direct_mode_wakes_its_watch() {
         if let Ok(blob) = woken.recv_timeout(Duration::from_secs(2)) {
             break blob;
         }
+
         assert!(started.elapsed() < STEP * 2, "no wake");
     };
+
     // NTF-136: the wake table opens the blob, and it names the
     // conversation of Bob.
     let opened = umbra_ffi::bindings::open_wake_blob(
@@ -1000,8 +1011,10 @@ fn a_group_record_wakes_a_member_that_went_away_through_its_notify_queue() {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
+
     // NTF-093: the GNREG of each replica leaves with the next pump.
     std::thread::sleep(Duration::from_secs(2));
+
     // NTF-135: the wake table of a locked Bob names the group.
     let table = bob.wake_table().unwrap();
     let bob_group = bob
@@ -1020,6 +1033,7 @@ fn a_group_record_wakes_a_member_that_went_away_through_its_notify_queue() {
     let draft = alice.new_draft(group).unwrap();
     draft.set_text(units("we leave at six")).unwrap();
     alice.send_draft(draft).unwrap();
+
     // NTF-136: the table opens the blob, and its alias names the group. A
     // late record of the pairwise queue can push first, and its blob names
     // that conversation.
@@ -1334,6 +1348,7 @@ fn start_signed_network_with(
         };
         let mut store: Box<dyn RelayStore> = Box::new(MemoryStore::default());
         let mut node = RelayNode::restored(config, store.load().unwrap());
+
         // WIR-526: a deposit reaches each other queue relay.
         node.set_queue_relays(
             placed
@@ -1342,6 +1357,7 @@ fn start_signed_network_with(
                 .map(|(id, (_, key))| (*id, *key))
                 .collect(),
         );
+
         // ABU-057, ABU-102: each relay signs its challenge, and the ingress
         // relays carry it beside the manifest.
         node.set_challenge_signer(
@@ -1361,6 +1377,7 @@ fn start_signed_network_with(
             // The first ingress relay has an address of its own here.
             route.0.relay.address = Some(std::net::IpAddr::from([127, 1, 0, 1]));
         }
+
         // The ingress relay is the carrier of the manifest, and of the
         // requests to the directory (`DIS-162`).
         carried.manifest = std::sync::Mutex::new((placed.layer == 1).then(|| manifest.clone()));
@@ -1463,6 +1480,7 @@ fn two_apps_take_their_network_from_a_signed_manifest() {
         Some(CA.into()),
     );
     assert_eq!(refused.err(), Some(FfiError::Unverified));
+
     // REL-147: a carrier that serves a part of the signed set as the set.
     // Each entry that is left still proves under the root. The key set is
     // the right one, thus the error is not the one that asks for a key
@@ -1479,6 +1497,7 @@ fn two_apps_take_their_network_from_a_signed_manifest() {
     assert_eq!(verified.epoch, epoch);
     assert!(!verified.is_clock_corrected);
     assert_eq!(verified.network.relays.len(), 7);
+
     // The two ingress relays are the two pins, and they come first. The
     // store holds them, thus the next call gives them in the same order.
     let pins_of = |network: &Network| -> Vec<Vec<u8>> {
@@ -1574,6 +1593,7 @@ fn two_apps_take_their_network_from_a_signed_manifest() {
     )
     .unwrap();
     assert_eq!(network_of(&alice, &older, 0).err(), Some(FfiError::Stale));
+
     // A device with no verified root takes it.
     let carol = launch(&directory, "carol.db", 3);
     assert_eq!(network_of(&carol, &older, 0).unwrap().epoch, epoch - 1);
@@ -1640,6 +1660,7 @@ fn a_network_of_one_operator_carries_a_contact_while_the_directory_is_provisiona
         let (_, message) = wait_for_message(to);
         assert_eq!(rendered(to, message), text);
     }
+
     // NET-343: the view names each circuit of one operator.
     let connection = alice.connection().unwrap();
     assert!(connection.standby.is_some());
@@ -1744,6 +1765,7 @@ fn the_authority_tool_holds_its_report_queue_in_a_network_of_one_operator() {
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).unwrap();
     let path = |name: &str| directory.join(name).to_str().unwrap().to_owned();
+
     // The settings of a test network: each seed is in the file.
     let settings = |name: &str, manifest: &[u8], keyset: &[u8]| {
         std::fs::write(path(&format!("{name}.manifest")), manifest).unwrap();
@@ -1774,6 +1796,7 @@ fn the_authority_tool_holds_its_report_queue_in_a_network_of_one_operator() {
         .iter()
         .any(|line| line.starts_with("authority online")));
     drop(tool);
+
     // REL-167: the file holds the address of the queue, then the key that
     // seals each report.
     let held = std::fs::read(path("provisional.queue")).unwrap();
@@ -1893,6 +1916,7 @@ fn a_file_goes_through_the_relays_of_a_signed_network() {
     // Two devices, each with a transfer task on a connection of its own.
     let clients = tokio::runtime::Runtime::new().unwrap();
     let tls = native::tls_config_with_root_file(CA).unwrap();
+
     // ABU-106: a registration carries a solution, thus each task takes the
     // signed challenges of the relays first, as a connect fetches them.
     std::thread::sleep(Duration::from_secs(3));
@@ -2010,6 +2034,7 @@ fn wait_for_file(handle: &Handle, message: &Arc<MsgHandle>, state: u8) {
         if file.state == state {
             return;
         }
+
         assert_ne!(file.state, 4, "the transfer failed");
         let _ = handle.wait_event(200);
     }
@@ -2091,12 +2116,14 @@ fn one_app_sends_a_file_and_the_other_app_gets_it() {
     draft.set_text(units("the summit at six")).unwrap();
 
     let sent = alice.send_draft(draft).unwrap();
+
     // The sender shows the caption while the upload runs.
     assert_eq!(rendered(&alice, sent.clone()), "the summit at six");
     let info = alice.msg_info(sent.clone()).unwrap();
     let file = info.file.unwrap();
     assert_eq!((file.pixel_w, file.pixel_h, file.mime_class), (800, 600, 1));
     assert!(file.state == 1 || file.state == 3);
+
     // The sender holds its own file from the start.
     assert_eq!(*alice.file_bytes(&sent).unwrap(), plain);
 
@@ -2110,6 +2137,7 @@ fn one_app_sends_a_file_and_the_other_app_gets_it() {
     let file = info.file.unwrap();
     assert_eq!((file.pixel_w, file.pixel_h, file.mime_class), (800, 600, 1));
     assert_eq!(*bob.file_bytes(&received).unwrap(), plain);
+
     // The caption travels in the body, and the sender keeps it after the
     // upload.
     assert_eq!(rendered(&bob, received.clone()), "the summit at six");
@@ -2475,6 +2503,7 @@ fn one_app_offers_a_group_and_the_other_app_joins_it() {
     assert_eq!(at_bob.group_id, info.group_id);
     assert_eq!((at_bob.own_index, at_bob.members), (1, 2));
     assert!(at_bob.is_ready);
+
     // The admin that offered the group shows under the name of its contact.
     let members = bob.group_members(joined.clone()).unwrap();
     let admin = members.iter().find(|member| member.index == 0).unwrap();
@@ -2837,6 +2866,7 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
     let mut control_app = vec![0u8; control_message.len()];
     let control_len = control_message.encode(&mut control_app).unwrap();
     control_app.truncate(control_len);
+
     // GRP-389: the record names the roster epoch that stands, thus the
     // member it removes still reads the object that removes it.
     let control_record = creator.post(&control_app, now, &mut rng).unwrap();
@@ -2948,6 +2978,7 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
     let GroupUpdate::Failed { tag: 40, .. } = group_update(&mut creator_rx) else {
         panic!("the relay took a credential it does not hold");
     };
+
     // GRP-398: the same record under the new pair, with the pair of the
     // epoch before it as the fallback, goes in before any `GKEY`.
     creator_tx
@@ -3090,6 +3121,7 @@ fn the_group_run_outlives_its_relays_and_carries_its_commands_on() {
         "{}",
         update_name(&update)
     );
+
     // A record that the caller gives while no relay runs waits in the
     // run, and it fails nowhere.
     commands
@@ -3122,6 +3154,7 @@ fn the_group_run_outlives_its_relays_and_carries_its_commands_on() {
         }
     }
     assert!(answered, "the record did not go in the new session");
+
     // The new session takes a new command as the first one did.
     commands.send(create(3)).ok().unwrap();
     let GroupUpdate::Created { tag: 3, .. } = group_update(&mut updates) else {
@@ -3158,6 +3191,7 @@ fn an_app_in_the_foreground_writes_its_backup_to_the_relays() {
         .unwrap()
         .network;
     assert_eq!(alice.last_backup_at(), None);
+
     // IDN-080: a device in the background writes none.
     alice.clone().connect(verified).unwrap();
     wait_for(&alice, |event| match event {
@@ -3219,6 +3253,7 @@ fn a_lost_phone_comes_back_from_its_backup_and_its_contact_talks_again() {
     // The backup of Alice goes up, and she writes her recovery code down.
     alice.set_foreground(true);
     let start = Instant::now();
+
     // The root follows the object, and a restore needs both. A fixed wait
     // for the root was too short on a slow machine.
     while alice.last_backup_at().is_none() || alice.is_backup_running() {
@@ -3363,6 +3398,7 @@ fn a_new_device_links_from_the_code_of_the_existing_one() {
         "no ticket",
     );
     assert!(ticket.starts_with("UMBRA-LINK:"));
+
     // DEV-285: the set begins with the existing device alone.
     let devices = alice.devices().unwrap();
     assert_eq!(devices.len(), 1);
@@ -3395,6 +3431,7 @@ fn a_new_device_links_from_the_code_of_the_existing_one() {
     );
     assert_eq!(code_of(&alice), code_of(&tablet));
     assert_eq!(code_of(&alice).unwrap().len(), 6);
+
     // No provision before the confirmation.
     std::thread::sleep(Duration::from_secs(3));
     assert!(code_of(&tablet).is_some());
@@ -3507,6 +3544,7 @@ fn a_new_device_links_from_the_code_of_the_existing_one() {
         );
         std::thread::sleep(Duration::from_millis(200));
     }
+
     // DEV-304: the receipt of Bob reaches the phone, and the state of the
     // message reaches the tablet that composed it.
     let on_tablet = tablet
@@ -3536,6 +3574,7 @@ fn a_new_device_links_from_the_code_of_the_existing_one() {
         }
         std::thread::sleep(Duration::from_millis(200));
     }
+
     // DEV-294: a contact that the phone makes after the link, and its
     // name, reach the tablet, and so does the first record of that contact.
     let carol = launch(&directory, "carol.db", 4);
@@ -3561,6 +3600,7 @@ fn a_new_device_links_from_the_code_of_the_existing_one() {
         if named {
             break;
         }
+
         assert!(
             start.elapsed() < Duration::from_secs(60),
             "no new contact on the tablet"
@@ -3597,6 +3637,7 @@ fn a_new_device_links_from_the_code_of_the_existing_one() {
             .count(),
         1
     );
+
     // §7.7: the snapshot held no recovery code of the phone, thus a device
     // that the user removes reads no later backup.
     let code_of = |handle: &Handle| {
@@ -3626,6 +3667,7 @@ fn a_new_device_links_from_the_code_of_the_existing_one() {
     let draft = bob.new_draft(bob_conversation.clone()).unwrap();
     draft.set_text(units("after the removal")).unwrap();
     bob.send_draft(draft).unwrap();
+
     // The phone holds an earlier record of Carol in its events too.
     wait_for(&alice, |event| match event {
         FfiEvent::Message { message, .. } => {
@@ -3645,6 +3687,7 @@ fn a_new_device_links_from_the_code_of_the_existing_one() {
             assert_ne!(rendered(&bob, message), "from a removed tablet");
         }
     }
+
     // The channel of the removed tablet shows as no conversation, in this
     // run and in the next one.
     assert_eq!(alice.summaries().unwrap().len(), 2);
@@ -3715,6 +3758,7 @@ fn link_new_device(
         FfiEvent::DeviceLinked => Some(()),
         _ => None,
     });
+
     // The owner reads flight 3 after the new device, thus its side of the
     // link ends a moment later, and a second link waits for it.
     tick_until(
@@ -3827,6 +3871,7 @@ fn a_linked_device_reads_and_writes_a_group() {
         if let Some(summary) = found {
             break summary.conversation;
         }
+
         assert!(
             start.elapsed() < Duration::from_secs(60),
             "Bob did not come in"
@@ -3873,6 +3918,7 @@ fn a_linked_device_reads_and_writes_a_group() {
         );
         std::thread::sleep(Duration::from_millis(200));
     }
+
     // GRP-338: the tablet makes no group of its own.
     assert!(tablet.create_group("Other".into()).is_err());
 
@@ -3961,6 +4007,7 @@ fn a_linked_device_takes_over_the_set_of_a_lost_phone_and_its_contact_talks_on()
     let bob_conversation = wait_for_contact(&bob);
 
     let laptop = link_new_device(&alice, &directory, "laptop.db", 3, &network_for);
+
     // The ratchet of the phone moves on after the snapshot of the link, and
     // the laptop takes the record of Bob on the sync channel.
     let draft = bob.new_draft(bob_conversation.clone()).unwrap();
@@ -4006,6 +4053,7 @@ fn a_linked_device_takes_over_the_set_of_a_lost_phone_and_its_contact_talks_on()
     let code = Arc::new(View::default());
     assert_eq!(laptop.take_over(code.clone()).err(), Some(FfiError::Busy));
     assert!(code.0.lock().unwrap().is_empty());
+
     // A record that the user composes on the laptop waits for the phone.
     let draft = laptop.new_draft(alice_conversation.clone()).unwrap();
     draft.set_text(units("while the phone was away")).unwrap();
@@ -4014,10 +4062,12 @@ fn a_linked_device_takes_over_the_set_of_a_lost_phone_and_its_contact_talks_on()
     // The clock of the laptop passes `OWNER_ABSENCE`.
     laptop.age_owner_absence().unwrap();
     assert!(laptop.can_take_over().unwrap());
+
     // DEV-235: what the phone owns.
     let count = laptop.take_over_count().unwrap();
     assert_eq!((count.contacts, count.groups, count.unreachable), (2, 0, 0));
     laptop.take_over(code.clone()).unwrap();
+
     // DEV-316: the new recovery code, as digits of type 0x0001.
     let digits = code.0.lock().unwrap().clone();
     assert_eq!(recovery_digits_kind(digits), 1);
@@ -4057,6 +4107,7 @@ fn a_linked_device_takes_over_the_set_of_a_lost_phone_and_its_contact_talks_on()
         );
         std::thread::sleep(Duration::from_millis(200));
     }
+
     // DEV-316: the record that waited for the phone went from the laptop.
     let start = Instant::now();
     while !holds_text(&bob, &bob_conversation, "while the phone was away") {
@@ -4066,6 +4117,7 @@ fn a_linked_device_takes_over_the_set_of_a_lost_phone_and_its_contact_talks_on()
         );
         std::thread::sleep(Duration::from_millis(200));
     }
+
     // DEV-131: the pairwise identity did not change, thus Bob sees no key
     // change and no prompt.
     assert!(bob.key_change(bob_conversation.clone()).unwrap().is_none());
@@ -4229,6 +4281,7 @@ fn a_removed_device_that_offers_a_renewal_gives_the_contact_a_question_and_no_ch
     });
     alice.clone().tick();
     alice.end_sweeps().unwrap();
+
     // The run sends the guard record at its next step. Part 7 §7.7 step
     // 2c: the rotation is what keeps the laptop from the queue that it
     // knew. Until Bob writes to the new queue, a device with the store of
@@ -4243,6 +4296,7 @@ fn a_removed_device_that_offers_a_renewal_gives_the_contact_a_question_and_no_ch
         alice.clone().tick();
         std::thread::sleep(Duration::from_millis(200));
     }
+
     // The address of the new queue went before this record on the ratchet.
     exchange(&alice, &alice_conversation, &bob, &bob_conversation, "two");
     exchange(
@@ -4269,6 +4323,7 @@ fn a_removed_device_that_offers_a_renewal_gives_the_contact_a_question_and_no_ch
     });
     assert!(bob.renewal_ask(bob_conversation.clone()).unwrap().is_some());
     assert!(bob.key_change(bob_conversation.clone()).unwrap().is_none());
+
     // The channel of Bob is the one of the phone: the two exchange a
     // record in each direction, and the laptop reads none of them.
     exchange(&alice, &alice_conversation, &bob, &bob_conversation, "four");
@@ -4380,6 +4435,7 @@ fn a_group_made_after_the_link_reaches_each_linked_device() {
         if let Some(summary) = found {
             break summary.conversation;
         }
+
         assert!(
             start.elapsed() < Duration::from_secs(60),
             "Bob did not come in"
@@ -4397,6 +4453,7 @@ fn a_group_made_after_the_link_reaches_each_linked_device() {
     draft.set_text(units("from bob")).unwrap();
     bob.send_draft(draft).unwrap();
     wait_for_text(&alice, &group, "from bob");
+
     // A linked device builds its own circuits to the replicas first.
     let start = Instant::now();
     loop {
@@ -4407,6 +4464,7 @@ fn a_group_made_after_the_link_reaches_each_linked_device() {
         if t && l {
             break;
         }
+
         assert!(
             start.elapsed() < Duration::from_secs(60),
             "the linked devices did not read the group: tablet {t} laptop {l}, reading tablet {:?} laptop {:?}",
@@ -4448,6 +4506,7 @@ fn a_group_made_after_the_link_reaches_each_linked_device() {
     let draft = bob.new_draft(joined.clone()).unwrap();
     draft.set_text(units("bob after the rekey")).unwrap();
     bob.send_draft(draft).unwrap();
+
     // This step failed on a loaded machine with its cause open. A failure
     // thus reports the state of each side.
     let start = Instant::now();
@@ -4586,6 +4645,7 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
     let alice = launch(&directory, "alice.db", 1);
     let bob = launch(&directory, "bob.db", 2);
     let carol = launch(&directory, "carol.db", 3);
+
     // The test outlives `CIRCUIT_MAX_AGE`, and the app starts a new run at
     // the end of an aged one (NET-320). A new run at each phase does the
     // same.
@@ -4605,11 +4665,13 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
     let link = alice.create_public_link(0).unwrap();
     assert!(link.link.starts_with("umbra://p/"));
     bob.set_profile_name("Bob".into()).unwrap();
+
     // DIS-132: a cross-relay token admits the hello in place of the proof
     // of work. The addressee holds the key from the log.
     alice.stock_tokens(0).unwrap();
     bob.stock_tokens(1).unwrap();
     assert_eq!(bob.tokens_held().unwrap(), 1);
+
     // DIS-180: the hello carries the profile of the sender and its note.
     request_with_note(&bob, &link.link, "We met at the summit.");
     assert_eq!(bob.tokens_held().unwrap(), 0);
@@ -4643,11 +4705,13 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
     let request = alice.contact_requests().unwrap().remove(0);
     alice.decline_contact_request(request.id).unwrap();
     assert!(alice.contact_requests().unwrap().is_empty());
+
     // DIS-134: the grace of the old queue ends.
     alice
         .maintain_directory_at(later + umbra_core::discovery::ROTATE_GRACE + 60)
         .unwrap();
     assert_eq!(alice.entry_queues(&link.id).unwrap(), (second, None));
+
     // DIS-137: the device reads its own entries, and each one is its own.
     assert!(alice.directory_warnings().unwrap().is_empty());
 
@@ -4657,10 +4721,12 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
     let handle = alice.claim_handle("Alice".into()).unwrap();
     assert!(handle.starts_with("@alice#"), "{handle}");
     assert_eq!(alice.my_handle().unwrap(), Some(handle.clone()));
+
     // §9.3.1: the profile link opens the blob beside the handle, and the
     // directory holds no key of it.
     alice.set_profile_name("Alice".into()).unwrap();
     alice.set_welcome("Say where we met.".into()).unwrap();
+
     // DIS-176: the picture is a JPEG, and other bytes are refused.
     // The frame header names one component of 16 by 16 pixels.
     let picture = vec![
@@ -4695,6 +4761,7 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].picture, carol_picture);
     assert!(alice.entries_at_limit().unwrap().is_empty());
+
     // §9.9: one tap moves the handle to a new queue.
     let start = Instant::now();
     loop {
@@ -4724,6 +4791,7 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
         }
     }
     std::thread::sleep(Duration::from_secs(6));
+
     // The blob stays beside the label through the rotation of its key, and
     // a request through the profile link reaches the new key.
     assert_eq!(preview_until_listed(&bob, &profile_link).1, "Alice");
@@ -4731,6 +4799,7 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
     wait_for_requests(&alice, 2);
     assert_eq!(alice.contact_requests().unwrap().len(), 2);
     assert!(alice.directory_warnings().unwrap().is_empty());
+
     // DIS-079: Carol holds the key of her first hello. The versions between
     // it and the new key show a rotation and no tombstone, thus her second
     // hello goes with no warning.
@@ -4753,6 +4822,7 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
         if alice.handle_rotation().unwrap() == Some((1, false)) {
             break;
         }
+
         assert!(
             start.elapsed() < Duration::from_secs(40),
             "the handle key did not come back"
@@ -4847,6 +4917,7 @@ fn a_blocked_contact_sends_and_nothing_shows() {
     alice.set_blocked(alice_bob.clone(), true).unwrap();
     assert!(alice.is_blocked(alice_bob.clone()).unwrap());
     send("while blocked");
+
     // The relay takes the record, and the device of Alice acknowledges it.
     let sent = bob
         .messages(bob_alice.clone())
@@ -4940,6 +5011,7 @@ fn a_party_prohibits_the_forward_of_its_messages_and_the_other_app_obeys() {
     assert_eq!(marks(&bob, &bob_alice), [true]);
     assert!(bob.msg_info(of_alice.clone()).unwrap().no_forward);
     assert!(!bob.msg_info(of_bob.clone()).unwrap().no_forward);
+
     // The forward of a message of Alice fails, and the one of his own
     // message works.
     assert_eq!(
@@ -4953,6 +5025,7 @@ fn a_party_prohibits_the_forward_of_its_messages_and_the_other_app_obeys() {
         }
         _ => None,
     });
+
     // The setting of Alice binds no message of Bob on her device.
     let from_bob = alice
         .messages(alice_bob.clone())
@@ -5063,6 +5136,7 @@ fn a_connect_that_replaces_a_run_keeps_the_new_run() {
 fn a_client_takes_the_signed_challenge_of_each_relay_from_the_carrier() {
     let relays = tokio::runtime::Runtime::new().unwrap();
     let network = start_signed_network(&relays);
+
     // ABU-057, ABU-102: each relay signs its challenge at its start and
     // hands it to the carriers of the manifest.
     std::thread::sleep(Duration::from_secs(3));
@@ -5086,6 +5160,7 @@ fn a_client_takes_the_signed_challenge_of_each_relay_from_the_carrier() {
         .iter()
         .all(|relay| !relay.identity_pk.is_empty()));
     assert_eq!(alice.challenges_held(), 0);
+
     // ABU-065, ABU-105: the connect fetches them from the ingress, and each
     // one verifies under the identity key of its relay.
     alice.clone().connect(verified).unwrap();

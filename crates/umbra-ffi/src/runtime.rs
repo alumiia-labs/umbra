@@ -638,6 +638,7 @@ fn settle(
             }
         }
     }
+
     let asked: Vec<(u64, &[u8])> = events
         .iter()
         .filter_map(|event| match event {
@@ -647,12 +648,14 @@ fn settle(
             _ => None,
         })
         .collect();
+
     let made = invitation_queues(&changes, &asked);
     for (_, queue) in &made {
         if !persist.device_invitation(queue) {
             return Err(Ended::StoreFault);
         }
     }
+
     let mut received: Vec<(ContactId, Vec<u8>)> = events
         .iter()
         .filter_map(|event| match event {
@@ -660,6 +663,7 @@ fn settle(
             _ => None,
         })
         .collect();
+
     let settled = Settled {
         made,
         stores_hellos,
@@ -667,7 +671,9 @@ fn settle(
     if changes.is_empty() && received.is_empty() {
         return Ok(settled);
     }
+
     let committed = persist.commit(changes, &received);
+
     // IMP-126: the store holds each record now, and this copy of the
     // plaintext leaves the memory.
     for (_, app) in &mut received {
@@ -676,6 +682,7 @@ fn settle(
     if !committed {
         return Err(Ended::StoreFault);
     }
+
     Ok(settled)
 }
 
@@ -751,6 +758,7 @@ impl Resends {
         if !arq.may_send(now) {
             return false;
         }
+
         let held = HeldSend {
             contact,
             app,
@@ -792,12 +800,14 @@ impl Resends {
         let Some(held) = self.held.get_mut(&tag) else {
             return false;
         };
+
         held.arq.rejected(reason);
         held.again_at = None;
         if held.arq.may_send(now) {
             self.wait(tag);
             return true;
         }
+
         self.ended(tag);
         false
     }
@@ -831,6 +841,7 @@ impl Resends {
             if held.arq.may_send(now) {
                 return Some((tag, held.arq.attempts() == 1));
             }
+
             self.ended(tag);
             stopped.push(tag);
         }
@@ -970,6 +981,7 @@ fn clock_stepped(before: (i64, bool), after: (i64, bool)) -> bool {
 fn cover_delay(rng: &mut OsRng) -> Duration {
     let mut bytes = [0u8; 4];
     let _ = rng.try_fill_bytes(&mut bytes);
+
     // A value in (0, 1], thus the logarithm is finite.
     let unit = (f64::from(u32::from_be_bytes(bytes)) + 1.0) / (f64::from(u32::MAX) + 1.0);
     COVER_MEAN.mul_f64(-unit.ln())
@@ -1094,6 +1106,7 @@ pub async fn run_client(
         let _ = updates.send(Update::Offline(Ended::DialFailed));
         return;
     };
+
     let started = match parked {
         Some(parked) => node.resumed(parked, unix_now(), &mut rng).map(|_| ()),
         None => node.connected(&mut rng),
@@ -1104,9 +1117,11 @@ pub async fn run_client(
         let _ = updates.send(Update::Offline(Ended::NodeFault));
         return;
     }
+
     // WIR-547: the time at which a resume with no capsule of the relay
     // counts as failed.
     let resume_end = tokio::time::Instant::now() + RESUME_CONFIRM_WAIT;
+
     // WIR-539, WIR-540: the cause of the end of a run that pauses its
     // session, and the time at which it waits for the relay no more.
     let mut pausing: Option<(Ended, tokio::time::Instant)> = None;
@@ -1118,24 +1133,30 @@ pub async fn run_client(
     let mut rendezvous_tags: BTreeMap<u64, u64> = BTreeMap::new();
     let mut report_handles: BTreeSet<u64> = BTreeSet::new();
     let mut tags: BTreeMap<u64, u64> = BTreeMap::new();
+
     // NET-218: the records of the user that wait for a relay
     // acknowledgment, for the ARQ of this run.
     let mut resends = Resends::default();
+
     let mut device_invites: BTreeSet<u64> = BTreeSet::new();
     // DEV-290: the handle of each device invitation whose link ended
     // before a relay made its queue. The store holds the queue of each
     // other one.
     let mut ended_invites: BTreeSet<u64> = BTreeSet::new();
+
     let mut is_foreground = true;
     let mut next_slot = tokio::time::Instant::now() + cover_delay(&mut rng);
+
     // The tick of `CIRCUIT_BUILD_TIMEOUT`. It sends nothing unless a build
     // ran out, and the cover clock stays memoryless.
     let mut tick = tokio::time::interval(Duration::from_secs(1));
+
     // The check of the queue rotations of Part 3 §3.2.6. A rotation
     // counts in days, thus a check each minute is on time. The minute
     // counts on the monotonic source (`SCP-018`): a device clock that moves
     // back stops no check, and no work of [`Update::Tick`] with it.
     let mut next_rotation_check = tokio::time::Instant::now();
+
     // IMP-146: the batch of receipts or the digest that a slot carried,
     // until a relay answered its record. With it goes the time at which the
     // run waits for that answer no more. The store erases the batch at the
@@ -1143,16 +1164,20 @@ pub async fn run_client(
     // one waits, no slot asks the store for a second one: the store names
     // the batch of its last answer alone.
     let mut carried: Option<(CoverSlot, tokio::time::Instant)> = None;
+
     let mut last_faults = LinkFaults::default();
+
     // NET-100: the end of a push-wake session, or none for a run of the
     // screen or of the carrier.
     let mut wake_end: Option<tokio::time::Instant> = None;
+
     // SCP-018, SCP-019: the reading of the two clocks that this run saw
     // last, from which a tick sees a clock movement. It starts from the
     // reading of the last run of this process.
     let mut clock_seen = *CLOCK_SEEN
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+
     let ended = 'run: loop {
         // WIR-254, WIR-339: the indices of the records of the user, and the
         // holes of the records of the contacts.
@@ -1167,11 +1192,13 @@ pub async fn run_client(
         for (contact, index) in node.take_lost() {
             let _ = updates.send(Update::Lost { contact, index });
         }
+
         // WIR-540: the relay answered the pause, thus each of its frames
         // arrived, and the connection closes.
         if let Some((cause, _)) = pausing.filter(|_| node.is_paused()) {
             break 'run cause;
         }
+
         let mut is_closed = false;
         for capsule in node.take_capsules() {
             if link.send(&capsule).await.is_err() {
@@ -1186,12 +1213,14 @@ pub async fn run_client(
             if !node.is_resuming() {
                 break 'run Ended::LinkClosed;
             }
+
             match open_again(&mut node, &guard, &tls, &mut rng).await {
                 Ok(opened) => link = opened,
                 Err(ended) => break 'run ended,
             }
             continue 'run;
         }
+
         let events = tokio::select! {
             received = link.recv() => match received {
                 Ok(bytes) => match node.on_capsule(&bytes, unix_now(), &mut rng) {
@@ -1240,6 +1269,7 @@ pub async fn run_client(
                     if resume.is_none() || node.pause().is_err() {
                         break 'run Ended::Stopped;
                     }
+
                     let end = tokio::time::Instant::now() + Duration::from_secs(PAUSE_WAIT);
                     pausing = Some((Ended::Stopped, end));
                     Vec::new()
@@ -1261,6 +1291,7 @@ pub async fn run_client(
                         tokio::time::Instant::now()
                             + Duration::from_secs(umbra_core::notify::WAKE_SESSION_MAX),
                     );
+
                     // NET-099: a push-wake session builds no spare circuit.
                     node.set_wake(true);
                     Vec::new()
@@ -1280,6 +1311,7 @@ pub async fn run_client(
                 if node.pause().is_err() {
                     break 'run Ended::WakeDone;
                 }
+
                 let end = tokio::time::Instant::now() + Duration::from_secs(PAUSE_WAIT);
                 pausing = Some((Ended::WakeDone, end));
                 Vec::new()
@@ -1289,6 +1321,7 @@ pub async fn run_client(
             () = tokio::time::sleep_until(next_slot), if pausing.is_none() => {
                 next_slot = tokio::time::Instant::now() + cover_delay(&mut rng);
                 let now = unix_now();
+
                 // NET-071, NET-065: a record of the user goes again in a
                 // slot: one that a relay refused with `BUSY` or
                 // `ADMISSION`, one whose send took no answer, and one whose
@@ -1303,6 +1336,7 @@ pub async fn run_client(
                     tags.retain(|_, held| *held != tag);
                     let _ = updates.send(Update::Failed(tag));
                 }
+
                 if let Some((tag, is_first)) = resend {
                     let is_free =
                         is_first || matches!(node.on_ack_slot(now, &mut rng), Ok(false));
@@ -1325,33 +1359,36 @@ pub async fn run_client(
                     }
                     Vec::new()
                 } else {
-                // IMP-146: a batch whose record took no answer in
-                // `CARRIED_WAIT` waits for none, and a slot carries the
-                // batch of the store again.
-                if carried.is_some_and(|(_, until)| tokio::time::Instant::now() >= until) {
-                    carried = None;
-                }
-                let receipt = if carried.is_none() { persist.due_receipt(now) } else { None };
-                // NET-065: a digest only where no receipt waits.
-                let asks_digest = carried.is_none() && receipt.is_none();
-                let digest = if asks_digest { persist.due_digest(now) } else { None };
-                let given = receipt.as_ref().map(|(contact, app)| (contact, app.as_slice()));
-                let offered = digest.as_ref().map(|(contact, app)| (contact, app.as_slice()));
-                if let Ok(slot @ (CoverSlot::Receipt | CoverSlot::Digest)) =
-                    node.on_cover_slot(is_foreground, given, offered, now, &mut rng)
-                {
-                    carried = Some((slot, tokio::time::Instant::now() + CARRIED_WAIT));
-                }
-                for contact in node.take_gaps() {
-                    let _ = updates.send(Update::DeliveryGap(contact));
-                }
-                Vec::new()
+                    // IMP-146: a batch whose record took no answer in
+                    // `CARRIED_WAIT` waits for none, and a slot carries the
+                    // batch of the store again.
+                    if carried.is_some_and(|(_, until)| tokio::time::Instant::now() >= until) {
+                        carried = None;
+                    }
+
+                    let receipt = if carried.is_none() { persist.due_receipt(now) } else { None };
+
+                    // NET-065: a digest only where no receipt waits.
+                    let asks_digest = carried.is_none() && receipt.is_none();
+                    let digest = if asks_digest { persist.due_digest(now) } else { None };
+                    let given = receipt.as_ref().map(|(contact, app)| (contact, app.as_slice()));
+                    let offered = digest.as_ref().map(|(contact, app)| (contact, app.as_slice()));
+                    if let Ok(slot @ (CoverSlot::Receipt | CoverSlot::Digest)) =
+                        node.on_cover_slot(is_foreground, given, offered, now, &mut rng)
+                    {
+                        carried = Some((slot, tokio::time::Instant::now() + CARRIED_WAIT));
+                    }
+                    for contact in node.take_gaps() {
+                        let _ = updates.send(Update::DeliveryGap(contact));
+                    }
+                    Vec::new()
                 }
             }
             // NET-169: a build that no relay answers ends, and the run
             // ends with its last circuit.
             _ = tick.tick(), if pausing.is_none() => {
                 let now = unix_now();
+
                 // SCP-019: a step of the device clock of more than
                 // CLOCK_SKEW against the monotonic source interrupts each
                 // duration that runs.
@@ -1364,19 +1401,25 @@ pub async fn run_client(
                 *CLOCK_SEEN
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(offset);
+
                 node.set_challenge_clock(now);
                 let mut events = node.on_tick(now);
+
                 // DIS-015: the rendezvous circuits start on their own delay.
                 let _ = node.start_rendezvous_due(now, &mut rng);
+
                 // NET-347: a record that waits takes a new build after one
                 // that ran out of time.
                 let _ = node.rebuild_lost(now, &mut rng);
+
                 // NET-320, NET-321: a circuit near a margin takes a spare,
                 // and the run goes on.
                 let _ = node.replace_aging(now, &mut rng);
+
                 // A `SUB` that a relay refused with `LIMIT` or `BUSY` goes
                 // again at the end of its wait.
                 let _ = node.subscribe_due(now, &mut rng);
+
                 // NET-176: a fault of one rotation ends no run, and the
                 // next check tries again.
                 if node.is_ready() && tokio::time::Instant::now() >= next_rotation_check {
@@ -1385,6 +1428,7 @@ pub async fn run_client(
                     events.extend(node.rotate_due(now, &mut rng).unwrap_or_default());
                     let _ = updates.send(Update::Tick);
                 }
+
                 // The view of the connection reads the counts while the run
                 // holds them.
                 if node.faults() != &last_faults {
@@ -1394,6 +1438,7 @@ pub async fn run_client(
                 events
             }
         };
+
         // ABU-048: each `NEW` that a relay under load refused goes once
         // more with a token of this device, or with a proof of work.
         let mut events = events;
@@ -1408,12 +1453,14 @@ pub async fn run_client(
             if pausing.is_some() {
                 break;
             }
+
             let token = persist.admission_token(unix_now());
             match node.admit_queue(handle, token.as_deref(), &mut rng) {
                 Ok(more) => events.extend(more),
                 Err(_) => break 'run Ended::NodeFault,
             }
         }
+
         let asked: BTreeSet<u64> = device_invites.union(&ended_invites).copied().collect();
         let Settled {
             made,
@@ -1426,6 +1473,7 @@ pub async fn run_client(
             Err(_) if pausing.is_some() => continue 'run,
             Err(ended) => break 'run ended,
         };
+
         for event in events {
             let update = match event {
                 ClientEvent::CircuitReady => Update::Online,
@@ -1444,6 +1492,7 @@ pub async fn run_client(
                         }
                         continue;
                     }
+
                     if device_invites.remove(&handle) {
                         Update::DeviceInvitation(bundle)
                     } else {
@@ -1631,21 +1680,26 @@ pub async fn run_client(
             };
             let _ = updates.send(update);
         }
+
         let chains = node.chains();
         if chains != shown_chains {
             shown_chains.clone_from(&chains);
             let _ = updates.send(Update::Circuits(chains));
         }
+
         let queues = node.inbound_queues();
         if queues != shown_queues {
             shown_queues.clone_from(&queues);
             let _ = updates.send(Update::Queues(queues));
         }
+
         while node.is_ready() && pausing.is_none() {
             let Some(command) = early.pop_front() else {
                 break;
             };
+
             let now = unix_now();
+
             // A value of the user ends no runtime: a bad bundle and a send
             // to no contact fail that one command.
             match command {
@@ -1756,6 +1810,7 @@ pub async fn run_client(
                     sent,
                 } => {
                     let told = node.peer_candidate(&contact, &address, dead, sent, now, &mut rng);
+
                     // NET-191: the store learns of the one send.
                     for event in told.unwrap_or_default() {
                         if let ClientEvent::CandidateSent { contact } = event {
@@ -1836,6 +1891,7 @@ pub async fn run_client(
             }
         }
     };
+
     // WIR-360, WIR-542: the session of a run that ended at the word of the
     // client or with its link stays for the next run. A link that closed
     // with no pause resumes only when no frame was in flight.
@@ -1845,6 +1901,7 @@ pub async fn run_client(
         }
         _ => None,
     };
+
     // WIR-246: a session that no run continues ends at the relay now, and
     // the relay holds no circuit for it.
     if parked.is_none() {
@@ -1855,6 +1912,7 @@ pub async fn run_client(
     if let Some(slot) = &resume {
         slot.put(turn, parked);
     }
+
     // REL-172: the counts go to the next run.
     let _ = updates.send(Update::Faults(Box::new(node.take_faults())));
     let _ = updates.send(Update::Offline(ended));
@@ -1878,6 +1936,7 @@ mod tests {
         assert!(resends.hold(7, contact, app(), new, 100));
         resends.left(7, 100);
         assert_eq!(resends.next(100, &mut stopped), None);
+
         // NET-218: a `BUSY` and an `ADMISSION` continue the ARQ, and the
         // record waits for a slot. NET-065: the flag names the first
         // retransmission alone.
@@ -1888,6 +1947,7 @@ mod tests {
         assert_eq!(resends.next(102, &mut stopped), None);
         assert!(resends.refused(7, Reject::Admission, 103));
         assert_eq!(resends.next(103, &mut stopped), Some((7, false)));
+
         // NET-219: the send of `SEND_MAX_ATTEMPTS` is the last one.
         for _ in 2..SEND_MAX_ATTEMPTS {
             assert!(resends.take(7).is_some());
@@ -1905,6 +1965,7 @@ mod tests {
         assert!(resends.refused(8, Reject::Busy, 1_001));
         assert_eq!(resends.next(1_000 + SEND_GIVE_UP, &mut stopped), None);
         assert_eq!(stopped, [8]);
+
         // A relay that took the record ends its ARQ, and a refusal of a
         // record that this run does not hold continues none.
         assert!(resends.hold(9, contact, app(), new, 2_000));
@@ -1922,6 +1983,7 @@ mod tests {
         let contact = ContactId([3; 32]);
         let app = || Zeroizing::new(vec![1, 2, 3]);
         let mut resends = Resends::default();
+
         // NET-219: the store counts 14 sends of the record, for each
         // reason. This run has two sends left, and not sixteen.
         let prior = Prior {
@@ -1936,6 +1998,7 @@ mod tests {
         resends.left(5, 2_002);
         assert!(!resends.refused(5, Reject::Admission, 2_003));
         assert!(!resends.held.contains_key(&5));
+
         // A record at the count of an earlier run takes no send at all.
         let spent = Prior {
             sends: SEND_MAX_ATTEMPTS,
@@ -1943,6 +2006,7 @@ mod tests {
             in_slot: false,
         };
         assert!(!resends.hold(6, contact, app(), spent, 2_000));
+
         // NET-220: `SEND_GIVE_UP` runs from the first send of the record,
         // which an earlier run made.
         let old = Prior {
@@ -1961,10 +2025,12 @@ mod tests {
         let mut resends = Resends::default();
         let mut stopped = Vec::new();
         assert!(resends.hold(1, contact, app(), Prior::default(), 100));
+
         // A record that the node holds for a circuit left no send, and it
         // waits for no answer.
         resends.unanswered(100 + ANSWER_WAIT_MAX);
         assert_eq!(resends.next(100 + ANSWER_WAIT_MAX, &mut stopped), None);
+
         // NET-071: the wait ends with no send. The slot after it carries
         // the record, as its first retransmission (`NET-065`).
         resends.left(1, 100);
@@ -1977,6 +2043,7 @@ mod tests {
         );
         assert!(resends.take(1).is_some());
         resends.left(1, 200);
+
         // The second wait is twice the first one, and the send after it is
         // a later retransmission.
         resends.unanswered(200 + 2 * ANSWER_WAIT - 1);
@@ -1986,6 +2053,7 @@ mod tests {
             resends.next(200 + 2 * ANSWER_WAIT, &mut stopped),
             Some((1, false))
         );
+
         // The oldest send goes first.
         assert!(resends.hold(2, contact, app(), Prior::default(), 300));
         assert!(resends.hold(3, contact, app(), Prior::default(), 300));
@@ -1996,6 +2064,7 @@ mod tests {
         assert_eq!(resends.next(1_000, &mut stopped), Some((3, true)));
         assert!(resends.take(3).is_some());
         assert_eq!(resends.next(1_000, &mut stopped), Some((2, true)));
+
         // A relay that answered ends the wait.
         resends.ended(2);
         resends.unanswered(u64::MAX);
@@ -2014,6 +2083,7 @@ mod tests {
         let contact = ContactId([3; 32]);
         let mut resends = Resends::default();
         let mut stopped = Vec::new();
+
         // NET-071: the wait after a `LIMIT` ended inside the run. The
         // record leaves at no minute check: it waits for a slot.
         let held = Prior {
@@ -2023,6 +2093,7 @@ mod tests {
         };
         assert!(resends.hold(4, contact, Zeroizing::new(vec![9]), held, 2_000));
         resends.wait(4);
+
         // NET-065: one send left before, thus this one is the first
         // retransmission. After a second send it is a later one.
         assert_eq!(resends.next(2_000, &mut stopped), Some((4, true)));
@@ -2062,6 +2133,7 @@ mod tests {
             queue: [4; 32],
             envelope: vec![5; 8],
         }];
+
         // WIR-115: the store takes the hello in the step that commits the
         // call, and the run gives no update for it.
         let mut store = Ordered {
@@ -2071,6 +2143,7 @@ mod tests {
         let settled = settle(&mut node, &mut store, &hello, &BTreeSet::new());
         assert!(settled.is_ok_and(|settled| settled.stores_hellos));
         assert_eq!(store.calls.first(), Some(&"hello"));
+
         // A store that did not take it ends the run before the batch, thus
         // no cursor moves and no `ACK` leaves.
         let mut store = Ordered {
@@ -2080,6 +2153,7 @@ mod tests {
         let settled = settle(&mut node, &mut store, &hello, &BTreeSet::new());
         assert!(matches!(settled, Err(Ended::StoreFault)));
         assert_eq!(store.calls, ["hello"]);
+
         // A store with no part in it leaves the hello to the update.
         let mut store = Ordered {
             calls: Vec::new(),
@@ -2102,6 +2176,7 @@ mod tests {
             StateChange::InvitationEnded { queue: [3; 32] },
             stored(2, &bundle),
         ];
+
         // DEV-290: the invitation of handle 7 reads queue 2, and a handle
         // whose bundle no change stores names no queue.
         let asked = [(7u64, bundle.as_slice()), (8, &[0x11; 64][..])];
@@ -2123,6 +2198,7 @@ mod tests {
     #[test]
     fn a_sleep_is_no_clock_movement_on_a_source_that_stops_in_it() {
         let skew = i64::try_from(umbra_core::directory::CLOCK_SKEW).unwrap_or(i64::MAX);
+
         // SCP-019: on a source that counts the sleep, a step of the device
         // clock in each direction is a movement. A step inside CLOCK_SKEW
         // is none.
@@ -2130,16 +2206,20 @@ mod tests {
         assert!(clock_stepped((0, true), (skew + 1, true)));
         assert!(clock_stepped((40, true), (39 - skew, true)));
         assert!(!clock_stepped((40, true), (40 - skew, true)));
+
         // A source that stops in a sleep falls behind by each sleep. A
         // night of sleep is thus no movement, and each duration of a
         // rotation, of an invitation, and of a `DEL` runs on.
         assert!(!clock_stepped((0, false), (8 * 3_600, false)));
+
         // A device clock that fell behind such a source moved back.
         assert!(clock_stepped((0, false), (-skew - 1, false)));
         assert!(!clock_stepped((0, false), (-skew, false)));
+
         // Two readings of two sources compare no more.
         assert!(!clock_stepped((0, true), (90_000, false)));
         assert!(!clock_stepped((0, false), (-90_000, true)));
+
         // The reading of this process starts at its anchor.
         let now = unix_now();
         let (offset, _) = clock_offset(now);
@@ -2152,6 +2232,7 @@ mod tests {
         assert!(is_hardened());
         let mut hardened = [0u8; 32];
         let _ = OsRng.try_fill_bytes(&mut hardened);
+
         // IMP-127: a locked client holds no key, and its values come from
         // the platform source alone.
         harden_clear();

@@ -256,6 +256,7 @@ impl DirectoryLink {
         if newest.tree_size == tree_size {
             return Ok(Some(newest.root == *root));
         }
+
         Ok(Some(
             umbra_core::discovery::logtree::verify_consistency(
                 tree_size,
@@ -282,14 +283,17 @@ impl DirectoryLink {
         if held.hk_pub == resolved.hk_pub {
             return Ok(Takeover::Silent);
         }
+
         // DIS-061: the log does not give an older version than it gave.
         if resolved.version <= held.version {
             return Err(FfiError::Stale);
         }
+
         // DIS-080: a long history warns with no fetch.
         if resolved.version.saturating_sub(held.version) > HANDLE_HISTORY_MAX {
             return Ok(Takeover::Warn);
         }
+
         let mut between = Vec::new();
         for version in held.version.saturating_add(1)..resolved.version {
             let bytes = self.version_entry(search_key, version)?;
@@ -297,6 +301,7 @@ impl DirectoryLink {
             if entry.handle != input || entry.version != version {
                 return Err(FfiError::Unverified);
             }
+
             between.push(Version {
                 version,
                 hk_pub: entry.hk_pub,
@@ -323,6 +328,7 @@ impl DirectoryLink {
         if found.0.degraded {
             return Err(FfiError::Stale);
         }
+
         Ok(found)
     }
 
@@ -385,6 +391,7 @@ impl DirectoryLink {
         let Purpose::Write { version_new } = purpose else {
             return Err(FfiError::Malformed);
         };
+
         let entry = entry_of(version_new)?;
         let ans = answer(purpose, key, name, &challenge, Some(&entry))
             .map_err(|_| FfiError::Unverified)?;
@@ -495,6 +502,7 @@ impl DirectoryLink {
         if !matches!(purpose, Purpose::Renew { .. }) {
             return Err(FfiError::Malformed);
         }
+
         let ans = answer(purpose, key, name, &challenge, None).map_err(|_| FfiError::Unverified)?;
         let body = dirclient::renew_body(input, &ans).map_err(|_| FfiError::Malformed)?;
         self.send(Kind::Renew, &body).map(|_| ())
@@ -708,6 +716,7 @@ impl Drop for HeldLink<'_> {
         if self.before.is_some_and(|(held, _, _)| held >= size) {
             return;
         }
+
         let _ = locked(&self.handle.inner).client.keep_head(
             size,
             &root,
@@ -722,10 +731,12 @@ impl Handle {
     /// The route to the directory, for a device that owns its channels.
     fn directory_link(&self) -> Result<HeldLink<'_>, FfiError> {
         let inner = locked(&self.inner);
+
         // DEV-287: a linked device makes no contact of its own.
         if !inner.owns_channels {
             return Err(FfiError::NotFound);
         }
+
         let before = inner.client.newest_head()?;
         let directory = inner.directory.as_ref().ok_or(FfiError::Offline)?;
         let keyset = inner.client.log_keyset(&directory.pins.keyset)?;
@@ -760,10 +771,12 @@ impl Handle {
             if inner.rendezvous_refused.remove(&tag) {
                 return Err(FfiError::Busy);
             }
+
             drop(inner);
             if start.elapsed() > QUEUE_WAIT {
                 return Err(FfiError::Offline);
             }
+
             std::thread::sleep(Duration::from_millis(100));
         }
     }
@@ -873,6 +886,7 @@ impl Handle {
         if locked(&self.inner).client.token_count(epoch)? >= TOKEN_LOW {
             return Ok(());
         }
+
         self.fetch_tokens(link, epoch, TOKEN_BATCH)
     }
 
@@ -921,6 +935,7 @@ impl Handle {
             else {
                 return Ok(());
             };
+
             let handle = DirHandle::parse(
                 core::str::from_utf8(&entry.name).map_err(|_| FfiError::Integrity)?,
                 &username_case_mapped,
@@ -1003,6 +1018,7 @@ impl Handle {
             self.end_rendezvous(previous);
         }
         let mut inner = locked(&self.inner);
+
         // NTF-043: the handle of the queue goes with it.
         let _ = inner.client.unbind_queue(&entry.queue, &mut OsRng);
         if let Some((previous, _)) = entry.previous {
@@ -1110,6 +1126,7 @@ impl Handle {
         if shown.version.checked_add(1) != Some(entry.version) {
             return Ok(());
         }
+
         let (key, before) = {
             let inner = locked(&self.inner);
             let key = inner
@@ -1126,6 +1143,7 @@ impl Handle {
         let Some(signer) = signer_of(&shown.key, &key, before.as_ref()) else {
             return Ok(());
         };
+
         let bytes = entry_bytes(entry, &key)?;
         match link.write_staged(&entry.label, &entry.name, signer, shown.version, &bytes) {
             // The next look waits for the epoch of this write.
@@ -1161,7 +1179,9 @@ impl Handle {
         if !locked(&self.inner).client.awaits_resync(&entry.id)? {
             return Ok(false);
         }
+
         let found = link.find(&entry.label)?;
+
         // A look that ends for certain ends the look of the restore; one
         // that a fault of the network ended goes again at the next upkeep.
         let done = |this: &Self| {
@@ -1177,6 +1197,7 @@ impl Handle {
             done(self);
             return Ok(false);
         };
+
         let last = entry
             .rotation
             .saturating_add(umbra_core::identity::HANDLE_KEY_LOOKAHEAD);
@@ -1195,6 +1216,7 @@ impl Handle {
             done(self);
             return Ok(false);
         };
+
         let next_version = version.checked_add(1).ok_or(FfiError::TooLong)?;
         let (queue, rendezvous) = self.new_rendezvous()?;
         let found = Published {
@@ -1243,6 +1265,7 @@ impl Handle {
         entry.rotation = 0;
         entry.version = 0;
         inner.client.put_published(&entry, &mut OsRng)?;
+
         // The handle stands as a restore left it, and it looks for its key.
         Ok(inner.client.mark_resync(&mut OsRng)?)
     }
@@ -1261,6 +1284,7 @@ impl Handle {
         let (Some(bytes), Some(version)) = (found.entry, found.version) else {
             return Ok((Standing::Foreign, None));
         };
+
         let shown = match entry.kind {
             EntryKind::Address => AddressEntry::parse(&bytes)
                 .map(|shown| (shown.address_pk, shown.rendezvous))
@@ -1273,6 +1297,7 @@ impl Handle {
             let shown = shown.ok().map(|(key, _)| Shown { version, key });
             return Ok((standing(entry.version, version, false, false), shown));
         }
+
         let (shown_key, shown_queue) = shown?;
         let key = locked(&self.inner)
             .client
@@ -1294,11 +1319,14 @@ impl Handle {
     #[doc(hidden)]
     pub fn maintain_directory_at(&self, now: u64) -> Result<(), FfiError> {
         let link = self.directory_link()?;
+
         // §9.3.1: a profile blob that no write took yet goes now.
         let _ = self.publish_profile_blob(&link);
+
         // Part 13 §13.3.1: the keys that a hello of a stranger names, and
         // the tokens of the hellos of this device.
         let _ = self.keep_cross_relay_tokens(&link, now);
+
         // DIS-136: the tree heads of contacts that no held head names.
         let _ = self.check_gossiped_heads(&link);
         let entries = locked(&self.inner).client.published()?;
@@ -1310,12 +1338,14 @@ impl Handle {
                 let _ = self.end_entry(&entry);
                 continue;
             }
+
             // DIS-137, DIS-138: the holder reads its own entry. IDN-109:
             // a restored handle finds its current key before it shows as
             // held by another party.
             let mut is_staged = false;
             if let Ok((standing, shown)) = self.entry_standing(&link, &entry) {
                 is_staged = standing == Standing::Staged;
+
                 // DEV-306: the log shows the held version under its key,
                 // thus the directory holds the key of the held rotation. An
                 // earlier identity root that served the rotation before it
@@ -1351,6 +1381,7 @@ impl Handle {
                 let Some(own) = own else {
                     continue;
                 };
+
                 if own == entry.foreign {
                     entry.foreign = !own;
                     locked(&self.inner)
@@ -1358,10 +1389,12 @@ impl Handle {
                         .put_published(&entry, &mut OsRng)?;
                 }
             }
+
             // DIS-139: over a version of another writer, only the user acts.
             if entry.foreign {
                 continue;
             }
+
             // DIS-134: the grace of the queue before the last rotation ends.
             // The log names that queue while the write of the rotation
             // waits, thus it ends no queue then.
@@ -1374,6 +1407,7 @@ impl Handle {
                     inner.client.put_published(&entry, &mut OsRng)?;
                 }
             }
+
             // DIS-133: a queue of `RENDEZVOUS_ROTATE` takes its successor. A
             // queue in its grace waits for the end of that grace.
             if entry.previous.is_none()
@@ -1383,11 +1417,13 @@ impl Handle {
                 let _ = self.rotate_queue(&link, &entry, now);
                 continue;
             }
+
             // A timed link ends inside its lease, and no renewal moves that
             // end (DIS-172).
             if entry.expires_at != 0 || now.saturating_sub(entry.renewed_at) < RENEW_EVERY {
                 continue;
             }
+
             let key =
                 locked(&self.inner)
                     .client
@@ -1415,6 +1451,7 @@ impl Handle {
         if count == 0 {
             return Ok(());
         }
+
         self.fetch_tokens(&link, epoch_number(now), count as usize)
     }
 
@@ -1567,10 +1604,12 @@ impl Handle {
     /// for the next one, and the call then gives `Busy`.
     pub fn retire_public_link(&self, id: Vec<u8>) -> Result<(), FfiError> {
         let entry = self.find_published(&id)?;
+
         // A timed link past its end holds no label to write (DIS-172).
         if entry.expires_at != 0 && unix_now() >= entry.expires_at {
             return self.end_entry(&entry);
         }
+
         let link = self.directory_link()?;
         self.retire(&link, &entry)
     }
@@ -1594,6 +1633,7 @@ impl Handle {
         if self.my_handle()?.is_some() {
             return Err(FfiError::Stale);
         }
+
         let name = name.trim().trim_start_matches("@");
         for _ in 0..CLAIM_TRIES {
             let mut draw = [0u8; 4];
@@ -1680,6 +1720,7 @@ impl Handle {
             ..entry.clone()
         };
         self.write_version(&link, &entry, &rotated, &old, &new, entry.version)?;
+
         // A queue still in its grace ends now: one queue waits at a time.
         if let Some((previous, _)) = entry.previous {
             self.end_rendezvous(previous);
@@ -1701,6 +1742,7 @@ impl Handle {
             .find(|entry| entry.kind == EntryKind::Handle)
             .ok_or(FfiError::NotFound)?;
         self.retire(&link, &entry)?;
+
         // DIS-178: the tombstone took the blob, and a later handle takes a
         // new link.
         let mut inner = locked(&self.inner);
@@ -1727,8 +1769,10 @@ impl Handle {
         if note.len() > umbra_core::discovery::profile::WELCOME_MAX {
             return Err(FfiError::TooLong);
         }
+
         let link = self.directory_link()?;
         let target = target.trim();
+
         // DIS-078: the key of a handle that this hello goes to.
         let mut to_hold = None;
         let (entry_pk, rendezvous) = if target.starts_with("@")
@@ -1746,12 +1790,14 @@ impl Handle {
             if found.degraded && !confirmed {
                 return Err(FfiError::Unverified);
             }
+
             let degraded = found.degraded;
             let bytes = found.entry.ok_or(FfiError::NotFound)?;
             let entry = DirectoryEntry::parse(&bytes).map_err(|_| FfiError::Unverified)?;
             if entry.handle != input || Some(entry.version) != found.version {
                 return Err(FfiError::Unverified);
             }
+
             let rendezvous = entry.rendezvous.ok_or(FfiError::NotFound)?;
             let resolved = Version {
                 version: entry.version,
@@ -1780,12 +1826,15 @@ impl Handle {
             if found.degraded && !confirmed {
                 return Err(FfiError::Unverified);
             }
+
             let bytes = found.entry.ok_or(FfiError::NotFound)?;
             let entry = AddressEntry::parse(&bytes).map_err(|_| FfiError::Unverified)?;
+
             // IDN-131, DIS-128: the key hashes to the address.
             if entry.address != address || entry.check().is_err() {
                 return Err(FfiError::Unverified);
             }
+
             let rendezvous = entry.rendezvous.ok_or(FfiError::NotFound)?;
             (entry.address_pk, rendezvous)
         };
@@ -1794,6 +1843,7 @@ impl Handle {
             .encode(&mut encoded)
             .map_err(|_| FfiError::Malformed)?;
         let inner = locked(&self.inner);
+
         // DIS-180: the hello carries the profile of the sender, with the
         // note in the place of the welcome text.
         let name = inner.client.profile_name()?;
@@ -1806,14 +1856,17 @@ impl Handle {
         .encode()
         .map_err(|_| FfiError::Malformed)?;
         drop(inner);
+
         // DIS-132: a cross-relay token of this epoch, when the device holds
         // one, and else a proof of work.
         let mut inner = locked(&self.inner);
+
         // ABU-076: a token leaves the store only for a hello that a run
         // takes, thus a client with no run spends none.
         if inner.bridge.is_none() {
             return Err(FfiError::Offline);
         }
+
         let token = inner.client.take_token(epoch_number(unix_now()))?;
         let bridge = inner.bridge.as_ref().ok_or(FfiError::Offline)?;
         bridge.hello(entry_pk.to_vec(), encoded, profile, token)?;
@@ -1880,6 +1933,7 @@ impl Handle {
         let Some(handle) = self.my_handle()? else {
             return Ok(None);
         };
+
         let handle =
             DirHandle::parse(&handle, &username_case_mapped).map_err(|_| FfiError::Integrity)?;
         let fragment = locked(&self.inner).client.handle_fragment(&mut OsRng)?;
@@ -1895,15 +1949,18 @@ impl Handle {
         let (handle, fragment) =
             parse_profile_link(&target, &username_case_mapped).map_err(|_| FfiError::Malformed)?;
         let input = handle.label_input();
+
         // DIS-067: a stale head still completes the lookup.
         let (found, _) = link.find_read(&input)?;
         let bytes = found.entry.ok_or(FfiError::NotFound)?;
+
         // DIS-157: the entry names this handle at the newest version, and a
         // tombstone previews no contact.
         let entry = DirectoryEntry::parse(&bytes).map_err(|_| FfiError::Unverified)?;
         if entry.handle != input || Some(entry.version) != found.version {
             return Err(FfiError::Unverified);
         }
+
         entry.rendezvous.ok_or(FfiError::NotFound)?;
         let mut preview = ContactPreview {
             handle: handle.canonical(),
@@ -1956,6 +2013,7 @@ impl Handle {
         if inner.bridge.is_none() {
             return Err(FfiError::Offline);
         }
+
         let bundle = inner.client.take_request(&id)?;
         let bridge = inner.bridge.as_ref().ok_or(FfiError::Offline)?;
         Ok(bridge.accept(bundle.to_vec())?)
@@ -1984,15 +2042,18 @@ mod tests {
     fn a_version_of_the_log_stands_as_own_staged_or_foreign() {
         // DIS-137: the version of this device, with its key and its queue.
         assert_eq!(standing(3, 3, true, true), Standing::Own);
+
         // DIS-138: the same version under another key or on another queue.
         assert_eq!(standing(3, 3, false, true), Standing::Foreign);
         assert_eq!(standing(3, 3, true, false), Standing::Foreign);
+
         // DIS-166: the store took a version that the log does not show yet,
         // whatever the version of the log holds. A rotation that a lock or
         // the end of the process cut after the store is such a case, and it
         // is no takeover.
         assert_eq!(standing(3, 2, false, false), Standing::Staged);
         assert_eq!(standing(3, 0, true, true), Standing::Staged);
+
         // The store takes a version before the directory does, thus a
         // version above the held one is of another writer.
         assert_eq!(standing(3, 4, true, true), Standing::Foreign);
@@ -2006,15 +2067,18 @@ mod tests {
         let same = |found: Option<&KeyPair>, key: &KeyPair| {
             found.map(|found| found.public().to_bytes()) == Some(key.public().to_bytes())
         };
+
         // A move of the queue: the log shows the held key, and it signs.
         let shown = held.public().to_bytes();
         assert!(same(signer_of(&shown, &held, Some(&before)), &held));
         assert!(same(signer_of(&shown, &held, None), &held));
+
         // A rotation of the handle key: the log shows the key before, which
         // answers the challenge of the new version (`DIS-093`).
         let shown = before.public().to_bytes();
         assert!(same(signer_of(&shown, &held, Some(&before)), &before));
         assert!(signer_of(&shown, &held, None).is_none());
+
         // DIS-139: a version under no key of this device takes no write.
         let shown = other.public().to_bytes();
         assert!(signer_of(&shown, &held, Some(&before)).is_none());

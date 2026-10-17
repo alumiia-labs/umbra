@@ -343,6 +343,7 @@ async fn a_second_run_resumes_the_session_and_reads_with_no_circuit_build() {
         ports.push(listener.local_addr().unwrap().port());
         listeners.push(listener);
     }
+
     // The chains that each relay opened, which its node counts at each
     // second.
     let builds: Vec<Arc<AtomicU64>> = (0..3).map(|_| Arc::default()).collect();
@@ -458,6 +459,7 @@ async fn a_second_run_resumes_the_session_and_reads_with_no_circuit_build() {
     assert_eq!(ended, Ended::WakeDone);
     assert!(slot.holds());
     drop(alice);
+
     // Each relay counted each build of the two first runs by now.
     tokio::time::sleep(Duration::from_millis(2_500)).await;
     let before = built();

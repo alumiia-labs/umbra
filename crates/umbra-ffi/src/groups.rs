@@ -329,6 +329,117 @@ impl GroupCommand {
             _ => None,
         }
     }
+
+    /// The tag, the relay, the group queue, and the job of the node for a
+    /// command that goes on a circuit. The challenges go on none.
+    fn job(&self) -> Option<(Option<u64>, [u8; 32], [u8; 32], GroupJob)> {
+        match self {
+            GroupCommand::Create {
+                tag,
+                relay,
+                read_pk,
+                write_pk,
+                own,
+                payment,
+            } => Some((
+                Some(*tag),
+                *relay,
+                [0; 32],
+                GroupJob::Create {
+                    read_pk: *read_pk,
+                    write_pk: *write_pk,
+                    own: StaticSecret::from(*own.expose()),
+                    payment: payment.clone(),
+                },
+            )),
+            // The receive arms take the challenges.
+            GroupCommand::Challenges { .. } => None,
+            GroupCommand::Post {
+                tag,
+                relay,
+                group_queue_id,
+                write,
+                record,
+                ..
+            } => Some((
+                Some(*tag),
+                *relay,
+                *group_queue_id,
+                GroupJob::Post {
+                    write: StaticSecret::from(*write.expose()),
+                    record: record.clone(),
+                },
+            )),
+            GroupCommand::Subscribe {
+                relay,
+                group_queue_id,
+                read,
+                from_seq,
+                ..
+            }
+            | GroupCommand::Repair {
+                relay,
+                group_queue_id,
+                read,
+                from_seq,
+                ..
+            } => Some((
+                None,
+                *relay,
+                *group_queue_id,
+                GroupJob::Subscribe {
+                    read: StaticSecret::from(*read.expose()),
+                    from_seq: *from_seq,
+                },
+            )),
+            GroupCommand::Rotate {
+                relay,
+                group_queue_id,
+                own,
+                next_own_pk,
+                read_pk,
+                write_pk,
+            } => Some((
+                None,
+                *relay,
+                *group_queue_id,
+                GroupJob::Rotate {
+                    own: StaticSecret::from(*own.expose()),
+                    next_own_pk: *next_own_pk,
+                    read_pk: *read_pk,
+                    write_pk: *write_pk,
+                },
+            )),
+            GroupCommand::Delete {
+                relay,
+                group_queue_id,
+                own,
+            } => Some((
+                None,
+                *relay,
+                *group_queue_id,
+                GroupJob::Delete {
+                    own: StaticSecret::from(*own.expose()),
+                },
+            )),
+            GroupCommand::Notify {
+                relay,
+                group_queue_id,
+                read,
+                queue,
+                on,
+            } => Some((
+                None,
+                *relay,
+                *group_queue_id,
+                GroupJob::Notify {
+                    read: StaticSecret::from(*read.expose()),
+                    queue: queue.clone(),
+                    on: *on,
+                },
+            )),
+        }
+    }
 }
 
 /// What the task tells the caller.
@@ -448,6 +559,7 @@ pub async fn run_groups(
         if matches!(end, End::Closed) {
             break;
         }
+
         // A `GKEY` or a `GDEL` that may not have arrived goes in the next
         // session. A `GSUB` of the caller comes again after `Reset`.
         carried.early.append(&mut carried.quiet);
@@ -458,6 +570,7 @@ pub async fn run_groups(
             )
         });
         let _ = updates.send(GroupUpdate::Reset);
+
         backoff = if was_ready {
             GROUP_RELINK_FIRST
         } else {
@@ -479,6 +592,7 @@ pub async fn run_groups(
             break;
         }
     }
+
     for command in carried.early.iter() {
         if let GroupCommand::Create { tag, .. } | GroupCommand::Post { tag, .. } = command {
             let _ = updates.send(GroupUpdate::Failed {
@@ -487,6 +601,7 @@ pub async fn run_groups(
             });
         }
     }
+
     let _ = updates.send(GroupUpdate::Ended);
 }
 
@@ -503,18 +618,22 @@ async fn session(
 ) -> (End, bool) {
     let mut rng = OsRng;
     let mut pending: std::collections::BTreeMap<u64, Pending> = std::collections::BTreeMap::new();
+
     // Each `GSUB` as it left, by the handle of the node.
     let mut subscribed: std::collections::BTreeMap<u64, GroupCommand> =
         std::collections::BTreeMap::new();
+
     // Each `GSUB` that a relay answered with `LIMIT`, with the instant at
     // which it goes again, and the wait of each group queue (`NET-349`).
     let mut again: Vec<(tokio::time::Instant, GroupCommand)> = Vec::new();
     let mut waits: std::collections::BTreeMap<[u8; 32], Duration> =
         std::collections::BTreeMap::new();
+
     // The second form of each command that carries a credential of the
     // previous epoch, by the handle of its first form (`GRP-398`).
     let mut second: std::collections::BTreeMap<u64, GroupCommand> =
         std::collections::BTreeMap::new();
+
     let mut key = [0u8; 16];
     let mut mask = [0u8; 4];
     let _ = rng.try_fill_bytes(&mut key);
@@ -524,6 +643,7 @@ async fn session(
     let Ok(mut link) = connected else {
         return (End::Lost, false);
     };
+
     // NET-024: the node builds each chain again on a new link.
     if node.connected(&mut rng).is_err() {
         return (End::Lost, false);
@@ -537,6 +657,7 @@ async fn session(
                 break 'run End::Lost;
             }
         }
+
         let events = tokio::select! {
             received = link.recv() => match received {
                 Ok(bytes) => match node.on_capsule(&bytes, crate::runtime::unix_now(), &mut rng) {
@@ -560,18 +681,21 @@ async fn session(
                 if ready_since.is_some_and(|since| since.elapsed() >= SETTLED) {
                     carried.quiet.clear();
                 }
+
                 // A `GSUB` whose wait after a `LIMIT` ran out goes again.
                 let now = tokio::time::Instant::now();
                 let (due, later): (Vec<_>, Vec<_>) =
                     again.drain(..).partition(|(at, _)| *at <= now);
                 again = later;
                 carried.early.extend(due.into_iter().map(|(_, command)| command));
+
                 // CIRCUIT_BUILD_TIMEOUT: a build that no relay answers ends.
                 let now = crate::runtime::unix_now();
                 node.set_challenge_clock(now);
                 node.on_tick(now)
             }
         };
+
         // A group node holds no contact, thus it commits nothing.
         let _ = node.take_changes();
         for event in events {
@@ -597,13 +721,16 @@ async fn session(
                         carried.early.insert(0, retry);
                         continue;
                     }
+
                     if let Some(command) = subscribed.remove(&handle) {
                         let (GroupCommand::Subscribe { group_queue_id, .. }
                         | GroupCommand::Repair { group_queue_id, .. }) = &command
                         else {
                             continue;
                         };
+
                         let group_queue_id = *group_queue_id;
+
                         // NET-349: the relay held no room for the drain of
                         // this `GSUB`, and it gave none of its records. The
                         // same `GSUB` goes again after a wait, from the
@@ -616,6 +743,7 @@ async fn session(
                             *wait = wait.saturating_mul(2).min(GSUB_AGAIN_MAX);
                             continue;
                         }
+
                         // GRP-205: the loss of a second `GSUB` for a gap
                         // ends no subscription.
                         if matches!(command, GroupCommand::Subscribe { .. }) {
@@ -623,9 +751,11 @@ async fn session(
                         }
                         continue;
                     }
+
                     let Some(held) = pending.remove(&handle) else {
                         continue;
                     };
+
                     let update = match outcome {
                         GroupOutcome::Created(group_queue_id) => GroupUpdate::Created {
                             tag: held.tag,
@@ -671,113 +801,13 @@ async fn session(
         if ready_since.is_none() {
             continue;
         }
+
         for command in carried.early.drain(..) {
-            let (tag, relay, group_queue_id, job) = match &command {
-                GroupCommand::Create {
-                    tag,
-                    relay,
-                    read_pk,
-                    write_pk,
-                    own,
-                    payment,
-                } => (
-                    Some(*tag),
-                    *relay,
-                    [0; 32],
-                    GroupJob::Create {
-                        read_pk: *read_pk,
-                        write_pk: *write_pk,
-                        own: StaticSecret::from(*own.expose()),
-                        payment: payment.clone(),
-                    },
-                ),
-                // The receive arms take the challenges.
-                GroupCommand::Challenges { .. } => continue,
-                GroupCommand::Post {
-                    tag,
-                    relay,
-                    group_queue_id,
-                    write,
-                    record,
-                    ..
-                } => (
-                    Some(*tag),
-                    *relay,
-                    *group_queue_id,
-                    GroupJob::Post {
-                        write: StaticSecret::from(*write.expose()),
-                        record: record.clone(),
-                    },
-                ),
-                GroupCommand::Subscribe {
-                    relay,
-                    group_queue_id,
-                    read,
-                    from_seq,
-                    ..
-                }
-                | GroupCommand::Repair {
-                    relay,
-                    group_queue_id,
-                    read,
-                    from_seq,
-                    ..
-                } => (
-                    None,
-                    *relay,
-                    *group_queue_id,
-                    GroupJob::Subscribe {
-                        read: StaticSecret::from(*read.expose()),
-                        from_seq: *from_seq,
-                    },
-                ),
-                GroupCommand::Rotate {
-                    relay,
-                    group_queue_id,
-                    own,
-                    next_own_pk,
-                    read_pk,
-                    write_pk,
-                } => (
-                    None,
-                    *relay,
-                    *group_queue_id,
-                    GroupJob::Rotate {
-                        own: StaticSecret::from(*own.expose()),
-                        next_own_pk: *next_own_pk,
-                        read_pk: *read_pk,
-                        write_pk: *write_pk,
-                    },
-                ),
-                GroupCommand::Delete {
-                    relay,
-                    group_queue_id,
-                    own,
-                } => (
-                    None,
-                    *relay,
-                    *group_queue_id,
-                    GroupJob::Delete {
-                        own: StaticSecret::from(*own.expose()),
-                    },
-                ),
-                GroupCommand::Notify {
-                    relay,
-                    group_queue_id,
-                    read,
-                    queue,
-                    on,
-                } => (
-                    None,
-                    *relay,
-                    *group_queue_id,
-                    GroupJob::Notify {
-                        read: StaticSecret::from(*read.expose()),
-                        queue: queue.clone(),
-                        on: *on,
-                    },
-                ),
+            // The receive arms take the challenges.
+            let Some((tag, relay, group_queue_id, job)) = command.job() else {
+                continue;
             };
+
             match node.group(relay, group_queue_id, job, &mut rng) {
                 Ok(handle) => {
                     if let Some(tag) = tag {
@@ -807,15 +837,18 @@ async fn session(
             }
         }
     };
+
     // WIR-246: no run continues this session, thus it ends at the relay
     // now, and the relay holds no circuit for it.
     if let Some(capsule) = node.close() {
         let _ = tokio::time::timeout(Duration::from_secs(1), link.send(&capsule)).await;
     }
+
     // Each command that left and took no answer goes again in a later
     // session, under the tag the caller gave it.
     for held in pending.values() {
         let _ = updates.send(GroupUpdate::Unsent { tag: held.tag });
     }
+
     (end, ready_since.is_some())
 }

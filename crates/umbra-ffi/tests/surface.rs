@@ -241,6 +241,7 @@ fn a_lock_stops_the_run_of_the_network_before_it_returns() {
     handle.lock();
     assert!(start.elapsed() < std::time::Duration::from_secs(5));
     assert!(link_ended(&mut link), "a locked client held its link");
+
     // The run of a locked client brings no update: the lock is the one
     // event of its end.
     let mut is_locked = false;

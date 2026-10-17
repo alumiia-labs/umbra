@@ -158,6 +158,7 @@ fn relay(r: &mut Reader<'_>) -> Result<RelayEndpoint, FfiError> {
         None
     };
     let class = r.option(|r| r.u8()).map_err(bad)?;
+
     Ok(RelayEndpoint {
         host,
         ipv4,
@@ -248,10 +249,12 @@ impl WatchTable {
         for relay in &self.relays {
             put_relay(&mut w, relay)?;
         }
+
         w.flag(self.root_ca_path.is_some());
         if let Some(path) = &self.root_ca_path {
             put_text(&mut w, path)?;
         }
+
         w.flag(self.bootstrap);
         w.u32(u32::try_from(self.entries.len()).map_err(|_| FfiError::TooLong)?);
         for entry in &self.entries {
@@ -259,6 +262,7 @@ impl WatchTable {
             w.bytes(&entry.notifier_id);
             w.bytes(entry.secret.expose());
         }
+
         Ok(w.finish())
     }
 
@@ -269,17 +273,20 @@ impl WatchTable {
         if r.u8().map_err(bad)? != VERSION {
             return Err(FfiError::Malformed);
         }
+
         let guard = relay(&mut r)?;
         let count = r.u32().map_err(bad)?;
         let mut relays = Vec::new();
         for _ in 0..count {
             relays.push(relay(&mut r)?);
         }
+
         let root_ca_path = if r.flag().map_err(bad)? {
             Some(text(&mut r)?)
         } else {
             None
         };
+
         let bootstrap = r.flag().map_err(bad)?;
         let count = r.u32().map_err(bad)?;
         let mut entries = Vec::new();
@@ -290,6 +297,7 @@ impl WatchTable {
                 secret: Secret::new(r.array().map_err(bad)?),
             });
         }
+
         r.end().map_err(bad)?;
         Ok(WatchTable {
             guard,
@@ -359,7 +367,9 @@ pub fn start_watch(
     if parsed.is_empty() {
         return Err(FfiError::NotFound);
     }
+
     node_of(&parsed, &mut OsRng)?;
+
     let (stop, stopped) = mpsc::unbounded_channel();
     std::thread::Builder::new()
         .name("umbra-watch".to_owned())
@@ -374,6 +384,7 @@ pub fn start_watch(
             runtime.block_on(run_watch(parsed, listener, stopped));
         })
         .map_err(|_| FfiError::Offline)?;
+
     Ok(Arc::new(Watch {
         stop: Mutex::new(Some(stop)),
     }))
@@ -419,12 +430,14 @@ async fn run_watch(
                 break;
             }
         }
+
         let wait = next_wait(&mut backoff, was_ready);
         tokio::select! {
             () = tokio::time::sleep(wait) => {}
             _ = stopped.recv() => break,
         }
     }
+
     crate::devlog::line("watch: end".to_owned());
 }
 
@@ -440,6 +453,7 @@ async fn session(
     let Ok((mut node, dial, tls)) = node_of(table, &mut rng) else {
         return (End::Down, false);
     };
+
     let mut key = [0u8; 16];
     let mut mask = [0u8; 4];
     let _ = rng.try_fill_bytes(&mut key);
@@ -452,10 +466,12 @@ async fn session(
     if node.connected(&mut rng).is_err() {
         return (End::Lost, false);
     }
+
     for entry in &table.entries {
         let secret = StaticSecret::from(*entry.secret.expose());
         let _ = node.watch(entry.relay, entry.notifier_id, secret, &mut rng);
     }
+
     let mut is_ready = false;
     let mut ticks = 0u32;
     let mut tick = tokio::time::interval(TICK);
@@ -482,6 +498,7 @@ async fn session(
                 node.on_tick(crate::runtime::unix_now())
             }
         };
+
         // The node of a watch holds no contact, thus it commits nothing.
         let _ = node.take_changes();
         for event in events {
@@ -501,10 +518,12 @@ async fn session(
             }
         }
     };
+
     // WIR-246: the session ends at the relay now.
     if let Some(capsule) = node.close() {
         let _ = tokio::time::timeout(Duration::from_secs(1), link.send(&capsule)).await;
     }
+
     (end, is_ready)
 }
 
@@ -521,16 +540,19 @@ fn node_of(
         addr_v6: None,
         port: table.guard.port,
     };
+
     let ingress = relay_info(&table.guard)?;
     let mut candidates = Vec::new();
     for relay in table.relays.iter().filter(|relay| relay.layer != 1) {
         candidates.push(relay_info(relay)?);
     }
+
     let tls = match &table.root_ca_path {
         Some(path) => native::tls_config_with_root_file(path),
         None => native::tls_config(),
     }
     .map_err(|_| FfiError::Storage)?;
+
     let mut seed = [0u8; 32];
     let _ = rng.try_fill_bytes(&mut seed);
     let root = RootIdentity::new(Secret::new(seed));
@@ -579,10 +601,12 @@ mod tests {
             vec![([3; 32], [4; 32], Secret::new([5; 32]))],
         );
         let bytes = table.encode().unwrap();
+
         // IMP-124: the writer took its full size first, thus it grew in no
         // reallocation.
         assert!(bytes.len() <= table.size());
         assert_eq!(bytes.capacity(), table.size());
+
         let back = WatchTable::parse(&bytes).unwrap();
         assert_eq!(back.guard.host, "r1.example");
         assert_eq!(back.relays.len(), 3);
@@ -595,6 +619,7 @@ mod tests {
         assert_eq!(back.entries[0].notifier_id, [4; 32]);
         assert_eq!(back.entries[0].secret.expose(), &[5; 32]);
         assert_eq!(back.encode().unwrap(), bytes);
+
         // A table with bytes after its end does not parse.
         let mut long = bytes.to_vec();
         long.push(0);
@@ -609,6 +634,7 @@ mod tests {
             .map(|_| next_wait(&mut backoff, false).as_secs())
             .collect();
         assert_eq!(waits, [2, 4, 8, 16, 30, 30]);
+
         // A session that reached the ready state sets it back to 2 s.
         assert_eq!(next_wait(&mut backoff, true).as_secs(), 2);
         assert_eq!(next_wait(&mut backoff, false).as_secs(), 4);
@@ -632,11 +658,13 @@ mod tests {
         let start = |table: WatchTable| {
             start_watch(table.encode().unwrap().to_vec(), Arc::new(Nobody)).err()
         };
+
         // NTF-120: a guard with no IPv4 address.
         let mut guard = endpoint(1, 1);
         guard.ipv4 = vec![10, 0, 0];
         let table = WatchTable::new(guard, vec![endpoint(2, 2)], None, false, entries());
         assert_eq!(start(table), Some(FfiError::Malformed));
+
         // A root certificate file that an update of the app removed.
         let table = WatchTable::new(
             endpoint(1, 1),
