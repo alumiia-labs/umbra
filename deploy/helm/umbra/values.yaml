@@ -19,6 +19,7 @@ invitationHost: ""
 # time with `openssl rand -hex 32` and kept.
 operator: umbra-project
 family: ""
+
 # The country of a relay (Part 10 §10.6.3) and the autonomous system of the
 # provider (OVH: 16276). A server can state its own.
 country: US
@@ -64,8 +65,10 @@ ndr:
   # The name of a Secret with the key `fcm.json`: the service account file of
   # the Firebase project.
   fcmSecret: umbra-fcm
+
 directory:
   server: west-1
+
 signer:
   server: signer-west-1
   # The key directory under <root>/signer. A rotation moves it.
@@ -73,6 +76,7 @@ signer:
   # Revoked measurer certificates (Part 10 REL-105).
   #   - { id: "<32 hex characters>", not_after: <epoch> }
   revokedMeasurers: []
+
 measurer:
   # The rate of the plan of the signer server, in Mbit/s.
   capacity: 500
@@ -81,6 +85,7 @@ measurer:
 # The port of the notification server and of the directory. Only the relay
 # servers reach it.
 servicePort: 8443
+
 # The bytes that each exit relay holds for files (Part 12), in memory.
 chunkCapacity: 1073741824
 

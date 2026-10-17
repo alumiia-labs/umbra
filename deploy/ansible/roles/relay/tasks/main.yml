@@ -1,6 +1,7 @@
 # Phase 2 of each relay of this server: the key set and the first manifest
 # of the signer, then the service. Later manifests arrive on their own from
 # the signer (the `manifest_from` line).
+
 - name: The service unit of the relays is there
   ansible.builtin.template:
     src: umbra-relay@.service.j2

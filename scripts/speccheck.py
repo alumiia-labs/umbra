@@ -60,9 +60,10 @@ def strip_code(line: str) -> str:
 
 
 def load_spec():
-    """Return (markers, sections, texts).
+    """Return (markers, dupes, sections, texts).
 
     markers: id -> (file, line, section)
+    dupes: (id, file, line, first marker) for each marker that occurs again
     sections: part -> {section number}
     texts: file -> list of lines
     """
@@ -74,8 +75,10 @@ def load_spec():
         path = SPEC / fname
         if not path.exists():
             continue
+
         lines = path.read_text(encoding="utf-8").splitlines()
         texts[fname] = lines
+
         current = f"{part}"
         in_fence = False
         for no, raw in enumerate(lines, 1):
@@ -184,16 +187,19 @@ def main(argv):
                     elif w.group(2) and w.group(2) not in sections[p]:
                         problems["dangling-section-ref"].append(f"Part {p} §{w.group(2)} at {fname}:{no}")
             prev = raw
+
             for m in RULE_REF_RE.finditer(raw):
                 rid = m.group(1)
                 if rid[:3] in PREFIX_FILE and rid not in markers and "retire" not in raw:
                     problems["dangling-rule-ref"].append(f"{rid} at {fname}:{no}")
+
             for m in PART_SECTION_RE.finditer(raw):
                 p, sec = int(m.group(1)), m.group(2)
                 if p not in sections:
                     problems["dangling-part-ref"].append(f"Part {p} at {fname}:{no}")
                 elif sec not in sections[p]:
                     problems["dangling-section-ref"].append(f"Part {p} §{sec} at {fname}:{no}")
+
             for m in BARE_SECTION_RE.finditer(raw):
                 sec = m.group(1)
                 top = int(sec.split(".")[0])
@@ -204,12 +210,13 @@ def main(argv):
                         problems["dangling-section-ref"].append(f"§{sec} (Part {top}) at {fname}:{no}")
                 elif sec not in sections[part]:
                     problems["dangling-section-ref"].append(f"§{sec} at {fname}:{no}")
+
             for m in PART_RE.finditer(raw):
                 p = int(m.group(1))
                 if p not in sections:
                     problems["dangling-part-ref"].append(f"Part {p} at {fname}:{no}")
 
-    # index rows also reference sections; check those against the owning part
+    # An index row also names a section. Check it against the part of its marker.
     for rid, (sec, kw, no) in rows.items():
         if rid in markers:
             part = FILE_PART[markers[rid][0]]

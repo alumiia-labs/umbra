@@ -3,9 +3,11 @@
 # services read their certificate at their start, thus they restart. The
 # group umbra-tls holds each service user.
 set -eu
+
 lineage="${RENEWED_LINEAGE:-/etc/letsencrypt/live/{{ umbra_fqdn }}}"
 install -o root -g umbra-tls -m 0644 "$lineage/fullchain.pem" /etc/umbra/tls/cert.pem
 install -o root -g umbra-tls -m 0640 "$lineage/privkey.pem" /etc/umbra/tls/key.pem
+
 # Each service of this server with its port. The services restart one at a
 # time, thus the relays of one server are not down together. A service that
 # does not stay up does not stop the others: the alert tells the operator,
@@ -22,12 +24,14 @@ for pair in{% if inventory_hostname in groups['relays'] %}{% for relay in relays
         failed="$failed $service"
     fi
 done
+
 if systemctl is-active --quiet nginx; then
     if ! systemctl reload nginx; then
         /usr/local/sbin/umbra-alert nginx.service || true
         failed="$failed nginx.service"
     fi
 fi
+
 if [ -n "$failed" ]; then
     logger -p daemon.err -t umbra-deploy-hook "the certificate is new, and these services did not stay up:$failed"
     exit 1

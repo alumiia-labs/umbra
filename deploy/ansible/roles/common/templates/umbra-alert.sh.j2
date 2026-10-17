@@ -3,6 +3,7 @@
 # that a unit failed. journald also writes a line of the highest priority
 # to each open terminal.
 set -u
+
 unit="${1:-a unit}"
 message="UMBRA: $unit failed on $(hostname). See: journalctl -u $unit -n 50"
 logger -p daemon.emerg -t umbra-alert "$message"

@@ -22,11 +22,15 @@ fail() {
 
 systemctl restart "$unit" || fail "the restart failed"
 before=$(systemctl show --value -p NRestarts "$unit")
+
 sleep "$settle"
+
 systemctl is-active --quiet "$unit" || fail "not active $settle s after the restart"
 after=$(systemctl show --value -p NRestarts "$unit")
 [ "$after" = "$before" ] || fail "systemd restarted it $before -> $after times within $settle s"
+
 if [ -n "$port" ] && [ -z "$(ss -Htln "sport = :$port")" ]; then
     fail "no listener on port $port"
 fi
+
 echo "$unit: up"

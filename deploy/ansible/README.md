@@ -137,9 +137,9 @@ manifest of an hour rejects a second one for it. Thus:
 - **Back up the signer keys.** Copy `/var/lib/umbra-signer` from
   `signer-west-1` to an offline place: each key directory and the key chain.
   Without the chain, an app that ships an older key set cannot reach the
-  new one. Without those keys, no new manifest
-  verifies under the key set that the app ships. The network then stops
-  within three hours of the last manifest.
+  new one. Without those keys, no new manifest verifies under the key set
+  that the app ships. The network then stops within three hours of the
+  last manifest.
 - **Give the release app its network.** Run `bash scripts/release-network.sh`
   from the repo root, then build the release app. The script turns `build/`
   into the assets of the release build:
@@ -228,8 +228,8 @@ manifest of an hour rejects a second one for it. Thus:
   - The tool runs as the user `umbra-signer`, because it reads the seed
     files of that user. Its unit shows it the seeds of the authorities 0
     and 1 alone. It hides each other file of `/var/lib/umbra-signer`, also
-    the second key directory of a rotation. Its settings file, `/etc/umbra-authority/authority.conf`, holds no
-    secret.
+    the second key directory of a rotation. Its settings file,
+    `/etc/umbra-authority/authority.conf`, holds no secret.
   - The tool makes the two secrets of its report queue in
     `/var/lib/umbra-authority/secrets` at its first start, each readable by
     its owner alone. It refuses a seed file or a secret file that a group
@@ -378,7 +378,6 @@ user runs each relay of a server.
   the first file Android does not verify the App Link, and a tap on a link
   opens the browser and not the app. The folder `site/` of this repository
   holds those files and the way to deploy them.
-
 - **One measurer, class 0 alone.** Part 10 §10.5.1 accepts a class from 3
   measurers in 2 networks. This deployment has one measurer on one server
   of 500 Mbit/s, which tests class 0 alone ("Measurement" above).

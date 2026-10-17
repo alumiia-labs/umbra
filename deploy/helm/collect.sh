@@ -10,12 +10,14 @@
 # scripts/release-network.sh deploy/helm/build then gives the release app
 # its network.
 set -euo pipefail
+
 # Git Bash on Windows turns each /path argument into a Windows path.
 export MSYS_NO_PATHCONV=1
 
 namespace="${1:-umbra}"
 out="$(cd "$(dirname "$0")" && pwd)/build"
 mkdir -p "$out/descriptors"
+
 k() { kubectl -n "$namespace" "$@"; }
 
 k exec deploy/ndr -c ndr -- umbra-entry ndr key-config | tr -d '\r\n' > "$out/ndr-key-config.hex"
@@ -37,6 +39,7 @@ k exec deploy/signer -c signer -- cat "$www/manifest" > "$out/manifest" 2>/dev/n
 k get configmap -l app.kubernetes.io/name=umbra \
     -o jsonpath='{range .items[*]}{.data.network\.properties}{end}' > "$out/network.properties"
 
+
 {
     echo "# Written by deploy/helm/collect.sh. Public values alone."
     echo "network:"
@@ -48,4 +51,5 @@ k get configmap -l app.kubernetes.io/name=umbra \
         echo "    $relay: $(base64 -w0 < "$out/descriptors/$relay.desc")"
     done
 } > "$out/network-values.yaml"
+
 echo "wrote $out"

@@ -60,16 +60,19 @@ def paragraphs(lines):
             continue
         if in_fence:
             continue
+
         s = raw.strip()
         if not s:
             if buf:
                 yield start, " ".join(buf)
                 buf, start = [], None
             continue
+
         s = re.sub(r"^(?:>\s*|[-*]\s+|\d+\.\s+|\|\s*)+", "", s)
         if start is None:
             start = no
         buf.append(s)
+
     if buf:
         yield start, " ".join(buf)
 
@@ -77,17 +80,21 @@ def paragraphs(lines):
 def extract_sentence(text_after: str) -> str:
     """The requirement sentence that follows a marker."""
     t = re.sub(r"^(?:\*\*|\s)+", "", text_after)
-    # stop at the next marker
+
+    # Stop at the next marker.
     nxt = MARKER_RE.search(t)
     if nxt:
         t = t[: nxt.start()]
-    # end at the first sentence terminator followed by a space or the end
+
+    # End at the first sentence terminator before a space or the end.
     m = re.search(r"\.\*\*(?=\s|$)|\.(?=\s|$)", t)
     if m:
         t = t[: m.end()]
+
     t = re.sub(r"\s+", " ", t).strip()
     t = re.sub(r"\*\*\s*$", "", t).strip()
-    # drop unmatched bold markers that a split left behind
+
+    # Drop an unmatched bold marker that a split left behind.
     if t.count("**") % 2:
         t = t.replace("**", "", 1) if t.startswith("**") else t[: t.rfind("**")] + t[t.rfind("**") + 2:]
     return t
@@ -122,7 +129,8 @@ def collect_markers():
         if not path.exists():
             continue
         lines = path.read_text(encoding="utf-8").splitlines()
-        # section per line
+
+        # The section of each line.
         sec_at = {}
         current = str(part)
         for no, raw in enumerate(lines, 1):
@@ -130,12 +138,14 @@ def collect_markers():
             if h:
                 current = h.group(2)
             sec_at[no] = current
+
         for start, text in paragraphs(lines):
             stripped = strip_code(text)
             for m in MARKER_RE.finditer(stripped):
                 rid = m.group(1)
                 if rid in out:
                     continue
+
                 after = text[m.end():]
                 sentence = extract_sentence(after)
                 nxt = MARKER_RE.search(after)
@@ -151,7 +161,7 @@ def load_rows():
     for raw in lines:
         m = ROW_RE.match(raw)
         if m:
-            rows[m.group(1)] = m.group(2)  # everything after the Section cell
+            rows[m.group(1)] = m.group(2)  # Each cell after the Section cell.
     return lines, rows
 
 
@@ -165,7 +175,7 @@ def main(argv):
     for rid, (prefix, num, sec, sentence, segment) in markers.items():
         if rid in rows:
             cells = rows[rid].split("|")
-            # cells: key word, binder, requirement, module, test, ""
+            # The cells: key word, binder, requirement, module, test, "".
             if len(cells) >= 5 and normalized(cells[2]) not in segment:
                 cells[2] = f" {sentence} "
                 refreshed.append(rid)
@@ -175,20 +185,22 @@ def main(argv):
             kw, binder = keyword_and_binder(sentence)
             new_rows[rid] = f"| `{rid}` | §{sec} | {kw} | {binder} | {sentence} |  |  |"
             added.append(rid)
+
     for rid in rows:
         if rid not in markers:
             removed.append(rid)
 
-    # summary counts
+    # The counts of the Summary table.
     counts = defaultdict(Counter)
     for rid, row in new_rows.items():
         cells = [c.strip() for c in row.split("|")]
         kw = cells[3]
         counts[rid[:3]][kw] += 1
 
-    # rebuild the file: keep the preamble up to the Summary table, rewrite the rest
+    # Keep the preamble up to the Summary table, and write the rest again.
     head_end = next(i for i, l in enumerate(lines) if l.startswith("## Summary"))
     out = lines[:head_end]
+
     out.append("## Summary")
     out.append("")
     out.append("| Prefix | MUST | MUST NOT | SHOULD | SHOULD NOT | MAY | Total |")
@@ -201,6 +213,7 @@ def main(argv):
         grand.update(c)
     out.append(f"| **All** | {grand['MUST']} | {grand['MUST NOT']} | {grand['SHOULD']} | {grand['SHOULD NOT']} | {grand['MAY']} | **{sum(grand.values())}** |")
     out.append("")
+
     for prefix, fname in PREFIX_FILE.items():
         out.append(f"## {prefix} — {PART_TITLE[prefix]}")
         out.append("")
@@ -218,6 +231,7 @@ def main(argv):
         print("added:", ", ".join(added))
     if removed:
         print("removed:", ", ".join(removed))
+
     if not dry:
         (SPEC / "req-index.md").write_text("\n".join(out) + "\n", encoding="utf-8", newline="\n")
         print("wrote spec/req-index.md")

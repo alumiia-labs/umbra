@@ -94,16 +94,19 @@ class Mark:
         """Points on the edge of the mark, for its box and its reach."""
         (bx, by), r, k = self.b, self.r, CORNER_R
         pts = []
+
         # The three round quadrants of the bubble: from the left, over the
         # top, to the bottom.
         for i in range(n + 1):
             a = math.radians(180 + 270 * i / n)
             pts.append((bx + r * math.cos(a), by + r * math.sin(a)))
+
         # The rounded corner.
         cx, cy = bx - r + k, by + r - k
         for i in range(n // 4 + 1):
             a = math.radians(90 + 90 * i / (n // 4))
             pts.append((cx + k * math.cos(a), cy + k * math.sin(a)))
+
         # The outer edge of the rim.
         h1, h2 = self.horns()
         a1 = math.atan2(h1[1] - self.s[1], h1[0] - self.s[0])
@@ -115,6 +118,7 @@ class Mark:
         for i in range(n + 1):
             a = a1 + span * i / n
             pts.append((self.s[0] + self.sr * math.cos(a), self.s[1] + self.sr * math.sin(a)))
+
         return pts
 
     def box(self):
@@ -142,6 +146,7 @@ class Mark:
                   f"A{R} {R} 0 1 1 {P((bx, by + r))}"
                   f"H{num(offset[0] + scale * (bx - r + k))}"
                   f"A{K} {K} 0 0 1 {P((bx - r, by + r - k))}Z")
+
         h1, h2 = self.horns()
         # The outer edge runs over the far side of the sun; the inner edge
         # runs back along the gap circle. Both flags follow from that.
@@ -149,6 +154,7 @@ class Mark:
         # With y down, a positive turn is clockwise on screen: sweep 1.
         sweep = 1 if cross(h1, self.far(), h2) > 0 else 0
         large = 1 if cross(h1, h2, self.s) * cross(h1, h2, self.far()) > 0 else 0
+
         SR, GR = num(scale * self.sr), num(scale * self.gr)
         rim = (f"M{P(h1)}"
                f"A{SR} {SR} 0 {large} {sweep} {P(h2)}"
@@ -156,7 +162,7 @@ class Mark:
         return bubble + rim
 
     def placed(self, size, extent):
-        """The path with the box centerd in `size` and its larger side `extent` long."""
+        """The path with the box centered in `size` and its larger side `extent` long."""
         x0, y0, x1, y1 = self.box()
         s = extent / max(x1 - x0, y1 - y0)
         c = self.center()
@@ -168,9 +174,11 @@ def font():
         FONT_CACHE.parent.mkdir(parents=True, exist_ok=True)
         with urllib.request.urlopen(FONT_URL) as r:
             FONT_CACHE.write_bytes(r.read())
+
     digest = hashlib.sha256(FONT_CACHE.read_bytes()).hexdigest()
     if digest != FONT_SHA256:
         sys.exit(f"logo: {FONT_CACHE} has SHA-256 {digest}, expected {FONT_SHA256}")
+
     return instantiateVariableFont(TTFont(FONT_CACHE), {"wght": WORD_WEIGHT})
 
 
@@ -187,6 +195,7 @@ def wordmark(cap):
     em = tt["head"].unitsPerEm
     pen = SVGPathPen(glyphs, num)
     names = [cmap[ord(ch)] for ch in WORD]
+
     x, inks, low, high = 0.0, [], 0.0, 0.0
     for i, name in enumerate(names):
         g = glyphs[name]
@@ -196,6 +205,7 @@ def wordmark(cap):
         low, high = min(low, bounds.bounds[1]), max(high, bounds.bounds[3])
         g.draw(TransformPen(pen, (k, 0, 0, -k, x * k, cap)))
         x += g.width + (WORD_TRACKING * em if i < len(names) - 1 else 0)
+
     return pen.getCommands(), inks[0][0] * k, inks[-1][1] * k, cap - high * k, cap - low * k
 
 
@@ -215,6 +225,7 @@ def no_arcs(d):
     0.03 % of the radius.
     """
     import re
+
     tokens = re.findall(r"[MAHZ]|-?[0-9]*[.]?[0-9]+", d)
     out, at, i = [], (0.0, 0.0), 0
     while i < len(tokens):
@@ -235,6 +246,7 @@ def no_arcs(d):
             i += 7
             if abs(rx - ry) > 1e-9:
                 raise ValueError("an arc of the mark is a part of a circle")
+
             # The center, from the two ends (SVG 1.1 appendix F.6.5).
             (x0, y0), r = at, rx
             mx, my = (x0 - x) / 2, (y0 - y) / 2
@@ -244,6 +256,7 @@ def no_arcs(d):
             side = -1.0 if large == sweep else 1.0
             cx = (x0 + x) / 2 + side * h * my
             cy = (y0 + y) / 2 - side * h * mx
+
             a0 = math.atan2(y0 - cy, x0 - cx)
             a1 = math.atan2(y - cy, x - cx)
             turn = a1 - a0
@@ -251,9 +264,11 @@ def no_arcs(d):
                 turn += 2 * math.pi
             if not sweep and turn > 0:
                 turn -= 2 * math.pi
+
             parts = max(1, math.ceil(abs(turn) / (math.pi / 2) - 1e-9))
             step = turn / parts
             k = 4 / 3 * math.tan(step / 4)
+
             for n in range(parts):
                 b0, b1 = a0 + n * step, a0 + (n + 1) * step
                 p1 = (cx + r * (math.cos(b0) - k * math.sin(b0)),
@@ -266,6 +281,7 @@ def no_arcs(d):
             at = (x, y)
         else:
             raise ValueError(f"a number with no command in a path: {cmd}")
+
     return "".join(out)
 
 
@@ -295,10 +311,12 @@ def vector(size_dp, viewport, paths, height_dp=None, viewport_height=None, shift
     """
     body = "".join(f'\n    <path\n        android:fillColor="{fill}"\n'
                    f'        android:pathData="{d}" />' for fill, d in paths)
+
     if shift != (0, 0):
         body = (f'\n    <group\n        android:translateX="{num(shift[0])}"\n'
                 f'        android:translateY="{num(shift[1])}">'
                 + body.replace("\n", "\n    ") + "\n    </group>")
+
     return ('<?xml version="1.0" encoding="utf-8"?>\n'
             "<!-- Generated by scripts/logo.py. Do not edit. -->\n"
             '<vector xmlns:android="http://schemas.android.com/apk/res/android"\n'
@@ -331,7 +349,7 @@ def outputs():
     files = {}
     mark = Mark()
 
-    # The mark alone: its box centerd in a 100-unit square, 90 units on
+    # The mark alone: its box centered in a 100-unit square, 90 units on
     # its larger side.
     d = mark.placed(100, 90)
     files["brand/umbra-mark.svg"] = svg("0 0 100 100", f'<path fill="currentColor" d="{d}"/>')
@@ -369,6 +387,7 @@ def outputs():
     files["brand/umbra-logo-auto.svg"] = svg(
         vb, f'<path class="mark" d="{m}"/><path class="word" {move} d="{wd}"/>',
         auto_css((GREEN, MINT), (INK, SOFT)))
+
     # The box of the wordmark holds each point of its ink.
     files["brand/umbra-wordmark.svg"] = svg(
         f"{num(wl)} {num(wt)} {num(wr - wl)} {num(wb - wt)}", f'<path fill="currentColor" d="{wd}"/>')
@@ -386,6 +405,7 @@ def outputs():
         files[f"brand/{name}"] = svg(
             "0 0 108 108",
             f'<rect width="108" height="108"{corner} fill="{bg}"/><path fill="{fg}" d="{icon}"/>')
+
     # The mail logo of BIMI: the square tile, which a mail client crops to a
     # circle. The mark lies inside the safe zone, thus the crop cuts none.
     files["brand/umbra-app-icon-tiny-ps.svg"] = svg_tiny_ps(
@@ -411,26 +431,32 @@ def outputs():
     files[f"{RES}/drawable/ic_launcher_monochrome.xml"] = vector(108, 108, [("#FFFFFFFF", launcher)])
     files[f"{RES}/mipmap-anydpi-v26/ic_launcher.xml"] = adaptive()
     files[f"{RES}/mipmap-anydpi-v26/ic_launcher_round.xml"] = adaptive()
+
     splash = mark.placed(288, 64 / mark.reach() * span)
     files[f"{RES}/drawable/ic_splash.xml"] = vector(288, 288, [(GREEN, splash)])
     files[f"{RES}/drawable-night/ic_splash.xml"] = vector(288, 288, [(MINT, splash)])
+
     files[f"{RES}/drawable/ic_stat_umbra.xml"] = vector(24, 100, [("#FFFFFFFF", small)])
     files[f"{RES}/drawable/ic_umbra_mark.xml"] = vector(24, 100, [("#FF000000", d)])
+
     # The wordmark of the top bar, with a cap height of 13 dp. The app
     # tints it with the color of the text.
     word_dp = 13 / cap
     files[f"{RES}/drawable/ic_umbra_wordmark.xml"] = vector(
         (wr - wl) * word_dp, wr - wl, [("#FF000000", wd)],
         height_dp=(wb - wt) * word_dp, viewport_height=wb - wt, shift=(-wl, -wt))
+
     files[f"{RES}/values/brand.xml"] = (
         '<?xml version="1.0" encoding="utf-8"?>\n'
         "<!-- Generated by scripts/logo.py. Do not edit. -->\n"
         f'<resources>\n    <color name="brand_green">{GREEN}</color>\n</resources>\n')
+
     return files
 
 
 def main():
     check = "--check" in sys.argv[1:]
+
     stale = []
     for rel, text in outputs().items():
         path = ROOT / rel
@@ -443,6 +469,7 @@ def main():
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text, encoding="utf-8", newline="\n")
             print(f"wrote {rel}")
+
     if stale:
         sys.exit("logo: stale files, run python scripts/logo.py:\n  " + "\n  ".join(stale))
 

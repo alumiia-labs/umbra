@@ -1,6 +1,7 @@
 # The signer of the directory: the seven authority keys of a network of
 # one operator, a manifest each hour, and nginx that serves it at
 # /.well-known/umbra/manifest to the relays and to the app (Part 3 NET-316).
+
 - name: The packages of the signer are there
   ansible.builtin.apt:
     name: nginx

@@ -3,6 +3,7 @@
 # Each step fails the run on its own, thus a later step never hides an
 # earlier failure.
 set -euo pipefail
+
 cd "$(dirname "$0")/.."
 
 step() { printf '\n== %s\n' "$1"; }
@@ -44,7 +45,9 @@ cargo clippy -p umbra-ffi --features bindings,sockets-test --all-targets -- -D w
 # with few threads, two of them side by side starve each other, and a transfer
 # step then times out. Ten full runs at three at a time passed on 24 threads.
 socket_tests=1
-if [ "$(nproc)" -ge 16 ]; then socket_tests=3; fi
+if [ "$(nproc)" -ge 16 ]; then
+    socket_tests=3
+fi
 cargo test -p umbra-ffi --features bindings,sockets-test -- --test-threads="$socket_tests"
 
 step "build, wasm32-unknown-unknown"
@@ -57,10 +60,12 @@ step "dependency policy"
 # The advisories check reads the RustSec database, thus this step needs the
 # network. It fails on a known fault and on a yanked version (Part 14
 # §14.2.7).
+#
 # `deps.py --check` below can fail with no change in the tree. A `skip`
 # entry of deny.toml is then older than 90 days. Check the entry again.
 # Then give it a new date or remove it.
 cargo deny check advisories bans licenses sources
+
 # The platform graph of register R3: its advisories, its licenses under the
 # exceptions of deny.toml, and its sources. Its crates stay off the bans
 # allow list (Part 14 §14.2.3).
@@ -82,6 +87,7 @@ python scripts/sitecheck.py
 step "interface strings"
 # Part 14 §14.9.3: each string that a rule requires, in each locale.
 python scripts/uistrings.py
+
 # Each translation of the app and of the site against its English source.
 python scripts/l10ncheck.py
 

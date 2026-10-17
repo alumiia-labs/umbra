@@ -4,6 +4,7 @@
 # the user of the signer, because it reads the seed files of that user. Its
 # unit shows it the two seeds that it needs and hides each other file of
 # the signer.
+
 - name: The directories of the authority tool are there
   ansible.builtin.file:
     path: "{{ item.path }}"

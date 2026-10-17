@@ -32,16 +32,18 @@ alone, because the host answers each unknown path with that one file.
 
 `scripts/logo.py` writes the two logo files. Do not edit them by hand.
 
-The two pages take the look of a full view of the app (`Ui.kt`, `Widgets.kt`,
-`Theme.kt`). They take the warm white ground, the mark on the sage tile of
-`BrandHero`, and the sizes of `Headline`. The app has a light form alone, thus so have
-the pages. The font is DM Sans; the app itself sets its text in Roboto, and
-the wordmark is Jost. The font file is a subset of the variable file of the
+The two pages take the look of a full view of the app (`Ui.kt`,
+`Widgets.kt`, `Theme.kt`). They take the warm white ground, the mark on the
+sage tile of `BrandHero`, and the sizes of `Headline`. The app has a light
+form alone, thus so have the pages.
+
+The font is DM Sans; the app itself sets its text in Roboto, and the
+wordmark is Jost. The font file is a subset of the variable file of the
 DM Sans project (`ofl/dmsans/DMSans[opsz,wght].ttf` of
 github.com/google/fonts):
 
 ```sh
-python -m fontTools.subset "DMSans[opsz,wght].ttf"   --unicodes="U+0020-007E,U+00A0-00FF,U+2018-201D,U+2026"   --layout-features=kern,liga --flavor=woff2   --output-file=site/public/dm-sans.woff2
+python -m fontTools.subset "DMSans[opsz,wght].ttf"     --unicodes="U+0020-007E,U+00A0-00FF,U+2018-201D,U+2026"     --layout-features=kern,liga --flavor=woff2     --output-file=site/public/dm-sans.woff2
 ```
 
 A text of a page in a script outside that range needs a wider subset.
