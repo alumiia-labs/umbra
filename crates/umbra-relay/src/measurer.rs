@@ -189,6 +189,7 @@ impl Socket {
         pad_body(bucket, command, content, &mut body).ok()?;
         let tag = self.circuit.seal(&mut body).ok()?;
         let cell = [self.circuit.circ_id().as_slice(), &tag, &body].concat();
+
         let mut capsule = vec![0u8; cell.len() + 64];
         let used = self.link.send(&cell, &mut capsule).ok()?;
         capsule.truncate(used);
@@ -202,15 +203,19 @@ impl Socket {
         let Ok((CapsuleType::Cell, value, _)) = capsule::parse(bytes) else {
             return false;
         };
+
         let Ok(Some(cell)) = self.link.receive(value) else {
             return false;
         };
+
         let Ok((parsed, Bucket::B0)) = Cell::parse(cell) else {
             return false;
         };
+
         if *parsed.circ_id != self.circuit.circ_id() {
             return false;
         }
+
         let mut body = parsed.body.to_vec();
         self.circuit.open(parsed.tag, &mut body).is_ok()
             && matches!(unpad_body(&body), Ok((CellCommand::MeasEcho, _)))
@@ -230,6 +235,7 @@ async fn open_socket(
     let mut draw = [0u8; 16 + 4 + 8 + 32 + 16];
     rng.try_fill_bytes(&mut draw)
         .map_err(|_| MeasureError::Local)?;
+
     let take = |from: usize, len: usize| draw.get(from..from + len).unwrap_or(&[]);
     let ws_key: [u8; 16] = take(0, 16).try_into().map_err(|_| MeasureError::Local)?;
     let mask: [u8; 4] = take(16, 4).try_into().map_err(|_| MeasureError::Local)?;
@@ -242,9 +248,11 @@ async fn open_socket(
         .await
         .map_err(|_| MeasureError::Connect)?
         .map_err(|_| MeasureError::Connect)?;
+
     let mut buffer = vec![0u8; 40_000];
     let (mut link, used) = ClientLink::open(session_id, Secret::new(secret), &mut buffer)
         .map_err(|_| MeasureError::Local)?;
+
     tcp.send(buffer.get(..used).unwrap_or(&[]))
         .await
         .map_err(|_| MeasureError::Connect)?;
@@ -254,11 +262,14 @@ async fn open_socket(
         s: target.ntor_pk,
         relay_id: target.relay_id,
     };
+
     let mut hello = [0u8; HELLO_LEN];
     let pending = Pending::hello(&relay, DelayClass::Fast, &mut rng, &mut hello)
         .map_err(|_| MeasureError::Local)?;
+
     let mut body = vec![0u8; BUILD_BUCKET.body_len()];
     build_cell_body(CellCommand::Extend, &hello, &mut body).map_err(|_| MeasureError::Local)?;
+
     let cell = [circ_id.as_slice(), &[0u8; 16], &body].concat();
     let used = link
         .send(&cell, &mut buffer)
@@ -266,19 +277,23 @@ async fn open_socket(
     tcp.send(buffer.get(..used).unwrap_or(&[]))
         .await
         .map_err(|_| MeasureError::Connect)?;
+
     let ss_hop = tokio::time::timeout(wait, async {
         loop {
             let bytes = tcp.recv().await.map_err(|_| MeasureError::Build)?;
             let Ok((CapsuleType::Cell, value, _)) = capsule::parse(&bytes) else {
                 continue;
             };
+
             let Ok(Some(cell)) = link.receive(value) else {
                 continue;
             };
+
             let (parsed, _) = Cell::parse(cell).map_err(|_| MeasureError::Build)?;
             if *parsed.circ_id != circ_id || *parsed.tag != [0u8; 16] {
                 return Err(MeasureError::Build);
             }
+
             let (_, reply) = read_cell_body(parsed.body).map_err(|_| MeasureError::Build)?;
             return pending.finish(reply).map_err(|_| MeasureError::Build);
         }
@@ -289,8 +304,10 @@ async fn open_socket(
     let circuit = MeasureCircuit::new(&ss_hop, u32::from(target.layer), circ_id);
     let content = open_content(cert, key, &target.relay_id, &circ_id, &mut rng)
         .map_err(|_| MeasureError::Local)?;
+
     let (mut reader, mut writer) = tcp.split();
     let mut socket = Socket { link, circuit };
+
     let open = socket
         .frame(CellCommand::MeasOpen, Bucket::B3, &content)
         .ok_or(MeasureError::Local)?;
@@ -303,6 +320,7 @@ async fn open_socket(
         .send_all(&[open, first])
         .await
         .map_err(|_| MeasureError::Connect)?;
+
     let echoed = tokio::time::timeout(wait, async {
         loop {
             match reader.recv().await {
@@ -314,6 +332,7 @@ async fn open_socket(
     })
     .await
     .unwrap_or(false);
+
     if echoed {
         Ok((socket, reader, writer))
     } else {
@@ -330,6 +349,7 @@ async fn run_socket(
     end: Instant,
 ) -> (u64, u64) {
     let (mut socket, mut reader, mut writer) = opened;
+
     // The writing half runs as its own task, thus a write that waits for
     // the relay holds no read back.
     let (batches, mut waiting) = mpsc::channel::<Vec<Vec<u8>>>(2);
@@ -340,6 +360,7 @@ async fn run_socket(
             }
         }
     });
+
     // The reading half runs as its own task too, and it notes the time of
     // each capsule. In one task with the sending, a measurer behind its
     // rate reads one echo for each batch that it sends.
@@ -351,6 +372,7 @@ async fn run_socket(
             }
         }
     });
+
     let (mut sent, mut echoed) = (0u64, 0u64);
     // Each capsule goes through its layers in its order, and an echo counts
     // by the time at which it came.
@@ -361,23 +383,28 @@ async fn run_socket(
             }
         }
     };
+
     tokio::time::sleep_until(start.into()).await;
     let mut pace = tokio::time::interval(PACE);
     let mut counter = 0u64;
+
     loop {
         let now = Instant::now();
         // A connection that ended carries no more of the test.
         if now >= end || read.is_finished() {
             break;
         }
+
         count(&mut socket, &mut arrivals);
         let due = (now.duration_since(start).as_secs_f64() * cells_each_second) as u64;
         let owed = due.saturating_sub(sent).min(BATCH_CELLS);
+
         tokio::select! {
             permit = batches.reserve(), if owed > 0 => {
                 let Ok(permit) = permit else {
                     break;
                 };
+
                 let mut batch = Vec::with_capacity(owed as usize);
                 for _ in 0..owed {
                     counter = counter.wrapping_add(1);
@@ -388,8 +415,10 @@ async fn run_socket(
                     };
                     batch.push(capsule);
                 }
+
                 sent += batch.len() as u64;
                 permit.send(batch);
+
                 // A full batch tells of a measurer behind its rate. Such a
                 // loop never waits, and a thread that never waits polls no
                 // socket: the echoes stay unseen. The yield gives the
@@ -402,7 +431,9 @@ async fn run_socket(
             () = tokio::time::sleep_until(end.into()) => break,
         }
     }
+
     count(&mut socket, &mut arrivals);
+
     // The measurer ends its circuit and its session (Part 6 `WIR-246`):
     // the relay parks nothing of it.
     let mut last = Vec::new();
@@ -412,7 +443,9 @@ async fn run_socket(
         close.truncate(used);
         last.push(close);
     }
+
     let _ = batches.send(last).await;
+
     drop(batches);
     let _ = tokio::time::timeout(Duration::from_secs(2), write).await;
     read.abort();
@@ -434,24 +467,29 @@ pub async fn measure(
     for _ in 0..plan.sockets {
         sockets.push(open_socket(target, cert, key, tls.clone()).await?);
     }
+
     let cell_bits = bits_of_cells(1) as f64;
     let each = plan.send_bits as f64 / cell_bits / plan.sockets as f64;
     let start = Instant::now() + Duration::from_millis(50);
     let end = start + plan.slot;
+
     let runs: Vec<_> = sockets
         .into_iter()
         .map(|socket| tokio::spawn(run_socket(socket, each, start, end)))
         .collect();
+
     let (mut sent, mut echoed) = (0u64, 0u64);
     for run in runs {
         let (one_sent, one_echoed) = run.await.map_err(|_| MeasureError::Local)?;
         sent += one_sent;
         echoed += one_echoed;
     }
+
     let millis = u64::try_from(plan.slot.as_millis())
         .unwrap_or(u64::MAX)
         .max(1);
     let echoed_bits = bits_of_cells(echoed).saturating_mul(1_000) / millis;
+
     Ok(Outcome {
         sent,
         echoed,
@@ -488,12 +526,14 @@ pub fn clusters(targets: &[Target]) -> Vec<Vec<usize>> {
             if !target.is_near(other) {
                 continue;
             }
+
             let (Some(from), Some(to)) = (
                 cluster_of.get(other_index).copied(),
                 cluster_of.get(index).copied(),
             ) else {
                 continue;
             };
+
             for held in &mut cluster_of {
                 if *held == from {
                     *held = to;
@@ -501,10 +541,12 @@ pub fn clusters(targets: &[Target]) -> Vec<Vec<usize>> {
             }
         }
     }
+
     let mut grouped: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for (index, cluster) in cluster_of.into_iter().enumerate() {
         grouped.entry(cluster).or_default().push(index);
     }
+
     grouped.into_values().collect()
 }
 
@@ -527,25 +569,30 @@ pub fn slots<R: TryCryptoRng + ?Sized>(
     let width = width.max(1);
     let mut out = Vec::new();
     let mut is_narrow = false;
+
     for mut cluster in clusters(targets) {
         let sample = if cluster.len() <= CLUSTER_FULL {
             cluster.len()
         } else {
             CLUSTER_SAMPLE
         };
+
         if sample > width {
             is_narrow = true;
         }
+
         // A uniform order, by the Fisher-Yates method.
         for last in (1..cluster.len()).rev() {
             let draw = rng.try_next_u64().unwrap_or(0);
             let pick = usize::try_from(draw % (last as u64 + 1)).unwrap_or(0);
             cluster.swap(last, pick);
         }
+
         for slot in cluster.chunks(sample.min(width).max(1)) {
             out.push(slot.to_vec());
         }
     }
+
     (out, is_narrow)
 }
 
@@ -590,6 +637,7 @@ mod tests {
             target(4, [10, 0, 4, 1], 0),
             target(5, [10, 0, 5, 1], 7),
         ];
+
         let mut found = clusters(&targets);
         found.sort();
         assert_eq!(found, vec![vec![0, 2], vec![1, 3, 5], vec![4]]);
@@ -603,20 +651,24 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].len(), 4);
         assert!(!is_narrow);
+
         // REL-100, REL-101: nine relays in ceil(9 / 4) slots, each relay
         // one time.
         let nine: Vec<Target> = (0..9u8).map(|n| target(1, [10, n, 0, 1], 0)).collect();
         let (found, is_narrow) = slots(&nine, 8, &mut OsRng);
         assert_eq!(found.len(), 3);
         assert!(!is_narrow);
+
         let mut seen: Vec<usize> = found.concat();
         seen.sort_unstable();
         assert_eq!(seen, (0..9).collect::<Vec<_>>());
         assert!(found.iter().all(|slot| slot.len() <= CLUSTER_SAMPLE));
+
         // The order comes from the generator: two runs differ.
         let orders: std::collections::BTreeSet<Vec<Vec<usize>>> =
             (0..16).map(|_| slots(&nine, 8, &mut OsRng).0).collect();
         assert!(orders.len() > 1);
+
         // A measurer of the launch network holds two C0 tests in a slot.
         let six: Vec<Target> = (0..6u8).map(|n| target(1, [10, n, 0, 1], 0)).collect();
         let (found, is_narrow) = slots(&six, 2, &mut OsRng);
@@ -627,8 +679,10 @@ mod tests {
     #[test]
     fn a_server_of_500_mbit_tests_two_relays_at_c0_and_no_class_above() {
         let capacity = 500_000_000;
+
         assert_eq!(slot_width(capacity, 0), 2);
         assert_eq!(slot_width(capacity, 1), 0);
+
         assert_eq!(highest_class(capacity), Some(0));
         assert_eq!(highest_class(224_999_999), None);
         assert_eq!(highest_class(1_125_000_000), Some(2));

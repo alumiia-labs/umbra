@@ -49,9 +49,9 @@
 //! measurer key file (`umbra-measurer keygen` writes it), under the keys
 //! of authority 5 and authority 6 (`REL-103`). The authority tool holds the
 //! keys of authority 0 and authority 1 while it runs, thus the keys of
-//! that tool issue no certificate. The certificate is void
-//! after the count of epochs, 24 when the command names none and
-//! `MEASURER_CERT_TTL` at most (`REL-070`). The command prints the
+//! that tool issue no certificate. The certificate is void after the count
+//! of epochs, 24 when the command names none and `MEASURER_CERT_TTL` at
+//! most (`REL-070`). The command prints the
 //! `measurer_id` and the `not_after` of the certificate: a `revoked` line
 //! with the two values revokes it (`REL-105`), and the signer drops the
 //! line from the root when `not_after` passed (`REL-106`).
@@ -131,10 +131,12 @@ fn hex32(text: &str) -> Option<[u8; 32]> {
     if text.len() != 64 {
         return None;
     }
+
     let mut out = [0u8; 32];
     for (index, byte) in out.iter_mut().enumerate() {
         *byte = u8::from_str_radix(text.get(index * 2..index * 2 + 2)?, 16).ok()?;
     }
+
     Some(out)
 }
 
@@ -142,10 +144,12 @@ fn hex16(text: &str) -> Option<[u8; 16]> {
     if text.len() != 32 {
         return None;
     }
+
     let mut out = [0u8; 16];
     for (index, byte) in out.iter_mut().enumerate() {
         *byte = u8::from_str_radix(text.get(index * 2..index * 2 + 2)?, 16).ok()?;
     }
+
     Some(out)
 }
 
@@ -169,12 +173,15 @@ fn write_whole(path: &Path, bytes: &[u8], secret: bool) -> Result<(), &'static s
     }
     #[cfg(not(unix))]
     let _ = secret;
+
     let mut file = options
         .open(&temporary)
         .map_err(|_| "a file does not open for writing")?;
+
     file.write_all(bytes)
         .and_then(|()| file.sync_all())
         .map_err(|_| "a file does not take its bytes")?;
+
     std::fs::rename(&temporary, path).map_err(|_| "a file does not take its name")
 }
 
@@ -183,6 +190,7 @@ fn keygen(dir: &Path, keyset_epoch: u64) -> Result<(), &'static str> {
     if holds_any || dir.is_file() {
         return Err("the key directory holds a file already");
     }
+
     // The keys go into a new directory beside the one named and take its
     // name at the end. Thus a keygen that stops half-way leaves no key
     // there. This run makes the random name of that directory, thus the
@@ -191,21 +199,26 @@ fn keygen(dir: &Path, keyset_epoch: u64) -> Result<(), &'static str> {
     OsRng
         .try_fill_bytes(&mut tag)
         .map_err(|_| "the system gives no randomness")?;
+
     let name = dir
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or("the key directory has no name")?;
     let staging = dir.with_file_name(format!(".{name}.keygen-{}", to_hex(&tag)));
+
     if let Some(parent) = staging.parent().filter(|path| !path.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent).map_err(|_| "the key directory does not open")?;
     }
+
     std::fs::create_dir(&staging).map_err(|_| "the key directory does not open")?;
+
     let made = fill_keys(&staging, keyset_epoch).and_then(|keyset| {
         // An empty directory of that name gives way to the keys.
         let _ = std::fs::remove_dir(dir);
         std::fs::rename(&staging, dir).map_err(|_| "the key directory does not take its name")?;
         Ok(keyset)
     });
+
     let keyset = match made {
         Ok(keyset) => keyset,
         Err(cause) => {
@@ -213,11 +226,13 @@ fn keygen(dir: &Path, keyset_epoch: u64) -> Result<(), &'static str> {
             return Err(cause);
         }
     };
+
     println!(
         "keyset={} bytes sha3-256={}",
         keyset.len(),
         to_hex(&sha3_256(&[&keyset]))
     );
+
     Ok(())
 }
 
@@ -230,6 +245,7 @@ fn fill_keys(staging: &Path, keyset_epoch: u64) -> Result<Vec<u8>, &'static str>
         std::fs::set_permissions(staging, std::fs::Permissions::from_mode(0o700))
             .map_err(|_| "the key directory takes no mode")?;
     }
+
     let mut keys = Vec::with_capacity(AUTHORITY_COUNT);
     for index in 0..AUTHORITY_COUNT {
         let mut seed = Secret::<32>::zeroed();
@@ -241,6 +257,7 @@ fn fill_keys(staging: &Path, keyset_epoch: u64) -> Result<Vec<u8>, &'static str>
         write_whole(&seed_path(staging, index), text.as_bytes(), true)?;
         keys.push(SigningKey::from_seed(seed));
     }
+
     let keyset = keyset_bytes_with(&keys, keyset_epoch, INDEPENDENT_COUNT)
         .map_err(|_| "the key set does not build")?;
     write_whole(&staging.join("keyset.bin"), &keyset, false)?;
@@ -258,7 +275,9 @@ fn read_keys(dir: &Path) -> Result<(Vec<SigningKey>, Vec<u8>), &'static str> {
         let seed = Zeroizing::new(hex32(text.trim()).ok_or("a seed file does not parse")?);
         keys.push(SigningKey::from_seed(Secret::new(*seed)));
     }
+
     let keyset = std::fs::read(dir.join("keyset.bin")).map_err(|_| "keyset.bin does not read")?;
+
     // The key set on the disk names these keys, or a client rejects each
     // root that the signer makes.
     let (parsed, _) = DirectoryKeySet::parse(&keyset).map_err(|_| "keyset.bin does not parse")?;
@@ -266,9 +285,11 @@ fn read_keys(dir: &Path) -> Result<(Vec<SigningKey>, Vec<u8>), &'static str> {
         .iter()
         .zip(parsed.keys.iter())
         .all(|(key, public)| key.verifying_key().to_bytes().as_slice() == *public);
+
     if !named || parsed.keys.len() != AUTHORITY_COUNT {
         return Err("keyset.bin names other keys than the seeds");
     }
+
     Ok((keys, keyset))
 }
 
@@ -314,9 +335,11 @@ fn candidates_of(path: &Path, keyset: &[u8], now: u64) -> Result<Vec<Candidate>,
     let set = RelaySet::accept(&mut consensus, &manifest, &BlocList::v1(), now).map_err(|_| {
         "the manifest does not verify under the old key set; give the one of this epoch"
     })?;
+
     if !set.is_whole {
         return Err("the manifest holds a part of the relay set");
     }
+
     Ok(set.relays.iter().map(|relay| relay.candidate).collect())
 }
 
@@ -332,10 +355,12 @@ fn rotate(
 ) -> Result<(), &'static str> {
     let (old_keys, old_keyset) = read_keys(old)?;
     let (_, new_keyset) = read_keys(new)?;
+
     let (old_parsed, _) =
         DirectoryKeySet::parse(&old_keyset).map_err(|_| "the old keyset.bin does not parse")?;
     let (new_parsed, _) =
         DirectoryKeySet::parse(&new_keyset).map_err(|_| "the new keyset.bin does not parse")?;
+
     // REL-037: a client takes the next epoch alone, thus a set of another
     // epoch would leave each client at the old set.
     if !is_next_epoch(old_parsed.keyset_epoch, new_parsed.keyset_epoch) {
@@ -344,6 +369,7 @@ fn rotate(
              rejects it (REL-037): keygen <dir> <epoch>",
         );
     }
+
     // REL-142: the count rises to the floor only over a relay set that
     // carries a chain from each ingress relay.
     if new_parsed.independent_count >= AUTHORITY_FLOOR {
@@ -355,7 +381,9 @@ fn rotate(
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| "the clock is before 1970")?
             .as_secs();
+
         let candidates = candidates_of(manifest, &old_keyset, now)?;
+
         if !count_stands(new_parsed.independent_count, &candidates) {
             return Err(
                 "the relay set holds an ingress relay with no chain of three operators, \
@@ -364,32 +392,40 @@ fn rotate(
             );
         }
     }
+
     let link = umbra_core::directory::keychain::sign_keyset(&old_keys, &new_keyset, &mut OsRng)
         .map_err(|_| "the new key set does not sign")?;
+
     let held = std::fs::read(chain).ok();
     let mut links: Vec<&[u8]> = match &held {
         Some(bytes) => umbra_core::directory::keychain::links(bytes)
             .map_err(|_| "the key chain file does not parse")?,
         None => Vec::new(),
     };
+
     // A rotation runs one time: a chain that reaches this epoch takes no
     // second link of it.
     let reached = links.iter().any(|held| {
         DirectoryKeySet::parse(held)
             .is_ok_and(|(set, _)| set.keyset_epoch >= new_parsed.keyset_epoch)
     });
+
     if reached {
         return Err("the key chain reaches that epoch already");
     }
+
     links.push(&link);
     let encoded =
         umbra_core::directory::keychain::encode(&links).map_err(|_| "the key chain is full")?;
+
     // The chain walks from the old set to the new one, as each client will.
     umbra_core::directory::keychain::advance(&old_keyset, &encoded)
         .ok()
         .filter(|reached| *reached == new_keyset)
         .ok_or("the key chain does not reach the new key set")?;
+
     write_whole(chain, &encoded, false)?;
+
     println!(
         "keychain links={} newest epoch={}",
         links.len(),
@@ -443,6 +479,7 @@ fn measurer_cert(
     lifetime: u64,
 ) -> Result<(), &'static str> {
     let (keys, _) = read_keys(dir)?;
+
     let text =
         std::fs::read_to_string(key_file).map_err(|_| "the measurer key file does not read")?;
     let text = text.trim();
@@ -455,20 +492,25 @@ fn measurer_cert(
             u8::from_str_radix(pair, 16).map_err(|_| "the measurer key file does not parse")?,
         );
     }
+
     let mut measurer_id = [0u8; 16];
     OsRng
         .try_fill_bytes(&mut measurer_id)
         .map_err(|_| "no random value")?;
+
     let epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| "the clock is before 1970")?
         .as_secs()
         / EPOCH_SECONDS;
+
     let signers: Vec<(u8, &SigningKey)> = (0u8..).zip(keys.iter()).skip(5).collect();
     let cert = issue_cert(measurer_id, &public, epoch, lifetime, &signers, &mut OsRng).map_err(
         |_| "the certificate does not issue: the key is no ML-DSA-65 key, or the life is above MEASURER_CERT_TTL",
     )?;
+
     write_whole(out, &cert, false)?;
+
     println!(
         "measurer_id={} not_after={}",
         to_hex(&measurer_id),
@@ -514,6 +556,7 @@ fn listed_class(
     epoch: u64,
 ) -> Option<u8> {
     let before = state.get(relay_id).copied();
+
     match verified_class(relay_id, declared, results) {
         Some(verified) => {
             let staged = staged_class(before, verified, epoch);
@@ -565,17 +608,21 @@ fn live_removals(
         })
         .copied()
         .collect();
+
     let by_link = |one: &LinkRemoval, other: &LinkRemoval| {
         (one.relay_a, one.relay_b, other.epoch).cmp(&(other.relay_a, other.relay_b, one.epoch))
     };
+
     live.sort_by(by_link);
     live.dedup_by(|one, other| one.relay_a == other.relay_a && one.relay_b == other.relay_b);
+
     let over = live.len().saturating_sub(LINK_REMOVALS_MAX);
     if over > 0 {
         live.sort_by(|one, other| other.epoch.cmp(&one.epoch).then(by_link(one, other)));
         live.truncate(LINK_REMOVALS_MAX);
         live.sort_by(by_link);
     }
+
     (live, over)
 }
 
@@ -605,9 +652,11 @@ fn published(held: Option<&[u8]>, fresh: &[u8]) -> Published {
             manifest.removals.len(),
         ))
     };
+
     let (Some(held), Some(fresh)) = (held.and_then(read), read(fresh)) else {
         return Published::Nothing;
     };
+
     if held.0 != fresh.0 {
         Published::Nothing
     } else if held == fresh {
@@ -632,6 +681,7 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
     let mut results: Option<Vec<ClassResult>> = None;
     let mut class_state_file: Option<PathBuf> = None;
     let mut revoked: Vec<([u8; 16], u64)> = Vec::new();
+
     for line in text
         .lines()
         .map(str::trim)
@@ -690,10 +740,13 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
             _ => return Err("the settings file does not parse"),
         }
     }
+
     let key_dir = key_dir.ok_or("the settings file needs a line: keys=<key directory>")?;
     let out = out.ok_or("the settings file needs a line: out=<output directory>")?;
+
     let (keys, keyset) = read_keys(&key_dir)?;
     let (parsed, _) = DirectoryKeySet::parse(&keyset).map_err(|_| "keyset.bin does not parse")?;
+
     // REL-200: each relay and each app reaches the key set of the manifest
     // through the chain alone, thus the signer signs under the set that
     // the chain ends at, and under the first set before any rotation. A
@@ -707,6 +760,7 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
             .map(|(set, used)| (set.keyset_epoch, used)),
         None => None,
     };
+
     match (&chain, newest) {
         (Some(bytes), Some((_, used))) => {
             let links = umbra_core::directory::keychain::links(bytes)
@@ -721,6 +775,7 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
         }
         _ => {}
     }
+
     // REL-198: the signer places the relays of one operator alone.
     let parsed_count = parsed.independent_count;
     let provisional = parsed_count < AUTHORITY_FLOOR;
@@ -733,6 +788,7 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
         .map_err(|_| "the clock is before 1970")?
         .as_secs();
     let epoch = now / EPOCH_SECONDS;
+
     // REL-106: a revoked measurer stays in the root until the `not_after`
     // of its certificate passed.
     let mut revoked: Vec<[u8; 16]> = revoked
@@ -740,11 +796,14 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
         .filter(|(_, not_after)| *not_after >= epoch)
         .map(|(id, _)| id)
         .collect();
+
     revoked.sort_unstable();
     revoked.dedup();
+
     if revoked.len() > MEASURER_REVOKE_MAX {
         return Err("the settings revoke more measurers than MEASURER_REVOKE_MAX");
     }
+
     // REL-001: the step rule needs the class of the last listing.
     let mut class_state = match (&results, &class_state_file) {
         (Some(_), None) => {
@@ -753,6 +812,7 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
         (_, Some(path)) => read_class_state(&std::fs::read_to_string(path).unwrap_or_default()),
         (None, None) => ClassState::new(),
     };
+
     // REL-188: the dense-subgraph search over the removed links of their
     // life expels each relay that it peels.
     let live: Vec<LinkRemoval> = removed
@@ -760,10 +820,12 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
         .filter(|removal| in_life(removal, epoch))
         .copied()
         .collect();
+
     for relay in peel(&live) {
         println!("relay {} expelled by the link-fault search", to_hex(&relay));
         expelled.push(relay);
     }
+
     // REL-183: the manifest carries the removed links after the search,
     // thus the links of a relay that it expelled take no place. Before
     // this, the bound stopped the run before the search took out a relay
@@ -798,23 +860,28 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
             }
             None => relay.class,
         };
+
         let listing = Listing {
             descriptor: &relay.descriptor,
             operator_id: relay.operator_id,
             class,
             is_ingress: matches!(relay.place, Place::Ingress),
         };
+
         let admission = match relay.place {
             Place::Exit => Admission::Fixed { layer: 3 },
             Place::Ingress | Place::Middle => Admission::Fixed { layer: 2 },
         };
+
         let entry = entry_of(&listing, admission)
             .map_err(|_| "a descriptor does not verify, or its class is above the declared one")?;
+
         let read = RelayEntry::parse(&entry).map_err(|_| "an entry does not verify")?;
         if expelled.contains(&read.descriptor.relay_id) {
             println!("relay {} expelled", to_hex(&read.descriptor.relay_id));
             continue;
         }
+
         if matches!(relay.place, Place::Ingress) && !read.ingress() {
             // §10.6.1: an ingress relay that a class test took below C1
             // keeps its listing and loses the flag.
@@ -826,9 +893,11 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
                 to_hex(&read.descriptor.relay_id)
             );
         }
+
         if matches!(relay.place, Place::Exit) && read.layer() != 3 {
             return Err("an exit relay offers no queue role and no chain role");
         }
+
         // ATT-088: the floor of the chunk store applies from the first
         // directory that is not provisional (Part 3 `NET-340` to `NET-345`).
         // This signer signs a provisional directory alone (`REL-198`).
@@ -846,6 +915,7 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
         );
         entries.push(entry);
     }
+
     let signers: Vec<u8> = (0u8..).take(AUTHORITY_COUNT).collect();
     let manifest = sign_manifest_revoking(
         &keys,
@@ -858,15 +928,18 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
         &mut OsRng,
     )
     .map_err(|_| "the manifest does not build")?;
+
     // REL-167: the report queue of each authority that wrote one.
     let mut signed_queues = Vec::new();
     for (index, file) in &report_queues {
         let Ok(held) = std::fs::read(file) else {
             continue;
         };
+
         let (address, report_pk) = held
             .split_at_checked(QUEUE_ADDRESS_LEN)
             .ok_or("a report queue file does not parse")?;
+
         let queue = ReportQueue {
             authority_index: *index,
             epoch,
@@ -877,15 +950,18 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
                 .try_into()
                 .map_err(|_| "a report queue file does not parse")?,
         };
+
         let key = keys
             .get(usize::from(*index))
             .ok_or("no authority of that index")?;
+
         signed_queues.push(
             queue
                 .sign(key, &mut OsRng)
                 .map_err(|_| "a report queue does not sign")?,
         );
     }
+
     // REL-183: each removed link of its life, under each key.
     let removal_signers: Vec<(u8, &SigningKey)> = (0u8..).zip(keys.iter()).collect();
     let mut signed_removals = Vec::new();
@@ -896,6 +972,7 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
                 .map_err(|_| "a link removal does not sign")?,
         );
     }
+
     let manifest = if signed_queues.is_empty() && signed_removals.is_empty() {
         manifest
     } else {
@@ -905,6 +982,7 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
         parsed.removals = signed_removals.iter().map(Vec::as_slice).collect();
         parsed.encode().map_err(|_| "the manifest does not build")?
     };
+
     // The signer verifies its own manifest as each relay and each client
     // does, thus a fault of one entry stops here and not at the network.
     let (keyset_parsed, _) =
@@ -914,10 +992,12 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
     let parsed = RelayManifest::parse(&manifest).map_err(|_| "the manifest does not parse")?;
     let set = RelaySet::accept(&mut consensus, &parsed, &BlocList::v1(), now)
         .map_err(|_| "the manifest does not verify; check the clock of each relay")?;
+
     // REL-147: each client and each relay takes a whole set alone.
     if !set.is_whole {
         return Err("the manifest holds a part of the relay set");
     }
+
     // REL-142: no manifest goes out under a count at the floor over a relay
     // set with an ingress relay that has no chain.
     let candidates: Vec<Candidate> = set.relays.iter().map(|relay| relay.candidate).collect();
@@ -928,6 +1008,7 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
              AUTHORITY_FLOOR (REL-142)",
         );
     }
+
     // REL-160: an epoch takes one root. A second run inside the epoch leaves
     // the first root in its place, with or without a changed relay set.
     let held = std::fs::read(out.join("manifest")).ok();
@@ -945,18 +1026,22 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
         }
         _ => {}
     }
+
     std::fs::create_dir_all(&out).map_err(|_| "the output directory does not open")?;
     write_whole(&out.join("manifest"), &manifest, false)?;
     write_whole(&out.join("keyset.bin"), &keyset, false)?;
+
     // REL-199: the chain of each rotation, beside the manifest.
     if let Some(chain) = keychain.as_ref().and_then(|path| std::fs::read(path).ok()) {
         write_whole(&out.join("keychain"), &chain, false)?;
     }
+
     // The state follows the manifest that went out: a run that kept the
     // root of its epoch moved no class.
     if let Some(path) = &class_state_file {
         write_whole(path, class_state_text(&class_state).as_bytes(), false)?;
     }
+
     println!(
         "epoch={epoch} relays={} manifest={} bytes report_queues={} removed_links={}",
         relays.len(),
@@ -1027,11 +1112,13 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+
     let done = std::thread::Builder::new()
         .stack_size(STACK_BYTES)
         .spawn(work)
         .ok()
         .and_then(|thread| thread.join().ok());
+
     match done {
         Some(Ok(())) => ExitCode::SUCCESS,
         Some(Err(cause)) => {
@@ -1062,6 +1149,7 @@ mod tests {
     fn descriptor(seed: u8, relay_roles: u8, chunk_store_gib: u32) -> Vec<u8> {
         let mut host = [0u8; umbra_core::directory::descriptor::HOST_LEN];
         host[..9].copy_from_slice(b"localhost");
+
         RelayDescriptor {
             relay_id: [0; 32],
             identity_pk: &[],
@@ -1127,6 +1215,7 @@ mod tests {
             OsRng.try_fill_bytes(&mut tag).unwrap();
             let root = std::env::temp_dir().join(format!("umbra-signer-test-{}", to_hex(&tag)));
             std::fs::create_dir_all(&root).unwrap();
+
             // A live key directory with the name that an earlier keygen
             // took for its work, and one with a dot in its name.
             let other = root.join("keys.new");
@@ -1138,23 +1227,28 @@ mod tests {
 
             keygen(&root.join("keys"), FIRST_KEYSET_EPOCH).unwrap();
             assert!(read_keys(&root.join("keys")).is_ok());
+
             assert_eq!(
                 std::fs::read(other.join("authority-0.seed")).unwrap(),
                 b"live"
             );
+
             // A directory that holds a file takes no keys and keeps its file.
             assert!(keygen(&dotted, FIRST_KEYSET_EPOCH).is_err());
             assert!(keygen(&root.join("keys"), FIRST_KEYSET_EPOCH).is_err());
+
             assert_eq!(
                 std::fs::read(dotted.join("authority-0.seed")).unwrap(),
                 b"live"
             );
+
             // No work directory stays behind.
             let left: Vec<_> = std::fs::read_dir(&root)
                 .unwrap()
                 .map(|entry| entry.unwrap().file_name().into_string().unwrap())
                 .filter(|name| name.contains("keygen"))
                 .collect();
+
             assert!(left.is_empty(), "{left:?}");
             std::fs::remove_dir_all(&root).unwrap();
         });
@@ -1166,23 +1260,29 @@ mod tests {
             let first_keys = keys(0x40);
             let two = [entry(1), entry(2)];
             let first = manifest(&first_keys, 700, &two);
+
             // REL-160: the first run of a directory, and a damaged file.
             assert_eq!(published(None, &first), Published::Nothing);
             assert_eq!(published(Some(&[0x01, 0x02]), &first), Published::Nothing);
+
             // The same settings sign other bytes under the same digest.
             let again = manifest(&first_keys, 700, &two);
             assert_ne!(first, again);
             assert_eq!(published(Some(&first), &again), Published::Same);
+
             // A relay more in the same epoch is another root for it.
             let three = [two[0].clone(), two[1].clone(), entry(3)];
             let more = manifest(&first_keys, 700, &three);
             assert_eq!(published(Some(&first), &more), Published::Other);
+
             // A descriptor that a relay signed again is another root too.
             let signed_again = manifest(&first_keys, 700, &[two[0].clone(), entry(2)]);
             assert_eq!(published(Some(&first), &signed_again), Published::Other);
+
             // Another key set in the same epoch is another root too.
             let rotated = manifest(&keys(0x80), 700, &two);
             assert_eq!(published(Some(&first), &rotated), Published::Other);
+
             // The next epoch signs the new set.
             let next = manifest(&first_keys, 701, &three);
             assert_eq!(published(Some(&first), &next), Published::Nothing);
@@ -1203,17 +1303,21 @@ mod tests {
             OsRng.try_fill_bytes(&mut tag).unwrap();
             let root = std::env::temp_dir().join(format!("umbra-signer-test-{}", to_hex(&tag)));
             std::fs::create_dir_all(&root).unwrap();
+
             let chain = root.join("keychain");
             keygen(&root.join("first"), FIRST_KEYSET_EPOCH).unwrap();
             keygen(&root.join("same"), FIRST_KEYSET_EPOCH).unwrap();
             keygen(&root.join("far"), FIRST_KEYSET_EPOCH + 2).unwrap();
             keygen(&root.join("next"), FIRST_KEYSET_EPOCH + 1).unwrap();
+
             // A set of the same epoch and a set two above sign no link.
             assert!(rotate(&root.join("first"), &root.join("same"), &chain, None).is_err());
             assert!(rotate(&root.join("first"), &root.join("far"), &chain, None).is_err());
             assert!(!chain.exists());
+
             rotate(&root.join("first"), &root.join("next"), &chain, None).unwrap();
             assert!(chain.exists());
+
             std::fs::remove_dir_all(&root).unwrap();
         });
     }
@@ -1227,10 +1331,12 @@ mod tests {
             passed,
             epoch,
         };
+
         let mut state = ClassState::new();
         // No result: the relay takes the class that its operator declares
         // (§10.2, the provisional directory).
         assert_eq!(listed_class(&relay, 2, &[], &mut state, 1_000), Some(2));
+
         // REL-095, REL-096: a failed test at C1 lists the relay at C0 in
         // the next manifest, two steps at once.
         let mut results = vec![result(1, false, 1_001)];
@@ -1238,6 +1344,7 @@ mod tests {
             listed_class(&relay, 2, &results, &mut state, 1_002),
             Some(0)
         );
+
         // REL-001: a newer pass verifies the declared class again, and the
         // listing rises one step in each 168 epochs. The first step comes
         // 168 epochs after the first listing.
@@ -1262,6 +1369,7 @@ mod tests {
             listed_class(&relay, 2, &results, &mut state, 1_336),
             Some(2)
         );
+
         // The state file holds the class and the epoch of the last step.
         let read = read_class_state(&class_state_text(&state));
         assert_eq!(read, state);
@@ -1272,6 +1380,7 @@ mod tests {
                 stepped_at: 1_336
             })
         );
+
         // REL-197: a failed test at C0 takes the relay out of the listing,
         // and a newer pass lists it at C0 first.
         results.push(result(0, false, 1_400));
@@ -1293,6 +1402,7 @@ mod tests {
             let keys = keys(0x30);
             let keyset = keyset_bytes_with(&keys, FIRST_KEYSET_EPOCH, INDEPENDENT_COUNT).unwrap();
             let signers: Vec<u8> = (0u8..).take(AUTHORITY_COUNT).collect();
+
             // REL-105: the root names the measurer.
             let manifest = sign_manifest_revoking(
                 &keys,
@@ -1305,14 +1415,17 @@ mod tests {
                 &mut OsRng,
             )
             .unwrap();
+
             let parsed = RelayManifest::parse(&manifest).unwrap();
             let root = DirectoryRoot::parse(parsed.root).unwrap();
             assert_eq!(root.revoked, vec![[0x4D; 16]]);
+
             let (keyset, _) = DirectoryKeySet::parse(&keyset).unwrap();
             let mut consensus = Consensus::new(keyset, 0).unwrap();
             assert!(
                 RelaySet::accept(&mut consensus, &parsed, &BlocList::v1(), 700 * 3_600).is_ok()
             );
+
             assert_eq!(hex16(&to_hex(&[0x4D; 16])), Some([0x4D; 16]));
             assert_eq!(hex16("4d"), None);
         });
@@ -1325,9 +1438,11 @@ mod tests {
             other[..2].copy_from_slice(&index.to_be_bytes());
             LinkRemoval::of(epoch, [0; 32], other)
         };
+
         let max = u16::try_from(LINK_REMOVALS_MAX).unwrap();
         let full: Vec<LinkRemoval> = (0..max).map(|index| link(index, 700)).collect();
         assert_eq!(live_removals(&full, &[], 700), (full.clone(), 0));
+
         // A second verdict of one link and a link past its life count for
         // nothing.
         let mut same = full.clone();
@@ -1335,16 +1450,19 @@ mod tests {
         same.push(link(max, 700 - LINK_REMOVAL_EPOCHS - 1));
         same.push(link(max + 1, 701));
         assert_eq!(live_removals(&same, &[], 700), (full.clone(), 0));
+
         // One live link more leaves the oldest one out, and the run goes
         // on: the manifest carries the newest 512.
         let mut over: Vec<LinkRemoval> = (0..max)
             .map(|index| link(index, if index == 7 { 698 } else { 700 }))
             .collect();
         over.push(link(max, 700));
+
         let (carried, left_out) = live_removals(&over, &[], 700);
         assert_eq!((carried.len(), left_out), (512, 1));
         assert!(!carried.contains(&link(7, 698)));
         assert!(carried.contains(&link(max, 700)));
+
         // The links of a relay that the search expelled take no place.
         let mut far = [0xFF; 32];
         far[..2].copy_from_slice(&3u16.to_be_bytes());
@@ -1358,10 +1476,12 @@ mod tests {
     fn a_verdict_of_a_later_epoch_hides_no_live_verdict_of_its_link() {
         let live = LinkRemoval::of(690, [1; 32], [2; 32]);
         let later = LinkRemoval::of(900, [1; 32], [2; 32]);
+
         // The verdict of the later epoch is outside its life, and the live
         // one of the same link stays. Before this, the later one took its
         // place first, and the manifest carried no removal of the link.
         assert_eq!(live_removals(&[later, live], &[], 700), (vec![live], 0));
+
         // An epoch at the end of its range wraps nothing.
         let last = LinkRemoval::of(u64::MAX, [1; 32], [2; 32]);
         assert!(in_life(&last, u64::MAX));
@@ -1382,6 +1502,7 @@ mod tests {
                 } else {
                     roles::QUEUE | roles::CHAIN
                 };
+
                 let descriptor = descriptor(seed, relay_roles, 0);
                 let listing = Listing {
                     descriptor: &descriptor,
@@ -1389,6 +1510,7 @@ mod tests {
                     class: 1,
                     is_ingress,
                 };
+
                 let entry = entry_of(
                     &listing,
                     Admission::Fixed {
@@ -1396,17 +1518,20 @@ mod tests {
                     },
                 )
                 .unwrap();
+
                 Candidate {
                     bloc: blocs.bloc_of(code),
                     ..Candidate::from_entry(&RelayEntry::parse(&entry).unwrap(), &blocs)
                 }
             };
+
             // Three operators, and hop 1 and hop 3 in two blocs.
             let apart = [
                 relay(1, 1, b"US", 1),
                 relay(2, 2, b"US", 2),
                 relay(3, 3, b"SE", 3),
             ];
+
             assert_eq!(ingress_with_no_chain(&apart), None);
             assert!(count_stands(AUTHORITY_FLOOR, &apart));
 

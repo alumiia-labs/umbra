@@ -8,6 +8,8 @@
 //! answer that names it (`ATT-191`). A registration that waits for its
 //! bytes stays in RAM, and a restart ends it.
 
+use std::collections::BTreeMap;
+
 use umbra_core::{
     abuse::admission::{Accepts, RelayGate},
     attach::{
@@ -18,15 +20,15 @@ use umbra_core::{
         store::{ChunkStore, Class, Credentials},
     },
 };
-
-use crate::store::{Loaded, StoreChange};
-use std::collections::BTreeMap;
 use umbra_crypto::rand_core::CryptoRng;
 use umbra_queue::{params::store_time, relay::session::Session, Reject};
 use umbra_wire::command::{Cmd, Command};
 
 use super::{answer, Reply};
-use crate::circuits::CircuitKey;
+use crate::{
+    circuits::CircuitKey,
+    store::{Loaded, StoreChange},
+};
 
 /// One copy that this relay owes to a target of a `CREP` (`ATT-102`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +114,7 @@ impl ChunkService {
     pub fn sweep(&mut self, now: u64) {
         self.store.sweep(now);
         self.store.trim();
+
         let store = &self.store;
         self.copies
             .retain(|chunk_id, _| store.bytes(chunk_id).is_some());
@@ -141,8 +144,10 @@ impl ChunkService {
         let Cmd::Attachment(byte) = command.cmd else {
             return Err(Reject::Rejected);
         };
+
         let cmd = ChunkCmd::from_byte(byte).map_err(|_| Reject::Rejected)?;
         let chunk_id = command.queue_id;
+
         let reply = |cmd: ChunkCmd, payload: &[u8]| {
             vec![answer(
                 circuit,
@@ -151,23 +156,28 @@ impl ChunkService {
                 payload,
             )]
         };
+
         match cmd {
             ChunkCmd::Cnew | ChunkCmd::Bnew => {
                 let register =
                     RegisterPayload::parse(command.payload).map_err(|_| Reject::Rejected)?;
                 // ATT-180: the key of the payload authorizes its own command.
                 session.accept(command, &register.cred_pk)?;
+
                 // ABU-106, ABU-107: a token, or a solution that admits up to
                 // POW_CHUNK_ALLOWANCE registrations. It names the holder of
                 // the upload quota (ATT-092).
                 let holder = gate.admit_chunk(&register.admission, accepts, now)?;
+
                 let mut storage_token = [0u8; 32];
                 rng.fill_bytes(&mut storage_token);
+
                 let class = if cmd == ChunkCmd::Bnew {
                     Class::Backup
                 } else {
                     Class::Attachment
                 };
+
                 self.store.register(
                     chunk_id,
                     class,
@@ -179,6 +189,7 @@ impl ChunkService {
                     storage_token,
                     now,
                 )?;
+
                 Ok(reply(ChunkCmd::Cid, &storage_token))
             }
             ChunkCmd::Cput => {
@@ -188,9 +199,11 @@ impl ChunkService {
                     (registration.credentials.cred_pk, registration.storage_token);
                 // ATT-042: the authorized bytes hold the token.
                 session.accept_bound(command, &cred_pk, &token)?;
+
                 let chunk = chunk_payload(command.payload).map_err(|_| Reject::Rejected)?;
                 self.store.put(chunk_id, chunk, now)?;
                 self.note_held(chunk_id);
+
                 Ok(reply(ChunkCmd::Cprf, &self.held_proof(command)?))
             }
             ChunkCmd::Cget => {
@@ -206,9 +219,11 @@ impl ChunkService {
                 let Ok(credentials) = self.credentials(&chunk_id) else {
                     return Ok(Vec::new());
                 };
+
                 if session.accept(command, &credentials.read_pk).is_err() {
                     return Ok(Vec::new());
                 }
+
                 if self.store.renew(&chunk_id, now).is_ok() {
                     if let Some(erase_at) = self.store.erase_at(&chunk_id) {
                         self.changes.push(StoreChange::ChunkRenewed {
@@ -218,24 +233,29 @@ impl ChunkService {
                         });
                     }
                 }
+
                 Ok(Vec::new())
             }
             ChunkCmd::Cvfy => {
                 let cred_pk = self.credentials(&chunk_id)?.cred_pk;
                 session.accept(command, &cred_pk)?;
+
                 let nonce: [u8; NONCE_LEN] =
                     fixed_payload(command.payload).map_err(|_| Reject::Rejected)?;
                 let proof = self
                     .store
                     .prove(&chunk_id, &nonce)
                     .ok_or(Reject::Rejected)?;
+
                 Ok(reply(ChunkCmd::Cprf, &proof))
             }
             ChunkCmd::Crep => {
                 let cred_pk = self.credentials(&chunk_id)?.cred_pk;
                 session.accept(command, &cred_pk)?;
+
                 let targets = CrepPayload::parse(command.payload).map_err(|_| Reject::Rejected)?;
                 let proof = self.held_proof(command)?;
+
                 // A copy for a replica is no fetch, thus it takes nothing from
                 // the egress budget of §12.11.
                 let chunk = self
@@ -243,6 +263,7 @@ impl ChunkService {
                     .bytes(&chunk_id)
                     .ok_or(Reject::Rejected)?
                     .to_vec();
+
                 let sent = self.copies.entry(chunk_id).or_insert(0);
                 for target in targets.targets {
                     if *sent >= COPIES_MAX {
@@ -255,6 +276,7 @@ impl ChunkService {
                         chunk: chunk.clone(),
                     });
                 }
+
                 Ok(reply(ChunkCmd::Cprf, &proof))
             }
             ChunkCmd::Cdel => {
@@ -263,9 +285,12 @@ impl ChunkService {
                     Some(registration) => registration.credentials.cred_pk,
                     None => self.credentials(&chunk_id)?.cred_pk,
                 };
+
                 session.accept(command, &cred_pk)?;
+
                 self.store.delete(&chunk_id)?;
                 self.copies.remove(&chunk_id);
+
                 // ATT-187: the relay holds no byte of the chunk.
                 Ok(reply(ChunkCmd::Cprf, &[0; PROOF_LEN]))
             }
@@ -315,20 +340,25 @@ mod tests {
     use umbra_wire::admission::Admission;
 
     struct Rng(u8);
+
     impl TryRng for Rng {
         type Error = core::convert::Infallible;
+
         fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
             Ok(0)
         }
+
         fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
             Ok(0)
         }
+
         fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
             self.0 = self.0.wrapping_add(1);
             dst.fill(self.0);
             Ok(())
         }
     }
+
     impl TryCryptoRng for Rng {}
 
     /// A relay with one circuit, and a client that signs for it.
@@ -370,6 +400,7 @@ mod tests {
         ) -> (Result<Vec<Reply>, Reject>, [u8; 16]) {
             self.corr += 1;
             let corr_id = [self.corr; 16];
+
             let mut command = Command {
                 cmd: Cmd::Attachment(cmd.to_byte()),
                 corr_id,
@@ -377,8 +408,10 @@ mod tests {
                 auth: [0; 32],
                 payload,
             };
+
             let key = CommandAuthKey::derive(signer, &self.session.relay_session_pk()).unwrap();
             command.sign(&key, bind).unwrap();
+
             let accepts = Accepts::CrossRelay(&self.issuer);
             let result = self.service.handle(
                 CIRCUIT,
@@ -389,6 +422,7 @@ mod tests {
                 1_000,
                 &mut self.rng,
             );
+
             (result, corr_id)
         }
     }
@@ -397,6 +431,7 @@ mod tests {
     fn payload_of(result: Result<Vec<Reply>, Reject>, cmd: ChunkCmd) -> Vec<u8> {
         let replies = result.unwrap();
         assert_eq!(replies.len(), 1);
+
         let (command, _) =
             Command::parse(&replies[0].outbound.encoded, replies[0].outbound.bucket).unwrap();
         assert_eq!(command.cmd, Cmd::Attachment(cmd.to_byte()));
@@ -415,20 +450,24 @@ mod tests {
                 &mut self.rng,
             )
             .unwrap();
+
             let mut body = [0u8; umbra_core::abuse::pow::SOLUTION_LEN];
             let used = solution.encode(&mut body).unwrap();
             let admission = Admission {
                 kind: umbra_wire::admission::AdmissionKind::Pow,
                 body: &body[..used],
             };
+
             let payload = RegisterPayload {
                 cred_pk: *XPublic::from(cred).as_bytes(),
                 read_pk: *XPublic::from(read).as_bytes(),
                 admission,
             };
+
             let mut out = vec![0u8; 64 + admission.len()];
             let used = payload.encode(&mut out).unwrap();
             out.truncate(used);
+
             out
         }
     }
@@ -438,6 +477,7 @@ mod tests {
         let mut bench = Bench::new();
         let cred = StaticSecret::from([3; 32]);
         let read = StaticSecret::from([4; 32]);
+
         // ABU-106: a registration with no token and no solution fails, even
         // at an effort of 0.
         let bare = RegisterPayload {
@@ -445,19 +485,23 @@ mod tests {
             read_pk: *XPublic::from(&read).as_bytes(),
             admission: Admission::NONE,
         };
+
         let mut out = vec![0u8; 64 + Admission::NONE.len()];
         let used = bare.encode(&mut out).unwrap();
         let (refused, _) = bench.send(ChunkCmd::Cnew, [0xE0; 32], &out[..used], &cred, b"");
         assert_eq!(refused.err(), Some(Reject::Admission));
+
         // ABU-107: one solution admits POW_CHUNK_ALLOWANCE registrations, and
         // not one more.
         let register = bench.register_payload(&cred, &read);
+
         for i in 0..umbra_core::abuse::POW_CHUNK_ALLOWANCE {
             let mut id = [0xE1; 32];
             id[..2].copy_from_slice(&i.to_be_bytes());
             let (answer, _) = bench.send(ChunkCmd::Cnew, id, &register, &cred, b"");
             assert!(answer.is_ok(), "registration {i}");
         }
+
         let (over, _) = bench.send(ChunkCmd::Cnew, [0xE2; 32], &register, &cred, b"");
         assert_eq!(over.err(), Some(Reject::Admission));
     }
@@ -465,25 +509,33 @@ mod tests {
     #[test]
     fn a_held_chunk_outlives_a_restart_and_an_erased_one_does_not() {
         use crate::store::{MemoryStore, RelayStore};
+
         let mut bench = Bench::new();
         let mut disk = MemoryStore::default();
         let cred = StaticSecret::from([3; 32]);
         let read = StaticSecret::from([4; 32]);
+
         let chunk = vec![0x5A; CHUNK_SIZE];
         let register = bench.register_payload(&cred, &read);
+
         let (cid, _) = bench.send(ChunkCmd::Cnew, [0xC1; 32], &register, &cred, b"");
         let token = payload_of(cid, ChunkCmd::Cid);
+
         // A registration with no bytes stays in RAM.
         assert!(bench.service.take_changes().is_empty());
+
         let (put, _) = bench.send(ChunkCmd::Cput, [0xC1; 32], &chunk, &cred, &token);
         payload_of(put, ChunkCmd::Cprf);
+
         // ATT-191: the bytes go to the store with the answer.
         let changes = bench.service.take_changes();
         assert!(matches!(&changes[..], [StoreChange::Chunk { .. }]));
         disk.commit(&changes).unwrap();
+
         let (renewed, _) = bench.send(ChunkCmd::Crnw, [0xC1; 32], &[], &read, b"");
         assert_eq!(renewed, Ok(Vec::new()));
         disk.commit(&bench.service.take_changes()).unwrap();
+
         let (cid, _) = bench.send(ChunkCmd::Cnew, [0xC2; 32], &register, &cred, b"");
         payload_of(cid, ChunkCmd::Cid);
 
@@ -493,12 +545,15 @@ mod tests {
         assert_eq!(loaded.chunks[&[0xC1; 32]].renewed_at, store_time(1_000));
         let erase_at = loaded.chunks[&[0xC1; 32]].erase_at;
         assert_eq!(erase_at % 3_600, 0);
+
         bench.service = ChunkService::restore(1 << 24, &mut loaded);
         // The service took the bytes, and no second copy stays.
         assert!(loaded.chunks.is_empty());
         assert_eq!(bench.service.held_count(), 1);
+
         let (got, _) = bench.send(ChunkCmd::Cget, [0xC1; 32], &[], &read, b"");
         assert_eq!(payload_of(got, ChunkCmd::Cdat), chunk);
+
         let (lost, _) = bench.send(ChunkCmd::Cput, [0xC2; 32], &chunk, &cred, &token);
         assert_eq!(lost, Err(Reject::Rejected));
 
@@ -520,6 +575,7 @@ mod tests {
         let (cid, _) = bench.send(ChunkCmd::Cnew, chunk_id, &register, &cred, b"");
         let token = payload_of(cid, ChunkCmd::Cid);
         assert_eq!(token.len(), 32);
+
         // ATT-058: a second registration of the identifier.
         let (again, _) = bench.send(ChunkCmd::Cnew, chunk_id, &register, &cred, b"");
         assert_eq!(again, Err(Reject::Rejected));
@@ -528,10 +584,13 @@ mod tests {
         // the read credential, and one of a wrong length.
         let (no_bind, _) = bench.send(ChunkCmd::Cput, chunk_id, &chunk, &cred, b"");
         assert_eq!(no_bind, Err(Reject::Rejected));
+
         let (wrong_key, _) = bench.send(ChunkCmd::Cput, chunk_id, &chunk, &read, &token);
         assert_eq!(wrong_key, Err(Reject::Rejected));
+
         let (short, _) = bench.send(ChunkCmd::Cput, chunk_id, &chunk[1..], &cred, &token);
         assert_eq!(short, Err(Reject::Rejected));
+
         assert_eq!(bench.service.held_count(), 0);
 
         // ATT-186: the answer of the `CPUT` proves the bytes under its
@@ -541,23 +600,29 @@ mod tests {
             payload_of(put, ChunkCmd::Cprf),
             seal::proof(&corr_id, &chunk)
         );
+
         assert_eq!(bench.service.held_count(), 1);
 
         // ATT-040, ATT-041: each credential opens its own commands alone.
         let (by_cred, _) = bench.send(ChunkCmd::Cget, chunk_id, &[], &cred, b"");
         assert_eq!(by_cred, Err(Reject::Rejected));
+
         let (got, _) = bench.send(ChunkCmd::Cget, chunk_id, &[], &read, b"");
         assert_eq!(payload_of(got, ChunkCmd::Cdat), chunk);
+
         let (by_read, _) = bench.send(ChunkCmd::Cvfy, chunk_id, &[8; 16], &read, b"");
         assert_eq!(by_read, Err(Reject::Rejected));
+
         let (proof, _) = bench.send(ChunkCmd::Cvfy, chunk_id, &[8; 16], &cred, b"");
         assert_eq!(
             payload_of(proof, ChunkCmd::Cprf),
             seal::proof(&[8; 16], &chunk)
         );
+
         // ATT-126: a renewal has no answer.
         let (renewed, _) = bench.send(ChunkCmd::Crnw, chunk_id, &[], &read, b"");
         assert_eq!(renewed, Ok(Vec::new()));
+
         // ATT-126: a renewal of a chunk that the relay does not hold, and
         // one under another key, get no `NACK` too.
         let (unknown, _) = bench.send(ChunkCmd::Crnw, [0xEE; 32], &[], &read, b"");
@@ -580,22 +645,27 @@ mod tests {
         };
         let mut crep = vec![0u8; targets.len()];
         targets.encode(&mut crep).unwrap();
+
         let (replicated, corr_id) = bench.send(ChunkCmd::Crep, chunk_id, &crep, &cred, b"");
         assert_eq!(
             payload_of(replicated, ChunkCmd::Cprf),
             seal::proof(&corr_id, &chunk)
         );
+
         let pushes = bench.service.take_pushes();
         assert_eq!(pushes.len(), 2);
+
         assert!(pushes
             .iter()
             .all(|push| push.chunk == chunk && push.chunk_id == chunk_id));
         assert_eq!(pushes[1].target.storage_token, [0xC2; 32]);
+
         assert!(bench.service.take_pushes().is_empty());
 
         // ATT-187: the erase, and then the chunk is unknown.
         let (erased, _) = bench.send(ChunkCmd::Cdel, chunk_id, &[], &cred, b"");
         assert_eq!(payload_of(erased, ChunkCmd::Cprf), [0; PROOF_LEN]);
+
         let (gone, _) = bench.send(ChunkCmd::Cget, chunk_id, &[], &read, b"");
         assert_eq!(gone, Err(Reject::Rejected));
     }
@@ -621,23 +691,28 @@ mod tests {
             .unwrap();
             out
         };
+
         // ATT-107: another token opens nothing. ATT-111: the length is fixed.
         let wrong_token = copy([0; 32], &chunk);
         assert_eq!(
             bench.service.replica_put(chunk_id, &wrong_token, 1_000),
             Err(Reject::Rejected)
         );
+
         let good = copy(token, &chunk);
         assert_eq!(
             bench.service.replica_put(chunk_id, &good[1..], 1_000),
             Err(Reject::Rejected)
         );
+
         bench.service.replica_put(chunk_id, &good, 1_000).unwrap();
+
         // ATT-110: one copy for each registration.
         assert_eq!(
             bench.service.replica_put(chunk_id, &good, 1_000),
             Err(Reject::Rejected)
         );
+
         let (got, _) = bench.send(ChunkCmd::Cget, chunk_id, &[], &read, b"");
         assert_eq!(payload_of(got, ChunkCmd::Cdat), chunk);
     }

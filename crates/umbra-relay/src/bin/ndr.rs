@@ -45,11 +45,13 @@ fn hex32(text: &str) -> Option<Zeroizing<[u8; 32]>> {
     if text.len() != 64 {
         return None;
     }
+
     let mut out = Zeroizing::new([0u8; 32]);
     for (at, slot) in out.iter_mut().enumerate() {
         let start = at.checked_mul(2)?;
         *slot = u8::from_str_radix(text.get(start..start.checked_add(2)?)?, 16).ok()?;
     }
+
     Some(out)
 }
 
@@ -65,6 +67,7 @@ fn main() -> ExitCode {
     else {
         return ExitCode::from(1);
     };
+
     runtime.block_on(run())
 }
 
@@ -78,15 +81,18 @@ async fn run() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+
     // The text holds the seed of the gateway key, thus `Zeroizing` wipes it.
     let Ok(text) = std::fs::read_to_string(path).map(Zeroizing::new) else {
         eprintln!("the settings file does not read");
         return ExitCode::from(2);
     };
+
     let values: BTreeMap<&str, &str> = text
         .lines()
         .filter_map(|line| line.trim().split_once('='))
         .collect();
+
     let (Some(seed), Some(key_id)) = (
         values.get("kem_seed").and_then(|seed| hex32(seed)),
         values.get("key_id").and_then(|id| id.parse::<u8>().ok()),
@@ -94,6 +100,7 @@ async fn run() -> ExitCode {
         eprintln!("the settings file needs kem_seed and key_id");
         return ExitCode::from(2);
     };
+
     let pair = gateway_pair(&seed);
     if prints_config {
         let config = ohttp::encode_key_config(key_id, pair.public());
@@ -106,6 +113,7 @@ async fn run() -> ExitCode {
         );
         return ExitCode::SUCCESS;
     }
+
     let (Some(listen), Some(cert), Some(key), Some(store)) = (
         values.get("listen"),
         values.get("cert"),
@@ -115,10 +123,12 @@ async fn run() -> ExitCode {
         eprintln!("the settings file needs listen, cert, key, and store");
         return ExitCode::from(2);
     };
+
     let Some(tls) = tls_acceptor(cert, key) else {
         eprintln!("the certificate or the key does not load");
         return ExitCode::from(2);
     };
+
     let provider_tls = match values.get("trust") {
         Some(path) => native::tls_config_with_root_file(path),
         None => native::tls_config(),
@@ -127,6 +137,7 @@ async fn run() -> ExitCode {
         eprintln!("the TLS client configuration does not build");
         return ExitCode::from(1);
     };
+
     let store: Box<dyn NdrStore> = match SqliteNdrStore::open(store) {
         Ok(store) => Box::new(store),
         Err(_) => {
@@ -134,12 +145,15 @@ async fn run() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+
     let Ok(listener) = TcpListener::bind(listen).await else {
         eprintln!("the listen address does not bind");
         return ExitCode::from(1);
     };
+
     // No line of this program names a handle, a token, or an address.
     println!("ndr listen={listen} key_id={key_id}");
+
     let fcm = match values.get("fcm_credentials") {
         Some(path) => {
             // The file holds the key of the account.
@@ -158,6 +172,7 @@ async fn run() -> ExitCode {
         }
         None => None,
     };
+
     match run_ndr(listener, tls, Gateway { key_id, pair }, store, fcm).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(_) => {

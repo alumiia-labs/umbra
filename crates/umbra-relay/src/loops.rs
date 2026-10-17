@@ -68,12 +68,14 @@ struct Chain {
 fn seal(hops: &mut [KeySet], body: &mut [u8], endpoint: bool) -> Option<[u8; BLOCK]> {
     let last = hops.len().checked_sub(1);
     let mut left = [0u8; BLOCK];
+
     for (index, hop) in hops.iter_mut().enumerate().rev() {
         left = hop.forward.encipher(&left, body).ok()?;
         if endpoint && Some(index) == last {
             hop.forward.update(&left);
         }
     }
+
     Some(left)
 }
 
@@ -84,18 +86,22 @@ fn open(hops: &mut [KeySet], tag: &[u8; BLOCK], body: &mut [u8], endpoint: bool)
     let last = hops.len().checked_sub(1);
     let mut left = *tag;
     let mut last_input = [0u8; BLOCK];
+
     for (index, hop) in hops.iter_mut().enumerate() {
         if Some(index) == last {
             last_input = left;
         }
         left = hop.backward.decipher(&left, body).ok()?;
     }
+
     if !umbra_crypto::ct_eq(&left, &[0u8; BLOCK]) {
         return None;
     }
+
     if endpoint {
         hops.last_mut()?.backward.update(&last_input);
     }
+
     Some(())
 }
 
@@ -106,8 +112,10 @@ impl Chain {
     fn cell(&mut self, bucket: Bucket, command: CellCommand) -> Option<(LinkId, Vec<u8>)> {
         let mut body = vec![0u8; bucket.body_len()];
         pad_body(bucket, command, &[], &mut body).ok()?;
+
         let endpoint = matches!(self.stage, Stage::Ready);
         let tag = seal(&mut self.hops, &mut body, endpoint)?;
+
         self.cells.0 = self.cells.0.saturating_add(1);
         Some((self.link, [self.circ_id.as_slice(), &tag, &body].concat()))
     }
@@ -120,6 +128,7 @@ impl Chain {
         } else {
             BUILD_BUCKET
         };
+
         self.cell(bucket, CellCommand::Destroy)
     }
 
@@ -178,6 +187,7 @@ impl Loops {
                 .map(|(relay_id, (_, s))| (*relay_id, *s))
                 .collect::<BTreeMap<_, _>>()
         };
+
         self.next = of_layer(self.layer.saturating_add(1));
         self.exits = of_layer(3);
     }
@@ -198,9 +208,11 @@ impl Loops {
             link: chain.link,
             circ_id: chain.circ_id,
         });
+
         if let Some(until) = hold_off_until {
             self.held_off.insert(*relay_id, until);
         }
+
         Some(chain)
     }
 
@@ -219,6 +231,7 @@ impl Loops {
         if self.layer >= 3 {
             return cells;
         }
+
         let ended: Vec<([u8; 32], bool)> = self
             .chains
             .iter()
@@ -236,12 +249,14 @@ impl Loops {
                 }
             })
             .collect();
+
         for (relay_id, failed) in ended {
             let wait = failed.then_some(now.saturating_add(LOOP_REBUILD_WAIT));
             if let Some(mut chain) = self.remove(&relay_id, wait) {
                 cells.extend(chain.destroy());
             }
         }
+
         for chain in self.chains.values_mut() {
             if matches!(chain.stage, Stage::Ready)
                 && now.saturating_sub(chain.last_loop) >= RELAY_LOOP_PERIOD
@@ -253,6 +268,7 @@ impl Loops {
                 }
             }
         }
+
         self.held_off.retain(|_, until| *until > now);
         let wanted: Vec<([u8; 32], LinkId)> = next_hops
             .iter()
@@ -263,9 +279,11 @@ impl Loops {
             })
             .map(|(relay_id, link)| (*relay_id, *link))
             .collect();
+
         for (relay_id, link) in wanted {
             cells.extend(self.start(relay_id, link, now, circuits, rng));
         }
+
         cells
     }
 
@@ -292,10 +310,12 @@ impl Loops {
                 relay_id: *exit_id,
             });
         }
+
         let mut key = CircuitKey {
             link,
             circ_id: [0; 16],
         };
+
         // NET-154, NET-155.
         loop {
             rng.fill_bytes(&mut key.circ_id);
@@ -303,13 +323,16 @@ impl Loops {
                 break;
             }
         }
+
         let first = path.first()?;
         let mut hello = [0u8; HELLO_LEN];
         // The chain takes the default mode, thus its cells take the delay
         // of most circuits (§3.9).
         let pending = Pending::hello(first, DelayClass::Balanced, rng, &mut hello).ok()?;
+
         let mut body = vec![0u8; BUILD_BUCKET.body_len()];
         build_cell_body(CellCommand::Extend, &hello, &mut body).ok()?;
+
         self.by_circuit.insert(key, relay_id);
         self.chains.insert(
             relay_id,
@@ -327,6 +350,7 @@ impl Loops {
                 cells: (1, 0),
             },
         );
+
         Some((
             link,
             [key.circ_id.as_slice(), &[0u8; BLOCK], &body].concat(),
@@ -346,6 +370,7 @@ impl Loops {
         let Ok((parsed, _)) = Cell::parse(cell) else {
             return Vec::new();
         };
+
         let key = CircuitKey {
             link,
             circ_id: *parsed.circ_id,
@@ -353,11 +378,13 @@ impl Loops {
         let Some(relay_id) = self.by_circuit.get(&key).copied() else {
             return Vec::new();
         };
+
         let mut body = parsed.body.to_vec();
         let step = self
             .chains
             .get_mut(&relay_id)
             .and_then(|chain| Self::step(chain, self.layer, parsed.tag, &mut body, rng));
+
         match step {
             Some(Step::Loop) => {
                 self.returned = self.returned.saturating_add(1);
@@ -393,6 +420,7 @@ impl Loops {
                 Step::Quiet
             });
         };
+
         // NET-164, NET-199: the answer comes back under the layers of the
         // hops before it, with no key update.
         open(&mut chain.hops, tag, body, false)?;
@@ -400,24 +428,29 @@ impl Loops {
         if command != CellCommand::Extended {
             return None;
         }
+
         let ss_hop = pending.finish(reply).ok()?;
         let index = u32::try_from(chain.hops.len()).ok()?;
         // The layer of the hop is its hop index (`NET-106`).
         let hop_layer = u32::from(layer).saturating_add(1).saturating_add(index);
         chain.hops.push(KeySet::derive(&ss_hop, hop_layer));
+
         let Some(next) = chain.path.get(chain.hops.len()) else {
             chain.last_loop = chain.born;
             return Some(Step::Quiet);
         };
+
         let mut hello = [0u8; HELLO_LEN];
         let pending = Pending::hello(next, DelayClass::Balanced, rng, &mut hello).ok()?;
         chain.stage = Stage::Building {
             pending: Box::new(pending),
             since,
         };
+
         let mut body = vec![0u8; BUILD_BUCKET.body_len()];
         build_cell_body(CellCommand::Extend, &hello, &mut body).ok()?;
         let tag = seal(&mut chain.hops, &mut body, false)?;
+
         chain.cells.0 = chain.cells.0.saturating_add(1);
         Some(Step::Send((
             chain.link,
@@ -431,6 +464,7 @@ impl Loops {
         let Some(relay_id) = self.by_circuit.get(&CircuitKey { link, circ_id }).copied() else {
             return false;
         };
+
         self.remove(&relay_id, Some(now.saturating_add(LOOP_REBUILD_WAIT)));
         true
     }
@@ -443,6 +477,7 @@ impl Loops {
             .filter(|(_, chain)| chain.link == link)
             .map(|(relay_id, _)| *relay_id)
             .collect();
+
         for relay_id in on_link {
             self.remove(&relay_id, None);
         }
@@ -473,11 +508,14 @@ mod tests {
     use umbra_crypto::x25519::{PublicKey as XPublic, StaticSecret};
 
     struct Rng(u64);
+
     impl umbra_crypto::rand_core::TryRng for Rng {
         type Error = core::convert::Infallible;
+
         fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
             Ok(self.try_next_u64()? as u32)
         }
+
         fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
             self.0 = self
                 .0
@@ -485,6 +523,7 @@ mod tests {
                 .wrapping_add(1);
             Ok(self.0 >> 11)
         }
+
         fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
             for byte in dst {
                 *byte = self.try_next_u64()? as u8;
@@ -492,6 +531,7 @@ mod tests {
             Ok(())
         }
     }
+
     impl umbra_crypto::rand_core::TryCryptoRng for Rng {}
 
     fn relay(seed: u8, layer: u8) -> (RelayStatic, CircuitTable) {
@@ -500,6 +540,7 @@ mod tests {
             s: *XPublic::from(&secret).as_bytes(),
             relay_id: [seed; 32],
         };
+
         let table = CircuitTable::new(
             RelayStatic {
                 s: relay.s,
@@ -508,6 +549,7 @@ mod tests {
             secret,
             layer,
         );
+
         (relay, table)
     }
 
@@ -538,6 +580,7 @@ mod tests {
             (b.relay_id, (2, b.s)),
             (c.relay_id, (3, c.s)),
         ]));
+
         let (_, table_a) = relay(0xA1, 1);
         let mut rng = Rng(7);
         let next_hops = BTreeMap::from([(b.relay_id, 1)]);
@@ -549,22 +592,26 @@ mod tests {
         let [(1, hello)] = &cells[..] else {
             panic!("no build cell");
         };
+
         // B answers on the link of A.
         let actions = table_b.on_cell(1, hello, Origin::Relay, now, &mut rng);
         let [Action::Send { link: 1, cell }] = &actions[..] else {
             panic!("B gave no answer");
         };
         assert!(loops.owns(1, cell[..16].try_into().unwrap()));
+
         // A sends the hello of C under the layer of B.
         let cells = loops.on_cell(1, cell, now, &mut rng);
         let [(1, extend)] = &cells[..] else {
             panic!("no EXTEND for C");
         };
+
         let actions = table_b.on_cell(1, extend, Origin::Relay, now, &mut rng);
         let actions = now_due(&mut table_b, actions);
         let [Action::Extend { from, body, .. }] = &actions[..] else {
             panic!("B did not extend");
         };
+
         let next = CircuitKey {
             link: 3,
             circ_id: [9; 16],
@@ -573,46 +620,55 @@ mod tests {
         let [Action::Send { link: 3, cell }] = &actions[..] else {
             panic!("no build cell to C");
         };
+
         let actions = table_c.on_cell(3, cell, Origin::Relay, now, &mut rng);
         let [Action::Send { link: 3, cell }] = &actions[..] else {
             panic!("C gave no answer");
         };
+
         let actions = table_b.on_cell(3, cell, Origin::Relay, now, &mut rng);
         let [Action::Send { link: 1, cell }] = &actions[..] else {
             panic!("B did not move the answer back");
         };
+
         assert!(loops.on_cell(1, cell, now, &mut rng).is_empty());
 
         // NET-069: one loop each `RELAY_LOOP_PERIOD`, and C sends it back.
         assert!(loops
             .tick(now + 1, &next_hops, &table_a, &mut rng)
             .is_empty());
+
         for round in 1..=3u64 {
             now += RELAY_LOOP_PERIOD;
             let cells = loops.tick(now, &next_hops, &table_a, &mut rng);
             let [(1, cell)] = &cells[..] else {
                 panic!("no loop");
             };
+
             let actions = table_b.on_cell(1, cell, Origin::Relay, now, &mut rng);
             let actions = now_due(&mut table_b, actions);
             let [Action::Send { link: 3, cell }] = &actions[..] else {
                 panic!("B did not move the loop");
             };
+
             let actions = table_c.on_cell(3, cell, Origin::Relay, now, &mut rng);
             let actions = now_due(&mut table_c, actions);
             let [Action::Loop { circuit }] = &actions[..] else {
                 panic!("C did not take the loop");
             };
+
             let back = table_c
                 .originate(circuit, Bucket::B0, CellCommand::Loop, &[])
                 .unwrap();
             let Action::Send { link: 3, cell } = back else {
                 panic!("C sent nothing back");
             };
+
             let actions = table_b.on_cell(3, &cell, Origin::Relay, now, &mut rng);
             let [Action::Send { link: 1, cell }] = &actions[..] else {
                 panic!("B did not move the loop back");
             };
+
             assert!(loops.on_cell(1, cell, now, &mut rng).is_empty());
             assert_eq!(loops.counts(), (round, round));
         }
@@ -622,11 +678,14 @@ mod tests {
         let circ_id = hello[..16].try_into().unwrap();
         assert!(loops.on_destroy(1, circ_id, now));
         assert!(!loops.owns(1, circ_id));
+
         assert!(loops
             .tick(now + 1, &next_hops, &table_a, &mut rng)
             .is_empty());
+
         let cells = loops.tick(now + LOOP_REBUILD_WAIT, &next_hops, &table_a, &mut rng);
         assert_eq!(cells.len(), 1);
+
         // A link that closes ends the chain on it.
         loops.link_closed(1);
         assert!(loops.chains.is_empty() && loops.by_circuit.is_empty());
@@ -638,9 +697,11 @@ mod tests {
         let mut rng = Rng(1);
         let mut loops = Loops::new(3);
         loops.set_relays(&BTreeMap::from([([1; 32], (3, [2; 32]))]));
+
         assert!(loops
             .tick(10, &BTreeMap::from([([1; 32], 1)]), &table, &mut rng)
             .is_empty());
+
         let mut loops = Loops::new(2);
         assert!(loops
             .tick(10, &BTreeMap::from([([1; 32], 1)]), &table, &mut rng)

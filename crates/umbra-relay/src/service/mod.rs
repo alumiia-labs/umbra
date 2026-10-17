@@ -1,7 +1,7 @@
 //! The services of a relay at the end of a circuit: the pairwise queues,
-//! the group queues, and the chunk store. Each
-//! service takes one command and gives the commands that go back, to the
-//! circuit of the command or to the circuit of a subscriber.
+//! the group queues, and the chunk store. Each service takes one command
+//! and gives the commands that go back, to the circuit of the command or to
+//! the circuit of a subscriber.
 
 use umbra_queue::Reject;
 use umbra_wire::{
@@ -95,16 +95,20 @@ impl Drains {
         if self.asked.0 != minute {
             self.asked = (minute, 0);
         }
+
         if self.asked.1 >= DRAINS_PER_MINUTE {
             return Err(Reject::Limit);
         }
+
         self.asked.1 = self.asked.1.saturating_add(1);
+
         let named = self
             .held
             .iter()
             .filter(|drain| drain.queue_id != *queue_id)
             .fold(0usize, |sum, drain| sum.saturating_add(drain.left));
         let room = DRAIN_MAX.saturating_sub(named);
+
         let mut bytes = 0usize;
         for len in lengths {
             bytes = bytes.saturating_add(len);
@@ -112,6 +116,7 @@ impl Drains {
                 return Err(Reject::Limit);
             }
         }
+
         Ok(bytes)
     }
 
@@ -175,13 +180,16 @@ fn encode(cmd: Cmd, corr_id: [u8; 16], queue_id: [u8; 32], payload: &[u8]) -> Ou
         auth: [0; 32],
         payload,
     };
+
     let mut encoded = vec![0u8; command.len()];
     // The buffer has the length of the command, thus the write cannot fail.
     let _ = command.encode(&mut encoded);
+
     let bucket = BUCKETS
         .into_iter()
         .find(|bucket| encoded.len() <= bucket.command_area())
         .unwrap_or(Bucket::B3);
+
     Outbound { bucket, encoded }
 }
 
@@ -203,12 +211,14 @@ pub fn nack(circuit: CircuitKey, command: &Command<'_>, reject: Reject) -> Reply
         Reject::Busy => Reason::Busy,
         Reject::Version => Reason::Version,
     };
+
     let mut payload = [0u8; 17];
     let _ = NackPayload {
         corr_id: command.corr_id,
         reason,
     }
     .encode(&mut payload);
+
     answer(circuit, command, Cmd::Nack, &payload)
 }
 
@@ -237,6 +247,7 @@ mod tests {
             .unwrap();
         assert_eq!(bytes, 32 * MIB);
         drains.hold(drain(1, bytes));
+
         // A drain of another queue finds what the first one left of
         // `DRAIN_MAX`, and one above it gets `LIMIT`. The check stops at
         // the record that passes the room: it reads no length after it.
@@ -244,10 +255,12 @@ mod tests {
         let lengths = core::iter::repeat_n(MIB, 1_000).inspect(|_| read += 1);
         assert_eq!(drains.admit(&[2; 32], lengths, 60), Err(Reject::Limit));
         assert_eq!(read, 9);
+
         let bytes = drains
             .admit(&[2; 32], core::iter::repeat_n(MIB, 8), 60)
             .unwrap();
         drains.hold(drain(2, bytes));
+
         // A new drain of a queue takes the place of the one before it,
         // thus its own bytes count for nothing against it.
         assert!(drains
@@ -257,9 +270,11 @@ mod tests {
             drains.admit(&[1; 32], core::iter::repeat_n(MIB, 33), 60),
             Err(Reject::Limit)
         );
+
         drains.hold(drain(1, 5 * MIB));
         assert_eq!(drains.of(&[1; 32]).unwrap().left, 5 * MIB);
         assert_eq!(drains.of(&[2; 32]).unwrap().left, 8 * MIB);
+
         // The drains take their steps in the order of their arrival.
         assert_eq!(drains.first_mut().unwrap().queue_id, [2; 32]);
         drains.end_first();
@@ -271,12 +286,14 @@ mod tests {
     fn a_circuit_asks_for_a_bounded_count_of_drains_in_a_minute() {
         let mut drains = Drains::default();
         let minute = 6_000;
+
         // The refused ones count too: the fifth and each later one is above
         // the room, and each costs one of the count.
         for asked in 0..DRAINS_PER_MINUTE {
             let lengths = core::iter::repeat_n(DRAIN_MAX, if asked < 4 { 1 } else { 2 });
             assert_eq!(drains.admit(&[1; 32], lengths, minute).is_ok(), asked < 4);
         }
+
         // One more reads no length at all.
         let mut read = 0usize;
         let lengths = core::iter::repeat_n(1, 4).inspect(|_| read += 1);
@@ -285,6 +302,7 @@ mod tests {
             Err(Reject::Limit)
         );
         assert_eq!(read, 0);
+
         // The next minute gives the count back.
         assert!(drains
             .admit(&[1; 32], core::iter::repeat_n(1, 4), minute + 60)

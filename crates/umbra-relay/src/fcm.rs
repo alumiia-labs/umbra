@@ -73,10 +73,12 @@ pub fn sent_of(status: u16, body: &[u8]) -> Sent {
 /// service account file holds.
 pub fn json_string(json: &str, key: &str) -> Option<String> {
     let rest = value_after(json, key)?.strip_prefix('"')?;
+
     // The string can be a key, thus it takes its full room at once and no
     // growth leaves a copy behind.
     let mut out = String::with_capacity(rest.len());
     let mut chars = rest.chars();
+
     loop {
         match chars.next()? {
             '"' => return Some(out),
@@ -113,6 +115,7 @@ fn value_after<'a>(json: &'a str, key: &str) -> Option<&'a str> {
 fn json_quote(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
     out.push('"');
+
     for c in text.chars() {
         match c {
             '"' => out.push_str("\\\""),
@@ -121,6 +124,7 @@ fn json_quote(text: &str) -> String {
             c => out.push(c),
         }
     }
+
     out.push('"');
     out
 }
@@ -129,6 +133,7 @@ fn json_quote(text: &str) -> String {
 pub fn base64url(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+
     for group in bytes.chunks(3) {
         let byte = |i: usize| u32::from(group.get(i).copied().unwrap_or(0));
         let n = (byte(0) << 16) | (byte(1) << 8) | byte(2);
@@ -138,6 +143,7 @@ pub fn base64url(bytes: &[u8]) -> String {
             out.extend(TABLE.get(index).map(|symbol| char::from(*symbol)));
         }
     }
+
     out
 }
 
@@ -154,11 +160,13 @@ fn base64_decode(text: &str) -> Option<Zeroizing<Vec<u8>>> {
             _ => return None,
         }))
     };
+
     let mut clean = Zeroizing::new(Vec::with_capacity(text.len()));
     clean.extend(
         text.bytes()
             .filter(|c| !c.is_ascii_whitespace() && *c != b'='),
     );
+
     let mut out = Zeroizing::new(Vec::with_capacity(clean.len() * 3 / 4 + 3));
     for group in clean.chunks(4) {
         let mut n = 0u32;
@@ -168,6 +176,7 @@ fn base64_decode(text: &str) -> Option<Zeroizing<Vec<u8>>> {
         let bytes = n.to_be_bytes();
         out.extend_from_slice(bytes.get(1..group.len())?);
     }
+
     Some(out)
 }
 
@@ -194,8 +203,10 @@ impl ServiceAccount {
         for line in pem.lines().filter(|line| !line.starts_with("-----")) {
             body.push_str(line);
         }
+
         let der = base64_decode(&body)?;
         let audience = json_string(json, "token_uri")?;
+
         Some(ServiceAccount {
             client_email: json_string(json, "client_email")?,
             project_id: json_string(json, "project_id")?,
@@ -215,6 +226,7 @@ impl ServiceAccount {
             json_quote(&self.audience),
             now.saturating_add(ASSERTION_LIFE),
         );
+
         let signed = format!("{header}.{}", base64url(claims.as_bytes()));
         let mut signature = vec![0u8; self.key.public_modulus_len()];
         self.key
@@ -225,6 +237,7 @@ impl ServiceAccount {
                 &mut signature,
             )
             .ok()?;
+
         Some(format!("{signed}.{}", base64url(&signature)))
     }
 }
@@ -273,17 +286,20 @@ impl Fcm {
     async fn access_token(&self) -> Option<String> {
         let mut held = self.access.lock().await;
         let now = unix_now();
+
         if let Some((token, until)) = held.token.as_ref() {
             if now.saturating_add(TOKEN_MARGIN) < *until {
                 return Some(token.clone());
             }
         }
+
         if held
             .failed_at
             .is_some_and(|at| now.saturating_sub(at) < TOKEN_RETRY)
         {
             return None;
         }
+
         let fetched = self.fetch_token(now).await;
         match &fetched {
             Some((token, until)) => {
@@ -292,6 +308,7 @@ impl Fcm {
             }
             None => held.failed_at = Some(unix_now()),
         }
+
         fetched.map(|(token, _)| token)
     }
 
@@ -301,6 +318,7 @@ impl Fcm {
         let body = format!(
             "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion={assertion}"
         );
+
         let (status, answer) = https::post(
             &self.account.token_uri,
             "application/x-www-form-urlencoded",
@@ -312,9 +330,11 @@ impl Fcm {
         )
         .await
         .ok()?;
+
         if status != 200 {
             return None;
         }
+
         let answer = core::str::from_utf8(&answer).ok()?;
         let token = json_string(answer, "access_token")?;
         let life = json_number(answer, "expires_in").unwrap_or(3_600);
@@ -329,8 +349,10 @@ impl Fcm {
         let Some(access) = self.access_token().await else {
             return Sent::Refused;
         };
+
         let message = message_of(token, blob, ttl);
         let authorization = format!("Bearer {access}");
+
         let answer = https::post(
             &self.send,
             "application/json",
@@ -341,6 +363,7 @@ impl Fcm {
             WAIT,
         )
         .await;
+
         match answer {
             Ok((status, body)) => sent_of(status, &body),
             Err(_) => Sent::Refused,
@@ -353,6 +376,7 @@ impl Fcm {
 fn message_of(token: &str, blob: &[u8], ttl: u32) -> Zeroizing<String> {
     let quoted = Zeroizing::new(json_quote(token));
     let mut message = Zeroizing::new(String::with_capacity(quoted.len().saturating_add(256)));
+
     message.push_str("{\"message\":{\"token\":");
     message.push_str(&quoted);
     message.push_str(",\"data\":{\"b\":");
@@ -375,12 +399,15 @@ mod tests {
         assert_eq!(json_number(json, "n"), Some(3599));
         assert_eq!(json_string(json, "u").unwrap(), "A");
         assert_eq!(json_string(json, "missing"), None);
+
         assert_eq!(json_quote("a\"b\\c\n"), r#""a\"b\\c\u000a""#);
+
         assert_eq!(base64url(b""), "");
         assert_eq!(base64url(b"f"), "Zg");
         assert_eq!(base64url(b"fo"), "Zm8");
         assert_eq!(base64url(b"foo"), "Zm9v");
         assert_eq!(base64url(&[0xFB, 0xFF]), "-_8");
+
         assert_eq!(base64_decode("Zm9vYmE=").unwrap().as_slice(), b"fooba");
         assert_eq!(base64_decode("Zm9v\nYmFy").unwrap().as_slice(), b"foobar");
     }
@@ -390,10 +417,12 @@ mod tests {
         // NTF-130: the body of FCM for a registration token that is gone.
         let gone = br#"{"error":{"code":404,"message":"Requested entity was not found.","status":"NOT_FOUND","details":[{"@type":"type.googleapis.com/google.firebase.fcm.v1.FcmError","errorCode":"UNREGISTERED"}]}}"#;
         assert_eq!(sent_of(404, gone), Sent::Gone);
+
         // A project that does not exist gives 404 too, and it names no
         // token: the registration stays.
         let other = br#"{"error":{"code":404,"message":"Requested entity was not found.","status":"NOT_FOUND"}}"#;
         assert_eq!(sent_of(404, other), Sent::Refused);
+
         assert_eq!(sent_of(404, b"<html>not found</html>"), Sent::Refused);
         assert_eq!(sent_of(200, b"{}"), Sent::Taken);
         assert_eq!(sent_of(400, gone), Sent::Refused);

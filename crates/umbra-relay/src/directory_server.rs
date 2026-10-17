@@ -101,10 +101,12 @@ impl Issued {
         if !matches!(directory::parse_response(answer), Ok((Status::Done, _))) {
             return;
         }
+
         self.at(now);
         if self.held.insert(key, answer.to_vec()).is_none() {
             self.order.push_back(key);
         }
+
         if self.order.len() > ISSUED_HELD {
             if let Some(oldest) = self.order.pop_front() {
                 self.held.remove(&oldest);
@@ -156,6 +158,7 @@ impl SqliteDirectoryStore {
         fault(connection.pragma_update(None, "secure_delete", "ON"))?;
         fault(connection.pragma_update(None, "journal_mode", "WAL"))?;
         fault(connection.pragma_update(None, "synchronous", "FULL"))?;
+
         fault(connection.execute_batch(
             "CREATE TABLE IF NOT EXISTS log (
                 seq   INTEGER PRIMARY KEY,
@@ -174,6 +177,7 @@ impl SqliteDirectoryStore {
                 PRIMARY KEY (epoch, nonce)
             ) WITHOUT ROWID;",
         ))?;
+
         Ok(SqliteDirectoryStore { connection })
     }
 }
@@ -181,6 +185,7 @@ impl SqliteDirectoryStore {
 impl DirectoryStore for SqliteDirectoryStore {
     fn load(&mut self) -> Result<Vec<DirEvent>, StoreFault> {
         let mut out = Vec::new();
+
         let mut statement = fault(
             self.connection
                 .prepare("SELECT kind, a, b, c FROM log ORDER BY seq"),
@@ -208,6 +213,7 @@ impl DirectoryStore for SqliteDirectoryStore {
                 _ => return Err(StoreFault),
             });
         }
+
         let mut statement = fault(
             self.connection
                 .prepare("SELECT search_key, state FROM labels"),
@@ -221,6 +227,7 @@ impl DirectoryStore for SqliteDirectoryStore {
         for row in rows {
             out.push(fault(row)?);
         }
+
         let mut statement = fault(
             self.connection
                 .prepare("SELECT epoch, nonce FROM spent ORDER BY epoch"),
@@ -235,6 +242,7 @@ impl DirectoryStore for SqliteDirectoryStore {
                 nonce: nonce.try_into().map_err(|_| StoreFault)?,
             });
         }
+
         Ok(out)
     }
 
@@ -242,6 +250,7 @@ impl DirectoryStore for SqliteDirectoryStore {
         if events.is_empty() {
             return Ok(());
         }
+
         let transaction = fault(self.connection.transaction())?;
         for event in events {
             match event {
@@ -272,6 +281,7 @@ impl DirectoryStore for SqliteDirectoryStore {
                 ))?,
             };
         }
+
         // ABU-095: a nonce two epochs back names no token that passes.
         let newest = events
             .iter()
@@ -286,6 +296,7 @@ impl DirectoryStore for SqliteDirectoryStore {
                 [i64::from(newest.saturating_sub(1))],
             ))?;
         }
+
         fault(transaction.commit())
     }
 }
@@ -307,12 +318,15 @@ impl State {
         if self.broken {
             return None;
         }
+
         let out = run(&mut self.directory);
+
         if self.store.commit(&self.directory.take_events()).is_err() {
             eprintln!("the store took no commit, and the directory serves nothing more");
             self.broken = true;
             return None;
         }
+
         Some(out)
     }
 }
@@ -350,6 +364,7 @@ impl Shared {
         while self.clock_waits.load(Ordering::Acquire) {
             std::thread::sleep(CLOCK_WAIT);
         }
+
         match self.state.lock() {
             Ok(mut state) => state.step(|directory| directory.handle(request, now(), &mut OsRng)),
             Err(_) => None,
@@ -382,9 +397,11 @@ impl Shared {
                 return held;
             }
         }
+
         let Ok(place) = self.work.clone().try_acquire_owned() else {
             return directory::encode_response(Status::Busy, &[]).ok();
         };
+
         // The proofs of work of an issuance take some milliseconds, thus the
         // step leaves the runtime threads free. The step keeps its place
         // until it ends, whatever the connection does meanwhile. The server
@@ -415,22 +432,27 @@ async fn serve(
     let Ok(request) = https::read_request(&mut stream, &mut inbound, REQUEST_MAX).await else {
         return;
     };
+
     if request.method != "POST" || request.path != GATEWAY_PATH {
         let _ = https::respond(&mut stream, 404, "text/plain", &[]).await;
         return;
     }
+
     let Ok((plain, key)) = ohttp::decapsulate_request(gateway.key_id, &gateway.pair, &request.body)
     else {
         let _ = https::respond(&mut stream, 400, "text/plain", &[]).await;
         return;
     };
+
     let Some(answer) = shared.answer(plain).await else {
         let _ = https::respond(&mut stream, 502, "text/plain", &[]).await;
         return;
     };
+
     let Ok(sealed) = ohttp::encapsulate_response(&key, &answer, &mut OsRng) else {
         return;
     };
+
     let _ = https::respond(&mut stream, 200, "message/ohttp-res", &sealed).await;
 }
 
@@ -446,11 +468,13 @@ pub async fn run_directory(
     directory
         .replay(&events, &mut OsRng)
         .map_err(|_| StoreFault)?;
+
     let shared = Arc::new(Shared::new(State {
         directory,
         store,
         broken: false,
     }));
+
     let clock = shared.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(TICK);
@@ -463,6 +487,7 @@ pub async fn run_directory(
             let ticked = tokio::task::spawn_blocking(move || clock.tick())
                 .await
                 .unwrap_or(false);
+
             // One line for each run of ticks that fail. It names no label.
             if !ticked && !failed {
                 eprintln!("a tick of the directory failed, and the epoch does not close");
@@ -470,8 +495,10 @@ pub async fn run_directory(
             failed = !ticked;
         }
     });
+
     let gateway = Arc::new(gateway);
     let held = Arc::new(tokio::sync::Semaphore::new(CONNECTION_MAX));
+
     loop {
         // An accept that fails ends no directory: the process is out of
         // descriptors, or a peer reset its connection in the queue, and
@@ -481,12 +508,15 @@ pub async fn run_directory(
             tokio::time::sleep(ACCEPT_RETRY).await;
             continue;
         };
+
         let Ok(permit) = held.clone().try_acquire_owned() else {
             continue;
         };
+
         let tls = tls.clone();
         let gateway = gateway.clone();
         let shared = shared.clone();
+
         tokio::spawn(async move {
             let _permit = permit;
             let _ = tokio::time::timeout(CONNECTION_TIME, async move {
@@ -521,10 +551,12 @@ mod tests {
 
         let mut issued = Issued::default();
         assert!(issued.get(&key, NOW).is_none());
+
         // The server holds no refusal: the request can pass at a later time.
         let refused = directory::encode_response(Status::Refused, &[]).unwrap();
         issued.keep(key, &refused, NOW);
         assert!(issued.get(&key, NOW).is_none());
+
         let done = directory::encode_response(Status::Done, &[1, 2, 3]).unwrap();
         issued.keep(key, &done, NOW);
         assert_eq!(issued.get(&key, NOW + 1), Some(done.clone()));
@@ -537,6 +569,7 @@ mod tests {
             issued.keep(other, &done, NOW);
         }
         assert_eq!(issued.held.len(), ISSUED_HELD);
+
         assert!(issued.get(&key, NOW).is_none());
 
         // ABU-110: an answer serves the epoch of the clock and no later one.

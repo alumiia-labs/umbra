@@ -58,6 +58,7 @@ impl LogChannel for IssuerReader {
             .enable_all()
             .build()
             .map_err(|_| ReadError::Offline)?;
+
         let mut rng = crate::server::OsRng;
         runtime
             .block_on(call(&self.route, request, self.tls.clone(), &mut rng))
@@ -106,16 +107,20 @@ pub fn keep_reading(reader: IssuerReader, inputs: mpsc::Sender<Input>) {
     // The epoch before the first one of a log has no key. One line says
     // that its key did not come, and the read goes again at the long wait.
     let mut told_before = None;
+
     loop {
         let mut failed = false;
         let epoch = epoch_number(unix_now());
         held.retain(|known| *known >= epoch.saturating_sub(1));
+
         for wanted in wanted_epochs(epoch) {
             if held.contains(&wanted) {
                 continue;
             }
+
             let mut rng = crate::server::OsRng;
             let read = reader::cross_relay_key(&reader, wanted, &mut rng);
+
             if let Err(error) = &read {
                 if wanted >= epoch {
                     eprintln!("the issuer key of epoch {wanted} did not come: {error:?}");
@@ -125,6 +130,7 @@ pub fn keep_reading(reader: IssuerReader, inputs: mpsc::Sender<Input>) {
                     told_before = Some(wanted);
                 }
             }
+
             if let Ok(key) = read {
                 if inputs
                     .blocking_send(Input::IssuerKey {
@@ -139,6 +145,7 @@ pub fn keep_reading(reader: IssuerReader, inputs: mpsc::Sender<Input>) {
                 held.push(wanted);
             }
         }
+
         std::thread::sleep(if failed { READ_AGAIN } else { READ_EVERY });
     }
 }
