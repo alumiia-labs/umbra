@@ -21,6 +21,7 @@
 # deploy/ansible do: a relay states the address of the host, it sees the
 # address of each client and each relay, and the firewall of the host
 # applies. Each state directory is under UMBRA_ROOT on the host.
+
 name: umbra
 
 x-hardened: &hardened

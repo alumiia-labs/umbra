@@ -12,6 +12,7 @@
 # The relays keep their queues in the volume, thus a restart ends no
 # contact. `docker compose -f compose.devnet.yaml down -v` gives an empty
 # network.
+
 name: umbra-devnet
 
 services:
