@@ -67,11 +67,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let parsed = Token::parse(token).map_err(|_| Error::Malformed)?;
             rows.push(open.store.row_id(TOKENS, &parsed.nonce));
         }
+
         let mut batch = open.store.begin();
         for (row, token) in rows.into_iter().zip(tokens) {
             let value = [&epoch.to_be_bytes()[..], token.as_slice()].concat();
             batch.put(TOKENS, row, None, &value, rng)?;
         }
+
         Ok(batch.commit()?)
     }
 
@@ -102,12 +104,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 gone.push(row);
             }
         }
+
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         for row in gone {
             batch.delete(TOKENS, row);
         }
+
         batch.commit()?;
+
         Ok(taken)
     }
 
@@ -124,6 +129,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let row = open.store.row_id(TOKEN_STATE, &key_key(epoch));
         let mut batch = open.store.begin();
         batch.put(TOKEN_STATE, row, None, modulus, rng)?;
+
         Ok(batch.commit()?)
     }
 
@@ -152,11 +158,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if token.token_type != TYPE_CROSS_RELAY {
             return Ok(false);
         }
+
         let mut admitted = None;
         for held in [epoch, epoch.saturating_sub(1)] {
             let Some(key) = self.cross_relay_key(held)? else {
                 continue;
             };
+
             let challenge = TokenChallenge {
                 token_type: TYPE_CROSS_RELAY,
                 epoch: held,
@@ -170,18 +178,22 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 break;
             }
         }
+
         let Some(held) = admitted else {
             return Ok(false);
         };
+
         let open = self.open_mut()?;
         let row = open.store.row_id(TOKEN_STATE, &spent_key(&token.nonce));
         if open.store.get(TOKEN_STATE, &row)?.is_some() {
             return Ok(false);
         }
+
         let mut batch = open.store.begin();
         batch.put(TOKEN_STATE, row, None, &held.to_be_bytes(), rng)?;
         batch.commit()?;
         self.prune_token_state(epoch)?;
+
         Ok(true)
     }
 
@@ -201,10 +213,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if open.store.get(TOKEN_STATE, &row)?.is_some() {
             return Ok(false);
         }
+
         let mut batch = open.store.begin();
         batch.put(TOKEN_STATE, row, None, &epoch.to_be_bytes(), rng)?;
         batch.commit()?;
         self.prune_token_state(epoch)?;
+
         Ok(true)
     }
 
@@ -223,15 +237,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
             }
         }
+
         for held in floor.saturating_sub(4)..floor {
             let store = &self.open_ref()?.store;
             gone.push(store.row_id(TOKEN_STATE, &key_key(held)));
         }
+
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         for row in gone {
             batch.delete(TOKEN_STATE, row);
         }
+
         Ok(batch.commit()?)
     }
 }

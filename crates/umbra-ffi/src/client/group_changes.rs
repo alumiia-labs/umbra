@@ -73,6 +73,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         batch.put(GROUP_SENDER, message.0, Some(conversation.0), &value, rng)?;
+
         Ok(batch.commit()?)
     }
 
@@ -82,10 +83,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(value) = self.open_ref()?.store.get(GROUP_SENDER, &message.0)? else {
             return Ok(None);
         };
+
         let index: [u8; 2] = value
             .get(16..18)
             .and_then(|b| b.try_into().ok())
             .ok_or(Error::Integrity)?;
+
         Ok(Some(u16::from_be_bytes(index)))
     }
 
@@ -115,11 +118,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if author == sender {
             return Ok(true);
         }
+
         let group = self.group_of(conversation)?;
         let roster = group.roster();
         let contested = roster
             .rekey_replaced()
             .is_some_and(|rival| rival.new_index == sender);
+
         Ok(!contested && roster.successor_of(author) == Some(sender))
     }
 
@@ -139,6 +144,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(plain) = open.store.get(TableId::MESSAGE, &message.0)? else {
             return Ok(Target::Absent);
         };
+
         let plain = Zeroizing::new(plain);
         let info = info_of(&plain)?;
         let is_author = match (sender, self.group_sender(&message)?) {
@@ -151,6 +157,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !is_author || info.deleted {
             return Ok(Target::Barred);
         }
+
         Ok(Target::Held((message, plain)))
     }
 
@@ -183,6 +190,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if is_deleted || is_full {
             return Ok(());
         }
+
         let entry = Zeroizing::new(
             [
                 conversation.0.as_slice(),
@@ -194,6 +202,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         );
         let mut batch = open.store.begin();
         batch.put(PENDING, row, Some(conversation.0), &entry, rng)?;
+
         Ok(batch.commit()?)
     }
 
@@ -216,6 +225,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(entry) = open.store.get(PENDING, &row)?.map(Zeroizing::new) else {
             return Ok(None);
         };
+
         let at = entry
             .get(32..PENDING_ROW_LEN)
             .and_then(|bytes| bytes.try_into().ok())
@@ -224,6 +234,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if (now_ms / 1_000).saturating_sub(at) >= REF_ORPHAN_TTL {
             return Ok(None);
         }
+
         Ok(Some((row, entry)))
     }
 
@@ -246,12 +257,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if !self.is_same_member(conversation, sender, index)? {
                 continue;
             }
+
             let held = self.held_group_entry(conversation, msg_id, index, now_ms)?;
+
             // An entry with no text is a deletion.
             if held.is_some_and(|(_, entry)| entry.len() == PENDING_ROW_LEN) {
                 return Ok(true);
             }
         }
+
         Ok(false)
     }
 
@@ -273,21 +287,25 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if !self.is_same_member(conversation, sender, index)? {
                 continue;
             }
+
             let Some((row, entry)) = self.held_group_entry(conversation, msg_id, index, now_ms)?
             else {
                 continue;
             };
             let text = entry.get(PENDING_ROW_LEN..).ok_or(Error::Integrity)?;
+
             // An entry with no text is a deletion, and it stays.
             if text.is_empty() {
                 continue;
             }
+
             let open = self.open_mut()?;
             let mut batch = open.store.begin();
             batch.delete(PENDING, row);
             batch.commit()?;
             self.put_group_edit(conversation, message, text, now_ms, rng)?;
         }
+
         Ok(())
     }
 
@@ -306,6 +324,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(plain) = open.store.get(TableId::MESSAGE, &message.0)? else {
             return Ok(());
         };
+
         let plain = Zeroizing::new(plain);
         let info = info_of(&plain)?;
         let count = match open.store.get(REVISION, &message.0)? {
@@ -319,6 +338,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Ok(changed) = row_with_text(&plain, text) else {
             return Ok(());
         };
+
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         batch.put(
@@ -329,6 +349,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             rng,
         )?;
         batch.put(REVISION, message.0, None, &[count.saturating_add(1)], rng)?;
+
         // IMP-154: the earlier text leaves the log of the store.
         batch.erase_earlier();
         batch.commit()?;
@@ -336,6 +357,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             conversation,
             message,
         });
+
         Ok(())
     }
 
@@ -386,6 +408,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 let Ok(edit) = EditBody::parse(parsed.body) else {
                     return Ok(());
                 };
+
                 let text = edit.new_body.as_bytes();
                 match self.authored_target(conversation, &edit.target, sender)? {
                     Target::Held((message, _)) => {
@@ -410,6 +433,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
             _ => {}
         }
+
         Ok(())
     }
 }

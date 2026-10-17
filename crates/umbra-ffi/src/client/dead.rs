@@ -131,15 +131,18 @@ impl DeadRow {
                 out.extend_from_slice(&[0; ADDRESS_LEN]);
             }
         }
+
         out.extend_from_slice(&self.written_week.to_be_bytes());
         out.extend_from_slice(self.written_cred.expose());
         let count = self.written_relays.len().min(BLOB_RELAYS);
         out.push(u8::try_from(count).unwrap_or(0));
+
         // The row has one length. The count names the relays, and zero
         // bytes fill the places after them.
         for at in 0..BLOB_RELAYS {
             out.extend_from_slice(self.written_relays.get(at).unwrap_or(&[0; 32]));
         }
+
         out.extend_from_slice(&self.fetch_week.to_be_bytes());
         out.extend_from_slice(&self.fetch_at.to_be_bytes());
         if let Some(candidate) = self.candidate.as_ref().filter(|c| c.len() == ADDRESS_LEN) {
@@ -149,6 +152,7 @@ impl DeadRow {
             out.extend_from_slice(&self.candidate_since.to_be_bytes());
             out.extend_from_slice(&self.candidate_week.to_be_bytes());
         }
+
         out
     }
 
@@ -157,6 +161,7 @@ impl DeadRow {
         if ![ROW_LEN, with_candidate, with_candidate + SENT_TAIL].contains(&bytes.len()) {
             return Err(Error::Integrity);
         }
+
         let mut at = 0usize;
         let mut take = |len: usize| -> Result<&[u8], Error> {
             let part = bytes.get(at..at + len).ok_or(Error::Integrity)?;
@@ -186,6 +191,7 @@ impl DeadRow {
                 written_relays.push(relay);
             }
         }
+
         let fetch_week = week(take(4)?)?;
         let fetch_at = u64::from_be_bytes(array(take(8)?)?);
         let candidate = if bytes.len() == ROW_LEN {
@@ -194,6 +200,7 @@ impl DeadRow {
             if take(1)? != [1] {
                 return Err(Error::Integrity);
             }
+
             Some(Zeroizing::new(take(ADDRESS_LEN)?.to_vec()))
         };
         let (candidate_sent, candidate_since, candidate_week) =
@@ -207,6 +214,7 @@ impl DeadRow {
             } else {
                 (false, 0, NO_WEEK)
             };
+
         Ok(DeadRow {
             dead,
             dead_since,
@@ -283,6 +291,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(plain) = store.get(DEAD_CHANNEL, &row)? else {
             return Ok(None);
         };
+
         DeadRow::parse(&Zeroizing::new(plain)).map(Some)
     }
 
@@ -299,6 +308,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             Some(row) => batch.put(DEAD_CHANNEL, key, None, &row.encode(), rng)?,
             None => batch.delete(DEAD_CHANNEL, key),
         }
+
         Ok(batch.commit()?)
     }
 
@@ -329,6 +339,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if row.dead {
             return Ok(());
         }
+
         row.dead = true;
         row.dead_since = now;
         row.address = None;
@@ -351,16 +362,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if address.len() != ADDRESS_LEN {
             return Ok(());
         }
+
         // NET-191: a candidate that took the address of the queue before
         // takes the new one, one time.
         let sends_again = row.candidate.is_some() && row.candidate_sent;
         if !row.dead && !sends_again {
             return Ok(());
         }
+
         row.candidate_sent = false;
         if row.dead {
             row.address = Some(Zeroizing::new(address.to_vec()));
         }
+
         self.put_dead_row(conversation, Some(&row), rng)
     }
 
@@ -408,6 +422,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if address.len() != ADDRESS_LEN {
             return Ok(None);
         }
+
         let names_week = week != NO_WEEK && row.candidate_week != NO_WEEK;
         let is_held = row
             .candidate
@@ -421,12 +436,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if row.candidate.is_some() && names_week && week < row.candidate_week {
                 return Ok(None);
             }
+
             row.candidate = Some(Zeroizing::new(address.to_vec()));
             row.candidate_sent = false;
             row.candidate_since = self.known_now_ms()? / 1_000;
             row.candidate_week = week;
         }
+
         self.put_dead_row(conversation, Some(&row), rng)?;
+
         Ok(Some((row.dead, row.candidate_sent)))
     }
 
@@ -445,6 +463,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if row.candidate.is_none() || row.candidate_sent {
             return Ok(());
         }
+
         row.candidate_sent = true;
         self.put_dead_row(conversation, Some(&row), rng)
     }
@@ -465,6 +484,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Some(held) = self.dead_row(conversation)? else {
                 continue;
             };
+
             if let Some(candidate) = held.candidate {
                 out.push((
                     conversation,
@@ -475,6 +495,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 ));
             }
         }
+
         Ok(out)
     }
 
@@ -493,8 +514,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(row) = self.dead_row(conversation)? else {
             return Ok(None);
         };
+
         let erase = self.erase_of(conversation, &row)?;
         self.put_dead_row(conversation, None, rng)?;
+
         Ok(erase)
     }
 
@@ -506,7 +529,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if row.written_week == NO_WEEK || row.written_relays.is_empty() {
             return Ok(None);
         }
+
         let (secret, own_pk, _) = self.dead_channel_of(conversation)?;
+
         Ok(Some(DeadWork::Erase {
             handle: secret.handle(&own_pk, row.written_week),
             cred: Secret::new(*row.written_cred.expose()),
@@ -525,6 +550,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .ok_or(Error::NotFound)?,
         );
         let state = plain.get(QUEUE_ID_LEN..).ok_or(Error::Integrity)?;
+
         Ok(stored_dead_channel(state, &self.root_identity()?)?)
     }
 
@@ -541,6 +567,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(mut row) = self.dead_row(conversation)? else {
             return Ok(None);
         };
+
         let erase = if row.written_week == week {
             None
         } else {
@@ -550,6 +577,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         row.written_cred = cred;
         row.written_relays = relays;
         self.put_dead_row(conversation, Some(&row), rng)?;
+
         Ok(erase)
     }
 
@@ -578,18 +606,22 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(plain) = open.store.get(TableId::MESSAGE, &message.0)? else {
             return Ok(());
         };
+
         let conversation = super::conversation_of(&Zeroizing::new(plain))?;
         let Some(contact) = open.store.get(TableId::CONTACT, &conversation.0)? else {
             return Ok(());
         };
+
         drop(Zeroizing::new(contact));
         let name = [UNANSWERED_SETTING, conversation.0.as_slice()].concat();
         let row = open.store.row_id(SETTINGS, &name);
         if open.store.get(SETTINGS, &row)?.is_some() {
             return Ok(());
         }
+
         let mut batch = open.store.begin();
         batch.put(SETTINGS, row, None, &now_ms.to_be_bytes(), rng)?;
+
         Ok(batch.commit()?)
     }
 
@@ -603,8 +635,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if open.store.get(SETTINGS, &row)?.is_none() {
             return Ok(());
         }
+
         let mut batch = open.store.begin();
         batch.delete(SETTINGS, row);
+
         Ok(batch.commit()?)
     }
 
@@ -627,6 +661,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 out.push(conversation);
             }
         }
+
         Ok(out)
     }
 
@@ -651,13 +686,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Ok(info) = info_of(&message) else {
                 continue;
             };
+
             if info.outgoing && matches!(info.delivery, Delivery::Delivered | Delivery::Read) {
                 receipted = receipted.max(info.stored_at_ms);
             }
         }
+
         let mut records = Vec::new();
         for (row, message) in store.list(TableId::MESSAGE, Some(&conversation.0))? {
             let message = Zeroizing::new(message);
+
             // IMP-121: the plaintext names its owner. A record of another
             // conversation never goes to this contact.
             if super::conversation_of(&message)? != conversation {
@@ -666,6 +704,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Ok(info) = info_of(&message) else {
                 continue;
             };
+
             let is_bound = info.stored_at_ms > receipted
                 && now_ms.saturating_sub(info.stored_at_ms) < ttl_ms
                 && !info.deleted;
@@ -683,9 +722,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 ));
             }
         }
+
         records.sort_by_key(|(stored_at, _)| *stored_at);
         self.outgoing
             .extend(records.into_iter().map(|(_, record)| record));
+
         Ok(())
     }
 
@@ -706,9 +747,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if consensus_epoch == 0 {
             return Ok(Vec::new());
         }
+
         let week = week_of(consensus_epoch);
         let mut conversations: Vec<ConversationId> = silent.to_vec();
         let store = &self.open_ref()?.store;
+
         // A row names its conversation by the key alone, thus each contact
         // is asked.
         for (row, plain) in store.list(TableId::CONTACT, None)? {
@@ -718,6 +761,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 conversations.push(conversation);
             }
         }
+
         let mut work = Vec::new();
         for conversation in conversations {
             // NET-194, NET-197: a blocked contact has no blob of this device,
@@ -729,6 +773,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
                 continue;
             }
+
             let is_silent = silent.contains(&conversation);
             let mut row = self.dead_row(conversation)?.unwrap_or_else(DeadRow::empty);
             if !row.dead && !is_silent {
@@ -737,6 +782,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 self.put_dead_row(conversation, None, rng)?;
                 continue;
             }
+
             // NET-190: a candidate that gave no address of the peer in
             // `DEAD_CHANNEL_SILENCE` ends, and the row holds it no more. A
             // blob of a later fetch that names it gives a new candidate.
@@ -748,6 +794,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     row.end_candidate();
                 }
             }
+
             let (secret, own_pk, peer_pk) = self.dead_channel_of(conversation)?;
             if row.dead {
                 match &row.address {
@@ -773,6 +820,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     Some(_) => {}
                 }
             }
+
             // NET-187, NET-188: one fetch in each week, at a uniform time in
             // the 24 hours from the start of the condition or of the week.
             if row.fetch_week != week {
@@ -790,12 +838,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                             blob_key: secret.blob_key(&peer_pk, at_week),
                         });
                     }
+
                     row.fetch_week = week;
                     row.fetch_at = 0;
                 }
             }
+
             self.put_dead_row(conversation, Some(&row), rng)?;
         }
+
         Ok(work)
     }
 }
@@ -835,6 +886,7 @@ mod tests {
             DeadRow::parse(&DeadRow::empty().encode()).unwrap().address,
             None
         );
+
         // NET-190: a row with a candidate address holds it in a tail, and a
         // row of an earlier build, which ends before it, holds none.
         assert_eq!(back.candidate, None);
@@ -849,6 +901,7 @@ mod tests {
         assert_eq!(again.candidate.as_deref(), Some(&vec![8; LEN]));
         assert_eq!(again.address.as_deref(), Some(&vec![7; LEN]));
         assert!(DeadRow::parse(bytes.split_last().unwrap().1).is_err());
+
         // NET-191: the row says whether the candidate took its record,
         // since when this device holds it, and the week of its blob.
         assert_eq!(
@@ -874,6 +927,7 @@ mod tests {
             ),
             (true, 1_800_000_500, 3_001)
         );
+
         // A row of an earlier build holds the candidate alone: it took no
         // record, and its time starts at the next check.
         let old = DeadRow::parse(&sent.encode()[..earlier]).unwrap();
@@ -928,6 +982,7 @@ mod tests {
             .unwrap();
         let conversation = client.conversation_for(&peer.0).unwrap();
         client.channel_dead(conversation, 1_000, &mut rng).unwrap();
+
         // The clock of the platform, from which the time of a candidate
         // counts.
         client.touch(2_000);
@@ -954,6 +1009,7 @@ mod tests {
         assert_eq!(held(&client), (first.clone(), true, true));
         let took = client.hold_candidate_of(conversation, &first, 3_002, &mut rng);
         assert_eq!(took.unwrap(), Some((true, true)));
+
         // One more record goes after a rotation of the own queue.
         let mut own = vec![0u8; LEN];
         umbra_wire::address::QueueAddress {
@@ -968,6 +1024,7 @@ mod tests {
             .dead_queue_rotated(conversation, &own, &mut rng)
             .unwrap();
         assert_eq!(held(&client), (first.clone(), true, false));
+
         // Another address of a later week is a new candidate.
         client.candidate_sent(conversation, &mut rng).unwrap();
         let took = client.hold_candidate_of(conversation, &second, 3_003, &mut rng);

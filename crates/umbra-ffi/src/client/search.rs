@@ -176,18 +176,22 @@ fn fold_with(text: &str, mut emit: impl FnMut(u8, u32, u32)) {
             if !is_after_space {
                 emit(b' ', start, end);
             }
+
             is_after_space = true;
             continue;
         }
+
         for part in core::iter::once(source).nfd() {
             if is_combining_mark(part) {
                 continue;
             }
+
             for lower in part.to_lowercase() {
                 let mut bytes = [0u8; 4];
                 for byte in lower.encode_utf8(&mut bytes).bytes() {
                     emit(byte, start, end);
                 }
+
                 bytes.zeroize();
                 is_after_space = false;
             }
@@ -202,6 +206,7 @@ fn fold(text: &str) -> Zeroizing<Vec<u8>> {
     while out.last() == Some(&b' ') {
         out.pop();
     }
+
     out
 }
 
@@ -210,6 +215,7 @@ fn find(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
     if needle.is_empty() {
         return None;
     }
+
     hay.get(from..)?
         .windows(needle.len())
         .position(|window| window == needle)
@@ -233,15 +239,18 @@ fn words(text: &[u8]) -> impl Iterator<Item = (usize, &[u8])> {
         while rest.peek().is_some_and(|(_, c)| !c.is_alphanumeric()) {
             rest.next();
         }
+
         let (start, _) = *rest.peek()?;
         let mut end = start;
         while let Some((at, c)) = rest.peek().copied() {
             if !c.is_alphanumeric() {
                 break;
             }
+
             end = at.saturating_add(c.len_utf8());
             rest.next();
         }
+
         Some((start, text.as_bytes().get(start..end)?))
     })
 }
@@ -254,6 +263,7 @@ fn errors_for(word: &[u8]) -> usize {
     if !word.chars().all(char::is_alphanumeric) {
         return 0;
     }
+
     match word.chars().count() {
         n if !(NEAR_MIN..=NEAR_MAX).contains(&n) => 0,
         n if n < NEAR_TWO => 1,
@@ -271,6 +281,7 @@ fn is_near(a: &[char], b: &[char], max: usize) -> bool {
     if a.len().abs_diff(b.len()) > max || a.len() > NEAR_MAX + 2 || b.len() > NEAR_MAX + 2 {
         return false;
     }
+
     let mut before = [usize::MAX; WIDTH];
     let mut last = [usize::MAX; WIDTH];
     for (j, value) in last.iter_mut().enumerate().take(b.len().saturating_add(1)) {
@@ -283,6 +294,7 @@ fn is_near(a: &[char], b: &[char], max: usize) -> bool {
         if let Some(first) = row.first_mut() {
             *first = left;
         }
+
         for (j, y) in b.iter().enumerate() {
             let cost = usize::from(x != y);
             let up = last.get(j.saturating_add(1)).copied().unwrap_or(usize::MAX);
@@ -302,15 +314,19 @@ fn is_near(a: &[char], b: &[char], max: usize) -> bool {
             if let Some(place) = row.get_mut(j.saturating_add(1)) {
                 *place = best;
             }
+
             left = best;
             least = least.min(best);
         }
+
         if least > max {
             return false;
         }
+
         before = last;
         last = row;
     }
+
     last.get(b.len()).is_some_and(|value| *value <= max)
 }
 
@@ -349,6 +365,7 @@ fn both(a: &[u32], b: &[u32]) -> Vec<u32> {
             }
         }
     }
+
     out
 }
 
@@ -366,6 +383,7 @@ fn rank(text: &[u8], query: &[u8]) -> Option<(u8, usize, usize)> {
     if let Some(at) = find(text, query, 0) {
         return Some((TIER_PHRASE, at, at.saturating_add(query.len())));
     }
+
     let mut tier = TIER_WORDS;
     let mut first = None;
     for term in query.split(|byte| *byte == b' ').take(TERMS_MAX) {
@@ -376,6 +394,7 @@ fn rank(text: &[u8], query: &[u8]) -> Option<(u8, usize, usize)> {
                 if max == 0 {
                     return None;
                 }
+
                 let wanted = chars_of(term);
                 let (at, word) =
                     words(text).find(|(_, word)| is_near(&wanted, &chars_of(word), max))?;
@@ -385,6 +404,7 @@ fn rank(text: &[u8], query: &[u8]) -> Option<(u8, usize, usize)> {
         };
         first.get_or_insert(place);
     }
+
     first.map(|(start, end)| (tier, start, end))
 }
 
@@ -403,6 +423,7 @@ impl Index {
             self.text.zeroize();
             self.text = wider;
         }
+
         self.text.extend_from_slice(bytes);
     }
 
@@ -414,6 +435,7 @@ impl Index {
         if folded.is_empty() {
             return;
         }
+
         let start = self.text.len();
         self.push_text(folded);
         self.docs.push(Doc {
@@ -427,10 +449,12 @@ impl Index {
                 list.push(id);
             }
         }
+
         for (_, word) in words(folded) {
             if errors_for(word) == 0 {
                 continue;
             }
+
             let list = match self.words.get_mut(word) {
                 Some(list) => list,
                 None => self.words.entry(word.into()).or_default(),
@@ -452,6 +476,7 @@ impl Index {
         if term.len() < 3 {
             return (0..u32::try_from(self.docs.len()).unwrap_or(u32::MAX)).collect();
         }
+
         let mut lists: Vec<&Vec<u32>> = Vec::new();
         for key in term.windows(3).filter_map(gram_key) {
             match self.grams.get(&key) {
@@ -459,6 +484,7 @@ impl Index {
                 None => return Vec::new(),
             }
         }
+
         lists.sort_unstable_by_key(|list| list.len());
         let mut found: Option<Vec<u32>> = None;
         for list in lists {
@@ -467,6 +493,7 @@ impl Index {
                 None => list.clone(),
             });
         }
+
         found.unwrap_or_default()
     }
 
@@ -507,6 +534,7 @@ impl Index {
         if max == 0 {
             return Vec::new();
         }
+
         let wanted = chars_of(term);
         let mut buffer = ['\0'; NEAR_MAX];
         let mut lists = Vec::new();
@@ -514,11 +542,13 @@ impl Index {
             if word.len().abs_diff(term.len()) > max.saturating_mul(4) {
                 continue;
             }
+
             let count = word_chars(word, &mut buffer);
             if is_near(&wanted, buffer.get(..count).unwrap_or_default(), max) {
                 lists.push(list);
             }
         }
+
         let mut found: Vec<u32> = lists.into_iter().flatten().copied().collect();
         found.sort_unstable();
         found.dedup();
@@ -538,6 +568,7 @@ impl Index {
                 let wider = either(&self.possible_holders(term), &self.near_holders(term));
                 possible = Some(possible.map_or(wider.clone(), |held| both(&held, &wider)));
             }
+
             return self
                 .ordered(possible.unwrap_or_default(), options)
                 .into_iter()
@@ -546,17 +577,20 @@ impl Index {
                 .take(max)
                 .collect();
         }
+
         let mut taken = BTreeSet::new();
         let mut found = Vec::new();
         for (id, doc) in self.ordered(self.possible_holders(query), options) {
             if found.len() >= max {
                 return found;
             }
+
             if find(self.text_of(doc), query, 0).is_some() {
                 taken.insert(id);
                 found.push(doc);
             }
         }
+
         if terms.len() > 1 {
             let mut possible: Option<Vec<u32>> = None;
             for term in &terms {
@@ -567,6 +601,7 @@ impl Index {
                 if found.len() >= max {
                     return found;
                 }
+
                 let text = self.text_of(doc);
                 let holds_each = terms.iter().all(|term| find(text, term, 0).is_some());
                 if holds_each && taken.insert(id) {
@@ -574,9 +609,11 @@ impl Index {
                 }
             }
         }
+
         if found.len() >= max || terms.iter().all(|term| errors_for(term) == 0) {
             return found;
         }
+
         let mut near: Option<Vec<u32>> = None;
         for term in &terms {
             let wider = either(&self.holders(term), &self.near_holders(term));
@@ -586,10 +623,12 @@ impl Index {
             if found.len() >= max {
                 break;
             }
+
             if taken.insert(id) {
                 found.push(doc);
             }
         }
+
         found
     }
 }
@@ -609,6 +648,7 @@ fn searched_text(plain: &[u8]) -> Result<Zeroizing<String>, Error> {
             }
         }
     }
+
     Ok(text)
 }
 
@@ -639,6 +679,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             index: Index::default(),
             pending,
         });
+
         Ok(())
     }
 
@@ -655,9 +696,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             self.search.ready = Some(build.index);
             return Ok(true);
         };
+
         let open = self.open_ref()?;
         for (row, plain) in open.store.list(TableId::MESSAGE, Some(&conversation.0))? {
             let plain = Zeroizing::new(plain);
+
             // IMP-121: the plaintext names its owner.
             if conversation_of(&plain)? != conversation {
                 return Err(Error::Integrity);
@@ -668,11 +711,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Ok(text) = searched_text(&plain) else {
                 continue;
             };
+
             build
                 .index
                 .add(entry_of(MsgRef(row), &plain)?, &fold(&text));
         }
+
         self.search.building = Some(build);
+
         Ok(false)
     }
 
@@ -697,12 +743,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if query.is_empty() || query.len() > QUERY_MAX {
             return Ok(Vec::new());
         }
+
         let index = match (&self.search.ready, &self.search.building) {
             (Some(index), _) => index,
             (None, Some(build)) => &build.index,
             (None, None) => return Ok(Vec::new()),
         };
         let mut hits = Vec::new();
+
         // A row that the store holds no more takes a place of the first read.
         for doc in index.candidates(&query, options, SEARCH_RESULTS_MAX.saturating_mul(2)) {
             if hits.len() >= SEARCH_RESULTS_MAX {
@@ -711,10 +759,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Some(plain) = open.store.get(TableId::MESSAGE, &doc.entry.message.0)? else {
                 continue;
             };
+
             let plain = Zeroizing::new(plain);
             if conversation_of(&plain)? != doc.entry.conversation || !is_searched(&plain)? {
                 continue;
             }
+
             // The limits read the row of the store too: an edit can
             // take the file of a message away.
             if !options.keeps(&entry_of(doc.entry.message, &plain)?) {
@@ -723,6 +773,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Ok(text) = searched_text(&plain) else {
                 continue;
             };
+
             let shown_units = shown_text(&plain)
                 .ok()
                 .and_then(|shown| core::str::from_utf8(shown).ok())
@@ -736,6 +787,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Some((tier, from, to)) = rank(&folded, &query) else {
                 continue;
             };
+
             let start = places.get(from).map_or(0, |(start, _)| *start);
             let end = to
                 .checked_sub(1)
@@ -753,10 +805,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 end,
             });
         }
+
         // A text that changed after the build can have a different rank.
         if options.order == SearchOrder::Rank {
             hits.sort_by_key(|hit| hit.tier);
         }
+
         Ok(hits)
     }
 }
@@ -814,6 +868,7 @@ mod tests {
             "dinner on friday",
             "dinner friday",
         ]);
+
         // The phrase comes first, then the newest of the other two.
         assert_eq!(found(&index, "dinner friday"), [2, 1, 0]);
     }
@@ -822,8 +877,10 @@ mod tests {
     fn a_misspelled_word_matches_after_each_exact_match() {
         let index = index_of(&["the restaurant was full", "resturant", "rest"]);
         assert_eq!(found(&index, "resturant"), [1, 0]);
+
         // Each of the two texts holds a word with two errors or less.
         assert_eq!(found(&index, "restuarant"), [1, 0]);
+
         // A short word takes no spelling error.
         assert_eq!(found(&index, "rast"), [] as [u8; 0]);
     }
@@ -882,6 +939,7 @@ mod tests {
     #[test]
     fn a_limit_keeps_the_side_the_age_and_the_files() {
         let mut index = Index::default();
+
         // The message 1 is of this user, and the message 2 has a file.
         index.add(entry(1, 0, 10), &fold("harbor"));
         let mut with_file = entry(2, 0, 20);
@@ -995,18 +1053,22 @@ mod tests {
             for _ in 0..(4 + next() % 12) {
                 let word = WORDS[next() % WORDS.len()];
                 text.push_str(word);
+
                 // A part of the words is rare, as names are.
                 if next() % 5 == 0 {
                     text.push_str(&format!("{}", next() % 5_000));
                 }
+
                 text.push(' ');
             }
+
             let mut message = [0u8; 16];
             message[..4].copy_from_slice(&id.to_be_bytes());
             let mut entry = entry(0, 0, u64::from(id));
             entry.message = MsgRef(message);
             index.add(entry, &fold(&text));
         }
+
         let build = started.elapsed();
         let postings: usize = index.grams.values().map(Vec::len).sum::<usize>()
             + index.words.values().map(Vec::len).sum::<usize>();

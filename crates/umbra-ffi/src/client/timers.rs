@@ -65,6 +65,7 @@ impl TimerSetting {
             .get(4..12)
             .and_then(|b| b.try_into().ok())
             .ok_or(Error::Integrity)?;
+
         Ok(TimerSetting {
             seconds: u32::from_be_bytes(seconds),
             set_at_ms: u64::from_be_bytes(at),
@@ -79,6 +80,7 @@ pub fn timer_body(body: &[u8]) -> Option<u32> {
     let [0x01, a, b, c, d] = body else {
         return None;
     };
+
     let seconds = u32::from_be_bytes([*a, *b, *c, *d]);
     TIMER_VALUES.contains(&seconds).then_some(seconds)
 }
@@ -147,6 +149,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if seconds == 0 || !is_timed_kind(kind) {
             return Ok(());
         }
+
         self.put_deadline(conversation, message, Deadline::received(now, seconds), rng)
     }
 
@@ -191,10 +194,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut due = Vec::new();
         for (row, value) in self.open_ref()?.store.list(DEADLINES, None)? {
             let value = Zeroizing::new(value);
+
             // A row that does not parse stops no other deadline.
             let Ok(at) = deadline_at(&value) else {
                 continue;
             };
+
             if (Deadline { at }).due(now) {
                 let conversation: [u8; 16] = value
                     .get(..16)
@@ -203,6 +208,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 due.push((ConversationId(conversation), MsgRef(row)));
             }
         }
+
         for (conversation, message) in &due {
             // A row that a deletion took first leaves its deadline alone.
             // A fault of one message keeps its deadline for the next sweep,
@@ -210,6 +216,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if self.delete_if_held(message).is_err() {
                 continue;
             }
+
             let open = self.open_mut()?;
             let mut batch = open.store.begin();
             batch.delete(DEADLINES, message.0);
@@ -219,12 +226,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 message: *message,
             });
         }
+
         // DEV-211: a body that waits for a resend on a sync channel holds
         // the record too.
         if !due.is_empty() {
             let messages: Vec<MsgRef> = due.iter().map(|(_, message)| *message).collect();
             self.drop_sync_sent_of(&messages)?;
         }
+
         Ok(due.len())
     }
 
@@ -242,6 +251,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !TIMER_VALUES.contains(&seconds) {
             return Err(Error::Malformed);
         }
+
         let mut msg_id = [0u8; 16];
         rng.fill_bytes(&mut msg_id);
         let body = [&[0x01][..], &seconds.to_be_bytes()].concat();
@@ -287,6 +297,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             message
         };
         self.put_timer(conversation, seconds, now_ms, true, rng)?;
+
         Ok(message)
     }
 
@@ -308,6 +319,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         batch.put(TIMERS, row, Some(conversation.0), &setting.encode(), rng)?;
+
         Ok(batch.commit()?)
     }
 
@@ -329,6 +341,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let reference = super::msg_ref(&open.device_set_key, &parsed.msg_id);
         let natural = [conversation.0.as_slice(), &reference].concat();
         let row = open.store.row_id(TableId::MESSAGE, &natural);
+
         Ok(match self.deadline_of(&MsgRef(row))? {
             // A copy at its deadline goes with one second, and the peer
             // erases it at once.
@@ -347,6 +360,7 @@ mod tests {
     fn a_timer_body_takes_a_value_of_the_set_alone() {
         assert_eq!(timer_body(&[1, 0, 0, 0x0E, 0x10]), Some(3_600));
         assert_eq!(timer_body(&[1, 0, 0, 0, 0]), Some(0));
+
         // WIR-202: a period out of the set names a conversation.
         assert_eq!(timer_body(&[1, 0, 0, 0x10, 0xF1]), None);
         assert_eq!(timer_body(&[2, 0, 0, 0x0E, 0x10]), None);

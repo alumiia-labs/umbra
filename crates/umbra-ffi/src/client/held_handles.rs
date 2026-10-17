@@ -24,7 +24,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(value) = store.get(HELD_HANDLES, &row)? else {
             return Ok(None);
         };
+
         let (version, hk_pub) = value.split_at_checked(4).ok_or(Error::Integrity)?;
+
         Ok(Some(Version {
             version: u32::from_be_bytes(version.try_into().map_err(|_| Error::Integrity)?),
             hk_pub: hk_pub.try_into().map_err(|_| Error::Integrity)?,
@@ -43,6 +45,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let value = [&held.version.to_be_bytes()[..], &held.hk_pub[..]].concat();
         let mut batch = open.store.begin();
         batch.put(HELD_HANDLES, row, None, &value, rng)?;
+
         Ok(batch.commit()?)
     }
 }

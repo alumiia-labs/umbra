@@ -66,6 +66,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             Some(value) => batch.put(BLOCKED, row, None, value, rng)?,
             None => batch.delete(BLOCKED, row),
         }
+
         Ok(batch.commit()?)
     }
 
@@ -92,6 +93,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 rng,
             )?;
         }
+
         Ok(())
     }
 
@@ -107,11 +109,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             blocked.then_some(value.as_slice()),
             rng,
         )?;
+
         // NET-194: the dead-channel work drops the blob of a blocked
         // contact at its next pass.
         if !blocked {
             return Ok(());
         }
+
         // ABU-031: a read receipt that waits for its slot says that the
         // user read a record of this contact, and it goes with the block.
         let open = self.open_mut()?;
@@ -121,13 +125,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 waiting.push(row);
             }
         }
+
         if waiting.is_empty() {
             return Ok(());
         }
+
         let mut batch = open.store.begin();
         for row in waiting {
             batch.delete(super::RECEIPT, row);
         }
+
         Ok(batch.commit()?)
     }
 
@@ -143,6 +150,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 out.push(member.index);
             }
         }
+
         Ok(out)
     }
 
@@ -192,6 +200,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.is_member_blocked(conversation, old)? {
             return Ok(());
         }
+
         let value = [1u8];
         self.put_block_row(&member_key(conversation, new), Some(&value), rng)?;
         self.put_block_row(&member_key(conversation, old), None, rng)
@@ -254,7 +263,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
             _ => return Err(Error::Malformed),
         }
+
         self.events.push_back(super::Event::Conversations);
+
         Ok(())
     }
 }

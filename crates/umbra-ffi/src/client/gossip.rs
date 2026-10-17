@@ -103,11 +103,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if rows.is_empty() {
             return Ok(());
         }
+
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         for row in rows {
             batch.delete(GOSSIP, row);
         }
+
         Ok(batch.commit()?)
     }
 
@@ -130,6 +132,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
             }
         }
+
         self.drop_gossip(old)
     }
 
@@ -139,6 +142,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Some((held, digest)) = root_of(&value) else {
                 continue;
             };
+
             let wanted = match epoch {
                 Some(epoch) => held == epoch,
                 None => found.is_none_or(|(newest, _)| held > newest),
@@ -147,6 +151,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 found = Some((held, digest));
             }
         }
+
         Ok(found)
     }
 
@@ -163,6 +168,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 return Ok(Some(u64::from_be_bytes(at)));
             }
         }
+
         Ok(None)
     }
 
@@ -188,6 +194,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Some((epoch, digest)) = named else {
                 continue;
             };
+
             let mut body = [0u8; DIGEST_LEN];
             DigestBody {
                 source,
@@ -207,6 +214,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             record.encode(&mut app)?;
             return Ok(Some((source, app)));
         }
+
         Ok(None)
     }
 
@@ -220,6 +228,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 out.push(*conversation);
             }
         }
+
         Ok(out)
     }
 
@@ -250,6 +259,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             match digest.source {
                 DigestSource::TreeHead => {
                     let heads = self.held_heads()?;
+
                     // DIS-071: the degraded read shows no split view.
                     let fresh = heads.iter().any(|(_, _, timestamp)| {
                         timestamp.saturating_add(TREE_HEAD_FRESHNESS + CLOCK_SKEW) >= now
@@ -257,6 +267,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     if !fresh {
                         continue;
                     }
+
                     match heads.iter().find(|(size, _, _)| *size == digest.epoch) {
                         Some((_, root, _)) if *root == digest.digest => {}
                         Some(_) => self.warn(DigestSource::TreeHead, digest.epoch, rng)?,
@@ -274,6 +285,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 DigestSource::ReleaseLog => {}
             }
         }
+
         Ok(())
     }
 
@@ -301,6 +313,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 kept = kept.saturating_sub(1);
             }
         }
+
         self.drop_gossip(gone)?;
         let value = [&key[..], &now.to_be_bytes()].concat();
         self.put_gossip(&key, &value, rng)
@@ -325,6 +338,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
                 continue;
             }
+
             if value.len() == 49 && value.first() == Some(&CHECK) {
                 let field =
                     |range: core::ops::Range<usize>| value.get(range).ok_or(Error::Integrity);
@@ -339,6 +353,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 out.push((row, check, at));
             }
         }
+
         Ok(out)
     }
 
@@ -365,6 +380,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if is_split {
             self.warn(DigestSource::TreeHead, check.tree_size, rng)?;
         }
+
         Ok(())
     }
 
@@ -387,6 +403,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if value.len() != 10 || value.first() != Some(&WARNING) {
                 continue;
             }
+
             let source = match value.get(1) {
                 Some(0x01) => DigestSource::TreeHead,
                 Some(0x02) => DigestSource::ConsensusRoot,
@@ -400,6 +417,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             );
             out.push(GossipWarning { source, epoch });
         }
+
         Ok(out)
     }
 }
@@ -408,6 +426,8 @@ fn root_of(value: &[u8]) -> Option<(u64, [u8; 32])> {
     if value.len() != 41 || value.first() != Some(&ROOT) {
         return None;
     }
+
     let epoch = u64::from_be_bytes(value.get(1..9)?.try_into().ok()?);
+
     Some((epoch, value.get(9..41)?.try_into().ok()?))
 }

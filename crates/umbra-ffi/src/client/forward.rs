@@ -80,6 +80,7 @@ impl ForwardSetting {
             out.extend_from_slice(&side.seq.to_be_bytes());
             out.push(u8::from(side.prohibits));
         }
+
         out
     }
 
@@ -87,7 +88,9 @@ impl ForwardSetting {
         if bytes.len() != SIDE_LEN.saturating_mul(2) {
             return Err(Error::Integrity);
         }
+
         let (own, peer) = bytes.split_at(SIDE_LEN);
+
         Ok(ForwardSetting {
             own: ForwardSide::parse(own)?,
             peer: ForwardSide::parse(peer)?,
@@ -109,6 +112,7 @@ impl ForwardSetting {
             seq: policy.seq,
             prohibits: policy.prohibits,
         };
+
         true
     }
 }
@@ -164,6 +168,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.forward_prohibited_of(&plain)? {
             return Err(Error::Refused);
         }
+
         let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
         let parsed = AppMessage::parse(app, Channel::Pairwise)?;
         let text = super::text_of(&parsed)?;
@@ -171,6 +176,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if depth >= FORWARD_MAX_DEPTH {
             return Err(Error::TooLong);
         }
+
         let is_group = self.is_group(to)?;
         let channel = if is_group {
             Channel::Group
@@ -224,7 +230,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if info_of(plain)?.outgoing {
             return Ok(false);
         }
+
         let conversation = super::conversation_of(plain)?;
+
         Ok(self.forward_setting(conversation)?.peer.prohibits)
     }
 
@@ -241,6 +249,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !setting.take(policy, false) {
             return Ok(false);
         }
+
         let open = self.open_mut()?;
         let row = open.store.row_id(FORWARD_POLICY, &conversation.0);
         let mut batch = open.store.begin();
@@ -252,6 +261,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             rng,
         )?;
         batch.commit()?;
+
         Ok(true)
     }
 
@@ -297,6 +307,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             self.take_group_forward_policy(conversation, &policy, rng)?;
             return Ok(message);
         }
+
         setting.take(&policy, true);
         let open = self.open_mut()?;
         let reference = super::msg_ref(&open.device_set_key, &msg_id);
@@ -310,6 +321,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             open.stamp.next(now_ms),
             &app,
         );
+
         // The record and the setting go in one commit, thus no crash leaves
         // a setting that the other party never gets.
         let mut batch = open.store.begin();
@@ -329,6 +341,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             conversation,
             app,
         });
+
         Ok(message)
     }
 }
@@ -357,6 +370,7 @@ mod tests {
         assert!(!setting.take(&on(1), false));
         assert_eq!(setting.peer.seq, 2);
         assert!(!setting.peer.prohibits);
+
         // The two directions are independent.
         assert_eq!(setting.own, ForwardSide::default());
         assert!(setting.take(&on(1), true));

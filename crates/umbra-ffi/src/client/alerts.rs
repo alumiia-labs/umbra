@@ -102,11 +102,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     ) -> Result<(), Error> {
         let value = alert_value(setting, muted_until_ms);
         self.put_alert(conversation, &value, rng)?;
+
         // NTF-135: the wake table names a silent and a muted queue.
         self.wake_changed();
         if let Some(subject) = self.subject_of(conversation)? {
             self.publish_mutable(ITEM_ALERT, &subject, &value, rng)?;
         }
+
         Ok(())
     }
 
@@ -121,6 +123,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if value > ALERT_NONE {
             return Err(Error::Malformed);
         }
+
         let muted_until_ms = self.muted_until(conversation)?;
         self.publish_alert(conversation, value, muted_until_ms, rng)
     }
@@ -151,6 +154,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             self.events.push_back(Event::Conversations);
             self.wake_changed();
         }
+
         Ok(())
     }
 
@@ -192,11 +196,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if plain.get(MESSAGE_PREFIX..).is_none() || info_of(&plain)?.outgoing {
             return Ok(false);
         }
+
         let conversation = self.conversation_of_message(message)?;
         let (setting, muted_until_ms) = self.alert_state(conversation)?;
         if now_ms < muted_until_ms {
             return Ok(false);
         }
+
         Ok(match setting {
             ALERT_ALL => true,
             ALERT_MENTIONS => self.info(message)?.mentions_me,

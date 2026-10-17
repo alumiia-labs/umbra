@@ -66,6 +66,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             Some(value) => batch.put(RECOVERY, row, Some(conversation.0), value, rng)?,
             None => batch.delete(RECOVERY, row),
         }
+
         Ok(batch.commit()?)
     }
 
@@ -81,6 +82,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.owns_channels()? || !self.is_group(conversation)? {
             return Ok(());
         }
+
         let now = now_ms / 1_000;
         if let Some(held) = self.recovery_row(conversation)? {
             let asked = held
@@ -93,7 +95,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 return Ok(());
             }
         }
+
         let group = self.group_of(conversation)?;
+
         // WIR-523: scope 0x03 names no member, and the notice goes on the
         // group queue.
         let request = KeyRequest {
@@ -106,12 +110,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let n = request.encode(&mut body)?;
         let body = body.get(..n).ok_or(Error::Malformed)?.to_vec();
         drop(group);
+
         // A member that lacks the epoch too posts nothing, and its
         // contacts carry the request.
         let _ = self.post_group_app(conversation, AppKind::KeyRequest, &body, now_ms, rng);
         for contact in self.contacts_in(conversation)? {
             self.send_pairwise_app(contact, AppKind::KeyRequest, &body, now_ms, rng)?;
         }
+
         let value = [[WANTED].as_slice(), &now.to_be_bytes()].concat();
         self.put_recovery(conversation, Some(&value), rng)
     }
@@ -129,6 +135,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if request.scope != KeyScope::RosterSnapshot || request.id != *group.group_id() {
             return;
         }
+
         let is_admin = group
             .roster()
             .member(group.own_index())
@@ -136,10 +143,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !is_admin || request.epoch >= group.roster().epoch_index() {
             return;
         }
+
         let job = (conversation, request.epoch);
         if self.groups.snapshot_jobs.contains(&job) {
             return;
         }
+
         let rate = self
             .groups
             .key_answers_rate
@@ -169,6 +178,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 });
             }
         }
+
         None
     }
 
@@ -232,6 +242,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Ok(notice) = SnapshotNotice::parse(payload) else {
             return Ok(());
         };
+
         let wanted = self
             .recovery_row(conversation)?
             .is_some_and(|held| held.first() == Some(&WANTED));
@@ -264,6 +275,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
             }
         }
+
         Ok(fetches)
     }
 
@@ -284,6 +296,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let outcomes: VecDeque<_> = group.retry_held(now_ms / 1_000).into_iter().collect();
         self.take_outcomes(conversation, group, outcomes, before, false, now_ms, rng)?;
         self.events.push_back(crate::Event::Conversations);
+
         Ok(())
     }
 

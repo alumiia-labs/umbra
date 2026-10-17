@@ -100,11 +100,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if open.store.get(ROSTER_FORKS, &row)?.is_some() {
             return Ok(());
         }
+
         let value = [epoch.to_be_bytes().as_slice(), &device, &[kind, 0], &label].concat();
         let mut batch = open.store.begin();
         batch.put(ROSTER_FORKS, row, None, &value, rng)?;
         batch.commit()?;
         self.events.push_back(Event::Conversations);
+
         Ok(())
     }
 
@@ -115,6 +117,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if value.len() != FORK_LEN || value.get(25) != Some(&0) {
                 continue;
             }
+
             let epoch = value
                 .get(..8)
                 .and_then(|b| b.try_into().ok())
@@ -136,7 +139,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 kind: value.get(24).copied().unwrap_or(0),
             });
         }
+
         out.sort_by_key(|fork| fork.epoch);
+
         Ok(out)
     }
 
@@ -152,8 +157,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if let Some(flag) = value.get_mut(25) {
             *flag = 1;
         }
+
         let mut batch = open.store.begin();
         batch.put(ROSTER_FORKS, *id, None, &value, rng)?;
+
         Ok(batch.commit()?)
     }
 
@@ -168,6 +175,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     ) -> Result<bool, Error> {
         let head = Roster::parse(current)?;
         let rival = Roster::parse(bytes)?;
+
         // A device with no parent, as a new one, verifies no rival.
         let Some(parent) = self.roster_parent()? else {
             return Ok(false);
@@ -175,17 +183,20 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if rival.verify_rival(&parent).is_err() {
             return Ok(false);
         }
+
         // DEV-180, DEV-181: this device does not apply a verified rival
         // that revokes it, and the user learns of it as on the successor
         // path.
         if rival.revokes(&own) {
             self.mark_removed_from_set(rng)?;
+
             // DEV-317: a rival that takes the set over ends the ownership
             // of this device as a successor does.
             let before: Vec<DeviceId> = parent.signers.iter().map(|(id, _)| *id).collect();
             self.fold_claims(&before, &rival, rng)?;
             return Ok(false);
         }
+
         let label = label_of(&rival.signer_id, &[&rival, &head]);
         let (index, fork) = match resolve(&head, &rival)? {
             Competing::Fork => {
@@ -200,6 +211,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if index == 0 {
             return Ok(false);
         }
+
         let gone: Vec<DeviceId> = rival
             .revoked
             .iter()
@@ -210,11 +222,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for device in gone {
             self.end_sync_channel(device, rng)?;
         }
+
         // DEV-179: the changes of the epoch that lost go again against
         // the epoch that won.
         if head.signer_id == own {
             self.sign_again(&head, &parent, rng)?;
         }
+
         Ok(true)
     }
 
@@ -254,6 +268,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if added.is_empty() && removed.is_empty() {
             return Ok(());
         }
+
         let mut devices: Vec<_> = base
             .devices
             .iter()
@@ -264,6 +279,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if devices.len() > umbra_core::devset::MAX_DEVICES {
             return Err(Error::TooLong);
         }
+
         let mut revoked = base.revoked.clone();
         revoked.extend(removed.iter().copied());
         let next = Roster {
@@ -280,6 +296,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for device in removed {
             self.end_sync_channel(device, rng)?;
         }
+
         self.publish_roster(rng)
     }
 }

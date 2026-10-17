@@ -66,6 +66,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if threshold < 2 || count < threshold || unique.len() != holders.len() {
             return Err(Error::Malformed);
         }
+
         let device_peers = self.device_peers()?;
         for holder in holders {
             if self.is_group(*holder)?
@@ -75,9 +76,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 return Err(Error::Malformed);
             }
         }
+
         let code = self.recovery_code(rng)?;
         let mut coeffs = Zeroizing::new(vec![0u8; usize::from(threshold - 1) * 16]);
         rng.fill_bytes(&mut coeffs);
+
         // IDN-084, IDN-085: the social half alone goes into a share.
         let shares = split_social(code.social(), threshold, count, &coeffs)?;
         let mut set_id = [0u8; 16];
@@ -112,6 +115,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             record.encode(&mut app)?;
             sends.push((*holder, msg_id, app, share[0]));
         }
+
         let open = self.open_mut()?;
         let rows: Vec<[u8; 16]> = sends
             .iter()
@@ -127,6 +131,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for row in old {
             batch.delete(SHARES_GIVEN, row);
         }
+
         let mut outgoing = Vec::with_capacity(sends.len());
         for ((holder, _, app, index), row) in sends.iter().zip(rows) {
             // The request row holds the record for its send, and no view
@@ -153,8 +158,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 app: app.to_vec(),
             });
         }
+
         batch.commit()?;
         self.outgoing.extend(outgoing);
+
         Ok(())
     }
 
@@ -173,7 +180,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 count,
             });
         }
+
         given.sort_by_key(|share| share.index);
+
         Ok(given)
     }
 
@@ -189,6 +198,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if RecoveryShare::parse(body).is_err() {
             return Ok(());
         }
+
         let value =
             Zeroizing::new([conversation.0.as_slice(), &now_ms.to_be_bytes(), body].concat());
         let open = self.open_mut()?;
@@ -202,6 +212,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         )?;
         batch.commit()?;
         self.events.push_back(Event::Conversations);
+
         Ok(())
     }
 
@@ -212,12 +223,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(value) = self.open_ref()?.store.get(SHARES_HELD, &conversation.0)? else {
             return Ok(None);
         };
+
         let value = Zeroizing::new(value);
         let at: [u8; 8] = value
             .get(16..24)
             .and_then(|b| b.try_into().ok())
             .ok_or(Error::Integrity)?;
         let body = RecoveryShare::parse(value.get(24..).ok_or(Error::Integrity)?)?;
+
         Ok(Some((u64::from_be_bytes(at), body)))
     }
 

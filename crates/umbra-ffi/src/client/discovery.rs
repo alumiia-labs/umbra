@@ -100,8 +100,10 @@ fn parse_earlier_roots(bytes: &[u8]) -> Result<Vec<EarlierRoot>, Error> {
         for _ in 0..count {
             names.push(r.array::<ENTRY_NAME_LEN>()?);
         }
+
         roots.push((seed, names));
     }
+
     Ok(roots)
 }
 
@@ -115,6 +117,7 @@ fn encode_earlier_roots(roots: &[EarlierRoot]) -> Result<Zeroizing<Vec<u8>>, Err
             out.extend_from_slice(name);
         }
     }
+
     Ok(out)
 }
 
@@ -199,7 +202,9 @@ impl Published {
             }
             None => out.push(0),
         }
+
         out.push(u8::from(self.foreign));
+
         Ok(out)
     }
 
@@ -209,6 +214,7 @@ impl Published {
         if version != PUBLISHED_VERSION && version != PUBLISHED_V1 {
             return Err(Error::Integrity);
         }
+
         let mut out = Published {
             id: r.array()?,
             kind: match r.u8()? {
@@ -237,9 +243,12 @@ impl Published {
             if r.u8()? == 1 {
                 out.previous = Some((r.array()?, u64::from_be_bytes(r.array()?)));
             }
+
             out.foreign = r.u8()? == 1;
         }
+
         r.end()?;
+
         Ok(out)
     }
 }
@@ -275,8 +284,10 @@ impl Cursor<'_> {
         if self.0.len() < n {
             return Err(Error::Integrity);
         }
+
         let (head, rest) = self.0.split_at(n);
         self.0 = rest;
+
         Ok(head)
     }
 
@@ -350,12 +361,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if plain.len() != HEAD_ROW_LEN {
                 return Err(Error::Integrity);
             }
+
             let mut r = Cursor(&plain);
             let size = u64::from_be_bytes(r.array()?);
             let root = r.array()?;
             let timestamp = u64::from_be_bytes(r.array()?);
             heads.push((size, root, timestamp));
         }
+
         Ok(heads)
     }
 
@@ -383,6 +396,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 stale.push(held_row);
             }
         }
+
         let value = [
             size.to_be_bytes().as_slice(),
             root,
@@ -395,6 +409,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for held in stale {
             batch.delete(DIRECTORY_HEADS, held);
         }
+
         Ok(batch.commit()?)
     }
 
@@ -407,6 +422,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .ok()
                 .map(|(set, _)| set.keyset_epoch)
         };
+
         Ok(match self.get_row(super::SETTINGS, LOG_KEYSET_SETTING)? {
             Some(held) if epoch(&held) > epoch(pinned) => held.to_vec(),
             _ => pinned.to_vec(),
@@ -430,7 +446,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for (_, plain) in store.list(PUBLISHED, None)? {
             out.push(Published::parse(&Zeroizing::new(plain))?);
         }
+
         out.sort_by_key(|entry| entry.created_at);
+
         Ok(out)
     }
 
@@ -461,6 +479,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(kept) = self.used_earlier_roots(&published, Some(id))? else {
             return Ok(());
         };
+
         if kept.is_empty() {
             self.delete_row(TableId::LOCAL_IDENTITY, EARLIER_ROOTS_KEY)
         } else {
@@ -504,6 +523,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for row in request_rows {
             batch.delete(REQUESTS, row);
         }
+
         batch.delete(PUBLISHED, entry_row);
         match &roots {
             Some(Some(value)) => {
@@ -512,6 +532,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             Some(None) => batch.delete(TableId::LOCAL_IDENTITY, roots_row),
             None => {}
         }
+
         Ok(batch.commit()?)
     }
 
@@ -552,6 +573,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if roots.is_empty() {
             return Ok(None);
         }
+
         encode_earlier_roots(&roots).map(Some)
     }
 
@@ -571,6 +593,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if roots.is_empty() {
             return Ok(None);
         }
+
         let is_needed = |name: &EntryName| {
             published.iter().any(|entry| {
                 let own = entry_name(entry.kind, entry.index, entry.rotation);
@@ -591,6 +614,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .collect();
         let is_same = kept.len() == roots.len()
             && kept.iter().zip(&roots).all(|(a, b)| a.1.len() == b.1.len());
+
         Ok((!is_same).then_some(kept))
     }
 
@@ -609,6 +633,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             &next.to_be_bytes(),
             rng,
         )?;
+
         Ok(index)
     }
 
@@ -629,6 +654,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
             None => self.root_identity()?,
         };
+
         Ok(match kind {
             EntryKind::Address => root.public_address_key(index),
             EntryKind::Handle => root.handle_key(index, rotation),
@@ -654,11 +680,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if name.len() > PROFILE_NAME_MAX {
             return Err(Error::TooLong);
         }
+
         // DIS-201: no control character, line break, or bidirectional
         // format character.
         if !is_plain_name(name) {
             return Err(Error::Malformed);
         }
+
         self.put_row(super::SETTINGS, PROFILE_NAME_SETTING, name.as_bytes(), rng)?;
         self.put_row(super::SETTINGS, BLOB_DUE_SETTING, &[1], rng)
     }
@@ -684,6 +712,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !is_plain_note(text) {
             return Err(Error::Malformed);
         }
+
         self.put_row(super::SETTINGS, WELCOME_SETTING, text.as_bytes(), rng)?;
         self.put_row(super::SETTINGS, BLOB_DUE_SETTING, &[1], rng)
     }
@@ -716,6 +745,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .map_err(|_| Error::Malformed)?;
             self.put_row(super::SETTINGS, PICTURE_SETTING, picture, rng)?;
         }
+
         self.put_row(super::SETTINGS, BLOB_DUE_SETTING, &[1], rng)
     }
 
@@ -728,9 +758,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if let Some(held) = self.get_row(super::SETTINGS, FRAGMENT_SETTING)? {
             return held.as_slice().try_into().map_err(|_| Error::Integrity);
         }
+
         let mut fragment = [0u8; umbra_core::discovery::handle::FRAGMENT_LEN];
         rng.fill_bytes(&mut fragment);
         self.put_row(super::SETTINGS, FRAGMENT_SETTING, &fragment, rng)?;
+
         Ok(fragment)
     }
 
@@ -776,19 +808,23 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }) else {
             return Ok(None);
         };
+
         // DIS-174: a timed link takes no hello after its end, although its
         // queue waits for the upkeep of this device.
         if entry.expires_at != 0 && now >= entry.expires_at {
             return Ok(None);
         }
+
         let key = self.entry_key(entry.kind, entry.index, entry.rotation)?;
         let Ok(plain) = hello::open(&key, envelope) else {
             return Ok(None);
         };
+
         let plain = Zeroizing::new(plain);
         let Ok(body) = HelloBody::parse(&plain) else {
             return Ok(None);
         };
+
         // DIS-132: a cross-relay token that the log vouches for, or a proof
         // of work. ABU-079: a first-party token needs the secret of its
         // issuer, thus it admits no hello.
@@ -803,6 +839,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 let Ok(solution) = PowSolution::parse(body.admission.body) else {
                     return Ok(None);
                 };
+
                 let entry_pk = key.public().to_bytes();
                 if umbra_core::abuse::pow::verify_hello(&entry_pk, epoch, &solution).is_err() {
                     return Ok(None);
@@ -813,6 +850,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
             _ => return Ok(None),
         }
+
         // ABU-086: HELLO_INBOUND_LIMIT hellos for one entry in one epoch.
         let count_key = [HELLO_COUNT_SETTING, entry.id.as_slice()].concat();
         let count = match self.get_row(super::SETTINGS, &count_key)? {
@@ -833,9 +871,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             self.events.push_back(super::Event::Conversations);
             return Ok(None);
         }
+
         let mut bundle = Zeroizing::new(vec![0u8; body.bundle.len()]);
         let used = body.bundle.encode(&mut bundle)?;
         bundle.truncate(used);
+
         // A second copy of one hello is no second request.
         let requests = self.stored_requests()?;
         if requests
@@ -844,6 +884,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         {
             return Ok(None);
         }
+
         // DIS-180: the profile of the sender, or the bare name of a build
         // before it.
         let (name, note, picture) = match ProfilePlain::parse(body.profile) {
@@ -876,6 +917,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut counted = epoch.to_be_bytes().to_vec();
         counted.extend_from_slice(&(count + 1).to_be_bytes());
         self.put_row(super::SETTINGS, &count_key, &counted, rng)?;
+
         Ok(Some(id))
     }
 
@@ -888,11 +930,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if r.u8()? != REQUEST_VERSION {
                 return Err(Error::Integrity);
             }
+
             let id = r.array()?;
             let via = r.array()?;
             let received_at = u64::from_be_bytes(r.array()?);
             let bundle = Zeroizing::new(r.var()?);
             let name = String::from_utf8_lossy(&r.var()?).into_owned();
+
             // A row of an earlier build ends after the name.
             let (note, picture) = if r.0.is_empty() {
                 (String::new(), Vec::new())
@@ -915,7 +959,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 StoredRequest { bundle },
             ));
         }
+
         out.sort_by_key(|(request, _)| request.received_at);
+
         Ok(out)
     }
 
@@ -926,9 +972,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(bytes) = self.get_row(super::SETTINGS, &key)? else {
             return Ok(false);
         };
+
         let mut r = Cursor(&bytes);
         let epoch = u32::from_be_bytes(r.array()?);
         let count = u32::from_be_bytes(r.array()?);
+
         Ok(epoch == epoch_number(now) && count >= HELLO_INBOUND_LIMIT)
     }
 
@@ -950,6 +998,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .find(|(request, _)| request.id == *id)
             .ok_or(Error::NotFound)?;
         self.delete_row(REQUESTS, id)?;
+
         Ok(held.bundle)
     }
 

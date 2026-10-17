@@ -55,6 +55,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if seconds < HISTORY_AGE_MIN {
             return Err(Error::Malformed);
         }
+
         self.remove_setting(SWEPT_AT)?;
         self.put_setting(HISTORY_AGE, &seconds.to_be_bytes(), rng)
     }
@@ -89,9 +90,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if open.store.get(TableId::MESSAGE, &message)?.is_none() {
             return Ok(());
         }
+
         let value = [source.as_slice(), &counter.to_be_bytes()].concat();
         let mut batch = open.store.begin();
         batch.put(SYNC_ORIGIN, message, None, &value, rng)?;
+
         Ok(batch.commit()?)
     }
 
@@ -101,6 +104,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(held) = self.setting(WATERMARKS)? else {
             return Ok(());
         };
+
         for entry in held.as_chunks::<24>().0 {
             let (source, counter) = entry.split_at(16);
             let source: DeviceId = source.try_into().map_err(|_| Error::Integrity)?;
@@ -109,6 +113,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .watermarks_mut()
                 .advance(source, u64::from_be_bytes(counter));
         }
+
         Ok(())
     }
 
@@ -126,27 +131,33 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if swept.is_some_and(|at| now.saturating_sub(at) < SWEEP_EVERY) {
             return Ok(0);
         }
+
         self.put_setting(SWEPT_AT, &now.to_be_bytes(), rng)?;
         let age = self.history_age()?;
         if age == HISTORY_AGE_ALL {
             return Ok(0);
         }
+
         let cutoff_ms = now.saturating_sub(age).saturating_mul(1_000);
         let mut due: Vec<(ConversationId, MsgRef)> = Vec::new();
         for (row, plain) in self.open_ref()?.store.list(TableId::MESSAGE, None)? {
             let plain = Zeroizing::new(plain);
             let info = info_of(&plain)?;
+
             // A message that waits for its send stays.
             if info.outgoing && info.delivery == Delivery::Queued {
                 continue;
             }
+
             if info.stored_at_ms < cutoff_ms {
                 due.push((conversation_of(&plain)?, MsgRef(row)));
             }
         }
+
         if due.is_empty() {
             return Ok(0);
         }
+
         // DEV-015: the removal of a synced record moves the watermark of
         // its source.
         let mut pruned: BTreeMap<DeviceId, u64> = BTreeMap::new();
@@ -157,12 +168,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     *top = (*top).max(counter);
                 }
             }
+
             // A fault of one message keeps it for the next sweep, and it
             // stops no other removal. ATT-161: the end of the period is no
             // deletion, thus no chunk of a file leaves its relay here.
             if self.remove_aged(message).is_err() {
                 continue;
             }
+
             let open = self.open_mut()?;
             let mut batch = open.store.begin();
             batch.delete(SYNC_ORIGIN, message.0);
@@ -172,9 +185,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 message: *message,
             });
         }
+
         let messages: Vec<MsgRef> = due.iter().map(|(_, message)| *message).collect();
         self.drop_sync_sent_of(&messages)?;
         self.advance_watermarks(pruned, rng)?;
+
         Ok(due.len())
     }
 
@@ -189,6 +204,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if pruned.is_empty() {
             return Ok(());
         }
+
         let mut lowest_held: BTreeMap<DeviceId, u64> = BTreeMap::new();
         for (_, origin) in self.open_ref()?.store.list(SYNC_ORIGIN, None)? {
             if let Some((source, counter)) = origin_of(&origin) {
@@ -196,15 +212,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 *low = (*low).min(counter);
             }
         }
+
         let Some(mut engine) = self.sync_engine()? else {
             return Ok(());
         };
+
         for (source, top) in pruned {
             let below = lowest_held
                 .get(&source)
                 .map_or(top, |low| top.min(low.saturating_sub(1)));
             engine.watermarks_mut().advance(source, below);
         }
+
         let mut copy = Vec::new();
         for source in engine.peers().copied().collect::<Vec<_>>() {
             let mark = engine.watermarks().get(&source);
@@ -213,6 +232,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 copy.extend_from_slice(&mark.to_be_bytes());
             }
         }
+
         self.put_engine(&engine, None, rng)?;
         self.put_setting(WATERMARKS, &copy, rng)
     }

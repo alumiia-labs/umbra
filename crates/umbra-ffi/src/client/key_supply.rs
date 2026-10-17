@@ -78,6 +78,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .row_id(SEND_INDEX, &index_key(conversation, index));
         let mut batch = open.store.begin();
         batch.put(SEND_INDEX, row, Some(conversation.0), &message.0, rng)?;
+
         Ok(batch.commit()?)
     }
 
@@ -104,6 +105,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             conversation: to,
             app,
         });
+
         Ok(())
     }
 
@@ -132,6 +134,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let store = &self.open_ref()?.store;
         let row = store.row_id(KEY_ASKED, &asked_key(conversation, index));
         let answered = store.row_id(KEY_ASKED, &answered_key(conversation, index));
+
         // WIR-347: one request for one hole. The index wraps at 65 536,
         // thus a request older than 24 hours named another record. A new
         // hole at its index takes a request of its own.
@@ -142,6 +145,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if is_recent {
             return Ok(false);
         }
+
         let recent = store
             .list(KEY_ASKED, Some(&conversation.0))?
             .iter()
@@ -151,6 +155,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if recent >= KEY_REQUEST_RATE {
             return Ok(false);
         }
+
         let request = Self::session_request(index);
         let mut body = vec![0u8; umbra_wire::app::keys::REQUEST_LEN];
         request.encode(&mut body)?;
@@ -166,6 +171,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         )?;
         batch.delete(KEY_ASKED, answered);
         batch.commit()?;
+
         Ok(true)
     }
 
@@ -196,9 +202,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if count >= KEY_REQUEST_RATE as u64 {
             return Ok(false);
         }
+
         count = count.saturating_add(1);
         let value = [since.to_be_bytes(), count.to_be_bytes()].concat();
         self.put_setting(&key, &value, rng)?;
+
         Ok(true)
     }
 
@@ -218,11 +226,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Ok(index) = u16::try_from(request.index) else {
             return Ok(());
         };
+
         // WIR-338: a request above the rate goes, with no record again and
         // no supply, thus a contact makes no flood of this device.
         if !self.serves_key_request(conversation, now_ms / 1_000, rng)? {
             return Ok(());
         }
+
         let store = &self.open_ref()?.store;
         let row = store.row_id(SEND_INDEX, &index_key(conversation, index));
         let again = match store.get(SEND_INDEX, &row)? {
@@ -288,6 +298,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Ok(index) = u16::try_from(supply.request.index) else {
             return Ok(());
         };
+
         let open = self.open_ref()?;
         let row = open
             .store
@@ -295,6 +306,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if open.store.get(KEY_ASKED, &row)?.is_none() {
             return Ok(());
         }
+
         // WIR-347: one supply answers one request. A copy of a supply that
         // came finds the mark, and it changes nothing.
         let answered = open
@@ -303,6 +315,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if open.store.get(KEY_ASKED, &answered)?.is_some() {
             return Ok(());
         }
+
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         batch.put(KEY_ASKED, answered, Some(conversation.0), &[1], rng)?;
@@ -319,6 +332,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 rng,
             )?;
         }
+
         Ok(())
     }
 }

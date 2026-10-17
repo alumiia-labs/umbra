@@ -83,6 +83,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.put(ROSTER_NOTES, row, Some(conversation.0), &value, rng)?;
         batch.commit()?;
         self.groups.noted.insert(conversation);
+
         Ok(())
     }
 
@@ -132,6 +133,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         } else {
             self.group_reads_live(conversations, now);
         }
+
         for &conversation in conversations {
             let key = [conversation.0.as_slice(), b"read"].concat();
             let last = self.clock(&key)?;
@@ -147,13 +149,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     },
                     rng,
                 )?;
+
                 // GRP-329: the roster objects of that period are gone too.
                 self.request_roster_snapshot(conversation, now_ms, rng)?;
             }
+
             if last.is_none_or(|at| now.saturating_sub(at) >= READ_CLOCK_STEP) {
                 self.put_clock(conversation, key, now, rng)?;
             }
         }
+
         Ok(())
     }
 
@@ -186,6 +191,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 rng,
             )?;
         }
+
         Ok(())
     }
 
@@ -234,6 +240,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             });
         }
         notes.sort_by_key(|note| note.at_ms);
+
         Ok(notes)
     }
 }

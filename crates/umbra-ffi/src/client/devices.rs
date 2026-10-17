@@ -142,6 +142,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let row = open.store.row_id(DEVICE_SELF, SELF_KEY);
         let mut batch = open.store.begin();
         batch.put(DEVICE_SELF, row, None, &plain, rng)?;
+
         Ok(batch.commit()?)
     }
 
@@ -193,6 +194,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.put(ROSTER_HASHES, hash_row, None, &Roster::hash(bytes), rng)?;
         if let Some((parent, current)) = superseded {
             batch.put(ROSTER_PARENT, parent_row, None, &parent, rng)?;
+
             // DEV-229: the epoch that the new head follows stays for a peer
             // that missed it, and the one past the bound leaves.
             batch.put(DEVICE_ROSTER, kept_row, None, &current, rng)?;
@@ -200,12 +202,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 batch.delete(DEVICE_ROSTER, old_row);
             }
         }
+
         for write in &writes {
             match write {
                 RowWrite::Put(table, row, plain) => batch.put(*table, *row, None, plain, rng)?,
                 RowWrite::Delete(table, row) => batch.delete(*table, *row),
             }
         }
+
         Ok(batch.commit()?)
     }
 
@@ -226,11 +230,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(head) = self.roster_bytes()? else {
             return Ok(Vec::new());
         };
+
         let from = Roster::parse(bytes)?.epoch;
         let top = Roster::parse(&head)?.epoch;
         if from >= top || top.saturating_sub(from) > ROSTER_CHAIN_KEPT.saturating_add(1) {
             return Ok(Vec::new());
         }
+
         let mut chain = Vec::new();
         let mut previous = Roster::hash(bytes);
         for epoch in from.saturating_add(1)..top {
@@ -240,13 +246,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if Roster::parse(&kept)?.prev_hash != previous {
                 return Ok(Vec::new());
             }
+
             previous = Roster::hash(&kept);
             chain.push(kept);
         }
+
         if Roster::parse(&head)?.prev_hash != previous {
             return Ok(Vec::new());
         }
+
         chain.push(head);
+
         Ok(chain)
     }
 
@@ -260,6 +270,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.device_identity()?.is_some() {
             return Ok(());
         }
+
         let identity = DeviceIdentity::generate(label, rng);
         let keys = EntryKeys::of(&identity);
         let genesis = Roster {
@@ -306,6 +317,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             sig: &[0; umbra_crypto::sign::SIGNATURE_LEN],
         };
         let bytes = sign_roster(&genesis, &identity.roster_key(), rng)?;
+
         Ok((identity, bytes))
     }
 
@@ -334,6 +346,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if previous.devices.len() >= umbra_core::devset::MAX_DEVICES {
             return Err(Error::TooLong);
         }
+
         // DEV-224: an identifier that the roster holds or revoked names
         // another device, and two entries with one identifier would share
         // one sync channel.
@@ -341,6 +354,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         {
             return Err(Error::Malformed);
         }
+
         let added = EntryKeys::of_hello(hello);
         let epoch = previous.epoch.saturating_add(1);
         let mut devices = previous.devices.clone();
@@ -354,6 +368,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             signer_id: identity.device_id,
             sig: previous.sig,
         };
+
         Ok(sign_roster(&next, &identity.roster_key(), rng)?)
     }
 
@@ -370,6 +385,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 return Err(Error::Integrity);
             }
         }
+
         self.put_roster(bytes, rng)
     }
 
@@ -385,11 +401,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if device == identity.device_id {
             return Err(Error::Malformed);
         }
+
         let current = self.roster_bytes()?.ok_or(Error::NotFound)?;
         let previous = Roster::parse(&current)?;
         if previous.entry(&device).is_none() {
             return Err(Error::NotFound);
         }
+
         let mut revoked = previous.revoked.clone();
         revoked.push(device);
         let next = Roster {
@@ -407,12 +425,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             sig: previous.sig,
         };
         let bytes = sign_roster(&next, &identity.roster_key(), rng)?;
+
         // Step 2c and DEV-313: the store holds what the revocation owes
         // before it holds the epoch. Thus a run that is not up now, or a
         // crash after the epoch, loses no rotation and no notice.
         let channel = self.peer_channels()?.get(&device).copied();
         self.owe_revocation(device, channel, &bytes, true, rng)?;
         self.put_roster(&bytes, rng)?;
+
         // DEV-313: the revoked device learns of it once, on the channel
         // that ends when a relay took the notice, thus it can show it
         // (`DEV-181`). The channel takes no record from here on. A device
@@ -421,6 +441,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if let Some(channel) = channel {
             self.queue_revocation_notice(channel, &bytes, rng)?;
         }
+
         Ok(bytes)
     }
 
@@ -438,6 +459,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if notice.epoch.saturating_sub(below) > ROSTER_CHAIN_KEPT {
                 break;
             }
+
             // The head is the parent of a notice that a crash kept out of
             // the store, and each other parent is a kept epoch.
             let held = match self.kept_epoch(below)? {
@@ -447,11 +469,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Some(held) = held.filter(|held| Roster::hash(held) == parent) else {
                 break;
             };
+
             parent = Roster::parse(&held)?.prev_hash;
             chain.push(held);
             epoch = below;
         }
+
         chain.reverse();
+
         Ok(chain)
     }
 
@@ -490,11 +515,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             batch.put(SETTINGS, leaving_row, None, &leaving, rng)?;
             batch.put(SETTINGS, notice_row, None, &notice, rng)?;
         }
+
         batch.commit()?;
+
         // The run that is up takes the rotations at its next step, each
         // with a new guard (`NET-357`).
         self.rotation_asked = 0;
         self.rotation_guarded.clear();
+
         Ok(())
     }
 
@@ -511,6 +539,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 owed.extend_from_slice(&row);
             }
         }
+
         Ok(owed)
     }
 
@@ -534,12 +563,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(owed) = self.setting(ROTATION_OWED)? else {
             return Ok(Vec::new());
         };
+
         // A link snapshot carries the settings of the device that owns the
         // channels. A linked device owns no queue of a contact (`DEV-287`),
         // thus it owes none.
         if !self.owns_channels()? {
             return Ok(Vec::new());
         }
+
         let mut contacts = Vec::new();
         for conversation in owed.as_chunks::<16>().0 {
             // A contact that left the store owes nothing.
@@ -548,9 +579,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 contacts.push((contact, self.rotation_guarded.insert(conversation)));
             }
         }
+
         if !contacts.is_empty() {
             self.rotation_asked = now.max(1);
         }
+
         Ok(contacts)
     }
 
@@ -566,10 +599,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(owed) = self.setting(ROTATION_OWED)? else {
             return Ok(());
         };
+
         let (entries, _) = owed.as_chunks::<16>();
         if !entries.contains(&conversation.0) || !self.rotation_guarded.remove(&conversation) {
             return Ok(());
         }
+
         // A contact that left the store owes nothing either.
         let store = &self.open_ref()?.store;
         let mut left = Vec::new();
@@ -578,6 +613,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 left.extend_from_slice(entry);
             }
         }
+
         if left.is_empty() {
             self.remove_setting(ROTATION_OWED)
         } else {
@@ -599,6 +635,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(held) = self.setting(LEAVING_CHANNELS)? else {
             return Ok(Vec::new());
         };
+
         Ok(held
             .as_chunks::<LEAVING_ENTRY>()
             .0
@@ -649,6 +686,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for kept in self.roster_chain_below(epoch)? {
             self.queue_roster(channel, &kept, rng)?;
         }
+
         let body = DeviceSetBody::Control {
             control_type: ControlType::RosterEpoch,
             payload: epoch,
@@ -683,6 +721,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         ) {
             self.end_leaving_channel(device, channel, rng)?;
         }
+
         Ok(true)
     }
 
@@ -701,6 +740,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 left.extend_from_slice(&other);
             }
         }
+
         let notice_key = [REVOCATION_NOTICE, device.as_slice()].concat();
         let open = self.open_mut()?;
         let leaving_row = open.store.row_id(SETTINGS, LEAVING_CHANNELS);
@@ -714,7 +754,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         } else {
             batch.put(SETTINGS, leaving_row, None, &left, rng)?;
         }
+
         batch.delete(SETTINGS, notice_row);
+
         Ok(batch.commit()?)
     }
 
@@ -750,6 +792,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .find_map(|roster| roster.entry(&next.signer_id).map(|entry| entry.label))
                 .unwrap_or([0; 32])
         };
+
         // DEV-182: a peer applied another epoch at an index that this
         // device applied.
         if next.epoch < previous.epoch {
@@ -771,12 +814,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
             return Ok(false);
         }
+
         if next.epoch == previous.epoch {
             if hash == Roster::hash(&current) {
                 return Ok(false);
             }
             return self.on_rival_roster(identity.device_id, &current, bytes, rng);
         }
+
         if next.epoch == previous.epoch.saturating_add(1)
             && next.prev_hash != Roster::hash(&current)
         {
@@ -792,11 +837,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let before: Vec<DeviceId> = previous.devices.iter().map(|d| d.device_id).collect();
         if next.revokes(&identity.device_id) {
             self.mark_removed_from_set(rng)?;
+
             // DEV-317: the epoch stays out of the store, and its claim
             // still ends the ownership of this device.
             self.fold_claims(&before, &next, rng)?;
             return Ok(false);
         }
+
         let gone: Vec<DeviceId> = next
             .revoked
             .iter()
@@ -810,14 +857,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if !owed.is_empty() {
                 self.put_setting(ROTATION_OWED, &owed, rng)?;
             }
+
             self.rotation_asked = 0;
             self.rotation_guarded.clear();
         }
+
         self.put_roster(bytes, rng)?;
         self.fold_claims(&before, &next, rng)?;
         for device in gone {
             self.end_sync_channel(device, rng)?;
         }
+
         Ok(true)
     }
 
@@ -833,6 +883,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.put(SETTINGS, row, None, &[1], rng)?;
         batch.commit()?;
         self.events.push_back(crate::Event::Conversations);
+
         Ok(())
     }
 
@@ -850,6 +901,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 return Ok(epoch.verify_signature(entry.mldsa_pk).is_ok());
             }
         }
+
         Ok(head
             .entry(&epoch.signer_id)
             .is_some_and(|entry| epoch.verify_signature(entry.mldsa_pk).is_ok()))
@@ -875,11 +927,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(channel) = channels.get(&device).copied() else {
             return Ok(());
         };
+
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         batch.delete(DEVICE_PEERS, channel.0);
         batch.delete(TableId::CONTACT, channel.0);
         batch.put(ENDED_CHANNELS, channel.0, None, &[1], rng)?;
+
         Ok(batch.commit()?)
     }
 
@@ -905,6 +959,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(bytes) = self.roster_bytes()? else {
             return Ok(());
         };
+
         let roster = Roster::parse(&bytes)?;
         let channels = self.peer_channels()?;
         let leaving = self.leaving_channels()?;
@@ -918,6 +973,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 self.end_sync_channel(*device, rng)?;
                 continue;
             };
+
             let notice = self.setting(&[REVOCATION_NOTICE, device.as_slice()].concat())?;
             let at = notice
                 .as_deref()
@@ -931,6 +987,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 _ => self.end_leaving_channel(*device, *channel, rng)?,
             }
         }
+
         // A notice whose epoch a crash kept out of the store names a device
         // that the roster still holds. Its channel is a sync channel as
         // before, and the user removes the device again.
@@ -939,6 +996,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 self.forget_notice(device, channel, rng)?;
             }
         }
+
         Ok(())
     }
 
@@ -957,6 +1015,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 left.extend_from_slice(&other);
             }
         }
+
         self.remove_setting(&[REVOCATION_NOTICE, device.as_slice()].concat())?;
         if left.is_empty() {
             self.remove_setting(LEAVING_CHANNELS)
@@ -971,6 +1030,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(bytes) = self.roster_bytes()? else {
             return Ok(Vec::new());
         };
+
         let roster = Roster::parse(&bytes)?;
         Ok(roster
             .devices
@@ -1004,6 +1064,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if held.contains(queue) {
             return Ok(());
         }
+
         held.push(*queue);
         self.put_setting(DEVICE_INVITES_SETTING, &held.concat(), rng)
     }
@@ -1027,6 +1088,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if kept.is_empty() {
             return self.remove_setting(DEVICE_INVITES_SETTING);
         }
+
         self.put_setting(DEVICE_INVITES_SETTING, &kept.concat(), rng)
     }
 
@@ -1049,6 +1111,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.owns_channels()? {
             return Ok(None);
         }
+
         Ok(self
             .setting(PENDING_PEER_SETTING)?
             .and_then(|value| value.get(..16).and_then(|id| id.try_into().ok())))
@@ -1080,6 +1143,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.delete(DEVICE_PEERS, conversation.0);
         batch.delete(TableId::CONTACT, conversation.0);
         batch.put(ENDED_CHANNELS, conversation.0, None, &[1], rng)?;
+
         Ok(batch.commit()?)
     }
 
@@ -1131,6 +1195,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         sync_floor: u64,
     ) -> Result<Vec<BackupRow>, Error> {
         let identity = self.device_identity()?.ok_or(Error::NotFound)?;
+
         // The head of this device is the parent of the epoch that adds the
         // new one, thus the new device verifies a rival of it.
         let parent = self
@@ -1146,6 +1211,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             plain: Zeroizing::new(plain),
         };
         let peer = [identity.device_id.as_slice(), &identity.label].concat();
+
         // DEV-311: the counter at the confirmation; each record after it
         // waits for the new device under DEV-297, and the snapshot holds
         // the state of each one at or below it.
@@ -1164,6 +1230,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if let Some(parent) = parent {
             rows.push(put(ROSTER_PARENT, PARENT_KEY, parent));
         }
+
         Ok(rows)
     }
 
@@ -1182,10 +1249,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !entry_matches || self.pending_sync_bundle()?.is_none() {
             return Err(Error::Integrity);
         }
+
         self.put_device_identity(identity, false, rng)?;
+
         // DEV-230: with no record of the existing device yet, its absence
         // counts from the link.
         self.note_owner_heard(super::unix_now_seconds(), rng)?;
+
         // IDN-183 is for a restore: a linked device renews no contact, and
         // DEV-117 holds no deletion of the other devices.
         self.remove_setting(super::own_delete::HOLDS_DELETIONS)?;

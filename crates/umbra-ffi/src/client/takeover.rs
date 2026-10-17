@@ -59,6 +59,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if let Some((device, channel)) = channels.iter().next() {
             return Ok(Some((*device, Some(*channel))));
         }
+
         Ok(self
             .setting(PENDING_PEER_SETTING)?
             .and_then(|value| value.get(..16).and_then(|id| id.try_into().ok()))
@@ -78,6 +79,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if is_recent {
             return Ok(());
         }
+
         self.put_setting(OWNER_HEARD_SETTING, &now.to_be_bytes(), rng)
     }
 
@@ -112,6 +114,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             self.note_owner_heard(now, rng)?;
             return Ok(Some(0));
         };
+
         Ok(Some(now.saturating_sub(heard)))
     }
 
@@ -157,11 +160,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if groups.contains(&conversation) {
                 continue;
             }
+
             contacts = contacts.saturating_add(1);
             if self.is_shadow_contact(conversation)? {
                 unreachable = unreachable.saturating_add(1);
             }
         }
+
         Ok(TakeOverCount {
             contacts,
             groups: u32::try_from(groups.len()).unwrap_or(u32::MAX),
@@ -196,11 +201,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 *device,
             );
         }
+
         let mut absence = epoch.clone();
         absence
             .claims
             .retain(|claim| claim.scope == ClaimScope::Absence);
         table.fold_roster(&absence);
+
         Ok(table.owner(&subject).map_or(owner, |held| held.owner))
     }
 
@@ -220,14 +227,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(identity) = self.device_identity()? else {
             return Ok(());
         };
+
         let own = identity.device_id;
         if epoch.signer_id == own || self.owner_after(own, devices, epoch)? == own {
             return Ok(());
         }
+
         self.put_device_identity(&identity, false, rng)?;
+
         // The records that wait go on no channel of this device.
         self.outgoing.clear();
         self.events.push_back(Event::Conversations);
+
         Ok(())
     }
 
@@ -246,12 +257,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             Some(absent_for) if !may_claim_absence(absent_for) => return Err(Error::Busy),
             Some(_) => {}
         }
+
         let identity = self.device_identity()?.ok_or(Error::NotFound)?;
         let own = identity.device_id;
         let (absent, channel) = self.owning_device()?.ok_or(Error::NotFound)?;
         let current = self.roster_bytes()?.ok_or(Error::NotFound)?;
         let previous = Roster::parse(&current)?;
         let entry = previous.entry(&own).ok_or(Error::Integrity)?.clone();
+
         // DEV-314: this device reaches no other linked device (`DEV-308`),
         // and a set has one owner. Thus each other device leaves.
         let before: Vec<DeviceId> = previous.devices.iter().map(|d| d.device_id).collect();
@@ -290,8 +303,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if device_peers.contains(&conversation) || self.is_shadow_contact(conversation)? {
                 continue;
             }
+
             stale.extend_from_slice(plain.get(..QUEUE_ID_LEN).ok_or(Error::Integrity)?);
         }
+
         let mut writes = self.new_recovery_code_writes(rng)?;
         let store = &self.open_ref()?.store;
         let mut owner_row = Zeroizing::new(vec![1u8]);
@@ -307,6 +322,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         } else {
             RowWrite::Put(SETTINGS, stale_row, Zeroizing::new(stale))
         });
+
         // The state that named the absent device as the owner goes: the
         // link that did not end, the count of its absence, the rotations
         // that its snapshot carried, and each record that waited for it.
@@ -323,6 +339,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             drop(Zeroizing::new(plain));
             writes.push(RowWrite::Delete(SYNC_SENT, row));
         }
+
         // The shares of the code that the absent device held open no
         // backup of this device.
         for (row, _) in store.list(SHARES_GIVEN, None)? {
@@ -335,17 +352,21 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for send in core::mem::take(&mut self.sync_out) {
             drop(Zeroizing::new(send.app));
         }
+
         self.synced_out.clear();
         if let Some(channel) = channel {
             self.queue_revocation_notice(channel, &bytes, rng)?;
         }
+
         // IDN-109: each handle of the set looks for its current key once.
         self.mark_resync(rng)?;
+
         // Part 7 §7.7 step 2e: the absent device holds the keys of each
         // group. A group that waits takes its re-key at a later try, and
         // it does not undo the take-over.
         let _ = self.rekey_groups(now.saturating_mul(1_000), rng);
         self.events.push_back(Event::Conversations);
+
         Ok(bytes)
     }
 }

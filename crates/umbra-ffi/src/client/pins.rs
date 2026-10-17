@@ -25,9 +25,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     pub fn is_pinned(&self, conversation: ConversationId) -> Result<bool, Error> {
         let store = &self.open_ref()?.store;
         let row = store.row_id(SETTINGS, &flags_key(conversation));
-        Ok(
-            matches!(store.get(SETTINGS, &row)?.as_deref(), Some([flags, ..]) if flags & FLAG_PIN != 0),
-        )
+        let held = store.get(SETTINGS, &row)?;
+        Ok(matches!(held.as_deref(), Some([flags, ..]) if flags & FLAG_PIN != 0))
     }
 
     fn put_pinned<R: CryptoRng + ?Sized>(
@@ -41,6 +40,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let row = open.store.row_id(SETTINGS, &flags_key(conversation));
         let mut batch = open.store.begin();
         batch.put(SETTINGS, row, None, &[flags], rng)?;
+
         Ok(batch.commit()?)
     }
 
@@ -57,6 +57,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let flags = if is_pinned { FLAG_PIN } else { 0 };
             self.publish_mutable(ITEM_FLAGS, &subject, &[flags], rng)?;
         }
+
         Ok(())
     }
 
@@ -72,10 +73,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let [flags, ..] = value else {
             return Err(Error::Malformed);
         };
+
         if let Some(conversation) = self.conversation_of_subject(subject)? {
             self.put_pinned(conversation, flags & FLAG_PIN != 0, rng)?;
             self.events.push_back(Event::Conversations);
         }
+
         Ok(())
     }
 }

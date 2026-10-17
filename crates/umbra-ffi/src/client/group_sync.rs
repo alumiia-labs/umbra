@@ -72,10 +72,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.owns_channels()? || self.sync_engine()?.is_none() {
             return Ok(());
         }
+
         let open = self.open_mut()?;
         let row = open.store.row_id(GROUP_STATE_DUE, &conversation.0);
         let mut batch = open.store.begin();
         batch.put(GROUP_STATE_DUE, row, None, &conversation.0, rng)?;
+
         Ok(batch.commit()?)
     }
 
@@ -95,6 +97,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if self.groups.state_out.contains(&conversation) {
                 continue;
             }
+
             match self.group_state_object(conversation, now) {
                 Ok(object) => {
                     self.groups.state_out.insert(conversation);
@@ -106,6 +109,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
             }
         }
+
         None
     }
 
@@ -115,6 +119,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let row = open.store.row_id(GROUP_STATE_DUE, &conversation.0);
         let mut batch = open.store.begin();
         batch.delete(GROUP_STATE_DUE, row);
+
         Ok(batch.commit()?)
     }
 
@@ -161,6 +166,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 plain: Zeroizing::new(plain),
             });
         }
+
         for table in OWNED_BY_GROUP {
             for (row, plain) in store.list(table, Some(&conversation.0))? {
                 rows.push(BackupRow::Put {
@@ -171,12 +177,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 });
             }
         }
+
         let object = BackupObject {
             kind: KIND_FULL,
             written_at: now,
             base_at: 0,
             rows,
         };
+
         Ok(object.encode()?)
     }
 
@@ -210,10 +218,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.owns_channels()? {
             return Ok(());
         }
+
         let descriptor = FileDescriptor::parse(value)?;
         self.groups
             .state_in
             .push_back((subject, Box::new(descriptor)));
+
         Ok(())
     }
 
@@ -253,11 +263,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if group_subject(&open.device_set_key, &group_id) != *subject {
             return Err(Error::Integrity);
         }
+
         let conversation = self.conversation_of_group(&group_id)?;
         let replaces = self.is_group(conversation)?;
         if replaces && !self.state_replaces(conversation, &group_id, &object)? {
             return Ok(conversation);
         }
+
         // The rows of the membership before leave with it. The read mark
         // and the name of the conversation are of this device, and they
         // stay.
@@ -271,6 +283,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     store.row_id(TableId::LOCAL_IDENTITY, &key),
                 ));
             }
+
             rows
         } else {
             Vec::new()
@@ -289,6 +302,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if table == CONVERSATION {
                 return *row == store.row_id(CONVERSATION, &conversation.0) && owner.is_none();
             }
+
             OWNED_BY_GROUP.contains(&table) && owner == Some(&conversation.0)
         };
         for row in &object.rows {
@@ -299,6 +313,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 _ => return Err(Error::Integrity),
             }
         }
+
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         for (table, row) in stale {
@@ -315,14 +330,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 if replaces && *table == CONVERSATION {
                     continue;
                 }
+
                 batch.put(*table, *row, *owner, plain, rng)?;
             }
         }
+
         batch.commit()?;
         self.events.push_back(super::Event::Conversations);
         self.replay_group_records(subject, conversation, rng)?;
+
         // DEV-301: a re-key item that came before the group applies now.
         self.retry_rekey_items(super::unix_now_seconds().saturating_mul(1_000), rng)?;
+
         Ok(conversation)
     }
 
@@ -360,11 +379,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let (Some(row), Some(seed)) = (find(GROUP, conversation.0), seed_of(group_id)) else {
             return Ok(false);
         };
+
         // The byte after the identifier is the state of the group at the
         // device that wrote the row, and 0 is an open group.
         let Some((&[0], stored)) = row.get(32..).and_then(|rest| rest.split_at_checked(1)) else {
             return Ok(false);
         };
+
         let previous = seed_of(&previous_seed_key(group_id));
         let Ok(incoming) = Group::restore_with_previous(stored, &seed, previous.as_ref()) else {
             return Ok(false);
@@ -372,7 +393,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if incoming.own_role().is_none() {
             return Ok(false);
         }
+
         let held = self.group_of(conversation)?;
+
         Ok(held.own_role().is_none() || incoming.own_index() > held.own_index())
     }
 
@@ -388,6 +411,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.owns_channels()? {
             return Ok(());
         }
+
         let order = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| {
@@ -397,6 +421,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut nonce = [0u8; 16];
         rng.fill_bytes(&mut nonce);
         let row = open.store.row_id(GROUP_RECORDS_HELD, &nonce);
+
         // DEV-244: a timed record waits with its deadline, thus the wait
         // does not lengthen its period.
         let at = if expires_in > 0 {
@@ -415,6 +440,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         );
         let mut batch = open.store.begin();
         batch.put(GROUP_RECORDS_HELD, row, None, &value, rng)?;
+
         Ok(batch.commit()?)
     }
 
@@ -431,6 +457,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if plain.get(..32) != Some(subject.as_slice()) {
                 continue;
             }
+
             let order = u64::from_be_bytes(
                 plain
                     .get(32..40)
@@ -446,6 +473,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let app = Zeroizing::new(plain.get(48..).ok_or(Error::Integrity)?.to_vec());
             held.push((order, row, at, app));
         }
+
         held.sort_by_key(|(order, _, _, _)| *order);
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -459,11 +487,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if at == 0 || expires_in > 0 {
                 let _ = self.apply_synced_group(conversation, &app, expires_in, now_ms, rng);
             }
+
             let open = self.open_mut()?;
             let mut batch = open.store.begin();
             batch.delete(GROUP_RECORDS_HELD, row);
             batch.commit()?;
         }
+
         Ok(())
     }
 
@@ -508,12 +538,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.owns_channels()? {
             return Ok(false);
         }
+
         // DEV-301: a group that this device does not hold yet takes the
         // item when it comes.
         let Some(conversation) = self.conversation_of_group_subject(&subject)? else {
             self.hold_rekey_item(subject, value, since, rng)?;
             return Ok(true);
         };
+
         let seed: [u8; 32] = value
             .get(..32)
             .and_then(|bytes| bytes.try_into().ok())
@@ -532,11 +564,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 return Ok(true);
             }
         }
+
         self.store_rekeyed(conversation, &group, &seed, rng)?;
+
         // DEV-303: an epoch key of the new index that came on the group
         // queue before the seed waits, and it installs now.
         self.retry_epoch_keys(conversation, now_ms, rng)?;
         self.events.push_back(super::Event::Conversations);
+
         Ok(false)
     }
 
@@ -552,6 +587,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 return Ok(Some(conversation));
             }
         }
+
         Ok(None)
     }
 }
@@ -571,6 +607,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let held = Zeroizing::new([since.to_be_bytes().as_slice(), &subject, value].concat());
         let mut batch = open.store.begin();
         batch.put(REKEY_HELD, row, None, &held, rng)?;
+
         Ok(batch.commit()?)
     }
 
@@ -586,6 +623,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if held.is_empty() {
             return Ok(());
         }
+
         let now = now_ms / 1_000;
         let mut done = Vec::new();
         for (row, plain) in held {
@@ -605,6 +643,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 done.push(row);
                 continue;
             }
+
             // An item that applied goes; one that waits again kept its row
             // and its time; a fault keeps the row for the next try, and it
             // stops no other item.
@@ -612,11 +651,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 done.push(row);
             }
         }
+
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         for row in done {
             batch.delete(REKEY_HELD, row);
         }
+
         Ok(batch.commit()?)
     }
 
@@ -637,6 +678,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if open.store.list(EPOCH_HELD, Some(&conversation.0))?.len() >= EPOCH_HELD_MAX {
             return Ok(());
         }
+
         let digest = umbra_crypto::hash::sha3_256(&[body]);
         let key = [conversation.0.as_slice(), &epoch.to_be_bytes(), &digest].concat();
         let row = open.store.row_id(EPOCH_HELD, &key);
@@ -650,6 +692,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         );
         let mut batch = open.store.begin();
         batch.put(EPOCH_HELD, row, Some(conversation.0), &value, rng)?;
+
         Ok(batch.commit()?)
     }
 
@@ -686,6 +729,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if held.is_empty() {
             return Ok(());
         }
+
         held.sort_by_key(|(_, epoch, _, _)| *epoch);
         let now = now_ms / 1_000;
         let mut group = self.group_of(conversation)?;
@@ -701,6 +745,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 done.push(row);
                 continue;
             }
+
             if epoch == group.epoch() {
                 if group
                     .install_epoch_key(epoch, start_slot, &body, now)
@@ -711,6 +756,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 done.push(row);
                 continue;
             }
+
             if group
                 .install_epoch_key(epoch, start_slot, &body, now)
                 .is_ok()
@@ -720,16 +766,20 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 outcomes.extend(group.retry_held(now));
             }
         }
+
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         for row in done {
             batch.delete(EPOCH_HELD, row);
         }
+
         batch.commit()?;
         if !installed {
             return Ok(());
         }
+
         self.take_outcomes(conversation, group, outcomes, before, true, now_ms, rng)?;
+
         Ok(())
     }
 }

@@ -49,6 +49,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Ok(notice) = KeyChangeNotice::parse(body) else {
             return Ok(());
         };
+
         // DEV-294: this device holds the salt alone of a contact whose
         // channel another device owns. It holds no key of the peer to
         // change. Thus the notice waits at the device that owns the
@@ -56,6 +57,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.is_shadow_contact(conversation)? {
             return Ok(());
         }
+
         let value = Zeroizing::new(
             [
                 conversation.0.as_slice(),
@@ -76,6 +78,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         )?;
         batch.commit()?;
         self.events.push_back(Event::Conversations);
+
         Ok(())
     }
 
@@ -86,6 +89,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(value) = self.open_ref()?.store.get(KEY_CHANGES, &conversation.0)? else {
             return Ok(None);
         };
+
         let key: [u8; 32] = value
             .get(X25519_AT..X25519_AT + 32)
             .and_then(|b| b.try_into().ok())
@@ -95,6 +99,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .get(at_from..at_from + 8)
             .and_then(|b| b.try_into().ok())
             .ok_or(Error::Integrity)?;
+
         Ok(Some((key, u64::from_be_bytes(at))))
     }
 
@@ -107,11 +112,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some((key, at_ms)) = self.held_key_change(conversation)? else {
             return Ok(None);
         };
+
         // A notice that an earlier build kept for a shadow contact blocks
         // nothing: the device that owns the channel asks the user.
         if self.is_shadow_contact(conversation)? {
             return Ok(None);
         }
+
         let store = &self.open_ref()?.store;
         let plain = Zeroizing::new(
             store
@@ -120,6 +127,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         );
         let state = plain.get(QUEUE_ID_LEN..).ok_or(Error::Integrity)?;
         let (own, _) = stored_contact_keys(state, &self.root_identity()?)?;
+
         Ok(Some(PendingKeyChange {
             new_safety_number: safety_number(&own, &key),
             at_ms,
@@ -153,9 +161,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.put(TableId::CONTACT, conversation.0, None, &changed, rng)?;
         batch.delete(KEY_CHANGES, conversation.0);
         batch.commit()?;
+
         // DEV-319: each other device of the set takes the new key.
         let _ = self.publish_channel_entry(conversation, rng);
         self.events.push_back(Event::Conversations);
+
         Ok((ContactId(contact), key))
     }
 }

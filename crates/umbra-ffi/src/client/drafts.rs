@@ -29,6 +29,7 @@ fn cut(text: &str, max: usize) -> &str {
     while !text.is_char_boundary(end) {
         end = end.saturating_sub(1);
     }
+
     text.get(..end).unwrap_or_default()
 }
 
@@ -40,8 +41,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(bytes) = store.get(DRAFTS, &row)? else {
             return Ok(Zeroizing::new(Vec::new()));
         };
+
         let bytes = Zeroizing::new(bytes);
         let text = core::str::from_utf8(&bytes).map_err(|_| Error::Integrity)?;
+
         Ok(Zeroizing::new(text.encode_utf16().collect()))
     }
 
@@ -57,6 +60,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.put_draft(conversation, &text, rng)? {
             return Ok(());
         }
+
         if self.draft_sync()? {
             if let Some(subject) = self.subject_of(conversation)? {
                 let value = cut(&text, DRAFT_SYNC_MAX).as_bytes().to_vec();
@@ -64,6 +68,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 self.publish_mutable(ITEM_DRAFT, &subject, &value, rng)?;
             }
         }
+
         Ok(())
     }
 
@@ -89,13 +94,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if held.as_deref().map(Vec::as_slice).unwrap_or_default() == text.as_bytes() {
             return Ok(false);
         }
+
         let mut batch = open.store.begin();
         if text.is_empty() {
             batch.delete(DRAFTS, row);
         } else {
             batch.put(DRAFTS, row, None, text.as_bytes(), rng)?;
         }
+
         batch.commit()?;
+
         Ok(true)
     }
 
@@ -109,10 +117,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.draft_sync()? {
             return Ok(());
         }
+
         let text = core::str::from_utf8(value).map_err(|_| Error::Malformed)?;
         if let Some(conversation) = self.conversation_of_subject(subject)? {
             self.put_draft(conversation, text, rng)?;
         }
+
         Ok(())
     }
 

@@ -65,6 +65,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
                 continue;
             };
+
             let since = match held {
                 Some(value) if u64_at(&value, 16)? == from => u64_at(&value, 32)?,
                 _ => now,
@@ -83,9 +84,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .concat();
             writes.push((row, Some(value)));
         }
+
         if writes.is_empty() {
             return Ok(());
         }
+
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         for (row, value) in writes {
@@ -94,6 +97,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 None => batch.delete(SYNC_HOLES, row),
             }
         }
+
         Ok(batch.commit()?)
     }
 
@@ -109,6 +113,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if value.len() != HOLE_LEN {
                 return Err(Error::Integrity);
             }
+
             let device: DeviceId = value
                 .get(..16)
                 .and_then(|bytes| bytes.try_into().ok())
@@ -126,6 +131,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 is_arriving: peers.contains(&device) && now.saturating_sub(since) < SYNC_MAX_AGE,
             });
         }
+
         Ok(out)
     }
 }

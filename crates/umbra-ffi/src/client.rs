@@ -43,12 +43,6 @@ mod roster_fork;
 mod roster_notes;
 mod search;
 mod snapshot_recovery;
-pub use retention::{HISTORY_AGE_ALL, HISTORY_AGE_MIN};
-pub use search::{
-    SearchFrom, SearchHit, SearchOptions, SearchOrder, SEARCH_RESULTS_MAX, TIER_NEAR, TIER_PHRASE,
-    TIER_WORDS,
-};
-pub use snapshot_recovery::SnapshotJob;
 mod social;
 mod sync;
 mod takeover;
@@ -82,10 +76,16 @@ pub use pictures::PET_AVATAR_MAX;
 pub use polls::{PollView, POLL_OPEN_MAX, POLL_OPEN_MIN};
 pub use quota::HOLD_RETRY;
 pub use reset::ResetSummary;
+pub use retention::{HISTORY_AGE_ALL, HISTORY_AGE_MIN};
 pub use roster_fork::{RosterFork, FORK_ONE_SIGNER, FORK_PEER, FORK_REVOKED};
 pub use roster_notes::{
     RosterNote, NOTE_EVICTED, NOTE_FORK, NOTE_GAP, NOTE_JOINED, NOTE_LEFT, NOTE_NOBODY, NOTE_ROLE,
 };
+pub use search::{
+    SearchFrom, SearchHit, SearchOptions, SearchOrder, SEARCH_RESULTS_MAX, TIER_NEAR, TIER_PHRASE,
+    TIER_WORDS,
+};
+pub use snapshot_recovery::SnapshotJob;
 pub use social::{GivenShare, HeldShare};
 pub use sync::SyncSend;
 pub use takeover::TakeOverCount;
@@ -231,6 +231,7 @@ fn revision_of(row: Option<&[u8]>) -> Result<(u8, Option<SyncPlace>), Error> {
     let Some(row) = row else {
         return Ok((0, None));
     };
+
     let count = *row.first().ok_or(Error::Integrity)?;
     let mark = match (row.get(1..17), row.get(17..25)) {
         (Some(source), Some(counter)) => source
@@ -239,6 +240,7 @@ fn revision_of(row: Option<&[u8]>) -> Result<(u8, Option<SyncPlace>), Error> {
             .zip(counter.try_into().ok().map(u64::from_be_bytes)),
         _ => None,
     };
+
     Ok((count, mark))
 }
 
@@ -292,6 +294,7 @@ fn pending_copy(plain: &[u8]) -> Option<(Vec<u8>, ConversationId, &[u8])> {
     }
     let app = plain.get(16..)?;
     is_record(app).then_some(())?;
+
     Some((Vec::new(), conversation_at(0)?, app))
 }
 
@@ -503,6 +506,7 @@ fn passphrase_bytes(code_units: &[u16]) -> Result<Zeroizing<Vec<u8>>, Error> {
         let mut utf8 = [0u8; 4];
         bytes.extend_from_slice(character.encode_utf8(&mut utf8).as_bytes());
     }
+
     Ok(bytes)
 }
 
@@ -548,10 +552,12 @@ fn tombstone_of(parsed: &AppMessage<'_>) -> Result<Option<Tombstone>, Error> {
     if parsed.kind != AppKind::Delete {
         return Ok(None);
     }
+
     let body = DeleteBody::parse(parsed.body)?;
     if body.scope == DeleteScope::Conversation {
         return Ok(Some(Tombstone::Cleared));
     }
+
     Ok(Some(if body.targets == [parsed.msg_id] {
         Tombstone::Placeholder
     } else {
@@ -575,6 +581,7 @@ fn deletion_record(msg_id: [u8; 16], sent_at: u64, target: [u8; 16]) -> Result<V
     };
     let mut app = vec![0u8; record.len()];
     record.encode(&mut app)?;
+
     Ok(app)
 }
 
@@ -590,6 +597,7 @@ fn with_text(app: &[u8], text: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
             if rich.inner_kind != AppKind::Text {
                 return Err(Error::Malformed);
             }
+
             let changed = RichRecord {
                 inner_body: text,
                 ..rich
@@ -608,6 +616,7 @@ fn with_text(app: &[u8], text: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
     };
     let mut changed = Zeroizing::new(vec![0u8; record.len()]);
     record.encode(&mut changed)?;
+
     Ok(changed)
 }
 
@@ -643,6 +652,7 @@ fn text_of<'a>(parsed: &AppMessage<'a>) -> Result<&'a [u8], Error> {
             if rich.inner_kind != AppKind::Text {
                 return Err(Error::Malformed);
             }
+
             Ok(rich.inner_body)
         }
         _ => Err(Error::Malformed),
@@ -657,12 +667,15 @@ fn reply_field(app: &[u8]) -> Result<Option<core::ops::Range<usize>>, Error> {
     if parsed.kind != AppKind::Rich {
         return Ok(None);
     }
+
     let rich = RichRecord::parse(parsed.body, Channel::Group)?;
     if rich.reply_target == [0; 16] {
         return Ok(None);
     }
+
     let body_at = app.len().saturating_sub(parsed.body.len());
     let at = body_at.saturating_add(1);
+
     Ok(Some(at..at.saturating_add(16)))
 }
 
@@ -683,6 +696,7 @@ fn keep_reply_as_reference(app: &mut [u8], key: &Secret<32>) -> Result<(), Error
             .ok_or(Error::Integrity)?
             .copy_from_slice(&reference);
     }
+
     Ok(())
 }
 
@@ -693,12 +707,15 @@ fn thread_field(app: &[u8]) -> Result<Option<core::ops::Range<usize>>, Error> {
     if parsed.kind != AppKind::Rich {
         return Ok(None);
     }
+
     let rich = RichRecord::parse(parsed.body, Channel::Group)?;
     if rich.thread_root == [0; 16] {
         return Ok(None);
     }
+
     let body_at = app.len().saturating_sub(parsed.body.len());
     let at = body_at.saturating_add(17);
+
     Ok(Some(at..at.saturating_add(16)))
 }
 
@@ -795,6 +812,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             nonce,
             &element,
         )?;
+
         let mut store = Store::unlock(backend, store_key)?;
         let row = store.row_id(TableId::LOCAL_IDENTITY, ROOT_KEY);
         let mark = store.row_id(TableId::LOCAL_IDENTITY, SET_MARK);
@@ -802,6 +820,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.put(TableId::LOCAL_IDENTITY, row, None, seed.expose(), rng)?;
         batch.put(TableId::LOCAL_IDENTITY, mark, None, &[1], rng)?;
         batch.commit()?;
+
         let mut client = Client {
             element,
             header,
@@ -832,8 +851,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             search: search::Search::default(),
             clock: 0,
         };
+
         // IDN-070: the recovery code comes at the first launch.
         client.recovery_code(rng)?;
+
         Ok(client)
     }
 
@@ -885,6 +906,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let State::Locked(_) = self.state else {
             return Ok(());
         };
+
         let store_key = self
             .header
             .unwrap(&passphrase_bytes(passphrase)?, &self.element)
@@ -892,6 +914,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let State::Locked(backend) = core::mem::replace(&mut self.state, State::Closed) else {
             return Err(Error::Closed);
         };
+
         let store = match Store::unlock(backend, store_key) {
             Ok(store) => store,
             Err(_) => {
@@ -899,6 +922,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 return Err(Error::Integrity);
             }
         };
+
         // IDN-039, IDN-040: a row of the identity that does not read after
         // the store opened is a fault of the file, and the user learns it.
         let read = (|| -> Result<(bool, Zeroizing<[u8; 32]>, u64), Error> {
@@ -909,6 +933,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if set_marked && !store.indexed() {
                 return Err(Error::Integrity);
             }
+
             let row = store.row_id(TableId::LOCAL_IDENTITY, ROOT_KEY);
             let seed = Zeroizing::new(
                 store
@@ -940,12 +965,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             },
             set_marked,
         }));
+
         // Each record that waited for the send path at the lock waits again.
         self.requeue_waiting()?;
         self.requeue_transfers()?;
         let seconds = self.auto_lock_seconds()?;
         self.apply_auto_lock(seconds);
         self.auto_lock.touch(now);
+
         Ok(())
     }
 
@@ -979,19 +1006,23 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if open.stamp.last == open.stamp.kept && open.set_marked {
             return Ok(());
         }
+
         let row = open.store.row_id(SETTINGS, STAMP_FLOOR);
         let mark = open.store.row_id(TableId::LOCAL_IDENTITY, SET_MARK);
         let last = open.stamp.last;
         let mut batch = open.store.begin();
         batch.put(SETTINGS, row, None, &last.to_be_bytes(), rng)?;
+
         // IDN-193: the commit writes the MAC of the set of tables, and the
         // mark says so from now on.
         if !open.set_marked {
             batch.put(TableId::LOCAL_IDENTITY, mark, None, &[1], rng)?;
         }
+
         batch.commit()?;
         open.stamp.kept = last;
         open.set_marked = true;
+
         Ok(())
     }
 
@@ -1005,6 +1036,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let _ = self.keep_stamp(&mut crate::runtime::OsRng);
         if let State::Unlocked(open) = core::mem::replace(&mut self.state, State::Closed) {
             self.state = State::Locked(open.store.lock());
+
             // IMP-126, IMP-127: each queue in RAM leaves with the key, and
             // its plaintext is wiped. The store holds each record again at
             // the unlock: the send queue in its rows, and a sync record in
@@ -1018,6 +1050,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             for send in &mut self.sync_out {
                 send.app.zeroize();
             }
+
             self.outgoing.clear();
             self.sync_out.clear();
             self.subjects.clear();
@@ -1026,11 +1059,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             self.limit_sends.clear();
             self.slot_sends.clear();
             self.roster_chain_sent.clear();
+
             // A file job holds the file in the clear, and a group job an
             // owner credential, thus both leave the memory with the key.
             // The store brings them back at the unlock.
             self.files = FileQueues::default();
             self.groups = groups::GroupQueues::default();
+
             // IMP-177: the search index leaves the memory with the key.
             self.search = search::Search::default();
             self.events.push_back(Event::Locked);
@@ -1084,11 +1119,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if self.is_ended_channel(self.conversation_for(&contact.0)?)? {
                 continue;
             }
+
             // DEV-257: a channel that waits for the notice of its revocation
             // sends that notice, and it takes no record.
             if self.is_leaving_channel(self.conversation_for(&contact.0)?)? {
                 continue;
             }
+
             records.push(Record {
                 conversation: self.conversation_for(&contact.0)?,
                 app: app.clone(),
@@ -1097,6 +1134,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 expires_in: 0,
             });
         }
+
         let mut kept: Vec<&StateChange> = Vec::with_capacity(changes.len());
         for change in changes {
             if let StateChange::Contact { contact, .. } = change {
@@ -1104,8 +1142,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     continue;
                 }
             }
+
             kept.push(change);
         }
+
         // DEV-319: a channel whose peer moved to a new queue, that a
         // renewal made again, or that took a new renewal guard, goes to the
         // other devices of the set. The bridge publishes the channel of a
@@ -1116,6 +1156,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let StateChange::Contact { contact, state } = change else {
                 continue;
             };
+
             let conversation = self.conversation_for(&contact.0)?;
             let held = self
                 .open_ref()?
@@ -1129,6 +1170,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if before.is_some() && before != Self::channel_end_of(state) {
                 moved.push(conversation);
             }
+
             // NET-355: a bundle of the contact waits for the user, or it
             // waits no more.
             let waited = held
@@ -1139,6 +1181,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 asked.push(conversation);
             }
         }
+
         self.commit_records(&kept, &records, now_ms, rng)?;
         for conversation in moved {
             // The batch is in the store, and an item that did not go ends
@@ -1148,6 +1191,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for conversation in asked {
             self.events.push_back(Event::RenewalAsk { conversation });
         }
+
         // DEV-290: an invitation that left the node waits for no retirement.
         let ended: Vec<[u8; 32]> = changes
             .iter()
@@ -1159,6 +1203,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !ended.is_empty() {
             self.forget_device_invitations(&ended, rng)?;
         }
+
         // Part 3 §3.2.6: each record here opened under the ratchet of its
         // contact. Thus it is a sign of the peer, and the silence of its
         // channel ends.
@@ -1169,6 +1214,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 self.peer_heard(record.conversation)?;
             }
         }
+
         Ok(())
     }
 
@@ -1184,7 +1230,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if pending.is_empty() {
             return Ok(());
         }
+
         let mut done = Vec::new();
+
         // DEV-031 to DEV-035: the copies go in the order in which this
         // device took their records. The order of the store is the order of
         // a keyed hash, thus each row holds its place.
@@ -1199,6 +1247,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 None => done.push(row),
             }
         }
+
         ordered.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
         for (_, row, conversation, app) in ordered {
             match self.publish_sync(conversation, &app, false, None, now, rng) {
@@ -1209,11 +1258,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 Err(_) => break,
             }
         }
+
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         for row in done {
             batch.delete(PUBLISH_PENDING, row);
         }
+
         Ok(batch.commit()?)
     }
 
@@ -1251,7 +1302,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 sends_delivery.push(record.conversation);
             }
         }
+
         let mut blocked = Vec::new();
+
         // The timer of each conversation, which a timer record of this
         // batch moves for each record after it (`DEV-203`).
         let mut timers: BTreeMap<ConversationId, u32> = BTreeMap::new();
@@ -1265,19 +1318,23 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 slot.insert(self.timer_seconds(record.conversation)?);
             }
         }
+
         let mut sync_bodies: Vec<(ConversationId, Vec<u8>)> = Vec::new();
         let mut digests: Vec<DigestBody> = Vec::new();
         let mut to_publish: Vec<(ConversationId, Vec<u8>)> = Vec::new();
         let mut handoffs: Vec<Outgoing> = Vec::new();
+
         // IMP-167, IMP-168: a file above this size waits for a tap.
         let limit = self.download_limit_now()?;
         let open = self.open_mut()?;
+
         // The batch borrows the store, thus each row identifier and each
         // duplicate check comes first.
         enum Planned {
             Put(TableId, RowId, Option<RowId>, Zeroizing<Vec<u8>>),
             Delete(TableId, RowId),
         }
+
         /// The newest write of this batch to a row: the value of a put, or
         /// none for a deletion. The outer none is a row that the batch does
         /// not touch, thus the store holds its value.
@@ -1294,9 +1351,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 _ => None,
             })
         }
+
         let mut planned = Vec::new();
         let mut wanted: Vec<DownloadJob> = Vec::new();
         let mut control: Vec<(ConversationId, Vec<u8>)> = Vec::new();
+
         // The requests of Part 11 §11.4.3 of a member that lacks an epoch.
         let mut key_requests: Vec<(ConversationId, Vec<u8>)> = Vec::new();
         let mut votes: Vec<(ConversationId, Vec<u8>, u16)> = Vec::new();
@@ -1304,6 +1363,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut shares: Vec<(ConversationId, Zeroizing<Vec<u8>>)> = Vec::new();
         let mut intros: Vec<(ConversationId, Zeroizing<Vec<u8>>)> = Vec::new();
         let mut supplies: Vec<(ConversationId, Vec<u8>)> = Vec::new();
+
         for change in changes {
             planned.push(match change {
                 StateChange::Contact { contact, state } => Planned::Put(
@@ -1342,9 +1402,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 ),
             });
         }
+
         let mut events = Vec::new();
         let mut owner_fault = false;
         let mut delivered: Vec<(RowId, Delivery)> = Vec::new();
+
         // What this batch plans and the store does not hold yet. The plan
         // holds the count and the mark of each revised message, each
         // pending reference, and the reactions that each party adds to each
@@ -1352,11 +1414,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut revised: BTreeMap<RowId, (u8, Option<SyncPlace>)> = BTreeMap::new();
         let mut pended: BTreeMap<RowId, (ConversationId, Zeroizing<Vec<u8>>)> = BTreeMap::new();
         let mut reacted: BTreeMap<(RowId, u8), usize> = BTreeMap::new();
+
         // The forward policy of each conversation that this batch moves.
         let mut forwards: BTreeMap<ConversationId, ForwardSetting> = BTreeMap::new();
+
         // DEV-335: each deletion of a whole conversation, with its bound and
         // the count of the writes that this batch planned before it.
         let mut clears: Vec<(ConversationId, Vec<u8>, [u8; 16], usize)> = Vec::new();
+
         // The messages that a deletion of this batch overwrote, whose copies
         // for the other devices of the set go after the commit (`DEV-099`).
         let mut erased: Vec<MsgRef> = Vec::new();
@@ -1365,6 +1430,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let conversation = record.conversation;
             let from_user = record.from_user;
             let place = places.get(index).copied().flatten();
+
             // A record whose app does not parse is one silent drop, as
             // GRP-251 has it for a group. A fault here would end the commit
             // of the batch, and no ACK would leave. The relay would give
@@ -1373,6 +1439,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Ok(parsed) = AppMessage::parse(app, Channel::Pairwise) else {
                 continue;
             };
+
             // DEV-052: a sync channel carries kind 0x20 alone, and no view
             // shows its records.
             if device_peers.contains(&conversation) {
@@ -1381,10 +1448,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
                 continue;
             }
+
             // DEV-050: kind 0x20 on a pairwise channel changes nothing.
             if parsed.kind == AppKind::DeviceSet {
                 continue;
             }
+
             // DIS-033, REL-008: the digest of a contact is no message, and
             // it compares after the batch. A body that does not parse goes.
             if parsed.kind == AppKind::TransparencyDigest {
@@ -1395,6 +1464,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
                 continue;
             }
+
             // WIR-176: a pairwise record names no member, and a poll that
             // does not parse is no poll (WIR-180 to WIR-182).
             // DEV-174: a rich record of a pairwise channel goes around a
@@ -1413,6 +1483,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if is_invalid {
                 continue;
             }
+
             // ABU-027 to ABU-030: the record of a blocked contact goes,
             // after its acknowledgment, with no view and no alert. A
             // delivery receipt keeps the rate that held before the block.
@@ -1426,6 +1497,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     key_requests.push((conversation, parsed.body.to_vec()));
                     continue;
                 }
+
                 let is_kept = match parsed.kind {
                     AppKind::Text | AppKind::Rich | AppKind::Attachment | AppKind::Poll => true,
                     AppKind::ConversationTimer => timers::timer_body(parsed.body).is_some(),
@@ -1449,16 +1521,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
                 continue;
             }
+
             // DEV-247: the owner of the channels forwards no revision that it
             // rejected, thus the copy of an edit waits for its checks below.
             let publishes = !record.synced && owns;
             if publishes && parsed.kind != AppKind::Edit {
                 to_publish.push((conversation, app.clone()));
             }
+
             // The owner of the channels sends each record that a peer
             // handed to it. The record of an edit, a deletion, or a reaction
             // waits in a request row, as one of this device does.
             let handoff = record.synced && from_user && owns;
+
             // A row of the store reads back with its body, thus a handed
             // record whose body does not parse is one drop and no row.
             let is_unreadable = match parsed.kind {
@@ -1469,6 +1544,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if handoff && is_unreadable {
                 continue;
             }
+
             if handoff
                 && matches!(
                     parsed.kind,
@@ -1482,6 +1558,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 if queued || open.store.get(TableId::MESSAGE, &row)?.is_some() {
                     continue;
                 }
+
                 planned.push(Planned::Put(
                     TableId::MESSAGE,
                     row,
@@ -1520,12 +1597,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     let Some(plain) = open.store.get(TableId::MESSAGE, &row)? else {
                         continue;
                     };
+
                     // WIR-293: a receipt names a message of this device to
                     // this peer.
                     if info_of(&plain)?.outgoing {
                         named.push((row, Zeroizing::new(plain)));
                     }
                 }
+
                 if reported == Delivery::Read {
                     // WIR-514: the peer saw each message up to the newest
                     // one that the receipt names. A message that no relay
@@ -1536,6 +1615,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     }
                     for (row, plain) in open.store.list(TableId::MESSAGE, Some(&conversation.0))? {
                         let plain = Zeroizing::new(plain);
+
                         // IMP-121: the plaintext names its owner. A receipt
                         // of this contact moves no record of another
                         // conversation. Such a row is a fault of the file
@@ -1550,6 +1630,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                             }
                             continue;
                         }
+
                         let info = info_of(&plain)?;
                         let is_sent =
                             matches!(info.delivery, Delivery::Accepted | Delivery::Delivered);
@@ -1559,6 +1640,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         }
                     }
                 }
+
                 for (row, mut plain) in named {
                     // A state goes up only.
                     if !info_of(&plain)?.delivery.is_below(reported) {
@@ -1580,6 +1662,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
                 continue;
             }
+
             if parsed.kind == AppKind::GroupControl {
                 // The join flow of Part 11 §11.9.1 runs after this loop,
                 // because it reads and writes groups of its own. The device
@@ -1589,12 +1672,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
                 continue;
             }
+
             if parsed.kind == AppKind::KeyRequest {
                 if !record.synced {
                     key_requests.push((conversation, parsed.body.to_vec()));
                 }
                 continue;
             }
+
             // WIR-459: the supply of a request of scope 0x01 comes on the
             // channel of the request, and it is no message.
             if parsed.kind == AppKind::KeySupply {
@@ -1603,6 +1688,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
                 continue;
             }
+
             // WIR-287: a typing record of the contact moves a state of the
             // view, and no store holds it. A group takes none (GRP-300).
             if parsed.kind == AppKind::Typing {
@@ -1616,6 +1702,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
                 continue;
             }
+
             // IDN-059: a key-change notice of the contact comes on its
             // receiving chain, and it waits for the user. It is no message.
             if parsed.kind == AppKind::KeyChange {
@@ -1624,6 +1711,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
                 continue;
             }
+
             // WIR-196, WIR-358: a contact share is no message, and a request
             // or an offer waits for the user.
             if parsed.kind == AppKind::ContactShare {
@@ -1632,6 +1720,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
                 continue;
             }
+
             // IDN-189: a share of a contact is no message, and this device
             // holds it for the day that contact needs it.
             if parsed.kind == AppKind::RecoveryShare {
@@ -1640,6 +1729,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
                 continue;
             }
+
             if parsed.kind == AppKind::PollVote {
                 // A vote is no message: it moves the count of its poll
                 // after the batch.
@@ -1651,6 +1741,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 votes.push((conversation, parsed.body.to_vec(), voter));
                 continue;
             }
+
             if parsed.kind == AppKind::Reaction {
                 // A reaction is no message. One that does not parse, one
                 // with a text in the place of an emoji, and one to a message
@@ -1661,9 +1752,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 if !is_emoji(reaction.emoji) {
                     continue;
                 }
+
                 let reference = msg_ref(&open.device_set_key, &reaction.target);
                 let natural = [conversation.0.as_slice(), &reference].concat();
                 let target = open.store.row_id(TableId::MESSAGE, &natural);
+
                 // A target that came earlier in this batch is in the plan.
                 let held = match planned_row(&planned, TableId::MESSAGE, target) {
                     Some(held) => held,
@@ -1678,6 +1771,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 if info_of(&held)?.deleted || is_request(&held)? {
                     continue;
                 }
+
                 let plain = reaction_row(conversation, &reference, direction, reaction.emoji);
                 let row = open.store.row_id(REACTION, &plain);
                 let exists = match planned_row(&planned, REACTION, row) {
@@ -1692,6 +1786,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                                 == Some([reference.as_slice(), &[direction]].concat().as_slice());
                             of_contact = of_contact.saturating_add(usize::from(same));
                         }
+
                         // The reactions that this batch adds count too.
                         let added = reacted.entry((target, direction)).or_insert(0usize);
                         if of_contact.saturating_add(*added) >= REACTIONS_MAX {
@@ -1711,21 +1806,25 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     }
                     _ => continue,
                 }
+
                 events.push(Event::Reacted {
                     conversation,
                     message: MsgRef(target),
                 });
                 continue;
             }
+
             if parsed.kind == AppKind::Edit {
                 // An edit is no message. A body that does not parse
                 // changes nothing.
                 let Ok(edit) = EditBody::parse(parsed.body) else {
                     continue;
                 };
+
                 let reference = msg_ref(&open.device_set_key, &edit.target);
                 let natural = [conversation.0.as_slice(), &reference].concat();
                 let row = open.store.row_id(TableId::MESSAGE, &natural);
+
                 // A target that came earlier in this batch is in the plan.
                 let target = match planned_row(&planned, TableId::MESSAGE, row) {
                     Some(held) => held,
@@ -1734,6 +1833,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 match target {
                     Some(plain) => {
                         let info = info_of(&plain)?;
+
                         // An earlier edit of this batch moved the count and
                         // the mark, and the store does not hold them yet.
                         let held = match revised.get(&row) {
@@ -1741,6 +1841,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                             None => revision_of(open.store.get(REVISION, &row)?.as_deref())?,
                         };
                         let (count, mark) = held;
+
                         // WIR-082: the sender of the target alone. DEV-087:
                         // inside the window from the store time of this
                         // device. DEV-088: below the limit. DEV-246: a copy
@@ -1754,6 +1855,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         {
                             continue;
                         }
+
                         // DEV-034, DEV-035: a copy at or below the newest
                         // revision that its source gave is an older text.
                         // It never takes the place of a newer one. The
@@ -1766,15 +1868,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         if is_older {
                             continue;
                         }
+
                         // WIR-260: a target with no text takes no edit. The
                         // plan holds the text of an earlier edit of this
                         // batch.
                         let Ok(changed) = row_with_text(&plain, edit.new_body.as_bytes()) else {
                             continue;
                         };
+
                         if publishes {
                             to_publish.push((conversation, app.clone()));
                         }
+
                         // The earlier text goes: the row gets a new key.
                         planned.push(Planned::Put(
                             TableId::MESSAGE,
@@ -1803,6 +1908,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                                 .get(PENDING, &pending)?
                                 .is_some_and(|entry| entry.len() == PENDING_ROW_LEN),
                         };
+
                         // DEV-095: the entries of this batch count too.
                         let held = open
                             .store
@@ -1817,9 +1923,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         if is_deleted || held >= REF_ORPHAN_MAX {
                             continue;
                         }
+
                         if publishes {
                             to_publish.push((conversation, app.clone()));
                         }
+
                         let entry = Zeroizing::new(
                             [
                                 conversation.0.as_slice(),
@@ -1835,11 +1943,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
                 continue;
             }
+
             if parsed.kind == AppKind::Delete {
                 // A deletion is no message. WIR-084: a contact deletes for
                 // the other party, and a record of another scope, or one
                 // that does not parse, changes nothing.
                 let body = DeleteBody::parse(parsed.body).ok();
+
                 // DEV-335: the contact deletes the whole conversation after
                 // this batch. A copy of a request of the user is no order:
                 // the deletions of scope 0x01 of DEV-333 reach this device.
@@ -1860,6 +1970,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     let reference = msg_ref(&open.device_set_key, &target);
                     let natural = [conversation.0.as_slice(), &reference].concat();
                     let row = open.store.row_id(TableId::MESSAGE, &natural);
+
                     // A target that came earlier in this batch is in the
                     // plan, and the store does not hold it yet.
                     let held = match planned_row(&planned, TableId::MESSAGE, row) {
@@ -1873,12 +1984,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                             if info_of(&plain)?.outgoing != from_user || info_of(&plain)?.deleted {
                                 continue;
                             }
+
                             planned.push(Planned::Put(
                                 TableId::MESSAGE,
                                 row,
                                 Some(conversation.0),
                                 placeholder_of(&plain)?,
                             ));
+
                             // A placeholder holds no reaction, no vote, no
                             // poll, and no deadline.
                             let mut gone: Vec<(TableId, RowId)> = Vec::new();
@@ -1896,6 +2009,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                                     }
                                 }
                             }
+
                             for (held, other) in
                                 open.store.list(polls::VOTES, Some(&conversation.0))?
                             {
@@ -1903,6 +2017,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                                     gone.push((polls::VOTES, held));
                                 }
                             }
+
                             // The contact uploaded the file, thus this device
                             // holds no credential that erases a chunk. A
                             // message of the user from another device leaves
@@ -1924,6 +2039,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                             let message = MsgRef(row);
                             wanted.retain(|job| job.message != message);
                             handoffs.retain(|held| held.message != message);
+
                             // DEV-099: no copy of the content goes to the
                             // other devices of the set.
                             to_publish.retain(|(held, copy)| {
@@ -1931,6 +2047,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                                     || AppMessage::parse(copy, Channel::Pairwise)
                                         .map_or(true, |copy| copy.msg_id != target)
                             });
+
                             // A message of this batch raises no alert now.
                             events.retain(|event| {
                                 !matches!(event, Event::Message { message: m, .. } if *m == message)
@@ -1956,6 +2073,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                             if held >= REF_ORPHAN_MAX {
                                 continue;
                             }
+
                             let pending = open
                                 .store
                                 .row_id(PENDING, &pending_key(&natural, from_user));
@@ -1979,10 +2097,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
                 continue;
             }
+
             let reference = msg_ref(&open.device_set_key, &parsed.msg_id);
             let natural = [conversation.0.as_slice(), &reference].concat();
             let row = open.store.row_id(TableId::MESSAGE, &natural);
             let message = MsgRef(row);
+
             // A deletion that came first takes the message at its arrival:
             // the view shows nothing at that position (Part 7 §7.5.6).
             // DEV-093: the entry of the party that sent the message alone.
@@ -2000,6 +2120,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 pending = open.store.row_id(PENDING, &natural);
                 waiting = open.store.get(PENDING, &pending)?.map(Zeroizing::new);
             }
+
             // DEV-093: a deletion of another device of the user came first.
             // It takes the message, and an edit that waits goes with it.
             let own = open.store.row_id(PENDING, &own_pending_key(&natural));
@@ -2016,6 +2137,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     continue;
                 }
             }
+
             let mut edited_text = None;
             if let Some(entry) = waiting {
                 let at: [u8; 8] = entry
@@ -2023,28 +2145,38 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     .and_then(|bytes| bytes.try_into().ok())
                     .ok_or(Error::Integrity)?;
                 planned.push(Planned::Delete(PENDING, pending));
+
                 // DEV-095: an entry above its time counts for nothing.
                 if (now_ms / 1_000).saturating_sub(u64::from_be_bytes(at)) < REF_ORPHAN_TTL {
                     let text = entry.get(PENDING_ROW_LEN..).ok_or(Error::Integrity)?;
+
                     // An entry with no text is a deletion.
                     if text.is_empty() {
                         continue;
                     }
+
                     edited_text = Some(Zeroizing::new(text.to_vec()));
                 }
             }
+
             let in_batch = events.iter().any(|event| {
-                matches!(event, Event::Message { message: m, .. } | Event::Delivery { message: m, .. } if *m == message)
+                matches!(
+                    event,
+                    Event::Message { message: m, .. } | Event::Delivery { message: m, .. }
+                        if *m == message
+                )
             });
             if in_batch || open.store.get(TableId::MESSAGE, &row)?.is_some() {
                 continue;
             }
+
             // DEV-205: either party sets the timer, and the record stays in
             // the conversation as the mark of the change (`DEV-207`).
             if parsed.kind == AppKind::ConversationTimer {
                 let Some(seconds) = timers::timer_body(parsed.body) else {
                     continue;
                 };
+
                 timers.insert(conversation, seconds);
                 let setting = TimerSetting {
                     seconds,
@@ -2058,12 +2190,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     setting.encode(),
                 ));
             }
+
             // DEV-321, DEV-323: each party sets the policy of its own
             // messages, and an older record changes nothing and is no row.
             if parsed.kind == AppKind::ForwardPolicy {
                 let Ok(policy) = umbra_wire::app::signal::ForwardPolicy::parse(parsed.body) else {
                     continue;
                 };
+
                 let mut setting = match forwards.get(&conversation) {
                     Some(held) => *held,
                     None => forward::setting_in(&open.store, conversation)?,
@@ -2071,6 +2205,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 if !setting.take(&policy, from_user) {
                     continue;
                 }
+
                 forwards.insert(conversation, setting);
                 planned.push(Planned::Put(
                     forward::FORWARD_POLICY,
@@ -2079,6 +2214,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     setting.encode(),
                 ));
             }
+
             // DEV-208, DEV-244: the period runs from the receive time here,
             // and a sync copy brings the rest of its own.
             let now = now_ms / 1_000;
@@ -2100,6 +2236,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     timers::deadline_row(conversation, deadline.at),
                 ));
             }
+
             if handoff {
                 // The record goes as the peer wrote it: its reply target
                 // becomes a reference at the send (`WIR-071`).
@@ -2130,6 +2267,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         Zeroizing::new(state),
                     ));
                 }
+
                 handoffs.push(Outgoing {
                     message,
                     conversation,
@@ -2141,7 +2279,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 });
                 continue;
             }
+
             let mut kept = Zeroizing::new(app.clone());
+
             // An edit that came first gives the message its text and the
             // edited mark. A target with no text keeps what it has.
             if let Some(text) = edited_text {
@@ -2151,7 +2291,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     planned.push(Planned::Put(REVISION, row, None, Zeroizing::new(vec![1])));
                 }
             }
+
             keep_reply_as_reference(&mut kept, &open.device_set_key)?;
+
             // A record of the user from another device left the owner of
             // the channels, or waits there.
             let delivery = if from_user {
@@ -2171,6 +2313,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     &kept,
                 ),
             ));
+
             // WIR-187: the period of a poll runs from its receive time.
             if parsed.kind == AppKind::Poll {
                 let open_seconds = Poll::parse(parsed.body).map_or(0, |poll| poll.open_seconds);
@@ -2181,6 +2324,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     polls::poll_row(conversation, open_seconds, now),
                 ));
             }
+
             if parsed.kind == AppKind::Attachment {
                 let (state, descriptor) = files::incoming_state_row(parsed.body, limit);
                 planned.push(Planned::Put(
@@ -2196,6 +2340,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     });
                 }
             }
+
             // A record of the user raises no alert.
             events.push(if from_user {
                 Event::Delivery { message, delivery }
@@ -2205,6 +2350,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     message,
                 }
             });
+
             // NET-041: this device holds the message now.
             if !record.synced && sends_delivery.contains(&conversation) {
                 let key = held_receipt_key(conversation, AppKind::DeliveryReceipt, &parsed.msg_id);
@@ -2221,6 +2367,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 ));
             }
         }
+
         // DEV-268, DEV-293: each record of a contact goes to each device of
         // the set, and its copy waits in the same commit as the record. Each
         // copy holds its place: the time of this commit, above each copy
@@ -2235,6 +2382,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 order_ms = order_ms.max(at.saturating_add(1));
             }
         }
+
         let pending_copies: Vec<(RowId, Zeroizing<Vec<u8>>)> = to_publish
             .iter()
             .enumerate()
@@ -2256,6 +2404,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 Planned::Delete(table, row) => batch.delete(*table, *row),
             }
         }
+
         // IMP-154: an edit keeps no earlier text in the log of the store.
         if events
             .iter()
@@ -2266,8 +2415,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for (row, value) in &pending_copies {
             batch.put(PUBLISH_PENDING, *row, None, value, rng)?;
         }
+
         batch.commit()?;
         self.events.extend(events);
+
         // IMP-132: the batch is in the store, and the relay gives no record
         // of it again. Thus each step below runs to its end. A record that
         // one step does not take is one drop, and a fault of the store in
@@ -2287,11 +2438,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .retain(|job| !erased.contains(&job.message));
             settle(self.drop_sync_sent_of(&erased));
         }
+
         settle(self.publish_pending(now_ms / 1_000, rng));
+
         // DEV-304: each other device of the set holds a copy of the message.
         for (row, delivery) in delivered {
             let _ = self.publish_delivery(&row, delivery, rng);
         }
+
         self.files.downloads.extend(wanted);
         for outgoing in handoffs {
             self.synced_out.insert(outgoing.message);
@@ -2346,6 +2500,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     .map(|_| ()),
             );
         }
+
         if !digests.is_empty() {
             settle(self.take_digests(&digests, now_ms / 1_000, rng));
         }
@@ -2360,6 +2515,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 Err(error) => settle(Err(error)),
             }
         }
+
         fault.map_or(Ok(()), Err)
     }
 
@@ -2375,6 +2531,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // runs after the other records of the batch, thus it takes a target
         // that came in the same batch.
         let (synced, own) = own_delete::split_own_deletions(synced);
+
         // DEV-015: each synced message keeps its source and counter.
         let origins: Vec<(ConversationId, Vec<u8>, umbra_core::devset::DeviceId, u64)> = synced
             .iter()
@@ -2399,6 +2556,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 rng,
             );
         }
+
         let places: Vec<Option<SyncPlace>> =
             synced.iter().map(|synced| Some(synced.origin)).collect();
         let records: Vec<Record> = synced
@@ -2414,16 +2572,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !records.is_empty() {
             self.commit_records_at(&[], &records, &places, now_ms, rng)?;
         }
+
         for (conversation, app, source, counter) in origins {
             let Ok(parsed) = AppMessage::parse(&app, Channel::Pairwise) else {
                 continue;
             };
+
             let open = self.open_ref()?;
             let reference = msg_ref(&open.device_set_key, &parsed.msg_id);
             let natural = [conversation.0.as_slice(), &reference].concat();
             let row = open.store.row_id(TableId::MESSAGE, &natural);
             self.keep_sync_origin(row, &source, counter, rng)?;
         }
+
         self.take_own_deletions(own, now_ms, rng)
     }
 
@@ -2439,6 +2600,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if rows.is_empty() {
             return Ok(());
         }
+
         let _ = self.store_synced(synced, now_ms, rng);
         self.drop_sync_inbox(&rows)
     }
@@ -2467,14 +2629,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for (row, plain) in store.list(TableId::CONTACT, None)? {
             contacts.push((ConversationId(row), state_of(plain)?));
         }
+
         let mut invitations = Vec::new();
         for (_, plain) in store.list(INVITATION, None)? {
             invitations.push(state_of(plain)?);
         }
+
         let mut notify_queues = Vec::new();
         for (_, plain) in store.list(NOTIFY_STATE, None)? {
             notify_queues.push(state_of(plain)?);
         }
+
         // DEV-287: the snapshot of a link carries the rendezvous queues of
         // the device that owns the channels, and that device reads them. A
         // second reader would take a hello away from it.
@@ -2484,6 +2649,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 rendezvous_queues.push(state_of(plain)?);
             }
         }
+
         Ok(StoredNetwork {
             contacts,
             invitations,
@@ -2508,6 +2674,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .filter(|conversation| !device_peers.contains(conversation))
             .collect();
         out.extend(self.group_conversations()?);
+
         Ok(out)
     }
 
@@ -2520,7 +2687,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(plain) = store.get(SETTINGS, &row)? else {
             return Ok(AUTO_LOCK_DEFAULT);
         };
+
         let seconds: [u8; 8] = plain.as_slice().try_into().map_err(|_| Error::Integrity)?;
+
         Ok(u64::from_be_bytes(seconds))
     }
 
@@ -2533,7 +2702,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(plain) = store.get(SETTINGS, &row)? else {
             return Ok(AUTO_DOWNLOAD_DEFAULT);
         };
+
         let bytes: [u8; 8] = plain.as_slice().try_into().map_err(|_| Error::Integrity)?;
+
         Ok(u64::from_be_bytes(bytes))
     }
 
@@ -2583,7 +2754,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(plain) = store.get(SETTINGS, &row)? else {
             return Ok(0);
         };
+
         let epoch: [u8; 8] = plain.as_slice().try_into().map_err(|_| Error::Integrity)?;
+
         Ok(u64::from_be_bytes(epoch))
     }
 
@@ -2595,7 +2768,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(plain) = store.get(SETTINGS, &row)? else {
             return Ok(None);
         };
+
         let value: [u8; 8] = plain.as_slice().try_into().map_err(|_| Error::Integrity)?;
+
         Ok(Some(i64::from_be_bytes(value)))
     }
 
@@ -2609,11 +2784,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.directory_correction()? == Some(correction) {
             return Ok(());
         }
+
         let open = self.open_mut()?;
         let row = open.store.row_id(SETTINGS, DIRECTORY_CORRECTION_SETTING);
         let mut batch = open.store.begin();
         batch.put(SETTINGS, row, None, &correction.to_be_bytes(), rng)?;
         batch.commit()?;
+
         Ok(())
     }
 
@@ -2622,11 +2799,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.directory_correction()?.is_none() {
             return Ok(());
         }
+
         let open = self.open_mut()?;
         let row = open.store.row_id(SETTINGS, DIRECTORY_CORRECTION_SETTING);
         let mut batch = open.store.begin();
         batch.delete(SETTINGS, row);
         batch.commit()?;
+
         Ok(())
     }
 
@@ -2640,11 +2819,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if epoch <= self.directory_epoch()? {
             return Ok(());
         }
+
         let open = self.open_mut()?;
         let row = open.store.row_id(SETTINGS, DIRECTORY_EPOCH_SETTING);
         let mut batch = open.store.begin();
         batch.put(SETTINGS, row, None, &epoch.to_be_bytes(), rng)?;
         batch.commit()?;
+
         Ok(())
     }
 
@@ -2670,6 +2851,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut batch = open.store.begin();
         batch.put(SETTINGS, row, None, &pins.encode(), rng)?;
         batch.commit()?;
+
         Ok(())
     }
 
@@ -2683,12 +2865,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if seconds > AUTO_LOCK_MAX {
             return Err(Error::TooLong);
         }
+
         let open = self.open_mut()?;
         let row = open.store.row_id(SETTINGS, AUTO_LOCK_SETTING);
         let mut batch = open.store.begin();
         batch.put(SETTINGS, row, None, &seconds.to_be_bytes(), rng)?;
         batch.commit()?;
         self.apply_auto_lock(seconds);
+
         Ok(())
     }
 
@@ -2725,6 +2909,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if new.is_empty() {
             return Err(Error::Malformed);
         }
+
         let store_key = header
             .unwrap(&passphrase_bytes(current)?, element)
             .map_err(|_| Error::WrongPassphrase)?;
@@ -2732,6 +2917,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         rng.fill_bytes(&mut salt);
         let mut nonce = [0u8; 24];
         rng.fill_bytes(&mut nonce);
+
         Ok(WrapHeader::wrap(
             &store_key,
             &passphrase_bytes(new)?,
@@ -2756,6 +2942,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .ok_or(Error::NotFound)?;
         let plain = Zeroizing::new(plain);
         let state = plain.get(QUEUE_ID_LEN..).ok_or(Error::Integrity)?;
+
         Ok(stored_contact_keys(state, &self.root_identity()?)?)
     }
 
@@ -2777,14 +2964,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         rng: &mut R,
     ) -> Result<(), Error> {
         self.put_verified(conversation, peer_static, now_ms, rng)?;
+
         // DEV-197: each other device of the set takes the state.
         if self.has_sync_peers()? {
             let Some(subject) = self.subject_of(conversation)? else {
                 return Ok(());
             };
+
             let value = [peer_static.as_slice(), &now_ms.to_be_bytes()].concat();
             self.publish_mutable(ITEM_VERIFICATION, &subject, &value, rng)?;
         }
+
         Ok(())
     }
 
@@ -2806,6 +2996,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         .concat();
         let mut batch = open.store.begin();
         batch.put(TableId::VERIFICATION, row, None, &plain, rng)?;
+
         Ok(batch.commit()?)
     }
 
@@ -2821,13 +3012,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if plain.get(..16) != Some(conversation.0.as_slice()) {
             return Err(Error::Integrity);
         }
+
         // DEV-294: a contact whose channel another device owns holds the
         // salt alone here. This device cannot compare the key, thus it shows
         // no verified mark, and the device that owns the channel shows it.
         if self.is_shadow_contact(conversation)? {
             return Ok(false);
         }
+
         let (_, peer) = self.identity_keys(conversation)?;
+
         Ok(plain.get(16..48) == Some(peer.as_slice()))
     }
 
@@ -2839,6 +3033,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(plain) = store.get(TableId::CONTACT, &conversation.0)? else {
             return Ok(false);
         };
+
         let plain = Zeroizing::new(plain);
         let state = plain.get(QUEUE_ID_LEN..).ok_or(Error::Integrity)?;
         let root = self.root_identity()?;
@@ -2861,7 +3056,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if digits(given) != digits(&safety_number(&own, &peer)) {
             return Ok(false);
         }
+
         self.set_verified(conversation, &peer, now_ms, rng)?;
+
         Ok(true)
     }
 
@@ -2873,16 +3070,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(plain) = store.get(CONVERSATION, &row)? else {
             return Ok((0, String::new()));
         };
+
         // IMP-121: the plaintext names its owner.
         if plain.get(..16) != Some(conversation.0.as_slice()) {
             return Err(Error::Integrity);
         }
+
         let marker: [u8; 8] = plain
             .get(READ_UP_TO)
             .and_then(|bytes| bytes.try_into().ok())
             .ok_or(Error::Integrity)?;
         let name = plain.get(CONVERSATION_PREFIX..).ok_or(Error::Integrity)?;
         let name = core::str::from_utf8(name).map_err(|_| Error::Integrity)?;
+
         Ok((u64::from_be_bytes(marker), name.to_owned()))
     }
 
@@ -2901,6 +3101,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         plain.extend_from_slice(name.as_bytes());
         let mut batch = open.store.begin();
         batch.put(CONVERSATION, row, None, &plain, rng)?;
+
         Ok(batch.commit()?)
     }
 
@@ -2916,8 +3117,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if name.len() > CONTACT_NAME_MAX {
             return Err(Error::TooLong);
         }
+
         let (read_up_to, _) = self.conversation_meta(conversation)?;
         self.put_conversation_meta(conversation, read_up_to, name, rng)?;
+
         // DEV-197: the name is mutable state of the set.
         self.publish_contact_name(conversation, name, rng)
     }
@@ -2932,6 +3135,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if name.len() > CONTACT_NAME_MAX {
             return Err(Error::TooLong);
         }
+
         let (read_up_to, _) = self.conversation_meta(conversation)?;
         self.put_conversation_meta(conversation, read_up_to, name, rng)
     }
@@ -2951,20 +3155,25 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if now_ms <= read_up_to {
             return Ok(());
         }
+
         // NET-042: the user opened the conversation, and no other act gives
         // a read receipt. ABU-031: a blocked contact gets none.
         if self.receipt_settings(conversation)?.read && !self.is_blocked(conversation)? {
             self.hold_read_receipts(conversation, read_up_to, now_ms / 1_000, rng)?;
         }
+
         self.put_conversation_meta(conversation, now_ms, &name, rng)?;
         self.auto_lock.touch(now_ms / 1_000);
+
         // DEV-197: the read marker converges across the set.
         if self.has_sync_peers()? {
             let Some(subject) = self.subject_of(conversation)? else {
                 return Ok(());
             };
+
             self.publish_mutable(ITEM_READ_MARKER, &subject, &now_ms.to_be_bytes(), rng)?;
         }
+
         Ok(())
     }
 
@@ -2986,6 +3195,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(conversation) = self.conversation_of_subject(subject)? else {
             return Ok(());
         };
+
         match item {
             ITEM_READ_MARKER => {
                 let at: [u8; 8] = value.try_into().map_err(|_| Error::Malformed)?;
@@ -3010,6 +3220,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
             _ => {}
         }
+
         Ok(())
     }
 
@@ -3021,6 +3232,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         rng: &mut R,
     ) -> Result<(), Error> {
         let open = self.open_mut()?;
+
         // WIR-514: a read receipt names the newest message that the user
         // saw, and it covers each earlier one.
         // The order of a conversation view: two messages of one batch hold
@@ -3029,6 +3241,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut owner_fault = false;
         for (row, plain) in open.store.list(TableId::MESSAGE, Some(&conversation.0))? {
             let plain = Zeroizing::new(plain);
+
             // IMP-121: the plaintext names its owner. A receipt to this
             // contact names no record of another conversation. This call
             // skips such a row, and the user learns of the fault one time
@@ -3037,10 +3250,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 owner_fault = true;
                 continue;
             }
+
             let info = info_of(&plain)?;
             if info.outgoing || info.stored_at_ms <= read_up_to {
                 continue;
             }
+
             // DEV-032: the stamp orders, and the row breaks a tie.
             let order = (info.stored_at_ms, row);
             if newest.is_none_or(|(held, _)| order > held) {
@@ -3049,12 +3264,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 newest = Some((order, target));
             }
         }
+
         let Some((_, target)) = newest else {
             if owner_fault {
                 self.events.push_back(Event::IntegrityFault);
             }
             return Ok(());
         };
+
         // NET-307: the one that waited names an older message, and it goes.
         let mut earlier = Vec::new();
         for (row, plain) in open.store.list(RECEIPT, Some(&conversation.0))? {
@@ -3062,6 +3279,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 earlier.push(row);
             }
         }
+
         let key = held_receipt_key(conversation, AppKind::ReadReceipt, &target);
         let row = open.store.row_id(RECEIPT, &key);
         let plain = held_receipt(conversation, AppKind::ReadReceipt, &target, now);
@@ -3069,11 +3287,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for held in earlier {
             batch.delete(RECEIPT, held);
         }
+
         batch.put(RECEIPT, row, Some(conversation.0), &plain, rng)?;
         batch.commit()?;
         if owner_fault {
             self.events.push_back(Event::IntegrityFault);
         }
+
         Ok(())
     }
 
@@ -3082,6 +3302,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// the row and its key.
     pub fn delete_for_me(&mut self, message: &MsgRef) -> Result<(), Error> {
         self.remove_message(message, true)?;
+
         // DEV-099: no copy of the record waits for another device.
         self.drop_sync_sent_of(&[*message])
     }
@@ -3095,6 +3316,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 Err(error) => return Err(error),
             }
         }
+
         self.drop_sync_sent_of(messages)
     }
 
@@ -3127,6 +3349,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         } else {
             None
         };
+
         // ATT-161: a deletion takes the hold, thus the copy of the
         // credentials is due. The end of the history period erases no
         // chunk, and it takes the copy too.
@@ -3142,6 +3365,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for row in erase_rows {
             batch.delete(ERASE_DUE, row);
         }
+
         batch.delete(TableId::MESSAGE, message.0);
         batch.delete(OUTBOX, message.0);
         batch.delete(REVISION, message.0);
@@ -3157,12 +3381,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for table in [FILE_STATE, FILE_DATA, CHUNK_CRED] {
             batch.delete(table, message.0);
         }
+
         batch.commit()?;
+
         // ATT-161: a deletion of a record with a file that this device
         // uploaded erases each chunk at its relays.
         if let Some(erasure) = erasure {
             self.start_erasures(message, erasure);
         }
+
         Ok(())
     }
 
@@ -3193,6 +3420,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if open.store.row_id(TableId::MESSAGE, &natural) != message.0 {
                 continue;
             }
+
             let emoji = row.get(REACTION_PREFIX..).ok_or(Error::Integrity)?;
             found.push(Reaction {
                 emoji: core::str::from_utf8(emoji)
@@ -3201,7 +3429,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 mine: row.get(32) == Some(&OUTGOING),
             });
         }
+
         found.sort_by(|a, b| (!a.mine, &a.emoji).cmp(&(!b.mine, &b.emoji)));
+
         Ok(found)
     }
 
@@ -3218,6 +3448,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !is_emoji(emoji) {
             return Err(Error::Malformed);
         }
+
         let open = self.open_mut()?;
         let plain = Zeroizing::new(
             open.store
@@ -3227,13 +3458,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if info_of(&plain)?.deleted || is_request(&plain)? {
             return Err(Error::Malformed);
         }
+
         let conversation = conversation_of(&plain)?;
+
         // A group carries a reaction on its own queue, and Part 11 gives
         // that path no rule yet. The view offers none, and this call
         // refuses one.
         if self.is_group(conversation)? {
             return Err(Error::Malformed);
         }
+
         let open = self.open_mut()?;
         let plain = Zeroizing::new(
             open.store
@@ -3253,6 +3487,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     == Some([reference.as_slice(), &[OUTGOING]].concat().as_slice());
                 mine = mine.saturating_add(usize::from(same));
             }
+
             if mine >= REACTIONS_MAX {
                 return Err(Error::TooLong);
             }
@@ -3296,6 +3531,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         } else {
             batch.put(REACTION, held_row, Some(conversation.0), &held, rng)?;
         }
+
         batch.put(
             TableId::MESSAGE,
             request_row,
@@ -3312,6 +3548,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             app: request,
         });
         self.auto_lock.touch(now_ms / 1_000);
+
         Ok(())
     }
 
@@ -3344,6 +3581,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 rows.push(row);
             }
         }
+
         Ok(rows)
     }
 
@@ -3363,6 +3601,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if draft.is_empty() || draft.conversation() != self.conversation_of_message(message)? {
             return Err(Error::Malformed);
         }
+
         // An edit in a group is one group record (Part 7 §7.5.6).
         let is_group = self.is_group(draft.conversation())?;
         let open = self.open_mut()?;
@@ -3375,10 +3614,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !info.outgoing || info.deleted || !info.has_text || is_request(&plain)? {
             return Err(Error::Malformed);
         }
+
         let (count, mark) = revision_of(open.store.get(REVISION, &message.0)?.as_deref())?;
         if count >= EDIT_MAX || now_ms.saturating_sub(info.stored_at_ms) >= EDIT_WINDOW_MS {
             return Err(Error::TooLong);
         }
+
         let conversation = conversation_of(&plain)?;
         let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
         let target = AppMessage::parse(app, Channel::Pairwise)?.msg_id;
@@ -3431,6 +3672,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             &revision_row((count.saturating_add(1), mark)),
             rng,
         )?;
+
         // IMP-154: the earlier text leaves the log of the store.
         batch.erase_earlier();
         if !is_group {
@@ -3443,6 +3685,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             )?;
             batch.put(OUTBOX, request_row, None, &outbox_row(), rng)?;
         }
+
         batch.commit()?;
         if is_group {
             self.post_to_group(conversation, msg_id, &request, now_ms, rng)?;
@@ -3455,12 +3698,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for waiting in self.outgoing.iter_mut().filter(|w| w.message == *message) {
             waiting.app.clone_from(&changed_app);
         }
+
         self.outgoing.push_back(Outgoing {
             message: MsgRef(request_row),
             conversation,
             app: request.to_vec(),
         });
         self.auto_lock.touch(now_ms / 1_000);
+
         Ok(())
     }
 
@@ -3490,6 +3735,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if open.store.get(FILE_STATE, &message.0)?.is_some() {
             return Err(Error::Malformed);
         }
+
         let conversation = conversation_of(&plain)?;
         let app = plain
             .get(MESSAGE_PREFIX..)
@@ -3520,7 +3766,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 app,
             });
         }
+
         self.auto_lock.touch(now_ms / 1_000);
+
         Ok(())
     }
 
@@ -3556,10 +3804,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .ok_or(Error::NotFound)?,
         );
         let info = info_of(&plain)?;
+
         // A contact takes a deletion for a message of this device alone.
         if !info.outgoing || info.deleted || is_request(&plain)? {
             return Err(Error::Malformed);
         }
+
         let conversation = conversation_of(&plain)?;
         let reactions = self.reaction_rows(message, conversation)?;
         let votes = self.vote_rows(message, conversation)?;
@@ -3573,6 +3823,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 return Err(Error::Busy);
             }
         }
+
         // The rate comes first, and the hold of the erase leaves in the
         // batch below: a call that changes nothing makes no chunk due.
         let erasure = self.file_erasures(message)?;
@@ -3601,6 +3852,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             &placeholder_of(&plain)?,
             rng,
         )?;
+
         // The message itself waits for no relay now, and a placeholder has
         // no edited mark, no reaction, no file, no poll, and no deadline.
         batch.delete(OUTBOX, message.0);
@@ -3623,6 +3875,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for row in votes {
             batch.delete(polls::VOTES, row);
         }
+
         if !is_group {
             batch.put(
                 TableId::MESSAGE,
@@ -3633,6 +3886,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             )?;
             batch.put(OUTBOX, request_row, None, &outbox_row(), rng)?;
         }
+
         batch.put(SETTINGS, limit_row, None, &now.to_be_bytes(), rng)?;
         batch.commit()?;
         if is_group {
@@ -3641,6 +3895,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             self.outgoing.retain(|waiting| waiting.message != *message);
             self.post_to_group(conversation, msg_id, &request, now_ms, rng)?;
             self.auto_lock.touch(now);
+
             // DEV-099: no copy of the content waits for another device.
             return self.drop_sync_sent_of(&[*message]);
         }
@@ -3655,6 +3910,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             app: request,
         });
         self.auto_lock.touch(now);
+
         // DEV-099: no copy of the content waits for another device.
         self.drop_sync_sent_of(&[*message])
     }
@@ -3667,6 +3923,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             None => 0,
             Some(plain) => *plain.first().ok_or(Error::Integrity)?,
         };
+
         Ok(ReceiptSettings {
             delivery: flags & SENDS_DELIVERY != 0,
             read: flags & SENDS_READ != 0,
@@ -3698,11 +3955,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 ended.push(held);
             }
         }
+
         let mut batch = open.store.begin();
         batch.put(SETTINGS, row, None, &[flags], rng)?;
         for held in ended {
             batch.delete(RECEIPT, held);
         }
+
         Ok(batch.commit()?)
     }
 
@@ -3727,6 +3986,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 if plain.get(16) != Some(&(kind as u8)) {
                     continue;
                 }
+
                 let field = |at: usize, len: usize| plain.get(at..at.saturating_add(len));
                 let conversation: [u8; 16] = field(0, 16)
                     .and_then(|bytes| bytes.try_into().ok())
@@ -3742,6 +4002,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     stale.push(row);
                     continue;
                 }
+
                 let conversation = ConversationId(conversation);
                 let at_peer = holds.iter().position(|(held, _, _)| *held == conversation);
                 let index = at_peer.unwrap_or_else(|| {
@@ -3753,11 +4014,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     rows.push((row, target));
                 }
             }
+
             for (conversation, mut hold, rows) in holds {
                 let targets = hold.take_batch(now);
                 if due.is_some() || targets.is_empty() {
                     continue;
                 }
+
                 let body = ReceiptBody { targets };
                 let mut encoded =
                     vec![0u8; 2usize.saturating_add(body.targets.len().saturating_mul(16))];
@@ -3783,13 +4046,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 });
             }
         }
+
         if !stale.is_empty() {
             let mut batch = open.store.begin();
             for row in stale {
                 batch.delete(RECEIPT, row);
             }
+
             batch.commit()?;
         }
+
         Ok(due)
     }
 
@@ -3800,6 +4066,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for row in &receipt.rows {
             batch.delete(RECEIPT, *row);
         }
+
         Ok(batch.commit()?)
     }
 
@@ -3818,6 +4085,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !is_sound {
             self.events.push_back(Event::IntegrityFault);
         }
+
         Ok(out)
     }
 
@@ -3837,6 +4105,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let mut unread = 0u32;
             for (row, plain) in store.list(TableId::MESSAGE, Some(&conversation.0))? {
                 let plain = Zeroizing::new(plain);
+
                 // IMP-121: the plaintext names its owner, and a row of
                 // another conversation counts for none here.
                 if conversation_of(&plain).ok() != Some(conversation) {
@@ -3852,14 +4121,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 if is_hidden {
                     continue;
                 }
+
                 if !info.outgoing && info.stored_at_ms > read_up_to {
                     unread = unread.saturating_add(1);
                 }
+
                 let key = (info.stored_at_ms, row);
                 if last.is_none_or(|newest| key > newest) {
                     last = Some(key);
                 }
             }
+
             out.push(ConversationSummary {
                 conversation,
                 name,
@@ -3883,6 +4155,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }),
             });
         }
+
         // DEV-330: the pinned conversations first, the newest first in each.
         out.sort_by_key(|summary| {
             (
@@ -3890,6 +4163,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 core::cmp::Reverse(summary.last_at_ms),
             )
         });
+
         Ok((out, is_sound))
     }
 
@@ -3898,6 +4172,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// accepted, and the next run sends them again under their `msg_id`.
     pub fn requeue_waiting(&mut self) -> Result<(), Error> {
         self.outgoing.clear();
+
         // A new run sends each record that waits when it is ready, and
         // no slot of a run that ended holds one back.
         self.slot_sends.clear();
@@ -3907,12 +4182,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Some(plain) = store.get(TableId::MESSAGE, &row)? else {
                 continue;
             };
+
             let plain = Zeroizing::new(plain);
             let conversation = conversation_of(&plain)?;
+
             // A record of a group takes the run of the group queues.
             if self.is_group(conversation)? {
                 continue;
             }
+
             let info = info_of(&plain)?;
             waiting_records.push((
                 info.stored_at_ms,
@@ -3926,10 +4204,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 },
             ));
         }
+
         // The order of the store is the order of a keyed hash.
         waiting_records.sort_by_key(|(stored_at, _)| *stored_at);
         self.outgoing
             .extend(waiting_records.into_iter().map(|(_, record)| record));
+
         Ok(())
     }
 
@@ -3944,6 +4224,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .ok_or(Error::Integrity)?,
         );
         let seed: [u8; 32] = seed.as_slice().try_into().map_err(|_| Error::Integrity)?;
+
         Ok(RootIdentity::new(Secret::new(seed)).rng_harden_key())
     }
 
@@ -3953,6 +4234,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if let Some(seed) = self.identity_seed()? {
             return Ok(Zeroizing::new(seed));
         }
+
         let store = &self.open_ref()?.store;
         let row = store.row_id(TableId::LOCAL_IDENTITY, ROOT_KEY);
         let seed = Zeroizing::new(
@@ -3960,6 +4242,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .get(TableId::LOCAL_IDENTITY, &row)?
                 .ok_or(Error::Integrity)?,
         );
+
         Ok(Zeroizing::new(
             seed.as_slice().try_into().map_err(|_| Error::Integrity)?,
         ))
@@ -3976,6 +4259,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         )?;
         let units: Zeroizing<Vec<u16>> = Zeroizing::new(digits.encode_utf16().collect());
         sink.put(&units);
+
         Ok(())
     }
 
@@ -3985,6 +4269,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if let Some(seed) = self.identity_seed()? {
             return Ok(RootIdentity::new(Secret::new(seed)));
         }
+
         let store = &self.open_ref()?.store;
         let row = store.row_id(TableId::LOCAL_IDENTITY, ROOT_KEY);
         let seed = Zeroizing::new(
@@ -3993,6 +4278,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .ok_or(Error::Integrity)?,
         );
         let seed: [u8; 32] = seed.as_slice().try_into().map_err(|_| Error::Integrity)?;
+
         Ok(RootIdentity::new(Secret::new(seed)))
     }
 
@@ -4022,12 +4308,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if draft.is_empty() {
             return Err(Error::Malformed);
         }
+
         let conversation = draft.conversation();
         let message = self.send_checked(draft, now_ms, rng)?;
+
         // DEV-201: a send erases the draft from the set. A send that this
         // call refused sent nothing, thus the stored draft of each device
         // stays for the next try.
         self.clear_draft(conversation, rng)?;
+
         Ok(message)
     }
 
@@ -4052,6 +4341,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
             return self.send_file(conversation, msg_id, file, draft.text(), now_ms, rng);
         }
+
         // A mention names a member of a group by its pair key (`GRP-334`).
         let is_group = self.is_group(conversation)?;
         let mentions = if is_group && !draft.mentions().is_empty() {
@@ -4067,6 +4357,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         } else {
             Channel::Pairwise
         };
+
         // A reply is a rich record around the text. The wire carries the raw
         // `msg_id` of the target, which the row of the target holds.
         let rich = match draft.reply_to() {
@@ -4091,17 +4382,21 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         .get(TableId::MESSAGE, &target.0)?
                         .ok_or(Error::NotFound)?,
                 );
+
                 // WIR-171: an answer stays inside its conversation.
                 if conversation_of(&plain)? != conversation {
                     return Err(Error::Malformed);
                 }
+
                 let held = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
+
                 // WIR-269: a pairwise record is in no thread.
                 let thread_root = if is_group {
                     self.thread_root_for(&plain, &info_of(&plain)?)?
                 } else {
                     [0; 16]
                 };
+
                 // The row of a message of this device holds the raw
                 // `msg_id` of its answer while no relay took it, and the
                 // raw `msg_id` of the message itself at each time.
@@ -4151,6 +4446,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !is_group && self.key_change(conversation)?.is_some() {
             return Err(Error::Busy);
         }
+
         // A group record goes to the two replicas of its group queue and
         // on no pairwise channel (Part 11 §11.2).
         if is_group {
@@ -4164,6 +4460,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // conversation that never expires.
         let seconds = self.timer_seconds(conversation)?;
         let open = self.open_mut()?;
+
         // IMP-024, IMP-025: the store holds the keyed form of `msg_id`.
         let reference = msg_ref(&open.device_set_key, &msg_id);
         let natural = [conversation.0.as_slice(), &reference].concat();
@@ -4188,6 +4485,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 rng,
             )?;
         }
+
         batch.commit()?;
 
         let message = MsgRef(row);
@@ -4197,6 +4495,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             app: app.to_vec(),
         });
         self.auto_lock.touch(now_ms / 1_000);
+
         Ok(message)
     }
 
@@ -4223,6 +4522,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         };
         let mut app = vec![0u8; record.len()];
         record.encode(&mut app)?;
+
         // DEV-215: the deadline is in the commit of the message.
         let seconds = self.timer_seconds(conversation)?;
         let open = self.open_mut()?;
@@ -4263,6 +4563,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 rng,
             )?;
         }
+
         batch.commit()?;
         let message = MsgRef(row);
         self.files.uploads.push_back(UploadJob {
@@ -4271,6 +4572,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             shape: file.shape,
         });
         self.auto_lock.touch(now_ms / 1_000);
+
         Ok(message)
     }
 
@@ -4280,12 +4582,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(position) = self.outgoing.iter().position(|o| o.message == *message) else {
             return Ok(false);
         };
+
         self.outgoing.remove(position);
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         batch.delete(TableId::MESSAGE, message.0);
         batch.delete(OUTBOX, message.0);
         batch.commit()?;
+
         Ok(true)
     }
 
@@ -4306,11 +4610,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Some(reference) = app.get(field.clone()) else {
                 continue;
             };
+
             let natural = [conversation.0.as_slice(), reference].concat();
             let row = store.row_id(TableId::MESSAGE, &natural);
             let Some(target) = store.get(TableId::MESSAGE, &row)? else {
                 continue;
             };
+
             let target = Zeroizing::new(target);
             let raw = target
                 .get(MESSAGE_PREFIX..)
@@ -4320,6 +4626,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 place.copy_from_slice(&raw);
             }
         }
+
         Ok(out)
     }
 
@@ -4352,6 +4659,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(row) = open.store.get(OUTBOX, &message.0)? else {
             return Ok(());
         };
+
         let (sends, first) = outbox_sends(&row);
         let first = if sends == 0 { now.max(1) } else { first };
         let mut batch = open.store.begin();
@@ -4362,6 +4670,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             &outbox_sent(sends.saturating_add(1), first),
             rng,
         )?;
+
         Ok(batch.commit()?)
     }
 
@@ -4398,11 +4707,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.notice_delivery(message, delivery, rng)? {
             return Ok(());
         }
+
         // Part 3 §3.2.6: the acknowledgment of a relay starts the silence
         // of the channel, which a record of the peer ends.
         if delivery == Delivery::Accepted {
             self.relay_accepted(message, rng)?;
         }
+
         let open = self.open_mut()?;
         let mut plain = Zeroizing::new(
             open.store
@@ -4420,6 +4731,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let mut batch = open.store.begin();
             batch.delete(TableId::MESSAGE, message.0);
             batch.delete(OUTBOX, message.0);
+
             // IDN-063: a relay took the key-change notice of this contact,
             // and it waits for no second send.
             if is_notice {
@@ -4427,6 +4739,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
             return Ok(batch.commit()?);
         }
+
         // DEV-304: a state goes up only. A copy that went again reports
         // `accepted`, or fails, after a receipt named the first copy, and
         // the receipt stays.
@@ -4439,6 +4752,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             batch.delete(OUTBOX, message.0);
             return Ok(batch.commit()?);
         }
+
         // A failed record keeps its raw target, because the user can send it
         // again (`IMP-075`).
         if info_of(&plain)?.delivery == Delivery::Queued
@@ -4461,6 +4775,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             // A relay took the record, or the ARQ stopped. It waits no more.
             batch.delete(OUTBOX, message.0);
         }
+
         match (delivery, cause) {
             (Delivery::Failed, Some(cause)) => {
                 batch.put(FAILURE, message.0, None, &[cause as u8], rng)?;
@@ -4469,6 +4784,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             // A record that goes again, or that a relay took, fails no more.
             _ => batch.delete(FAILURE, message.0),
         }
+
         // IDN-063: a key-change notice that reached no relay goes again
         // after a new delay of its own, in the commit of the failure. No
         // view shows its row, thus no user could send it again.
@@ -4489,18 +4805,22 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 rng,
             )?;
         }
+
         batch.commit()?;
         if delivery != Delivery::Queued {
             self.limit_sends.remove(message);
         }
+
         self.events.push_back(Event::Delivery {
             message: *message,
             delivery,
         });
+
         // The view of the identity shows a notice that waits again.
         if delivery == Delivery::Failed && is_notice {
             self.events.push_back(Event::Conversations);
         }
+
         // DEV-114: the user sees an edit or a deletion that reached no relay.
         if delivery == Delivery::Failed {
             if let Some(is_delete) = change_kind(&plain)? {
@@ -4510,10 +4830,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 });
             }
         }
+
         // DEV-304: a message that no relay took ends on each device.
         if delivery == Delivery::Failed {
             self.publish_delivery(&message.0, delivery, rng)?;
         }
+
         Ok(())
     }
 
@@ -4537,6 +4859,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if open.store.get(TableId::MESSAGE, &row)?.is_some() {
             return Ok(message);
         }
+
         let plain = stored_message(
             INCOMING,
             Delivery::Delivered,
@@ -4551,6 +4874,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             conversation,
             message,
         });
+
         Ok(message)
     }
 
@@ -4583,6 +4907,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut units = Zeroizing::new(Vec::with_capacity(text.len()));
         units.extend(text.encode_utf16());
         sink.put(&units);
+
         Ok(())
     }
 
@@ -4601,6 +4926,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         info.sender = self.group_sender(message)?;
         info.recovered = self.is_recovered(message)?;
         info.no_forward = self.forward_prohibited_of(&plain)?;
+
         // IMP-074: a failed message names its cause.
         if info.delivery == Delivery::Failed {
             info.failure = open
@@ -4609,10 +4935,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .and_then(|value| value.first().copied())
                 .and_then(crate::FailureCause::from_byte);
         }
+
         if let Some((state, role)) = self.moderation_of(message)? {
             info.moderation = state;
             info.moderator_role = role;
         }
+
         info.revisions = match open.store.get(REVISION, &message.0)? {
             None => 0,
             Some(count) => *count.first().ok_or(Error::Integrity)?,
@@ -4639,6 +4967,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 None => ReplyTarget::Absent,
             };
         }
+
         // WIR-271, WIR-273: the root of the thread of a group record, in
         // its conversation alone.
         if let Some(field) = thread_field(app)? {
@@ -4656,6 +4985,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let row = open.store.row_id(TableId::MESSAGE, &natural);
             info.thread = open.store.get(TableId::MESSAGE, &row)?.map(|_| MsgRef(row));
         }
+
         Ok(info)
     }
 
@@ -4683,13 +5013,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Some(root) = store.get(TableId::MESSAGE, &row)? else {
                 return Ok([0; 16]);
             };
+
             let root = Zeroizing::new(root);
             let root_app = root.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
             return Ok(AppMessage::parse(root_app, Channel::Group)?.msg_id);
         }
+
         if reply_field(app)?.is_none() {
             return Ok(parsed.msg_id);
         }
+
         Ok([0; 16])
     }
 
@@ -4701,6 +5034,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut found = Vec::new();
         for (row, plain) in open.store.list(TableId::MESSAGE, Some(&conversation.0))? {
             let plain = Zeroizing::new(plain);
+
             // IMP-121: the plaintext names its owner.
             if conversation_of(&plain)? != conversation {
                 return Err(Error::Integrity);
@@ -4708,12 +5042,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if is_request(&plain)? {
                 continue;
             }
+
             let info = info_of(&plain)?;
+
             // DEV-031, DEV-032: the insertion stamp orders, and the row
             // breaks a tie.
             found.push((info.stored_at_ms, row));
         }
+
         found.sort_unstable();
+
         Ok(found.into_iter().map(|(_, row)| MsgRef(row)).collect())
     }
 
@@ -4727,6 +5065,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             self.events.push_back(Event::IntegrityFault);
             return Err(Error::Integrity);
         }
+
         Ok(())
     }
 
@@ -4744,14 +5083,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 gone.push(row);
             }
         }
+
         if gone.is_empty() {
             return Ok(());
         }
+
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         for row in gone {
             batch.delete(PENDING, row);
         }
+
         Ok(batch.commit()?)
     }
 
@@ -4763,21 +5105,26 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.audit.next == 0 && now.saturating_sub(self.audit.started) < AUDIT_PERIOD {
             return Ok(());
         }
+
         if self.audit.next == 0 {
             self.audit.started = now;
+
             // DEV-095: a pending reference above REF_ORPHAN_TTL goes, thus
             // an expired one takes no place under REF_ORPHAN_MAX.
             self.sweep_pending_refs(now)?;
         }
+
         let Some(table) = tables.get(self.audit.next).copied() else {
             self.audit.next = 0;
             return Ok(());
         };
+
         self.audit.next = self.audit.next.saturating_add(1);
         if self.open_ref()?.store.audit(table).is_err() {
             self.events.push_back(Event::IntegrityFault);
             return Err(Error::Integrity);
         }
+
         Ok(())
     }
 }
@@ -4787,6 +5134,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 fn shown_text(plain: &[u8]) -> Result<&[u8], Error> {
     let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
     let parsed = AppMessage::parse(app, Channel::Pairwise)?;
+
     // The text of a file is its caption (WIR-535). A file of this
     // device holds the caption alone until its upload ends.
     Ok(match parsed.kind {
@@ -4820,6 +5168,7 @@ fn info_of(plain: &[u8]) -> Result<MessageInfo, Error> {
         .get(STORED_AT)
         .and_then(|bytes| bytes.try_into().ok())
         .ok_or(Error::Integrity)?;
+
     Ok(MessageInfo {
         outgoing: direction == OUTGOING,
         stored_at_ms: u64::from_be_bytes(stored_at),
@@ -4872,6 +5221,7 @@ fn info_of(plain: &[u8]) -> Result<MessageInfo, Error> {
 fn is_request(plain: &[u8]) -> Result<bool, Error> {
     let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
     let parsed = AppMessage::parse(app, Channel::Pairwise)?;
+
     // A reaction of the contact changes the reaction table and is never a row.
     // A group control object of Part 11 travels on a pairwise channel and
     // is no message of that conversation (`GRP-309`, `GRP-312`).
@@ -4901,6 +5251,7 @@ fn change_kind(plain: &[u8]) -> Result<Option<bool>, Error> {
     if parsed.kind == AppKind::Edit {
         return Ok(Some(false));
     }
+
     Ok((tombstone_of(&parsed)? == Some(Tombstone::Request)).then_some(true))
 }
 
@@ -4949,9 +5300,11 @@ mod tests {
 
     impl TryRng for Rng {
         type Error = core::convert::Infallible;
+
         fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
             Ok(self.try_next_u64()? as u32)
         }
+
         fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
             self.0 = self
                 .0
@@ -4959,11 +5312,13 @@ mod tests {
                 .wrapping_add(1_442_695_040_888_963_407);
             Ok(self.0 >> 11 ^ self.0 << 7)
         }
+
         fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
             for chunk in dst.chunks_mut(8) {
                 let bytes = self.try_next_u64()?.to_le_bytes();
                 chunk.copy_from_slice(&bytes[..chunk.len()]);
             }
+
             Ok(())
         }
     }
@@ -5117,6 +5472,7 @@ mod tests {
                 inner_body,
             };
             let mut body = vec![0u8; rich.len()];
+
             // The wire check of a rich record refuses some of these, and
             // the client then takes the bytes as a peer could send them.
             if rich.encode(Channel::Pairwise, &mut body).is_err() {
@@ -5126,6 +5482,7 @@ mod tests {
                 body.push(inner_kind as u8);
                 body.extend_from_slice(inner_body);
             }
+
             body
         };
         let delete = DeleteBody {
@@ -5183,8 +5540,10 @@ mod tests {
             if parsed.kind == AppKind::ReadReceipt {
                 break;
             }
+
             client.receipt_sent(&due).unwrap();
         }
+
         client.set_blocked(conversation, true, &mut rng).unwrap();
         while let Some(due) = client.due_receipt(T0 / 1_000 + 2, &mut rng).unwrap() {
             let parsed = AppMessage::parse(&due.app, Channel::Pairwise).unwrap();
@@ -5211,7 +5570,9 @@ mod tests {
             named.extend(ReceiptBody::parse(parsed.body).unwrap().targets);
             client.receipt_sent(&due).unwrap();
         }
+
         assert_eq!(named, [[4; 16]]);
+
         // ABU-027, ABU-028: no record of the blocked contact is in a view.
         assert_eq!(client.messages(conversation).unwrap().len(), 1);
     }
@@ -5231,6 +5592,7 @@ mod tests {
             (contact, again.clone()),
         ];
         client.commit_network(&[], &received, T0, &mut rng).unwrap();
+
         // DEV-031 to DEV-035: one copy of each record, in the order of the
         // records.
         let sends: Vec<_> = core::iter::from_fn(|| client.take_sync_send()).collect();
@@ -5274,6 +5636,7 @@ mod tests {
             expires_in: 0,
         };
         let source = [7u8; 16];
+
         // DEV-246: the device that owns the ratchet measured the window,
         // and this device measures none for the copy.
         let late = T0 + 2 * EDIT_WINDOW_MS;
@@ -5287,6 +5650,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(text_of(&client, &message), "second text");
+
         // DEV-035: the copy of an earlier revision that comes after it.
         client
             .commit_records_at(
@@ -5309,6 +5673,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(text_of(&client, &message), "third text");
+
         // A revision that the contact sends on its ratchet is still inside
         // the window of this device.
         client
@@ -5325,6 +5690,7 @@ mod tests {
     #[test]
     fn a_pending_reference_of_the_contact_takes_no_record_of_the_user() {
         let (mut client, mut rng, contact, conversation) = client_with_contact(305);
+
         // DEV-093: the contact deletes a target that this device does not
         // hold, and the entry waits.
         let delete = DeleteBody {
@@ -5390,6 +5756,7 @@ mod tests {
         };
         client.commit_network(&[change], &[], T0, &mut rng).unwrap();
         let held = client.conversation_for(&shadow.0).unwrap();
+
         // DEV-197: the verification state of the owner of the channel
         // arrives, and this device holds no key to compare.
         client.put_verified(held, &[6; 32], T0, &mut rng).unwrap();
@@ -5408,6 +5775,7 @@ mod tests {
         notice.encode(&mut body).unwrap();
         client.take_key_change(held, &body, T0, &mut rng).unwrap();
         assert!(client.key_change(held).unwrap().is_none());
+
         // A contact with a key of its own takes the notice as before.
         client
             .take_key_change(conversation, &body, T0, &mut rng)
@@ -5466,6 +5834,7 @@ mod tests {
                 .set_delivery(&message, Delivery::Accepted, &mut rng)
                 .unwrap();
         }
+
         // The receipt names the raw `msg_id` of the message.
         let sent = {
             let open = client.open_ref().unwrap();
@@ -5498,6 +5867,7 @@ mod tests {
             client.info(&receipted).unwrap().delivery,
             Delivery::Delivered
         );
+
         // DEV-304: the report of a second copy does not take the receipt.
         client
             .set_delivery(&receipted, Delivery::Accepted, &mut rng)
@@ -5563,6 +5933,7 @@ mod tests {
             })
             .collect();
         client.commit_network(&[], &received, T0, &mut rng).unwrap();
+
         // WIR-338: one supply for each request inside the rate.
         let supplies = core::iter::from_fn(|| client.take_outgoing())
             .filter(|outgoing| {
@@ -5595,6 +5966,7 @@ mod tests {
                 )
                 .unwrap();
         }
+
         let lost = client
             .roster_notes(conversation)
             .unwrap()
@@ -5602,6 +5974,7 @@ mod tests {
             .filter(|note| note.kind == NOTE_LOST)
             .count();
         assert_eq!(lost, 1);
+
         // A hole at that index a day later is another record.
         assert!(!client
             .lost_record(conversation, 40, T0 + 2_000, &mut rng)
@@ -5638,6 +6011,7 @@ mod tests {
         }
         assert_eq!(client.send_due_notices(11, &mut rng).unwrap(), 1);
         let sent = client.take_outgoing().unwrap();
+
         // The notice is on the send path, and it goes no second time.
         assert_eq!(client.send_due_notices(12, &mut rng).unwrap(), 0);
         assert_eq!(client.notices_waiting().unwrap(), 1);
@@ -5650,6 +6024,7 @@ mod tests {
         assert_eq!(client.send_due_notices(u64::MAX - 1, &mut rng).unwrap(), 1);
         let again = client.take_outgoing().unwrap();
         assert_eq!(again.app, sent.app);
+
         // A relay took it, and the row goes.
         client
             .set_delivery(&again.message, Delivery::Accepted, &mut rng)
@@ -5662,6 +6037,7 @@ mod tests {
     fn a_removal_of_a_device_owes_each_rotation_and_its_notice_until_they_are_done() {
         let (mut client, mut rng, contact, conversation) = client_with_contact(312);
         let (tablet, channel) = link_device(&mut client, &mut rng);
+
         // The channel of the tablet as the node stored it.
         let change = StateChange::Contact {
             contact: ContactId([0x7C; 32]),
@@ -5676,12 +6052,14 @@ mod tests {
         assert!(!client.owes_rotation(channel).unwrap());
         assert!(client.is_leaving_channel(channel).unwrap());
         assert!(!client.is_ended_channel(channel).unwrap());
+
         // NET-357: a rotation before the request for the new guard ends
         // nothing that the revocation owes.
         client
             .dead_queue_rotated(conversation, &[0; 4], &mut rng)
             .unwrap();
         assert!(client.owes_rotation(conversation).unwrap());
+
         // A lock, or the end of the process, takes the queue in RAM.
         while client.take_sync_send().is_some() {}
 
@@ -5702,10 +6080,12 @@ mod tests {
         assert!(sends.iter().all(|send| send.peer == channel));
         let notice = sends.pop().unwrap();
         assert!(sends.iter().all(|send| send.message.is_none()));
+
         // The first request sets the new guard, and a later one does not.
         assert_eq!(client.rotation_owed(5_000).unwrap(), [(contact.0, true)]);
         assert!(client.rotation_owed(5_001).unwrap().is_empty());
         assert_eq!(client.rotation_owed(5_100).unwrap(), [(contact.0, false)]);
+
         // DEV-257: the channel takes no record while it waits.
         let from_tablet = record(AppKind::Text, [0x31; 16], b"still here");
         client
@@ -5763,6 +6143,7 @@ mod tests {
             &mut rng,
         )
         .unwrap();
+
         // Two contacts, each with its first guard.
         let contacts = [ContactId([9; 32]), ContactId([10; 32])];
         let commit = |client: &mut TestClient, guard: u8, rng: &mut Rng| {
@@ -5807,6 +6188,7 @@ mod tests {
             };
             client.commit_network(&[change], &[], T0, &mut rng).unwrap();
         }
+
         let secret = |guard: u8| [0xA0 + guard; 32];
         let sends = |client: &mut TestClient| -> Vec<(ConversationId, Vec<u8>)> {
             core::iter::from_fn(|| client.take_sync_send())
@@ -5820,6 +6202,7 @@ mod tests {
                 .publish_channel_entry(*conversation, &mut rng)
                 .unwrap();
         }
+
         let first = sends(&mut client);
         for device in [to_tablet, to_laptop] {
             let held = first
@@ -5839,6 +6222,7 @@ mod tests {
             .all(|contact| owed.contains(&(contact.0, true))));
         sends(&mut client);
         commit(&mut client, 2, &mut rng);
+
         // NET-357: the new secret of each contact goes to the laptop, and
         // no record with it goes to the tablet.
         let second = sends(&mut client);
@@ -5859,6 +6243,7 @@ mod tests {
     #[test]
     fn a_contact_with_no_bundle_that_waits_asks_the_user_nothing() {
         let (mut client, mut rng, contact, conversation) = client_with_contact(332);
+
         // A stored contact of an earlier form holds no question.
         assert_eq!(client.renewal_ask(conversation).unwrap(), None);
         assert!(client.renewal_contact(conversation).is_err());
@@ -5923,14 +6308,18 @@ mod tests {
         let before = entry_public(&client, EntryKind::Handle, 0, 2);
         let unused = entry_public(&client, EntryKind::Address, 7, 0);
         client.reset_identity(T0, &mut rng).unwrap();
+
         // DEV-306, DIS-093: the directory holds the key of the entry, and
         // this device still answers under it.
         assert_eq!(entry_public(&client, EntryKind::Handle, 0, 2), before);
+
         // The rotation of the key, and each new entry, take the new root.
         assert_ne!(entry_public(&client, EntryKind::Address, 7, 0), unused);
+
         // The log shows the entry as this device holds it: the root stays.
         client.confirm_published(&entry.id, &mut rng).unwrap();
         assert_eq!(entry_public(&client, EntryKind::Handle, 0, 2), before);
+
         // The store takes the rotation first. The key before it signs the
         // write, thus it stays while the directory did not take the write.
         let rotated = Published {
@@ -5941,6 +6330,7 @@ mod tests {
         client.put_published(&rotated, &mut rng).unwrap();
         client.put_published(&rotated, &mut rng).unwrap();
         assert_eq!(entry_public(&client, EntryKind::Handle, 0, 2), before);
+
         // The log shows the rotation under its key: the earlier root has no
         // more use, and it leaves the store.
         client.confirm_published(&entry.id, &mut rng).unwrap();
@@ -5967,6 +6357,7 @@ mod tests {
         let before = entry_public(&client, EntryKind::Handle, 0, 2);
         client.reset_identity(T0, &mut rng).unwrap();
         let roots = client.earlier_roots_row().unwrap().unwrap();
+
         // The steps of a rotation that the directory refuses: the store
         // takes the next version, and then the version before it again.
         let rotated = Published {
@@ -5976,12 +6367,15 @@ mod tests {
             ..entry.clone()
         };
         client.put_published(&rotated, &mut rng).unwrap();
+
         // The upkeep of another entry runs between the two writes.
         client.confirm_published(&link.id, &mut rng).unwrap();
         client.put_published(&entry, &mut rng).unwrap();
+
         // DEV-306: the state is the one before the call, with its roots.
         assert_eq!(client.earlier_roots_row().unwrap().unwrap(), roots);
         assert_eq!(client.published().unwrap().len(), 2);
+
         // The directory holds the key of the earlier root, and the renewal
         // and the next rotation answer under it.
         assert_eq!(entry_public(&client, EntryKind::Handle, 0, 2), before);
@@ -6006,6 +6400,7 @@ mod tests {
         client.put_published(&link, &mut rng).unwrap();
         let before = entry_public(&client, EntryKind::Handle, 0, 2);
         client.reset_identity(T0, &mut rng).unwrap();
+
         // The write left, and no answer came: the store keeps the rotation.
         let rotated = Published {
             rotation: 3,
@@ -6013,14 +6408,17 @@ mod tests {
             ..entry.clone()
         };
         client.put_published(&rotated, &mut rng).unwrap();
+
         // The upkeep writes each other entry and reads the log for it.
         client.put_published(&link, &mut rng).unwrap();
         client.confirm_published(&link.id, &mut rng).unwrap();
+
         // The log still shows the version before under the key of the
         // earlier root, which signs the write again (DIS-093).
         assert_eq!(entry_public(&client, EntryKind::Handle, 0, 2), before);
         let next = entry_public(&client, EntryKind::Handle, 0, 3);
         assert_ne!(next, before);
+
         // The write goes again, and the store marks its time.
         let again = Published {
             queue_since: 900,
@@ -6028,12 +6426,14 @@ mod tests {
         };
         client.put_published(&again, &mut rng).unwrap();
         assert_eq!(entry_public(&client, EntryKind::Handle, 0, 2), before);
+
         // The log shows the rotation: the earlier root of the handle goes,
         // and the one of the link stays.
         client.confirm_published(&entry.id, &mut rng).unwrap();
         assert_ne!(entry_public(&client, EntryKind::Handle, 0, 2), before);
         assert_eq!(entry_public(&client, EntryKind::Handle, 0, 3), next);
         assert!(client.earlier_roots_row().unwrap().is_some());
+
         // The link goes: no entry holds a name of an earlier root.
         client.drop_published(&link.id, &mut rng).unwrap();
         assert!(client.earlier_roots_row().unwrap().is_none());
@@ -6046,6 +6446,7 @@ mod tests {
         let (mut client, mut rng, _, _) = client_with_contact(319);
         let (peer, _) = link_device(&mut client, &mut rng);
         let own = client.device_identity().unwrap().unwrap().device_id;
+
         // The sync channel as the node stored it.
         let channel = ContactId([0x7C; 32]);
         let change = StateChange::Contact {
@@ -6053,6 +6454,7 @@ mod tests {
             state: contact_state(6),
         };
         client.commit_network(&[change], &[], T0, &mut rng).unwrap();
+
         // A record of the peer whose Lamport counter is far above the bound
         // of DEV-275. The peer took values of other devices that this
         // device did not see.
@@ -6067,6 +6469,7 @@ mod tests {
             let mut engine = client.sync_engine().unwrap().unwrap();
             !engine.acknowledgments(u64::MAX).unwrap().is_empty()
         };
+
         // This device owns the channels: the bound holds, and it takes
         // neither the counter nor the value.
         client
@@ -6151,6 +6554,7 @@ mod tests {
                 .flatten()
                 .map(|end| (end.outbound.to_vec(), end.guard_seq, *end.guard_secret))
         };
+
         // DEV-320: the device that owns the channels takes no such item.
         client
             .commit_network(
@@ -6177,6 +6581,7 @@ mod tests {
             .put(super::devices::DEVICE_SELF, row, None, &identity, &mut rng)
             .unwrap();
         batch.commit().unwrap();
+
         // An item that another device wrote changes nothing, and neither
         // does one whose subject names another contact.
         client
@@ -6197,6 +6602,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(end_of(&mut client), None);
+
         // The item of the device that owns the channels gives the contact
         // the form that a node restores, with the key of the peer.
         client
@@ -6214,6 +6620,7 @@ mod tests {
         );
         assert!(!client.is_shadow_contact(conversation).unwrap());
         assert_eq!(client.identity_keys(conversation).unwrap().1, [6; 32]);
+
         // The conversation keeps its row, and no second one comes.
         assert_eq!(client.conversations().unwrap(), [conversation]);
         client.audit().unwrap();
@@ -6231,12 +6638,14 @@ mod tests {
         };
         let earlier = backend.rows_mut()[&key].clone();
         client.unlock(&units("correct horse"), 1_000).unwrap();
+
         // The ratchet of the contact moves on.
         let change = StateChange::Contact {
             contact,
             state: contact_state(7),
         };
         client.commit_network(&[change], &[], T0, &mut rng).unwrap();
+
         // A party with the file puts the earlier row back. The unlock reads
         // no row of the table (IDN-037).
         client.lock();
@@ -6255,6 +6664,7 @@ mod tests {
     fn a_row_that_names_another_owner_ends_no_batch_and_the_user_learns_of_it_once() {
         use super::{Event, TableId};
         let (mut client, mut rng, contact, conversation) = client_with_contact(318);
+
         // A message of this device that a relay took, and a message of the
         // contact.
         let mut draft = client.new_draft(conversation);
@@ -6300,6 +6710,7 @@ mod tests {
             while let Some(event) = client.next_event() {
                 faults += usize::from(event == Event::IntegrityFault);
             }
+
             faults
         };
 
@@ -6373,11 +6784,13 @@ mod tests {
             }
         };
         let state = |client: &TestClient| client.file_info(&message).unwrap().unwrap().state;
+
         // ATT-010: a replica that no consensus names answers nothing, and
         // the fetch fails. Inside the life of the chunks a tap tries again.
         client.clock = T0 / 1_000 + CHUNK_LIFE_MAX - 1;
         client.download_failed(&message, &mut rng).unwrap();
         assert_eq!(state(&client), FileState::Failed);
+
         // ATT-160: no relay holds a chunk after `CHUNK_LIFE_MAX`, thus the
         // file is gone, and no tap fetches it again (ATT-052).
         client.clock = T0 / 1_000 + CHUNK_LIFE_MAX;
@@ -6453,6 +6866,7 @@ mod tests {
         assert!(client.take_erasure().is_none());
         assert!(client.info(&aged).is_err());
         assert!(client.info(&deleted).is_err());
+
         // No copy of a credential outlives its message there.
         let erase_rows = |client: &TestClient| {
             let store = &client.open_ref().unwrap().store;
@@ -6486,6 +6900,7 @@ mod tests {
             while let Some(job) = client.take_erasure() {
                 due.push(job.chunk_id[0]);
             }
+
             due.sort_unstable();
             due
         };
@@ -6531,6 +6946,7 @@ mod tests {
             .unwrap();
         let hers = client.messages(conversation).unwrap()[0];
         let mine = send(&mut client, conversation, "mine", T0 + 1);
+
         // With no policy each text takes a forward.
         assert!(!client.info(&hers).unwrap().no_forward);
         client.forward(&hers, other, T0 + 2, &mut rng).unwrap();
@@ -6554,6 +6970,7 @@ mod tests {
             Err(Error::Refused)
         );
         client.forward(&mine, other, T0 + 4, &mut rng).unwrap();
+
         // DEV-324: the change is a row of the conversation, with no text.
         let rows = client.messages(conversation).unwrap();
         let mark = rows
@@ -6589,6 +7006,7 @@ mod tests {
             .unwrap();
         assert_eq!(client.messages(conversation).unwrap().len(), before);
         assert!(client.forward_setting(conversation).unwrap().peer.prohibits);
+
         // A body that does not parse changes nothing.
         let odd = record(AppKind::ForwardPolicy, [9; 16], &[1, 0, 0, 0, 9, 7]);
         client
@@ -6608,6 +7026,7 @@ mod tests {
         assert_eq!(parsed.body, &[1, 0, 0, 0, 1, 1]);
         assert!(client.prohibits_forward(conversation).unwrap());
         assert_eq!(client.info(&change).unwrap().forward_policy, Some(true));
+
         // The policy of the user binds no device of the user.
         client.forward(&mine, other, T0 + 8, &mut rng).unwrap();
 
@@ -6624,6 +7043,7 @@ mod tests {
         assert!(!setting.peer.prohibits && setting.own.prohibits);
         assert!(!client.info(&hers).unwrap().no_forward);
         client.forward(&hers, other, T0 + 10, &mut rng).unwrap();
+
         // The next record of the user takes the next counter.
         while client.take_outgoing().is_some() {}
         client
@@ -6641,6 +7061,7 @@ mod tests {
 
         let (mut client, mut rng, contact, conversation) = client_with_contact(402);
         link_device(&mut client, &mut rng);
+
         // DEV-293: the record of the contact goes to each linked device.
         let hers = policy_record(1, true, 1);
         client
@@ -6685,6 +7106,7 @@ mod tests {
             .unwrap();
         assert!(client.prohibits_forward(conversation).unwrap());
         assert_eq!(client.take_outgoing().unwrap().app, own);
+
         // The next record of this device goes above the synced counter.
         client
             .set_forward_policy(conversation, false, T0 + 2, &mut rng)
@@ -6700,7 +7122,10 @@ mod tests {
             .rows
             .iter()
             .filter(|row| {
-                matches!(row, BackupRow::Put { table, .. } if *table == super::forward::FORWARD_POLICY)
+                matches!(
+                    row,
+                    BackupRow::Put { table, .. } if *table == super::forward::FORWARD_POLICY
+                )
             })
             .count();
         assert_eq!(policies, 1);
@@ -6724,6 +7149,7 @@ mod tests {
         use umbra_core::identity::backup::{BackupObject, BackupRow};
 
         let (mut client, mut rng, _, conversation) = client_with_contact(404);
+
         // A store with no row, as each store of an earlier build is.
         assert!(!client
             .open_ref()
@@ -6738,6 +7164,7 @@ mod tests {
             .set_contact_picture(conversation, &picture, &mut rng)
             .unwrap();
         assert_eq!(client.contact_picture(conversation).unwrap(), picture);
+
         // The largest picture, and one byte above it.
         let overhead = jpeg(192, 0).len();
         let largest = jpeg(192, super::PET_AVATAR_MAX - overhead);
@@ -6750,6 +7177,7 @@ mod tests {
             client.set_contact_picture(conversation, &above, &mut rng),
             Err(Error::TooLong)
         );
+
         // Bytes that are no JPEG, and a JPEG with a side above the bound.
         assert_eq!(
             client.set_contact_picture(conversation, b"GIF89a", &mut rng),
@@ -6759,6 +7187,7 @@ mod tests {
             client.set_contact_picture(conversation, &jpeg(2_000, 0), &mut rng),
             Err(Error::Malformed)
         );
+
         // A conversation that is no contact takes none.
         let nobody = ConversationId([0x55; 16]);
         assert_eq!(
@@ -6777,7 +7206,10 @@ mod tests {
             .rows
             .iter()
             .filter(|row| {
-                matches!(row, BackupRow::Put { table, .. } if *table == super::pictures::PET_AVATARS)
+                matches!(
+                    row,
+                    BackupRow::Put { table, .. } if *table == super::pictures::PET_AVATARS
+                )
             })
             .count();
         assert_eq!(pictures, 1);
@@ -6809,6 +7241,7 @@ mod tests {
         assert_eq!(sends.len(), 1);
         assert!(carries(&sends[0].app, &picture));
         assert!(client.take_outgoing().is_none());
+
         // The same picture again is no change and no item.
         client
             .set_contact_picture(conversation, &picture, &mut rng)
@@ -6837,6 +7270,7 @@ mod tests {
             .commit_network(&[], &[(channel, item(&newer, 1))], T0, &mut rng)
             .unwrap();
         assert_eq!(client.contact_picture(conversation).unwrap(), newer);
+
         // A value that is no picture changes nothing.
         client
             .commit_network(&[], &[(channel, item(b"no picture", 2))], T0, &mut rng)
@@ -6892,11 +7326,13 @@ mod tests {
                 .commit_network(&[], &[(channel, item(kind, value, msg_id))], T0, &mut rng)
                 .unwrap();
         };
+
         // DEV-329: the other bits and bytes belong to a later version.
         take(&mut client, super::pins::ITEM_FLAGS, &[0xFE, 0x55], 1);
         assert!(!client.is_pinned(conversation).unwrap());
         take(&mut client, super::pins::ITEM_FLAGS, &[0x03], 2);
         assert!(client.is_pinned(conversation).unwrap());
+
         // DEV-332: a value of one byte is the setting with no mute.
         take(&mut client, super::alerts::ITEM_ALERT, &[ALERT_ALL], 3);
         assert_eq!(client.alert_setting(conversation).unwrap(), ALERT_ALL);
@@ -6908,6 +7344,7 @@ mod tests {
             4,
         );
         assert_eq!(client.muted_until(conversation).unwrap(), MUTE_FOREVER);
+
         // A value of another length changes nothing.
         take(
             &mut client,
@@ -6943,6 +7380,7 @@ mod tests {
                 .collect()
         };
         assert_eq!(order(&mut client), [other, conversation]);
+
         // DEV-330: a pinned conversation comes first, whatever its age.
         client.set_pinned(conversation, true, &mut rng).unwrap();
         assert_eq!(order(&mut client), [conversation, other]);
@@ -6954,6 +7392,7 @@ mod tests {
         for at in 0..10 {
             send(&mut client, other, "more", T0 * 1_000 + 10_000 + at);
         }
+
         while client.take_sync_send().is_some() {}
         assert_eq!(client.messages(other).unwrap().len(), 11);
         client
@@ -6990,6 +7429,7 @@ mod tests {
             T0,
         );
         let second = send(&mut client, conversation, "the train is late", T0 + 1);
+
         // No build ran, thus a query finds nothing.
         assert!(search_of(&client, "cafe").is_empty());
         build_search(&mut client);
@@ -7033,6 +7473,7 @@ mod tests {
         draft.set_text(&units("station at nine")).unwrap();
         client.edit(&edited, draft, T0 + 2, &mut rng).unwrap();
         assert!(search_of(&client, "harbor").is_empty());
+
         // The new text comes with the next build.
         assert!(search_of(&client, "station").is_empty());
         build_search(&mut client);
@@ -7121,6 +7562,7 @@ mod tests {
         assert_eq!(reactions[0].emoji, "👍");
         let open = client.open_ref().unwrap();
         assert!(open.store.list(super::PENDING, None).unwrap().is_empty());
+
         // A placeholder holds no poll (Part 7 §7.5.6).
         assert!(open
             .store
@@ -7174,6 +7616,7 @@ mod tests {
         let messages = client.messages(conversation).unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(text_of(&client, &messages[0]), "kept");
+
         // The target that comes later stays deleted.
         client
             .commit_network(
@@ -7199,6 +7642,7 @@ mod tests {
         let second = record(AppKind::Text, [2; 16], b"second secret");
         let received = [(contact, first.clone()), (contact, edit.clone())];
         client.commit_network(&[], &received, T0, &mut rng).unwrap();
+
         // The contact deletes the first message, and a second one comes
         // with its deletion in one batch.
         let received = [
@@ -7236,6 +7680,7 @@ mod tests {
             assert!(!sends.iter().any(|send| carries(&send.app, inner)));
             assert!(!held.iter().any(|value| carries(value, inner)));
         }
+
         assert_eq!(client.messages(conversation).unwrap().len(), 2);
 
         // A deletion for this device alone takes the copy too.

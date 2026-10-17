@@ -71,6 +71,7 @@ fn encode_row(row: &Row) -> Result<Zeroizing<Vec<u8>>, Error> {
     out.push(u8::try_from(third_name.len()).map_err(|_| Error::TooLong)?);
     out.extend_from_slice(third_name);
     out.extend_from_slice(&row.link);
+
     Ok(out)
 }
 
@@ -94,6 +95,7 @@ fn read_row(value: &[u8]) -> Result<Row, Error> {
         .get(at + 1..at + 1 + third_len)
         .ok_or(Error::Integrity)?;
     let link = value.get(at + 1 + third_len..).ok_or(Error::Integrity)?;
+
     Ok(Row {
         kind,
         peer,
@@ -109,6 +111,7 @@ fn fit(name: &str) -> &str {
     while !name.is_char_boundary(end) {
         end -= 1;
     }
+
     name.get(..end).unwrap_or("")
 }
 
@@ -138,6 +141,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             conversation: to,
             app,
         });
+
         Ok(())
     }
 
@@ -148,6 +152,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         batch.put(INTROS, id, Some(row.peer.0), &value, rng)?;
+
         Ok(batch.commit()?)
     }
 
@@ -184,6 +189,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if to == about || self.is_group(to)? || self.is_group(about)? {
             return Err(Error::Malformed);
         }
+
         let about_name = fit(about_name);
         let share = ContactShare {
             share_type: ShareType::Request,
@@ -215,6 +221,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Ok(share) = ContactShare::parse(body) else {
             return Ok(());
         };
+
         // A limit of this client: one contact holds `INTROS_WAITING_MAX`
         // requests and offers that wait for the user, and one above that
         // count goes. Thus a contact grows no table and makes no flood of
@@ -233,6 +240,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 return Ok(());
             }
         }
+
         match share.share_type {
             // WIR-196: a request waits for the user.
             ShareType::Request => {
@@ -260,9 +268,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         break;
                     }
                 }
+
                 let Some((id, row)) = asked else {
                     return Ok(());
                 };
+
                 let offer = ContactShare {
                     share_type: ShareType::Offer,
                     name: &row.third_name,
@@ -287,6 +297,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 self.events.push_back(Event::Introduction { from });
             }
         }
+
         Ok(())
     }
 
@@ -304,6 +315,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 });
             }
         }
+
         Ok(out)
     }
 
@@ -321,6 +333,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if row.kind != REQUEST_IN || link.is_empty() {
             return Err(Error::Malformed);
         }
+
         let share = ContactShare {
             share_type: ShareType::Grant,
             name: &row.name,
@@ -345,6 +358,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if row.kind != OFFER_IN {
             return Err(Error::Malformed);
         }
+
         Ok((row.link, row.name))
     }
 
@@ -354,6 +368,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if row.kind == ASKED {
             return Err(Error::Malformed);
         }
+
         self.drop_intro(id)
     }
 }

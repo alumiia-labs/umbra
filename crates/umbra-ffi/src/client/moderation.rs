@@ -56,6 +56,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(value) = self.open_ref()?.store.get(MODERATED, &message.0)? else {
             return Ok(None);
         };
+
         match value.get(16..18) {
             Some([action, role]) => Ok(Some((*action, *role))),
             _ => Err(Error::Integrity),
@@ -89,6 +90,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if held.is_some_and(|(state, _)| state == MOD_REMOVE) {
                 continue;
             }
+
             match action.action {
                 MOD_HIDE => {
                     self.put_moderation(conversation, message, MOD_HIDE, actor_role, rng)?;
@@ -108,11 +110,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
                 _ => continue,
             }
+
             self.events.push_back(Event::Edited {
                 conversation,
                 message,
             });
         }
+
         let value = [
             conversation.0.as_slice(),
             &note.at_ms.to_be_bytes(),
@@ -128,6 +132,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let row = open.store.row_id(MOD_NOTES, &key);
         let mut batch = open.store.begin();
         batch.put(MOD_NOTES, row, Some(conversation.0), &value, rng)?;
+
         Ok(batch.commit()?)
     }
 
@@ -158,16 +163,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(plain) = self.open_ref()?.store.get(TableId::MESSAGE, &message.0)? else {
             return Ok(());
         };
+
         let plain = Zeroizing::new(plain);
         if conversation_of(&plain)? != conversation {
             return Ok(());
         }
+
         let placeholder = placeholder_of(&plain)?;
         self.outgoing.retain(|waiting| waiting.message != message);
         self.files.uploads.retain(|job| job.message != message);
         self.files.downloads.retain(|job| job.message != message);
         let reactions = self.reaction_rows(&message, conversation)?;
         let votes = self.vote_rows(&message, conversation)?;
+
         // ATT-161: a moderator deletion sends no `CDEL`, thus the copy of
         // the chunk credentials that waits for one leaves with the file.
         let erase = self.erase_rows(&message)?;
@@ -201,6 +209,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         ] {
             batch.delete(table, message.0);
         }
+
         Ok(batch.commit()?)
     }
 
@@ -218,6 +227,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         {
             self.leave_placeholder(conversation, message, rng)?;
         }
+
         Ok(())
     }
 
@@ -235,10 +245,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !matches!(action, MOD_HIDE | MOD_REMOVE | MOD_UNHIDE) {
             return Err(Error::Malformed);
         }
+
         let conversation = self.conversation_of_message(message)?;
         if !self.is_group(conversation)? || !self.owns_channels()? {
             return Err(Error::Malformed);
         }
+
         let held = self.moderation_of(message)?;
         let is_allowed = match (action, held) {
             (_, Some((MOD_REMOVE, _))) => false,
@@ -249,6 +261,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !is_allowed {
             return Err(Error::Malformed);
         }
+
         let plain = Zeroizing::new(
             self.open_ref()?
                 .store
@@ -263,6 +276,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .map_err(|_| Error::Malformed)?;
         self.post_group_control(conversation, &object, now_ms, rng)?;
         self.apply_own_roster_object(conversation, &object, now_ms, rng)?;
+
         Ok(())
     }
 
@@ -292,6 +306,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             });
         }
         notes.sort_by_key(|note| note.at_ms);
+
         Ok(notes)
     }
 }

@@ -153,6 +153,7 @@ fn record_messages<B: Backend>(
             ids.push(edit.target);
         }
     }
+
     ids.iter()
         .map(|id| {
             let reference = super::msg_ref(&open.device_set_key, id);
@@ -174,6 +175,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .ok_or(Error::Integrity)?;
             out.insert(device, ConversationId(row));
         }
+
         Ok(out)
     }
 
@@ -187,7 +189,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(roster) = self.roster_bytes()? else {
             return Ok(None);
         };
+
         let roster = Roster::parse(&roster)?;
+
         // DEV-308: the channels form a star around the device that owns
         // them, thus a peer is a device with a sync channel to this one.
         let channels = self.peer_channels()?;
@@ -209,6 +213,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if others.is_empty() {
             return Ok(None);
         }
+
         let store = &self.open_ref()?.store;
         let row = store.row_id(SYNC_STATE, ENGINE_KEY);
         let stored = store.get(SYNC_STATE, &row)?;
@@ -222,6 +227,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 fresh
             }
         };
+
         // A device that left the roster leaves the engine, with its
         // retained records (`DEV-257`).
         let gone: Vec<DeviceId> = engine
@@ -235,6 +241,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for device in others {
             engine.add_peer(device)?;
         }
+
         // DEV-275: a device that owns no channel has one peer, the device
         // that owns them (`DEV-308`), and its Lamport counter follows that
         // peer. A device that the owner links starts at zero, and the
@@ -245,6 +252,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 engine.set_owner(Some(*owner));
             }
         }
+
         // DEV-311: a new device takes the records of its link from the
         // snapshot, and the counter of the existing device starts there.
         if is_fresh {
@@ -259,6 +267,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
             }
         }
+
         Ok(Some(engine))
     }
 
@@ -317,7 +326,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for (value, row) in inbox.iter().zip(&inbox_rows) {
             batch.put(SYNC_INBOX, *row, None, &Zeroizing::new(value.clone()), rng)?;
         }
+
         batch.commit()?;
+
         Ok(inbox_rows)
     }
 
@@ -336,10 +347,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             self.subjects.insert(conversation, subject);
             return Ok(Some(subject));
         }
+
         let open = self.open_ref()?;
         let Some(row) = open.store.get(TableId::CONTACT, &conversation.0)? else {
             return Ok(None);
         };
+
         let row = Zeroizing::new(row);
         let state = row.get(32..).ok_or(Error::Integrity)?;
         let salt = umbra_core::session::node::stored_contact_salt(state)?;
@@ -351,6 +364,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             &key.public().to_bytes(),
         );
         self.subjects.insert(conversation, subject);
+
         Ok(Some(subject))
     }
 
@@ -362,6 +376,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if let Some((conversation, _)) = self.subjects.iter().find(|(_, held)| *held == subject) {
             return Ok(Some(*conversation));
         }
+
         let peers = self.device_peers()?;
         let rows: Vec<RowId> = self
             .open_ref()?
@@ -383,6 +398,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 return Ok(Some(conversation));
             }
         }
+
         Ok(None)
     }
 
@@ -411,6 +427,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(subject) = self.subject_of(conversation)? else {
             return Ok(());
         };
+
         let is_group = self.is_group(conversation)?;
         let channel = if is_group {
             umbra_wire::app::Channel::Group
@@ -418,12 +435,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             umbra_wire::app::Channel::Pairwise
         };
         let parsed = AppMessage::parse(app, channel)?;
+
         // A request for an epoch and its answer belong to the reader of the
         // group, and each device reads the group itself (GRP-343).
         let is_group_request = matches!(parsed.kind, AppKind::KeyRequest | AppKind::KeySupply);
         if !umbra_core::devset::engine::carried_on_sync(parsed.kind) || is_group_request {
             return Ok(());
         }
+
         let origin = Origin {
             scope: if is_group {
                 SCOPE_GROUP
@@ -433,6 +452,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             subject,
             author: if from_user { AUTHOR_USER } else { AUTHOR_PEER },
         };
+
         // DEV-242: a timed record carries the rest of its period.
         let expires_in = self.expires_in_of(conversation, app, now)?;
         let counter = engine.counter().saturating_add(1);
@@ -445,6 +465,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 self.queue_sync(*channel, &published.body, first.take(), rng)?;
             }
         }
+
         Ok(())
     }
 
@@ -465,6 +486,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if engine.peers().next().is_none() {
             return Ok(());
         }
+
         let groups = self.group_conversations()?;
         for conversation in self.conversations()? {
             if groups.contains(&conversation) {
@@ -473,15 +495,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Some(subject) = self.subject_of(conversation)? else {
                 continue;
             };
+
             if !engine.holds_mutable(ITEM_IDENTITY_ENTRY, &subject) {
                 self.publish_identity_entry(conversation, rng)?;
             }
+
             // DEV-319: a channel whose item no device took yet, as the one
             // of a contact from before this rule.
             if !engine.holds_mutable(ITEM_CHANNEL, &subject) {
                 self.publish_channel_entry(conversation, rng)?;
             }
         }
+
         Ok(())
     }
 
@@ -510,6 +535,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if open.store.list(PAIRWISE_HELD, None)?.len() >= PAIRWISE_HELD_MAX {
             return Ok(());
         }
+
         // One record holds one row, thus a record that comes again takes
         // no second place.
         let digest = umbra_crypto::hash::sha3_256(&[subject.as_slice(), app]);
@@ -526,6 +552,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         );
         let mut batch = open.store.begin();
         batch.put(PAIRWISE_HELD, row, None, &value, rng)?;
+
         Ok(batch.commit()?)
     }
 
@@ -553,6 +580,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 old.push(row);
                 continue;
             }
+
             if let Some(subject) = plain
                 .get(..32)
                 .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
@@ -560,19 +588,23 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 subjects.insert(subject);
             }
         }
+
         if !old.is_empty() {
             let open = self.open_mut()?;
             let mut batch = open.store.begin();
             for row in old {
                 batch.delete(PAIRWISE_HELD, row);
             }
+
             batch.commit()?;
         }
+
         for subject in subjects {
             if let Some(conversation) = self.conversation_of_subject(&subject)? {
                 self.replay_pairwise_records(&subject, conversation, rng)?;
             }
         }
+
         Ok(())
     }
 
@@ -591,12 +623,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if plain.get(..32) != Some(subject.as_slice()) {
                 continue;
             }
+
             let field = |range: core::ops::Range<usize>| plain.get(range).ok_or(Error::Integrity);
             let order =
                 u64::from_be_bytes(field(32..40)?.try_into().map_err(|_| Error::Integrity)?);
             let at = u64::from_be_bytes(field(40..48)?.try_into().map_err(|_| Error::Integrity)?);
             let from_user = field(48..49)? == [1];
             let app = plain.get(49..).ok_or(Error::Integrity)?.to_vec();
+
             // A timed record whose period ended stays gone (DEV-210).
             if at != 0 && at <= now {
                 held.push((
@@ -612,6 +646,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 ));
                 continue;
             }
+
             let expires_in = if at == 0 {
                 0
             } else {
@@ -629,9 +664,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 },
             ));
         }
+
         if held.is_empty() {
             return Ok(());
         }
+
         held.sort_by_key(|(order, _, _)| *order);
         let rows: Vec<RowId> = held.iter().map(|(_, row, _)| *row).collect();
         let records: Vec<super::Record> = held
@@ -642,11 +679,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !records.is_empty() {
             self.commit_records(&[], &records, now.saturating_mul(1_000), rng)?;
         }
+
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         for row in rows {
             batch.delete(PAIRWISE_HELD, row);
         }
+
         Ok(batch.commit()?)
     }
 
@@ -662,6 +701,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(mut engine) = self.sync_engine()? else {
             return Ok(());
         };
+
         let counter = engine.counter().saturating_add(1);
         let published =
             engine.publish_mutable(item, key, value, counter_ref(counter), unix_now())?;
@@ -672,6 +712,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 self.queue_sync(*channel, &published.body, None, rng)?;
             }
         }
+
         Ok(())
     }
 
@@ -688,6 +729,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(subject) = self.subject_of(conversation)? else {
             return Ok(());
         };
+
         let row = Zeroizing::new(
             self.open_ref()?
                 .store
@@ -722,6 +764,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(subject) = self.subject_of(conversation)? else {
             return Ok(());
         };
+
         let row = Zeroizing::new(
             self.open_ref()?
                 .store
@@ -732,6 +775,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(end) = Self::channel_end_of(state) else {
             return Ok(());
         };
+
         let entry = ChannelEntry {
             salt: umbra_core::session::node::stored_contact_salt(state)?,
             conversation: row
@@ -768,6 +812,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.owns_channels()? {
             return Ok(());
         }
+
         let entry = ChannelEntry::parse(value)?;
         let pairwise = self.root_identity()?.pairwise_identity(&entry.salt);
         let peers = self.device_peers()?;
@@ -778,10 +823,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             &pairwise.public().to_bytes(),
         );
         let row = open.store.row_id(TableId::CONTACT, &entry.conversation);
+
         // The subject must name the salt, and a sync channel is no contact.
         if named != subject || peers.contains(&ConversationId(row)) {
             return Err(Error::Integrity);
         }
+
         let end = umbra_core::session::node::ChannelEnd {
             peer_static: entry.peer_static,
             outbound: entry.outbound,
@@ -799,6 +846,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             self.subjects.insert(ConversationId(row), subject);
             self.events.push_back(Event::Conversations);
         }
+
         // DEV-294: each record that came before the conversation takes
         // its place now.
         self.replay_pairwise_records(&subject, ConversationId(row), rng)
@@ -817,6 +865,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.owns_channels()? {
             return Ok(());
         }
+
         self.publish_mutable(ITEM_DELIVERY, message, &[delivery as u8], rng)
     }
 
@@ -832,6 +881,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.owns_channels()? {
             return Ok(());
         }
+
         let row: RowId = key.try_into().map_err(|_| Error::Malformed)?;
         let reported = value
             .first()
@@ -842,6 +892,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(plain) = open.store.get(TableId::MESSAGE, &row)? else {
             return Ok(());
         };
+
         let mut plain = Zeroizing::new(plain);
         let info = super::info_of(&plain)?;
         let moves = match reported {
@@ -856,6 +907,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !info.outgoing || !moves {
             return Ok(());
         }
+
         let conversation = super::conversation_of(&plain)?;
         *plain.get_mut(1).ok_or(Error::Integrity)? = reported as u8;
         let mut batch = open.store.begin();
@@ -865,6 +917,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             message: MsgRef(row),
             delivery: reported,
         });
+
         Ok(())
     }
 
@@ -878,6 +931,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(subject) = self.subject_of(conversation)? else {
             return Ok(());
         };
+
         self.publish_mutable(ITEM_CONTACT_NAME, &subject, name.as_bytes(), rng)
     }
 
@@ -897,10 +951,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if item == umbra_core::devset::sync::ITEM_BLOCK {
             return self.apply_block_item(key, value, rng);
         }
+
         let subject: [u8; 32] = key.try_into().map_err(|_| Error::Malformed)?;
         match item {
             ITEM_IDENTITY_ENTRY => {
                 let entry = IdentityEntry::parse(value)?;
+
                 // The subject must name the salt, thus a peer names no
                 // conversation of another identity.
                 let pairwise = self.root_identity()?.pairwise_identity(&entry.salt);
@@ -913,6 +969,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 if named != subject {
                     return Err(Error::Integrity);
                 }
+
                 let row = open.store.row_id(TableId::CONTACT, &entry.conversation);
                 if open.store.get(TableId::CONTACT, &row)?.is_none() {
                     let state = umbra_core::session::node::shadow_contact_state(&entry.salt);
@@ -923,6 +980,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     self.subjects.insert(ConversationId(row), subject);
                     self.events.push_back(Event::Conversations);
                 }
+
                 // DEV-294: each record that came before its entry takes its
                 // place now, and one that an earlier try left too.
                 self.replay_pairwise_records(&subject, ConversationId(row), rng)?;
@@ -949,6 +1007,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             // An item that this build does not apply changes nothing.
             _ => {}
         }
+
         Ok(())
     }
 
@@ -970,6 +1029,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut app = vec![0u8; record.len()];
         record.encode(&mut app)?;
         self.sync_out.push_back(SyncSend { peer, app, message });
+
         Ok(())
     }
 
@@ -989,6 +1049,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             zeroize::Zeroize::zeroize(&mut send.app);
             send.app = app;
         }
+
         Some(send)
     }
 
@@ -1000,6 +1061,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Ok(queued) = AppMessage::parse(app, umbra_wire::app::Channel::Pairwise) else {
             return Ok(None);
         };
+
         let is_timed = queued.kind == AppKind::DeviceSet
             && matches!(
                 SyncedRecord::parse(queued.body),
@@ -1011,6 +1073,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(body) = self.restamped(queued.body.to_vec(), unix_now())? else {
             return Ok(None);
         };
+
         let record = AppMessage {
             kind: AppKind::DeviceSet,
             msg_id: queued.msg_id,
@@ -1019,6 +1082,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         };
         let mut out = vec![0u8; record.len()];
         record.encode(&mut out)?;
+
         Ok(Some(out))
     }
 
@@ -1031,10 +1095,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(mut engine) = self.sync_engine()? else {
             return Ok(());
         };
+
         let due = engine.acknowledgments(now)?;
         if due.is_empty() {
             return Ok(());
         }
+
         self.put_engine(&engine, None, rng)?;
         let channels = self.peer_channels()?;
         for (peer, body) in due {
@@ -1042,6 +1108,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 self.queue_sync(*channel, &body, None, rng)?;
             }
         }
+
         Ok(())
     }
 
@@ -1052,6 +1119,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(roster) = self.roster_bytes()? else {
             return Ok(());
         };
+
         let channels: Vec<ConversationId> = self.peer_channels()?.into_values().collect();
         for channel in channels {
             // DEV-313: the channel of a revoked device carries the epoch
@@ -1059,8 +1127,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if self.is_leaving_channel(channel)? {
                 continue;
             }
+
             self.queue_roster(channel, &roster, rng)?;
         }
+
         Ok(())
     }
 
@@ -1093,11 +1163,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(mut engine) = self.sync_engine()? else {
             return Ok(());
         };
+
         let channels = self.peer_channels()?;
         let peers: Vec<DeviceId> = engine.peers().copied().collect();
         for peer in peers.iter().filter(|peer| channels.contains_key(*peer)) {
             engine.new_queue(peer);
         }
+
         self.put_engine(&engine, None, rng)
     }
 
@@ -1112,6 +1184,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(mut engine) = self.sync_engine()? else {
             return Ok(());
         };
+
         let Some(peer) = self
             .peer_channels()?
             .into_iter()
@@ -1119,6 +1192,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         else {
             return Ok(());
         };
+
         // The link can lose a kept epoch that went with the lost record.
         // Thus the channel takes the kept epochs again at the next head of
         // its peer.
@@ -1126,6 +1200,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !engine.peers().any(|held| *held == peer) {
             return Ok(());
         }
+
         engine.new_queue(&peer);
         self.put_engine(&engine, None, rng)
     }
@@ -1143,6 +1218,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !engine.resending() {
             return Ok(false);
         }
+
         let channels = self.peer_channels()?;
         let peers: Vec<DeviceId> = engine.peers().copied().collect();
         for peer in peers {
@@ -1152,6 +1228,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Some((_, counter)) = engine.next_resend(&peer) else {
                 continue;
             };
+
             let store = &self.open_ref()?.store;
             let row = store.row_id(SYNC_SENT, &counter_key(counter));
             let body = store
@@ -1163,6 +1240,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 Some(body) => self.restamped(body, now)?,
                 None => None,
             };
+
             // DEV-069: a counter whose body is gone for good, as that of a
             // timed record whose period ended, goes as a void. The peer
             // takes the counter, thus its acknowledgment point passes it
@@ -1177,7 +1255,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             self.queue_sync(channel, &body, None, rng)?;
             return Ok(true);
         }
+
         self.put_engine(&engine, None, rng)?;
+
         Ok(false)
     }
 
@@ -1193,6 +1273,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(mut engine) = self.sync_engine()? else {
             return Ok((Vec::new(), Vec::new()));
         };
+
         let devices: BTreeMap<ConversationId, DeviceId> = self
             .peer_channels()?
             .into_iter()
@@ -1203,13 +1284,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.owns_channels()? && bodies.iter().any(|(held, _)| devices.contains_key(held)) {
             self.note_owner_heard(now, rng)?;
         }
+
         let mut out = Vec::new();
+
         // DEV-308: the device that owns the channels relays what one peer
         // publishes to each peer, and a peer drops its own record when the
         // relay brings it back.
         let relays = self.owns_channels()? && engine.peers().count() > 1;
         let mut relay_records: Vec<(Origin, Vec<u8>, u32)> = Vec::new();
         let mut relay_items: Vec<RelayItem> = Vec::new();
+
         // DEV-075: a record past `SYNC_MAX_AGE` waits for no resend.
         let floor = engine.retained_floor();
         engine.expire(now);
@@ -1218,6 +1302,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Some(source) = devices.get(&channel) else {
                 continue;
             };
+
             // DEV-273: a record that does not name its channel changes
             // nothing, and it ends no batch.
             match engine.receive(source, &body, now) {
@@ -1276,6 +1361,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     if is_channel && writer != *source {
                         continue;
                     }
+
                     // An item that does not apply ends no batch.
                     let _ = self.apply_mutable(item, &key, &value, rng);
                 }
@@ -1289,6 +1375,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         .unwrap_or(false)
                     {
                         self.events.push_back(Event::Conversations);
+
                         // DEV-257: a device that the epoch revokes gives
                         // nothing more, the later bodies of this batch too.
                         let revoked: Vec<DeviceId> = Roster::parse(&payload)?
@@ -1323,6 +1410,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                             for epoch in chain {
                                 self.queue_roster(channel, &epoch, rng)?;
                             }
+
                             self.roster_chain_sent.insert(channel, head);
                         }
                     }
@@ -1335,6 +1423,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 _ => {}
             }
         }
+
         // DEV-308: each peer takes each counter of this device, thus the
         // relay goes to each peer, the source too. An item keeps the Lamport
         // counter of its write, thus its echo supersedes no later write of
@@ -1349,6 +1438,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 relayed.push((published.counter, published.body));
             }
         }
+
         for (item, key, value, lamport, writer) in relay_items {
             let counter = engine.counter().saturating_add(1);
             if let Ok(published) = engine.relay_mutable(
@@ -1363,6 +1453,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 relayed.push((published.counter, published.body));
             }
         }
+
         // DEV-013: the records that the engine took wait in the inbox, in
         // the commit of the engine, until the caller stores them. A crash
         // between the two loses no record: the inbox gives it again.
@@ -1371,11 +1462,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for (_, body) in &relayed {
             self.queue_to_peers(&engine, body, rng)?;
         }
+
         if acked {
             let below = engine.retained_floor().saturating_sub(1);
             self.prune_sync_sent(below.max(engine.acked_by_all()))?;
         }
+
         self.keep_history_holes(&engine, now, rng)?;
+
         Ok((out, inbox_rows))
     }
 
@@ -1384,11 +1478,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if rows.is_empty() {
             return Ok(());
         }
+
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         for row in rows {
             batch.delete(SYNC_INBOX, *row);
         }
+
         Ok(batch.commit()?)
     }
 
@@ -1404,6 +1500,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 out.push(synced);
             }
         }
+
         Ok((out, rows))
     }
 
@@ -1420,6 +1517,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 self.queue_sync(*channel, body, None, rng)?;
             }
         }
+
         Ok(())
     }
 
@@ -1437,6 +1535,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 return Ok(true);
             }
         }
+
         Ok(false)
     }
 
@@ -1477,6 +1576,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if let Some(expires_in) = deadline {
             restamp_expires_in(&mut body, expires_in)?;
         }
+
         Ok(Some(body))
     }
 
@@ -1507,6 +1607,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if gone.is_empty() {
             return Ok(());
         }
+
         let names = |named: &[MsgRef]| named.iter().any(|one| gone.contains(one));
         let mut sent = Vec::new();
         for (row, value) in self.open_ref()?.store.list(SYNC_SENT, None)? {
@@ -1514,10 +1615,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Some(body) = value.get(8..) else {
                 continue;
             };
+
             if names(&self.messages_of_sync_body(body)?) {
                 sent.push(row);
             }
         }
+
         // DEV-243: a copy that still waits for its send goes nowhere after
         // the period, as one that a push-wake session held. The peer would
         // keep it for the full period again.
@@ -1534,6 +1637,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 self.sync_out.push_back(send);
             }
         }
+
         let mut copies = Vec::new();
         let open = self.open_ref()?;
         for (row, held) in open.store.list(super::PUBLISH_PENDING, None)? {
@@ -1541,10 +1645,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Some((_, conversation, app)) = super::pending_copy(&held) else {
                 continue;
             };
+
             if names(&record_messages(open, conversation, app)) {
                 copies.push(row);
             }
         }
+
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         for row in sent {
@@ -1553,6 +1659,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for row in copies {
             batch.delete(super::PUBLISH_PENDING, row);
         }
+
         Ok(batch.commit()?)
     }
 
@@ -1566,6 +1673,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(conversation) = self.conversation_of_subject(&record.origin.subject)? else {
             return Ok(Vec::new());
         };
+
         Ok(record_messages(
             self.open_ref()?,
             conversation,
@@ -1586,10 +1694,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 gone.push(row);
             }
         }
+
         let mut batch = open.store.begin();
         for row in gone {
             batch.delete(SYNC_SENT, row);
         }
+
         Ok(batch.commit()?)
     }
 }

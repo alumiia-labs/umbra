@@ -111,6 +111,7 @@ fn take<const N: usize>(bytes: &[u8], at: &mut usize) -> Result<[u8; N], Error> 
         .and_then(|slice| slice.try_into().ok())
         .ok_or(Error::Malformed)?;
     *at = end;
+
     Ok(out)
 }
 
@@ -139,7 +140,9 @@ impl Relay {
         if bytes.len() != RELAY_LEN {
             return Err(Error::Malformed);
         }
+
         let mut at = 0;
+
         Ok(Relay {
             relay_id: take(bytes, &mut at)?,
             root: Secret::new(take(bytes, &mut at)?),
@@ -169,6 +172,7 @@ impl Group {
         if bytes.len() != GROUP_LEN && bytes.len() != GROUP_LEN_V1 {
             return Err(Error::Malformed);
         }
+
         let mut at = 0;
         let handle = take(bytes, &mut at)?;
         let relay_id = take(bytes, &mut at)?;
@@ -183,6 +187,7 @@ impl Group {
         } else {
             (None, 0)
         };
+
         Ok(Group {
             handle,
             relay_id,
@@ -215,6 +220,7 @@ impl Queue {
         if bytes.len() != QUEUE_LEN && bytes.len() != QUEUE_LEN_V1 {
             return Err(Error::Malformed);
         }
+
         let mut at = 0;
         let recipient_id = take(bytes, &mut at)?;
         let handle = take(bytes, &mut at)?;
@@ -225,6 +231,7 @@ impl Queue {
         } else {
             None
         };
+
         Ok(Queue {
             recipient_id,
             handle,
@@ -299,6 +306,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.push_token()?.unwrap_or_default() == plain {
             return Ok(());
         }
+
         let mut rows = vec![(SETTINGS, PUSH_TOKEN_SETTING.to_vec(), Zeroizing::new(plain))];
         for mut group in self.notify_groups()? {
             if group.state == REGISTERED {
@@ -306,6 +314,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 rows.push((NOTIFY_GROUP, group.handle.to_vec(), group.encode()));
             }
         }
+
         self.put_rows(&rows, rng)
     }
 
@@ -337,6 +346,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for (table, row) in gone {
             batch.delete(table, row);
         }
+
         batch.commit()?;
         let binds = |table: &TableId| [NOTIFY_RELAY, NOTIFY_GROUP, NOTIFY_QUEUE].contains(table);
         if rows.iter().any(|(table, ..)| binds(table))
@@ -344,6 +354,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         {
             self.wake_changed();
         }
+
         Ok(())
     }
 
@@ -365,6 +376,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .collect();
         rows.sort_unstable();
         let parts: Vec<&[u8]> = rows.iter().map(|row| row.as_slice()).collect();
+
         Ok(sha3_256(&parts))
     }
 
@@ -383,6 +395,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.binds()? {
             return Ok(false);
         }
+
         let mut groups = self.notify_groups()?;
         let mut rows = Vec::new();
         let set = self.contact_set()?;
@@ -391,6 +404,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let row = store.row_id(SETTINGS, CONTACT_SET_SETTING);
             store.get(SETTINGS, &row)?
         };
+
         // The first check records the set, and each later change of it
         // makes each group due.
         if known.as_deref() != Some(set.as_slice()) {
@@ -399,12 +413,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     group.rotated_at = 0;
                 }
             }
+
             rows.push((
                 SETTINGS,
                 CONTACT_SET_SETTING.to_vec(),
                 Zeroizing::new(set.to_vec()),
             ));
         }
+
         // Each group row below holds its root, thus no relay root stays.
         rows.extend(self.unused_relay_roots()?);
         let due = groups.iter().position(|group| {
@@ -418,6 +434,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             );
             return self.put_rows(&rows, rng).map(|()| false);
         };
+
         let old = groups.swap_remove(at);
         let old_handle = old.handle;
         let mut fresh = Group {
@@ -432,6 +449,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             rotated_at: now,
         };
         let mut deleted = Vec::new();
+
         // A handle that the NDR never held needs no NUNREG.
         if old.state == UNREGISTERED {
             deleted.push((NOTIFY_GROUP, old.handle.to_vec()));
@@ -443,11 +461,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             };
             rows.push((NOTIFY_GROUP, retired.handle.to_vec(), retired.encode()));
         }
+
         let queues = self.open_ref()?.store.list(NOTIFY_QUEUE, None)?;
         for (_, bytes) in queues {
             let Ok(mut queue) = Queue::parse(&bytes) else {
                 continue;
             };
+
             // NTF-034: the group takes again the queues that it holds now.
             if queue.handle == old_handle {
                 fresh.count = fresh.count.saturating_add(1);
@@ -457,6 +477,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 rows.push((NOTIFY_QUEUE, queue.recipient_id.to_vec(), queue.encode()));
             }
         }
+
         rows.push((NOTIFY_GROUP, fresh.handle.to_vec(), fresh.encode()));
         rows.extend(
             groups
@@ -464,6 +485,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .map(|group| (NOTIFY_GROUP, group.handle.to_vec(), group.encode())),
         );
         self.write_rows(&rows, &deleted, rng)?;
+
         Ok(true)
     }
 
@@ -494,6 +516,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 Err(_) => crate::devlog::line("push: a group row does not read"),
             }
         }
+
         // A row of the first form holds the root of its relay.
         for group in &mut groups {
             if group.root.is_none() {
@@ -504,6 +527,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     .map(|relay| Secret::new(*relay.root.expose()));
             }
         }
+
         Ok(groups)
     }
 
@@ -517,6 +541,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 Err(_) => crate::devlog::line("push: a relay row does not read"),
             }
         }
+
         Ok(relays)
     }
 
@@ -556,6 +581,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.binds()? {
             return Ok(Vec::new());
         }
+
         let mut relays = self.notify_relays()?;
         let mut groups = self.notify_groups()?;
         let mut unbound = Vec::new();
@@ -569,8 +595,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
                 None => {}
             }
+
             if !relays.iter().any(|relay| relay.relay_id == *relay_id) {
                 let relay_idx = u16::try_from(relays.len()).map_err(|_| Error::TooLong)?;
+
                 // Each group draws a root of its own (`NTF-007`).
                 relays.push(Relay {
                     relay_id: *relay_id,
@@ -578,6 +606,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     relay_idx,
                 });
             }
+
             // NTF-031, NTF-032: a group holds at most eight queues of one
             // relay, and a notify queue shares a group with no pairwise
             // queue (`NTF-091`).
@@ -624,9 +653,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             });
             unbound.push(*recipient_id);
         }
+
         if new_queues.is_empty() {
             return Ok(unbound);
         }
+
         // Each group row below holds its root, thus no relay root stays.
         let rows: Vec<_> = relays
             .iter()
@@ -646,6 +677,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             )
             .collect();
         self.put_rows(&rows, rng)?;
+
         Ok(unbound)
     }
 
@@ -659,6 +691,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// notification setting or a mute gives [`Event::WakeTable`].
     pub fn wake_table(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
         let mut roots: Vec<[u8; 32]> = Vec::new();
+
         // A group of the first form took the root of its relay, and the
         // group list holds that root for it. Each binding uses the root of
         // its group, a retired group too until its queues bind again.
@@ -669,9 +702,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
             }
         }
+
         // A group notify queue names its group by its own row.
         let mut conversations = self.group_notify_conversations()?;
         let store = &self.open_ref()?.store;
+
         // A contact row starts with the RecipientId of its inbound queue.
         for (row, plain) in store.list(TableId::CONTACT, None)? {
             let plain = Zeroizing::new(plain);
@@ -679,6 +714,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 conversations.push((recipient, row));
             }
         }
+
         // ABU-029, DEV-219: a locked client reads no setting, thus the
         // table says which queue raises no alert. Such a queue is the queue
         // of a blocked contact, of a conversation that shows no
@@ -693,6 +729,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if silent.contains(&conversation) {
                 continue;
             }
+
             let muted_until_ms = self.muted_until(conversation)?;
             if self.is_blocked(conversation)?
                 || self.alert_setting(conversation)? == super::ALERT_NONE
@@ -703,6 +740,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 mutes.push((conversation, muted_until_ms.div_ceil(1_000)));
             }
         }
+
         let mut aliases = Vec::new();
         let mut muted = Vec::new();
         for queue in store
@@ -718,6 +756,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 aliases.push((queue.alias, WAKE_SILENT));
                 continue;
             }
+
             aliases.push((queue.alias, conversation));
             if let Some((_, until)) = mutes
                 .iter()
@@ -731,8 +770,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             aliases,
             muted,
         };
+
         // The drop of the table wipes its roots.
         let encoded = Zeroizing::new(table.encode()?);
+
         Ok(encoded)
     }
 
@@ -771,6 +812,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .iter()
             .filter(|group| group.state == REGISTERED)
             .count();
+
         Ok((bound, registered))
     }
 
@@ -780,6 +822,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(queue) = self.notify_queue(recipient_id)? else {
             return Ok(None);
         };
+
         let Some(group) = self
             .notify_groups()?
             .into_iter()
@@ -797,6 +840,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(root) = group.root else {
             return Ok(None);
         };
+
         // NTF-143: with no push token the binding serves the watch alone,
         // and it names no handle and no token key of an NDR.
         let (handle, k_tok) = if self.push_token()?.is_some() {
@@ -804,6 +848,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         } else {
             (WATCH_HANDLE, Secret::new([0; 32]))
         };
+
         Ok(Some(Binding {
             root,
             handle,
@@ -833,6 +878,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.locked_watch()? == on {
             return Ok(());
         }
+
         let mut rows = vec![(
             SETTINGS,
             WATCH_SETTING.to_vec(),
@@ -842,10 +888,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Ok(mut queue) = Queue::parse(&bytes) else {
                 continue;
             };
+
             queue.bound = false;
             queue.notifier_id = None;
             rows.push((NOTIFY_QUEUE, queue.recipient_id.to_vec(), queue.encode()));
         }
+
         self.put_rows(&rows, rng)
     }
 
@@ -856,10 +904,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(binding) = self.binding_of(recipient_id)? else {
             return Ok(None);
         };
+
         let kdf = Hkdf::<Sha3_256>::new(Some(recipient_id), binding.root.expose());
         let mut secret = Secret::<32>::zeroed();
         kdf.expand(labels::NTF_NOTIFIER, secret.expose_mut())
             .map_err(|_| Error::Malformed)?;
+
         Ok(Some(secret))
     }
 
@@ -876,6 +926,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if queue.notifier_id == Some(notifier_id) {
             return Ok(());
         }
+
         queue.notifier_id = Some(notifier_id);
         self.put_rows(
             &[(NOTIFY_QUEUE, recipient_id.to_vec(), queue.encode())],
@@ -890,6 +941,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.locked_watch()? || self.push_token()?.is_some() {
             return Ok(Vec::new());
         }
+
         let groups = self.notify_groups()?;
         let mut out = Vec::new();
         for (_, bytes) in self.open_ref()?.store.list(NOTIFY_QUEUE, None)? {
@@ -902,10 +954,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Some(group) = groups.iter().find(|group| group.handle == queue.handle) else {
                 continue;
             };
+
             if let Some(secret) = self.notifier_secret(&queue.recipient_id)? {
                 out.push((group.relay_id, notifier_id, secret));
             }
         }
+
         Ok(out)
     }
 
@@ -920,6 +974,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(queue) = self.notify_queue(recipient_id)? else {
             return Ok(());
         };
+
         let mut rows = Vec::new();
         if let Some(mut group) = self
             .notify_groups()?
@@ -949,11 +1004,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(mut queue) = self.notify_queue(recipient_id)? else {
             return Ok(true);
         };
+
         queue.bound = true;
         self.put_rows(
             &[(NOTIFY_QUEUE, recipient_id.to_vec(), queue.encode())],
             rng,
         )?;
+
         Ok(true)
     }
 
@@ -993,12 +1050,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 (Some(_), REGISTERED) | (None, UNREGISTERED) => continue,
                 (Some(plain), state) => {
                     let nonce: [u8; 24] = random(rng);
+
                     // NTF-123: `ct_token` seals the token under `k_tok`,
                     // bound to the handle.
                     let mut ct_token = plain.clone();
                     let tag = aead::seal(&group.k_tok, &nonce, &group.handle, &mut ct_token)
                         .map_err(|_| Error::Malformed)?;
                     ct_token.extend_from_slice(&tag);
+
                     // NTF-124: a handle that the NDR holds moves on its
                     // removal secret, and the next registration takes the
                     // next secret of the chain. The request carries the
@@ -1049,6 +1108,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             };
             calls.push(request);
         }
+
         Ok(calls)
     }
 
@@ -1066,6 +1126,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         else {
             return Ok(Vec::new());
         };
+
         // NTF-124: the registration took the next secret of the chain.
         if call.advances {
             group.removal = next_removal(&group.removal);
@@ -1084,6 +1145,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
             return Ok(Vec::new());
         }
+
         // A registration under a token that the platform replaced since
         // holds the handle under the old token, thus the handle moves again.
         let current = self
@@ -1096,6 +1158,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         } else {
             STALE
         };
+
         // NTF-125: a relay that pushed before this registration got `gone`
         // and dropped its binding, thus each queue of the handle binds again.
         let mut unbound = Vec::new();
@@ -1108,6 +1171,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 if queue.handle != group.handle {
                     continue;
                 }
+
                 if queue.bound {
                     queue.bound = false;
                     unbound.push((NOTIFY_QUEUE, queue.recipient_id.to_vec(), queue.encode()));
@@ -1118,9 +1182,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
             }
         }
+
         unbound.push((NOTIFY_GROUP, group.handle.to_vec(), group.encode()));
         self.put_rows(&unbound, rng)?;
         self.binds_sent(&again);
+
         Ok(again)
     }
 }

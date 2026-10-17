@@ -221,6 +221,7 @@ fn state_row(state: FileState, shape: &Shape, size: u64, extras: &FileExtras) ->
     row.extend_from_slice(&shape.pixel_h.to_be_bytes());
     row.extend_from_slice(&shape.media_seconds.to_be_bytes());
     row.extend_from_slice(&size.to_be_bytes());
+
     // The name takes one length byte and the preview two, as the body of
     // `WIR-531` does. A value too long for its field passes neither
     // `WIR-532` nor `WIR-533`, thus it never reaches this row.
@@ -275,6 +276,7 @@ fn read_state_row(row: &[u8]) -> Result<FileInfo, Error> {
         .get(STATE_ROW_LEN..STATE_ROW_LEN + 8)
         .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
         .map_or(0, u64::from_be_bytes);
+
     Ok(FileInfo {
         size,
         state: FileState::from_byte(state).ok_or(Error::Integrity)?,
@@ -301,6 +303,7 @@ pub(super) fn shape_of(descriptor: &FileDescriptor) -> Shape {
 pub(super) fn fetchable(body: &[u8]) -> Option<FileDescriptor> {
     let descriptor = AttachmentBody::parse(body).ok()?.descriptor;
     let is_in_reach = !descriptor.refs.is_empty() && descriptor.refs.len() <= MAX_DESCRIPTOR_REFS;
+
     // ATT-142: a descriptor of a conversation names three replicas.
     let names_each = umbra_core::attach::manifest::reject_null_hints(&descriptor.refs).is_ok();
     (is_in_reach && names_each).then_some(descriptor)
@@ -366,6 +369,7 @@ fn credentials_row(credentials: &[ChunkCredential]) -> Result<Zeroizing<Vec<u8>>
             row.extend_from_slice(relay);
         }
     }
+
     Ok(row)
 }
 
@@ -386,12 +390,14 @@ fn read_credentials_row(row: &[u8]) -> Result<Vec<ErasureJob>, Error> {
         for _ in 0..relay_count {
             relays.push(take(32)?.try_into().map_err(|_| Error::Integrity)?);
         }
+
         jobs.push(ErasureJob {
             chunk_id,
             cred: Secret::new(cred),
             relays,
         });
     }
+
     Ok(jobs)
 }
 
@@ -481,6 +487,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             rng,
         )?;
         batch.commit()?;
+
         Ok(conversation.0)
     }
 
@@ -503,6 +510,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .ok_or(Error::NotFound)?,
         );
         let conversation = conversation_of(&plain)?;
+
         // ATT-160: the copy of the credentials for the erase, and its hold.
         let credentials = credentials_row(&uploaded.credentials)?;
         let mut erase = Zeroizing::new(Vec::with_capacity(
@@ -512,6 +520,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         erase.extend_from_slice(&now.to_be_bytes());
         erase.extend_from_slice(&credentials);
         let hold = open.store.row_id(ERASE_DUE, &hold_key(&message.0));
+
         // WIR-531: the name travels after the descriptor, inside the record.
         let descriptor = FileDescriptor::parse(&{
             let mut bytes = Zeroizing::new(vec![0u8; uploaded.descriptor.len()]);
@@ -520,6 +529,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         })?;
         let held = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
         let stored = AppMessage::parse(held, Channel::Pairwise)?;
+
         // WIR-535: the record held the caption alone until now.
         let caption = match core::str::from_utf8(stored.body) {
             Ok(text) if !text.is_empty() => Some(text),
@@ -564,6 +574,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             &credentials,
             rng,
         )?;
+
         // The two rows name no conversation, thus a deletion that goes by
         // the owner of a row takes neither.
         batch.put(ERASE_DUE, message.0, None, &erase, rng)?;
@@ -576,6 +587,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             rng,
         )?;
         batch.commit()?;
+
         // A file of a group goes to the group queue, and on no pairwise
         // channel (Part 11 §11.2).
         if self.is_group(conversation)? {
@@ -588,7 +600,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 app: app.to_vec(),
             });
         }
+
         self.events.push_back(Event::File { message: *message });
+
         Ok(())
     }
 
@@ -605,6 +619,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             message: *message,
             delivery: Delivery::Failed,
         });
+
         Ok(())
     }
 
@@ -622,6 +637,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.put(FILE_DATA, message.0, Some(conversation), file, rng)?;
         batch.commit()?;
         self.events.push_back(Event::File { message: *message });
+
         Ok(())
     }
 
@@ -643,6 +659,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         };
         self.set_file_state(message, state, rng)?;
         self.events.push_back(Event::File { message: *message });
+
         Ok(())
     }
 
@@ -657,6 +674,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .ok_or(Error::NotFound)?,
         );
         let stored_at = info_of(&plain)?.stored_at_ms / 1_000;
+
         Ok(self.clock.saturating_sub(stored_at) >= umbra_core::attach::CHUNK_LIFE_MAX)
     }
 
@@ -693,6 +711,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !info_of(&plain)?.outgoing {
             return Err(Error::Malformed);
         }
+
         let conversation = conversation_of(&plain)?;
         let extras = self.file_extras(message)?;
         let file = DraftFile {
@@ -721,11 +740,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .get(TableId::MESSAGE, &message.0)?
                 .ok_or(Error::NotFound)?,
         );
+
         // A tap fetches a file that failed, and a file that waits for it
         // (`IMP-167`).
         if !matches!(info.state, FileState::Failed | FileState::Held) {
             return Err(Error::Malformed);
         }
+
         // A restored or linked store holds no file of the send, and the
         // file of the record comes down as the file of a contact does.
         let held = if info_of(&plain)?.outgoing {
@@ -745,6 +766,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             });
             return Ok(());
         }
+
         let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
         let parsed = AppMessage::parse(app, Channel::Pairwise)?;
         let descriptor = fetchable(parsed.body).ok_or(Error::Malformed)?;
@@ -753,6 +775,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             message: *message,
             descriptor: Box::new(descriptor),
         });
+
         Ok(())
     }
 
@@ -769,6 +792,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if is_metered || !self.unmetered_only()? {
             return Ok(0);
         }
+
         let limit = self.auto_download_limit()?;
         let store = &self.open_ref()?.store;
         let mut waiting = Vec::new();
@@ -780,6 +804,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Some(plain) = store.get(TableId::MESSAGE, &row)? else {
                 continue;
             };
+
             let plain = Zeroizing::new(plain);
             let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
             let parsed = AppMessage::parse(app, Channel::Pairwise)?;
@@ -787,6 +812,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 waiting.push((MsgRef(row), descriptor));
             }
         }
+
         let count = waiting.len();
         for (message, descriptor) in waiting {
             self.set_file_state(&message, FileState::Wanted, rng)?;
@@ -796,6 +822,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             });
             self.events.push_back(Event::File { message });
         }
+
         Ok(count)
     }
 
@@ -811,6 +838,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.files.is_metered && self.unmetered_only()? {
             return Ok(0);
         }
+
         self.auto_download_limit()
     }
 
@@ -830,6 +858,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for row in rows {
             self.requeue_file(&MsgRef(row))?;
         }
+
         // ATT-161: each `CDEL` that an earlier run did not complete.
         self.requeue_erasures()
     }
@@ -850,11 +879,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 // A hold row. Its credentials row takes it along.
                 continue;
             };
+
             // IMP-130: a row of a version that this build does not read
             // stays, and it stops no unlock and no run.
             if head.first() != Some(&ERASE_VERSION) {
                 continue;
             }
+
             let at = head
                 .get(1..)
                 .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
@@ -864,10 +895,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 ended.push((row, hold));
                 continue;
             }
+
             let is_held = open.store.get(ERASE_DUE, &hold)?.is_some();
             if open.store.get(CHUNK_CRED, &row)?.is_some() {
                 continue;
             }
+
             // A hold with no row of `CHUNK_CRED`: the message left on a
             // path that erases no chunk. A removal by a moderator and the
             // removal of its conversation are such paths. No later deletion
@@ -876,21 +909,26 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 ended.push((row, hold));
                 continue;
             }
+
             if let Ok(jobs) = read_credentials_row(credentials) {
                 due.push((row, jobs));
             }
         }
+
         if !ended.is_empty() {
             let mut batch = open.store.begin();
             for (row, hold) in ended {
                 batch.delete(ERASE_DUE, row);
                 batch.delete(ERASE_DUE, hold);
             }
+
             batch.commit()?;
         }
+
         for (row, jobs) in due {
             self.erase_from(row, jobs);
         }
+
         Ok(())
     }
 
@@ -923,9 +961,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut batch = open.store.begin();
         batch.put(ERASE_DUE, row, None, &value, rng)?;
         batch.commit()?;
+
         // The answer to a `CDEL` of this run takes the row away.
         self.files.erasing.insert(*chunk_id, row);
         self.files.erase_left.insert(row, 1);
+
         Ok(())
     }
 
@@ -946,6 +986,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if head.first() != Some(&ERASE_LINK) {
                 continue;
             }
+
             let at = head
                 .get(1..)
                 .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
@@ -954,17 +995,21 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 ended.push(row);
                 continue;
             }
+
             if let Ok(jobs) = read_credentials_row(credentials) {
                 due.push((row, jobs));
             }
         }
+
         if !ended.is_empty() {
             let mut batch = open.store.begin();
             for row in ended {
                 batch.delete(ERASE_DUE, row);
             }
+
             batch.commit()?;
         }
+
         let mut out = Vec::new();
         for (row, jobs) in due {
             self.files.erase_left.insert(row, jobs.len());
@@ -973,6 +1018,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 out.push(job);
             }
         }
+
         Ok(out)
     }
 
@@ -983,6 +1029,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for job in &jobs {
             files.erasing.insert(job.chunk_id, row);
         }
+
         files.erase_left.insert(row, jobs.len());
         for job in jobs {
             if !files
@@ -1003,17 +1050,20 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(row) = self.files.erasing.remove(chunk_id) else {
             return Ok(());
         };
+
         let left = self.files.erase_left.get(&row).copied().unwrap_or(0);
         if left > 1 {
             self.files.erase_left.insert(row, left.saturating_sub(1));
             return Ok(());
         }
+
         self.files.erase_left.remove(&row);
         let open = self.open_mut()?;
         let hold = open.store.row_id(ERASE_DUE, &hold_key(&row));
         let mut batch = open.store.begin();
         batch.delete(ERASE_DUE, row);
         batch.delete(ERASE_DUE, hold);
+
         Ok(batch.commit()?)
     }
 
@@ -1035,16 +1085,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(state) = store.get(FILE_STATE, &message.0)? else {
             return Ok(());
         };
+
         let info = read_state_row(&state)?;
         let Some(plain) = store.get(TableId::MESSAGE, &message.0)? else {
             return Ok(());
         };
+
         let plain = Zeroizing::new(plain);
         match info.state {
             FileState::Uploading => {
                 let Some(file) = store.get(FILE_DATA, &message.0)? else {
                     return Ok(());
                 };
+
                 self.files.uploads.push_back(UploadJob {
                     message: *message,
                     plain: Zeroizing::new(file),
@@ -1064,6 +1117,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             // A held file waits for a tap and not for a new start.
             FileState::Ready | FileState::Failed | FileState::Held | FileState::Gone => {}
         }
+
         Ok(())
     }
 
@@ -1083,6 +1137,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             Some(row) => read_credentials_row(&Zeroizing::new(row))?,
             None => Vec::new(),
         };
+
         Ok(FileErasure {
             jobs,
             // A file of an earlier version holds no copy, and its erase
@@ -1107,8 +1162,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             for job in &erasure.jobs {
                 self.files.erasing.insert(job.chunk_id, message.0);
             }
+
             self.files.erase_left.insert(message.0, erasure.jobs.len());
         }
+
         self.files.erasures.extend(erasure.jobs);
     }
 }
@@ -1139,6 +1196,7 @@ mod tests {
             let rest = row[1..].to_vec();
             carried_state(&mut row);
             assert_eq!(row[0], to as u8);
+
             // IDN-186: the shape, the size, and the extras stay.
             assert_eq!(row[1..], rest[..]);
         }
@@ -1155,6 +1213,7 @@ mod tests {
         let read = extras_of_state_row(&row).name.unwrap();
         assert_eq!(read, "reportfdp.exe");
         assert!(umbra_wire::descriptor::is_file_name(&read));
+
         // A name of marks alone is no name.
         let extras = FileExtras {
             name: Some("\u{200E}\u{2069}".to_owned()),
@@ -1185,6 +1244,7 @@ mod tests {
                 replicas: [[4; 12], [5; 12]],
             }],
         };
+
         // The body as a build before the rule of the marks wrote it.
         let name = "a\u{200E}b.pdf";
         let mut body = vec![0u8; descriptor.len()];
@@ -1192,6 +1252,7 @@ mod tests {
         body.push(u8::try_from(name.len()).unwrap());
         body.extend_from_slice(name.as_bytes());
         body.extend_from_slice(&[0, 0]);
+
         // The file stays in reach, and its name shows with no mark.
         assert_eq!(fetchable(&body).unwrap().refs.len(), 1);
         let (row, wanted) = incoming_state_row(&body, u64::MAX);

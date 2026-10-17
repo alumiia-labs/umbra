@@ -269,6 +269,7 @@ impl AddSeq {
         for relay in &self.relays {
             out.extend_from_slice(relay);
         }
+
         out.push(self.answered);
         out.extend_from_slice(&self.seqs[0].to_be_bytes());
         out.extend_from_slice(&self.seqs[1].to_be_bytes());
@@ -284,6 +285,7 @@ impl AddSeq {
         if r.u8()? != ADD_SEQ_VERSION {
             return Err(Error::Integrity);
         }
+
         let join_row: RowId = r.take(16)?.try_into().map_err(|_| Error::Integrity)?;
         let from = ConversationId(r.take(16)?.try_into().map_err(|_| Error::Integrity)?);
         let group_id: [u8; 32] = r.take(32)?.try_into().map_err(|_| Error::Integrity)?;
@@ -294,6 +296,7 @@ impl AddSeq {
         ];
         let answered = r.u8()?;
         let seqs = [r.u32()?, r.u32()?];
+
         Ok(Self {
             join_row,
             from,
@@ -335,6 +338,7 @@ impl GkeyRow {
                 out.extend_from_slice(before.expose());
             }
         }
+
         out
     }
 
@@ -343,6 +347,7 @@ impl GkeyRow {
         if r.u8().ok()? != GKEY_ROW_VERSION {
             return None;
         }
+
         let mut held = GkeyRow::default();
         for (taken, replaced) in held.taken.iter_mut().zip(&mut held.replaced) {
             let is_taken = r.u8().ok()? == 1;
@@ -352,6 +357,7 @@ impl GkeyRow {
                 replaced.push(Secret::new(r.take(32).ok()?.try_into().ok()?));
             }
         }
+
         Some(held)
     }
 }
@@ -923,6 +929,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.owns_channels()? {
             return Err(Error::NotFound);
         }
+
         let name = name.trim();
         if name.len() > GROUP_NAME_MAX {
             return Err(Error::TooLong);
@@ -930,6 +937,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if relays[0] == relays[1] {
             return Err(Error::Malformed);
         }
+
         // GRP-151, GRP-052: both come from the device CSPRNG, and neither
         // comes from the other.
         let mut group_id = [0u8; 32];
@@ -980,12 +988,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 rng,
             )?;
         }
+
         batch.commit()?;
         self.put_conversation_meta(conversation, 0, name, rng)?;
         for job in jobs {
             self.groups.creations.push_back(job);
         }
+
         self.start_group_alert(conversation, 1, rng)?;
+
         Ok(conversation)
     }
 
@@ -1005,6 +1016,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .ok_or(Error::Integrity)?,
         );
         let seed: [u8; 32] = seed.as_slice().try_into().map_err(|_| Error::Integrity)?;
+
         // GRP-372: the seed before a re-key, while the group reads with it.
         let previous_row = store.row_id(TableId::LOCAL_IDENTITY, &previous_seed_key(&group_id));
         let previous = store
@@ -1037,6 +1049,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 fault.get_or_insert(error);
             }
         }
+
         fault.map_or(Ok(()), Err)
     }
 
@@ -1055,6 +1068,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.group_closed(conversation)? {
             return Ok(());
         }
+
         let group = self.group_of(conversation)?;
         if !group
             .roster()
@@ -1080,15 +1094,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
             other => other?,
         }
+
         if self.rekey_waits(conversation)? {
             self.put_clock(conversation, rekey_key(conversation), 0, rng)?;
         }
+
         let mut group = self.group_of(conversation)?;
         let group_id = *group.group_id();
         group
             .adopt_rekey(&object, &fresh.seed, now_ms / 1_000)
             .map_err(|_| Error::Malformed)?;
         self.store_rekeyed(conversation, &group, &fresh.seed, rng)?;
+
         // DEV-300: each other device of the set moves with this one.
         self.publish_group_rekey(&group_id, &fresh.seed, &object, rng)
     }
@@ -1114,14 +1131,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.owns_channels()? {
             return Ok(());
         }
+
         let row = self.open_ref()?.store.row_id(OWN_EPOCH, &conversation.0);
         let Some(object) = self.open_ref()?.store.get(OWN_EPOCH, &row)? else {
             return Ok(());
         };
+
         let control = GroupControl::parse(&object)?;
         if control.epoch_hash() != displaced.hash {
             return Ok(());
         }
+
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         batch.delete(OWN_EPOCH, row);
@@ -1143,6 +1163,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     if active {
                         self.remove_from_group(conversation, index, now_ms, rng)?;
                     }
+
                     Ok(())
                 }
                 PlainOp::SelfRemoval => {
@@ -1151,6 +1172,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     if active {
                         self.leave_group(conversation, now_ms, rng)?;
                     }
+
                     Ok(())
                 }
                 PlainOp::Add { index, keys } => {
@@ -1163,6 +1185,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     if held {
                         return Ok(());
                     }
+
                     let join = JoinRecord {
                         group_id,
                         keys: keys.clone(),
@@ -1186,6 +1209,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         rng,
                     )?;
                 }
+
                 Ok(())
             }
             // GRP-119: a moderation epoch that the order did not select goes
@@ -1201,6 +1225,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 let Ok(object) = group.moderate(&acts, rng) else {
                     return Ok(());
                 };
+
                 drop(group);
                 self.post_group_control(conversation, &object, now_ms, rng)?;
                 self.apply_own_roster_object(conversation, &object, now_ms, rng)?;
@@ -1243,9 +1268,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 found = Some((row, from));
             }
         }
+
         let Some((row, from)) = found else {
             return Ok(());
         };
+
         let mut payload = vec![0u8; 1_400];
         let used = join.encode(&mut payload)?;
         payload.truncate(used);
@@ -1262,6 +1289,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.delete(GROUP_MEMBER, member);
         batch.commit()?;
         self.events.push_back(Event::GroupJoiner { from });
+
         Ok(())
     }
 
@@ -1290,6 +1318,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.put(TableId::LOCAL_IDENTITY, previous_row, None, &old, rng)?;
         batch.put(TableId::LOCAL_IDENTITY, seed_row, None, seed.expose(), rng)?;
         batch.put(GROUP, conversation.0, None, &row, rng)?;
+
         Ok(batch.commit()?)
     }
 
@@ -1302,6 +1331,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         row.extend_from_slice(group.group_id());
         row.push(state);
         row.extend_from_slice(&stored);
+
         Ok(row)
     }
 
@@ -1333,15 +1363,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.group_closed(conversation)? {
             return Ok(());
         }
+
         let group = self.group_of(conversation)?;
-        // GRP-297: a member that lacks the epoch is refused as a queue
-        // that is gone is, and it is its membership that ended.
+
+        // GRP-297: a replica refuses a member that lacks the epoch, as it
+        // refuses a queue that is gone. Then the membership lapsed, and the
+        // group did not close.
         let state = if group.lacks_epoch().is_some() {
             LAPSED
         } else {
             CLOSED
         };
         let row = Self::group_row(&group, state)?;
+
         // GRP-363: each replica refused the pair of the epoch that this
         // device holds, although this device knew of a `GKEY` of it there.
         // A `GKEY` of an older epoch can have moved a replica back, and a
@@ -1355,10 +1389,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 self.put_gkey_row(conversation, &held, rng)?;
             }
         }
+
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         batch.put(GROUP, conversation.0, None, &row, rng)?;
         batch.commit()?;
+
         // Each record that waited for a queue that is gone leaves the
         // work list. The store keeps the message, and the user sees that
         // it did not go: a message that no replica took fails.
@@ -1370,16 +1406,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Some(message) = post.message else {
                 continue;
             };
+
             if self.open_ref()?.store.get(OUTBOX, &message.0)?.is_some() {
                 waited.push(message);
             }
         }
+
         self.groups
             .posts
             .retain(|post| post.conversation != conversation);
         for message in waited {
             self.fail(&message, crate::FailureCause::Refused, rng)?;
         }
+
         Ok(())
     }
 
@@ -1398,6 +1437,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.commit()?;
         self.groups.key_requests.remove(&conversation);
         self.events.push_back(Event::Conversations);
+
         Ok(())
     }
 
@@ -1422,6 +1462,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .get(TableId::LOCAL_IDENTITY, &previous_row)?
                 .map(Zeroizing::new)
         };
+
         // The member reads with the keys before its re-key again: a rival
         // took its place (GRP-369), or an epoch of another member came first
         // (GRP-117). The seed before is the seed of the group again, and
@@ -1456,6 +1497,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 batch.put(TableId::LOCAL_IDENTITY, lost_row, None, &fresh, rng)?;
             }
         }
+
         Ok(batch.commit()?)
     }
 
@@ -1492,6 +1534,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(conversation) = self.conversation_of_queue(group_queue_id)? else {
             return Ok(());
         };
+
         let group = self.group_of(conversation)?;
         let relay = group.replicas().and_then(|replicas| {
             (0..GROUP_REPLICAS)
@@ -1519,6 +1562,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(replicas) = group.replicas_mut() else {
             return Ok(());
         };
+
         let Some(which) = (0..GROUP_REPLICAS).find(|index| {
             replicas
                 .reference(*index)
@@ -1531,6 +1575,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if let Some(watch) = self.groups.watch.get_mut(&conversation) {
                 watch.answered |= watch.which == which;
             }
+
             // GRP-210: a replica that answers under the credentials of this
             // device holds the group queue. Thus the group is not gone, and
             // a group that this device showed as closed opens again.
@@ -1538,12 +1583,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 self.reopen_group(conversation, rng)?;
             }
         }
+
         let Some(replicas) = group.replicas_mut() else {
             return Ok(());
         };
         if replicas.is_reachable(which) == reached {
             return Ok(());
         }
+
         let before = replicas.unreachable();
         replicas.set_reachable(which, reached);
         let moved = replicas.unreachable() != before;
@@ -1551,6 +1598,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if moved {
             self.events.push_back(super::Event::Conversations);
         }
+
         Ok(())
     }
 
@@ -1602,14 +1650,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if plain.len() != QUEUE_ROW_LEN.saturating_add(32) {
                 return Ok(false);
             }
+
             let (head, id) = plain.split_at(QUEUE_ROW_LEN);
             let (_, replica, relay) = read_queue_row(head)?;
             let id: [u8; 32] = id.try_into().map_err(|_| Error::Integrity)?;
             made.push((row, replica, relay, id));
         }
+
         if made.len() != GROUP_REPLICAS {
             return Ok(false);
         }
+
         made.sort_by_key(|(_, replica, _, _)| *replica);
         let refs = [
             ReplicaRef {
@@ -1631,11 +1682,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for (row, _, _, _) in made {
             batch.delete(GROUP_QUEUE, row);
         }
+
         batch.commit()?;
+
         // Each record that waited for the second queue goes now.
         self.requeue_group_posts(rng)?;
+
         // DEV-298: the group is whole, and it goes to the other devices.
         self.group_state_due(conversation, rng)?;
+
         Ok(true)
     }
 
@@ -1664,6 +1719,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.is_group(conversation)? {
             return Err(Error::Malformed);
         }
+
         let mut msg_id = [0u8; 16];
         rng.fill_bytes(&mut msg_id);
         let record = AppMessage {
@@ -1690,6 +1746,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.put(OUTBOX, row, None, &super::outbox_row(), rng)?;
         batch.commit()?;
         self.push_outgoing(MsgRef(row), conversation, app.to_vec());
+
         Ok(())
     }
 
@@ -1708,6 +1765,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.owns_channels()? {
             return Err(Error::NotFound);
         }
+
         let held = self.group_of(group)?;
         let own = held
             .roster()
@@ -1716,6 +1774,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if own.role < Role::Admin {
             return Err(Error::Malformed);
         }
+
         // A member that joined and became an admin holds the hash of its key
         // in the roster alone.
         let admin_roster_pk = held.own_roster_pk();
@@ -1759,6 +1818,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.owns_channels()? {
             return Err(Error::NotFound);
         }
+
         // GRP-153: this device refuses an offer to a group that it is a
         // member of. A membership that ended takes a new invitation (Part
         // 11 §11.12, `GRP-297`, `GRP-374`).
@@ -1766,6 +1826,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.holds_membership(conversation)? {
             return Err(Error::Malformed);
         }
+
         let row = self.join_row(offer.from, &offer.group_id)?;
         let held = self.join_entry(&row)?.ok_or(Error::NotFound)?;
         let JoinEntry::Offer {
@@ -1776,6 +1837,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         else {
             return Err(Error::Malformed);
         };
+
         // The row of a membership that ended still opens under its own
         // seed. Thus the seed of the new join waits beside it, under the
         // key of `GRP-370`, until the admit takes the place of the row.
@@ -1784,6 +1846,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         } else {
             offer.group_id.to_vec()
         };
+
         // GRP-052: the seed comes from the device CSPRNG, and it stays in
         // the local identity table until the admit arrives. A join of this
         // group that waits already keeps its seed, thus the admit of each
@@ -1836,6 +1899,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.put(TableId::LOCAL_IDENTITY, seed_row, None, seed.expose(), rng)?;
         batch.put(GROUP_JOIN, row, Some(offer.from.0), &entry, rng)?;
         batch.commit()?;
+
         Ok(())
     }
 
@@ -1849,6 +1913,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.is_group(conversation)? || self.group_state(conversation)? != OPEN {
             return Ok(false);
         }
+
         Ok(self.group_of(conversation)?.own_role().is_some())
     }
 
@@ -1888,6 +1953,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
             }
         }
+
         Ok(rows)
     }
 
@@ -1937,7 +2003,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let InvitationStage::Admit(_) = &invitation.stage else {
             return Ok(());
         };
+
         let row = self.join_row(from, &invitation.group_id)?;
+
         // An admit to a group that this device did not ask for is no admit.
         // GRP-421: a second admit of the admin of a join whose add is the
         // head takes the place of the group.
@@ -1975,6 +2043,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.put(GROUP_JOIN, row, Some(from.0), &entry, rng)?;
         batch.commit()?;
         self.events.push_back(Event::GroupAdmit { from });
+
         Ok(())
     }
 
@@ -1990,11 +2059,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Ok(control) = GroupControl::parse(body) else {
             return Ok(());
         };
+
         match control.control_type {
             ControlType::Invitation => {
                 let Ok(invitation) = GroupInvitation::parse(control.payload) else {
                     return Ok(());
                 };
+
                 let InvitationStage::Offer {
                     name,
                     admin_roster_pk,
@@ -2003,6 +2074,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 else {
                     return self.on_admit(from, &invitation, control.payload, rng);
                 };
+
                 // GRP-153: an offer to a group that this device is a member
                 // of is no offer. A membership that ended takes one (Part 11
                 // §11.12).
@@ -2010,7 +2082,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 if self.holds_membership(conversation)? {
                     return Ok(());
                 }
+
                 let row = self.join_row(from, &invitation.group_id)?;
+
                 // GRP-170: a join that runs keeps its row, thus a second
                 // offer ends no wait for an admit. One contact holds no
                 // more than `JOIN_ROWS_MAX` rows here.
@@ -2024,6 +2098,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         }
                     }
                 }
+
                 let name: String = name.chars().take(GROUP_NAME_MAX).collect();
                 let mut entry = vec![OFFERED];
                 entry.extend_from_slice(&from.0);
@@ -2031,6 +2106,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 entry.extend_from_slice(creator_roster_pk);
                 entry.extend_from_slice(name.as_bytes());
                 let open = self.open_mut()?;
+
                 // The admin that offers is the contact that sent the offer,
                 // thus the group can name it once this device holds the
                 // roster. The key of that admin stays with its own offer:
@@ -2055,6 +2131,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 let Ok(record) = JoinRecord::parse(control.payload) else {
                     return Ok(());
                 };
+
                 // A join record for a group that this device does not hold,
                 // or holds below `admin`, names no group of any admin here
                 // (`GRP-382`).
@@ -2062,11 +2139,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 if !self.holds_membership(conversation)? {
                     return Ok(());
                 }
+
                 let group = self.group_of(conversation)?;
                 if group.own_role().is_none_or(|role| role < Role::Admin) {
                     return Ok(());
                 }
+
                 let row = self.join_row(from, &record.group_id)?;
+
                 // GRP-306: an add that runs keeps its row, and the same
                 // keys again add no second member. A contact that comes
                 // back under new keys asks again.
@@ -2087,6 +2167,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         }
                     }
                 }
+
                 drop(group);
                 let mut entry = vec![ASKED];
                 entry.extend_from_slice(&from.0);
@@ -2131,11 +2212,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !record.chain_is_zero() {
             return Ok(());
         }
+
         let group_id = record.chain.group_id;
         let conversation = self.conversation_of_group(&group_id)?;
         if !self.is_group(conversation)? || self.group_closed(conversation)? {
             return Ok(());
         }
+
         let group = self.group_of(conversation)?;
         if group.own_role().is_none_or(|role| role < Role::Admin) {
             return Ok(());
@@ -2146,6 +2229,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if old.active || record.verify(&old.roster_pk_hash).is_err() {
             return Ok(());
         }
+
         // GRP-349: a record whose index no rival re-key moved is no record.
         let has_rival = group
             .roster()
@@ -2162,11 +2246,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(held) = group.roster().member(rival) else {
             return Ok(());
         };
+
         // The keys of the record are the keys that lost. The member that
         // holds the index asks for nothing.
         if held.pair_pk == record.new_keys.pair_pk {
             return Ok(());
         }
+
         let (is_active, role) = (held.active, held.role);
         drop(group);
         let join = JoinRecord {
@@ -2189,6 +2275,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !is_active {
             return Ok(());
         }
+
         // GRP-351: no party uses the removed index again, and GRP-264
         // rotates with the removal. The joiner waits already, thus a
         // removal that the roster refuses loses no request. The floor of
@@ -2237,18 +2324,22 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.owns_channels()? {
             return Ok(());
         }
+
         let group = self.group_of(conversation)?;
         if !group.lost_rekey() {
             return Ok(());
         }
+
         let group_id = *group.group_id();
         let Some(admin) = self.return_contact(conversation)? else {
             return Ok(());
         };
+
         let row = self.join_row(admin, &group_id)?;
         if self.join_pending(&row)? {
             return Ok(());
         }
+
         let creator_roster_pk = group
             .roster()
             .member(0)
@@ -2292,6 +2383,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut batch = open.store.begin();
         batch.put(TableId::LOCAL_IDENTITY, lost_row, None, seed.expose(), rng)?;
         batch.put(GROUP_JOIN, row, Some(admin.0), &entry, rng)?;
+
         Ok(batch.commit()?)
     }
 
@@ -2308,6 +2400,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 return Ok(Some(ConversationId(id)));
             }
         }
+
         Ok(self.contacts_in(conversation)?.into_iter().next())
     }
 
@@ -2323,7 +2416,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(admin) = self.return_contact(conversation)? else {
             return Ok((false, true));
         };
+
         let row = self.join_row(admin, group.group_id())?;
+
         Ok((self.join_pending(&row)?, false))
     }
 
@@ -2351,6 +2446,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.owns_channels()? {
             return Err(Error::NotFound);
         }
+
         let conversation = self.conversation_of_group(&joiner.group_id)?;
         let row = self.join_row(joiner.from, &joiner.group_id)?;
         let group = self.group_of(conversation)?;
@@ -2361,6 +2457,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if own.role < Role::Admin {
             return Err(Error::Malformed);
         }
+
         let record = match self.join_entry(&row)? {
             Some(JoinEntry::Asked { record, .. }) => record,
             // GRP-306: the roster holds the member once. A second call
@@ -2381,6 +2478,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             _ => return Err(Error::NotFound),
         };
         let parsed = JoinRecord::parse(&record)?;
+
         // GRP-329: a roster from a snapshot builds no add before an object
         // of another member gave it the index of the group.
         let add = group.add_object(&parsed).map_err(|_| {
@@ -2390,10 +2488,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 Error::Malformed
             }
         })?;
+
         // GRP-310, GRP-389: the add goes to each replica first, thus its
         // record names the roster epoch that every member holds.
         let queued = self.groups.posts.len();
         self.post_group_control(conversation, &add, now_ms, rng)?;
+
         // GRP-311: the kept record of the add takes the `GSEQ` of each
         // replica, and the admit names them.
         let add_row = if self.groups.posts.len() > queued {
@@ -2408,11 +2508,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Applied::Added(index) = index else {
             return Err(Error::Malformed);
         };
+
         // GRP-324: the snapshot carries the authority path of each role.
         let group = self.group_of(conversation)?;
         let path = self.authority_path(conversation, &group)?;
         let snapshot = group.snapshot(&path).map_err(|_| Error::Malformed)?;
         self.note_member_contact(conversation, index, joiner.from, rng)?;
+
         // A row of an earlier add of this join is stale now.
         let stale: Vec<RowId> = self
             .add_seqs()?
@@ -2431,6 +2533,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for stale in stale {
             batch.delete(ADD_SEQ, stale);
         }
+
         if let Some((add_row, relays)) = add_row {
             let held = AddSeq {
                 join_row: row,
@@ -2444,7 +2547,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             };
             batch.put(ADD_SEQ, add_row, None, &held.encode(), rng)?;
         }
+
         batch.commit()?;
+
         Ok(GroupAdmission { snapshot, index })
     }
 
@@ -2464,7 +2569,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.owns_channels()? {
             return Err(Error::NotFound);
         }
+
         let row = self.join_row(joiner.from, &joiner.group_id)?;
+
         // GRP-311: the admit waits for the `GSEQ` of the add at each
         // replica, and the descriptor waits with it.
         let waiting = self
@@ -2479,6 +2586,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             batch.commit()?;
             return self.pump_admits(now_ms, rng);
         }
+
         // A join row of an earlier build kept no add, thus the joiner
         // subscribes from the start of each replica.
         self.send_admit(
@@ -2501,6 +2609,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 out.push((row, held));
             }
         }
+
         Ok(out)
     }
 
@@ -2517,7 +2626,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(plain) = self.open_ref()?.store.get(ADD_SEQ, row)? else {
             return Ok(());
         };
+
         let mut held = AddSeq::parse(&plain)?;
+
         // The replicas that the add went to, which the group may have
         // replaced since.
         if let Some(which) = held.relays.iter().position(|held| held == relay) {
@@ -2525,11 +2636,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 *slot = seq;
                 held.answered |= 1 << which;
             }
+
             let open = self.open_mut()?;
             let mut batch = open.store.begin();
             batch.put(ADD_SEQ, *row, None, &held.encode(), rng)?;
             batch.commit()?;
         }
+
         self.pump_admits(now_ms, rng)
     }
 
@@ -2562,6 +2675,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Some(descriptor) = held.descriptor.as_deref() else {
                 continue;
             };
+
             let ended = self
                 .open_ref()?
                 .store
@@ -2570,9 +2684,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if held.answered != 0b11 && !ended {
                 continue;
             }
+
             // Each `seq` goes to the replica of the admit with the same
             // relay, and a replica that came since takes 0.
             let seqs = self.seqs_of_admit(&held)?;
+
             // A fault of one admit ends its row, and no other row.
             let _ = self.send_admit(
                 held.from,
@@ -2585,14 +2701,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             );
             done.push(add_row);
         }
+
         if done.is_empty() {
             return Ok(());
         }
+
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         for row in done {
             batch.delete(ADD_SEQ, row);
         }
+
         Ok(batch.commit()?)
     }
 
@@ -2616,6 +2735,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
             }
         }
+
         Ok(seqs)
     }
 
@@ -2639,6 +2759,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let conversation = self.conversation_of_group(&joiner.group_id)?;
         let group = self.group_of(conversation)?;
         let row = self.join_row(joiner.from, &joiner.group_id)?;
+
         // GRP-323: the admit names the roster epoch of the add, which the
         // kept snapshot holds; the roster may have moved since.
         let roster_epoch = match self.join_entry(&row)? {
@@ -2651,6 +2772,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .admit_at(index, roster_epoch, descriptor, seqs, now_ms / 1_000)
             .map_err(|_| Error::Malformed)?;
         self.send_pairwise_control(joiner.from, &body, now_ms, rng)?;
+
         // GRP-420: the row stays while the add is the head, thus an epoch
         // that displaces the add finds the joiner.
         let mut entry = vec![SENT];
@@ -2661,6 +2783,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         batch.put(GROUP_JOIN, row, Some(joiner.from.0), &entry, rng)?;
+
         Ok(batch.commit()?)
     }
 
@@ -2689,14 +2812,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 gone.push(row);
             }
         }
+
         if gone.is_empty() {
             return Ok(());
         }
+
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         for row in gone {
             batch.delete(GROUP_JOIN, row);
         }
+
         Ok(batch.commit()?)
     }
 
@@ -2722,6 +2848,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         else {
             return Err(Error::NotFound);
         };
+
         // GRP-421: a second admit takes the place of the group only while
         // the add of this member is the head of its roster. Else an admit
         // to a group that this device is a member of is no admit
@@ -2739,6 +2866,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 return Err(Error::Malformed);
             }
         }
+
         let seed = {
             let store = &self.open_ref()?.store;
             // GRP-370: a member that comes back after a rival re-key joins
@@ -2757,12 +2885,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         };
         let control = GroupControl::parse(&admit)?;
         let invitation = GroupInvitation::parse(control.payload)?;
+
         // GRP-326: the snapshot verifies against the hash of the add and
         // the roster key of the creator, which the offer carried.
         let checked = umbra_wire::group::control::RosterSnapshot::parse(snapshot)
             .map_err(Error::from)
             .and_then(|snapshot| {
                 let add_hash = Self::add_hash_of(&invitation, &snapshot)?;
+
                 // The entry at the index of the admit holds the keys of
                 // this device, or the admission fails here.
                 accept_admit(&invitation, &snapshot, &add_hash, &creator_roster_pk, now)
@@ -2781,9 +2911,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         };
         let add_epoch = snapshot.roster_epoch;
         let conversation = self.adopt_group(admitted, &seed, &name, again, rng)?;
+
         // GRP-290: the contact that brought this device in is a member it
         // can ask on a pairwise channel when the group queue refuses it.
         self.note_contact_in(conversation, b"via", from, rng)?;
+
         // That admin shows under the name of the contact. It is the member
         // whose roster key the offer of this same contact named, when the
         // snapshot gives it `admin` or above. An offer of another contact
@@ -2791,12 +2923,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if let Some(index) = self.offering_admin(conversation, from)? {
             self.note_contact_in(conversation, &index.to_be_bytes(), from, rng)?;
         }
+
         self.end_other_joins(conversation, group_id, row)?;
+
         // GRP-068: this member may build a snapshot later, thus it keeps
         // the path that admitted it.
         for grant in umbra_core::group::roster::split_path(snapshot.path)? {
             self.note_grant(conversation, grant, rng)?;
         }
+
         // GRP-421: the row stays while the add is the head, thus a second
         // admit of this admin takes the place of the group.
         let mut entry = vec![JOINED];
@@ -2809,10 +2944,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut batch = open.store.begin();
         batch.put(GROUP_JOIN, row, Some(from.0), &entry, rng)?;
         batch.commit()?;
+
         // DEV-298: the group goes to the other devices of the set.
         self.group_state_due(conversation, rng)?;
         let members = self.group_of(conversation)?.roster().active_count();
         self.start_group_alert(conversation, members, rng)?;
+
         Ok(conversation)
     }
 
@@ -2829,6 +2966,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if admit.roster_epoch != snapshot.roster_epoch {
             return Err(Error::Integrity);
         }
+
         Ok(snapshot.chain_hash)
     }
 
@@ -2850,6 +2988,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 });
             }
         }
+
         Ok(out)
     }
 
@@ -2872,6 +3011,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.put(GROUP_JOIN, *row, Some(from.0), &entry, rng)?;
         batch.commit()?;
         self.events.push_back(Event::GroupOffer { from });
+
         Ok(())
     }
 
@@ -2893,6 +3033,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 });
             }
         }
+
         Ok(out)
     }
 
@@ -2906,9 +3047,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !matches!(self.join_entry(&row)?, Some(JoinEntry::Refused { .. })) {
             return Err(Error::NotFound);
         }
+
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         batch.delete(GROUP_JOIN, row);
+
         Ok(batch.commit()?)
     }
 
@@ -2930,6 +3073,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 _ => {}
             }
         }
+
         Ok(out)
     }
 
@@ -2951,12 +3095,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let InvitationStage::Admit(stage) = &invitation.stage else {
                 continue;
             };
+
             out.push(GroupAdmitWaiting {
                 from,
                 group_id: invitation.group_id,
                 descriptor: stage.descriptor.to_vec(),
             });
         }
+
         Ok(out)
     }
 
@@ -2983,6 +3129,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(plain) = store.get(GROUP_JOIN, row)? else {
             return Ok(None);
         };
+
         let plain = Zeroizing::new(plain);
         let kind = *plain.first().ok_or(Error::Integrity)?;
         let from: [u8; 16] = plain
@@ -2995,6 +3142,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .and_then(|bytes| bytes.try_into().ok())
             .ok_or(Error::Integrity)?;
         let rest = plain.get(49..).ok_or(Error::Integrity)?;
+
         Ok(Some(match kind {
             REFUSED => JoinEntry::Refused {
                 from,
@@ -3103,8 +3251,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if name.len() > GROUP_NAME_MAX {
             return Err(Error::TooLong);
         }
+
         let group = Group::joined(admitted, seed).map_err(|_| Error::Malformed)?;
         let group_id = *group.group_id();
+
         // GRP-153: a second admit to a group that this device is a member
         // of is no group. A member whose membership ended comes back under
         // the admit (`GRP-414`, Part 11 §11.12). The new group takes the
@@ -3114,6 +3264,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !replaces && self.holds_membership(conversation)? {
             return Err(Error::Malformed);
         }
+
         // The rows of the membership before leave with it. A record that it
         // sealed, and the owner credentials and the clocks that it held,
         // belong to an index that the roster holds no more.
@@ -3136,14 +3287,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for (table, stale) in stale {
             batch.delete(table, stale);
         }
+
         batch.put(GROUP, conversation.0, None, &row, rng)?;
         batch.put(TableId::LOCAL_IDENTITY, seed_row, None, seed.expose(), rng)?;
         batch.delete(TableId::LOCAL_IDENTITY, lost_row);
         batch.delete(TableId::LOCAL_IDENTITY, previous_row);
         batch.commit()?;
+
         // The conversation keeps its read mark over a new membership.
         let (read_up_to, _) = self.conversation_meta(conversation)?;
         self.put_conversation_meta(conversation, read_up_to, name, rng)?;
+
         Ok(conversation)
     }
 
@@ -3182,11 +3336,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.put(OUTBOX, row, None, &super::outbox_row(), rng)?;
         batch.commit()?;
         let message = MsgRef(row);
+
         // DEV-245: the period of a record of this device runs from its send,
         // and the sync copy carries it.
         let kind = AppMessage::parse(app, umbra_wire::app::Channel::Group)?.kind;
         self.stamp_deadline(conversation, message, kind, now_ms / 1_000, rng)?;
         self.queue_group_post(conversation, Some(message), app, now_ms, rng)?;
+
         Ok(message)
     }
 
@@ -3224,6 +3380,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
             return Ok(());
         }
+
         // GRP-210: a group whose two queues are gone takes no record, and
         // the view shows that the message did not go (`IMP-076`). The user
         // sends it again when the group opens.
@@ -3233,7 +3390,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
             return Ok(());
         }
+
         let mut group = self.group_of(conversation)?;
+
         // GRP-422: a key that reaches a removed party carries no record but
         // a roster object, thus this device rotates first. A rotation that
         // this device may not make leaves the post under the current key.
@@ -3247,14 +3406,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 let Some(message) = message else {
                     return Err(fault);
                 };
+
                 self.fail(&message, crate::FailureCause::Refused, rng)?;
                 return Ok(());
             }
+
             group = self.group_of(conversation)?;
         }
         let Some(replicas) = group.replicas() else {
             return Ok(());
         };
+
         let replicas = [
             GroupReplica {
                 relay: replicas.reference(0).ok_or(Error::Integrity)?.relay_id,
@@ -3271,11 +3433,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     .group_queue_id,
             },
         ];
+
         // GRP-076: each member discards a roster object above a rate of
         // the roster chain, thus this device posts none and the act fails.
         if group.rate_bars(app, now_ms / 1_000) {
             return Err(Error::Busy);
         }
+
         // GRP-246: the counter of this device moves with the record, thus
         // the group goes back to the store before the record leaves.
         let record = match roster_epoch {
@@ -3301,6 +3465,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             rng,
         )?;
         self.put_clock(conversation, sent_key(conversation), now_ms / 1_000, rng)?;
+
         // A record of the member carries no tag for its own index, thus
         // another device of the set cannot read it on the group queue. It
         // takes the record on the sync channel (DEV-296).
@@ -3320,6 +3485,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         rng: &mut R,
     ) -> Result<(), Error> {
         let parsed = AppMessage::parse(app, umbra_wire::app::Channel::Group)?;
+
         // DEV-248: a device of an admin sets the timer, and no other.
         let timer = if parsed.kind == AppKind::ConversationTimer {
             let group = self.group_of(conversation)?;
@@ -3333,6 +3499,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         } else {
             None
         };
+
         // DEV-325: a device of an admin sets the forward policy, and no
         // other.
         let policy = if parsed.kind == AppKind::ForwardPolicy {
@@ -3354,6 +3521,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             open.store
                 .row_id(umbra_core::store::record::TableId::MESSAGE, &natural),
         );
+
         // A second copy moves no timer and no deadline.
         if open
             .store
@@ -3362,20 +3530,24 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         {
             return Ok(());
         }
+
         // An edit and a deletion of the user from another device change the
         // message here, and the owner of the channels posts them.
         if matches!(parsed.kind, AppKind::Edit | AppKind::Delete) {
             if self.owns_channels()? {
                 self.post_to_group(conversation, parsed.msg_id, app, now_ms, rng)?;
             }
+
             self.take_group_change(conversation, None, &parsed, now_ms, rng)?;
             return Ok(());
         }
+
         // A vote of the user from another device moves the count here.
         if parsed.kind == AppKind::PollVote {
             if self.owns_channels()? {
                 self.post_to_group(conversation, parsed.msg_id, app, now_ms, rng)?;
             }
+
             self.take_vote(
                 conversation,
                 parsed.body,
@@ -3386,12 +3558,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             )?;
             return Ok(());
         }
+
         // DEV-323: an older policy changes nothing and is no row.
         if let Some(policy) = policy {
             if !self.take_group_forward_policy(conversation, &policy, rng)? {
                 return Ok(());
             }
         }
+
         self.store_synced_group(conversation, app, now_ms, rng)?;
         if parsed.kind == AppKind::Poll {
             let open_seconds =
@@ -3407,6 +3581,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 umbra_core::devset::edits::Deadline::from_sync(now_ms / 1_000, expires_in);
             self.put_deadline(conversation, message, deadline, rng)?;
         }
+
         Ok(())
     }
 
@@ -3438,12 +3613,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
             return Ok(());
         }
+
         if parsed.kind == AppKind::GroupControl {
             // A re-key of the member moves the device that made it alone,
             // since only it holds the new seed.
             let is_rekey = GroupControl::parse(parsed.body).is_ok_and(|control| {
                 control.control_type == umbra_wire::group::control::ControlType::Rekey
             });
+
             // GRP-076: the rates count on the slot of the record that the
             // owner of the channels built. They count at the time that its
             // `AppMessage` names, and not at the time of this arrival.
@@ -3458,12 +3635,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
             return Ok(());
         }
+
         let limit = self.download_limit_now()?;
         let open = self.open_mut()?;
         let mut kept = Zeroizing::new(app.to_vec());
         if super::keep_reply_as_reference(&mut kept, &open.device_set_key).is_err() {
             return Ok(());
         }
+
         let plain = stored_message(
             super::OUTGOING,
             Delivery::Accepted,
@@ -3491,6 +3670,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             )?;
             wanted = descriptor;
         }
+
         batch.commit()?;
         let message = MsgRef(row);
         if let Some(descriptor) = wanted {
@@ -3499,10 +3679,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 descriptor: Box::new(descriptor),
             });
         }
+
         self.events.push_back(crate::Event::Delivery {
             message,
             delivery: Delivery::Accepted,
         });
+
         Ok(())
     }
 
@@ -3511,6 +3693,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(replicas) = group.replicas() else {
             return Ok(None);
         };
+
         let mut out = [GroupReplica {
             relay: [0; 32],
             group_queue_id: [0; 32],
@@ -3522,6 +3705,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 group_queue_id: reference.group_queue_id,
             };
         }
+
         Ok(Some(out))
     }
 
@@ -3540,6 +3724,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.owns_channels()? {
             return Err(Error::NotFound);
         }
+
         let object = self
             .group_of(conversation)?
             .remove_object(index)
@@ -3547,6 +3732,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.roster_takes(conversation, &object, now_ms)? {
             return Err(Error::Malformed);
         }
+
         self.post_group_control(conversation, &object, now_ms, rng)?;
         self.apply_own_roster_object(conversation, &object, now_ms, rng)?;
         self.rotate_group(conversation, now_ms, rng)
@@ -3570,6 +3756,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.owns_channels()? {
             return Err(Error::NotFound);
         }
+
         let group = self.group_of(conversation)?;
         let held = group
             .roster()
@@ -3583,20 +3770,24 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if held == role {
             return Ok(());
         }
+
         // The owner credentials travel with the admin roles, thus a device
         // that holds none gives no such role.
         if (held >= Role::Admin || role >= Role::Admin) && group.owner(0).is_none() {
             return Err(Error::Malformed);
         }
+
         let object = group
             .grant(index, role, rng)
             .map_err(|_| Error::Malformed)?;
         drop(group);
+
         // GRP-304, GRP-051: a grant above `ROLE_HOLDER_MAX` or below the
         // owner floor applies at no member.
         if !self.roster_takes(conversation, &object, now_ms)? {
             return Err(Error::Malformed);
         }
+
         self.post_group_control(conversation, &object, now_ms, rng)?;
         self.apply_own_roster_object(conversation, &object, now_ms, rng)?;
         if held < Role::Admin && role >= Role::Admin {
@@ -3609,6 +3800,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         } else if held >= Role::Admin && role < Role::Admin {
             self.rotate_owners(conversation, now_ms, rng)?;
         }
+
         Ok(())
     }
 
@@ -3624,6 +3816,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(replicas) = Self::group_replicas_of(group)? else {
             return Ok(());
         };
+
         let write = group.credentials().ok_or(Error::Integrity)?.write_secret();
         let fallback = group.previous_credentials().map(|held| held.write_secret());
         self.keep_post(
@@ -3657,15 +3850,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.owns_channels()? {
             return Ok(());
         }
+
         self.groups.owner_backoff.remove(&conversation);
         if self.group_closed(conversation)? {
             return Ok(());
         }
+
         let mut group = self.group_of(conversation)?;
         if Self::group_replicas_of(&group)?.is_none() {
             return Ok(());
         }
+
         let old = group.replace_owners(rng).map_err(|_| Error::Malformed)?;
+
         // GRP-401: the credentials that the new ones replace authorize the
         // `GKEY` that carries the new `own_pk`, and no other party holds
         // them for this device. They go to the store before the group row
@@ -3677,6 +3874,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let excess = replaced.len().saturating_sub(OWNER_HELD_MAX);
             replaced.drain(..excess);
         }
+
         self.put_gkey_row(conversation, &held, rng)?;
         self.save_group(conversation, &group, rng)?;
         self.queue_gkeys(conversation, &group, true)?;
@@ -3692,6 +3890,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .map_err(|_| Error::Malformed)?;
             self.queue_group_record(conversation, &group, record, now_ms, rng)?;
         }
+
         self.note_owners(conversation, &group, rng)
     }
 
@@ -3705,12 +3904,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if group.own_role() != Some(Role::Owner) {
             return Ok(false);
         }
+
         let roster = group.roster();
         let owners = roster.owner_count();
         for member in roster.active() {
             if member.role != Role::Owner || member.index == group.own_index() {
                 continue;
             }
+
             let seen = self.clock(&Self::member_key(conversation, member.index))?;
             let is_silent = seen.is_some_and(|at| now.saturating_sub(at) >= GROUP_SILENT_EVICT);
             if is_silent
@@ -3720,6 +3921,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 return Ok(true);
             }
         }
+
         Ok(false)
     }
 
@@ -3741,6 +3943,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let row = open.store.row_id(GROUP_GRANTS, &key);
         let mut batch = open.store.begin();
         batch.put(GROUP_GRANTS, row, Some(conversation.0), control, rng)?;
+
         Ok(batch.commit()?)
     }
 
@@ -3758,6 +3961,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 rows.push((row, bytes));
             }
         }
+
         let grants: Vec<&[u8]> = rows.iter().map(|(_, bytes)| bytes.as_slice()).collect();
         let (path, kept) = group
             .roster()
@@ -3775,8 +3979,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             for row in gone {
                 batch.delete(GROUP_GRANTS, row);
             }
+
             batch.commit()?;
         }
+
         Ok(path)
     }
 
@@ -3805,6 +4011,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let row = open.store.row_id(GROUP_OWNERS, &conversation.0);
         let mut batch = open.store.begin();
         batch.put(GROUP_OWNERS, row, Some(conversation.0), &set, rng)?;
+
         Ok(batch.commit()?)
     }
 
@@ -3823,10 +4030,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if self.group_closed(conversation)? {
                 continue;
             }
+
             let group = self.group_of(conversation)?;
             if group.owner(0).is_none() || group.own_role().is_none_or(|role| role < Role::Admin) {
                 continue;
             }
+
             let row = {
                 let store = &self.open_ref()?.store;
                 let key = store.row_id(GROUP_OWNERS, &conversation.0);
@@ -3836,6 +4045,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 self.note_owners(conversation, &group, rng)?;
                 continue;
             };
+
             let admins = Self::admins_of(&group);
             let gone: Vec<u16> = held
                 .as_chunks::<2>()
@@ -3850,6 +4060,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 self.groups.owner_backoff.remove(&conversation);
                 continue;
             }
+
             // A member that fell below `admin` has an admin that took the
             // role and draws new credentials at once (`GRP-401`). This admin
             // waits for its record, and acts only when none came.
@@ -3869,6 +4080,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
             }
         }
+
         Ok(due)
     }
 
@@ -3885,6 +4097,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.owns_channels()? {
             return Err(Error::NotFound);
         }
+
         // GRP-067: the last owner of a group that holds another member
         // gives `owner` to one of them first. This call refuses its
         // self-removal as it refuses each act that the roles forbid.
@@ -3895,8 +4108,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.roster_takes(conversation, &object, now_ms)? {
             return Err(Error::Malformed);
         }
+
         self.post_group_control(conversation, &object, now_ms, rng)?;
         self.apply_own_roster_object(conversation, &object, now_ms, rng)?;
+
         Ok(())
     }
 
@@ -3934,12 +4149,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if matches!(applied, Applied::Granted { .. }) {
             self.note_grant(conversation, object, rng)?;
         }
+
         self.roster_moved(conversation, &applied, now_ms / 1_000, rng)?;
         self.drop_passed_adds(conversation)?;
+
         // DEV-301: a re-key item that waited for this roster object
         // applies now, and DEV-303: a key that waited installs now.
         self.retry_rekey_items(now_ms, rng)?;
         self.retry_epoch_keys(conversation, now_ms, rng)?;
+
         Ok(applied)
     }
 
@@ -3959,14 +4177,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.owns_channels()? {
             return Ok(());
         }
+
         self.groups.backoff.remove(&conversation);
         if self.group_closed(conversation)? {
             return Ok(());
         }
+
         let mut group = self.group_of(conversation)?;
         let Some(replicas) = Self::group_replicas_of(&group)? else {
             return Ok(());
         };
+
         // The relay may not hold the pair of the epoch that ends either,
         // when no admin sent its `GKEY` yet.
         let fallback = group.previous_credentials().map(|held| held.write_secret());
@@ -4004,6 +4225,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 tries: 0,
             }),
         }
+
         self.put_clock(conversation, sent_key(conversation), now_ms / 1_000, rng)
     }
 
@@ -4027,6 +4249,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(replicas) = Self::group_replicas_of(&group)? else {
             return Ok(());
         };
+
         let record = group
             .chunked_record(upload.epoch, &upload.chunked, descriptor)
             .map_err(|_| Error::Malformed)?;
@@ -4103,11 +4326,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(which) = replicas.iter().position(|held| held.relay == *relay) else {
             return Ok(None);
         };
+
         let (Some(own), Some(credentials), Some(reference)) =
             (group.owner(which), group.credentials(), replicas.get(which))
         else {
             return Ok(None);
         };
+
         Ok(Some(GroupRekey {
             relay: *relay,
             group_queue_id: reference.group_queue_id,
@@ -4131,12 +4356,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(job) = self.group_rekey_for(conversation, relay)? else {
             return Ok(false);
         };
+
         let group = self.group_of(conversation)?;
         let which = Self::group_replicas_of(&group)?
             .and_then(|replicas| replicas.iter().position(|held| held.relay == *relay));
         let taken = which
             .and_then(|which| self.gkey_row(conversation).ok()?.taken.get(which).copied())
             .flatten();
+
         Ok(taken != Some(job.write_pk))
     }
 
@@ -4164,6 +4391,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 contact,
             });
         }
+
         Ok(members)
     }
 
@@ -4194,6 +4422,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(hash) = store.get(GROUP_MEMBER, &row)? else {
             return Ok(None);
         };
+
         let group = self.group_of(conversation)?;
         let index = group
             .roster()
@@ -4204,6 +4433,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     && member.roster_pk_hash.as_slice() == hash.as_slice()
             })
             .map(|member| member.index);
+
         Ok(index)
     }
 
@@ -4222,6 +4452,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if row == joined {
                 continue;
             }
+
             let ended = match self.join_entry(&row) {
                 Ok(Some(JoinEntry::Offer { group_id: held, .. })) => held == *group_id,
                 Ok(Some(JoinEntry::Waiting { .. } | JoinEntry::Admitted { .. })) => {
@@ -4233,6 +4464,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 gone.push((GROUP_JOIN, row));
             }
         }
+
         let store = &self.open_ref()?.store;
         for (row, value) in store.list(GROUP_MEMBER, Some(&conversation.0))? {
             // A contact behind a member is 16 bytes, and a key hash is 32.
@@ -4240,14 +4472,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 gone.push((GROUP_MEMBER, row));
             }
         }
+
         if gone.is_empty() {
             return Ok(());
         }
+
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         for (table, row) in gone {
             batch.delete(table, row);
         }
+
         Ok(batch.commit()?)
     }
 
@@ -4273,6 +4508,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let row = open.store.row_id(GROUP_MEMBER, &key);
         let mut batch = open.store.begin();
         batch.put(GROUP_MEMBER, row, Some(conversation.0), &contact.0, rng)?;
+
         Ok(batch.commit()?)
     }
 
@@ -4293,6 +4529,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
             }
         }
+
         Ok(out)
     }
 
@@ -4311,6 +4548,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .row_id(GROUP_MEMBER, &Self::member_key(conversation, index));
         let mut batch = open.store.begin();
         batch.put(GROUP_MEMBER, row, Some(conversation.0), &contact.0, rng)?;
+
         Ok(batch.commit()?)
     }
 
@@ -4330,15 +4568,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     ) -> Result<(), Error> {
         self.groups.offered = false;
         let now = now_ms / 1_000;
+
         // GRP-196: each kept record that a replica did not take goes again
         // after its wait.
         self.resend_group_posts(now, rng)?;
+
         // One sweep a minute: a hold ends at its hour, and the window moves
         // by the slot. A clock check forces one (`clock_check`).
         let swept_at = self.groups.swept_at;
         if (swept_at..swept_at.saturating_add(60)).contains(&now) {
             return Ok(());
         }
+
         self.groups.swept_at = now;
         let mut released_any = false;
         for conversation in self.group_conversations()? {
@@ -4346,10 +4587,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Ok(mut group) = self.group_of(conversation) else {
                 continue;
             };
+
             if group.expire_held(now) > 0 {
                 let _ = self.save_group(conversation, &group, rng);
                 let _ = self.delivery_gap(conversation, now_ms, rng);
             }
+
             // GRP-229: a held record whose slot came inside the window
             // opens now, after a clock movement or as the window moved.
             if group.holds_openable(now) {
@@ -4369,9 +4612,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     let Ok(stored) = self.group_of(conversation) else {
                         continue;
                     };
+
                     group = stored;
                 }
             }
+
             // GRP-345: a re-key that a rate or an open index held back goes
             // again. A fault of it stops no other group.
             if self.rekey_waits(conversation).unwrap_or(false)
@@ -4381,8 +4626,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 let Ok(stored) = self.group_of(conversation) else {
                     continue;
                 };
+
                 group = stored;
             }
+
             // IMP-080: the `clock` line leaves with its condition.
             let suspect = group.holds_clock_suspect(now);
             let changed = if suspect {
@@ -4394,11 +4641,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 self.events.push_back(Event::Conversations);
             }
         }
+
         // DEV-309: a roster object that a retry released can be the one that
         // a held re-key item waits for.
         if released_any {
             let _ = self.retry_rekey_items(now_ms, rng);
         }
+
         Ok(())
     }
 
@@ -4407,6 +4656,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     pub fn clock_check<R: CryptoRng + ?Sized>(&mut self, now_ms: u64, rng: &mut R) {
         self.groups.swept_at = 0;
         let _ = self.expire_group_holds(now_ms, rng);
+
         // GRP-396: no silence counts across the movement.
         let _ = self.restart_silence(now_ms / 1_000, rng);
     }
@@ -4428,6 +4678,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 self.groups.backoff.remove(&conversation);
                 continue;
             };
+
             match self.groups.backoff.get(&conversation) {
                 Some((roster_epoch, at)) if *roster_epoch == trigger.roster_epoch => {
                     if now >= *at {
@@ -4443,6 +4694,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
             }
         }
+
         Ok(due)
     }
 
@@ -4509,6 +4761,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if self.group_closed(conversation)? {
                 continue;
             }
+
             let group = self.group_of(conversation)?;
             let Some(epoch) = group.lacks_epoch() else {
                 continue;
@@ -4516,6 +4769,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if group.own_role().is_none() || group.replicas().is_none() {
                 continue;
             }
+
             let entry = self.groups.key_requests.entry(conversation).or_default();
             if entry
                 .1
@@ -4528,6 +4782,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 due.push((conversation, epoch));
             }
         }
+
         Ok(due)
     }
 
@@ -4545,6 +4800,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.owns_channels()? {
             return Ok(());
         }
+
         let group = self.group_of(conversation)?;
         let request = KeyRequest {
             scope: KeyScope::GroupEpoch,
@@ -4573,11 +4829,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Ok(request) = KeyRequest::parse(body) else {
             return;
         };
+
         // GRP-330: a member behind the roster asks for a snapshot.
         if request.scope == KeyScope::RosterSnapshot {
             self.on_snapshot_request(conversation, group, &request, now);
             return;
         }
+
         // WIR-523: 0 names the sender, and any other value names the
         // member that another member carries the request for.
         let target = match request.index {
@@ -4601,6 +4859,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !rate.allow(now) {
             return;
         }
+
         let at = now.saturating_add(group.rotation_delay(rng));
         self.groups
             .key_answers
@@ -4620,10 +4879,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if !self.group_lapsed(conversation)? {
                 continue;
             }
+
             let group = self.group_of(conversation)?;
             let Some(epoch) = group.lacks_epoch() else {
                 continue;
             };
+
             let entry = self.groups.key_requests.entry(conversation).or_default();
             if entry
                 .1
@@ -4636,6 +4897,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 due.push((conversation, epoch));
             }
         }
+
         Ok(due)
     }
 
@@ -4654,6 +4916,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.owns_channels()? {
             return Ok(0);
         }
+
         let group = self.group_of(conversation)?;
         let request = KeyRequest {
             scope: KeyScope::GroupEpoch,
@@ -4668,6 +4931,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for contact in &contacts {
             self.send_pairwise_app(*contact, AppKind::KeyRequest, &body, now_ms, rng)?;
         }
+
         Ok(contacts.len())
     }
 
@@ -4686,6 +4950,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Ok(request) = KeyRequest::parse(body) else {
             return Ok(());
         };
+
         // GRP-329: a contact behind the roster of a group asks for a
         // snapshot on the pairwise channel.
         if request.scope == KeyScope::RosterSnapshot {
@@ -4699,6 +4964,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if request.scope != KeyScope::GroupEpoch || request.index == 0 {
             return Ok(());
         }
+
         let conversation = self.conversation_of_group(&request.id)?;
         if !self.is_group(conversation)? || self.group_closed(conversation)? {
             return Ok(());
@@ -4706,7 +4972,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Ok(target) = u16::try_from(request.index - 1) else {
             return Ok(());
         };
+
         let group = self.group_of(conversation)?;
+
         // GRP-377: a request for an index that the roster does not hold
         // takes no answer, and it counts against no rate.
         if !group
@@ -4727,12 +4995,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if group.may_supply(target, request.epoch) {
             return self.answer_key_request(conversation, target, now_ms, rng);
         }
+
         if group.own_role().is_some() {
             let mut carried = [0u8; 64];
             let n = request.encode(&mut carried)?;
             let carried = carried.get(..n).ok_or(Error::Malformed)?.to_vec();
             self.post_group_app(conversation, AppKind::KeyRequest, &carried, now_ms, rng)?;
         }
+
         Ok(())
     }
 
@@ -4750,6 +5020,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for key in &due {
             self.groups.key_answers.remove(key);
         }
+
         due
     }
 
@@ -4768,10 +5039,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.owns_channels()? {
             return Ok(());
         }
+
         let group = self.group_of(conversation)?;
         let Ok(record) = group.key_supply(index, rng) else {
             return Ok(());
         };
+
         let epoch = group.epoch();
         self.queue_group_record(conversation, &group, record, now_ms, rng)?;
         let supply = KeySupply {
@@ -4813,10 +5086,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Some(credentials) = group.credentials().map(|held| held.read_secret()) else {
                 continue;
             };
+
             let fallback = group.previous_credentials().map(|held| held.read_secret());
             let Some(replicas) = group.replicas_mut() else {
                 continue;
             };
+
             // The first `GSUB` of a group takes a random replica, and the
             // draw stands until that `GSUB` goes.
             let coin = match self.groups.picked.get(&conversation) {
@@ -4828,6 +5103,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Some(reference) = replicas.reference(which) else {
                 continue;
             };
+
             out.push(GroupSubscription {
                 conversation,
                 relay: reference.relay_id,
@@ -4837,6 +5113,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 from_seq: replicas.cursor(which),
             });
         }
+
         Ok(out)
     }
 
@@ -4855,17 +5132,20 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(replicas) = group.replicas_mut() else {
             return Ok(());
         };
+
         let which = replicas.pick(coin);
         self.save_group(conversation, &group, rng)?;
         self.groups
             .watch
             .insert(conversation, Watch::start(which, now));
         self.groups.repaired.remove(&conversation);
+
         // A relay that started again holds no registration, and a `GNREG`
         // that it holds already changes nothing and counts for no circuit.
         if self.group_notify_row(conversation)?.is_some() {
             self.groups.notify_again.insert((conversation, which));
         }
+
         Ok(())
     }
 
@@ -4904,10 +5184,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Some(replicas) = group.replicas() else {
                 continue;
             };
+
             let other = watch.which.saturating_add(1) % GROUP_REPLICAS;
             let Some(reference) = replicas.reference(other) else {
                 continue;
             };
+
             out.push(GroupSubscription {
                 conversation,
                 relay: reference.relay_id,
@@ -4918,6 +5200,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             });
             self.groups.repaired.insert(conversation);
         }
+
         Ok(out)
     }
 
@@ -4941,6 +5224,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if watch.has_hole(now) {
                 watch.lapse(now);
             }
+
             watch.beat = now;
         }
     }
@@ -4962,6 +5246,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if watch.which != which {
             return;
         }
+
         watch.answered = true;
         watch.last_record = now;
         let current = umbra_core::group::slot_of(now);
@@ -4998,14 +5283,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             self.groups.watch.insert(conversation, watch);
             return Ok(false);
         }
+
         if !watch.caught_up {
             let quiet = now.saturating_sub(watch.last_record) >= WATCH_QUIET;
             if !watch.live && !quiet {
                 return Ok(false);
             }
+
             self.resume_watch(conversation, group, now, rng)?;
             watch.caught_up = true;
             watch.stored = now;
+
             // GRP-361, GRP-401: each `GKEY` that a replica still owes goes
             // again now, and not before. A device that did not read its
             // backlog can hold an epoch that the group left. Its `GKEY`
@@ -5017,7 +5305,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             self.put_clock(conversation, watch_key(conversation), now, rng)?;
             watch.stored = now;
         }
+
         self.groups.watch.insert(conversation, watch);
+
         Ok(true)
     }
 
@@ -5039,10 +5329,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if watch.answered {
             return Ok(true);
         }
+
         if !watch.probed {
             watch.probed = true;
             self.post_presence(conversation, now_ms, rng)?;
         }
+
         Ok(false)
     }
 
@@ -5063,6 +5355,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if gap >= WATCH_STEP {
             self.shift_silence(conversation, group, gap, now, rng)?;
         }
+
         self.put_clock(conversation, watch_key(conversation), now, rng)
     }
 
@@ -5089,9 +5382,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
             }
         }
+
         if moved.is_empty() {
             return Ok(());
         }
+
         let open = self.open_mut()?;
         let moved: Vec<(RowId, u64)> = moved
             .into_iter()
@@ -5107,6 +5402,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 rng,
             )?;
         }
+
         Ok(batch.commit()?)
     }
 
@@ -5126,6 +5422,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if group.own_role().is_none_or(|role| role < Role::Admin) {
                 continue;
             }
+
             self.shift_silence(conversation, &group, u64::MAX, now, rng)?;
             self.put_clock(conversation, watch_key(conversation), now, rng)?;
             if let Some(watch) = self.groups.watch.get_mut(&conversation) {
@@ -5133,6 +5430,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 watch.stored = now;
             }
         }
+
         Ok(())
     }
 
@@ -5145,11 +5443,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.binds()? {
             return Ok(Vec::new());
         }
+
         let mut out = Vec::new();
         for conversation in self.group_conversations()? {
             if !self.notify_wanted(conversation)? {
                 continue;
             }
+
             let due = match self.group_notify_row(conversation)? {
                 None => true,
                 Some(row) => {
@@ -5161,6 +5461,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 out.push(conversation);
             }
         }
+
         Ok(out)
     }
 
@@ -5175,6 +5476,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 out.extend(row.previous.map(|(queue, _)| queue));
             }
         }
+
         Ok(out)
     }
 
@@ -5188,6 +5490,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 out.extend(row.previous.map(|(queue, _)| (queue, conversation.0)));
             }
         }
+
         Ok(out)
     }
 
@@ -5198,6 +5501,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.group_closed(conversation)? {
             return Ok(false);
         }
+
         Ok(self
             .group_of(conversation)
             .is_ok_and(|group| group.own_role().is_some()))
@@ -5212,6 +5516,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Some(row) = self.group_notify_row(conversation)? else {
                 continue;
             };
+
             let gone = !self.notify_wanted(conversation)?;
             let mut ended: Vec<([u8; 32], Vec<u8>)> = Vec::new();
             if gone {
@@ -5225,6 +5530,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if ended.is_empty() {
                 continue;
             }
+
             // A group that holds no read key can send no `GNUNREG`; its
             // registrations leave with the relay life of `NTF-102`.
             let group = self.group_of(conversation).ok();
@@ -5240,6 +5546,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         let Some(reference) = replicas.reference(which) else {
                             continue;
                         };
+
                         unregistrations.push(NotifyRegistration {
                             conversation,
                             which,
@@ -5258,6 +5565,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 queues: ended.into_iter().map(|(queue, _)| queue).collect(),
             });
         }
+
         Ok(out)
     }
 
@@ -5271,6 +5579,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(mut row) = self.group_notify_row(conversation)? else {
             return Ok(());
         };
+
         let gone = !self.notify_wanted(conversation)?;
         let open = self.open_mut()?;
         let key = open.store.row_id(GROUP_NOTIFY, &conversation.0);
@@ -5281,8 +5590,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             row.previous = None;
             batch.put(GROUP_NOTIFY, key, None, &row.encode(), rng)?;
         }
+
         batch.commit()?;
         self.wake_changed();
+
         Ok(())
     }
 
@@ -5299,6 +5610,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if address.len() != umbra_wire::address::LEN {
             return Err(Error::Malformed);
         }
+
         // NTF-105: the queue that this one replaces leaves after the new
         // one registered.
         let previous = self
@@ -5318,6 +5630,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.put(GROUP_NOTIFY, row, None, &value, rng)?;
         batch.commit()?;
         self.wake_changed();
+
         Ok(())
     }
 
@@ -5330,6 +5643,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if value.len() != GROUP_NOTIFY_LEN && value.len() != GROUP_NOTIFY_LEN_V1 {
             return Err(Error::Integrity);
         }
+
         let (queue, rest) = value.split_at(32);
         let (address, rest) = rest.split_at(umbra_wire::address::LEN);
         let at = |range: core::ops::Range<usize>| -> Result<u64, Error> {
@@ -5353,6 +5667,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         } else {
             (0, None)
         };
+
         Ok(Some(NotifyRow {
             queue: queue.try_into().map_err(|_| Error::Integrity)?,
             address: address.to_vec(),
@@ -5377,6 +5692,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if !self.notify_wanted(conversation)? {
                 continue;
             }
+
             let Some(NotifyRow { address, times, .. }) = self.group_notify_row(conversation)?
             else {
                 continue;
@@ -5388,6 +5704,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Some(replicas) = group.replicas() else {
                 continue;
             };
+
             for (which, at) in times.iter().enumerate() {
                 let again = self.groups.notify_again.contains(&(conversation, which));
                 if *at != 0 && now.saturating_sub(*at) < NOTIFY_REREGISTER && !again {
@@ -5396,6 +5713,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 let Some(reference) = replicas.reference(which) else {
                     continue;
                 };
+
                 out.push(NotifyRegistration {
                     conversation,
                     which,
@@ -5407,6 +5725,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 });
             }
         }
+
         Ok(out)
     }
 
@@ -5422,15 +5741,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(mut row) = self.group_notify_row(conversation)? else {
             return Ok(());
         };
+
         if let Some(at) = row.times.get_mut(which) {
             *at = now;
         }
+
         let value = row.encode();
         let open = self.open_mut()?;
         let row = open.store.row_id(GROUP_NOTIFY, &conversation.0);
         let mut batch = open.store.begin();
         batch.put(GROUP_NOTIFY, row, None, &value, rng)?;
         batch.commit()?;
+
         Ok(())
     }
 
@@ -5455,13 +5777,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Some((held, earlier)) = read_unsent_row(&plain, row) else {
                 continue;
             };
+
             order = order.max(held.saturating_add(1));
+
             // A message that goes again under a new seal (`IMP-075`) takes
             // the place of its earlier seal.
             if post.message.is_some() && earlier.message == post.message {
                 replaced.push(row);
             }
         }
+
         let mut row = [0u8; 16];
         rng.fill_bytes(&mut row);
         let value = unsent_row(order, &post, &[ReplicaArq::default(); GROUP_REPLICAS]);
@@ -5469,10 +5794,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for earlier in replaced {
             batch.delete(GROUP_UNSENT, earlier);
         }
+
         batch.put(GROUP_UNSENT, row, Some(post.conversation.0), &value, rng)?;
         batch.commit()?;
         post.unsent = Some(row);
         self.groups.posts.push_back(post);
+
         Ok(())
     }
 
@@ -5490,10 +5817,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         })?;
         if let Some((post, which)) = place {
             self.groups.resent.remove(&(*row, which));
+
             // GRP-361, GRP-401: the `GSEQ` of a record that left after a
             // `GKEY` tells that the `GKEY` arrived.
             self.gkey_arrived(post.conversation, which, row, rng)?;
         }
+
         Ok(())
     }
 
@@ -5515,6 +5844,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         })?;
         if let Some((post, which)) = place {
             self.groups.resent.insert((*row, which), now);
+
             // The record tells of the `GKEY` before it when the replica can
             // take it under the credentials of that `GKEY` alone. The
             // replica then holds no pair of the epoch before (`GRP-398`),
@@ -5529,6 +5859,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
             }
         }
+
         Ok(())
     }
 
@@ -5546,6 +5877,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(plain) = open.store.get(GROUP_UNSENT, row)? else {
             return Ok(None);
         };
+
         let plain = Zeroizing::new(plain);
         let Some((order, post, mut arq)) = read_unsent(&plain, *row) else {
             return Ok(None);
@@ -5556,6 +5888,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(replica) = arq.get_mut(index) else {
             return Ok(None);
         };
+
         change(replica);
         let mut batch = open.store.begin();
         if arq.iter().all(|replica| replica.state != REPLICA_PENDING) {
@@ -5564,7 +5897,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let value = unsent_row(order, &post, &arq);
             batch.put(GROUP_UNSENT, *row, Some(post.conversation.0), &value, rng)?;
         }
+
         batch.commit()?;
+
         Ok(Some((post, index)))
     }
 
@@ -5581,11 +5916,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(conversation) = self.conversation_of_queue(group_queue_id)? else {
             return Ok(None);
         };
+
         let mut group = self.group_of(conversation)?;
+
         // GRP-253, GRP-254: a record that waited past GROUP_ROSTER_WAIT
         // for its roster leaves, and the conversation shows a gap.
         let expired = group.expire_held(now_ms / 1_000);
         let outcome = group.receive(record, now_ms / 1_000);
+
         // GRP-202: the cursor of that replica moves to the record.
         let which = (0..GROUP_REPLICAS).find(|index| {
             group
@@ -5596,6 +5934,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if let Some((which, replicas)) = which.zip(group.replicas_mut()) {
             let is_epoch_key = matches!(outcome, Ok(Outcome::EpochKey { .. }));
             replicas.arrived(which, seq, is_epoch_key);
+
             // GRP-396: a record of the replica of this session is its
             // answer, and one of the current slot ends its backlog.
             let slot = match &outcome {
@@ -5604,6 +5943,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             };
             self.watch_record(conversation, which, slot, now_ms / 1_000);
         }
+
         let before = Before::of(&group);
         let outcomes: VecDeque<Outcome> = outcome.into_iter().collect();
         let taken =
@@ -5611,9 +5951,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if expired > 0 {
             self.delivery_gap(conversation, now_ms, rng)?;
         }
+
         // DEV-309: a roster object of another member can be the one that a
         // held re-key item waits for.
         self.retry_rekey_items(now_ms, rng)?;
+
         Ok(taken)
     }
 
@@ -5647,6 +5989,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                             self.groups.key_answers.remove(&(conversation, index));
                         }
                     }
+
                     // GRP-284: the slot of a chunked record waits on the
                     // chunk path, and this device fetches its one chunk.
                     if let Ok(Some(wanted)) = group.wanted_chunk(epoch, start_slot, &body, now) {
@@ -5666,6 +6009,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         }
                         continue;
                     }
+
                     let before = group.epoch();
                     let is_one_slot = group.slot_indices(&body).len() == 1;
                     if group
@@ -5673,6 +6017,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         .is_ok()
                     {
                         installed = true;
+
                         // WIR-462: a one-slot record that brings the next
                         // epoch is a key supply for a rotation that this
                         // device missed. A delivery of owner credentials
@@ -5681,6 +6026,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                             let key = recovered_key(conversation, epoch);
                             self.put_clock(conversation, key, now, rng)?;
                         }
+
                         // GRP-252: a record of the new epoch that arrived
                         // before its key waited, and it opens now.
                         outcomes.extend(group.retry_held(now));
@@ -5704,6 +6050,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     ..
                 } => {
                     self.note_seen(conversation, &group, sender, now, rng)?;
+
                     // GRP-251: a record whose app does not parse is one
                     // silent drop; it ends no other outcome of the arrival.
                     let Ok(parsed) =
@@ -5711,6 +6058,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     else {
                         continue;
                     };
+
                     // A request of a member that lacks the epoch, and the
                     // notice that one was answered, are no messages.
                     if parsed.kind == AppKind::KeyRequest {
@@ -5720,6 +6068,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     if parsed.kind == AppKind::KeySupply {
                         continue;
                     }
+
                     // A roster object moves the roster and is no message
                     // (`GRP-318`), and a record that waited for it opens.
                     if parsed.kind == AppKind::GroupControl {
@@ -5736,10 +6085,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                                 )?;
                                 continue;
                             }
+
                             let forks = group.roster().forks().len();
+
                             // GRP-076: the rates of the chain count on the
                             // slot of the record that carried the object.
                             let applied = group.apply_control_at(&control, sender, slot, now);
+
                             // GRP-070, GRP-071: a fork shows, and the member
                             // picks no successor in silence.
                             self.note_forks(conversation, &group, forks, now_ms, rng)?;
@@ -5750,12 +6102,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                                 if matches!(applied, Applied::Granted { .. }) {
                                     self.note_grant(conversation, parsed.body, rng)?;
                                 }
+
                                 self.roster_moved(conversation, &applied, now, rng)?;
                                 outcomes.extend(group.retry_held(now));
                             }
                         }
                         continue;
                     }
+
                     // ABU-036, ABU-038: a record of a blocked member goes,
                     // and the view counts it.
                     if self.is_member_blocked(conversation, sender)? {
@@ -5766,6 +6120,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         }
                         continue;
                     }
+
                     // GRP-206, GRP-259: a record under a counter that this
                     // device took already is a copy. The other replica gave
                     // it, or a replica kept it. A message drops at its
@@ -5785,12 +6140,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     {
                         continue;
                     }
+
                     // An edit and a deletion of an author name a message of
                     // that member alone (Part 11 §11.9.6).
                     if matches!(parsed.kind, AppKind::Edit | AppKind::Delete) {
                         self.take_group_change(conversation, Some(sender), &parsed, now_ms, rng)?;
                         continue;
                     }
+
                     // GRP-336: a vote is one group record, and each member
                     // counts it in the order of its sender (WIR-190). The
                     // order is the index, then the epoch, then the counter,
@@ -5809,6 +6166,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         self.take_vote(conversation, parsed.body, sender, position, now, rng)?;
                         continue;
                     }
+
                     // WIR-075, GRP-299, GRP-300: a group stores the kinds of
                     // a message alone. A receipt, a typing indicator, and
                     // each kind of the pairwise channel make no row and no
@@ -5825,6 +6183,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     ) {
                         continue;
                     }
+
                     // A record that does not parse under the layout of a
                     // group goes (WIR-163, WIR-180).
                     // DEV-174: a rich record takes its class from the kind
@@ -5847,6 +6206,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     if is_invalid {
                         continue;
                     }
+
                     // DEV-093, DEV-102: a deletion of its author came first.
                     // The view shows nothing at that position, and no alert
                     // goes. The entry stays, thus the copy of the other
@@ -5854,6 +6214,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     if self.held_group_deletion(conversation, &parsed.msg_id, sender, now_ms)? {
                         continue;
                     }
+
                     // DEV-249: a timer record of a member below admin goes.
                     let timer = if parsed.kind == AppKind::ConversationTimer {
                         let is_admin = group
@@ -5867,6 +6228,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     } else {
                         None
                     };
+
                     // DEV-325: a policy record of a member below admin
                     // goes, and so does one that is older than the policy
                     // of the group (`DEV-323`).
@@ -5885,6 +6247,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                             continue;
                         }
                     }
+
                     let stored = self.store_group_message(conversation, &app, now_ms, rng)?;
                     if let Some(message) = stored {
                         let is_recovered =
@@ -5899,6 +6262,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                                 self.stamp_deadline(conversation, message, parsed.kind, now, rng)?
                             }
                         }
+
                         // DEV-093: an edit of its author that a replica gave
                         // first applies now.
                         self.take_held_group_change(
@@ -5910,6 +6274,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                             rng,
                         )?;
                     }
+
                     first = first.or(stored);
                 }
                 // GRP-229: the list shows the `clock` state. A record of an
@@ -5929,8 +6294,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 Outcome::Held | Outcome::Duplicate => {}
             }
         }
+
         // The counters, the held records and the roster moved.
         self.save_group(conversation, &group, rng)?;
+
         // GRP-400: another admin drew the owner credentials that this
         // device holds now, and that admin moves each replica to them.
         // What this device knew of its own `GKEY` commands names
@@ -5942,14 +6309,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .gkey_sent
                 .retain(|(held, _), _| *held != conversation);
         }
+
         // GRP-370: a rival re-key took the index of this member.
         if group.lost_rekey() {
             self.ask_to_return(conversation, now_ms, rng)?;
         }
+
         for head in displaced {
             self.repost_displaced(conversation, head, now_ms, rng)?;
         }
+
         self.drop_passed_adds(conversation)?;
+
         // GRP-363: an admin that installs an epoch it did not credential
         // moves each replica to it. A delivery of owner credentials alone
         // installs no epoch. GRP-364: a switch to the secret of a lower
@@ -5969,6 +6340,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if read_backlog && group.lacks_epoch().is_none() {
                 self.queue_gkeys(conversation, &group, false)?;
             }
+
             // GRP-405: the epoch that a lapsed member lacked arrived, and
             // the credentials of it take its records again. GRP-210: a
             // group that each replica refused takes a new epoch, thus its
@@ -5977,12 +6349,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 self.reopen_group(conversation, rng)?;
             }
         }
+
         // GRP-402: owner credentials from another admin answer the call for
         // them, thus this admin stands down.
         if group.owner(0).map(|held| *held.expose()) != before.owners {
             self.groups.owner_backoff.remove(&conversation);
             self.note_owners(conversation, &group, rng)?;
         }
+
         Ok(first)
     }
 
@@ -5996,6 +6370,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         rng: &mut R,
     ) -> Result<Option<MsgRef>, Error> {
         let parsed = umbra_wire::app::AppMessage::parse(app, umbra_wire::app::Channel::Group)?;
+
         // IMP-167, IMP-168: a file above this size waits for a tap.
         let limit = self.download_limit_now()?;
         let open = self.open_mut()?;
@@ -6011,11 +6386,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         {
             return Ok(None);
         }
+
         // GRP-142: the answer resolves inside this group, as a reference.
         let mut kept = Zeroizing::new(app.to_vec());
         if super::keep_reply_as_reference(&mut kept, &open.device_set_key).is_err() {
             return Ok(None);
         }
+
         let plain = stored_message(
             super::INCOMING,
             Delivery::Delivered,
@@ -6031,6 +6408,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             &plain,
             rng,
         )?;
+
         // IMP-163: a file of a group takes the same download as a file of a
         // pairwise channel.
         let mut wanted = None;
@@ -6045,6 +6423,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             )?;
             wanted = descriptor;
         }
+
         batch.commit()?;
         let message = MsgRef(row);
         if let Some(descriptor) = wanted {
@@ -6053,10 +6432,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 descriptor: Box::new(descriptor),
             });
         }
+
         self.events.push_back(Event::Message {
             conversation,
             message,
         });
+
         Ok(Some(message))
     }
 
@@ -6080,6 +6461,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     parsed.body,
                     umbra_wire::app::Channel::Group,
                 )?;
+
                 // GRP-335: the pair key of the roster entry. This device
                 // tests its own identifier alone, thus a mention of no
                 // member names nobody here (GRP-140).
@@ -6100,6 +6482,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
             _ => {}
         }
+
         Ok(())
     }
 
@@ -6123,11 +6506,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 &member.pair_pk,
             ));
         }
+
         ids.sort_unstable();
         ids.dedup();
         if ids.len() > umbra_core::group::MENTION_MAX {
             return Err(Error::TooLong);
         }
+
         Ok(ids)
     }
 
@@ -6149,6 +6534,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             &at.to_be_bytes(),
             rng,
         )?;
+
         Ok(batch.commit()?)
     }
 
@@ -6175,6 +6561,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if group.own_role().is_none_or(|role| role < Role::Admin) {
             return Ok(());
         }
+
         self.groups.evictions.remove(&(conversation, sender));
         self.put_clock(
             conversation,
@@ -6222,6 +6609,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 rng,
             )?;
         }
+
         match applied {
             Applied::Added(index) => self.put_clock(
                 conversation,
@@ -6254,6 +6642,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     batch.delete(GROUP_PRESENCE, row);
                     batch.commit()?;
                 }
+
                 Ok(())
             }
             _ => Ok(()),
@@ -6274,16 +6663,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if self.group_closed(conversation)? {
                 continue;
             }
+
             let group = self.group_of(conversation)?;
             if group.own_role().is_none() || group.replicas().is_none() {
                 continue;
             }
+
             match self.clock(&sent_key(conversation))? {
                 None => self.put_clock(conversation, sent_key(conversation), now, rng)?,
                 Some(at) if presence_due(Some(at), now) => due.push(conversation),
                 Some(_) => {}
             }
         }
+
         Ok(due)
     }
 
@@ -6299,16 +6691,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.owns_channels()? {
             return Ok(());
         }
+
         let mut group = self.group_of(conversation)?;
         let Some(replicas) = Self::group_replicas_of(&group)? else {
             return Ok(());
         };
+
         let record = group
             .presence(now_ms / 1_000, rng)
             .map_err(|_| Error::Malformed)?;
         let write = group.credentials().ok_or(Error::Integrity)?.write_secret();
         let fallback = group.previous_credentials().map(|held| held.write_secret());
         self.save_group(conversation, &group, rng)?;
+
         // A presence is a signal of activity alone, and a later one takes
         // its place, thus no row keeps it.
         self.groups.posts.push_back(GroupPost {
@@ -6347,6 +6742,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if group.own_role().is_none_or(|role| role < Role::Admin) {
                 continue;
             }
+
             // GRP-396, GRP-134: silence counts while this admin reads the
             // group with no backlog, and no removal comes before that. A
             // closed group removes nobody; the `GKEY` that its replicas
@@ -6355,6 +6751,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if !watches || self.group_closed(conversation)? {
                 continue;
             }
+
             let roster = group.roster();
             let (active, owners) = (roster.active_count(), roster.owner_count());
             let watched: Vec<(u16, Role)> = roster
@@ -6368,6 +6765,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     self.put_clock(conversation, key, now, rng)?;
                     continue;
                 };
+
                 // GRP-063, GRP-166: only an owner takes the role of an
                 // owner, thus an admin leaves a silent owner to the owners.
                 let own_role = group.own_role();
@@ -6395,7 +6793,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         if !self.watch_answered(conversation, now_ms, rng)? {
                             continue;
                         }
+
                         due.push((conversation, index, action));
+
                         // GRP-076: the removal after a demotion waits for
                         // the rate of one epoch of this admin.
                         let next = now
@@ -6411,6 +6811,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
             }
         }
+
         Ok(due)
     }
 
@@ -6441,8 +6842,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(credentials) = group.credentials() else {
             return Ok(());
         };
+
         let (read_pk, write_pk) = (credentials.read_public(), credentials.write_public());
         let held = self.gkey_row(conversation)?;
+
         // GRP-362: a replica takes no `GKEY` before it accepted the
         // epoch-key record of this device.
         let waits = self.rotation_waits(conversation)?;
@@ -6458,6 +6861,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if waits {
                 continue;
             }
+
             let job = |own: &Secret<32>, next_own_pk| GroupRekey {
                 relay: replica.relay,
                 group_queue_id: replica.group_queue_id,
@@ -6470,6 +6874,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 &umbra_crypto::x25519::StaticSecret::from(*own.expose()),
             )
             .as_bytes();
+
             // A rotation that never reached the group row replaced nothing.
             let replaced: Vec<&Secret<32>> = replaced
                 .iter()
@@ -6478,18 +6883,22 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if replaced.is_empty() && taken == Some(write_pk) {
                 continue;
             }
+
             for before in replaced {
                 self.groups.rekeys.push_back(job(before, Some(next)));
             }
+
             if !drew {
                 self.groups.rekeys.push_back(job(own, None));
             }
+
             let sent = GkeySent {
                 write_pk,
                 after: BTreeSet::new(),
             };
             self.groups.gkey_sent.insert((conversation, which), sent);
         }
+
         Ok(())
     }
 
@@ -6503,6 +6912,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if uploads.iter().any(|held| held.conversation == conversation) {
             return Ok([true; GROUP_REPLICAS]);
         }
+
         let mut waits = [false; GROUP_REPLICAS];
         let store = &self.open_ref()?.store;
         for (row, plain) in store.list(GROUP_UNSENT, Some(&conversation.0))? {
@@ -6513,10 +6923,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if !post.is_rotation {
                 continue;
             }
+
             for (waits, replica) in waits.iter_mut().zip(arq) {
                 *waits |= replica.state == REPLICA_PENDING;
             }
         }
+
         Ok(waits)
     }
 
@@ -6546,9 +6958,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .store
             .row_id(GROUP_OWNERS, &Self::gkey_key(conversation));
         let mut batch = open.store.begin();
+
         // The row names no owner, thus it stays on this device: a linked
         // device sends no `GKEY` (`GRP-340`).
         batch.put(GROUP_OWNERS, row, None, &held.encode(), rng)?;
+
         Ok(batch.commit()?)
     }
 
@@ -6571,6 +6985,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !sent.after.contains(row) {
             return Ok(());
         }
+
         let write_pk = sent.write_pk;
         self.groups.gkey_sent.remove(&key);
         let mut held = self.gkey_row(conversation)?;
@@ -6580,6 +6995,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if let Some(replaced) = held.replaced.get_mut(which) {
             replaced.clear();
         }
+
         self.put_gkey_row(conversation, &held, rng)
     }
 
@@ -6594,6 +7010,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Some(replicas) = group.replicas() else {
                 continue;
             };
+
             let holds = (0..GROUP_REPLICAS).any(|index| {
                 replicas
                     .reference(index)
@@ -6603,6 +7020,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 return Ok(Some(conversation));
             }
         }
+
         Ok(None)
     }
 
@@ -6624,6 +7042,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for conversation in self.group_conversations()? {
             self.ask_to_return(conversation, now_ms, rng)?;
         }
+
         Ok(())
     }
 
@@ -6660,7 +7079,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Some((order, mut post, mut arq)) = read_unsent(&plain, row) else {
                 continue;
             };
+
             held.insert(row);
+
             // A record in the work list goes from there, and a group that
             // closed takes none.
             let waits = self
@@ -6671,29 +7092,35 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if waits || self.group_closed(post.conversation).unwrap_or(true) {
                 continue;
             }
+
             let before = arq;
             let mut due = [false; GROUP_REPLICAS];
             for (which, (replica, due)) in arq.iter_mut().zip(&mut due).enumerate() {
                 let Some(sent) = self.groups.resent.get(&(row, which)) else {
                     continue;
                 };
+
                 let wait = RESEND_FIRST
                     .checked_shl(replica.attempts.saturating_sub(1))
                     .map_or(RESEND_MAX, |wait| wait.min(RESEND_MAX));
                 if replica.state != REPLICA_PENDING || now.saturating_sub(*sent) < wait {
                     continue;
                 }
+
                 replica.check(now);
                 *due = replica.state == REPLICA_PENDING;
             }
+
             if arq.iter().all(|replica| replica.state != REPLICA_PENDING) {
                 let accepted = arq.iter().any(|replica| replica.state == REPLICA_ACCEPTED);
                 if let Some(message) = post.message.filter(|_| !accepted) {
                     failed.push(message);
                 }
+
                 ended.push(row);
                 continue;
             }
+
             if arq != before {
                 changed.push((row, post.conversation, unsent_row(order, &post, &arq)));
             }
@@ -6702,6 +7129,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 again.push((order, post));
             }
         }
+
         self.groups.resent.retain(|(row, _), _| held.contains(row));
         if !changed.is_empty() || !ended.is_empty() {
             let open = self.open_mut()?;
@@ -6712,11 +7140,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             for row in ended {
                 batch.delete(GROUP_UNSENT, row);
             }
+
             batch.commit()?;
         }
+
         for message in failed {
             self.fail(&message, crate::FailureCause::NoReplica, rng)?;
         }
+
         again.sort_by_key(|(order, _)| *order);
         for (_, post) in again {
             // The next send sets the time of this replica again.
@@ -6727,8 +7158,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     }
                 }
             }
+
             self.groups.posts.push_back(post);
         }
+
         Ok(())
     }
 
@@ -6737,6 +7170,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     fn requeue_group_posts<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<(), Error> {
         self.groups.posts.clear();
         self.groups.resent.clear();
+
         // GRP-392: each sealed record goes again as it was, in the order of
         // its seal. A group that is gone or closed takes none, and a message
         // that no longer waits in the outbox takes none.
@@ -6752,8 +7186,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 dropped.push(row);
                 continue;
             };
+
             let store = &self.open_ref()?.store;
             let is_held = store.get(GROUP, &post.conversation.0)?.is_some();
+
             // NET-258: a record that one replica accepted left the outbox,
             // and it still goes to the other one.
             let accepted = arq.iter().any(|replica| replica.state == REPLICA_ACCEPTED);
@@ -6765,11 +7201,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 dropped.push(row);
                 continue;
             }
+
             // NET-271: each replica ends its own ARQ, and NET-272 fails the
             // message only when no replica accepted it.
             for replica in &mut arq {
                 replica.check(now);
             }
+
             post.pending = [
                 arq[0].state == REPLICA_PENDING,
                 arq[1].state == REPLICA_PENDING,
@@ -6780,26 +7218,33 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         failed.push(message);
                     }
                 }
+
                 ended.push(row);
                 continue;
             }
+
             if let Some(message) = post.message {
                 sealed.insert(message);
             }
+
             kept.push((order, post));
         }
+
         if !dropped.is_empty() || !ended.is_empty() {
             let open = self.open_mut()?;
             let mut batch = open.store.begin();
             for row in dropped.into_iter().chain(ended) {
                 batch.delete(GROUP_UNSENT, row);
             }
+
             batch.commit()?;
         }
+
         // NET-272, IMP-074: no replica took the record before its ARQ gave up.
         for message in failed {
             self.fail(&message, crate::FailureCause::NoReplica, rng)?;
         }
+
         kept.sort_by_key(|(order, _)| *order);
         self.groups
             .posts
@@ -6810,11 +7255,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Some(plain) = store.get(umbra_core::store::record::TableId::MESSAGE, &row)? else {
                 continue;
             };
+
             let plain = Zeroizing::new(plain);
             let conversation = super::conversation_of(&plain)?;
             if store.get(GROUP, &conversation.0)?.is_none() || sealed.contains(&MsgRef(row)) {
                 continue;
             }
+
             let info = super::info_of(&plain)?;
             waiting.push((
                 info.stored_at_ms,
@@ -6828,7 +7275,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 ),
             ));
         }
+
         waiting.sort_by_key(|(stored_at, _, _, _)| *stored_at);
+
         // GRP-246: a record that no seal took yet takes the slot of the last
         // tick, as a send then would. GRP-415: one that cannot be sealed any
         // more fails alone, and the rest go.
@@ -6847,6 +7296,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 self.fail(&message, crate::FailureCause::NoPath, rng)?;
             }
         }
+
         Ok(())
     }
 
@@ -6858,13 +7308,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut jobs = Vec::new();
         for (_, plain) in store.list(GROUP_QUEUE, None)? {
             let plain = Zeroizing::new(plain);
+
             // A row that carries its identifier is done.
             if plain.len() != QUEUE_ROW_LEN {
                 continue;
             }
+
             let (group_id, replica, relay) = read_queue_row(&plain)?;
             jobs.push((group_id, replica, relay));
         }
+
         for (group_id, replica, relay) in jobs {
             let conversation = self.conversation_of_group(&group_id)?;
             let group = self.group_of(conversation)?;
@@ -6879,6 +7332,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 own: Secret::new(*own.expose()),
             });
         }
+
         Ok(())
     }
 }
@@ -6908,6 +7362,7 @@ fn unsent_row(
         value.extend_from_slice(&replica.relay);
         value.extend_from_slice(&replica.group_queue_id);
     }
+
     value.push(u8::from(post.message.is_some()));
     value.extend_from_slice(&post.message.map_or([0u8; 16], |message| message.0));
     for replica in arq {
@@ -6915,6 +7370,7 @@ fn unsent_row(
         value.extend_from_slice(&replica.attempts.to_be_bytes());
         value.extend_from_slice(&replica.first.to_be_bytes());
     }
+
     value.extend_from_slice(&post.record);
     value
 }
@@ -6961,6 +7417,7 @@ fn read_unsent(
             replica.attempts = u32::from_be_bytes(body.get(at + 1..at + 5)?.try_into().ok()?);
             replica.first = u64::from_be_bytes(body.get(at + 5..at + 13)?.try_into().ok()?);
         }
+
         head + GROUP_REPLICAS * REPLICA_ARQ_LEN
     } else {
         head
@@ -6990,10 +7447,12 @@ fn read_unsent(
     if record.is_empty() {
         return None;
     }
+
     let pending = [
         arq[0].state == REPLICA_PENDING,
         arq[1].state == REPLICA_PENDING,
     ];
+
     Some((
         order,
         GroupPost {
@@ -7034,9 +7493,11 @@ mod tests {
 
     impl TryRng for Rng {
         type Error = core::convert::Infallible;
+
         fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
             Ok(self.try_next_u64()? as u32)
         }
+
         fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
             self.0 = self
                 .0
@@ -7044,11 +7505,13 @@ mod tests {
                 .wrapping_add(1_442_695_040_888_963_407);
             Ok(self.0 >> 11 ^ self.0 << 7)
         }
+
         fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
             for chunk in dst.chunks_mut(8) {
                 let bytes = self.try_next_u64()?.to_le_bytes();
                 chunk.copy_from_slice(&bytes[..chunk.len()]);
             }
+
             Ok(())
         }
     }
@@ -7205,6 +7668,7 @@ mod tests {
                     .unwrap();
             }
         }
+
         while client.take_epoch_upload().is_some() {}
         let silent = client.members_to_evict(now * 1_000, rng).unwrap();
         let read: Vec<ConversationId> = reading.iter().copied().collect();
@@ -7299,6 +7763,7 @@ mod tests {
             .apply_group_state(&subject, &before, &mut rng)
             .unwrap();
         assert_eq!(joiner.group_info(member).unwrap().own_index, 2);
+
         // The state of a membership takes the place of a row whose own
         // membership ended.
         joiner
@@ -7448,6 +7913,7 @@ mod tests {
         };
         assert_eq!(contact_of(0), Some(admin_at_invited));
         assert_eq!(contact_of(1), None);
+
         // The offer of the other contact left with the join.
         assert!(invited.group_offers().unwrap().is_empty());
     }
@@ -7483,6 +7949,7 @@ mod tests {
         assert!(pump(&mut admin, &mut reading, start, &mut rng).is_empty());
         let watched = start + WATCH_QUIET;
         assert!(pump(&mut admin, &mut reading, watched, &mut rng).is_empty());
+
         // Each hour a tick names the group as read, for thirty days.
         let silent = watched + GROUP_SILENT_EVICT;
         let mut at = watched;
@@ -7490,6 +7957,7 @@ mod tests {
             at += 3_600;
             admin.group_reads(&[group], at * 1_000, &mut rng).unwrap();
         }
+
         // GRP-397: the backoff comes first. GRP-134: the replica of this
         // session gave no answer yet, thus one presence record asks it for
         // a `GSEQ`. No removal comes before that answer.
@@ -7504,6 +7972,7 @@ mod tests {
                 .group_replica_reached(group, &relay, true, &mut rng)
                 .unwrap();
         }
+
         assert_eq!(
             pump(&mut admin, &mut reading, silent + 3_602, &mut rng),
             vec![(group, 1, Silence::Remove), (group, 2, Silence::Remove)]
@@ -7630,6 +8099,7 @@ mod tests {
 
         let held = client.gkey_row(group).unwrap();
         assert!(held.replaced.iter().all(|before| before.len() == 1));
+
         // A record that leaves after them takes its `GSEQ` at each replica:
         // each `GKEY` arrived, and the credentials before leave the store.
         say(&mut client, group, "after the rotation", T0 + 300, &mut rng);
@@ -7657,6 +8127,7 @@ mod tests {
         let group = new_group(&mut client, &mut rng);
         client.close_group(group, &mut rng).unwrap();
         assert!(client.group_info(group).unwrap().is_closed);
+
         // GRP-210: the message did not go, and the view shows it.
         let message = say(&mut client, group, "into a closed group", T0 + 10, &mut rng);
         assert!(client.take_group_post().is_none());
@@ -7683,11 +8154,13 @@ mod tests {
             assert_eq!(held.len(), 1);
             held[0].relay
         };
+
         // GRP-204: a pump that sends no `GSUB` changes nothing.
         let stored = client.group_of(group).unwrap().export().unwrap();
         let first = relay_of(&mut client);
         assert_eq!(relay_of(&mut client), first);
         assert_eq!(client.group_of(group).unwrap().export().unwrap(), stored);
+
         // The `GSUB` goes, and the next one takes the other replica. That
         // is in the same session after a `GSUB` that found no circuit
         // (`GRP-391`), and in the next session else.
@@ -7703,6 +8176,7 @@ mod tests {
             .unwrap();
         while client.take_epoch_upload().is_some() {}
         assert_eq!(relay_of(&mut client), first);
+
         // A tick that names the group as read sends no `GSUB`.
         while client.take_epoch_upload().is_some() {}
         client
@@ -7727,6 +8201,7 @@ mod tests {
                 .notify_registered(group, due.which, T0 + 30, &mut rng)
                 .unwrap();
         }
+
         assert!(client.notify_registrations_due(T0 + 31).unwrap().is_empty());
         let next = relay_of(&mut client);
         client
@@ -7755,11 +8230,13 @@ mod tests {
                 .group_post_sent(&row, &relay, sent, &mut rng)
                 .unwrap();
         }
+
         // GRP-196: no replica answered, and no wait ran out yet.
         client
             .expire_group_holds((sent + RESEND_FIRST - 1) * 1_000, &mut rng)
             .unwrap();
         assert!(client.take_group_post().is_none());
+
         // The same bytes go again to each replica after the first wait.
         let again = sent + RESEND_FIRST + RESEND_SWEEP;
         client.expire_group_holds(again * 1_000, &mut rng).unwrap();
@@ -7768,6 +8245,7 @@ mod tests {
         assert_eq!(second.unsent, Some(row));
         assert_eq!(second.pending, [true, true]);
         assert!(client.take_group_post().is_none());
+
         // One replica takes it, and the other one alone gets it once more,
         // after twice the wait.
         for relay in RELAYS {
@@ -7775,6 +8253,7 @@ mod tests {
                 .group_post_sent(&row, &relay, again, &mut rng)
                 .unwrap();
         }
+
         client
             .group_post_accepted(&row, &RELAYS[0], &mut rng)
             .unwrap();
@@ -7916,6 +8395,7 @@ mod tests {
                 .unwrap()
                 .is_none());
         }
+
         assert!(client.messages(group).unwrap().is_empty());
         while let Some(event) = client.next_event() {
             assert!(!matches!(event, Event::Message { .. }));
@@ -7936,6 +8416,7 @@ mod tests {
             T0 + 1,
             &mut rng,
         );
+
         // DEV-174: a rich record takes its class from the kind that it goes
         // around, and one around a vote is no message.
         let rich = umbra_wire::app::rich::RichRecord {
@@ -7983,6 +8464,7 @@ mod tests {
             T0 + 1,
             &mut rng,
         );
+
         // The member moves to new keys after it lost a device, and no rival
         // re-key ever came.
         let mut stolen = joiner.group_of(member).unwrap();
@@ -8083,6 +8565,7 @@ mod tests {
                 .on_group_record(queue, 31, &first.record, ms(T0 + 13), &mut rng)
                 .unwrap();
         }
+
         assert_eq!(client.info(&held).unwrap().revisions, 1);
         assert_eq!(text(&client, &held), "meet at 9");
 
@@ -8098,6 +8581,7 @@ mod tests {
             .unwrap();
         assert_eq!(client.info(&held).unwrap().revisions, 2);
         assert_eq!(text(&client, &held), "meet at 10");
+
         // A copy of the message itself drops at its `msg_id`.
         assert!(client
             .on_group_record(&QUEUES[1], 30, &message.record, ms(T0 + 601), &mut rng)
@@ -8139,6 +8623,7 @@ mod tests {
             .unwrap();
         assert_eq!(client.group_of(group).unwrap().epoch(), 2);
         assert!(client.take_group_rekey().is_none());
+
         // The backlog ended: the `GKEY` of the epoch that stands goes to
         // each replica.
         pump(
@@ -8205,12 +8690,14 @@ mod tests {
         let mut client = new_client(&mut rng);
         let group = new_group(&mut client, &mut rng);
         let ms = |seconds: u64| seconds * 1_000;
+
         // GRP-076: four re-keys of one member in a day, and the fifth
         // waits. The device that left the set holds keys of the group
         // until it goes.
         for step in 0..u64::from(umbra_core::group::REKEY_RATE_DAY) {
             client.rekey_groups(ms(T0 + 10 + step), &mut rng).unwrap();
         }
+
         let index = client.group_info(group).unwrap().own_index;
         assert_eq!(index, 4);
         assert!(matches!(
@@ -8221,10 +8708,12 @@ mod tests {
         // A sweep inside the day posts nothing, and the re-key still waits.
         client.expire_group_holds(ms(T0 + 100), &mut rng).unwrap();
         assert_eq!(client.group_info(group).unwrap().own_index, index);
+
         // The rate takes it a day later, and the sweep posts it.
         let later = T0 + 25 * 3_600;
         client.expire_group_holds(ms(later), &mut rng).unwrap();
         assert_eq!(client.group_info(group).unwrap().own_index, index + 1);
+
         // It goes once.
         client
             .expire_group_holds(ms(later + 120), &mut rng)

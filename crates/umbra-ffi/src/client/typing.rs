@@ -57,10 +57,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.typing_enabled()? || self.is_group(conversation)? {
             return Ok(false);
         }
+
         let last = self.typing_sent.get(&conversation).copied();
         if last.is_some_and(|at| now_ms.saturating_sub(at) < TYPING_INTERVAL_MS) {
             return Ok(false);
         }
+
         let mut body = [0u8; 2];
         let state = if started {
             TypingState::Started
@@ -84,6 +86,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             conversation,
             app,
         });
+
         Ok(true)
     }
 }

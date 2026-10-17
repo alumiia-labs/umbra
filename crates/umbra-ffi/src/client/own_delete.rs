@@ -83,6 +83,7 @@ pub(super) fn split_own_deletions(synced: Vec<Synced>) -> (Vec<Synced>, Vec<OwnD
             None => kept.push(record),
         }
     }
+
     (kept, deletions)
 }
 
@@ -114,6 +115,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let target = AppMessage::parse(app, Channel::Pairwise)
             .or_else(|_| AppMessage::parse(app, Channel::Group))?
             .msg_id;
+
         Ok((conversation, target))
     }
 
@@ -165,6 +167,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for batch in targets.chunks(DELETE_BATCH_MAX) {
             self.publish_own_targets(conversation, batch.to_vec(), now_ms, rng)?;
         }
+
         // An edit, a reaction, or a vote of the user that waits for its
         // relay names a message that goes now, and no view shows it. Its
         // record would carry the content after the act. A deletion for the
@@ -188,22 +191,27 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 gone.push(MsgRef(row));
             }
         }
+
         // An edit that waits for its target holds a text. A deletion that
         // waits stays, thus a target that comes later stays deleted.
         for (row, entry) in open.store.list(PENDING, Some(&conversation.0))? {
             if entry.len() > PENDING_ROW_LEN {
                 texts.push(row);
             }
+
             drop(Zeroizing::new(entry));
         }
+
         self.delete_all_held(&gone)?;
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         for row in texts {
             batch.delete(PENDING, row);
         }
+
         batch.commit()?;
         self.events.push_back(Event::Conversations);
+
         Ok(())
     }
 
@@ -223,6 +231,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.is_group(conversation)? {
             return Err(Error::Malformed);
         }
+
         let now = now_ms / 1_000;
         let limit = [LAST_DELETE_SETTING, conversation.0.as_slice()].concat();
         let open = self.open_ref()?;
@@ -233,6 +242,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 return Err(Error::Busy);
             }
         }
+
         let bound = self.newest_of_contact(conversation)?;
         self.delete_conversation(conversation, now_ms, rng)?;
 
@@ -280,6 +290,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             app: request,
         });
         self.auto_lock.touch(now);
+
         Ok(())
     }
 
@@ -290,15 +301,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Some(plain) = self.open_ref()?.store.get(TableId::MESSAGE, &message.0)? else {
                 continue;
             };
+
             let plain = Zeroizing::new(plain);
             if info_of(&plain)?.outgoing {
                 continue;
             }
+
             let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
             if let Ok(parsed) = AppMessage::parse(app, Channel::Pairwise) {
                 return Ok(parsed.msg_id);
             }
         }
+
         Ok([0; 16])
     }
 
@@ -340,11 +354,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if later.contains(&message.0) {
                 continue;
             }
+
             let info = self.info(&message)?;
             if !info.outgoing || up_to.is_some_and(|at| info.stored_at_ms <= at) {
                 gone.push(message);
             }
         }
+
         self.delete_all_held(&gone)?;
         for message in gone {
             self.events.push_back(Event::Deleted {
@@ -352,6 +368,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 message,
             });
         }
+
         let parsed = AppMessage::parse(app, Channel::Pairwise)?;
         let open = self.open_mut()?;
         let reference = msg_ref(&open.device_set_key, &parsed.msg_id);
@@ -369,7 +386,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             batch.put(TableId::MESSAGE, row, Some(conversation.0), &trace, rng)?;
             batch.commit()?;
         }
+
         self.events.push_back(Event::Conversations);
+
         Ok(())
     }
 
@@ -401,24 +420,30 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
             }
         }
+
         for deletion in &deletions {
             self.count_deletion(&deletion.source, rng)?;
         }
+
         self.pend_own_deletions(&waiting, now_ms, rng)?;
+
         // DEV-118: after a restore each one waits for the user.
         if holds {
             if gone.is_empty() {
                 return Ok(());
             }
+
             let open = self.open_mut()?;
             let mut batch = open.store.begin();
             for (conversation, message) in &gone {
                 batch.put(HELD_DELETIONS, message.0, None, &conversation.0, rng)?;
             }
+
             batch.commit()?;
             self.events.push_back(Event::Conversations);
             return Ok(());
         }
+
         let messages: Vec<MsgRef> = gone.iter().map(|(_, message)| *message).collect();
         self.delete_all_held(&messages)?;
         for (conversation, message) in gone {
@@ -427,6 +452,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 message,
             });
         }
+
         Ok(())
     }
 
@@ -443,6 +469,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if waiting.is_empty() {
             return Ok(());
         }
+
         let open = self.open_mut()?;
         let mut held: BTreeMap<ConversationId, usize> = BTreeMap::new();
         let mut entries = Vec::new();
@@ -454,6 +481,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if count >= REF_ORPHAN_MAX {
                 continue;
             }
+
             held.insert(*conversation, count.saturating_add(1));
             let row = open.store.row_id(PENDING, &own_pending_key(natural));
             let entry = Zeroizing::new(
@@ -466,10 +494,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             );
             entries.push((row, *conversation, entry));
         }
+
         let mut batch = open.store.begin();
         for (row, conversation, entry) in &entries {
             batch.put(PENDING, *row, Some(conversation.0), entry, rng)?;
         }
+
         Ok(batch.commit()?)
     }
 
@@ -498,6 +528,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(held) = self.setting(&count_key(device))? else {
             return Ok(0);
         };
+
         let epoch = held
             .get(..8)
             .and_then(|bytes| bytes.try_into().ok())
@@ -505,6 +536,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if epoch != Some(self.roster_epoch()?) {
             return Ok(0);
         }
+
         Ok(held
             .get(8..12)
             .and_then(|bytes| bytes.try_into().ok())
@@ -526,6 +558,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if self.delete_if_held(&message).is_err() {
                 continue;
             }
+
             if let Ok(conversation) = <[u8; 16]>::try_from(conversation.as_slice()) {
                 self.events.push_back(Event::Deleted {
                     conversation: ConversationId(conversation),
@@ -533,6 +566,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 });
             }
         }
+
         self.end_held_deletions()
     }
 
@@ -560,6 +594,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for row in rows {
             batch.delete(HELD_DELETIONS, row);
         }
+
         batch.commit()?;
         self.remove_setting(HOLDS_DELETIONS)
     }

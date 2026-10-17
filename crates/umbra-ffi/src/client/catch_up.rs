@@ -52,6 +52,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(engine) = self.sync_engine()? else {
             return Ok(None);
         };
+
         let channels = self.peer_channels()?;
         let peers: Vec<DeviceId> = engine.peers().copied().collect();
         for peer in peers {
@@ -61,6 +62,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if !engine.needs_catch_up(&peer) {
                 continue;
             }
+
             let acked = engine.acked_of(&peer).unwrap_or(0);
             let done = self
                 .setting(&sent_key(&peer))?
@@ -69,6 +71,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if done == Some(acked) {
                 continue;
             }
+
             let mut object = Zeroizing::new(Vec::new());
             for counter in engine.retained_counters(&peer) {
                 let store = &self.open_ref()?.store;
@@ -79,20 +82,24 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 let Some(body) = value.get(8..).map(<[u8]>::to_vec) else {
                     continue;
                 };
+
                 // A timed record carries the period that remains now.
                 let Some(body) = self.restamped(body, now)? else {
                     continue;
                 };
+
                 let len = u32::try_from(body.len()).map_err(|_| Error::TooLong)?;
                 object.extend_from_slice(&len.to_be_bytes());
                 object.extend_from_slice(&body);
             }
+
             self.put_setting(&sent_key(&peer), &acked.to_be_bytes(), rng)?;
             if object.is_empty() {
                 continue;
             }
             return Ok(Some(CatchUp { channel, object }));
         }
+
         Ok(None)
     }
 
@@ -139,6 +146,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 out.push((channel, descriptor));
             }
         }
+
         Ok(out)
     }
 
@@ -186,6 +194,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             record.encode(&mut app)?;
             received.push((ContactId(contact), app));
         }
+
         self.commit_network(&[], &received, now_ms, rng)
     }
 

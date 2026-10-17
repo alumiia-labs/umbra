@@ -120,6 +120,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if AppMessage::parse(&app, Channel::Group)?.kind != AppKind::Poll {
             return Err(Error::Malformed);
         }
+
         Ok((conversation, app))
     }
 
@@ -164,6 +165,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(target) = vote_target(body) else {
             return Ok(None);
         };
+
         let open = self.open_ref()?;
         let reference = msg_ref(&open.device_set_key, &target);
         let natural = [conversation.0.as_slice(), &reference].concat();
@@ -171,10 +173,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Ok((held_in, app)) = self.poll_record(&poll) else {
             return Ok(None);
         };
+
         // GRP-142: a vote names a poll of its own conversation.
         if held_in != conversation {
             return Ok(None);
         }
+
         let parsed = AppMessage::parse(&app, Channel::Group)?;
         let Ok(question) = Poll::parse(parsed.body) else {
             return Ok(None);
@@ -182,10 +186,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Ok(vote) = PollVote::parse(body, &question) else {
             return Ok(None);
         };
+
         let closes_at = self.closes_at(&poll)?;
         if closes_at != 0 && now > closes_at {
             return Ok(None);
         }
+
         // WIR-190: a member that re-keyed votes under its newest index, thus
         // its vote before the re-key and after it are one vote.
         let voter = if voter == VOTER_SELF {
@@ -207,6 +213,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 return Ok(None);
             }
         }
+
         let value = Zeroizing::new(
             [
                 conversation.0.as_slice(),
@@ -225,6 +232,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             conversation,
             message: poll,
         });
+
         Ok(Some(poll))
     }
 
@@ -249,14 +257,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         {
             return Err(Error::TooLong);
         }
+
         // A poll that hides its count until the close needs a close.
         if hidden && open_seconds == 0 {
             return Err(Error::Malformed);
         }
+
         // WIR-557: no period, or one inside the two bounds.
         if open_seconds != 0 && !(POLL_OPEN_MIN..=POLL_OPEN_MAX).contains(&open_seconds) {
             return Err(Error::Malformed);
         }
+
         let poll = Poll {
             multiple,
             hidden,
@@ -315,6 +326,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             message
         };
         self.auto_lock.touch(now);
+
         Ok(message)
     }
 
@@ -336,6 +348,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if closes_at != 0 && now > closes_at {
             return Err(Error::Closed);
         }
+
         let vote = PollVote {
             target: parsed.msg_id,
             choices: choices.to_vec(),
@@ -380,7 +393,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 app: request,
             });
         }
+
         self.auto_lock.touch(now);
+
         Ok(())
     }
 
@@ -394,6 +409,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let closed = closes_at != 0 && now > closes_at;
         let mut counts = vec![0u32; question.options.len()];
         let mut mine = Vec::new();
+
         // WIR-190: one vote for each member, under its newest index, and
         // the latest position of that member wins.
         let group = self.group_of(conversation).ok();
@@ -404,6 +420,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if value.get(16..32) != Some(poll.0.as_slice()) {
                 continue;
             }
+
             let voter: [u8; 2] = value
                 .get(32..34)
                 .and_then(|b| b.try_into().ok())
@@ -417,6 +434,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if voter == VOTER_SELF {
                 mine = choices.to_vec();
             }
+
             let member = if voter == VOTER_SELF {
                 voter
             } else {
@@ -432,6 +450,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 *held = (position, choices.to_vec());
             }
         }
+
         let voters = u32::try_from(by_member.len()).unwrap_or(u32::MAX);
         for (_, choices) in by_member.values() {
             for choice in choices {
@@ -440,9 +459,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
             }
         }
+
         if question.hidden && !closed {
             counts.clear();
         }
+
         Ok(PollView {
             question: question.question.to_owned(),
             options: question
@@ -472,6 +493,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 rows.push(row);
             }
         }
+
         Ok(rows)
     }
 }

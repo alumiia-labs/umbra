@@ -25,6 +25,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.is_device_peer(conversation)? {
             return Ok(None);
         }
+
         let Some(plain) = self
             .open_ref()?
             .store
@@ -47,6 +48,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.renewal_ask(conversation)?.is_none() {
             return Err(Error::NotFound);
         }
+
         self.contact_id_of(conversation).map(ContactId)
     }
 
@@ -62,6 +64,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.renewal_ask(conversation)?.is_none() {
             return Err(Error::NotFound);
         }
+
         let open = self.open_mut()?;
         let plain = Zeroizing::new(
             open.store
@@ -77,6 +80,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.put(TableId::CONTACT, conversation.0, None, &changed, rng)?;
         batch.commit()?;
         self.events.push_back(Event::RenewalAsk { conversation });
+
         Ok(())
     }
 }

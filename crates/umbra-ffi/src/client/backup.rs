@@ -59,6 +59,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let bytes = Zeroizing::new(bytes);
             return Ok(RecoveryCode::from_bytes(&bytes)?);
         }
+
         // IDN-070: two independent outputs of the CSPRNG.
         let mut user = Secret::new([0u8; 16]);
         rng.fill_bytes(user.expose_mut());
@@ -74,6 +75,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             rng,
         )?;
         batch.commit()?;
+
         Ok(code)
     }
 
@@ -100,6 +102,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         rng: &mut R,
     ) -> Result<Vec<RowWrite>, Error> {
         let store = &self.open_ref()?.store;
+
         // IDN-070: two independent outputs of the CSPRNG.
         let mut code = Zeroizing::new(vec![0u8; 32]);
         let (user, social) = code.split_at_mut(16);
@@ -117,6 +120,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for (row, _) in store.list(BACKUP_INDEX, None)? {
             writes.push(RowWrite::Delete(BACKUP_INDEX, row));
         }
+
         Ok(writes)
     }
 }
@@ -260,7 +264,9 @@ impl BackupState {
                 }
             }
         }
+
         writer.u64(self.first_written_at);
+
         Ok(writer.finish())
     }
 
@@ -282,18 +288,21 @@ impl BackupState {
                 for _ in 0..reader.u8()? {
                     relays.push(reader.array()?);
                 }
+
                 credentials.push(ChunkCredential {
                     chunk_id,
                     cred,
                     relays,
                 });
             }
+
             entries.push(StoredEntry {
                 kind,
                 descriptor,
                 credentials,
             });
         }
+
         // A state of an earlier version ends after the entries.
         let first_written_at = if reader.end().is_ok() {
             0
@@ -301,6 +310,7 @@ impl BackupState {
             reader.u64()?
         };
         reader.end()?;
+
         Ok(BackupState {
             next_full_at,
             next_delta_at,
@@ -370,6 +380,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let key: [u8; 32] = bytes.as_slice().try_into().map_err(|_| Error::Integrity)?;
             return Ok(BackupRootKey::from_secret(Secret::new(key)).epoch(week));
         }
+
         let key = self.recovery_code(rng)?.backup_root_key()?;
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
@@ -381,6 +392,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             rng,
         )?;
         batch.commit()?;
+
         Ok(key.epoch(week))
     }
 
@@ -397,10 +409,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         device_peers: &BTreeSet<RowId>,
     ) -> Result<bool, Error> {
         let store = &self.open_ref()?.store;
+
         // DEV-286: a sync channel belongs to this device alone.
         if device_peers.contains(row) || owner.is_some_and(|owner| device_peers.contains(owner)) {
             return Ok(true);
         }
+
         if table == super::SETTINGS {
             let local = [
                 super::notify::PUSH_TOKEN_SETTING,
@@ -418,6 +432,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .iter()
                 .any(|key| store.row_id(super::SETTINGS, key) == *row));
         }
+
         // DEV-215: a timed record enters no store but the local database,
         // and each row of it stays with it.
         let message = if table == super::REACTION {
@@ -457,6 +472,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 return Ok(age_ms > BACKUP_HISTORY_DAYS * 86_400 * 1_000);
             }
         }
+
         Ok(false)
     }
 
@@ -467,6 +483,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Ok(open) = self.open_ref() else {
             return (false, false);
         };
+
         let list = open
             .store
             .row_id(super::SETTINGS, super::devices::DEVICE_INVITES_SETTING);
@@ -505,6 +522,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 }
             }
         }
+
         Ok(current)
     }
 
@@ -524,6 +542,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .filter(|table| *table != super::OUTBOX)
             .collect();
         let mut rows = self.carried_rows(now, &tables)?;
+
         // The recovery code opens each later backup, thus a device that the
         // user removes later must not hold it (§7.7). The device that owns
         // the channels writes the backups and keeps the code.
@@ -532,7 +551,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .store
             .row_id(TableId::LOCAL_IDENTITY, RECOVERY_CODE_KEY);
         rows.retain(|row| {
-            !matches!(row, BackupRow::Put { table, row, .. } if *table == TableId::LOCAL_IDENTITY && *row == code)
+            !matches!(
+                row,
+                BackupRow::Put { table, row, .. }
+                    if *table == TableId::LOCAL_IDENTITY && *row == code
+            )
         });
         rows.extend(self.link_rows(roster, sync_bundle, sync_floor)?);
         let object = BackupObject {
@@ -541,6 +564,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             base_at: 0,
             rows,
         };
+
         Ok(object.encode()?)
     }
 
@@ -556,6 +580,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !is_foreground {
             return Ok(None);
         }
+
         let state = self.backup_state()?;
         let kind = match &state {
             None => KIND_FULL,
@@ -570,6 +595,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for (key, value) in store.list(BACKUP_INDEX, None)? {
             indexed.insert(key, value);
         }
+
         let mut rows = Vec::new();
         let mut index = Vec::new();
         let mut kept: BTreeSet<RowId> = BTreeSet::new();
@@ -592,15 +618,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if kind == KIND_DELTA && is_same {
                 continue;
             }
+
             if !is_same {
                 index.push((key, Some(value)));
             }
+
             rows.push(put);
         }
+
         for (key, value) in &indexed {
             if kept.contains(key) {
                 continue;
             }
+
             index.push((*key, None));
             if kind == KIND_DELTA && value.len() == INDEX_VALUE_LEN {
                 let table = TableId(value.first().copied().ok_or(Error::Integrity)?);
@@ -611,6 +641,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 rows.push(BackupRow::Delete { table, row });
             }
         }
+
         let base_at = match (&state, kind) {
             (Some(state), KIND_DELTA) => state.last_written_at,
             _ => 0,
@@ -621,6 +652,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             base_at,
             rows,
         };
+
         Ok(Some(BackupUpload {
             plain: object.encode()?,
             pending: PendingBackup {
@@ -666,12 +698,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             for old in core::mem::take(&mut state.entries) {
                 erase.extend(old.credentials);
             }
+
             state.next_full_at = next_write(now, BACKUP_FULL_INTERVAL, rng);
         }
+
         state.entries.push(entry);
         if is_first {
             state.first_written_at = now;
         }
+
         // IDN-185: a new install writes more often, on a clock that follows
         // the age of the install and no act of the user.
         let is_early = state.first_written_at != 0
@@ -712,7 +747,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 None => batch.delete(BACKUP_INDEX, key),
             }
         }
+
         batch.commit()?;
+
         Ok(RootWrite {
             handle: credentials.handle,
             cred: Secret::new(*credentials.write.expose()),
@@ -752,10 +789,12 @@ impl RestoredBackup {
         let mut rows: BTreeMap<(u8, RowId), BackupRow> = BTreeMap::new();
         for (at, bytes) in objects.iter().enumerate() {
             let object = BackupObject::parse(bytes)?;
+
             // IDN-102: the full object first, and then each delta.
             if (at == 0) != (object.kind == KIND_FULL) {
                 return Err(Error::Malformed);
             }
+
             for row in object.rows {
                 match row {
                     BackupRow::Put { table, row: id, .. } => {
@@ -768,6 +807,7 @@ impl RestoredBackup {
                 }
             }
         }
+
         let names_root = |seed: [u8; 32], row: &RowId| {
             let store_key = RootIdentity::new(Secret::new(seed)).storage_key();
             RowKey::derive(&store_key).row_id(TableId::LOCAL_IDENTITY, super::ROOT_KEY) == *row
@@ -793,6 +833,7 @@ impl RestoredBackup {
                 _ => None,
             })
             .collect();
+
         Ok(RestoredBackup {
             seed: Secret::new(seed),
             rows: rows.into_values().collect(),
@@ -837,6 +878,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 batch.put(*table, *row, *owner, plain, rng)?;
             }
         }
+
         batch.put(
             super::SETTINGS,
             listed,
@@ -844,9 +886,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             &restored.contacts.concat(),
             rng,
         )?;
+
         // DEV-117: the deletions of the other devices wait for the user.
         batch.put(super::SETTINGS, holds, None, &[1], rng)?;
         batch.commit()?;
+
         // IDN-109: each handle of the restore looks for its current key
         // once; a device that no restore made takes no newer version of
         // its handle in silence (DIS-138).
@@ -866,6 +910,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let row = open.store.row_id(super::SETTINGS, RESTORE_RESYNC_SETTING);
         let mut batch = open.store.begin();
         batch.put(super::SETTINGS, row, None, &ids, rng)?;
+
         Ok(batch.commit()?)
     }
 
@@ -890,6 +935,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(bytes) = open.store.get(super::SETTINGS, &row)? else {
             return Ok(());
         };
+
         let kept: Vec<u8> = bytes
             .as_chunks::<16>()
             .0
@@ -904,6 +950,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         } else {
             batch.put(super::SETTINGS, row, None, &kept, rng)?;
         }
+
         Ok(batch.commit()?)
     }
 
@@ -914,6 +961,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(bytes) = store.get(super::SETTINGS, &row)? else {
             return Ok(Vec::new());
         };
+
         Ok(bytes.as_chunks::<32>().0.to_vec())
     }
 
@@ -928,6 +976,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !listed.contains(contact) {
             return Ok(());
         }
+
         listed.retain(|held| held != contact);
         let open = self.open_mut()?;
         let row = open.store.row_id(super::SETTINGS, RESTORE_STALE_SETTING);
@@ -937,6 +986,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         } else {
             batch.put(super::SETTINGS, row, None, &listed.concat(), rng)?;
         }
+
         Ok(batch.commit()?)
     }
 }

@@ -44,10 +44,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(plain) = store.get(PET_AVATARS, &row)? else {
             return Ok(Vec::new());
         };
+
         // IMP-121: the plaintext names its owner.
         if plain.get(..16) != Some(conversation.0.as_slice()) {
             return Err(Error::Integrity);
         }
+
         Ok(plain.get(16..).unwrap_or_default().to_vec())
     }
 
@@ -61,6 +63,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.contact_picture(conversation)? == picture {
             return Ok(false);
         }
+
         let open = self.open_mut()?;
         let row = open.store.row_id(PET_AVATARS, &conversation.0);
         let mut batch = open.store.begin();
@@ -70,7 +73,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let plain = Zeroizing::new([conversation.0.as_slice(), picture].concat());
             batch.put(PET_AVATARS, row, Some(conversation.0), &plain, rng)?;
         }
+
         batch.commit()?;
+
         Ok(true)
     }
 
@@ -90,6 +95,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !picture.is_empty() && !is_picture(picture) {
             return Err(Error::Malformed);
         }
+
         let is_contact = self
             .open_ref()?
             .store
@@ -101,11 +107,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !self.put_contact_picture(conversation, picture, rng)? {
             return Ok(());
         }
+
         // DEV-327: the picture is mutable state of the set, and an empty
         // value carries the removal.
         if let Some(subject) = self.subject_of(conversation)? {
             self.publish_mutable(ITEM_PET_AVATAR, &subject, picture, rng)?;
         }
+
         Ok(())
     }
 
@@ -128,9 +136,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.is_group(conversation)? {
             return Ok(());
         }
+
         if self.put_contact_picture(conversation, value, rng)? {
             self.events.push_back(Event::Conversations);
         }
+
         Ok(())
     }
 }

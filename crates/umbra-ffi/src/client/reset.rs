@@ -71,10 +71,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.devices()?.len() > 1 {
             return Err(Error::Busy);
         }
+
         let mut seed = Zeroizing::new([0u8; 32]);
         rng.fill_bytes(seed.as_mut());
         let root = RootIdentity::new(Secret::new(*seed));
         let now = now_ms / 1_000;
+
         // DEV-172, DEV-173: a new roster key and a new roster epoch 0. Each
         // key comes before the first write, thus a fault leaves no half of
         // a reset.
@@ -90,15 +92,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if device_peers.contains(&conversation) || self.is_ended_channel(conversation)? {
                 continue;
             }
+
             let plain = Zeroizing::new(plain);
             let Some(state) = plain.get(QUEUE_ID_LEN..) else {
                 continue;
             };
+
             // A contact whose channel another device owns has no ratchet
             // here, and its salt alone.
             let Ok(salt) = stored_contact_salt(state) else {
                 continue;
             };
+
             let public = root.pairwise_identity(&salt).public().to_bytes();
             let (x25519, mlkem) = public.split_at(32);
             let notice = KeyChangeNotice {
@@ -120,6 +125,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let due = now.saturating_add(sweep_delay(rng.next_u64()));
             notices.push((conversation, due, app));
         }
+
         // DEV-306, DIS-093: the directory holds the key of the root before
         // the reset for each entry that this device publishes. The device
         // keeps that root for those entries alone, in the commit of the new
@@ -150,6 +156,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 rng,
             )?;
         }
+
         for (conversation, due, app) in &notices {
             let value =
                 Zeroizing::new([conversation.0.as_slice(), &due.to_be_bytes(), app].concat());
@@ -161,12 +168,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 rng,
             )?;
         }
+
         batch.commit()?;
         self.keep_device_set(&device, &roster, rng)?;
+
         // DEV-263: the group re-key of Part 11 §11.12 in each group.
         let groups = self.group_conversations()?.len();
         self.rekey_groups(now_ms, rng)?;
         self.events.push_back(Event::Conversations);
+
         Ok(ResetSummary {
             contacts: u32::try_from(notices.len()).unwrap_or(u32::MAX),
             groups: u32::try_from(groups).unwrap_or(u32::MAX),
@@ -178,10 +188,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Ok(parsed) = AppMessage::parse(app, umbra_wire::app::Channel::Pairwise) else {
             return Ok(false);
         };
+
         let open = self.open_ref()?;
         let reference = msg_ref(&open.device_set_key, &parsed.msg_id);
         let natural = [conversation.0.as_slice(), &reference].concat();
         let row = open.store.row_id(TableId::MESSAGE, &natural);
+
         Ok(open.store.get(OUTBOX, &row)?.is_some())
     }
 
@@ -209,6 +221,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .and_then(|b| b.try_into().ok())
                 .ok_or(Error::Integrity)?;
             let app = value.get(24..).ok_or(Error::Integrity)?;
+
             // A notice that the send path lost, as a row that left the
             // store under it, is due again.
             let is_lost = u64::from_be_bytes(at) == IN_FLIGHT
@@ -217,6 +230,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 due.push((ConversationId(row), app.to_vec()));
             }
         }
+
         for (conversation, app) in &due {
             // A notice that does not read is one drop, and it stops no
             // other notice.
@@ -227,6 +241,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 batch.commit()?;
                 continue;
             };
+
             let open = self.open_mut()?;
             let reference = msg_ref(&open.device_set_key, &parsed.msg_id);
             let natural = [conversation.0.as_slice(), &reference].concat();
@@ -257,6 +272,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 app: app.clone(),
             });
         }
+
         Ok(due.len())
     }
 }

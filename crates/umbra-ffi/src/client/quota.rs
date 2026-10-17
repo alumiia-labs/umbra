@@ -110,11 +110,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.held_row(message)?.is_none() {
             return Ok(());
         }
+
         let open = self.open_mut()?;
         let name = [HELD_SETTING, message.0.as_slice()].concat();
         let row = open.store.row_id(SETTINGS, &name);
         let mut batch = open.store.begin();
         batch.delete(SETTINGS, row);
+
         Ok(batch.commit()?)
     }
 
@@ -129,6 +131,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.held_sends.contains_key(message) {
             return Ok(true);
         }
+
         // A record that this run released for a send holds its counts in
         // the memory, and it goes.
         if self.limit_sends.contains_key(message) {
@@ -137,13 +140,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(held) = self.held_row(message)? else {
             return Ok(false);
         };
+
         self.limit_sends.insert(*message, (held.sends, held.first));
         if now.saturating_sub(held.at) >= HOLD_RETRY {
             return Ok(false);
         }
+
         let conversation = self.conversation_of_message(message)?;
         self.held_sends.insert(*message, (conversation, held.at));
         self.set_full(conversation, true);
+
         Ok(true)
     }
 
@@ -155,6 +161,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.is_leaving_channel(ConversationId(message.0))? {
             return Ok(());
         }
+
         // The relay holds this record, thus its wait ended.
         self.end_held_row(message)?;
         let conversation = self.conversation_of_message(message)?;
@@ -171,6 +178,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 self.requeue_held(&message)?;
             }
         }
+
         Ok(())
     }
 
@@ -186,14 +194,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if self.is_leaving_channel(ConversationId(message.0))? {
             return Ok(());
         }
+
         let conversation = self.conversation_of_message(message)?;
+
         // DEV-113, DEV-114: an edit and a deletion take no retry that the
         // quota paces, and the user sees the failure.
         if self.is_change(message)? {
             self.set_full(conversation, true);
             return self.fail(message, crate::FailureCause::Full, rng);
         }
+
         self.set_full(conversation, true);
+
         // The count of the `LIMIT` answers gives the length of the wait.
         // The memory holds it for a record that this unlocked client held
         // before, and the store holds it for each other one.
@@ -203,6 +215,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         };
         let (limits, first_limit) = stored.unwrap_or((0, now));
         let limits = limits.saturating_add(1);
+
         // NET-219 to NET-221: the ARQ of a record ends at
         // `SEND_MAX_ATTEMPTS` sends and at `SEND_GIVE_UP` from its first
         // send, and the record then fails. One count holds each send of
@@ -224,10 +237,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return self.fail(message, crate::FailureCause::Full, rng);
         }
         self.limit_sends.insert(*message, (limits, first_limit));
+
         // The time of the next send: the wait counts from this refusal.
         let wait = hold_wait(limits).saturating_sub(HOLD_RETRY);
         let at = now.saturating_add(wait);
         self.held_sends.insert(*message, (conversation, at));
+
         // The store takes the wait, thus a later run keeps it.
         let held = HeldRow {
             at,
@@ -239,6 +254,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let row = open.store.row_id(SETTINGS, &name);
         let mut batch = open.store.begin();
         batch.put(SETTINGS, row, None, &held.encode(), rng)?;
+
         Ok(batch.commit()?)
     }
 
@@ -249,7 +265,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(plain) = store.get(TableId::MESSAGE, &message.0)? else {
             return Ok(false);
         };
+
         let plain = Zeroizing::new(plain);
+
         Ok(super::change_kind(&plain)?.is_some())
     }
 
@@ -271,6 +289,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 sent = true;
             }
         }
+
         Ok(sent)
     }
 
@@ -297,6 +316,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if sends < umbra_queue::params::SEND_MAX_ATTEMPTS && !is_late {
             return Ok(false);
         }
+
         let cause = if self.held_row(message)?.is_some() {
             crate::FailureCause::Full
         } else {
@@ -307,6 +327,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         self.slot_sends.remove(message);
         self.end_held_row(message)?;
         self.fail(message, cause, rng)?;
+
         Ok(true)
     }
 
@@ -320,10 +341,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(plain) = store.get(TableId::MESSAGE, &message.0)? else {
             return Ok(false);
         };
+
         let plain = Zeroizing::new(plain);
         if info_of(&plain)?.delivery != Delivery::Queued {
             return Ok(false);
         }
+
         let conversation = conversation_of(&plain)?;
         let app = plain
             .get(MESSAGE_PREFIX..)
@@ -334,6 +357,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             conversation,
             app,
         });
+
         Ok(true)
     }
 }
@@ -387,6 +411,7 @@ mod tests {
         while let Ok(command) = receiver.try_recv() {
             sends += usize::from(matches!(command, Command::Send { .. }));
         }
+
         sends
     }
 
@@ -439,6 +464,7 @@ mod tests {
                 sends.push(prior);
             }
         }
+
         sends
     }
 
@@ -448,16 +474,20 @@ mod tests {
         let mut rng = OsRng;
         let (mut client, contacts, message) = with_one_record();
         let now = unix_now();
+
         // The first send carries no count.
         client.requeue_waiting().unwrap();
         assert_eq!(flushed(&mut client, &contacts), [Prior::default()]);
+
         // NET-219: 13 sends leave, and a relay answers each one with
         // `BUSY` or with nothing. The store counts each one, and it keeps
         // the time of the first one.
         for send in 0..13 {
             client.note_send(&message, now + send, &mut rng).unwrap();
         }
+
         assert_eq!(client.send_counts(&message).unwrap(), (13, now));
+
         // A lock and a new run start no new count, and no new 7 days.
         client.lock();
         client.unlock(&units("correct horse"), now).unwrap();
@@ -473,6 +503,7 @@ mod tests {
         client.note_send(&message, now + 20, &mut rng).unwrap();
         client.hold_for_room(&message, now + 20, &mut rng).unwrap();
         assert_eq!(client.info(&message).unwrap().delivery, Delivery::Queued);
+
         // NET-071: the wait ends inside a run, and the retry takes a slot
         // of the cover clock.
         let later = now + 20 + HOLD_RETRY;
@@ -483,6 +514,7 @@ mod tests {
             in_slot: true,
         };
         assert_eq!(flushed(&mut client, &contacts), [in_slot]);
+
         // Send 15 takes a `LIMIT` too, and a `QUOTA` that names room sends
         // the record at once, with no slot.
         client.note_send(&message, later, &mut rng).unwrap();
@@ -495,6 +527,7 @@ mod tests {
             in_slot: false,
         };
         assert_eq!(flushed(&mut client, &contacts), [at_once]);
+
         // NET-219: send 16 is the last one. Its `LIMIT` fails the record,
         // though only three of its sends took a `LIMIT`.
         client.note_send(&message, later + 1, &mut rng).unwrap();
@@ -547,6 +580,7 @@ mod tests {
         let mut draft = client.new_draft(conversation);
         draft.set_text(&units("waits for room")).unwrap();
         let message = client.send_draft(draft, 1_001_000, &mut rng).unwrap();
+
         // The first send, and the `LIMIT` of the full queue.
         assert_eq!(connect(&mut client, &contacts), 1);
         let now = unix_now();
@@ -559,6 +593,7 @@ mod tests {
         for _ in 0..20 {
             assert_eq!(connect(&mut client, &contacts), 0);
         }
+
         assert_eq!(client.info(&message).unwrap().delivery, Delivery::Queued);
 
         // A lock takes the memory of the wait, and the store gives it
@@ -567,6 +602,7 @@ mod tests {
         client.unlock(&passphrase, now).unwrap();
         assert_eq!(connect(&mut client, &contacts), 0);
         assert!(client.queue_full(conversation));
+
         // The record goes at the end of its wait, one time.
         assert!(!client.resend_held(now + HOLD_RETRY - 1).unwrap());
         assert!(client.resend_held(now + HOLD_RETRY).unwrap());
@@ -587,6 +623,7 @@ mod tests {
         let last = now + umbra_queue::params::SEND_GIVE_UP;
         client.hold_for_room(&message, last, &mut rng).unwrap();
         assert_eq!(client.info(&message).unwrap().delivery, Delivery::Failed);
+
         // The wait ended with the record: a later connection holds nothing
         // back for it.
         assert!(!client.waits_for_room(&message, last).unwrap());

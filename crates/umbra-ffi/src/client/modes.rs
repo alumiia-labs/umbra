@@ -38,6 +38,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if mode == DelayClass::default() {
             return self.remove_setting(&mode_key(conversation));
         }
+
         self.put_setting(&mode_key(conversation), &[mode as u8], rng)
     }
 }
