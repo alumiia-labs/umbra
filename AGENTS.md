@@ -17,6 +17,18 @@ Use American English spelling in all text (color, behavior, initialize, center).
 - Keep comments sparse. Add a comment only when the reason is not clear from the code.
 - Keep comments brief. Use one short sentence when possible.
 
+## Readability
+
+Write code and text that a new reader understands on the first read.
+
+- Put a blank line between the steps of a function: a check, a lookup, a change, a result.
+- Do not put a blank line between each statement. A group of lines that do one step stays together.
+- Put one statement on a line. Do not chain commands on one line when separate lines are clearer.
+- Give a value a name that says what it holds. Use a short name only in a small scope.
+- Move a deep nesting or a long function into named parts when each part has one clear job.
+- Use a list or a table for steps and for sets of values, not a long paragraph.
+- Keep each paragraph of text to one topic.
+
 ## Versions
 
 One semantic version applies to the Android app, the Rust crates, the specification, and the web site.
