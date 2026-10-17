@@ -11,6 +11,7 @@
 # A second run changes nothing that is there already: no key is made again.
 #
 #   ansible-playbook site.yml
+
 - name: Each server
   hosts: all
   become: true

@@ -2,6 +2,7 @@
 # and its signed descriptor, which goes to the signer (Part 10 REL-047,
 # REL-048). One server can run several relays; `relays` in the inventory
 # names them.
+
 - name: The user and the directories of the relays are there
   ansible.builtin.include_role:
     name: common

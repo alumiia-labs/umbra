@@ -34,7 +34,7 @@ binaryData:
 {{- $lines := list }}
 {{- range $carriers }}
 {{- $server := include "umbra.server" (list $ .) | fromJson }}
-{{- $lines = append $lines (printf "%s.%s,%s" .  $.Values.domain $server.address) }}
+{{- $lines = append $lines (printf "%s.%s,%s" . $.Values.domain $server.address) }}
 {{- end }}
 {{- $ndrRoute := include "umbra.server" (list $ (include "umbra.route" (list $ .Values.ndr.server))) | fromJson }}
 {{- $directoryRoute := include "umbra.server" (list $ (include "umbra.route" (list $ .Values.directory.server))) | fromJson }}

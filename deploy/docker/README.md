@@ -151,7 +151,9 @@ that one ends, three hours later.
 - **A new binary.** On one server at a time:
 
   ```sh
-  git pull && docker compose build && docker compose up -d
+  git pull
+  docker compose build
+  docker compose up -d
   ```
 
   Tag each build (`UMBRA_IMAGE=umbra-servers:<version>`) to go back to the

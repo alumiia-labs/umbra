@@ -2,6 +2,7 @@
 # class test of each relay one time in each 7 days (`REL-097`), and the
 # signer reads its results. It runs as a user of its own, which reads no
 # key of an authority (Part 10 §10.5.1).
+
 - name: The user of the measurer is there
   ansible.builtin.user:
     name: umbra-measurer

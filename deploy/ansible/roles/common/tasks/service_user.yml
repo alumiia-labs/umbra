@@ -1,6 +1,7 @@
 # One service: its system user, a member of umbra-tls, and its data
 # directory, which it alone writes. `umbra_service` names it, as
 # umbra-relay.
+
 - name: "The user of {{ umbra_service }} is there"
   ansible.builtin.user:
     name: "{{ umbra_service }}"

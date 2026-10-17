@@ -2,6 +2,7 @@
 # binary replaces it, the one that runs now stays as <name>.prev, thus an
 # operator can go back to it (README, "Going back to the binary before").
 # The role then copies the new binary itself and notifies its own handler.
+
 - name: "The new binary of {{ umbra_binary }} on this machine"
   ansible.builtin.stat:
     path: "{{ umbra_bin_dir }}/{{ umbra_binary }}"

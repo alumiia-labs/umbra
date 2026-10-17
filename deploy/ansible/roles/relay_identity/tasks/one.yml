@@ -1,4 +1,5 @@
 # Phase 1 of one relay, `relay` of the loop in main.yml.
+
 - name: "The relay {{ relay.name }} is stated"
   ansible.builtin.assert:
     that:

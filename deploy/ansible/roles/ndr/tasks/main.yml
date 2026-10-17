@@ -1,4 +1,5 @@
 # The Notification Delivery Relay of Part 8 §8.2, on port umbra_service_port.
+
 - name: The Firebase service account file is named
   ansible.builtin.assert:
     that: umbra_fcm_credentials | length > 0
