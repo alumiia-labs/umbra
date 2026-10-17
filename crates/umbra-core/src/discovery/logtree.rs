@@ -56,9 +56,11 @@ impl LogFrontier {
             sibling,
             sibling_right: false,
         };
+
         let mut steps = Vec::new();
         let mut height = 0u32;
         let mut hash = leaf_hash;
+
         while let Some((last_height, last_hash)) = self.subtrees.last().copied() {
             if last_height != height {
                 break;
@@ -68,6 +70,7 @@ impl LogFrontier {
             hash = node(&last_hash, &hash);
             height = height.saturating_add(1);
         }
+
         steps.extend(self.subtrees.iter().rev().map(|(_, root)| left(*root)));
         self.subtrees.push((height, hash));
         self.size = self.size.saturating_add(1);
@@ -105,6 +108,7 @@ pub fn verify_newest(
         }
         hash = node(&step.sibling, &hash);
     }
+
     if hash == *expected_root {
         Ok(())
     } else {
@@ -129,6 +133,7 @@ fn subproof(first: usize, leaves: &[[u8; 32]], whole: bool, out: &mut Vec<[u8; 3
         }
         return;
     }
+
     let k = split_point(n);
     let (left, right) = leaves.split_at(k.min(n));
     if first <= k {
@@ -146,6 +151,7 @@ pub fn prove_consistency(leaves: &[[u8; 32]], first: usize) -> Option<Vec<[u8; 3
     if first == 0 || first > leaves.len() {
         return None;
     }
+
     let mut out = Vec::new();
     subproof(first, leaves, true, &mut out);
     Some(out)
@@ -180,15 +186,19 @@ impl LogNodes {
             if self.levels.len() <= height {
                 self.levels.push(Vec::new());
             }
+
             let Some(level) = self.levels.get_mut(height) else {
                 return;
             };
+
             level.push(hash);
+
             // An even count fills the subtree one level up.
             let filled = match level.as_slice() {
                 [.., left, right] if level.len().is_multiple_of(2) => node(left, right),
                 _ => return,
             };
+
             hash = filled;
             height = height.saturating_add(1);
         }
@@ -202,10 +212,12 @@ impl LogNodes {
         if count == 0 {
             return None;
         }
+
         if count.is_power_of_two() && start.is_multiple_of(count) {
             let height = usize::try_from(count.trailing_zeros()).ok()?;
             return self.levels.get(height)?.get(start / count).copied();
         }
+
         let k = split_point(count);
         let left = self.range_root(start, k)?;
         let right = self.range_root(start.checked_add(k)?, count.checked_sub(k)?)?;
@@ -226,9 +238,11 @@ impl LogNodes {
             }
             return;
         }
+
         let k = split_point(count).min(count);
         let after = start.saturating_add(k);
         let rest = count.saturating_sub(k);
+
         if first <= k {
             self.subproof(first, start, k, whole, out);
             out.extend(self.range_root(after, rest));
@@ -244,6 +258,7 @@ impl LogNodes {
         if first == 0 || first > self.len() {
             return None;
         }
+
         let mut out = Vec::new();
         self.subproof(first, 0, self.len(), true, &mut out);
         Some(out)
@@ -262,6 +277,7 @@ pub fn verify_consistency(
     if first == 0 || first > second {
         return Err(Error::Unverified);
     }
+
     if first == second {
         return if proof.is_empty() && first_root == second_root {
             Ok(())
@@ -269,6 +285,7 @@ pub fn verify_consistency(
             Err(Error::Unverified)
         };
     }
+
     let mut path = proof.iter();
     let mut from_node = first.saturating_sub(1);
     let mut to_node = second.saturating_sub(1);
@@ -276,18 +293,22 @@ pub fn verify_consistency(
         from_node >>= 1;
         to_node >>= 1;
     }
+
     // A first tree that is one full subtree is its own first proof node.
     let seed = if first.is_power_of_two() {
         *first_root
     } else {
         *path.next().ok_or(Error::Unverified)?
     };
+
     let mut first_hash = seed;
     let mut second_hash = seed;
+
     for sibling in path {
         if to_node == 0 {
             return Err(Error::Unverified);
         }
+
         if from_node & 1 == 1 || from_node == to_node {
             first_hash = node(sibling, &first_hash);
             second_hash = node(sibling, &second_hash);
@@ -301,6 +322,7 @@ pub fn verify_consistency(
         from_node >>= 1;
         to_node >>= 1;
     }
+
     if to_node == 0 && first_hash == *first_root && second_hash == *second_root {
         Ok(())
     } else {
@@ -351,6 +373,7 @@ mod tests {
                 .is_err());
             }
         }
+
         assert!(prove_consistency(&leaves(3), 0).is_none());
         assert!(prove_consistency(&leaves(3), 4).is_none());
         assert!(verify_consistency(3, &[0; 32], 2, &[0; 32], &[]).is_err());

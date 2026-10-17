@@ -118,6 +118,7 @@ impl PrefixProof {
                 w.put(commitment)?;
             }
         }
+
         w.u16(u16::try_from(self.siblings.len()).map_err(|_| Error::Malformed)?)?;
         for sibling in &self.siblings {
             w.put(sibling)?;
@@ -136,14 +137,17 @@ impl PrefixProof {
             },
             _ => return Err(Error::Malformed),
         };
+
         let count = usize::from(r.u16()?);
         if count > DEPTH_MAX {
             return Err(Error::Malformed);
         }
+
         let mut siblings = Vec::with_capacity(count);
         for _ in 0..count {
             siblings.push(r.array()?);
         }
+
         Ok(PrefixProof { terminal, siblings })
     }
 
@@ -159,6 +163,7 @@ impl PrefixProof {
         if depth > DEPTH_MAX {
             return Err(Error::Malformed);
         }
+
         let (mut hash, found) = match &self.terminal {
             Terminal::Found(commitment) => (
                 leaf_hash(nonce, index, depth, commitment),
@@ -177,6 +182,7 @@ impl PrefixProof {
                 (leaf_hash(nonce, other, depth, commitment), None)
             }
         };
+
         for (level, sibling) in self.siblings.iter().enumerate().rev() {
             hash = if bit(index, level) {
                 interior_hash(sibling, &hash)
@@ -184,6 +190,7 @@ impl PrefixProof {
                 interior_hash(&hash, sibling)
             };
         }
+
         if hash == *expected_root {
             Ok(found)
         } else {
@@ -258,6 +265,7 @@ impl PrefixTree {
         if self.leaves.contains_key(&index) {
             return Err(Error::Stale);
         }
+
         self.leaves.insert(index, commitment);
         self.cache.clear();
         self.cache_nonce = None;
@@ -279,6 +287,7 @@ impl PrefixTree {
         for index in indexes {
             self.leaves.remove(index);
         }
+
         self.cache = kept.cache;
         self.cache_nonce = kept.nonce;
     }
@@ -305,6 +314,7 @@ impl PrefixTree {
         // level, thus it holds about n / 8 nodes.
         let bits = usize::try_from(self.leaves.len().max(1).ilog2()).unwrap_or(0);
         let keep = bits.saturating_sub(4).min(CACHE_DEPTH);
+
         let mut cache = BTreeMap::new();
         let root = subtree(
             &self.sorted(),
@@ -313,6 +323,7 @@ impl PrefixTree {
             nonce,
             &mut Some((&mut cache, keep)),
         );
+
         self.cache = cache;
         self.cache_nonce = Some(*nonce);
         root
@@ -328,11 +339,13 @@ impl PrefixTree {
                 return *hash;
             }
         }
+
         let leaves: Vec<([u8; 32], [u8; 32])> = self
             .leaves
             .range(prefix..=prefix_end(path, depth))
             .map(|(index, commitment)| (*index, *commitment))
             .collect();
+
         subtree(&leaves, depth, path, nonce, &mut None)
     }
 
@@ -358,12 +371,14 @@ impl PrefixTree {
                 };
                 return PrefixProof { terminal, siblings };
             }
+
             // The sibling subtree sits under the path prefix with the bit
             // of this depth inverted.
             let mut sibling_path = *index;
             if let Some(byte) = sibling_path.get_mut(depth / 8) {
                 *byte ^= 0x80 >> (depth % 8);
             }
+
             let next = depth.saturating_add(1);
             siblings.push(self.subtree_at(nonce, &sibling_path, next));
             depth = next;
@@ -382,6 +397,7 @@ fn subtree(
     cache: &mut Option<(&mut BTreeMap<NodeKey, [u8; 32]>, usize)>,
 ) -> [u8; 32] {
     let hash = subtree_hash(leaves, depth, path, nonce, cache);
+
     if let Some((cache, keep)) = cache.as_mut() {
         if depth <= *keep {
             let key = (
@@ -408,14 +424,17 @@ fn subtree_hash(
         _ => {
             let split = leaves.partition_point(|(leaf, _)| !bit(leaf, depth));
             let (left, right) = leaves.split_at(split);
+
             let mut right_path = *path;
             if let Some(byte) = right_path.get_mut(depth / 8) {
                 *byte |= 0x80 >> (depth % 8);
             }
+
             let mut left_path = *path;
             if let Some(byte) = left_path.get_mut(depth / 8) {
                 *byte &= !(0x80 >> (depth % 8));
             }
+
             let next = depth.saturating_add(1);
             interior_hash(
                 &subtree(left, next, &left_path, nonce, cache),
@@ -448,12 +467,14 @@ mod tests {
         let plain = tree(300);
         let mut sealed = plain.clone();
         assert_eq!(sealed.seal(&nonce), plain.root(&nonce));
+
         for n in (0..300u16).chain(2_000..2_050) {
             assert_eq!(
                 sealed.prove(&nonce, &index(n)),
                 plain.prove(&nonce, &index(n))
             );
         }
+
         // Another nonce reads no cached hash.
         let root = sealed.root(&[9; 32]);
         let proof = sealed.prove(&[9; 32], &index(4));
@@ -526,10 +547,12 @@ mod tests {
             let mut w = Writer::new(&mut buffer);
             proof.write(&mut w).unwrap();
             assert_eq!(w.position(), proof.len());
+
             let mut r = Reader::new(&buffer);
             assert_eq!(PrefixProof::read(&mut r).unwrap(), proof);
             r.finish().unwrap();
         }
+
         assert_eq!(prefix_of(&[0xFF; 32], 0), [0; 32]);
         assert_eq!(prefix_of(&[0xFF; 32], 11)[..3], [0xFF, 0xE0, 0x00]);
         assert_eq!(prefix_of(&[0xFF; 32], 256), [0xFF; 32]);

@@ -188,20 +188,24 @@ mod tests {
         state.insert(&t2);
         let mac = state.commit(&key, b"messages");
         state.verify(&key, b"messages", &mac).unwrap();
+
         // The same rows in the other order give the same accumulator.
         let mut other = TableState::new();
         other.insert(&t2);
         other.insert(&t1);
         other.commit(&key, b"messages");
         assert_eq!(other.fields().0, state.fields().0);
+
         // A row rolled back to an earlier ciphertext changes the MAC.
         let t1_old = key.row_tag(b"messages", b"row-1", &[9; 16]);
         let mut rolled = state.clone();
         rolled.update(&t1, &t1_old);
         assert!(rolled.verify(&key, b"messages", &mac).is_err());
+
         // A removed row changes the count and the MAC.
         state.remove(&t2);
         assert!(state.verify(&key, b"messages", &mac).is_err());
+
         let (accum, rows, commits) = state.fields();
         let restored = TableState::restore(accum, rows, commits);
         assert_eq!(restored, state);
@@ -217,11 +221,13 @@ mod tests {
             key.row_tag_owned(&table, &[3; 16], Some(&[5; 16]), &[1; 16])
         );
         assert_ne!(with, key.row_tag_owned(&table, &[3; 16], None, &[1; 16]));
+
         // The form of the earlier version gives another tag for one row.
         assert_ne!(
             key.row_tag_owned(&table, &[3; 16], None, &[1; 16]),
             key.row_tag(&[0x01], &[3; 16], &[1; 16])
         );
+
         let state = TableState::restore([7; 32], 2, 9);
         let mac = state.mac(&key, &table);
         state.verify(&key, &table, &mac).unwrap();

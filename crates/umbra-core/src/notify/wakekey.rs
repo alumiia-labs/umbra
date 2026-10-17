@@ -1,9 +1,10 @@
 //! The wake key of Part 8 §8.4.1: what a locked client holds outside
-//! `K_store` to open a push blob (`NTF-135`, `NTF-136`). An open client writes the
-//! table below, and the platform seals it under a keystore key that needs no
-//! passphrase. A locked client opens a blob with it and learns which
-//! conversation waits, and no message: the record stays at the relay until
-//! the unlock.
+//! `K_store` to open a push blob (`NTF-135`, `NTF-136`).
+//!
+//! An open client writes the table below, and the platform seals it under
+//! a keystore key that needs no passphrase. A locked client opens a blob
+//! with it and learns which conversation waits, and no message: the record
+//! stays at the relay until the unlock.
 //!
 //! ```text
 //! WakeTable {
@@ -97,25 +98,30 @@ impl WakeTable {
         {
             return Err(Error::Malformed);
         }
+
         let size =
             1 + 2 + self.roots.len() * 32 + 2 + self.aliases.len() * 32 + 2 + self.muted.len() * 24;
         let mut out = alloc::vec![0u8; size];
         let mut w = Writer::new(&mut out);
         w.u8(0x02)?;
+
         w.u16(u16::try_from(self.roots.len()).map_err(|_| Error::Malformed)?)?;
         for root in &self.roots {
             w.put(root)?;
         }
+
         w.u16(u16::try_from(self.aliases.len()).map_err(|_| Error::Malformed)?)?;
         for (alias, conversation) in &self.aliases {
             w.put(alias)?;
             w.put(conversation)?;
         }
+
         w.u16(u16::try_from(self.muted.len()).map_err(|_| Error::Malformed)?)?;
         for (alias, until) in &self.muted {
             w.put(alias)?;
             w.put(&until.to_be_bytes())?;
         }
+
         Ok(out)
     }
 
@@ -126,6 +132,7 @@ impl WakeTable {
         if version != 0x01 && version != 0x02 {
             return Err(Error::Malformed);
         }
+
         let roots_len = usize::from(r.u16()?);
         if roots_len > WAKE_ENTRIES_MAX {
             return Err(Error::Malformed);
@@ -134,6 +141,7 @@ impl WakeTable {
         for _ in 0..roots_len {
             roots.push(r.array()?);
         }
+
         let aliases_len = usize::from(r.u16()?);
         if aliases_len > WAKE_ENTRIES_MAX {
             return Err(Error::Malformed);
@@ -142,6 +150,7 @@ impl WakeTable {
         for _ in 0..aliases_len {
             aliases.push((r.array()?, r.array()?));
         }
+
         let mut muted = Vec::new();
         if version == 0x02 {
             let muted_len = usize::from(r.u16()?);
@@ -154,6 +163,7 @@ impl WakeTable {
             }
         }
         r.finish()?;
+
         Ok(WakeTable {
             roots,
             aliases,
@@ -169,6 +179,7 @@ impl WakeTable {
         if !Receiver::in_window(epoch, now) {
             return Ok(Woken::OutsideWindow);
         }
+
         let opened: Option<Plain> = self
             .roots
             .iter()
@@ -176,6 +187,8 @@ impl WakeTable {
         let Some(plain) = opened else {
             return Ok(Woken::Failed);
         };
+
+        // A muted queue names the silent conversation until its mute ends.
         let conversation = self
             .aliases
             .iter()
@@ -193,6 +206,7 @@ impl WakeTable {
                     conversation
                 }
             });
+
         Ok(Woken::Opened {
             conversation,
             waiting: plain.waiting_count,
@@ -225,6 +239,7 @@ mod tests {
             muted: alloc::vec![([8; 16], u64::MAX)],
         };
         let table = WakeTable::parse(&table.encode().unwrap()).unwrap();
+
         assert_eq!(
             table.open(&blob, now).unwrap(),
             Woken::Opened {
@@ -233,12 +248,14 @@ mod tests {
                 urgent: true,
             }
         );
+
         // NTF-076: a blob of another day runs no open, and counts as no
         // failure.
         assert_eq!(
             table.open(&blob, now + 3 * 86_400).unwrap(),
             Woken::OutsideWindow
         );
+
         // NTF-077: no root opens it.
         let other = WakeTable {
             roots: alloc::vec![[9; 32]],
@@ -246,6 +263,7 @@ mod tests {
             muted: alloc::vec![],
         };
         assert_eq!(other.open(&blob, now).unwrap(), Woken::Failed);
+
         // A queue of no conversation names none.
         let unnamed = WakeTable {
             roots: alloc::vec![[3; 32]],
@@ -259,8 +277,10 @@ mod tests {
                 ..
             }
         ));
+
         assert!(WakeTable::parse(&[0x01, 0, 0, 0, 0, 0]).is_err());
         assert!(WakeTable::parse(&[0x03, 0, 0, 0, 0]).is_err());
+
         // A table of the first version holds no mute.
         assert_eq!(
             WakeTable::parse(&[0x01, 0, 0, 0, 0]).unwrap(),
@@ -289,6 +309,7 @@ mod tests {
             Woken::Opened { conversation, .. } => conversation,
             _ => None,
         };
+
         // DEV-331: the mute holds while the client is locked, and it ends
         // at its time with no write of the table.
         assert_eq!(conversation(now), Some(WAKE_SILENT));

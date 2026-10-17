@@ -87,6 +87,7 @@ fn answer_of(
     if let Some(entry) = entry_new {
         mac.update(&sha3_256(&[entry]));
     }
+
     mac.finalize().into_bytes().into()
 }
 
@@ -110,9 +111,11 @@ impl Issued {
     ) -> Result<Self, Error> {
         let pk = PublicKey::from_bytes(hk_pub)?;
         let (ct, ss) = kem::encapsulate(&pk, rng);
+
         let mut nonce = [0u8; NONCE_LEN];
         rng.fill_bytes(&mut nonce);
         let expected_k = derive_k(purpose, &ss, handle);
+
         let mut bytes = [0u8; CHALLENGE_LEN];
         if let Some(head) = bytes.get_mut(..CIPHERTEXT_LEN) {
             head.copy_from_slice(ct.as_bytes());
@@ -120,6 +123,7 @@ impl Issued {
         if let Some(tail) = bytes.get_mut(CIPHERTEXT_LEN..) {
             tail.copy_from_slice(&nonce);
         }
+
         // The shared secret leaves with the encapsulation (DIS-042,
         // DIS-100); the directory holds `k` until the answer.
         Ok(Issued {
@@ -147,6 +151,7 @@ impl Issued {
         if entry_new.is_some() != self.purpose.binds() {
             return Err(Error::Malformed);
         }
+
         let expected = answer_of(&self.expected_k, &self.nonce, entry_new);
         if ct_eq(&expected, answer) {
             Ok(())
@@ -168,14 +173,17 @@ pub fn answer(
     if challenge.len() != CHALLENGE_LEN {
         return Err(Error::Malformed);
     }
+
     if entry_new.is_some() != purpose.binds() {
         return Err(Error::Malformed);
     }
+
     let ct = Ciphertext::from_bytes(challenge.get(..CIPHERTEXT_LEN).ok_or(Error::Malformed)?)?;
     let nonce: [u8; NONCE_LEN] = challenge
         .get(CIPHERTEXT_LEN..)
         .and_then(|b| b.try_into().ok())
         .ok_or(Error::Malformed)?;
+
     let ss = hk.decapsulate(&ct)?;
     let k = derive_k(purpose, &ss, handle);
     Ok(answer_of(&k, &nonce, entry_new))
@@ -230,11 +238,13 @@ mod tests {
         )
         .unwrap();
         let wrong_handle = answer(renew, &hk, b"@alice#1235", issued.bytes(), None).unwrap();
+
         assert_ne!(ans, wrong_key);
         assert_ne!(ans, wrong_epoch);
         assert_ne!(ans, wrong_handle);
         assert!(answer(renew, &hk, handle, &issued.bytes()[..10], None).is_err());
         assert!(answer(renew, &hk, handle, issued.bytes(), Some(b"x")).is_err());
+
         let bytes = *issued.bytes();
         issued.verify(&ans, None).unwrap();
         let again = Issued::new(renew, &hk.public().to_bytes(), handle, &mut rng).unwrap();
@@ -248,6 +258,7 @@ mod tests {
         let other_entry = answer(write, &hk, handle, issued.bytes(), Some(b"other")).unwrap();
         assert_ne!(ans, other_entry);
         assert_eq!(issued.verify(&ans, None), Err(Error::Malformed));
+
         let issued = Issued::new(write, &hk.public().to_bytes(), handle, &mut rng).unwrap();
         let ans = answer(write, &hk, handle, issued.bytes(), Some(entry)).unwrap();
         issued.verify(&ans, Some(entry)).unwrap();

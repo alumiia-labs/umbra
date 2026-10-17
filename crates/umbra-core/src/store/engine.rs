@@ -216,6 +216,7 @@ impl<B: Backend> Store<B> {
         let table_key = TableKey::derive(&store_key);
         let row_key = RowKey::derive(&store_key);
         let stored_tables = backend.tables()?;
+
         // IMP-130: the form of the set MAC is the mark of the record
         // version. A new store holds no table and starts at the current
         // version. A store with tables and no set MAC is of a build before
@@ -242,6 +243,7 @@ impl<B: Backend> Store<B> {
                 }
             }
         };
+
         let mut tables = BTreeMap::new();
         let mut held_set = None;
         let mut scanned = TableState::new();
@@ -255,6 +257,7 @@ impl<B: Backend> Store<B> {
             scanned.insert(&form.set_tag(&table_key, table, &stored.mac));
             tables.insert(table, state);
         }
+
         // IDN-193: a table whose MAC row left the file shows here, since
         // the set MAC counts each table that the store ever held. In the
         // current form it reads the MAC of each table too, thus a table
@@ -271,6 +274,7 @@ impl<B: Backend> Store<B> {
             }
             None => scanned,
         };
+
         Ok(Store {
             backend,
             store_key,
@@ -321,13 +325,16 @@ impl<B: Backend> Store<B> {
         if self.form == Form::Current {
             return Ok(true);
         }
+
         if let Some(fault) = self.migration_fault {
             return Err(fault);
         }
+
         let moved = self.migrate_tables(rng);
         if let Err(fault) = moved {
             self.migration_fault = Some(fault);
         }
+
         moved
     }
 
@@ -336,6 +343,7 @@ impl<B: Backend> Store<B> {
         let ids: Vec<TableId> = self.tables.keys().copied().collect();
         let mut moved: BTreeMap<TableId, TableState> = BTreeMap::new();
         let mut is_sound = true;
+
         for table in ids {
             let held = self.tables.get(&table).cloned().unwrap_or_default();
             let mut earlier = held.clone();
@@ -344,6 +352,7 @@ impl<B: Backend> Store<B> {
             let mut writes = Vec::new();
             let mut size = 0usize;
             let mut after: Option<RowId> = None;
+
             loop {
                 let page = self
                     .backend
@@ -352,10 +361,12 @@ impl<B: Backend> Store<B> {
                     break;
                 };
                 after = Some(last);
+
                 for row_id in page {
                     let Some(row) = self.backend.read(table, &row_id)? else {
                         continue;
                     };
+
                     let owner = row.owner;
                     let old_tag = Form::Earlier.row_tag(
                         &self.table_key,
@@ -365,7 +376,9 @@ impl<B: Backend> Store<B> {
                         &row.sealed,
                     )?;
                     scanned.insert(&old_tag);
+
                     let sealed = SealedRecord::from_bytes(row.sealed)?;
+
                     // A record with a discarded key has no plaintext, and a
                     // record that opens under neither version is a fault
                     // that each later read reports. The two stay as they
@@ -394,6 +407,7 @@ impl<B: Backend> Store<B> {
                         )?);
                         continue;
                     };
+
                     // The earlier bytes go before the seal, and the
                     // plaintext goes right after it.
                     drop(sealed);
@@ -407,6 +421,7 @@ impl<B: Backend> Store<B> {
                     )?;
                     drop(plain);
                     let len = again.as_bytes().len();
+
                     // A record that does not fit beside the ones that wait
                     // lets them commit first. Thus a record above the bound
                     // is a batch of its own.
@@ -414,6 +429,7 @@ impl<B: Backend> Store<B> {
                         self.apply_earlier(table, &mut earlier, &mut writes)?;
                         size = 0;
                     }
+
                     let new_tag = Form::Earlier.row_tag(
                         &self.table_key,
                         table,
@@ -430,6 +446,7 @@ impl<B: Backend> Store<B> {
                     )?);
                     earlier.update(&old_tag, &new_tag);
                     size = size.saturating_add(len);
+
                     writes.push(Write::Put(
                         table,
                         StoredRow {
@@ -438,15 +455,18 @@ impl<B: Backend> Store<B> {
                             sealed: again.into_bytes(),
                         },
                     ));
+
                     if size >= MIGRATION_BATCH || writes.len() >= MIGRATION_ROWS {
                         self.apply_earlier(table, &mut earlier, &mut writes)?;
                         size = 0;
                     }
                 }
             }
+
             if !writes.is_empty() {
                 self.apply_earlier(table, &mut earlier, &mut writes)?;
             }
+
             // A table that did not match its accumulator before the pass
             // does not match it after. The difference moves with the rows,
             // thus the scan of `IDN-162` still reports it. The commit
@@ -455,14 +475,18 @@ impl<B: Backend> Store<B> {
             let (held_accum, held_rows, _) = held.fields();
             let (_, _, commit_counter) = earlier.fields();
             let (scanned_accum, scanned_rows, _) = scanned.fields();
+
             if !umbra_crypto::ct_eq(&held_accum, &scanned_accum) || held_rows != scanned_rows {
                 is_sound = false;
             }
+
             for ((byte, held), scanned) in accum.iter_mut().zip(held_accum).zip(scanned_accum) {
                 *byte ^= held ^ scanned;
             }
+
             moved.insert(table, TableState::restore(accum, held_rows, commit_counter));
         }
+
         // The mark: each MAC in the current form, in one transaction.
         let mut writes = Vec::with_capacity(moved.len().saturating_add(1));
         let mut set = TableState::new();
@@ -471,19 +495,23 @@ impl<B: Backend> Store<B> {
             set.insert(&Form::Current.set_tag(&self.table_key, *table, &mac));
             writes.push(Write::Table(*table, stored_table(state, mac)));
         }
+
         let (accum, row_count, _) = set.fields();
         let (_, _, commit_counter) = self.set.fields();
         let mut set = TableState::restore(accum, row_count, commit_counter);
         let mac = set.commit(&self.table_key, Form::Current.domain(TableId::SET).bytes());
         writes.push(Write::Table(TableId::SET, stored_table(&set, mac)));
+
         self.backend.apply(&Batch {
             writes,
             deletion: false,
         })?;
+
         self.tables = moved;
         self.set = set;
         self.indexed = true;
         self.form = Form::Current;
+
         Ok(is_sound)
     }
 
@@ -499,10 +527,12 @@ impl<B: Backend> Store<B> {
         let mac = state.commit(&self.table_key, Form::Earlier.domain(table).bytes());
         let mut writes = core::mem::take(writes);
         writes.push(Write::Table(table, stored_table(state, mac)));
+
         self.backend.apply(&Batch {
             writes,
             deletion: false,
         })?;
+
         self.tables.insert(table, state.clone());
         Ok(())
     }
@@ -552,6 +582,7 @@ impl<B: Backend> Store<B> {
         let Some(row) = self.backend.read(table, row_id)? else {
             return Ok(None);
         };
+
         let sealed = SealedRecord::from_bytes(row.sealed)?;
         Ok(Some(self.open_row(
             table,
@@ -577,12 +608,14 @@ impl<B: Backend> Store<B> {
             if sealed.is_discarded() {
                 continue;
             }
+
             let bound = owner.or(row.owner.as_ref());
             out.push((
                 row.row_id,
                 self.open_row(table, &row.row_id, bound, &sealed)?,
             ));
         }
+
         Ok(out)
     }
 
@@ -596,9 +629,11 @@ impl<B: Backend> Store<B> {
             if sealed.is_discarded() {
                 continue;
             }
+
             let plain = self.open_row(table, &row.row_id, row.owner.as_ref(), &sealed)?;
             out.push((row.row_id, row.owner, plain));
         }
+
         Ok(out)
     }
 
@@ -614,6 +649,7 @@ impl<B: Backend> Store<B> {
             if !seen.insert(row.row_id) {
                 return Err(Error::Unverified);
             }
+
             scanned.insert(&self.form.row_tag(
                 &self.table_key,
                 table,
@@ -622,6 +658,7 @@ impl<B: Backend> Store<B> {
                 &row.sealed,
             )?);
         }
+
         let held = self.tables.get(&table).cloned().unwrap_or_default();
         let (scanned_accum, scanned_rows, _) = scanned.fields();
         let (held_accum, held_rows, _) = held.fields();
@@ -671,6 +708,7 @@ impl<B: Backend> Transaction<'_, B> {
         if self.store.form == Form::Earlier {
             self.store.migrate(rng)?;
         }
+
         let sealed = SealedRecord::seal(
             &self.store.store_key,
             table,
@@ -679,6 +717,7 @@ impl<B: Backend> Transaction<'_, B> {
             plaintext,
             rng,
         )?;
+
         self.pending.insert(
             (table, row_id),
             Pending::Put(StoredRow {
@@ -687,6 +726,7 @@ impl<B: Backend> Transaction<'_, B> {
                 sealed: sealed.as_bytes().to_vec(),
             }),
         );
+
         Ok(())
     }
 
@@ -712,8 +752,10 @@ impl<B: Backend> Transaction<'_, B> {
             .backend
             .read(table, &row_id)?
             .ok_or(Error::NoPath)?;
+
         let mut sealed = SealedRecord::from_bytes(row.sealed)?;
         sealed.discard_key();
+
         self.pending.insert(
             (table, row_id),
             Pending::Put(StoredRow {
@@ -734,10 +776,12 @@ impl<B: Backend> Transaction<'_, B> {
         let form = store.form;
         let mut states: BTreeMap<TableId, TableState> = BTreeMap::new();
         let mut writes = Vec::with_capacity(self.pending.len());
+
         for ((table, row_id), change) in self.pending {
             let state = states
                 .entry(table)
                 .or_insert_with(|| store.tables.get(&table).cloned().unwrap_or_default());
+
             let old_tag = match store.backend.read(table, &row_id)? {
                 Some(old) => Some(form.row_tag(
                     &store.table_key,
@@ -748,6 +792,7 @@ impl<B: Backend> Transaction<'_, B> {
                 )?),
                 None => None,
             };
+
             match change {
                 Pending::Put(row) => {
                     let new_tag = form.row_tag(
@@ -771,15 +816,18 @@ impl<B: Backend> Transaction<'_, B> {
                 }
             }
         }
+
         // IDN-193: a table that enters the store enters the set MAC, and a
         // store of an earlier build writes that MAC at its first commit.
         // In the current form the set MAC reads the MAC of each table,
         // thus each commit that changes a table writes the set MAC too.
         let mut set = store.set.clone();
         let mut set_changed = !store.indexed;
+
         for (table, state) in &mut states {
             let mac = state.commit(&store.table_key, form.domain(*table).bytes());
             let new_tag = form.set_tag(&store.table_key, *table, &mac);
+
             match store.tables.get(table) {
                 Some(old) if form == Form::Current => {
                     let old_mac = old.mac(&store.table_key, form.domain(*table).bytes());
@@ -792,21 +840,26 @@ impl<B: Backend> Transaction<'_, B> {
                     set_changed = true;
                 }
             }
+
             writes.push(Write::Table(*table, stored_table(state, mac)));
         }
+
         if set_changed {
             let mac = set.commit(&store.table_key, form.domain(TableId::SET).bytes());
             writes.push(Write::Table(TableId::SET, stored_table(&set, mac)));
         }
+
         store.backend.apply(&Batch {
             writes,
             deletion: self.deletion,
         })?;
+
         store.tables.extend(states);
         if set_changed {
             store.set = set;
             store.indexed = true;
         }
+
         Ok(())
     }
 }
@@ -876,9 +929,11 @@ impl Backend for MemoryBackend {
                 }
             }
         }
+
         if batch.deletion {
             self.deletion_batches = self.deletion_batches.saturating_add(1);
         }
+
         Ok(())
     }
 }
@@ -896,6 +951,7 @@ mod tests {
         let conversation = store.row_id(TableId::CONTACT, b"alice");
         let first = store.row_id(TableId::MESSAGE, b"alice/1");
         let second = store.row_id(TableId::MESSAGE, b"alice/2");
+
         let mut rng = Rng(1);
         let mut batch = store.begin();
         batch
@@ -920,6 +976,7 @@ mod tests {
             .put(TableId::CONTACT, conversation, None, b"alice", &mut rng)
             .unwrap();
         batch.commit().unwrap();
+
         (store, conversation, first, second)
     }
 
@@ -941,16 +998,19 @@ mod tests {
             .list(TableId::MESSAGE, Some(&first))
             .unwrap()
             .is_empty());
+
         store.audit(TableId::MESSAGE).unwrap();
         store.audit(TableId::CONTACT).unwrap();
 
         let backend = store.lock();
         assert_eq!(backend.deletion_batches, 0);
+
         let again = Store::unlock(backend.clone(), Secret::new(KEY)).unwrap();
         assert_eq!(
             again.get(TableId::MESSAGE, &first).unwrap().unwrap(),
             b"one"
         );
+
         // Another master key fails at the first table MAC.
         assert!(Store::unlock(backend, Secret::new([2; 32])).is_err());
     }
@@ -1023,6 +1083,7 @@ mod tests {
             Store::unlock(dropped, Secret::new(KEY)).err(),
             Some(Error::Unverified)
         );
+
         // The set MAC that left the file alone fails too. Each table MAC is
         // of the current form, and a store with no set MAC is not.
         let mut bare = current.clone();
@@ -1031,6 +1092,7 @@ mod tests {
             Store::unlock(bare, Secret::new(KEY)).err(),
             Some(Error::Unverified)
         );
+
         // A store of an earlier build with no set MAC opens and writes one
         // at its next commit.
         let earlier = earlier_backend(false);
@@ -1075,6 +1137,7 @@ mod tests {
         let mut backend = MemoryBackend::default();
         let mut set = TableState::new();
         let tables: BTreeSet<TableId> = content.iter().map(|row| row.0).collect();
+
         for table in tables {
             let mut state = TableState::new();
             for (_, natural, owner, plain) in content.iter().filter(|row| row.0 == table) {
@@ -1091,10 +1154,12 @@ mod tests {
                     },
                 );
             }
+
             let mac = state.commit(&table_key, &[table.0]);
             backend.tables.insert(table, stored_table(&state, mac));
             set.insert(&table_key.row_tag(&[TableId::SET.0], &[table.0], &[0; 16]));
         }
+
         if indexed {
             let mac = set.commit(&table_key, &[TableId::SET.0]);
             backend.tables.insert(TableId::SET, stored_table(&set, mac));
@@ -1115,9 +1180,11 @@ mod tests {
         fn read(&self, table: TableId, row_id: &RowId) -> Result<Option<StoredRow>, Error> {
             self.inner.read(table, row_id)
         }
+
         fn rows(&self, table: TableId, owner: Option<&RowId>) -> Result<Vec<StoredRow>, Error> {
             self.inner.rows(table, owner)
         }
+
         fn row_ids(
             &self,
             table: TableId,
@@ -1126,13 +1193,16 @@ mod tests {
         ) -> Result<Vec<RowId>, Error> {
             self.inner.row_ids(table, after, limit)
         }
+
         fn tables(&self) -> Result<Vec<(TableId, StoredTable)>, Error> {
             self.inner.tables()
         }
+
         fn apply(&mut self, batch: &Batch) -> Result<(), Error> {
             if self.left == 0 {
                 return Err(Error::Storage);
             }
+
             self.left = self.left.saturating_sub(1);
             self.batches.push(
                 batch
@@ -1175,6 +1245,7 @@ mod tests {
         assert_eq!(store.get(TableId::MESSAGE, &first), Err(Error::Unverified));
         assert_eq!(store.list(TableId::MESSAGE, None), Err(Error::Unverified));
         assert_eq!(store.list_owned(TableId::MESSAGE), Err(Error::Unverified));
+
         // The rows that stayed with their owner still open.
         assert_eq!(
             store.list(TableId::MESSAGE, Some(&conversation)).unwrap(),
@@ -1238,6 +1309,7 @@ mod tests {
             Store::unlock(rolled, Secret::new(KEY)).err(),
             Some(Error::Unverified)
         );
+
         // The set MAC of the earlier state with the tables of this one.
         let mut rolled = current;
         let held = *before.tables.get(&TableId::SET).unwrap();
@@ -1256,6 +1328,7 @@ mod tests {
             assert!(store.migration_due());
             let conversation = store.row_id(TableId::CONTACT, b"alice");
             let first = store.row_id(TableId::MESSAGE, b"alice/1");
+
             // Before the move the store reads each record and passes the
             // scan of the earlier form.
             assert_eq!(
@@ -1280,10 +1353,12 @@ mod tests {
                 )
                 .unwrap();
             batch.commit().unwrap();
+
             assert!(!store.migration_due());
             assert!(store.indexed());
             store.audit(TableId::MESSAGE).unwrap();
             store.audit(TableId::CONTACT).unwrap();
+
             let moved = store.lock();
             let store = Store::unlock(moved.clone(), Secret::new(KEY)).unwrap();
             assert!(!store.migration_due());
@@ -1302,6 +1377,7 @@ mod tests {
                 store.get(TableId::CONTACT, &conversation).unwrap().unwrap(),
                 b"alice"
             );
+
             // No record kept its bytes of version 0x01.
             for (key, row) in &earlier.rows {
                 assert_ne!(moved.rows.get(key).unwrap().sealed, row.sealed);
@@ -1331,6 +1407,7 @@ mod tests {
                 Store::unlock(downgraded, Secret::new(KEY)).err(),
                 Some(Error::Unverified)
             );
+
             let mut downgraded = moved;
             downgraded.tables = earlier.tables.clone();
             let store = Store::unlock(downgraded, Secret::new(KEY)).unwrap();
@@ -1353,6 +1430,7 @@ mod tests {
         let first = store.row_id(TableId::MESSAGE, b"alice/1");
         assert_eq!(store.migrate(&mut Rng(9)), Err(Error::Storage));
         assert!(store.migration_due());
+
         // A write of that run fails with the move, and changes nothing. It
         // runs no second pass, although the backend would take one now:
         // the next unlock does.
@@ -1382,6 +1460,7 @@ mod tests {
         );
         store.audit(TableId::MESSAGE).unwrap();
         store.audit(TableId::CONTACT).unwrap();
+
         // IDN-068: the commit counter of a table goes up only, through the
         // batches of the two passes and the mark.
         let before = half.tables.get(&TableId::MESSAGE).unwrap().commit_counter;
@@ -1394,7 +1473,9 @@ mod tests {
         assert_eq!(contact, first_contact + 2);
         store.audit(TableId::MESSAGE).unwrap();
         store.audit(TableId::CONTACT).unwrap();
+
         let done = store.lock();
+
         // The second pass sealed no record of the current version again.
         assert_eq!(
             done.rows.get(&(TableId::MESSAGE, first)),
@@ -1404,6 +1485,7 @@ mod tests {
             done.rows.get(&(TableId::CONTACT, conversation)),
             half.rows.get(&(TableId::CONTACT, conversation))
         );
+
         let store = Store::unlock(done, Secret::new(KEY)).unwrap();
         assert!(!store.migration_due());
         assert_eq!(
@@ -1426,6 +1508,7 @@ mod tests {
         let mut batch = store.begin();
         batch.discard_key(TableId::MESSAGE, first).unwrap();
         batch.commit().unwrap();
+
         assert!(store.migration_due());
         store.migrate(&mut Rng(12)).unwrap();
         assert_eq!(store.get(TableId::MESSAGE, &first), Err(Error::Stale));
@@ -1441,6 +1524,7 @@ mod tests {
         earlier.rows_mut().remove(&(TableId::MESSAGE, second));
         let mut store = Store::unlock(earlier, Secret::new(KEY)).unwrap();
         assert_eq!(store.audit(TableId::MESSAGE), Err(Error::Unverified));
+
         // The pass says that a table did not match, and it moves the rest.
         assert!(!store.migrate(&mut Rng(13)).unwrap());
         assert_eq!(store.audit(TableId::MESSAGE), Err(Error::Unverified));
@@ -1473,11 +1557,13 @@ mod tests {
                 )
             })
             .collect();
+
         let ending = Ending {
             inner: earlier_backend_of(&content, true),
             left: u32::MAX,
             batches: Vec::new(),
         };
+
         let mut store = Store::unlock(ending, Secret::new(KEY)).unwrap();
         assert!(store.migrate(&mut Rng(14)).unwrap());
         store.audit(TableId::MESSAGE).unwrap();
@@ -1490,12 +1576,14 @@ mod tests {
                 .len(),
             naturals.len()
         );
+
         // The last batch is the mark and holds no row.
         let batches = &store.backend.batches;
         assert!(batches.last().unwrap().is_empty());
         let moved = &batches[..batches.len() - 1];
         assert_eq!(moved.iter().map(Vec::len).sum::<usize>(), naturals.len());
         assert!(moved.len() >= 4);
+
         for batch in moved {
             // Each batch holds both bounds, and the row above the bound of
             // the bytes is a batch of its own.
@@ -1503,6 +1591,7 @@ mod tests {
             let bytes: usize = batch.iter().sum();
             assert!(bytes <= MIGRATION_BATCH || batch.len() == 1, "{bytes}");
         }
+
         assert!(moved
             .iter()
             .any(|batch| batch.len() == 1 && batch[0] > MIGRATION_BATCH));
@@ -1544,13 +1633,16 @@ mod tests {
             .clone();
         old.owner = Some(other);
         back.rows_mut().insert((TableId::MESSAGE, first), old);
+
         let mut store = Store::unlock(back, Secret::new(KEY)).unwrap();
         assert!(store.migration_due());
+
         // IDN-039: the pass finds a table that does not match the MAC that
         // came back, and it says so before a view reads the row.
         assert!(!store.migrate(&mut Rng(16)).unwrap());
         assert!(!store.migration_due());
         assert_eq!(store.audit(TableId::MESSAGE), Err(Error::Unverified));
+
         // A store that no party changed moves with no such word.
         let mut store = Store::unlock(earlier, Secret::new(KEY)).unwrap();
         assert!(store.migrate(&mut Rng(17)).unwrap());
@@ -1564,6 +1656,7 @@ mod tests {
             hmac::{digest::KeyInit, Hmac, Mac},
             sha3::Sha3_256,
         };
+
         // Each byte below comes from the layout of version 0x01 in Part 4
         // §4.6 and Part 14 §14.6.4 and from the primitives. No byte comes
         // from a function of the store. A store that an earlier build wrote
@@ -1576,6 +1669,7 @@ mod tests {
                 .unwrap();
             out
         };
+
         let hmac = |key: &Secret<32>, parts: &[&[u8]]| -> [u8; 32] {
             let mut mac = Hmac::<Sha3_256>::new_from_slice(key.expose()).unwrap();
             for part in parts {
@@ -1583,8 +1677,10 @@ mod tests {
             }
             mac.finalize().into_bytes().into()
         };
+
         let row_key = expand(None, b"umbra/v1/row-id");
         let table_key = expand(None, b"umbra/v1/table-mac");
+
         // `row_id`: the first 16 bytes of the MAC over the table and the
         // natural key.
         let row_id = |table: u8, natural: &[u8]| -> RowId {
@@ -1592,7 +1688,9 @@ mod tests {
                 .try_into()
                 .unwrap()
         };
+
         let conversation = row_id(0x03, b"alice");
+
         // The table, the row, the owner column, the salt, and the plaintext.
         type Row<'a> = (u8, RowId, Option<RowId>, u8, &'a [u8]);
         let content: [Row<'_>; 3] = [
@@ -1612,11 +1710,14 @@ mod tests {
             ),
             (0x03, conversation, None, 0xA3, b"alice"),
         ];
+
         let mut backend = MemoryBackend::default();
         let mut set_accum = [0u8; 32];
+
         for table in [0x01u8, 0x03] {
             let mut accum = [0u8; 32];
             let mut count = 0u64;
+
             for (_, row, owner, salt, plain) in content.iter().filter(|row| row.0 == table) {
                 // The record: `record_salt || nonce || ct || tag`, under
                 // the key of its salt, its table and its row. The
@@ -1629,6 +1730,7 @@ mod tests {
                 let mut body = plain.to_vec();
                 let tag = aead::seal(&key, &nonce, &ad, &mut body).unwrap();
                 let sealed = [&salt[..], &nonce, &body, &tag].concat();
+
                 // `row_tag`: 0x01, the table, the row, and the record tag.
                 let row_tag = hmac(&table_key, &[&[0x01], &[table], row, &tag]);
                 for (byte, tag) in accum.iter_mut().zip(row_tag) {
@@ -1644,6 +1746,7 @@ mod tests {
                     },
                 );
             }
+
             // `table_mac`: 0x02, the table, the count of the rows, the
             // commit counter, and the accumulator.
             let counter = 7u64;
@@ -1666,6 +1769,7 @@ mod tests {
                     mac,
                 },
             );
+
             // The set of tables is table 0x00: a table is a row of it
             // under its identifier, with a record tag of 16 zero bytes.
             let set_tag = hmac(&table_key, &[&[0x01], &[0x00], &[table], &[0; 16]]);
@@ -1673,6 +1777,7 @@ mod tests {
                 *byte ^= tag;
             }
         }
+
         let set_mac = hmac(
             &table_key,
             &[
@@ -1683,6 +1788,7 @@ mod tests {
                 &set_accum,
             ],
         );
+
         backend.tables.insert(
             TableId::SET,
             StoredTable {
@@ -1707,18 +1813,21 @@ mod tests {
         );
         store.audit(TableId::MESSAGE).unwrap();
         store.audit(TableId::CONTACT).unwrap();
+
         // The move: each record under its owner, and each MAC of the
         // current form.
         assert!(store.migrate(&mut Rng(18)).unwrap());
         assert!(!store.migration_due());
         store.audit(TableId::MESSAGE).unwrap();
         store.audit(TableId::CONTACT).unwrap();
+
         let moved = store.lock();
         for (key, row) in &backend.rows {
             let held = moved.rows.get(key).unwrap();
             assert_eq!(held.owner, row.owner);
             assert_ne!(held.sealed, row.sealed);
         }
+
         let store = Store::unlock(moved.clone(), Secret::new(KEY)).unwrap();
         assert!(!store.migration_due());
         assert_eq!(
@@ -1736,6 +1845,7 @@ mod tests {
             store.get(TableId::CONTACT, &conversation).unwrap().unwrap(),
             b"alice"
         );
+
         // IMP-121: the owner column is in the record now.
         let mut other = moved;
         other
@@ -1751,11 +1861,13 @@ mod tests {
     fn a_salt_that_a_party_sets_to_zero_fails_the_scan() {
         let (store, _, first, _) = filled();
         let mut backend = store.lock();
+
         // IDN-031, IDN-163: a row hidden by a zero salt shows in the scan.
         let row = backend.rows.get_mut(&(TableId::MESSAGE, first)).unwrap();
         for byte in row.sealed.iter_mut().take(16) {
             *byte = 0;
         }
+
         let store = Store::unlock(backend, Secret::new(KEY)).unwrap();
         assert_eq!(store.audit(TableId::MESSAGE), Err(Error::Unverified));
     }
@@ -1776,6 +1888,7 @@ mod tests {
             .unwrap()
             .is_empty());
         store.audit(TableId::MESSAGE).unwrap();
+
         let backend = store.lock();
         assert_eq!(backend.deletion_batches, 1);
         Store::unlock(backend, Secret::new(KEY)).unwrap();

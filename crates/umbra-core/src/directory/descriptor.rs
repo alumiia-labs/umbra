@@ -74,6 +74,7 @@ fn host_ok(host: &[u8; HOST_LEN]) -> bool {
     if name_len == 0 {
         return false;
     }
+
     let (name, pad) = host.split_at(name_len);
     pad.iter().all(|b| *b == 0)
         && name
@@ -93,6 +94,7 @@ impl<'a> RelayDescriptor<'a> {
         if self.identity_pk.len() != VERIFYING_KEY_LEN || self.sig.len() != SIGNATURE_LEN {
             return Err(Error::Malformed);
         }
+
         let mut w = Writer::new(out);
         self.put_signed(&mut w)?;
         w.put(self.sig)?;
@@ -124,10 +126,12 @@ impl<'a> RelayDescriptor<'a> {
         if bytes.len() != DESCRIPTOR_LEN {
             return Err(Error::Malformed);
         }
+
         let mut r = Reader::new(bytes);
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let out = RelayDescriptor {
             relay_id: r.array()?,
             identity_pk: r.take(VERIFYING_KEY_LEN)?,
@@ -146,6 +150,7 @@ impl<'a> RelayDescriptor<'a> {
             sig: r.take(SIGNATURE_LEN)?,
         };
         r.finish()?;
+
         if out.relay_id != sha3_256(&[out.identity_pk])
             || !host_ok(&out.host)
             || out.capacity_class > 3
@@ -158,6 +163,7 @@ impl<'a> RelayDescriptor<'a> {
         if !out.jurisdiction.iter().all(u8::is_ascii_uppercase) {
             return Err(Error::Malformed);
         }
+
         let key = VerifyingKey::from_bytes(out.identity_pk)?;
         let sig = Signature::from_bytes(out.sig)?;
         let mut preimage =
@@ -188,6 +194,7 @@ impl<'a> RelayDescriptor<'a> {
             sig: &sig,
             ..unsigned
         };
+
         let mut out = alloc::vec![0u8; DESCRIPTOR_LEN];
         signed.encode(&mut out)?;
         // A descriptor that this relay could not read back helps no party.
@@ -200,6 +207,7 @@ impl<'a> RelayDescriptor<'a> {
         let mut body = [0u8; SIGNED_LEN];
         let mut w = Writer::new(&mut body);
         self.put_signed(&mut w)?;
+
         let mut out = alloc::vec::Vec::with_capacity(labels::RELAY_DESCRIPTOR.len() + SIGNED_LEN);
         out.extend_from_slice(labels::RELAY_DESCRIPTOR);
         out.extend_from_slice(&body);
@@ -269,6 +277,7 @@ impl<'a> RelayEntry<'a> {
         if bytes.len() != ENTRY_LEN {
             return Err(Error::Malformed);
         }
+
         let (desc, rest) = bytes.split_at(DESCRIPTOR_LEN);
         let descriptor = RelayDescriptor::parse(desc)?;
         let mut r = Reader::new(rest);
@@ -279,9 +288,11 @@ impl<'a> RelayEntry<'a> {
             flags: r.u8()?,
         };
         r.finish()?;
+
         if out.class > 3 || out.class > out.descriptor.capacity_class {
             return Err(Error::Malformed);
         }
+
         // REL-151: layer 3 needs the queue role and the chain role, it is no
         // ingress, and no other bit exists. REL-157: a pending entry names
         // no layer.
@@ -295,6 +306,7 @@ impl<'a> RelayEntry<'a> {
         {
             return Err(Error::Malformed);
         }
+
         Ok(out)
     }
 }

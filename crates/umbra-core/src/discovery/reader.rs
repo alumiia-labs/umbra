@@ -130,6 +130,7 @@ pub fn keyset_for<C: LogChannel + ?Sized>(
     if keyset_hash(&held)? == *wanted {
         return Ok(held);
     }
+
     for _ in 0..KEYSET_ROUNDS {
         let epoch = LogKeySet::parse(&held)
             .map_err(|_| ReadError::Malformed)?
@@ -140,19 +141,24 @@ pub fn keyset_for<C: LogChannel + ?Sized>(
         if signed.is_empty() {
             break;
         }
+
         for link in &signed {
             let (set, _) = LogKeySet::parse(&held).map_err(|_| ReadError::Malformed)?;
             let next = set.rotate(link).map_err(|_| ReadError::Unverified)?;
+
             let mut bytes = alloc::vec![0u8; KEYSET_LEN];
             let used = next.encode(&mut bytes).map_err(|_| ReadError::Malformed)?;
             bytes.truncate(used);
+
             channel.set_keyset(bytes.clone());
             held = bytes;
+
             if keyset_hash(&held)? == *wanted {
                 return Ok(held);
             }
         }
     }
+
     // DIS-060: no signed rotation reaches the set of the head.
     Err(ReadError::Unverified)
 }
@@ -188,6 +194,7 @@ pub fn search_key<C: LogChannel + ?Sized, R: TryCryptoRng + ?Sized>(
     let epoch = epoch_number(channel.now());
     let (state, body) = dirclient::evaluate_request(input, &pk, epoch, None, rng)
         .map_err(|_| ReadError::Malformed)?;
+
     let evaluated = send(channel, Kind::Evaluate, &body)?;
     dirclient::evaluate_finish(&state, &evaluated, &pk).map_err(|_| ReadError::Unverified)
 }
@@ -204,9 +211,11 @@ pub fn extends_held<C: LogChannel + ?Sized>(
     let Some((size, root, _)) = channel.held() else {
         return Ok(true);
     };
+
     if head.tree_size < size {
         return Err(ReadError::Stale);
     }
+
     if head.tree_size == size {
         return if head.root == root {
             Ok(true)
@@ -214,12 +223,15 @@ pub fn extends_held<C: LogChannel + ?Sized>(
             Err(ReadError::Unverified)
         };
     }
+
     let answer = send(channel, Kind::Head, &size.to_be_bytes())?;
     let (newest, consistency) = dirclient::parse_head(&answer).map_err(|_| ReadError::Malformed)?;
     let (newest, _) = verify_head(channel, &newest, now)?;
+
     if newest.tree_size != head.tree_size || newest.root != head.root {
         return Ok(false);
     }
+
     super::logtree::verify_consistency(size, &root, head.tree_size, &head.root, &consistency)
         .map_err(|_| ReadError::Unverified)?;
     Ok(true)
@@ -252,10 +264,12 @@ pub fn read_head<C: LogChannel + ?Sized>(
     if !extends_held(channel, &head, now)? {
         return Ok(None);
     }
+
     let degraded = freshness == Freshness::Degraded;
     if !degraded {
         channel.set_held((head.tree_size, head.root, head.timestamp));
     }
+
     Ok(Some((
         AcceptedHead {
             tree_size: head.tree_size,
@@ -291,6 +305,7 @@ fn lookup_read<C: LogChannel + ?Sized>(
         let looked = send(channel, Kind::Lookup, search_key)?;
         let (bytes, blob, proof) =
             dirclient::parse_lookup(&looked).map_err(|_| ReadError::Malformed)?;
+
         if let Some((head, degraded)) = read_head(channel, &bytes)? {
             return Ok((proof, head, blob, degraded));
         }
@@ -306,9 +321,11 @@ pub fn version_entry<C: LogChannel + ?Sized>(
     version: u32,
 ) -> Result<Vec<u8>, ReadError> {
     let body = dirclient::version_body(search_key, version);
+
     for _ in 0..HEAD_TRIES {
         let answer = send(channel, Kind::Version, &body)?;
         let (bytes, proof) = dirclient::parse_version(&answer).map_err(|_| ReadError::Malformed)?;
+
         if let Some(head) = accept_head(channel, &bytes)? {
             return proof
                 .verify(search_key, version, &vrf_key(channel)?, &head)
@@ -326,12 +343,14 @@ pub fn find_keyed<C: LogChannel + ?Sized, R: TryCryptoRng + ?Sized>(
     rng: &mut R,
 ) -> Result<(Found, [u8; 64]), ReadError> {
     let search_key = search_key(channel, input, rng)?;
+
     // DIS-067: a head past its freshness still completes the lookup.
     let (proof, head, blob, degraded) = lookup_read(channel, &search_key)?;
     let entry = proof
         .verify(&search_key, &vrf_key(channel)?, &head)
         .map_err(|_| ReadError::Unverified)?
         .map(<[u8]>::to_vec);
+
     let found = Found {
         entry,
         version: proof.newest,
@@ -349,14 +368,17 @@ pub fn cross_relay_key<C: LogChannel + ?Sized, R: TryCryptoRng + ?Sized>(
     rng: &mut R,
 ) -> Result<PublicKey2048, ReadError> {
     let (found, _) = find_keyed(channel, &issuer_label_input(TYPE_CROSS_RELAY, epoch), rng)?;
+
     // An unverified read gives no key that admits a token.
     if found.degraded {
         return Err(ReadError::Stale);
     }
+
     let bytes = found.entry.ok_or(ReadError::NotFound)?;
     let entry = IssuerKeyEntry::parse(&bytes).map_err(|_| ReadError::Unverified)?;
     if found.version != Some(0) || entry.token_type != TYPE_CROSS_RELAY || entry.epoch != epoch {
         return Err(ReadError::Unverified);
     }
+
     PublicKey2048::from_modulus(&entry.public_key).map_err(|_| ReadError::Unverified)
 }

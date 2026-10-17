@@ -144,6 +144,7 @@ impl LabelRecord {
         out.extend_from_slice(&self.label.tombstoned_at.unwrap_or(u64::MAX).to_be_bytes());
         out.extend_from_slice(&self.label.lease_epoch.to_be_bytes());
         out.extend_from_slice(&self.label.ends_at.unwrap_or(0).to_be_bytes());
+
         let blob = self.blob.as_deref().unwrap_or(&[]);
         out.extend_from_slice(&u16::try_from(blob.len()).unwrap_or(0).to_be_bytes());
         out.extend_from_slice(blob);
@@ -158,6 +159,7 @@ impl LabelRecord {
         let lease_until = u64::from_be_bytes(r.array()?);
         let tombstoned_at = u64::from_be_bytes(r.array()?);
         let lease_epoch = u64::from_be_bytes(r.array()?);
+
         // A record of an earlier build ends here.
         let ends_at = if r.remaining() == 0 {
             0
@@ -169,6 +171,7 @@ impl LabelRecord {
         } else {
             take_var16(&mut r)?.to_vec()
         };
+
         r.finish()?;
         Ok(LabelRecord {
             input,
@@ -309,6 +312,7 @@ impl Directory {
         if keys.signers.len() != keyset.keys.len() {
             return Err(Error::Malformed);
         }
+
         let keyset_hash = keyset.hash()?;
         Ok(Directory {
             lookup_verifier: lookup_verifier(voprf.public()),
@@ -355,17 +359,21 @@ impl Directory {
     pub fn set_keyset_chain(&mut self, chain: Vec<Vec<u8>>) -> Result<(), Error> {
         let mut epoch = 0u64;
         let mut last = None;
+
         for signed in &chain {
             let (set, _) = LogKeySet::parse(signed)?;
             if set.keyset_epoch <= epoch {
                 return Err(Error::Malformed);
             }
+
             epoch = set.keyset_epoch;
             last = Some(set.hash()?);
         }
+
         if last.is_some_and(|hash| hash != self.keyset_hash) {
             return Err(Error::Malformed);
         }
+
         self.keyset_chain = chain;
         Ok(())
     }
@@ -403,7 +411,9 @@ impl Directory {
                 DirEvent::Spent { epoch, nonce } => self.spent.restore(*epoch, *nonce),
             }
         }
+
         self.events.clear();
+
         // The newest head alone: a client asks for no older one.
         match self.last_close {
             Some(at) => self.sign_head(at, rng),
@@ -449,12 +459,14 @@ impl Directory {
     ) -> Result<u32, Error> {
         let mut opening = [0u8; 32];
         rng.fill_bytes(&mut opening);
+
         let version = self.operator.stage(search_key, entry.clone(), opening)?;
         self.events.push(DirEvent::Staged {
             search_key: search_key.to_vec(),
             entry,
             opening,
         });
+
         Ok(version)
     }
 
@@ -463,6 +475,7 @@ impl Directory {
         if record.label.is_tombstoned() {
             record.blob = None;
         }
+
         self.events.push(DirEvent::Label {
             search_key: search_key.to_vec(),
             state: record.encode(),
@@ -476,6 +489,7 @@ impl Directory {
     fn advance(&mut self, nonce: [u8; 32], at: u64) -> Result<(), Error> {
         let auditors = &self.auditors;
         let mut steps = Vec::with_capacity(auditors.len());
+
         self.operator.close_epoch_checked(nonce, |update| {
             // DIS-049, DIS-050: each auditor checks the epoch before it
             // signs.
@@ -490,9 +504,11 @@ impl Directory {
             }
             root.map(|_| ()).ok_or(Error::NoPath)
         })?;
+
         for (auditor, step) in self.auditors.iter_mut().zip(steps) {
             auditor.commit(step);
         }
+
         self.last_close = Some(at);
         Ok(())
     }
@@ -509,6 +525,7 @@ impl Directory {
             keyset_hash: self.keyset_hash,
             sigs: Vec::new(),
         };
+
         let preimage = unsigned.preimage();
         let mut sigs = Vec::new();
         for signer in &self.signers {
@@ -519,6 +536,7 @@ impl Directory {
                     .to_bytes(),
             );
         }
+
         let head = SignedTreeHead {
             sigs: sigs
                 .iter()
@@ -530,9 +548,11 @@ impl Directory {
                 .collect(),
             ..unsigned
         };
+
         let mut out = vec![0u8; super::head::HEAD_FIXED + 3 * super::head::SIGNER_SIG_LEN];
         let used = head.encode(&mut out)?;
         out.truncate(used);
+
         self.head = Some(out);
         Ok(())
     }
@@ -552,6 +572,7 @@ impl Directory {
         {
             return Ok(());
         }
+
         let lapsed: Vec<Vec<u8>> = self
             .labels
             .iter()
@@ -564,13 +585,16 @@ impl Directory {
             })
             .map(|(key, _)| key.clone())
             .collect();
+
         for search_key in lapsed {
             let Some(mut record) = self.labels.get(&search_key).cloned() else {
                 continue;
             };
+
             let Some(version) = record.label.tombstone_if_lapsed(now) else {
                 continue;
             };
+
             // A label whose tombstone does not build or does not stage
             // keeps its state, and the next epoch tries it again. The
             // epoch closes without it: one label with a fault must not
@@ -578,11 +602,14 @@ impl Directory {
             let Ok(entry) = tombstone_entry(&record.input, version) else {
                 continue;
             };
+
             if self.stage(&search_key, entry, rng).is_err() {
                 continue;
             }
+
             self.keep_label(&search_key, record);
         }
+
         // ABU-098: each key of this epoch and of the next one goes into the
         // log before its epoch starts.
         let epoch = epoch_number(now);
@@ -591,6 +618,7 @@ impl Directory {
                 if self.published_issuers.contains(&(token_type, epoch)) {
                     continue;
                 }
+
                 let public_key = if token_type == TYPE_FIRST_PARTY {
                     self.issuer_public(epoch)?.to_vec()
                 } else {
@@ -599,24 +627,30 @@ impl Directory {
                     };
                     modulus
                 };
+
                 let entry = IssuerKeyEntry {
                     token_type,
                     epoch,
                     public_key,
                 }
                 .encode()?;
+
                 let search_key = self
                     .voprf
                     .evaluate_direct(&issuer_label_input(token_type, epoch));
+
                 self.stage(&search_key, entry, rng)?;
                 self.published_issuers.insert((token_type, epoch));
             }
         }
+
         let mut nonce = [0u8; 32];
         rng.fill_bytes(&mut nonce);
+
         self.advance(nonce, now)?;
         self.sign_head(now, rng)?;
         self.events.push(DirEvent::Closed { nonce, at: now });
+
         self.challenges
             .retain(|_, pending| now.saturating_sub(pending.at) < CHALLENGE_TTL);
         Ok(())
@@ -632,6 +666,7 @@ impl Directory {
         let Ok((kind, body)) = directory::parse_request(request) else {
             return tag(Status::Malformed, &[]);
         };
+
         let result = match kind {
             Kind::Evaluate => self.evaluate(body, now, rng),
             Kind::Lookup => self.lookup(body),
@@ -645,6 +680,7 @@ impl Directory {
             Kind::KeySet => self.keysets(body),
             Kind::Issue => self.issue(body, now, rng),
         };
+
         match result {
             Ok(body) => tag(Status::Done, &body),
             Err(status) => tag(status, &[]),
@@ -665,6 +701,7 @@ impl Directory {
         let mut r = Reader::new(body.get(used..).ok_or(Status::Malformed)?);
         let blinded: [u8; 32] = r.array().map_err(|_| Status::Malformed)?;
         r.finish().map_err(|_| Status::Malformed)?;
+
         match admission.kind {
             // DIS-164: a first-party token or a proof of work.
             AdmissionKind::Token => self.spend_token(admission.body, now)?,
@@ -677,6 +714,7 @@ impl Directory {
                 let Some(seed_epoch) = seed_epoch else {
                     return Err(Status::Refused);
                 };
+
                 // DIS-200: a seed serves one evaluation, thus a request that
                 // comes again costs no proof check and no evaluation.
                 if solution.effort < POW_LOOKUP_FLOOR
@@ -684,9 +722,11 @@ impl Directory {
                 {
                     return Err(Status::Refused);
                 }
+
                 if self.lookup_seeds.count(seed_epoch) >= LOOKUP_SEEDS_MAX {
                     return Err(Status::Busy);
                 }
+
                 pow::verify(
                     &self.lookup_verifier,
                     &solution.seed,
@@ -695,12 +735,14 @@ impl Directory {
                     &solution.solution,
                 )
                 .map_err(|_| Status::Refused)?;
+
                 self.lookup_seeds
                     .spend(epoch, seed_epoch, solution.seed)
                     .map_err(|_| Status::Refused)?;
             }
             AdmissionKind::None => return Err(Status::Refused),
         }
+
         let evaluation = self
             .voprf
             .evaluate(&blinded, rng)
@@ -720,6 +762,7 @@ impl Directory {
         self.spent
             .spend(epoch_number(now), token_epoch, nonce)
             .map_err(|_| Status::Refused)?;
+
         // A restart takes the spent nonce again from the store.
         self.events.push(DirEvent::Spent {
             epoch: token_epoch,
@@ -735,6 +778,7 @@ impl Directory {
         if token.token_type != TYPE_FIRST_PARTY {
             return Err(Status::Refused);
         }
+
         let epoch = epoch_number(now);
         for token_epoch in [epoch, epoch.saturating_sub(1)] {
             let digest = TokenChallenge {
@@ -746,9 +790,11 @@ impl Directory {
             if digest != token.challenge_digest {
                 continue;
             }
+
             if self.spent.is_spent(token_epoch, &token.nonce) {
                 return Err(Status::Refused);
             }
+
             let issuer = self.issuer(token_epoch).map_err(|_| Status::Refused)?;
             issuer.verify(&token).map_err(|_| Status::Refused)?;
             return Ok((token_epoch, token.nonce));
@@ -760,12 +806,14 @@ impl Directory {
         if body.len() != 64 {
             return Err(Status::Malformed);
         }
+
         let head = self.newest_head()?;
         let proof = self
             .operator
             .lookup(body)
             .and_then(|proof| proof.encode())
             .map_err(|_| Status::NotFound)?;
+
         // DIS-175: the sealed profile blob of a live label comes with it.
         let blob = self
             .labels
@@ -773,6 +821,7 @@ impl Directory {
             .filter(|record| !record.label.is_tombstoned())
             .and_then(|record| record.blob.as_deref())
             .unwrap_or(&[]);
+
         let mut out = Vec::new();
         put_var16(&mut out, head).map_err(|_| Status::Busy)?;
         put_var16(&mut out, blob).map_err(|_| Status::Busy)?;
@@ -787,12 +836,14 @@ impl Directory {
         let search_key = r.take(64).map_err(|_| Status::Malformed)?;
         let version = r.u32().map_err(|_| Status::Malformed)?;
         r.finish().map_err(|_| Status::Malformed)?;
+
         let head = self.newest_head()?;
         let proof = self
             .operator
             .version(search_key, version)
             .and_then(|proof| proof.encode())
             .map_err(|_| Status::NotFound)?;
+
         let mut out = Vec::new();
         put_var16(&mut out, head).map_err(|_| Status::Busy)?;
         out.extend_from_slice(&proof);
@@ -811,6 +862,7 @@ impl Directory {
             .filter(|signed| LogKeySet::parse(signed).is_ok_and(|(set, _)| set.keyset_epoch > held))
             .take(KEYSET_CHAIN_ANSWER)
             .collect();
+
         let mut out = vec![u8::try_from(after.len()).map_err(|_| Status::Busy)?];
         for signed in after {
             put_var16(&mut out, signed).map_err(|_| Status::Busy)?;
@@ -827,20 +879,25 @@ impl Directory {
         let answer: [u8; ANSWER_LEN] = r.array().map_err(|_| Status::Malformed)?;
         let blob = take_var16(&mut r).map_err(|_| Status::Malformed)?.to_vec();
         r.finish().map_err(|_| Status::Malformed)?;
+
         if blob.len() > PROFILE_BLOB_MAX || blob.first().is_some_and(|v| *v != BLOB_VERSION) {
             return Err(Status::Malformed);
         }
+
         let search_key = self.voprf.evaluate_direct(&input).to_vec();
         let mut record = self
             .labels
             .get(&search_key)
             .cloned()
             .ok_or(Status::NotFound)?;
+
         if record.label.is_tombstoned() {
             return Err(Status::Stale);
         }
+
         let version = record.label.version;
         self.answer_pending(&search_key, BLOB, version, &answer, Some(&blob), now)?;
+
         record.blob = (!blob.is_empty()).then_some(blob);
         self.keep_label(&search_key, record);
         Ok(Vec::new())
@@ -852,12 +909,14 @@ impl Directory {
         let head = self.newest_head()?;
         let mut out = Vec::new();
         put_var16(&mut out, head).map_err(|_| Status::Busy)?;
+
         let (size, _) = self.operator.head().ok_or(Status::NotFound)?;
         let proof = if from > 0 && from < size {
             self.operator.consistency(from).ok_or(Status::Stale)?
         } else {
             Vec::new()
         };
+
         out.push(u8::try_from(proof.len()).map_err(|_| Status::Busy)?);
         for hash in proof {
             out.extend_from_slice(&hash);
@@ -881,9 +940,11 @@ impl Directory {
             if parsed.address.as_slice() != address || parsed.version != version {
                 return Err(Status::Refused);
             }
+
             parsed.check().map_err(|_| Status::Refused)?;
             return Ok(parsed.address_pk);
         }
+
         let text = core::str::from_utf8(input).map_err(|_| Status::Malformed)?;
         // DIS-091: the name holds under the profile.
         let handle = if is_held {
@@ -895,6 +956,7 @@ impl Directory {
         if handle.label_input() != input {
             return Err(Status::Refused);
         }
+
         let parsed = DirectoryEntry::parse(entry).map_err(|_| Status::Malformed)?;
         if parsed.handle != input || parsed.version != version {
             return Err(Status::Refused);
@@ -931,6 +993,7 @@ impl Directory {
         let input = take_var16(&mut r).map_err(|_| Status::Malformed)?.to_vec();
         let entry = take_var16(&mut r).map_err(|_| Status::Malformed)?.to_vec();
         let answer: [u8; ANSWER_LEN] = r.array().map_err(|_| Status::Malformed)?;
+
         // DIS-172: a registration can end before a full lease.
         let lease = if r.remaining() == 0 {
             None
@@ -942,16 +1005,20 @@ impl Directory {
             Some(seconds)
         };
         r.finish().map_err(|_| Status::Malformed)?;
+
         let search_key = self.voprf.evaluate_direct(&input).to_vec();
         let version = self.register_version(&search_key, now)?;
+
         // DIS-010: one version of a label in each epoch.
         if self.operator.is_staged(&search_key) {
             return Err(Status::Busy);
         }
+
         let key = self.check_entry(&input, &entry, version, false)?;
         if key == [0; 1_216] {
             return Err(Status::Refused);
         }
+
         // DIS-076: the label takes the change before the log does, thus a
         // change that the label refuses stages no entry.
         let mut label = match self.labels.get(&search_key).cloned() {
@@ -964,20 +1031,25 @@ impl Directory {
                 record.label
             }
         };
+
         if let Some(seconds) = lease {
             label.end_at(now.saturating_add(seconds));
         }
+
         if self.operator.next_version(&search_key) != Some(version) {
             return Err(Status::Stale);
         }
+
         // DIS-197: the registrant holds the private half of the key of the
         // entry, and the answer binds the entry.
         let (token_epoch, nonce) = self.check_token(token, now)?;
         let slot = Self::register_slot(&search_key, &key);
         self.answer_pending(&slot, REGISTER, version, &answer, Some(&entry), now)?;
+
         // The token spends after each check that can refuse, thus a refused
         // registration keeps it.
         self.commit_spend(token_epoch, nonce, now)?;
+
         if self
             .stage(&search_key, entry, rng)
             .map_err(|_| Status::Stale)?
@@ -985,6 +1057,7 @@ impl Directory {
         {
             return Err(Status::Stale);
         }
+
         self.keep_label(
             &search_key,
             LabelRecord {
@@ -1009,9 +1082,11 @@ impl Directory {
         let input = take_var16(r).map_err(|_| Status::Malformed)?.to_vec();
         let key: [u8; 1_216] = r.array().map_err(|_| Status::Malformed)?;
         r.finish().map_err(|_| Status::Malformed)?;
+
         if key == [0; 1_216] {
             return Err(Status::Refused);
         }
+
         // DIS-169: an address names the hash of its key.
         let name = match input.strip_prefix(labels::ADDRESS_INDEX) {
             Some(address) => {
@@ -1021,15 +1096,18 @@ impl Directory {
             }
             None => input.clone(),
         };
+
         let search_key = self.voprf.evaluate_direct(&input).to_vec();
         let version = self.register_version(&search_key, now)?;
         let slot = (Self::register_slot(&search_key, &key), REGISTER);
+
         // DIS-194: a live challenge goes again.
         if let Some(pending) = self.challenges.get(&slot) {
             if pending.version == version && now.saturating_sub(pending.at) < CHALLENGE_TTL {
                 return Ok(pending.out.clone());
             }
         }
+
         let waiting = self
             .challenges
             .iter()
@@ -1040,6 +1118,7 @@ impl Directory {
         if waiting >= REGISTER_PENDING_MAX {
             return Err(Status::Busy);
         }
+
         let issued = Issued::new(
             Purpose::Write {
                 version_new: version,
@@ -1049,8 +1128,10 @@ impl Directory {
             rng,
         )
         .map_err(|_| Status::Busy)?;
+
         let mut out = issued.bytes().to_vec();
         out.extend_from_slice(&version.to_be_bytes());
+
         self.challenges.insert(
             slot,
             Pending {
@@ -1074,23 +1155,28 @@ impl Directory {
         if purpose == REGISTER {
             return self.register_challenge(&mut r, now, rng);
         }
+
         let input = take_var16(&mut r).map_err(|_| Status::Malformed)?.to_vec();
         r.finish().map_err(|_| Status::Malformed)?;
+
         let search_key = self.voprf.evaluate_direct(&input).to_vec();
         let mut record = self
             .labels
             .get(&search_key)
             .cloned()
             .ok_or(Status::NotFound)?;
+
         let allowed = match purpose {
             RENEW | BLOB => !record.label.is_tombstoned(),
             // DIS-075: during the reservation the last key writes too.
             WRITE => record.label.needs(now) != Needs::Token,
             _ => false,
         };
+
         if !allowed {
             return Err(Status::Stale);
         }
+
         // DIS-194: a live challenge of this purpose goes again, thus a
         // party that asks for the label of another ends no challenge of it.
         let slot = (search_key.clone(), purpose);
@@ -1104,6 +1190,7 @@ impl Directory {
                 return Ok(pending.out.clone());
             }
         }
+
         let (purpose, lease_epoch) = match purpose {
             RENEW => {
                 let lease_epoch = record.label.issue_lease_epoch();
@@ -1117,16 +1204,19 @@ impl Directory {
             ),
             _ => (Purpose::Blob, None),
         };
+
         let issued = Issued::new(purpose, &record.label.hk_pub, record.challenge_name(), rng)
             .map_err(|_| Status::Busy)?;
         let mut out = issued.bytes().to_vec();
         if let Some(lease_epoch) = lease_epoch {
             out.extend_from_slice(&lease_epoch.to_be_bytes());
         }
+
         let version = record.label.version;
         if lease_epoch.is_some() {
             self.keep_label(&search_key, record);
         }
+
         self.challenges.insert(
             slot,
             Pending {
@@ -1155,15 +1245,18 @@ impl Directory {
     ) -> Result<Purpose, Status> {
         let slot = (search_key.to_vec(), purpose);
         let pending = self.challenges.get(&slot).ok_or(Status::Stale)?;
+
         // A challenge sealed to a key that a write replaced ends with it.
         if now.saturating_sub(pending.at) >= CHALLENGE_TTL || pending.version != version {
             self.challenges.remove(&slot);
             return Err(Status::Stale);
         }
+
         pending
             .issued
             .verify(answer, bound)
             .map_err(|_| Status::Refused)?;
+
         let purpose = pending.issued.purpose();
         self.challenges.remove(&slot);
         Ok(purpose)
@@ -1180,15 +1273,18 @@ impl Directory {
         let answer: [u8; 32] = r.array().map_err(|_| Status::Malformed)?;
         let entry = take_var16(&mut r).map_err(|_| Status::Malformed)?.to_vec();
         r.finish().map_err(|_| Status::Malformed)?;
+
         let search_key = self.voprf.evaluate_direct(&input).to_vec();
         let mut record = self
             .labels
             .get(&search_key)
             .cloned()
             .ok_or(Status::NotFound)?;
+
         if self.operator.is_staged(&search_key) {
             return Err(Status::Busy);
         }
+
         // DIS-097, DIS-098: the answer binds the entry.
         let version = record.label.version;
         let Purpose::Write { version_new } =
@@ -1196,7 +1292,9 @@ impl Directory {
         else {
             return Err(Status::Stale);
         };
+
         let key = self.check_entry(&input, &entry, version_new, true)?;
+
         // DIS-076: the label takes the change before the log does, thus a
         // change that the label refuses stages no entry, and the label and
         // the log never part.
@@ -1212,9 +1310,11 @@ impl Directory {
                 .publish(version_new, key, now)
                 .map_err(|_| Status::Stale)?;
         }
+
         if self.operator.next_version(&search_key) != Some(version_new) {
             return Err(Status::Stale);
         }
+
         if self
             .stage(&search_key, entry, rng)
             .map_err(|_| Status::Stale)?
@@ -1222,6 +1322,7 @@ impl Directory {
         {
             return Err(Status::Stale);
         }
+
         self.keep_label(&search_key, record);
         Ok(Vec::new())
     }
@@ -1251,9 +1352,11 @@ impl Directory {
                     .map_err(|_| Status::Malformed)?,
             )
             .map_err(|_| Status::Malformed)?;
+
             if solution.seed != issue_seed(epoch, message) || solution.effort < POW_EFFORT_MAX {
                 return Err(Status::Refused);
             }
+
             pow::verify(
                 &verifier,
                 &solution.seed,
@@ -1262,9 +1365,11 @@ impl Directory {
                 &solution.solution,
             )
             .map_err(|_| Status::Refused)?;
+
             blinded.push(message.to_vec());
         }
         r.finish().map_err(|_| Status::Malformed)?;
+
         // ABU-110: no request names an epoch before this one, thus the
         // signatures of an epoch that ended go.
         if self.signed_from < current {
@@ -1272,10 +1377,12 @@ impl Directory {
             self.signed_order.retain(|(held, _)| *held >= current);
             self.signed_from = current;
         }
+
         let names: Vec<(u32, [u8; 32])> = blinded
             .iter()
             .map(|message| (epoch, sha3_256(&[message])))
             .collect();
+
         // Each message that no earlier request held, one time.
         let mut fresh: Vec<Vec<u8>> = Vec::new();
         let mut fresh_names = Vec::new();
@@ -1285,6 +1392,7 @@ impl Directory {
                 fresh.push(message.clone());
             }
         }
+
         if !fresh.is_empty() {
             let key = self.cross_relay_key(epoch).ok_or(Status::NotFound)?;
             let signatures = crate::abuse::token::issue_cross_relay(key, &fresh)
@@ -1294,10 +1402,12 @@ impl Directory {
                 self.signed_order.push_back(name);
             }
         }
+
         let mut out = vec![u8::try_from(count).map_err(|_| Status::Malformed)?];
         for name in &names {
             out.extend_from_slice(self.signed.get(name).ok_or(Status::Busy)?);
         }
+
         // The oldest signatures go at the bound, after this answer took
         // its own.
         while self.signed_order.len() > SIGNED_HELD_MAX {
@@ -1313,22 +1423,26 @@ impl Directory {
         let input = take_var16(&mut r).map_err(|_| Status::Malformed)?.to_vec();
         let answer: [u8; 32] = r.array().map_err(|_| Status::Malformed)?;
         r.finish().map_err(|_| Status::Malformed)?;
+
         let search_key = self.voprf.evaluate_direct(&input).to_vec();
         let mut record = self
             .labels
             .get(&search_key)
             .cloned()
             .ok_or(Status::NotFound)?;
+
         let version = record.label.version;
         let Purpose::Renew { lease_epoch } =
             self.answer_pending(&search_key, RENEW, version, &answer, None, now)?
         else {
             return Err(Status::Stale);
         };
+
         record
             .label
             .renew(lease_epoch, now)
             .map_err(|_| Status::Stale)?;
+
         self.keep_label(&search_key, record);
         Ok(Vec::new())
     }
@@ -1349,6 +1463,7 @@ impl Directory {
         {
             return Err(Status::Malformed);
         }
+
         // ABU-110: this epoch, and the next once its key is in the log.
         let current = epoch_number(now);
         let allowed = epoch == current
@@ -1357,9 +1472,11 @@ impl Directory {
         if !allowed {
             return Err(Status::Stale);
         }
+
         if token_type == TYPE_CROSS_RELAY {
             return self.issue_cross_relay(&mut r, epoch, current, count);
         }
+
         let issuer_pk = *self.issuer(epoch).map_err(|_| Status::Busy)?.public();
         let verifier = issue_verifier(&issuer_pk);
         let mut blinded = Vec::with_capacity(count);
@@ -1370,10 +1487,12 @@ impl Directory {
                     .map_err(|_| Status::Malformed)?,
             )
             .map_err(|_| Status::Malformed)?;
+
             // ABU-076, ABU-077, ABU-109.
             if solution.seed != issue_seed(epoch, &element) || solution.effort < POW_EFFORT_MAX {
                 return Err(Status::Refused);
             }
+
             pow::verify(
                 &verifier,
                 &solution.seed,
@@ -1382,14 +1501,17 @@ impl Directory {
                 &solution.solution,
             )
             .map_err(|_| Status::Refused)?;
+
             blinded.push(element);
         }
         r.finish().map_err(|_| Status::Malformed)?;
+
         let batch = self
             .issuer(epoch)
             .map_err(|_| Status::Busy)?
             .issue(&blinded, rng)
             .map_err(|_| Status::Malformed)?;
+
         let mut out = vec![u8::try_from(count).map_err(|_| Status::Malformed)?];
         for element in &batch.elements {
             out.extend_from_slice(element);
@@ -1408,11 +1530,13 @@ fn tombstone_entry(input: &[u8], version: u32) -> Result<Vec<u8>, Error> {
             rendezvous: None,
             version,
         };
+
         let mut out = vec![0u8; super::entry::ADDRESS_ENTRY_LEN];
         let used = entry.encode(&mut out)?;
         out.truncate(used);
         return Ok(out);
     }
+
     let entry = DirectoryEntry::tombstone(input.to_vec(), version);
     let mut out = vec![0u8; entry.len()];
     let used = entry.encode(&mut out)?;
@@ -1454,9 +1578,11 @@ mod tests {
             keyset_epoch: 1,
             keys: public.iter().map(|k| &k[..]).collect(),
         };
+
         let mut keyset = vec![0u8; KEYSET_LEN];
         let used = set.encode(&mut keyset).unwrap();
         keyset.truncate(used);
+
         (
             DirectoryKeys {
                 voprf_seed: Secret::new([1; 32]),
@@ -1511,6 +1637,7 @@ mod tests {
             let input = issuer_label_input(TYPE_FIRST_PARTY, epoch);
             assert!(read(&mut dir, &keyset, &input, now, &mut rng).is_some());
         }
+
         // Two epochs take two keys.
         assert_ne!(
             dir.cross_relay_public(epoch),
@@ -1537,6 +1664,7 @@ mod tests {
         let now = T0 + DIRECTORY_EPOCH;
         dir.tick(now, &mut rng).unwrap();
         let epoch = epoch_number(now);
+
         // ABU-002: the key comes from the log.
         let input = issuer_label_input(TYPE_CROSS_RELAY, epoch);
         let entry = IssuerKeyEntry::parse(&read(&mut dir, &keyset, &input, now, &mut rng).unwrap())
@@ -1552,9 +1680,11 @@ mod tests {
             // ABU-078: a third party verifies with the public key alone.
             verify_cross_relay(&issuer_pk, token).unwrap();
         }
+
         // The signature of one blinded message is one value.
         let again = call(&mut dir, Kind::Issue, &body, now, &mut rng).unwrap();
         assert_eq!(again, answer);
+
         // The directory holds each signature. Thus the same messages in
         // another order, and one of them alone, take what it holds. It
         // signs nothing more.
@@ -1573,6 +1703,7 @@ mod tests {
             call(&mut dir, Kind::Issue, &one, now, &mut rng).unwrap(),
             [&[1u8][..], second_sig].concat()
         );
+
         // One message two times in one batch is one signature.
         let twice = [head, first, first].concat();
         assert_eq!(
@@ -1581,12 +1712,14 @@ mod tests {
         );
         assert_eq!(dir.signed.len(), 2);
         assert_eq!(dir.signed_order.len(), 2);
+
         // A message whose proof of work does not verify takes no signature
         // that the directory holds.
         let mut bare = one.clone();
         let last = bare.len() - 1;
         bare[last] ^= 1;
         assert!(call(&mut dir, Kind::Issue, &bare, now, &mut rng).is_err());
+
         // The signatures of an epoch go when it ends.
         let next = now + crate::abuse::EPOCH_SECONDS;
         assert_eq!(epoch_number(next), epoch + 1);
@@ -1750,6 +1883,7 @@ mod tests {
 
         let spent = tokens(&mut dir, epoch_number(T0), 2, T0, &mut rng);
         let entry0 = handle_entry(input, &hk, 0);
+
         // DIS-197: a party that holds no private half of the key of the
         // entry does not register it, and its token stays unspent.
         let thief = root.handle_key(5, 0);
@@ -1778,6 +1912,7 @@ mod tests {
             &mut rng,
         )
         .unwrap();
+
         // DIS-170: a held label does not register again, and a token
         // spends once.
         assert_eq!(
@@ -1808,6 +1943,7 @@ mod tests {
             ),
             Err(DirError::Status(Status::Refused))
         );
+
         // DIS-169: the entry names its label.
         assert_eq!(
             register(
@@ -1853,6 +1989,7 @@ mod tests {
         let ans = answer(purpose, &hk, input, &bytes, Some(&entry)).unwrap();
         let write = dirclient::write_body(input, &ans, &entry).unwrap();
         call(&mut dir, Kind::Write, &write, now + 1, &mut rng).unwrap();
+
         // DIS-168: a challenge lapses.
         let (bytes, purpose) = challenge(&mut dir, true, input, now, &mut rng).unwrap();
         let ans = answer(purpose, &next, input, &bytes, None).unwrap();
@@ -1881,6 +2018,7 @@ mod tests {
         let search_key = again.voprf.evaluate_direct(input).to_vec();
         assert_eq!(again.labels.get(&search_key).unwrap().label.version, 1);
         assert!(again.take_events().is_empty());
+
         // ABU-114: a restart keeps each spent nonce.
         assert!(!dir.spent.is_empty());
         assert_eq!(again.spent.len(), dir.spent.len());
@@ -1934,6 +2072,7 @@ mod tests {
         let hk = root.handle_key(0, 0);
         for input in [&b"@a%23b#12"[..], b"@a#b#12", b"@a@b#12", b"@a/b#12"] {
             let at = dir.last_close.unwrap();
+
             // A registration takes no such name.
             let spent = tokens(&mut dir, epoch_number(at), 1, at, &mut rng);
             let entry = handle_entry(input, &hk, 0);
@@ -1941,6 +2080,7 @@ mod tests {
                 register(&mut dir, &spent[0], input, &entry, &hk, None, at, &mut rng),
                 Err(DirError::Status(Status::Refused))
             );
+
             // A directory of an earlier build holds the label.
             let search_key = dir.voprf.evaluate_direct(input).to_vec();
             dir.stage(&search_key, handle_entry(input, &hk, 0), &mut rng)
@@ -1959,6 +2099,7 @@ mod tests {
                 read(&mut dir, &keyset, input, now, &mut rng).unwrap(),
                 handle_entry(input, &hk, 0)
             );
+
             // The holder renews it, and moves it to its next key.
             let (bytes, purpose) = challenge(&mut dir, true, input, now, &mut rng).unwrap();
             let ans = answer(purpose, &hk, input, &bytes, None).unwrap();
@@ -1972,6 +2113,7 @@ mod tests {
             call(&mut dir, Kind::Write, &write, now, &mut rng).unwrap();
             let now = now + DIRECTORY_EPOCH;
             dir.tick(now, &mut rng).unwrap();
+
             // DIS-171: the holder retires it.
             let tomb = DirectoryEntry::tombstone(input.to_vec(), 2);
             let mut bytes_of = vec![0u8; tomb.len()];
@@ -2012,6 +2154,7 @@ mod tests {
             version: 0,
         });
         let spent = tokens(&mut dir, epoch_number(T0), 2, T0, &mut rng);
+
         // DIS-169: the challenge names the key whose hash is the address.
         let other = root.public_address_key(4);
         assert_eq!(
@@ -2030,6 +2173,7 @@ mod tests {
         let (bytes, purpose) = challenge(&mut dir, false, &input, T0, &mut rng).unwrap();
         let ans = answer(purpose, &key, &address, &bytes, Some(&tomb)).unwrap();
         let write = dirclient::write_body(&input, &ans, &tomb).unwrap();
+
         // DIS-010: one version in each epoch, thus the write waits.
         assert_eq!(
             call(&mut dir, Kind::Write, &write, T0, &mut rng),
@@ -2047,6 +2191,7 @@ mod tests {
             read(&mut dir, &keyset, &input, now, &mut rng).unwrap(),
             tomb
         );
+
         // A tombstone renews nothing.
         assert_eq!(
             challenge(&mut dir, true, &input, now, &mut rng).map(|_| ()),
@@ -2063,6 +2208,7 @@ mod tests {
         .unwrap();
         let lapse = now + HANDLE_LEASE + DIRECTORY_EPOCH;
         dir.tick(lapse, &mut rng).unwrap();
+
         // The tombstone stages at the tick, and shows at the next one.
         let lapse = lapse + DIRECTORY_EPOCH;
         dir.tick(lapse, &mut rng).unwrap();
@@ -2087,6 +2233,7 @@ mod tests {
             &mut dir, &spent[0], handle, &entry0, &hk, None, T0, &mut rng,
         )
         .unwrap();
+
         // A stored label with a fault: an address input of a wrong length,
         // whose tombstone entry does not build.
         let held = dir
@@ -2102,6 +2249,7 @@ mod tests {
                 ..held
             },
         );
+
         // DIS-073: the leases lapse. The epoch closes, the handle takes
         // its tombstone, and the label with the fault keeps its state.
         let lapse = T0 + HANDLE_LEASE + DIRECTORY_EPOCH;
@@ -2173,6 +2321,7 @@ mod tests {
         let ans = answer(Purpose::Blob, &hk, input, &bytes, Some(&blob)).unwrap();
         let write = dirclient::blob_body(input, &ans, &blob).unwrap();
         call(&mut dir, Kind::Blob, &write, now, &mut rng).unwrap();
+
         // The blob needs no epoch of the log, and the fragment opens it.
         let held = read_blob(&mut dir, input, now, &mut rng).unwrap();
         assert_eq!(held, blob);
@@ -2278,11 +2427,13 @@ mod tests {
             call(&mut dir, Kind::Issue, &body, T0, &mut rng),
             Err(DirError::Status(Status::Stale))
         );
+
         // ABU-110: the next epoch is in the log after the first tick.
         assert_eq!(tokens(&mut dir, epoch + 1, 1, T0, &mut rng).len(), 1);
 
         let pk = dir.issuer_public(epoch).unwrap();
         let (_, mut body) = dirclient::issue_request(epoch, &pk, 1, &mut rng).unwrap();
+
         // The effort of the one solution: after the type, the epoch, the
         // count, the element, the version byte, the seed, and the nonce.
         let at = 7 + 32 + 1 + 32 + 16;
@@ -2292,6 +2443,7 @@ mod tests {
             Err(DirError::Status(Status::Refused))
         );
     }
+
     #[test]
     fn a_lapsed_label_registers_again_only_under_the_key_that_it_names() {
         use crate::discovery::HANDLE_RESERVE;
@@ -2306,15 +2458,18 @@ mod tests {
         let entry0 = handle_entry(input, &hk, 0);
         register(&mut dir, &spent[0], input, &entry0, &hk, None, T0, &mut rng).unwrap();
         dir.tick(T0 + DIRECTORY_EPOCH, &mut rng).unwrap();
+
         // DIS-073: the lease lapses, and the tombstone shows at version 1.
         let lapse = T0 + HANDLE_LEASE + DIRECTORY_EPOCH;
         dir.tick(lapse, &mut rng).unwrap();
         dir.tick(lapse + DIRECTORY_EPOCH, &mut rng).unwrap();
+
         // DIS-077: after the reservation the label registers as version 2.
         let later = lapse + HANDLE_RESERVE;
         dir.tick(later, &mut rng).unwrap();
         let at = later + 1;
         let fresh = tokens(&mut dir, epoch_number(at), 2, at, &mut rng);
+
         // A second party reuses the published key of the holder with a
         // queue of its own. It holds no private half, thus no answer of it
         // holds (DIS-197).
@@ -2335,6 +2490,7 @@ mod tests {
             register_as(&mut dir, &fresh[0], input, &stolen, &hk, &thief, None, at, &mut rng),
             Err(DirError::Status(Status::Refused))
         );
+
         // The challenge names the version that the entry carries.
         assert_eq!(
             register(
@@ -2349,6 +2505,7 @@ mod tests {
             ),
             Err(DirError::Status(Status::Refused))
         );
+
         // The holder registers it again under its own key.
         let entry2 = handle_entry(input, &hk, 2);
         register(&mut dir, &fresh[0], input, &entry2, &hk, None, at, &mut rng).unwrap();
@@ -2369,6 +2526,7 @@ mod tests {
         let (_, body) =
             dirclient::evaluate_request(b"@gina#1", &pk, epoch_number(T0), None, &mut rng).unwrap();
         call(&mut dir, Kind::Evaluate, &body, T0, &mut rng).unwrap();
+
         // DIS-200: the same element and solution again cost no evaluation.
         assert_eq!(
             call(&mut dir, Kind::Evaluate, &body, T0 + 1, &mut rng),
@@ -2388,6 +2546,7 @@ mod tests {
         let spent = tokens(&mut dir, epoch_number(T0), 1, T0, &mut rng);
         let entry0 = handle_entry(input, &hk, 0);
         register(&mut dir, &spent[0], input, &entry0, &hk, None, T0, &mut rng).unwrap();
+
         // An auditor that holds another log refuses the epoch: the log, the
         // other auditor, and the staged version stay as they were.
         let held = dir.auditors.clone();
@@ -2399,6 +2558,7 @@ mod tests {
         assert_eq!(dir.auditors[0], held[0]);
         let search_key = dir.voprf.evaluate_direct(input).to_vec();
         assert!(dir.operator.is_staged(&search_key));
+
         // With the auditor back, the next tick closes the epoch.
         dir.auditors[1] = held[1].clone();
         dir.tick(now + 1, &mut rng).unwrap();
@@ -2427,21 +2587,27 @@ mod tests {
                 .borrow_mut()
                 .handle(request, now, &mut *self.rng.borrow_mut()))
         }
+
         fn pins(&self) -> &dirclient::DirectoryPins {
             &self.pins
         }
+
         fn held(&self) -> Option<crate::discovery::reader::HeldHead> {
             self.held.get()
         }
+
         fn set_held(&self, head: crate::discovery::reader::HeldHead) {
             self.held.set(Some(head));
         }
+
         fn now(&self) -> u64 {
             self.now.get()
         }
+
         fn keyset(&self) -> Vec<u8> {
             self.keyset.borrow().clone()
         }
+
         fn set_keyset(&self, keyset: Vec<u8>) {
             *self.keyset.borrow_mut() = keyset;
         }
@@ -2454,6 +2620,7 @@ mod tests {
 
         let mut rng = Rng(34);
         let (old, genesis) = keys();
+
         // DIS-064: the next set, signed by two signers of the genesis set.
         let next: Vec<_> = [0u8, 1, 2]
             .into_iter()
@@ -2480,6 +2647,7 @@ mod tests {
             ..old
         };
         let mut dir = Directory::new(keys, DIRECTORY_EPOCH, ascii_profile).unwrap();
+
         // DIS-198: the chain ends at the set of the signers.
         assert!(dir.set_keyset_chain(vec![genesis.clone()]).is_err());
         dir.set_keyset_chain(vec![signed]).unwrap();
@@ -2498,6 +2666,7 @@ mod tests {
             keyset: core::cell::RefCell::new(genesis.clone()),
             now: core::cell::Cell::new(T0 + 1),
         };
+
         // DIS-199: a head under the next set takes the rotation, and the
         // reader keeps that set.
         let input = issuer_label_input(TYPE_FIRST_PARTY, epoch_number(T0));
@@ -2515,6 +2684,7 @@ mod tests {
         assert!(found.entry.is_some());
         assert!(found.degraded);
         assert_eq!(local.held.get(), held);
+
         // A strict read and an issuer key take no such head.
         assert_eq!(
             reader::lookup(&local, &key).map(|_| ()),

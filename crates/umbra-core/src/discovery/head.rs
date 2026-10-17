@@ -41,14 +41,17 @@ fn parse_sigs<'a>(r: &mut Reader<'a>) -> Result<Vec<SignerSig<'a>>, Error> {
     if !(SIGNATURES_NEEDED..=SIGNER_COUNT).contains(&count) {
         return Err(Error::Malformed);
     }
+
     let mut sigs = Vec::with_capacity(count);
     let mut last: Option<u8> = None;
     for _ in 0..count {
         let signer_index = r.u8()?;
+
         // Ascending order rejects a repeat as well (DIS-055, DIS-057).
         if last.is_some_and(|l| signer_index <= l) || usize::from(signer_index) >= SIGNER_COUNT {
             return Err(Error::Malformed);
         }
+
         last = Some(signer_index);
         sigs.push(SignerSig {
             signer_index,
@@ -64,6 +67,7 @@ fn write_sigs(w: &mut Writer<'_>, sigs: &[SignerSig<'_>]) -> Result<(), Error> {
         if s.sig.len() != SIGNATURE_LEN {
             return Err(Error::Malformed);
         }
+
         w.u8(s.signer_index)?;
         w.put(s.sig)?;
     }
@@ -85,10 +89,12 @@ impl<'a> LogKeySet<'a> {
         if self.keys.len() != SIGNER_COUNT {
             return Err(Error::Malformed);
         }
+
         let mut w = Writer::new(out);
         w.u8(0x01)?;
         w.put(&self.keyset_epoch.to_be_bytes())?;
         w.u8(u8::try_from(SIGNER_COUNT).map_err(|_| Error::Malformed)?)?;
+
         for key in &self.keys {
             if key.len() != VERIFYING_KEY_LEN {
                 return Err(Error::Malformed);
@@ -104,10 +110,12 @@ impl<'a> LogKeySet<'a> {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let keyset_epoch = u64::from_be_bytes(r.array()?);
         if usize::from(r.u8()?) != SIGNER_COUNT {
             return Err(Error::Malformed);
         }
+
         let mut keys = Vec::with_capacity(SIGNER_COUNT);
         for _ in 0..SIGNER_COUNT {
             keys.push(r.take(VERIFYING_KEY_LEN)?);
@@ -138,6 +146,7 @@ impl<'a> LogKeySet<'a> {
                 valid = valid.saturating_add(1);
             }
         }
+
         if valid >= SIGNATURES_NEEDED {
             Ok(())
         } else {
@@ -163,9 +172,11 @@ impl<'a> LogKeySet<'a> {
         if next.keyset_epoch <= self.keyset_epoch {
             return Err(Error::Stale);
         }
+
         let mut r = Reader::new(signed.get(used..).ok_or(Error::Malformed)?);
         let sigs = parse_sigs(&mut r)?;
         r.finish()?;
+
         self.verify_multi(&next.rotation_preimage()?, &sigs)?;
         Ok(next)
     }
@@ -205,12 +216,14 @@ impl<'a> SignedTreeHead<'a> {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let tree_size = u64::from_be_bytes(r.array()?);
         let timestamp = u64::from_be_bytes(r.array()?);
         let root = r.array()?;
         let keyset_hash = r.array()?;
         let sigs = parse_sigs(&mut r)?;
         r.finish()?;
+
         Ok(SignedTreeHead {
             tree_size,
             timestamp,
@@ -287,12 +300,15 @@ impl<'a> HeadState<'a> {
         if head.keyset_hash != self.keyset_hash {
             return Err(Error::Unverified);
         }
+
         self.keyset.verify_multi(&head.preimage(), &head.sigs)?;
+
         let is_old = head
             .timestamp
             .saturating_add(TREE_HEAD_FRESHNESS + CLOCK_SKEW)
             < device_clock;
         let is_ahead = head.timestamp > device_clock.saturating_add(CLOCK_SKEW);
+
         Ok(if is_old || is_ahead {
             Freshness::Degraded
         } else {
@@ -317,6 +333,7 @@ impl<'a> HeadState<'a> {
         if head.tree_size < self.highest_tree_size {
             return Err(Error::Stale);
         }
+
         // DIS-160: a second root at a retained size is a split view, and
         // the two heads are the evidence of `DIS-051`.
         let held = self
@@ -329,9 +346,11 @@ impl<'a> HeadState<'a> {
         {
             return Err(Error::Unverified);
         }
+
         if freshness == Freshness::Degraded {
             return Err(Error::Stale);
         }
+
         if !is_extending
             && self
                 .newest()
@@ -339,6 +358,7 @@ impl<'a> HeadState<'a> {
         {
             return Err(Error::Unverified);
         }
+
         self.highest_tree_size = head.tree_size;
         let accepted = AcceptedHead {
             tree_size: head.tree_size,
@@ -346,6 +366,7 @@ impl<'a> HeadState<'a> {
             timestamp: head.timestamp,
             accepted_at: device_clock,
         };
+
         // One row for each size: the same head again takes the place of
         // its row, and `DIS-063` then counts from the later acceptance.
         match held.and_then(|at| self.retained.get_mut(at)) {
@@ -375,6 +396,7 @@ impl<'a> HeadState<'a> {
                 consistency,
             )?;
         }
+
         self.admit(head, device_clock, true)
     }
 
@@ -418,9 +440,11 @@ impl<'a> HeadState<'a> {
         if digest.source != DigestSource::TreeHead {
             return Verdict::NotOurs;
         }
+
         if self.degraded(device_clock) {
             return Verdict::Degraded;
         }
+
         match self.at(digest.epoch) {
             Some(h) if h.root == digest.digest => Verdict::Match,
             Some(_) => Verdict::SplitView,
@@ -478,6 +502,7 @@ impl Gossip {
                 if last.is_some_and(|l| now.saturating_sub(l) < GOSSIP_INTERVAL) {
                     return false;
                 }
+
                 *last = Some(now);
                 true
             }
@@ -598,10 +623,12 @@ mod tests {
         let head = signed_head(&keys, &[0, 1], 10, clock - 100, hash);
         let head = SignedTreeHead::parse(&head).unwrap();
         state.accept(&head, clock).unwrap();
+
         // The state accepts the same head again, and it adds no row.
         state.accept(&head, clock + 5).unwrap();
         assert_eq!(state.retained.len(), 1);
         assert_eq!(state.at(10).unwrap().accepted_at, clock + 5);
+
         // DIS-160: two signers sign another root at that size.
         let split = signed_head_over(&keys, &[1, 2], 10, clock - 50, hash, [0xEE; 32]);
         assert_eq!(
@@ -623,6 +650,7 @@ mod tests {
         state
             .accept(&SignedTreeHead::parse(&first).unwrap(), clock)
             .unwrap();
+
         // DIS-159: a retained head takes no larger head without the proof.
         let second = signed_head(&keys, &[0, 1], 2, clock - 5, hash);
         let second = SignedTreeHead::parse(&second).unwrap();
@@ -631,6 +659,7 @@ mod tests {
             .accept_extending(&second, &[[0xAB; 32]], clock)
             .is_err());
         assert_eq!(state.newest().unwrap().tree_size, 1);
+
         // DIS-067: a head past its freshness verifies and is degraded.
         let old = signed_head(
             &keys,
@@ -763,11 +792,15 @@ mod tests {
             }
             out
         };
+
         let _ = &mut rng;
+
         let same_epoch = make(1, &[0, 1], &keys);
         assert_eq!(state.rotate_keys(&same_epoch), Err(Error::Stale));
+
         let self_signed = make(2, &[0, 1], &next_keys);
         assert_eq!(state.rotate_keys(&self_signed), Err(Error::Unverified));
+
         let good = make(2, &[1, 2], &keys);
         state.rotate_keys(&good).unwrap();
         assert_eq!(state.keyset().keyset_epoch, 2);

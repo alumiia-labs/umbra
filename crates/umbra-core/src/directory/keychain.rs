@@ -42,6 +42,7 @@ pub fn sign_keyset<R: TryCryptoRng + ?Sized>(
     if used != next.len() {
         return Err(Error::Malformed);
     }
+
     let mut preimage = Vec::with_capacity(64);
     preimage.extend_from_slice(labels::DIRECTORY_KEYSET);
     preimage.push(0x01);
@@ -51,8 +52,13 @@ pub fn sign_keyset<R: TryCryptoRng + ?Sized>(
     for key in previous {
         sigs.push(key.sign(&preimage, rng)?.to_bytes());
     }
+
+    // The key set, then a count, then an index and a signature for each key.
     let count = u8::try_from(sigs.len()).map_err(|_| Error::Malformed)?;
-    let mut out = alloc::vec![0u8; next.len().saturating_add(1).saturating_add(sigs.len().saturating_mul(1 + umbra_crypto::sign::SIGNATURE_LEN))];
+    let sig_bytes = sigs
+        .len()
+        .saturating_mul(1 + umbra_crypto::sign::SIGNATURE_LEN);
+    let mut out = alloc::vec![0u8; next.len().saturating_add(1).saturating_add(sig_bytes)];
     out.get_mut(..next.len())
         .ok_or(Error::Malformed)?
         .copy_from_slice(next);
@@ -62,6 +68,7 @@ pub fn sign_keyset<R: TryCryptoRng + ?Sized>(
         w.u8(index)?;
         w.put(sig)?;
     }
+
     Ok(out)
 }
 
@@ -71,10 +78,12 @@ pub fn links(chain: &[u8]) -> Result<Vec<&[u8]>, Error> {
     if r.u8()? != 0x01 {
         return Err(Error::Malformed);
     }
+
     let count = usize::from(r.u8()?);
     if count == 0 || count > KEYCHAIN_MAX {
         return Err(Error::Malformed);
     }
+
     let mut out = Vec::with_capacity(count);
     for _ in 0..count {
         let len = usize::try_from(r.u32()?).map_err(|_| Error::Malformed)?;
@@ -89,6 +98,7 @@ pub fn encode(links: &[&[u8]]) -> Result<Vec<u8>, Error> {
     if links.is_empty() || links.len() > KEYCHAIN_MAX {
         return Err(Error::Malformed);
     }
+
     let size = links
         .iter()
         .map(|link| link.len().saturating_add(4))
@@ -119,6 +129,7 @@ pub fn advance(held: &[u8], chain: &[u8]) -> Result<Vec<u8>, Error> {
         if next.keyset_epoch <= current.keyset_epoch {
             continue;
         }
+
         let accepted = current.rotate(link)?;
         if accepted != next {
             return Err(Error::Unverified);
@@ -137,6 +148,7 @@ fn split(bytes: &[u8]) -> Result<(&[u8], Option<[u8; 32]>), Error> {
     if rest.is_empty() {
         return Ok((set, None));
     }
+
     let start = rest.try_into().map_err(|_| Error::Malformed)?;
     Ok((set, Some(start)))
 }
@@ -152,6 +164,7 @@ pub fn advance_kept(held: &[u8], chain: &[u8]) -> Result<Vec<u8>, Error> {
     if next == set {
         return Ok(held.to_vec());
     }
+
     let start = match start {
         Some(start) => start,
         None => DirectoryKeySet::parse(set)?.0.hash()?,

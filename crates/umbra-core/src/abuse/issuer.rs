@@ -46,6 +46,7 @@ impl IssuerKeyEntry {
         w.u32(self.epoch)?;
         w.u16(u16::try_from(self.public_key.len()).map_err(|_| Error::Malformed)?)?;
         w.put(&self.public_key)?;
+
         Ok(out)
     }
 
@@ -57,6 +58,7 @@ impl IssuerKeyEntry {
         let key_len = usize::from(r.u16()?);
         let public_key = r.take(key_len)?.to_vec();
         r.finish()?;
+
         Ok(IssuerKeyEntry {
             token_type,
             epoch,
@@ -78,6 +80,7 @@ impl IssuerKeys {
         if authenticator_len(token_type).is_none() {
             return Err(Error::Malformed);
         }
+
         match self.keys.get(&(token_type, epoch)) {
             Some(held) if held == public_key => Ok(()),
             Some(_) => Err(Error::Stale),
@@ -108,6 +111,7 @@ impl IssuerKeys {
         if proof.newest != Some(0) || entry.token_type != token_type || entry.epoch != epoch {
             return Err(Error::Unverified);
         }
+
         self.accept(token_type, epoch, &entry.public_key)
     }
 

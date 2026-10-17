@@ -45,6 +45,7 @@ fn base64url(bytes: &[u8]) -> String {
         let b1 = chunk.get(1).copied().unwrap_or(0);
         let b2 = chunk.get(2).copied().unwrap_or(0);
         let n = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
+
         let idx = |shift: u32| {
             B64.get(((n >> shift) & 63) as usize)
                 .copied()
@@ -59,6 +60,7 @@ fn base64url(bytes: &[u8]) -> String {
             out.push(char::from(idx(0)));
         }
     }
+
     out
 }
 
@@ -77,9 +79,11 @@ fn base64url_decode(text: &str, out: &mut [u8]) -> Result<(), Error> {
             at += 1;
         }
     }
+
     if at != out.len() || acc & ((1 << bits) - 1) != 0 {
         return Err(Error::Malformed);
     }
+
     Ok(())
 }
 
@@ -119,14 +123,10 @@ impl Fragment {
     pub fn parse(link: &str, host: &str) -> Result<Self, Error> {
         let prefix = alloc::format!("https://{host}{PATH}#");
         let text = link.strip_prefix(&prefix).ok_or(Error::Malformed)?;
+
         let mut bytes = [0u8; FRAGMENT_LEN];
         base64url_decode(text, &mut bytes)?;
-        let mut r = Reader::new(&bytes);
-        Ok(Fragment {
-            key: r.array()?,
-            link_id: r.array()?,
-            relay_ref: r.array()?,
-        })
+        Self::from_bytes(&bytes)
     }
 
     /// The blob key: `HKDF("umbra/v1/invite-blob" || SHA3-256(fragment))`,
@@ -170,11 +170,14 @@ impl<'a> Bundle<'a> {
         if self.responder_kem_ek.len() != 1_184 {
             return Err(Error::Malformed);
         }
+
         let mut w = Writer::new(out);
         w.put(&self.responder_static_x25519)?;
         w.put(self.responder_kem_ek)?;
         w.put(&self.version_range)?;
         let n = self.queue_address.encode(w.tail())?;
+
+        // The address went into the tail, thus a new writer continues after it.
         let at = w.position().saturating_add(n);
         let mut w = Writer::new(out.get_mut(at..).ok_or(Error::Malformed)?);
         w.u16(u16::try_from(self.relay_bundle.len()).map_err(|_| Error::Malformed)?)?;
@@ -210,15 +213,17 @@ impl<'a> Bundle<'a> {
         w.u8(BLOB_VERSION)?;
         w.put(&nonce)?;
         let n = self.encode(w.tail())?;
-        let body_at = 25usize;
-        let (head, rest) = out.split_at_mut(body_at);
-        let _ = head;
+
+        // The body starts after the version byte and the nonce.
+        let body_at = 1 + 24;
+        let (_, rest) = out.split_at_mut(body_at);
         let (body, tag_out) = rest.split_at_mut(n);
         let tag = aead::seal(&fragment.blob_key(), &nonce, &fragment.link_id, body)?;
         tag_out
             .get_mut(..aead::TAG_LEN)
             .ok_or(Error::Malformed)?
             .copy_from_slice(&tag);
+
         out.truncate(body_at + n + aead::TAG_LEN);
         Ok(out)
     }
@@ -234,6 +239,7 @@ impl<'a> Bundle<'a> {
         if r.u8()? != BLOB_VERSION {
             return Err(Error::Malformed);
         }
+
         let nonce: [u8; 24] = r.array()?;
         let rest = r.rest();
         let plain_len = rest
@@ -241,6 +247,7 @@ impl<'a> Bundle<'a> {
             .checked_sub(aead::TAG_LEN)
             .ok_or(Error::Malformed)?;
         let (ct, tag) = rest.split_at(plain_len);
+
         buf.clear();
         buf.extend_from_slice(ct);
         aead::open(&fragment.blob_key(), &nonce, &fragment.link_id, buf, tag)?;
@@ -299,6 +306,7 @@ mod tests {
         assert!(link.starts_with("https://invite.example/i#"));
         assert_eq!(Fragment::parse(&link, "invite.example").unwrap(), f);
         assert!(Fragment::parse(&link, "other.example").is_err());
+
         let mut short = link.clone();
         short.pop();
         assert!(Fragment::parse(&short, "invite.example").is_err());
@@ -324,9 +332,11 @@ mod tests {
         let opened = Bundle::open(&f, &blob, &mut buf).unwrap();
         assert_eq!(opened.queue_address.sender_id, [7; 32]);
         assert_eq!(opened.relay_bundle, b"signed manifest");
+
         let other = Fragment { key: [11; 32], ..f };
         let mut buf2 = Vec::new();
         assert!(Bundle::open(&other, &blob, &mut buf2).is_err());
+
         let issued = Issued {
             fragment: f,
             issued_at: 100,

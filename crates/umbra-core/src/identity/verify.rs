@@ -20,11 +20,13 @@ pub fn code(own_pk: &[u8], peer_pk: &[u8], own_nonce: &[u8; 32], peer_nonce: &[u
     } else {
         (peer_nonce, own_nonce)
     };
+
     let digest = sha3_256(&[labels::SAS, lo, hi, nonce_lo, nonce_hi]);
     let mut head = [0u8; 4];
     if let Some(h) = digest.get(..4) {
         head.copy_from_slice(h);
     }
+
     u32::from_be_bytes(head) % 1_000_000
 }
 
@@ -139,6 +141,7 @@ impl Ceremony {
         if !self.sent_commit || self.peer_commit.is_none() {
             return Err(Error::Unverified);
         }
+
         Ok(self.own_nonce)
     }
 
@@ -149,6 +152,7 @@ impl Ceremony {
         if commit(&peer_nonce) != held {
             return Err(Error::Unverified);
         }
+
         self.peer_nonce = Some(peer_nonce);
         Ok(())
     }
@@ -164,6 +168,7 @@ impl Ceremony {
         if self.peer_nonce.is_none() {
             return Err(Error::Unverified);
         }
+
         self.confirmed = true;
         Ok(())
     }
@@ -192,6 +197,7 @@ mod tests {
         let mut a = Ceremony::new([3; 32]);
         let mut b = Ceremony::new([4; 32]);
         assert!(a.reveal_to_send().is_err());
+
         let ca = a.commit_to_send();
         let cb = b.commit_to_send();
         a.peer_committed(cb);
@@ -201,14 +207,17 @@ mod tests {
         assert!(a.peer_revealed([9; 32]).is_err());
         a.peer_revealed(rb).unwrap();
         b.peer_revealed(ra).unwrap();
+
         let code_a = a.code(&pk_a, &pk_b).unwrap();
         let code_b = b.code(&pk_b, &pk_a).unwrap();
         assert_eq!(code_a, code_b);
         assert!(code_a < 1_000_000);
         assert_eq!(digits(42).len(), 6);
+
         assert!(!a.verified());
         a.user_confirmed().unwrap();
         assert!(a.verified());
+
         let mut fresh = Ceremony::new([5; 32]);
         assert!(fresh.user_confirmed().is_err());
     }
@@ -226,6 +235,7 @@ mod tests {
         assert_eq!(timed.asked_start_at(1_000 + HELD_START_LIFE), None);
         assert_eq!(timed.asked_start_at(999), None);
         assert!(timed.reveal_to_send().is_err());
+
         // IDN-170: the held start of the peer is no ceremony.
         let mut asked = Ceremony::asked([7; 32]);
         assert_eq!(asked.asked_start(), Some([7; 32]));

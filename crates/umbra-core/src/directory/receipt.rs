@@ -84,6 +84,7 @@ impl LinkReceipt {
         rng: &mut R,
     ) -> Result<Vec<u8>, Error> {
         let sig = key.sign(&self.preimage()?, rng)?;
+
         let mut out = alloc::vec![0u8; RECEIPT_LEN];
         let mut w = Writer::new(&mut out);
         self.fields(&mut w)?;
@@ -97,6 +98,7 @@ impl LinkReceipt {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let receipt = LinkReceipt {
             from_relay: r.array()?,
             to_relay: r.array()?,
@@ -107,9 +109,11 @@ impl LinkReceipt {
         };
         r.take(SIGNATURE_LEN)?;
         r.finish()?;
+
         if receipt.cell_count == 0 || receipt.cell_count > RECEIPT_WINDOW {
             return Err(Error::Malformed);
         }
+
         Ok(receipt)
     }
 
@@ -127,8 +131,9 @@ impl LinkReceipt {
 
 /// What the signature of a `RelayHello` covers: the relay that dialed, the
 /// relay that it dialed, and the session of the link. The dialer chooses
-/// the session, thus the session alone binds no link. The relay that took a
-/// hello could show it to a third relay under the same session.
+/// the session, thus the session alone binds no link. Without `to_relay`,
+/// the relay that took a hello could show it to a third relay under the
+/// same session.
 fn hello_preimage(relay_id: &[u8; 32], to_relay: &[u8; 32], session_id: &[u8; 8]) -> Vec<u8> {
     [
         labels::RELAY_HELLO,
@@ -166,13 +171,16 @@ pub fn verify_relay_hello(
     if r.u8()? != 0x01 {
         return Err(Error::Malformed);
     }
+
     let relay_id: [u8; 32] = r.array()?;
     let sig = r.take(SIGNATURE_LEN)?;
     r.finish()?;
+
     // A relay does not dial itself.
     if relay_id == *own {
         return Err(Error::Unverified);
     }
+
     let identity_pk = identity_of(&relay_id).ok_or(Error::Unverified)?;
     verify_under(
         &identity_pk,
@@ -227,6 +235,7 @@ impl ReceiptQuery {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let query = ReceiptQuery {
             authority_index: r.u8()?,
             relay_id: r.array()?,
@@ -235,6 +244,7 @@ impl ReceiptQuery {
         };
         let sig = r.take(SIGNATURE_LEN)?;
         r.finish()?;
+
         let preimage = [labels::RECEIPT_QUERY, &query.body()].concat();
         keyset.verify_by(query.authority_index, &preimage, sig)?;
         Ok(query)
@@ -259,6 +269,7 @@ fn proof_fits(proof: &[Step], index: u32, count: u32) -> bool {
     if index >= count {
         return false;
     }
+
     let (mut at, mut width) = (index, count);
     let mut steps = proof.iter();
     while width > 1 {
@@ -319,6 +330,7 @@ impl ReceiptAnswer {
         if self.receipt.len() != RECEIPT_LEN || self.proof.len() > STEPS_MAX {
             return Err(Error::Malformed);
         }
+
         out.extend_from_slice(&self.receipt);
         out.extend_from_slice(&self.leaf_index.to_be_bytes());
         out.push(u8::try_from(self.proof.len()).map_err(|_| Error::Malformed)?);
@@ -335,6 +347,7 @@ impl ReceiptAnswer {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let found = match r.u8()? {
             0x00 => Found::None,
             0x01 => Found::Issued,
@@ -345,12 +358,14 @@ impl ReceiptAnswer {
             r.finish()?;
             return Ok(Self::none());
         }
+
         let receipt = r.take(RECEIPT_LEN)?.to_vec();
         let leaf_index = u32::from_be_bytes(r.array()?);
         let count = usize::from(r.u8()?);
         if count > STEPS_MAX {
             return Err(Error::Malformed);
         }
+
         let mut proof = Vec::with_capacity(count);
         for _ in 0..count {
             let sibling_right = match r.u8()? {
@@ -364,6 +379,7 @@ impl ReceiptAnswer {
             });
         }
         r.finish()?;
+
         Ok(ReceiptAnswer {
             found,
             receipt,
@@ -387,6 +403,7 @@ impl ReceiptAnswer {
         if !proof_fits(&self.proof, self.leaf_index, receipt.cell_count) {
             return Err(Error::Unverified);
         }
+
         tree::verify(&query.tag, &self.proof, &receipt.batch_root)?;
         Ok(receipt)
     }
@@ -439,6 +456,7 @@ pub fn judge_link(
             .is_some_and(|receipt| receipt.from_relay == from && receipt.to_relay == to)
     };
     let denied = to_answer.is_some_and(|answer| answer.found == Found::None);
+
     if covers(to_answer, Found::Issued) {
         LinkVerdict::Held
     } else if denied && covers(from_answer, Found::Taken) {

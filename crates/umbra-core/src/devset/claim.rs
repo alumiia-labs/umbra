@@ -45,12 +45,14 @@ impl<'a> OwnerClaimRecord<'a> {
         {
             return Err(Error::Malformed);
         }
+
         // DEV-234: an absence claim travels alone. A subject shows once.
         // The parse of the scope rejects `0x02` (DEV-192).
         let has_absence = self.claims.iter().any(|c| c.scope == ClaimScope::Absence);
         if has_absence && self.claims.iter().any(|c| c.scope != ClaimScope::Absence) {
             return Err(Error::Malformed);
         }
+
         for (i, a) in self.claims.iter().enumerate() {
             if self
                 .claims
@@ -61,6 +63,7 @@ impl<'a> OwnerClaimRecord<'a> {
                 return Err(Error::Malformed);
             }
         }
+
         Ok(())
     }
 
@@ -95,6 +98,7 @@ impl<'a> OwnerClaimRecord<'a> {
         let mut w = Writer::new(&mut body);
         self.put_signed(&mut w)?;
         let n = w.position();
+
         let mut out = Vec::with_capacity(labels::DEVICE_CLAIM.len() + n);
         out.extend_from_slice(labels::DEVICE_CLAIM);
         out.extend_from_slice(body.get(..n).ok_or(Error::Malformed)?);
@@ -116,6 +120,7 @@ impl<'a> OwnerClaimRecord<'a> {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let roster_epoch = u64::from_be_bytes(r.array()?);
         let roster_hash = r.array()?;
         let claim_seq = r.u32()?;
@@ -123,13 +128,16 @@ impl<'a> OwnerClaimRecord<'a> {
         if count == 0 || count > OWNER_CLAIM_MAX {
             return Err(Error::Malformed);
         }
+
         let mut claims = Vec::with_capacity(count);
         for _ in 0..count {
             claims.push(OwnerClaim::read(&mut r)?);
         }
+
         let signer_id = r.array()?;
         let sig = r.take(SIGNATURE_LEN)?;
         r.finish()?;
+
         let out = OwnerClaimRecord {
             roster_epoch,
             roster_hash,
@@ -156,6 +164,7 @@ impl<'a> OwnerClaimRecord<'a> {
         if self.roster_epoch < highest_applied {
             return Err(Error::Stale);
         }
+
         let entry = roster.entry(&self.signer_id).ok_or(Error::Unverified)?;
         let key = VerifyingKey::from_bytes(entry.mldsa_pk)?;
         let sig = Signature::from_bytes(self.sig)?;
@@ -214,6 +223,7 @@ impl Ownership {
                     || (candidate.at == held.at && candidate.signer < held.signer)
             }
         };
+
         if replace {
             self.table.insert(subject, candidate);
         }
@@ -226,8 +236,8 @@ impl Ownership {
         }
     }
 
-    /// Folds a verified claim record (`DEV-189`, `DEV-190`). The record's
-    /// bytes are not retained afterwards (`DEV-229`).
+    /// Folds a verified claim record (`DEV-189`, `DEV-190`). The table does
+    /// not keep the bytes of the record (`DEV-229`).
     pub fn fold_record(&mut self, record: &OwnerClaimRecord<'_>) {
         for c in &record.claims {
             self.fold_one(c, record.roster_epoch, record.claim_seq, record.signer_id);
@@ -240,6 +250,7 @@ impl Ownership {
             at: (epoch, seq),
             signer,
         };
+
         if claim.scope == ClaimScope::Absence {
             // Every subject the absent device owns at this point moves
             // (DEV-233). The subject names the absent device.
@@ -255,6 +266,7 @@ impl Ownership {
             }
             return;
         }
+
         self.apply(claim.subject, candidate);
     }
 
@@ -304,6 +316,7 @@ impl ClaimRate {
                 if self.absence.len() >= OWNER_ABSENCE_RATE as usize {
                     return false;
                 }
+
                 self.absence.push(now);
                 true
             }
@@ -312,6 +325,7 @@ impl ClaimRate {
                 if self.ordinary.len() >= OWNER_CLAIM_RATE as usize {
                     return false;
                 }
+
                 self.ordinary.push(now);
                 true
             }
@@ -377,6 +391,7 @@ mod tests {
         let mut rb = alloc::vec![0u8; record.len()];
         record.encode(&mut rb).unwrap();
         assert_eq!(rb.len(), 62 + 49 + 3_309);
+
         let parsed = OwnerClaimRecord::parse(&rb).unwrap();
         parsed.verify(&roster, &hash, 4).unwrap();
         assert_eq!(parsed.verify(&roster, &hash, 5), Err(Error::Stale));
@@ -407,6 +422,7 @@ mod tests {
         };
         table.fold_record(&absence);
         assert_eq!(table.owner(&[7; 32]).unwrap().owner, [1; 16]);
+
         // DEV-159: a subject that no claim named belongs to the device
         // that established it, and a claim takes it from there.
         let mut fresh = Ownership::new();
@@ -416,8 +432,10 @@ mod tests {
         fresh.register_absence_subject([8; 32], [2; 16]);
         fresh.fold_record(&absence);
         assert_eq!(fresh.owner(&[6; 32]).unwrap().owner, [1; 16]);
+
         assert!(may_claim_after_timeout(OWNER_TIMEOUT));
         assert!(!may_claim_absence(OWNER_ABSENCE - 1));
+
         let mut rate = ClaimRate::default();
         for _ in 0..OWNER_CLAIM_RATE {
             assert!(rate.allow(ClaimScope::Pairwise, 0));

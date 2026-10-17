@@ -33,6 +33,7 @@ impl BlocList {
             b"SI", b"SK",
         ];
         let five: &[&[u8; 2]] = &[b"AU", b"CA", b"GB", b"NZ", b"US"];
+
         let mut list = BlocList {
             blocs: alloc::vec![
                 eu.iter().map(|c| **c).collect(),
@@ -53,10 +54,12 @@ impl BlocList {
     }
 
     fn is_canonical(&self) -> bool {
-        self.blocs
+        let codes_ascend = self
+            .blocs
             .iter()
-            .all(|b| !b.is_empty() && b.windows(2).all(|w| matches!(w, [a, c] if a < c)))
-            && self.blocs.windows(2).all(|w| matches!(w, [a, c] if a < c))
+            .all(|b| !b.is_empty() && b.windows(2).all(|w| matches!(w, [a, c] if a < c)));
+        let blocs_ascend = self.blocs.windows(2).all(|w| matches!(w, [a, c] if a < c));
+        codes_ascend && blocs_ascend
     }
 
     /// Writes the canonical encoding.
@@ -64,6 +67,7 @@ impl BlocList {
         if !self.is_canonical() {
             return Err(Error::Malformed);
         }
+
         let mut w = Writer::new(out);
         w.u8(0x01)?;
         w.u8(u8::try_from(self.blocs.len()).map_err(|_| Error::Malformed)?)?;
@@ -101,6 +105,7 @@ impl BlocList {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let count = usize::from(r.u8()?);
         let mut blocs = Vec::with_capacity(count);
         for _ in 0..count {
@@ -112,6 +117,7 @@ impl BlocList {
             blocs.push(bloc);
         }
         r.finish()?;
+
         let out = BlocList { blocs };
         if !out.is_canonical() {
             return Err(Error::Malformed);

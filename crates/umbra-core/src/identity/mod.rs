@@ -45,10 +45,10 @@ pub const WEEK_EPOCHS: u64 = 168;
 
 /// The weekly epoch of a consensus epoch (Part 4 §4.7.2, Part 3 §3.2.6).
 pub const fn weekly_epoch(consensus_epoch: u64) -> u32 {
-    let w = consensus_epoch / WEEK_EPOCHS;
-    if w > u32::MAX as u64 {
+    let week = consensus_epoch / WEEK_EPOCHS;
+    if week > u32::MAX as u64 {
         u32::MAX
     } else {
-        w as u32
+        week as u32
     }
 }

@@ -62,6 +62,7 @@ pub fn seal_segment(
     if segment.len() != SEGMENT_SIZE {
         return Err(Error::Malformed);
     }
+
     let mut chunk = Vec::with_capacity(CHUNK_SIZE);
     chunk.extend_from_slice(segment);
     let tag = aead::seal(
@@ -87,6 +88,7 @@ pub fn open_chunk(
     if chunk.len() != CHUNK_SIZE {
         return Err(Error::Malformed);
     }
+
     let body = chunk.get(..SEGMENT_SIZE).ok_or(Error::Malformed)?;
     let tag = chunk.get(SEGMENT_SIZE..).ok_or(Error::Malformed)?;
     let mut plain = body.to_vec();
@@ -155,6 +157,7 @@ pub fn seal_file(
     if u64::try_from(plain.len()).map_or(true, |n| n > MAX_FILE_SIZE) {
         return Err(Error::Malformed);
     }
+
     let padded = segment::pad_file(plain);
     let count = padded.len() / SEGMENT_SIZE;
     let chunks = padded
@@ -175,6 +178,7 @@ pub fn seal_file(
         .collect::<Result<Vec<_>, _>>()?;
     let padded_size =
         u32::try_from(count.saturating_mul(CHUNK_SIZE)).map_err(|_| Error::Malformed)?;
+
     Ok(SealedFile {
         chunks,
         digest: sha3_256(&[plain]),
@@ -212,10 +216,12 @@ impl Assembler {
     /// equal the chunk count (`ATT-067`).
     pub fn for_data(descriptor: &FileDescriptor) -> Result<Self, Error> {
         verify_commit(descriptor)?;
+
         let chunk_count = descriptor.padded_size / umbra_wire::descriptor::CHUNK_SIZE;
         if chunk_count == 0 {
             return Err(Error::Malformed);
         }
+
         // ATT-022: a file above MAX_FILE_SIZE holds more chunks than one
         // that a sender may seal, and a receiver takes none of it: the
         // download would hold the whole of it in memory.
@@ -223,11 +229,13 @@ impl Assembler {
         if usize::try_from(chunk_count).map_or(true, |count| count > most) {
             return Err(Error::Malformed);
         }
+
         if descriptor.level == Level::Data
             && usize::try_from(chunk_count).ok() != Some(descriptor.refs.len())
         {
             return Err(Error::Malformed);
         }
+
         Ok(Self::new(
             Secret::new(*descriptor.file_key.expose()),
             descriptor.file_nonce,
@@ -244,6 +252,7 @@ impl Assembler {
         if descriptor.level != Level::Manifest || descriptor.refs.is_empty() {
             return Err(Error::Malformed);
         }
+
         let chunk_count = u32::try_from(descriptor.refs.len()).map_err(|_| Error::Malformed)?;
         Ok(Self::new(
             manifest_key(&descriptor.file_key, &descriptor.file_nonce),
@@ -282,6 +291,7 @@ impl Assembler {
         if self.is_complete() {
             return Err(Error::Stale);
         }
+
         self.plain.extend_from_slice(segment);
         self.next = self.next.saturating_add(1);
         Ok(())
@@ -293,6 +303,7 @@ impl Assembler {
         if self.is_complete() {
             return Err(Error::Stale);
         }
+
         let last = self.next.saturating_add(1) == self.chunk_count;
         let segment = open_chunk(&self.key, &self.nonce, self.next, last, chunk)?;
         let start = self.plain.len();
@@ -306,12 +317,14 @@ impl Assembler {
         if !self.is_complete() {
             return Err(Error::Stale);
         }
+
         segment::unpad_file(&mut self.plain)?;
         if let Some(digest) = self.digest {
             if !ct_eq(&sha3_256(&[&self.plain]), &digest) {
                 return Err(Error::Unverified);
             }
         }
+
         Ok(self.plain)
     }
 }
@@ -399,9 +412,11 @@ mod tests {
         let sealed = seal_file(&key, &nonce, b"hello").unwrap();
         let d = descriptor([1; 32], nonce, &sealed);
         verify_commit(&d).unwrap();
+
         let mut other = descriptor([3; 32], nonce, &sealed);
         assert_eq!(verify_commit(&other), Err(Error::Unverified));
         assert!(Assembler::for_data(&other).is_err());
+
         // The negative vector of ATT-007: the same ciphertext under a
         // different key fails, even with a commitment made for that key.
         other.commit = commit(&Secret::new([3; 32]), &nonce);
@@ -438,13 +453,16 @@ mod tests {
         d.level = Level::Manifest;
         d.commit = commit(&key, &nonce);
         d.padded_size = 3 * CHUNK_SIZE as u32;
+
         let mut a = Assembler::for_manifest(&d).unwrap();
         a.accept(&sealed.chunks[0]).unwrap();
         assert_eq!(a.finish().unwrap(), refs_plain);
+
         // The same bytes under file_key do not open (ATT-076).
         let under_file_key = seal_file(&key, &nonce, &refs_plain).unwrap();
         let mut b = Assembler::for_manifest(&d).unwrap();
         assert!(b.accept(&under_file_key.chunks[0]).is_err());
+
         d.level = Level::Data;
         assert!(Assembler::for_manifest(&d).is_err());
     }

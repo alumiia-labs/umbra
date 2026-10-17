@@ -33,6 +33,7 @@ pub fn placement_list(handle: &[u8; 32], relays: &[AttachmentRelay]) -> Vec<[u8;
         .map(|r| (rank(handle, &r.relay_id), r))
         .collect();
     ranked.sort_unstable_by_key(|entry| entry.0);
+
     let mut families: Vec<[u8; 32]> = Vec::new();
     let mut list = Vec::new();
     for (_, relay) in ranked {
@@ -43,6 +44,7 @@ pub fn placement_list(handle: &[u8; 32], relays: &[AttachmentRelay]) -> Vec<[u8;
         families.push(relay.family_id);
         list.push(relay.relay_id);
     }
+
     list
 }
 
@@ -58,6 +60,7 @@ pub fn writer_targets(list: &[[u8; 32]], failed: &[[u8; 32]]) -> Result<Vec<[u8;
     if targets.len() < BACKUP_REPLICAS {
         return Err(Error::NoPath);
     }
+
     Ok(targets)
 }
 
@@ -77,6 +80,7 @@ pub fn resolve_hint(
     if *hint == [0; 12] {
         return Err(Error::NoPath);
     }
+
     let mut found = None;
     for relay_id in relay_ids {
         if seal::relay_hint(&relay_id) == *hint {
@@ -86,6 +90,7 @@ pub fn resolve_hint(
             found = Some(relay_id);
         }
     }
+
     found.ok_or(Error::NoPath)
 }
 
@@ -131,6 +136,7 @@ pub fn fetch_order(
         .filter(|r| !hold_offs.blocked(chunk_id, r, now))
         .copied()
         .collect();
+
     // Fisher–Yates from the end, with one random draw per position.
     let mut end = order.len();
     while end > 1 {
@@ -139,6 +145,7 @@ pub fn fetch_order(
         order.swap(pick, end.saturating_sub(1));
         end = end.saturating_sub(1);
     }
+
     order
 }
 
@@ -168,16 +175,19 @@ mod tests {
         assert_eq!(list.len(), 4);
         let ranks: Vec<[u8; 32]> = list.iter().map(|r| rank(&[7; 32], r)).collect();
         assert!(ranks.windows(2).all(|w| w[0] < w[1]));
+
         // A different handle gives a different order, and the same handle
         // gives the same list at each party.
         assert_eq!(list, placement_list(&[7; 32], &relays));
         let other = placement_list(&[8; 32], &relays);
         assert_eq!(other.len(), 4);
+
         let targets = writer_targets(&list, &[]).unwrap();
         assert_eq!(targets, list[..2]);
         let replaced = writer_targets(&list, &[list[0]]).unwrap();
         assert_eq!(replaced, list[1..3]);
         assert!(writer_targets(&list, &list[..3]).is_err());
+
         assert_eq!(reader_probes(&list), &list[..4]);
         assert_eq!(reader_probes(&list[..2]), &list[..2]);
     }
@@ -191,11 +201,13 @@ mod tests {
             resolve_hint(&hint, ids[..1].iter().copied()),
             Err(Error::NoPath)
         );
+
         let twice = [[2u8; 32], [2; 32]];
         assert_eq!(
             resolve_hint(&hint, twice.iter().copied()),
             Err(Error::NoPath)
         );
+
         assert_eq!(
             resolve_hint(&[0; 12], ids.iter().copied()),
             Err(Error::NoPath)
@@ -207,6 +219,7 @@ mod tests {
         let replicas = [[1u8; 32], [2; 32], [3; 32]];
         let mut hold = HoldOffs::default();
         hold.note([9; 32], [2; 32], 100);
+
         let mut counter = 0u32;
         let mut random = |bound: u32| {
             counter = counter.wrapping_add(1);
@@ -215,6 +228,7 @@ mod tests {
         let order = fetch_order(&[9; 32], &replicas, &hold, 200, &mut random);
         assert_eq!(order.len(), 2);
         assert!(order.contains(&[1; 32]) && order.contains(&[3; 32]));
+
         let later = fetch_order(
             &[9; 32],
             &replicas,
@@ -225,6 +239,7 @@ mod tests {
         assert_eq!(later.len(), 3);
         hold.expire(100 + FETCH_RETRY_HOLD);
         assert!(!hold.blocked(&[9; 32], &[2; 32], 100));
+
         // A different draw gives a different order.
         let mut first = |_: u32| 0u32;
         let a = fetch_order(&[9; 32], &replicas, &hold, 0, &mut first);

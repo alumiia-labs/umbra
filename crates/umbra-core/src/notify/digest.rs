@@ -37,11 +37,13 @@ impl NotifyDigest {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let out = NotifyDigest {
             id: r.array()?,
             post_count: r.u8()?,
         };
         r.finish()?;
+
         Ok(out)
     }
 }
@@ -96,6 +98,7 @@ impl DigestGate {
         if self.registrations.len() >= REGISTRATION_MAX {
             return Err(Error::NoPath);
         }
+
         self.registrations.insert(
             queue,
             Registered {
@@ -135,12 +138,12 @@ impl DigestGate {
         }
     }
 
-    fn take(r: &mut Registered, now: u64) -> Due {
+    fn take(queue: [u8; 32], r: &mut Registered, now: u64) -> Due {
         let count = u8::try_from(r.unsent).unwrap_or(u8::MAX);
         r.unsent = 0;
         r.last_digest = Some(now);
         Due {
-            queue: [0; 32],
+            queue,
             post_count: count,
         }
     }
@@ -153,11 +156,10 @@ impl DigestGate {
         for (queue, r) in &mut self.registrations {
             r.unsent = r.unsent.saturating_add(1);
             if Self::allowed(policy, r, now) {
-                let mut d = Self::take(r, now);
-                d.queue = *queue;
-                due.push(d);
+                due.push(Self::take(*queue, r, now));
             }
         }
+
         due
     }
 
@@ -166,15 +168,15 @@ impl DigestGate {
     pub fn tick(&mut self, now: u64) -> Vec<Due> {
         self.registrations
             .retain(|_, r| now.saturating_sub(r.registered_at) < REGISTRATION_TTL);
+
         let policy = self.policy;
         let mut due = Vec::new();
         for (queue, r) in &mut self.registrations {
             if r.unsent > 0 && Self::allowed(policy, r, now) {
-                let mut d = Self::take(r, now);
-                d.queue = *queue;
-                due.push(d);
+                due.push(Self::take(*queue, r, now));
             }
         }
+
         due
     }
 }
@@ -199,6 +201,7 @@ mod tests {
         gate.register([1; 32], 0).unwrap();
         gate.register([1; 32], 0).unwrap();
         assert_eq!(gate.len(), 1);
+
         let first = gate.on_post(100);
         assert_eq!(
             first,
@@ -207,14 +210,17 @@ mod tests {
                 post_count: 1
             }]
         );
+
         assert!(gate.on_post(105).is_empty());
         assert!(gate.on_post(108).is_empty());
         assert!(gate.tick(109).is_empty());
         let end = gate.tick(110);
         assert_eq!(end[0].post_count, 2);
         assert!(gate.tick(111).is_empty());
+
         gate.unregister(&[1; 32]);
         assert!(gate.is_empty());
+
         gate.register([2; 32], 0).unwrap();
         assert!(gate.tick(REGISTRATION_TTL).is_empty());
         assert!(gate.is_empty());

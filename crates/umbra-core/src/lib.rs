@@ -1,14 +1,20 @@
 //! The core of the UMBRA protocol: the objects and the state machines of
 //! the parts above the wire, over the five crates below it.
 //!
-//! [`directory`] holds Part 10: the directory root under its 5-of-7
-//! multi-signature, the relay descriptor and entry, the relay-set tree
-//! and its proofs, the diff, the bloc list, the layer assignment, and the
-//! path invariants of Part 3 §3.4.6. [`attach`] holds Part 12: the
-//! segments, the key-committing seal, the manifest level, the chunk
-//! commands, the relay chunk store, and the placement of a handle-addressed
-//! chunk. Each type takes the time and the random values it needs as
-//! arguments.
+//! | Module | Contents |
+//! | --- | --- |
+//! | [`identity`] | Part 4: addresses, invitation, verification, table MAC, recovery, backup. |
+//! | [`devset`] | Part 7: device sets, ownership claims, sync, revocation. |
+//! | [`notify`] | Part 8: the notification blob, tokens, push, and wake rules. |
+//! | [`discovery`] | Part 9: handles, the transparency log, and the hello. |
+//! | [`directory`] | Part 10: the 5-of-7 directory root, descriptors, and the path rules of Part 3 §3.4.6. |
+//! | [`group`] | Part 11: private groups. |
+//! | [`attach`] | Part 12: attachments, chunk commands, and the chunk store. |
+//! | [`abuse`] | Part 13: tokens, proof of work, and admission. |
+//! | [`store`] | Part 14: the local store. |
+//! | [`session`] | The session driver from a conversation to the cells of a circuit. |
+//!
+//! Each type takes the time and the random values it needs as arguments.
 #![forbid(unsafe_code)]
 #![no_std]
 

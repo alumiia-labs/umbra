@@ -106,19 +106,25 @@ impl RelayGate {
         core::mem::take(&mut self.admissions)
     }
 
+    /// The epoch of the challenge that `token` answers: the current epoch
+    /// or the one before it, for this relay or for any relay.
     fn token_epoch(&self, token: &Token, now: u64) -> Option<u32> {
-        let epoch = epoch_number(now);
-        [epoch, epoch.wrapping_sub(1)].into_iter().find(|&e| {
+        // A zero redemption context names no relay, thus any relay.
+        let answers = |epoch: u32| {
             [self.relay_id, [0; 32]].iter().any(|context| {
-                TokenChallenge {
+                let challenge = TokenChallenge {
                     token_type: token.token_type,
-                    epoch: e,
+                    epoch,
                     redemption_context: *context,
-                }
-                .digest()
-                    == token.challenge_digest
+                };
+                challenge.digest() == token.challenge_digest
             })
-        })
+        };
+
+        let epoch = epoch_number(now);
+        [epoch, epoch.wrapping_sub(1)]
+            .into_iter()
+            .find(|&e| answers(e))
     }
 
     /// Admits a command that ends with `admission` at `now` (`ABU-044`
@@ -139,31 +145,42 @@ impl RelayGate {
                     Err(Reject::Admission)
                 }
             }
-            AdmissionKind::Token => {
-                let token = Token::parse(admission.body).map_err(|_| Reject::Admission)?;
-                if token.token_type != accepts.token_type() {
-                    return Err(Reject::Admission);
-                }
-                let epoch = self.token_epoch(&token, now).ok_or(Reject::Admission)?;
-                accepts
-                    .verify(&token, epoch)
-                    .map_err(|_| Reject::Admission)?;
-                self.spent
-                    .spend(epoch_number(now), epoch, token.nonce)
-                    .map_err(|_| Reject::Admission)?;
-                self.fresh.push((epoch, token.nonce));
-                Ok(Admitted::Token { epoch })
-            }
+            AdmissionKind::Token => self.admit_token(admission.body, accepts, now),
             AdmissionKind::Pow => {
                 let solution = PowSolution::parse(admission.body).map_err(|_| Reject::Admission)?;
                 self.pow.accept(&solution).map_err(|_| Reject::Admission)?;
                 Ok(Admitted::Pow)
             }
         }?;
+
         // ABU-060: the backlog counts what the relay accepted. A refusal
         // costs its sender nothing, thus it must not raise the effort.
         self.admissions = self.admissions.saturating_add(1);
         Ok(admitted)
+    }
+
+    /// Checks a token and spends its nonce. It does not count the backlog.
+    fn admit_token(
+        &mut self,
+        body: &[u8],
+        accepts: &Accepts<'_>,
+        now: u64,
+    ) -> Result<Admitted, Reject> {
+        let token = Token::parse(body).map_err(|_| Reject::Admission)?;
+        if token.token_type != accepts.token_type() {
+            return Err(Reject::Admission);
+        }
+
+        let epoch = self.token_epoch(&token, now).ok_or(Reject::Admission)?;
+        accepts
+            .verify(&token, epoch)
+            .map_err(|_| Reject::Admission)?;
+
+        self.spent
+            .spend(epoch_number(now), epoch, token.nonce)
+            .map_err(|_| Reject::Admission)?;
+        self.fresh.push((epoch, token.nonce));
+        Ok(Admitted::Token { epoch })
     }
 }
 
@@ -187,34 +204,40 @@ impl RelayGate {
                 let token = Token::parse(admission.body).map_err(|_| Reject::Admission)?;
                 Ok(holder(b"token", &token.nonce))
             }
-            AdmissionKind::Pow => {
-                let solution = PowSolution::parse(admission.body).map_err(|_| Reject::Admission)?;
-                let key = (solution.seed, solution.nonce);
-                let holder = holder(b"pow", &[&solution.seed[..], &solution.nonce].concat());
-                // A solution to a challenge that went out of use admits
-                // nothing more.
-                let pow = &self.pow;
-                self.chunk_uses
-                    .retain(|(seed, _), _| pow.is_live_seed(seed));
-                if let Some((bytes, left)) = self.chunk_uses.get_mut(&key) {
-                    if *bytes != solution.solution || *left == 0 {
-                        return Err(Reject::Admission);
-                    }
-                    *left -= 1;
-                    return Ok(holder);
-                }
-                if solution.effort < POW_CHUNK_FLOOR {
-                    return Err(Reject::Admission);
-                }
-                self.pow.accept(&solution).map_err(|_| Reject::Admission)?;
-                self.admissions = self.admissions.saturating_add(1);
-                self.chunk_uses.insert(
-                    key,
-                    (solution.solution, POW_CHUNK_ALLOWANCE.saturating_sub(1)),
-                );
-                Ok(holder)
-            }
+            AdmissionKind::Pow => self.admit_chunk_pow(admission.body),
         }
+    }
+
+    /// Admits a chunk command under a solution: a further use of a held
+    /// solution, or the first use of a new one.
+    fn admit_chunk_pow(&mut self, body: &[u8]) -> Result<[u8; 32], Reject> {
+        let solution = PowSolution::parse(body).map_err(|_| Reject::Admission)?;
+        let key = (solution.seed, solution.nonce);
+        let holder = holder(b"pow", &[&solution.seed[..], &solution.nonce].concat());
+
+        // A solution to a challenge that went out of use admits nothing more.
+        let pow = &self.pow;
+        self.chunk_uses
+            .retain(|(seed, _), _| pow.is_live_seed(seed));
+
+        if let Some((bytes, left)) = self.chunk_uses.get_mut(&key) {
+            if *bytes != solution.solution || *left == 0 {
+                return Err(Reject::Admission);
+            }
+            *left -= 1;
+            return Ok(holder);
+        }
+
+        if solution.effort < POW_CHUNK_FLOOR {
+            return Err(Reject::Admission);
+        }
+        self.pow.accept(&solution).map_err(|_| Reject::Admission)?;
+        self.admissions = self.admissions.saturating_add(1);
+        self.chunk_uses.insert(
+            key,
+            (solution.solution, POW_CHUNK_ALLOWANCE.saturating_sub(1)),
+        );
+        Ok(holder)
     }
 }
 

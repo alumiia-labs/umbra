@@ -54,8 +54,8 @@ pub struct StatQuery {
     /// The index of the aggregator in the key set.
     pub authority_index: u8,
     /// The relay that the query asks. The signature covers it (`REL-192`).
-    /// A query that verified at each relay let a relay that took the two
-    /// queries of one epoch read both shares of another relay.
+    /// Without it, a relay that gets the two queries of one epoch can send
+    /// them to another relay and read both shares of that relay.
     pub relay_id: [u8; 32],
     /// The consensus epoch of the count.
     pub epoch: u64,
@@ -97,6 +97,7 @@ impl StatQuery {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let query = StatQuery {
             authority_index: r.u8()?,
             relay_id: r.array()?,
@@ -104,9 +105,11 @@ impl StatQuery {
         };
         let sig = r.take(SIGNATURE_LEN)?;
         r.finish()?;
+
         if query.authority_index >= AGGREGATORS {
             return Err(Error::Unverified);
         }
+
         let preimage = [labels::STAT_QUERY, &query.body()].concat();
         keyset.verify_by(query.authority_index, &preimage, sig)?;
         Ok(query)
@@ -138,9 +141,11 @@ impl StatAnswer {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let found = r.u8()?;
         let share = u64::from_be_bytes(r.array()?);
         r.finish()?;
+
         match found {
             0x00 if share == 0 => Ok(StatAnswer { share: None }),
             0x01 => Ok(StatAnswer { share: Some(share) }),

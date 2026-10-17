@@ -17,9 +17,6 @@ use umbra_wire::{
     },
 };
 
-/// The one version of a `GroupPresence` (Part 6 §6.6.3, `WIR-492`).
-pub const PRESENCE_VERSION: u8 = 0x01;
-
 use umbra_crypto::stored::{Reader, Writer};
 
 use super::{
@@ -28,6 +25,9 @@ use super::{
     slot_of,
 };
 use crate::Error;
+
+/// The one version of a `GroupPresence` (Part 6 §6.6.3, `WIR-492`).
+pub const PRESENCE_VERSION: u8 = 0x01;
 
 /// The cached `K_ij` of each member (§11.3.3).
 #[derive(Default)]
@@ -52,6 +52,7 @@ impl PairCache {
                 .ok_or(Error::NoPath)?;
             slot.insert(own.pair_key(&peer.pair_pk, roster.group_id())?);
         }
+
         self.keys.get(&index).ok_or(Error::NoPath)
     }
 
@@ -98,10 +99,12 @@ impl Sender {
     pub fn export(&self, w: &mut Writer) -> Result<(), Error> {
         w.u8(STORED_VERSION);
         w.u32(count(self.counters.len())?);
+
         for (epoch, counter) in &self.counters {
             w.u32(*epoch);
             w.u32(*counter);
         }
+
         Ok(())
     }
 
@@ -110,10 +113,12 @@ impl Sender {
         if r.u8()? != STORED_VERSION {
             return Err(Error::Stale);
         }
+
         let mut counters = BTreeMap::new();
         for _ in 0..r.u32()? {
             counters.insert(r.u32()?, r.u32()?);
         }
+
         Ok(Sender { counters })
     }
 
@@ -157,10 +162,12 @@ impl Sender {
     /// As [`Sender::build`], under an earlier `roster_epoch` that the
     /// roster history holds: the tags go to the members active at it. A
     /// member behind the roster checks such a record under the epoch it
-    /// holds (`GRP-330`). A member whose pair key this roster lost since
-    /// takes a tag of zeros. A member whose `pair_pk` gives no pair key
-    /// takes one too (`GRP-237`). One entry that fails stops no record to
-    /// each other member.
+    /// holds (`GRP-330`).
+    ///
+    /// These members take a tag of zeros, so that one failed entry does not
+    /// stop the record to each other member:
+    /// - a member whose pair key this roster lost since;
+    /// - a member whose `pair_pk` gives no pair key (`GRP-237`).
     #[allow(clippy::too_many_arguments)]
     pub fn build_at(
         &mut self,
@@ -179,6 +186,7 @@ impl Sender {
         if epoch == 0 {
             return Err(Error::NoPath);
         }
+
         let slot = send_slot(epochs, now);
         let record_key = &epochs.send_key(slot, now)?;
         let active = roster
@@ -187,6 +195,7 @@ impl Sender {
             .to_vec();
         let counter = self.next_counter(epoch)?;
         let hash = app_hash(app);
+
         let mut tags = Vec::with_capacity(active.len().saturating_mul(TAG_LEN));
         for index in &active {
             if *index == own_index {
@@ -207,6 +216,7 @@ impl Sender {
                 app_hash: &hash,
             }));
         }
+
         let plain = ContentPlain {
             sender_index: own_index,
             counter,
@@ -250,6 +260,7 @@ impl Sender {
         let record_key = &epochs.send_key(slot, now)?;
         let roster_epoch = roster.epoch_index();
         let counter = self.counter(epoch);
+
         let version = [PRESENCE_VERSION];
         let control = GroupControl {
             control_type: ControlType::Presence,
@@ -268,6 +279,7 @@ impl Sender {
         app.truncate(app_len);
         let app = app.as_slice();
         let hash = app_hash(app);
+
         let targets: Vec<u16> = roster
             .active()
             .filter(|m| m.role >= Role::Admin && m.index != own_index)
@@ -292,6 +304,7 @@ impl Sender {
                 }),
             ));
         }
+
         let plain = ContentPlain {
             sender_index: own_index,
             counter,
@@ -335,11 +348,13 @@ mod tests {
             .unwrap();
         let mut pairs = PairCache::default();
         assert!(pairs.get(1, &roster, &creator).is_ok());
+
         let remove = plain_control(&roster, PlainOp::Remove { index: 1 });
         roster
             .apply(&GroupControl::parse(&remove).unwrap(), 0, 2)
             .unwrap();
         pairs.remove(1);
+
         // GRP-245: a record under the roster epoch before the removal gives
         // that member a tag of zeros, and the cache stays without its key.
         assert_eq!(pairs.get(1, &roster, &creator).err(), Some(Error::NoPath));

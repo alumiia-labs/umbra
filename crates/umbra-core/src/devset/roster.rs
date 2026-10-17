@@ -155,6 +155,7 @@ impl<'a> Roster<'a> {
         {
             return Err(Error::Malformed);
         }
+
         // DEV-224, DEV-157: a `device_id` names one device. An epoch that
         // names one identifier two times gives two devices one sync channel.
         // An epoch that names a revoked identifier as a device puts back a
@@ -170,6 +171,7 @@ impl<'a> Roster<'a> {
                 return Err(Error::Malformed);
             }
         }
+
         // DEV-162: no subject twice in one epoch.
         for (i, a) in self.claims.iter().enumerate() {
             if self
@@ -181,6 +183,7 @@ impl<'a> Roster<'a> {
                 return Err(Error::Malformed);
             }
         }
+
         Ok(())
     }
 
@@ -230,6 +233,7 @@ impl<'a> Roster<'a> {
         let mut w = Writer::new(&mut body);
         self.put_signed(&mut w)?;
         let n = w.position();
+
         let mut out = Vec::with_capacity(labels::DEVICE_ROSTER.len() + n);
         out.extend_from_slice(labels::DEVICE_ROSTER);
         out.extend_from_slice(body.get(..n).ok_or(Error::Malformed)?);
@@ -251,11 +255,13 @@ impl<'a> Roster<'a> {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let epoch = u64::from_be_bytes(r.array()?);
         let count = usize::from(r.u8()?);
         if count == 0 || count > MAX_DEVICES {
             return Err(Error::Malformed);
         }
+
         let mut devices = Vec::with_capacity(count);
         for _ in 0..count {
             devices.push(DeviceEntry {
@@ -268,23 +274,28 @@ impl<'a> Roster<'a> {
                 sync_scope: SyncScope::from_byte(r.u8()?)?,
             });
         }
+
         let revoked_count = usize::from(r.u8()?);
         let mut revoked = Vec::with_capacity(revoked_count);
         for _ in 0..revoked_count {
             revoked.push(r.array()?);
         }
+
         let claim_count = usize::from(r.u8()?);
         if claim_count > OWNER_CLAIM_MAX {
             return Err(Error::Malformed);
         }
+
         let mut claims = Vec::with_capacity(claim_count);
         for _ in 0..claim_count {
             claims.push(OwnerClaim::read(&mut r)?);
         }
+
         let prev_hash = r.array()?;
         let signer_id = r.array()?;
         let sig = r.take(SIGNATURE_LEN)?;
         r.finish()?;
+
         let out = Roster {
             epoch,
             devices,
@@ -328,6 +339,7 @@ impl<'a> Roster<'a> {
         if self.epoch != 0 {
             return Err(Error::Malformed);
         }
+
         let entry = self.entry(&self.signer_id).ok_or(Error::Unverified)?;
         self.verify_with(entry.mldsa_pk)
     }
@@ -348,6 +360,7 @@ impl<'a> Roster<'a> {
         if !previous.revoked.iter().all(|t| self.revoked.contains(t)) {
             return Err(Error::Unverified);
         }
+
         let entry = previous.entry(&self.signer_id).ok_or(Error::Unverified)?;
         self.verify_with(entry.mldsa_pk)
     }
@@ -364,6 +377,7 @@ impl<'a> Roster<'a> {
         {
             return Err(Error::Unverified);
         }
+
         let (_, key) = parent
             .signers
             .iter()
@@ -419,10 +433,12 @@ impl Parent {
         let mut w = Writer::new(&mut out);
         w.put(&self.epoch.to_be_bytes())?;
         w.put(&self.hash)?;
+
         w.u8(u8::try_from(self.revoked.len()).map_err(|_| Error::Malformed)?)?;
         for t in &self.revoked {
             w.put(t)?;
         }
+
         w.u8(u8::try_from(self.signers.len()).map_err(|_| Error::Malformed)?)?;
         for (device, key) in &self.signers {
             if key.len() != VERIFYING_KEY_LEN {
@@ -431,6 +447,7 @@ impl Parent {
             w.put(device)?;
             w.put(key)?;
         }
+
         Ok(out)
     }
 
@@ -439,15 +456,18 @@ impl Parent {
         let mut r = Reader::new(bytes);
         let epoch = u64::from_be_bytes(r.array()?);
         let hash = r.array()?;
+
         let mut revoked = Vec::new();
         for _ in 0..r.u8()? {
             revoked.push(r.array()?);
         }
+
         let mut signers = Vec::new();
         for _ in 0..r.u8()? {
             let device = r.array()?;
             signers.push((device, r.take(VERIFYING_KEY_LEN)?.to_vec()));
         }
+
         r.finish()?;
         Ok(Parent {
             epoch,
@@ -483,6 +503,7 @@ pub fn resolve(a: &Roster<'_>, b: &Roster<'_>) -> Result<Competing, Error> {
     if a.signer_id == b.signer_id {
         return Ok(Competing::Fork);
     }
+
     // DEV-178: the fork shows in each case but two equal lists.
     let fork =
         a.revoked.len() != b.revoked.len() || !a.revoked.iter().all(|t| b.revoked.contains(t));
@@ -491,6 +512,7 @@ pub fn resolve(a: &Roster<'_>, b: &Roster<'_>) -> Result<Competing, Error> {
     } else {
         usize::from(b.revoked.len() > a.revoked.len())
     };
+
     Ok(Competing::Select { index, fork })
 }
 
@@ -590,6 +612,7 @@ pub(crate) mod tests {
         e1.encode(&mut bytes1).unwrap();
         let r1 = Roster::parse(&bytes1).unwrap();
         r1.verify_successor(&g, &h0).unwrap();
+
         // DEV-229: the parent data alone verifies a rival of the head.
         let parent = Parent::parse(&Parent::of(&bytes0).unwrap().encode().unwrap()).unwrap();
         assert_eq!(parent.hash, h0);
@@ -597,6 +620,7 @@ pub(crate) mod tests {
         let mut wrong = parent.clone();
         wrong.signers.retain(|(device, _)| *device != [2; 16]);
         assert!(r1.verify_rival(&wrong).is_err());
+
         assert!(r1.revokes(&[1; 16]));
         assert!(r1.verify_successor(&g, &[1; 32]).is_err());
 
@@ -615,6 +639,7 @@ pub(crate) mod tests {
         sign(&mut e2, &k1, &mut s2);
         e2.sig = &s2;
         assert!(e2.verify_successor(&r1, &Roster::hash(&bytes1)).is_err());
+
         assert_eq!(
             OwnerClaim::subject(&Secret::new([1; 32]), ClaimScope::GroupSender, &[0; 32]).len(),
             32
@@ -638,23 +663,27 @@ pub(crate) mod tests {
         };
         let mut out = alloc::vec![0u8; base.len() + ENTRY_LEN];
         base.encode(&mut out).unwrap();
+
         // DEV-224: two entries with one identifier.
         let twice = Roster {
             devices: alloc::vec![entry(1, &pk1, &kem), entry(1, &pk1, &kem)],
             ..base.clone()
         };
         assert_eq!(twice.encode(&mut out), Err(Error::Malformed));
+
         // DEV-157: a tombstone is permanent, thus no entry holds its id.
         let back = Roster {
             devices: alloc::vec![entry(1, &pk1, &kem), entry(3, &pk1, &kem)],
             ..base.clone()
         };
         assert_eq!(back.encode(&mut out), Err(Error::Malformed));
+
         // A parser rejects the same bytes: the second entry takes the
         // identifier of the first one.
         let used = base.encode(&mut out).unwrap();
         out[1 + 8 + 1 + ENTRY_LEN..][..16].copy_from_slice(&[1; 16]);
         assert_eq!(Roster::parse(&out[..used]).err(), Some(Error::Malformed));
+
         // The signature check alone reads no chain.
         let mut signed = base.clone();
         let mut made = [0u8; SIGNATURE_LEN];
@@ -680,6 +709,7 @@ pub(crate) mod tests {
             signer_id: [1; 16],
             sig: &sig,
         };
+
         let by_two = Roster {
             signer_id: [2; 16],
             ..base.clone()
@@ -691,6 +721,7 @@ pub(crate) mod tests {
                 fork: false
             }
         );
+
         let more_revoked = Roster {
             signer_id: [2; 16],
             revoked: alloc::vec![[3; 16]],
@@ -704,6 +735,7 @@ pub(crate) mod tests {
                 fork: true
             }
         );
+
         let other_revoked = Roster {
             signer_id: [0; 16],
             revoked: alloc::vec![[4; 16]],
@@ -716,6 +748,7 @@ pub(crate) mod tests {
                 fork: true
             }
         );
+
         assert_eq!(resolve(&base, &base).unwrap(), Competing::Fork);
         let other_epoch = Roster {
             epoch: 4,

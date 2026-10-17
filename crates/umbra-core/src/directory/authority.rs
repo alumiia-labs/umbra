@@ -69,38 +69,19 @@ pub fn entry_of(listing: &Listing<'_>, admission: Admission) -> Result<Vec<u8>, 
     if listing.class > 3 || listing.class > descriptor.capacity_class {
         return Err(Error::Malformed);
     }
+
     // §10.6.1: an ingress relay holds C1 or above, thus a relay demoted
     // below it keeps its listing and loses the flag.
     let is_ingress = listing.is_ingress && listing.class >= super::path::INGRESS_CLASS_MIN;
-    let exit_roles = roles::QUEUE | roles::CHAIN;
     let flags = if is_ingress {
         if descriptor.roles & roles::INGRESS_OFFERED == 0 {
             return Err(Error::Malformed);
         }
         flags::INGRESS
     } else {
-        match admission {
-            // REL-156: the first root of a chain relay places it nowhere.
-            Admission::Pending => flags::PENDING,
-            Admission::Placed { root, epoch } => {
-                if descriptor.roles & exit_roles == exit_roles
-                    && layer(&root, epoch, &descriptor.relay_id) == 3
-                {
-                    flags::LAYER_3
-                } else {
-                    0
-                }
-            }
-            Admission::Fixed { layer: 3 } => {
-                if descriptor.roles & exit_roles != exit_roles {
-                    return Err(Error::Malformed);
-                }
-                flags::LAYER_3
-            }
-            Admission::Fixed { layer: 2 } => 0,
-            Admission::Fixed { .. } => return Err(Error::Malformed),
-        }
+        chain_flags(&descriptor, admission)?
     };
+
     let entry = RelayEntry {
         descriptor,
         operator_id: listing.operator_id,
@@ -112,6 +93,34 @@ pub fn entry_of(listing: &Listing<'_>, admission: Admission) -> Result<Vec<u8>, 
     // The rules of a client hold for what an authority signs.
     RelayEntry::parse(&out)?;
     Ok(out)
+}
+
+/// The flags of a relay of the chain population at one stage of its
+/// admission.
+fn chain_flags(descriptor: &RelayDescriptor<'_>, admission: Admission) -> Result<u8, Error> {
+    let exit_roles = roles::QUEUE | roles::CHAIN;
+    let flags = match admission {
+        // REL-156: the first root of a chain relay places it nowhere.
+        Admission::Pending => flags::PENDING,
+        Admission::Placed { root, epoch } => {
+            if descriptor.roles & exit_roles == exit_roles
+                && layer(&root, epoch, &descriptor.relay_id) == 3
+            {
+                flags::LAYER_3
+            } else {
+                0
+            }
+        }
+        Admission::Fixed { layer: 3 } => {
+            if descriptor.roles & exit_roles != exit_roles {
+                return Err(Error::Malformed);
+            }
+            flags::LAYER_3
+        }
+        Admission::Fixed { layer: 2 } => 0,
+        Admission::Fixed { .. } => return Err(Error::Malformed),
+    };
+    Ok(flags)
 }
 
 /// The canonical key set of `keys`, each under a control of its own.
@@ -140,6 +149,7 @@ pub fn keyset_bytes_with(
         independent_count,
         keys: public.iter().map(|key| key.as_slice()).collect(),
     };
+
     let mut out = alloc::vec![0u8; keyset.len()];
     keyset.encode(&mut out)?;
     Ok(out)
@@ -196,6 +206,7 @@ pub fn sign_manifest_revoking<R: TryCryptoRng + ?Sized>(
     }) {
         return Err(Error::Malformed);
     }
+
     let leaves: Vec<[u8; 32]> = entries.iter().map(|entry| tree::leaf(entry)).collect();
     let (keyset, _) = DirectoryKeySet::parse(keyset)?;
     let mut root = DirectoryRoot {
@@ -207,6 +218,7 @@ pub fn sign_manifest_revoking<R: TryCryptoRng + ?Sized>(
         revoked: revoked.to_vec(),
         sigs: Vec::new(),
     };
+
     let preimage = root.preimage();
     let mut signers = signers.to_vec();
     signers.sort_unstable();
@@ -222,6 +234,7 @@ pub fn sign_manifest_revoking<R: TryCryptoRng + ?Sized>(
             sig: sig.as_slice(),
         })
         .collect();
+
     let mut root_bytes = alloc::vec![0u8; 24_000];
     let root_len = root.encode(&mut root_bytes)?;
     root_bytes.truncate(root_len);
@@ -233,6 +246,7 @@ pub fn sign_manifest_revoking<R: TryCryptoRng + ?Sized>(
             proof: tree::prove(&leaves, index).ok_or(Error::Malformed)?,
         });
     }
+
     RelayManifest {
         root: &root_bytes,
         entries: proven,

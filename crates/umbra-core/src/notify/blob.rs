@@ -40,6 +40,7 @@ impl Plain {
         if self.flags & FLAG_RESERVED != 0 {
             return Err(Error::Malformed);
         }
+
         let mut out = [0u8; PLAIN_LEN];
         let mut w = Writer::new(&mut out);
         w.u16(self.relay_idx)?;
@@ -60,10 +61,12 @@ impl Plain {
             flags: r.u8()?,
         };
         r.finish()?;
+
         // A reserved bit rejects the blob (NTF-037).
         if out.flags & FLAG_RESERVED != 0 {
             return Err(Error::Malformed);
         }
+
         Ok(out)
     }
 }
@@ -100,6 +103,7 @@ pub fn seal(
         &associated_data(epoch),
         &mut body,
     )?;
+
     let mut out = [0u8; BLOB_LEN];
     let mut w = Writer::new(&mut out);
     w.u8(VERSION)?;
@@ -115,6 +119,7 @@ pub fn epoch_of_blob(blob: &[u8]) -> Result<u32, Error> {
     if blob.len() != BLOB_LEN {
         return Err(Error::Malformed);
     }
+
     let mut r = Reader::new(blob);
     if r.u8()? != VERSION {
         return Err(Error::Malformed);
@@ -149,6 +154,8 @@ impl Receiver {
         if !Self::in_window(epoch, now) {
             return Err(Error::Stale);
         }
+
+        // The version and the epoch were read above.
         let mut r = Reader::new(blob);
         let _ = r.take(5)?;
         let nonce: [u8; 24] = r.array()?;
@@ -161,6 +168,7 @@ impl Receiver {
             &mut body,
             tag,
         );
+
         match opened {
             Ok(()) => {
                 self.failures = 0;
@@ -209,12 +217,14 @@ mod tests {
         let epoch = epoch_of(now);
         let blob = seal(&root, epoch, [2; 24], &plain()).unwrap();
         assert_eq!(blob.len(), BLOB_LEN);
+
         let mut rx = Receiver::new(Secret::new([1; 32]));
         assert_eq!(rx.open(&blob, now).unwrap(), plain());
         assert_eq!(rx.open(&blob, now + EPOCH_SECONDS).unwrap(), plain());
         assert_eq!(rx.open(&blob, now - EPOCH_SECONDS).unwrap(), plain());
         assert_eq!(rx.open(&blob, now + 2 * EPOCH_SECONDS), Err(Error::Stale));
         assert!(!rx.clock_suspect());
+
         // A wrong root fails, and three failures show the clock state.
         let mut other = Receiver::new(Secret::new([9; 32]));
         for _ in 0..NTF_FAIL_MAX {
@@ -224,6 +234,7 @@ mod tests {
         other.reset(Secret::new([1; 32]));
         assert!(other.open(&blob, now).is_ok());
         assert!(!other.clock_suspect());
+
         // The epoch is bound: a blob re-labeled with another epoch fails.
         let mut relabeled = blob;
         relabeled[1..5].copy_from_slice(&(epoch + 1).to_be_bytes());
@@ -239,6 +250,7 @@ mod tests {
             ..plain()
         };
         assert!(seal(&root, 1, [0; 24], &bad).is_err());
+
         let digest = Plain {
             flags: FLAG_DIGEST,
             ..plain()
@@ -249,6 +261,7 @@ mod tests {
             rx.open(&blob, EPOCH_SECONDS + 1).unwrap().flags,
             FLAG_DIGEST
         );
+
         assert_ne!(
             epoch_key(&Secret::new([1; 32]), 1).expose(),
             epoch_key(&Secret::new([1; 32]), 2).expose()

@@ -72,6 +72,7 @@ pub fn issue_request<R: TryCryptoRng + ?Sized>(
     if count == 0 || count > ISSUE_REQUEST_MAX {
         return Err(Error::Malformed);
     }
+
     let challenge = TokenChallenge {
         token_type: TYPE_FIRST_PARTY,
         epoch,
@@ -79,10 +80,12 @@ pub fn issue_request<R: TryCryptoRng + ?Sized>(
     };
     let (state, blinded) = FirstPartyRequest::new(count, &challenge, issuer_pk, rng)?;
     let verifier = issue_verifier(issuer_pk);
+
     let mut body = Vec::new();
     body.extend_from_slice(&TYPE_FIRST_PARTY.to_be_bytes());
     body.extend_from_slice(&epoch.to_be_bytes());
     body.push(u8::try_from(count).map_err(|_| Error::Malformed)?);
+
     for element in &blinded {
         let solution =
             PowSolution::solve(&verifier, &issue_seed(epoch, element), POW_EFFORT_MAX, rng)?;
@@ -91,6 +94,7 @@ pub fn issue_request<R: TryCryptoRng + ?Sized>(
         body.extend_from_slice(element);
         body.extend_from_slice(&encoded);
     }
+
     Ok((state, body))
 }
 
@@ -106,6 +110,7 @@ pub fn cross_relay_issue_request<R: TryCryptoRng + ?Sized>(
     if count == 0 || count > ISSUE_REQUEST_MAX {
         return Err(Error::Malformed);
     }
+
     let challenge = TokenChallenge {
         token_type: TYPE_CROSS_RELAY,
         epoch,
@@ -113,10 +118,12 @@ pub fn cross_relay_issue_request<R: TryCryptoRng + ?Sized>(
     };
     let (state, blinded) = CrossRelayRequest::new(count, &challenge, issuer_pk, rng)?;
     let verifier = issue_verifier(issuer_pk.modulus());
+
     let mut body = Vec::new();
     body.extend_from_slice(&TYPE_CROSS_RELAY.to_be_bytes());
     body.extend_from_slice(&epoch.to_be_bytes());
     body.push(u8::try_from(count).map_err(|_| Error::Malformed)?);
+
     for message in &blinded {
         let solution =
             PowSolution::solve(&verifier, &issue_seed(epoch, message), POW_EFFORT_MAX, rng)?;
@@ -125,6 +132,7 @@ pub fn cross_relay_issue_request<R: TryCryptoRng + ?Sized>(
         body.extend_from_slice(message);
         body.extend_from_slice(&encoded);
     }
+
     Ok((state, body))
 }
 
@@ -181,6 +189,7 @@ pub fn evaluate_request<R: TryCryptoRng + ?Sized>(
     rng: &mut R,
 ) -> Result<(BlindState, Vec<u8>), Error> {
     let (state, blinded) = BlindState::blind(label_input, rng)?;
+
     let mut encoded = [0u8; SOLUTION_LEN];
     let admission = match token {
         Some(token) => Admission {
@@ -201,6 +210,7 @@ pub fn evaluate_request<R: TryCryptoRng + ?Sized>(
             }
         }
     };
+
     let mut body = vec![0u8; admission.len() + 32];
     let used = admission.encode(&mut body)?;
     body.truncate(used);
@@ -223,7 +233,6 @@ pub fn evaluate_finish(
     Ok(state.finalize(&evaluation, directory_pk)?)
 }
 
-/// A lookup response: the head and the proof.
 /// A parsed lookup: the head bytes, the sealed profile blob, and the proof.
 pub type Looked = (Vec<u8>, Option<Vec<u8>>, LookupProof);
 
@@ -323,6 +332,7 @@ pub fn register_body(
     put_var16(&mut body, label_input)?;
     put_var16(&mut body, entry)?;
     body.extend_from_slice(answer);
+
     // DIS-172: the end of a timed link, which the directory keeps.
     if let Some(seconds) = lease {
         body.extend_from_slice(&seconds.to_be_bytes());

@@ -104,6 +104,7 @@ impl PowChallenge {
         if self.signature.len() != SIGNATURE_LEN || self.effort > POW_EFFORT_MAX {
             return Err(Error::Malformed);
         }
+
         let mut w = Writer::new(out);
         self.write_signed(&mut w)?;
         w.put(&self.signature)?;
@@ -115,22 +116,27 @@ impl PowChallenge {
         if bytes.len() != CHALLENGE_LEN {
             return Err(Error::Malformed);
         }
+
         let mut r = Reader::new(bytes);
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let verifier_id = r.array()?;
         if r.u8()? != SCHEME_EQUIX {
             return Err(Error::Malformed);
         }
+
         let seed = r.array()?;
         let effort = r.u32()?;
         if effort > POW_EFFORT_MAX {
             return Err(Error::Malformed);
         }
+
         let issued_at = u64::from_be_bytes(r.array()?);
         let signature = r.take(SIGNATURE_LEN)?.to_vec();
         r.finish()?;
+
         Ok(PowChallenge {
             verifier_id,
             seed,
@@ -171,10 +177,12 @@ impl PowSolution {
         if bytes.len() != SOLUTION_LEN {
             return Err(Error::Malformed);
         }
+
         let mut r = Reader::new(bytes);
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let out = PowSolution {
             seed: r.array()?,
             nonce: r.array()?,
@@ -213,6 +221,7 @@ impl PowSolution {
         let mut nonce = [0u8; equix::NONCE_LEN];
         rng.try_fill_bytes(&mut nonce)
             .map_err(|_| Error::from(umbra_crypto::Error::Rng))?;
+
         Ok(
             equix::attempt(verifier_id, seed, &nonce, effort).map(|solution| PowSolution {
                 seed: *seed,
@@ -299,9 +308,12 @@ impl Verifier {
         let mut seed = [0u8; 32];
         rng.try_fill_bytes(&mut seed)
             .map_err(|_| Error::Unverified)?;
+
         let effort = effort_from_backlog(backlog)
             .max(self.floor)
             .min(POW_EFFORT_MAX);
+
+        // The challenge before the previous one retires with its nonces.
         if let Some(old) = self.previous.take() {
             self.nonces.retain(|(s, _)| *s != old.seed);
         }
@@ -311,6 +323,7 @@ impl Verifier {
             effort,
             issued_at: now,
         });
+
         Ok(PowChallenge {
             verifier_id: self.verifier_id,
             seed,
@@ -340,6 +353,7 @@ impl Verifier {
         if self.nonces.contains(&(solution.seed, solution.nonce)) {
             return Err(Error::Stale);
         }
+
         solution.check(&self.verifier_id)?;
         self.nonces.insert((solution.seed, solution.nonce));
         Ok(())
@@ -369,6 +383,7 @@ impl ChallengeBook {
         if !is_live(challenge.issued_at, now) {
             return Err(Error::Stale);
         }
+
         let is_newer = self
             .held
             .get(&challenge.verifier_id)
@@ -483,6 +498,38 @@ impl ChunkAdmissions {
         relay: &[u8; 32],
         rng: &mut R,
     ) -> Option<PowSolution> {
+        self.drop_ended();
+
+        let challenge = self.book.get(relay, self.now)?;
+        let seed = challenge.seed;
+        let effort = challenge.effort.clamp(POW_CHUNK_FLOOR, POW_EFFORT_MAX);
+        let key = (upload, *relay);
+
+        if let Some((solution, left)) = self.held.get_mut(&key) {
+            if *left > 0 {
+                *left -= 1;
+                return Some(*solution);
+            }
+        }
+
+        if let Some(solution) = self.take_stock(key, &seed, effort) {
+            return Some(solution);
+        }
+
+        // ABU-069: no new solve past one period from the fetch.
+        if self.now.saturating_sub(self.fetched_at) >= POW_CHALLENGE_PERIOD {
+            return None;
+        }
+
+        let solution = PowSolution::solve(relay, &seed, effort, rng).ok()?;
+        self.held
+            .insert(key, (solution, POW_CHUNK_ALLOWANCE.saturating_sub(1)));
+        Some(solution)
+    }
+
+    /// Drops each held solution and each stock whose challenge is not the
+    /// newest live one of its relay.
+    fn drop_ended(&mut self) {
         // A solution to a challenge that is not the newest serves no more,
         // thus the state holds the uploads of the live challenges alone.
         let (book, now) = (&self.book, self.now);
@@ -490,6 +537,7 @@ impl ChunkAdmissions {
             book.get(relay, now)
                 .is_some_and(|challenge| challenge.seed == solution.seed)
         });
+
         // An upload that ended leaves its stock, which goes with its seed.
         self.stock.retain(|(_, relay), solutions| {
             book.get(relay, now).is_some_and(|challenge| {
@@ -498,37 +546,27 @@ impl ChunkAdmissions {
                     .any(|solution| solution.seed == challenge.seed)
             })
         });
-        let challenge = self.book.get(relay, self.now)?;
-        if let Some((solution, left)) = self.held.get_mut(&(upload, *relay)) {
-            if *left > 0 {
-                *left -= 1;
-                return Some(*solution);
-            }
+    }
+
+    /// Takes a solution of the stock of `key` for `seed` at `floor` or
+    /// above, and holds it. A stock with no such solution goes.
+    fn take_stock(
+        &mut self,
+        key: (u64, [u8; 32]),
+        seed: &[u8; 32],
+        floor: u32,
+    ) -> Option<PowSolution> {
+        let solutions = self.stock.get_mut(&key)?;
+        solutions.retain(|solution| solution.seed == *seed && solution.effort >= floor);
+
+        if let Some(solution) = solutions.pop() {
+            self.held
+                .insert(key, (solution, POW_CHUNK_ALLOWANCE.saturating_sub(1)));
+            return Some(solution);
         }
-        let floor = challenge.effort.clamp(POW_CHUNK_FLOOR, POW_EFFORT_MAX);
-        if let Some(solutions) = self.stock.get_mut(&(upload, *relay)) {
-            solutions
-                .retain(|solution| solution.seed == challenge.seed && solution.effort >= floor);
-            if let Some(solution) = solutions.pop() {
-                self.held.insert(
-                    (upload, *relay),
-                    (solution, POW_CHUNK_ALLOWANCE.saturating_sub(1)),
-                );
-                return Some(solution);
-            }
-            self.stock.remove(&(upload, *relay));
-        }
-        // ABU-069: no new solve past one period from the fetch.
-        if self.now.saturating_sub(self.fetched_at) >= POW_CHALLENGE_PERIOD {
-            return None;
-        }
-        let effort = challenge.effort.clamp(POW_CHUNK_FLOOR, POW_EFFORT_MAX);
-        let solution = PowSolution::solve(relay, &challenge.seed, effort, rng).ok()?;
-        self.held.insert(
-            (upload, *relay),
-            (solution, POW_CHUNK_ALLOWANCE.saturating_sub(1)),
-        );
-        Some(solution)
+
+        self.stock.remove(&key);
+        None
     }
 
     /// The seed and the effort of a solution that admits a registration at
@@ -537,6 +575,7 @@ impl ChunkAdmissions {
         if self.now.saturating_sub(self.fetched_at) >= POW_CHALLENGE_PERIOD {
             return None;
         }
+
         let challenge = self.book.get(relay, self.now)?;
         let effort = challenge.effort.clamp(POW_CHUNK_FLOOR, POW_EFFORT_MAX);
         Some((challenge.seed, effort))
@@ -632,6 +671,7 @@ pub fn verify_hello(entry_pk: &[u8], epoch: u32, solution: &PowSolution) -> Resu
     if solution.effort < HELLO_POW_EFFORT {
         return Err(Error::Unverified);
     }
+
     solution.check(&derived.verifier_id)
 }
 
@@ -757,9 +797,8 @@ mod tests {
         let late = PowSolution::solve(&[2; 32], &first.seed, 1, &mut Rng(8)).unwrap();
         assert_eq!(v.accept(&late), Err(Error::Unverified));
         assert_ne!(third.seed, first.seed);
-        let floored = Verifier::new([2; 32], 20);
-        let mut floored_v = floored;
-        assert_eq!(floored_v.issue(0, 0, &mut Rng(9)).unwrap().effort, 20);
+        let mut floored = Verifier::new([2; 32], 20);
+        assert_eq!(floored.issue(0, 0, &mut Rng(9)).unwrap().effort, 20);
     }
 
     #[test]

@@ -224,6 +224,7 @@ impl Group {
             roster_pk: Some(keys.roster().verifying_key().to_bytes().to_vec()),
             active: true,
         };
+
         let secret = EpochSecret::generate(rng)?;
         let mut epochs = EpochStore::default();
         epochs.install(EpochState::new(
@@ -235,11 +236,13 @@ impl Group {
             0,
             now,
         ))?;
+
         let mut owners = [Secret::<32>::zeroed(), Secret::<32>::zeroed()];
         for owner in &mut owners {
             rng.try_fill_bytes(owner.expose_mut())
                 .map_err(|_| Error::Unverified)?;
         }
+
         Ok(Group {
             own_index: 0,
             previous: None,
@@ -265,8 +268,10 @@ impl Group {
         if !admitted.holds_keys(&keys) {
             return Err(Error::Unverified);
         }
+
         let mut epochs = EpochStore::default();
         epochs.install(admitted.epoch)?;
+
         Ok(Group {
             own_index: admitted.index,
             previous: None,
@@ -295,22 +300,26 @@ impl Group {
         self.epochs.export(&mut w);
         self.sender.export(&mut w)?;
         self.receiver.export(&mut w)?;
+
         w.flag(self.owners.is_some());
         if let Some(owners) = &self.owners {
             for owner in owners {
                 w.bytes(owner.expose());
             }
         }
+
         w.flag(self.replicas.is_some());
         if let Some(replicas) = &self.replicas {
             replicas.export(&mut w);
         }
+
         // The index before a re-key. Its seed is a row of the local identity
         // table, as the seed of the member is.
         w.flag(self.previous.is_some());
         if let Some(previous) = &self.previous {
             w.u16(previous.index);
         }
+
         // The epochs that wait for a roster object or for the clock.
         w.u32(super::roster::count(self.pending.len())?);
         for held in &self.pending {
@@ -327,6 +336,7 @@ impl Group {
             w.flag(held.serves_all);
             w.u64(held.arrived_at);
         }
+
         w.u32(super::roster::count(self.waiting.len())?);
         for held in &self.waiting {
             w.u32(held.epoch);
@@ -334,6 +344,7 @@ impl Group {
             w.u64(held.arrived_at);
             w.var(&held.body)?;
         }
+
         Ok(w.finish())
     }
 
@@ -356,6 +367,7 @@ impl Group {
         if r.u8()? != STORED_VERSION {
             return Err(Error::Stale);
         }
+
         let own_index = r.u16()?;
         let roster = Roster::import(&mut r)?;
         let epochs = EpochStore::import(&mut r)?;
@@ -371,6 +383,7 @@ impl Group {
         } else {
             None
         };
+
         // A form of an earlier build ends here.
         let previous_index = if r.end().is_ok() {
             None
@@ -379,6 +392,7 @@ impl Group {
         } else {
             None
         };
+
         // A form before the epochs that wait ends here.
         let mut pending = Vec::new();
         let mut waiting = Vec::new();
@@ -417,7 +431,9 @@ impl Group {
                 });
             }
         }
+
         r.end()?;
+
         let previous = previous_index
             .zip(previous_seed)
             .map(|(index, seed)| Previous {
@@ -425,6 +441,7 @@ impl Group {
                 keys: Box::new(MemberKeys::from_seed(seed)),
                 pairs: PairCache::default(),
             });
+
         Ok(Group {
             own_index,
             previous,
@@ -513,17 +530,20 @@ impl Group {
         if self.own_role().is_none() {
             return Err(Error::NoPath);
         }
+
         // GRP-076: each member discards a roster object above a rate, thus
         // this member posts none.
         if self.rate_bars(app, now) {
             return Err(Error::NoPath);
         }
+
         // GRP-231, GRP-386: the previous epoch ends with its grace.
         self.epochs.expire(now);
         let members = self.roster.active_count();
         let bucket = bucket_for(members, app.len()).ok_or(Error::NoPath)?;
         let mut nonce = [0u8; 12];
         rng.fill_bytes(&mut nonce);
+
         self.sender.build(
             self.own_index,
             &self.keys,
@@ -545,9 +565,11 @@ impl Group {
         else {
             return false;
         };
+
         if message.kind != umbra_wire::app::AppKind::GroupControl {
             return false;
         }
+
         GroupControl::parse(message.body)
             .ok()
             .and_then(|control| Roster::rate_kind(&control))
@@ -570,6 +592,7 @@ impl Group {
         if self.own_role().is_none() || roster_epoch > self.roster.epoch_index() {
             return Err(Error::NoPath);
         }
+
         self.epochs.expire(now);
         let members = self
             .roster
@@ -579,6 +602,7 @@ impl Group {
         let bucket = bucket_for(members, app.len()).ok_or(Error::NoPath)?;
         let mut nonce = [0u8; 12];
         rng.fill_bytes(&mut nonce);
+
         self.sender.build_at(
             self.own_index,
             &self.keys,
@@ -605,6 +629,7 @@ impl Group {
         rng.fill_bytes(&mut nonce);
         let mut msg_id = [0u8; 16];
         rng.fill_bytes(&mut msg_id);
+
         self.sender.build_presence(
             self.own_index,
             &self.keys,
@@ -646,6 +671,7 @@ impl Group {
             own: &self.keys,
         };
         let first = self.receiver.receive(record, bucket, &mut ctx, now);
+
         // GRP-372: a record that a member tagged for the index before the
         // re-key opens with the keys of that index.
         let Some(previous) = self.previous.as_mut() else {
@@ -654,6 +680,7 @@ impl Group {
         if !matches!(first, Err(Error::Unverified)) {
             return first;
         }
+
         let current = self.receiver.own_index();
         self.receiver.set_own_index(previous.index);
         let mut ctx = Context {
@@ -681,6 +708,7 @@ impl Group {
         {
             return Err(Error::Unverified);
         }
+
         // Each owner whose key this roster holds can be the creator of the
         // path. This member is the creator when it holds index 0, which the
         // creation gave and no later object gives (`GRP-306`). The key of
@@ -695,13 +723,16 @@ impl Group {
         if self.own_index == 0 {
             keys.push(self.own_roster_pk());
         }
+
         let mut roster = keys
             .iter()
             .find_map(|key| Roster::from_snapshot(&snapshot, &snapshot.chain_hash, key, now).ok())
             .ok_or(Error::Unverified)?;
+
         // GRP-320: the snapshot names the active members alone, and a
         // member that left can hold the highest index.
         roster.open_next_index();
+
         let own = roster
             .member(self.own_index)
             .filter(|member| member.active)
@@ -710,6 +741,7 @@ impl Group {
         if own.pair_pk != self.keys.pair_public() || own.kem_pk_hash != own_kem {
             return Err(Error::Unverified);
         }
+
         self.roster = roster;
         Ok(())
     }
@@ -720,6 +752,7 @@ impl Group {
         // GRP-357: an epoch that waited for the roster object comes first,
         // and each record that waited for its key opens after it.
         let mut out = self.retry_epochs(now);
+
         // GRP-372: each record takes both indexes of a re-key, as a record
         // that arrives does, thus one tagged for the index before stays.
         for (bytes, bucket, arrived_at) in self.receiver.take_held() {
@@ -731,6 +764,7 @@ impl Group {
                 Err(_) => {}
             }
         }
+
         out
     }
 
@@ -768,6 +802,7 @@ impl Group {
                 .ok_or(Error::Stale)?,
             Err(error) => return Err(error),
         };
+
         let keys = core::mem::replace(&mut self.keys, Box::new(MemberKeys::from_seed(seed)));
         let pairs = core::mem::take(&mut self.pairs);
         self.previous = Some(Previous {
@@ -777,6 +812,7 @@ impl Group {
         });
         self.own_index = new;
         self.receiver.set_own_index(new);
+
         // The counter of a sender runs for each index.
         self.sender = Sender::default();
         Ok(new)
@@ -821,6 +857,7 @@ impl Group {
         if !self.lost_rekey() {
             return Err(Error::NoPath);
         }
+
         super::join::rekey_record(&self.keys, fresh, &self.roster, self.own_index, false, rng)
     }
 
@@ -833,6 +870,7 @@ impl Group {
             .retain(|held| now.saturating_sub(held.arrived_at) < GROUP_ROSTER_WAIT);
         self.waiting
             .retain(|held| now.saturating_sub(held.arrived_at) < GROUP_ROSTER_WAIT);
+
         // A record that left the list at its bound is a gap too.
         self.receiver
             .expire_held(now, current)
@@ -872,6 +910,7 @@ impl Group {
         if self.own_role().is_none_or(|own| own < Role::Admin) {
             return Err(Error::Unverified);
         }
+
         let grantee = self
             .roster
             .member(index)
@@ -893,6 +932,7 @@ impl Group {
         };
         let sig = self.keys.roster().sign(&epoch.preimage(), rng)?.to_bytes();
         epoch.sig = &sig;
+
         let mut payload = alloc::vec![0u8; 6_000];
         let n = epoch.encode(&mut payload)?;
         super::join::wrap(
@@ -914,6 +954,7 @@ impl Group {
         let Some(role) = self.own_role().filter(|role| *role >= Role::Moderator) else {
             return Err(Error::Unverified);
         };
+
         let actor_pk = self.keys.roster().verifying_key().to_bytes();
         let mut epoch = ModerationEpoch {
             chain: Chain {
@@ -936,6 +977,7 @@ impl Group {
         };
         let sig = self.keys.roster().sign(&epoch.preimage(), rng)?.to_bytes();
         epoch.sig = &sig;
+
         let mut payload = alloc::vec![0u8; 6_000];
         let n = epoch.encode(&mut payload)?;
         super::join::wrap(
@@ -960,6 +1002,7 @@ impl Group {
         if !self.may_leave() {
             return Err(Error::NoPath);
         }
+
         self.plain_epoch(PlainOp::SelfRemoval)
     }
 
@@ -972,6 +1015,7 @@ impl Group {
             },
             op,
         };
+
         let mut payload = alloc::vec![0u8; 1_400];
         let n = epoch.encode(&mut payload)?;
         super::join::wrap(
@@ -988,6 +1032,7 @@ impl Group {
         let Some(current) = self.epochs.current() else {
             return false;
         };
+
         let triggers = self.roster.triggers_since(current.roster_epoch());
         !triggers.is_empty()
             && !triggers
@@ -1008,6 +1053,7 @@ impl Group {
         if !self.roster.member(self.own_index).is_some_and(|m| m.active) {
             return None;
         }
+
         let triggers = self.roster.triggers_since(current.roster_epoch());
         if triggers
             .iter()
@@ -1015,9 +1061,11 @@ impl Group {
         {
             return None;
         }
+
         if let Some(last) = triggers.last() {
             return Some(*last);
         }
+
         // GRP-360: the age of the epoch is a trigger of its own.
         current.aged(now).then_some(Trigger {
             excluded: None,
@@ -1062,6 +1110,7 @@ impl Group {
         if !self.roster.member(self.own_index).is_some_and(|m| m.active) {
             return Err(Error::Unverified);
         }
+
         // GRP-387: only a rotator at `admin` or above holds the owner
         // credentials, and a rotator below it fills no slot with them.
         let own_sks = self.owners.as_ref().filter(|_| {
@@ -1069,6 +1118,7 @@ impl Group {
                 .member(self.own_index)
                 .is_some_and(|member| member.role >= Role::Admin)
         });
+
         let mut members: Vec<(u16, Role, Vec<u8>, PairKey)> = Vec::new();
         for member in self.roster.active() {
             let kem_pk = member.kem_pk.clone().ok_or(Error::NoPath)?;
@@ -1084,6 +1134,7 @@ impl Group {
             }
             members.push((member.index, member.role, kem_pk, pair));
         }
+
         let included: Vec<Included<'_>> = members
             .iter()
             .map(|(index, role, kem_pk, pair)| Included {
@@ -1097,6 +1148,7 @@ impl Group {
             .iter()
             .filter(|member| member.role >= Role::Admin && own_sks.is_some())
             .count();
+
         // GRP-280: the slots go inline when a bucket holds them, and on
         // the chunk path otherwise.
         let bucket =
@@ -1113,6 +1165,7 @@ impl Group {
             bucket,
             rng,
         )?;
+
         let carrier = match (output.inline, output.chunks) {
             (Some(body), _) => {
                 // GRP-383: the header carries `t_{e+1}` in its slot field.
@@ -1137,6 +1190,7 @@ impl Group {
             }),
             (None, None) => return Err(Error::Malformed),
         };
+
         self.epochs.install(
             EpochState::new(
                 output.secret,
@@ -1153,6 +1207,7 @@ impl Group {
         let current = self.epochs.epoch();
         self.pending.retain(|held| held.epoch >= current);
         self.waiting.retain(|held| held.epoch > current);
+
         Ok(Rotation {
             carrier,
             epoch,
@@ -1176,6 +1231,7 @@ impl Group {
                 descriptor,
             },
         };
+
         let need = EPOCH_KEY_FIXED
             .saturating_add(4)
             .saturating_add(descriptor.len());
@@ -1186,6 +1242,7 @@ impl Group {
         let mut body_bytes = alloc::vec![0u8; bucket.group_body()];
         let n = body.encode(bucket, &mut body_bytes)?;
         body_bytes.truncate(n);
+
         let record = GroupQueueRecord {
             kind: RecordKind::EpochKey,
             epoch,
@@ -1223,6 +1280,7 @@ impl Group {
         else {
             return Ok(None);
         };
+
         self.check_epoch(epoch)?;
         // GRP-357: any writer of the queue posts such a record at any time.
         // Thus this member fetches a chunk only for an epoch that a trigger
@@ -1233,6 +1291,7 @@ impl Group {
         if epoch > self.epochs.epoch() {
             self.check_above(epoch, roster_epoch, start_slot, None, false, now)?;
         }
+
         // The rotation served the active set of its roster epoch in index
         // order, thus the rank of this member there names its block.
         // A rotation of a roster epoch before a re-key served the index
@@ -1247,6 +1306,7 @@ impl Group {
             })
             .ok_or(Error::NoPath)?;
         let chunk = rank / usize::from(slots_per_chunk);
+
         Ok(Some(WantedChunk {
             descriptor: descriptor.to_vec(),
             chunk: u32::try_from(chunk).map_err(|_| Error::Malformed)?,
@@ -1267,11 +1327,13 @@ impl Group {
         now: u64,
     ) -> Result<(), Error> {
         self.check_epoch(wanted.epoch)?;
+
         let first = usize::try_from(wanted.chunk)
             .map_err(|_| Error::Malformed)?
             .saturating_mul(usize::from(wanted.slots_per_chunk));
         let count = usize::from(wanted.slots_per_chunk)
             .min(usize::from(wanted.slot_count).saturating_sub(first));
+
         let mut refused = Error::NoPath;
         // GRP-388: the rotator's role sets the length of an admin slot.
         for admin_layout in [true, false] {
@@ -1299,6 +1361,7 @@ impl Group {
                 Err(error) => refused = error,
             }
         }
+
         Err(refused)
     }
 
@@ -1342,6 +1405,7 @@ impl Group {
             });
             at = end;
         }
+
         // GRP-281: zero bytes fill the rest of the block.
         block
             .get(at..)?
@@ -1377,6 +1441,7 @@ impl Group {
             }
             return Err(error);
         }
+
         match self.open_epoch_slot(epoch, start_slot, body, now) {
             Ok(opened) => self.install_opened(opened, now),
             Err(error) => {
@@ -1393,6 +1458,7 @@ impl Group {
         if epoch < current.epoch() {
             return Err(Error::Stale);
         }
+
         Ok(())
     }
 
@@ -1461,9 +1527,11 @@ impl Group {
                 supplied,
             );
         }
+
         if epoch < current.epoch() {
             return Ok(());
         }
+
         // A second record of the current epoch races the first (GRP-273,
         // GRP-288). It answers the triggers since the base of that epoch,
         // as the first did. A stored form before the base holds the epoch
@@ -1493,6 +1561,7 @@ impl Group {
         if floor.is_some_and(|floor| roster_epoch < floor) {
             return Err(Error::Unverified);
         }
+
         // GRP-356: an index that any trigger since the epoch before
         // excludes rotates nothing, whatever roster epoch its record names.
         let excluded = triggers
@@ -1501,6 +1570,7 @@ impl Group {
         if excluded {
             return Err(Error::Unverified);
         }
+
         Ok(())
     }
 
@@ -1532,6 +1602,7 @@ impl Group {
         supplied: bool,
     ) -> Result<(), Error> {
         self.check_triggers(base.roster_epoch, roster_epoch, rotator, supplied)?;
+
         let room = roster_epoch
             .saturating_sub(base.roster_epoch)
             .saturating_mul(2)
@@ -1540,6 +1611,7 @@ impl Group {
         if epoch.saturating_sub(base.epoch) > room {
             return Err(Error::Unverified);
         }
+
         Ok(())
     }
 
@@ -1579,6 +1651,7 @@ impl Group {
         let current = self.epochs.current().ok_or(Error::NoPath)?;
         let own = current.as_base();
         let above = current.base_of_next(roster_epoch);
+
         if self.rotation_called(now)
             && self
                 .check_from(own, 1, epoch, roster_epoch, start_slot, rotator, supplied)
@@ -1586,6 +1659,7 @@ impl Group {
         {
             return Ok(above);
         }
+
         if self.first_since_admission(roster_epoch)
             && epoch == current.epoch().saturating_add(1)
             && self
@@ -1594,6 +1668,7 @@ impl Group {
         {
             return Ok(above);
         }
+
         let base = current.base().ok_or(Error::Unverified)?;
         let age = u64::from(base.start_slot).saturating_mul(crate::group::GROUP_SLOT);
         let called = !self.roster.triggers_since(base.roster_epoch).is_empty()
@@ -1601,6 +1676,7 @@ impl Group {
         if !called {
             return Err(Error::Unverified);
         }
+
         self.check_from(base, 0, epoch, roster_epoch, start_slot, rotator, supplied)?;
         Ok((Some(base), above.1))
     }
@@ -1618,6 +1694,7 @@ impl Group {
         let Some(base) = current.base() else {
             return;
         };
+
         let rotator = opened.payload.rotator;
         let is_lower = opened.epoch < current.epoch()
             && opened.epoch > base.epoch
@@ -1640,6 +1717,7 @@ impl Group {
         {
             return;
         }
+
         self.epochs.mark_repeat();
         self.roster.note_rotation(opened.roster_epoch);
     }
@@ -1664,6 +1742,7 @@ impl Group {
         if opened.epoch < current.epoch() {
             return Err(Error::Stale);
         }
+
         // GRP-383: `t_e` lies inside the bound of the clock. An epoch that
         // starts above it takes no record until the clock reaches it. An
         // epoch that starts below it is past `GROUP_EPOCH_MAX_AGE` at once.
@@ -1672,16 +1751,19 @@ impl Group {
             core::cmp::Ordering::Less => return Err(Error::Stale),
             core::cmp::Ordering::Equal => {}
         }
+
         // The roster object that the record answers has not arrived.
         if opened.roster_epoch > self.roster.epoch_index() {
             return Err(Error::NoPath);
         }
+
         if self
             .role_at(opened.payload.rotator, opened.roster_epoch)
             .is_none()
         {
             return Err(Error::Unverified);
         }
+
         let supplied = !opened.serves_all && self.receiver.holds_epoch_record(opened.epoch);
         if opened.epoch > current.epoch() {
             return self.check_above(
@@ -1693,12 +1775,14 @@ impl Group {
                 now,
             );
         }
+
         self.check_rotator(
             opened.epoch,
             opened.roster_epoch,
             opened.payload.rotator,
             supplied,
         )?;
+
         // A second secret of the current epoch stands where the first one
         // does.
         Ok((current.base(), current.is_repeat()))
@@ -1713,6 +1797,7 @@ impl Group {
             {
                 return Err(Error::Unverified);
             }
+
             // GRP-379, GRP-401: only an admin of the roster that stands
             // hands them. A member that left the role or the group keeps
             // its pair key. Its slot would put its own bytes in the place
@@ -1724,13 +1809,16 @@ impl Group {
             {
                 return Err(Error::Unverified);
             }
+
             self.take_owners(&opened.payload);
+
             // GRP-372: a slot for the new index ends the keys before it.
             if opened.is_current {
                 self.previous = None;
             }
             return Ok(());
         }
+
         let (base, repeat) = match self.check_install(&opened, now) {
             Ok(place) => place,
             Err(error) => {
@@ -1740,6 +1828,7 @@ impl Group {
                 return Err(error);
             }
         };
+
         let before = self.epochs.epoch();
         let secret = EpochSecret::from_secret(Secret::new(*opened.payload.epoch_secret.expose()));
         // GRP-386: the two queue credentials come from `K_e`.
@@ -1756,6 +1845,7 @@ impl Group {
         if !opened.serves_all {
             state = state.supplied();
         }
+
         self.epochs.install(state)?;
         let current = self.epochs.epoch();
         if current != before {
@@ -1764,6 +1854,7 @@ impl Group {
             self.pending.retain(|held| held.epoch >= current);
             self.waiting.retain(|held| held.epoch > current);
         }
+
         self.take_owners(&opened.payload);
         // GRP-372: a slot for the new index ends the keys before it.
         if opened.is_current {
@@ -1791,9 +1882,11 @@ impl Group {
         {
             return;
         }
+
         if self.pending.len() >= PENDING_MAX {
             self.pending.remove(0);
         }
+
         self.pending.push(opened);
     }
 
@@ -1812,6 +1905,7 @@ impl Group {
         else {
             return;
         };
+
         // GRP-383: a start slot past the age bound installs nothing.
         // GRP-256: a record below the admission of this member holds no
         // slot for it.
@@ -1828,6 +1922,7 @@ impl Group {
         {
             return;
         }
+
         if self.waiting.len() >= WAITING_MAX {
             // The highest epoch leaves, and of one epoch the body that came
             // last. A body that came first keeps its place.
@@ -1845,6 +1940,7 @@ impl Group {
             }
             self.waiting.remove(last);
         }
+
         self.waiting.push(Waiting {
             epoch,
             start_slot,
@@ -1871,12 +1967,14 @@ impl Group {
                 out.push(Outcome::EpochInstalled { epoch });
             }
         }
+
         for held in core::mem::take(&mut self.waiting) {
             if held.epoch <= self.epochs.epoch()
                 || now.saturating_sub(held.arrived_at) >= GROUP_ROSTER_WAIT
             {
                 continue;
             }
+
             let fetches = matches!(
                 self.wanted_chunk(held.epoch, held.start_slot, &held.body, now),
                 Ok(Some(_))
@@ -1891,6 +1989,7 @@ impl Group {
                 self.waiting.push(held);
             }
         }
+
         out
     }
 
@@ -1932,6 +2031,7 @@ impl Group {
         if self.own_role().is_none_or(|own| own < Role::Admin) {
             return Err(Error::Unverified);
         }
+
         let owners = self.owners.as_ref().ok_or(Error::NoPath)?;
         let member = self
             .roster
@@ -1948,6 +2048,7 @@ impl Group {
             kem_pk: &kem_pk,
             pair_key: &pair,
         };
+
         // GRP-400: no epoch secret, thus a promotee that joined inside the
         // epoch learns no record before its join.
         let roster_epoch = self.roster.epoch_index();
@@ -1984,6 +2085,7 @@ impl Group {
             bucket,
             rng,
         )?;
+
         let record = GroupQueueRecord {
             kind: RecordKind::EpochKey,
             epoch: current.epoch(),
@@ -2043,6 +2145,7 @@ impl Group {
         let Some(current) = self.epochs.current() else {
             return false;
         };
+
         current.epoch() == epoch
             && current.holds_secret()
             && index != self.own_index
@@ -2073,6 +2176,7 @@ impl Group {
         if !self.may_supply(index, current.epoch()) {
             return Err(Error::Unverified);
         }
+
         let member = self.roster.member(index).ok_or(Error::NoPath)?;
         let kem_pk = member.kem_pk.clone().ok_or(Error::NoPath)?;
         let pair = self
@@ -2084,6 +2188,7 @@ impl Group {
             kem_pk: &kem_pk,
             pair_key: &pair,
         };
+
         // The roster epoch of the rotation, thus the requester counts the
         // triggers after it as every other member does (`GRP-357`).
         let secret = Secret::new(*current.secret().expose().expose());
@@ -2112,14 +2217,15 @@ impl Group {
                 return slots.iter().map(|slot| slot.index).collect();
             }
         }
+
         Vec::new()
     }
 
     /// Opens this member's slot in an epoch-key body and verifies its tag.
-    /// The rotator's role sets the length of an admin slot and no field in
-    /// the clear names the rotator, thus the admin layout is read first
-    /// and the layout of a rotator that holds no owner credential after it
-    /// (`GRP-388`).
+    /// The rotator's role sets the length of an admin slot, and no field in
+    /// the clear names the rotator. Thus this member reads the admin layout
+    /// first, and then the layout of a rotator that holds no owner
+    /// credential (`GRP-388`).
     fn open_epoch_slot(
         &self,
         epoch: u32,
@@ -2141,11 +2247,13 @@ impl Group {
             let Ok(parsed) = parsed else {
                 continue;
             };
+
             let Carrier::Inline(slots) = &parsed.carrier else {
                 // GRP-284: the slot of a chunked record is on the chunk
                 // path, and `install_chunk` reads it.
                 return Err(Error::NoPath);
             };
+
             match self.read_own_slot(parsed.roster_epoch, slots, epoch, start_slot) {
                 Ok((payload, is_current)) => {
                     let indices: Vec<u16> = slots.iter().map(|slot| slot.index).collect();
@@ -2164,6 +2272,7 @@ impl Group {
                 Err(error) => refused = error,
             }
         }
+
         Err(refused)
     }
 
@@ -2217,6 +2326,7 @@ impl Group {
             let member = self.roster.member(index)?;
             keys.pair_key(&member.pair_pk, self.roster.group_id()).ok()
         };
+
         super::epoch::open_own_slot(
             slots,
             own_index,
@@ -2257,6 +2367,7 @@ impl Group {
         now: u64,
     ) -> Result<Applied, Error> {
         let slot = send_slot(&self.epochs, now);
+
         self.apply_control_at(control, sender, slot, now)
     }
 
@@ -2279,6 +2390,7 @@ impl Group {
     ) -> Result<Applied, Error> {
         let applied = self.apply_roster(control, sender, slot, now)?;
         self.revert_orphaned_rekey();
+
         Ok(applied)
     }
 
@@ -2291,6 +2403,7 @@ impl Group {
         let Some(previous) = self.previous.as_ref() else {
             return;
         };
+
         let holds = |index: u16, keys: &MemberKeys| {
             let hash = umbra_crypto::hash::sha3_256(&[&keys.roster().verifying_key().to_bytes()]);
             self.roster
@@ -2305,6 +2418,7 @@ impl Group {
         if holds_own || !holds(previous.index, &previous.keys) {
             return;
         }
+
         if let Some(previous) = self.previous.take() {
             self.keys = previous.keys;
             self.pairs = previous.pairs;
@@ -2331,6 +2445,7 @@ impl Group {
         now: u64,
     ) -> Result<Applied, Error> {
         let applied = self.roster.apply_at(control, sender, slot, now);
+
         // GRP-369: the second of two re-keys of one index verified now,
         // whichever one stands. The epochs of their roster epoch that this
         // member installed count from here, as they do at a member that
@@ -2347,10 +2462,13 @@ impl Group {
             let took_place = matches!(applied, Ok(Applied::Rekeyed { replaced: true, .. }));
             self.roster.rival_after_rotation(held, took_place);
         }
+
         let applied = applied?;
+
         // GRP-263: the history keeps what the epochs of this member name.
         let keep_from = self.epochs.oldest_roster_epoch().unwrap_or(u32::MAX);
         self.roster.retain_history(now, keep_from);
+
         // GRP-117: another head took the place of the last one, and each
         // pair key comes from the roster again.
         if let Some(displaced) = self.roster.take_displaced() {
@@ -2360,6 +2478,7 @@ impl Group {
             }
             self.displaced = Some(displaced);
         }
+
         match &applied {
             Applied::Removed(trigger) => {
                 if let Some(index) = trigger.excluded {
@@ -2379,6 +2498,7 @@ impl Group {
             }
             _ => {}
         }
+
         Ok(applied)
     }
 
@@ -2410,6 +2530,7 @@ impl Group {
         for (reference, seq) in refs.iter_mut().zip(seqs) {
             reference.seq_of_add = seq;
         }
+
         let slot = admit_slot(slot_of(now), current.start_slot());
         // GRP-423: an admin that joined inside the epoch holds no `K_e`,
         // thus it derives from its own chain.
@@ -2425,6 +2546,7 @@ impl Group {
             let chain = current.chain();
             (chain, slot.max(chain.slot()))
         };
+
         admit(
             *self.roster.group_id(),
             index,
@@ -2457,6 +2579,7 @@ impl Group {
         if keys.len() != entries.len() {
             return Err(Error::NoPath);
         }
+
         let snapshot = RosterSnapshot {
             group_id: *self.roster.group_id(),
             roster_epoch: self.roster.epoch_index(),
@@ -2465,6 +2588,7 @@ impl Group {
             keys,
             path,
         };
+
         let mut out = alloc::vec![0u8; snapshot.len()];
         let n = snapshot.encode(&mut out)?;
         out.truncate(n);
@@ -2567,14 +2691,17 @@ mod tests {
         assert_eq!(creator.roster().active_count(), 2);
         assert_eq!(member.own_index(), 1);
         assert_eq!(member.epoch(), creator.epoch());
+
         // GRP-222: the two members derive one pair of credentials.
         assert_eq!(
             creator.credentials().unwrap().read_public(),
             member.credentials().unwrap().read_public()
         );
+
         // A member that joined holds no owner credential (`GRP-188`).
         assert!(creator.owner(0).is_some());
         assert!(member.owner(0).is_none());
+
         // GRP-076: the snapshot of a join carries no count of the rates.
         assert!(creator.roster().rates_are_whole());
         assert!(!member.roster().rates_are_whole());
@@ -2595,6 +2722,7 @@ mod tests {
 
         // The sender reads no record of its own: its own tag is zero bytes.
         assert!(creator.receive(&record, now).is_err());
+
         // GRP-259, GRP-206: the same record again carries the mark of a
         // repeated counter, and the store drops it by its `msg_id`.
         assert!(is_repeat(&member.receive(&record, now).unwrap()));
@@ -2660,9 +2788,11 @@ mod tests {
             creator.credentials().unwrap().write_public(),
             member.credentials().unwrap().write_public()
         );
+
         // The owner credentials came back, and a member still holds none.
         assert!(creator.owner(1).is_some());
         assert!(member.owner(0).is_none());
+
         // The replicas came back with their cursors.
         assert_eq!(
             creator.replicas().unwrap().reference(1).unwrap().relay_id,
@@ -2841,6 +2971,7 @@ mod tests {
         let (mut creator, mut member, mut third) = trio(now);
         let mut rng = Rng(21);
         assert_eq!(creator.roster().active_count(), 3);
+
         // No trigger stands before the removal.
         assert!(creator.owes_rotation(now).is_none());
 
@@ -2859,9 +2990,11 @@ mod tests {
         assert_eq!(trigger.excluded, Some(1));
         assert!(member.owes_rotation(now).is_none());
         assert!(third.owes_rotation(now).is_some());
+
         // GRP-422: until the next epoch, a post waits for a rotation.
         assert!(third.withholds());
         assert!(!member.withholds());
+
         // GRP-356: a rotation by the removed index, or one that names the
         // roster epoch before the removal, installs nowhere.
         let next_epoch = third.epoch() + 1;
@@ -2890,6 +3023,7 @@ mod tests {
             .install_epoch_key(record.epoch, record.slot, record.body, now)
             .unwrap();
         assert_eq!(third.epoch(), first_epoch + 1);
+
         // GRP-276: the removed member holds no slot in the record.
         assert!(member
             .install_epoch_key(record.epoch, record.slot, record.body, now)
@@ -2907,6 +3041,7 @@ mod tests {
             AppMessage::parse(&app, Channel::Group).unwrap().body,
             b"after the removal"
         );
+
         // The removed member holds the old epoch alone, thus the record
         // of the new one never opens and it waits until it expires.
         assert!(!matches!(
@@ -2936,6 +3071,7 @@ mod tests {
             member.receive(&records[2], now).unwrap(),
             Outcome::Content { .. }
         ));
+
         // GRP-259, GRP-205: the other replica gives the record of the hole.
         assert!(matches!(
             member.receive(&records[1], now).unwrap(),
@@ -2950,6 +3086,7 @@ mod tests {
         let now = 1_700_000_000;
         let (mut creator, mut member, _) = pair(now);
         let mut rng = Rng(31);
+
         // A record of the creator before the re-key, which the member reads
         // after it.
         let before = creator
@@ -2962,6 +3099,7 @@ mod tests {
             keys: MemberKeys::from_seed(&seed),
         };
         let object = member.rekey_object(&fresh, &mut rng).unwrap();
+
         // GRP-365: the record goes out under the index that stands.
         let app = AppMessage {
             kind: AppKind::GroupControl,
@@ -3006,6 +3144,7 @@ mod tests {
             member.receive(&after, now).unwrap(),
             Outcome::Content { sender: 0, .. }
         ));
+
         // The member posts under its new index, and the creator reads it.
         let from_new = member
             .post(&text("from the new index"), now, &mut rng)
@@ -3058,6 +3197,7 @@ mod tests {
         let (mut creator, mut member, _) = pair(now);
         let mut rng = Rng(41);
         let creator_seed = Secret::new([0x21; 32]);
+
         // A second reader that gets the two re-keys in the other order.
         let mut late = Group::restore(&creator.export().unwrap(), &creator_seed).unwrap();
 
@@ -3071,9 +3211,11 @@ mod tests {
         let record = member
             .post(&control_app(&object, 8), now, &mut rng)
             .unwrap();
+
         // A removed device holds the keys of the member, and it makes a
         // rival with a lower hash, as an attacker grinds one (§11.12).
         let mut rival = Group::restore(&member.export().unwrap(), &JOINER_SEED).unwrap();
+
         // A linked device of the member, which reads the record on the queue
         // before the seed comes on its sync channel (DEV-300).
         let mut linked = Group::restore(&member.export().unwrap(), &JOINER_SEED).unwrap();
@@ -3123,6 +3265,7 @@ mod tests {
         assert_eq!(creator.roster().forks()[0].named, Some(1));
         assert_eq!(creator.roster().successor_of(1), Some(2));
         assert_eq!(creator.roster().active_count(), 2);
+
         // The same record again changes nothing.
         assert_eq!(
             read_control(&mut creator, &rival_record, now),
@@ -3245,6 +3388,7 @@ mod tests {
     fn a_member_behind_the_roster_takes_the_snapshot_of_an_admin() {
         let now = 1_700_000_000;
         let (mut creator, mut member, _) = pair(now);
+
         // The member misses the add of a third member, as a restore from
         // an old backup does.
         const THIRD_SEED: Secret<32> = Secret::new([0x33; 32]);
@@ -3274,6 +3418,7 @@ mod tests {
             creator.roster().epoch_index()
         );
         assert!(member.roster().member(2).unwrap().kem_pk.is_some());
+
         // A snapshot at the epoch it holds already changes nothing.
         assert!(member.recover_roster(&snapshot, now).is_err());
     }
@@ -3283,6 +3428,7 @@ mod tests {
         let now = 1_700_000_000;
         let (mut creator, mut member, mut third) = trio(now);
         let mut rng = Rng(23);
+
         // The member that leaves is the trigger, and the plain member
         // that stays answers it (`GRP-355`).
         let leave = third.leave_object().unwrap();
@@ -3294,12 +3440,14 @@ mod tests {
         assert!(member.owner(0).is_none());
         let rotation = member.rotate(now, &mut rng).unwrap();
         let record = parse_record(inline(&rotation));
+
         // GRP-388: the creator is an owner, thus the admin layout is the
         // first one read, and the plain layout is the one that opens.
         creator
             .install_epoch_key(record.epoch, record.slot, record.body, now)
             .unwrap();
         assert_eq!(creator.epoch(), member.epoch());
+
         // GRP-379: the rotation of a plain member hands no owner
         // credential, and the owner keeps the one it already holds.
         assert!(creator.owner(0).is_some());
@@ -3321,6 +3469,7 @@ mod tests {
         let now = 1_700_000_000;
         let (mut creator, mut member, _) = pair(now);
         let mut rng = Rng(27);
+
         // The member joined inside the epoch and holds no `K_e`, thus it
         // takes the first epoch after its add. From there on it counts the
         // triggers of its own roster.
@@ -3329,6 +3478,7 @@ mod tests {
         member
             .install_epoch_key(record.epoch, record.slot, record.body, now)
             .unwrap();
+
         // GRP-357: no trigger stands, thus the record is refused.
         let rotation = creator.rotate(now, &mut rng).unwrap();
         let record = parse_record(inline(&rotation));
@@ -3336,6 +3486,7 @@ mod tests {
             member.install_epoch_key(record.epoch, record.slot, record.body, now),
             Err(Error::Unverified)
         );
+
         // GRP-360: the age of the epoch is a trigger of its own.
         let aged = now + crate::group::GROUP_EPOCH_MAX_AGE;
         assert!(member.owes_rotation(aged).is_some());
@@ -3343,11 +3494,13 @@ mod tests {
             .install_epoch_key(record.epoch, record.slot, record.body, aged)
             .unwrap();
         assert_eq!(member.epoch(), rotation.epoch);
+
         // GRP-288: the epoch before the current one does not install.
         assert_eq!(
             member.install_epoch_key(1, record.slot, record.body, aged),
             Err(Error::Stale)
         );
+
         // The backoff of a role holder is shorter than that of a member.
         assert!(creator.rotation_delay(&mut Rng(3)) <= member.rotation_delay(&mut Rng(3)));
     }
@@ -3420,6 +3573,7 @@ mod tests {
         let first_epoch = joiner.epoch();
         let rotation = creator.rotate(now, &mut rng).unwrap();
         let record = parse_record(inline(&rotation));
+
         // A record that names a roster epoch before the add installs
         // nothing, and the member that left holds no slot.
         let add_epoch = joiner.roster().admission_epoch();
@@ -3442,6 +3596,7 @@ mod tests {
             AppMessage::parse(&app, Channel::Group).unwrap().body,
             b"after the rotation"
         );
+
         // The epoch that it installed holds `K_e`, thus the next one needs
         // a trigger that its own roster holds.
         let again = creator.rotate(now, &mut rng).unwrap();
@@ -3458,13 +3613,16 @@ mod tests {
         let (mut creator, mut member, mut third) = trio(now);
         let mut rng = Rng(31);
         let presence = member.presence(now, &mut rng).unwrap();
+
         // GRP-216: one sparse record in `B0`.
         assert_eq!(presence.len(), Bucket::B0.group_record());
+
         // GRP-217: the owner finds its tag and reads a presence signal.
         assert_eq!(
             creator.receive(&presence, now).unwrap(),
             Outcome::Presence { sender: 1 }
         );
+
         // GRP-322: a plain member finds no entry and discards the record.
         assert!(third.receive(&presence, now).is_err());
 
@@ -3481,6 +3639,7 @@ mod tests {
             assert_eq!(counter, 1);
             assert!(!reader.needs_other_replica(now + crate::group::GROUP_GAP_TIMEOUT));
         }
+
         // A second presence at the same counter is no duplicate at the admin.
         let again = member.presence(now, &mut rng).unwrap();
         assert_eq!(
@@ -3496,6 +3655,7 @@ mod tests {
         let now = 1_700_000_000;
         let (mut creator, mut member, mut third) = trio(now);
         let mut rng = Rng(37);
+
         // A member below `admin` grants nothing (`GRP-063`).
         assert_eq!(
             member.grant(2, Role::Moderator, &mut rng),
@@ -3513,6 +3673,7 @@ mod tests {
             );
         }
         assert_eq!(third.own_role(), Some(Role::Moderator));
+
         // A demotion goes the same way, and each roster agrees.
         let demote = creator.grant(2, Role::Member, &mut rng).unwrap();
         let control = GroupControl::parse(&demote).unwrap();
@@ -3550,10 +3711,12 @@ mod tests {
         );
         assert_eq!(third.epoch(), creator.epoch());
         assert_eq!(third.credentials().unwrap().read_public(), before);
+
         // A member that the record does not serve finds no slot in it.
         assert!(member
             .install_epoch_key(record.epoch, record.slot, record.body, now)
             .is_err());
+
         // A member below `admin` hands out nothing.
         assert!(member.owner_delivery(2, &mut rng).is_err());
 
@@ -3641,6 +3804,7 @@ mod tests {
         let now = 1_700_000_000;
         let (mut creator, mut member, third) = trio(now);
         let mut rng = Rng(47);
+
         // The third member leaves, and the creator rotates. The member
         // reads the removal, and the epoch-key record never reaches it.
         let leave = third.leave_object().unwrap();
@@ -3656,6 +3820,7 @@ mod tests {
             member.receive(&later, now).unwrap(),
             Outcome::Content { .. }
         ));
+
         // GRP-289: the held record names the epoch it lacks.
         assert_eq!(member.lacks_epoch(), Some(creator.epoch()));
 
@@ -3714,6 +3879,7 @@ mod tests {
                 seq_of_add: 0,
             },
         ]);
+
         // 29 members join, thus the group holds 30, above the 27 slots of
         // the inline carrier.
         let mut last = None;
@@ -3776,9 +3942,11 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(wanted.descriptor, b"a descriptor");
+
         // The member holds the last index, rank 28, thus block 1.
         assert_eq!(wanted.chunk, 1);
         let segment = crate::attach::SEGMENT_SIZE;
+
         // Block 0 holds the slots of rank 0 to 26 and none of this member.
         assert!(member
             .install_chunk(&wanted, &chunked.object[..segment], now)
@@ -3811,8 +3979,8 @@ mod tests {
         (keys, kem_pk)
     }
 
-    /// Adds a member of the keys of `seed` at each of `groups`, from the
-    /// creator at index 0, and gives its index.
+    /// Adds a member of the keys of `seed` at the creator and at each of
+    /// `others`, from the creator at index 0, and gives its index.
     fn add_member(creator: &mut Group, others: &mut [&mut Group], seed: u8, now: u64) -> u16 {
         let (keys, kem_pk) = join_of(creator, seed);
         let add = creator
@@ -3852,10 +4020,12 @@ mod tests {
         assert_eq!(member.epoch(), 1);
         assert!(member.post(&text("still here"), now, &mut rng).is_ok());
         assert!(member.retry_held(now).is_empty());
+
         // The sweep of the client tries the slot again when the clock
         // reached its bound, and not before.
         assert!(!member.holds_openable(now));
         assert!(member.holds_openable(ahead - 2 * slot));
+
         // The stored form keeps the slot that waits. The clock reaches the
         // bound of `GROUP_SLOT_SKEW`, and the epoch installs.
         let mut member = Group::restore(&member.export().unwrap(), &JOINER_SEED).unwrap();
@@ -3865,6 +4035,7 @@ mod tests {
             [Outcome::EpochInstalled { epoch: 2 }]
         ));
         assert_eq!(member.epoch(), 2);
+
         // GRP-246: the clock lies below `t_e`, and the record takes `t_e`.
         let post = member.post(&text("in the skew"), near, &mut rng).unwrap();
         assert_eq!(parse_record(&post).slot, slot_of(ahead));
@@ -3897,6 +4068,7 @@ mod tests {
         let now = 1_700_000_000;
         let (mut owner, mut admin, mut reader) = trio(now);
         let mut rng = Rng(63);
+
         // The two members joined inside epoch 1 and hold no `K_e`, and such
         // a member takes the first epoch after its add. Epoch 2 reaches
         // each of them first, thus each one counts the triggers of its own
@@ -3962,6 +4134,7 @@ mod tests {
             .apply_control(&GroupControl::parse(&again).unwrap(), 1, now)
             .unwrap();
         assert_eq!(admin.owes_rotation(now).unwrap().excluded, Some(3));
+
         // A record of the admin under the epoch that the reader lacks.
         let between = admin
             .post(&text("between the two epochs"), now, &mut rng)
@@ -3998,11 +4171,13 @@ mod tests {
         assert_eq!(reader.roster().epoch_index(), base + 2);
         assert!(reader.retry_held(now).is_empty());
         assert_eq!(reader.epoch(), 2);
+
         // The member that the removal took out rotates nothing, under any
         // number of an epoch.
         assert!(reader.check_rotator(3, base + 2, 3, false).is_err());
         assert!(reader.check_rotator(9, base + 2, 3, false).is_err());
         assert!(reader.check_rotator(9, base + 2, 1, false).is_ok());
+
         // GRP-375: a key supply of that epoch names the roster epoch of its
         // rotation. With no record of the epoch here it waits; the record
         // that the reader holds for that epoch lets it install, and the
@@ -4025,6 +4200,7 @@ mod tests {
                 Outcome::Content { sender: 1, .. }
             ]
         ));
+
         // The key of that epoch reaches the member that the removal took
         // out, thus the reader owes a rotation and withholds (GRP-422).
         assert!(reader.withholds());
@@ -4059,8 +4235,10 @@ mod tests {
         let now = 1_700_000_000;
         let (mut creator, member, mut third) = trio(now);
         let mut rng = Rng(67);
+
         // A third reader that takes the records in another order.
         let late = Group::restore(&third.export().unwrap(), &THIRD).unwrap();
+
         // Two holders of the keys of index 1 each re-key at one
         // predecessor. The record with the higher hash arrives first.
         let rival = Group::restore(&member.export().unwrap(), &JOINER_SEED).unwrap();
@@ -4086,6 +4264,7 @@ mod tests {
         let first = parse_record(inline(&first));
         assert!(creator.owes_rotation(now).is_none());
         assert!(creator.may_supply(3, creator.epoch()));
+
         // GRP-369: the rival takes the place of the re-key. The epoch of
         // the creator is one of that roster epoch, thus the keys that lost
         // hold it. The rival is a trigger, and no supply goes to the index.
@@ -4100,6 +4279,7 @@ mod tests {
         let second = parse_record(inline(&second));
         assert!(creator.owes_rotation(now).is_none());
         assert!(!creator.withholds());
+
         // A rotation that no trigger calls for.
         let surplus = Group::restore(&creator.export().unwrap(), &Secret::new([0x21; 32]))
             .unwrap()
@@ -4270,6 +4450,7 @@ mod tests {
     fn an_epoch_far_above_the_current_one_installs_nowhere_and_one_missed_epoch_does() {
         let now = 1_700_000_000;
         let mut rng = Rng(73);
+
         // GRP-288: a member that an admit placed holds no `K_e` and no
         // trigger. It takes the epoch directly above its own, and no
         // higher one, thus no record parts it from each later epoch.
@@ -4301,6 +4482,7 @@ mod tests {
         }
         let leave = third.leave_object().unwrap();
         spread(&leave, 2, &mut [&mut creator, &mut member], now);
+
         // An active member that the trigger does not exclude names the
         // highest number, and a number far above the bound. With either
         // one installed, no rotation could follow.
@@ -4313,6 +4495,7 @@ mod tests {
             );
         }
         assert_eq!(creator.epoch(), 2);
+
         // The stored form holds the same bound.
         let mut again =
             Group::restore(&creator.export().unwrap(), &Secret::new([0x21; 32])).unwrap();
@@ -4345,6 +4528,7 @@ mod tests {
             member.credentials().unwrap().read_public(),
             creator.credentials().unwrap().read_public()
         );
+
         // The number above it is free, thus the next rotation runs.
         assert_eq!(member.rotate(now, &mut rng).unwrap().epoch, 5);
     }
@@ -4361,12 +4545,14 @@ mod tests {
                 .install_epoch_key(settled.epoch, settled.slot, settled.body, now)
                 .unwrap();
         }
+
         // A member leaves, and the member at index 1 rotates. The creator
         // never holds that epoch, as after the order of `GRP-117` displaced
         // the head that carried its trigger.
         let leave = third.leave_object().unwrap();
         spread(&leave, 2, &mut [&mut creator, &mut member], now);
         assert_eq!(member.rotate(now, &mut rng).unwrap().epoch, 3);
+
         // One more trigger, which each of the two answers from its own
         // epoch: the creator with epoch 3, and the member with epoch 4.
         assert_eq!(add_member(&mut creator, &mut [&mut member], 0x71, now), 3);
@@ -4412,9 +4598,11 @@ mod tests {
                 ends.push((place, verdict));
             }
         }
+
         // The reader below the two records holds one base in each order.
         assert_eq!(ends[0], ends[1]);
         assert_eq!(ends[2].1, ends[3].1);
+
         // The rotator of the lower number follows, and the one of the
         // higher number stays.
         creator
@@ -4442,6 +4630,7 @@ mod tests {
         member
             .install_epoch_key(record.epoch, record.slot, record.body, now)
             .unwrap();
+
         // The admin builds a delivery of bytes of its own, and it leaves.
         // Its entry keeps the role `admin`, and its pair key still derives.
         member.replace_owners(&mut rng).unwrap();
@@ -4449,6 +4638,7 @@ mod tests {
         let leave = member.leave_object().unwrap();
         spread(&leave, 1, &mut [&mut creator, &mut third], now);
         assert_eq!(creator.roster().member(1).unwrap().role, Role::Admin);
+
         // GRP-379, GRP-401: the record names a roster epoch at which the
         // member was active. Its rotator is not active now, thus the
         // credentials that the relay holds stay.
@@ -4469,6 +4659,7 @@ mod tests {
         let mut rng = Rng(71);
         let leave = third.leave_object().unwrap();
         spread(&leave, 2, &mut [&mut creator, &mut member], now);
+
         // The member at index 1 rotates, and each member holds its secret.
         let rotation = member.rotate(now, &mut rng).unwrap();
         let record = parse_record(inline(&rotation));
@@ -4507,6 +4698,7 @@ mod tests {
         member
             .install_epoch_key(record.epoch, record.slot, record.body, now)
             .unwrap();
+
         // The secret opens records and takes no place: the member writes
         // under the secret that the group holds.
         assert_eq!(member.epoch_rotator(), Some(1));
@@ -4516,9 +4708,11 @@ mod tests {
             creator.receive(&post, now).unwrap(),
             Outcome::Content { sender: 1, .. }
         ));
+
         // The stored form keeps the two apart.
         let mut member = Group::restore(&member.export().unwrap(), &JOINER_SEED).unwrap();
         assert_eq!(member.epoch_rotator(), Some(1));
+
         // A true supply of the secret that the member holds changes nothing.
         let supply = creator.key_supply(1, &mut rng).unwrap();
         let record = parse_record(&supply);
@@ -4532,6 +4726,7 @@ mod tests {
     fn a_roster_from_a_snapshot_takes_the_index_of_the_group_once() {
         let now = 1_700_000_000;
         let (mut creator, mut member, _) = pair(now);
+
         // The member misses two adds and the removal of the newest member,
         // as a restore from an old backup does.
         assert_eq!(add_member(&mut creator, &mut [], 0x61, now), 2);
@@ -4543,10 +4738,12 @@ mod tests {
         let snapshot = creator.snapshot(&[]).unwrap();
         member.recover_roster(&snapshot, now).unwrap();
         assert_eq!(member.roster().active_count(), 3);
+
         // GRP-320: the snapshot holds the active members alone, thus the
         // highest index that the group used lies above each entry. The next
         // add gives it, and the index after that one is exact again.
         assert_eq!(member.roster().next_index().unwrap(), 3);
+
         // GRP-329: until then the member builds no re-key from its own
         // count. Each other member holds index 4 as the next one, and a
         // record under index 3 would stand at this member alone.
@@ -4575,6 +4772,7 @@ mod tests {
         member
             .apply_control(&GroupControl::parse(&add).unwrap(), 0, now)
             .unwrap();
+
         // The stored form keeps an open index.
         let (mut creator, mut member, _) = pair(now);
         assert_eq!(add_member(&mut creator, &mut [], 0x61, now), 2);
@@ -4593,6 +4791,7 @@ mod tests {
     fn the_key_of_a_member_starts_no_authority_path_unless_it_holds_index_zero() {
         let now = 1_700_000_000;
         let (creator, mut member, _) = pair(now);
+
         // GRP-399: a snapshot that makes the member at index 1 the one
         // owner, with no grant. Its own key as the start of the path would
         // back that role with nothing.
@@ -4630,6 +4829,7 @@ mod tests {
         let now = 1_700_000_000;
         let (mut creator, mut member, mut third) = trio(now);
         let mut rng = Rng(73);
+
         // Two devices hold the keys of index 1. One re-keys, and one
         // leaves, at one predecessor and under one counter.
         let mut other = Group::restore(&member.export().unwrap(), &JOINER_SEED).unwrap();
@@ -4654,6 +4854,7 @@ mod tests {
             third.roster().active_count()
         );
         assert!(!creator.roster().member(1).unwrap().active);
+
         // A record of that index that is no roster object stays out.
         let late = other.post(&text("after the head"), now, &mut rng).unwrap();
         assert_eq!(creator.receive(&late, now), Err(Error::Unverified));
@@ -4664,6 +4865,7 @@ mod tests {
         let now = 1_700_000_000;
         let (mut creator, mut member, _) = pair(now);
         let mut rng = Rng(75);
+
         // GRP-342: two devices of one member post at an ownership change,
         // each under the counter that the sync gave it.
         let mut other = Group::restore(&member.export().unwrap(), &JOINER_SEED).unwrap();
@@ -4677,6 +4879,7 @@ mod tests {
                 ..
             }
         ));
+
         // GRP-206: the counter gives the order alone. The second record is
         // no copy, and the store tells that by its `msg_id`.
         let Outcome::Content {
@@ -4693,6 +4896,7 @@ mod tests {
             AppMessage::parse(&app, Channel::Group).unwrap().body,
             b"from the tablet"
         );
+
         // A request for a key enters no store, thus its copy goes.
         let request = AppMessage {
             kind: AppKind::KeyRequest,
@@ -4719,6 +4923,7 @@ mod tests {
         let now = 1_700_000_000;
         let (mut creator, mut member, mut third) = trio(now);
         let mut rng = Rng(77);
+
         // GRP-067: the one owner of three members stays until another
         // member holds `owner`. A member below `owner` leaves.
         assert!(!creator.may_leave());
@@ -4729,9 +4934,11 @@ mod tests {
             .apply_control(&GroupControl::parse(&grant).unwrap(), 0, now)
             .unwrap();
         spread(&grant, 0, &mut [&mut member, &mut third], now);
+
         // One owner stays behind, thus this one leaves.
         assert!(creator.may_leave());
         assert!(creator.leave_object().is_ok());
+
         // The one owner of two members leaves the other with no owner.
         let (creator, other, _) = pair(now);
         assert!(!creator.may_leave());
@@ -4743,6 +4950,7 @@ mod tests {
         let now = 1_700_000_000;
         let (mut creator, _, _) = pair(now);
         let mut rng = Rng(79);
+
         // GRP-076: the add of the pair is one object of this slot. The
         // creator adds and removes a member until the slot is full.
         let mut made = 1;
@@ -4770,6 +4978,7 @@ mod tests {
             creator.apply_control(&GroupControl::parse(&add).unwrap(), 0, now),
             Err(Error::Unverified)
         );
+
         // A record that is no roster object goes out, and the next slot
         // takes the object.
         assert!(!creator.rate_bars(&text("a text"), now));
@@ -4801,11 +5010,13 @@ mod tests {
         creator.apply_control(&grant, 0, now).unwrap();
         member.apply_control(&grant, 0, now).unwrap();
         assert_eq!(member.own_role(), Some(Role::Observer));
+
         // §11.9: an observer reads the group and posts nothing to it.
         let said = member
             .post(&text("from an observer"), now, &mut rng)
             .unwrap();
         assert_eq!(creator.receive(&said, now), Err(Error::Unverified));
+
         // Its roster objects still apply.
         let leave = member.leave_object().unwrap();
         let leave = member.post(&control_app(&leave, 9), now, &mut rng).unwrap();
@@ -4839,21 +5050,25 @@ mod tests {
         let (mut creator, _, _) = pair(now);
         let t = slot_of(now);
         let e = creator.epoch();
+
         // Any writer of the queue posts bodies of later epochs first.
         for (step, mark) in [(5u32, 1u8), (6, 2), (7, 3), (8, 4)] {
             let _ = creator.install_epoch_key(e + step, t, &chunked(1, mark), now);
         }
         assert_eq!(creator.waiting.len(), WAITING_MAX);
+
         // The body of the next epoch takes the place of the highest one.
         let _ = creator.install_epoch_key(e + 1, t, &chunked(1, 9), now);
         let held: Vec<u32> = creator.waiting.iter().map(|held| held.epoch).collect();
         assert!(held.contains(&(e + 1)) && !held.contains(&(e + 8)));
+
         // A body of a later epoch than each one held goes, and so does
         // one whose start slot is past the age bound (GRP-383).
         let _ = creator.install_epoch_key(e + 9, t, &chunked(1, 10), now);
         assert!(!creator.waiting.iter().any(|held| held.epoch == e + 9));
         let _ = creator.install_epoch_key(e + 2, 0, &chunked(1, 11), now);
         assert!(!creator.waiting.iter().any(|held| held.epoch == e + 2));
+
         // Of one epoch, the body that came first keeps its place.
         let _ = creator.install_epoch_key(e + 1, t, &chunked(1, 12), now + 1);
         assert!(creator

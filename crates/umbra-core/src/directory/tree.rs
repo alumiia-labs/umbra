@@ -34,18 +34,25 @@ pub fn root(leaves: &[[u8; 32]]) -> Option<[u8; 32]> {
     if level.is_empty() {
         return None;
     }
+
     while level.len() > 1 {
-        let mut next = Vec::with_capacity(level.len().div_ceil(2));
-        for pair in level.chunks(2) {
-            match pair {
-                [l, r] => next.push(node(l, r)),
-                [odd] => next.push(*odd),
-                _ => {}
-            }
-        }
-        level = next;
+        level = parent_level(&level);
     }
     level.first().copied()
+}
+
+/// The level above `level`: each pair joins in a node, and an odd last
+/// hash goes up unchanged.
+fn parent_level(level: &[[u8; 32]]) -> Vec<[u8; 32]> {
+    let mut next = Vec::with_capacity(level.len().div_ceil(2));
+    for pair in level.chunks(2) {
+        match pair {
+            [l, r] => next.push(node(l, r)),
+            [odd] => next.push(*odd),
+            _ => {}
+        }
+    }
+    next
 }
 
 /// The proof of the leaf at `index`, from the leaf to the root.
@@ -53,6 +60,7 @@ pub fn prove(leaves: &[[u8; 32]], index: usize) -> Option<Vec<Step>> {
     if index >= leaves.len() {
         return None;
     }
+
     let mut level: Vec<[u8; 32]> = leaves.to_vec();
     let mut at = index;
     let mut steps = Vec::new();
@@ -64,15 +72,8 @@ pub fn prove(leaves: &[[u8; 32]], index: usize) -> Option<Vec<Step>> {
                 sibling_right: sibling_index > at,
             });
         }
-        let mut next = Vec::with_capacity(level.len().div_ceil(2));
-        for pair in level.chunks(2) {
-            match pair {
-                [l, r] => next.push(node(l, r)),
-                [odd] => next.push(*odd),
-                _ => {}
-            }
-        }
-        level = next;
+
+        level = parent_level(&level);
         at /= 2;
     }
     Some(steps)
@@ -88,6 +89,7 @@ pub fn verify(entry: &[u8], proof: &[Step], expected_root: &[u8; 32]) -> Result<
             node(&step.sibling, &hash)
         };
     }
+
     if hash == *expected_root {
         Ok(())
     } else {

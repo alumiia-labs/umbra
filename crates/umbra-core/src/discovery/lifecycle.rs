@@ -117,10 +117,12 @@ impl Label {
         if version_new != self.version.saturating_add(1) || hk_pub == [0; 1_216] {
             return Err(Error::Stale);
         }
+
         let needs = self.needs(now);
         if needs == Needs::ReserveChallenge && hk_pub != self.hk_pub {
             return Err(Error::Unverified);
         }
+
         // DIS-172: the end of a timed registration holds through its
         // tombstone, thus the holder of the reservation writes no lease
         // past it. A registration after the reservation is a new one, and
@@ -130,10 +132,12 @@ impl Label {
             _ if self.ends_at.is_some_and(|end| end <= now) => return Err(Error::Stale),
             _ => {}
         }
+
         self.version = version_new;
         self.hk_pub = hk_pub;
         self.lease_until = Some(self.lease_end(now));
         self.tombstoned_at = None;
+
         // A lease epoch issued before this version was encapsulated to the
         // key of an earlier version, thus it renews nothing now.
         self.lease_epoch = 0;
@@ -152,6 +156,7 @@ impl Label {
         if self.is_tombstoned() || lease_epoch != self.lease_epoch {
             return Err(Error::Stale);
         }
+
         self.lease_until = Some(self.lease_end(now));
         Ok(())
     }
@@ -163,6 +168,7 @@ impl Label {
         if self.is_tombstoned() || version_new != self.version.saturating_add(1) {
             return Err(Error::Stale);
         }
+
         self.version = version_new;
         self.lease_until = None;
         self.tombstoned_at = Some(now);
@@ -176,6 +182,7 @@ impl Label {
         if self.is_tombstoned() || self.lease_until.is_some_and(|until| now < until) {
             return None;
         }
+
         self.version = self.version.saturating_add(1);
         self.lease_until = None;
         self.tombstoned_at = Some(now);
@@ -201,6 +208,7 @@ pub fn assess(held: &Version, between: &[Version]) -> Result<Takeover, Error> {
     if resolved.version <= held.version {
         return Err(Error::Stale);
     }
+
     let expected: Vec<u32> = (held.version.saturating_add(1)..=resolved.version).collect();
     if between
         .iter()
@@ -209,9 +217,11 @@ pub fn assess(held: &Version, between: &[Version]) -> Result<Takeover, Error> {
     {
         return Err(Error::Malformed);
     }
+
     if resolved.version.saturating_sub(held.version) > HANDLE_HISTORY_MAX {
         return Ok(Takeover::Warn);
     }
+
     let chain: Vec<&Version> = core::iter::once(held).chain(between.iter()).collect();
     for (i, v) in chain.iter().enumerate() {
         if v.is_tombstone() {
@@ -224,6 +234,7 @@ pub fn assess(held: &Version, between: &[Version]) -> Result<Takeover, Error> {
             }
         }
     }
+
     Ok(Takeover::Silent)
 }
 
@@ -242,11 +253,14 @@ mod tests {
         assert_eq!(label.needs(1), Needs::WriteChallenge);
         assert_eq!(label.publish(2, pk(2), 1), Err(Error::Stale));
         label.publish(1, pk(2), 1).unwrap();
+
         let epoch = label.issue_lease_epoch();
         assert_eq!(label.renew(epoch + 1, 2), Err(Error::Stale));
         label.renew(epoch, 2).unwrap();
+
         assert!(label.tombstone_if_lapsed(2 + HANDLE_LEASE - 1).is_none());
         assert_eq!(label.tombstone_if_lapsed(2 + HANDLE_LEASE), Some(2));
+
         let t = 2 + HANDLE_LEASE;
         assert!(label.tombstone_if_lapsed(t).is_none());
         assert_eq!(label.needs(t + 1), Needs::ReserveChallenge);
@@ -255,6 +269,7 @@ mod tests {
         let mut restored = label.clone();
         restored.publish(3, pk(2), t + 1).unwrap();
         assert!(!restored.is_tombstoned());
+
         assert_eq!(label.needs(t + HANDLE_RESERVE), Needs::Token);
         label.publish(3, pk(9), t + HANDLE_RESERVE).unwrap();
         assert_eq!(label.version, 3);
@@ -266,15 +281,18 @@ mod tests {
         // DIS-172: a registration that ends at 1 000.
         let mut label = Label::register(pk(1), 0);
         label.end_at(1_000);
+
         // The holder retires it, and writes it again under the reserve
         // challenge with the same key: the lease still stops at the end.
         label.retire(1, 10).unwrap();
         label.publish(2, pk(1), 20).unwrap();
         assert!(label.tombstone_if_lapsed(999).is_none());
         assert_eq!(label.tombstone_if_lapsed(1_000), Some(3));
+
         // After the end the reservation gives its holder no new lease.
         assert_eq!(label.needs(1_001), Needs::ReserveChallenge);
         assert_eq!(label.publish(4, pk(1), 1_001), Err(Error::Stale));
+
         // A registration after the reservation is a new one with no end.
         let later = 1_000 + HANDLE_RESERVE;
         assert_eq!(label.needs(later), Needs::Token);
@@ -296,6 +314,7 @@ mod tests {
             hk_pub: pk(2),
         }];
         assert_eq!(assess(&held, &rotation).unwrap(), Takeover::Silent);
+
         let restore = [
             Version {
                 version: 2,
@@ -307,6 +326,7 @@ mod tests {
             },
         ];
         assert_eq!(assess(&held, &restore).unwrap(), Takeover::Silent);
+
         let takeover = [
             Version {
                 version: 2,
@@ -318,6 +338,7 @@ mod tests {
             },
         ];
         assert_eq!(assess(&held, &takeover).unwrap(), Takeover::Warn);
+
         let many: Vec<Version> = (2..=2 + HANDLE_HISTORY_MAX)
             .map(|v| Version {
                 version: v,
@@ -329,6 +350,7 @@ mod tests {
             assess(&held, &many[..many.len() - 1]).unwrap(),
             Takeover::Silent
         );
+
         assert!(assess(&held, &[]).is_err());
         assert!(assess(&held, &restore[1..]).is_err());
         assert_eq!(assess(&restore[1], &rotation), Err(Error::Stale));

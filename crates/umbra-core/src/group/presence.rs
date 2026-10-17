@@ -62,12 +62,13 @@ impl PresenceTracker {
             .collect()
     }
 
-    /// What to do about the silent member `index` of `role`, given the
-    /// active member count and the owner count of the roster.
+    /// What to do about a silent member of `role`, given the active member
+    /// count and the owner count of the roster.
     pub const fn eviction(role: Role, active: usize, owners: usize) -> Eviction {
         if active <= 2 {
             return Eviction::HoldTwoMembers;
         }
+
         match role {
             Role::Owner if owners <= OWNER_MIN => Eviction::HoldForOwners,
             Role::Moderator | Role::Admin | Role::Owner => Eviction::DemoteFirst,
@@ -136,6 +137,7 @@ fn step(window: Window, slot: u32, span: u32, unseen: Option<u32>) -> Window {
             ..window
         };
     }
+
     // An object of the window that ended lies below `start + span`.
     let quiet = window.held == 0
         || slot
@@ -149,6 +151,7 @@ fn step(window: Window, slot: u32, span: u32, unseen: Option<u32>) -> Window {
     };
     let is_sure =
         was_sure || (quiet && unseen.is_none_or(|unseen| slot >= unseen.saturating_add(span)));
+
     Window {
         start: slot,
         held: 1,
@@ -211,6 +214,7 @@ impl RosterRates {
     pub fn allow(&mut self, maker: u16, kind: RateKind, slot: u32) -> bool {
         let unseen = self.unseen;
         let over = |window: Window, limit: u32| window.held > limit && !window.unsure;
+
         let member = step(
             self.members.get(&maker).copied().unwrap_or_default(),
             slot,
@@ -221,10 +225,12 @@ impl RosterRates {
         if over(member, ROSTER_SLOT_RATE) || over(group, GROUP_SLOT_RATE) {
             return false;
         }
+
         let grants = step(self.grants, slot, RATE_DAY_SLOTS, unseen);
         if kind == RateKind::Grant && over(grants, GRANT_RATE_DAY) {
             return false;
         }
+
         let rekeys = step(
             self.rekeys.get(&maker).copied().unwrap_or_default(),
             slot,
@@ -234,6 +240,7 @@ impl RosterRates {
         if matches!(kind, RateKind::Rekey { .. }) && over(rekeys, REKEY_RATE_DAY) {
             return false;
         }
+
         self.members
             .retain(|_, window| slot < window.start.saturating_add(WINDOW_KEPT));
         self.rekeys.retain(|_, window| {
@@ -241,6 +248,7 @@ impl RosterRates {
                 .start
                 .saturating_add(RATE_DAY_SLOTS.saturating_add(WINDOW_KEPT))
         });
+
         self.members.insert(maker, member);
         self.group = group;
         match kind {
@@ -252,6 +260,7 @@ impl RosterRates {
             }
             RateKind::Epoch | RateKind::Demotion => {}
         }
+
         true
     }
 
@@ -266,11 +275,13 @@ impl RosterRates {
                 w.flag(window.unsure);
             }
         }
+
         for window in [self.group, self.grants] {
             w.u32(window.start);
             w.u32(window.held);
             w.flag(window.unsure);
         }
+
         w.option(self.unseen.as_ref(), |w, slot| w.u32(*slot));
         Ok(())
     }
@@ -285,6 +296,7 @@ impl RosterRates {
                 unsure: marks && r.flag()?,
             })
         };
+
         let mut maps = [BTreeMap::new(), BTreeMap::new()];
         for map in &mut maps {
             for _ in 0..r.u32()? {
@@ -292,6 +304,7 @@ impl RosterRates {
                 map.insert(index, window(r)?);
             }
         }
+
         let [members, rekeys] = maps;
         Ok(RosterRates {
             members,
@@ -315,11 +328,14 @@ mod tests {
         t.joined(2, 0);
         t.seen(2, 100);
         t.seen(2, 50);
+
         assert!(t.silent(GROUP_SILENT_EVICT - 1).is_empty());
         assert_eq!(t.silent(GROUP_SILENT_EVICT), alloc::vec![1]);
         assert_eq!(t.silent(GROUP_SILENT_EVICT + 100), alloc::vec![1, 2]);
+
         t.removed(1);
         assert_eq!(t.silent(GROUP_SILENT_EVICT + 100), alloc::vec![2]);
+
         assert_eq!(
             PresenceTracker::eviction(Role::Member, 5, 2),
             Eviction::Remove
@@ -340,6 +356,7 @@ mod tests {
             PresenceTracker::eviction(Role::Member, 2, 2),
             Eviction::HoldTwoMembers
         );
+
         assert!(presence_due(None, 0));
         assert!(!presence_due(Some(0), PRESENCE_INTERVAL - 1));
         assert!(presence_due(Some(0), PRESENCE_INTERVAL));
@@ -357,6 +374,7 @@ mod tests {
         assert!(!r.allow(1, RateKind::Epoch, 99));
         assert!(r.allow(2, RateKind::Epoch, 100));
         assert!(r.allow(1, RateKind::Epoch, 101));
+
         // The group: `GROUP_SLOT_RATE` objects in one slot.
         let mut all = RosterRates::default();
         for maker in 0..GROUP_SLOT_RATE {
@@ -364,17 +382,20 @@ mod tests {
         }
         assert!(!all.allow(999, RateKind::Epoch, 7));
         assert!(all.allow(999, RateKind::Epoch, 8));
+
         // The grants: four in 24 slots, and a demotion counts in none.
         let mut g = RosterRates::default();
         for maker in 0..4u16 {
             assert!(g.allow(maker, RateKind::Grant, 10 + u32::from(maker)));
         }
+
         // A refusal counts nothing.
         let before = g.clone();
         assert!(!g.allow(5, RateKind::Grant, 20));
         assert_eq!(g, before);
         assert!(g.allow(5, RateKind::Demotion, 20));
         assert!(g.allow(5, RateKind::Grant, 10 + RATE_DAY_SLOTS));
+
         // The re-keys: the count follows the member to each new index.
         let mut k = RosterRates::default();
         let mut index = 3u16;
@@ -402,6 +423,7 @@ mod tests {
             },
             50 + RATE_DAY_SLOTS
         ));
+
         // The stored form holds each window.
         let mut w = Writer::new();
         k.export(&mut w).unwrap();
@@ -419,6 +441,7 @@ mod tests {
         let rekey = |index: u16| RateKind::Rekey {
             new_index: index + 1,
         };
+
         // `count` re-keys of one member from the index `from` in one slot,
         // each of which the rates take. The result is its index after them.
         let run = |rates: &mut RosterRates, from: u16, count: u32, slot: u32| {
@@ -430,12 +453,15 @@ mod tests {
         };
         let mut partial = RosterRates::partial(100);
         assert!(!partial.is_whole());
+
         run(&mut partial, 3, REKEY_RATE_DAY + 1, 101);
+
         // A member whose window opens `RATE_DAY_SLOTS` above each object
         // that this roster did not read holds the window of the group.
         let known = 100 + GROUP_SLOT_SKEW + RATE_DAY_SLOTS;
         let index = run(&mut partial, 40, REKEY_RATE_DAY, known);
         assert!(!partial.allow(index, rekey(index), known));
+
         // The window of a member stays open while its objects follow each
         // other inside two windows. It is sure after a pause of that
         // length.
@@ -448,6 +474,7 @@ mod tests {
         let slot = 101 + 7 * RATE_DAY_SLOTS;
         let index = run(&mut dense, index, REKEY_RATE_DAY, slot);
         assert!(!dense.allow(index, rekey(index), slot));
+
         // The rates of one slot are sure from the first slot above the
         // history.
         let mut slots = RosterRates::partial(100);
@@ -458,6 +485,7 @@ mod tests {
             assert!(slots.allow(1, RateKind::Epoch, 101 + GROUP_SLOT_SKEW));
         }
         assert!(!slots.allow(1, RateKind::Epoch, 101 + GROUP_SLOT_SKEW));
+
         // The stored form keeps each mark.
         let mut w = Writer::new();
         dense.export(&mut w).unwrap();

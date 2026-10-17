@@ -67,11 +67,13 @@ impl HandleWrite {
         if chunk.len() != CHUNK_SIZE {
             return Err(Error::Malformed);
         }
+
         let list = placement_list(&handle, relays);
         let targets = writer_targets(&list, &[])?
             .into_iter()
             .map(|relay| (relay, None))
             .collect();
+
         Ok(HandleWrite {
             handle,
             cred,
@@ -113,6 +115,7 @@ impl HandleWrite {
             .handle
             .first_chunk::<8>()
             .map_or(0, |prefix| u64::from_be_bytes(*prefix));
+
         let handle = node.chunk_of(upload, relay, self.handle, job, rng)?;
         self.waiting.push((handle, relay, self.ticks));
         Ok(())
@@ -131,6 +134,7 @@ impl HandleWrite {
                     self.ask(node, relay, job, rng)?;
                 }
             }
+
             Step::Register => {
                 let open: Vec<[u8; 32]> = self
                     .targets
@@ -147,6 +151,7 @@ impl HandleWrite {
                     self.ask(node, relay, job, rng)?;
                 }
             }
+
             Step::Put => {
                 let (relay, token) = *self.targets.first().ok_or(Error::NoPath)?;
                 let job = ChunkJob::Put {
@@ -156,6 +161,7 @@ impl HandleWrite {
                 };
                 self.ask(node, relay, job, rng)?;
             }
+
             Step::Replicate => {
                 let (relay, _) = *self.targets.first().ok_or(Error::NoPath)?;
                 let targets = self
@@ -177,6 +183,7 @@ impl HandleWrite {
                 self.ask(node, relay, job, rng)?;
             }
         }
+
         Ok(())
     }
 
@@ -193,12 +200,14 @@ impl HandleWrite {
             self.started = true;
             return self.start_step(node, rng);
         }
+
         let late: Vec<(u64, [u8; 32], u32)> = self
             .waiting
             .iter()
             .filter(|(_, _, at)| self.ticks.saturating_sub(*at) >= STEP_TIMEOUT_TICKS)
             .copied()
             .collect();
+
         for (handle, _, _) in late {
             self.on_outcome(
                 node,
@@ -207,6 +216,7 @@ impl HandleWrite {
                 rng,
             )?;
         }
+
         Ok(())
     }
 
@@ -222,6 +232,7 @@ impl HandleWrite {
             return Ok(Progress::Running(0, 1));
         };
         let (_, relay, _) = self.waiting.remove(at);
+
         match (self.step, outcome) {
             // An erase of a chunk that the relay does not hold is refused,
             // and it is done as well.
@@ -231,9 +242,11 @@ impl HandleWrite {
                     target.1 = Some(token);
                 }
             }
+
             // ATT-134: the next relay of the list takes the place.
             (Step::Register, _) => {
                 self.failed.push(relay);
+
                 let next = writer_targets(&self.list, &self.failed)?;
                 let replacement = next
                     .into_iter()
@@ -242,6 +255,7 @@ impl HandleWrite {
                 if let Some(target) = self.targets.iter_mut().find(|(held, _)| *held == relay) {
                     *target = (replacement, None);
                 }
+
                 // The list order puts the lowest rank first (`ATT-135`).
                 let list = &self.list;
                 self.targets.sort_by_key(|(held, _)| {
@@ -249,6 +263,7 @@ impl HandleWrite {
                         .position(|entry| entry == held)
                         .unwrap_or(usize::MAX)
                 });
+
                 let job = ChunkJob::Register {
                     cred: self.cred(),
                     read_pk: self.read_pk,
@@ -256,15 +271,18 @@ impl HandleWrite {
                 };
                 self.ask(node, replacement, job, rng)?;
             }
+
             (Step::Put, ChunkOutcome::Stored) => {}
             (Step::Replicate, ChunkOutcome::Replicated) => {}
             // A put or a copy that failed ends the write, and the caller
             // writes again later.
             _ => return Err(Error::NoPath),
         }
+
         if !self.waiting.is_empty() {
             return Ok(Progress::Running(0, 1));
         }
+
         self.step = match self.step {
             Step::Erase => Step::Register,
             Step::Register => Step::Put,
@@ -275,6 +293,7 @@ impl HandleWrite {
                 ));
             }
         };
+
         self.start_step(node, rng)?;
         Ok(Progress::Running(0, 1))
     }
@@ -315,6 +334,7 @@ impl HandleRead {
         let list = placement_list(&handle, relays);
         let mut order = reader_probes(&list).to_vec();
         order.reverse();
+
         HandleRead {
             handle,
             read,
@@ -346,12 +366,14 @@ impl HandleRead {
             }
             self.waiting = None;
         }
+
         let Some(relay) = self.order.pop() else {
             return Ok(Progress::Done(HandleFound {
                 chunks: core::mem::take(&mut self.found),
                 answered: self.answered,
             }));
         };
+
         let read = StaticSecret::from(*self.read.expose());
         let handle = node.chunk(relay, self.handle, ChunkJob::Fetch { read }, rng)?;
         self.waiting = Some((handle, self.ticks));
@@ -370,6 +392,7 @@ impl HandleRead {
         if !self.owns(handle) {
             return Ok(Progress::Running(0, 1));
         }
+
         self.waiting = None;
         match outcome {
             ChunkOutcome::Fetched(bytes) => {
@@ -387,6 +410,7 @@ impl HandleRead {
             ) => {}
             _ => self.answered = true,
         }
+
         self.tick(node, rng)
     }
 }

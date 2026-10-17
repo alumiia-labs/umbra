@@ -80,6 +80,7 @@ impl RowKey {
             .unwrap_or_else(|_| Hmac::<Sha3_256>::new(&Default::default()));
         mac.update(&[table.0]);
         mac.update(natural_key);
+
         let full: [u8; 32] = mac.finalize().into_bytes().into();
         umbra_crypto::bytes::part::<0, ROW_ID_LEN, 32>(&full)
     }
@@ -112,6 +113,7 @@ fn owned_data(
             len = end;
         }
     };
+
     push(&[RECORD_VERSION, table.0]);
     push(row_id);
     match owner {
@@ -121,6 +123,7 @@ fn owned_data(
         }
         None => push(&[0x00]),
     }
+
     (ad, len)
 }
 
@@ -186,6 +189,7 @@ impl SealedRecord {
         rng.fill_bytes(&mut salt);
         let mut nonce = [0u8; aead::NONCE_LEN];
         rng.fill_bytes(&mut nonce);
+
         // The seal runs on the record in its place. Thus the largest row of
         // a store, a whole file, has one copy beside its plaintext.
         let head = SALT_LEN + aead::NONCE_LEN;
@@ -193,11 +197,13 @@ impl SealedRecord {
         out.extend_from_slice(&salt);
         out.extend_from_slice(&nonce);
         out.extend_from_slice(plaintext);
+
         let key = record_key(store_key, &salt, table, row_id);
         let sealed = match out.get_mut(head..) {
             Some(body) => aead::seal(&key, &nonce, ad, body),
             None => Err(umbra_crypto::Error::Queue),
         };
+
         match sealed {
             Ok(tag) => {
                 out.extend_from_slice(&tag);
@@ -216,6 +222,7 @@ impl SealedRecord {
         if bytes.len() < OVERHEAD {
             return Err(Error::Malformed);
         }
+
         Ok(SealedRecord(bytes))
     }
 
@@ -281,11 +288,13 @@ impl SealedRecord {
         let (body, tag) = rest.split_at(body_len);
         let salt: [u8; SALT_LEN] = salt.try_into().map_err(|_| Error::Malformed)?;
         let nonce: [u8; aead::NONCE_LEN] = nonce.try_into().map_err(|_| Error::Malformed)?;
+
         // IMP-041: a zero salt marks a discarded key, and no party derives
         // that key again.
         if salt == [0u8; SALT_LEN] {
             return Err(Error::Stale);
         }
+
         let mut plain = body.to_vec();
         let key = record_key(store_key, &salt, table, row_id);
         aead::open(&key, &nonce, ad, &mut plain, tag).map_err(|_| Error::Unverified)?;
@@ -307,7 +316,9 @@ impl SealedRecord {
         if bytes.len() < OVERHEAD {
             return Err(Error::Malformed);
         }
+
         let mut tag: [u8; aead::TAG_LEN] = bytes.last_chunk().copied().ok_or(Error::Malformed)?;
+
         if bytes.iter().take(SALT_LEN).all(|byte| *byte == 0) {
             for byte in &mut tag {
                 *byte = !*byte;
@@ -361,6 +372,7 @@ mod tests {
             sealed.open(&store_key, table, &row, None).unwrap(),
             b"hello"
         );
+
         assert!(sealed.open(&store_key, table, &other_row, None).is_err());
         assert!(sealed
             .open(&store_key, TableId::CONTACT, &row, None)
@@ -383,12 +395,14 @@ mod tests {
         let other = [7; ROW_ID_LEN];
         let mut rng = Rng(1);
         let table = TableId::MESSAGE;
+
         let sealed =
             SealedRecord::seal(&store_key, table, &row, Some(&owner), b"hello", &mut rng).unwrap();
         assert_eq!(
             sealed.open(&store_key, table, &row, Some(&owner)).unwrap(),
             b"hello"
         );
+
         // IMP-121: the owner column of another conversation, or none.
         assert_eq!(
             sealed.open(&store_key, table, &row, Some(&other)),
@@ -398,9 +412,11 @@ mod tests {
             sealed.open(&store_key, table, &row, None),
             Err(Error::Unverified)
         );
+
         // A row with no owner does not open under one.
         let alone = SealedRecord::seal(&store_key, table, &row, None, b"hello", &mut rng).unwrap();
         assert!(alone.open(&store_key, table, &row, Some(&owner)).is_err());
+
         // IMP-130: the two versions do not read each other.
         assert!(sealed.open_earlier(&store_key, table, &row).is_err());
         assert!(alone.open_earlier(&store_key, table, &row).is_err());
@@ -421,10 +437,12 @@ mod tests {
         let table = TableId::MESSAGE;
         let mut sealed =
             SealedRecord::seal(&store_key, table, &row, None, b"erase me", &mut Rng(1)).unwrap();
+
         let tag = sealed.tag().unwrap();
         sealed.discard_key();
         assert!(sealed.is_discarded());
         assert_eq!(sealed.tag(), Ok(tag));
+
         // The read of the stored bytes gives the same input as the record,
         // and bytes below the length of a record give an error and no tag.
         let marked = tag.map(|byte| !byte);

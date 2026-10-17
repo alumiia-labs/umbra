@@ -110,8 +110,11 @@ pub fn issue_cert<R: TryCryptoRng + ?Sized>(
     {
         return Err(Error::Malformed);
     }
+
     let not_after = epoch.checked_add(lifetime).ok_or(Error::Malformed)?;
     let preimage = cert_preimage(&measurer_id, mldsa_pk, not_after);
+
+    // The certificate is the preimage with no label, then the signatures.
     let mut out = preimage
         .get(labels::MEASURER_CERT.len()..)
         .ok_or(Error::Malformed)?
@@ -121,6 +124,7 @@ pub fn issue_cert<R: TryCryptoRng + ?Sized>(
         out.push(*index);
         out.extend_from_slice(&key.sign(&preimage, rng)?.to_bytes());
     }
+
     Ok(out)
 }
 
@@ -132,9 +136,11 @@ impl<'a> MeasurerCert<'a> {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let measurer_id = r.array()?;
         let mldsa_pk = r.take(VERIFYING_KEY_LEN)?;
         let not_after = u64::from_be_bytes(r.array()?);
+
         let count = usize::from(r.u8()?);
         if !(MEASURER_SIGNATURES..=AUTHORITY_COUNT).contains(&count) {
             return Err(Error::Malformed);
@@ -153,6 +159,7 @@ impl<'a> MeasurerCert<'a> {
                 sig: r.take(SIGNATURE_LEN)?,
             });
         }
+
         Ok((
             MeasurerCert {
                 measurer_id,
@@ -179,6 +186,7 @@ impl<'a> MeasurerCert<'a> {
         if revoked.len() > MEASURER_REVOKE_MAX || revoked.contains(&self.measurer_id) {
             return Err(Error::Unverified);
         }
+
         let preimage = cert_preimage(&self.measurer_id, self.mldsa_pk, self.not_after);
         let mut valid = 0usize;
         for s in &self.sigs {
@@ -189,6 +197,7 @@ impl<'a> MeasurerCert<'a> {
                 valid = valid.saturating_add(1);
             }
         }
+
         if valid >= MEASURER_SIGNATURES {
             Ok(())
         } else {
@@ -219,9 +228,9 @@ pub fn open_content<R: TryCryptoRng + ?Sized>(
 /// took on the circuit `circ_id` at the consensus epoch `epoch`, and
 /// returns the `measurer_id`.
 ///
-/// The signature of the measurer runs first. A cell under a key that the
-/// sender made thus costs one verification and no more of them than a cell
-/// under a certificate.
+/// The signature of the measurer runs first. Thus a cell under a key that
+/// the sender made costs one verification, and not the verifications of
+/// the certificate.
 pub fn verify_open(
     content: &[u8],
     trust: &MeasurerTrust,
@@ -234,6 +243,7 @@ pub fn verify_open(
     if sig.len() != SIGNATURE_LEN {
         return Err(Error::Malformed);
     }
+
     let (keyset, _) = DirectoryKeySet::parse(&trust.keyset)?;
     if cert.not_after < epoch {
         return Err(Error::Stale);
@@ -241,6 +251,7 @@ pub fn verify_open(
     if trust.revoked.contains(&cert.measurer_id) {
         return Err(Error::Unverified);
     }
+
     let key = VerifyingKey::from_bytes(cert.mldsa_pk)?;
     key.verify(
         &open_preimage(relay_id, circ_id),
@@ -286,10 +297,12 @@ impl ClassResult {
         if id.len() != 64 {
             return None;
         }
+
         let mut relay_id = [0u8; 32];
         for (byte, [high, low]) in relay_id.iter_mut().zip(id.as_chunks::<2>().0) {
             *byte = hex_digit(*high)? << 4 | hex_digit(*low)?;
         }
+
         let class: u8 = fields.next()?.parse().ok()?;
         let passed = match fields.next()? {
             "pass" => true,
@@ -300,6 +313,7 @@ impl ClassResult {
         if class > 3 || fields.next().is_some() {
             return None;
         }
+
         Some(ClassResult {
             relay_id,
             class,
@@ -315,6 +329,7 @@ impl ClassResult {
         for byte in &self.relay_id {
             let _ = write!(out, "{byte:02x}");
         }
+
         let word = if self.passed { "pass" } else { "fail" };
         let _ = write!(out, " {} {word} {}", self.class, self.epoch);
         out
@@ -339,6 +354,7 @@ pub fn verified_class(relay_id: &[u8; 32], declared: u8, results: &[ClassResult]
         })
         .map(|failed| failed.class)
         .min();
+
     match lowest_failed {
         None => Some(declared.min(3)),
         Some(0) => None,

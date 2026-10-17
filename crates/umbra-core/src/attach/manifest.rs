@@ -90,6 +90,7 @@ pub fn parse(plain: &[u8]) -> Result<Vec<ChunkRef>, Error> {
     if plain.is_empty() || !plain.len().is_multiple_of(CHUNK_REF_LEN) {
         return Err(Error::Malformed);
     }
+
     plain
         .as_chunks::<CHUNK_REF_LEN>()
         .0
@@ -120,6 +121,7 @@ pub fn collapse(refs: &[ChunkRef], expected: usize) -> Result<Vec<Replicas>, Err
     // costs one lookup for each ref, and no scan.
     let mut places: alloc::collections::BTreeMap<[u8; 32], usize> =
         alloc::collections::BTreeMap::new();
+
     for chunk_ref in refs {
         let place = match places.get(&chunk_ref.chunk_id) {
             Some(place) => *place,
@@ -135,10 +137,12 @@ pub fn collapse(refs: &[ChunkRef], expected: usize) -> Result<Vec<Replicas>, Err
                 place
             }
         };
+
         let entry = out.get_mut(place).ok_or(Error::Malformed)?;
         if entry.cred_pk != chunk_ref.cred_pk {
             return Err(Error::Malformed);
         }
+
         if !entry.relay_ids.contains(&chunk_ref.relay_id) {
             entry.relay_ids.push(chunk_ref.relay_id);
         }
@@ -148,9 +152,11 @@ pub fn collapse(refs: &[ChunkRef], expected: usize) -> Result<Vec<Replicas>, Err
             }
         }
     }
+
     if out.len() != expected {
         return Err(Error::Malformed);
     }
+
     Ok(out)
 }
 
@@ -160,6 +166,7 @@ pub fn reject_null_hints(refs: &[ChunkRef]) -> Result<(), Error> {
     if refs.iter().any(|r| r.replicas.contains(&[0; 12])) {
         return Err(Error::Malformed);
     }
+
     Ok(())
 }
 
@@ -189,9 +196,11 @@ mod tests {
         );
         assert!(level_for(MAX_DATA_CHUNKS + 1, MAX_DESCRIPTOR_REFS).is_err());
         assert!(level_for(0, 13).is_err());
+
         assert_eq!(manifest_chunks(271), 1);
         assert_eq!(manifest_chunks(272), 2);
         assert_eq!(manifest_chunks(MAX_DATA_CHUNKS), MAX_DESCRIPTOR_REFS);
+
         // ATT-184: a sender at `HOT_REPLICAS` writes two refs for each
         // chunk, and a receiver takes the manifest of that size.
         assert_eq!(manifest_chunk_range(271), 1..=2);
@@ -221,9 +230,11 @@ mod tests {
         assert_eq!(groups[0].relay_ids, alloc::vec![[1; 32], [9; 32]]);
         assert_eq!(groups[0].hints, alloc::vec![[1; 12], [2; 12], [8; 12]]);
         assert!(collapse(&refs, 3).is_err());
+
         let mut wrong_cred = extra;
         wrong_cred.cred_pk = [0; 32];
         assert!(collapse(&[chunk_ref(1), wrong_cred], 1).is_err());
+
         assert!(reject_null_hints(&refs).is_err());
         assert!(reject_null_hints(&refs[..2]).is_ok());
     }

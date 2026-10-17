@@ -158,9 +158,11 @@ impl Ndr {
             .filter(|(_, held)| expired(held.registered_at, now))
             .map(|(handle, _)| *handle)
             .collect();
+
         for handle in &gone {
             self.drop_handle(*handle);
         }
+
         gone.len()
     }
 
@@ -185,6 +187,7 @@ impl Ndr {
                     }
                     pushed = held.pushed;
                 }
+
                 let held = Held {
                     nonce,
                     ct_token: ct_token.to_vec(),
@@ -219,11 +222,13 @@ impl Ndr {
                 let Some(held) = self.held.get(&handle) else {
                     return (NdrResponse::Gone, None);
                 };
+
                 // NTF-138: a registration past its time is gone too.
                 if expired(held.registered_at, now) {
                     self.drop_handle(handle);
                     return (NdrResponse::Gone, None);
                 }
+
                 let split = held.ct_token.len().saturating_sub(aead::TAG_LEN);
                 let (Some(body), Some(tag)) =
                     (held.ct_token.get(..split), held.ct_token.get(split..))
@@ -234,11 +239,13 @@ impl Ndr {
                 if aead::open(&k_tok, &held.nonce, &handle, &mut token, tag).is_err() {
                     return (NdrResponse::Refused, None);
                 }
+
                 // NTF-134: the NDR posts to FCM alone, and to no address
                 // that a caller named. The reserved carrier does not read.
                 let Ok((carrier, target)) = parse_token(&token) else {
                     return (NdrResponse::Refused, None);
                 };
+
                 let delivery = Delivery {
                     handle,
                     carrier,
@@ -307,6 +314,7 @@ mod tests {
             NdrResponse::Taken
         );
         assert_eq!(ndr.take_changes().len(), 1);
+
         // NTF-124: the same registration again, whose answer was lost, is
         // taken when it carries the secret that the device holds; with no
         // secret it moves nothing.
@@ -336,6 +344,7 @@ mod tests {
         assert_eq!(&delivery.target[..], b"fcm-device-1");
         assert_eq!(u64::from(delivery.ttl), PUSH_TTL_MESSAGE);
         assert_eq!(ndr.handle(&push([0; 32]), NOW).0, NdrResponse::Refused);
+
         // NTF-138: the registration lives `NDR_REG_TTL` after its NREG, and
         // a sweep before that keeps it.
         let last = NOW + NDR_REG_TTL - 1;
@@ -344,6 +353,7 @@ mod tests {
             ndr.handle(&push(*group.k_tok.expose()), last).0,
             NdrResponse::Taken
         );
+
         let mut later = Ndr::restore(ndr.held.clone());
         assert_eq!(
             later
@@ -352,6 +362,7 @@ mod tests {
             NdrResponse::Gone
         );
         assert!(later.is_empty());
+
         let mut swept = Ndr::restore(ndr.held.clone());
         assert_eq!(swept.expire(NOW + NDR_REG_TTL), 1);
         assert_eq!(
@@ -367,20 +378,24 @@ mod tests {
             ndr.handle(&register([1; 32], [5; 32]), NOW).0,
             NdrResponse::Refused
         );
+
         let wrong = request(&NdrRequest::Unregister {
             handle: group.handle,
             removal: Secret::new([1; 32]),
         });
         assert_eq!(ndr.handle(&wrong, NOW).0, NdrResponse::Refused);
         assert!(ndr.take_changes().is_empty());
+
         let right = request(&NdrRequest::Unregister {
             handle: group.handle,
             removal,
         });
         assert_eq!(ndr.handle(&right, NOW).0, NdrResponse::Taken);
         assert!(ndr.is_empty());
+
         // NTF-124: the removal again, whose answer was lost, is taken.
         assert_eq!(ndr.handle(&right, NOW).0, NdrResponse::Taken);
+
         // NTF-125: a push to a handle that left is gone.
         assert_eq!(
             ndr.handle(&push(*group.k_tok.expose()), NOW).0,
@@ -406,6 +421,7 @@ mod tests {
             NOW,
         );
         assert_eq!(taken.0, NdrResponse::Taken);
+
         let (answer, delivery) = ndr.handle(&push(*group.k_tok.expose()), NOW);
         assert_eq!(answer, NdrResponse::Refused);
         assert!(delivery.is_none());
@@ -427,6 +443,7 @@ mod tests {
             removal_hash: hash,
             prior: Secret::new([9; 32]),
         });
+
         // NTF-143: the same `NREG` under 16 zero bytes is refused, and the
         // NDR holds nothing.
         let mut watch = register;
@@ -437,6 +454,7 @@ mod tests {
 
         assert_eq!(ndr.handle(&register, NOW).0, NdrResponse::Taken);
         drop(ndr.take_changes());
+
         // The first push marks the registration once, and a move keeps it.
         assert!(ndr.took_push(&group.handle));
         assert!(!ndr.took_push(&group.handle));
@@ -447,6 +465,7 @@ mod tests {
                 handle: group.handle
             }]
         );
+
         assert_eq!(ndr.handle(&register, NOW + 1).0, NdrResponse::Taken);
         let changes = ndr.take_changes();
         assert!(matches!(
@@ -466,6 +485,7 @@ mod tests {
         };
         let mut ndr = Ndr::restore([([7; 16], held.clone()), ([8; 16], held)]);
         assert_eq!(ndr.len(), 2);
+
         ndr.gone([7; 16]);
         ndr.gone([9; 16]);
         assert_eq!(ndr.len(), 1);

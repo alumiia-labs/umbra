@@ -66,6 +66,7 @@ impl RecoveryCode {
             .get(16..)
             .and_then(|half| half.try_into().ok())
             .ok_or(Error::Malformed)?;
+
         Ok(RecoveryCode::new(Secret::new(user), Secret::new(social)))
     }
 
@@ -90,6 +91,7 @@ impl RecoveryCode {
         if m_kib < kdf::RECOVERY_M_KIB || t < kdf::RECOVERY_T {
             return Err(Error::Malformed);
         }
+
         let code = self.bytes();
         Ok(BackupRootKey(kdf::argon2id(code.expose(), salt, m_kib, t)?))
     }
@@ -169,12 +171,14 @@ impl<'a> BackupRoot<'a> {
         {
             return Err(Error::Malformed);
         }
+
         Ok(())
     }
 
     /// Writes the plaintext.
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, Error> {
         self.check()?;
+
         let mut w = Writer::new(out);
         w.u8(0x01)?;
         w.u8(u8::try_from(self.entries.len()).map_err(|_| Error::Malformed)?)?;
@@ -183,6 +187,7 @@ impl<'a> BackupRoot<'a> {
             w.u16(u16::try_from(e.descriptor.len()).map_err(|_| Error::Malformed)?)?;
             w.put(e.descriptor)?;
         }
+
         Ok(w.position())
     }
 
@@ -192,6 +197,7 @@ impl<'a> BackupRoot<'a> {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let count = usize::from(r.u8()?);
         let mut entries = Vec::with_capacity(count.min(BACKUP_ROOT_ENTRIES));
         for _ in 0..count {
@@ -203,6 +209,7 @@ impl<'a> BackupRoot<'a> {
             });
         }
         r.finish()?;
+
         let out = BackupRoot { entries };
         out.check()?;
         Ok(out)
@@ -215,12 +222,14 @@ impl<'a> BackupRoot<'a> {
         let (nonce_out, rest) = out.split_at_mut(24);
         nonce_out.copy_from_slice(&nonce);
         let n = self.encode(rest)?;
+
         let (body, tag_out) = rest.split_at_mut(n);
         let tag = aead::seal(&credentials.key, &nonce, &credentials.handle, body)?;
         tag_out
             .get_mut(..aead::TAG_LEN)
             .ok_or(Error::Malformed)?
             .copy_from_slice(&tag);
+
         out.truncate(24 + n + aead::TAG_LEN);
         Ok(out)
     }
@@ -239,6 +248,7 @@ impl<'a> BackupRoot<'a> {
             .checked_sub(aead::TAG_LEN)
             .ok_or(Error::Malformed)?;
         let (ct, tag) = rest.split_at(plain_len);
+
         buf.clear();
         buf.extend_from_slice(ct);
         aead::open(&credentials.key, &nonce, &credentials.handle, buf, tag)?;
@@ -317,11 +327,13 @@ pub fn to_digits(kind: DigitsType, payload: &[u8]) -> Result<Zeroizing<String>, 
     if payload.len() != kind.payload_len() {
         return Err(Error::Malformed);
     }
+
     let mut bytes = Zeroizing::new(Vec::with_capacity(4 + payload.len()));
     bytes.extend_from_slice(&(kind as u16).to_be_bytes());
     bytes.extend_from_slice(payload);
     bytes.extend_from_slice(&check_of(kind, payload));
     let digits = Zeroizing::new(decimal(&bytes, kind.width()));
+
     let mut out = Zeroizing::new(String::with_capacity(kind.width() + kind.width() / 5));
     for (i, group) in digits.as_bytes().chunks(5).enumerate() {
         if i > 0 {
@@ -329,6 +341,7 @@ pub fn to_digits(kind: DigitsType, payload: &[u8]) -> Result<Zeroizing<String>, 
         }
         out.push_str(core::str::from_utf8(group).unwrap_or(""));
     }
+
     Ok(out)
 }
 
@@ -338,6 +351,7 @@ pub fn to_digits(kind: DigitsType, payload: &[u8]) -> Result<Zeroizing<String>, 
 pub fn from_digits(text: &str, expected: DigitsType) -> Result<Zeroizing<Vec<u8>>, Error> {
     let digits: Zeroizing<Vec<u8>> =
         Zeroizing::new(text.bytes().filter(|b| b.is_ascii_digit()).collect());
+
     // The digit count names the length. The root seed and the recovery
     // code share a width, and `type` tells them apart (IDN-153).
     let total_len = 4 + match digits.len() {
@@ -346,6 +360,7 @@ pub fn from_digits(text: &str, expected: DigitsType) -> Result<Zeroizing<Vec<u8>
         51 => DigitsType::Share.payload_len(),
         _ => return Err(Error::Malformed),
     };
+
     // Decimal to big-endian bytes by repeated multiply-add.
     let mut bytes = Zeroizing::new(alloc::vec![0u8; total_len]);
     for d in digits.iter() {
@@ -359,19 +374,23 @@ pub fn from_digits(text: &str, expected: DigitsType) -> Result<Zeroizing<Vec<u8>
             return Err(Error::Malformed);
         }
     }
+
     let mut r = Reader::new(&bytes);
     let kind = DigitsType::from_u16(r.u16()?)?;
     if kind.width() != digits.len() {
         return Err(Error::Malformed);
     }
+
     let payload = Zeroizing::new(r.take(kind.payload_len())?.to_vec());
     let check: [u8; 2] = r.array()?;
     if check != check_of(kind, &payload) {
         return Err(Error::Malformed);
     }
+
     if kind != expected {
         return Err(Error::Unverified);
     }
+
     Ok(payload)
 }
 
@@ -417,6 +436,7 @@ pub fn split_social(
     if k < 2 || n < k || coeffs.len() != usize::from(k - 1) * 16 {
         return Err(Error::Malformed);
     }
+
     // Each share is a secret of the user, thus the list leaves no copy.
     let mut shares = Zeroizing::new(Vec::with_capacity(usize::from(n)));
     for x in 1..=n {
@@ -436,6 +456,7 @@ pub fn split_social(
         }
         shares.push(share);
     }
+
     Ok(shares)
 }
 
@@ -444,11 +465,14 @@ pub fn join_social(shares: &[[u8; 17]]) -> Result<Secret<16>, Error> {
     if shares.len() < 2 {
         return Err(Error::Malformed);
     }
+
     let mut xs: Vec<u8> = shares.iter().map(|s| s[0]).collect();
     xs.sort_unstable();
     if xs.contains(&0) || xs.windows(2).any(|w| matches!(w, [a, b] if a == b)) {
         return Err(Error::Malformed);
     }
+
+    // Lagrange interpolation at x = 0, one byte position at a time.
     let mut out = [0u8; 16];
     for (byte, slot) in out.iter_mut().enumerate() {
         let mut acc = 0u8;
@@ -469,6 +493,7 @@ pub fn join_social(shares: &[[u8; 17]]) -> Result<Secret<16>, Error> {
         }
         *slot = acc;
     }
+
     Ok(Secret::new(out))
 }
 
@@ -516,10 +541,12 @@ mod tests {
         assert_eq!(text.bytes().filter(|b| b.is_ascii_digit()).count(), 87);
         assert_eq!(*from_digits(&text, DigitsType::Code).unwrap(), code);
         assert_eq!(from_digits(&text, DigitsType::User), Err(Error::Unverified));
+
         let mut wrong = text.clone();
         let last = wrong.pop().unwrap();
         wrong.push(if last == '0' { '1' } else { '0' });
         assert!(from_digits(&wrong, DigitsType::Code).is_err());
+
         assert_eq!(
             to_digits(DigitsType::User, &[1; 16])
                 .unwrap()
@@ -536,6 +563,7 @@ mod tests {
                 .count(),
             51
         );
+
         // IDN-003: the root seed takes the width of the code, and its type
         // tells the two apart (IDN-153).
         let seed = to_digits(DigitsType::Root, &[9; 32]).unwrap();
@@ -551,10 +579,12 @@ mod tests {
         let coeffs = [0x5Au8; 32];
         let shares = split_social(&secret, 3, 5, &coeffs).unwrap();
         assert_eq!(shares.len(), 5);
+
         let rebuilt = join_social(&[shares[0], shares[2], shares[4]]).unwrap();
         assert_eq!(rebuilt.expose(), secret.expose());
         let rebuilt = join_social(&[shares[3], shares[1], shares[0], shares[4]]).unwrap();
         assert_eq!(rebuilt.expose(), secret.expose());
+
         let two = join_social(&[shares[0], shares[1]]).unwrap();
         assert_ne!(two.expose(), secret.expose());
         assert!(join_social(&[shares[0], shares[0]]).is_err());
@@ -568,10 +598,12 @@ mod tests {
         let second = alloc::vec![3u8; 9];
         let earlier = alloc::vec![full.clone(), first.clone()];
         let later = alloc::vec![full.clone(), first.clone(), second.clone()];
+
         // IDN-099: the replica that answers first serves the earlier root.
         assert_eq!(later_entries(earlier.clone(), later.clone()), later);
         assert_eq!(later_entries(later.clone(), earlier.clone()), later);
         assert_eq!(later_entries(later.clone(), later.clone()), later);
+
         // A root of another full object is no later form of this one.
         let other = alloc::vec![alloc::vec![7u8; 9], first, second, full];
         assert_eq!(later_entries(earlier.clone(), other.clone()), earlier);
@@ -584,6 +616,7 @@ mod tests {
         let week = key.epoch(2_950);
         let next = key.epoch(2_951);
         assert_ne!(week.handle, next.handle);
+
         let root = BackupRoot {
             entries: alloc::vec![
                 BackupEntry {
@@ -601,6 +634,7 @@ mod tests {
         assert_eq!(BackupRoot::open(&week, &chunk, &mut buf).unwrap(), root);
         let mut buf2 = Vec::new();
         assert!(BackupRoot::open(&next, &chunk, &mut buf2).is_err());
+
         let delta_first = BackupRoot {
             entries: alloc::vec![BackupEntry {
                 kind: 0x02,
@@ -608,6 +642,7 @@ mod tests {
             }],
         };
         assert!(delta_first.encode(&mut [0u8; 100]).is_err());
+
         let code = RecoveryCode::new(Secret::new([1; 16]), Secret::new([2; 16]));
         assert!(code.root_key(b"salt", 8, 1).is_err());
         assert_eq!(code.bytes().expose()[16], 2);

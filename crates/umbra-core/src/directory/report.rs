@@ -27,7 +27,7 @@ pub const REPORT_QUEUE_LEN: usize = 1 + 1 + 8 + QUEUE_ADDRESS_LEN + 32 + SIGNATU
 /// The most report queues of one manifest: one for each authority.
 pub const REPORT_QUEUES_MAX: usize = 7;
 
-/// A loop-fault report of one chain in one epoch (`REL-076`).
+/// The report of the loop failures of one chain in one epoch (`REL-076`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LinkFaultReport {
     /// The consensus epoch.
@@ -62,14 +62,17 @@ impl LinkFaultReport {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let epoch = u64::from_be_bytes(r.array()?);
         let hops = [r.array()?, r.array()?, r.array()?];
         let loops_sent = r.u16()?;
         let loops_lost = r.u16()?;
         r.finish()?;
+
         if loops_lost > loops_sent {
             return Err(Error::Malformed);
         }
+
         Ok(LinkFaultReport {
             epoch,
             hops,
@@ -97,6 +100,7 @@ impl LinkFaultReport {
         if sealed.len() != SEALED_REPORT_LEN {
             return Err(Error::Malformed);
         }
+
         let plain = seal::open(report_sk, labels::LINK_FAULT_SEAL, sealed)
             .map_err(|_| Error::Unverified)?;
         Self::parse(&plain)
@@ -135,6 +139,7 @@ impl ReportQueue {
         rng: &mut R,
     ) -> Result<Vec<u8>, Error> {
         let sig = key.sign(&self.preimage(), rng)?;
+
         let mut out = alloc::vec![0u8; REPORT_QUEUE_LEN];
         let mut w = Writer::new(&mut out);
         w.u8(0x01)?;
@@ -157,6 +162,7 @@ impl ReportQueue {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let queue = ReportQueue {
             authority_index: r.u8()?,
             epoch: u64::from_be_bytes(r.array()?),
@@ -165,9 +171,11 @@ impl ReportQueue {
         };
         let sig = r.take(SIGNATURE_LEN)?;
         r.finish()?;
+
         if queue.epoch > root_epoch {
             return Err(Error::Stale);
         }
+
         keyset.verify_by(queue.authority_index, &queue.preimage(), sig)?;
         Ok(queue)
     }

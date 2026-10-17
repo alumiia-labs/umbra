@@ -203,6 +203,7 @@ impl ChunkStore {
         if self.free() < CHUNK_BYTES {
             return Err(Reject::Busy);
         }
+
         let counter = self.quota.entry(holder).or_insert((now, 0));
         if now.saturating_sub(counter.0) >= QUOTA_WINDOW {
             *counter = (now, 0);
@@ -211,6 +212,7 @@ impl ChunkStore {
             return Err(Reject::Limit);
         }
         counter.1 = counter.1.saturating_add(CHUNK_BYTES);
+
         self.pending.insert(
             chunk_id,
             Registration {
@@ -227,6 +229,7 @@ impl ChunkStore {
         if bytes.len() != CHUNK_SIZE {
             return Err(Reject::Rejected);
         }
+
         let registration = self.pending.remove(&chunk_id).ok_or(Reject::Rejected)?;
         let erase_at = match registration.class {
             Class::Attachment => now
@@ -234,6 +237,7 @@ impl ChunkStore {
                 .min(registration.registered_at.saturating_add(CHUNK_LIFE_MAX)),
             Class::Backup => now.saturating_add(BACKUP_TTL),
         };
+
         // The token is erased with the registration (ATT-112).
         self.held.insert(
             chunk_id,
@@ -270,6 +274,7 @@ impl ChunkStore {
         if !umbra_crypto::ct_eq(&registration.storage_token, storage_token) {
             return Err(Reject::Rejected);
         }
+
         self.accept_bytes(chunk_id, bytes, now)
     }
 
@@ -283,10 +288,12 @@ impl ChunkStore {
             self.egress_day = day;
             self.egress_bytes = 0;
         }
+
         let held = self.held.get_mut(chunk_id).ok_or(Reject::Rejected)?;
         if self.egress_bytes.saturating_add(CHUNK_BYTES) > CHUNK_EGRESS_BUDGET_DAY {
             return Err(Reject::Busy);
         }
+
         // The hour of the rate is an hour of the UTC clock, and no time
         // that the `CPUT` gave.
         let hour = now.saturating_sub(now % 3_600);
@@ -297,6 +304,7 @@ impl ChunkStore {
         if held.fetches >= CHUNK_FETCH_RATE {
             return Err(Reject::Limit);
         }
+
         held.fetches = held.fetches.saturating_add(1);
         self.egress_bytes = self.egress_bytes.saturating_add(CHUNK_BYTES);
         Ok(&held.bytes)
@@ -323,6 +331,7 @@ impl ChunkStore {
         if held.class == Class::Backup {
             return Err(Reject::Rejected);
         }
+
         held.renewed_at = now;
         held.erase_at = now
             .saturating_add(CHUNK_TTL)
@@ -361,10 +370,12 @@ impl ChunkStore {
             }
             keep
         });
+
         self.pending
             .retain(|_, r| now.saturating_sub(r.registered_at) < CHUNK_TTL);
         self.quota
             .retain(|_, (start, _)| now.saturating_sub(*start) < QUOTA_WINDOW);
+
         before.saturating_sub(self.held.len().saturating_add(self.pending.len()))
     }
 
@@ -388,6 +399,7 @@ impl ChunkStore {
                 self.pending.remove(&id);
             }
         }
+
         let mut erased = 0usize;
         while self.over_target() {
             let oldest = self
@@ -405,6 +417,7 @@ impl ChunkStore {
                 None => break,
             }
         }
+
         erased
     }
 }
@@ -428,11 +441,13 @@ mod tests {
         store
             .register([1; 32], Class::Attachment, creds(1), [9; 32], [7; 32], 100)
             .unwrap();
+
         assert_eq!(
             store.register([1; 32], Class::Attachment, creds(1), [9; 32], [7; 32], 100),
             Err(Reject::Rejected)
         );
         assert_eq!(store.registration(&[1; 32]).unwrap().storage_token, [7; 32]);
+
         assert_eq!(
             store.put([1; 32], &chunk[..100], 200),
             Err(Reject::Rejected)
@@ -441,6 +456,7 @@ mod tests {
         assert!(store.registration(&[1; 32]).is_none());
         assert_eq!(store.credentials(&[1; 32]).unwrap(), creds(1));
         assert_eq!(store.erase_at(&[1; 32]), Some(200 + CHUNK_TTL));
+
         assert_eq!(store.get(&[1; 32], 300).unwrap(), &chunk[..]);
         assert_eq!(store.get(&[2; 32], 300), Err(Reject::Rejected));
         assert_eq!(
@@ -448,6 +464,7 @@ mod tests {
             Some(seal::proof(&[3; 16], &chunk))
         );
         assert!(store.prove(&[2; 32], &[3; 16]).is_none());
+
         // A renewal moves the erase time, and the life bound caps it.
         store.renew(&[1; 32], 100 + CHUNK_LIFE_MAX - 10).unwrap();
         assert_eq!(store.erase_at(&[1; 32]), Some(100 + CHUNK_LIFE_MAX));
@@ -474,6 +491,7 @@ mod tests {
         );
         assert_eq!(store.erase_at(&[1; 32]), Some(200 + BACKUP_TTL));
         assert_eq!(store.renew(&[1; 32], 300), Err(Reject::Rejected));
+
         // A pending registration with no bytes leaves at CHUNK_TTL.
         store
             .register([2; 32], Class::Attachment, creds(2), [9; 32], [6; 32], 100)
@@ -497,6 +515,7 @@ mod tests {
             store.register([3; 32], Class::Attachment, creds(3), [9; 32], [7; 32], 0),
             Err(Reject::Busy)
         );
+
         let mut big = ChunkStore::new(u64::MAX);
         let per_day = u32::try_from(UPLOAD_QUOTA_DAY / CHUNK_BYTES).unwrap();
         for i in 0..per_day {
@@ -528,6 +547,7 @@ mod tests {
             big.get(&[0; 32], 30).unwrap();
         }
         assert_eq!(big.get(&[0; 32], 30), Err(Reject::Limit));
+
         big.get(&[0; 32], 30 + 3_600).unwrap();
         big.egress_bytes = CHUNK_EGRESS_BUDGET_DAY;
         assert_eq!(big.get(&[0; 32], 40 + 3_600), Err(Reject::Busy));
@@ -552,6 +572,7 @@ mod tests {
                 .unwrap();
             store.put(id, &chunk, i as u64).unwrap();
         }
+
         assert!(store.over_target());
         assert_eq!(store.trim(), 2);
         assert!(!store.over_target());
@@ -570,12 +591,14 @@ mod tests {
             id[..4].copy_from_slice(&i.to_be_bytes());
             id
         };
+
         for i in 0..4 {
             store
                 .register(id(i), Class::Attachment, creds(1), [9; 32], [7; 32], 0)
                 .unwrap();
             store.put(id(i), &chunk, 0).unwrap();
         }
+
         // Three registrations with no bytes put the used store above the
         // target, and the trim erases no chunk for them (ATT-090).
         for i in 10..13 {
@@ -595,6 +618,7 @@ mod tests {
         assert_eq!(store.trim(), 0);
         assert_eq!(store.held_count(), 4);
         assert!(store.registration(&id(12)).is_some());
+
         // The registrations alone pass the target: the oldest of them
         // leave, and each chunk stays.
         for i in 13..16 {
@@ -609,6 +633,7 @@ mod tests {
                 )
                 .unwrap();
         }
+
         assert_eq!(store.trim(), 0);
         assert_eq!(store.held_count(), 4);
         assert!(store.registration(&id(10)).is_none());
@@ -631,6 +656,7 @@ mod tests {
         store.get(&[1; 32], late).unwrap();
         store.egress_bytes = CHUNK_EGRESS_BUDGET_DAY;
         assert_eq!(store.get(&[1; 32], late + 9), Err(Reject::Busy));
+
         // The budget starts again at midnight, and not 24 h after the
         // first fetch.
         store.get(&[1; 32], late + 10).unwrap();
@@ -638,6 +664,7 @@ mod tests {
         store.egress_bytes = CHUNK_EGRESS_BUDGET_DAY;
         assert_eq!(store.get(&[1; 32], late + 86_400), Err(Reject::Busy));
         store.egress_bytes = 0;
+
         // The rate of one chunk starts again at each hour of the clock.
         let hour = 5 * 86_400 + 7_200;
         for _ in 0..CHUNK_FETCH_RATE {

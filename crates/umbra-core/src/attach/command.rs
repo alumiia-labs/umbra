@@ -146,6 +146,7 @@ impl<'a> RegisterPayload<'a> {
         if used != bytes.len().saturating_sub(64) {
             return Err(Error::Malformed);
         }
+
         Ok(RegisterPayload {
             cred_pk,
             read_pk,
@@ -165,6 +166,7 @@ pub fn chunk_payload(bytes: &[u8]) -> Result<&[u8], Error> {
     if bytes.len() != CHUNK_SIZE {
         return Err(Error::Malformed);
     }
+
     Ok(bytes)
 }
 
@@ -199,6 +201,7 @@ impl CrepPayload {
         if self.targets.is_empty() || self.targets.len() >= HOT_REPLICAS {
             return Err(Error::Malformed);
         }
+
         Ok(())
     }
 
@@ -221,6 +224,7 @@ impl CrepPayload {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let count = usize::from(r.u8()?);
         let mut targets = Vec::with_capacity(count);
         for _ in 0..count {
@@ -230,6 +234,7 @@ impl CrepPayload {
             });
         }
         r.finish()?;
+
         let out = CrepPayload { targets };
         out.check()?;
         Ok(out)
@@ -259,6 +264,7 @@ impl<'a> CrputPayload<'a> {
         if bytes.len() != CRPUT_LEN {
             return Err(Error::Malformed);
         }
+
         let mut r = Reader::new(bytes);
         let storage_token = r.array()?;
         let chunk = chunk_payload(r.rest())?;
@@ -280,6 +286,7 @@ mod tests {
             assert_eq!(ChunkCmd::from_byte(b).unwrap().to_byte(), b);
         }
         assert!(ChunkCmd::from_byte(0x7C).is_err());
+
         assert_eq!(ChunkCmd::Cput.authorizer(), Authorizer::Cred);
         assert_eq!(ChunkCmd::Cget.authorizer(), Authorizer::Read);
         assert_eq!(ChunkCmd::Crput.authorizer(), Authorizer::Token);
@@ -319,6 +326,7 @@ mod tests {
         assert_eq!(n, 130);
         assert_eq!(CrepPayload::parse(&out[..n]).unwrap(), crep);
         assert!(CrepPayload::parse(&out[..n - 1]).is_err());
+
         let empty = CrepPayload {
             targets: Vec::new(),
         };
@@ -338,6 +346,7 @@ mod tests {
         let back = CrputPayload::parse(&out[..CRPUT_LEN]).unwrap();
         assert_eq!(back.storage_token, [8; 32]);
         assert!(CrputPayload::parse(&out).is_err());
+
         assert!(chunk_payload(&chunk[..CHUNK_SIZE - 1]).is_err());
         assert_eq!(fixed_payload::<32>(&[9; 32]).unwrap(), [9; 32]);
         assert!(fixed_payload::<32>(&[9; 31]).is_err());

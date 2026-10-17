@@ -36,12 +36,14 @@ pub fn parse_profile_link(
         .trim()
         .strip_prefix(PROFILE_LINK_PREFIX)
         .ok_or(Error::Malformed)?;
+
     let (handle, fragment) = rest.rsplit_once('#').ok_or(Error::Malformed)?;
     let handle = match handle.rsplit_once("%23") {
         Some((name, discriminator)) => alloc::format!("@{name}#{discriminator}"),
         None => alloc::format!("@{handle}"),
     };
     let handle = Handle::parse(&handle, profile)?;
+
     let mut out = [0u8; FRAGMENT_LEN];
     crate::identity::address::base32_decode(fragment, &mut out)?;
     Ok((handle, out))
@@ -115,13 +117,16 @@ impl Handle {
         {
             return Err(Error::Malformed);
         }
+
         if name.is_empty() {
             return Err(Error::Malformed);
         }
+
         let mapped = profile(name).ok_or(Error::Malformed)?;
         if !is_name(&mapped) {
             return Err(Error::Malformed);
         }
+
         Ok(Handle {
             name: mapped,
             discriminator: String::from(discriminator),
@@ -202,6 +207,7 @@ impl Handle {
         w.u8(BLOB_VERSION)?;
         w.put(&nonce)?;
         w.put(profile)?;
+
         let body = w.written().get_mut(25..).ok_or(Error::Malformed)?;
         let tag = aead::seal(
             &self.blob_key(fragment),
@@ -209,6 +215,7 @@ impl Handle {
             self.canonical().as_bytes(),
             body,
         )?;
+
         let at = 25usize.saturating_add(profile.len());
         out.get_mut(at..)
             .ok_or(Error::Malformed)?
@@ -222,14 +229,17 @@ impl Handle {
         if r.u8()? != BLOB_VERSION {
             return Err(Error::Malformed);
         }
+
         let nonce: [u8; 24] = r.array()?;
         let rest = r.rest();
         if rest.len() < aead::TAG_LEN {
             return Err(Error::Malformed);
         }
+
         let split = rest.len().saturating_sub(aead::TAG_LEN);
         let mut plain = rest.get(..split).ok_or(Error::Malformed)?.to_vec();
         let tag = rest.get(split..).ok_or(Error::Malformed)?;
+
         aead::open(
             &self.blob_key(fragment),
             &nonce,
@@ -271,6 +281,7 @@ mod tests {
         assert_eq!(h.canonical(), "@alice#1234");
         assert_eq!(h.name(), "alice");
         assert_eq!(h.discriminator(), "1234");
+
         assert!(Handle::parse("alice#1234", &ascii_profile).is_err());
         assert!(Handle::parse("@alice#1", &ascii_profile).is_err());
         assert!(Handle::parse("@alice#1234567890", &ascii_profile).is_err());
@@ -279,6 +290,7 @@ mod tests {
         assert!(Handle::parse("@a b#1234", &ascii_profile).is_err());
         let long = alloc::format!("@{}#12", "a".repeat(33));
         assert!(Handle::parse(&long, &ascii_profile).is_err());
+
         assert!(Handle::is_canonical_name("alice", &ascii_profile));
         assert!(!Handle::is_canonical_name("Alice", &ascii_profile));
     }
@@ -291,6 +303,7 @@ mod tests {
         let (back, fragment) = parse_profile_link(&link, &ascii_profile).unwrap();
         assert_eq!(back.canonical(), "@bob#42");
         assert_eq!(fragment, [0xA5; 16]);
+
         let plain = link.replace("%23", "#");
         assert_eq!(
             parse_profile_link(&plain, &ascii_profile)
@@ -300,6 +313,7 @@ mod tests {
             "@bob#42"
         );
         assert!(parse_profile_link("umbra://h/bob%2342", &ascii_profile).is_err());
+
         // DIS-179: the parser reads one `%23`, thus a second one is no `#`
         // of a name.
         let twice = link.replace("bob", "a%23b");
@@ -330,6 +344,7 @@ mod tests {
             assert!(Handle::parse(&handle, &username_case_mapped).is_err());
             assert!(!Handle::is_canonical_name(&name, &username_case_mapped));
         }
+
         // A label that a directory holds already reads with a mark, thus
         // its holder still writes and retires it.
         for held in ["@alice#12#34", "@a%23b#12", "@a@b#12", "@a/b#12"] {
@@ -337,13 +352,16 @@ mod tests {
             let handle = Handle::parse_held(held, &username_case_mapped).unwrap();
             assert_eq!(handle.canonical(), held);
         }
+
         assert!(Handle::parse_held("@#12", &username_case_mapped).is_err());
         assert!(Handle::parse_held("@Alice#12", &username_case_mapped)
             .is_ok_and(|handle| handle.canonical() == "@alice#12"));
+
         // Two discriminators, and a name that reads as another handle
         // after the `%23` of its link.
         assert!(Handle::parse("@alice#12#34", &username_case_mapped).is_err());
         assert!(Handle::parse("@a%23b#12", &username_case_mapped).is_err());
+
         // A full-width mark maps to the plain one, and it goes too.
         assert!(Handle::parse("@a＃b#12", &username_case_mapped).is_err());
         assert!(Handle::is_canonical_name("alice", &username_case_mapped));

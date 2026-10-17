@@ -85,6 +85,7 @@ mod tests {
         let a = SyncSeed::genesis(&root);
         let b = SyncSeed::genesis(&root);
         assert_eq!(a.expose().expose(), b.expose().expose());
+
         let update = SyncSeedUpdate {
             epoch: 3,
             seed_input: [7; 32],
@@ -92,10 +93,12 @@ mod tests {
         let mut bytes = [0u8; UPDATE_LEN];
         assert_eq!(update.encode(&mut bytes).unwrap(), UPDATE_LEN);
         assert_eq!(SyncSeedUpdate::parse(&bytes).unwrap(), update);
+
         let a1 = a.next(&update);
         let b1 = b.next(&SyncSeedUpdate::parse(&bytes).unwrap());
         assert_eq!(a1.expose().expose(), b1.expose().expose());
         assert_ne!(a1.expose().expose(), a.expose().expose());
+
         let other = a.next(&SyncSeedUpdate { epoch: 4, ..update });
         assert_ne!(other.expose().expose(), a1.expose().expose());
     }

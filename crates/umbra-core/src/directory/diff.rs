@@ -55,14 +55,18 @@ impl RelaySetDiff {
         w.u8(0x01)?;
         w.put(&self.epoch.to_be_bytes())?;
         w.put(&self.base_epoch.to_be_bytes())?;
+
         w.u16(u16::try_from(self.removed.len()).map_err(|_| Error::Malformed)?)?;
         for id in &self.removed {
             w.put(id)?;
         }
+
         w.u16(u16::try_from(self.added.len()).map_err(|_| Error::Malformed)?)?;
         for id in &self.added {
             w.put(id)?;
         }
+
+        // Four levels go in one byte, the first leaf in the low bits.
         w.u16(u16::try_from(self.levels.len()).map_err(|_| Error::Malformed)?)?;
         for chunk in self.levels.chunks(4) {
             let mut byte = 0u8;
@@ -71,6 +75,7 @@ impl RelaySetDiff {
             }
             w.u8(byte)?;
         }
+
         Ok(w.position())
     }
 
@@ -80,26 +85,32 @@ impl RelaySetDiff {
         if r.u8()? != 0x01 {
             return Err(Error::Malformed);
         }
+
         let epoch = u64::from_be_bytes(r.array()?);
         let base_epoch = u64::from_be_bytes(r.array()?);
+
         let removed_count = usize::from(r.u16()?);
         let mut removed = Vec::with_capacity(removed_count.min(4_096));
         for _ in 0..removed_count {
             removed.push(r.array()?);
         }
+
         let added_count = usize::from(r.u16()?);
         let mut added = Vec::with_capacity(added_count.min(4_096));
         for _ in 0..added_count {
             added.push(r.array()?);
         }
+
         let leaf_count = usize::from(r.u16()?);
         let packed = r.take(leaf_count.div_ceil(4))?;
         r.finish()?;
+
         let mut levels = Vec::with_capacity(leaf_count);
         for i in 0..leaf_count {
             let byte = packed.get(i / 4).copied().ok_or(Error::Malformed)?;
             levels.push(StoreLevel::from_bits(byte >> (2 * (i % 4))));
         }
+
         // The spare bits of the last byte are zero in the canonical form.
         if let Some(last) = packed.last() {
             let used = leaf_count % 4;
@@ -107,6 +118,7 @@ impl RelaySetDiff {
                 return Err(Error::Malformed);
             }
         }
+
         Ok(RelaySetDiff {
             epoch,
             base_epoch,
