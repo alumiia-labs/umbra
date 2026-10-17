@@ -25,8 +25,8 @@ jurisdiction-disjointness invariant of Part 3 §3.4.6 and Part 10 §10.6. It doe
 **nothing** about item 2 in v1, and §15.5 states that limit.
 
 **The update channel is the largest compromise vector of UMBRA.** It is not a
-protocol problem, and that property is the cause that a project can under-invest
-in it. §15.5 states what v1 does about it.
+protocol problem, and that property is the cause that a project can
+under-invest in it. §15.5 states what v1 does about it.
 
 ## 15.1 The Compellable Set
 
@@ -84,9 +84,9 @@ the entry, which is public. The relay gives the hello times of one period,
 because Part 9 §9.9 rotates the rendezvous queue at each `RENDEZVOUS_ROTATE`.
 Neither one gives the person.
 
-**[SEC-001]** An anonymous credential MUST authorize a queue rotation. **[SEC-002]** A long-lived key MUST
-NOT authorize it. Thus the rotation does not make the linkage that it exists to
-break.
+**[SEC-001]** An anonymous credential MUST authorize a queue rotation.
+**[SEC-002]** A long-lived key MUST NOT authorize it. Thus the rotation does
+not make the linkage that it exists to break.
 
 ## 15.2 What UMBRA does not defend against
 
@@ -108,10 +108,10 @@ worse than a specification that has that limit.
   s.49, French art. 434-15-2, and Australian TOLA. The protocol cannot help.
 - **A malicious local change to the database.** Part 4 §4.6 makes such a change
   *detectable*, with a table MAC under the key `K_tab`. It does not make the
-  change impossible. No keystore holds `K_tab`: it derives from `K_store`. Thus a party with
-  code execution before the auto-lock of Part 14 §14.6.4 reads `K_store` and
-  computes a table MAC again. Part 4 §4.6 also does not detect a rollback of
-  the full database file to an earlier state.
+  change impossible. No keystore holds `K_tab`: it derives from `K_store`.
+  Thus a party with code execution before the auto-lock of Part 14 §14.6.4
+  reads `K_store` and computes a table MAC again. Part 4 §4.6 also does not
+  detect a rollback of the full database file to an earlier state.
 
 > **UMBRA does not ship a duress feature or a panic feature as a defense against
 > key-disclosure law.** Such a defense is untested, and it invites a charge of
@@ -171,33 +171,35 @@ practical PQ VRF today.
 ### 15.2.7 Protocol detectability
 
 A top-tier network classifier detects UMBRA at the flow level. Part 3 §3.8.1
-makes this an explicit trade. The ClientHello of Part 3 §3.8 is the ClientHello
-of the rustls stack, and not the ClientHello of a browser. v1 defers
-the web client of Part 14 §14.7. When it ships it sends the ClientHello of its
-browser, thus the ingress relay tells the two client classes apart. The class
-names no user. UMBRA does not claim to be unblockable. Refer to the non-goals
-in Part 2 §2.5.
+makes this an explicit trade. The ClientHello of Part 3 §3.8 is the
+ClientHello of the rustls stack, and not the ClientHello of a browser.
 
-Two properties of the design limit the damage from a lost relay. First, a relay
-shares its IP address and port 443 with a genuine website. Thus a destination
-address does not give a list of the users of UMBRA (G8). Second, a client holds
-two pinned ingress relays (Part 10 §10.6.1). Thus the loss of one relay does not
-stop delivery (U6).
+v1 defers the web client of Part 14 §14.7. When it ships it sends the
+ClientHello of its browser, thus the ingress relay tells the two client
+classes apart. The class names no user.
+
+UMBRA does not claim to be unblockable. Refer to the non-goals in Part 2 §2.5.
+
+Two properties of the design limit the damage from a lost relay:
+
+1. A relay shares its IP address and port 443 with a genuine website. Thus a
+   destination address does not give a list of the users of UMBRA (G8).
+2. A client holds two pinned ingress relays (Part 10 §10.6.1). Thus the loss
+   of one relay does not stop delivery (U6).
 
 ### 15.2.8 Multi-device history exposure
 
-The seizure of one linked device exposes the synced history of that device (Part
-7 §7.2). Part 7 §7.2 accepts this trade for multi-device operation with
-history sync. The mitigations
-limit the exposure, and they do not remove it.
+The seizure of one linked device exposes the synced history of that device
+(Part 7 §7.2). Part 7 §7.2 accepts this trade for multi-device operation with
+history sync. The mitigations limit the exposure, and they do not remove it.
 
 ### 15.2.9 Web distribution has one gatekeeper for each browser
 
-v1 defers the web client (Part 1 §1.1), and this section holds when
-it ships. The web client of Part 14 §14.7 is a browser extension, and each
-browser vendor operates the one store that its browser installs from without a
-policy change. A vendor can remove or replace the extension for each user of
-that browser. UMBRA accepts this residual, and §15.3 holds the row.
+v1 defers the web client (Part 1 §1.1), and this section holds when it ships.
+The web client of Part 14 §14.7 is a browser extension, and each browser
+vendor operates the one store that its browser installs from without a policy
+change. A vendor can remove or replace the extension for each user of that
+browser. UMBRA accepts this residual, and §15.3 holds the row.
 
 ## 15.3 Residual leaks, enumerated
 
@@ -297,12 +299,12 @@ that browser. UMBRA accepts this residual, and §15.3 holds the row.
 | A relay class above the class that the measurers of a provisional directory can test | Each client, as a relay whose declared class is false | Part 10 §10.2 rule `REL-206` and §10.3. A measurer on a launch server of 500 Mbit/s tests C0 alone, and each class above C0 stays as the operator declares it. The one operator of a provisional network declares each class itself. UMBRA accepts this residual for the launch |
 | The chain count of each relay before its noise, in a provisional directory | The one operator of that directory | Part 10 §10.4.2 and §10.8. One tool of that operator is both aggregators, thus it holds the two shares of each count. That operator runs each relay, and it holds each count at its relay too. UMBRA accepts this residual for the launch |
 | A measurement session at each relay, for a party that holds a leaked measurer key and its certificate | Each relay, as echo load of up to `MEAS_CIRCUITS_MAX` circuits for `MEAS_SESSION_MAX` at a time | Part 10 §10.3.1. `REL-202` bounds the sessions of one relay, the certificate ends at `MEASURER_CERT_TTL` at most, and the `revoked` list of `REL-105` ends it at the next consensus. UMBRA accepts this residual |
-| Each hop of each circuit, while the provisional directory lists relays of one country or of one provider | A5 in that country; the provider and a party that watches its network, which reads the timing of each hop | Part 3 rule `NET-350`; the route view of Part 14 §14.9.2 names the country of each hop. It ends when the relay set reaches the floor of Part 10 §10.6.3. UMBRA accepts this residual for the launch |
-| The activity timeline and the bucket of each record of a group | The group-queue relay, and A5 against it | Part 11 §11.2 replicates the queue on two relays under different operators; a reader alternates. UMBRA accepts this residual |
+| Each hop of each circuit, while the provisional directory lists relays of one country or of one provider | A5 in that country. The provider, and a party that watches its network, which reads the timing of each hop | Part 3 rule `NET-350`. The route view of Part 14 §14.9.2 names the country of each hop. It ends when the relay set reaches the floor of Part 10 §10.6.3. UMBRA accepts this residual for the launch |
+| The activity timeline and the bucket of each record of a group | The group-queue relay, and A5 against it | Part 11 §11.2 replicates the queue on two relays under different operators, and a reader alternates them. UMBRA accepts this residual |
 | A reader circuit and the group it reads, joined to an IP address | The ingress relay and the group-queue relay in collusion | The same class as the two-ended collusion of Part 3 §3.11 |
-| The ciphertext of a group for `GROUP_READ_GRACE` after a removal | The removed member | It holds no slot key of the new epoch; it reads timing and buckets only |
-| The retained records of the current epoch from `t_e`, at most `GROUP_EPOCH_MAX_AGE` of 30 days, at a member that holds `K_e`. That is each member that installed the epoch from its epoch-key record. The retained records from `t_join` at a member that joined inside the epoch. The 24 h of `GROUP_SLOT_WINDOW` bound a member of the second kind alone | A6, with the device and the relay's retained ciphertext | Part 11 §11.3.2; `K_e` serves the key supply and the credentials, and the slot chain is one-way from the slot a member holds. The rotation of `GRP-360` bounds it. UMBRA accepts this residual |
-| Every record of every group of a member, at a device in hostile hands, from the seizure until the first other member rotates after the `RekeyRecord` | A6 | Part 11 §11.12. A revocation heals a pairwise channel and no group key, thus the re-key is a second step; any member rotates it, one backoff after the first member comes online. Part 7 rule `DEV-262` starts it. UMBRA accepts this residual |
+| The ciphertext of a group for `GROUP_READ_GRACE` after a removal | The removed member | It holds no slot key of the new epoch. It reads timing and buckets only |
+| The retained records of the current epoch from `t_e`, at most `GROUP_EPOCH_MAX_AGE` of 30 days, at a member that holds `K_e`. That is each member that installed the epoch from its epoch-key record. The retained records from `t_join` at a member that joined inside the epoch. The 24 h of `GROUP_SLOT_WINDOW` bound a member of the second kind alone | A6, with the device and the relay's retained ciphertext | Part 11 §11.3.2. `K_e` serves the key supply and the credentials, and the slot chain is one-way from the slot a member holds. The rotation of `GRP-360` bounds it. UMBRA accepts this residual |
+| Every record of every group of a member, at a device in hostile hands, from the seizure until the first other member rotates after the `RekeyRecord` | A6 | Part 11 §11.12. A revocation heals a pairwise channel and no group key, thus the re-key is a second step. Any member rotates it, one backoff after the first member comes online. Part 7 rule `DEV-262` starts it. UMBRA accepts this residual |
 | The membership of a user in a group, when the attacker's device posts a `RekeyRecord` first and wins the hash of `GRP-369` | A6, until an admin acts on the pairwise path | Part 11 §11.12. The attacker must unlock the device first, at the cost of Part 14 §14.6.4 for each passphrase attempt. The user's self-removal rotates the attacker's keys out at once. UMBRA accepts this residual |
 | The relay credentials of the old epoch, at an excluded party, until an admin sends `GKEY`, and the write credential for `GROUP_WRITE_GRACE` after it | The excluded party | Part 11 §11.4.1. It fetches ciphertext it cannot open, and every receiver rejects its posts under §11.3.5. Its posts are not harmless at the relay, and the row below gives what they do. UMBRA accepts this residual |
 | A group silenced and its retained history evicted. A holder of a write credential posts at `GROUP_POST_RATE`, which the group shares. The records fill `GROUP_QUEUE_QUOTA`, which erases the oldest record first | Each current member, and a removed member until `GROUP_WRITE_GRACE` of 24 h after the `GKEY`, or with no bound while no admin sends `GKEY` | Part 3 §3.2.7 rules `NET-240`, `NET-241`, `NET-243` and `NET-247`. 60 `B3` records each minute fill 32 MiB in about 17 minutes. Each honest post then gets `LIMIT`, and a member that was offline loses each record that the quota erased. Each receiver rejects the flood, and the relay cannot tell the flooder from a member. The two replicas of `NET-253` are no bound, because the credential serves both. A `GKEY` and the end of the grace stop a removed member, and nothing stops a current one but its removal. UMBRA accepts this residual |
@@ -312,9 +314,9 @@ that browser. UMBRA accepts this residual, and §15.3 holds the row.
 | Different group keys at different members after one rotation, from a rotator that seals a different `k_e` in each slot | A member that rotates, against the availability and the consistency of its group | Part 11 §11.7 and §15.2.4. An epoch-key record holds no commitment to one `K_e`, and `GRP-273` prefers the lower member index. The group does not converge before an honest member rotates. No key leaves the group. A commitment in `EpochKeyBody` is a planned wire change of a later version. UMBRA accepts this residual |
 | Owner credentials that the relay no longer takes, at an admin, after two admins drew new ones for two departures at once | The admin whose `GKEY` came second | Part 11 `GRP-402`. That admin cannot send `GKEY` or `GDEL` until an admin of the first draw delivers the credentials again. It is an availability loss and no confidentiality loss |
 | No queue credential that the relay holds, at a member, after two rotations inside one `GROUP_EPOCH_GRACE` with no `GKEY` | Each member that installed the second epoch | Part 11 `GRP-398`. The member cannot post until an admin sends `GKEY`, and its client shows the group closed under `GRP-210`. It is an availability loss and no confidentiality loss |
-| A forged tag between two members, by an insider that holds a quantum computer | A quantum insider | Part 5 §5.4.4 posture; `sig_id` agility |
-| The group of a leaving member stays readable to it until any other member rotates | The leaving member | Part 11 §11.4.1; one backoff after the first other member comes online |
-| The slot chunk that one member fetched, at the chunk relay | The chunk relay | Part 12 §12.9; one anonymous fetch per member per rotation |
+| A forged tag between two members, by an insider that holds a quantum computer | A quantum insider | The posture of Part 5 §5.4.4, and the agility of `sig_id` |
+| The group of a leaving member stays readable to it until any other member rotates | The leaving member | Part 11 §11.4.1. One backoff after the first other member comes online |
+| The slot chunk that one member fetched, at the chunk relay | The chunk relay | Part 12 §12.9. One anonymous fetch for each member at each rotation |
 | The `relay_id` of the notify queue of each reader, at the group-queue relay | The group-queue relay | Part 8 §8.5.2 |
 | A queue is a notify queue, and the address of the relay that deposits into it | The queue relay of the notify queue | Part 6 rule `WIR-526`. A deposit travels on a direct connection of the depositing relay, not over a circuit. The sealed digest names no group to that relay, and a registration names no member to the depositing relay. UMBRA accepts this residual |
 | The names that a user types for display, the verification code, the link ticket and code, and the invitation bundle. The question and the options of a poll, and the wake table. Each one is a Kotlin string or bytes on the JVM heap | A party that reads the memory of the Android process | Part 14 §14.6.1, the stated exceptions to `IMP-037`. Each one but the poll is a value that the platform draws, scans, or seals in each design. The poll text is message text that crosses as a string in v1, and that exception is a limit that a later version removes |
@@ -360,8 +362,8 @@ commit. §15.8 makes this table a published promise.
 
 ## 15.5 The update channel
 
-This channel is the largest compromise vector that each system in this list does
-not address. The party that signs a release and the store that serves it can
+This channel is the largest compromise vector that each system in this list
+does not address. The party that signs a release and the store that serves it can
 each replace the application. A court can compel each of them.
 
 v1 gives no control for this channel. The v1 client verifies no transparency
@@ -393,9 +395,9 @@ A launch below `AUTHORITY_FLOOR` shows a `provisional directory` state on
 each client under `REL-126`. Under that state Part 3 rule `NET-340` lets a
 client build a chain of one operator, thus a launch can start with the relays
 of the project alone, in three blocs and three autonomous systems. Rule
-`NET-350` also lets that launch start in one country and at one provider:
-one legal order of that country then reaches each relay, as one order to the
-one operator already does, and the provider sees each hop of each circuit.
+`NET-350` also lets that launch start in one country and at one provider. One
+legal order of that country then reaches each relay, as one order to the one
+operator already does, and the provider sees each hop of each circuit.
 
 ## 15.7 Open problems
 
@@ -413,13 +415,13 @@ have no open problem is not finished. Such a specification is unexamined.
    problem has no solution today.
 5. **Signature monoculture.** ML-DSA-65 alone signs the long-lived objects that
    a third party verifies. Those objects are the directory roots and the
-   transparency tree heads. A lattice break
-   permits a retroactive rewrite of the archived state.
+   transparency tree heads. A lattice break permits a retroactive rewrite of
+   the archived state.
 
    The `sig_id` field is negotiable, thus a deployment can add a hybrid. But
    in the message core this is one point of cryptanalytic failure. UMBRA
-   accepts that risk to keep the set of signed-object primitives minimal (Part 5
-   §5.1).
+   accepts that risk to keep the set of signed-object primitives minimal
+   (Part 5 §5.1).
 6. **Formal analysis.** No peer-reviewed analysis of SimpleX exists. Thus UMBRA
    inherits no assurance from its closest reference system. No formal
    analysis of the handshake, the ratchet, or the group key schedule of UMBRA
@@ -429,8 +431,8 @@ have no open problem is not finished. Such a specification is unexamined.
 
 The table in Part 3 §3.11 and the Compellable Set in §15.1 are **published
 promises**. A change to this protocol can make a row of one of those tables
-false. **[SEC-016]** Such a change MUST come with a specification change and a version
-increment. **[SEC-017]** A revision MUST NOT make a silent amendment.
+false. **[SEC-016]** Such a change MUST come with a specification change and a
+version increment. **[SEC-017]** A revision MUST NOT make a silent amendment.
 
 A drift in those tables, one convenience at a time, is the failure mode that
 ends this project.
