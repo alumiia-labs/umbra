@@ -3,6 +3,7 @@
 The relay of the UMBRA protocol: the circuit hops of Part 3 §3.4, the pairwise
 queues of Part 3 §3.2, the invitations of Part 4 §4.3.1, the chunk store of
 Part 12, and the group queues of Part 3 §3.2.7.
+
 The node is a plain state machine. The binary puts TLS 1.3, the WebSocket
 framing of Part 6 §6.2.1, a pacing clock, and an SQLite store around it.
 
@@ -44,8 +45,8 @@ It prints an `identity_seed` line, a `static_secret` line, and the `relay_id`
 in a comment line. The two secrets show one time. Put the three lines into
 the settings file of that relay. Keep that file readable for the service
 user alone. The identity seed gives the key that signs the descriptor of
-section 7. The `relay_id` is the hash of the public half of that key.
-The relay computes it, thus the settings file needs no `relay_id` line. The
+section 7. The `relay_id` is the hash of the public half of that key. The
+relay computes it, thus the settings file needs no `relay_id` line. The
 comment is for the `next` lines of the other relays.
 
 ### 3. A certificate for each relay
@@ -198,8 +199,8 @@ the key set, which its build ships.
 The address of a descriptor serves the clients and the relays of the layer
 before, and the /16 of that address is the network that a client tests. Thus
 two relays on one machine need two loopback networks, as `127.2.0.1` and
-`127.3.0.1`. `scripts/devnet.sh` runs such a network of seven relays, with two ingress
-relays for the two pins of a client.
+`127.3.0.1`. `scripts/devnet.sh` runs such a network of seven relays, with
+two ingress relays for the two pins of a client.
 
 A relay that reads a manifest also gives it to a client that asks over HTTPS
 at `/.well-known/umbra/manifest` (Part 3 rule `NET-316`). The debug build of
@@ -211,8 +212,8 @@ deployment the co-tenant site of the relay serves that path as a file.
 Queue identifiers, the public authorization keys, sequence numbers, the
 ciphertext of each record that no `ACK` covers, each invitation blob, and the
 group queues of Part 11 with their retained records. Each time is a multiple
-of one hour (`NET-301`). It holds no circuit, no session, no
-subscription, and no address of a client (`NET-300`). The file runs under
+of one hour (`NET-301`). It holds no circuit, no session, no subscription,
+and no address of a client (`NET-300`). The file runs under
 `secure_delete`, and the relay truncates the write-ahead log after each commit
 that deletes, thus an acknowledged record leaves no bytes behind (`NET-302`).
 

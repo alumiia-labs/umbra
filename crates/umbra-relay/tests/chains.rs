@@ -49,9 +49,11 @@ struct Rng(u64);
 
 impl TryRng for Rng {
     type Error = core::convert::Infallible;
+
     fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
         Ok(self.try_next_u64()? as u32)
     }
+
     fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
         self.0 = self
             .0
@@ -59,6 +61,7 @@ impl TryRng for Rng {
             .wrapping_add(1_442_695_040_888_963_407);
         Ok(self.0 >> 11 ^ self.0 << 7)
     }
+
     fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
         for chunk in dst.chunks_mut(8) {
             let bytes = self.try_next_u64()?.to_le_bytes();
@@ -91,6 +94,7 @@ fn relay_static(index: usize) -> (RelayStatic, StaticSecret) {
 /// relay for each layer obeys each invariant.
 fn relay_info(index: usize) -> RelayInfo {
     let key = relay_static(index).0;
+
     RelayInfo {
         candidate: Candidate {
             relay_id: key.relay_id,
@@ -163,6 +167,7 @@ impl Mesh {
                 })
             })
             .collect();
+
         let mut mesh = Mesh {
             relays,
             peers: vec![Vec::new(); LAYERS.len()],
@@ -178,6 +183,7 @@ impl Mesh {
             loses_pushes_to: None,
             challenges: umbra_core::abuse::pow::ChallengeBook::default(),
         };
+
         // ABU-057: each relay signs a challenge at its start. It carries its
         // own, and the book of a client takes each one under its key.
         for index in 0..LAYERS.len() {
@@ -185,6 +191,7 @@ impl Mesh {
             mesh.relays[index].set_challenge_signer(challenge_key(index), vec![relay_id]);
         }
         mesh.issue_challenges();
+
         for from in 0..LAYERS.len() {
             for to in (0..LAYERS.len()).filter(|to| LAYERS[*to] == LAYERS[from] + 1) {
                 let (out_link, in_link) = (900 + to as LinkId, 800 + from as LinkId);
@@ -201,6 +208,7 @@ impl Mesh {
                 mesh.route(from, outputs);
             }
         }
+
         for (index, seed) in seeds.iter().enumerate() {
             let mut node = client(*seed);
             node.connected(&mut Rng(100 + u64::from(*seed))).unwrap();
@@ -223,12 +231,14 @@ impl Mesh {
             let _ = self.relays[index].issue_challenge(self.now, &mut self.rng);
             let bundle = self.relays[index].take_challenge_bundle(self.now).unwrap();
             let identity = challenge_key(index).verifying_key();
+
             for challenge in umbra_core::abuse::pow::ChallengeBook::parse_bundle(&bundle).unwrap() {
                 self.challenges
                     .take(challenge, &identity, self.now)
                     .unwrap();
             }
         }
+
         for node in &mut self.clients {
             node.set_challenges(self.challenges.clone(), self.now);
         }
@@ -246,9 +256,11 @@ impl Mesh {
                     let target = (0..LAYERS.len())
                         .find(|index| relay_static(*index).0.relay_id == relay_id)
                         .unwrap();
+
                     if self.loses_pushes_to == Some(relay_id) {
                         continue;
                     }
+
                     self.pushes += 1;
                     let link = 5_000 + self.pushes;
                     let outputs =
@@ -258,10 +270,13 @@ impl Mesh {
                 }
                 other => panic!("an unexpected output: {other:?}"),
             };
+
             let Some(peer) = self.peers[at].iter().find(|(l, _)| *l == link) else {
                 continue;
             };
+
             let peer = peer.1;
+
             match peer {
                 Peer::Client(client) => self.inboxes[client].push_back(capsule),
                 Peer::Relay(next, next_link) => {
@@ -285,14 +300,17 @@ impl Mesh {
     fn flush_delayed(&mut self) {
         for _ in 0..64 {
             let mut any = false;
+
             for relay in 0..self.relays.len() {
                 if !self.relays[relay].has_delayed() {
                     continue;
                 }
+
                 any = true;
                 let outputs = self.relays[relay].release_delayed(u64::MAX, self.now, &mut self.rng);
                 self.route(relay, outputs);
             }
+
             if !any {
                 return;
             }
@@ -301,44 +319,47 @@ impl Mesh {
 
     /// One turn of each party.
     fn step(&mut self) {
-        {
-            for client in 0..self.clients.len() {
-                // The store takes each change before a capsule leaves.
-                for change in self.clients[client].take_changes().unwrap() {
-                    if let StateChange::Contact { contact, state } = change {
-                        self.stored[client].insert(contact, state.to_vec());
-                    }
-                }
-                for capsule in self.clients[client].take_capsules() {
-                    let outputs = self.relays[0].on_capsule(
-                        self.links[client],
-                        &capsule,
-                        self.now,
-                        &mut self.rng,
-                    );
-                    self.route(0, outputs);
+        for client in 0..self.clients.len() {
+            // The store takes each change before a capsule leaves.
+            for change in self.clients[client].take_changes().unwrap() {
+                if let StateChange::Contact { contact, state } = change {
+                    self.stored[client].insert(contact, state.to_vec());
                 }
             }
-            self.flush_delayed();
-            for relay in (0..LAYERS.len()).filter(|relay| LAYERS[*relay] == 3) {
-                let circuits: Vec<_> = self.relays[relay].paced_circuits().copied().collect();
-                for circuit in circuits {
-                    let outputs = self.relays[relay].pacing_tick(&circuit, self.now, &mut self.rng);
-                    self.route(relay, outputs);
-                }
-                let outputs = self.relays[relay].drain_tick(self.now, &mut self.rng);
+
+            for capsule in self.clients[client].take_capsules() {
+                let outputs = self.relays[0].on_capsule(
+                    self.links[client],
+                    &capsule,
+                    self.now,
+                    &mut self.rng,
+                );
+                self.route(0, outputs);
+            }
+        }
+
+        self.flush_delayed();
+
+        for relay in (0..LAYERS.len()).filter(|relay| LAYERS[*relay] == 3) {
+            let circuits: Vec<_> = self.relays[relay].paced_circuits().copied().collect();
+            for circuit in circuits {
+                let outputs = self.relays[relay].pacing_tick(&circuit, self.now, &mut self.rng);
                 self.route(relay, outputs);
             }
-            for client in 0..self.clients.len() {
-                while let Some(capsule) = self.inboxes[client].pop_front() {
-                    let events = self.clients[client]
-                        .on_capsule(&capsule, self.now, &mut self.rng)
-                        .unwrap();
-                    self.events[client].extend(events);
-                }
-            }
-            self.now += 1;
+            let outputs = self.relays[relay].drain_tick(self.now, &mut self.rng);
+            self.route(relay, outputs);
         }
+
+        for client in 0..self.clients.len() {
+            while let Some(capsule) = self.inboxes[client].pop_front() {
+                let events = self.clients[client]
+                    .on_capsule(&capsule, self.now, &mut self.rng)
+                    .unwrap();
+                self.events[client].extend(events);
+            }
+        }
+
+        self.now += 1;
     }
 
     /// Ends the run of a client and starts a new one from its store.
@@ -346,12 +367,15 @@ impl Mesh {
         let old_link = self.links[client];
         let closed = self.relays[0].link_closed(old_link, self.now);
         self.route(0, closed);
+
         self.peers[0].retain(|(link, _)| *link != old_link);
         self.inboxes[client].clear();
+
         let mut node = self::client(seed);
         for state in self.stored[client].values() {
             node.restore_contact(state).unwrap();
         }
+
         // A session identifier comes from the CSPRNG (`WIR-136`), thus each
         // run takes a new one. The ingress relay parked the session of the
         // run before, and it refuses a second open of that identifier
@@ -359,7 +383,9 @@ impl Mesh {
         let run = old_link / 10_000;
         node.connected(&mut Rng(300 + u64::from(seed) + run * 1_000))
             .unwrap();
+
         self.clients[client] = node;
+
         // The links of a relay to the next layer take 800 and 900 and
         // above, thus a new run of a client takes a link far from them.
         self.links[client] = old_link + 10_000;
@@ -378,6 +404,7 @@ fn text(tag: u8, words: &str) -> Vec<u8> {
         sent_at: 0,
         body: words.as_bytes(),
     };
+
     let mut out = vec![0u8; message.len()];
     message.encode(&mut out).unwrap();
     out
@@ -408,6 +435,29 @@ fn texts_of(events: Vec<ClientEvent>) -> Vec<Vec<u8>> {
         .collect()
 }
 
+/// Turns of the mesh until the two clients, 0 and 1, are each a contact
+/// of the other. Client 0 invites, and client 1 accepts.
+fn meet(mesh: &mut Mesh) -> [ContactId; 2] {
+    mesh.settle();
+    mesh.take_events(0);
+    mesh.take_events(1);
+    mesh.clients[0].invite(&mut Rng(1)).unwrap();
+    mesh.settle();
+
+    let events = mesh.take_events(0);
+    let [ClientEvent::Invitation { bundle, .. }] = &events[..] else {
+        panic!("{events:?}");
+    };
+    mesh.clients[1].accept(bundle.clone(), &mut Rng(2)).unwrap();
+    mesh.settle();
+    mesh.settle();
+
+    [
+        contact_of(&mesh.take_events(0)),
+        contact_of(&mesh.take_events(1)),
+    ]
+}
+
 /// The end of the first chain of a client.
 fn exit_of(node: &ClientNode) -> [u8; 32] {
     node.chains()[0][2]
@@ -417,6 +467,7 @@ fn exit_of(node: &ClientNode) -> [u8; 32] {
 fn two_clients_at_two_queue_relays_meet_and_talk() {
     const ALICE: usize = 0;
     const BOB: usize = 1;
+
     // The draw of a chain is random. Two seeds whose first chains end at
     // two relays give the case that this test is for.
     let mut found = None;
@@ -428,9 +479,12 @@ fn two_clients_at_two_queue_relays_meet_and_talk() {
             break;
         }
     }
+
     let mut mesh = found.expect("two first chains that end at two relays");
+
     assert_eq!(mesh.take_events(ALICE), [ClientEvent::CircuitReady]);
     assert_eq!(mesh.take_events(BOB), [ClientEvent::CircuitReady]);
+
     let (alice_exit, bob_exit) = (exit_of(&mesh.clients[ALICE]), exit_of(&mesh.clients[BOB]));
 
     // Each chain is the ingress, a relay of layer 2, and a relay of layer 3.
@@ -438,6 +492,7 @@ fn two_clients_at_two_queue_relays_meet_and_talk() {
         let [chain] = node.chains()[..] else {
             panic!("one chain at the start");
         };
+
         assert_eq!(chain[0], relay_static(0).0.relay_id);
         assert!([1, 2]
             .map(|i| relay_static(i).0.relay_id)
@@ -452,15 +507,19 @@ fn two_clients_at_two_queue_relays_meet_and_talk() {
     // of Bob lives at the end of his own chain.
     mesh.clients[ALICE].invite(&mut Rng(1)).unwrap();
     mesh.settle();
+
     let events = mesh.take_events(ALICE);
     let [ClientEvent::Invitation { bundle, .. }] = &events[..] else {
         panic!("{events:?}");
     };
+
     mesh.clients[BOB]
         .accept(bundle.clone(), &mut Rng(2))
         .unwrap();
+
     mesh.settle();
     mesh.settle();
+
     let alice_contact = contact_of(&mesh.take_events(ALICE));
     let bob_contact = contact_of(&mesh.take_events(BOB));
 
@@ -470,10 +529,13 @@ fn two_clients_at_two_queue_relays_meet_and_talk() {
         ends.sort_unstable();
         ends
     };
+
     let mut both = vec![alice_exit, bob_exit];
     both.sort_unstable();
+
     assert_eq!(ends(&mesh.clients[ALICE]), both);
     assert_eq!(ends(&mesh.clients[BOB]), both);
+
     // NET-023: the two chains of one client share no relay but the ingress.
     for node in &mesh.clients {
         let chains = node.chains();
@@ -486,9 +548,11 @@ fn two_clients_at_two_queue_relays_meet_and_talk() {
     mesh.clients[BOB]
         .send(&bob_contact, &text(1, "hello alice"), now, &mut Rng(3))
         .unwrap();
+
     mesh.clients[ALICE]
         .send(&alice_contact, &text(2, "hello bob"), now, &mut Rng(4))
         .unwrap();
+
     mesh.settle();
     assert_eq!(texts_of(mesh.take_events(ALICE)), [b"hello alice"]);
     assert_eq!(texts_of(mesh.take_events(BOB)), [b"hello bob"]);
@@ -501,12 +565,14 @@ fn two_clients_at_two_queue_relays_meet_and_talk() {
     // and an arrival must not end a run for the lack of a circuit.
     let alice_seed = mesh_seed_of(&mesh, ALICE);
     mesh.restart(ALICE, alice_seed);
+
     // Alice writes at the moment her first circuit holds its three hops:
     // the `SUB` left, the record of Bob is on its way to her, and the
     // circuit to the relay of Bob does not exist yet.
     while mesh.clients[ALICE].chains().is_empty() {
         mesh.step();
     }
+
     let now = mesh.now;
     let sent = mesh.clients[ALICE]
         .send(
@@ -516,7 +582,9 @@ fn two_clients_at_two_queue_relays_meet_and_talk() {
             &mut Rng(5),
         )
         .unwrap();
+
     assert_eq!(mesh.clients[ALICE].chains().len(), 1);
+
     mesh.settle();
     assert!(mesh.clients[ALICE].chains().contains(
         &mesh.clients[ALICE]
@@ -525,10 +593,13 @@ fn two_clients_at_two_queue_relays_meet_and_talk() {
             .find(|chain| chain[2] == alice_exit)
             .expect("a circuit to the relay of the queue of Alice")
     ));
+
     assert_eq!(texts_of(mesh.take_events(BOB)), [b"after a new run"]);
+
     assert!(mesh
         .take_events(ALICE)
         .contains(&ClientEvent::Accepted { handle: sent }));
+
     assert_eq!(mesh.clients[ALICE].chains().len(), 2);
 }
 
@@ -536,10 +607,13 @@ fn two_clients_at_two_queue_relays_meet_and_talk() {
 fn a_queue_at_a_relay_that_left_the_set_does_not_end_the_run() {
     const ALICE: usize = 0;
     const BOB: usize = 1;
+
     let mut mesh = Mesh::new(&[0x41, 0x42]);
     mesh.settle();
+
     mesh.clients[ALICE].invite(&mut Rng(1)).unwrap();
     mesh.settle();
+
     let bundle = mesh
         .take_events(ALICE)
         .into_iter()
@@ -548,9 +622,11 @@ fn a_queue_at_a_relay_that_left_the_set_does_not_end_the_run() {
             _ => None,
         })
         .expect("an invitation");
+
     mesh.clients[BOB].accept(bundle, &mut Rng(2)).unwrap();
     mesh.settle();
     mesh.settle();
+
     let alice_contact = contact_of(&mesh.take_events(ALICE));
     mesh.take_events(BOB);
 
@@ -560,9 +636,11 @@ fn a_queue_at_a_relay_that_left_the_set_does_not_end_the_run() {
     for state in mesh.stored[ALICE].values_mut() {
         state[1 + 16 + 32..1 + 16 + 32 + 32].fill(0xEE);
     }
+
     let alice_seed = mesh_seed_of(&mesh, ALICE);
     mesh.restart(ALICE, alice_seed);
     mesh.settle();
+
     // No circuit ends at that relay. One circuit is there for a new queue.
     let chains = mesh.clients[ALICE].chains();
     assert_eq!(chains.len(), 1);
@@ -573,6 +651,7 @@ fn a_queue_at_a_relay_that_left_the_set_does_not_end_the_run() {
     mesh.clients[ALICE]
         .send(&alice_contact, &text(1, "still there"), now, &mut Rng(3))
         .unwrap();
+
     mesh.settle();
     assert_eq!(texts_of(mesh.take_events(BOB)), [b"still there"]);
 }
@@ -580,6 +659,7 @@ fn a_queue_at_a_relay_that_left_the_set_does_not_end_the_run() {
 /// Waits for the answer to one chunk command.
 fn outcome_of(mesh: &mut Mesh, client: usize, handle: u64) -> ChunkOutcome {
     mesh.settle();
+
     let mut outcomes = mesh
         .take_events(client)
         .into_iter()
@@ -590,24 +670,30 @@ fn outcome_of(mesh: &mut Mesh, client: usize, handle: u64) -> ChunkOutcome {
             } if of == handle => Some(outcome),
             _ => None,
         });
+
     let outcome = outcomes.next().expect("an answer to the chunk command");
     assert!(outcomes.next().is_none());
+
     outcome
 }
 
 #[test]
 fn a_chunk_goes_to_one_relay_and_that_relay_makes_the_two_copies() {
     const CLIENT: usize = 0;
+
     let mut mesh = Mesh::new(&[0x61]);
+
     // Part 12 §12.8: the transfer has a connection and a node of its own.
     let mut node = ClientNode::for_transfers(
         relay_info(0),
         (1..LAYERS.len()).map(relay_info).collect(),
         RootIdentity::new(Secret::new([0x61; 32])),
     );
+
     node.connected(&mut Rng(61)).unwrap();
     node.set_challenges(mesh.challenges.clone(), mesh.now);
     mesh.clients[CLIENT] = node;
+
     mesh.settle();
     mesh.take_events(CLIENT);
 
@@ -615,8 +701,10 @@ fn a_chunk_goes_to_one_relay_and_that_relay_makes_the_two_copies() {
     let [first, second, third] = exits[..] else {
         panic!("three exits");
     };
+
     let cred = || StaticSecret::from([0x71; 32]);
     let read = || StaticSecret::from([0x72; 32]);
+
     let chunk_id = [0xC4; 32];
     let chunk = vec![0xAB; CHUNK_SIZE];
     let mut rng = Rng(9);
@@ -629,12 +717,15 @@ fn a_chunk_goes_to_one_relay_and_that_relay_makes_the_two_copies() {
             read_pk: *XPublic::from(&read()).as_bytes(),
             is_backup: false,
         };
+
         let handle = mesh.clients[CLIENT]
             .chunk(relay, chunk_id, job, &mut rng)
             .unwrap();
+
         let ChunkOutcome::Registered(token) = outcome_of(&mut mesh, CLIENT, handle) else {
             panic!("no token");
         };
+
         tokens.push(token);
     }
     // A circuit ends at each relay that holds a copy. The first circuit of
@@ -650,21 +741,26 @@ fn a_chunk_goes_to_one_relay_and_that_relay_makes_the_two_copies() {
         storage_token: tokens[1],
         chunk: chunk.clone(),
     };
+
     let handle = mesh.clients[CLIENT]
         .chunk(first, chunk_id, wrong_token, &mut rng)
         .unwrap();
+
     assert!(matches!(
         outcome_of(&mut mesh, CLIENT, handle),
         ChunkOutcome::Refused(_)
     ));
+
     let put = ChunkJob::Put {
         cred: cred(),
         storage_token: tokens[0],
         chunk: chunk.clone(),
     };
+
     let handle = mesh.clients[CLIENT]
         .chunk(first, chunk_id, put, &mut rng)
         .unwrap();
+
     assert_eq!(outcome_of(&mut mesh, CLIENT, handle), ChunkOutcome::Stored);
 
     // No replica holds the chunk before the `CREP`.
@@ -692,13 +788,16 @@ fn a_chunk_goes_to_one_relay_and_that_relay_makes_the_two_copies() {
         ],
         chunk: chunk.clone(),
     };
+
     let handle = mesh.clients[CLIENT]
         .chunk(first, chunk_id, replicate, &mut rng)
         .unwrap();
+
     assert_eq!(
         outcome_of(&mut mesh, CLIENT, handle),
         ChunkOutcome::Replicated
     );
+
     assert_eq!(mesh.pushes, 2);
 
     // ATT-113: each replica proves its copy, and a proof over other bytes
@@ -708,21 +807,26 @@ fn a_chunk_goes_to_one_relay_and_that_relay_makes_the_two_copies() {
             cred: cred(),
             chunk: chunk.clone(),
         };
+
         let handle = mesh.clients[CLIENT]
             .chunk(relay, chunk_id, verify, &mut rng)
             .unwrap();
+
         assert_eq!(
             outcome_of(&mut mesh, CLIENT, handle),
             ChunkOutcome::Verified
         );
     }
+
     let other_bytes = ChunkJob::Verify {
         cred: cred(),
         chunk: vec![0xAC; CHUNK_SIZE],
     };
+
     let handle = mesh.clients[CLIENT]
         .chunk(second, chunk_id, other_bytes, &mut rng)
         .unwrap();
+
     assert_eq!(
         outcome_of(&mut mesh, CLIENT, handle),
         ChunkOutcome::WrongProof
@@ -730,17 +834,21 @@ fn a_chunk_goes_to_one_relay_and_that_relay_makes_the_two_copies() {
 
     // A reader fetches from a replica under the read credential alone.
     let by_cred = ChunkJob::Fetch { read: cred() };
+
     let handle = mesh.clients[CLIENT]
         .chunk(third, chunk_id, by_cred, &mut rng)
         .unwrap();
+
     assert!(matches!(
         outcome_of(&mut mesh, CLIENT, handle),
         ChunkOutcome::Refused(_)
     ));
+
     let fetch = ChunkJob::Fetch { read: read() };
     let handle = mesh.clients[CLIENT]
         .chunk(third, chunk_id, fetch, &mut rng)
         .unwrap();
+
     assert_eq!(
         outcome_of(&mut mesh, CLIENT, handle),
         ChunkOutcome::Fetched(chunk.clone())
@@ -751,11 +859,14 @@ fn a_chunk_goes_to_one_relay_and_that_relay_makes_the_two_copies() {
     let handle = mesh.clients[CLIENT]
         .chunk(first, chunk_id, erase, &mut rng)
         .unwrap();
+
     assert_eq!(outcome_of(&mut mesh, CLIENT, handle), ChunkOutcome::Erased);
+
     let gone = ChunkJob::Fetch { read: read() };
     let handle = mesh.clients[CLIENT]
         .chunk(first, chunk_id, gone, &mut rng)
         .unwrap();
+
     assert!(matches!(
         outcome_of(&mut mesh, CLIENT, handle),
         ChunkOutcome::Refused(_)
@@ -774,8 +885,10 @@ fn use_transfer_node(mesh: &mut Mesh, client: usize, seed: u8) {
         (1..LAYERS.len()).map(relay_info).collect(),
         RootIdentity::new(Secret::new([seed; 32])),
     );
+
     node.connected(&mut Rng(u64::from(seed))).unwrap();
     node.set_challenges(mesh.challenges.clone(), mesh.now);
+
     mesh.clients[client] = node;
 }
 
@@ -795,9 +908,11 @@ fn chunk_answers(mesh: &mut Mesh, client: usize) -> Vec<(u64, ChunkOutcome)> {
 fn a_file_goes_up_from_one_client_and_comes_down_at_another() {
     const SENDER: usize = 0;
     const RECEIVER: usize = 1;
+
     let mut mesh = Mesh::new(&[0x63, 0x64]);
     use_transfer_node(&mut mesh, SENDER, 0x63);
     use_transfer_node(&mut mesh, RECEIVER, 0x64);
+
     mesh.settle();
     let relays: Vec<AttachmentRelay> = (3..6)
         .map(|index| {
@@ -814,18 +929,23 @@ fn a_file_goes_up_from_one_client_and_comes_down_at_another() {
     let plain: Vec<u8> = (0..SEGMENT_SIZE * 3 + 999)
         .map(|i| (i % 251) as u8)
         .collect();
+
     let shape = Shape {
         mime_class: 1,
         pixel_w: 640,
         pixel_h: 480,
         ..Shape::default()
     };
+
     let mut rng = Rng(11);
     // The redundancy is mandatory, thus a set of two relays holds no file.
     assert!(Upload::new(&plain, shape, &relays[..2], &mut rng).is_err());
+
     let mut upload = Upload::new(&plain, shape, &relays, &mut rng).unwrap();
     upload.tick(&mut mesh.clients[SENDER], &mut rng).unwrap();
+
     let mut uploaded: Option<Uploaded> = None;
+
     for _ in 0..400 {
         for (handle, outcome) in chunk_answers(&mut mesh, SENDER) {
             let node = &mut mesh.clients[SENDER];
@@ -835,19 +955,24 @@ fn a_file_goes_up_from_one_client_and_comes_down_at_another() {
                 uploaded = Some(done);
             }
         }
+
         if uploaded.is_some() {
             break;
         }
     }
+
     let uploaded = uploaded.expect("the upload ends");
     let descriptor = &uploaded.descriptor;
+
     assert_eq!(descriptor.refs.len(), 4);
     assert_eq!(descriptor.padded_size as usize, 4 * CHUNK_SIZE);
     assert_eq!((descriptor.pixel_w, descriptor.pixel_h), (640, 480));
+
     // Each chunk has a credential and an identifier of its own (`ATT-036`,
     // `ATT-055`), and one relay made two copies of each.
     assert_eq!(uploaded.credentials.len(), 4);
     assert_eq!(mesh.pushes, 8);
+
     for (index, credential) in uploaded.credentials.iter().enumerate() {
         assert!(uploaded.credentials[..index]
             .iter()
@@ -861,21 +986,26 @@ fn a_file_goes_up_from_one_client_and_comes_down_at_another() {
     let erase = ChunkJob::Erase {
         cred: StaticSecret::from(*first.cred.expose()),
     };
+
     let lost_at = descriptor.refs[0].relay_id;
+
     let handle = mesh.clients[SENDER]
         .chunk(lost_at, first.chunk_id, erase, &mut rng)
         .unwrap();
+
     assert_eq!(outcome_of(&mut mesh, SENDER, handle), ChunkOutcome::Erased);
 
     // The descriptor travels in a record, thus the receiver reads its bytes.
     let mut encoded = vec![0u8; descriptor.len()];
     descriptor.encode(&mut encoded).unwrap();
     let received = umbra_wire::descriptor::FileDescriptor::parse(&encoded).unwrap();
+
     let mut rng = Rng(12);
     let mut download = Download::new(&received, &relays, &mut rng).unwrap();
     download
         .tick(&mut mesh.clients[RECEIVER], &mut rng)
         .unwrap();
+
     let mut fetched = None;
     for _ in 0..400 {
         for (handle, outcome) in chunk_answers(&mut mesh, RECEIVER) {
@@ -891,6 +1021,7 @@ fn a_file_goes_up_from_one_client_and_comes_down_at_another() {
             break;
         }
     }
+
     assert_eq!(fetched.expect("the download ends"), plain);
     assert!(!download.is_gone());
 
@@ -898,11 +1029,14 @@ fn a_file_goes_up_from_one_client_and_comes_down_at_another() {
     // download says that the file is gone.
     let mut lost = umbra_wire::descriptor::FileDescriptor::parse(&encoded).unwrap();
     lost.refs[1].chunk_id = [0xEE; 32];
+
     let mut download = Download::new(&lost, &relays, &mut rng).unwrap();
     download
         .tick(&mut mesh.clients[RECEIVER], &mut rng)
         .unwrap();
+
     let mut ended = false;
+
     for _ in 0..400 {
         for (handle, outcome) in chunk_answers(&mut mesh, RECEIVER) {
             let node = &mut mesh.clients[RECEIVER];
@@ -910,10 +1044,12 @@ fn a_file_goes_up_from_one_client_and_comes_down_at_another() {
                 .on_outcome(node, handle, outcome, &mut rng)
                 .is_err();
         }
+
         if ended {
             break;
         }
     }
+
     assert!(ended, "the download ends");
     assert!(download.is_gone());
 
@@ -921,13 +1057,16 @@ fn a_file_goes_up_from_one_client_and_comes_down_at_another() {
     // next replica. The answers wait here, thus each chunk asks twice, and
     // the download still ends with the file.
     let mut download = Download::new(&received, &relays, &mut rng).unwrap();
+
     for _ in 0..=umbra_core::attach::transfer::STEP_TIMEOUT_TICKS {
         download
             .tick(&mut mesh.clients[RECEIVER], &mut rng)
             .unwrap();
     }
+
     let mut answers = 0;
     let mut fetched = None;
+
     for _ in 0..400 {
         for (handle, outcome) in chunk_answers(&mut mesh, RECEIVER) {
             answers += 1;
@@ -936,6 +1075,7 @@ fn a_file_goes_up_from_one_client_and_comes_down_at_another() {
             if fetched.is_some() {
                 continue;
             }
+
             let node = &mut mesh.clients[RECEIVER];
             if let Progress::Done(bytes) = download
                 .on_outcome(node, handle, outcome, &mut rng)
@@ -948,6 +1088,7 @@ fn a_file_goes_up_from_one_client_and_comes_down_at_another() {
             break;
         }
     }
+
     assert_eq!(fetched.expect("the download ends"), plain);
     assert!(answers > received.refs.len(), "{answers} answers");
 }
@@ -960,10 +1101,12 @@ fn a_file_goes_up_from_one_client_and_comes_down_at_another() {
 fn an_upload_with_no_fresh_relay_sends_a_lost_copy_from_the_device() {
     const SENDER: usize = 0;
     const RECEIVER: usize = 1;
+
     let mut mesh = Mesh::new(&[0x6B, 0x6C]);
     use_transfer_node(&mut mesh, SENDER, 0x6B);
     use_transfer_node(&mut mesh, RECEIVER, 0x6C);
     mesh.settle();
+
     let relays: Vec<AttachmentRelay> = (3..6).map(holder).collect();
     let deaf = holder(4).relay_id;
     mesh.loses_pushes_to = Some(deaf);
@@ -972,7 +1115,9 @@ fn an_upload_with_no_fresh_relay_sends_a_lost_copy_from_the_device() {
     let mut rng = Rng(61);
     let mut upload = Upload::new(&plain, Shape::default(), &relays, &mut rng).unwrap();
     upload.tick(&mut mesh.clients[SENDER], &mut rng).unwrap();
+
     let mut uploaded: Option<Uploaded> = None;
+
     for _ in 0..3_000 {
         for (handle, outcome) in chunk_answers(&mut mesh, SENDER) {
             let node = &mut mesh.clients[SENDER];
@@ -987,7 +1132,9 @@ fn an_upload_with_no_fresh_relay_sends_a_lost_copy_from_the_device() {
         }
         upload.tick(&mut mesh.clients[SENDER], &mut rng).unwrap();
     }
+
     let uploaded = uploaded.expect("the upload ends");
+
     // The relay with no copy holds a place of each chunk, and it was not the
     // first relay of each one: the test met the case.
     assert!(uploaded
@@ -1003,16 +1150,19 @@ fn an_upload_with_no_fresh_relay_sends_a_lost_copy_from_the_device() {
     // The receiver reads each chunk from that relay alone.
     let only: Vec<AttachmentRelay> = vec![holder(4)];
     let mut rng = Rng(62);
+
     let mut download = Download::new(&uploaded.descriptor, &only, &mut rng).unwrap();
     download
         .tick(&mut mesh.clients[RECEIVER], &mut rng)
         .unwrap();
+
     let mut fetched = None;
     for _ in 0..600 {
         for (handle, outcome) in chunk_answers(&mut mesh, RECEIVER) {
             if fetched.is_some() {
                 continue;
             }
+
             let node = &mut mesh.clients[RECEIVER];
             if let Progress::Done(bytes) = download
                 .on_outcome(node, handle, outcome, &mut rng)
@@ -1021,10 +1171,12 @@ fn an_upload_with_no_fresh_relay_sends_a_lost_copy_from_the_device() {
                 fetched = Some(bytes);
             }
         }
+
         if fetched.is_some() {
             break;
         }
     }
+
     assert!(fetched.expect("the download ends") == plain);
 }
 
@@ -1035,36 +1187,45 @@ fn an_upload_with_no_fresh_relay_sends_a_lost_copy_from_the_device() {
 #[test]
 fn a_transfer_passes_the_cell_count_of_one_circuit_with_no_end_of_its_run() {
     const SENDER: usize = 0;
+
     let mut mesh = Mesh::new(&[0x69, 0x6A]);
     use_transfer_node(&mut mesh, SENDER, 0x69);
     mesh.settle();
+
     let relay = relay_info(3).candidate.relay_id;
     let mut rng = Rng(51);
     let mut sent = 0u32;
     let mut answered = 0u32;
     let total = umbra_onion::CIRCUIT_MAX_CELLS + 800;
+
     for _ in 0..4_000 {
         // The window of an upload: some commands wait for their answers.
         while sent < total && sent - answered < 64 {
             let mut chunk_id = [0u8; 32];
             chunk_id[..4].copy_from_slice(&sent.to_be_bytes());
+
             let erase = ChunkJob::Erase {
                 cred: StaticSecret::from([0x33; 32]),
             };
+
             mesh.clients[SENDER]
                 .chunk(relay, chunk_id, erase, &mut rng)
                 .unwrap();
             sent += 1;
         }
+
         answered += chunk_answers(&mut mesh, SENDER).len() as u32;
+
         let now = mesh.now;
         let ticked = mesh.clients[SENDER].on_tick(now);
+
         assert!(
             !ticked
                 .iter()
                 .any(|event| matches!(event, ClientEvent::CircuitAged | ClientEvent::CircuitLost)),
             "the run ends after {sent} commands"
         );
+
         if answered == total {
             break;
         }
@@ -1077,41 +1238,51 @@ fn a_transfer_passes_the_cell_count_of_one_circuit_with_no_end_of_its_run() {
 #[test]
 fn an_answer_of_a_transfer_waits_for_no_tick() {
     const SENDER: usize = 0;
+
     let mut mesh = Mesh::new(&[0x6B, 0x6C]);
     use_transfer_node(&mut mesh, SENDER, 0x6B);
     mesh.settle();
+
     let relay = relay_info(3).candidate.relay_id;
     let mut rng = Rng(52);
+
     // The first command builds the circuit, thus the mesh settles once.
     for round in 0..2u8 {
         let erase = ChunkJob::Erase {
             cred: StaticSecret::from([0x34; 32]),
         };
+
         mesh.clients[SENDER]
             .chunk(relay, [round; 32], erase, &mut rng)
             .unwrap();
+
         if round == 0 {
             mesh.settle();
             mesh.take_events(SENDER);
         }
     }
+
     for capsule in mesh.clients[SENDER].take_capsules() {
         let link = mesh.links[SENDER];
         let outputs = mesh.relays[0].on_capsule(link, &capsule, mesh.now, &mut mesh.rng);
         mesh.route(0, outputs);
     }
+
     mesh.flush_delayed();
+
     while let Some(capsule) = mesh.inboxes[SENDER].pop_front() {
         let events = mesh.clients[SENDER]
             .on_capsule(&capsule, mesh.now, &mut mesh.rng)
             .unwrap();
         mesh.events[SENDER].extend(events);
     }
+
     let answers = mesh
         .take_events(SENDER)
         .into_iter()
         .filter(|event| matches!(event, ClientEvent::Chunk { .. }))
         .count();
+
     assert_eq!(answers, 1);
 }
 
@@ -1128,26 +1299,33 @@ fn holder(index: usize) -> AttachmentRelay {
 fn a_file_above_one_descriptor_goes_up_and_down_through_its_manifest() {
     use umbra_core::attach::MAX_DESCRIPTOR_REFS;
     use umbra_wire::descriptor::Level;
+
     const SENDER: usize = 0;
     const RECEIVER: usize = 1;
+
     let mut mesh = Mesh::new(&[0x67, 0x68]);
     use_transfer_node(&mut mesh, SENDER, 0x67);
     use_transfer_node(&mut mesh, RECEIVER, 0x68);
     mesh.settle();
+
     let relays: Vec<AttachmentRelay> = (3..6).map(holder).collect();
 
     // ATT-073: one chunk more than a descriptor holds.
     let plain: Vec<u8> = (0..SEGMENT_SIZE * MAX_DESCRIPTOR_REFS + 17)
         .map(|i| (i % 253) as u8)
         .collect();
+
     let mut rng = Rng(41);
     let mut upload = Upload::new(&plain, Shape::default(), &relays, &mut rng).unwrap();
     upload.tick(&mut mesh.clients[SENDER], &mut rng).unwrap();
+
     let mut uploaded: Option<Uploaded> = None;
     let mut last = (0, 0);
     let mut ticks = 0;
+
     for _ in 0..20_000 {
         ticks += 1;
+
         for (handle, outcome) in chunk_answers(&mut mesh, SENDER) {
             let node = &mut mesh.clients[SENDER];
             match upload.on_outcome(node, handle, outcome, &mut rng).unwrap() {
@@ -1155,20 +1333,26 @@ fn a_file_above_one_descriptor_goes_up_and_down_through_its_manifest() {
                 Progress::Running(done, total) => last = (done, total),
             }
         }
+
         if uploaded.is_some() {
             break;
         }
+
         upload.tick(&mut mesh.clients[SENDER], &mut rng).unwrap();
     }
+
     // ATT-198: each `CPUT` with a fast answer opened the window, up to its
     // bound.
     assert_eq!(upload.window(), umbra_core::attach::MAX_CONCURRENT_UP);
+
     let uploaded = uploaded.expect("the upload ends");
+
     // NET-360, ATT-164: one tick of the pacing clock carries each answer
-    // that waits, and the window of `ATT-198` holds the `CPUT` alone. Thus the 271
-    // chunks need far less than the tick for each answer that they needed
-    // before, which was above 600 ticks.
+    // that waits, and the window of `ATT-198` holds the `CPUT` alone. Thus
+    // the 271 chunks need far fewer ticks than the one tick for each answer
+    // that they needed before, which was above 600 ticks.
     assert!(ticks < 40, "{ticks} ticks");
+
     // 270 data chunks, whose 270 refs fit one manifest chunk of 271. The
     // progress counts both phases.
     assert_eq!(last.1, MAX_DESCRIPTOR_REFS as u32 + 2);
@@ -1179,9 +1363,11 @@ fn a_file_above_one_descriptor_goes_up_and_down_through_its_manifest() {
     // ATT-079: the receiver reads the manifest, and then the data.
     let mut rng = Rng(42);
     let mut download = Download::new(&uploaded.descriptor, &relays, &mut rng).unwrap();
+
     download
         .tick(&mut mesh.clients[RECEIVER], &mut rng)
         .unwrap();
+
     let mut fetched = None;
     for _ in 0..20_000 {
         for (handle, outcome) in chunk_answers(&mut mesh, RECEIVER) {
@@ -1193,10 +1379,12 @@ fn a_file_above_one_descriptor_goes_up_and_down_through_its_manifest() {
                 fetched = Some(bytes);
             }
         }
+
         if fetched.is_some() {
             break;
         }
     }
+
     assert!(fetched.expect("the download ends") == plain);
 }
 
@@ -1204,10 +1392,12 @@ fn a_file_above_one_descriptor_goes_up_and_down_through_its_manifest() {
 fn an_upload_leaves_a_relay_that_refuses_and_a_relay_that_holds_no_copy() {
     const SENDER: usize = 0;
     const RECEIVER: usize = 1;
+
     let mut mesh = Mesh::new(&[0x65, 0x66]);
     use_transfer_node(&mut mesh, SENDER, 0x65);
     use_transfer_node(&mut mesh, RECEIVER, 0x66);
     mesh.settle();
+
     // Five relays hold files. One has no room, and one gets no copy.
     let relays: Vec<AttachmentRelay> = (3..8).map(holder).collect();
     let full = holder(FULL_RELAY).relay_id;
@@ -1218,7 +1408,9 @@ fn an_upload_leaves_a_relay_that_refuses_and_a_relay_that_holds_no_copy() {
     let mut rng = Rng(31);
     let mut upload = Upload::new(&plain, Shape::default(), &relays, &mut rng).unwrap();
     upload.tick(&mut mesh.clients[SENDER], &mut rng).unwrap();
+
     let mut uploaded: Option<Uploaded> = None;
+
     for _ in 0..3_000 {
         for (handle, outcome) in chunk_answers(&mut mesh, SENDER) {
             let node = &mut mesh.clients[SENDER];
@@ -1228,19 +1420,25 @@ fn an_upload_leaves_a_relay_that_refuses_and_a_relay_that_holds_no_copy() {
                 uploaded = Some(done);
             }
         }
+
         if uploaded.is_some() {
             break;
         }
+
         // The clock of the caller: a proof that a replica did not hold goes
         // again at a tick.
         upload.tick(&mut mesh.clients[SENDER], &mut rng).unwrap();
     }
+
     let uploaded = uploaded.expect("the upload ends");
+
     let repairs = upload.repairs();
     assert_eq!(uploaded.credentials.len(), 8);
+
     let mut met_deaf = false;
     for credential in &uploaded.credentials {
         assert_eq!(credential.relays.len(), 3);
+
         // ATT-017: three operators. The relay with no room holds no chunk,
         // and the relay that gets no copy holds a chunk only where it took
         // the bytes from this device.
@@ -1251,8 +1449,10 @@ fn an_upload_leaves_a_relay_that_refuses_and_a_relay_that_holds_no_copy() {
                 .iter()
                 .all(|other| other != relay));
         }
+
         met_deaf |= credential.relays.first() == Some(&deaf);
     }
+
     // The draw of this seed met the two relays, thus the test tested them.
     assert!(met_deaf);
     assert!(repairs >= 2, "{repairs} repairs");
@@ -1260,9 +1460,11 @@ fn an_upload_leaves_a_relay_that_refuses_and_a_relay_that_holds_no_copy() {
     // Each chunk is at three relays that hold it: the file comes down.
     let mut rng = Rng(32);
     let mut download = Download::new(&uploaded.descriptor, &relays, &mut rng).unwrap();
+
     download
         .tick(&mut mesh.clients[RECEIVER], &mut rng)
         .unwrap();
+
     let mut fetched = None;
     for _ in 0..600 {
         for (handle, outcome) in chunk_answers(&mut mesh, RECEIVER) {
@@ -1274,20 +1476,25 @@ fn an_upload_leaves_a_relay_that_refuses_and_a_relay_that_holds_no_copy() {
                 fetched = Some(bytes);
             }
         }
+
         if fetched.is_some() {
             break;
         }
     }
+
     assert_eq!(fetched.expect("the download ends"), plain);
 
     // With three relays and one of them with no room, no draw holds a file.
     let few = [holder(3), holder(5), holder(FULL_RELAY)];
     let mut upload = Upload::new(&plain[..100], Shape::default(), &few, &mut rng).unwrap();
     upload.tick(&mut mesh.clients[SENDER], &mut rng).unwrap();
+
     let mut failed = false;
+
     'upload: for _ in 0..600 {
         for (handle, outcome) in chunk_answers(&mut mesh, SENDER) {
             let node = &mut mesh.clients[SENDER];
+
             match upload.on_outcome(node, handle, outcome, &mut rng) {
                 Ok(Progress::Done(_)) => panic!("an upload to two relays"),
                 Ok(Progress::Running(..)) => {}
@@ -1298,6 +1505,7 @@ fn an_upload_leaves_a_relay_that_refuses_and_a_relay_that_holds_no_copy() {
             }
         }
     }
+
     assert!(failed);
 }
 
@@ -1315,8 +1523,10 @@ fn a_relay_set_with_no_conformant_chain_builds_none() {
     for relay in relays.iter_mut().filter(|relay| relay.candidate.layer == 3) {
         relay.candidate.operator_id = ingress.candidate.operator_id;
     }
+
     let mut node =
         ClientNode::with_relays(ingress, relays, RootIdentity::new(Secret::new([1; 32])));
+
     assert!(node.connected(&mut Rng(5)).is_err());
     assert!(node.chains().is_empty());
 }
@@ -1379,9 +1589,12 @@ fn a_relay_under_load_makes_a_group_queue_for_a_token_or_a_proof_of_work() {
     use umbra_crypto::rsabssa::SecretKey2048;
 
     const CREATOR: usize = 0;
+
     let mut mesh = Mesh::new(&[0x71]);
     use_group_node(&mut mesh, CREATOR, 0x71);
+
     mesh.settle();
+
     let relay = relay_info(3).candidate.relay_id;
     let own = StaticSecret::from([0x33u8; 32]);
 
@@ -1389,20 +1602,25 @@ fn a_relay_under_load_makes_a_group_queue_for_a_token_or_a_proof_of_work() {
     // cross-relay issuer of this epoch from the log.
     let now = mesh.now;
     let epoch = epoch_number(now);
+
     let key = SecretKey2048::from_seed(&Secret::new([0x71; 32]), &epoch.to_be_bytes()).unwrap();
+
     for node in &mut mesh.relays {
         node.set_issuer_key(epoch, key.public().clone());
         let gate = node.gate_mut();
         gate.pow = Verifier::new(gate.relay_id, 4);
         gate.pow.issue(0, now, &mut Rng(9)).unwrap();
     }
+
     let challenge = TokenChallenge {
         token_type: TYPE_CROSS_RELAY,
         epoch,
         redemption_context: [0; 32],
     };
+
     let (state, blinded) =
         CrossRelayRequest::new(1, &challenge, key.public(), &mut Rng(3)).unwrap();
+
     let signed = issue_cross_relay(&key, &blinded).unwrap();
     let token = state.finalize(&signed, key.public()).unwrap().remove(0);
     let token = umbra_core::discovery::dirclient::token_bytes(&token).unwrap();
@@ -1415,16 +1633,20 @@ fn a_relay_under_load_makes_a_group_queue_for_a_token_or_a_proof_of_work() {
         own: StaticSecret::from(own.to_bytes()),
         payment,
     };
+
     mesh.clients[CREATOR]
         .group(relay, [0; 32], create(Payment::Free), &mut Rng(21))
         .unwrap();
+
     assert_eq!(
         one_answer(&mut mesh, CREATOR),
         GroupOutcome::Refused(umbra_queue::Reject::Admission)
     );
+
     mesh.clients[CREATOR]
         .group(relay, [0; 32], create(Payment::Token(token)), &mut Rng(22))
         .unwrap();
+
     let GroupOutcome::Created(_) = one_answer(&mut mesh, CREATOR) else {
         panic!("the relay made no group queue");
     };
@@ -1434,14 +1656,18 @@ fn a_relay_under_load_makes_a_group_queue_for_a_token_or_a_proof_of_work() {
     mesh.clients[CREATOR]
         .group(relay, [0; 32], create(Payment::Work), &mut Rng(23))
         .unwrap();
+
     assert_eq!(
         one_answer(&mut mesh, CREATOR),
         GroupOutcome::Refused(umbra_queue::Reject::Admission)
     );
+
     mesh.issue_challenges();
+
     mesh.clients[CREATOR]
         .group(relay, [0; 32], create(Payment::Work), &mut Rng(24))
         .unwrap();
+
     let GroupOutcome::Created(_) = one_answer(&mut mesh, CREATOR) else {
         panic!("the relay made no group queue for the proof of work");
     };
@@ -1452,34 +1678,43 @@ fn a_relay_under_load_makes_a_queue_for_a_proof_of_work() {
     use umbra_core::abuse::pow::Verifier;
 
     const ALICE: usize = 0;
+
     let mut mesh = Mesh::new(&[0x61]);
+
     mesh.settle();
     mesh.take_events(ALICE);
+
     // ABU-048: each relay raises its effort, and the device takes the new
     // challenges.
     for node in &mut mesh.relays {
         let gate = node.gate_mut();
         gate.pow = Verifier::new(gate.relay_id, 4);
     }
+
     mesh.issue_challenges();
 
     // The NEW with no credential asks for one, and with no token the
     // device solves the challenge of the relay (ABU-014).
     let invite = mesh.clients[ALICE].invite(&mut Rng(1)).unwrap();
     mesh.settle();
+
     assert_eq!(
         mesh.take_events(ALICE),
         [ClientEvent::AdmissionAsked { handle: invite }]
     );
+
     let events = mesh.clients[ALICE]
         .admit_queue(invite, None, &mut Rng(2))
         .unwrap();
+
     assert!(events.is_empty());
     mesh.settle();
+
     let events = mesh.take_events(ALICE);
     let [ClientEvent::Invitation { handle, .. }] = &events[..] else {
         panic!("{events:?}");
     };
+
     assert_eq!(*handle, invite);
 }
 
@@ -1487,16 +1722,19 @@ fn a_relay_under_load_makes_a_queue_for_a_proof_of_work() {
 fn a_group_queue_takes_a_record_at_one_client_and_gives_it_at_another() {
     const CREATOR: usize = 0;
     const READER: usize = 1;
+
     let mut mesh = Mesh::new(&[0x71, 0x72]);
     use_group_node(&mut mesh, CREATOR, 0x71);
     use_group_node(&mut mesh, READER, 0x72);
     mesh.settle();
+
     let relay = relay_info(3).candidate.relay_id;
     let (read, write, own) = (
         StaticSecret::from([0x31u8; 32]),
         StaticSecret::from([0x32u8; 32]),
         StaticSecret::from([0x33u8; 32]),
     );
+
     let public = |sk: &StaticSecret| *XPublic::from(sk).as_bytes();
 
     // The creator makes the queue, and the relay names it.
@@ -1513,6 +1751,7 @@ fn a_group_queue_takes_a_record_at_one_client_and_gives_it_at_another() {
             &mut Rng(21),
         )
         .unwrap();
+
     let GroupOutcome::Created(group_queue_id) = one_answer(&mut mesh, CREATOR) else {
         panic!("the relay made no group queue");
     };
@@ -1529,6 +1768,7 @@ fn a_group_queue_takes_a_record_at_one_client_and_gives_it_at_another() {
             &mut Rng(22),
         )
         .unwrap();
+
     mesh.settle();
 
     // The creator posts one record, and the reader takes it. The relay
@@ -1536,8 +1776,10 @@ fn a_group_queue_takes_a_record_at_one_client_and_gives_it_at_another() {
     let mut record: Vec<u8> = (0..Bucket::B1.group_record())
         .map(|i| (i % 253) as u8)
         .collect();
+
     record[0] = umbra_wire::group::record::VERSION;
     record[1] = 0x01;
+
     mesh.clients[CREATOR]
         .group(
             relay,
@@ -1549,7 +1791,9 @@ fn a_group_queue_takes_a_record_at_one_client_and_gives_it_at_another() {
             &mut Rng(23),
         )
         .unwrap();
+
     assert_eq!(one_answer(&mut mesh, CREATOR), GroupOutcome::Posted(1));
+
     let held = group_records(&mut mesh, READER, 8);
     assert_eq!(held, vec![(1, record.clone())]);
 
@@ -1566,7 +1810,9 @@ fn a_group_queue_takes_a_record_at_one_client_and_gives_it_at_another() {
             &mut Rng(24),
         )
         .unwrap();
+
     assert_eq!(one_answer(&mut mesh, CREATOR), GroupOutcome::Posted(1));
+
     assert!(group_records(&mut mesh, READER, 8).is_empty());
 
     // A record under a credential that the queue does not hold is refused.
@@ -1581,6 +1827,7 @@ fn a_group_queue_takes_a_record_at_one_client_and_gives_it_at_another() {
             &mut Rng(25),
         )
         .unwrap();
+
     assert!(matches!(
         one_answer(&mut mesh, CREATOR),
         GroupOutcome::Refused(_)
@@ -1588,6 +1835,7 @@ fn a_group_queue_takes_a_record_at_one_client_and_gives_it_at_another() {
 
     // GRP-187: a second group at one relay takes a circuit of its own.
     let before = mesh.clients[CREATOR].chains().len();
+
     mesh.clients[CREATOR]
         .group(
             relay,
@@ -1601,9 +1849,11 @@ fn a_group_queue_takes_a_record_at_one_client_and_gives_it_at_another() {
             &mut Rng(26),
         )
         .unwrap();
+
     let GroupOutcome::Created(second) = one_answer(&mut mesh, CREATOR) else {
         panic!("the relay made no second group queue");
     };
+
     assert_ne!(second, group_queue_id);
     assert!(mesh.clients[CREATOR].chains().len() > before);
 }
@@ -1612,11 +1862,14 @@ fn a_group_queue_takes_a_record_at_one_client_and_gives_it_at_another() {
 /// thus no queue passes `QUEUE_IDLE_TTL` while the clock moves by days.
 fn a_month_passes(mesh: &mut Mesh, contacts: (ContactId, ContactId), tag: u8) {
     mesh.now += 30 * 86_400;
+
     for client in 0..2 {
         let seed = mesh_seed_of(mesh, client);
         mesh.restart(client, seed);
     }
+
     mesh.settle();
+
     let now = mesh.now;
     mesh.clients[1]
         .send(
@@ -1634,7 +1887,9 @@ fn a_month_passes(mesh: &mut Mesh, contacts: (ContactId, ContactId), tag: u8) {
             &mut Rng(u64::from(tag) + 1),
         )
         .unwrap();
+
     mesh.settle();
+
     assert_eq!(texts_of(mesh.take_events(0)), [b"a month on"]);
     assert_eq!(texts_of(mesh.take_events(1)), [b"and back"]);
 }
@@ -1644,6 +1899,7 @@ fn a_month_passes(mesh: &mut Mesh, contacts: (ContactId, ContactId), tag: u8) {
 /// operator, and a later one makes the queue there.
 fn rotate(mesh: &mut Mesh, client: usize, contact: &ContactId) {
     let before = mesh.clients[client].inbound_queue(contact).unwrap();
+
     for turn in 0..8 {
         let now = mesh.now;
         // Each client draws its own ephemeral keys: a relay refuses a
@@ -1653,7 +1909,9 @@ fn rotate(mesh: &mut Mesh, client: usize, contact: &ContactId) {
             .rotate_due(now, &mut Rng(rotate_seed))
             .unwrap();
         mesh.events[client].extend(events);
+
         mesh.settle();
+
         if mesh.clients[client].inbound_queue(contact).unwrap().0 != before.0 {
             return;
         }
@@ -1674,27 +1932,13 @@ fn ended_queues(events: &[ClientEvent]) -> Vec<[u8; 32]> {
 #[test]
 fn a_conversation_in_another_mode_sends_on_a_circuit_of_that_mode() {
     use umbra_onion::build::DelayClass;
+
     const ALICE: usize = 0;
     const BOB: usize = 1;
+
     let mut mesh = Mesh::new(&[0x41, 0x61]);
-    mesh.settle();
-    mesh.take_events(ALICE);
-    mesh.take_events(BOB);
-    mesh.clients[ALICE].invite(&mut Rng(1)).unwrap();
-    mesh.settle();
-    let events = mesh.take_events(ALICE);
-    let [ClientEvent::Invitation { bundle, .. }] = &events[..] else {
-        panic!("{events:?}");
-    };
-    mesh.clients[BOB]
-        .accept(bundle.clone(), &mut Rng(2))
-        .unwrap();
-    mesh.settle();
-    mesh.settle();
-    let contacts = (
-        contact_of(&mesh.take_events(ALICE)),
-        contact_of(&mesh.take_events(BOB)),
-    );
+    let [alice_contact, bob_contact] = meet(&mut mesh);
+    let contacts = (alice_contact, bob_contact);
     let before = mesh.clients[ALICE].chains().len();
 
     // NET-028: the record of a conversation in Private mode goes on a
@@ -1704,8 +1948,10 @@ fn a_conversation_in_another_mode_sends_on_a_circuit_of_that_mode() {
     mesh.clients[ALICE]
         .send(&contacts.0, &text(51, "slow and steady"), now, &mut Rng(4))
         .unwrap();
+
     mesh.settle();
     mesh.settle();
+
     assert_eq!(texts_of(mesh.take_events(BOB)), [b"slow and steady"]);
     assert_eq!(mesh.clients[ALICE].chains().len(), before + 1);
 
@@ -1715,6 +1961,7 @@ fn a_conversation_in_another_mode_sends_on_a_circuit_of_that_mode() {
         .send(&contacts.0, &text(52, "again"), now, &mut Rng(5))
         .unwrap();
     mesh.settle();
+
     assert_eq!(texts_of(mesh.take_events(BOB)), [b"again"]);
     assert_eq!(mesh.clients[ALICE].chains().len(), before + 1);
 }
@@ -1722,29 +1969,14 @@ fn a_conversation_in_another_mode_sends_on_a_circuit_of_that_mode() {
 #[test]
 fn a_revocation_moves_each_queue_after_its_own_delay_across_a_restart() {
     const ALICE: usize = 0;
-    const BOB: usize = 1;
+
     let mut mesh = Mesh::new(&[0x41, 0x61]);
-    mesh.settle();
-    mesh.take_events(ALICE);
-    mesh.take_events(BOB);
-    mesh.clients[ALICE].invite(&mut Rng(1)).unwrap();
-    mesh.settle();
-    let events = mesh.take_events(ALICE);
-    let [ClientEvent::Invitation { bundle, .. }] = &events[..] else {
-        panic!("{events:?}");
-    };
-    mesh.clients[BOB]
-        .accept(bundle.clone(), &mut Rng(2))
-        .unwrap();
-    mesh.settle();
-    mesh.settle();
-    let contacts = (
-        contact_of(&mesh.take_events(ALICE)),
-        contact_of(&mesh.take_events(BOB)),
-    );
-    let alice_contact = contacts.0;
+    let contacts = meet(&mut mesh);
+    let alice_contact = contacts[ALICE];
+
     // A rotation waits for a sending chain, thus the two talk first.
-    talk(&mut mesh, [contacts.0, contacts.1], 1);
+    talk(&mut mesh, contacts, 1);
+
     let first = mesh.clients[ALICE].inbound_queue(&alice_contact).unwrap().0;
 
     // NET-180, NET-181: a revocation gives the queue of each contact a
@@ -1753,13 +1985,17 @@ fn a_revocation_moves_each_queue_after_its_own_delay_across_a_restart() {
     mesh.clients[ALICE]
         .rotate_swept(&alice_contact, now, &mut Rng(3))
         .unwrap();
+
     let at = mesh.clients[ALICE].sweep_time(&alice_contact).unwrap();
     assert!(at > now);
+
     assert!(mesh.clients[ALICE]
         .rotate_due(now, &mut Rng(4))
         .unwrap()
         .is_empty());
+
     mesh.settle();
+
     assert_eq!(
         mesh.clients[ALICE].inbound_queue(&alice_contact).unwrap().0,
         first
@@ -1769,14 +2005,18 @@ fn a_revocation_moves_each_queue_after_its_own_delay_across_a_restart() {
     mesh.now = mesh.now.max(at);
     let seed = mesh_seed_of(&mesh, ALICE);
     mesh.restart(ALICE, seed);
+
     mesh.settle();
     mesh.take_events(ALICE);
+
     assert_eq!(mesh.clients[ALICE].sweep_time(&alice_contact), Some(at));
     rotate(&mut mesh, ALICE, &alice_contact);
+
     assert_ne!(
         mesh.clients[ALICE].inbound_queue(&alice_contact).unwrap().0,
         first
     );
+
     assert_eq!(mesh.clients[ALICE].sweep_time(&alice_contact), None);
 }
 
@@ -1784,26 +2024,11 @@ fn a_revocation_moves_each_queue_after_its_own_delay_across_a_restart() {
 fn a_queue_rotates_to_another_operator_and_the_old_one_ends() {
     const ALICE: usize = 0;
     const BOB: usize = 1;
+
     let mut mesh = Mesh::new(&[0x41, 0x61]);
-    mesh.settle();
-    mesh.take_events(ALICE);
-    mesh.take_events(BOB);
-    mesh.clients[ALICE].invite(&mut Rng(1)).unwrap();
-    mesh.settle();
-    let events = mesh.take_events(ALICE);
-    let [ClientEvent::Invitation { bundle, .. }] = &events[..] else {
-        panic!("{events:?}");
-    };
-    mesh.clients[BOB]
-        .accept(bundle.clone(), &mut Rng(2))
-        .unwrap();
-    mesh.settle();
-    mesh.settle();
-    let contacts = (
-        contact_of(&mesh.take_events(ALICE)),
-        contact_of(&mesh.take_events(BOB)),
-    );
-    let alice_contact = contacts.0;
+    let [alice_contact, bob_contact] = meet(&mut mesh);
+    let contacts = (alice_contact, bob_contact);
+
     let (first_queue, first_relay, _) = mesh.clients[ALICE].inbound_queue(&alice_contact).unwrap();
 
     // NET-018: the queue is young, thus no check rotates it.
@@ -1812,7 +2037,9 @@ fn a_queue_rotates_to_another_operator_and_the_old_one_ends() {
         .rotate_due(now, &mut Rng(3))
         .unwrap()
         .is_empty());
+
     mesh.settle();
+
     assert_eq!(
         mesh.clients[ALICE].inbound_queue(&alice_contact).unwrap().0,
         first_queue
@@ -1822,14 +2049,19 @@ fn a_queue_rotates_to_another_operator_and_the_old_one_ends() {
     for month in 0..4u8 {
         a_month_passes(&mut mesh, contacts, 10 + 2 * month);
     }
+
     rotate(&mut mesh, ALICE, &alice_contact);
+
     let (second_queue, second_relay, reads_both) =
         mesh.clients[ALICE].inbound_queue(&alice_contact).unwrap();
+
     // Part 3 §3.2.4: the new queue is at a relay of another operator, and
     // the old one stays readable until the peer takes the new address.
     assert_ne!(second_relay, first_relay);
     assert!(reads_both);
+
     assert!(texts_of(mesh.take_events(BOB)).is_empty(), "NET-294");
+
     // The store keeps the contact under its first identifier.
     assert_eq!(
         mesh.stored[ALICE].keys().copied().collect::<Vec<_>>(),
@@ -1839,7 +2071,9 @@ fn a_queue_rotates_to_another_operator_and_the_old_one_ends() {
     // A new run of Alice holds the rotation from her store.
     let seed = mesh_seed_of(&mesh, ALICE);
     mesh.restart(ALICE, seed);
+
     mesh.settle();
+
     assert_eq!(
         mesh.clients[ALICE].inbound_queue(&alice_contact).unwrap(),
         (second_queue, second_relay, true)
@@ -1850,19 +2084,25 @@ fn a_queue_rotates_to_another_operator_and_the_old_one_ends() {
     mesh.clients[BOB]
         .send(&contacts.1, &text(40, "to the new queue"), now, &mut Rng(4))
         .unwrap();
+
     mesh.settle();
+
     let events = mesh.take_events(ALICE);
     assert_eq!(ended_queues(&events), [first_queue]);
     assert_eq!(texts_of(events), [b"to the new queue"]);
+
     assert_eq!(
         mesh.clients[ALICE].inbound_queue(&alice_contact).unwrap(),
         (second_queue, second_relay, false)
     );
+
     let now = mesh.now;
     mesh.clients[ALICE]
         .send(&alice_contact, &text(41, "still here"), now, &mut Rng(5))
         .unwrap();
+
     mesh.settle();
+
     assert_eq!(texts_of(mesh.take_events(BOB)), [b"still here"]);
 
     // A second rotation, and no record of Bob comes: the old queue ends at
@@ -1870,17 +2110,22 @@ fn a_queue_rotates_to_another_operator_and_the_old_one_ends() {
     for month in 0..4u8 {
         a_month_passes(&mut mesh, contacts, 50 + 2 * month);
     }
+
     rotate(&mut mesh, ALICE, &alice_contact);
+
     let (third_queue, _, reads_both) = mesh.clients[ALICE].inbound_queue(&alice_contact).unwrap();
     assert!(reads_both);
+
     mesh.now += 7 * 86_400 - 120;
     let now = mesh.now;
     let events = mesh.clients[ALICE].rotate_due(now, &mut Rng(6)).unwrap();
     assert!(ended_queues(&events).is_empty());
+
     mesh.now += 120;
     let now = mesh.now;
     let events = mesh.clients[ALICE].rotate_due(now, &mut Rng(7)).unwrap();
     assert_eq!(ended_queues(&events), [second_queue]);
+
     assert_eq!(
         mesh.clients[ALICE].inbound_queue(&alice_contact).unwrap().0,
         third_queue
@@ -1900,9 +2145,12 @@ fn write_handle(
 ) -> Vec<[u8; 32]> {
     // The clock may have moved past the challenges of the start.
     mesh.issue_challenges();
+
     let mut rng = Rng(61);
+
     for _ in 0..400 {
         write.tick(&mut mesh.clients[client], &mut rng).unwrap();
+
         for (handle, outcome) in chunk_answers(mesh, client) {
             let node = &mut mesh.clients[client];
             if let Progress::Done(holders) =
@@ -1926,6 +2174,7 @@ fn read_handle(
         if let Progress::Done(found) = read.tick(&mut mesh.clients[client], &mut rng).unwrap() {
             return found.chunks.into_iter().next();
         }
+
         for (handle, outcome) in chunk_answers(mesh, client) {
             let node = &mut mesh.clients[client];
             if let Progress::Done(found) = read.on_outcome(node, handle, outcome, &mut rng).unwrap()
@@ -1948,12 +2197,15 @@ fn a_dead_channel_blob_goes_to_its_placement_and_the_peer_reads_it() {
     };
     use umbra_crypto::dead::DeadChannel;
     use umbra_wire::address::{QueueAddress, LEN};
+
     const WRITER: usize = 0;
     const READER: usize = 1;
+
     let mut mesh = Mesh::new(&[0x71, 0x72]);
     use_transfer_node(&mut mesh, WRITER, 0x71);
     use_transfer_node(&mut mesh, READER, 0x72);
     mesh.settle();
+
     let relays: Vec<AttachmentRelay> = (3..7).map(holder).collect();
 
     // The two pairwise keys give one secret, and the writer names its own
@@ -1962,11 +2214,14 @@ fn a_dead_channel_blob_goes_to_its_placement_and_the_peer_reads_it() {
     let reader_key = RootIdentity::new(Secret::new([0x72; 32])).pairwise_identity(&[2; 16]);
     let at_writer = DeadChannel::new(&writer_key, &reader_key.x25519_public()).unwrap();
     let at_reader = DeadChannel::new(&reader_key, &writer_key.x25519_public()).unwrap();
+
     let writer_pk = writer_key.x25519_public();
     let week = 2_900;
     let handle = at_writer.handle(&writer_pk, week);
+
     let read_pk =
         |read: &Secret<32>| *XPublic::from(&StaticSecret::from(*read.expose())).as_bytes();
+
     let mut address = vec![0u8; LEN];
     QueueAddress {
         relay_id: [5; 32],
@@ -1976,6 +2231,7 @@ fn a_dead_channel_blob_goes_to_its_placement_and_the_peer_reads_it() {
     }
     .encode(&mut address)
     .unwrap();
+
     let chunk = seal_blob(&at_writer.blob_key(&writer_pk, week), &address, [9; 24]).unwrap();
 
     // ATT-133: the first two relays of the list hold it, and one of them
@@ -1989,7 +2245,9 @@ fn a_dead_channel_blob_goes_to_its_placement_and_the_peer_reads_it() {
         &relays,
     )
     .unwrap();
+
     let holders = write_handle(&mut mesh, WRITER, write);
+
     assert_eq!(holders, placement_list(&handle, &relays)[..2]);
     assert_eq!(mesh.pushes, 1);
 
@@ -2000,8 +2258,11 @@ fn a_dead_channel_blob_goes_to_its_placement_and_the_peer_reads_it() {
         at_reader.read_secret(&writer_pk, week),
         &relays,
     );
+
     let found = read_handle(&mut mesh, READER, read).expect("the blob");
+
     let opened = open_blob(&at_reader.blob_key(&writer_pk, week), &found).unwrap();
+
     assert_eq!(*opened, address);
 
     // NET-192: the handle of the week before holds nothing.
@@ -2010,11 +2271,13 @@ fn a_dead_channel_blob_goes_to_its_placement_and_the_peer_reads_it() {
         at_reader.read_secret(&writer_pk, week - 1),
         &relays,
     );
+
     assert!(read_handle(&mut mesh, READER, read).is_none());
 
     // ATT-138: a write under the same handle erases the first one, and the
     // reader gets the new blob.
     let chunk = seal_blob(&at_writer.blob_key(&writer_pk, week), &address, [10; 24]).unwrap();
+
     let write = HandleWrite::new(
         handle,
         Secret::new([0x33; 32]),
@@ -2024,12 +2287,15 @@ fn a_dead_channel_blob_goes_to_its_placement_and_the_peer_reads_it() {
         &relays,
     )
     .unwrap();
+
     assert_eq!(write_handle(&mut mesh, WRITER, write), holders);
+
     let read = HandleRead::new(
         at_reader.handle(&writer_pk, week),
         at_reader.read_secret(&writer_pk, week),
         &relays,
     );
+
     assert_eq!(read_handle(&mut mesh, READER, read), Some(chunk));
 }
 
@@ -2038,6 +2304,7 @@ fn a_dead_channel_blob_goes_to_its_placement_and_the_peer_reads_it() {
 fn add_transfer_node(mesh: &mut Mesh, seed: u8) -> usize {
     let index = mesh.clients.len();
     let link = 50_000 + index as LinkId;
+
     mesh.clients.push(client(seed));
     mesh.links.push(link);
     mesh.stored.push(BTreeMap::new());
@@ -2045,9 +2312,11 @@ fn add_transfer_node(mesh: &mut Mesh, seed: u8) -> usize {
     mesh.events.push(Vec::new());
     mesh.seeds.push(seed);
     mesh.peers[0].push((link, Peer::Client(index)));
+
     use_transfer_node(mesh, index, seed);
     mesh.settle();
     mesh.take_events(index);
+
     index
 }
 
@@ -2061,46 +2330,37 @@ fn two_contacts_whose_queues_lapsed_meet_again_through_their_blobs() {
         },
     };
     use umbra_queue::params::QUEUE_IDLE_TTL;
+
     const ALICE: usize = 0;
     const BOB: usize = 1;
+
     let mut mesh = Mesh::new(&[0x81, 0x82]);
-    mesh.settle();
-    mesh.take_events(ALICE);
-    mesh.take_events(BOB);
-    mesh.clients[ALICE].invite(&mut Rng(1)).unwrap();
-    mesh.settle();
-    let events = mesh.take_events(ALICE);
-    let [ClientEvent::Invitation { bundle, .. }] = &events[..] else {
-        panic!("{events:?}");
-    };
-    mesh.clients[BOB]
-        .accept(bundle.clone(), &mut Rng(2))
-        .unwrap();
-    mesh.settle();
-    mesh.settle();
-    let contacts = [
-        contact_of(&mesh.take_events(ALICE)),
-        contact_of(&mesh.take_events(BOB)),
-    ];
+    let contacts = meet(&mut mesh);
+
     let now = mesh.now;
     mesh.clients[BOB]
         .send(&contacts[BOB], &text(1, "first"), now, &mut Rng(3))
         .unwrap();
+
     mesh.settle();
+
     assert_eq!(texts_of(mesh.take_events(ALICE)), [b"first"]);
 
     // Both parties stay away past QUEUE_IDLE_TTL, and the relays drop the
     // two queues.
     mesh.now += QUEUE_IDLE_TTL + 3_600;
+
     for relay in 0..LAYERS.len() {
         let now = mesh.now;
         let outputs = mesh.relays[relay].sweep(now, &mut Rng(4));
         mesh.route(relay, outputs);
     }
+
     for client in [ALICE, BOB] {
         let seed = mesh_seed_of(&mesh, client);
         mesh.restart(client, seed);
     }
+
     mesh.settle();
 
     // NET-324: the SUB of each finds no queue, and each takes a new one.
@@ -2110,6 +2370,7 @@ fn two_contacts_whose_queues_lapsed_meet_again_through_their_blobs() {
     for client in [ALICE, BOB] {
         rotate(&mut mesh, client, &contacts[client]);
         mesh.settle();
+
         let events = mesh.take_events(client);
         let address = events
             .iter()
@@ -2118,7 +2379,9 @@ fn two_contacts_whose_queues_lapsed_meet_again_through_their_blobs() {
                 _ => None,
             })
             .expect("the address of the new queue");
+
         addresses.push(address);
+
         assert!(
             events.contains(&ClientEvent::ChannelDead {
                 contact: contacts[client]
@@ -2131,6 +2394,7 @@ fn two_contacts_whose_queues_lapsed_meet_again_through_their_blobs() {
     // the one of the peer.
     let relays: Vec<AttachmentRelay> = (3..7).map(holder).collect();
     let week = 3_000;
+
     let secrets: Vec<_> = [ALICE, BOB]
         .into_iter()
         .map(|client| {
@@ -2138,15 +2402,18 @@ fn two_contacts_whose_queues_lapsed_meet_again_through_their_blobs() {
             stored_dead_channel(&mesh.stored[client][&contacts[client]], &root).unwrap()
         })
         .collect();
+
     let movers = [
         add_transfer_node(&mut mesh, 0x81),
         add_transfer_node(&mut mesh, 0x82),
     ];
+
     for client in [ALICE, BOB] {
         let (secret, own_pk, _) = &secrets[client];
         let read = secret.read_secret(own_pk, week);
         let read_pk = *XPublic::from(&StaticSecret::from(*read.expose())).as_bytes();
         let chunk = seal_blob(&secret.blob_key(own_pk, week), &addresses[client], [7; 24]).unwrap();
+
         let write = HandleWrite::new(
             secret.handle(own_pk, week),
             Secret::new([0x40 + client as u8; 32]),
@@ -2156,18 +2423,22 @@ fn two_contacts_whose_queues_lapsed_meet_again_through_their_blobs() {
             &relays,
         )
         .unwrap();
+
         write_handle(&mut mesh, movers[client], write);
     }
     for client in [ALICE, BOB] {
         let (secret, _, peer_pk) = &secrets[client];
+
         let read = HandleRead::new(
             secret.handle(peer_pk, week),
             secret.read_secret(peer_pk, week),
             &relays,
         );
+
         let chunk = read_handle(&mut mesh, movers[client], read).expect("the blob of the peer");
         let address = open_blob(&secret.blob_key(peer_pk, week), &chunk).unwrap();
         assert_eq!(*address, addresses[1 - client]);
+
         // NET-190, NET-191: the peer moved, and the own address goes to it.
         let now = mesh.now;
         mesh.clients[client]
@@ -2181,6 +2452,7 @@ fn two_contacts_whose_queues_lapsed_meet_again_through_their_blobs() {
     }
     mesh.settle();
     mesh.settle();
+
     for client in [ALICE, BOB] {
         assert!(mesh.take_events(client).contains(&ClientEvent::PeerMoved {
             contact: contacts[client]
@@ -2192,11 +2464,14 @@ fn two_contacts_whose_queues_lapsed_meet_again_through_their_blobs() {
     mesh.clients[ALICE]
         .send(&contacts[ALICE], &text(6, "found you"), now, &mut Rng(6))
         .unwrap();
+
     mesh.clients[BOB]
         .send(&contacts[BOB], &text(7, "and you"), now, &mut Rng(7))
         .unwrap();
+
     mesh.settle();
     mesh.settle();
+
     assert_eq!(texts_of(mesh.take_events(BOB)), [b"found you"]);
     assert_eq!(texts_of(mesh.take_events(ALICE)), [b"and you"]);
 }
@@ -2206,6 +2481,7 @@ fn talk(mesh: &mut Mesh, contacts: [ContactId; 2], tag: u8) {
     for (from, to) in [(0usize, 1usize), (1, 0)] {
         let now = mesh.now;
         let words = format!("round {tag} from {from}");
+
         mesh.clients[from]
             .send(
                 &contacts[from],
@@ -2214,8 +2490,10 @@ fn talk(mesh: &mut Mesh, contacts: [ContactId; 2], tag: u8) {
                 &mut Rng(u64::from(tag)),
             )
             .unwrap();
+
         mesh.settle();
         assert_eq!(texts_of(mesh.take_events(to)), [words.as_bytes()]);
+
         mesh.take_events(from);
     }
 }
@@ -2228,30 +2506,16 @@ fn renewed(events: &[ClientEvent], contact: ContactId) -> bool {
 fn a_channel_restored_from_an_old_state_renews_and_talks_again() {
     const ALICE: usize = 0;
     const BOB: usize = 1;
+
     let mut mesh = Mesh::new(&[0x91, 0x92]);
-    mesh.settle();
-    mesh.take_events(ALICE);
-    mesh.take_events(BOB);
-    mesh.clients[ALICE].invite(&mut Rng(1)).unwrap();
-    mesh.settle();
-    let events = mesh.take_events(ALICE);
-    let [ClientEvent::Invitation { bundle, .. }] = &events[..] else {
-        panic!("{events:?}");
-    };
-    mesh.clients[BOB]
-        .accept(bundle.clone(), &mut Rng(2))
-        .unwrap();
-    mesh.settle();
-    mesh.settle();
-    let contacts = [
-        contact_of(&mesh.take_events(ALICE)),
-        contact_of(&mesh.take_events(BOB)),
-    ];
+    let contacts = meet(&mut mesh);
+
     talk(&mut mesh, contacts, 10);
 
     // The backup of Alice holds this state. The two talk on, and each DH
     // step moves the ratchet past it.
     let backup = mesh.stored[ALICE].clone();
+
     for round in 11..14 {
         talk(&mut mesh, contacts, round);
     }
@@ -2259,12 +2523,16 @@ fn a_channel_restored_from_an_old_state_renews_and_talks_again() {
     // NET-325: Alice comes back from the backup, and her channel is stale.
     // Her record waits, and no ratchet record leaves.
     mesh.stored[ALICE] = backup;
+
     let seed = mesh_seed_of(&mesh, ALICE);
     mesh.restart(ALICE, seed);
+
     mesh.settle();
     mesh.take_events(ALICE);
+
     mesh.clients[ALICE].mark_stale(&contacts[ALICE]).unwrap();
     assert!(mesh.clients[ALICE].is_stale(&contacts[ALICE]));
+
     let now = mesh.now;
     mesh.clients[ALICE]
         .send(
@@ -2281,74 +2549,98 @@ fn a_channel_restored_from_an_old_state_renews_and_talks_again() {
     mesh.settle();
     mesh.settle();
     mesh.settle();
+
     let alice = mesh.take_events(ALICE);
     let bob = mesh.take_events(BOB);
+
     assert!(renewed(&alice, contacts[ALICE]), "{alice:?}");
     assert!(renewed(&bob, contacts[BOB]), "{bob:?}");
     assert_eq!(texts_of(bob), [b"back from a backup"]);
+
     assert!(!mesh.clients[ALICE].is_stale(&contacts[ALICE]));
+
     talk(&mut mesh, contacts, 21);
 
     // The new state lives through a restart.
     let seed = mesh_seed_of(&mesh, ALICE);
     mesh.restart(ALICE, seed);
+
     mesh.settle();
     mesh.take_events(ALICE);
+
     talk(&mut mesh, contacts, 22);
 
     // NET-328: both come back from old states at once. Each offers a
     // bundle, the party with the lower static key answers, and the two
     // meet on one channel.
     let backups = [mesh.stored[ALICE].clone(), mesh.stored[BOB].clone()];
+
     talk(&mut mesh, contacts, 23);
     talk(&mut mesh, contacts, 24);
+
     for client in [ALICE, BOB] {
         mesh.stored[client] = backups[client].clone();
         let seed = mesh_seed_of(&mesh, client);
+
         mesh.restart(client, seed);
     }
     mesh.settle();
+
     // NET-180, NET-181: each renewal waits for its own delay, and the
     // delay lives through a restart.
     for client in [ALICE, BOB] {
         mesh.take_events(client);
+
         mesh.clients[client].mark_stale(&contacts[client]).unwrap();
         let now = mesh.now;
+
         let events = mesh.clients[client]
             .rotate_due(now, &mut Rng(30 + client as u64))
             .unwrap();
+
         assert!(events.is_empty());
     }
     mesh.settle();
+
     let due =
         [ALICE, BOB].map(|client| mesh.clients[client].sweep_time(&contacts[client]).unwrap());
+
     assert_ne!(due[0], due[1]);
     mesh.now = mesh.now.max(due[0]).max(due[1]);
+
     for client in [ALICE, BOB] {
         let seed = mesh_seed_of(&mesh, client);
         mesh.restart(client, seed);
     }
+
     mesh.settle();
+
     for client in [ALICE, BOB] {
         mesh.take_events(client);
         assert_eq!(
             mesh.clients[client].sweep_time(&contacts[client]),
             Some(due[client])
         );
+
         let now = mesh.now;
         let events = mesh.clients[client]
             .rotate_due(now, &mut Rng(40 + client as u64))
             .unwrap();
+
         mesh.events[client].extend(events);
     }
+
     for _ in 0..4 {
         mesh.settle();
     }
+
     for client in [ALICE, BOB] {
         let events = mesh.take_events(client);
+
         assert!(renewed(&events, contacts[client]), "{client}: {events:?}");
         assert!(!mesh.clients[client].is_stale(&contacts[client]));
     }
+
     talk(&mut mesh, contacts, 25);
 }
 
@@ -2356,21 +2648,28 @@ fn a_channel_restored_from_an_old_state_renews_and_talks_again() {
 fn a_backup_object_takes_two_replicas_and_its_manifest_above_seven_chunks() {
     use umbra_core::attach::transfer::Class;
     use umbra_wire::descriptor::Level;
+
     const WRITER: usize = 0;
     const READER: usize = 1;
+
     let mut mesh = Mesh::new(&[0xA1, 0xA2]);
     use_transfer_node(&mut mesh, WRITER, 0xA1);
     use_transfer_node(&mut mesh, READER, 0xA2);
     mesh.settle();
+
     let relays: Vec<AttachmentRelay> = (3..7).map(holder).collect();
 
     // IDN-096: nine data chunks are above BACKUP_DESC_REFS.
     let plain: Vec<u8> = (0..SEGMENT_SIZE * 8 + 5).map(|i| (i % 241) as u8).collect();
     let mut rng = Rng(71);
+
     let mut upload =
         Upload::with_class(&plain, Shape::default(), &relays, Class::BACKUP, &mut rng).unwrap();
+
     upload.tick(&mut mesh.clients[WRITER], &mut rng).unwrap();
+
     let mut uploaded: Option<Uploaded> = None;
+
     for _ in 0..600 {
         for (handle, outcome) in chunk_answers(&mut mesh, WRITER) {
             let node = &mut mesh.clients[WRITER];
@@ -2384,8 +2683,11 @@ fn a_backup_object_takes_two_replicas_and_its_manifest_above_seven_chunks() {
             break;
         }
     }
+
     let uploaded = uploaded.expect("the upload ends");
+
     assert_eq!(uploaded.descriptor.level, Level::Manifest);
+
     // IDN-076: each chunk is at two relays.
     assert!(uploaded
         .credentials
@@ -2395,11 +2697,15 @@ fn a_backup_object_takes_two_replicas_and_its_manifest_above_seven_chunks() {
     let mut encoded = vec![0u8; uploaded.descriptor.len()];
     uploaded.descriptor.encode(&mut encoded).unwrap();
     let received = umbra_wire::descriptor::FileDescriptor::parse(&encoded).unwrap();
+
     // ATT-073 holds for an attachment, thus the attachment path refuses it.
     assert!(Download::new(&received, &relays, &mut rng).is_err());
+
     let mut download = Download::new_backup(&received, &relays, &mut rng).unwrap();
     download.tick(&mut mesh.clients[READER], &mut rng).unwrap();
+
     let mut fetched = None;
+
     for _ in 0..600 {
         for (handle, outcome) in chunk_answers(&mut mesh, READER) {
             let node = &mut mesh.clients[READER];
@@ -2410,9 +2716,11 @@ fn a_backup_object_takes_two_replicas_and_its_manifest_above_seven_chunks() {
                 fetched = Some(bytes);
             }
         }
+
         if fetched.is_some() {
             break;
         }
     }
+
     assert_eq!(fetched.expect("the download ends"), plain);
 }
