@@ -356,7 +356,6 @@ pub enum Event {
     /// queue alias. The platform writes the wake table again (Part 8
     /// `NTF-135`).
     WakeTable,
-    /// A contact offered a group of Part 11. The user sees the offers of
     /// A contact asks to introduce the user to a third party, or it
     /// introduces the user to one (Part 6 §6.6.7). The view reads
     /// [`client::Client::introductions`].
@@ -364,6 +363,7 @@ pub enum Event {
         /// The pairwise conversation that carried it.
         from: ConversationId,
     },
+    /// A contact offered a group of Part 11. The user sees the offers of
     /// [`client::Client::group_offers`] and answers one of them
     /// (`GRP-170`).
     GroupOffer {
@@ -493,9 +493,11 @@ mod tests {
 
     impl TryRng for Rng {
         type Error = core::convert::Infallible;
+
         fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
             Ok(self.try_next_u64()? as u32)
         }
+
         fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
             self.0 = self
                 .0
@@ -503,6 +505,7 @@ mod tests {
                 .wrapping_add(1_442_695_040_888_963_407);
             Ok(self.0 >> 11 ^ self.0 << 7)
         }
+
         fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
             for chunk in dst.chunks_mut(8) {
                 let bytes = self.try_next_u64()?.to_le_bytes();
@@ -591,6 +594,7 @@ mod tests {
             .unwrap();
         assert!(client.is_group(conversation).unwrap());
         assert_eq!(client.conversations().unwrap().len(), contacts + 1);
+
         let name_of = |client: &mut Client<MemoryBackend, Element>| {
             client
                 .summaries()
@@ -629,6 +633,7 @@ mod tests {
         client
             .unlock(&units("correct horse"), 1_700_000_100)
             .unwrap();
+
         // The run of the group queues asks for the work at its start.
         assert!(client.take_group_creation().is_none());
         client.resume_group_work(&mut rng).unwrap();
@@ -651,6 +656,7 @@ mod tests {
             .unwrap();
         assert!(!ready);
         assert!(!client.group_info(conversation).unwrap().is_ready);
+
         let ready = client
             .group_queue_made(
                 &info.group_id,
@@ -704,6 +710,7 @@ mod tests {
             sent_at: 1_700_000_020_000,
             body: object,
         };
+
         let mut bytes = vec![0u8; app.len()];
         let n = app.encode(&mut bytes).unwrap();
         bytes.truncate(n);
@@ -785,6 +792,7 @@ mod tests {
         client
             .group_queue_made(&group_id, 1, relays[1], [0xD4; 32], &mut rng)
             .unwrap();
+
         // GRP-199, GRP-200: the line shows while no replica answers, and
         // the first answer ends it.
         assert!(!client.group_info(conversation).unwrap().is_unreachable);
@@ -1219,6 +1227,7 @@ mod tests {
             .on_group_record(&[0xC3; 32], 1, &post.record, (now + 1) * 1_000, &mut rng)
             .unwrap()
             .unwrap();
+
         // The receiver keeps the member that the tag named.
         assert_eq!(client.info(&held).unwrap().sender, Some(1));
         assert_eq!(other.info(&mine).unwrap().sender, None);
@@ -1496,6 +1505,7 @@ mod tests {
             .groups_owing_presence(ms(t0), &mut rng)
             .unwrap()
             .is_empty());
+
         // A plain member watches no silence (`GRP-132`).
         assert!(other
             .members_to_evict(ms(t0 + 60 * DAY), &mut rng)
@@ -1694,6 +1704,7 @@ mod tests {
             .unwrap();
         carry(&mut client, &mut other, now + 2_000);
         assert_eq!(owners_at(&other, member), owners_at(&client, conversation));
+
         other.leave_group(member, now + 3_000, &mut rng).unwrap();
         let post = other.take_group_post().unwrap();
         client
@@ -1709,6 +1720,7 @@ mod tests {
                 .unwrap(),
             vec![conversation]
         );
+
         let held = owners_at(&client, conversation);
         client
             .rotate_owners(conversation, now + 3_000_000, &mut rng)
@@ -1936,6 +1948,7 @@ mod tests {
         client
             .group_queue_made(&group_id, 1, relays[1], [0xD4; 32], &mut rng)
             .unwrap();
+
         // 28 members join before `other`, thus the group holds 30, above
         // the 27 slots of the inline carrier.
         let mut group = client.group_of(conversation).unwrap();
@@ -2095,6 +2108,7 @@ mod tests {
             .map(|i| ([i; 32], [0xA1; 32]))
             .chain([([0x50; 32], [0xB2; 32])])
             .collect();
+
         // No endpoint, no binding.
         assert!(client
             .queues_to_bind(&queues, 0, &mut rng)
@@ -2191,6 +2205,7 @@ mod tests {
             &ndr.handle(&push, 1_700_000_000).1.unwrap().target[..],
             second.as_bytes()
         );
+
         client.set_push_token(None, &mut rng).unwrap();
         let calls = client.ndr_calls_due(&mut rng).unwrap();
         assert!(calls.iter().all(|call| call.is_removal));
@@ -2267,6 +2282,7 @@ mod tests {
         client
             .set_group_notify(conversation, [0x22; 32], &second, t1, &mut rng)
             .unwrap();
+
         // A second rotation waits for the first one to end.
         assert!(client
             .groups_without_notify(t1 + ROTATE_INTERVAL)
@@ -2426,6 +2442,7 @@ mod tests {
             )
             .unwrap();
         assert!(erase.is_none());
+
         let work = client
             .dead_channel_work(now + 3 * 86_400, epoch, &[], &mut rng)
             .unwrap();
@@ -2438,6 +2455,7 @@ mod tests {
         assert!(work
             .iter()
             .any(|step| matches!(step, DeadWork::Write { week: 3_001, .. })));
+
         let erase = client
             .dead_blob_written(
                 conversation,
@@ -2539,6 +2557,7 @@ mod tests {
             .silent_conversations(later_ms + 30 * 86_400 * 1_000)
             .unwrap()
             .is_empty());
+
         // The condition ended: the row goes, and its candidate with it.
         client
             .dead_channel_work(now + 17 * 86_400, epoch + 336, &[], &mut rng)
@@ -2642,6 +2661,7 @@ mod tests {
                 relays: vec![[5; 32], [9; 32]],
             }],
         };
+
         let tables = |object: &BackupObject, table: TableId| {
             object
                 .rows
@@ -2792,6 +2812,7 @@ mod tests {
                 relays: vec![[5; 32], [9; 32]],
             }],
         };
+
         let messages_of = |client: &Client<MemoryBackend, Element>, conversation| {
             client
                 .messages(conversation)
@@ -2817,6 +2838,7 @@ mod tests {
             .commit_network(&[change], &[], now * 1_000, &mut rng)
             .unwrap();
         let conversation = alice.conversation_for(&contact.0).unwrap();
+
         let send =
             |client: &mut Client<MemoryBackend, Element>, words: &str, at: u64, rng: &mut Rng| {
                 let mut draft = client.new_draft(conversation);
@@ -2824,6 +2846,7 @@ mod tests {
                 client.send_draft(draft, at * 1_000, rng).unwrap();
                 while client.take_outgoing().is_some() {}
             };
+
         send(&mut alice, "before the full object", now, &mut rng);
         let BackupUpload {
             plain: full,
@@ -2832,6 +2855,7 @@ mod tests {
         alice
             .backup_uploaded(pending, &uploaded(), 168 * 3_000, &mut rng)
             .unwrap();
+
         send(&mut alice, "in the delta", now + 100, &mut rng);
         let BackupUpload {
             plain: delta,
@@ -2931,6 +2955,7 @@ mod tests {
                 relays: vec![[5; 32], [9; 32]],
             }],
         };
+
         let mut rng = Rng(171);
         let mut alice = new_client(&mut rng);
         let contact = ContactId([9; 32]);
@@ -2948,6 +2973,7 @@ mod tests {
             )
             .unwrap(),
         };
+
         let now = 1_800_000_000;
         alice
             .commit_network(&[state(1)], &[], now * 1_000, &mut rng)
@@ -2960,6 +2986,7 @@ mod tests {
         alice
             .backup_uploaded(pending, &uploaded(), 168 * 3_000, &mut rng)
             .unwrap();
+
         // The node sets a new guard, and the next delta holds the row.
         alice
             .commit_network(&[state(2)], &[], (now + 100) * 1_000, &mut rng)
@@ -3030,6 +3057,7 @@ mod tests {
         assert!(client
             .rotate_one_group(t0 + ROTATE_INTERVAL, &mut rng)
             .unwrap());
+
         // The queues bind again under the new triple and root.
         let unbound = client
             .queues_to_bind(&queues, t0 + ROTATE_INTERVAL, &mut rng)
@@ -3052,6 +3080,7 @@ mod tests {
             client.ndr_call_taken(call, &mut rng).unwrap();
         }
         assert!(client.ndr_calls_due(&mut rng).unwrap().is_empty());
+
         let push = |binding: &umbra_core::notify::binding::Binding| {
             let mut out = [0u8; NDR_REQUEST_LEN];
             NdrRequest::Push {
@@ -3064,6 +3093,7 @@ mod tests {
             .unwrap();
             out
         };
+
         assert_eq!(
             ndr.handle(&push(&before), 1_700_000_000).0,
             NdrResponse::Gone
@@ -3096,6 +3126,7 @@ mod tests {
             .member(0)
             .and_then(|creator| creator.roster_pk.clone())
             .unwrap();
+
         let joiner = JoinKeys::make(rng).unwrap();
         let kem_pk = joiner.keys.kem().public().to_bytes();
         let add = group
@@ -3104,6 +3135,7 @@ mod tests {
                 keys: joiner.wire_keys(&kem_pk),
             })
             .unwrap();
+
         let control = GroupControl::parse(&add).unwrap();
         let add_hash = control.epoch_hash();
         let umbra_core::group::roster::Applied::Added(index) =
@@ -3111,13 +3143,16 @@ mod tests {
         else {
             panic!("the add added nobody");
         };
+
         let admit = group.admit_for(index, b"", now).unwrap();
         let admit_control = GroupControl::parse(&admit).unwrap();
         let invitation = GroupInvitation::parse(admit_control.payload).unwrap();
+
         let path = client.authority_path(conversation, &group).unwrap();
         let snapshot_bytes = group.snapshot(&path).unwrap();
         let snapshot = RosterSnapshot::parse(&snapshot_bytes).unwrap();
         let admitted = accept_admit(&invitation, &snapshot, &add_hash, &creator_pk, now).unwrap();
+
         client.save_group(conversation, &group, rng).unwrap();
         other
             .adopt_group(admitted, &joiner.seed, "Trail", false, rng)
@@ -3157,6 +3192,7 @@ mod tests {
         let peer_at_joiner = ContactId([0x52; 32]);
         let pair_at_admin = admin.conversation_for(&peer_at_admin.0).unwrap();
         let pair_at_joiner = joiner.conversation_for(&peer_at_joiner.0).unwrap();
+
         let relays = [[0xA1; 32], [0xB2; 32]];
         let group = admin
             .create_group("Summit", relays, 1_700_000_000, rng)
@@ -3168,6 +3204,7 @@ mod tests {
         admin
             .group_queue_made(&group_id, 1, relays[1], [0xD4; 32], rng)
             .unwrap();
+
         admin
             .offer_group(group, pair_at_admin, 1_700_000_001_000, rng)
             .unwrap();
@@ -3179,10 +3216,12 @@ mod tests {
             .unwrap();
         let asked = joiner.take_outgoing().unwrap();
         deliver(admin, &peer_at_admin, &asked.app, 1_700_000_002_500, rng);
+
         let joiners = admin.group_joiners().unwrap();
         let admission = admin
             .add_joiner(&joiners[0], 1_700_000_003_000, rng)
             .unwrap();
+
         // GRP-311: the snapshot uploaded before any replica answered, thus
         // the admit waits for the `GSEQ` of the add at each.
         let posts: Vec<_> = core::iter::from_fn(|| admin.take_group_post()).collect();
@@ -3236,6 +3275,7 @@ mod tests {
                 rng,
             )
             .unwrap();
+
         // GRP-311, GRP-313: the joiner reads each replica from the `seq` of
         // the add there.
         let held = joiner.group_of(member).unwrap();
@@ -3253,10 +3293,12 @@ mod tests {
         let mut rng = Rng(110);
         let mut admin = new_client(&mut rng);
         let mut joiner = new_client(&mut rng);
+
         let peer_at_admin = ContactId([0x51; 32]);
         let peer_at_joiner = ContactId([0x52; 32]);
         let pair_at_admin = admin.conversation_for(&peer_at_admin.0).unwrap();
         let pair_at_joiner = joiner.conversation_for(&peer_at_joiner.0).unwrap();
+
         let relays = [[0xA1; 32], [0xB2; 32]];
         let group = admin
             .create_group("Summit", relays, 1_700_000_000, &mut rng)
@@ -3268,6 +3310,7 @@ mod tests {
         admin
             .group_queue_made(&group_id, 1, relays[1], [0xD4; 32], &mut rng)
             .unwrap();
+
         admin
             .offer_group(group, pair_at_admin, 1_700_000_001_000, &mut rng)
             .unwrap();
@@ -3279,6 +3322,7 @@ mod tests {
             1_700_000_001_500,
             &mut rng,
         );
+
         let held = joiner.group_offers().unwrap();
         joiner
             .accept_group_offer(&held[0], 1_700_000_002_000, &mut rng)
@@ -3291,6 +3335,7 @@ mod tests {
             1_700_000_002_500,
             &mut rng,
         );
+
         let joiners = admin.group_joiners().unwrap();
         let admission = admin
             .add_joiner(&joiners[0], 1_700_000_003_000, &mut rng)
@@ -3305,6 +3350,7 @@ mod tests {
                 &mut rng,
             )
             .unwrap();
+
         let admit = admin.take_outgoing().unwrap();
         deliver(
             &mut joiner,
@@ -3323,6 +3369,7 @@ mod tests {
         assert!(joiner
             .accept_group_admit(pair_at_joiner, &group_id, &forged, 1_700_000_005, &mut rng)
             .is_err());
+
         // GRP-328: a failed admission shows, and no fetch asks again.
         assert_eq!(
             joiner.next_event(),
@@ -3426,6 +3473,7 @@ mod tests {
             .body
             .to_vec();
         let hash = GroupControl::parse(&body).unwrap().epoch_hash();
+
         let rival_object = loop {
             let keys = JoinKeys::make(&mut rng).unwrap();
             let made = rival.rekey_object(&keys, &mut rng).unwrap();
@@ -3433,6 +3481,7 @@ mod tests {
                 break made;
             }
         };
+
         let second = rival
             .post(&control_app(&rival_object), 1_700_000_012, &mut rng)
             .unwrap();
@@ -3441,6 +3490,7 @@ mod tests {
                 .on_group_record(&[0xC3; 32], 1, record, 1_700_000_013_000, &mut rng)
                 .unwrap();
         }
+
         let rival_index = admin
             .group_of(group)
             .unwrap()
@@ -3480,6 +3530,7 @@ mod tests {
                 from: pair_at_admin
             })
         );
+
         let roster = admin.group_of(group).unwrap();
         assert!(!roster.roster().member(rival_index).unwrap().active);
         assert_eq!(admin.group_info(group).unwrap().members, 1);
@@ -3488,6 +3539,7 @@ mod tests {
             moved.push(post.record);
         }
         assert!(moved.len() >= 2, "a removal and a rotation");
+
         let joiners = admin.group_joiners().unwrap();
         assert_eq!(joiners.len(), 1);
         let admission = admin
@@ -3504,6 +3556,7 @@ mod tests {
                 &mut rng,
             )
             .unwrap();
+
         let admit = admin.take_outgoing().unwrap();
         deliver(
             &mut joiner,
@@ -3634,6 +3687,7 @@ mod tests {
         let admin_at_joiner = ContactId([0x62; 32]);
         let pair_at_admin = admin.conversation_for(&joiner_at_admin.0).unwrap();
         let pair_at_joiner = joiner.conversation_for(&admin_at_joiner.0).unwrap();
+
         admin
             .offer_group(at_admin, pair_at_admin, 1_700_000_011_000, &mut rng)
             .unwrap();
@@ -3645,6 +3699,7 @@ mod tests {
             1_700_000_011_500,
             &mut rng,
         );
+
         let offers = joiner.group_offers().unwrap();
         joiner
             .accept_group_offer(&offers[0], 1_700_000_012_000, &mut rng)
@@ -3657,6 +3712,7 @@ mod tests {
             1_700_000_012_500,
             &mut rng,
         );
+
         let joiners = admin.group_joiners().unwrap();
         let first = admin
             .add_joiner(&joiners[0], 1_700_000_013_000, &mut rng)
@@ -3673,6 +3729,7 @@ mod tests {
                 &mut rng,
             )
             .unwrap();
+
         let admit = admin.take_outgoing().unwrap();
         deliver(
             &mut joiner,
@@ -3730,6 +3787,7 @@ mod tests {
                 &mut rng,
             )
             .unwrap();
+
         let admit = admin.take_outgoing().unwrap();
         deliver(
             &mut joiner,
@@ -3748,6 +3806,7 @@ mod tests {
                 &mut rng,
             )
             .unwrap();
+
         assert_eq!(rejoined, joined);
         assert_eq!(joiner.group_info(joined).unwrap().own_index, second.index);
         let chain = *owner.group_of(group).unwrap().roster().chain_hash();
@@ -3856,6 +3915,7 @@ mod tests {
                 &mut rng,
             )
             .unwrap();
+
         // The joiner reads these from the queue after its add.
         let mut moved = Vec::new();
         while let Some(post) = admin.take_group_post() {
@@ -4165,6 +4225,7 @@ mod tests {
                 &mut rng
             )
             .is_err());
+
         // WIR-557: a period is 0, or it lies inside the two bounds.
         use crate::client::{POLL_OPEN_MAX, POLL_OPEN_MIN};
         let elsewhere = alice.conversation_for(&[0xC5; 32]).unwrap();
@@ -4189,6 +4250,7 @@ mod tests {
             assert_eq!(sent.is_ok(), is_taken, "{open_seconds}");
             while alice.take_outgoing().is_some() {}
         }
+
         let poll = alice
             .send_poll(
                 with_bob,
@@ -4394,6 +4456,7 @@ mod tests {
                 .unwrap();
             client.conversation_for(&contact.0).unwrap()
         };
+
         let salt = [5; 16];
         let old = alice
             .root_identity()
@@ -4402,6 +4465,7 @@ mod tests {
             .x25519_public();
         let with_bob = store(&mut alice, at_alice, salt, [7; 32], &mut rng);
         let with_alice = store(&mut bob, at_bob, [9; 16], old, &mut rng);
+
         let mut draft = alice.new_draft(with_bob);
         draft.set_text(&units("before the reset")).unwrap();
         let kept = alice.send_draft(draft, 1_001_000, &mut rng).unwrap();
@@ -4481,6 +4545,7 @@ mod tests {
             .iter()
             .map(|c| store(&mut alice, *c, &mut rng))
             .collect();
+
         // IDN-188: one share to each holder, and no holder twice.
         assert!(alice
             .split_social(&[holders[0], holders[0]], 2, 2_000_000, &mut rng)
@@ -4496,6 +4561,7 @@ mod tests {
         assert!(given
             .iter()
             .all(|share| (share.threshold, share.count) == (2, 3)));
+
         // The records are no rows of the view.
         assert!(holders
             .iter()
@@ -5049,6 +5115,7 @@ mod tests {
                 &encoded[..used],
             )
         };
+
         let from_laptop = ContactId([0x7D; 32]);
         deliver(
             &mut phone,
@@ -5059,6 +5126,7 @@ mod tests {
         );
         let answer = epochs_of(core::iter::from_fn(|| phone.take_sync_send()).collect());
         assert_eq!(answer, core::slice::from_ref(&e2));
+
         deliver(
             &mut phone,
             &from_laptop,
@@ -5327,6 +5395,7 @@ mod tests {
         laptop
             .commit_network(&[late], &[], HEARD * 1_000, &mut rng)
             .unwrap();
+
         // DEV-235: what the absent device owns.
         let count = laptop.take_over_count().unwrap();
         assert_eq!((count.contacts, count.groups, count.unreachable), (2, 0, 1));
@@ -5654,6 +5723,7 @@ mod tests {
             .unwrap()
             .rendezvous_queues
             .is_empty());
+
         // After a take-over the laptop is that device.
         laptop.take_over(HEARD + OWNER_ABSENCE, &mut rng).unwrap();
         assert_eq!(laptop.stored_network().unwrap().rendezvous_queues.len(), 1);
@@ -5745,10 +5815,12 @@ mod tests {
                     .body
             })
             .collect();
+
         let now = 3_000;
         let third = record(AppKind::DeviceSet, [0x70; 16], &bodies[2]);
         deliver(&mut phone, &channel, &third, now * 1_000, &mut rng);
         assert_eq!(phone.history_holes(now).unwrap().len(), 1);
+
         let control = DeviceSetBody::Control {
             control_type: ControlType::CatchUpDescriptor,
             payload: b"a descriptor",
@@ -5759,6 +5831,7 @@ mod tests {
         deliver(&mut phone, &channel, &notice, now * 1_000, &mut rng);
         let fetches = phone.catch_up_fetches().unwrap();
         assert_eq!(fetches, vec![(conversation, b"a descriptor".to_vec())]);
+
         let mut object = Vec::new();
         for body in &bodies[..2] {
             object.extend_from_slice(&(body.len() as u32).to_be_bytes());
@@ -5871,12 +5944,14 @@ mod tests {
             &mut rng,
         )
         .unwrap();
+
         let header = *client.header();
         let contact = ContactId([0x91; 32]);
         let change = StateChange::Contact {
             contact,
             state: zeroize::Zeroizing::new(vec![1, 2, 3]),
         };
+
         let first = record(AppKind::Text, [1; 16], b"first");
         client
             .commit_network(&[change], &[(contact, first)], 2_000_000, &mut rng)
@@ -5885,6 +5960,7 @@ mod tests {
         client
             .commit_network(&[], &[(contact, second)], 2_001_000, &mut rng)
             .unwrap();
+
         let conversation = client.conversation_for(&contact.0).unwrap();
         let texts = |client: &Client<SqliteBackend, Element>| -> Vec<Vec<u16>> {
             client
@@ -5898,6 +5974,7 @@ mod tests {
                 })
                 .collect()
         };
+
         assert_eq!(texts(&client), [units("first"), units("second")]);
         client.lock();
         drop(client);
@@ -5933,6 +6010,7 @@ mod tests {
                         .open(&store_key(), table, &row.row_id, row.owner.as_ref())
                         .unwrap(),
                 );
+
                 let salt = [0xA5u8; 16];
                 let nonce = [0xB6u8; aead::NONCE_LEN];
                 let ad = [&[table.0][..], &row.row_id].concat();
@@ -5943,6 +6021,7 @@ mod tests {
                         key.expose_mut(),
                     )
                     .unwrap();
+
                 let mut body = plain.to_vec();
                 let tag = aead::seal(&key, &nonce, &ad, &mut body).unwrap();
                 let old = [&salt[..], &nonce, &body, &tag].concat();
@@ -5957,10 +6036,12 @@ mod tests {
                     },
                 ));
             }
+
             let mac = state.commit(&table_key, &[table.0]);
             writes.push(Write::Table(table, stored(&state, mac)));
             set.insert(&table_key.row_tag(&[TableId::SET.0], &[table.0], &[0; 16]));
         }
+
         assert!(earlier.len() > 4);
         let mac = set.commit(&table_key, &[TableId::SET.0]);
         writes.push(Write::Table(TableId::SET, stored(&set, mac)));
@@ -6056,8 +6137,10 @@ mod tests {
                 )
                 .unwrap(),
             };
+
             let roster = phone.sign_linked_device(&hello, &mut rng).unwrap();
             phone.commit_roster(&roster, &mut rng).unwrap();
+
             let channel = ContactId([at; 32]);
             let change = StateChange::Contact {
                 contact: channel,
@@ -6073,6 +6156,7 @@ mod tests {
             phone.mark_device_peer(conversation, &mut rng).unwrap();
             (device, channel, conversation)
         };
+
         let (laptop, laptop_channel, _) = link(&mut phone, "Laptop", 0x61);
         let (tablet, _, tablet_conversation) = link(&mut phone, "Tablet", 0x62);
         let mut rng = Rng(123);
@@ -6113,6 +6197,7 @@ mod tests {
             }
             bodies
         };
+
         let bodies = resent(&mut phone, 2_600, &mut rng);
         let taken: Vec<Taken> = bodies
             .iter()
@@ -6123,6 +6208,7 @@ mod tests {
                     .unwrap()
             })
             .collect();
+
         let period = taken.iter().find_map(|taken| match taken {
             Taken::Record {
                 inner: held,
@@ -6162,6 +6248,7 @@ mod tests {
         let mut phone = new_client(&mut rng);
         phone.ensure_device_set("Phone", &mut rng).unwrap();
         let own = phone.device_identity().unwrap().unwrap();
+
         let laptop = DeviceIdentity::generate("Laptop", &mut rng);
         let hello = LinkHello {
             device_id: laptop.device_id,
@@ -6171,14 +6258,17 @@ mod tests {
             ct: umbra_crypto::kem::Ciphertext::from_bytes(&[0; umbra_crypto::kem::CIPHERTEXT_LEN])
                 .unwrap(),
         };
+
         let roster = phone.sign_linked_device(&hello, &mut rng).unwrap();
         phone.commit_roster(&roster, &mut rng).unwrap();
+
         let channel = ContactId([0x79; 32]);
         let peer = phone.conversation_for(&channel.0).unwrap();
         phone
             .set_pending_peer(laptop.device_id, &laptop.label, &mut rng)
             .unwrap();
         phone.mark_device_peer(peer, &mut rng).unwrap();
+
         let relays = [[0xA1; 32], [0xB2; 32]];
         let group = phone.create_group("Old", relays, 1_000, &mut rng).unwrap();
         let group_id = phone.group_info(group).unwrap().group_id;
@@ -6188,6 +6278,7 @@ mod tests {
         phone
             .group_queue_made(&group_id, 1, relays[1], [0xD4; 32], &mut rng)
             .unwrap();
+
         let subject = phone.sync_subject(group).unwrap().unwrap();
 
         // DEV-020: the default is `SYNC_MAX_AGE`, and one day is the least.
@@ -6263,6 +6354,7 @@ mod tests {
         let mut phone = new_client(&mut rng);
         phone.ensure_device_set("Phone", &mut rng).unwrap();
         let own = phone.device_identity().unwrap().unwrap();
+
         let laptop = DeviceIdentity::generate("Laptop", &mut rng);
         let hello = LinkHello {
             device_id: laptop.device_id,
@@ -6272,14 +6364,17 @@ mod tests {
             ct: umbra_crypto::kem::Ciphertext::from_bytes(&[0; umbra_crypto::kem::CIPHERTEXT_LEN])
                 .unwrap(),
         };
+
         let roster = phone.sign_linked_device(&hello, &mut rng).unwrap();
         phone.commit_roster(&roster, &mut rng).unwrap();
+
         let channel = ContactId([0x7A; 32]);
         let peer = phone.conversation_for(&channel.0).unwrap();
         phone
             .set_pending_peer(laptop.device_id, &laptop.label, &mut rng)
             .unwrap();
         phone.mark_device_peer(peer, &mut rng).unwrap();
+
         let relays = [[0xA1; 32], [0xB2; 32]];
         let group = phone.create_group("Kept", relays, 1_000, &mut rng).unwrap();
         let group_id = phone.group_info(group).unwrap().group_id;
@@ -6289,6 +6384,7 @@ mod tests {
         phone
             .group_queue_made(&group_id, 1, relays[1], [0xD4; 32], &mut rng)
             .unwrap();
+
         let subject = phone.sync_subject(group).unwrap().unwrap();
         let mut engine = SyncEngine::new(laptop.device_id, &[own.device_id]).unwrap();
         let origin = Origin {
@@ -6296,6 +6392,7 @@ mod tests {
             subject,
             author: AUTHOR_USER,
         };
+
         let now = 5_000;
         let mut send = |phone: &mut Client<MemoryBackend, Element>, inner: Vec<u8>, n: u8| {
             let body = engine
@@ -6311,10 +6408,12 @@ mod tests {
                 &mut Rng(200 + u64::from(n)),
             );
         };
+
         send(&mut phone, record(AppKind::Text, [1; 16], b"one"), 1);
         send(&mut phone, record(AppKind::Text, [2; 16], b"two"), 2);
         while phone.take_group_post().is_some() {}
         assert_eq!(phone.messages(group).unwrap().len(), 2);
+
         let deletion = |target: [u8; 16], n: u8| {
             let body = DeleteBody {
                 scope: DeleteScope::OwnDevices,
@@ -6462,6 +6561,7 @@ mod tests {
         assert!(alice
             .typing(conversation, true, 1_000_000, &mut rng)
             .unwrap());
+
         // WIR-285: one record in TYPING_INTERVAL.
         assert!(!alice
             .typing(conversation, false, 1_005_000, &mut rng)
@@ -6601,6 +6701,7 @@ mod tests {
                 .wait_for_check(size, &[0xE5; 32], now + size, &mut rng)
                 .unwrap();
         }
+
         let mut sizes: Vec<u64> = other
             .head_checks()
             .unwrap()
@@ -6609,6 +6710,7 @@ mod tests {
             .collect();
         sizes.sort_unstable();
         assert_eq!(sizes, [22, 23, 24, 25]);
+
         other
             .wait_for_check(30, &[0xE5; 32], now + 25 + 86_400, &mut rng)
             .unwrap();
@@ -6619,8 +6721,10 @@ mod tests {
             .map(|check| check.tree_size)
             .collect();
         assert_eq!(sizes, [30]);
+
         let check = other.head_checks().unwrap()[0];
         other.head_check_done(&check, false, &mut rng).unwrap();
+
         let mut split = new_client(&mut rng);
         split.conversation_for(&peer.0).unwrap();
         split
@@ -6775,6 +6879,7 @@ mod tests {
             .due_receipt(4_000 + RECEIPT_MIN_DELAY, &mut rng)
             .unwrap()
             .unwrap();
+
         // WIR-514: one target, the newest message that the user saw.
         assert_eq!(targets_of(&read, AppKind::ReadReceipt), [[12; 16]]);
         let delivery_only = ReceiptSettings {
@@ -6834,6 +6939,7 @@ mod tests {
             .set_delivery(&sent, Delivery::Accepted, &mut rng)
             .unwrap();
         while client.next_event().is_some() {}
+
         let receipt = |kind, id: u8| {
             let body = ReceiptBody {
                 targets: vec![sent_id],
@@ -6842,6 +6948,7 @@ mod tests {
             body.encode(&mut encoded).unwrap();
             (contact, record(kind, [id; 16], &encoded))
         };
+
         let before = client.messages(conversation).unwrap().len();
         client
             .commit_network(
@@ -6851,6 +6958,7 @@ mod tests {
                 &mut rng,
             )
             .unwrap();
+
         let mut moved = Vec::new();
         while let Some(Event::Delivery { message, delivery }) = client.next_event() {
             assert_eq!(delivery, Delivery::Read);
@@ -6861,6 +6969,7 @@ mod tests {
         expected.sort();
         assert_eq!(moved, expected);
         assert_eq!(client.info(&early[1]).unwrap().delivery, Delivery::Queued);
+
         client
             .commit_network(
                 &[],
@@ -6989,6 +7098,7 @@ mod tests {
         use umbra_core::attach::transfer::{ChunkCredential, Uploaded};
         use umbra_crypto::secret::Secret;
         use umbra_wire::descriptor::{ChunkRef, FileDescriptor, Level};
+
         let file_key = Secret::new([seed; 32]);
         let file_nonce = [seed; 24];
         Uploaded {
@@ -7441,6 +7551,7 @@ mod tests {
             }
             (message, outgoing.app)
         };
+
         send(
             &mut alice,
             &mut bob,
@@ -7948,6 +8059,7 @@ mod tests {
             body.encode(&mut encoded).unwrap();
             (contact, record(AppKind::Reaction, [id; 16], &encoded))
         };
+
         alice
             .commit_network(
                 &[],
@@ -7964,6 +8076,7 @@ mod tests {
                 &mut rng,
             )
             .unwrap();
+
         assert_eq!(alice.next_event(), None);
         assert_eq!(alice.reactions(&sent).unwrap().len(), 1);
         assert_eq!(
@@ -8122,6 +8235,7 @@ mod tests {
                 &mut rng,
             )
             .unwrap();
+
         // The row is no file of a message: the start of a run takes none of
         // it, because its link can still run.
         alice.requeue_transfers().unwrap();
@@ -8193,6 +8307,7 @@ mod tests {
         client
             .note_device_invitation(&[0x61; 32], &mut rng)
             .unwrap();
+
         // A lock ends the link and its run. The list is there after it,
         // thus the next run retires each invitation.
         client.lock();

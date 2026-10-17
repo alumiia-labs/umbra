@@ -295,6 +295,7 @@ mod tests {
         draft
             .attach(bytes(), shape(class::VOICE, VOICE_MAX_SECONDS))
             .unwrap();
+
         // An audio file that the user selected has no such bound.
         draft
             .attach(bytes(), shape(class::AUDIO, VOICE_MAX_SECONDS + 1))

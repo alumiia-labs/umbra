@@ -351,6 +351,7 @@ impl Inner {
             }
             None => {}
         }
+
         let mut erasures = Vec::new();
         for (slot, relays) in slots {
             if !relays.is_empty() {
@@ -402,6 +403,7 @@ impl Inner {
             self.peer_drop_due = false;
             return;
         }
+
         self.peer_drop_due = self.client.drop_pending_peer().is_err();
     }
 
@@ -459,6 +461,7 @@ impl Inner {
             self.drop_link_peer();
             self.end_link_invitation();
         }
+
         if let Some(link) = self.link.as_mut() {
             link.status = status;
             link.reading = false;
@@ -571,11 +574,13 @@ impl Inner {
                 self.end_link_invitation();
             }
         }
+
         self.pump_link_erasures();
 
         // Part 7 §7.7 step 2c: a removal of a device with no run up left
         // its rotations in the store. The run that is up takes them.
         self.pump_revocation(now);
+
         let next = match self.link.as_mut() {
             None => Next::Nothing,
             Some(link) if is_over(&link.status) => Next::Nothing,
@@ -628,6 +633,7 @@ impl Inner {
                 }
             }
         };
+
         match next {
             Next::Nothing => {}
             Next::End(status) => self.end_link(status),
@@ -649,6 +655,7 @@ impl Inner {
             | TransferUpdate::Gone { tag } => *tag,
             TransferUpdate::Faults(_) | TransferUpdate::Erased { .. } => return Some(update),
         };
+
         if !matches!(
             self.transfer_tags.get(&tag),
             Some(TransferWork::Link { .. })
@@ -916,6 +923,7 @@ impl Inner {
                 return;
             }
         };
+
         if let Some(tag) = self.link_tag(LinkStep::Snapshot) {
             self.send_transfer(TransferCommand::UploadBackup { tag, plain });
         }
@@ -953,6 +961,7 @@ impl Inner {
                 return;
             }
         };
+
         let slot = secret.provision_slot();
         match sealed {
             Ok(sealed) => {
@@ -993,6 +1002,7 @@ impl Inner {
             .roster
             .as_ref()
             .is_some_and(|roster| self.client.commit_roster(roster, &mut OsRng).is_ok());
+
         // DEV-176: each other device of the set takes the new epoch, and the
         // new device takes each record since the confirmation (DEV-072).
         if committed
@@ -1004,6 +1014,7 @@ impl Inner {
                 let _ = running.flush(client, &mut OsRng);
             }
         }
+
         self.end_link(if committed {
             LinkStatus::Linked
         } else {
@@ -1086,6 +1097,7 @@ impl Inner {
         let relays = core::mem::take(&mut join.hello_relays);
         let slot = hello_slot(&join.ticket.nonce);
         self.erase_slot(slot, relays);
+
         if let Some(tag) = self.link_tag(LinkStep::ReadSnapshot) {
             self.send_transfer(TransferCommand::DownloadBackup {
                 tag,
@@ -1151,12 +1163,14 @@ impl Handle {
             link_pk: link_key.public().clone(),
         }
         .encode();
+
         let mut nonce = [0u8; 16];
         let Ok(()) = OsRng.try_fill_bytes(&mut nonce);
         let ticket = LinkTicket {
             nonce,
             commit: commit(&offer),
         };
+
         let slot = offer_slot(&nonce);
         inner.start(LinkJob::Offer(Box::new(Offer {
             nonce,
@@ -1173,6 +1187,7 @@ impl Handle {
             provision_relays: Vec::new(),
             provisioned_at: 0,
         })));
+
         inner.write_slot(LinkStep::WriteOffer, slot, &offer);
         Ok(())
     }
@@ -1198,6 +1213,7 @@ impl Handle {
             hello_relays: Vec::new(),
             restored: None,
         })));
+
         inner.pump_link(unix_now());
         Ok(())
     }
@@ -1264,10 +1280,12 @@ impl Handle {
         inner
             .client
             .rekey_groups(super::unix_now_ms(), &mut OsRng)?;
+
         // Step 2c: the store holds the rotation that the revocation owes
         // each contact, and a run that is up takes each one now. With no
         // run, the first step of the next run takes them.
         inner.pump_revocation(super::unix_now());
+
         let Inner { client, bridge, .. } = &mut *inner;
         if let Some(running) = bridge.as_mut() {
             running.flush(client, &mut OsRng)?;
@@ -1322,6 +1340,7 @@ impl Handle {
             inner.owns_channels = true;
             inner.client.render_recovery_code(&mut held, &mut OsRng)?;
         }
+
         if let Some(runtime) = locked(&self.runtime).take() {
             runtime.shutdown_background();
         }
@@ -1546,6 +1565,7 @@ mod tests {
             .client
             .note_device_invitation(&[0x71; 32], &mut OsRng)
             .unwrap();
+
         // The link waits for its sync channel, thus its invitation is not
         // stale, and the start of a run retires nothing.
         assert!(stale_invitations(&inner.client, inner.link.as_ref()).is_empty());

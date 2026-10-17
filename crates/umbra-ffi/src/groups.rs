@@ -280,6 +280,10 @@ impl GroupCommand {
     }
 }
 
+/// The tag of a command that takes an answer, the relay, the group queue,
+/// and the job of the node.
+type CommandJob = (Option<u64>, [u8; 32], [u8; 32], GroupJob);
+
 impl GroupCommand {
     /// The same command under the credential of the previous epoch, when
     /// it carries one (`GRP-398`).
@@ -332,7 +336,7 @@ impl GroupCommand {
 
     /// The tag, the relay, the group queue, and the job of the node for a
     /// command that goes on a circuit. The challenges go on none.
-    fn job(&self) -> Option<(Option<u64>, [u8; 32], [u8; 32], GroupJob)> {
+    fn job(&self) -> Option<CommandJob> {
         match self {
             GroupCommand::Create {
                 tag,

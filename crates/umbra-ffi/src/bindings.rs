@@ -1307,10 +1307,16 @@ pub enum FfiEvent {
         /// The message.
         message: Arc<MsgHandle>,
     },
-    /// The run of the network ended. The cause is 0 for a stop by the
-    /// application, 1 for a dial that failed, 2 for a link that closed, 3
-    /// for a circuit that a relay destroyed, 4 for a fault in the client,
-    /// and 5 for a store that took no batch.
+    /// The run of the network ended. The cause is one of these values:
+    ///
+    /// - 0: the application stopped the run.
+    /// - 1: a dial failed.
+    /// - 2: a link closed.
+    /// - 3: a relay destroyed a circuit.
+    /// - 4: a fault in the client.
+    /// - 5: the store took no batch.
+    /// - 6: a circuit aged with no spare in its place.
+    /// - 7: a push-wake session reached its end.
     Offline {
         /// The cause.
         cause: u8,
@@ -4982,6 +4988,7 @@ impl Handle {
                             .ok()
                             .and_then(|b| Fragment::from_bytes(b).ok())
                             .map(|fragment| fragment.link(invitation_host));
+
                         // A bundle with no link serves no grant, and the
                         // grant waits for the next invitation.
                         if let Some((id, link)) =
@@ -5694,6 +5701,7 @@ impl Handle {
                 let bundle = node
                     .restore_invitation(state)
                     .map_err(|_| FfiError::Integrity)?;
+
                 // A renewal of Part 3 §3.2.6 is no invitation of the user.
                 if !bundle.is_empty() {
                     net_events.push_back(NetEvent::Invitation(bundle));
@@ -8024,6 +8032,7 @@ guard relay1.example.org"
             let (client, call) = (&handle, &call);
             let answered =
                 scope.spawn(move || client.on_ndr_answer(call, Err(NativeError::Timeout), flight));
+
             // The answer waits for the lock, and the group stays taken.
             std::thread::sleep(Duration::from_millis(200));
             let waits = !answered.is_finished() && NdrFlight::start(&flights, [1; 16]).is_none();

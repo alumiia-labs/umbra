@@ -221,10 +221,12 @@ fn start_relays_with(
             .unwrap();
         listeners.push(listener);
     }
+
     let ports: Vec<u16> = listeners
         .iter()
         .map(|listener| listener.local_addr().unwrap().port())
         .collect();
+
     for (index, listener) in listeners.into_iter().enumerate() {
         let number = index as u8 + 1;
         let layer = LAYERS[index];
@@ -376,6 +378,7 @@ fn the_relay_processes_end_and_the_contact_continues() {
     std::fs::create_dir_all(&directory).unwrap();
     let (relays, ports) = start_relays(Some(&directory), None);
     let network = network_of(&ports);
+
     let alice = launch(&directory, "alice.db", 1);
     let bob = launch(&directory, "bob.db", 2);
     alice.clone().connect(network.clone()).unwrap();
@@ -450,6 +453,7 @@ fn two_apps_meet_and_talk_through_the_exported_surface() {
         let keystore = Arc::new(Keystore([key; 32])) as Arc<dyn SecureElementCallback>;
         init(config, keystore, units("correct horse")).unwrap()
     };
+
     let alice = launch("alice.db", 1, true);
     let bob = launch("bob.db", 2, true);
 
@@ -636,6 +640,7 @@ fn two_apps_meet_and_talk_through_the_exported_surface() {
     // the contact, the history, and the ratchet are there.
     alice.disconnect();
     drop(alice);
+
     let alice = launch("alice.db", 1, false);
     alice.unlock(units("correct horse")).unwrap();
     assert_eq!(
@@ -697,6 +702,7 @@ fn fake_fcm(
             let _ = https::respond(&mut stream, 200, "application/json", b"{}").await;
         }
     });
+
     let pem = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../tests/fixtures/fcm/test-key.pem"
@@ -711,12 +717,14 @@ fn fake_fcm(
          \"private_key\":\"{key}\",\"client_email\":\"ndr@test-project.iam.example\",\
          \"token_uri\":\"https://localhost:{port}/token\"}}"
     );
+
     let fcm = Fcm::new(
         ServiceAccount::parse(&account).unwrap(),
         &format!("https://localhost:{port}"),
         native::tls_config_with_root_file(CA).unwrap(),
     )
     .unwrap();
+
     (fcm, posts)
 }
 
@@ -776,11 +784,13 @@ fn a_message_to_an_app_that_went_away_reaches_its_fcm_token() {
     let directory = std::env::temp_dir().join(format!("umbra-push-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).unwrap();
+
     let alice = launch(&directory, "alice.db", 1);
     let bob = launch(&directory, "bob.db", 2);
     alice.set_fcm_token(Some("fcm-alice".into())).unwrap();
     alice.clone().connect(network.clone()).unwrap();
     bob.clone().connect(network.clone()).unwrap();
+
     alice.invite().unwrap();
     let link = wait_for(&alice, |event| match event {
         FfiEvent::Invitation { link } => Some(link),
@@ -834,6 +844,7 @@ fn a_message_to_a_locked_app_in_direct_mode_wakes_its_watch() {
     let directory = std::env::temp_dir().join(format!("umbra-watch-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).unwrap();
+
     let alice = launch(&directory, "alice.db", 1);
     let bob = launch(&directory, "bob.db", 2);
 
@@ -842,6 +853,7 @@ fn a_message_to_a_locked_app_in_direct_mode_wakes_its_watch() {
     alice.set_watch(true).unwrap();
     alice.clone().connect(network.clone()).unwrap();
     bob.clone().connect(network.clone()).unwrap();
+
     alice.invite().unwrap();
     let link = wait_for(&alice, |event| match event {
         FfiEvent::Invitation { link } => Some(link),
@@ -931,9 +943,11 @@ fn a_group_record_wakes_a_member_that_went_away_through_its_notify_queue() {
     let directory = std::env::temp_dir().join(format!("umbra-gpush-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).unwrap();
+
     let alice = launch(&directory, "alice.db", 1);
     let bob = launch(&directory, "bob.db", 2);
     bob.set_fcm_token(Some("fcm-bob".into())).unwrap();
+
     let mut networks = Vec::new();
     for handle in [&alice, &bob] {
         let mut verified = handle
@@ -952,6 +966,7 @@ fn a_group_record_wakes_a_member_that_went_away_through_its_notify_queue() {
         networks.push(verified.clone());
         handle.clone().connect(verified).unwrap();
     }
+
     alice.invite().unwrap();
     let link = wait_for(&alice, |event| match event {
         FfiEvent::Invitation { link } => Some(link),
@@ -967,6 +982,7 @@ fn a_group_record_wakes_a_member_that_went_away_through_its_notify_queue() {
         assert!(start.elapsed() < STEP, "the group took no queues");
         std::thread::sleep(Duration::from_millis(50));
     }
+
     alice
         .offer_group(group.clone(), alice_conversation.clone())
         .unwrap();
@@ -974,6 +990,7 @@ fn a_group_record_wakes_a_member_that_went_away_through_its_notify_queue() {
         FfiEvent::GroupOffer => Some(()),
         _ => None,
     });
+
     let offers = bob.group_offers().unwrap();
     bob.accept_group_offer(offers[0].from.clone(), offers[0].group_id.clone())
         .unwrap();
@@ -981,10 +998,12 @@ fn a_group_record_wakes_a_member_that_went_away_through_its_notify_queue() {
         FfiEvent::GroupJoiner => Some(()),
         _ => None,
     });
+
     let joiners = alice.group_joiners().unwrap();
     alice
         .admit_joiner(joiners[0].from.clone(), joiners[0].group_id.clone())
         .unwrap();
+
     let start = Instant::now();
     while !bob
         .summaries()
@@ -1212,6 +1231,7 @@ fn start_test_directory(relays: &tokio::runtime::Runtime) -> (u16, Vec<u8>) {
         username_case_mapped,
     )
     .unwrap();
+
     let pair = umbra_crypto::kem::KeyPair::generate(&mut OsRng);
     let pins = DirectoryPins {
         key_config: umbra_crypto::ohttp::encode_key_config(1, pair.public()).to_vec(),
@@ -1221,6 +1241,7 @@ fn start_test_directory(relays: &tokio::runtime::Runtime) -> (u16, Vec<u8>) {
     }
     .encode()
     .unwrap();
+
     let listener = relays.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
     let port = listener.local_addr().unwrap().port();
     relays.spawn(umbra_relay::directory_server::run_directory(
@@ -1230,6 +1251,7 @@ fn start_test_directory(relays: &tokio::runtime::Runtime) -> (u16, Vec<u8>) {
         directory,
         Box::new(umbra_relay::directory_server::MemoryDirectoryStore::default()),
     ));
+
     (port, pins)
 }
 
@@ -1291,6 +1313,7 @@ fn start_signed_network_with(
         }
         .sign(&SigningKey::from_seed(Secret::new([*seed; 32])), &mut OsRng)
         .unwrap();
+
         let listing = Listing {
             descriptor: &descriptor,
             operator_id: owner(number),
@@ -1305,14 +1328,17 @@ fn start_signed_network_with(
             },
         )
         .unwrap();
+
         let relay_id = RelayEntry::parse(&entry).unwrap().descriptor.relay_id;
         identities.push((relay_id, relay.s, static_secret, *seed));
         entries.push(entry);
         listeners.push(listener);
     }
+
     let authorities: Vec<SigningKey> = (0..7u8)
         .map(|index| SigningKey::from_seed(Secret::new([0xD0 + index; 32])))
         .collect();
+
     let keyset = keyset_bytes_with(&authorities, 1, if provisional { 1 } else { 7 }).unwrap();
     let manifest = sign_manifest_under(
         &authorities,
@@ -1444,6 +1470,7 @@ fn two_apps_take_their_network_from_a_signed_manifest() {
     for name in ["alice.db", "bob.db", "carol.db", "dave.db"] {
         let _ = std::fs::remove_file(directory.join(name));
     }
+
     let alice = launch(&directory, "alice.db", 1);
     let bob = launch(&directory, "bob.db", 2);
     let network_of = |handle: &Handle, manifest: &[u8], shipped_epoch: u64| {
@@ -1553,6 +1580,7 @@ fn two_apps_take_their_network_from_a_signed_manifest() {
     bob.accept(link).unwrap();
     let alice_conversation = wait_for_contact(&alice);
     let bob_conversation = wait_for_contact(&bob);
+
     for (from, to, conversation, text) in [
         (&bob, &alice, &bob_conversation, "over a signed set"),
         (&alice, &bob, &alice_conversation, "and back"),
@@ -1616,6 +1644,7 @@ fn a_network_of_one_operator_carries_a_contact_while_the_directory_is_provisiona
     let directory = std::env::temp_dir().join(format!("umbra-bootstrap-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).unwrap();
+
     let alice = launch(&directory, "alice.db", 1);
     let bob = launch(&directory, "bob.db", 2);
     let carol = launch(&directory, "carol.db", 3);
@@ -1650,6 +1679,7 @@ fn a_network_of_one_operator_carries_a_contact_while_the_directory_is_provisiona
     bob.accept(link).unwrap();
     let alice_conversation = wait_for_contact(&alice);
     let bob_conversation = wait_for_contact(&bob);
+
     for (from, to, conversation, text) in [
         (&bob, &alice, &bob_conversation, "over one operator"),
         (&alice, &bob, &alice_conversation, "and back"),
@@ -1883,6 +1913,7 @@ fn a_file_goes_through_the_relays_of_a_signed_network() {
     let mut consensus = Consensus::new(keyset, 0).unwrap();
     let manifest = RelayManifest::parse(&network.manifest).unwrap();
     let set = RelaySet::accept(&mut consensus, &manifest, &BlocList::v1(), now).unwrap();
+
     let info_of = |relay: &ListedRelay| RelayInfo {
         candidate: relay.candidate,
         key: RelayStatic {
@@ -1890,6 +1921,7 @@ fn a_file_goes_through_the_relays_of_a_signed_network() {
             relay_id: relay.candidate.relay_id,
         },
     };
+
     let ingress = set
         .relays
         .iter()
@@ -1901,6 +1933,7 @@ fn a_file_goes_through_the_relays_of_a_signed_network() {
         addr_v6: None,
         port: ingress.port,
     };
+
     let holders: Vec<AttachmentRelay> = set
         .relays
         .iter()
@@ -1923,6 +1956,7 @@ fn a_file_goes_through_the_relays_of_a_signed_network() {
     let bundle = clients
         .block_on(native::fetch_challenges(&guard, tls.clone()))
         .unwrap();
+
     let mut book = umbra_core::abuse::pow::ChallengeBook::default();
     for challenge in umbra_core::abuse::pow::ChallengeBook::parse_bundle(&bundle).unwrap() {
         let listed = set
@@ -1933,6 +1967,7 @@ fn a_file_goes_through_the_relays_of_a_signed_network() {
         let identity = umbra_crypto::sign::VerifyingKey::from_bytes(&listed.identity_pk).unwrap();
         book.take(challenge, &identity, now).unwrap();
     }
+
     let start = |seed: u8| {
         let node = ClientNode::for_transfers(
             info_of(ingress),
@@ -1963,6 +1998,7 @@ fn a_file_goes_through_the_relays_of_a_signed_network() {
             .unwrap();
         (commands, updates)
     };
+
     let (sender, mut sender_updates) = start(0x81);
     let (receiver, mut receiver_updates) = start(0x82);
 
@@ -2050,6 +2086,7 @@ fn one_app_sends_a_file_and_the_other_app_gets_it() {
     for name in ["alice.db", "bob.db", "photo.bin"] {
         let _ = std::fs::remove_file(directory.join(name));
     }
+
     let alice = launch(&directory, "alice.db", 1);
     let bob = launch(&directory, "bob.db", 2);
     for handle in [&alice, &bob] {
@@ -2062,6 +2099,7 @@ fn one_app_sends_a_file_and_the_other_app_gets_it() {
                 Some(CA.into()),
             )
             .unwrap();
+
         // The three relays of layer 3 hold the chunks of a file.
         let holders = verified
             .network
@@ -2071,6 +2109,7 @@ fn one_app_sends_a_file_and_the_other_app_gets_it() {
         assert_eq!(holders.count(), 3);
         handle.clone().connect(verified.network).unwrap();
     }
+
     alice.invite().unwrap();
     let link = wait_for(&alice, |event| match event {
         FfiEvent::Invitation { link } => Some(link),
@@ -2096,6 +2135,7 @@ fn one_app_sends_a_file_and_the_other_app_gets_it() {
             None,
         )
         .unwrap();
+
     // The record of a file holds no text.
     // WIR-535: the text of a draft with a file is its caption, of
     // CAPTION_MAX at most.
@@ -2182,6 +2222,7 @@ fn a_contact_introduces_two_of_its_contacts_with_the_consent_of_each() {
     for name in ["alice.db", "bob.db", "carol.db"] {
         let _ = std::fs::remove_file(directory.join(name));
     }
+
     let alice = launch(&directory, "alice.db", 1);
     let bob = launch(&directory, "bob.db", 2);
     let carol = launch(&directory, "carol.db", 3);
@@ -2197,6 +2238,7 @@ fn a_contact_introduces_two_of_its_contacts_with_the_consent_of_each() {
             .unwrap();
         handle.clone().connect(verified.network).unwrap();
     }
+
     let befriend = |other: &Arc<Handle>| {
         alice.invite().unwrap();
         let link = wait_for(&alice, |event| match event {
@@ -2208,6 +2250,7 @@ fn a_contact_introduces_two_of_its_contacts_with_the_consent_of_each() {
         wait_for_contact(other);
         at_alice
     };
+
     let bob_at_alice = befriend(&bob);
     let carol_at_alice = befriend(&carol);
 
@@ -2244,7 +2287,9 @@ fn a_contact_introduces_two_of_its_contacts_with_the_consent_of_each() {
         "Bob"
     );
     wait_for_contact(&carol);
+
     wait_for_contact(&bob);
+
     assert!(carol.introductions().unwrap().is_empty());
     for handle in [&alice, &bob, &carol] {
         handle.disconnect();
@@ -2259,6 +2304,7 @@ fn a_push_wake_session_ends_after_six_seconds_unless_the_app_comes_to_the_screen
     let directory = std::env::temp_dir().join(format!("umbra-wake-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
     let _ = std::fs::remove_file(directory.join("alice.db"));
+
     let alice = launch(&directory, "alice.db", 1);
     let verified = alice
         .network_of_manifest(
@@ -2309,6 +2355,7 @@ fn a_contact_that_reset_its_identity_joins_a_group_and_reads_it() {
     for name in ["alice.db", "bob.db"] {
         let _ = std::fs::remove_file(directory.join(name));
     }
+
     let alice = launch(&directory, "alice.db", 1);
     let bob = launch(&directory, "bob.db", 2);
     let mut networks = Vec::new();
@@ -2325,6 +2372,7 @@ fn a_contact_that_reset_its_identity_joins_a_group_and_reads_it() {
         networks.push(verified.network.clone());
         handle.clone().connect(verified.network).unwrap();
     }
+
     alice.invite().unwrap();
     let link = wait_for(&alice, |event| match event {
         FfiEvent::Invitation { link } => Some(link),
@@ -2344,6 +2392,7 @@ fn a_contact_that_reset_its_identity_joins_a_group_and_reads_it() {
     while start.elapsed() < STEP && !alice.group_info(group.clone()).unwrap().is_ready {
         std::thread::sleep(Duration::from_millis(50));
     }
+
     alice
         .offer_group(group.clone(), alice_conversation.clone())
         .unwrap();
@@ -2351,6 +2400,7 @@ fn a_contact_that_reset_its_identity_joins_a_group_and_reads_it() {
         FfiEvent::GroupOffer => Some(()),
         _ => None,
     });
+
     let offers = bob.group_offers().unwrap();
     bob.accept_group_offer(offers[0].from.clone(), offers[0].group_id.clone())
         .unwrap();
@@ -2358,10 +2408,12 @@ fn a_contact_that_reset_its_identity_joins_a_group_and_reads_it() {
         FfiEvent::GroupJoiner => Some(()),
         _ => None,
     });
+
     let joiners = alice.group_joiners().unwrap();
     alice
         .admit_joiner(joiners[0].from.clone(), joiners[0].group_id.clone())
         .unwrap();
+
     let start = Instant::now();
     let mut joined = None;
     while start.elapsed() < Duration::from_secs(60) {
@@ -2377,6 +2429,7 @@ fn a_contact_that_reset_its_identity_joins_a_group_and_reads_it() {
         std::thread::sleep(Duration::from_millis(100));
     }
     let joined = joined.expect("Bob did not come into the group");
+
     let draft = alice.new_draft(group.clone()).unwrap();
     draft.set_text(units("we leave at six")).unwrap();
     alice.send_draft(draft).unwrap();
@@ -2417,6 +2470,7 @@ fn one_app_offers_a_group_and_the_other_app_joins_it() {
     for name in ["alice.db", "bob.db"] {
         let _ = std::fs::remove_file(directory.join(name));
     }
+
     let alice = launch(&directory, "alice.db", 1);
     let bob = launch(&directory, "bob.db", 2);
     let mut networks = Vec::new();
@@ -2433,6 +2487,7 @@ fn one_app_offers_a_group_and_the_other_app_joins_it() {
         networks.push(verified.network.clone());
         handle.clone().connect(verified.network).unwrap();
     }
+
     alice.invite().unwrap();
     let link = wait_for(&alice, |event| match event {
         FfiEvent::Invitation { link } => Some(link),
@@ -2482,6 +2537,7 @@ fn one_app_offers_a_group_and_the_other_app_joins_it() {
     alice
         .admit_joiner(joiners[0].from.clone(), joiners[0].group_id.clone())
         .unwrap();
+
     // The add applied at once, thus the roster of Alice holds two members.
     assert_eq!(alice.group_info(group.clone()).unwrap().members, 2);
     let start = Instant::now();
@@ -2674,10 +2730,12 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
         .roster()
         .verifying_key()
         .to_bytes();
+
     let mut creator = Group::create([0x77; 32], &creator_seed, now, &mut rng).unwrap();
     let credentials = creator.credentials().unwrap();
     let (read_pk, write_pk) = (credentials.read_public(), credentials.write_public());
     let write_sk = credentials.write_secret();
+
     for (index, relay) in replicas.iter().enumerate() {
         creator_tx
             .send(GroupCommand::Create {
@@ -2691,6 +2749,7 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
             .ok()
             .unwrap();
     }
+
     let mut queue_ids = [[0u8; 32]; 2];
     for _ in 0..2 {
         let GroupUpdate::Created {
@@ -2704,6 +2763,7 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
         assert_eq!(relay, replicas[tag as usize]);
         queue_ids[tag as usize] = group_queue_id;
     }
+
     assert_ne!(queue_ids[0], queue_ids[1]);
     creator.set_replicas([
         umbra_wire::group::control::ReplicaRef {
@@ -2755,6 +2815,7 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
         out.truncate(n);
         out
     };
+
     let mut post = |group: &mut Group, body: &[u8], tag: u64| {
         let record = group.post(&text_of(body), now, &mut rng).unwrap();
         for (index, relay) in replicas.iter().enumerate() {
@@ -2772,6 +2833,7 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
         }
         record
     };
+
     let first = post(&mut creator, b"a group of two", 10);
     for _ in 0..2 {
         let GroupUpdate::Posted { tag, seq, .. } = group_update(&mut creator_rx) else {
@@ -2794,6 +2856,7 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
         })
         .ok()
         .unwrap();
+
     let mut read_one = |expected: &[u8], body: &[u8]| {
         let GroupUpdate::Record {
             group_queue_id,
@@ -2819,6 +2882,7 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
             body
         );
     };
+
     read_one(&first, b"a group of two");
 
     // A record that the relay takes while the session lives reaches the
@@ -2838,6 +2902,7 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
         })
         .ok()
         .unwrap();
+
     // The refusal and the two answers of the record before it arrive in
     // no fixed order, thus this loop waits for each of the three.
     let mut refused = false;
@@ -2874,6 +2939,7 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
         creator.apply_control(&removal_control, 0, now).unwrap(),
         Applied::Removed(_)
     ));
+
     for (index, relay) in replicas.iter().enumerate() {
         creator_tx
             .send(GroupCommand::Post {
@@ -2887,12 +2953,14 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
             .ok()
             .unwrap();
     }
+
     for _ in 0..2 {
         let GroupUpdate::Posted { tag, .. } = group_update(&mut creator_rx) else {
             panic!("a replica refused the roster object");
         };
         assert!(tag == 30 || tag == 31);
     }
+
     let GroupUpdate::Record {
         record: carried, ..
     } = group_update(&mut member_rx)
@@ -2902,6 +2970,7 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
     let Outcome::Content { app: read, .. } = member.receive(&carried, now).unwrap() else {
         panic!("the roster object did not open");
     };
+
     let parsed =
         umbra_wire::app::AppMessage::parse(&read, umbra_wire::app::Channel::Group).unwrap();
     let control = umbra_wire::group::control::GroupControl::parse(parsed.body).unwrap();
@@ -2995,6 +3064,7 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
     let GroupUpdate::Posted { tag: 42, .. } = group_update(&mut creator_rx) else {
         panic!("the fallback did not take the record");
     };
+
     creator_tx
         .send(GroupCommand::Rotate {
             relay: replicas[0],
@@ -3006,6 +3076,7 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
         })
         .ok()
         .unwrap();
+
     creator_tx
         .send(GroupCommand::Post {
             tag: 41,
@@ -3017,6 +3088,7 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
         })
         .ok()
         .unwrap();
+
     let GroupUpdate::Posted { tag: 41, .. } = group_update(&mut creator_rx) else {
         panic!("the replica refused the record after the `GKEY`");
     };
@@ -3046,10 +3118,12 @@ fn the_group_run_outlives_its_relays_and_carries_its_commands_on() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
+
     let (keyset, _) = DirectoryKeySet::parse(&network.keyset).unwrap();
     let mut consensus = Consensus::new(keyset, 0).unwrap();
     let manifest = RelayManifest::parse(&network.manifest).unwrap();
     let set = RelaySet::accept(&mut consensus, &manifest, &BlocList::v1(), now).unwrap();
+
     let info_of = |relay: &ListedRelay| RelayInfo {
         candidate: relay.candidate,
         key: RelayStatic {
@@ -3057,6 +3131,7 @@ fn the_group_run_outlives_its_relays_and_carries_its_commands_on() {
             relay_id: relay.candidate.relay_id,
         },
     };
+
     let ingress = set
         .relays
         .iter()
@@ -3068,6 +3143,7 @@ fn the_group_run_outlives_its_relays_and_carries_its_commands_on() {
         addr_v6: None,
         port: ingress.port,
     };
+
     let exit = set
         .relays
         .iter()
@@ -3075,6 +3151,7 @@ fn the_group_run_outlives_its_relays_and_carries_its_commands_on() {
         .unwrap()
         .candidate
         .relay_id;
+
     let node = ClientNode::for_groups(
         info_of(ingress),
         set.relays
@@ -3084,6 +3161,7 @@ fn the_group_run_outlives_its_relays_and_carries_its_commands_on() {
             .collect(),
         umbra_crypto::hierarchy::RootIdentity::new(Secret::new([0x93; 32])),
     );
+
     let clients = tokio::runtime::Runtime::new().unwrap();
     let (commands, task_commands) = tokio::sync::mpsc::unbounded_channel();
     let (task_updates, mut updates) = tokio::sync::mpsc::unbounded_channel();
@@ -3094,6 +3172,7 @@ fn the_group_run_outlives_its_relays_and_carries_its_commands_on() {
         task_commands,
         task_updates,
     ));
+
     let create = |tag: u64| GroupCommand::Create {
         tag,
         relay: exit,
@@ -3102,6 +3181,7 @@ fn the_group_run_outlives_its_relays_and_carries_its_commands_on() {
         own: Secret::new([0x13; 32]),
         payment: Payment::Free,
     };
+
     commands.send(create(1)).ok().unwrap();
     let GroupUpdate::Created {
         tag: 1,
@@ -3179,6 +3259,7 @@ fn an_app_in_the_foreground_writes_its_backup_to_the_relays() {
     let directory = std::env::temp_dir().join(format!("umbra-backup-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).unwrap();
+
     let alice = launch(&directory, "alice.db", 1);
     let verified = alice
         .network_of_manifest(
@@ -3219,6 +3300,7 @@ fn a_lost_phone_comes_back_from_its_backup_and_its_contact_talks_again() {
     let directory = std::env::temp_dir().join(format!("umbra-restore-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).unwrap();
+
     let network_for = |handle: &Handle| {
         handle
             .network_of_manifest(
@@ -3231,11 +3313,13 @@ fn a_lost_phone_comes_back_from_its_backup_and_its_contact_talks_again() {
             .unwrap()
             .network
     };
+
     let alice = launch(&directory, "alice.db", 1);
     let bob = launch(&directory, "bob.db", 2);
     for handle in [&alice, &bob] {
         handle.clone().connect(network_for(handle)).unwrap();
     }
+
     alice.invite().unwrap();
     let link = wait_for(&alice, |event| match event {
         FfiEvent::Invitation { link } => Some(link),
@@ -3244,6 +3328,7 @@ fn a_lost_phone_comes_back_from_its_backup_and_its_contact_talks_again() {
     bob.accept(link).unwrap();
     let alice_conversation = wait_for_contact(&alice);
     let bob_conversation = wait_for_contact(&bob);
+
     let draft = bob.new_draft(bob_conversation.clone()).unwrap();
     draft.set_text(units("see you soon")).unwrap();
     bob.send_draft(draft).unwrap();
@@ -3350,6 +3435,7 @@ fn a_new_device_links_from_the_code_of_the_existing_one() {
     let directory = std::env::temp_dir().join(format!("umbra-link-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).unwrap();
+
     let network_for = |handle: &Handle| {
         handle
             .network_of_manifest(
@@ -3362,11 +3448,13 @@ fn a_new_device_links_from_the_code_of_the_existing_one() {
             .unwrap()
             .network
     };
+
     let alice = launch(&directory, "alice.db", 1);
     let bob = launch(&directory, "bob.db", 2);
     for handle in [&alice, &bob] {
         handle.clone().connect(network_for(handle)).unwrap();
     }
+
     alice.invite().unwrap();
     let link = wait_for(&alice, |event| match event {
         FfiEvent::Invitation { link } => Some(link),
@@ -3375,6 +3463,7 @@ fn a_new_device_links_from_the_code_of_the_existing_one() {
     bob.accept(link).unwrap();
     let alice_conversation = wait_for_contact(&alice);
     let bob_conversation = wait_for_contact(&bob);
+
     let draft = bob.new_draft(bob_conversation.clone()).unwrap();
     draft.set_text(units("before the tablet")).unwrap();
     bob.send_draft(draft).unwrap();
@@ -3559,6 +3648,7 @@ fn a_new_device_links_from_the_code_of_the_existing_one() {
         .into_iter()
         .find(|message| rendered(&alice, message.clone()) == "from the tablet")
         .unwrap();
+
     // A receipt waits `RECEIPT_MIN_DELAY` and then a slot of the cover
     // clock (Part 3 §3.5.4).
     let start = Instant::now();
@@ -3579,6 +3669,7 @@ fn a_new_device_links_from_the_code_of_the_existing_one() {
     // name, reach the tablet, and so does the first record of that contact.
     let carol = launch(&directory, "carol.db", 4);
     carol.clone().connect(network_for(&carol)).unwrap();
+
     alice.invite().unwrap();
     let link = wait_for(&alice, |event| match event {
         FfiEvent::Invitation { link } => Some(link),
@@ -3587,6 +3678,7 @@ fn a_new_device_links_from_the_code_of_the_existing_one() {
     carol.accept(link).unwrap();
     let alice_carol = wait_for_contact(&alice);
     let carol_conversation = wait_for_contact(&carol);
+
     alice
         .set_contact_name(alice_carol.clone(), "Carol".into())
         .unwrap();
@@ -3726,27 +3818,32 @@ fn link_new_device(
         },
         "no ticket",
     );
+
     let fresh = launch(directory, name, key);
     fresh.clone().connect(network_for(&fresh)).unwrap();
     wait_for(&fresh, |event| match event {
         FfiEvent::Online => Some(()),
         _ => None,
     });
+
     fresh.join_link(ticket, "Tablet".into()).unwrap();
     tick_until(
         &[owner, &fresh],
         || matches!(owner.link_status(), LinkStatus::Code { .. }),
         "no code",
     );
+
     owner.confirm_link().unwrap();
     tick_until(
         &[owner, &fresh],
         || fresh.link_status() == LinkStatus::Ready,
         "no snapshot",
     );
+
     let linked = fresh.take_linked().unwrap();
     fresh.disconnect();
     drop(fresh);
+
     let config = Config {
         database_path: directory.join(name).to_str().unwrap().to_owned(),
         argon2_floor_ms: 60_000,
@@ -3813,6 +3910,7 @@ fn a_linked_device_reads_and_writes_a_group() {
     let directory = std::env::temp_dir().join(format!("umbra-link-group-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).unwrap();
+
     let network_for = |handle: &Handle| {
         handle
             .network_of_manifest(
@@ -3825,11 +3923,13 @@ fn a_linked_device_reads_and_writes_a_group() {
             .unwrap()
             .network
     };
+
     let alice = launch(&directory, "alice.db", 1);
     let bob = launch(&directory, "bob.db", 2);
     for handle in [&alice, &bob] {
         handle.clone().connect(network_for(handle)).unwrap();
     }
+
     alice.invite().unwrap();
     let link = wait_for(&alice, |event| match event {
         FfiEvent::Invitation { link } => Some(link),
@@ -3980,6 +4080,7 @@ fn a_linked_device_takes_over_the_set_of_a_lost_phone_and_its_contact_talks_on()
     let directory = std::env::temp_dir().join(format!("umbra-takeover-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).unwrap();
+
     let network_for = |handle: &Handle| {
         handle
             .network_of_manifest(
@@ -3992,11 +4093,13 @@ fn a_linked_device_takes_over_the_set_of_a_lost_phone_and_its_contact_talks_on()
             .unwrap()
             .network
     };
+
     let alice = launch(&directory, "alice.db", 1);
     let bob = launch(&directory, "bob.db", 2);
     for handle in [&alice, &bob] {
         handle.clone().connect(network_for(handle)).unwrap();
     }
+
     alice.invite().unwrap();
     let link = wait_for(&alice, |event| match event {
         FfiEvent::Invitation { link } => Some(link),
@@ -4027,6 +4130,7 @@ fn a_linked_device_takes_over_the_set_of_a_lost_phone_and_its_contact_talks_on()
     // takes the conversation, and what a renewal of its channel needs.
     let carol = launch(&directory, "carol.db", 4);
     carol.clone().connect(network_for(&carol)).unwrap();
+
     alice.invite().unwrap();
     let link = wait_for(&alice, |event| match event {
         FfiEvent::Invitation { link } => Some(link),
@@ -4035,6 +4139,7 @@ fn a_linked_device_takes_over_the_set_of_a_lost_phone_and_its_contact_talks_on()
     carol.accept(link).unwrap();
     let with_carol = wait_for_contact(&alice);
     let carol_conversation = wait_for_contact(&carol);
+
     tick_until(
         &[&alice, &laptop],
         || {
@@ -4150,6 +4255,7 @@ fn a_linked_device_takes_over_the_set_of_a_lost_phone_and_its_contact_talks_on()
         .key_change(carol_conversation.clone())
         .unwrap()
         .is_none());
+
     // NET-355: each bundle of the laptop opened the guard that the phone
     // set, thus no contact got a question.
     assert_eq!(bob.renewal_ask(bob_conversation.clone()).unwrap(), None);
@@ -4202,6 +4308,7 @@ fn a_removed_device_that_offers_a_renewal_gives_the_contact_a_question_and_no_ch
     let directory = std::env::temp_dir().join(format!("umbra-guard-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).unwrap();
+
     let network_for = |handle: &Handle| {
         handle
             .network_of_manifest(
@@ -4214,11 +4321,13 @@ fn a_removed_device_that_offers_a_renewal_gives_the_contact_a_question_and_no_ch
             .unwrap()
             .network
     };
+
     let alice = launch(&directory, "alice.db", 1);
     let bob = launch(&directory, "bob.db", 2);
     for handle in [&alice, &bob] {
         handle.clone().connect(network_for(handle)).unwrap();
     }
+
     alice.invite().unwrap();
     let link = wait_for(&alice, |event| match event {
         FfiEvent::Invitation { link } => Some(link),
@@ -4227,6 +4336,7 @@ fn a_removed_device_that_offers_a_renewal_gives_the_contact_a_question_and_no_ch
     bob.accept(link).unwrap();
     let alice_conversation = wait_for_contact(&alice);
     let bob_conversation = wait_for_contact(&bob);
+
     let exchange = |from: &Arc<Handle>, at: &[u8], to: &Arc<Handle>, held: &[u8], text: &str| {
         let draft = from.new_draft(at.to_vec()).unwrap();
         draft.set_text(units(text)).unwrap();
@@ -4237,6 +4347,7 @@ fn a_removed_device_that_offers_a_renewal_gives_the_contact_a_question_and_no_ch
             std::thread::sleep(Duration::from_millis(200));
         }
     };
+
     exchange(&bob, &bob_conversation, &alice, &alice_conversation, "one");
 
     // The laptop joins the set, and it holds what a renewal of the channel
@@ -4257,6 +4368,7 @@ fn a_removed_device_that_offers_a_renewal_gives_the_contact_a_question_and_no_ch
         .find(|device| device.is_self)
         .unwrap()
         .device_id;
+
     // The phone removes the laptop while it has no connection: the store
     // holds what the removal owes, and no notice leaves yet.
     alice.disconnect();
@@ -4374,6 +4486,7 @@ fn a_group_made_after_the_link_reaches_each_linked_device() {
     let directory = std::env::temp_dir().join(format!("umbra-late-group-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).unwrap();
+
     let network_for = |handle: &Handle| {
         handle
             .network_of_manifest(
@@ -4386,11 +4499,13 @@ fn a_group_made_after_the_link_reaches_each_linked_device() {
             .unwrap()
             .network
     };
+
     let alice = launch(&directory, "alice.db", 1);
     let bob = launch(&directory, "bob.db", 2);
     for handle in [&alice, &bob] {
         handle.clone().connect(network_for(handle)).unwrap();
     }
+
     alice.invite().unwrap();
     let link = wait_for(&alice, |event| match event {
         FfiEvent::Invitation { link } => Some(link),
@@ -4535,11 +4650,13 @@ fn a_group_made_after_the_link_reaches_each_linked_device() {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+
     tick_until(
         &[&laptop],
         || holds_text(&laptop, &group, "bob after the rekey"),
         "the laptop did not read the group after the re-key",
     );
+
     for handle in [&alice, &bob, &tablet, &laptop] {
         handle.disconnect();
     }
@@ -4642,6 +4759,7 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
             .unwrap()
             .network
     };
+
     let alice = launch(&directory, "alice.db", 1);
     let bob = launch(&directory, "bob.db", 2);
     let carol = launch(&directory, "carol.db", 3);
@@ -4737,12 +4855,14 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
         alice.set_profile_picture(b"GIF89a".to_vec()).err(),
         Some(FfiError::Malformed)
     );
+
     alice.set_profile_picture(picture.clone()).unwrap();
     let profile_link = alice.my_handle_link().unwrap().unwrap();
     assert!(
         profile_link.starts_with("umbra://h/alice%23"),
         "{profile_link}"
     );
+
     let (shown, name, welcome, shown_picture) = preview_until_listed(&carol, &profile_link);
     assert_eq!(shown, handle);
     assert_eq!(shown_picture, picture);
@@ -4750,6 +4870,7 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
         (name.as_str(), welcome.as_str()),
         ("Alice", "Say where we met.")
     );
+
     let carol_picture = vec![
         0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x20, 0x00, 0x20, 0x01, 0x01, 0x11, 0x00,
         0xFF, 0xD9,
@@ -4757,6 +4878,7 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
     carol.set_profile_picture(carol_picture.clone()).unwrap();
     request_until_listed(&carol, &handle);
     wait_for_requests(&alice, 1);
+
     let requests = alice.contact_requests().unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].picture, carol_picture);
@@ -4881,6 +5003,7 @@ fn a_blocked_contact_sends_and_nothing_shows() {
     let directory = std::env::temp_dir().join(format!("umbra-block-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).unwrap();
+
     let network_for = |handle: &Handle| {
         handle
             .network_of_manifest(
@@ -4893,11 +5016,13 @@ fn a_blocked_contact_sends_and_nothing_shows() {
             .unwrap()
             .network
     };
+
     let alice = launch(&directory, "alice.db", 1);
     let bob = launch(&directory, "bob.db", 2);
     for handle in [&alice, &bob] {
         handle.clone().connect(network_for(handle)).unwrap();
     }
+
     alice.invite().unwrap();
     let link = wait_for(&alice, |event| match event {
         FfiEvent::Invitation { link } => Some(link),
@@ -4906,11 +5031,13 @@ fn a_blocked_contact_sends_and_nothing_shows() {
     bob.accept(link).unwrap();
     let alice_bob = wait_for_contact(&alice);
     let bob_alice = wait_for_contact(&bob);
+
     let send = |text: &str| {
         let draft = bob.new_draft(bob_alice.clone()).unwrap();
         draft.set_text(units(text)).unwrap();
         bob.send_draft(draft).unwrap();
     };
+
     send("before");
     wait_for_text(&alice, &alice_bob, "before");
 
@@ -4954,11 +5081,13 @@ fn a_party_prohibits_the_forward_of_its_messages_and_the_other_app_obeys() {
     let directory = std::env::temp_dir().join(format!("umbra-forward-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).unwrap();
+
     let alice = launch(&directory, "alice.db", 1);
     let bob = launch(&directory, "bob.db", 2);
     for handle in [&alice, &bob] {
         handle.clone().connect(network.clone()).unwrap();
     }
+
     alice.invite().unwrap();
     let link = wait_for(&alice, |event| match event {
         FfiEvent::Invitation { link } => Some(link),
@@ -4967,21 +5096,25 @@ fn a_party_prohibits_the_forward_of_its_messages_and_the_other_app_obeys() {
     bob.accept(link).unwrap();
     let alice_bob = wait_for_contact(&alice);
     let bob_alice = wait_for_contact(&bob);
+
     let say = |from: &Handle, conversation: &[u8], words: &str| {
         let draft = from.new_draft(conversation.to_vec()).unwrap();
         draft.set_text(units(words)).unwrap();
         from.send_draft(draft).unwrap()
     };
+
     let of_bob = say(&bob, &bob_alice, "a text of bob");
     wait_for_text(&alice, &alice_bob, "a text of bob");
     say(&alice, &alice_bob, "a text of alice");
     wait_for_text(&bob, &bob_alice, "a text of alice");
+
     let of_alice = bob
         .messages(bob_alice.clone())
         .unwrap()
         .into_iter()
         .find(|message| rendered(&bob, message.clone()) == "a text of alice")
         .unwrap();
+
     let rules = bob.forward_rules(bob_alice.clone()).unwrap();
     assert!(!rules.own && !rules.peer);
     assert!(!bob.msg_info(of_alice.clone()).unwrap().no_forward);
@@ -5102,6 +5235,7 @@ fn a_connect_that_replaces_a_run_keeps_the_new_run() {
     let directory = std::env::temp_dir().join(format!("umbra-reconnect-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).unwrap();
+
     let alice = launch(&directory, "alice.db", 1);
     let verified = alice
         .network_of_manifest(
@@ -5113,6 +5247,7 @@ fn a_connect_that_replaces_a_run_keeps_the_new_run() {
         )
         .unwrap()
         .network;
+
     // The app connects at the open and again when its carrier starts. The
     // end of each replaced run must not end the run that replaced it.
     for _ in 0..6 {
@@ -5124,6 +5259,7 @@ fn a_connect_that_replaces_a_run_keeps_the_new_run() {
         _ => None,
     });
     std::thread::sleep(Duration::from_secs(2));
+
     alice.invite().unwrap();
     wait_for(&alice, |event| match event {
         FfiEvent::Invitation { .. } => Some(()),
@@ -5143,6 +5279,7 @@ fn a_client_takes_the_signed_challenge_of_each_relay_from_the_carrier() {
     let directory = std::env::temp_dir().join(format!("umbra-challenges-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).unwrap();
+
     let alice = launch(&directory, "alice.db", 1);
     let verified = alice
         .network_of_manifest(
