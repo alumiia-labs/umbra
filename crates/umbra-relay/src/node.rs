@@ -12,15 +12,6 @@ use std::{
     ops::Bound,
 };
 
-/// The clock of the per-hop delay of Part 3 §3.9: the milliseconds since
-/// its first read. It never steps back, thus a change of the wall clock
-/// holds no cell and releases none early (`NET-339`).
-pub fn clock_ms() -> u64 {
-    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    let elapsed = START.get_or_init(std::time::Instant::now).elapsed();
-    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
-}
-
 use umbra_core::{
     abuse::{
         admission::{Accepts, RelayGate},
@@ -72,6 +63,15 @@ use crate::{
     },
     store::{Loaded, StoreChange},
 };
+
+/// The clock of the per-hop delay of Part 3 §3.9: the milliseconds since
+/// its first read. It never steps back, thus a change of the wall clock
+/// holds no cell and releases none early (`NET-339`).
+pub fn clock_ms() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let elapsed = START.get_or_init(std::time::Instant::now).elapsed();
+    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+}
 
 /// What a relay does with a query of an authority that verified.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,6 +171,7 @@ fn destroy_output(link: LinkId, circ_id: [u8; 16]) -> Option<Output> {
     let used = SessionControl::Destroy { circ_id }
         .encode(&mut control)
         .ok()?;
+
     let mut capsule = vec![0u8; capsule::HEADER_LEN + used];
     let used = capsule::encode(CapsuleType::Session, control.get(..used)?, &mut capsule).ok()?;
     capsule.truncate(used);
@@ -184,6 +185,7 @@ fn pause_output(link: LinkId, circ_id: [u8; 16]) -> Option<Output> {
     let used = SessionControl::CircuitPause { circ_id }
         .encode(&mut control)
         .ok()?;
+
     capsule_output(link, CapsuleType::Session, control.get(..used)?)
 }
 
@@ -200,6 +202,7 @@ fn push_output(push: &Push) -> Option<Output> {
     }
     .encode(&mut payload)
     .ok()?;
+
     let command = Command {
         cmd: Cmd::Attachment(CRPUT),
         // No answer names this value, and a fixed one keeps a relay from a
@@ -209,11 +212,14 @@ fn push_output(push: &Push) -> Option<Output> {
         auth: [0; 32],
         payload: &payload,
     };
+
     let mut encoded = vec![0u8; command.len()];
     command.encode(&mut encoded).ok()?;
+
     let mut capsule = vec![0u8; capsule::HEADER_LEN + encoded.len()];
     let used = capsule::encode(CapsuleType::Replica, &encoded, &mut capsule).ok()?;
     capsule.truncate(used);
+
     Some(Output::Push {
         relay_id: push.target.relay_id,
         capsule,
@@ -315,11 +321,13 @@ impl Waits {
         let Some(before) = self.by_circuit.get(&circ_id).copied() else {
             return;
         };
+
         let after = if up {
             before.saturating_add(len)
         } else {
             before.saturating_sub(len)
         };
+
         self.ranked.remove(&(before, circ_id));
         if after == 0 {
             self.by_circuit.remove(&circ_id);
@@ -343,6 +351,7 @@ impl Waits {
             if self.total.saturating_sub(len) < waiting {
                 break;
             }
+
             self.cells.pop_front();
             self.total = self.total.saturating_sub(len);
             self.moved(circ_id, len, false);
@@ -379,6 +388,7 @@ impl Endpoint {
         if self.outbox.len() >= OUTBOX_MAX {
             return;
         }
+
         if first {
             self.outbox.push_front(outbound);
         } else {
@@ -435,6 +445,7 @@ fn fits(
     let Some((held, limit)) = backlog.and_then(|backlog| backlog.of(link)) else {
         return true;
     };
+
     let waiting = framed.get(&link).copied().unwrap_or(0);
     held.saturating_add(waiting).saturating_add(len) <= limit / part.max(1)
 }
@@ -608,12 +619,15 @@ impl RelayNode {
             s: config.relay.s,
             relay_id,
         };
+
         let static_secret = config.static_secret.clone();
         let layer = config.layer;
+
         let mut queues = QueueService::default();
         if let Some(pair) = notify_pair(&config) {
             queues.set_notify_key(pair);
         }
+
         RelayNode {
             issuer_keys: BTreeMap::new(),
             links: BTreeMap::new(),
@@ -745,15 +759,18 @@ impl RelayNode {
             spent: 0,
             since: now,
         });
+
         if attempts.spent == 0 {
             attempts.since = now;
         }
+
         attempts.spent = attempts.spent.saturating_add(1);
     }
 
     /// Gives one measurement attempt back: its `MEAS_OPEN` verified.
     fn attempt_give(&mut self, link: LinkId) {
         let holder = self.attempt_holder(link);
+
         if let Some(attempts) = self.measure_attempts.get_mut(&holder) {
             attempts.spent = attempts.spent.saturating_sub(1);
             if attempts.spent == 0 {
@@ -776,13 +793,16 @@ impl RelayNode {
             }
             self.attempt_take(circuit.link, now);
         }
+
         let own = self.relay.relay_id;
         let measurer_id = self.measure_trust.as_ref().and_then(|trust| {
             verify_open(content, trust, now / EPOCH_SECONDS, &own, &circuit.circ_id).ok()
         });
+
         let Some(measurer_id) = measurer_id else {
             return self.circuits.end_now(circuit, Some(circuit.link));
         };
+
         // REL-202: one session for each measurer, and a small count of
         // each.
         self.measure_sessions
@@ -807,11 +827,13 @@ impl RelayNode {
             }
             None => None,
         };
+
         // The table counts the end of the session on its own clock.
         let table_until = until.map(|until| {
             self.table_now(now)
                 .saturating_add(until.saturating_sub(now))
         });
+
         match table_until {
             Some(until) if self.circuits.open_measure(&circuit, until) => {
                 self.attempt_give(circuit.link);
@@ -833,11 +855,13 @@ impl RelayNode {
         if self.measure_sessions.is_empty() {
             return;
         }
+
         let mut was_measured = false;
         self.measure_sessions.retain(|_, session| {
             was_measured |= session.circuits.remove(circuit);
             !session.circuits.is_empty()
         });
+
         // NET-335: at a relay of layer 2 or 3, the link of a measurer
         // whose session ended holds its place for `LINK_OPEN_TIMEOUT`.
         if was_measured
@@ -855,6 +879,7 @@ impl RelayNode {
     /// thus an echo that drops moves no chaining value.
     fn echo(&mut self, circuit: CircuitKey, content: &[u8]) -> Option<Output> {
         let len = Bucket::B0.cell_len().saturating_add(FRAME_ROOM);
+
         if self.parked.contains_key(&circuit.link)
             || !fits(
                 self.backlog.as_deref(),
@@ -866,9 +891,11 @@ impl RelayNode {
         {
             return None;
         }
+
         let Action::Send { link, cell } = self.circuits.echo(&circuit, content)? else {
             return None;
         };
+
         let framed = self.framed.entry(link).or_insert(0);
         *framed = framed.saturating_add(len);
         self.frame(link, &cell)
@@ -894,6 +921,7 @@ impl RelayNode {
         let Some(previous) = self.previous_layer.as_ref() else {
             return Vec::new();
         };
+
         let strangers: Vec<LinkId> = self
             .links
             .iter()
@@ -906,10 +934,12 @@ impl RelayNode {
             })
             .map(|(link, _)| *link)
             .collect();
+
         let mut outputs = Vec::new();
         for link in strangers {
             outputs.extend(self.drop_link(link, now));
         }
+
         outputs
     }
 
@@ -978,9 +1008,11 @@ impl RelayNode {
         if !matches!(self.links.get(&link), Some(Framing::Accepted(_))) {
             return Origin::Barred;
         }
+
         if self.layer == 1 {
             return Origin::Client;
         }
+
         if self.receipts.peer(link).is_some() || !self.knows_relays() {
             Origin::Relay
         } else if self.measure_trust.is_some() && self.attempt_left(link, now) {
@@ -1052,17 +1084,21 @@ impl RelayNode {
         let Some(key) = self.pow_key.as_ref() else {
             return Vec::new();
         };
+
         let backlog = self.gate.take_backlog();
         let Ok(mut challenge) = self.gate.pow.issue(backlog, now, rng) else {
             return Vec::new();
         };
+
         if challenge.sign(key, rng).is_err() {
             return Vec::new();
         }
+
         let mut encoded = vec![0u8; capsule::CHALLENGE_LEN];
         if challenge.encode(&mut encoded).is_err() {
             return Vec::new();
         }
+
         let mut outputs = Vec::new();
         for carrier in self.carriers.clone() {
             if carrier == self.relay.relay_id {
@@ -1072,6 +1108,7 @@ impl RelayNode {
                 }
                 continue;
             }
+
             let mut capsule = vec![0u8; capsule::HEADER_LEN + encoded.len()];
             if let Ok(used) = capsule::encode(CapsuleType::Challenge, &encoded, &mut capsule) {
                 capsule.truncate(used);
@@ -1081,6 +1118,7 @@ impl RelayNode {
                 });
             }
         }
+
         outputs
     }
 
@@ -1091,6 +1129,7 @@ impl RelayNode {
         let Ok(challenge) = PowChallenge::parse(value) else {
             return;
         };
+
         let Some(identity) = self
             .identities
             .get(&challenge.verifier_id)
@@ -1098,6 +1137,7 @@ impl RelayNode {
         else {
             return;
         };
+
         if let Ok(moved) = self.challenges.take(challenge, &identity, now) {
             self.challenges_moved |= moved;
         }
@@ -1110,6 +1150,7 @@ impl RelayNode {
         if !core::mem::take(&mut self.challenges_moved) {
             return None;
         }
+
         self.challenges.expire(now);
         self.challenges.encode(now).ok()
     }
@@ -1121,8 +1162,8 @@ impl RelayNode {
     }
 
     /// Hands each digest to its notify queue (Part 8 `NTF-096`): into a
-    /// queue of this relay at once, and to another queue
-    /// relay as an `UMBRA_DEPOSIT` capsule on a connection with no session.
+    /// queue of this relay at once, and to another queue relay as an
+    /// `UMBRA_DEPOSIT` capsule on a connection with no session.
     fn deliver_digests<R: CryptoRng + ?Sized>(
         &mut self,
         digests: Vec<DigestDue>,
@@ -1134,16 +1175,20 @@ impl RelayNode {
             let Ok(address) = QueueAddress::parse(&due.queue) else {
                 continue;
             };
+
             let mut inner = [0u8; 34];
             let digest = NotifyDigest {
                 id: due.id,
                 post_count: due.post_count,
             };
+
             let Ok(used) = digest.encode(&mut inner) else {
                 continue;
             };
+
             let mut nonce = [0u8; 12];
             rng.fill_bytes(&mut nonce);
+
             let Ok(sealed) = ChannelOutbound::new(&address).seal_record(
                 L6Kind::NotifyDigest,
                 inner.get(..used).unwrap_or_default(),
@@ -1151,8 +1196,10 @@ impl RelayNode {
             ) else {
                 continue;
             };
+
             let mut corr_id = [0u8; 16];
             rng.fill_bytes(&mut corr_id);
+
             if address.relay_id == self.relay.relay_id {
                 let Ok(encoded) = sealed.sign(&self.relay.s, corr_id) else {
                     continue;
@@ -1160,12 +1207,15 @@ impl RelayNode {
                 outputs.extend(self.take_deposit(&encoded, now, rng));
                 continue;
             }
+
             let Some(static_key) = self.queue_relays.get(&address.relay_id) else {
                 continue;
             };
+
             let Ok(encoded) = sealed.sign(static_key, corr_id) else {
                 continue;
             };
+
             let mut capsule = vec![0u8; capsule::HEADER_LEN + encoded.len()];
             if let Ok(used) = capsule::encode(CapsuleType::Deposit, &encoded, &mut capsule) {
                 capsule.truncate(used);
@@ -1175,6 +1225,7 @@ impl RelayNode {
                 });
             }
         }
+
         outputs
     }
 
@@ -1190,11 +1241,13 @@ impl RelayNode {
         let Ok((command, _)) = Command::parse(encoded, Bucket::B0) else {
             return Vec::new();
         };
+
         if let Some(reply) = self.queues.deposit(&command, &self.static_secret, now, rng) {
             if let Some(endpoint) = self.endpoints.get_mut(&reply.circuit) {
                 endpoint.post(reply.outbound, false);
             }
         }
+
         self.queues
             .take_ndr_pushes()
             .into_iter()
@@ -1209,13 +1262,17 @@ impl RelayNode {
         let chunks = ChunkService::restore(config.chunk_capacity, &mut loaded);
         let mut node = RelayNode::new(config);
         node.chunks = chunks;
+
         for (epoch, nonce) in &loaded.spent {
             node.gate.spent.restore(*epoch, *nonce);
         }
+
         node.groups = GroupService::restore(&loaded);
+
         let mut queues = QueueService::restore(loaded);
         queues.keep_notify_of(&mut node.queues);
         node.queues = queues;
+
         node
     }
 
@@ -1223,24 +1280,29 @@ impl RelayNode {
     /// re-push. The runtime calls it about once each second.
     pub fn push_tick<R: CryptoRng + ?Sized>(&mut self, now: u64, rng: &mut R) -> Vec<Output> {
         self.queues.push_tick(now, rng);
+
         // NTF-146: the wake at the end of the window of a watch.
         for reply in self.queues.take_wakes() {
             if let Some(endpoint) = self.endpoints.get_mut(&reply.circuit) {
                 endpoint.post(reply.outbound, false);
             }
         }
+
         let mut outputs: Vec<Output> = self
             .queues
             .take_ndr_pushes()
             .into_iter()
             .map(Output::NdrPush)
             .collect();
+
         // NTF-098: each digest whose gap ended, and each one that waited for
         // its turn under the rate of the group service.
         let due = self.groups.digest_tick(now);
         outputs.extend(self.deliver_digests(due, now, rng));
+
         // NET-069: the loops of this relay, and the chains that carry them.
         outputs.extend(self.loop_tick(now, rng));
+
         // NET-319: a dial that failed starts again while a body waits.
         let again: Vec<[u8; 32]> = self
             .extending
@@ -1252,6 +1314,7 @@ impl RelayNode {
             })
             .map(|(relay_id, _)| *relay_id)
             .collect();
+
         for relay_id in again {
             self.dials.insert(
                 relay_id,
@@ -1262,6 +1325,7 @@ impl RelayNode {
             );
             outputs.push(Output::Dial { relay_id });
         }
+
         // NET-335: a link that sent no `Open` holds no place. At a relay of
         // layer 2 or 3, a link that named no relay of the layer before
         // holds none too.
@@ -1271,22 +1335,27 @@ impl RelayNode {
             .filter(|(_, since)| now.saturating_sub(**since) >= LINK_OPEN_TIMEOUT)
             .map(|(link, _)| *link)
             .collect();
+
         for link in late {
             outputs.extend(self.drop_link(link, now));
         }
+
         // REL-074, REL-176: the windows of an ended epoch close, and an old
         // receipt goes.
         let built = self.circuits.take_builds();
         if let Some(seen) = &self.builds_seen {
             seen.fetch_add(built, std::sync::atomic::Ordering::Relaxed);
         }
+
         self.receipts.count_chains(built, now, rng);
+
         if let Some(key) = self.pow_key.as_ref() {
             let own = self.relay.relay_id;
             for (link, signed) in self.receipts.tick(&own, key, now, rng) {
                 outputs.extend(capsule_output(link, CapsuleType::Receipt, &signed));
             }
         }
+
         outputs
     }
 
@@ -1309,10 +1378,12 @@ impl RelayNode {
         if cells.is_empty() {
             return Vec::new();
         }
+
         let actions = cells
             .into_iter()
             .map(|(link, cell)| Action::Send { link, cell })
             .collect();
+
         self.run(actions, now, rng)
     }
 
@@ -1334,10 +1405,12 @@ impl RelayNode {
         if !query.asks(&self.relay.relay_id) {
             return QueryAnswer::Elsewhere;
         }
+
         // REL-186: one authority asks at most RECEIPT_QUERY_MAX times.
         let asked = self
             .receipts
             .admit_query(query.authority_index, query.epoch, false, now);
+
         match asked {
             Asked::Fresh => QueryAnswer::Given(self.receipts.answer(query)),
             // REL-179: no receipt of an epoch outside the retention, and
@@ -1354,9 +1427,11 @@ impl RelayNode {
         if !query.asks(&self.relay.relay_id) {
             return QueryAnswer::Elsewhere;
         }
+
         let asked = self
             .receipts
             .admit_query(query.authority_index, query.epoch, true, now);
+
         match asked {
             Asked::Fresh => QueryAnswer::Given(StatAnswer {
                 share: self.receipts.share(query.authority_index, query.epoch),
@@ -1379,6 +1454,7 @@ impl RelayNode {
         let mut changes = self.queues.take_changes();
         changes.append(&mut self.groups.take_changes());
         changes.append(&mut self.chunks.take_changes());
+
         // ABU-114: a restart spends no token a second time.
         changes.extend(
             self.gate
@@ -1386,6 +1462,7 @@ impl RelayNode {
                 .into_iter()
                 .map(|(epoch, nonce)| StoreChange::Spent { epoch, nonce }),
         );
+
         changes
     }
 
@@ -1430,19 +1507,24 @@ impl RelayNode {
         rng: &mut R,
     ) -> Vec<Output> {
         self.dials.remove(&relay_id);
+
         // NET-319: a second dial that ended after the first one gives a link
         // that nothing needs.
         if self.next_hops.contains_key(&relay_id) {
             return vec![Output::Close { link }];
         }
+
         let mut capsule = vec![0u8; 64];
         let Ok((client, used)) = ClientLink::open(session_id, session_secret, &mut capsule) else {
             return Vec::new();
         };
+
         capsule.truncate(used);
+
         self.links.insert(link, Framing::Dialed(client));
         self.next_hops.insert(relay_id, link);
         self.receipts.set_peer(link, relay_id);
+
         let mut outputs = vec![Output::Send { link, capsule }];
         // REL-173: the next hop learns which relay dialed it.
         if let Some(key) = self.pow_key.as_ref() {
@@ -1454,6 +1536,7 @@ impl RelayNode {
                     .and_then(|hello| capsule_output(link, CapsuleType::RelayHello, &hello)),
             );
         }
+
         let mut actions = Vec::new();
         for waiting in self.extending.remove(&relay_id).unwrap_or_default() {
             // The client ended a build older than its timeout.
@@ -1461,6 +1544,7 @@ impl RelayNode {
                 actions.extend(self.bind_extend(waiting.from, link, &waiting.body, now, rng));
             }
         }
+
         outputs.extend(self.run(actions, now, rng));
         outputs
     }
@@ -1479,6 +1563,7 @@ impl RelayNode {
             link: next_link,
             circ_id: [0; 16],
         };
+
         // NET-154, NET-155.
         loop {
             rng.fill_bytes(&mut next.circ_id);
@@ -1486,6 +1571,7 @@ impl RelayNode {
                 break;
             }
         }
+
         let at = self.table_now(now);
         self.circuits.bind_next(from, next, body, at)
     }
@@ -1507,6 +1593,7 @@ impl RelayNode {
             } else {
                 CapsuleLink::Relays
             };
+
         // A capsule that does not parse, that its link does not carry, or
         // that holds bytes after its value is a fault of the peer. The
         // session ends, and it does not park (`WIR-542`).
@@ -1516,11 +1603,13 @@ impl RelayNode {
         let Some((kind, value, _)) = parsed else {
             return self.drop_link(link, now);
         };
+
         // NET-335: the time of a link that holds no session runs from its
         // first sight.
         if !self.links.contains_key(&link) {
             self.fresh.entry(link).or_insert(now);
         }
+
         match kind {
             CapsuleType::Session => self.on_control(link, value, now),
             CapsuleType::Replica => {
@@ -1559,10 +1648,12 @@ impl RelayNode {
                 if self.receipts.peer(link).is_some() || !self.may_verify(link, now) {
                     return Vec::new();
                 }
+
                 if let Some(Framing::Accepted(framing)) = self.links.get(&link) {
                     let session_id = framing.session_id();
                     let identities = &self.identities;
                     let own = self.relay.relay_id;
+
                     // A relay outside the layer before dials no circuit
                     // here, thus its hello names no peer.
                     let previous = self.previous_layer.as_ref();
@@ -1591,6 +1682,7 @@ impl RelayNode {
                 {
                     let identity = identity.clone();
                     let own = self.relay.relay_id;
+
                     // A receipt that the book drops counts as one signature
                     // check of the link. A peer that sends receipts that
                     // fail thus costs this relay a bounded number of them.
@@ -1609,6 +1701,7 @@ impl RelayNode {
                     Some(Framing::Dialed(framing)) => framing.receive(value),
                     None => return self.drop_link(link, now),
                 };
+
                 match cell {
                     Ok(Some(cell)) => {
                         let cell = cell.to_vec();
@@ -1622,6 +1715,7 @@ impl RelayNode {
                                 outputs.extend(capsule_output(link, CapsuleType::Receipt, &signed));
                             }
                         }
+
                         // NET-363: a cell of a loop chain of this relay.
                         if let Some(circ_id) = cell.first_chunk::<16>() {
                             if self.loops.owns(link, *circ_id) {
@@ -1631,6 +1725,7 @@ impl RelayNode {
                                 return outputs;
                             }
                         }
+
                         self.circuits.set_clock_ms(clock_ms());
                         let origin = self.origin(link, now);
                         let at = self.table_now(now);
@@ -1652,7 +1747,9 @@ impl RelayNode {
         let Ok(control) = SessionControl::parse(value) else {
             return self.drop_link(link, now);
         };
+
         let held = self.links.contains_key(&link);
+
         match &control {
             // WIR-233: a session identifier that a session of this relay
             // holds opens no second one.
@@ -1661,6 +1758,7 @@ impl RelayNode {
                 if self.sessions.contains_key(&session_id) {
                     return self.drop_link(link, now);
                 }
+
                 match RelayLink::open(control) {
                     Ok(framing) => {
                         self.links.insert(link, Framing::Accepted(framing));
@@ -1686,6 +1784,7 @@ impl RelayNode {
                 if self.loops.on_destroy(link, *circ_id, at) {
                     return Vec::new();
                 }
+
                 self.circuits.set_clock_ms(clock_ms());
                 let actions = self.circuits.on_destroy(link, *circ_id);
                 self.finish(actions, now)
@@ -1712,14 +1811,17 @@ impl RelayNode {
             Some(Framing::Accepted(framing)) => framing.pause(control, now, &mut paused),
             _ => return self.drop_link(link, now),
         };
+
         let Ok(used) = answered else {
             return self.drop_link(link, now);
         };
+
         paused.truncate(used);
         let answer = Output::Send {
             link,
             capsule: paused,
         };
+
         // A session with no circuit has nothing to keep, and a relay
         // that parked each such session would hold them with no bound.
         if self.circuits.circuits_on(link) == 0 {
@@ -1727,6 +1829,7 @@ impl RelayNode {
             outputs.extend(self.drop_link(link, now));
             return outputs;
         }
+
         let mut outputs = self.park(link, now);
         outputs.push(answer);
         outputs
@@ -1740,6 +1843,7 @@ impl RelayNode {
         self.quiet.remove(&link);
         self.framed.remove(&link);
         self.waits.remove(&link);
+
         self.circuits.set_clock_ms(clock_ms());
         let actions = self.circuits.pause_link(link);
         self.run_pause(actions, now)
@@ -1764,7 +1868,9 @@ impl RelayNode {
             Some(Framing::Accepted(framing)) => framing.resume(control, now),
             _ => Err(ResumeFault::Refused),
         };
+
         let mut outputs = self.drop_link(link, now);
+
         match (resumed, target) {
             (Ok(()), Some(target)) => {
                 // The node holds nothing under the identifier of the new
@@ -1795,6 +1901,7 @@ impl RelayNode {
     fn run_pause(&mut self, actions: Vec<Action>, now: u64) -> Vec<Output> {
         let mut outputs = Vec::new();
         let mut work: VecDeque<Action> = actions.into();
+
         while let Some(action) = work.pop_front() {
             match action {
                 Action::Pause { key } => work.extend(self.circuits.pause_now(key)),
@@ -1841,6 +1948,7 @@ impl RelayNode {
         let Ok(used) = sent else {
             return Some(Output::Close { link });
         };
+
         capsule.truncate(used);
         self.receipts.cell_sent(link, cell);
         Some(Output::Send { link, capsule })
@@ -1866,19 +1974,25 @@ impl RelayNode {
         else {
             return (true, [None, None]);
         };
+
         let framed = self.framed.entry(link).or_insert(0);
         let waiting = held.saturating_add(*framed);
         let after = waiting.saturating_add(len);
+
         let Some(circ_id) = cell.first_chunk::<16>().copied() else {
             return (after <= limit, [None, None]);
         };
+
         let waits = self.waits.entry(link).or_default();
         waits.trim(waiting);
+
         let mut takes = after <= limit;
         let mut other = None;
+
         if after > limit.saturating_sub(limit / SHED_MARK_PART) {
             let mine = waits.of(&circ_id).saturating_add(len);
             let floor = limit / SHED_FLOOR_PART;
+
             // A circuit that ended holds no rank.
             let heaviest = loop {
                 match waits.heaviest_but(&circ_id) {
@@ -1888,6 +2002,7 @@ impl RelayNode {
                     found => break found,
                 }
             };
+
             match heaviest {
                 Some((heavy, bytes)) if bytes > mine && bytes >= floor => {
                     waits.forget(&heavy);
@@ -1897,6 +2012,7 @@ impl RelayNode {
                 _ => {}
             }
         }
+
         if takes {
             waits.add(circ_id, len);
             *framed = framed.saturating_add(len);
@@ -1929,6 +2045,7 @@ impl RelayNode {
                         if self.circuits.holds(link, *circ_id) {
                             self.keep_ended(link, *circ_id);
                         }
+
                         work.extend(self.circuits.shed(link, *circ_id));
                     }
                 }
@@ -1936,9 +2053,11 @@ impl RelayNode {
                     // NET-349: a link near its bound loses the circuit that
                     // filled it, and each other circuit on it stays.
                     let (takes, shed) = self.place_cell(link, &cell);
+
                     for circ_id in shed.into_iter().flatten() {
                         work.extend(self.circuits.shed(link, circ_id));
                     }
+
                     if takes {
                         outputs.extend(self.frame(link, &cell));
                     }
@@ -1968,6 +2087,7 @@ impl RelayNode {
                             );
                             outputs.push(Output::Dial { relay_id });
                         }
+
                         // NET-319: the bodies for one relay have a bound. A
                         // body above it ends its circuit, and its client
                         // builds again on another chain.
@@ -1975,6 +2095,7 @@ impl RelayNode {
                         if waiting.len() >= EXTEND_WAITING_MAX {
                             waiting.retain(|held| held.is_live(now));
                         }
+
                         if waiting.len() >= EXTEND_WAITING_MAX {
                             work.extend(self.circuits.shed(from.link, from.circ_id));
                         } else {
@@ -1996,6 +2117,7 @@ impl RelayNode {
                 } => {
                     self.wake_endpoint(&circuit);
                     let (paced, digests) = self.serve(circuit, bucket, &content, now, rng);
+
                     outputs.extend(self.deliver_digests(digests, now, rng));
                     // ATT-102: one copy for each target of a `CREP`.
                     outputs.extend(self.chunks.take_pushes().iter().filter_map(push_output));
@@ -2005,11 +2127,13 @@ impl RelayNode {
                             .into_iter()
                             .map(Output::NdrPush),
                     );
+
                     for reply in paced {
                         if let Some(endpoint) = self.endpoints.get_mut(&reply.circuit) {
                             endpoint.post(reply.outbound, false);
                         }
                     }
+
                     // NET-360: an answer of an attachment circuit follows
                     // the command of its own client, thus it waits for no
                     // tick. One step goes, and the clock sends the rest.
@@ -2053,6 +2177,7 @@ impl RelayNode {
                         *action,
                         Action::Send { .. } | Action::Serve { .. } | Action::Loop { .. }
                     );
+
                     if is_cell && self.delayed.len() >= RELAY_DELAYED_MAX {
                         self.circuits.released(&circuit);
                         work.extend(self.circuits.shed(circuit.link, circuit.circ_id));
@@ -2141,9 +2266,11 @@ impl RelayNode {
             self.circuits.released(&circuit);
             due.push(action);
         }
+
         if due.is_empty() {
             return Vec::new();
         }
+
         self.run(due, now, rng)
     }
 
@@ -2153,9 +2280,11 @@ impl RelayNode {
         if self.endpoints.contains_key(&circuit) {
             return true;
         }
+
         let Some(secret) = self.circuits.session_secret(&circuit).cloned() else {
             return false;
         };
+
         self.endpoints.insert(
             circuit,
             Endpoint {
@@ -2167,6 +2296,7 @@ impl RelayNode {
                 paused: false,
             },
         );
+
         self.paced_new.insert(circuit);
         true
     }
@@ -2190,8 +2320,10 @@ impl RelayNode {
         let Ok(commands) = unpack(content, bucket) else {
             return (Vec::new(), Vec::new());
         };
+
         let mut paced = Vec::new();
         let mut digests = Vec::new();
+
         for command in &commands {
             let outcome = self.serve_one(circuit, command, now, rng);
             match outcome {
@@ -2207,6 +2339,7 @@ impl RelayNode {
                 }
             }
         }
+
         // NET-037: the clock steps through each drain that a command left.
         if self
             .endpoints
@@ -2226,15 +2359,19 @@ impl RelayNode {
         rng: &mut R,
     ) -> Result<(Vec<Reply>, Vec<DigestDue>), Reject> {
         let range = Range::of(command.cmd);
+
         if !self.ensure_endpoint(circuit) {
             return Err(Reject::Rejected);
         }
+
         let accepts = Accepts::CrossRelay(&self.issuer_keys);
         let endpoint = self.endpoints.get_mut(&circuit).ok_or(Reject::Rejected)?;
+
         // WIR-107, WIR-363: one circuit carries one range.
         if *endpoint.range.get_or_insert(range) != range {
             return Err(Reject::Rejected);
         }
+
         match range {
             Range::Queue => self
                 .queues
@@ -2281,6 +2418,7 @@ impl RelayNode {
         let Some(endpoint) = self.endpoints.get_mut(circuit) else {
             return Vec::new();
         };
+
         let is_bulk = endpoint.range == Some(Range::Attachment);
         let has_room = is_bulk
             && fits(
@@ -2290,12 +2428,15 @@ impl RelayNode {
                 ANSWER_STEP,
                 DRAIN_CALM_PART,
             );
+
         let mut actions = Vec::new();
         let mut sent = 0usize;
         let mut next = endpoint.outbox.pop_front();
+
         while let Some(outbound) = next.take() {
             let bucket = outbound.bucket;
             let mut content = outbound.encoded;
+
             while endpoint.outbox.front().is_some_and(|more| {
                 is_bulk && content.len().saturating_add(more.encoded.len()) <= bucket.command_area()
             }) {
@@ -2303,6 +2444,7 @@ impl RelayNode {
                     content.extend(more.encoded);
                 }
             }
+
             let Some(action) =
                 self.circuits
                     .originate(circuit, bucket, CellCommand::Data, &content)
@@ -2313,12 +2455,15 @@ impl RelayNode {
                 actions.extend(self.circuits.shed(circuit.link, circuit.circ_id));
                 return actions;
             };
+
             actions.push(action);
             sent = sent.saturating_add(bucket.cell_len());
+
             let has_step = endpoint
                 .outbox
                 .front()
                 .is_some_and(|more| sent.saturating_add(more.bucket.cell_len()) <= ANSWER_STEP);
+
             if has_room && has_step {
                 next = endpoint.outbox.pop_front();
             }
@@ -2357,10 +2502,12 @@ impl RelayNode {
         else {
             return Vec::new();
         };
+
         if !endpoint.outbox.is_empty() {
             let actions = self.answers(circuit);
             return self.run(actions, now, rng);
         }
+
         let action = if endpoint.loops > 0 {
             endpoint.loops = endpoint.loops.saturating_sub(1);
             self.circuits
@@ -2369,6 +2516,7 @@ impl RelayNode {
             // WIR-015: a COVER of the shape of a B0 MSG.
             let mut corr_id = [0u8; 16];
             rng.fill_bytes(&mut corr_id);
+
             let payload = vec![0u8; Bucket::B0.l5_payload()];
             let cover = Command {
                 cmd: Cmd::Cover,
@@ -2377,6 +2525,7 @@ impl RelayNode {
                 auth: [0; 32],
                 payload: &payload,
             };
+
             let mut encoded = vec![0u8; cover.len()];
             cover.encode(&mut encoded).ok().and_then(|_| {
                 self.circuits
@@ -2396,6 +2545,7 @@ impl RelayNode {
         let mut cut = Vec::new();
         // The bytes that this tick put on each link.
         let mut stepped: BTreeMap<LinkId, usize> = BTreeMap::new();
+
         // The circuits take their steps in turns, from the one after the
         // last that took one. Before this, the circuits of the lowest
         // identifiers took the room of a link at each tick. A drain of a
@@ -2409,6 +2559,7 @@ impl RelayNode {
                 .collect(),
             None => self.draining.iter().copied().collect(),
         };
+
         for circuit in &order {
             let Some(endpoint) = self
                 .endpoints
@@ -2418,6 +2569,7 @@ impl RelayNode {
                 self.draining.remove(circuit);
                 continue;
             };
+
             // NET-349: the drains of one link share its backlog. A drain
             // waits while the link holds more than a part of its bound. The
             // drains of some circuits thus fill no link of the others.
@@ -2432,21 +2584,25 @@ impl RelayNode {
             if !calm {
                 continue;
             }
+
             self.drain_turn = Some(*circuit);
             let mut sent = 0usize;
             'step: while sent < DRAIN_STEP {
                 let Some(drain) = endpoint.drains.first_mut() else {
                     break;
                 };
+
                 let room = DRAIN_STEP.saturating_sub(sent);
                 let (records, ended) = match endpoint.range {
                     Some(Range::Queue) => self.queues.drain_step(circuit, drain, room, rng),
                     Some(Range::Group) => self.groups.drain_step(drain, room, rng),
                     Some(Range::Attachment) | None => (Vec::new(), true),
                 };
+
                 if ended {
                     endpoint.drains.end_first();
                 }
+
                 for outbound in records {
                     sent = sent.saturating_add(outbound.encoded.len());
                     let cell = self.circuits.originate(
@@ -2455,6 +2611,7 @@ impl RelayNode {
                         CellCommand::Data,
                         &outbound.encoded,
                     );
+
                     // NET-321: a drain longer than the cells of its circuit
                     // ends the circuit at once. The client asks again from
                     // its cursor on a new one.
@@ -2462,21 +2619,27 @@ impl RelayNode {
                         cut.push(*circuit);
                         break 'step;
                     };
+
                     actions.push(cell);
                 }
             }
+
             if endpoint.drains.is_empty() {
                 self.draining.remove(circuit);
             }
+
             let total = stepped.entry(circuit.link).or_insert(0);
             *total = total.saturating_add(sent);
         }
+
         for circuit in cut {
             actions.extend(self.circuits.shed(circuit.link, circuit.circ_id));
         }
+
         if actions.is_empty() {
             return Vec::new();
         }
+
         self.run(actions, now, rng)
     }
 
@@ -2488,9 +2651,11 @@ impl RelayNode {
         if held.0 != minute {
             *held = (minute, 0);
         }
+
         if held.1 >= VERIFIES_PER_MINUTE {
             return false;
         }
+
         held.1 = held.1.saturating_add(1);
         true
     }
@@ -2503,9 +2668,11 @@ impl RelayNode {
         if held.0 != minute {
             *held = (minute, 0);
         }
+
         if held.1 >= DEPOSITS_PER_MINUTE {
             return false;
         }
+
         held.1 = held.1.saturating_add(1);
         true
     }
@@ -2526,7 +2693,9 @@ impl RelayNode {
         if self.parked.contains_key(&link) {
             return Vec::new();
         }
+
         let parks = self.layer == 1 && self.circuits.circuits_on(link) > 0;
+
         match self.links.get_mut(&link) {
             Some(Framing::Accepted(framing)) if parks => {
                 framing.connection_lost(now);
@@ -2545,6 +2714,7 @@ impl RelayNode {
                 self.sessions.remove(&session_id);
             }
         }
+
         self.parked.remove(&link);
         self.verifies.remove(&link);
         self.deposits.remove(&link);
@@ -2556,6 +2726,7 @@ impl RelayNode {
         self.receipts.link_closed(link);
         self.next_hops.retain(|_, held| *held != link);
         self.loops.link_closed(link);
+
         self.circuits.set_clock_ms(clock_ms());
         let actions = self.circuits.link_closed(link);
         let mut outputs = self.finish(actions, now);
@@ -2599,19 +2770,24 @@ impl RelayNode {
             waiting.retain(|held| held.is_live(now));
         }
         self.extending.retain(|_, waiting| !waiting.is_empty());
+
         self.dials
             .retain(|_, dial| now.saturating_sub(dial.at) < DIAL_TIMEOUT);
+
         self.circuits.set_clock_ms(clock_ms());
         let aged = self.circuits.expire(self.table_now(now));
         let mut ended = self.finish(aged, now);
+
         // REL-069: an address whose attempts each came back leaves the
         // count.
         self.measure_attempts.retain(|_, attempts| {
             attempts.refill(now);
             attempts.spent > 0
         });
+
         self.measure_sessions
             .retain(|_, session| session.until > now);
+
         // NET-335: a client link that held no circuit for LINK_IDLE_TIMEOUT
         // gives its place back. A client of ordinary use holds a circuit
         // while it holds its link.
@@ -2630,9 +2806,11 @@ impl RelayNode {
                 })
                 .copied()
                 .collect();
+
             for link in over {
                 ended.extend(self.drop_link(link, now));
             }
+
             // A parked link holds no connection, thus it is not idle.
             let idle: Vec<LinkId> = self
                 .links
@@ -2644,8 +2822,10 @@ impl RelayNode {
                 })
                 .map(|(link, _)| *link)
                 .collect();
+
             self.quiet
                 .retain(|link, _| idle.binary_search(link).is_ok());
+
             for link in idle {
                 let since = *self.quiet.entry(link).or_insert(now);
                 if now.saturating_sub(since) >= LINK_IDLE_TIMEOUT {
@@ -2653,10 +2833,13 @@ impl RelayNode {
                 }
             }
         }
+
         self.queues.sweep(now);
+
         // ATT-046, ATT-168: a chunk past its erase time leaves, and the
         // store trims to its target.
         self.chunks.sweep(now);
+
         let due = self.groups.sweep(now);
         ended.extend(self.deliver_digests(due, now, rng));
         ended
@@ -2676,19 +2859,24 @@ mod tests {
     use umbra_crypto::x25519::PublicKey as XPublic;
 
     struct Rng;
+
     impl umbra_crypto::rand_core::TryRng for Rng {
         type Error = core::convert::Infallible;
+
         fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
             Ok(4)
         }
+
         fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
             Ok(4)
         }
+
         fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
             dst.fill(4);
             Ok(())
         }
     }
+
     impl umbra_crypto::rand_core::TryCryptoRng for Rng {}
 
     #[test]
@@ -2701,16 +2889,20 @@ mod tests {
             },
             chunk: vec![0x3C; CHUNK_SIZE],
         };
+
         let Some(Output::Push { relay_id, capsule }) = push_output(&push) else {
             panic!("no capsule");
         };
+
         assert_eq!(relay_id, [0xB1; 32]);
         let (kind, value, used) = capsule::parse(&capsule).unwrap();
         assert_eq!((kind, used), (CapsuleType::Replica, capsule.len()));
         assert_eq!(value.len(), capsule::REPLICA_LEN);
+
         let (command, _) = Command::parse(value, Bucket::B3).unwrap();
         assert_eq!(command.cmd, Cmd::Attachment(CRPUT));
         assert_eq!(command.queue_id, [0xC7; 32]);
+
         let copy = CrputPayload::parse(command.payload).unwrap();
         assert_eq!(copy.storage_token, [0xB2; 32]);
         assert_eq!(copy.chunk, push.chunk);
@@ -2727,8 +2919,10 @@ mod tests {
             layer: 3,
             chunk_capacity: 1 << 24,
         });
+
         assert!(node.on_capsule(2, &capsule, 1_000, &mut Rng).is_empty());
         assert_eq!(node.chunks.held_count(), 0);
+
         // A capsule of that type with another length does not parse, and the
         // link ends.
         let outputs = node.on_capsule(2, &capsule[..capsule.len() - 1], 1_000, &mut Rng);
@@ -2779,17 +2973,21 @@ mod tests {
         });
         assert!(node.on_capsule(3, &open, 1_000, &mut Rng).is_empty());
         assert_eq!(node.links.len(), 1);
+
         // WIR-233: a second open of that identifier closes its connection,
         // and the first session stays.
         let outputs = node.on_capsule(5, &open, 1_000, &mut Rng);
         assert!(matches!(outputs[..], [Output::Close { link: 5 }]));
         assert_eq!(node.sessions.get(&[0x62; 8]), Some(&3));
+
         // A live session at such a relay binds no resume either.
         let outputs = node.on_capsule(6, &resume, 1_000, &mut Rng);
         assert!(matches!(outputs[..], [Output::Close { link: 6 }]));
         assert_eq!(node.links.len(), 1);
+
         node.link_closed(3, 1_001);
         assert!(node.links.is_empty() && node.sessions.is_empty());
+
         assert_eq!(node.sessions_parked(), 0);
         let outputs = node.on_capsule(4, &resume, 1_002, &mut Rng);
         assert!(matches!(outputs[..], [Output::Close { link: 4 }]));
@@ -2805,22 +3003,27 @@ mod tests {
                 .iter()
                 .any(|change| matches!(change, StoreChange::Record { .. }))
         };
+
         // A deposit that names no queue of this relay counts all the same.
         let mut unknown = capsule.clone();
         let last = unknown.len() - 1;
         unknown[last] ^= 1;
+
         for _ in 0..DEPOSITS_PER_MINUTE {
             assert!(relay_b.on_capsule(4, &unknown, now, &mut Rng).is_empty());
         }
+
         // The deposit above the budget drops before any key agreement: it
         // gives no answer, it stores nothing, and the link stays.
         assert!(relay_b.on_capsule(4, &capsule, now, &mut Rng).is_empty());
         assert!(!stored(&mut relay_b));
+
         // The next minute gives the budget back, and each link has its own.
         assert!(!relay_b.may_deposit(4, now));
         assert!(relay_b.may_deposit(4, now + 60));
         assert!(relay_b.on_capsule(5, &capsule, now, &mut Rng).is_empty());
         assert!(stored(&mut relay_b));
+
         // A closed link leaves no count.
         relay_b.link_closed(4, now);
         assert!(!relay_b.deposits.contains_key(&4));
@@ -2832,6 +3035,7 @@ mod tests {
     fn deposit_bench(now: u64) -> (RelayNode, QueueAddress, Vec<u8>) {
         use umbra_crypto::stored::Writer;
         use umbra_queue::relay::queue::{Queue, QueueKeys};
+
         // Relay B holds the notify queue of a reader.
         let qs = StaticSecret::from([0x51; 32]);
         let keys = QueueKeys {
@@ -2842,6 +3046,7 @@ mod tests {
         };
         let mut head = Writer::new();
         Queue::new(keys, now).export_head(&mut head);
+
         let mut loaded = Loaded::default();
         loaded.queues.insert(
             [0x52; 32],
@@ -2850,6 +3055,7 @@ mod tests {
                 records: Vec::new(),
             },
         );
+
         let b = relay_config(0xB5);
         let b_id = b.relay.relay_id;
         let b_key = b.relay.s;
@@ -2858,27 +3064,34 @@ mod tests {
         // Relay A holds the group queue and the registration of that queue.
         let mut relay_a = RelayNode::new(relay_config(0xA5));
         relay_a.set_queue_relays(BTreeMap::from([(b_id, b_key)]));
+
         let address = QueueAddress {
             relay_id: b_id,
             sender_id: [0x53; 32],
             qs_auth_sk: Secret::new([0x51; 32]),
             qe: Secret::new([0x55; 32]),
         };
+
         let mut queue = [0u8; umbra_wire::address::LEN];
         address.encode(&mut queue).unwrap();
+
         let due = DigestDue {
             id: [0x56; 32],
             queue,
             post_count: 3,
         };
+
         let outputs = relay_a.deliver_digests(vec![due], now, &mut Rng);
         let [Output::Push { relay_id, capsule }] = &outputs[..] else {
             panic!("no deposit");
         };
+
         assert_eq!(*relay_id, b_id);
+
         let (kind, value, _) = capsule::parse(capsule).unwrap();
         assert_eq!(kind, CapsuleType::Deposit);
         assert_eq!(value.len(), capsule::DEPOSIT_LEN);
+
         (relay_b, address, capsule.clone())
     }
 
@@ -2886,6 +3099,7 @@ mod tests {
     fn a_digest_goes_to_the_queue_relay_of_its_notify_queue_as_one_deposit() {
         use umbra_crypto::queue::QueueKey;
         use umbra_wire::queue::open;
+
         let now = 1_800_000_000;
         let (mut relay_b, address, capsule) = deposit_bench(now);
         let b_id = address.relay_id;
@@ -2897,8 +3111,10 @@ mod tests {
         other.relay.relay_id = [0xC5; 32];
         let mut relay_c = RelayNode::new(other);
         relay_c.set_queue_relays(BTreeMap::from([(b_id, [0x77; 32])]));
+
         let mut queue = [0u8; umbra_wire::address::LEN];
         address.encode(&mut queue).unwrap();
+
         let forged = relay_c.deliver_digests(
             vec![DigestDue {
                 id: [0x56; 32],
@@ -2914,7 +3130,9 @@ mod tests {
         else {
             panic!("no deposit");
         };
+
         relay_b.on_capsule(4, forged, now, &mut Rng);
+
         assert!(!relay_b
             .take_changes()
             .iter()
@@ -2924,6 +3142,7 @@ mod tests {
         // the reader opens a digest that names the group queue.
         assert!(relay_b.on_capsule(4, capsule, now, &mut Rng).is_empty());
         let changes = relay_b.take_changes();
+
         let record = changes
             .iter()
             .find_map(|change| match change {
@@ -2931,10 +3150,12 @@ mod tests {
                 _ => None,
             })
             .expect("a stored record");
+
         let key = QueueKey::derive(&Secret::new([0x55; 32]), &[0x53; 32]);
         let mut inner = vec![0u8; Bucket::B0.l6_record()];
         let (kind, used) = open(&key, &[0x53; 32], &record, Bucket::B0, &mut inner).unwrap();
         assert_eq!(kind, L6Kind::NotifyDigest);
+
         let digest = NotifyDigest::parse(&inner[..used]).unwrap();
         assert_eq!((digest.id, digest.post_count), ([0x56; 32], 3));
 

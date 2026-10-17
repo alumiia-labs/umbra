@@ -134,6 +134,7 @@ impl Tokens {
         let refill = u32::try_from(seconds)
             .unwrap_or(u32::MAX)
             .saturating_mul(rate);
+
         self.builds = self.builds.saturating_add(refill).min(burst);
         self.refilled_at = self.refilled_at.max(now);
     }
@@ -195,6 +196,7 @@ impl LinkBudget {
         if !self.has_room(now) {
             return false;
         }
+
         self.tokens.builds -= 1;
         self.circuits += 1;
         true
@@ -219,6 +221,7 @@ impl Hellos {
         if self.current.len() >= HELLO_REPLAY_MIN {
             self.previous = core::mem::take(&mut self.current);
         }
+
         self.current.insert(ephemeral);
     }
 }
@@ -388,6 +391,7 @@ impl Held {
         } else {
             &mut self.cells.1
         };
+
         *count = count.saturating_add(1);
         *count <= CIRCUIT_MAX_CELLS
     }
@@ -504,13 +508,16 @@ impl CircuitTable {
             .entry(link)
             .or_insert_with(|| LinkBudget::new(origin, now));
         budget.retune(origin);
+
         if !budget.has_room(now) {
             return false;
         }
+
         let source = match origin {
             Origin::Client | Origin::Measurer => self.sources.get(&link).copied(),
             Origin::Relay | Origin::Barred => None,
         };
+
         if let Some(source) = source {
             let key = if self.source_budgets.contains_key(&source)
                 || self.source_budgets.len() < SOURCE_BUDGETS_MAX
@@ -519,6 +526,7 @@ impl CircuitTable {
             } else {
                 OVERFLOW_SOURCE
             };
+
             let tokens = self
                 .source_budgets
                 .entry(key)
@@ -527,8 +535,10 @@ impl CircuitTable {
             if tokens.builds == 0 {
                 return false;
             }
+
             tokens.builds -= 1;
         }
+
         budget.tokens.builds -= 1;
         budget.circuits += 1;
         true
@@ -551,6 +561,7 @@ impl CircuitTable {
             .counts
             .len()
             .saturating_add(usize::from(!self.counts.contains_key(joining)));
+
         (self.held_max / holders.max(1)).max(1)
     }
 
@@ -562,7 +573,9 @@ impl CircuitTable {
         } else {
             before.saturating_sub(1)
         };
+
         self.ranked.remove(&(before, holder));
+
         if after == 0 {
             self.counts.remove(&holder);
         } else {
@@ -581,6 +594,7 @@ impl CircuitTable {
                 circ_id: [0; 16],
             },
         );
+
         self.seats
             .range(first..)
             .next()
@@ -597,12 +611,14 @@ impl CircuitTable {
         if self.held.len() < self.held_max {
             return Vec::new();
         }
+
         let own = self.counts.get(&holder).copied().unwrap_or(0);
         let from = if usize::try_from(own).unwrap_or(usize::MAX) >= self.share(&holder) {
             Some(holder)
         } else {
             self.ranked.last().map(|(_, most)| *most)
         };
+
         match from.and_then(|from| self.stalest(from)) {
             Some(stalest) => self.end_now(stalest, None),
             None => Vec::new(),
@@ -652,18 +668,23 @@ impl CircuitTable {
         let Ok((parsed, bucket)) = Cell::parse(cell) else {
             return Vec::new();
         };
+
         let key = CircuitKey {
             link,
             circ_id: *parsed.circ_id,
         };
+
         let mut body = parsed.body.to_vec();
+
         if let Some(client_side) = self.back.get(&key).copied() {
             return self.backward(client_side, parsed.tag, body);
         }
+
         if self.held.contains_key(&key) {
             let actions = self.forward(key, bucket, parsed.tag, &mut body, now);
             return self.delay(key, actions, rng);
         }
+
         self.build(key, parsed.tag, &body, origin, now, rng)
     }
 
@@ -682,9 +703,11 @@ impl CircuitTable {
         if *tag != [0u8; 16] || origin == Origin::Barred {
             return Vec::new();
         }
+
         let Ok((CellCommand::Extend, hello)) = read_cell_body(body) else {
             return Vec::new();
         };
+
         // NET-153: a hello for another relay gets no answer. The relay reads
         // the name before the budget, thus such a hello costs its link no
         // build and this relay no key agreement. NET-337: a hello with no
@@ -692,26 +715,33 @@ impl CircuitTable {
         let Ok(named) = HopHello::parse(hello) else {
             return Vec::new();
         };
+
         if named.relay_id != self.relay.relay_id {
             return Vec::new();
         }
+
         // NET-361: a hello whose ephemeral key this relay ran an agreement
         // for gets no answer. A repeat would cost that agreement again and
         // give its sender no key, and it costs the sender nothing.
         let Some(ephemeral) = named.flight1.first_chunk::<16>().copied() else {
             return Vec::new();
         };
+
         if self.hellos.holds(&ephemeral) {
             return Vec::new();
         }
+
         let delay_mean_ms = named.delay_class.mean_ms();
+
         // NET-331, NET-332: a link above its circuits or its rate of builds,
         // or an address above its rate, gets no answer, before the
         // handshake costs this relay a key agreement.
         if !self.take_build(key.link, origin, now) {
             return Vec::new();
         }
+
         self.hellos.keep(ephemeral);
+
         let is_candidate = origin == Origin::Measurer;
         let mut reply = [0u8; REPLY_LEN];
         // A candidate ends at this relay in each layer, and it serves no
@@ -724,24 +754,29 @@ impl CircuitTable {
         } else {
             answer(&self.relay, &self.static_secret, hello, rng, &mut reply).map(|ss| (ss, None))
         };
+
         // A handshake that fails gets no answer. It cost a key agreement,
         // thus it keeps the build that it took of the budget.
         let Ok((ss_hop, session_secret)) = answered else {
             self.release(key.link);
             return Vec::new();
         };
+
         // NET-331: the room for the circuit, after the answer: a build that
         // gets no answer ends no circuit.
         let holder = self.holder_of(key.link);
         let mut actions = self.make_room(holder);
+
         let position = if self.layer == 3 && !is_candidate {
             Position::Endpoint
         } else {
             Position::Middle
         };
+
         self.seat_seq = self.seat_seq.wrapping_add(1);
         self.seats.insert((holder, self.seat_seq, key));
         self.count(holder, true);
+
         self.held.insert(
             key,
             Held {
@@ -765,20 +800,24 @@ impl CircuitTable {
                 },
             },
         );
+
         if is_candidate {
             actions.push(Action::Candidate { circuit: key });
         } else {
             // REL-189: a measurement circuit is no chain.
             self.builds = self.builds.saturating_add(1);
         }
+
         let mut out = vec![0u8; BUILD_BUCKET.body_len()];
         if build_cell_body(CellCommand::Extended, &reply, &mut out).is_err() {
             return actions;
         }
+
         actions.push(Action::Send {
             link: key.link,
             cell: cell_bytes(&key.circ_id, &[0u8; 16], &out),
         });
+
         actions
     }
 
@@ -796,10 +835,12 @@ impl CircuitTable {
         let Some(held) = self.held.get_mut(&key) else {
             return actions;
         };
+
         // A measurement circuit holds no cell: its relay is the one hop.
         if held.delay_mean_ms == 0 || held.measure != Measure::No {
             return actions;
         }
+
         // NET-362: a circuit holds at most `CIRCUIT_DELAYED_MAX` cells for
         // their delay. A cell that dropped would break the chain of its
         // layer, thus the circuit ends.
@@ -816,6 +857,7 @@ impl CircuitTable {
         if held.delayed_out.saturating_add(held_back) > CIRCUIT_DELAYED_MAX {
             return self.close(key);
         }
+
         actions
             .into_iter()
             .map(|action| match action {
@@ -847,11 +889,13 @@ impl CircuitTable {
         let Some(held) = self.held.get_mut(&key) else {
             return Vec::new();
         };
+
         // NET-339: the end of the circuit waits for its delayed cells, and
         // a forward cell after that end goes nowhere.
         if held.ending {
             return Vec::new();
         }
+
         let measure = held.measure;
         let over = match measure {
             // REL-201: the end of the session bounds the circuit, and
@@ -862,9 +906,11 @@ impl CircuitTable {
             }
             Measure::No => !held.count(true),
         };
+
         if over {
             return self.close(key);
         }
+
         // A candidate ends at each cell but a `MEAS_OPEN` that the node
         // verifies, and [`CircuitTable::close`] gives that end no sign.
         // NET-331: a forward cell moves the circuit behind each other one of
@@ -873,6 +919,7 @@ impl CircuitTable {
         self.seats.remove(&(held.holder, held.seat, key));
         held.seat = self.seat_seq;
         self.seats.insert((held.holder, held.seat, key));
+
         if let Some(next) = held.next {
             // NET-129: a relay in the middle makes no check.
             return match held.hop.forward(tag, body) {
@@ -883,19 +930,23 @@ impl CircuitTable {
                 Err(_) => self.close(key),
             };
         }
+
         let is_extending = held.extending;
         let recovered = if self.layer == 3 && measure == Measure::No {
             held.hop.forward(tag, body).map(|_| ())
         } else {
             held.hop.forward_build(tag, body)
         };
+
         // NET-115: a failed check ends the circuit.
         if recovered.is_err() {
             return self.close(key);
         }
+
         let Ok((command, content)) = unpad_body(body) else {
             return self.close(key);
         };
+
         match (measure, command) {
             // NET-169, NET-322: the client ended its circuit here. The
             // relays before this one moved the `DESTROY` as a cell of the
@@ -938,6 +989,7 @@ impl CircuitTable {
             }
             (Measure::No, _) => {}
         }
+
         match (command, self.layer) {
             (CellCommand::Data, 3) => vec![Action::Serve {
                 circuit: key,
@@ -954,13 +1006,16 @@ impl CircuitTable {
                 if is_extending || bucket != BUILD_BUCKET {
                     return self.close(key);
                 }
+
                 let Ok(relay_id) = HopHello::parse(content).map(|hello| hello.relay_id) else {
                     return Vec::new();
                 };
+
                 if let Some(held) = self.held.get_mut(&key) {
                     held.extending = true;
                     held.extended_at = now;
                 }
+
                 vec![Action::Extend {
                     from: key,
                     relay_id,
@@ -985,14 +1040,17 @@ impl CircuitTable {
         let Some(held) = self.held.get_mut(&from) else {
             return Vec::new();
         };
+
         // NET-165: a circuit with a next hop extends no more.
         if held.next.is_some() || !free {
             return Vec::new();
         }
+
         held.next = Some(next);
         held.extending = true;
         held.extended_at = now;
         self.back.insert(next, from);
+
         vec![Action::Send {
             link: next.link,
             cell: cell_bytes(&next.circ_id, &[0u8; 16], body),
@@ -1008,9 +1066,11 @@ impl CircuitTable {
         let Some(held) = self.held.get_mut(&client_side) else {
             return Vec::new();
         };
+
         if !held.count(false) {
             return self.close(client_side);
         }
+
         let layered = if held.extending {
             // NET-164, NET-199: the answer of the next hop is plain, and it
             // goes back under this layer alone.
@@ -1022,6 +1082,7 @@ impl CircuitTable {
         } else {
             held.hop.backward(tag, &mut body)
         };
+
         match layered {
             Ok(out_tag) => vec![Action::Send {
                 link: client_side.link,
@@ -1045,9 +1106,11 @@ impl CircuitTable {
         if !held.count(false) {
             return None;
         }
+
         let mut body = vec![0u8; bucket.body_len()];
         pad_body(bucket, command, content, &mut body).ok()?;
         let tag = held.hop.backward(&[0u8; 16], &mut body).ok()?;
+
         Some(Action::Send {
             link: circuit.link,
             cell: cell_bytes(&circuit.circ_id, &tag, &body),
@@ -1082,9 +1145,11 @@ impl CircuitTable {
         if !matches!(held.measure, Measure::Open { .. }) {
             return None;
         }
+
         let mut body = vec![0u8; Bucket::B0.body_len()];
         pad_body(Bucket::B0, CellCommand::MeasEcho, content, &mut body).ok()?;
         let tag = held.hop.backward_build(&mut body).ok()?;
+
         Some(Action::Send {
             link: circuit.link,
             cell: cell_bytes(&circuit.circ_id, &tag, &body),
@@ -1110,6 +1175,7 @@ impl CircuitTable {
             if held.ending {
                 return Vec::new();
             }
+
             if held.delayed_out > 0 {
                 held.ending = true;
                 return vec![Action::Delayed {
@@ -1119,6 +1185,7 @@ impl CircuitTable {
                 }];
             }
         }
+
         self.end_now(key, from)
     }
 
@@ -1134,9 +1201,11 @@ impl CircuitTable {
         let Some(held) = self.held.remove(&key) else {
             return Vec::new();
         };
+
         self.seats.remove(&(held.holder, held.seat, key));
         self.count(held.holder, false);
         self.release(key.link);
+
         let mut actions = Vec::new();
         if let Some(next) = held.next {
             self.back.remove(&next);
@@ -1147,12 +1216,14 @@ impl CircuitTable {
                 });
             }
         }
+
         if Some(key.link) != from {
             actions.push(Action::Destroy {
                 link: key.link,
                 circ_id: key.circ_id,
             });
         }
+
         actions.push(Action::Closed { circuit: key });
         actions
     }
@@ -1164,6 +1235,7 @@ impl CircuitTable {
         if self.held.contains_key(&key) {
             return self.end(key, Some(link));
         }
+
         match self.back.get(&key).copied() {
             Some(client_side) => self.end(client_side, Some(link)),
             None => Vec::new(),
@@ -1178,6 +1250,7 @@ impl CircuitTable {
         if self.held.contains_key(&key) {
             return self.end(key, None);
         }
+
         match self.back.get(&key).copied() {
             Some(client_side) => self.end(client_side, None),
             None => Vec::new(),
@@ -1196,9 +1269,11 @@ impl CircuitTable {
         let Some(held) = self.held.get_mut(&key) else {
             return Vec::new();
         };
+
         if held.ending {
             return Vec::new();
         }
+
         if held.delayed_out > 0 {
             held.delayed_out = held.delayed_out.saturating_add(1);
             return vec![Action::Delayed {
@@ -1207,6 +1282,7 @@ impl CircuitTable {
                 action: Box::new(Action::Pause { key }),
             }];
         }
+
         self.pause_now(key)
     }
 
@@ -1217,6 +1293,7 @@ impl CircuitTable {
         let Some(held) = self.held.get(&key) else {
             return Vec::new();
         };
+
         match held.next {
             Some(next) => vec![Action::PauseNext {
                 link: next.link,
@@ -1237,7 +1314,9 @@ impl CircuitTable {
             link,
             circ_id: [0xFF; 16],
         };
+
         let on_link: Vec<CircuitKey> = self.held.range(of_link).map(|(key, _)| *key).collect();
+
         on_link
             .into_iter()
             .flat_map(|key| self.on_pause(key.link, key.circ_id))
@@ -1262,6 +1341,7 @@ impl CircuitTable {
             link,
             circ_id: [0xFF; 16],
         };
+
         let on_link: Vec<CircuitKey> = self
             .held
             .range(of_link.clone())
@@ -1272,11 +1352,13 @@ impl CircuitTable {
             .range(of_link)
             .map(|(_, client_side)| *client_side)
             .collect();
+
         let actions = on_link
             .into_iter()
             .chain(behind)
             .flat_map(|key| self.end(key, Some(link)))
             .collect();
+
         self.budgets.remove(&link);
         self.holders.remove(&link);
         self.sources.remove(&link);
@@ -1303,6 +1385,7 @@ impl CircuitTable {
                     // REL-201: the end of the session.
                     Measure::Open { until } => now >= until,
                 };
+
                 measured
                     || age >= CIRCUIT_MAX_AGE
                     || (held.extending
@@ -1312,11 +1395,13 @@ impl CircuitTable {
             })
             .map(|(key, _)| *key)
             .collect();
+
         // NET-332: the count of an address that is full again leaves.
         self.source_budgets.retain(|_, tokens| {
             tokens.refill(now, SOURCE_BUILD_BURST, SOURCE_BUILD_RATE);
             tokens.builds < SOURCE_BUILD_BURST
         });
+
         aged.into_iter().flat_map(|key| self.close(key)).collect()
     }
 }
@@ -1330,15 +1415,22 @@ impl CircuitTable {
 )]
 mod tests {
     use super::*;
+    use umbra_crypto::x25519::PublicKey as XPublic;
+    use umbra_onion::{
+        build::{DelayClass, Pending, HELLO_LEN},
+        layer::KeySet,
+    };
 
     #[test]
     fn a_client_link_builds_its_burst_then_one_each_second() {
         let mut budget = LinkBudget::new(Origin::Client, 100);
+
         // NET-332: the burst passes, and the build after it does not.
         for _ in 0..LINK_BUILD_BURST {
             assert!(budget.take(100));
         }
         assert!(!budget.take(100));
+
         // Five seconds give five builds back.
         for _ in 0..5 {
             assert!(budget.take(105));
@@ -1349,16 +1441,19 @@ mod tests {
     #[test]
     fn a_relay_link_builds_its_own_burst_and_holds_no_count_of_circuits() {
         let mut budget = LinkBudget::new(Origin::Relay, 100);
+
         // NET-332: the link of a relay carries the circuits of many
         // clients, and its builds have a bound all the same.
         for _ in 0..RELAY_LINK_BUILD_BURST {
             assert!(budget.take(100));
         }
         assert!(!budget.take(100));
+
         for _ in 0..RELAY_LINK_BUILD_RATE {
             assert!(budget.take(101));
         }
         assert!(!budget.take(101));
+
         assert!(budget.circuits > LINK_CIRCUITS_MAX);
     }
 
@@ -1372,6 +1467,7 @@ mod tests {
         let mut table = CircuitTable::new(relay, secret, 1);
         table.set_held_max(12);
         let (one, other) = (Holder::Source([1; 16]), Holder::Source([2; 16]));
+
         // NET-331: one holder alone has the whole table, and each further
         // one makes the part of each smaller. A table with more holders
         // than places still gives each one a circuit.
@@ -1379,22 +1475,27 @@ mod tests {
         table.count(one, true);
         assert_eq!(table.share(&one), 12);
         assert_eq!(table.share(&other), 6);
+
         table.count(other, true);
         table.count(other, true);
         assert_eq!(table.share(&Holder::Link(9)), 4);
         assert_eq!(table.ranked.last(), Some(&(2, other)));
+
         table.count(other, false);
         table.count(other, false);
         assert_eq!(table.share(&one), 12);
         assert_eq!(table.counts.len(), 1);
+
         table.set_held_max(0);
         assert_eq!(table.share(&other), 1);
+
         // The links of one address count together, and a link that the
         // node named no holder for counts alone.
         table.set_holder(4, one);
         table.set_holder(6, one);
         assert_eq!(table.holder_of(4), table.holder_of(6));
         assert_eq!(table.holder_of(8), Holder::Link(8));
+
         table.link_closed(4);
         assert_eq!(table.holder_of(4), Holder::Link(4));
     }
@@ -1403,23 +1504,29 @@ mod tests {
     fn a_client_link_holds_at_most_its_circuits() {
         let mut budget = LinkBudget::new(Origin::Client, 0);
         let mut now = 0;
+
         while budget.circuits < LINK_CIRCUITS_MAX {
             now += 1;
             assert!(budget.take(now));
         }
+
         // NET-331: the next build fails even with builds in hand.
         now += 1_000;
         assert!(!budget.take(now));
+
         budget.circuits -= 1;
         assert!(budget.take(now));
     }
 
     struct Rng(u64);
+
     impl umbra_crypto::rand_core::TryRng for Rng {
         type Error = core::convert::Infallible;
+
         fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
             Ok(self.try_next_u64()? as u32)
         }
+
         fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
             self.0 = self
                 .0
@@ -1427,6 +1534,7 @@ mod tests {
                 .wrapping_add(1_442_695_040_888_963_407);
             Ok(self.0 >> 11 ^ self.0 << 7)
         }
+
         fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
             for byte in dst {
                 *byte = self.try_next_u64()? as u8;
@@ -1434,13 +1542,8 @@ mod tests {
             Ok(())
         }
     }
-    impl umbra_crypto::rand_core::TryCryptoRng for Rng {}
 
-    use umbra_crypto::x25519::PublicKey as XPublic;
-    use umbra_onion::{
-        build::{DelayClass, Pending, HELLO_LEN},
-        layer::KeySet,
-    };
+    impl umbra_crypto::rand_core::TryCryptoRng for Rng {}
 
     /// A relay of `layer` and its table.
     fn relay(seed: u8, layer: u8) -> (RelayStatic, CircuitTable) {
@@ -1449,6 +1552,7 @@ mod tests {
             s: *XPublic::from(&secret).as_bytes(),
             relay_id: [seed; 32],
         };
+
         let table = CircuitTable::new(
             RelayStatic {
                 s: relay.s,
@@ -1457,6 +1561,7 @@ mod tests {
             secret,
             layer,
         );
+
         (relay, table)
     }
 
@@ -1469,8 +1574,10 @@ mod tests {
     ) -> (Vec<u8>, Pending) {
         let mut hello = [0u8; HELLO_LEN];
         let pending = Pending::hello(relay, class, rng, &mut hello).unwrap();
+
         let mut body = vec![0u8; BUILD_BUCKET.body_len()];
         build_cell_body(CellCommand::Extend, &hello, &mut body).unwrap();
+
         ([circ_id.as_slice(), &[0u8; 16], &body].concat(), pending)
     }
 
@@ -1486,11 +1593,14 @@ mod tests {
     ) -> KeySet {
         let (cell, pending) = build_cell(relay, circ_id, class, rng);
         let actions = table.on_cell(link, &cell, Origin::Relay, 100, rng);
+
         let [Action::Send { cell, .. }] = &actions[..] else {
             panic!("no answer: {actions:?}");
         };
+
         let (_, reply) = read_cell_body(&cell[32..]).unwrap();
         let ss = pending.finish(reply).unwrap();
+
         KeySet::derive(&ss, u32::from(table.layer))
     }
 
@@ -1506,9 +1616,11 @@ mod tests {
         let mut body = vec![0u8; bucket.body_len()];
         pad_body(bucket, command, &[], &mut body).unwrap();
         let tag = hop.forward.encipher(&[0u8; 16], &mut body).unwrap();
+
         if endpoint {
             hop.forward.update(&tag);
         }
+
         [circ_id.as_slice(), &tag, &body].concat()
     }
 
@@ -1523,6 +1635,7 @@ mod tests {
         let (relay, mut table) = relay(0xA1, 1);
         let mut rng = Rng(3);
         let (cell, _) = build_cell(&relay, [1; 16], DelayClass::Fast, &mut rng);
+
         assert!(answered(&table.on_cell(
             2,
             &cell,
@@ -1530,19 +1643,24 @@ mod tests {
             100,
             &mut rng
         )));
+
         // NET-361: the same hello on another circuit, and on another link,
         // gets no answer before the key agreement.
         let mut again = cell.clone();
         again[..16].copy_from_slice(&[2; 16]);
+
         assert!(table
             .on_cell(2, &again, Origin::Client, 100, &mut rng)
             .is_empty());
+
         again[..16].copy_from_slice(&[3; 16]);
         assert!(table
             .on_cell(4, &again, Origin::Client, 100, &mut rng)
             .is_empty());
+
         assert_eq!(table.circuits_on(2), 1);
         assert_eq!(table.circuits_on(4), 0);
+
         // A fresh hello passes.
         let (fresh, _) = build_cell(&relay, [4; 16], DelayClass::Fast, &mut rng);
         assert!(answered(&table.on_cell(
@@ -1567,6 +1685,7 @@ mod tests {
             let (cell, _) = build_cell(&relay, circ_id, DelayClass::Fast, rng);
             answered(&table.on_cell(link, &cell, Origin::Client, now, rng))
         };
+
         // NET-332: four links of one address spend the burst of the address
         // together.
         let links = u64::from(SOURCE_BUILD_BURST / LINK_BUILD_BURST);
@@ -1576,24 +1695,30 @@ mod tests {
                 assert!(build(&mut table, link, &mut rng, 100));
             }
         }
+
         // A new connection of that address gets no new burst, and one of
         // another address does.
         table.set_source(50, source);
         assert!(!build(&mut table, 50, &mut rng, 100));
+
         table.set_source(51, [0x21; 16]);
         assert!(build(&mut table, 51, &mut rng, 100));
+
         // The count outlives the links of the address.
         for link in 0..links {
             table.link_closed(link);
         }
+
         table.link_closed(50);
         table.set_source(52, source);
         assert!(!build(&mut table, 52, &mut rng, 100));
+
         // One second gives `SOURCE_BUILD_RATE` builds back.
         for _ in 0..SOURCE_BUILD_RATE {
             assert!(build(&mut table, 52, &mut rng, 101));
         }
         assert!(!build(&mut table, 52, &mut rng, 101));
+
         // A count that is full again leaves the table at the sweep.
         assert_eq!(table.source_budgets.len(), 2);
         table.expire(101 + u64::from(SOURCE_BUILD_BURST));
@@ -1606,7 +1731,9 @@ mod tests {
         for _ in 0..LINK_BUILD_BURST {
             assert!(budget.take(0));
         }
+
         assert!(!budget.take(0));
+
         // NET-332: the hello verified, and the link takes the limits of a
         // relay link at its next build.
         budget.retune(Origin::Relay);
@@ -1624,16 +1751,19 @@ mod tests {
         let mut hop = one_hop(&mut table, &relay, 1, [5; 16], DelayClass::Fast, &mut rng);
         let cell = sealed(&mut hop, [5; 16], Bucket::B0, CellCommand::Destroy, false);
         let actions = table.on_cell(1, &cell, Origin::Relay, 101, &mut rng);
+
         assert!(actions.contains(&Action::Destroy {
             link: 1,
             circ_id: [5; 16]
         }));
         assert!(table.is_empty());
+
         // An ingress relay took it from the client itself.
         let (relay, mut table) = self::relay(0xA1, 1);
         let mut hop = one_hop(&mut table, &relay, 2, [6; 16], DelayClass::Fast, &mut rng);
         let cell = sealed(&mut hop, [6; 16], Bucket::B0, CellCommand::Destroy, false);
         let actions = table.on_cell(2, &cell, Origin::Client, 101, &mut rng);
+
         assert!(!actions
             .iter()
             .any(|action| matches!(action, Action::Destroy { .. })));
@@ -1653,10 +1783,12 @@ mod tests {
             let tag = hop.forward.encipher(&[0u8; 16], &mut body).unwrap();
             [circ_id.as_slice(), &tag, &body].concat()
         };
+
         let mut hop = one_hop(&mut table, &relay, 1, [5; 16], DelayClass::Fast, &mut rng);
         let cell = extend(&mut hop, [5; 16], Bucket::B1);
         let actions = table.on_cell(1, &cell, Origin::Relay, 101, &mut rng);
         assert!(matches!(actions[..], [Action::Extend { .. }]));
+
         // NET-319: a second `EXTEND` while the first waits ends the circuit.
         let cell = extend(&mut hop, [5; 16], Bucket::B1);
         let actions = table.on_cell(1, &cell, Origin::Relay, 101, &mut rng);
@@ -1666,11 +1798,13 @@ mod tests {
                 circ_id: [5; 16]
             }
         }));
+
         // NET-150: an `EXTEND` in another bucket ends its circuit, and its
         // body goes nowhere.
         let mut hop = one_hop(&mut table, &relay, 1, [6; 16], DelayClass::Fast, &mut rng);
         let cell = extend(&mut hop, [6; 16], Bucket::B3);
         let actions = table.on_cell(1, &cell, Origin::Relay, 101, &mut rng);
+
         assert!(!actions
             .iter()
             .any(|action| matches!(action, Action::Extend { .. })));
@@ -1689,11 +1823,13 @@ mod tests {
             DelayClass::Private,
             &mut rng,
         );
+
         for _ in 0..CIRCUIT_DELAYED_MAX {
             let cell = sealed(&mut hop, [5; 16], Bucket::B0, CellCommand::Loop, true);
             let actions = table.on_cell(1, &cell, Origin::Relay, 101, &mut rng);
             assert!(matches!(actions[..], [Action::Delayed { .. }]));
         }
+
         // NET-362: the cell above the bound ends the circuit after the cells
         // that wait.
         let cell = sealed(&mut hop, [5; 16], Bucket::B0, CellCommand::Loop, true);
@@ -1701,7 +1837,9 @@ mod tests {
         let [Action::Delayed { action, .. }] = &actions[..] else {
             panic!("{actions:?}");
         };
+
         assert!(matches!(**action, Action::End { .. }));
+
         // NET-339: a forward cell of a circuit whose end waits goes nowhere.
         let cell = sealed(&mut hop, [5; 16], Bucket::B0, CellCommand::Loop, true);
         assert!(table
