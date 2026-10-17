@@ -114,11 +114,13 @@ impl ClientLink {
         if !self.sends() || self.next_seq >= SEQ_MAX {
             return Err(Error::State);
         }
+
         let frame = SessionFrame {
             session_id: self.id,
             seq: self.next_seq,
             cell,
         };
+
         let used = frame_capsule(&frame, out)?;
         self.next_seq = self.next_seq.saturating_add(1);
         Ok(used)
@@ -132,9 +134,11 @@ impl ClientLink {
         if frame.session_id != self.id {
             return Err(Error::Refused);
         }
+
         if frame.seq < self.received {
             return Ok(None);
         }
+
         self.received = frame.seq.saturating_add(1);
         Ok(Some(frame.cell))
     }
@@ -145,6 +149,7 @@ impl ClientLink {
         if !self.sends() {
             return Err(Error::State);
         }
+
         let used = control_capsule(
             &SessionControl::Pause {
                 session_id: self.id,
@@ -196,10 +201,12 @@ impl ClientLink {
         if !self.may_resume(now) {
             return Err(Error::State);
         }
+
         let count = self.resume_count.saturating_add(1);
         let control =
             SessionControl::resume(&self.secret, self.id, count, self.next_seq, self.received);
         let used = control_capsule(&control, out)?;
+
         self.resume_count = count;
         self.connected = true;
         self.pausing = false;
@@ -311,16 +318,19 @@ impl RelayLink {
         if !self.bound {
             return Err(Error::State);
         }
+
         let (frame, _) = SessionFrame::parse(capsule_value)?;
         if frame.session_id != self.id {
             return Err(Error::Refused);
         }
+
         let span = u32::try_from(ACCEPTED_SPAN).unwrap_or(u32::MAX);
         let floor = self.top.map_or(0, |top| top.saturating_sub(span));
         let is_below = self.top.is_some() && frame.seq < floor;
         if is_below || !self.accepted.insert(frame.seq) {
             return Ok(None);
         }
+
         if self.top.is_none_or(|top| frame.seq > top) {
             self.top = Some(frame.seq);
             let floor = frame.seq.saturating_sub(span);
@@ -335,11 +345,13 @@ impl RelayLink {
         if !self.bound || self.next_seq >= SEQ_MAX {
             return Err(Error::State);
         }
+
         let frame = SessionFrame {
             session_id: self.id,
             seq: self.next_seq,
             cell,
         };
+
         let used = frame_capsule(&frame, out)?;
         self.next_seq = self.next_seq.saturating_add(1);
         Ok(used)
@@ -392,14 +404,17 @@ impl RelayLink {
         if self.expired(now) {
             return Err(ResumeFault::Refused);
         }
+
         let (count, sent, received) = control
             .verify_resume(&self.secret, &self.id, self.resume_count)
             .map_err(|_| ResumeFault::Refused)?;
         self.resume_count = count;
+
         let taken = self.top.map_or(0, |top| top.saturating_add(1));
         if sent != taken || received != self.next_seq {
             return Err(ResumeFault::Lost);
         }
+
         self.bound = true;
         self.closed_at = None;
         Ok(())
@@ -446,6 +461,7 @@ mod tests {
         let n = client.send(&cell, buf).unwrap();
         let (_, value, _) = capsule::parse(&buf[..n]).unwrap();
         assert_eq!(relay.receive(value).unwrap(), Some(&cell[..]));
+
         let n = relay.send(&cell, buf).unwrap();
         let (_, value, _) = capsule::parse(&buf[..n]).unwrap();
         assert_eq!(client.receive(value).unwrap(), Some(&cell[..]));
@@ -461,6 +477,7 @@ mod tests {
         assert_eq!(kind, CapsuleType::Cell);
         assert_eq!(relay.receive(value).unwrap(), Some(&cell[..]));
         assert_eq!(relay.receive(value).unwrap(), None);
+
         let n = relay.send(&cell, &mut buf).unwrap();
         let (_, value, _) = capsule::parse(&buf[..n]).unwrap();
         assert_eq!(client.receive(value).unwrap(), Some(&cell[..]));
@@ -481,14 +498,17 @@ mod tests {
         assert!(client.is_pausing() && !client.is_paused());
         assert!(client.send(&[7u8; 512], &mut buf).is_err());
         assert!(client.pause(&mut buf).is_err());
+
         // WIR-541: the relay answers, and it frames no cell after it.
         let n = relay.pause(&pause, 1_000, &mut buf).unwrap();
         let paused = control(&buf[..n]);
         assert!(!relay.is_bound());
         assert!(relay.send(&[7u8; 512], &mut buf).is_err());
+
         client.on_paused(&paused).unwrap();
         assert!(client.is_paused());
         client.connection_lost(1_001);
+
         // The window of the relay runs from the pause.
         relay.connection_lost(1_500);
         assert!(relay.expired(1_000 + RESUME_WINDOW));
@@ -506,6 +526,7 @@ mod tests {
         ));
         relay.resume(&resume, 2_000).unwrap();
         assert!(relay.is_bound());
+
         // WIR-238: the same record binds no second connection.
         assert_eq!(relay.resume(&resume, 2_001), Err(ResumeFault::Refused));
         exchange(&mut client, &mut relay, &mut buf);
@@ -561,6 +582,7 @@ mod tests {
         // WIR-237: a party without the secret names the right counts.
         let forged = SessionControl::resume(&Secret::new([9; 32]), [1; 8], 1, 1, 1);
         assert_eq!(relay.resume(&forged, 1_010), Err(ResumeFault::Refused));
+
         // The `auth` covers the two counts. A record with a count that its
         // `auth` does not cover is thus no proof of a lost frame.
         let SessionControl::Resume {
@@ -580,6 +602,7 @@ mod tests {
             auth,
         };
         assert_eq!(relay.resume(&moved, 1_010), Err(ResumeFault::Refused));
+
         // The session still takes the resume of its client.
         let n = client.resume(1_020, &mut buf).unwrap();
         relay.resume(&control(&buf[..n]), 1_020).unwrap();
@@ -601,6 +624,7 @@ mod tests {
             relay.resume(&late, 2_000 + RESUME_WINDOW),
             Err(ResumeFault::Refused)
         );
+
         let n = client.close(&mut buf).unwrap();
         relay.close(&control(&buf[..n])).unwrap();
     }
@@ -612,6 +636,7 @@ mod tests {
         let other = SessionControl::Pause { session_id: [9; 8] };
         assert!(relay.pause(&other, 1_000, &mut buf).is_err());
         assert!(relay.is_bound());
+
         // A `SessionPaused` that the client did not ask for binds nothing.
         let early = SessionControl::Paused { session_id: [1; 8] };
         assert!(client.on_paused(&early).is_err());

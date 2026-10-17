@@ -47,6 +47,7 @@ impl AckCursor {
             writer.u32(*seq);
             writer.u64(*at);
         }
+
         writer.option(self.hole_since.as_ref(), |w, since| w.u64(*since));
         writer.flag(self.gap_shown);
         Ok(())
@@ -59,11 +60,13 @@ impl AckCursor {
         if count > IN_FLIGHT_WINDOW {
             return Err(umbra_crypto::Error::Length);
         }
+
         let mut received = BTreeMap::new();
         for _ in 0..count {
             let seq = reader.u32()?;
             received.insert(seq, reader.u64()?);
         }
+
         Ok(AckCursor {
             acked,
             received,
@@ -104,11 +107,14 @@ impl AckCursor {
         if seq <= self.acked || self.received.contains_key(&seq) {
             return false;
         }
+
         let held = u32::try_from(self.received.len()).unwrap_or(u32::MAX);
         if held >= IN_FLIGHT_WINDOW {
             return false;
         }
+
         self.received.insert(seq, now);
+
         if self
             .received
             .keys()
@@ -156,10 +162,12 @@ impl AckCursor {
         let mut expect = self.acked.saturating_add(1);
         let mut crosses = false;
         let floor = self.hole_since.unwrap_or(0);
+
         for (seq, arrived) in &self.received {
             if now.saturating_sub(*arrived) < RECEIPT_MIN_DELAY {
                 break;
             }
+
             if *seq != expect {
                 let since = (*arrived).max(floor);
                 if now.saturating_sub(since) < ACK_HOLE_TIMEOUT {
@@ -170,6 +178,7 @@ impl AckCursor {
             point = *seq;
             expect = seq.saturating_add(1);
         }
+
         (point > self.acked).then_some(AckPoint {
             seq: point,
             crosses_hole: crosses,
@@ -183,6 +192,7 @@ impl AckCursor {
         if point.crosses_hole {
             self.gap_shown = true;
         }
+
         self.hole_since = match self.hole() {
             Some(_) => self.hole_since,
             None => None,
@@ -219,6 +229,7 @@ mod tests {
         assert!(c.receive(4, 102));
         assert!(!c.receive(2, 103));
         assert_eq!(c.hole(), Some(3));
+
         let p = c.ack_point(200).unwrap();
         assert_eq!(
             p,
@@ -227,9 +238,11 @@ mod tests {
                 crosses_hole: false
             }
         );
+
         c.acknowledged(p);
         assert_eq!(c.acked(), 2);
         assert_eq!(c.ack_point(200), None);
+
         // The hole closes when 3 arrives.
         assert!(c.receive(3, 300));
         // NET-050: the record at 3 is too new, and the point waits for it.
@@ -267,6 +280,7 @@ mod tests {
         let mut c = AckCursor::new(10);
         c.receive(12, 1_000);
         assert_eq!(c.ack_point(1_000 + ACK_HOLE_TIMEOUT - 1), None);
+
         // SCP-019, SCP-021: a clock movement starts the timer again, and
         // the point crosses no hole on the interrupted duration.
         let mut moved = AckCursor::new(10);
@@ -280,6 +294,7 @@ mod tests {
                 .unwrap()
                 .crosses_hole
         );
+
         let p = c.ack_point(1_000 + ACK_HOLE_TIMEOUT).unwrap();
         assert_eq!(
             p,
@@ -290,6 +305,7 @@ mod tests {
         );
         c.acknowledged(p);
         assert!(c.gap_shown());
+
         assert!(!c.receive(11, 2_000));
         assert!(AckCursor::drains(61));
         assert!(!AckCursor::drains(60));
@@ -304,11 +320,13 @@ mod tests {
         assert!(c.receive(far + 1, 1_001));
         assert!(!c.receive(far, 1_002));
         assert_eq!(c.hole(), Some(11));
+
         // WIR-113: the point stays below the hole until the timeout.
         assert_eq!(c.ack_point(1_000 + ACK_HOLE_TIMEOUT - 1), None);
         // WIR-116, WIR-117: it then crosses the hole and shows the gap.
         let p = c.ack_point(1_001 + ACK_HOLE_TIMEOUT).unwrap();
         assert_eq!((p.seq, p.crosses_hole), (far + 1, true));
+
         c.acknowledged(p);
         assert_eq!(c.acked(), far + 1);
         assert!(c.gap_shown());
@@ -320,12 +338,15 @@ mod tests {
         for seq in 1..=IN_FLIGHT_WINDOW {
             assert!(c.receive(seq, 100));
         }
+
         // The count bounds the cursor, thus the stored form reads back.
         assert!(!c.receive(IN_FLIGHT_WINDOW + 1, 100));
+
         let mut writer = Writer::new();
         c.export(&mut writer).unwrap();
         let stored = writer.finish();
         let mut c = AckCursor::restore(&mut Reader::new(&stored)).unwrap();
+
         let p = c.ack_point(100 + RECEIPT_MIN_DELAY).unwrap();
         assert_eq!((p.seq, p.crosses_hole), (IN_FLIGHT_WINDOW, false));
         c.acknowledged(p);

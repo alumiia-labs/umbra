@@ -46,6 +46,7 @@ impl Credential {
         if *pk == self.current {
             return true;
         }
+
         matches!(self.previous, Some((prev, at)) if prev == *pk && now.saturating_sub(at) < self.grace)
     }
 
@@ -191,6 +192,7 @@ impl GroupQueue {
                 dropped_through: None,
             });
         }
+
         while self
             .posts
             .front()
@@ -198,9 +200,11 @@ impl GroupQueue {
         {
             self.posts.pop_front();
         }
+
         if self.posts.len() >= GROUP_POST_RATE {
             return Err(Reject::Limit);
         }
+
         let seq = self.next_seq;
         self.next_seq = self.next_seq.checked_add(1).ok_or(Reject::Busy)?;
         self.posts.push_back(now);
@@ -210,6 +214,7 @@ impl GroupQueue {
             bytes: record.to_vec(),
         });
         self.bytes = self.bytes.saturating_add(record.len());
+
         let mut dropped_through = None;
         while self.bytes > GROUP_QUEUE_QUOTA {
             match self.records.pop_front() {
@@ -220,6 +225,7 @@ impl GroupQueue {
                 None => break,
             }
         }
+
         self.last_activity = now;
         Ok(Posted {
             seq,
@@ -260,11 +266,13 @@ impl GroupQueue {
             })
         };
         let mut queue = head().map_err(|_| Reject::Rejected)?;
+
         records.sort_by_key(|record| record.seq);
         let bytes: usize = records.iter().map(|record| record.bytes.len()).sum();
         if bytes > GROUP_QUEUE_QUOTA || records.iter().any(|record| record.seq >= queue.next_seq) {
             return Err(Reject::Rejected);
         }
+
         queue.bytes = bytes;
         queue.records = records.into();
         Ok(queue)
@@ -272,6 +280,7 @@ impl GroupQueue {
 
     /// The retained records above `from_seq`, in `seq` order, which a
     /// `GSUB` emits (`WIR-387`).
+    ///
     /// The records are in the order of their sequence, thus a search finds
     /// the first one. A relay that steps through a backlog reads no record
     /// below its cursor again (`NET-349`).
@@ -305,6 +314,7 @@ impl GroupQueue {
                 dropped_through = Some(old.seq);
             }
         }
+
         self.read.expire(now);
         self.write.expire(now);
         dropped_through
@@ -356,12 +366,15 @@ mod tests {
                 dropped_through: None,
             }
         );
+
         assert_eq!(q.post(b"b", 1_001).unwrap().seq, 2);
         for i in 0..(GROUP_POST_RATE - 2) {
             q.post(&[9, i as u8], 1_002).unwrap();
         }
+
         assert_eq!(q.post(b"z", 1_003), Err(Reject::Limit));
         assert_eq!(q.post(b"z", 1_000 + GROUP_POST_WINDOW).unwrap().seq, 61);
+
         let since: Vec<u32> = q.since(59).map(|r| r.seq).collect();
         assert_eq!(since, vec![60, 61]);
     }
@@ -375,9 +388,11 @@ mod tests {
         assert!(!q.accepts_read(&[2; 32], 2_000 + GROUP_READ_GRACE));
         assert!(q.accepts_write(&[3; 32], 2_000 + GROUP_WRITE_GRACE - 1));
         assert!(!q.accepts_write(&[3; 32], 2_000 + GROUP_WRITE_GRACE));
+
         q.expire(2_000 + GROUP_WRITE_GRACE);
         assert!(!q.accepts_write(&[3; 32], 2_000));
         assert!(q.accepts_read(&[2; 32], 2_000));
+
         // A second GKEY inside the grace replaces the previous key.
         // WIR-522: a new owner key ends the old one with no grace.
         q.rotate([7; 32], [8; 32], [9; 32], 3_000);
@@ -404,11 +419,13 @@ mod tests {
         assert_eq!(back.id(), [1; 32]);
         assert_eq!(back.own_pk(), [4; 32]);
         assert_eq!(back.len(), 2);
+
         // The sequence continues, thus no record takes the number of an
         // earlier one (`NET-232`).
         assert_eq!(back.since(0).map(|r| r.seq).collect::<Vec<_>>(), [1, 2]);
         let mut back = back;
         assert_eq!(back.post(b"three", 2_001).unwrap().seq, 3);
+
         // The previous credentials of the rotation came back with it.
         assert!(back.accepts_read(&[2; 32], 2_100));
         assert!(back.accepts_write(&[3; 32], 2_100));
@@ -431,15 +448,18 @@ mod tests {
         q.post(b"new", 1_000 + GROUP_RETENTION - 1).unwrap();
         assert_eq!(q.expire(1_000 + GROUP_RETENTION), Some(1));
         assert_eq!(q.len(), 1);
+
         let big = vec![0u8; GROUP_QUEUE_QUOTA / 2 + 1];
         let mut other = big.clone();
         other[0] = 1;
         q.post(&big, 5_000).unwrap();
         assert_eq!(q.post(&other, 5_001).unwrap().dropped_through, Some(3));
         assert_eq!(q.len(), 1);
+
         assert!(q.idle(5_001 + GROUP_IDLE_TTL));
         q.touch(9_000_000);
         assert!(!q.idle(9_000_000 + GROUP_IDLE_TTL - 1));
+
         assert_eq!(q.id(), [1; 32]);
         assert_eq!(q.own_pk(), [4; 32]);
         assert_eq!(q.delete().len(), 1);

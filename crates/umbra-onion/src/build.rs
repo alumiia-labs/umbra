@@ -31,6 +31,7 @@ pub const REPLY_LEN: usize = FLIGHT2_LEN;
 pub const BUILD_BUCKET: Bucket = Bucket::B1;
 
 const _: () = assert!(HELLO_LEN == 1_265);
+const _: () = assert!(REPLY_LEN == 1_136);
 
 /// The privacy mode of a circuit (Part 3 §3.9): the mean of the delay that
 /// each hop takes for each forward cell. A circuit carries one mode
@@ -68,7 +69,6 @@ impl DelayClass {
         }
     }
 }
-const _: () = assert!(REPLY_LEN == 1_136);
 
 /// The payload of an `EXTEND` cell.
 pub struct HopHello<'a> {
@@ -144,8 +144,10 @@ impl Pending {
         let out = out.get_mut(..HELLO_LEN).ok_or(Error::Length)?;
         let (id, rest) = out.split_at_mut(32);
         id.copy_from_slice(&relay.relay_id);
+
         let (flight, mode) = rest.split_at_mut(FLIGHT1_LEN);
         let client = nk::Client::flight1(relay, rng, flight, &mut NoTrace)?;
+
         if let Some(byte) = mode.first_mut() {
             *byte = class as u8;
         }
@@ -185,6 +187,7 @@ pub fn answer<R: CryptoRng + ?Sized>(
     if hello.relay_id != relay.relay_id {
         return Err(Error::Build);
     }
+
     let responder = nk::Relay::read_flight1(relay, static_secret, hello.flight1, &mut NoTrace)?;
     let out = out.get_mut(..REPLY_LEN).ok_or(Error::Length)?;
     Ok(responder.flight2(rng, out, &mut NoTrace)?)
@@ -204,6 +207,7 @@ pub fn answer_at_queue_relay<R: CryptoRng + ?Sized>(
     if hello.relay_id != relay.relay_id {
         return Err(Error::Build);
     }
+
     let responder = nk::Relay::read_flight1(relay, static_secret, hello.flight1, &mut NoTrace)?;
     let out = out.get_mut(..REPLY_LEN).ok_or(Error::Length)?;
     Ok(responder.flight2_keeping_er(rng, out, &mut NoTrace)?)
@@ -221,14 +225,18 @@ mod tests {
     use umbra_crypto::x25519::PublicKey as XPublic;
 
     struct Rng(u8);
+
     impl umbra_crypto::rand_core::TryRng for Rng {
         type Error = core::convert::Infallible;
+
         fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
             Ok(0)
         }
+
         fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
             Ok(0)
         }
+
         fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
             for (i, b) in dst.iter_mut().enumerate() {
                 *b = self.0.wrapping_add(i as u8);
@@ -237,6 +245,7 @@ mod tests {
             Ok(())
         }
     }
+
     impl umbra_crypto::rand_core::TryCryptoRng for Rng {}
 
     #[test]
@@ -255,10 +264,12 @@ mod tests {
         );
         assert_eq!(DelayClass::Private.mean_ms(), 700);
         assert!(DelayClass::from_byte(3).is_err());
+
         let mut body = [0u8; BUILD_BUCKET.body_len()];
         build_cell_body(CellCommand::Extend, &hello, &mut body).unwrap();
         let (cmd, payload) = read_cell_body(&body).unwrap();
         assert_eq!(cmd, CellCommand::Extend);
+
         let mut reply = [0u8; REPLY_LEN];
         let at_relay = answer(&relay, &s_sk, payload, &mut Rng(2), &mut reply).unwrap();
         let at_client = pending.finish(&reply).unwrap();
@@ -280,6 +291,7 @@ mod tests {
             ..relay
         };
         assert!(answer(&other, &s_sk, &hello, &mut Rng(3), &mut reply).is_err());
+
         // NET-157: a DATA cell is not a build cell.
         assert!(build_cell_body(CellCommand::Data, &hello, &mut body).is_err());
         pad_body(BUILD_BUCKET, CellCommand::Data, &hello, &mut body).unwrap();

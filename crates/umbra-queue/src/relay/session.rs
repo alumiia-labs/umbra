@@ -88,6 +88,7 @@ impl Session {
         let (count, _, _) = control
             .verify_resume(&self.secret, &self.id, self.resume_count)
             .map_err(|_| Reject::Rejected)?;
+
         self.resume_count = count;
         Ok(())
     }
@@ -111,15 +112,18 @@ impl Session {
         if self.seen.contains(&key_of_seen) {
             return Err(Reject::Rejected);
         }
+
         // NET-122: the replay check holds each `corr_id` of the session, and
         // a session past `SEEN_MAX` commands takes no more; its client
         // builds a new circuit, as at `CIRCUIT_MAX_CELLS`.
         if self.seen.len() >= SEEN_MAX {
             return Err(Reject::Limit);
         }
+
         let key = CommandAuthKey::derive(&self.relay_session_sk, auth_pk)
             .map_err(|_| Reject::Rejected)?;
         command.verify(&key, bind).map_err(|_| Reject::Rejected)?;
+
         self.seen.insert(key_of_seen);
         Ok(())
     }
@@ -130,9 +134,11 @@ impl Session {
         if self.queues.contains(&queue_id) {
             return Ok(());
         }
+
         if self.queues.len() >= MAX_QUEUES_PER_SESSION {
             return Err(Reject::Limit);
         }
+
         self.queues.push(queue_id);
         Ok(())
     }
@@ -178,6 +184,7 @@ mod tests {
             session_secret: Secret::new([3; 32]),
         };
         let mut session = Session::open(open, relay_sk).unwrap();
+
         let client_sk = StaticSecret::from([4u8; 32]);
         let client_pk = *XPublic::from(&client_sk).as_bytes();
         let key = CommandAuthKey::derive(&client_sk, &session.relay_session_pk()).unwrap();
@@ -188,14 +195,17 @@ mod tests {
             auth: [0; 32],
             payload: &[],
         };
+
         cmd.sign(&key, b"").unwrap();
         session.accept(&cmd, &client_pk).unwrap();
+
         // The same corr_id again is a replay.
         assert_eq!(session.accept(&cmd, &client_pk), Err(Reject::Rejected));
         cmd.corr_id = [7; 16];
         assert_eq!(session.accept(&cmd, &[9; 32]), Err(Reject::Rejected));
         cmd.sign(&key, b"").unwrap();
         session.accept(&cmd, &client_pk).unwrap();
+
         // The set holds the first 8 bytes of each value: a value that
         // shares them is refused, and no repeat passes.
         cmd.corr_id[15] = 8;
@@ -207,6 +217,7 @@ mod tests {
         }
         assert_eq!(session.bind_queue([0xFF; 32]), Err(Reject::Limit));
         session.bind_queue([0; 32]).unwrap();
+
         // A deleted queue frees its place.
         session.unbind_queue(&[1; 32]);
         session.bind_queue([0xFF; 32]).unwrap();

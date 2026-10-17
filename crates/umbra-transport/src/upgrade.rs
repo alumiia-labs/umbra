@@ -15,7 +15,7 @@ pub const SUBPROTOCOL: &str = "umbra.v1";
 /// The GUID of RFC 6455 §1.3.
 const GUID: &[u8] = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
-/// Base64 without padding stripping, as RFC 6455 wants it.
+/// Standard Base64 that keeps its `=` padding, as RFC 6455 wants it.
 fn base64(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3).saturating_mul(4));
@@ -24,12 +24,14 @@ fn base64(bytes: &[u8]) -> String {
         let b1 = chunk.get(1).copied().unwrap_or(0);
         let b2 = chunk.get(2).copied().unwrap_or(0);
         let n = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
+
         let idx = |shift: u32| {
             TABLE
                 .get(((n >> shift) & 63) as usize)
                 .copied()
                 .unwrap_or(b'A')
         };
+
         out.push(char::from(idx(18)));
         out.push(char::from(idx(12)));
         out.push(if chunk.len() > 1 {
@@ -69,6 +71,7 @@ fn sha1(message: &[u8]) -> [u8; 20] {
         0x1032_5476,
         0xC3D2_E1F0,
     ];
+
     let mut data = message.to_vec();
     let bit_len = (message.len() as u64).wrapping_mul(8);
     data.push(0x80);
@@ -76,6 +79,7 @@ fn sha1(message: &[u8]) -> [u8; 20] {
         data.push(0);
     }
     data.extend_from_slice(&bit_len.to_be_bytes());
+
     for block in data.chunks(64) {
         let mut w = [0u32; 80];
         for (i, word) in block.chunks(4).enumerate().take(16) {
@@ -85,6 +89,7 @@ fn sha1(message: &[u8]) -> [u8; 20] {
                 *slot = u32::from_be_bytes(b);
             }
         }
+
         for i in 16usize..80 {
             let at = |back: usize| w.get(i.wrapping_sub(back)).copied().unwrap_or(0);
             let v = at(3) ^ at(8) ^ at(14) ^ at(16);
@@ -92,6 +97,7 @@ fn sha1(message: &[u8]) -> [u8; 20] {
                 *slot = v.rotate_left(1);
             }
         }
+
         let [mut a, mut b, mut c, mut d, mut e] = h;
         for (i, wi) in w.iter().enumerate() {
             let (f, k) = match i {
@@ -112,10 +118,12 @@ fn sha1(message: &[u8]) -> [u8; 20] {
             b = a;
             a = t;
         }
+
         for (slot, v) in h.iter_mut().zip([a, b, c, d, e]) {
             *slot = slot.wrapping_add(v);
         }
     }
+
     let mut out = [0u8; 20];
     for (chunk, v) in out.chunks_mut(4).zip(h) {
         chunk.copy_from_slice(&v.to_be_bytes());
@@ -171,15 +179,18 @@ pub fn parse_request(bytes: &[u8]) -> Result<Option<(Request, usize)>, crate::Er
     let Some((head, used)) = split_head(bytes) else {
         return Ok(None);
     };
+
     let text = core::str::from_utf8(head).map_err(|_| crate::Error::Malformed)?;
     let mut lines = text.split("\r\n");
     let start = lines.next().ok_or(crate::Error::Malformed)?;
     if start != format!("GET {PATH} HTTP/1.1") {
         return Err(crate::Error::Malformed);
     }
+
     let lines: Vec<&str> = lines.collect();
     let host = header(&lines, "Host").ok_or(crate::Error::Malformed)?;
     let key = header(&lines, "Sec-WebSocket-Key").ok_or(crate::Error::Malformed)?;
+
     if !token_present(header(&lines, "Upgrade"), "websocket")
         || !token_present(header(&lines, "Connection"), "Upgrade")
         || header(&lines, "Sec-WebSocket-Version") != Some("13")
@@ -187,6 +198,7 @@ pub fn parse_request(bytes: &[u8]) -> Result<Option<(Request, usize)>, crate::Er
     {
         return Err(crate::Error::Malformed);
     }
+
     // WIR-485: no extension is negotiated, and a request that offers one
     // is answered without it; the relay never echoes the header.
     Ok(Some((
@@ -210,6 +222,7 @@ pub fn parse_response(bytes: &[u8], key: &[u8; 16]) -> Result<Option<usize>, cra
     let Some((head, used)) = split_head(bytes) else {
         return Ok(None);
     };
+
     let text = core::str::from_utf8(head).map_err(|_| crate::Error::Malformed)?;
     let mut lines = text.split("\r\n");
     let start = lines.next().ok_or(crate::Error::Malformed)?;
@@ -217,10 +230,12 @@ pub fn parse_response(bytes: &[u8], key: &[u8; 16]) -> Result<Option<usize>, cra
     if (status.next(), status.next()) != (Some("HTTP/1.1"), Some("101")) {
         return Err(crate::Error::Refused);
     }
+
     let lines: Vec<&str> = lines.collect();
     let exact = |name: &str, token: &str| {
         header(&lines, name).is_some_and(|value| value.eq_ignore_ascii_case(token))
     };
+
     if !exact("Upgrade", "websocket")
         || !token_present(header(&lines, "Connection"), "Upgrade")
         || header(&lines, "Sec-WebSocket-Accept") != Some(accept_value(&base64(key)).as_str())
@@ -229,6 +244,7 @@ pub fn parse_response(bytes: &[u8], key: &[u8; 16]) -> Result<Option<usize>, cra
     {
         return Err(crate::Error::Refused);
     }
+
     Ok(Some(used))
 }
 
@@ -249,27 +265,33 @@ mod tests {
         let (parsed, used) = parse_request(req.as_bytes()).unwrap().unwrap();
         assert_eq!(used, req.len());
         assert_eq!(parsed.host, "relay.example");
+
         let resp = response(&parsed.key);
         assert_eq!(
             parse_response(resp.as_bytes(), &key).unwrap(),
             Some(resp.len())
         );
         assert!(parse_response(resp.as_bytes(), &[8u8; 16]).is_err());
+
         assert_eq!(parse_request(&req.as_bytes()[..20]).unwrap(), None);
         let other = req.replace("/umbra", "/other");
         assert!(parse_request(other.as_bytes()).is_err());
+
         let compressed = resp.replace(
             "\r\n\r\n",
             "\r\nSec-WebSocket-Extensions: permessage-deflate\r\n\r\n",
         );
         assert!(parse_response(compressed.as_bytes(), &key).is_err());
+
         let refused = resp.replace("101 Switching Protocols", "400 Bad Request");
         assert_eq!(
             parse_response(refused.as_bytes(), &key),
             Err(crate::Error::Refused)
         );
+
         assert_eq!(base64(b"Man"), "TWFu");
         assert_eq!(base64(b"Ma"), "TWE=");
+
         // The example of RFC 6455 §1.3.
         assert_eq!(
             accept_value("dGhlIHNhbXBsZSBub25jZQ=="),
@@ -292,6 +314,7 @@ mod tests {
             parse_response(resp.as_bytes(), &key).unwrap(),
             Some(resp.len())
         );
+
         // NET-281: the status is one token, the `Upgrade` header is exact,
         // and the `Connection` header holds its token.
         for (from, to) in [
@@ -316,6 +339,7 @@ mod tests {
                 "{to}"
             );
         }
+
         // The token of the `Connection` header can stand in a list, as a
         // proxy in front of a relay sends it.
         let listed = resp.replace("Connection: Upgrade", "Connection: keep-alive, upgrade");
@@ -323,6 +347,7 @@ mod tests {
             parse_response(listed.as_bytes(), &key).unwrap(),
             Some(listed.len())
         );
+
         // The reason phrase is free text, and a relay may send none.
         let bare = resp.replace("101 Switching Protocols", "101");
         assert_eq!(
