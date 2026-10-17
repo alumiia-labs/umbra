@@ -30,17 +30,24 @@ implementation. A developer does not have to read the reference implementation.
 
 **Platform scope of v1.** Android is the v1 client platform. v1 defers the
 web client, an iOS client, and a native desktop shell to a later version.
-Part 14 §14.6.3 records what such a version must revisit. The web
-client is the same core in a browser extension, and it is a linked device of
-a device set. Part 14 §14.7 keeps its form and its limits as a design. Each
-rule that binds a web client applies when the web client ships, and it binds
-no v1 conformance claim. Those rules are `NET-275` and `NET-277`, `WIR-486`,
-`DEV-264` to `DEV-267`, `NTF-110` and `NTF-111`, and `IMP-094` to `IMP-113`.
-Three rules that exist for a browser bind v1 as they stand,
-because each one binds a relay or forbids a form: `THR-015`, `NET-276`, and
-`WIR-485`. The core stays
-platform-neutral, thus the deferral changes the scope of this text and not
-the design.
+Part 14 §14.6.3 records what such a version must revisit.
+
+The web client is the same core in a browser extension, and it is a linked
+device of a device set. Part 14 §14.7 keeps its form and its limits as a
+design. Each rule that binds a web client applies when the web client ships,
+and it binds no v1 conformance claim. These rules are:
+
+- `NET-275` and `NET-277`
+- `WIR-486`
+- `DEV-264` to `DEV-267`
+- `NTF-110` and `NTF-111`
+- `IMP-094` to `IMP-113`
+
+Three rules that exist for a browser bind v1 as they stand: `THR-015`,
+`NET-276`, and `WIR-485`. Each one binds a relay or forbids a form.
+
+The core stays platform-neutral, thus the deferral changes the scope of this
+text and not the design.
 
 **Transport scope of v1.** Part 3 §3.8 defers QUIC, and with it the
 transport race. That section names the rules that bind the later
@@ -83,9 +90,9 @@ below gives the mapping.
 | NOT RECOMMENDED | SHOULD NOT |
 | OPTIONAL | MAY |
 
-An implementation that disobeys a **MUST** is not an UMBRA implementation. **[SCP-001]** An
-implementation that disobeys a **SHOULD** MUST give the cause in its
-documentation.
+An implementation that disobeys a **MUST** is not an UMBRA implementation.
+**[SCP-001]** An implementation that disobeys a **SHOULD** MUST give the cause
+in its documentation.
 
 ## 1.4 Notation
 
@@ -118,8 +125,9 @@ different meaning. This document records each such difference.
 **User** — A person. UMBRA does not give a user one global identifier. Refer to
 *Root Identity*.
 
-**Device** — One installation of an UMBRA client that holds key material. **[SCP-002]** A user
-MAY have more than one device. The devices of one user make a *Device Set*.
+**Device** — One installation of an UMBRA client that holds key material.
+**[SCP-002]** A user MAY have more than one device. The devices of one user make
+a *Device Set*.
 
 **Root Identity** — The long-term secret. All other key material of a user comes
 from this secret. The first device makes the Root Identity. No device sends the
@@ -300,12 +308,12 @@ examples. Without the table below a maintainer finds the dependents by hand.
 | --- | --- | --- |
 | `MSG_TTL` | Part 3 §3.2.4 | Part 5 §5.5.4, Part 7 §7.5.6, Part 12 §12.7.1, Part 15 §15.1 |
 | `QUEUE_IDLE_TTL` | Part 3 §3.2.4 | Part 7 §7.5.1, Part 15 §15.1 |
-| `STORE_TIME_GRAIN` | Part 3 §3.2.4 | — |
+| `STORE_TIME_GRAIN` | Part 3 §3.2.4 | none |
 | `MAX_QUEUES_PER_SESSION` | Part 3 §3.2.5 | Part 2 §2.7, Part 3 §3.11, Part 8 §8.2.1, Part 8 §8.4.3, Part 15 §15.3 |
 | The bucket ladder | Part 3 §3.3 | Part 5 §5.6, Part 6 §6.9, Part 3 §3.12, Part 11 §11.3.3 |
 | `CIRCUIT_MAX_AGE`, `CIRCUIT_MAX_CELLS`, `CIRCUIT_AGE_MARGIN`, `CIRCUIT_CELL_MARGIN` | Part 3 §3.4.3 | Part 2 §2.4, Part 3 §3.4.4, Part 3 §3.11.1, Part 3 §3.12, Part 6 §6.2.2, Part 6 §6.2.3, Part 6 §6.8, Part 15 §15.3 |
 | `SESSION_RESUME_WINDOW` | Part 6 §6.2.3 | Part 3 §3.4.3, Part 3 §3.8, Part 3 §3.12, Part 15 §15.3 |
-| `SESSION_PAUSE_WAIT` | Part 6 §6.2.3 | — |
+| `SESSION_PAUSE_WAIT` | Part 6 §6.2.3 | none |
 | `PACING_MEAN` | Part 3 §3.9 | Part 3 §3.12, Part 8 §8.8, Part 10 §10.9.1 |
 | `RECEIPT_BATCH_MAX` | Part 3 §3.5.4 | Part 6 §6.6, Part 6 §6.6.9, Part 6 §6.8 |
 | The tier A cover rate | Part 3 §3.6.2 | Part 3 §3.12, Part 4 §4.7.2, Part 7 §7.5.1, Part 9 §9.5.3, Part 10 §10.4.2 |
@@ -344,7 +352,7 @@ examples. Without the table below a maintainer finds the dependents by hand.
 | `EDIT_WINDOW`, `EDIT_MAX`, `DELETE_RATE_LIMIT` | Part 7 §7.5.6 | Part 14 §14.6.1 |
 | `VOICE_MAX_SECONDS` | Part 12 §12.7 | Part 14 §14.6.4 |
 | `CIRCUIT_BUILD_TIMEOUT` | Part 3 §3.4.3 | Part 11 §11.2.2 |
-| `CIRCUIT_SPARE_LEAD`, `CIRCUIT_RETIRE_WAIT` | Part 3 §3.4.3 | — |
+| `CIRCUIT_SPARE_LEAD`, `CIRCUIT_RETIRE_WAIT` | Part 3 §3.4.3 | none |
 | `SWEEP_SPREAD` | Part 7 §7.5.6 | Part 4 §4.5.1 |
 | `SYNC_MAX_AGE` | Part 7 §7.8 | Part 2 §2.4, Part 6 §6.6 |
 | `SYNC_ACK_BATCH`, `SYNC_ACK_MAX_DELAY`, `OWNER_CLAIM_MAX` | Part 7 §7.8 | Part 3 §3.12 |
@@ -371,7 +379,7 @@ examples. Without the table below a maintainer finds the dependents by hand.
 | `RELAY_LOOP_RATE` | Part 3 §3.6.3 | none |
 | `NTF_FAIL_MAX` | Part 8 §8.2.3 | Part 14 §14.9.2 |
 | `PUSH_TTL_MESSAGE`, `PUSH_TTL_DIGEST`, `REPUSH_INTERVAL`, `REPUSH_MAX` | Part 8 §8.4.2 | Part 2 §2.4 |
-| `NDR_REQUEST_LEN`, `PUSH_TOKEN_MAX` | Part 8 §8.2.7 | |
+| `NDR_REQUEST_LEN`, `PUSH_TOKEN_MAX` | Part 8 §8.2.7 | none |
 | `POW_LOOKUP_FLOOR` | Part 13 §13.13 | Part 9 §9.4.1 |
 | `POW_CHUNK_FLOOR`, `POW_CHUNK_ALLOWANCE` | Part 13 §13.13 | Part 12 §12.10 |
 | `HELLO_POW_EFFORT`, `HELLO_INBOUND_LIMIT` | Part 13 §13.13 | Part 9 §9.9, Part 2 §2.4 |
@@ -394,18 +402,22 @@ examples. Without the table below a maintainer finds the dependents by hand.
 ## 1.8 The artifact register
 
 A requirement that names an object binds an implementer to build that object.
-The implementer needs three facts. The first is the byte layout. The second is
-the carrier that moves the object between two parties. The third is the party
-that makes the object, by an issuance or by a derivation. This specification
-gives each behavior a requirement ID, and it gives an artifact no such
-discipline.
+The implementer needs three facts:
+
+1. The byte layout.
+2. The carrier that moves the object between two parties.
+3. The party that makes the object, by an issuance or by a derivation.
+
+This specification gives each behavior a requirement ID, and it gives an
+artifact no such discipline.
 
 The table below lists each named artifact and the section that gives each fact.
 A cell that reads `none` records a fact that this specification does not give.
 A row with such a cell is not a defect of the register. The register exists to
-show that cell. The
-"Made by" column names the party in the sense of §1.5. "Out of band" names a
-side channel that the user selects, such as a QR code scan.
+show that cell.
+
+The "Made by" column names the party in the sense of §1.5. "Out of band" names
+a side channel that the user selects, such as a QR code scan.
 
 | Artifact | Layout | Carrier | Made by |
 | --- | --- | --- | --- |
@@ -552,12 +564,17 @@ Those rules are `DEV-087`, `DEV-208`, and `WIR-187`. No rule names a clock
 source. A phone clock moves at a restart, at a time-zone change, after a flat
 battery, and after a restore.
 
-This section defines five terms. A **duration** is a period that a rule states.
-The **device clock** is the clock that the platform sets from the network or
-from the user. A **monotonic source** is a counter that the platform does not
-move backward between two restarts. A **clock movement** is a change of the
-device clock by more than `CLOCK_SKEW` in one step. A clock movement that
-occurs while a duration runs **interrupts** that duration.
+This section defines five terms.
+
+- A **duration** is a period that a rule states.
+- The **device clock** is the clock that the platform sets from the network or
+  from the user.
+- A **monotonic source** is a counter that the platform does not move backward
+  between two restarts.
+- A **clock movement** is a change of the device clock by more than
+  `CLOCK_SKEW` in one step.
+- A clock movement that occurs while a duration runs **interrupts** that
+  duration.
 
 Part 10 §10.11 owns `CLOCK_SKEW` and sets it to 1 hour. A party detects a clock
 movement when the device clock and the monotonic source advance by amounts that
@@ -575,13 +592,16 @@ slot window is a `clock` event of Part 14 §14.9.2.
   measures it. **[SCP-017]** A revision that adds a duration MUST name the
   event that starts it.
 - **[SCP-018]** A party MUST measure a duration from a monotonic source between
-  two restarts. A count on the device clock with a monotonic source beside
-  it satisfies this rule when the party acts on each difference between
-  the two. The party MUST then compare the device clock against one
-  source. A source that stops while the device sleeps shows a sleep as a
-  device clock that ran ahead, and that is no clock movement. Part 14 rule
-  `IMP-119` gives the idle time of the auto-lock, which counts on a
-  monotonic source alone. A change of the device clock neither shortens
+  two restarts.
+
+  A count on the device clock with a monotonic source beside it satisfies
+  this rule when the party acts on each difference between the two. The
+  party MUST then compare the device clock against one source. A source that
+  stops while the device sleeps shows a sleep as a device clock that ran
+  ahead, and that is no clock movement.
+
+  Part 14 rule `IMP-119` gives the idle time of the auto-lock, which counts
+  on a monotonic source alone. A change of the device clock neither shortens
   nor lengthens that idle time.
 - **[SCP-019]** If a clock movement occurs while a duration runs, the party
   MUST start that duration again.

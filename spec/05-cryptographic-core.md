@@ -13,8 +13,8 @@ more implementation to audit, one more constant-time discipline to enforce, and
 one more location for an error. The **message core** carries **six primitive
 families** and no more. The message core holds the pairwise handshakes, the
 ratchets, the queue encryption, the group content, and the onion cell
-protection. **[CRY-001]** A proposal to add a seventh primitive to the message core MUST give
-its cause against this list.
+protection. **[CRY-001]** A proposal to add a seventh primitive to the message
+core MUST give its cause against this list.
 
 | # | Primitive | Parameters | Used for |
 | --- | --- | --- | --- |
@@ -51,18 +51,19 @@ The relay layer assignment of Part 3 §3.4.1 does **not** use AUX-3. Part 10
 assignment has no secret and no prover, thus a VRF would add a primitive and
 carry no information.
 
-**[CRY-002]** Those primitives MUST be in isolated crates or in platform adapters. **[CRY-003]** Those
-primitives MUST NOT protect ordinary message content. **[CRY-004]** Those primitives MUST NOT
-be on the path of a send on a pairwise channel that exists.
+**[CRY-002]** Those primitives MUST be in isolated crates or in platform
+adapters. **[CRY-003]** Those primitives MUST NOT protect ordinary message
+content. **[CRY-004]** Those primitives MUST NOT be on the path of a send on a
+pairwise channel that exists.
 
 Part 14 §14.2 gives the dependency register R1 for the message core, and the
 dependency register R2 for the auxiliary primitives above. Each register carries
 a cap of its own. `DEPENDENCIES.md` holds the measured counts.
 
-**[CRY-005]** An implementation MUST NOT use a cryptographic primitive that this section does
-not list. To add an auxiliary primitive, add a row to the auxiliary register and
-give its cause. To add a primitive to the message core, give its cause against
-the table above.
+**[CRY-005]** An implementation MUST NOT use a cryptographic primitive that this
+section does not list. To add an auxiliary primitive, add a row to the auxiliary
+register and give its cause. To add a primitive to the message core, give its
+cause against the table above.
 
 **Exclusions and their causes:**
 
@@ -75,11 +76,11 @@ the table above.
 
   > **The hybrid-signature question, answered explicitly.** A reasonable
   > argument says that long-lived objects that a third party verifies have to
-  > carry a *concatenated hybrid* Ed25519 and ML-DSA-65 signature. Those objects are
-  > the directory roots and the transparency tree heads. The argument is that
-  > a lattice break lets an attacker rewrite
-  > archived state retroactively. The argument also says that Ed25519 limits the
-  > cryptanalytic risk in a much younger scheme.
+  > carry a *concatenated hybrid* Ed25519 and ML-DSA-65 signature. Those objects
+  > are the directory roots and the transparency tree heads. The argument is
+  > that a lattice break lets an attacker rewrite archived state retroactively.
+  > The argument also says that Ed25519 limits the cryptanalytic risk in a much
+  > younger scheme.
   >
   > UMBRA declines, thus the protocol does not carry a seventh primitive.
   > `sig_id` (§5.10) is a wire field that the two parties negotiate. Thus a
@@ -121,8 +122,8 @@ assumptions do not give that property. Each ciphertext that UMBRA puts on a
 relay has to be unlinkable to a public key. Thus anonymity is a **first-class
 selection criterion** and not a detail.
 
-**[CRY-006]** A future KEM substitution MUST verify the anonymity and the robustness again,
-and not only IND-CCA.
+**[CRY-006]** A future KEM substitution MUST verify the anonymity and the
+robustness again, and not only IND-CCA.
 
 ## 5.2 Key hierarchy
 
@@ -192,9 +193,9 @@ other measure.
 Two classes of key are **not** in this hierarchy. The device makes each one
 directly from its CSPRNG.
 
-- Queue keys (Part 3 §3.2.2), one for each queue. **[CRY-007]** A device MUST NOT derive a
-  queue key from a long-term secret. Thus a seized relay cannot collect the
-  queues of one user.
+- Queue keys (Part 3 §3.2.2), one for each queue. **[CRY-007]** A device MUST
+  NOT derive a queue key from a long-term secret. Thus a seized relay cannot
+  collect the queues of one user.
 - `GroupRosterSeed_g` (Part 11 §11.9.1), one for each group. The roster key,
   the pair key, and the KEM key of Part 11 §11.3.3 derive from that seed under
   the labels of §5.11.
@@ -241,19 +242,21 @@ UMBRA-KEM.Decap(sk, pk, ct):
     return ss                                               // ss  = 32 B
 ```
 
-**The encoding is fixed.** **[CRY-034]** An implementation MUST encode `pk_X` and `pub_X` as
-the 32-byte little-endian u-coordinate of RFC 7748. **[CRY-035]** An implementation MUST
-encode `pk_M`, `sk_M`, and `ct_M` in the byte encoding of FIPS 203. **[CRY-036]** An
-implementation MUST concatenate in the order that the two algorithms above give.
-The order of the concatenation in `pk`, in `sk`, and in `ct` is the classical
-part and then the post-quantum part. The order inside the hash is the
-post-quantum part and then the classical part, and those two orders differ
-deliberately. **[CRY-037]** An implementation MUST NOT change either order.
+**The encoding is fixed.** **[CRY-034]** An implementation MUST encode `pk_X`
+and `pub_X` as the 32-byte little-endian u-coordinate of RFC 7748. **[CRY-035]**
+An implementation MUST encode `pk_M`, `sk_M`, and `ct_M` in the byte encoding of
+FIPS 203. **[CRY-036]** An implementation MUST concatenate in the order that the
+two algorithms above give. The order of the concatenation in `pk`, in `sk`, and
+in `ct` is the classical part and then the post-quantum part. The order inside
+the hash is the post-quantum part and then the classical part, and those two
+orders differ deliberately. **[CRY-037]** An implementation MUST NOT change
+either order.
 
-**The decapsulator holds `pk`.** A device that holds `sk` also holds the matching
-`pk`, because `pk` is public and local. **[CRY-038]** An implementation MUST NOT rebuild
-`pk_M` from `sk_M` at each decapsulation, because that step is not constant-time
-in each ML-KEM implementation. **[CRY-039]** An implementation MUST store `pk` beside `sk`.
+**The decapsulator holds `pk`.** A device that holds `sk` also holds the
+matching `pk`, because `pk` is public and local. **[CRY-038]** An implementation
+MUST NOT rebuild `pk_M` from `sk_M` at each decapsulation, because that step is
+not constant-time in each ML-KEM implementation. **[CRY-039]** An implementation
+MUST store `pk` beside `sk`.
 
 **The failure behavior.** The two halves fail in two different manners, and the
 three paragraphs below separate them.
@@ -273,10 +276,10 @@ each failure of `Decap`. Thus the validation abort of CRY-040 is the only failur
 that `Decap` signals, and no error value names the half that failed.
 **[CRY-043]** An implementation MUST perform the re-encapsulation check of §5.12.
 
-**[CRY-044]** `Encap` and `Decap` MUST give the same `ss` for one `(pk, sk)` pair and one
-`ct`. **[CRY-045]** The test vectors of Part 6 §6.8 MUST hold that equality.
-**[CRY-046]** Those test vectors MUST hold a negative vector for an all-zero
-`pub_X`.
+**[CRY-044]** `Encap` and `Decap` MUST give the same `ss` for one `(pk, sk)`
+pair and one `ct`. **[CRY-045]** The test vectors of Part 6 §6.8 MUST hold that
+equality. **[CRY-046]** Those test vectors MUST hold a negative vector for an
+all-zero `pub_X`.
 
 ### 5.3.1 Why this combiner and not X-Wing
 
@@ -527,37 +530,38 @@ empties, and no fallback handshake exists.
 
 ### 5.4.6 No wall-clock anywhere in the handshake
 
-**[CRY-012]** Implementations MUST NOT use a timestamp for replay protection. The TAI64N
-mechanism of WireGuard has a documented compromise-amplification failure. With
-one of the two static keys, an attacker forges an initiation that carries a
-maximum timestamp. That initiation **blocks all the future handshakes
-permanently** for that peer. Mobile clients have unreliable clocks, and a
-relay set of the project is an attractive target.
+**[CRY-012]** Implementations MUST NOT use a timestamp for replay protection.
+The TAI64N mechanism of WireGuard has a documented compromise-amplification
+failure. With one of the two static keys, an attacker forges an initiation that
+carries a maximum timestamp. That initiation **blocks all the future handshakes
+permanently** for that peer. Mobile clients have unreliable clocks, and a relay
+set of the project is an attractive target.
 
 Replay protection binds to the consumption of a one-time prekey. It also binds
 to a 16-byte random nonce with queue scope, which message 2 echoes. The KDF
-mixes in the ephemeral contribution of the responder. **[CRY-013]** Before that step, a 0-RTT
-payload MUST NOT make the final session state.
+mixes in the ephemeral contribution of the responder. **[CRY-013]** Before that
+step, a 0-RTT payload MUST NOT make the final session state.
 
 ### 5.4.7 Public-key validation
 
-**[CRY-014]** Implementations MUST reject an all-zero X25519 output. The Noise specification
-discourages the rejection of an invalid public key, and that guidance leaves the
-KXS-class attack reachable. A malicious initiator sends `e = 0`, which forces
-`ee = 0`. The key of the responder then depends only on static-static material.
-That key is the same across sessions, and the responder uses it with nonce 0.
-The nonce reuse then permits a forgery.
+**[CRY-014]** Implementations MUST reject an all-zero X25519 output. The Noise
+specification discourages the rejection of an invalid public key, and that
+guidance leaves the KXS-class attack reachable. A malicious initiator sends
+`e = 0`, which forces `ee = 0`. The key of the responder then depends only on
+static-static material. That key is the same across sessions, and the responder
+uses it with nonce 0. The nonce reuse then permits a forgery.
 
-**[CRY-015]** **UMBRA MUST NOT derive an AEAD key from static-static material alone.** **[CRY-016]** A
-client MUST put an ephemeral contribution from the two parties in each key
-derivation. The one-time prekey `s1` is the ephemeral contribution of the
-responder in flight 1, and §5.4.5 makes that prekey mandatory.
+**[CRY-015]** **UMBRA MUST NOT derive an AEAD key from static-static material
+alone.** **[CRY-016]** A client MUST put an ephemeral contribution from the two
+parties in each key derivation. The one-time prekey `s1` is the ephemeral
+contribution of the responder in flight 1, and §5.4.5 makes that prekey
+mandatory.
 
 ### 5.4.8 The handshake key schedule
 
 §5.4.2 gives the flights. This section gives the exact state, the exact KDF
-steps, the exact nonce values, and the payload protection. **[CRY-048]** An implementation
-MUST follow this section step by step.
+steps, the exact nonce values, and the payload protection. **[CRY-048]** An
+implementation MUST follow this section step by step.
 
 **The state.** A handshake holds four values.
 
@@ -597,16 +601,16 @@ Open(ct):
     return pt
 ```
 
-1. **[CRY-049]** An implementation MUST encode the ChaCha20-Poly1305 nonce as four zero
-   bytes and then `n` in big-endian order, which gives 12 bytes. Part 6 §6.1.1
-   rule 1 makes each integer of this specification big-endian.
-2. **[CRY-050]** An implementation MUST set `n` to 0 at each `MixKey`. Each `MixKey` gives a
-   new `k`, thus no nonce repeats under one key.
+1. **[CRY-049]** An implementation MUST encode the ChaCha20-Poly1305 nonce as
+   four zero bytes and then `n` in big-endian order, which gives 12 bytes.
+   Part 6 §6.1.1 rule 1 makes each integer of this specification big-endian.
+2. **[CRY-050]** An implementation MUST set `n` to 0 at each `MixKey`. Each
+   `MixKey` gives a new `k`, thus no nonce repeats under one key.
 3. **[CRY-051]** An implementation MUST abort if `n` reaches 2⁶⁴ − 1.
-4. **[CRY-052]** An implementation MUST `MixHash` a ciphertext after the tag check and not
-   before it.
-5. **[CRY-053]** An implementation MUST use `h` as the associated data of each `Seal` and each
-   `Open`. Thus each flight binds the full transcript before it.
+4. **[CRY-052]** An implementation MUST `MixHash` a ciphertext after the tag
+   check and not before it.
+5. **[CRY-053]** An implementation MUST use `h` as the associated data of each
+   `Seal` and each `Open`. Thus each flight binds the full transcript before it.
 6. The counter of this section is a handshake counter under a one-use key. Part
    6 §6.4.2 rule 3 forbids a counter for the L6 nonce, and that rule names a
    different layer and a long-lived key.
@@ -664,18 +668,17 @@ flight 1.
 > *What `pid` shows, stated.* The value is a hash of a public key that the
 > responder published. A party that holds the invitation bundle of §5.4.1
 > computes the same value. Thus `pid` names no new fact to that party. Flight 1
-> travels inside the queue end-to-end layer of
-> Part 6 §6.4.2, thus a relay on the path reads ciphertext only.
+> travels inside the queue end-to-end layer of Part 6 §6.4.2, thus a relay on
+> the path reads ciphertext only.
 
 The value `n_hs` is 16 bytes from the device CSPRNG, and §5.4.6 gives its
 function. The value `app_1` is the application payload. Part 3 rule `NET-173`
 puts the `QueueAddress` of the first queue of the initiator in it. The values
 `app_2` of flight 2 and `app_3` of flight 3 are the application payloads of
-those flights. Version 1 defines no content for either, and a party
-sends each one empty. Thus `payload2` seals `n_hs` alone, and `payload3`
-seals an empty string.
-**[CRY-054]** A responder MUST NOT make the final session state from `payload1`. CRY-013
-of §5.4.6 states the same rule.
+those flights. Version 1 defines no content for either, and a party sends each
+one empty. Thus `payload2` seals `n_hs` alone, and `payload3` seals an empty
+string. **[CRY-054]** A responder MUST NOT make the final session state from
+`payload1`. CRY-013 of §5.4.6 states the same rule.
 
 **The responder side of flight 1.** The responder runs the same schedule with
 `MLKEM768.Decap` in place of `MLKEM768.Encap`, and with `Open` in place of
@@ -694,8 +697,8 @@ holds a value that this section does not define. A responder that aborts under
 that rule runs no `MixHash` and sends no flight 2.
 
 **[CRY-055]** A responder MUST resolve `pid` against its outstanding prekeys
-before it runs `MixHash(s1)`. **[CRY-056]** That resolution MUST be constant-time with
-respect to the prekey position, and CRY-011 states that rule.
+before it runs `MixHash(s1)`. **[CRY-056]** That resolution MUST be
+constant-time with respect to the prekey position, and CRY-011 states that rule.
 The initialization before `MixHash(s1)` does not depend on the prekey, thus a
 responder computes that prefix one time.
 
@@ -709,8 +712,9 @@ responder computes that prefix one time.
 5.  payload2     <- Seal( n_hs || app_2 )
 ```
 
-**[CRY-057]** An initiator MUST check that the `n_hs` of flight 2 equals the `n_hs` that it
-sent. **[CRY-058]** An initiator MUST abort if the two values differ.
+**[CRY-057]** An initiator MUST check that the `n_hs` of flight 2 equals the
+`n_hs` that it sent. **[CRY-058]** An initiator MUST abort if the two values
+differ.
 
 **Flight 3, from the initiator to the responder.**
 
@@ -742,11 +746,11 @@ Split():
 ```
 
 The value `RK` is the initial root key of §5.5.1. The two header keys protect
-the `hdr_ct` field of Part 6 §6.5, one for each direction. **[CRY-059]** An implementation
-MUST erase `ck`, `h`, `k`, and each ephemeral private key after the split, with
-the one exception of the next rule. Part 14 §14.4 gives the erasure rule. Part
-7 §7.4 step 3 takes its 6-digit confirmation code from `h`, and it takes that
-code before the erasure.
+the `hdr_ct` field of Part 6 §6.5, one for each direction. **[CRY-059]** An
+implementation MUST erase `ck`, `h`, `k`, and each ephemeral private key after
+the split, with the one exception of the next rule. Part 14 §14.4 gives the
+erasure rule. Part 7 §7.4 step 3 takes its 6-digit confirmation code from `h`,
+and it takes that code before the erasure.
 
 **The first ratchet key.** The ephemeral `er` of flight 2 is the first DH
 ratchet key of the responder in §5.5.1. The initiator holds its public half
@@ -776,13 +780,14 @@ MUST erase it when the circuit ends.
 | The handshake mode | The prologue |
 | The address type | The prologue |
 
-**[CRY-060]** The test vectors of Part 6 §6.8 MUST hold one complete handshake transcript.
-**[CRY-061]** That vector MUST give `ck`, `h`, and `n` after each numbered step. **[CRY-062]** That vector
-MUST give `RK`, `HK_i2r`, and `HK_r2i`. **[CRY-103]** Those vectors MUST hold a
-second transcript in which `range_i` is (1, 1) and `range_r` is (1, 2).
-**[CRY-104]** That vector MUST assert one `h` at the two parties after flight 1.
-**[CRY-127]** Those vectors MUST hold a flight 1 whose `mode` byte is `0x02`,
-and the responder aborts before `MixHash(prologue)`.
+**[CRY-060]** The test vectors of Part 6 §6.8 MUST hold one complete handshake
+transcript. **[CRY-061]** That vector MUST give `ck`, `h`, and `n` after each
+numbered step. **[CRY-062]** That vector MUST give `RK`, `HK_i2r`, and `HK_r2i`.
+**[CRY-103]** Those vectors MUST hold a second transcript in which `range_i` is
+(1, 1) and `range_r` is (1, 2). **[CRY-104]** That vector MUST assert one `h` at
+the two parties after flight 1. **[CRY-127]** Those vectors MUST hold a flight 1
+whose `mode` byte is `0x02`, and the responder aborts before
+`MixHash(prologue)`.
 
 > *Cause.* Flight 1 carries `range_i`, because the prologue holds it. With
 > `range_i` in the prologue and in no flight, the two parties derive one `h`
@@ -791,10 +796,9 @@ and the responder aborts before `MixHash(prologue)`.
 > value that does not travel.
 >
 > *Cause of the mode byte.* `CRY-033` binds a handshake mode, thus a field
-> carries it. One byte in flight 1 and in the
-> prologue separates a later mode from this one at the first hash. §5.11
-> records the PQXDH precedent, which is a confusion between a full mode and a
-> reduced mode.
+> carries it. One byte in flight 1 and in the prologue separates a later mode
+> from this one at the first hash. §5.11 records the PQXDH precedent, which is a
+> confusion between a full mode and a reduced mode.
 
 ### 5.4.9 `UMBRA-NKhfs`, the circuit-hop handshake
 
@@ -980,10 +984,10 @@ UMBRA uses three ratchets together, and mixes them through one KDF.
     seals one body. A header key seals each header of one chain, and the
     random nonce separates them.
 
-**[CRY-017]** **A client MUST use the header-encrypted variant of the Double Ratchet.**
-Cleartext `dh`, `pn`, and `n` fields let a relay link messages into sessions and
-profile the cadence of a conversation. That result defeats the full function of
-pairwise queues.
+**[CRY-017]** **A client MUST use the header-encrypted variant of the Double
+Ratchet.** Cleartext `dh`, `pn`, and `n` fields let a relay link messages into
+sessions and profile the cadence of a conversation. That result defeats the full
+function of pairwise queues.
 
 ### 5.5.2 Post-quantum ratchet: chunked ML-KEM braid
 
@@ -1008,9 +1012,9 @@ ML-KEM-768 material, split:
 FIPS 203 encodes an ML-KEM-768 encapsulation key as
 `ek = ByteEncode12(t_hat) || rho`. The value `rho` is the 32-byte public seed
 that expands to the matrix `A`. The value `ek_vector` is the 1 152-byte encoded
-vector `t_hat`. Thus `ek_vector || rho` is `ek`, and the hash in `header` is
-the `H(ek)` of FIPS 203, because that function is SHA3-256 as well. The
-`header` and `ek_vector` together are 1 216 bytes, which is `ek` and its hash.
+vector `t_hat`. Thus `ek_vector || rho` is `ek`, and the hash in `header` is the
+`H(ek)` of FIPS 203, because that function is SHA3-256 as well. The `header` and
+`ek_vector` together are 1 216 bytes, which is `ek` and its hash.
 
 The values `ct1` and `ct2` are the two parts of the 1 088-byte ML-KEM-768
 ciphertext, which FIPS 203 writes as `c1 || c2`. The part `c1` depends on `rho`
@@ -1060,9 +1064,9 @@ RK <- HKDF-SHA3-256( salt = RK, ikm = ss_pq,
                      info = "umbra/v1/pq-epoch" || BE32(epoch), L = 32 )
 ```
 
-**[CRY-064]** An implementation MUST use the label `"umbra/v1/pq-epoch"` for that step. **[CRY-065]** An
-implementation MUST NOT apply that step before it rebuilt the full ML-KEM
-material from the chunks.
+**[CRY-064]** An implementation MUST use the label `"umbra/v1/pq-epoch"` for
+that step. **[CRY-065]** An implementation MUST NOT apply that step before it
+rebuilt the full ML-KEM material from the chunks.
 
 A **systematic Reed–Solomon erasure code** over GF(2¹⁶) encodes the four parts
 above, which are 2 304 bytes together. Thus *k* chunks of *n* rebuild the
@@ -1162,23 +1166,24 @@ code.
 The PQ braid frame is 7 bytes plus the chunk width (Part 6 §6.5). Thus the width
 128 costs 135 bytes, the width 64 costs 71 bytes, and the width 32 costs 39
 bytes. The width 128 gives 91 bytes of `B0` text, the width 64 gives 155 bytes,
-and the width 32 gives 187 bytes. **[CRY-018]** A client MUST select the chunk width so that
-the record fits the smallest bucket that holds the message. **[CRY-019]** If no permitted
-width gives a fit, the client MUST send the record with `pq_frame_len = 0`. **[CRY-020]** The
-client MUST then send the chunk on a later record. Such a record shows no
-epoch number, and rule `CRY-148` gives how the peer takes it at a DH step.
+and the width 32 gives 187 bytes. **[CRY-018]** A client MUST select the chunk
+width so that the record fits the smallest bucket that holds the message.
+**[CRY-019]** If no permitted width gives a fit, the client MUST send the record
+with `pq_frame_len = 0`. **[CRY-020]** The client MUST then send the chunk on a
+later record. Such a record shows no epoch number, and rule `CRY-148` gives how
+the peer takes it at a DH step.
 
-**[CRY-021]** **UMBRA MUST NOT use the retransmit-until-acknowledged strategy of Apple PQ3.**
-A conversation is unbalanced when a phone or a linked desktop is offline for
-hours, and that condition is normal for UMBRA. In such a conversation, that
-strategy costs 48 680 expected bytes to reach post-compromise security. The
-chunked design costs 10 010 bytes, thus the penalty is 4.9× (eprint 2025/078,
-Eurocrypt 2025).
+**[CRY-021]** **UMBRA MUST NOT use the retransmit-until-acknowledged strategy of
+Apple PQ3.** A conversation is unbalanced when a phone or a linked desktop is
+offline for hours, and that condition is normal for UMBRA. In such a
+conversation, that strategy costs 48 680 expected bytes to reach post-compromise
+security. The chunked design costs 10 010 bytes, thus the penalty is 4.9×
+(eprint 2025/078, Eurocrypt 2025).
 
-**[CRY-022]** **UMBRA MUST NOT make future KEM keypairs in advance.** Signal measured that
-parallel epoch generation heals faster but collects unused decapsulation keys.
-Those keys expose more messages to one device seizure, which is the incorrect
-trade under adversary A6 of Part 2.
+**[CRY-022]** **UMBRA MUST NOT make future KEM keypairs in advance.** Signal
+measured that parallel epoch generation heals faster but collects unused
+decapsulation keys. Those keys expose more messages to one device seizure, which
+is the incorrect trade under adversary A6 of Part 2.
 
 ### 5.5.3 Rekey cadence
 
@@ -1211,12 +1216,11 @@ the same sense. Five rules govern the incomplete epoch.
    `T` occurs during an incomplete epoch. In that schedule the epoch continues
    under one epoch number.
 
-> *Cause.* A limit `T` that starts a new epoch during an incomplete epoch
-> stops a quiet conversation from healing. A user that sends a few records
-> each month then completes no epoch of 41 chunks, because each 7 days the
-> timer starts a new one.
-> Apple PQ3 completes a quiet rekey with encrypted delivery receipts, and
-> CRY-021 bans the retransmission that PQ3 pairs with them. The rules above
+> *Cause.* A limit `T` that starts a new epoch during an incomplete epoch stops
+> a quiet conversation from healing. A user that sends a few records each month
+> then completes no epoch of 41 chunks, because each 7 days the timer starts a
+> new one. Apple PQ3 completes a quiet rekey with encrypted delivery receipts,
+> and CRY-021 bans the retransmission that PQ3 pairs with them. The rules above
 > carry a chunk on each record, and a receipt of Part 6 §6.6.9 is a record.
 > Part 3 §3.6 rule `NET-064` carries a queued receipt in a cover slot. Thus a
 > quiet conversation completes an epoch on the records that it sends in any
@@ -1259,14 +1263,14 @@ holds them, in the manner of `CRY-153`.
 raise `MSG_TTL` alone.
 
 > *Cause.* A relay holds an undelivered message for 45 days. With a `SKIP_TTL`
-> of 14 days, a receiver that skipped the key of that message discards that
-> key on day 14, thus the message arrives and it does not decrypt. U9 of Part 2 §2.4 sets the undecryptable rate
-> below 1 in 10⁵, and that window is 31 days wide on the ordinary path. Part 12
-> §12.7.1 does not hold the same relation for `CHUNK_TTL`. It sets a chunk
-> at 14 days, below `MSG_TTL`, on purpose: a record that arrives after its
-> chunks left opens, and its file does not. Part 2 §2.4 holds that trade in
-> its table, and rules `ATT-050` and `ATT-051` give the relation that Part 12
-> does keep.
+> of 14 days, a receiver that skipped the key of that message discards that key
+> on day 14, thus the message arrives and it does not decrypt. U9 of Part 2 §2.4
+> sets the undecryptable rate below 1 in 10⁵, and that window is 31 days wide on
+> the ordinary path. Part 12 §12.7.1 does not hold the same relation for
+> `CHUNK_TTL`. It sets a chunk at 14 days, below `MSG_TTL`, on purpose: a record
+> that arrives after its chunks left opens, and its file does not. Part 2 §2.4
+> holds that trade in its table, and rules `ATT-050` and `ATT-051` give the
+> relation that Part 12 does keep.
 >
 > **This is a trade, and Part 2 §2.4 requires the text to state it.** A skipped
 > key lives 45 days and not 14. A seized device therefore gives A6 a
@@ -1279,16 +1283,19 @@ each skip, and a skip that would pass `MAX_STORED` or `MAX_BYTES` MUST drop the
 oldest keys first. A session that refused a skip at the limit would open no
 later record of that peer, and the contact would end.
 
-`MAX_SKIP` bounds the keys that one chain leaves in two cases. Inside a chain,
-a session refuses a record whose `n` is more than `MAX_SKIP` above the next
-position of that chain, and the refusal holds for that record alone. At a DH
-ratchet step, the `pn` of the header names the length of the chain that ends.
-If `pn` is more than `MAX_SKIP` above the next position of that chain, the
-session stores the first `MAX_SKIP` keys of the chain, stores no key past
-them, and takes the step. A refusal at the step would repeat at each later
-chain, because each of them carries that `pn`, and the direction would end.
-The peer alone writes a header that opens, thus `MAX_SKIP` keys stay the cost
-of one step.
+`MAX_SKIP` bounds the keys that one chain leaves in two cases:
+
+- **Inside a chain**, a session refuses a record whose `n` is more than
+  `MAX_SKIP` above the next position of that chain, and the refusal holds for
+  that record alone.
+- **At a DH ratchet step**, the `pn` of the header names the length of the
+  chain that ends. If `pn` is more than `MAX_SKIP` above the next position of
+  that chain, the session stores the first `MAX_SKIP` keys of the chain,
+  stores no key past them, and takes the step.
+
+A refusal at the step would repeat at each later chain, because each of them
+carries that `pn`, and the direction would end. The peer alone writes a header
+that opens, thus `MAX_SKIP` keys stay the cost of one step.
 
 The age of a skipped key is a duration of Part 1 §1.9, and it starts when the
 session stores the key. At a clock movement the session starts the age of each
@@ -1296,10 +1303,10 @@ key that it holds again (Part 1 rule `SCP-019`). Thus a movement of the device
 clock deletes no key (rule `SCP-021`) and adds one `SKIP_TTL` at most to the
 life of a key.
 
-**[CRY-023]** An implementation MUST store the skipped keys encrypted at rest under `K_store`.
-The specification records that these keys are a long-tailed hole in the forward
-secrecy. An attacker that recorded the dropped ciphertexts, and later
-compromises the device, decrypts those ciphertexts.
+**[CRY-023]** An implementation MUST store the skipped keys encrypted at rest
+under `K_store`. The specification records that these keys are a long-tailed
+hole in the forward secrecy. An attacker that recorded the dropped ciphertexts,
+and later compromises the device, decrypts those ciphertexts.
 
 ### 5.5.5 The interlock of the two strands
 
@@ -1327,19 +1334,21 @@ field that names a target, an epoch, or a mix.
 4. **The mix.** Let party P own epoch `e`, and let `ss_e` be the shared secret
    of the ciphertext that the peer made against the key of that epoch.
    **[CRY-147]** P MUST apply the mix of `CRY-064` for epoch `e` immediately
-   before it derives the sending chain of its first DH ratchet step whose
-   chain carries an epoch above `e`. **[CRY-148]** The peer MUST apply the
-   same mix immediately before it derives the receiving chain of the step that
-   the same chain starts. It recognizes that step by the epoch number in the
-   frame of the record that starts the step at the peer. A record of the
-   chain can carry no frame under `CRY-019`, and the first record of the
-   chain can arrive late. When the record that starts the step carries no
-   frame and a secret waits for the mix, the peer MUST derive the receiving
-   chain without the mix and then with it. It MUST keep the derivation under
-   which the body of the record opens, and it MUST keep neither when no body
-   opens. **[CRY-149]** A party MUST retain
-   `ss_e` from the moment it computes it, by encapsulation or by
-   decapsulation, until the mix consumes it.
+   before it derives the sending chain of its first DH ratchet step whose chain
+   carries an epoch above `e`. **[CRY-148]** The peer MUST apply the same mix
+   immediately before it derives the receiving chain of the step that the same
+   chain starts. It recognizes that step by the epoch number in the frame of the
+   record that starts the step at the peer.
+
+   A record of the chain can carry no frame under `CRY-019`, and the first
+   record of the chain can arrive late. When the record that starts the step
+   carries no frame and a secret waits for the mix, the peer MUST derive the
+   receiving chain without the mix and then with it. It MUST keep the
+   derivation under which the body of the record opens, and it MUST keep
+   neither when no body opens.
+
+   **[CRY-149]** A party MUST retain `ss_e` from the moment it computes it, by
+   encapsulation or by decapsulation, until the mix consumes it.
 
 An epoch of P is **complete** when P rebuilt the peer's codeword that carries
 the ciphertext against the key of that epoch (§5.5.3). Under rule 1 that
@@ -1347,13 +1356,13 @@ codeword also carries the peer's next key, thus a party that completed an
 epoch holds the target of its next one.
 
 > *Cause.* The codeword does not show which key a ciphertext targets, when a
-> shared secret enters the root key, or how the first epoch starts with no
-> peer key. A receiver that guesses a target runs implicit rejection on the
-> wrong key and desynchronizes the root key without an error. The rules above make the target a function of the epoch
-> number, tie every advance to a DH chain start so that one record reveals
-> the epoch, and bind each mix to a DH step that both parties identify from
-> the same chain. The test vectors of Part 6 §6.8 hold the schedule of
-> `CRY-134` under these rules.
+> shared secret enters the root key, or how the first epoch starts with no peer
+> key. A receiver that guesses a target runs implicit rejection on the wrong key
+> and desynchronizes the root key without an error. The rules above make the
+> target a function of the epoch number, tie every advance to a DH chain start
+> so that one record reveals the epoch, and bind each mix to a DH step that both
+> parties identify from the same chain. The test vectors of Part 6 §6.8 hold the
+> schedule of `CRY-134` under these rules.
 
 ## 5.6 Steady-state overhead budget
 
@@ -1418,11 +1427,11 @@ impersonation.
 
 Part 11 gives the details. This section gives the cryptographic rule:
 
-**[CRY-024]** **Group content MUST have post-quantum protection in transit.**
-At rest, `K_store` of §5.2 covers each record.
-SimpleX excludes groups and files from its PQ layer explicitly. Archived group
-traffic is the harvest-now-decrypt-later target with the highest value. The v1
-scope of UMBRA holds groups of 2 to 500 members.
+**[CRY-024]** **Group content MUST have post-quantum protection in transit.** At
+rest, `K_store` of §5.2 covers each record. SimpleX excludes groups and files
+from its PQ layer explicitly. Archived group traffic is the
+harvest-now-decrypt-later target with the highest value. The v1 scope of UMBRA
+holds groups of 2 to 500 members.
 
 The mechanism is cheap. A group epoch key `K_e` travels to each member in an
 `UMBRA-KEM` slot of the epoch-key record (Part 11 §11.4), or at a join over the
@@ -1434,9 +1443,9 @@ authentication is classical under §5.4.4. The codebase holds one KEM and one
 AEAD for this, and it does not hold a second ratchet. A file-encryption key
 travels inside a group record, thus it inherits the same protection.
 
-> *Cause.* The alternative moves a symmetric sender key to each member over
-> the PQ ratchet of a pairwise channel, and a group of N members then holds
-> N × (N − 1) such channels. The group queue of Part 11 §11.2 holds no pairwise channel
+> *Cause.* The alternative moves a symmetric sender key to each member over the
+> PQ ratchet of a pairwise channel, and a group of N members then holds N × (N
+> − 1) such channels. The group queue of Part 11 §11.2 holds no pairwise channel
 > among members, thus the epoch key needs a carrier of its own, and the
 > `UMBRA-KEM` of §5.3 is that carrier.
 
@@ -1471,8 +1480,8 @@ says that "the disclosure of output(s) of an insecure random number generator
 itself." This function is also the substantive answer of UMBRA to the objection
 of SimpleX to ML-KEM.
 
-**[CRY-026]** Implementations MUST enforce one encapsulation for each ephemeral key **at the
-type level**. In Rust, `encapsulate` consumes `self`.
+**[CRY-026]** Implementations MUST enforce one encapsulation for each ephemeral
+key **at the type level**. In Rust, `encapsulate` consumes `self`.
 
 ## 5.10 Crypto-agility, done cheaply
 
@@ -1617,43 +1626,47 @@ the list gives its cause. The label names the object type and its lifetime:
 > own keeps that key apart from each epoch key of the same root, which
 > `"umbra/v1/ntf"` derives.
 >
-> *The cause of the last nine labels before it.* The two verifier labels take the
-> `verifier_id` of Part 9 `DIS-165` and Part 13 `ABU-109` apart from the seed
-> of the same proof of work, as `hello-seed` and `hello-verifier` are apart
-> (`CRY-031`). `relay-ntf`, `ndr`, and `directory` derive the key pair of a
-> relay notifier, of the NDR gateway, and of the directory gateway from the
-> seed of its operator. `client-rng` keys the hardening of the device
-> CSPRNG of `CRY-025` in a client runtime before its store opens.
-> `quota-holder` names the holder of a chunk quota at a relay (Part 12).
-> `ndr-removal` gives the removal secret of the next registration of a
-> handle from the one before it, thus each registration takes a fresh secret
-> and a lost answer can be sent again (Part 8 `NTF-124`). `renewal-guard`
-> is the prefix of the commitment of Part 3 rule `NET-354`. Thus no other
-> hash of this specification over a 32-byte value opens a renewal guard.
+> *The cause of the last nine labels before it.*
+>
+> - The two verifier labels take the `verifier_id` of Part 9 `DIS-165` and
+>   Part 13 `ABU-109` apart from the seed of the same proof of work, as
+>   `hello-seed` and `hello-verifier` are apart (`CRY-031`).
+> - `relay-ntf`, `ndr`, and `directory` derive the key pair of a relay
+>   notifier, of the NDR gateway, and of the directory gateway from the seed of
+>   its operator.
+> - `client-rng` keys the hardening of the device CSPRNG of `CRY-025` in a
+>   client runtime before its store opens.
+> - `quota-holder` names the holder of a chunk quota at a relay (Part 12).
+> - `ndr-removal` gives the removal secret of the next registration of a
+>   handle from the one before it, thus each registration takes a fresh secret
+>   and a lost answer can be sent again (Part 8 `NTF-124`).
+> - `renewal-guard` is the prefix of the commitment of Part 3 rule `NET-354`.
+>   Thus no other hash of this specification over a 32-byte value opens a
+>   renewal guard.
 >
 > *The exception of `msg_ref`.* Part 6 rule `WIR-067` derives
-> `msg_ref = SHA3-256(K_set || msg_id)[0..16]` with no label. Each device of
-> a set stores its references under that value, and the devices of one set
-> compare them. A label now would change each stored reference, and a device
-> of an earlier release would not find the references of a later one. The
-> lack of a label gives no collision with a labeled derivation. The input of
-> each labeled hash starts with the bytes `umbra/v1/`, and the input of
-> `msg_ref` starts with `K_set`, 32 pseudorandom bytes that the labeled
-> derivation `"umbra/v1/device-set"` of Part 4 §4.2 gives. No other
-> derivation hashes `K_set` with no label. A later version with a new reference format
-> gives that format a label of this list.
+> `msg_ref = SHA3-256(K_set || msg_id)[0..16]` with no label. Each device of a
+> set stores its references under that value, and the devices of one set compare
+> them. A label now would change each stored reference, and a device of an
+> earlier release would not find the references of a later one. The lack of a
+> label gives no collision with a labeled derivation. The input of each labeled
+> hash starts with the bytes `umbra/v1/`, and the input of `msg_ref` starts with
+> `K_set`, 32 pseudorandom bytes that the labeled derivation
+> `"umbra/v1/device-set"` of Part 4 §4.2 gives. No other derivation hashes
+> `K_set` with no label. A later version with a new reference format gives that
+> format a label of this list.
 >
 > *The construction under six labels.* No other part gives these, thus
 > this note gives each one in full.
 >
 > - `"umbra/v1/relay-ntf"`, `"umbra/v1/ndr"`, and `"umbra/v1/directory"` each
->   derive one `UMBRA-KEM` key pair from a 32-byte seed. With `label` as one
->   of the three: `x = SHA3-256(label || "/x" || seed)` is the X25519 seed,
->   and `d = SHA3-256(label || "/d" || seed)` and
->   `z = SHA3-256(label || "/z" || seed)` are the two ML-KEM-768 seeds of
->   FIPS 203 key generation, in that order. The seed of a queue relay is its
->   static secret (Part 8 rule `NTF-129`). The seed of the NDR gateway
->   and of the directory gateway is a secret of its operator.
+>   derive one `UMBRA-KEM` key pair from a 32-byte seed. With `label` as one of
+>   the three: `x = SHA3-256(label || "/x" || seed)` is the X25519 seed, and
+>   `d = SHA3-256(label || "/d" || seed)` and
+>   `z = SHA3-256(label || "/z" || seed)` are the two ML-KEM-768 seeds of FIPS
+>   203 key generation, in that order. The seed of a queue relay is its static
+>   secret (Part 8 rule `NTF-129`). The seed of the NDR gateway and of the
+>   directory gateway is a secret of its operator.
 > - `"umbra/v1/client-rng"` is the `context` of `randomness(context)` of
 >   `CRY-025` for each draw of a client runtime, in each state of its store.
 > - `"umbra/v1/quota-holder"` names the holder of an upload quota at a relay:
@@ -1664,22 +1677,22 @@ the list gives its cause. The label names the object type and its lifetime:
 > - `"umbra/v1/handle-blob"` is the salt of the blob challenge of Part 9
 >   §9.9.3, which that section gives.
 
-**The list above is closed.** **[CRY-028]** An implementation MUST NOT use a label that this
-list does not hold. **[CRY-029]** A revision that needs a new label MUST add that label to
-this list. **[CRY-030]** That revision MUST give the cause. §5.1 closes the
-primitive register in the same manner.
+**The list above is closed.** **[CRY-028]** An implementation MUST NOT use a
+label that this list does not hold. **[CRY-029]** A revision that needs a new
+label MUST add that label to this list. **[CRY-030]** That revision MUST give
+the cause. §5.1 closes the primitive register in the same manner.
 
 > *The cause of the five link labels.* Part 7 §7.4 links a device over
 > handle-addressed chunks. The offer and the hello each need a slot of their
 > own, the transcript and the code each need a hash of their own, and the
 > provision needs a slot and a seal key that only the two devices derive.
 
-> *The cause of `"umbra/v1/issuer-rsa"`.* An issuer of the cross-relay token
-> of Part 13 §13.3.1 derives the RSA key of each epoch from one secret seed
-> under this label and the epoch, thus a restart of the issuer finds the key
-> that the log already holds. The primes come from
-> `HMAC-SHA3-256(HMAC-SHA3-256(seed, label || BE32(epoch)), BE64(counter))`,
-> and no other derivation takes that input.
+> *The cause of `"umbra/v1/issuer-rsa"`.* An issuer of the cross-relay token of
+> Part 13 §13.3.1 derives the RSA key of each epoch from one secret seed under
+> this label and the epoch, thus a restart of the issuer finds the key that the
+> log already holds. The primes come from
+> `HMAC-SHA3-256(HMAC-SHA3-256(seed, label || BE32(epoch)), BE64(counter))`, and
+> no other derivation takes that input.
 
 > *The cause of `"umbra/v1/handle-blob"`.* Part 9 rule `DIS-175` writes the
 > profile blob under a challenge of its own. Its answer binds the blob, as the
@@ -1697,38 +1710,47 @@ primitive register in the same manner.
 > derives a mention identifier under `"umbra/v1/mention"`, and Part 12 §12.3.4
 > derives a manifest key under `"umbra/v1/file-manifest"`.
 >
-> *The cause of the eleven group-queue labels.* A group uses the group queue
-> of Part 11 and no sender key, thus the list holds no
-> `"umbra/v1/sender-key"` and no `"umbra/v1/group-member"` (the member
-> identifier is a member index, which no KDF makes). Part 11 §11.3.1
-> derives the first slot key of an epoch from `K_e` under
-> `"umbra/v1/group-slot"`, each later slot key from the previous one under
-> `"umbra/v1/group-slot-next"`, and the record key of a slot under
-> `"umbra/v1/group-record-key"`; each of the three lives for one epoch or one
-> slot. `"umbra/v1/group-record"` is the associated data of a group record and
-> not a KDF label; it binds the ciphertext to the group, the epoch, and the
-> slot. Part 11 §11.3.1 derives the reader credential and the writer credential
-> of a group queue from `K_e` under `"umbra/v1/group-read"` and
-> `"umbra/v1/group-write"`, one pair for each epoch. Part 11 §11.3.3 derives
-> the pair key and the KEM key of a member from `GroupRosterSeed_g` under
-> `"umbra/v1/group-pair"` and `"umbra/v1/group-kem"`, for the life of the
-> membership, and it derives the pair MAC key of two members and computes each
-> tag under `"umbra/v1/group-tag"`. Part 11 §11.4.2 derives the slot key of an
-> epoch-key record under `"umbra/v1/group-epoch-slot"`, and it computes the
-> rotator's tag inside a slot under `"umbra/v1/group-epoch-tag"`; each lives
-> for one rotation. Part 11 §11.12 signs a `RekeyRecord` under
-> `"umbra/v1/group-rekey"`, and it lives for one re-key. Each label names one
-> object type, and CRY-031 holds.
+> *The cause of the eleven group-queue labels.* A group uses the group queue of
+> Part 11 and no sender key, thus the list holds no `"umbra/v1/sender-key"` and
+> no `"umbra/v1/group-member"` (the member identifier is a member index, which
+> no KDF makes).
 >
-> *The cause of seven more labels.* Part 5 §5.4.8 hashes a
-> one-time prekey under `"umbra/v1/prekey-id"`. Part 10 §10.5.4 computes the
-> relay layer under `"umbra/v1/relay-layer"`, and Part 10 §10.6.3 signs a family
-> certificate under `"umbra/v1/relay-family"`. Part 10 §10.4.2 signs a link
-> receipt under `"umbra/v1/link-receipt"`, and Part 10 §10.3.1 signs a measurer
-> certificate under `"umbra/v1/measurer-cert"`. Part 7 §7.3.1 signs an ownership
-> claim record under `"umbra/v1/device-claim"`. Part 9 §9.9.1 derives a
-> renewal challenge under `"umbra/v1/handle-renew"`. Each one names one object
-> type, and CRY-031 keeps them apart.
+> - Part 11 §11.3.1 derives the first slot key of an epoch from `K_e` under
+>   `"umbra/v1/group-slot"`, each later slot key from the previous one under
+>   `"umbra/v1/group-slot-next"`, and the record key of a slot under
+>   `"umbra/v1/group-record-key"`; each of the three lives for one epoch or one
+>   slot.
+> - `"umbra/v1/group-record"` is the associated data of a group record and not
+>   a KDF label; it binds the ciphertext to the group, the epoch, and the slot.
+> - Part 11 §11.3.1 derives the reader credential and the writer credential of
+>   a group queue from `K_e` under `"umbra/v1/group-read"` and
+>   `"umbra/v1/group-write"`, one pair for each epoch.
+> - Part 11 §11.3.3 derives the pair key and the KEM key of a member from
+>   `GroupRosterSeed_g` under `"umbra/v1/group-pair"` and
+>   `"umbra/v1/group-kem"`, for the life of the membership, and it derives the
+>   pair MAC key of two members and computes each tag under
+>   `"umbra/v1/group-tag"`.
+> - Part 11 §11.4.2 derives the slot key of an epoch-key record under
+>   `"umbra/v1/group-epoch-slot"`, and it computes the rotator's tag inside a
+>   slot under `"umbra/v1/group-epoch-tag"`; each lives for one rotation.
+> - Part 11 §11.12 signs a `RekeyRecord` under `"umbra/v1/group-rekey"`, and it
+>   lives for one re-key.
+>
+> Each label names one object type, and CRY-031 holds.
+>
+> *The cause of seven more labels.*
+>
+> - Part 5 §5.4.8 hashes a one-time prekey under `"umbra/v1/prekey-id"`.
+> - Part 10 §10.5.4 computes the relay layer under `"umbra/v1/relay-layer"`.
+> - Part 10 §10.6.3 signs a family certificate under `"umbra/v1/relay-family"`.
+> - Part 10 §10.4.2 signs a link receipt under `"umbra/v1/link-receipt"`.
+> - Part 10 §10.3.1 signs a measurer certificate under
+>   `"umbra/v1/measurer-cert"`.
+> - Part 7 §7.3.1 signs an ownership claim record under
+>   `"umbra/v1/device-claim"`.
+> - Part 9 §9.9.1 derives a renewal challenge under `"umbra/v1/handle-renew"`.
+>
+> Each one names one object type, and CRY-031 keeps them apart.
 >
 > *The cause of the measurer-open label.* Part 10 §10.3.1 signs the open of
 > a measurement session under `"umbra/v1/measurer-open"`, with the key of the
@@ -1790,23 +1812,23 @@ primitive register in the same manner.
 > key under `"umbra/v1/issuer-key"`, which keeps that input apart from a
 > handle and an address in the one VOPRF of Part 9 §9.4.
 
-> *The cause of the hop-update label.* Part 3 §3.4.4 rule `NET-204` replaces
-> the key set of the hop 3 layer after each cell under
+> *The cause of the hop-update label.* Part 3 §3.4.4 rule `NET-204` replaces the
+> key set of the hop 3 layer after each cell under
 > `"umbra/v1/onion-hop-update"`. The label `"umbra/v1/onion-hop"` derives the
-> first key set from `ss_hop`, and the update derives the next key set from
-> the current one. The two derivations take different input, thus CRY-031
-> gives them two labels.
+> first key set from `ss_hop`, and the update derives the next key set from the
+> current one. The two derivations take different input, thus CRY-031 gives them
+> two labels.
 
 > *The cause of the handle-key label.* Part 9 §9.3 names the handle key
 > `HK_pub`. Part 4 §4.2.4 derives that key from the root identity with a
-> rotation counter, thus a restored client recovers the private half. The label separates the handle key from
-> `"umbra/v1/public-address"`, and a directory crawl does not link the two.
+> rotation counter, thus a restored client recovers the private half. The label
+> separates the handle key from `"umbra/v1/public-address"`, and a directory
+> crawl does not link the two.
 
-> *The cause of the relay-layer label.* The label
-> `"umbra/v1/relay-descriptor"` names the descriptor signature. CRY-031
-> forbids two object types under one label, thus the layer assignment has a
-> label of its own. Part 10 §10.5.3 gives the leaf hash and the node hash no
-> label at all.
+> *The cause of the relay-layer label.* The label `"umbra/v1/relay-descriptor"`
+> names the descriptor signature. CRY-031 forbids two object types under one
+> label, thus the layer assignment has a label of its own. Part 10 §10.5.3 gives
+> the leaf hash and the node hash no label at all.
 
 > *The cause of six labels of Part 7, Part 11, and Part 12.* Part 7 §7.3.1 signs a
 > `Roster` under `"umbra/v1/device-roster"`. Part 11 §11.9.2 signs a granting
@@ -1836,17 +1858,18 @@ primitive register in the same manner.
 > `"umbra/v1/address-index"` in front of the address keeps that label space
 > apart from the handle label space.
 
-One label names one object type. **[CRY-031]** Two object types MUST NOT share one label.
-Part 11 §11.9.2 signs a granting epoch of a group, and Part 11 §11.9.6 signs a
-moderation epoch of a group. The two objects use two labels of their own.
+One label names one object type. **[CRY-031]** Two object types MUST NOT share
+one label. Part 11 §11.9.2 signs a granting epoch of a group, and Part 11
+§11.9.6 signs a moderation epoch of a group. The two objects use two labels of
+their own.
 
 **[CRY-032]** The label `"umbra/v1/group-roster"` is not used, and an
-implementation MUST NOT add it. Part 11 §11.9.1 makes `GroupRosterSeed_g` from the device
-CSPRNG. That value does not come from a KDF, thus it needs no derivation
-label. The pair key and the KEM key that Part 11 §11.3.3 derives from
-`GroupRosterSeed_g` use `"umbra/v1/group-pair"` and `"umbra/v1/group-kem"`. **[CRY-066]** A group signature MUST use
-`"umbra/v1/group-grant"` or `"umbra/v1/group-moderation"`, and it MUST NOT use a
-label that names a seed.
+implementation MUST NOT add it. Part 11 §11.9.1 makes `GroupRosterSeed_g` from
+the device CSPRNG. That value does not come from a KDF, thus it needs no
+derivation label. The pair key and the KEM key that Part 11 §11.3.3 derives from
+`GroupRosterSeed_g` use `"umbra/v1/group-pair"` and `"umbra/v1/group-kem"`.
+**[CRY-066]** A group signature MUST use `"umbra/v1/group-grant"` or
+`"umbra/v1/group-moderation"`, and it MUST NOT use a label that names a seed.
 
 PQXDH did not domain-separate its signed ephemeral KEM public key from its
 semi-static KEM public key. That omission made a trivial key-confusion attack,
@@ -1855,11 +1878,11 @@ and the two published analyses had to model around it (Fiedler and Günther, PKC
 X3DH-full and PQXDH-reduced, for the same cause. Domain separation is free, and
 there is no cause for an error here.
 
-**[CRY-033]** Implementations MUST bind the **full handshake transcript** into the KDF. The
-transcript holds the two identity keys, the KEM encapsulation key, the KEM
-ciphertext, the protocol version, the handshake mode, and the address type. The
-address type is pairwise or published. This binding is the mechanism that lets
-the security argument survive a future KEM change.
+**[CRY-033]** Implementations MUST bind the **full handshake transcript** into
+the KDF. The transcript holds the two identity keys, the KEM encapsulation key,
+the KEM ciphertext, the protocol version, the handshake mode, and the address
+type. The address type is pairwise or published. This binding is the mechanism
+that lets the security argument survive a future KEM change.
 
 ## 5.12 Explicitly out of scope
 

@@ -32,15 +32,16 @@ intended incentive.
    type carries a `u8` type directly after the version. The queue end-to-end
    record (§6.4.2) and the ratchet record (§6.5) each have one type, thus each
    carries a version and no type.
-4. **Canonical encoding is mandatory.** **[WIR-001]** A parser MUST reject an encoding that is
-   not the unique canonical form. **[WIR-002]** A parser MUST reject a non-minimal length,
-   trailing bytes, and a set reserved bit. **[WIR-003]** A parser MUST reject padding that
-   does not match the specified pattern.
-5. **[WIR-004]** **A party MUST NOT use ciphertext bytes or signature bytes for one of three
-   functions.** Those three functions are an identifier, a deduplication key,
-   and an order tiebreak. **[WIR-005]** **A party MUST NOT use a value that comes from those
-   bytes for one of those three functions.** A hash of a ciphertext is such a
-   value.
+4. **Canonical encoding is mandatory.** **[WIR-001]** A parser MUST reject an
+   encoding that is not the unique canonical form. **[WIR-002]** A parser MUST
+   reject a non-minimal length, trailing bytes, and a set reserved bit.
+   **[WIR-003]** A parser MUST reject padding that does not match the specified
+   pattern.
+5. **[WIR-004]** **A party MUST NOT use ciphertext bytes or signature bytes for
+   one of three functions.** Those three functions are an identifier, a
+   deduplication key, and an order tiebreak. **[WIR-005]** **A party MUST NOT
+   use a value that comes from those bytes for one of those three functions.** A
+   hash of a ciphertext is such a value.
 
    The ML-DSA hint-malleability defect of RustCrypto (CVE-2026-24850, which used
    `<=` in place of `<`) is a canonical-encoding failure. A malleable identifier
@@ -53,22 +54,30 @@ intended incentive.
    two different plaintexts under two different keys. Facebook deduplicated an
    abuse report by ciphertext. That construction let a sender deliver an image
    that the recipient could not report (Dodis and others, CRYPTO 2018).
-6. **[WIR-006]** A parser MUST be total. Each input parses to a correct structure, or the
-   parser returns an error. There are no panics, no unbounded allocations, and
-   no recursion.
+6. **[WIR-006]** A parser MUST be total. Each input parses to a correct
+   structure, or the parser returns an error. There are no panics, no unbounded
+   allocations, and no recursion.
 7. **Each byte value in this specification is in one namespace.** Part 6 gives
-   seven namespaces. These are the cell command (§6.3), the queue command
-   (§6.4), the L6 record kind (§6.4.2), the group queue record kind (§6.4.6),
-   the `PqFrame` kind (§6.5), the application kind (§6.6), and the group
-   control type (§6.6.3). A byte value has a meaning only inside its own namespace. **[WIR-007]** A part
-   outside Part 6 MAY declare a namespace of its own. Part 7 §7.5.5 declares
-   the device-set control type.
+   seven namespaces:
+
+   - the cell command (§6.3);
+   - the queue command (§6.4);
+   - the L6 record kind (§6.4.2);
+   - the group queue record kind (§6.4.6);
+   - the `PqFrame` kind (§6.5);
+   - the application kind (§6.6);
+   - the group control type (§6.6.3).
+
+   A byte value has a meaning only inside its own namespace.
+   **[WIR-007]** A part outside Part 6 MAY declare a namespace of its own.
+   Part 7 §7.5.5 declares the device-set control type.
 
    The two rules below hold for each namespace.
 
-   - **[WIR-008]** A parser MUST read a byte value in the namespace of its own layer only.
-   - **[WIR-009]** An implementation MUST give each namespace a separate type. **[WIR-010]** An
-     implementation MUST NOT convert one type into another.
+   - **[WIR-008]** A parser MUST read a byte value in the namespace of its own
+     layer only.
+   - **[WIR-009]** An implementation MUST give each namespace a separate type.
+     **[WIR-010]** An implementation MUST NOT convert one type into another.
 
    This specification also follows two editorial conventions for a namespace.
    Part 6 names the namespace with each byte value that it gives. A part outside
@@ -239,11 +248,11 @@ A `u24` gives 16 777 216 frames. A session between two relays carries many
 circuits, thus `CIRCUIT_MAX_CELLS` of Part 3 §3.4.3 does not bound it, and
 the sender closes the link at the last value and opens a new session.
 
-**[WIR-140]** A sender MUST send each frame one time, and it MUST set
-`flags` to zero. **[WIR-141]** A receiver MUST
-ignore a frame whose `seq` it already accepted. **[WIR-142]** A receiver MUST
-reject a frame whose `flags` is not zero. Thus each bit of `flags` is a
-reserved bit of `WIR-002`, and no implementation sends a resend flag.
+**[WIR-140]** A sender MUST send each frame one time, and it MUST set `flags` to
+zero. **[WIR-141]** A receiver MUST ignore a frame whose `seq` it already
+accepted. **[WIR-142]** A receiver MUST reject a frame whose `flags` is not
+zero. Thus each bit of `flags` is a reserved bit of `WIR-002`, and no
+implementation sends a resend flag.
 
 > *Cause.* The frame is **not** a reliability layer of its own. TLS and QUIC
 > give the ordering and the retransmission of L1, and the ARQ of Part 3 §3.7
@@ -388,13 +397,13 @@ record that arrives takes its push (Part 8 rule `NTF-128`).
   the derivation above. **[WIR-550]** A client MUST set `sent` to its next
   `seq`, and `received` to the count of the frames of the relay that it
   accepted.
-- **[WIR-237]** A relay MUST verify `auth` before it binds the connection to
-  the session. **[WIR-238]** A relay MUST reject a `SessionResume` whose
+- **[WIR-237]** A relay MUST verify `auth` before it binds the connection to the
+  session. **[WIR-238]** A relay MUST reject a `SessionResume` whose
   `resume_count` is not above the last value that it accepted. **[WIR-239]** If
-  the verification fails, or the record names no session of the relay, the
-  relay MUST close the connection. **[WIR-240]** A
-  relay MUST NOT report the cause of that close. A `SessionResume` that fails
-  `WIR-237` or `WIR-238` MUST NOT change the session that it names.
+  the verification fails, or the record names no session of the relay, the relay
+  MUST close the connection. **[WIR-240]** A relay MUST NOT report the cause of
+  that close. A `SessionResume` that fails `WIR-237` or `WIR-238` MUST NOT
+  change the session that it names.
 - **[WIR-544]** A relay that verified a `SessionResume` MUST compare `sent`
   with the highest `seq` that it accepted plus one, or with zero when it
   accepted no frame. It MUST compare `received` with its own next `seq`. If
@@ -410,11 +419,10 @@ record that arrives takes its push (Part 8 rule `NTF-128`).
   discard the session and each circuit of it, and it MUST open a new session
   with a `SessionOpen` on a new connection.
 - **[WIR-243]** A relay MUST hold the state of a parked session for
-  `SESSION_RESUME_WINDOW`.
-  **[WIR-244]** If the window ends with no accepted resume, the relay MUST
-  discard that state, and it MUST end each circuit of the session under
-  `NET-322`. **[WIR-245]** If a client observed the close more than
-  `SESSION_RESUME_WINDOW` before, it MUST open a new session.
+  `SESSION_RESUME_WINDOW`. **[WIR-244]** If the window ends with no accepted
+  resume, the relay MUST discard that state, and it MUST end each circuit of the
+  session under `NET-322`. **[WIR-245]** If a client observed the close more
+  than `SESSION_RESUME_WINDOW` before, it MUST open a new session.
 - **[WIR-548]** A session between two relays MUST NOT park, and it MUST NOT
   resume: a lost link between two relays ends each circuit on it. A relay MUST
   NOT write a parked session to its store. A relay that starts again holds no
@@ -428,14 +436,13 @@ record that arrives takes its push (Part 8 rule `NTF-128`).
   discard the session state when it receives a `SessionClose`, and it MUST end
   each circuit of that session under `NET-322`. **[WIR-248]**
   Each party MUST erase `session_secret` when the session ends.
-- **[WIR-360]** At the end of a push wake, a client MUST pause its session
-  under `WIR-539`, and it MUST close the connection
-  without a `SessionClose`. **[WIR-361]** If the next connection to that
-  ingress starts inside `SESSION_RESUME_WINDOW` and the client holds the
-  session, the client MUST send a `SessionResume`. In each other case the
-  client MUST send a `SessionOpen` with a new `session_id` and a new
-  `session_secret`. Rule `WIR-246` does not apply to the close of `WIR-360`,
-  because the client does not end the session.
+- **[WIR-360]** At the end of a push wake, a client MUST pause its session under
+  `WIR-539`, and it MUST close the connection without a `SessionClose`.
+  **[WIR-361]** If the next connection to that ingress starts inside
+  `SESSION_RESUME_WINDOW` and the client holds the session, the client MUST send
+  a `SessionResume`. In each other case the client MUST send a `SessionOpen`
+  with a new `session_id` and a new `session_secret`. Rule `WIR-246` does not
+  apply to the close of `WIR-360`, because the client does not end the session.
 - **[WIR-524]** A relay MUST send a `CircuitDestroy` under `NET-322` on the
   link of each neighbor of a circuit that it ends, with the `circ_id` that the
   circuit carries on that link. A receiver MUST drop a `CircuitDestroy` that
@@ -483,16 +490,15 @@ measure two separate durations, and no rule compares their clocks.
 > its place, and the ARQ of Part 3 §3.7 recovers each record of a session
 > that did not resume.
 
-> *Cause of the 4 hours.* With a `SESSION_RESUME_WINDOW` of 60 s, a push wake
-> of Part 8 §8.4.1 opens a new session at each wake, and each new session
-> pays a circuit build. Part 3 §3.4.3 sets `CIRCUIT_MAX_AGE` to 4
-> hours, and a circuit does not outlive its session, thus the window is the same
-> 4 hours. Part 3 §3.12 gives the builds that the resume saves. The cost has two
-> parts. An ingress relay holds a parked session and its circuits for up to 4
-> hours with no connection, and each relay of each chain holds its part of
-> each circuit for that time. A
-> resume links two wakes of one client across a network change. Part 15 §15.3
-> records those residuals.
+> *Cause of the 4 hours.* With a `SESSION_RESUME_WINDOW` of 60 s, a push wake of
+> Part 8 §8.4.1 opens a new session at each wake, and each new session pays a
+> circuit build. Part 3 §3.4.3 sets `CIRCUIT_MAX_AGE` to 4 hours, and a circuit
+> does not outlive its session, thus the window is the same 4 hours. Part 3
+> §3.12 gives the builds that the resume saves. The cost has two parts. An
+> ingress relay holds a parked session and its circuits for up to 4 hours with
+> no connection, and each relay of each chain holds its part of each circuit for
+> that time. A resume links two wakes of one client across a network change.
+> Part 15 §15.3 records those residuals.
 
 ## 6.3 Cell
 
@@ -566,22 +572,26 @@ content, on the same circuit. The relay under test knows each cell of a
 measurement, and Part 10 §10.3 gives the cause that this knowledge does not
 weaken the test.
 
-> **These byte values are cell commands.** The value `0x01` is `RELAY` here,
-> `NEW` in §6.4, an L6 ratchet record in §6.4.2, `hdr` in §6.5, and Text in
-> §6.6. The value `0x02` is `DATA` here, `IDS` in §6.4, a reserved L6 kind in
-> §6.4.2, an epoch-key record in §6.4.6, `ek` in §6.5, and an attachment
-> descriptor in §6.6. The value
-> `0x04` is `EXTENDED` here, `ILINK` in §6.4, `ct2` in §6.5, and Edit in
-> §6.6. The value `0x05` is `DESTROY` here, `IPUT` in §6.4, a handshake record
-> in §6.4.2, a reserved braid kind in §6.5, and Delete in §6.6. The value
-> `0x07` is `MEAS_ECHO` here, and `IBLOB` in §6.4. Rule 7 of §6.1.1 keeps
-> them apart.
+> **These byte values are cell commands.**
+>
+> - The value `0x01` is `RELAY` here, `NEW` in §6.4, an L6 ratchet record in
+>   §6.4.2, `hdr` in §6.5, and Text in §6.6.
+> - The value `0x02` is `DATA` here, `IDS` in §6.4, a reserved L6 kind in
+>   §6.4.2, an epoch-key record in §6.4.6, `ek` in §6.5, and an attachment
+>   descriptor in §6.6.
+> - The value `0x04` is `EXTENDED` here, `ILINK` in §6.4, `ct2` in §6.5, and
+>   Edit in §6.6.
+> - The value `0x05` is `DESTROY` here, `IPUT` in §6.4, a handshake record in
+>   §6.4.2, a reserved braid kind in §6.5, and Delete in §6.6.
+> - The value `0x07` is `MEAS_ECHO` here, and `IBLOB` in §6.4.
+>
+> Rule 7 of §6.1.1 keeps them apart.
 
-**[WIR-011]** The padding in `body` MUST be zero bytes after one marker byte of `0x80`. This
-is the ISO/IEC 7816-4 style. **[WIR-012]** A receiver MUST verify the padding
-pattern. **[WIR-013]** A receiver MUST reject malformed padding. A `PADDING`
-body holds its command byte, the marker, and zero bytes. A receiver MUST
-reject a `PADDING` body that holds a byte between the command byte and the
+**[WIR-011]** The padding in `body` MUST be zero bytes after one marker byte of
+`0x80`. This is the ISO/IEC 7816-4 style. **[WIR-012]** A receiver MUST verify
+the padding pattern. **[WIR-013]** A receiver MUST reject malformed padding. A
+`PADDING` body holds its command byte, the marker, and zero bytes. A receiver
+MUST reject a `PADDING` body that holds a byte between the command byte and the
 marker.
 
 > Padding code is easy to make incorrectly, and it is on the path of each
@@ -604,8 +614,8 @@ Command {
 }
 ```
 
-The command header is 84 bytes. The field `auth` is 32 bytes and it is a MAC. **[WIR-014]** A
-party MUST NOT compute `auth` as an AEAD ciphertext.
+The command header is 84 bytes. The field `auth` is 32 bytes and it is a MAC.
+**[WIR-014]** A party MUST NOT compute `auth` as an AEAD ciphertext.
 
 | `cmd` | Name | Sent by | Payload |
 | --- | --- | --- | --- |
@@ -737,13 +747,12 @@ plus the length of its `Admission`, and an `IDS` whose `payload_len` is not
 > recipient requests, thus a `NEW` holds no field for one. A parser needs one
 > canonical length under §6.1.1 rule 4.
 
-**[WIR-512]** A relay MUST NOT answer a `COVER` of a client. An accepted
-`ACK`, `SUB`, `UNSUB`, `NSUB`, or `DEL` has no answer command: the records
-of a `SUB` and the wakes of an `NSUB` are its effect, and a `NACK` reports a
-refusal.
-**[WIR-513]** A client MUST NOT hold a `COVER`, an `ACK`, an `UNSUB`, an
-`NSUB`, or a `DEL` in the table of the commands that wait for an answer. A `NACK` for one
-of them then names no command of the session, and `WIR-323` drops it. A
+**[WIR-512]** A relay MUST NOT answer a `COVER` of a client. An accepted `ACK`,
+`SUB`, `UNSUB`, `NSUB`, or `DEL` has no answer command: the records of a `SUB`
+and the wakes of an `NSUB` are its effect, and a `NACK` reports a refusal.
+**[WIR-513]** A client MUST NOT hold a `COVER`, an `ACK`, an `UNSUB`, an `NSUB`,
+or a `DEL` in the table of the commands that wait for an answer. A `NACK` for
+one of them then names no command of the session, and `WIR-323` drops it. A
 `SUB` waits in that table, because Part 3 `NET-324` acts on its `REJECTED`. A
 lost `ACK` costs a second delivery, which the cursor of `IMP-135` drops.
 
@@ -756,9 +765,9 @@ with the shape of `MSG` in a queue session, and with the shape of `GMSG` in a
 group-queue session (§6.4.5).
 
 Part 12 §12.3.3 gives the attachment commands. Those commands put a `chunk_id`
-in `queue_id`. **[WIR-107]** An attachment command MUST travel on the separate connection of
-Part 12 §12.8. **[WIR-108]** A client MUST NOT batch an attachment command with a queue
-command.
+in `queue_id`. **[WIR-107]** An attachment command MUST travel on the separate
+connection of Part 12 §12.8. **[WIR-108]** A client MUST NOT batch an attachment
+command with a queue command.
 
 **One attachment command travels between two relays.** `CRPUT` of Part 12
 §12.4.1 carries a chunk from the relay that holds it to a replica relay.
@@ -797,17 +806,17 @@ exactly as to a queue session.
   `ATT-108`).
 
 - **[WIR-526]** A relay that writes a digest of Part 8 §8.5 into a queue at
-  another relay MUST send it as the value of one
-  `UMBRA_DEPOSIT` capsule, on a connection of §6.2.1 that it opens for
-  deposits. One connection MAY carry more than one such capsule to the same
-  relay, each whole and one after the other. Thus a burst of digests costs
-  one handshake and not one for each. The value is one `SEND` of bucket `B0` with its header, and a
-  receiver MUST reject each other length and each other command. The sender
-  MUST derive the key of `auth` under Part 3 §3.2.3 with the static key of
-  the receiving relay, which the relay manifest gives, in the place of
-  `RelaySession_pk`. The capsule is outside the session of §6.2.3, and it
-  gets no answer. A relay that writes a digest into a queue of its own
-  stores it with no capsule.
+  another relay MUST send it as the value of one `UMBRA_DEPOSIT` capsule, on a
+  connection of §6.2.1 that it opens for deposits. One connection MAY carry more
+  than one such capsule to the same relay, each whole and one after the other.
+  Thus a burst of digests costs one handshake and not one for each.
+
+  The value is one `SEND` of bucket `B0` with its header, and a receiver MUST
+  reject each other length and each other command. The sender MUST derive the
+  key of `auth` under Part 3 §3.2.3 with the static key of the receiving relay,
+  which the relay manifest gives, in the place of `RelaySession_pk`. The capsule
+  is outside the session of §6.2.3, and it gets no answer. A relay that writes a
+  digest into a queue of its own stores it with no capsule.
 - **[WIR-527]** A relay MUST hold the `corr_id` of each of the last 4 096
   deposits that it took, and it MUST drop a deposit that repeats one. A
   deposit whose `auth` does not verify drops, and its `corr_id` is not held.
@@ -819,21 +828,20 @@ exactly as to a queue session.
   the session of §6.2.3, and it gets no answer. The signature of the relay
   is its one authority (Part 13 `ABU-103`).
 
-> *Cause of the deposit.* Part 8 rule `NTF-096` makes a relay write a digest
-> as a `SEND`. A
-> `SEND` travels at the end of a circuit under the key of its session, and a
-> relay holds no circuit to another relay of layer 3. The static key of the
-> receiving relay takes the place of the session key, and the held `corr_id`
-> values take the place of the session that rejects a repeat. A repeat older
-> than the window stores one more digest, which costs one more wake and no
+> *Cause of the deposit.* Part 8 rule `NTF-096` makes a relay write a digest as
+> a `SEND`. A `SEND` travels at the end of a circuit under the key of its
+> session, and a relay holds no circuit to another relay of layer 3. The static
+> key of the receiving relay takes the place of the session key, and the held
+> `corr_id` values take the place of the session that rejects a repeat. A repeat
+> older than the window stores one more digest, which costs one more wake and no
 > more.
 
-> *Cause of the capsule.* A `SessionFrame` holds a cell of
-> one bucket, and `WIR-213` puts a `CRPUT` in no cell. The session adds a
-> sequence and a resume, and a copy needs neither: rule `ATT-113` of Part 12 makes the
-> uploader find a copy that did not arrive. A token holder that is no relay
-> can send the capsule, and it then stores the chunk that it registered,
-> which a `CPUT` gives it too.
+> *Cause of the capsule.* A `SessionFrame` holds a cell of one bucket, and
+> `WIR-213` puts a `CRPUT` in no cell. The session adds a sequence and a resume,
+> and a copy needs neither: rule `ATT-113` of Part 12 makes the uploader find a
+> copy that did not arrive. A token holder that is no relay can send the
+> capsule, and it then stores the chunk that it registered, which a `CPUT` gives
+> it too.
 >
 > *Cause.* A relay-to-relay transfer has a relay at each end, thus no party of
 > that transfer is a user. Part 3 §3.3 pads a cell to hide a user record, and
@@ -842,12 +850,12 @@ exactly as to a queue session.
 
 ### 6.4.1 Batching
 
-**[WIR-016]** A client MUST pack each command that is ready together into one cell, up to
-the command area of the bucket. **[WIR-109]** A client MUST NOT send a cell that carries one
-command when a second ready command fits the command area of that cell.
-**Batching is mandatory and it is not optional.** Without batching, an `ACK` of
-88 bytes costs a full cell, and the fixed-size design then destroys the mobile
-data budget.
+**[WIR-016]** A client MUST pack each command that is ready together into one
+cell, up to the command area of the bucket. **[WIR-109]** A client MUST NOT send
+a cell that carries one command when a second ready command fits the command
+area of that cell. **Batching is mandatory and it is not optional.** Without
+batching, an `ACK` of 88 bytes costs a full cell, and the fixed-size design then
+destroys the mobile data budget.
 
 A `SEND` and a `MSG` each take the command area of the bucket (§6.4.2 rule 6). A
 `MSG` fills that area exactly, and a `SEND` leaves 4 bytes. A `GPOST` and a
@@ -868,61 +876,75 @@ QueueE2E {
 ```
 
 1. **[WIR-017]** A party MUST key the record with `K_QE`. The derivation is
-   `K_QE = HKDF-SHA3-256(salt = "", ikm = QE, info = "umbra/v1/queue-e2e"
-   || SenderId, L = 32)`. The value `QE` is the 32-byte per-queue secret of
+   `K_QE = HKDF-SHA3-256(salt = "", ikm = QE, info = "umbra/v1/queue-e2e" ||
+   SenderId, L = 32)`. The value `QE` is the 32-byte per-queue secret of
    Part 3 §3.2.2.
 
    > *Cause.* The info string does not hold `RecipientId`. A sender has to
    > compute `K_QE` to seal a `SEND`, thus a `RecipientId` in the info string
-   > makes the sender hold `RecipientId`. Part 3 §3.2.1 states that `RecipientId` is known
-   > only to the queue owner, and rule `NET-117` of that section states the
-   > prohibition. `SenderId` is unique to the queue and the queue address
-   > carries it, thus it gives the derivation the same separation.
-2. **[WIR-018]** A party MUST use ChaCha20-Poly1305 with a 12-byte nonce and a 16-byte tag.
-   **The L6 overhead is 32 bytes.** That total is 1 byte of `version`, 12 bytes
-   of `nonce`, and the 16-byte tag. It also holds the 1-byte `kind` and the
-   2-byte true length of rule 5, which sit inside the ciphertext. **[WIR-106]** Each version MUST count that true
-   length in each capacity row of §6.9.
+   > makes the sender hold `RecipientId`. Part 3 §3.2.1 states that
+   > `RecipientId` is known only to the queue owner, and rule `NET-117` of that
+   > section states the prohibition. `SenderId` is unique to the queue and the
+   > queue address carries it, thus it gives the derivation the same separation.
+2. **[WIR-018]** A party MUST use ChaCha20-Poly1305 with a 12-byte nonce and a
+   16-byte tag. **The L6 overhead is 32 bytes.** That total is 1 byte of
+   `version`, 12 bytes of `nonce`, and the 16-byte tag. It also holds the 1-byte
+   `kind` and the 2-byte true length of rule 5, which sit inside the ciphertext.
+   **[WIR-106]** Each version MUST count that true length in each capacity row
+   of §6.9.
 3. **[WIR-019]** A sender MUST draw `nonce` from the device CSPRNG for each record.
    **[WIR-020]** A sender MUST NOT use a counter. **[WIR-021]** A sender MUST NOT
    repeat a nonce under one `K_QE`.
 4. **[WIR-022]** A party MUST bind `version || SenderId` as the associated data.
-5. The plaintext starts with a `u16` true length and then a `u8` L6 record kind.
-   The value `0x01` names a ratchet record (§6.5). The values `0x02` and
-   `0x03` are reserved. The value
-   `0x04` names a `NotifyDigest` (Part 8 §8.5.1).
-   The value `0x05` names a handshake record, which the text after rule 6
-   gives. The value `0x06` names a renewal record: the `RenewalRecord` of
-   a party whose ratchet is stale (Part 3 §3.2.6, `NET-326`), which the
-   text after rule 6 gives.
+5. The plaintext starts with a `u16` true length and then a `u8` L6 record kind:
+
+   | Kind | The record |
+   | --- | --- |
+   | `0x01` | A ratchet record (§6.5) |
+   | `0x02`, `0x03` | Reserved |
+   | `0x04` | A `NotifyDigest` (Part 8 §8.5.1) |
+   | `0x05` | A handshake record, which the text after rule 6 gives |
+   | `0x06` | A renewal record: the `RenewalRecord` of a party whose ratchet is stale (Part 3 §3.2.6, `NET-326`), which the text after rule 6 gives |
+   | `0x07` | A hello: the sealed envelope of Part 9 `DIS-143` |
+   | `0x08` | A link-fault report: the `SealedReport` of Part 10 §10.4.2 |
+
    **[WIR-023]** A receiver MUST reject an unknown kind and a reserved kind.
+
    **[WIR-528]** A receiver MUST take the content of a renewal record as a
-   `RenewalRecord`, and it MUST read it on the queue of
-   a contact whose handshake is complete. No ratchet covers the record.
-   The value `0x07` names a hello: the sealed envelope of Part 9 `DIS-143`.
+   `RenewalRecord`, and it MUST read it on the queue of a contact whose
+   handshake is complete. No ratchet covers the record.
+
    **[WIR-534]** A receiver MUST read a hello record on a rendezvous queue of
    Part 9 §9.6 alone, and it MUST reject a hello record on each other queue.
-   The value `0x08` names a link-fault report: the `SealedReport` of Part 10
-   §10.4.2. **[WIR-536]** A receiver MUST read a link-fault report on the
-   report queue of a directory authority alone, and it MUST reject one on
-   each other queue.
-6. **[WIR-024]** **A sender MUST fill the L6 record to a fixed length for the bucket.** That
-   length is the "L6 record on a `MSG`" row of §6.9. That row gives 390 bytes at
-   bucket `B0`. **[WIR-025]** Thus the `payload_len` of a `SEND` MUST equal that row.
 
-   **[WIR-026]** The `payload_len` of a `MSG` MUST equal the L5 payload row of §6.9. That row
-   gives 394 bytes at bucket `B0`. A `MSG` payload carries a `u32` sequence
-   number before the L6 record, thus the two lengths differ by 4 bytes.
+   **[WIR-536]** A receiver MUST read a link-fault report on the report queue
+   of a directory authority alone, and it MUST reject one on each other queue.
+6. **[WIR-024]** **A sender MUST fill the L6 record to a fixed length for the
+   bucket.** That length is the "L6 record on a `MSG`" row of §6.9. That row
+   gives 390 bytes at bucket `B0`. **[WIR-025]** Thus the `payload_len` of a
+   `SEND` MUST equal that row.
 
-   **[WIR-027]** A receiver MUST take the true length from the `u16` inside the ciphertext. **[WIR-028]** A
-   sender MUST fill the remainder with zero bytes inside the ciphertext. A relay
-   prepends the sequence number to the L6 record that the `SEND` carried. **[WIR-029]** A
-   relay MUST NOT move the message to a different bucket at that step.
+   **[WIR-026]** The `payload_len` of a `MSG` MUST equal the L5 payload row of
+   §6.9. That row gives 394 bytes at bucket `B0`. A `MSG` payload carries a
+   `u32` sequence number before the L6 record, thus the two lengths differ by 4
+   bytes.
+
+   **[WIR-027]** A receiver MUST take the true length from the `u16` inside the
+   ciphertext. **[WIR-028]** A sender MUST fill the remainder with zero bytes
+   inside the ciphertext. A relay prepends the sequence number to the L6 record
+   that the `SEND` carried. **[WIR-029]** A relay MUST NOT move the message to a
+   different bucket at that step.
 
    The command header of §6.4 is 84 bytes, and it sits inside the command area.
    Thus a `MSG` fills the command area exactly: 84 + 394 = 478 at bucket `B0`. A
    `SEND` reaches 84 + 390 = 474 and leaves 4 bytes. The cell padding of §6.3
    covers those 4 bytes.
+
+   > *Cause of rule 6.* A relay parses `payload_len` in the clear. Without this
+   > rule a relay reads the exact plaintext length of each record. That length
+   > separates a receipt from a reaction, and a short text from a long one, and
+   > G11 does not permit that result. The cell is padded to the bucket in any
+   > case, thus this rule costs no wire byte and no cell.
 
 **The handshake record.** A flight of `UMBRA-XKhfs` (Part 5 §5.4.8) travels
 as an L6 record of kind `0x05`. No ratchet exists before flight 3, thus the
@@ -950,9 +972,9 @@ HandshakeRecord {                 // the content of an L6 record of kind 0x05
   one queue for each direction.
 
 > *Cause.* Rule `WIR-023` makes each receiver reject a record with no known
-> kind, thus a flight needs a record kind. A kind of its own lets a receiver separate a
-> flight from a ratchet record before it has a ratchet. The `flight` byte
-> costs one byte, and it lets a receiver drop a late flight with no trial
+> kind, thus a flight needs a record kind. A kind of its own lets a receiver
+> separate a flight from a ratchet record before it has a ratchet. The `flight`
+> byte costs one byte, and it lets a receiver drop a late flight with no trial
 > decryption of a 2 339-byte record.
 
 **The renewal record.** The bundle of a channel renewal travels as an L6
@@ -983,12 +1005,6 @@ RenewalRecord {                   // the content of an L6 record of kind 0x06
 > two lengths for one bundle, and a relay reads no length of the record in
 > each case (rule 6).
 
-> *Cause.* A relay parses `payload_len` in the clear. Without this rule a
-> relay reads the exact plaintext length of each record. That length separates
-> a receipt from a reaction, and a short text from a long one, and G11 does
-> not permit that result. The cell is padded to the bucket in any case, thus
-> this rule costs no wire byte and no cell.
-
 7. A relay reads the version, the nonce, and the bucket only. A group record
    travels on a group queue (§6.4.5) and never on a pairwise queue, thus a
    relay that serves a pairwise queue holds no group record. §6.4.6 gives the
@@ -997,8 +1013,8 @@ RenewalRecord {                   // the content of an L6 record of kind 0x06
 8. **[WIR-030]** A receiver MUST reject a record with an unknown version.
    **[WIR-031]** A receiver MUST reject a record whose tag does not verify.
    **[WIR-032]** A receiver MUST NOT report which check failed.
-9. **[WIR-033]** A sender MUST make a new queue before the message count of that queue reaches
-   `ROTATE_AFTER` (Part 3 §3.2.4).
+9. **[WIR-033]** A sender MUST make a new queue before the message count of that
+   queue reaches `ROTATE_AFTER` (Part 3 §3.2.4).
 10. This rule number is reserved. A group send is one `GPOST` of
     §6.4.5 to each replica of the group queue, and no per-recipient record
     exists.
@@ -1007,69 +1023,74 @@ RenewalRecord {                   // the content of an L6 record of kind 0x06
 
 1. `DEL` deletes the queue. The recipient sends it, `QR_auth` authorizes it, and
    the payload is empty.
-2. **[WIR-039]** On a `DEL`, a relay MUST erase the queue record and each stored ciphertext. **[WIR-040]** A
-   relay MUST also erase the sequence counter and the link between the
-   `RecipientId` and the `SenderId`. **[WIR-041]** **A relay MUST NOT retain an identifier of
-   a deleted queue. [WIR-042] A relay MUST NOT keep a record that a queue existed.** A
-   later command that names an unknown identifier gets a `NACK` with reason
-   `REJECTED` (§6.4.4), which is the response to a failed `auth` also.
-3. **[WIR-043]** At the end of a queue rotation, a client MUST send `DEL` to the old relay
-   (Part 3 §3.2.4). **[WIR-044]** A client MUST send each `DEL` at an independent delay with
-   the rotation jitter of Part 3 §3.2.4. **[WIR-045]** A client MUST NOT send more than one
-   `DEL` in one transport session.
-4. **[WIR-046]** **A client MUST NOT send `DEL` at a device revocation.** Part 7 §7.7 step 2b
-   makes an immediate DH ratchet step and step 2c makes a fresh queue. Those two
-   steps cut the revoked device. A `DEL` at that moment names a set of queues at
-   one instant. Two colluding relays then link those queues to one person (A3,
-   G7).
+2. **[WIR-039]** On a `DEL`, a relay MUST erase the queue record and each stored
+   ciphertext. **[WIR-040]** A relay MUST also erase the sequence counter and
+   the link between the `RecipientId` and the `SenderId`. **[WIR-041]** **A
+   relay MUST NOT retain an identifier of a deleted queue. [WIR-042] A relay
+   MUST NOT keep a record that a queue existed.** A later command that names an
+   unknown identifier gets a `NACK` with reason `REJECTED` (§6.4.4), which is
+   the response to a failed `auth` also.
+3. **[WIR-043]** At the end of a queue rotation, a client MUST send `DEL` to the
+   old relay (Part 3 §3.2.4). **[WIR-044]** A client MUST send each `DEL` at an
+   independent delay with the rotation jitter of Part 3 §3.2.4. **[WIR-045]** A
+   client MUST NOT send more than one `DEL` in one transport session.
+4. **[WIR-046]** **A client MUST NOT send `DEL` at a device revocation.** Part 7
+   §7.7 step 2b makes an immediate DH ratchet step and step 2c makes a fresh
+   queue. Those two steps cut the revoked device. A `DEL` at that moment names a
+   set of queues at one instant. Two colluding relays then link those queues to
+   one person (A3, G7).
 5. A relay gives each accepted `SEND` a sequence number. That number is a `u32`
    and it starts at 1 on a new queue. That number counts up by one for each
-   accepted message on that queue. **[WIR-047]** A relay MUST NOT derive the sequence number
-   from the ciphertext, because §6.1.1 rule 5 forbids that derivation.
-6. `MSG` carries the sequence number of the message that it delivers. **[WIR-110]** A relay
-   MUST emit each `MSG` of a queue that it holds and that no `ACK` covers.
-   **[WIR-111]** A relay MUST NOT erase a message before `MSG_TTL` and before an `ACK`
-   covers it. The randomized delay of Part 3 §3.5.3 gives the emission order,
-   thus a gap in the arrival order can close by itself.
+   accepted message on that queue. **[WIR-047]** A relay MUST NOT derive the
+   sequence number from the ciphertext, because §6.1.1 rule 5 forbids that
+   derivation.
+6. `MSG` carries the sequence number of the message that it delivers.
+   **[WIR-110]** A relay MUST emit each `MSG` of a queue that it holds and that
+   no `ACK` covers. **[WIR-111]** A relay MUST NOT erase a message before
+   `MSG_TTL` and before an `ACK` covers it. The randomized delay of Part 3
+   §3.5.3 gives the emission order, thus a gap in the arrival order can close by
+   itself.
 7. `ACK` carries one sequence number and it is cumulative. `QR_auth` authorizes
-   it. An `ACK` names a sequence number `s`. **[WIR-048]** A relay MUST then delete each
-   message on that queue with a sequence number at or below `s`.
+   it. An `ACK` names a sequence number `s`. **[WIR-048]** A relay MUST then
+   delete each message on that queue with a sequence number at or below `s`.
 
    **An `ACK` does not reach the sending device.** An `ACK` is an instruction to
-   the relay. **[WIR-049]** A relay MUST NOT forward an `ACK` to the sender. Part 7 §7.5.5
-   gives the device-set acknowledgment, which is an application record on the
-   reverse sync queue.
+   the relay. **[WIR-049]** A relay MUST NOT forward an `ACK` to the sender.
+   Part 7 §7.5.5 gives the device-set acknowledgment, which is an application
+   record on the reverse sync queue.
 
    **A cumulative `ACK` deletes each message below the named number, thus an
    `ACK` across a hole destroys a message that no party delivered.** Four rules
    close that path.
 
-   - **[WIR-112]** A recipient MUST NOT send an `ACK` that names `s` before it received
-     each message of that queue at or below `s`.
-   - **[WIR-113]** If the lowest sequence number that a recipient did not receive is `h`, that
-     recipient MUST set `s` below `h`.
-   - **[WIR-114]** A recipient MUST count a record that it stored under rule 8 as received.
-     An undecryptable record is a received record, and it is not a hole.
-   - **[WIR-115]** A recipient MUST NOT acknowledge a `MSG` before it commits that record to
-     the local database. The hello of a contact request (Part 9 §9.6) arrives
-     on a rendezvous queue, and its request is no row of the queue state.
-     Thus a client stores the request first, in a commit of its own. It then
-     commits the batch that moves the cursor of that queue. It writes a
-     capsule of that step only after that commit, the `ACK` among them. A store that does
-     not take the request ends the run with no later commit and no `ACK`. A
-     run that ends between the two commits gets the hello again from the
-     relay, and the client drops that second copy as a copy. That order
+   - **[WIR-112]** A recipient MUST NOT send an `ACK` that names `s` before it
+     received each message of that queue at or below `s`.
+   - **[WIR-113]** If the lowest sequence number that a recipient did not
+     receive is `h`, that recipient MUST set `s` below `h`.
+   - **[WIR-114]** A recipient MUST count a record that it stored under rule 8
+     as received. An undecryptable record is a received record, and it is not a
+     hole.
+   - **[WIR-115]** A recipient MUST NOT acknowledge a `MSG` before it commits
+     that record to the local database. The hello of a contact request (Part 9
+     §9.6) arrives on a rendezvous queue, and its request is no row of the queue
+     state. Thus a client stores the request first, in a commit of its own. It
+     then commits the batch that moves the cursor of that queue. It writes a
+     capsule of that step only after that commit, the `ACK` among them. A store
+     that does not take the request ends the run with no later commit and no
+     `ACK`. A run that ends between the two commits gets the hello again from
+     the relay, and the client drops that second copy as a copy. That order
      satisfies this rule.
 
    A hole can stay open. A relay that holds a message and does not emit it
    blocks the acknowledgment point, and `QUEUE_QUOTA` then stops the queue. Two
    rules bound that state.
 
-   - **[WIR-116]** If a hole at `h` stays open for `ACK_HOLE_TIMEOUT`, a recipient MAY send an
-     `ACK` above `h`. Part 3 §3.2.4 gives `ACK_HOLE_TIMEOUT`.
-   - **[WIR-117]** A recipient that acknowledges above a hole MUST show a delivery gap for
-     that conversation. **[WIR-118]** That recipient MUST NOT show the conversation as
-     complete.
+   - **[WIR-116]** If a hole at `h` stays open for `ACK_HOLE_TIMEOUT`, a
+     recipient MAY send an `ACK` above `h`. Part 3 §3.2.4 gives
+     `ACK_HOLE_TIMEOUT`.
+   - **[WIR-117]** A recipient that acknowledges above a hole MUST show a
+     delivery gap for that conversation. **[WIR-118]** That recipient MUST NOT
+     show the conversation as complete.
 
    > *Cause.* The relay assigns the sequence number, thus a hole is a statement
    > by the relay and it is not evidence of a loss (rule 9 below). But a
@@ -1078,17 +1099,18 @@ RenewalRecord {                   // the content of an L6 record of kind 0x06
    > tell that the message existed. `ACK_HOLE_TIMEOUT` trades that outcome
    > against a queue that a hostile relay can freeze.
 
-8. **[WIR-050]** A recipient MUST store a record that it cannot decrypt before it acknowledges
-   a later record. Thus a decryption retry after a ratchet repair stays possible,
-   and the key request of §6.6.11 can recover the record.
-9. **[WIR-051]** A recipient MAY use a hole in the sequence to find that a relay did not
-   deliver a message. **[WIR-052]** A recipient MUST NOT treat the sequence as proof of a
-   loss, because the relay assigns the sequence.
-10. **[WIR-053]** A client MUST NOT use the sequence number as a message identifier. The
-    number has queue scope, a relay assigns it, and a rotation resets it.
+8. **[WIR-050]** A recipient MUST store a record that it cannot decrypt before
+   it acknowledges a later record. Thus a decryption retry after a ratchet
+   repair stays possible, and the key request of §6.6.11 can recover the record.
+9. **[WIR-051]** A recipient MAY use a hole in the sequence to find that a relay
+   did not deliver a message. **[WIR-052]** A recipient MUST NOT treat the
+   sequence as proof of a loss, because the relay assigns the sequence.
+10. **[WIR-053]** A client MUST NOT use the sequence number as a message
+    identifier. The number has queue scope, a relay assigns it, and a rotation
+    resets it.
 11. **The protocol gives no sender-side withdrawal.** No command withdraws an
-    enqueued ciphertext. **[WIR-054]** A relay MUST reject a delete command that `QS_auth`
-    authorizes.
+    enqueued ciphertext. **[WIR-054]** A relay MUST reject a delete command that
+    `QS_auth` authorizes.
 12. To recall a message that a recipient already holds, a client sends the
     tombstone of §6.6, which is kind `0x05`. That mechanism is a request to the
     client of the recipient. **[WIR-055]** A client MUST NOT show a deletion as an
@@ -1102,13 +1124,12 @@ RenewalRecord {                   // the content of an L6 record of kind 0x06
 
 ### 6.4.4 The rejection, `NACK`
 
-A relay rejects a command under about 140 rules of this specification.
-Without a typed rejection, a client cannot tell an
-authorization failure from a dropped cell, a relay outage, or a queue that
-`WIR-039` erased. Each of the four looks like the absence of an inbound cell,
-which Part 3 §3.5.2 fills with a cover cell. `NACK` gives each rejection one
-wire form. It travels in the place of a cover cell, thus it adds no cell that an
-observer can count.
+A relay rejects a command under about 140 rules of this specification. Without a
+typed rejection, a client cannot tell an authorization failure from a dropped
+cell, a relay outage, or a queue that `WIR-039` erased. Each of the four looks
+like the absence of an inbound cell, which Part 3 §3.5.2 fills with a cover
+cell. `NACK` gives each rejection one wire form. It travels in the place of a
+cover cell, thus it adds no cell that an observer can count.
 
 ```
 NackPayload {                     // 17 bytes
@@ -1285,13 +1306,13 @@ manner of §6.4.3 rule 5.
   carries the `corr_id` of that `GPOST`. The `GSEQ` sits in the place that
   Part 3 §3.7 gives the acknowledgment of a `SEND`.
 - **[WIR-385]** If a relay holds a record whose bytes equal the
-  `GroupQueueRecord` of a `GPOST`, it MUST answer with the `seq` that it
-  holds. **[WIR-386]** That relay MUST NOT store a second copy. A sender under
-  the ARQ of Part 3 §3.7 sends one record to a replica again in a later
-  session, and this rule makes that send idempotent. The comparison selects nothing but a stored `seq`, and
-  `WIR-382` keeps that value out of the three functions of `WIR-004`. A
-  comparison that fails stores a second record, and the `msg_id` rule
-  `WIR-065` removes the duplicate at each reader.
+  `GroupQueueRecord` of a `GPOST`, it MUST answer with the `seq` that it holds.
+  **[WIR-386]** That relay MUST NOT store a second copy. A sender under the ARQ
+  of Part 3 §3.7 sends one record to a replica again in a later session, and
+  this rule makes that send idempotent. The comparison selects nothing but a
+  stored `seq`, and `WIR-382` keeps that value out of the three functions of
+  `WIR-004`. A comparison that fails stores a second record, and the `msg_id`
+  rule `WIR-065` removes the duplicate at each reader.
 
 **The subscription.** There is no acknowledgment from a reader.
 
@@ -1309,11 +1330,11 @@ manner of §6.4.3 rule 5.
 
 **The rotation of the credentials.**
 
-- **[WIR-390]** On a `GKEY`, a relay MUST replace `read_pk` and `write_pk`
-  with the two values of the payload. **[WIR-522]** It MUST replace
-  `own_pk` with the third value, and it MUST keep no previous `own_pk`: a
-  command under the owner key that the `GKEY` replaced is refused at once. A
-  `GKEY` that keeps the owners carries the present `own_pk`. **[WIR-391]** A relay MUST keep the
+- **[WIR-390]** On a `GKEY`, a relay MUST replace `read_pk` and `write_pk` with
+  the two values of the payload. **[WIR-522]** It MUST replace `own_pk` with the
+  third value, and it MUST keep no previous `own_pk`: a command under the owner
+  key that the `GKEY` replaced is refused at once. A `GKEY` that keeps the
+  owners carries the present `own_pk`. **[WIR-391]** A relay MUST keep the
   previous `read_pk` for `GROUP_READ_GRACE` after the `GKEY`. **[WIR-392]** A
   relay MUST keep the previous `write_pk` for `GROUP_WRITE_GRACE` after the
   `GKEY`.
@@ -1351,11 +1372,10 @@ member, including the records that a reader stores for a later retry.
 
 > *Cause.* A group message as one pairwise `SEND` for each member costs 499
 > sends at 500 members, and a membership change costs each member 499 sends
-> more. The group
-> queue puts one record at a relay that holds no membership list, and §6.4.6
-> gives the tag vector that keeps the attribution the pairwise channel gave.
-> Part 11 §11.1 gives the argument, and Part 11 §11.5 gives what the
-> group-queue relay learns.
+> more. The group queue puts one record at a relay that holds no membership
+> list, and §6.4.6 gives the tag vector that keeps the attribution the pairwise
+> channel gave. Part 11 §11.1 gives the argument, and Part 11 §11.5 gives what
+> the group-queue relay learns.
 
 ### 6.4.6 The group queue record
 
@@ -1591,15 +1611,16 @@ the label.
   failure from `session_tag`, from `send_index`, and from the `epoch` of the
   braid frame. **[WIR-254]** A receiver MUST use `send_index` to find the hole
   that Part 7 §7.5.6 rule `DEV-097` names.
+
   **[WIR-560]** A receiver MUST NOT count a hole at a `send_index` of a record
-  that opened, also in an earlier run, thus it MUST keep the indices that
-  opened in the store with the channel. It MUST NOT count a hole more than
-  `MAX_SKIP` of Part 5 §5.5.4 above the newest `send_index` that opened, or
-  more than 2 048 below it. Before the first record of a session opens, the
-  newest index counts as one below zero. No key covers the `send_index` of a
-  record that does not open, and each holder of the queue key can write such
-  a record. The two bounds keep the key requests that it draws near the
-  records of the session, and the rate of Part 11 §11.10 bounds their count.
+  that opened, also in an earlier run, thus it MUST keep the indices that opened
+  in the store with the channel. It MUST NOT count a hole more than `MAX_SKIP`
+  of Part 5 §5.5.4 above the newest `send_index` that opened, or more than 2 048
+  below it. Before the first record of a session opens, the newest index counts
+  as one below zero. No key covers the `send_index` of a record that does not
+  open, and each holder of the queue key can write such a record. The two bounds
+  keep the key requests that it draws near the records of the session, and the
+  rate of Part 11 §11.10 bounds their count.
 - **[WIR-255]** A receiver MUST reject a `version` that is not `0x02`.
 
 Part 2 §2.4 rule `THR-009` names a session identifier, a ratchet epoch, and a
@@ -1656,14 +1677,16 @@ A group message carries `msg_id` in the `AppMessage` that is the `app` of a
 `GroupQueueRecord`. No wrapper names the group, because the group queue names
 it, and §6.6.2 reserves the kind of a wrapper.
 
-**[WIR-056]** A sender MUST draw `msg_id` from the device CSPRNG. **[WIR-057]** A sender MUST NOT derive
-`msg_id` from the content or from a counter. **[WIR-058]** A sender MUST NOT use a value that
-a different conversation also holds.
+**[WIR-056]** A sender MUST draw `msg_id` from the device CSPRNG. **[WIR-057]**
+A sender MUST NOT derive `msg_id` from the content or from a counter.
+**[WIR-058]** A sender MUST NOT use a value that a different conversation also
+holds.
 
-**[WIR-059]** A sender MUST draw a new `msg_id` for each message and for each conversation.
-**A group is one conversation.** **[WIR-060]** A group send MUST carry one `msg_id` to each
-member. One `GPOST` of §6.4.5 carries that one value to each replica of the
-group queue of Part 11 §11.2. **[WIR-061]** An edit or a tombstone MUST name the `msg_id` of the target.
+**[WIR-059]** A sender MUST draw a new `msg_id` for each message and for each
+conversation. **A group is one conversation.** **[WIR-060]** A group send MUST
+carry one `msg_id` to each member. One `GPOST` of §6.4.5 carries that one value
+to each replica of the group queue of Part 11 §11.2. **[WIR-061]** An edit or a
+tombstone MUST name the `msg_id` of the target.
 
 > *Cause.* A moderation epoch of Part 11 §11.9.6 names one `msg_id` for a
 > target. A per-recipient value matches the history of one recipient only,
@@ -1678,34 +1701,36 @@ group queue of Part 11 §11.2. **[WIR-061]** An edit or a tombstone MUST name th
 > WIR-058 forbids one value in two conversations, and WIR-062 makes a forward
 > and a re-share new messages.
 
-**[WIR-062]** A client MUST NOT copy a `msg_id` that it received from a peer. A forward, a
-quote, and a re-share are new messages. **[WIR-063]** A sender MUST draw a new `msg_id` for
-each one.
+**[WIR-062]** A client MUST NOT copy a `msg_id` that it received from a peer. A
+forward, a quote, and a re-share are new messages. **[WIR-063]** A sender MUST
+draw a new `msg_id` for each one.
 
-**[WIR-064]** A sender MUST NOT use one `msg_id` two times on one chain. **[WIR-065]** A receiver MUST
-reject the second use. **[WIR-066]** A receiver MUST NOT change a record that the first use
-named. The triple of conversation, sender, and `msg_ref` is one address. Part 7
-§7.5.3 deduplicates on that address. Part 7 §7.5.6 builds the edit and the
-deletion on it.
+**[WIR-064]** A sender MUST NOT use one `msg_id` two times on one chain.
+**[WIR-065]** A receiver MUST reject the second use. **[WIR-066]** A receiver
+MUST NOT change a record that the first use named. The triple of conversation,
+sender, and `msg_ref` is one address. Part 7 §7.5.3 deduplicates on that
+address. Part 7 §7.5.6 builds the edit and the deletion on it.
 
 **The stored reference is `msg_ref`.** **[WIR-067]** A client MUST derive
 `msg_ref = SHA3-256(K_set || msg_id)` truncated to 16 bytes. The value `K_set`
-is the `DeviceSetKey` of Part 4 §4.2. **[WIR-068]** A client MUST use `msg_ref` for each
-stored reference to a message. Those stored references are the deduplication
-address of Part 7 §7.5.3 and the retransmission key of Part 7 §7.5.5. They also
-include the edit target and the deletion target of Part 7 §7.5.6.
+is the `DeviceSetKey` of Part 4 §4.2. **[WIR-068]** A client MUST use `msg_ref`
+for each stored reference to a message. Those stored references are the
+deduplication address of Part 7 §7.5.3 and the retransmission key of Part 7
+§7.5.5. They also include the edit target and the deletion target of Part 7
+§7.5.6.
 
-**[WIR-069]** A client MUST NOT store a raw `msg_id` as a key, as an index, or as a join
-column. Each device of one device set holds one `K_set`, thus each device
-derives the same `msg_ref`. A device set therefore deduplicates and orders on
-`msg_ref` across the set. The wire carries the raw `msg_id`.
+**[WIR-069]** A client MUST NOT store a raw `msg_id` as a key, as an index, or
+as a join column. Each device of one device set holds one `K_set`, thus each
+device derives the same `msg_ref`. A device set therefore deduplicates and
+orders on `msg_ref` across the set. The wire carries the raw `msg_id`.
 
 A record that a client has not yet delivered needs the raw value again at the
-send. **[WIR-070]** Thus a client MAY hold a raw `msg_id` inside the stored body of an
-undelivered record. Part 7 §7.5.5 rule 1 retains an unacknowledged sync record,
-and Part 3 §3.5.4 holds a queued receipt. **[WIR-071]** A client MUST erase that raw value
-when the retention ends. **[WIR-072]** A client MUST NOT index such a body by the raw value. **[WIR-073]** A
-client MUST NOT copy that raw value into a different row.
+send. **[WIR-070]** Thus a client MAY hold a raw `msg_id` inside the stored body
+of an undelivered record. Part 7 §7.5.5 rule 1 retains an unacknowledged sync
+record, and Part 3 §3.5.4 holds a queued receipt. **[WIR-071]** A client MUST
+erase that raw value when the retention ends. **[WIR-072]** A client MUST NOT
+index such a body by the raw value. **[WIR-073]** A client MUST NOT copy that
+raw value into a different row.
 
 > *Cause.* One logical message carries one `msg_id` at each device of the sender
 > and at each device of each recipient. A raw stored key is thus a direct join
@@ -1767,43 +1792,46 @@ AttachmentBody {
 }
 ```
 
-**[WIR-531]** A sender MAY put the trailer after the descriptor. A `name_len`
-of zero carries no name, and a `preview_len` of zero carries no preview. A
-body that ends after the descriptor carries neither.
+**[WIR-531]** A sender MAY put the trailer after the descriptor. A `name_len` of
+zero carries no name, and a `preview_len` of zero carries no preview. A body
+that ends after the descriptor carries neither.
+
 **[WIR-532]** A parser MUST reject a body of kind `0x02` whose bytes after the
 descriptor are not one complete trailer, with or without its caption. It MUST
-also reject a trailer that carries no name, no preview, and no caption.
-The body that ends after the descriptor is the one form of that body.
-It MUST also reject a `name` that is
-not valid UTF-8, a `name_len` above `FILE_NAME_MAX`, a `name` that holds a
-control character, `/`, or `\`, and a `name` of `.` or `..`. A sender MUST NOT
-send a trailer or a `name` that this rule rejects. A sender MUST NOT send a
-`name` that holds a bidirectional format character: U+061C, U+200E, U+200F,
-U+202A to U+202E, and U+2066 to U+2069. A parser MUST NOT reject a body for
-such a character. A stored record and a record of an earlier sender
-can hold one, and their file must stay in reach. The parser MUST take each such
-character out of the `name` before a view, a save, or a store uses it. The
-parser MUST read a `name` that is then empty, `.`, or `..` as no name.
+also reject a trailer that carries no name, no preview, and no caption. The
+body that ends after the descriptor is the one form of that body. It MUST also
+reject a `name` that is not valid UTF-8, a `name_len` above `FILE_NAME_MAX`, a
+`name` that holds a control character, `/`, or `\`, and a `name` of `.` or
+`..`. A sender MUST NOT send a trailer or a `name` that this rule rejects.
+
+A sender MUST NOT send a `name` that holds a bidirectional format character:
+U+061C, U+200E, U+200F, U+202A to U+202E, and U+2066 to U+2069. A parser MUST
+NOT reject a body for such a character. A stored record and a record of an
+earlier sender can hold one, and their file must stay in reach. The parser
+MUST take each such character out of the `name` before a view, a save, or a
+store uses it. The parser MUST read a `name` that is then empty, `.`, or `..`
+as no name.
+
 **[WIR-533]** A `preview` MUST be a JPEG of at most `PREVIEW_MAX` bytes that
 starts with `FF D8 FF` and ends with `FF D9`. A parser MUST reject a body with
 another `preview`, and a body whose `mime_class` is not `0x01` or `0x02` and
-that carries a preview. Part 12 §12.7 gives `FILE_NAME_MAX` and
-`PREVIEW_MAX`.
+that carries a preview. Part 12 §12.7 gives `FILE_NAME_MAX` and `PREVIEW_MAX`.
+
 **[WIR-535]** A `caption` is the text that the sender wrote with the file. A
 sender MUST put it only after a complete name and preview part, which may be
 empty. A parser MUST reject a `caption_len` of zero, one above `CAPTION_MAX`,
 and a `caption` that is not valid UTF-8. A view shows the caption as the text
-of the message. A record of kind `0x02` answers no message, thus a draft with
-a file and an answer is malformed. Part 12 §12.7 gives `CAPTION_MAX`.
+of the message. A record of kind `0x02` answers no message, thus a draft with a
+file and an answer is malformed. Part 12 §12.7 gives `CAPTION_MAX`.
 
 > *Cause.* The descriptor omits the name and the preview, because each party
 > that sees a descriptor sees it (Part 12 §12.3). The body is inside the
 > ratchet, thus both reach the recipient and no relay. A name with a path, or
 > with a control character, would let a sender choose where a save writes or
 > what a view shows. A name with a bidirectional format character shows a
-> different extension than its bytes hold. A preview is a small picture that a view shows in
-> place of a picture that waits for a tap (Part 14 `IMP-167`), thus the user
-> knows what the download brings.
+> different extension than its bytes hold. A preview is a small picture that a
+> view shows in place of a picture that waits for a tap (Part 14 `IMP-167`),
+> thus the user knows what the download brings.
 
 For kind `0x03`, for kind `0x06`, for kind `0x07`, and for kind `0x08`,
 §6.6.9 gives the body. Part 3 §3.5.4 sets `RECEIPT_BATCH_MAX` and gives the
@@ -1829,22 +1857,23 @@ For kind `0x04` the body is an `EditBody`, and for kind `0x05` the body is a
 `DeleteBody`. §6.6.1 gives the two structures. Part 7 §7.5.6 gives the edit
 window, the authorization, and the interface rules.
 
-Each kind of this table is in exactly one class of Part 7 §7.5.3. **[WIR-074]** A new kind
-MUST declare its class in this table. **[WIR-075]** A client MUST NOT process a kind that
-declares no class.
+Each kind of this table is in exactly one class of Part 7 §7.5.3. **[WIR-074]**
+A new kind MUST declare its class in this table. **[WIR-075]** A client MUST NOT
+process a kind that declares no class.
 
 > **These byte values are application kinds.** A cell command of §6.3 and a
 > queue command of §6.4 use the same byte values with different meanings. An L6
 > record kind of §6.4.2 and a `PqFrame` kind of §6.5 also do.
 
-The field `sent_at` is **advisory only**. **[WIR-076]** An implementation MUST NOT use it for
-a security decision, for an ordering guarantee, or for a replay check. Mobile
-clocks are unreliable, and an attacker can influence them. The sender-chain
-position and the local insertion sequence give the order (Part 7 §7.5.3).
+The field `sent_at` is **advisory only**. **[WIR-076]** An implementation MUST
+NOT use it for a security decision, for an ordering guarantee, or for a replay
+check. Mobile clocks are unreliable, and an attacker can influence them. The
+sender-chain position and the local insertion sequence give the order (Part 7
+§7.5.3).
 
-**[WIR-077]** Typing indicators (`0x08`) MUST be off by default. They multiply the message
-rate by about a factor of ten. They also push a conversation into the traffic
-regime where correlation attacks operate best.
+**[WIR-077]** Typing indicators (`0x08`) MUST be off by default. They multiply
+the message rate by about a factor of ten. They also push a conversation into
+the traffic regime where correlation attacks operate best.
 
 ### 6.6.1 The edit body and the delete body
 
@@ -1864,12 +1893,12 @@ DeleteBody {
 ```
 
 **The edit body.** There is no inner length field, because `body_len` gives the
-size. **[WIR-078]** A parser MUST reject a `body_len` below 18. **[WIR-079]** A parser MUST reject a
-`new_body` that is not valid UTF-8. **[WIR-434]** A receiver MUST resolve the
-target of an edit through each `RichRecord` wrapper. **[WIR-260]** A receiver
-MUST apply an edit only when the innermost
-kind of the target is `0x01`. **[WIR-081]** A receiver MUST reject an edit that names an attachment
-descriptor, a reaction, or a control kind.
+size. **[WIR-078]** A parser MUST reject a `body_len` below 18. **[WIR-079]** A
+parser MUST reject a `new_body` that is not valid UTF-8. **[WIR-434]** A
+receiver MUST resolve the target of an edit through each `RichRecord` wrapper.
+**[WIR-260]** A receiver MUST apply an edit only when the innermost kind of the
+target is `0x01`. **[WIR-081]** A receiver MUST reject an edit that names an
+attachment descriptor, a reaction, or a control kind.
 
 **[WIR-261]** A receiver MUST replace the innermost text of the target only.
 **[WIR-262]** A receiver MUST NOT change the `reply_target`, the `thread_root`,
@@ -1878,8 +1907,9 @@ or the mention list of the target. A group text is the `app` of a
 Part 7 §7.5.6 and Part 11 §11.11 apply an edit to both, and this rule makes
 that possible.
 
-**[WIR-082]** A receiver MUST accept an edit only from the sender of the target. **[WIR-083]** The ratchet
-direction gives that authorization, and a client MUST NOT sign an edit.
+**[WIR-082]** A receiver MUST accept an edit only from the sender of the target.
+**[WIR-083]** The ratchet direction gives that authorization, and a client MUST
+NOT sign an edit.
 
 At bucket `B0` a `new_body` holds a maximum of **138 bytes**. §6.9 gives 155
 bytes to the body of an `AppMessage` at `B0`. That figure is the `Text, default
@@ -1894,8 +1924,8 @@ step.
 devices of one user, and the value `0x02` names a deletion for the other party.
 The value `0x03` names a deletion of the whole pairwise conversation at the
 other party (Part 7 `DEV-334`). Part 7 §7.5.3 gives the routing of each value.
-**[WIR-084]** A receiver MUST reject a record
-whose scope byte does not match the channel that carried it.
+**[WIR-084]** A receiver MUST reject a record whose scope byte does not match
+the channel that carried it.
 
 **[WIR-558]** A receiver MUST reject a record of scope `0x03` that a group
 record carries. **[WIR-559]** A parser MUST reject a record of scope `0x03`
@@ -1903,17 +1933,19 @@ whose `k` is not 1. That one target is the bound of Part 7 `DEV-335`: the
 `msg_id` of the newest message of the receiver that the sender holds, or 16
 zero bytes when the sender holds none.
 
-**[WIR-085]** A parser MUST reject a record when (`body_len` − 2) mod 16 is not 0. **[WIR-086]** A parser
-MUST reject a `k` of 0. **[WIR-087]** A parser MUST reject a `k` above `DELETE_BATCH_MAX`. **[WIR-088]** A
-parser MUST reject a target list that is not in strictly increasing byte order.
-**[WIR-089]** A parser MUST reject a repeated target. These rules give one canonical form, as
+**[WIR-085]** A parser MUST reject a record when (`body_len` − 2) mod 16 is
+not 0. **[WIR-086]** A parser MUST reject a `k` of 0. **[WIR-087]** A parser MUST
+reject a `k` above `DELETE_BATCH_MAX`. **[WIR-088]** A parser MUST reject a
+target list that is not in strictly increasing byte order. **[WIR-089]** A
+parser MUST reject a repeated target. These rules give one canonical form, as
 §6.1.1 rule 4 requires.
 
-`DELETE_BATCH_MAX` is **9**. §6.9 gives 155 bytes to the body of an
-`AppMessage` at bucket `B0`. The two fixed bytes leave 153 bytes, and each
-target takes 16 bytes. Thus the maximum is 9. **[WIR-090]** A later version MUST derive this value
-again if the bucket ladder or the default chunk width changes. **[WIR-091]** If more targets
-wait, the client MUST split them across two records.
+`DELETE_BATCH_MAX` is **9**. §6.9 gives 155 bytes to the body of an `AppMessage`
+at bucket `B0`. The two fixed bytes leave 153 bytes, and each target takes 16
+bytes. Thus the maximum is 9. **[WIR-090]** A later version MUST derive this
+value again if the bucket ladder or the default chunk width changes.
+**[WIR-091]** If more targets wait, the client MUST split them across two
+records.
 
 > *Cause.* A batch that does not fit `B0` moves the cell into bucket `B1`. Such
 > a cell is then the one oversized cell in a private conversation, and a relay
@@ -1927,9 +1959,9 @@ wait, the client MUST split them across two records.
 
 ### 6.6.2 The group record
 
-Kind `0x12` is reserved. A group
-content record is the `app` of a `GroupQueueRecord` (§6.4.6), and it needs no
-wrapper because the queue names the group.
+Kind `0x12` is reserved. A group content record is the `app` of a
+`GroupQueueRecord` (§6.4.6), and it needs no wrapper because the queue names the
+group.
 
 ### 6.6.3 The group control record
 
@@ -2101,34 +2133,35 @@ epoch takes `group_id || BE32(epoch_index) || previous_epoch_hash ||
 BE16(actor_index) || actor_role || action_count || (action || target)` for
 each action after its label, and `author_hint` stays out of it.
 
-- **[WIR-489]** A parser MUST reject an `op` of a `PlainEpoch` that the
-  layout above does not hold, and a `PlainEpoch` whose length does not equal
-  the sum of the fields of its `op`. **[WIR-490]** A parser MUST reject a
-  `GrantingEpoch` or a `ModerationEpoch` whose length does not hold the one
-  1 952-byte roster key of its signer and the 3 309-byte signature after
-  the fields before them. **[WIR-491]** A parser
-  MUST reject an `action_count` of 0 or above `MOD_ACTION_MAX`, and an
-  `action` that the layout above does not hold. **[WIR-492]** A parser MUST
-  reject a `GroupPresence` whose length is not 1.
+- **[WIR-489]** A parser MUST reject an `op` of a `PlainEpoch` that the layout
+  above does not hold, and a `PlainEpoch` whose length does not equal the sum of
+  the fields of its `op`. **[WIR-490]** A parser MUST reject a `GrantingEpoch`
+  or a `ModerationEpoch` whose length does not hold the one 1 952-byte roster
+  key of its signer and the 3 309-byte signature after the fields before them.
+  **[WIR-491]** A parser MUST reject an `action_count` of 0 or above
+  `MOD_ACTION_MAX`, and an `action` that the layout above does not hold.
+  **[WIR-492]** A parser MUST reject a `GroupPresence` whose length is not 1.
 
-> *Cause.* Without one layout, two implementations can select two byte
-> orders, and no vector of `WIR-479` can exist. The layouts follow the
-> preimages,
-> thus a verifier reads the signed bytes from the record in one pass.
+> *Cause.* Without one layout, two implementations can select two byte orders,
+> and no vector of `WIR-479` can exist. The layouts follow the preimages, thus a
+> verifier reads the signed bytes from the record in one pass.
 
 The authority path is each granting epoch of Part 11 §11.9.2 on the path of
 every current role holder, concatenated, as `GRP-068` keeps it.
 
-A `JoinRecord` is 1 345 bytes as an `AppMessage`, thus it uses bucket `B1`.
-An offer is 3 973 bytes and the name as an `AppMessage`, thus it uses bucket
-`B2`. An admit is 578 bytes as an `AppMessage` at 3 members (a one-segment
-descriptor of 257 bytes), thus it uses bucket `B1`; at `GROUP_MAX` the
-descriptor of a 21-segment snapshot is 2 657 bytes, the admit is 2 978
-bytes, and it uses bucket `B2`. A granting epoch carries an ML-DSA-65
-signature of 3 309 bytes and a roster public key of 1 952 bytes, thus a path
-at `ROLE_HOLDER_MAX` is about 86 KB and fits no cell. The authority path
-therefore travels in the `RosterSnapshot` in every case, under Part 11
-§11.9.8 rules `GRP-324` and `GRP-325`, and the admit carries none.
+The sizes as an `AppMessage` set the bucket of each record:
+
+- A `JoinRecord` is 1 345 bytes, thus it uses bucket `B1`.
+- An offer is 3 973 bytes and the name, thus it uses bucket `B2`.
+- An admit is 578 bytes at 3 members (a one-segment descriptor of 257 bytes),
+  thus it uses bucket `B1`. At `GROUP_MAX` the descriptor of a 21-segment
+  snapshot is 2 657 bytes, the admit is 2 978 bytes, and it uses bucket `B2`.
+
+A granting epoch carries an ML-DSA-65 signature of 3 309 bytes and a roster
+public key of 1 952 bytes, thus a path at `ROLE_HOLDER_MAX` is about 86 KB and
+fits no cell. The authority path therefore travels in the `RosterSnapshot` in
+every case, under Part 11 §11.9.8 rules `GRP-324` and `GRP-325`, and the admit
+carries none.
 
 - **[WIR-435]** A parser MUST reject a `JoinRecord` whose length is not
   1 313. **[WIR-436]** A parser MUST reject a `stage` that is not `0x01` or
@@ -2149,11 +2182,10 @@ therefore travels in the `RosterSnapshot` in every case, under Part 11
   on no pairwise channel. **[WIR-446]** A receiver MUST discard a group
   control record of one of those types that arrives on a pairwise channel.
 
-> *Cause.* A join that opens a pairwise channel from the joiner to each
-> member costs 499 channels and 499 first-access locks at `GROUP_MAX`. The
-> group queue of §6.4.5 needs no channel between two
-> members, thus the admit carries the queue, the epoch key, and a snapshot of
-> the roster, and nothing else.
+> *Cause.* A join that opens a pairwise channel from the joiner to each member
+> costs 499 channels and 499 first-access locks at `GROUP_MAX`. The group queue
+> of §6.4.5 needs no channel between two members, thus the admit carries the
+> queue, the epoch key, and a snapshot of the roster, and nothing else.
 
 **The roster snapshot and its notice.** Part 11 §11.9.8 gives the writer, the
 reader, and the acceptance rules of a snapshot.
@@ -2195,7 +2227,6 @@ chain order; a parser MUST reject a `path` that ends inside an entry or that
 holds a `control_type` other than `0x04`.
 
 ```
-
 MemberKemKey {                    // 1 218 bytes
     index             u16
     kem_pk            [1216]u8    // GroupKemKey_g.pk
@@ -2245,9 +2276,9 @@ RekeyRecord {                     // 6 614 bytes, control type 0x09
 ```
 
 The signature covers the preimage `"umbra/v1/group-rekey" || group_id ||
-epoch_index || previous_epoch_hash || old_index || old_roster_pk || new_index
-|| pair_pk || roster_pk_hash || kem_pk`, and Part 5 §5.11 holds the label. As
-an `AppMessage` the record is 6 646 bytes, thus it uses bucket `B2`.
+epoch_index || previous_epoch_hash || old_index || old_roster_pk ||
+new_index || pair_pk || roster_pk_hash || kem_pk`, and Part 5 §5.11 holds the
+label. As an `AppMessage` the record is 6 646 bytes, thus it uses bucket `B2`.
 
 - **[WIR-482]** A parser MUST reject a `RekeyRecord` whose length is not
   6 614. **[WIR-483]** A client MUST send a `RekeyRecord` as a group record,
@@ -2507,11 +2538,11 @@ Carol.
   which no `grant` gave it.
 - **[WIR-196]** A client MUST show a `request` of type `0x01`, and it MUST NOT
   answer it without a user action. **[WIR-358]** A client MUST show an `offer`
-  of type `0x03`, and it MUST NOT accept it without a user action. Part 2
-  §2.4.2 goal S3 names that offer as the introduction path. **[WIR-197]** A
-  parser MUST reject a
-  `body_len` above zero on a record of type `0x01`. **[WIR-198]** A parser MUST
-  reject a `body_len` of zero on a record of type `0x02` or of type `0x03`.
+  of type `0x03`, and it MUST NOT accept it without a user action. Part 2 §2.4.2
+  goal S3 names that offer as the introduction path. **[WIR-197]** A parser MUST
+  reject a `body_len` above zero on a record of type `0x01`. **[WIR-198]** A
+  parser MUST reject a `body_len` of zero on a record of type `0x02` or of type
+  `0x03`.
 - **[WIR-199]** A client MUST make a fresh invitation for each `grant`.
   **[WIR-200]** A client MUST NOT reuse one invitation across two grants.
 
@@ -2593,9 +2624,8 @@ ReceiptBody {                     // kind 0x06 and kind 0x07
   not equal 19 plus `emoji_len`.
 - **[WIR-280]** A client MUST store `target` as the `msg_ref` of §6.6.
   **[WIR-281]** A receiver MUST apply a remove action only to a reaction with
-  the same sender, `emoji`, and target.
-  **[WIR-282]** A receiver MUST resolve `target` under the rules of `WIR-171`
-  and `WIR-172`.
+  the same sender, `emoji`, and target. **[WIR-282]** A receiver MUST resolve
+  `target` under the rules of `WIR-171` and `WIR-172`.
 
 **The typing indicator.** The body is 2 bytes. `WIR-077` keeps the indicator
 off by default.
@@ -2668,8 +2698,8 @@ resolves `relay_id` in the consensus that it holds, under Part 10 rule
 
 > *Cause.* Part 3 §3.2.2 makes the queue owner give `QE` to the sender in the
 > queue address. Two mandatory operations name that address. Those are the
-> rotation of Part 3 §3.2.4 and the re-establishment of Part 7 rule
-> `DEV-135`. Thus the address needs one layout and one carrier. SimpleX carries the same
+> rotation of Part 3 §3.2.4 and the re-establishment of Part 7 rule `DEV-135`.
+> Thus the address needs one layout and one carrier. SimpleX carries the same
 > values in its `QADD` and `QKEY` messages, and UMBRA carries them in one
 > record.
 
@@ -2709,20 +2739,24 @@ each one fits bucket `B0` on a pairwise channel. In a group the dense tag
 vector of §6.4.6 sets the bucket: `B1` at 25 members and `B2` at `GROUP_MAX`,
 by the group-queue capacity table of §6.9.
 
-**The three scopes answer three different failures.** In a pairwise session a
-receiver derives each skipped key itself, and the braid of Part 5 §5.5.3 heals
-a lost frame. A record that the receiver still cannot open is a record that
-the sender chain never carried in a form the receiver can reach. The answer to
-a request of scope `0x01` is therefore a re-send and not a key. In a group a
-member that holds no slot in the current epoch derives nothing, and the answer
-to a request of scope `0x02` is a one-slot epoch-key record of §6.4.6 for
-that member, posted on the group queue (Part 11 §11.4.3). A member that lacks
-the KEM keys of the roster, after a restore from a backup, asks for the
-snapshot, and the answer to a request of scope `0x03` is a `SnapshotNotice`
-of §6.6.3 with a fresh descriptor, posted on the group queue (Part 11
-§11.9.8). In scope `0x02` and in scope `0x03` the `body` of the `KeySupply`
-is empty, and status `0x01` means that the answering member posted the
-record.
+**The three scopes answer three different failures.**
+
+- **Scope `0x01`.** In a pairwise session a receiver derives each skipped key
+  itself, and the braid of Part 5 §5.5.3 heals a lost frame. A record that the
+  receiver still cannot open is a record that the sender chain never carried
+  in a form the receiver can reach. The answer to a request of scope `0x01` is
+  therefore a re-send and not a key.
+- **Scope `0x02`.** In a group a member that holds no slot in the current
+  epoch derives nothing, and the answer to a request of scope `0x02` is a
+  one-slot epoch-key record of §6.4.6 for that member, posted on the group
+  queue (Part 11 §11.4.3).
+- **Scope `0x03`.** A member that lacks the KEM keys of the roster, after a
+  restore from a backup, asks for the snapshot, and the answer to a request of
+  scope `0x03` is a `SnapshotNotice` of §6.6.3 with a fresh descriptor, posted
+  on the group queue (Part 11 §11.9.8).
+
+In scope `0x02` and in scope `0x03` the `body` of the `KeySupply` is empty, and
+status `0x01` means that the answering member posted the record.
 
 1. **[WIR-332]** A parser MUST reject a `scope` value or a `status` value that
    this section does not name. It MUST also reject a `KeySupply` whose
@@ -2734,26 +2768,29 @@ record.
    on the group queue when it holds a write credential inside
    `GROUP_WRITE_GRACE` and an epoch inside `GROUP_EPOCH_GRACE`. **[WIR-457]**
    Otherwise a client MUST send that request on a pairwise channel with a
-   member of the group. **[WIR-523]** A request of scope `0x02` on a pairwise
-   channel MUST carry 1 plus the member index of the requester in `index`,
-   and one that another member posts on the group queue for it keeps that
-   value; the tag of a group record names its poster and not the member that
-   lacks the epoch. A request of scope `0x02` that its requester posts MUST
-   carry 0. Part 11 §11.4.3 gives the answer. A member that holds no path
-   shows the group as lapsed, under the same section.
+   member of the group.
+
+   **[WIR-523]** A request of scope `0x02` on a pairwise channel MUST carry 1
+   plus the member index of the requester in `index`, and one that another
+   member posts on the group queue for it keeps that value; the tag of a group
+   record names its poster and not the member that lacks the epoch. A request of
+   scope `0x02` that its requester posts MUST carry 0. Part 11 §11.4.3 gives the
+   answer. A member that holds no path shows the group as lapsed, under the same
+   section.
 3. **[WIR-459]** A receiver MUST accept a key supply of scope `0x01` only on
    the channel on which it sent the request. **[WIR-347]** A receiver MUST
    discard a key supply that matches no outstanding request of its own. A
    request is outstanding while the receiver awaits an answer for that
    `scope`, `id`, `epoch`, and `index`. The L6 QueueE2E key of that channel
-   names the peer, and no field of the supply does. **[WIR-460]** A receiver
-   MUST accept the answer to a request of scope `0x02` or `0x03` under the
-   rules of Part 11 §11.4.2 and §11.9.8, and not by the channel that carried
-   the request. The answer is a group record, and the group queue carries it
-   to every member. **[WIR-461]** A member that answers a request of scope
-   `0x02` or `0x03` MAY send a `KeySupply` of status `0x01` on the channel
-   that carried the request, and the requester takes nothing from it but the
-   report.
+   names the peer, and no field of the supply does.
+
+   **[WIR-460]** A receiver MUST accept the answer to a request of scope `0x02`
+   or `0x03` under the rules of Part 11 §11.4.2 and §11.9.8, and not by the
+   channel that carried the request. The answer is a group record, and the group
+   queue carries it to every member. **[WIR-461]** A member that answers a
+   request of scope `0x02` or `0x03` MAY send a `KeySupply` of status `0x01` on
+   the channel that carried the request, and the requester takes nothing from it
+   but the report.
 4. **[WIR-462]** A client MUST mark each record that it opens under an epoch
    secret from a one-slot epoch-key record as recovered. **[WIR-463]** The
    interface MUST NOT show a recovered record as a record whose `counter` the
@@ -2766,10 +2803,10 @@ record.
    MUST discard a key request above that rate.
 6. For scope `0x01`: **[WIR-339]** If a sender holds the logical message that
    `index` names, it MUST send that message again. **[WIR-348]** That re-send
-   MUST carry the original `msg_id` under the current ratchet state. The
-   supply then carries status `resent`.
-   **[WIR-340]** A sender that does not hold it MUST answer with status `not
-   held`. WIR-065 discards the copy if the first send arrives later.
+   MUST carry the original `msg_id` under the current ratchet state. The supply
+   then carries status `resent`. **[WIR-340]** A sender that does not hold it
+   MUST answer with status `not held`. WIR-065 discards the copy if the first
+   send arrives later.
 7. For scope `0x02`: Part 11 §11.4.3 gives the answer, which is a one-slot
    epoch-key record of §6.4.6 on the group queue, and the acceptance rule.
    The same record carries the owner credentials to a member that a granting
@@ -2779,13 +2816,12 @@ record.
    a delivery failure under Part 2 §2.4 U9.
 
 > *Cause.* Part 2 rule `THR-009` and Part 7 rule `DEV-098` each name a key
-> request. A supply that any party can send is a path to
-> plant a key. Thus rule 3 binds a pairwise supply to the channel of the
-> request, and a group answer to the acceptance rules of the epoch-key record,
-> which verify the rotator's tag and role. Rule 4 keeps a supplied key from
-> lending a record the attribution of a gap-free counter. The answer of
-> scope `0x02` goes on the group queue and not in the supply body, thus one
-> answer serves every member that lacks the key.
+> request. A supply that any party can send is a path to plant a key. Thus rule
+> 3 binds a pairwise supply to the channel of the request, and a group answer to
+> the acceptance rules of the epoch-key record, which verify the rotator's tag
+> and role. Rule 4 keeps a supplied key from lending a record the attribution of
+> a gap-free counter. The answer of scope `0x02` goes on the group queue and not
+> in the supply body, thus one answer serves every member that lacks the key.
 
 ### 6.6.12 The renewal guard
 
@@ -2861,27 +2897,30 @@ version_range {
 }
 ```
 
-The two parties select `min(max_a, max_b)`. **[WIR-092]** The two parties MUST abort if that
-value is below the `min` value of one of them. There is no feature negotiation
-beyond the version number and the suite identifiers of Part 5 §5.10. A version
-is an atomic and fully specified wire format, and it is not a set of options.
+The two parties select `min(max_a, max_b)`. **[WIR-092]** The two parties MUST
+abort if that value is below the `min` value of one of them. There is no feature
+negotiation beyond the version number and the suite identifiers of Part 5 §5.10.
+A version is an atomic and fully specified wire format, and it is not a set of
+options.
 
-**[WIR-093]** **Downgrade protection:** an implementation MUST bind the negotiated version and
-the two advertised ranges into the handshake transcript hash. Thus a downgrade
-causes a handshake failure and not a silent loss of strength.
+**[WIR-093]** **Downgrade protection:** an implementation MUST bind the
+negotiated version and the two advertised ranges into the handshake transcript
+hash. Thus a downgrade causes a handshake failure and not a silent loss of
+strength.
 
 ## 6.8 Test vectors
 
-**[WIR-094]** Each structure in this part MUST have canonical test vectors. **[WIR-095]** The vectors MUST
-cover these cases:
+**[WIR-094]** Each structure in this part MUST have canonical test vectors.
+**[WIR-095]** The vectors MUST cover these cases:
 
 - The minimum length and the maximum length of each variable field.
 - Each bucket boundary, for the padding and for the unpadding.
 - Each rejection case, which is a non-minimal length, trailing bytes, a nonzero
   reserved field, malformed padding, an unknown version, and an unknown command.
 - An unknown value in each of the seven namespaces, with the rejection of each
-  one. **[WIR-096]** A vector MUST cover a cell body that carries an application kind value at
-  the command offset. **[WIR-097]** The parser MUST reject that cell.
+  one. **[WIR-096]** A vector MUST cover a cell body that carries an application
+  kind value at the command offset. **[WIR-097]** The parser MUST reject that
+  cell.
 - The capsule of §6.2.1. **[WIR-294]** The vectors MUST cover one
   `UMBRA_CELL` capsule at each bucket and one `UMBRA_SESSION` capsule at each
   op. **[WIR-295]** The parser MUST reject each case below.
@@ -2893,11 +2932,10 @@ cover these cases:
   - A `length` in the 2-byte form.
   - An `UMBRA_CELL` capsule of `length` 525.
   - A `SessionResume` of `length` 41.
-- The session control records of §6.2.3. **[WIR-296]** The vectors MUST cover
-  an open, a resume with a correct `auth`, a close, a circuit destroy, a
-  session pause, a session paused, and a circuit pause.
-  **[WIR-297]** The relay
-  MUST reject the three cases below.
+- The session control records of §6.2.3. **[WIR-296]** The vectors MUST cover an
+  open, a resume with a correct `auth`, a close, a circuit destroy, a session
+  pause, a session paused, and a circuit pause. **[WIR-297]** The relay MUST
+  reject the three cases below.
   - A resume with one changed bit of `auth`.
   - A resume with one changed bit of `sent`.
   - A resume whose `resume_count` repeats the last accepted value.
@@ -2919,19 +2957,20 @@ cover these cases:
   `RenewalRecord` with a `guard_seq` of 0 and one nonzero byte of `secret`,
   a `RenewalRecord` of 35 bytes, a `RenewalGuard` of 36 bytes, and a
   `RenewalGuard` with a `guard_seq` of 0.
-- The length pair of §6.4.2 rule 6, at each of the four buckets. **[WIR-098]** A vector MUST
-  hold a `SEND` and the `MSG` that a relay makes from that `SEND`. **[WIR-099]** The vector
-  MUST assert both `payload_len` values. **[WIR-100]** The vector MUST assert one bucket for
-  the two commands.
-- The `EditBody` and the `DeleteBody` of §6.6.1. **[WIR-101]** The vectors MUST cover the
-  four cases below.
+- The length pair of §6.4.2 rule 6, at each of the four buckets. **[WIR-098]** A
+  vector MUST hold a `SEND` and the `MSG` that a relay makes from that `SEND`.
+  **[WIR-099]** The vector MUST assert both `payload_len` values. **[WIR-100]**
+  The vector MUST assert one bucket for the two commands.
+- The `EditBody` and the `DeleteBody` of §6.6.1. **[WIR-101]** The vectors MUST
+  cover the four cases below.
   - The minimum length and the maximum length of each variable field.
   - The bucket boundary at 138 bytes of `new_body`.
   - The bucket boundary at `DELETE_BATCH_MAX` targets.
   - An edit of a group text, and an edit of a reply. **[WIR-465]** The vectors
     MUST assert that the `reply_target`, the `thread_root`, and the mention
     list do not change.
-- Each rejection case of §6.6.1. **[WIR-102]** The parser MUST reject each case below.
+- Each rejection case of §6.6.1. **[WIR-102]** The parser MUST reject each case
+  below.
   - A `body_len` below 18.
   - A `new_body` that is not valid UTF-8.
   - An edit whose innermost target kind is `0x02`.
@@ -2964,20 +3003,22 @@ cover these cases:
   **[WIR-469]** The relay MUST reject a `GSUB` under the previous read key
   after `GROUP_READ_GRACE`, and a `GPOST` under the previous write key after
   `GROUP_WRITE_GRACE`.
-- The `Roster` of Part 7 §7.3.1. **[WIR-129]** The vectors MUST cover the three cases below.
-  **[WIR-130]** The parser MUST reject the second case and the third case.
+- The `Roster` of Part 7 §7.3.1. **[WIR-129]** The vectors MUST cover the three
+  cases below. **[WIR-130]** The parser MUST reject the second case and the
+  third case.
   - An epoch that a device of the previous epoch signed.
   - An epoch that a revoked device signed.
   - An epoch whose `prev_hash` does not chain.
-- The `DirectoryRoot` of Part 10 §10.5.2. **[WIR-131]** The vectors MUST cover the four cases
-  below. **[WIR-132]** The parser MUST reject the last three cases.
+- The `DirectoryRoot` of Part 10 §10.5.2. **[WIR-131]** The vectors MUST cover
+  the four cases below. **[WIR-132]** The parser MUST reject the last three
+  cases.
   - Five valid signatures.
   - Four valid signatures with one invalid signature.
   - A repeated `authority_index`.
   - A `sigs` list that is not in ascending order.
-- The `FileDescriptor` of Part 12 §12.3. **[WIR-133]** The vectors MUST cover a correct
-  `commit` value and an incorrect `commit` value. **[WIR-134]** The vectors MUST cover the
-  13-chunk boundary at bucket `B1`.
+- The `FileDescriptor` of Part 12 §12.3. **[WIR-133]** The vectors MUST cover a
+  correct `commit` value and an incorrect `commit` value. **[WIR-134]** The
+  vectors MUST cover the 13-chunk boundary at bucket `B1`.
 - The `GroupControl` of §6.6.3. **[WIR-479]** The vectors MUST cover one record
   of each of the eight control types. **[WIR-480]** The parser MUST reject a
   `control_type` of `0x00`, of `0x01`, and of `0x0A`. **[WIR-481]** The vectors
@@ -3090,9 +3131,9 @@ supply-chain dependency at verification time.
 TCP transport of §6.2.1, from the client to the relay. A relay-to-client cell
 carries no WebSocket mask, thus it costs 4 bytes less at each bucket. Each
 budget of this specification uses the client-to-relay figure as the bound for
-the two directions. A web client of Part 14 §14.7, when one ships, sends the same frames
-through the stack of its browser, and that stack decides the record count;
-each budget uses the figure of this table for it.
+the two directions. A web client of Part 14 §14.7, when one ships, sends the
+same frames through the stack of its browser, and that stack decides the record
+count; each budget uses the figure of this table for it.
 
 | Value | `B0` | `B1` | `B2` | `B3` |
 | --- | --- | --- | --- | --- |
@@ -3103,11 +3144,11 @@ each budget uses the figure of this table for it.
 | TLS records | 1 | 1 | 1 | 3 |
 | **Wire cost**, which is the frame and 22 bytes for each record | **560** | **2 096** | **8 240** | **32 860** |
 
-**The wire cost of one `B0` cell is 560 bytes.** A `B1` cell costs 2 096
-bytes, a `B2` cell costs 8 240 bytes, and a `B3` cell costs 32 860 bytes.
-Seven other parts give each group figure and each session figure with these
-four constants. Part 1 §1.7 lists the quoting sections. A `B3` frame needs three records, because 32 794 bytes exceed
-the 2¹⁴-byte record cap two times.
+**The wire cost of one `B0` cell is 560 bytes.** A `B1` cell costs 2 096 bytes,
+a `B2` cell costs 8 240 bytes, and a `B3` cell costs 32 860 bytes. Seven other
+parts give each group figure and each session figure with these four constants.
+Part 1 §1.7 lists the quoting sections. A `B3` frame needs three records,
+because 32 794 bytes exceed the 2¹⁴-byte record cap two times.
 
 **The capacity.** The table below counts the bytes that each layer leaves for
 the layer above it.
@@ -3184,8 +3225,8 @@ part of `GroupQueueRecord`, the fixed fields of `ContentPlain`, or
 > relay knows the queue kind from the command. Thus a capacity of its own
 > for the group record tells the relay nothing more, and the table gives one.
 
-**[WIR-103]** A client MUST compute the bucket from the capacity table. **[WIR-104]** A client MUST NOT put a
-message in a bucket that does not hold it. The capacity of this table is a
-client-side selection rule. **[WIR-105]** A relay MUST NOT read a capacity from a served cell.
-Rule 6 of §6.4.2 fixes the `payload_len` of a `SEND` and of a `MSG` for each
-bucket.
+**[WIR-103]** A client MUST compute the bucket from the capacity table.
+**[WIR-104]** A client MUST NOT put a message in a bucket that does not hold it.
+The capacity of this table is a client-side selection rule. **[WIR-105]** A
+relay MUST NOT read a capacity from a served cell. Rule 6 of §6.4.2 fixes the
+`payload_len` of a `SEND` and of a `MSG` for each bucket.
