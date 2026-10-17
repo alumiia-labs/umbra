@@ -15,8 +15,13 @@ Include these items:
 
 ## Scope
 
-A report can be about the specification in `spec/`, the Rust crates, the
-Android app, the deployment playbooks, or the web site.
+A report can be about one of these:
+
+- the specification in `spec/`;
+- the Rust crates;
+- the Android app;
+- the deployment files in `deploy/`;
+- the web site.
 
 ## Supported versions
 

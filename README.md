@@ -19,7 +19,7 @@ protocol or the code. Do not use UMBRA where a failure puts a person at risk.
 | `spec/` | The specification, in 15 parts. `spec/req-index.md` lists each rule. |
 | `crates/` | The Rust core, the relay, and the FFI layer. |
 | `android/` | The Android app, in Kotlin and Compose. |
-| `deploy/` | The Ansible playbooks for a relay network. |
+| `deploy/` | The deployment of a relay network: Ansible playbooks, Docker files, and a Helm chart. |
 | `site/` | The web site of the invitation links. |
 | `brand/` | The logo files. |
 | `scripts/` | The build scripts and the check scripts. |
@@ -37,14 +37,25 @@ cargo test --workspace
 bash scripts/check.sh           # the full check set of each commit
 ```
 
-`android/README.md` gives the build of the app. `deploy/ansible/README.md`
-gives the deployment of a network on Debian servers. The same network runs
-in Docker (`compose.yaml`, `deploy/docker/README.md`) and on Kubernetes
-(the Helm chart in `deploy/helm/umbra`).
+`android/README.md` gives the build of the app.
 
-`docker compose -f compose.devnet.yaml up --build` runs a test network of
-seven relays on this machine, with no Rust toolchain. Its seeds are in the
-repository, thus it protects nothing. `android/README.md` gives its use.
+A relay network runs in three forms:
+
+| Form | Where to start |
+| --- | --- |
+| Debian servers | `deploy/ansible/README.md` |
+| Docker | `compose.yaml` and `deploy/docker/README.md` |
+| Kubernetes | The Helm chart in `deploy/helm/umbra` |
+
+**The test network.** This command runs a test network of seven relays on
+this machine, with no Rust toolchain:
+
+```sh
+docker compose -f compose.devnet.yaml up --build
+```
+
+Its seeds are in the repository, thus it protects nothing.
+`android/README.md` gives its use.
 
 ## Contribute
 
@@ -57,6 +68,8 @@ repository, thus it protects nothing. `android/README.md` gives its use.
 
 ## License
 
-AGPL-3.0-only. Refer to `LICENSE`. The icons of
-`android/app/src/main/assets/fa` are Font Awesome Free, under CC BY 4.0. The
-fonts are under the SIL Open Font License 1.1.
+AGPL-3.0-only. Refer to `LICENSE`.
+
+- The icons of `android/app/src/main/assets/fa` are Font Awesome Free, under
+  CC BY 4.0.
+- The fonts are under the SIL Open Font License 1.1.
