@@ -28,11 +28,13 @@ const ASK_WAIT: Duration = Duration::from_secs(15);
 fn laplace(b: f64) -> Option<i64> {
     let mut bytes = [0u8; 8];
     OsRng.try_fill_bytes(&mut bytes).ok()?;
+
     // 53 bits give each value of the unit interval that an f64 holds.
     let unit = (u64::from_be_bytes(bytes) >> 11) as f64 / (1u64 << 53) as f64;
     let u = unit - 0.5;
     let magnitude = -b * (1.0 - 2.0 * u.abs()).max(f64::MIN_POSITIVE).ln();
     let sample = if u < 0.0 { -magnitude } else { magnitude };
+
     // A sample far outside the range of a count is no count.
     (sample.abs() < 1e15).then(|| sample.round() as i64)
 }
@@ -54,6 +56,7 @@ async fn noised_share(
     let body = query
         .sign(&super::authority_key(settings, index)?, &mut OsRng)
         .ok()?;
+
     let url = https::Url {
         host: relay.host.clone(),
         port: relay.port,
@@ -75,6 +78,7 @@ async fn noised_share(
     if status != 200 {
         return None;
     }
+
     let share = StatAnswer::parse(&answer).ok()?.share?;
     Some(stat::add_noise(share, laplace(CHAIN_NOISE_SCALE)?))
 }
@@ -98,11 +102,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_noise_centres_on_zero_at_its_scale() {
+    fn the_noise_centers_on_zero_at_its_scale() {
         let samples: Vec<i64> = (0..4_000).filter_map(|_| laplace(10.0)).collect();
         assert_eq!(samples.len(), 4_000);
         let mean = samples.iter().sum::<i64>() as f64 / 4_000.0;
         let spread = samples.iter().map(|s| s.abs()).sum::<i64>() as f64 / 4_000.0;
+
         // The mean of Laplace(b) is 0, and the mean of its magnitude is b.
         assert!(mean.abs() < 1.5, "mean {mean}");
         assert!((spread - 10.0).abs() < 1.5, "spread {spread}");

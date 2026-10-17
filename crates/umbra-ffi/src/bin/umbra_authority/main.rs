@@ -47,8 +47,8 @@
 //! The program writes `queue` once the relay made the queue, and the
 //! signer signs that file into the next manifest (`REL-167`). The standard
 //! output gives the totals of the reports, one line each minute at most,
-//! and no hop of a report. The file `state` holds the keys of the queue, readable by its
-//! owner alone.
+//! and no hop of a report. The file `state` holds the keys of the queue,
+//! readable by its owner alone.
 //!
 //! After the end of each epoch the authority reads the noised chain count
 //! of each relay that `FAULT_MIN_REPORTS` reports of that epoch name, from
@@ -160,6 +160,7 @@ fn hex32(text: &str) -> Option<[u8; 32]> {
     if text.len() != 64 {
         return None;
     }
+
     let mut out = [0u8; 32];
     for (index, byte) in out.iter_mut().enumerate() {
         *byte = u8::from_str_radix(text.get(index * 2..index * 2 + 2)?, 16).ok()?;
@@ -183,6 +184,7 @@ fn read_secret(path: &std::path::Path) -> Option<[u8; 32]> {
             return None;
         }
     }
+
     let text = zeroize::Zeroizing::new(std::fs::read_to_string(path).ok()?);
     hex32(text.trim())
 }
@@ -193,6 +195,7 @@ fn secret_at(path: &std::path::Path) -> Option<[u8; 32]> {
     if path.exists() {
         return read_secret(path);
     }
+
     let mut secret = [0u8; 32];
     umbra_crypto::rand_core::TryRng::try_fill_bytes(&mut umbra_ffi::runtime::OsRng, &mut secret)
         .ok()?;
@@ -219,6 +222,7 @@ fn read_settings(path: &str) -> Option<Settings> {
         .filter_map(|line| line.split_once('='))
         .map(|(key, value)| (key.trim(), value.trim()))
         .collect();
+
     // A deployment names the key directory and the secret directory. A
     // test network gives each seed in the file.
     let (keys, root_seed, report_seed) = match (values.get("keys"), values.get("seed")) {
@@ -227,6 +231,7 @@ fn read_settings(path: &str) -> Option<Settings> {
                 eprintln!("a settings file with a keys line holds no seed");
                 return None;
             }
+
             let secrets = PathBuf::from(values.get("secrets")?);
             std::fs::create_dir_all(&secrets).ok()?;
             (
@@ -242,6 +247,7 @@ fn read_settings(path: &str) -> Option<Settings> {
         ),
         _ => return None,
     };
+
     Some(Settings {
         keys,
         index: values.get("index")?.parse().ok()?,
@@ -293,12 +299,14 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut part = path.as_os_str().to_owned();
     part.push(".part");
     let part = PathBuf::from(part);
+
     // A part of an earlier crash can have another mode, and the mode below
     // applies to a new file alone.
     match std::fs::remove_file(&part) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
         _ => {}
     }
+
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -306,6 +314,7 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
+
     let mut file = options.open(&part)?;
     std::io::Write::write_all(&mut file, bytes)?;
     file.sync_all()?;
@@ -410,6 +419,7 @@ async fn challenges(settings: &Settings) -> Option<ChallengeBook> {
     let bundle = native::fetch_challenges(&dial, tls_of(settings).ok()?)
         .await
         .ok()?;
+
     let now = unix_now();
     let mut book = ChallengeBook::default();
     for challenge in ChallengeBook::parse_bundle(&bundle).ok()? {
@@ -443,6 +453,7 @@ fn relay_set(settings: &Settings) -> Result<RelaySet, &'static str> {
     if !set.is_whole {
         return Err("the manifest holds a part of the relay set");
     }
+
     Ok(set)
 }
 
@@ -497,10 +508,12 @@ fn evaluate(settings: &Arc<Settings>, key: &Arc<SigningKey>, counts: &mut Counts
         if tally.is_done || now < ended {
             continue;
         }
+
         tally.is_done = true;
         if tally.reports < FAULT_MIN_REPORTS {
             continue;
         }
+
         let (settings, key, chain) = (Arc::clone(settings), Arc::clone(key), tally.chain);
         let (epoch, relay, reports) = (*epoch, *relay, tally.reports);
         tokio::spawn(async move {
@@ -518,6 +531,7 @@ fn evaluate(settings: &Arc<Settings>, key: &Arc<SigningKey>, counts: &mut Counts
                 println!("no chain count for {} in epoch {epoch}", to_hex(&relay));
                 return;
             };
+
             // A noised count of 0 gives the largest rate, and REL-112 is the
             // floor that holds then.
             let rate = f64::from(reports) / chains.max(1) as f64;
@@ -528,6 +542,7 @@ fn evaluate(settings: &Arc<Settings>, key: &Arc<SigningKey>, counts: &mut Counts
             if rate < RELAY_FAULT_RATE {
                 return;
             }
+
             println!("isolation query on {}", to_hex(&relay));
             match isolation::isolate(&settings, &key, chain).await {
                 Ok((verdict, epoch)) => isolation::record(&settings, &chain, &verdict, epoch),
@@ -560,16 +575,20 @@ async fn run_once(
         removed,
     } = relays_of(settings)?;
     let tls = tls_of(settings)?;
+
     let mut node = ClientNode::with_relays(
         guard,
         chain,
         RootIdentity::new(Secret::new(settings.root_seed)),
     );
     node.set_bootstrap(is_provisional(settings)?);
+
     // REL-185: no chain of this run holds a removed link.
     node.set_removed_links(removed);
+
     let (commands, runtime_commands) = mpsc::unbounded_channel();
     let (runtime_updates, mut updates) = mpsc::unbounded_channel();
+
     // A queue of an earlier run continues, and its address stays in the
     // manifest.
     let restored = std::fs::read(&settings.state)
@@ -579,6 +598,7 @@ async fn run_once(
     if !restored {
         let _ = commands.send(Command::MakeReportQueue);
     }
+
     let store = Box::new(QueueStore {
         state: settings.state.clone(),
     });
@@ -591,14 +611,17 @@ async fn run_once(
         store,
         None,
     ));
+
     let report_pk = seal::public_of(report_sk);
     let mut clock = tokio::time::interval(EVALUATE_EVERY);
+
     // REL-208: the time of the next `NEW` after a refusal, and the wait
     // that the refusal after it takes.
     let mut again: Option<tokio::time::Instant> = None;
     let mut wait = QUEUE_RETRY;
     let mut reports = ReportTotals::default();
     let mut logged = reports;
+
     loop {
         let at = again.unwrap_or_else(tokio::time::Instant::now);
         let update = tokio::select! {
@@ -616,6 +639,7 @@ async fn run_once(
             }
             () = tokio::time::sleep_until(at), if again.is_some() => {
                 again = None;
+
                 // ABU-048: the `NEW` goes again with the newest challenges.
                 if let Some(book) = challenges(settings).await {
                     let _ = commands.send(Command::Challenges { book, now: unix_now() });
@@ -627,6 +651,7 @@ async fn run_once(
         let Some(update) = update else {
             break;
         };
+
         match update {
             Update::Online => println!("authority online, queue restored={restored}"),
             Update::ReportQueue { address } => {
@@ -646,6 +671,7 @@ async fn run_once(
             Update::LinkFault(sealed) => match LinkFaultReport::open(report_sk, &sealed) {
                 Ok(report) => {
                     reports.opened += 1;
+
                     // REL-170: a report of the current epoch or the one
                     // before it counts, and each other goes.
                     let epoch = unix_now() / EPOCH_SECONDS;
@@ -664,6 +690,7 @@ async fn run_once(
             _ => {}
         }
     }
+
     drop(commands);
     let _ = run.await;
     Ok(())
@@ -689,6 +716,7 @@ fn print_count(path: &str, relay: &str, epoch: &str) -> ExitCode {
     else {
         return ExitCode::from(1);
     };
+
     runtime.block_on(async {
         let Ok(set) = relay_set(&settings) else {
             eprintln!("the manifest does not verify");
@@ -702,6 +730,7 @@ fn print_count(path: &str, relay: &str, epoch: &str) -> ExitCode {
             eprintln!("the manifest names no such relay");
             return ExitCode::from(1);
         };
+
         match stats::chain_count(&settings, listed, epoch).await {
             Some(count) => {
                 println!("chains {} epoch={epoch} noised={count}", to_hex(&relay));
@@ -752,16 +781,19 @@ fn run_main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+
     let Some(settings) = read_settings(path) else {
         eprintln!("the settings file does not parse");
         return ExitCode::from(2);
     };
     let settings = Arc::new(settings);
+
     let Some(key) = authority_key(&settings, settings.index) else {
         eprintln!("the key of the authority does not read");
         return ExitCode::from(1);
     };
     let key = Arc::new(key);
+
     let Ok(runtime) = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .thread_stack_size(16 << 20)
@@ -771,6 +803,7 @@ fn run_main() -> ExitCode {
         eprintln!("the runtime does not start");
         return ExitCode::from(1);
     };
+
     // REL-108: one query on the evidence of this authority.
     if let Some(chain) = probe {
         return runtime.block_on(async {
@@ -786,6 +819,7 @@ fn run_main() -> ExitCode {
             }
         });
     }
+
     let report_sk = Secret::new(settings.report_seed);
     let mut counts = Counts::new();
     runtime.block_on(async {
@@ -817,6 +851,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("report-queue.state");
         std::fs::write(&path, b"old").unwrap();
+
         // A part file of a crash, open to each user.
         std::fs::write(dir.join("report-queue.state.part"), b"crash").unwrap();
         write_private(&path, b"new").unwrap();

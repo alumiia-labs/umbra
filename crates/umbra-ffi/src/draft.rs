@@ -91,6 +91,7 @@ impl Draft {
         if text.len() > DRAFT_TEXT_MAX {
             return Err(Error::TooLong);
         }
+
         self.text = text;
         Ok(())
     }
@@ -105,6 +106,7 @@ impl Draft {
         if plain.len() > DRAFT_FILE_MAX {
             return Err(Error::TooLong);
         }
+
         // ATT-069, ATT-070: a duration belongs to an audio, a voice, or a
         // video object alone. ATT-071: a voice object has an upper bound.
         let is_timed = matches!(shape.mime_class, class::AUDIO | class::VOICE | class::VIDEO);
@@ -114,6 +116,7 @@ impl Draft {
         if shape.mime_class == class::VOICE && shape.media_seconds > VOICE_MAX_SECONDS {
             return Err(Error::TooLong);
         }
+
         self.file = Some(DraftFile {
             plain,
             shape,
@@ -132,6 +135,7 @@ impl Draft {
         {
             return Err(Error::Malformed);
         }
+
         // IMP-039: a preview is a picture of the file, thus the one that
         // this call replaces leaves the memory as the text does.
         if let Some(mut earlier) = file.preview.replace(preview.to_vec()) {
@@ -159,6 +163,7 @@ impl Draft {
         ) {
             return Err(Error::Malformed);
         }
+
         if let Some(mut earlier) = file.name.replace(core::mem::take(&mut *name)) {
             earlier.zeroize();
         }
@@ -290,6 +295,7 @@ mod tests {
         draft
             .attach(bytes(), shape(class::VOICE, VOICE_MAX_SECONDS))
             .unwrap();
+
         // An audio file that the user selected has no such bound.
         draft
             .attach(bytes(), shape(class::AUDIO, VOICE_MAX_SECONDS + 1))
@@ -307,11 +313,13 @@ mod tests {
         let file = draft.file.as_mut().unwrap();
         file.preview = Some(vec![0xFF, 0xD8, 0xFF, 0xD9]);
         file.name = Some("minutes.pdf".to_owned());
+
         // IMP-039: the drop runs this, and a wiped buffer holds no byte.
         draft.wipe_file();
         let file = draft.file.as_ref().unwrap();
         assert_eq!(file.preview.as_deref(), Some(&[][..]));
         assert_eq!(file.name.as_deref(), Some(""));
+
         // A file that left with the send is no part of the draft.
         assert!(draft.take_file().is_some());
         draft.wipe_file();
@@ -326,6 +334,7 @@ mod tests {
             ..Shape::default()
         };
         draft.attach(Zeroizing::new(vec![7; 10]), shape).unwrap();
+
         // WIR-532: the wire takes no such character, and the attach works.
         draft
             .set_file_name("\u{200F}report\u{202E}fdp.exe\u{2069}")
@@ -333,6 +342,7 @@ mod tests {
         let name = draft.file.as_ref().unwrap().name.clone().unwrap();
         assert_eq!(name, "reportfdp.exe");
         assert!(umbra_wire::descriptor::is_file_name(&name));
+
         // A name of marks alone is no name, and each other check holds.
         assert_eq!(draft.set_file_name("\u{061C}"), Err(Error::Malformed));
         assert_eq!(draft.set_file_name("a/b"), Err(Error::Malformed));

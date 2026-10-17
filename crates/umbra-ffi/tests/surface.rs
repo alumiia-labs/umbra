@@ -199,6 +199,7 @@ fn link_ended(link: &mut std::net::TcpStream) -> bool {
     use std::io::Read as _;
     link.set_read_timeout(Some(std::time::Duration::from_secs(3)))
         .unwrap();
+
     let mut bytes = [0u8; 4_096];
     loop {
         match link.read(&mut bytes) {
@@ -225,6 +226,7 @@ fn a_lock_stops_the_run_of_the_network_before_it_returns() {
         argon2_floor_ms: 60_000,
     };
     let keystore = Arc::new(Keystore([8; 32])) as Arc<dyn SecureElementCallback>;
+
     let handle = init(config, keystore, units("correct horse")).unwrap();
 
     // An ingress relay that takes the connection and answers nothing: the
@@ -241,6 +243,7 @@ fn a_lock_stops_the_run_of_the_network_before_it_returns() {
     handle.lock();
     assert!(start.elapsed() < std::time::Duration::from_secs(5));
     assert!(link_ended(&mut link), "a locked client held its link");
+
     // The run of a locked client brings no update: the lock is the one
     // event of its end.
     let mut is_locked = false;

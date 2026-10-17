@@ -85,6 +85,7 @@ impl Drop for Counted {
                 open.remove(&self.0);
             }
         }
+
         drop(open);
         CLOSED.notify_all();
     }
@@ -139,10 +140,12 @@ impl SqliteBackend {
             #[cfg(test)]
             checkpoints: 0,
         };
+
         let connection = &backend.connection;
         storage(connection.pragma_update(None, "secure_delete", "ON"))?;
         storage(connection.pragma_update(None, "journal_mode", "WAL"))?;
         storage(connection.execute_batch(SCHEMA))?;
+
         // IMP-043: a checkpoint that an earlier run left undone runs now,
         // and at the next batch when a reader keeps it from its end.
         backend.checkpoint();
@@ -164,6 +167,7 @@ impl SqliteBackend {
         if tables == 0 {
             return Ok(false);
         }
+
         let headers: i64 = storage(connection.query_row(
             "SELECT count(*) FROM wrap WHERE id = 1 AND header IS NOT NULL",
             [],
@@ -247,6 +251,7 @@ impl Backend for SqliteBackend {
                 None,
             ),
         };
+
         let mut statement = storage(self.connection.prepare(sql))?;
         let found = storage(statement.query_map(params![table.0, owner_bytes], Self::row_of))?;
         let mut out = Vec::new();
@@ -270,11 +275,13 @@ impl Backend for SqliteBackend {
              WHERE table_id = ?1 AND row_id > ?2
              ORDER BY row_id LIMIT ?3",
         ))?;
+
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let after = after.map_or(&[][..], |after| after.as_slice());
         let found = storage(statement.query_map(params![table.0, after, limit], |row| {
             row.get::<_, Vec<u8>>(0)
         }))?;
+
         let mut out = Vec::new();
         for row_id in found {
             out.push(array(storage(row_id)?)?);
@@ -296,6 +303,7 @@ impl Backend for SqliteBackend {
                 row.get::<_, Vec<u8>>(4)?,
             ))
         }))?;
+
         let mut out = Vec::new();
         for row in found {
             let (table, accum, row_count, commit_counter, mac) = storage(row)?;
@@ -315,6 +323,7 @@ impl Backend for SqliteBackend {
     fn apply(&mut self, batch: &Batch) -> Result<(), Error> {
         // IMP-123: the rows and the table MACs of a batch commit together.
         let transaction = storage(self.connection.transaction())?;
+
         // IMP-133: a batch that replaces the row of a channel is no
         // deletion batch. The state before it holds chain keys that the
         // forward secrecy erased. Without a checkpoint the file keeps that
@@ -339,6 +348,7 @@ impl Backend for SqliteBackend {
                 _ => {}
             }
         }
+
         for write in &batch.writes {
             match write {
                 Write::Put(table, row) => storage(transaction.execute(
@@ -372,6 +382,7 @@ impl Backend for SqliteBackend {
                 ))?,
             };
         }
+
         storage(transaction.commit())?;
         if batch.deletion || replaces_channel || self.checkpoint_due {
             // IMP-043: no frame of the deleted record stays in the log. The
@@ -400,6 +411,7 @@ mod tests {
         let path = directory.join("count.db");
         let _ = std::fs::remove_file(&path);
         let path_text = path.to_str().unwrap().to_owned();
+
         assert!(SqliteBackend::await_closed(&path_text, Duration::ZERO));
         let first = SqliteBackend::open(&path_text).unwrap();
         let second = SqliteBackend::open(&path_text).unwrap();
@@ -409,6 +421,7 @@ mod tests {
             &path_text,
             Duration::from_millis(50)
         ));
+
         // The wait ends at the close on another thread, before its bound.
         let closes = std::thread::spawn(move || drop(second));
         assert!(SqliteBackend::await_closed(
@@ -416,6 +429,7 @@ mod tests {
             Duration::from_secs(60)
         ));
         closes.join().unwrap();
+
         // A file that is closed takes its removal on each platform.
         std::fs::remove_file(&path).unwrap();
         let _ = std::fs::remove_dir_all(&directory);
@@ -428,6 +442,7 @@ mod tests {
         let path = directory.join("header.db");
         let _ = std::fs::remove_file(&path);
         let path_text = path.to_str().unwrap().to_owned();
+
         // A first launch that ended before its header.
         let backend = SqliteBackend::open(&path_text).unwrap();
         assert!(!SqliteBackend::holds_header(&path_text).unwrap());
@@ -441,6 +456,7 @@ mod tests {
             wrapped: [3; 32],
             tag: [4; 16],
         };
+
         backend.set_header(&header).unwrap();
         assert!(SqliteBackend::holds_header(&path_text).unwrap());
         drop(backend);
@@ -458,12 +474,15 @@ mod tests {
         struct Counter(u8);
         impl umbra_crypto::rand_core::TryRng for Counter {
             type Error = core::convert::Infallible;
+
             fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
                 Ok(0)
             }
+
             fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
                 Ok(0)
             }
+
             fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
                 for byte in dst {
                     self.0 = self.0.wrapping_add(1);
@@ -480,6 +499,7 @@ mod tests {
             Secret::new([1; 32]),
         )
         .unwrap();
+
         let owner = store.row_id(TableId::CONTACT, b"alice");
         let row = store.row_id(TableId::MESSAGE, b"alice/1");
         let mut batch = store.begin();
@@ -517,6 +537,7 @@ mod tests {
         assert_eq!(store.list(TableId::MESSAGE, Some(&owner)).unwrap().len(), 1);
         assert!(store.list(TableId::MESSAGE, Some(&row)).unwrap().is_empty());
         store.audit(TableId::MESSAGE).unwrap();
+
         // The walk of a table by its row identifiers, one page at a time.
         let more: Vec<RowId> = (0..5u8)
             .map(|index| store.row_id(TableId::MESSAGE, &[index]))
@@ -528,6 +549,7 @@ mod tests {
                 .unwrap();
         }
         batch.commit().unwrap();
+
         let mut written = more;
         written.push(row);
         written.sort_unstable();
@@ -542,6 +564,7 @@ mod tests {
             let Some(last) = page.last().copied() else {
                 break;
             };
+
             after = Some(last);
             walked.extend(page);
         }
@@ -581,12 +604,15 @@ mod tests {
         struct Counter(u8);
         impl umbra_crypto::rand_core::TryRng for Counter {
             type Error = core::convert::Infallible;
+
             fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
                 Ok(0)
             }
+
             fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
                 Ok(0)
             }
+
             fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
                 for byte in dst {
                     self.0 = self.0.wrapping_add(1);
@@ -603,6 +629,7 @@ mod tests {
             Secret::new([1; 32]),
         )
         .unwrap();
+
         let row = store.row_id(TableId::CONTACT, b"alice");
         let other = store.row_id(TableId::CONTACT, b"bob");
         let mut batch = store.begin();
@@ -613,7 +640,9 @@ mod tests {
             .put(TableId::CONTACT, other, None, b"the first of bob", &mut rng)
             .unwrap();
         batch.commit().unwrap();
+
         let backend = store.lock();
+
         // The first row of a channel replaces no state: the open ran one
         // checkpoint, and this batch ran none.
         assert_eq!(backend.checkpoints, 1);
@@ -643,6 +672,7 @@ mod tests {
             .unwrap();
         batch.commit().unwrap();
         assert!(!holds(&sealed[..24]));
+
         // One checkpoint serves the two rows of the batch.
         let backend = store.lock();
         assert_eq!(backend.checkpoints, 2);

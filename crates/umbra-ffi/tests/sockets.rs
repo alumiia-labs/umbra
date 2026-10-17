@@ -154,44 +154,7 @@ async fn wait_for_message(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_clients_meet_and_talk_over_real_sockets() {
     let client_tls = native::tls_config_with_root_file(CA).unwrap();
-
-    // Each listener binds before a relay starts, thus the dial of a lower
-    // layer at its start finds a port that accepts.
-    let mut listeners = Vec::new();
-    let mut ports = Vec::new();
-    for _ in 0..3 {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        ports.push(listener.local_addr().unwrap().port());
-        listeners.push(listener);
-    }
-    for (index, listener) in listeners.into_iter().enumerate() {
-        let layer = index as u8 + 1;
-        let (relay, static_secret) = relay_static(layer);
-        let node = RelayNode::new(Config {
-            relay,
-            static_secret,
-            layer,
-            chunk_capacity: 1 << 26,
-        });
-        let mut next_hops = BTreeMap::new();
-        if layer < 3 {
-            next_hops.insert(
-                relay_static(layer + 1).0.relay_id,
-                localhost(ports[index + 1]),
-            );
-        }
-        tokio::spawn(run_relay(
-            node,
-            listener,
-            tls_acceptor(LEAF, LEAF_KEY).unwrap(),
-            next_hops,
-            BTreeMap::new(),
-            client_tls.clone(),
-            PACING_MEAN_MS,
-            Box::new(MemoryStore::default()),
-            Carried::default(),
-        ));
-    }
+    let ports = start_relays(&client_tls, PACING_MEAN_MS).await;
 
     let mut clients = Vec::new();
     for index in 0..2u8 {
@@ -211,6 +174,7 @@ async fn two_clients_meet_and_talk_over_real_sockets() {
         ));
         clients.push((commands, updates, kept));
     }
+
     let (bob, mut bob_updates, mut bob_kept) = clients.pop().unwrap();
     let (alice, mut alice_updates, mut alice_kept) = clients.pop().unwrap();
 
@@ -238,6 +202,7 @@ async fn two_clients_meet_and_talk_over_real_sockets() {
     assert_eq!(from, alice_contact);
     let parsed = AppMessage::parse(&app, Channel::Pairwise).unwrap();
     assert_eq!(parsed.body, b"hello alice");
+
     wait_for(&mut bob_updates, |update| {
         (update == Update::Sent(71)).then_some(())
     })
@@ -249,6 +214,7 @@ async fn two_clients_meet_and_talk_over_real_sockets() {
     let mut unknown = text(4, "of a later build");
     unknown[1] = 0xEE;
     assert!(AppMessage::parse(&unknown, Channel::Pairwise).is_err());
+
     let send = Command::Send {
         contact: bob_contact,
         app: unknown,
@@ -256,10 +222,12 @@ async fn two_clients_meet_and_talk_over_real_sockets() {
         prior: Prior::default(),
     };
     bob.send(send).unwrap();
+
     wait_for(&mut bob_updates, |update| {
         (update == Update::Sent(74)).then_some(())
     })
     .await;
+
     let send = Command::Send {
         contact: bob_contact,
         app: text(5, "after it"),
@@ -267,6 +235,7 @@ async fn two_clients_meet_and_talk_over_real_sockets() {
         prior: Prior::default(),
     };
     bob.send(send).unwrap();
+
     let app = loop {
         let (from, app) = wait_for_message(&mut alice_updates, &mut alice_kept).await;
         assert_eq!(from, alice_contact);
@@ -274,6 +243,7 @@ async fn two_clients_meet_and_talk_over_real_sockets() {
             break app;
         }
     };
+
     let parsed = AppMessage::parse(&app, Channel::Pairwise).unwrap();
     assert_eq!(parsed.body, b"after it");
 
@@ -285,6 +255,7 @@ async fn two_clients_meet_and_talk_over_real_sockets() {
         prior: Prior::default(),
     };
     alice.send(send).unwrap();
+
     let (from, app) = wait_for_message(&mut bob_updates, &mut bob_kept).await;
     assert_eq!(from, bob_contact);
     let parsed = AppMessage::parse(&app, Channel::Pairwise).unwrap();
@@ -298,6 +269,7 @@ async fn two_clients_meet_and_talk_over_real_sockets() {
         prior: Prior::default(),
     };
     alice.send(send).unwrap();
+
     wait_for(&mut alice_updates, |update| {
         (update == Update::Unsent(73)).then_some(())
     })
@@ -343,6 +315,7 @@ async fn a_second_run_resumes_the_session_and_reads_with_no_circuit_build() {
         ports.push(listener.local_addr().unwrap().port());
         listeners.push(listener);
     }
+
     // The chains that each relay opened, which its node counts at each
     // second.
     let builds: Vec<Arc<AtomicU64>> = (0..3).map(|_| Arc::default()).collect();
@@ -375,6 +348,7 @@ async fn a_second_run_resumes_the_session_and_reads_with_no_circuit_build() {
             Carried::default(),
         ));
     }
+
     let built = || -> Vec<u64> {
         builds
             .iter()
@@ -397,6 +371,7 @@ async fn a_second_run_resumes_the_session_and_reads_with_no_circuit_build() {
         Box::new(Kept(keeps)),
         None,
     ));
+
     let (records, mut alice_kept) = mpsc::unbounded_channel();
     let store = Lasting {
         contacts: Arc::default(),
@@ -433,10 +408,12 @@ async fn a_second_run_resumes_the_session_and_reads_with_no_circuit_build() {
         prior: Prior::default(),
     };
     bob.send(send).unwrap();
+
     let (from, app) = wait_for_message(&mut alice_updates, &mut alice_kept).await;
     assert_eq!(from, alice_contact);
     let parsed = AppMessage::parse(&app, Channel::Pairwise).unwrap();
     assert_eq!(parsed.body, b"the first run");
+
     wait_for(&mut bob_updates, |update| {
         (update == Update::Sent(81)).then_some(())
     })
@@ -455,9 +432,11 @@ async fn a_second_run_resumes_the_session_and_reads_with_no_circuit_build() {
     })
     .await
     .expect("the wake did not end");
+
     assert_eq!(ended, Ended::WakeDone);
     assert!(slot.holds());
     drop(alice);
+
     // Each relay counted each build of the two first runs by now.
     tokio::time::sleep(Duration::from_millis(2_500)).await;
     let before = built();
@@ -471,6 +450,7 @@ async fn a_second_run_resumes_the_session_and_reads_with_no_circuit_build() {
         prior: Prior::default(),
     };
     bob.send(send).unwrap();
+
     wait_for(&mut bob_updates, |update| {
         (update == Update::Sent(82)).then_some(())
     })
@@ -482,6 +462,7 @@ async fn a_second_run_resumes_the_session_and_reads_with_no_circuit_build() {
     for state in store.contacts.lock().unwrap().values() {
         node.restore_contact(state).unwrap();
     }
+
     let (_alice, runtime_commands) = mpsc::unbounded_channel();
     let (runtime_updates, mut alice_updates) = mpsc::unbounded_channel();
     tokio::spawn(run_client(
@@ -493,6 +474,7 @@ async fn a_second_run_resumes_the_session_and_reads_with_no_circuit_build() {
         Box::new(store.clone()),
         Some(slot.clone()),
     ));
+
     assert!(
         !slot.holds() || {
             // The run takes the session at its start.
@@ -500,6 +482,7 @@ async fn a_second_run_resumes_the_session_and_reads_with_no_circuit_build() {
             !slot.holds()
         }
     );
+
     let (from, app) = wait_for_message(&mut alice_updates, &mut alice_kept).await;
     assert_eq!(from, alice_contact);
     let parsed = AppMessage::parse(&app, Channel::Pairwise).unwrap();
@@ -513,6 +496,8 @@ async fn a_second_run_resumes_the_session_and_reads_with_no_circuit_build() {
 
 /// Three relay servers on localhost, one of each layer, and their ports.
 async fn start_relays(client_tls: &Arc<native::ClientConfig>, pacing_ms: u64) -> Vec<u16> {
+    // Each listener binds before a relay starts, thus the dial of a lower
+    // layer at its start finds a port that accepts.
     let mut listeners = Vec::new();
     let mut ports = Vec::new();
     for _ in 0..3 {
@@ -520,6 +505,7 @@ async fn start_relays(client_tls: &Arc<native::ClientConfig>, pacing_ms: u64) ->
         ports.push(listener.local_addr().unwrap().port());
         listeners.push(listener);
     }
+
     for (index, listener) in listeners.into_iter().enumerate() {
         let layer = index as u8 + 1;
         let (relay, static_secret) = relay_static(layer);
@@ -548,6 +534,7 @@ async fn start_relays(client_tls: &Arc<native::ClientConfig>, pacing_ms: u64) ->
             Carried::default(),
         ));
     }
+
     ports
 }
 
@@ -606,15 +593,18 @@ async fn a_sync_invitation_of_a_link_that_ended_with_its_run_retires_in_the_next
         Box::new(store.clone()),
         None,
     ));
+
     commands.send(Command::InviteDevice).unwrap();
     wait_for(&mut updates, |update| match update {
         Update::DeviceInvitation(bundle) => Some(bundle),
         _ => None,
     })
     .await;
+
     let listed = store.listed.lock().unwrap().clone();
     assert_eq!(listed.len(), 1);
     let queue = listed[0];
+
     let waits = |store: &Linking| {
         let mut node = ClientNode::new(path(), root());
         match store.invitations.lock().unwrap().get(&queue) {
@@ -625,6 +615,7 @@ async fn a_sync_invitation_of_a_link_that_ended_with_its_run_retires_in_the_next
             None => false,
         }
     };
+
     assert!(waits(&store));
 
     // The run ends with the link: no command retired the invitation.
@@ -634,6 +625,7 @@ async fn a_sync_invitation_of_a_link_that_ended_with_its_run_retires_in_the_next
     })
     .await
     .expect("the run did not end");
+
     assert!(waits(&store));
 
     // DEV-290: the next run starts from the store, and it retires each
@@ -644,6 +636,7 @@ async fn a_sync_invitation_of_a_link_that_ended_with_its_run_retires_in_the_next
         node.restore_invitation(state).unwrap();
     }
     assert!(node.holds_handshake());
+
     let (commands, runtime_commands) = mpsc::unbounded_channel();
     let (runtime_updates, _updates) = mpsc::unbounded_channel();
     tokio::spawn(run_client(
@@ -655,6 +648,7 @@ async fn a_sync_invitation_of_a_link_that_ended_with_its_run_retires_in_the_next
         Box::new(store.clone()),
         None,
     ));
+
     commands.send(Command::EndDeviceInvitation(listed)).unwrap();
     timeout(STEP, async {
         while waits(&store) {
@@ -663,6 +657,7 @@ async fn a_sync_invitation_of_a_link_that_ended_with_its_run_retires_in_the_next
     })
     .await
     .expect("the invitation did not retire");
+
     let mut node = ClientNode::new(path(), root());
     if let Some(state) = store.invitations.lock().unwrap().get(&queue) {
         node.restore_invitation(state).unwrap();

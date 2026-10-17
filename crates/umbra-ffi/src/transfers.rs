@@ -228,22 +228,26 @@ const SOLVE_AHEAD_MAX: usize = 8;
 /// at its send, as before.
 async fn solve_ahead(node: &mut ClientNode, upload: &Upload) {
     let allowance = usize::from(umbra_core::abuse::POW_CHUNK_ALLOWANCE);
+
     // Each job: the relay, the seed, the effort, and the solutions to make.
     let mut jobs: Vec<([u8; 32], [u8; 32], u32, usize)> = Vec::new();
     for (relay, count) in upload.registrations() {
         let Some((seed, effort)) = node.chunk_admissions().work(&relay) else {
             continue;
         };
+
         let solves = count.div_ceil(allowance).min(SOLVE_AHEAD_MAX);
         jobs.push((relay, seed, effort, solves));
     }
     if jobs.is_empty() {
         return;
     }
+
     let solved = tokio::task::spawn_blocking(move || {
         let threads = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
         let jobs = std::sync::Mutex::new(jobs);
         let solved = std::sync::Mutex::new(Vec::new());
+
         std::thread::scope(|scope| {
             for _ in 0..threads {
                 scope.spawn(|| loop {
@@ -266,6 +270,7 @@ async fn solve_ahead(node: &mut ClientNode, upload: &Upload) {
                     let (Ok(mut jobs), Ok(mut solved)) = (jobs.lock(), solved.lock()) else {
                         break;
                     };
+
                     if let Some(job) = jobs.iter_mut().find(|job| job.0 == relay && job.3 > 0) {
                         job.3 = job.3.saturating_sub(1);
                         solved.push((relay, solution));
@@ -273,10 +278,12 @@ async fn solve_ahead(node: &mut ClientNode, upload: &Upload) {
                 });
             }
         });
+
         solved.into_inner().unwrap_or_default()
     })
     .await
     .unwrap_or_default();
+
     let name = upload.admission_name();
     for (relay, solution) in solved {
         node.chunk_admissions().stock(name, relay, solution);
@@ -295,6 +302,7 @@ pub async fn run_transfers(
     updates: mpsc::UnboundedSender<TransferUpdate>,
 ) {
     let mut rng = OsRng;
+
     // ATT-174: the relays that refused a chunk, which the runs of this
     // handle share, as the fetch orders take them at each start.
     let held = || {
@@ -308,17 +316,21 @@ pub async fn run_transfers(
         );
         (holds, now)
     };
+
     let mut active: BTreeMap<u64, Active> = BTreeMap::new();
+
     // ATT-167: the mode of each transfer, which the node takes before each
     // call into it.
     let mut classes: BTreeMap<u64, umbra_core::session::node::DelayClass> = BTreeMap::new();
     let mut early: Vec<TransferCommand> = Vec::new();
+
     // ATT-161: the chunk of each `CDEL` with no answer yet, by the handle
     // of the command. For each chunk: the answers that it waits for, and
     // whether each answer so far says that the relay holds it no more.
     let mut erasing: BTreeMap<u64, [u8; 32]> = BTreeMap::new();
     let mut progress: BTreeMap<u64, (u32, u32)> = BTreeMap::new();
     let mut erase_left: BTreeMap<[u8; 32], (usize, bool)> = BTreeMap::new();
+
     // A run that ends ends no transfer: each one goes again in the next run.
     let fail_each = |active: &BTreeMap<u64, Active>, early: &[TransferCommand]| {
         for tag in active.keys() {
@@ -347,6 +359,7 @@ pub async fn run_transfers(
     let _ = rng.try_fill_bytes(&mut mask);
     let plan = Plan::Only(Wire::Tcp);
     let connected = native::connect(&guard, tls, plan, key, mask, Duration::from_secs(10)).await;
+
     // Each exit closes the channel first and fails each command in it, thus
     // no command waits for an answer that no task gives.
     let drain = |commands: &mut mpsc::UnboundedReceiver<TransferCommand>,
@@ -356,6 +369,7 @@ pub async fn run_transfers(
             early.push(command);
         }
     };
+
     let Ok(mut link) = connected else {
         crate::devlog::line("transfers: the dial failed");
         drain(&mut commands, &mut early);
@@ -378,6 +392,7 @@ pub async fn run_transfers(
                 break 'run;
             }
         }
+
         let events = tokio::select! {
             received = link.recv() => match received {
                 Ok(bytes) => match node.on_capsule(&bytes, crate::runtime::unix_now(), &mut rng) {
@@ -402,6 +417,7 @@ pub async fn run_transfers(
                 } else {
                     idle_since = tokio::time::Instant::now();
                 }
+
                 let mut failed = Vec::new();
                 let mut read = Vec::new();
                 for (tag, transfer) in &mut active {
@@ -425,12 +441,14 @@ pub async fn run_transfers(
                         failed.push(*tag);
                     }
                 }
+
                 for tag in failed {
                     crate::devlog::line(format!("transfers: tag {tag} failed at a tick"));
                     active.remove(&tag);
                     classes.remove(&tag);
                     let _ = updates.send(TransferUpdate::Failed { tag });
                 }
+
                 for (tag, found) in read {
                     active.remove(&tag);
                     classes.remove(&tag);
@@ -440,11 +458,13 @@ pub async fn run_transfers(
                         answered: found.answered,
                     });
                 }
+
                 // CIRCUIT_BUILD_TIMEOUT: a build that no relay answers ends,
                 // and a run with no circuit left ends with it.
                 node.on_tick(crate::runtime::unix_now())
             }
         };
+
         // The node commits nothing: a transfer node holds no contact. The
         // changes leave it, thus they do not pile up.
         let _ = node.take_changes();
@@ -478,6 +498,7 @@ pub async fn run_transfers(
                         }
                         continue;
                     }
+
                     let owner = active.iter().find_map(|(tag, transfer)| {
                         let owns = match transfer {
                             Active::One(fetch) => fetch.owns(handle),
@@ -492,6 +513,7 @@ pub async fn run_transfers(
                     let Some(transfer) = active.get_mut(&tag) else {
                         continue;
                     };
+
                     node.set_chunk_class(classes.get(&tag).copied().unwrap_or_default());
                     let step = match transfer {
                         Active::One(fetch) => fetch
@@ -552,6 +574,7 @@ pub async fn run_transfers(
                                 },
                             }),
                     };
+
                     let refused = match transfer {
                         Active::One(fetch) => fetch.take_refused(),
                         Active::Down(download) => download.take_refused(),
@@ -565,10 +588,12 @@ pub async fn run_transfers(
                             }
                         }
                     }
+
                     let update = step.unwrap_or_else(|error| {
                         crate::devlog::line(format!("transfers: tag {tag} failed: {error:?}"));
                         TransferUpdate::Failed { tag }
                     });
+
                     // Each answer gives a progress, and most of them move
                     // no count. The client takes one that says something new.
                     let is_new = match &update {
@@ -582,9 +607,11 @@ pub async fn run_transfers(
                             true
                         }
                     };
+
                     if is_new {
                         let _ = updates.send(update);
                     }
+
                     if node.faults().due().is_some() {
                         let faults = Box::new(node.take_faults());
                         let _ = updates.send(TransferUpdate::Faults(faults));
@@ -596,6 +623,7 @@ pub async fn run_transfers(
         if !is_ready {
             continue;
         }
+
         for command in early.drain(..) {
             match command {
                 TransferCommand::FetchChunk {
@@ -659,9 +687,11 @@ pub async fn run_transfers(
                         let _ = updates.send(TransferUpdate::Erased { chunk_id });
                         continue;
                     }
+
                     // ATT-167: each start takes a mode of its own, not the mode
                     // of the transfer before it.
                     node.set_chunk_class(umbra_core::session::node::DelayClass::default());
+
                     // No transfer owns the handles, thus the task counts
                     // the answers itself. A command that did not leave
                     // counts as an answer that is not done.
@@ -679,11 +709,13 @@ pub async fn run_transfers(
                             Err(_) => each = false,
                         }
                     }
+
                     if left > 0 {
                         // A second erase of one chunk adds to the first.
                         let waits = erase_left.entry(chunk_id).or_insert((0, true));
                         *waits = (waits.0.saturating_add(left), waits.1 && each);
                     }
+
                     idle_since = tokio::time::Instant::now();
                 }
                 TransferCommand::DownloadBackup { tag, descriptor } => {
@@ -801,6 +833,7 @@ pub async fn run_transfers(
             }
         }
     }
+
     // WIR-246: no run continues this session, thus it ends at the relay
     // now, and the relay holds no circuit for it.
     if let Some(capsule) = node.close() {
@@ -811,6 +844,7 @@ pub async fn run_transfers(
         active.len(),
         early.len()
     ));
+
     drain(&mut commands, &mut early);
     fail_each(&active, &early);
 }

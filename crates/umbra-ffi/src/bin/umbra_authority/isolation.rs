@@ -74,6 +74,7 @@ async fn probe(
     if !a.candidate.ingress {
         return Err("the chain does not start at an ingress relay");
     }
+
     let mut seed = [0u8; 32];
     umbra_crypto::rand_core::TryRng::try_fill_bytes(&mut OsRng, &mut seed)
         .map_err(|_| "no random bytes")?;
@@ -83,14 +84,17 @@ async fn probe(
         RootIdentity::new(Secret::new(seed)),
     );
     node.set_bootstrap(super::is_provisional(settings)?);
+
     // REL-185: a chain with a removed link gives no probe circuit.
     node.set_removed_links(set.removed_links.clone());
+
     let tls = super::tls_of(settings)?;
     let wait = guard_wait(unix_now());
     if wait > 0 {
         println!("the probe waits {wait} s for the turn of the epoch");
         tokio::time::sleep(Duration::from_secs(wait)).await;
     }
+
     let (commands, runtime_commands) = mpsc::unbounded_channel();
     let (runtime_updates, mut updates) = mpsc::unbounded_channel();
     let dial: Dial = dial_of(a, settings.host_alias);
@@ -103,6 +107,7 @@ async fn probe(
         Box::new(NoStore),
         None,
     ));
+
     let _ = commands.send(Command::OpenCircuit(*third));
     let deadline = tokio::time::Instant::now() + PROBE_WAIT;
     let mut tick = tokio::time::interval(Duration::from_secs(2));
@@ -123,6 +128,7 @@ async fn probe(
             }
         }
     };
+
     drop(commands);
     let _ = run.await;
     found
@@ -165,6 +171,7 @@ pub async fn isolate(
     println!("probe sent in epoch {epoch}, the receipts follow its end");
     let ready = (epoch + 1) * EPOCH_SECONDS + RECEIPT_SETTLE;
     tokio::time::sleep(Duration::from_secs(ready.saturating_sub(unix_now()))).await;
+
     // The link from hop k to hop k + 1 carries the tag of hop k + 1.
     let [first, second, third] = chain;
     let [_, second_tag, third_tag] = tags;
@@ -187,6 +194,7 @@ pub async fn isolate(
             relay_id: from,
             ..query
         })?;
+
         // The far end answers first: the relay before it then learns of
         // the query after that answer came.
         let to_relay = find(&set, &to)?;
@@ -200,6 +208,7 @@ pub async fn isolate(
             issued.as_ref(),
             &to_relay.identity_pk,
         );
+
         if verdict != LinkVerdict::Held {
             return Ok((Verdict::Link(verdict), epoch));
         }
@@ -218,6 +227,7 @@ pub fn record(settings: &Settings, chain: &[[u8; 32]; 3], verdict: &Verdict, epo
         }
         Verdict::Link(LinkVerdict::Held) => return,
     };
+
     println!("verdict {line}");
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
@@ -236,15 +246,18 @@ mod tests {
     fn a_probe_keeps_away_from_each_end_of_its_epoch() {
         let epoch = 490_000 * EPOCH_SECONDS;
         let span = PROBE_WAIT.as_secs();
+
         // The first seconds of an epoch wait for the guard.
         assert_eq!(guard_wait(epoch), PROBE_GUARD);
         assert_eq!(guard_wait(epoch + PROBE_GUARD - 1), 1);
         assert_eq!(guard_wait(epoch + PROBE_GUARD), 0);
+
         // A probe that could reach the end of the epoch waits for the next.
         let last = epoch + EPOCH_SECONDS - PROBE_GUARD - span;
         assert_eq!(guard_wait(last), 0);
         assert_eq!(guard_wait(last + 1), span + 2 * PROBE_GUARD - 1);
         assert_eq!(guard_wait(epoch + EPOCH_SECONDS - 1), PROBE_GUARD + 1);
+
         // After each wait the whole probe lies inside one epoch.
         for into in 0..EPOCH_SECONDS {
             let start = epoch + into + guard_wait(epoch + into);

@@ -311,16 +311,19 @@ impl Bridge {
         if self.commands.is_closed() {
             return Ok(());
         }
+
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_secs());
         while let Some(outgoing) = client.take_outgoing() {
             let (message, conversation) = (outgoing.message, outgoing.conversation);
+
             // IMP-126: this copy of the record overwrites itself at each
             // end of the step, as the copy of the command does.
             let app = Zeroizing::new(outgoing.app);
             let tag = self.next_tag;
             self.next_tag = self.next_tag.wrapping_add(1);
+
             // An ephemeral record takes no delivery state and no sync copy.
             if message == crate::client::EPHEMERAL {
                 if let Some(contact) = self.contacts.get(&conversation) {
@@ -333,17 +336,20 @@ impl Bridge {
                 }
                 continue;
             }
+
             // IMP-082: a record that waits for the room of a full queue
             // goes at the end of its wait, and not at each connection. Its
             // row keeps it, and the wait gives it to this path again.
             if client.waits_for_room(&message, now)? {
                 continue;
             }
+
             // NET-219 to NET-221: the store counts each send of the record
             // across the runs, and a record at a bound fails with no send.
             if client.fail_stopped(&message, now, rng)? {
                 continue;
             }
+
             let (sends, first) = client.send_counts(&message)?;
             let prior = Prior {
                 sends,
@@ -362,6 +368,7 @@ impl Bridge {
             match taken {
                 Some(true) => {
                     self.sent.insert(tag, message);
+
                     // DEV-268: each record of the user goes to each device
                     // of the set, but one that a peer handed to this device.
                     if !client.was_handed(&message) {
@@ -380,6 +387,7 @@ impl Bridge {
                 None => client.fail(&message, crate::FailureCause::NoPath, rng)?,
             }
         }
+
         // NET-097: the records of a sync channel wait for a session of the
         // screen or of the carrier.
         while let Some(send) = if self.is_wake {
@@ -393,6 +401,7 @@ impl Bridge {
                 self.sync_waiting.insert(send.peer);
                 continue;
             };
+
             let tag = self.next_tag;
             self.next_tag = self.next_tag.wrapping_add(1);
             let command = Command::Send {
@@ -408,6 +417,7 @@ impl Bridge {
                 }
             }
         }
+
         Ok(())
     }
 
@@ -471,6 +481,7 @@ impl Bridge {
                 contact, is_device, ..
             } => {
                 let conversation = client.conversation_for(&contact.0)?;
+
                 // DEV-290: a sync channel that opens while no device waits
                 // for one belongs to a link that ended. It names no device
                 // of the set, thus it ends here. No view shows it, no
@@ -479,6 +490,7 @@ impl Bridge {
                     client.refuse_device_channel(conversation, rng)?;
                     return Ok(None);
                 }
+
                 self.contacts.insert(conversation, contact);
                 if is_device {
                     client.mark_device_peer(conversation, rng)?;
@@ -538,6 +550,7 @@ impl Bridge {
                 // A message that the user deleted since takes no index.
                 if let Some(message) = self.sent.get(&tag) {
                     let _ = client.note_send_index(message, index, rng);
+
                     // NET-219, NET-220: each seal is one send of the
                     // record to its contact, and the store counts it. A
                     // record that goes to the owner of the channels on a
@@ -577,6 +590,7 @@ impl Bridge {
             // REL-115: a clock movement discards the directory correction.
             Update::ClockMoved => {
                 client.clear_directory_correction()?;
+
                 // GRP-229: the clock check that the held group records wait
                 // for. A fault of one sweep ends no update.
                 client.clock_check(now_ms, rng);
