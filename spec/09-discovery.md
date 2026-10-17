@@ -164,9 +164,9 @@ The blob holds the selected picture of a Profile (Part 4 §4.2.5). Three rules
 apply to that picture.
 
 1. **[DIS-001]** A client MUST re-encode a selected picture before it stores
-   that picture in the blob. **[DIS-002]** The re-encode MUST remove each metadata field.
-   **[DIS-003]** The re-encode MUST hold the result inside the `B2` bucket of
-   8 KiB.
+   that picture in the blob. **[DIS-002]** The re-encode MUST remove each
+   metadata field. **[DIS-003]** The re-encode MUST hold the result inside the
+   `B2` bucket of 8 KiB.
 2. **[DIS-004]** If the user selects one picture for two Profiles, the client
    MUST warn. **[DIS-005]** The client MUST get an explicit confirmation. Part 4
    §4.2.5 gives the cross-Profile rules and the rule for a reused name.
@@ -211,10 +211,10 @@ starts from that form.
 > *Cause.* A handle with no normalization gives the VOPRF the bytes that the
 > user typed. A `name` in NFD and the same `name` in NFC then give two
 > directory indexes, and a lookup of the one misses the other. Signal avoids
-> the problem with an ASCII grammar, and UMBRA keeps a Unicode `name`. The profile maps two renderings to one string, and it rejects
-> a control character. A confusable pair stays, because no profile removes it.
-> DIS-016 makes a handle no verified identity, and §9.8 gives the petname that
-> the user trusts instead.
+> the problem with an ASCII grammar, and UMBRA keeps a Unicode `name`. The
+> profile maps two renderings to one string, and it rejects a control character.
+> A confusable pair stays, because no profile removes it. DIS-016 makes a handle
+> no verified identity, and §9.8 gives the petname that the user trusts instead.
 
 ### 9.3.3 The address index
 
@@ -316,10 +316,10 @@ Merkle prefix tree. A snapshot of that tree goes into a left-balanced
 append-only log tree, with HMAC commitments and a binary-ladder search.
 
 **[DIS-007]** **The VRF inputs MUST be `(label || version)`, and not `label`
-alone.** This rule is not negotiable. A fixed tree position for each user gives the CONIKS
-tracing vulnerability. In that vulnerability, the sibling in your own inclusion
-proof shows when your neighbor rotates a key. That leak continues forever, and
-it continues after that neighbor removes you.
+alone.** This rule is not negotiable. A fixed tree position for each user gives
+the CONIKS tracing vulnerability. In that vulnerability, the sibling in your own
+inclusion proof shows when your neighbor rotates a key. That leak continues
+forever, and it continues after that neighbor removes you.
 
 More requirements:
 
@@ -674,14 +674,14 @@ a client in that state, because two signers suffice. The loss of two does.
 > *Cause.* A rule that accepts only a tree head that all three signers
 > co-signed in 7 days fails closed. One auditor outage, one dispute, or one
 > legal order then stops each handle lookup after seven days. §9.4.1 says that
-> the directory degrades gracefully and does not fail closed. The deployment of Signal runs two auditors in one
-> jurisdiction, which shows how hard three funded auditors in three
-> jurisdictions are to keep. A 2-of-3 acceptance keeps the property that no
-> one legal order makes a split view, and it survives the loss of one signer.
-> The degraded read keeps a lookup available below that threshold, and it
-> removes the two automatic actions that a forged entry would exploit.
-> `DIS-011` names the object, the field, the measuring party, and the skew
-> tolerance, as §1.9 requires.
+> the directory degrades gracefully and does not fail closed. The deployment of
+> Signal runs two auditors in one jurisdiction, which shows how hard three
+> funded auditors in three jurisdictions are to keep. A 2-of-3 acceptance keeps
+> the property that no one legal order makes a split view, and it survives the
+> loss of one signer. The degraded read keeps a lookup available below that
+> threshold, and it removes the two automatic actions that a forged entry would
+> exploit. `DIS-011` names the object, the field, the measuring party, and the
+> skew tolerance, as §1.9 requires.
 
 ### 9.5.3 Gossip the tree head in ordinary ciphertext
 
@@ -734,9 +734,9 @@ directory.
 | **Index blinding** | **ECVRF-EDWARDS25519-SHA512-TAI (RFC 9381) — classically secure only** |
 
 **[DIS-012]** **An implementation MUST state this limit in its user-facing
-documentation.** Part 15 §15.2.6 records the same limit as a residual risk. A harvested log and a
-future cryptographically relevant quantum computer together **de-blind the full
-historical directory**.
+documentation.** Part 15 §15.2.6 records the same limit as a residual risk. A
+harvested log and a future cryptographically relevant quantum computer together
+**de-blind the full historical directory**.
 
 There are two mitigations. First, rotate the VRF key at a multi-year era
 boundary. Second, use the "enumeration is worthless" property of §9.3. The
@@ -851,9 +851,9 @@ The ratchet of the existing session authenticates the notice, in the same manner
 as it authenticates an edit (Part 6 §6.6.1).
 
 Each contact receives a different record on a different chain. **[DIS-023]** A
-client MUST send one notice for each contact. **[DIS-024]** A client MUST NOT reuse one
-authenticated object across two contacts. Part 4 §4.5.1 rule 6 gives the delay
-that separates the sends.
+client MUST send one notice for each contact. **[DIS-024]** A client MUST NOT
+reuse one authenticated object across two contacts. Part 4 §4.5.1 rule 6 gives
+the delay that separates the sends.
 
 A client uses the root identity **only** for recovery after a total loss. That
 recovery falls back correctly to out-of-band verification.
@@ -870,18 +870,18 @@ Each contact has three names:
 
 **[DIS-016]** **A handle MUST NOT render as a verified identity.** The
 documentation of Signal states that key transparency "does not verify the
-identity of the user who controls a particular phone number or username." A handle proves that *this key
-is consistently published for this string*. A handle proves nothing about the
-party that holds the key.
+identity of the user who controls a particular phone number or username." A
+handle proves that *this key is consistently published for this string*. A
+handle proves nothing about the party that holds the key.
 
 The user assigns the petname when the user accepts the contact. That moment also
 gives the user a natural point to do the out-of-band confirmation.
 
 **The pet-avatar.** **[DIS-017]** The viewer MAY also assign a picture to a
 contact. The client shows that picture to the viewer only. **[DIS-018]** **A
-client MUST NOT send a pet-avatar to any party.** A pet-avatar is mutable state under Part 7 §7.5.3,
-thus the devices of one user converge on one value. §9.3.1 rule 3 keeps a
-pet-avatar out of the encrypted profile blob.
+client MUST NOT send a pet-avatar to any party.** A pet-avatar is mutable state
+under Part 7 §7.5.3, thus the devices of one user converge on one value. §9.3.1
+rule 3 keeps a pet-avatar out of the encrypted profile blob.
 
 **[DIS-195]** A client MUST take a pet-avatar from a picker that gives the
 client the one picture that the user selected. Then:
@@ -1287,8 +1287,9 @@ lookup hides it.
 > *Cause.* A timed link that ends by the tombstone write of its holder alone
 > depends on the phone of that holder. A phone that is off at the end leaves
 > the link open, possibly for days. The directory already writes the
-> tombstone of a lapsed lease, and a lease with an end moves that work to it. A requester that read the entry
-> before its end still holds its queue, thus the holder drops such a hello.
+> tombstone of a lapsed lease, and a lease with an end moves that work to it. A
+> requester that read the entry before its end still holds its queue, thus the
+> holder drops such a hello.
 
 ## 9.11 Parameters
 

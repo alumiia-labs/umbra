@@ -58,13 +58,16 @@ takes in.
   holds the relays of one operator, and the measurers of that operator test
   them. **[REL-206]** Under that directory, an authority MUST list a relay
   of its own operator at the class that the operator declares, with three
-  exceptions. A class test of that relay that failed at a class lists the
-  relay below that class, until a newer test at that class or above passes.
-  A class test that failed at C0 removes the relay under `REL-197`, until
-  such a newer test passes. A class rises under `REL-001` alone. A relay
-  with no test thus keeps the declared class. The first clause of `REL-197`
-  and the removal of `REL-098` bind a directory at `AUTHORITY_FLOOR`, which
-  lists no class that no test verified.
+  exceptions:
+  1. A class test of that relay that failed at a class lists the relay below
+     that class, until a newer test at that class or above passes.
+  2. A class test that failed at C0 removes the relay under `REL-197`, until
+     such a newer test passes.
+  3. A class rises under `REL-001` alone.
+
+  A relay with no test thus keeps the declared class. The first clause of
+  `REL-197` and the removal of `REL-098` bind a directory at
+  `AUTHORITY_FLOOR`, which lists no class that no test verified.
 - **The selection is weighted by class.** **[REL-196]** A client MUST order
   the relays of a draw at random in proportion to the rate of their class,
   with the weights 2, 5, 10, and 20 for C0 to C3. The draws are the hops of
@@ -88,16 +91,18 @@ takes in.
 - **The cadence.** **[REL-097]** A directory authority SHOULD measure each
   relay, C0 included, one time in each `MEASURE_INTERVAL`. **[REL-098]** If a
   relay has no verifying report inside `MEASURE_STALE`, a directory authority
-  MUST remove it from the listing until a class test verifies it again. The directory authority measures each of the two
-  periods from the slot of the last verifying report. §10.11 gives the two
-  values.
+  MUST remove it from the listing until a class test verifies it again. The
+  directory authority measures each of the two periods from the slot of the
+  last verifying report. §10.11 gives the two values.
 
 This rule limits the payoff of one bandwidth-inflation step to **2.5×**, which
 is one class step in one 7-day epoch. The ladder has three steps, thus the
-payoff over the full ladder is **10×** in three epochs or more. The published payoffs
-were 177×, 420×, and 28×, and each one is a cumulative figure. The rule needs
-**no cryptography**. It needs the measurement fleet of §10.3. A demotion needs no delay, because a false claim is what the
-delay defends against, and a lower class is not a claim.
+payoff over the full ladder is **10×** in three epochs or more. The published
+payoffs were 177×, 420×, and 28×, and each one is a cumulative figure.
+
+The rule needs **no cryptography**. It needs the measurement fleet of §10.3. A
+demotion needs no delay, because a false claim is what the delay defends
+against, and a lower class is not a claim.
 
 Four discrete weights keep the Gini coefficient of the relay selection near
 the flat end of the Snader–Borisov family, and the floor keeps the ratio of the
@@ -118,8 +123,8 @@ with aggregate measurer capacity >= 2.25x the class ceiling being claimed
 → bound: <= 1.33x inflation
 ```
 
-**[REL-002]** A relay MUST decrypt each `MEAS_ECHO` cell that a measurer sends to it. **[REL-003]** That
-relay MUST then re-emit that cell to the measurer.
+**[REL-002]** A relay MUST decrypt each `MEAS_ECHO` cell that a measurer sends
+to it. **[REL-003]** That relay MUST then re-emit that cell to the measurer.
 
 **The echo.** The cells of a measurement travel on a measurement circuit of
 §10.3.1, and Part 6 §6.3 gives their layouts. **[REL-204]** A relay MUST
@@ -145,10 +150,10 @@ measurer with a void certificate would then fail each relay.
 
 **The wire value is `0x07`**, and Part 6 §6.3 holds the closed cell-command
 table that carries it. `MEAS_ECHO` is a cell command and it is not a queue
-command, thus Part 6 §6.4 gives it no entry. **[REL-040]** A measurer MUST send a
-`MEAS_ECHO` cell in bucket `B0`. **[REL-041]** A relay MUST reject a `MEAS_ECHO`
-cell in a different bucket, because a larger bucket turns the echo into an
-amplifier.
+command, thus Part 6 §6.4 gives it no entry. **[REL-040]** A measurer MUST
+send a `MEAS_ECHO` cell in bucket `B0`. **[REL-041]** A relay MUST reject a
+`MEAS_ECHO` cell in a different bucket, because a larger bucket turns the echo
+into an amplifier.
 
 **One rule differs from the FlashFlow specification, and it is important.**
 Measure a group of relays **in the same 30-second slot** if those relays share
@@ -163,18 +168,18 @@ This rule is the only defense against the *n × N* cluster inflation of TorMult.
 Its cost is measurer capacity. §10.6 lets one ASN hold 10 % of the chain
 population of a bloc, and §10.5.3 works with about 3 000 relays. A cluster of
 300 relays at class C2 needs 300 × 1 125 Mbit/s, which is 337.5 Gbit/s, in
-one 30-second slot. No cheap measurer fleet holds that burst, thus a large cluster
-is measured in samples.
+one 30-second slot. No cheap measurer fleet holds that burst, thus a large
+cluster is measured in samples.
 
-- **[REL-099]** If a cluster holds `CLUSTER_FULL` relays or fewer, the directory
-  MUST measure the full cluster in one slot.
+- **[REL-099]** If a cluster holds `CLUSTER_FULL` relays or fewer, the
+  directory MUST measure the full cluster in one slot.
 - **[REL-100]** If a cluster holds more than `CLUSTER_FULL` relays, the
   measurer MUST select `CLUSTER_SAMPLE` relays of it for each slot. The
   measurer MUST draw the selection from its CSPRNG. **[REL-101]** The
-  directory MUST measure
-  each relay of such a cluster inside `ceil(n / CLUSTER_SAMPLE)` slots. The
-  value `n` is the cluster size. **[REL-102]** A measurer MUST NOT show the
-  selection of a slot before that slot ends.
+  directory MUST measure each relay of such a cluster inside
+  `ceil(n / CLUSTER_SAMPLE)` slots. The value `n` is the cluster size.
+  **[REL-102]** A measurer MUST NOT show the selection of a slot before that
+  slot ends.
 
 A sampled cluster keeps a residual. A relay outside the sample of a slot can
 lend capacity to a relay inside it. The selection is not predictable, thus
@@ -182,19 +187,31 @@ the cluster does not know which relays to feed. v1 holds no proof of that
 selection: no party but the measurer can verify that the draw was random.
 Part 15 §15.3 records the two residuals.
 
-**The capacity of a measurer bounds its tests.** A test needs 225 Mbit/s of
-measurer capacity for C0, 562.5 Mbit/s for C1, 1 125 Mbit/s for C2, and
-2 250 Mbit/s for C3. A measurer tests no class above its capacity, and one
-slot holds the tests that its capacity holds together. A cluster that needs
-a larger slot goes in more slots than `REL-099` and `REL-101` give, and the
-measurer tells its operator of it. The relays of that cluster outside a
-slot can then lend capacity to those inside it. The launch network of Part 3
-rule `NET-340` is such a case. Each of its servers has 500 Mbit/s. One
-measurer on one server tests C0 alone, at two relays in one slot, and it
-cannot test C1, C2, or C3. The relays of that network share one ASN, thus
-they are one cluster above `CLUSTER_FULL`, and a slot of two holds a part
-of the sample of four. `REL-206` gives the class of a relay above the
-class that a measurer can test.
+**The capacity of a measurer bounds its tests.** A test needs this measurer
+capacity:
+
+| Class | Measurer capacity |
+| --- | --- |
+| C0 | 225 Mbit/s |
+| C1 | 562.5 Mbit/s |
+| C2 | 1 125 Mbit/s |
+| C3 | 2 250 Mbit/s |
+
+A measurer tests no class above its capacity, and one slot holds the tests
+that its capacity holds together. A cluster that needs a larger slot goes in
+more slots than `REL-099` and `REL-101` give, and the measurer tells its
+operator of it. The relays of that cluster outside a slot can then lend
+capacity to those inside it.
+
+The launch network of Part 3 rule `NET-340` is such a case:
+
+- Each of its servers has 500 Mbit/s.
+- One measurer on one server tests C0 alone, at two relays in one slot, and
+  it cannot test C1, C2, or C3.
+- The relays of that network share one ASN, thus they are one cluster above
+  `CLUSTER_FULL`, and a slot of two holds a part of the sample of four.
+
+`REL-206` gives the class of a relay above the class that a measurer can test.
 
 A class test proves a **threshold** only, which is the question "does this relay
 hold 500 Mbit/s?". A class test does not estimate a value. Thus the measurer
@@ -367,15 +384,17 @@ bandwidth. It also uses the traffic that UMBRA generates for the cover function.
 
 The loop-failure input comes from the foreground only. A client makes a cover
 cell in the foreground only (Part 3 §3.6.2), thus a client gives about 72 loop
-samples each day. **[REL-004]** The directory MUST size the detection window for that rate.
+samples each day. **[REL-004]** The directory MUST size the detection window
+for that rate.
 
 ### 10.4.1 Indistinguishability of a probe from real traffic
 
-A design can also use positive measurement. **[REL-005]** In that case a probe MUST be
-**VRF-selected and cryptographically committed**. **[REL-006]** The directory MUST show the
-probe only after the epoch closes. Thus a probe is indistinguishable from real
-traffic while it moves. A relay that can tell a probe from a user packet serves
-the probes well and serves the other traffic badly.
+A design can also use positive measurement. **[REL-005]** In that case a probe
+MUST be **VRF-selected and cryptographically committed**. **[REL-006]** The
+directory MUST show the probe only after the epoch closes. Thus a probe is
+indistinguishable from real traffic while it moves. A relay that can tell a
+probe from a user packet serves the probes well and serves the other traffic
+badly.
 
 The loop cover cells of UMBRA are the correct vehicle. The directory VRF-selects
 a subset of those cells as scored measurements.
@@ -586,10 +605,12 @@ report.
 > builds circuits for its own queues at other times too.
 
 > *Cause.* A `B0` cell names a queue, thus the report needs a queue of an
-> authority as its destination. The seal uses X25519 alone. A hybrid encapsulation with
-> ML-KEM-768 takes 1 088 bytes, and the L6 record of a `B0` cell holds 357
-> bytes, thus a hybrid seal would move the report out of `B0` and out of the
-> cover slot, where it becomes a visible event. A later quantum adversary that
+> authority as its destination.
+>
+> The seal uses X25519 alone. A hybrid encapsulation with ML-KEM-768 takes
+> 1 088 bytes, and the L6 record of a `B0` cell holds 357 bytes. Thus a hybrid
+> seal would move the report out of `B0` and out of the cover slot, where it
+> becomes a visible event. A later quantum adversary that
 > opens a stored report learns that some client, which the circuit hid, lost
 > loops on three named relays in a past epoch. Part 9 §9.5.4 states the other
 > place where UMBRA is not post-quantum.
@@ -678,14 +699,18 @@ relay that it asks, with the `relay_id` of that relay. It asks the relay at the
 far end of a link before the relay at the near end.
 
 - **[REL-179]** A relay MUST answer a `ReceiptQuery` that satisfies two
-  conditions. The query verifies under the key of that authority in the key set
-  of the relay set that the relay holds. The query names the `relay_id` of the
-  relay. The answer MUST give the receipt of that `epoch`, issued or taken,
-  whose window holds the leaf of `tag`. The answer MUST also give the inclusion
+  conditions:
+  1. The query verifies under the key of that authority in the key set of the
+     relay set that the relay holds.
+  2. The query names the `relay_id` of the relay.
+
+  The answer MUST give the receipt of that `epoch`, issued or taken, whose
+  window holds the leaf of `tag`. The answer MUST also give the inclusion
   proof of that leaf. `leaf_index` is the place of the cell among the
   `cell_count` cells of the receipt. The authority MUST reject a proof that
   does not lead to that place. A relay that holds no such receipt MUST answer
-  `found` 0x00. **[REL-180]** A relay MUST refuse a query that does not verify
+  `found` 0x00.
+- **[REL-180]** A relay MUST refuse a query that does not verify
   with HTTP status 403 and no body. A relay MUST refuse a query that names
   another `relay_id` with no body. That query MUST NOT count in the bound of
   `REL-186`.
@@ -725,11 +750,14 @@ far end of a link before the relay at the near end.
   the same rule. A relay that gives no answer to a query is such a case, and
   the authority removes the link. No answer is each outcome but a
   `ReceiptAnswer` that parses: a timeout, a refusal under `REL-187`, and an
-  error of the transport. A contradiction thus needs two items. The first is
-  the answer `found` 0x00 of the relay at the far end. The second is a receipt
-  under the signature of that relay at the near end. The relay before a link,
-  and each party on the path of the query, can cause a silence. None of them
-  can cause that answer.
+  error of the transport.
+
+  A contradiction thus needs two items:
+  1. the answer `found` 0x00 of the relay at the far end;
+  2. a receipt under the signature of that relay at the near end.
+
+  The relay before a link, and each party on the path of the query, can cause
+  a silence. None of them can cause that answer.
 
 **The removed link.** An expelled relay leaves the relay set, and the manifest
 lists it no more. A removed link keeps both relays, thus the manifest carries
@@ -772,9 +800,8 @@ the label.
   chain.
 
 > *Cause.* A removal with no carrier reaches no client, and no client can
-> then avoid the link. A removal changes the paths of each
-> client, thus it takes the signatures of a root and not the key of one
-> authority.
+> then avoid the link. A removal changes the paths of each client, thus it
+> takes the signatures of a root and not the key of one authority.
 
 **The dense-subgraph search.** Step 5 of §10.4 runs at each consensus epoch
 over the **link-fault graph**. That graph has one vertex for each relay of the
@@ -789,7 +816,9 @@ set and one edge for each `LinkRemoval` that the manifest carries.
 > link to it. An attacker loses one link for each relay whose traffic it drops.
 > Thus the relay with the most edges is an attacker before it is a victim, and
 > its expulsion takes one edge from each of its victims. One incident expels no
-> relay. **The residual.** `LINK_FAULT_DEGREE` attackers that each give up one
+> relay.
+>
+> **The residual.** `LINK_FAULT_DEGREE` attackers that each give up one
 > link to one honest relay expel that relay, and each attacker stays. The trade
 > costs the attackers one link each for one honest relay, and the Miranda
 > evaluation of §10.4 names the same residual.
@@ -816,9 +845,8 @@ the foreground a client pays 0 cells, because a report replaces a cover cell.
 > `REL-083` is not a forensic test over two receipts, because the committed
 > values of two such receipts are disjoint by construction. Miranda resolves
 > the same case with the party that built the packet, which holds each per-hop
-> value.
-> The authority is that party for its own probe. The probe adds no key and no
-> party.
+> value. The authority is that party for its own probe. The probe adds no key
+> and no party.
 
 ## 10.5 The directory is a Byzantine broadcast, not a plurality vote
 
@@ -837,9 +865,9 @@ the preimage, and the verification rules.
 
 Requirements:
 
-- **[REL-007]** A client MUST verify the 5-of-7 multi-signature of §10.5.2. **[REL-008]** A client MUST
-  also gossip the
-  consensus digest in band, over the existing queue traffic and loop traffic.
+- **[REL-007]** A client MUST verify the 5-of-7 multi-signature of §10.5.2.
+  **[REL-008]** A client MUST also gossip the consensus digest in band, over
+  the existing queue traffic and loop traffic.
   This method gives UMBRA an always-on equivocation detector at no cost. It
   needs no separate monitoring service, and it makes no new correlator.
 - **[REL-160]** The consensus digest, source `0x02` of Part 6 §6.6.4, MUST be
@@ -860,10 +888,10 @@ Requirements:
   radio is on for another cause (Part 3 §3.6.2). **[REL-010]** A client MUST
   NOT open a session for the only purpose of a directory diff. A validity of 3
   hours holds a client over a gap between two such occasions.
-- An **ML-DSA-65 public key identifies an authority, and an address does not**. A
-  supermajority of the current set can rotate the key set. An offline recovery
-  key under a legally separate arrangement supports that rotation. §10.5.2 gives
-  the rotation object.
+- An **ML-DSA-65 public key identifies an authority, and an address does
+  not**. A supermajority of the current set can rotate the key set. An offline
+  recovery key under a legally separate arrangement supports that rotation.
+  §10.5.2 gives the rotation object.
 - The signed relay manifest moves over **each available bootstrap carrier** of
   Part 3 §3.10. The `RelaySetDiff` of §10.5.3 and the `BlocList` of §10.6.3
   move beside it. Thus one carrier is not a single point of failure for
@@ -895,22 +923,28 @@ independence is a requirement, and it is not a description.
   `AUTHORITY_FLOOR` as 5. `keyset_hash` covers `independent_count`, thus a
   change of the count is a key-set rotation under `REL-036`.
 
-> *Cause.* Part 2 §2.6 assumption 6 rests on
-> the count of signing keys that one adversary holds. One legal person that
-> operates four authorities holds four keys under one order, and the assumption
-> then fails at a count of seven. The rules above make the independent count a
-> published fact that the authorities sign. The client shows a launch that has
-> not reached the floor.
+> *Cause.* Part 2 §2.6 assumption 6 rests on the count of signing keys that
+> one adversary holds. One legal person that operates four authorities holds
+> four keys under one order, and the assumption then fails at a count of seven.
+> The rules above make the independent count a published fact that the
+> authorities sign. The client shows a launch that has not reached the floor.
 
 A measurement report is a signed tuple `(relay_id, class_claimed,
 class_verified, slot_id, measurer_id)`. An authority accepts a class only after
 **3 or more independent measurer reports from 2 or more different ASes**.
-That rule binds a directory at `AUTHORITY_FLOOR`. v1 defines no layout, no
-label, and no carrier for the signed report, thus no v1 measurer signs one.
-A v1 measurer gives each result to the authority of its own operator, on
-the machine of that operator: the relay, the class of the test, pass or
-fail, and the consensus epoch of the slot. A provisional directory takes
-the results of the measurers of its own operator under `REL-206`.
+That rule binds a directory at `AUTHORITY_FLOOR`.
+
+v1 defines no layout, no label, and no carrier for the signed report, thus no
+v1 measurer signs one. A v1 measurer gives each result to the authority of its
+own operator, on the machine of that operator. A result holds these values:
+
+- the relay;
+- the class of the test;
+- pass or fail;
+- the consensus epoch of the slot.
+
+A provisional directory takes the results of the measurers of its own operator
+under `REL-206`.
 
 > This rule is the operational lesson from the live consensus of Tor. Only 5 of
 > the 9 authorities give a bandwidth value, because the combination of the two
@@ -918,9 +952,10 @@ the results of the measurers of its own operator under `REL-206`.
 
 ### 10.5.2 The directory root object
 
-**[REL-025]** A directory authority MUST sign a `DirectoryRoot` with ML-DSA-65. Part 5 §5.1
-gives ML-DSA-65 as primitive 3, and the primitive register holds no threshold
-scheme. **[REL-026]** An implementation MUST NOT use a threshold signature construction.
+**[REL-025]** A directory authority MUST sign a `DirectoryRoot` with
+ML-DSA-65. Part 5 §5.1 gives ML-DSA-65 as primitive 3, and the primitive
+register holds no threshold scheme. **[REL-026]** An implementation MUST NOT
+use a threshold signature construction.
 
 ```
 DirectoryRoot {
@@ -981,30 +1016,32 @@ fits one `B3` cell.
 **The verification rules.**
 
 1. **[REL-027]** A client MUST reject a `sig_count` below 5 or above 7.
-2. **[REL-028]** A client MUST reject a repeated `authority_index`. **[REL-029]** A client MUST reject an
-   `authority_index` at or above `authority_count`.
-3. **[REL-030]** A client MUST reject a `sigs` list that is not in ascending order of
-   `authority_index`. Part 6 §6.1.1 rule 4 requires one canonical form.
+2. **[REL-028]** A client MUST reject a repeated `authority_index`.
+   **[REL-029]** A client MUST reject an `authority_index` at or above
+   `authority_count`.
+3. **[REL-030]** A client MUST reject a `sigs` list that is not in ascending
+   order of `authority_index`. Part 6 §6.1.1 rule 4 requires one canonical
+   form.
 4. **[REL-031]** A client MUST verify each signature against the key at its
-   `authority_index` in the key set that the client holds. **[REL-032]** A client MUST count
-   5 or more **valid** signatures before it accepts the object. A count of the
-   entries is not a count of the valid signatures.
-5. **[REL-033]** A client MUST reject a `DirectoryRoot` whose `keyset_hash` differs from the
-   hash of the key set that the client holds. **[REL-119]** A directory
-   authority MUST set `bloc_hash` to the SHA3-256 over the canonical `BlocList`
-   of §10.6.3. **[REL-120]** A client MUST reject a `DirectoryRoot` whose
-   `revoked_count` is above `MEASURER_REVOKE_MAX`.
-6. **[REL-034]** A client MUST reject a `DirectoryRoot` whose `epoch` is below the highest
-   epoch that the client verified.
+   `authority_index` in the key set that the client holds. **[REL-032]** A
+   client MUST count 5 or more **valid** signatures before it accepts the
+   object. A count of the entries is not a count of the valid signatures.
+5. **[REL-033]** A client MUST reject a `DirectoryRoot` whose `keyset_hash`
+   differs from the hash of the key set that the client holds. **[REL-119]** A
+   directory authority MUST set `bloc_hash` to the SHA3-256 over the canonical
+   `BlocList` of §10.6.3. **[REL-120]** A client MUST reject a `DirectoryRoot`
+   whose `revoked_count` is above `MEASURER_REVOKE_MAX`.
+6. **[REL-034]** A client MUST reject a `DirectoryRoot` whose `epoch` is below
+   the highest epoch that the client verified.
 
    **The epoch names a start time.** §10.11 gives the epoch a length of 1 hour,
    and it gives the consensus a validity of 3 hours. Consensus epoch `E` starts
    at `E × 3 600` Unix seconds, and it ends before `(E + 1) × 3 600`.
-   **[REL-117]** A directory authority MUST set
-   `epoch_start_unix` to `epoch × 3 600`. **[REL-118]** A client MUST reject a
-   `DirectoryRoot` whose `epoch_start_unix` differs from `epoch × 3 600`. The
-   field makes the origin of the epoch count an explicit signed statement. Part
-   3 §3.2.6 and Part 4 §4.7.2 derive their week from that count.
+   **[REL-117]** A directory authority MUST set `epoch_start_unix` to
+   `epoch × 3 600`. **[REL-118]** A client MUST reject a `DirectoryRoot` whose
+   `epoch_start_unix` differs from `epoch × 3 600`. The field makes the origin
+   of the epoch count an explicit signed statement. Part 3 §3.2.6 and Part 4
+   §4.7.2 derive their week from that count.
 
    **The freshness test is against the client clock, and it is not against the
    highest epoch.** `REL-034` already rejects each epoch below the highest
@@ -1016,12 +1053,17 @@ fits one `B3` cell.
    A `DirectoryRoot` is valid from `epoch_start_unix` to `epoch_start_unix`
    plus `CONSENSUS_VALIDITY`. The **clock correction** is the distance from
    the device clock, at the moment the client accepted that root, to that
-   span: `epoch_start_unix` minus the device clock when the device clock is
-   before the span, zero inside it, and the end of the span minus the device
-   clock after it. The **client clock** is the device clock plus the
-   correction. A client holds one
-   correction or none. Each rule of this section that names a clock names the
-   client clock.
+   span:
+
+   | Device clock | Clock correction |
+   | --- | --- |
+   | Before the span | `epoch_start_unix` minus the device clock |
+   | Inside the span | Zero |
+   | After the span | The end of the span minus the device clock |
+
+   The **client clock** is the device clock plus the correction. A client holds
+   one correction or none. Each rule of this section that names a clock names
+   the client clock.
 
    **[REL-035]** A client MUST reject a `DirectoryRoot` whose `epoch_start_unix`
    is more than `CONSENSUS_VALIDITY` plus `CLOCK_SKEW` before the client clock.
@@ -1039,11 +1081,15 @@ fits one `B3` cell.
    > of up to that validity. That client moves its clock back, and it shows
    > the `corrected` state from each root older than `CLOCK_SKEW`.
 
-   A client is in one of three clock states. It is `unsynchronized` while it
-   holds no correction. It is `synchronized` while the magnitude of the
-   correction is at or below `CLOCK_SKEW`. It is `corrected` while that
-   magnitude is above `CLOCK_SKEW`. **[REL-116]** A client MUST show the user
-   the `corrected` state.
+   A client is in one of three clock states:
+
+   | State | Condition |
+   | --- | --- |
+   | `unsynchronized` | The client holds no correction. |
+   | `synchronized` | The magnitude of the correction is at or below `CLOCK_SKEW`. |
+   | `corrected` | The magnitude of the correction is above `CLOCK_SKEW`. |
+
+   **[REL-116]** A client MUST show the user the `corrected` state.
 
    **[REL-045]** A client build MUST ship the epoch number that held at the build
    time. **[REL-046]** A client with no verified epoch MUST reject a
@@ -1061,18 +1107,19 @@ fits one `B3` cell.
    > more than `CLOCK_SKEW` after that clock. A phone with a clock one day
    > behind then rejects each fresh root, and it accepts no root at all. Part
    > 3 §3.4 selects no path without an accepted root, thus that client loses
-   > the network and not freshness alone. The
-   > rules above take the time from the root, because a root that verifies is
-   > authenticated evidence of the time. `REL-034` keeps the epochs monotone
-   > under it. A stale root at the first launch gives a stale
-   > correction, and Part 15 §15.3 records that residual. `REL-046` bounds it
-   > to the age of the build, and `REL-044` heals it at the first fresh root.
+   > the network and not freshness alone.
+   >
+   > The rules above take the time from the root, because a root that verifies
+   > is authenticated evidence of the time. `REL-034` keeps the epochs monotone
+   > under it. A stale root at the first launch gives a stale correction, and
+   > Part 15 §15.3 records that residual. `REL-046` bounds it to the age of the
+   > build, and `REL-044` heals it at the first fresh root.
 
 **The key-set rotation.**
 
-7. **[REL-036]** A client MUST accept a `DirectoryKeySet` only with 5 or more valid ML-DSA-65
-   signatures from the **previous** key set. Each of those signatures covers
-   `"umbra/v1/directory-keyset" || version || keyset_epoch ||`
+7. **[REL-036]** A client MUST accept a `DirectoryKeySet` only with 5 or more
+   valid ML-DSA-65 signatures from the **previous** key set. Each of those
+   signatures covers `"umbra/v1/directory-keyset" || version || keyset_epoch ||`
    `SHA3-256(the new canonical key set)`. Part 5 §5.11 holds that label, and it
    is not the label of a `DirectoryRoot`.
 8. **[REL-037]** A client MUST reject a `DirectoryKeySet` whose `keyset_epoch`
@@ -1081,11 +1128,11 @@ fits one `B3` cell.
    value. `keyset_epoch` counts the rotations and names no time, thus the step
    of one is its only bound. A set that names a far value would stand above
    each honest set after it.
-9. **[REL-038]** The offline recovery arrangement MUST hold one key of the 7. That key gives
-   a rotation when a legal order or a compromise removes an authority, and the
-   remaining authorities cannot reach 5 without it.
-10. **[REL-039]** A client build MUST ship the genesis `DirectoryKeySet`, or a later set
-    that the key chain below reaches from it.
+9. **[REL-038]** The offline recovery arrangement MUST hold one key of the 7.
+   That key gives a rotation when a legal order or a compromise removes an
+   authority, and the remaining authorities cannot reach 5 without it.
+10. **[REL-039]** A client build MUST ship the genesis `DirectoryKeySet`, or a
+    later set that the key chain below reaches from it.
 
 **The key chain.** A client shipped with one key set reaches each later one
 through the chain of rotations:
@@ -1106,16 +1153,19 @@ KeyChain {
 - **[REL-200]** A client or a relay that holds a key set under which a
   manifest does not verify MUST fetch the `KeyChain` and walk it from the set
   it holds: it passes over each link at or below the held `keyset_epoch`,
-  and it accepts each later link under `REL-036` and `REL-037` in order. It
-  MUST keep the newest set that it accepted in its store, and it MUST keep
-  the set that it held when a link does not verify. A client MUST keep,
-  beside that set, the SHA3-256 of the canonical key set that the walk
-  started from. A client MUST start from the set in its store only when that
-  hash equals the hash of the shipped set. The shipped set is the set that the
-  build of the client ships. A client MUST start from the shipped set in each
-  other case. It then walks the chain again from the shipped set. A
-  `keyset_epoch` gives a stored set no standing. Thus a build that ships a set
-  after a leaked one trusts no link that the leaked set signed. That build
+  and it accepts each later link under `REL-036` and `REL-037` in order.
+  - It MUST keep the newest set that it accepted in its store, and it MUST
+    keep the set that it held when a link does not verify.
+  - A client MUST keep, beside that set, the SHA3-256 of the canonical key set
+    that the walk started from.
+  - A client MUST start from the set in its store only when that hash equals
+    the hash of the shipped set. The shipped set is the set that the build of
+    the client ships.
+  - A client MUST start from the shipped set in each other case. It then walks
+    the chain again from the shipped set.
+
+  A `keyset_epoch` gives a stored set no standing. Thus a build that ships a
+  set after a leaked one trusts no link that the leaked set signed. That build
   takes back a device that walked such a link. Thus a rotation reaches a build
   that predates it.
 
@@ -1127,9 +1177,9 @@ KeyChain {
 > device keeps the set of the attacker until its user clears the data of the
 > app.
 
-> *Cause.* Part 5 §5.1 lists no threshold construction, and the
-> message core is closed at six primitive families. A list of 5 to 7 ordinary
-> ML-DSA-65 signatures needs no new primitive, and it gives one property that a
+> *Cause.* Part 5 §5.1 lists no threshold construction, and the message core
+> is closed at six primitive families. A list of 5 to 7 ordinary ML-DSA-65
+> signatures needs no new primitive, and it gives one property that a
 > threshold scheme does not: a verifier reads **which** authorities signed.
 > §10.5 says that one compromised authority in Tor can equivocate, and a named
 > signer set is the evidence that makes an equivocation attributable.
@@ -1172,12 +1222,15 @@ RelayDescriptor {
 
 The fixed width is **5 464 bytes**. The descriptor carries no static
 ML-KEM-768 key, because no handshake consumes one. Part 5 §5.4.9 gives the
-cause. **[REL-127]** A relay MUST set
-`chunk_store_gib` to the store that it declares under Part 12 §12.7, in GiB. A
-relay without the attachment role sets the field to 0. The queue role (bit 0)
-covers the group queues of Part 3 §3.2.7 as well as the pairwise queues: a
-relay that serves queues serves group queues, and no separate role bit exists
-for them.
+cause.
+
+**[REL-127]** A relay MUST set `chunk_store_gib` to the store that it declares
+under Part 12 §12.7, in GiB. A relay without the attachment role sets the field
+to 0.
+
+The queue role (bit 0) covers the group queues of Part 3 §3.2.7 as well as the
+pairwise queues. A relay that serves queues serves group queues, and no
+separate role bit exists for them.
 
 **[REL-047]** A relay MUST publish its descriptor in the encoding above.
 **[REL-048]** A relay MUST sign the descriptor with `identity_pk` over this
@@ -1236,10 +1289,13 @@ multi-signature.
 - **[REL-129]** A directory authority MUST set `class` at or below
   `capacity_class` of the descriptor. §10.2 gives the measurement that sets
   it.
-- A relay is **ingress eligible** when three conditions hold. Its `roles` bit 2
-  is set. Its `class` is C1 or above, under §10.6.1. Its staging of §10.7.1 is
-  complete. **[REL-130]** A directory authority MUST set `flags` bit 0 only for
-  an ingress eligible relay.
+- A relay is **ingress eligible** when three conditions hold:
+  1. Its `roles` bit 2 is set.
+  2. Its `class` is C1 or above, under §10.6.1.
+  3. Its staging of §10.7.1 is complete.
+
+  **[REL-130]** A directory authority MUST set `flags` bit 0 only for an
+  ingress eligible relay.
 - **[REL-131]** A directory authority MUST NOT take `operator_id`, `class`, or
   `flags` from a relay.
 - **[REL-132]** A client MUST take the class, the operator, and the ingress
@@ -1272,10 +1328,11 @@ hash and a node hash under one construction.
 > KEYTRANS construction, which carries its own separation.
 
 **[REL-054]** A directory authority MUST order the leaves by `relay_id`, from
-the lowest value to the highest value. **[REL-055]** That authority MUST NOT put
-two leaves with one `relay_id` in one tree. **[REL-056]** A directory authority MUST
-carry the last node of a level with an odd node count to the next level without
-a change. **[REL-063]** That authority MUST NOT duplicate that node.
+the lowest value to the highest value. **[REL-055]** That authority MUST NOT
+put two leaves with one `relay_id` in one tree. **[REL-056]** A directory
+authority MUST carry the last node of a level with an odd node count to the
+next level without a change. **[REL-063]** That authority MUST NOT duplicate
+that node.
 
 **[REL-057]** A client MUST verify the inclusion proof of an entry before it
 selects the relay of that entry. The proof is against the `root` of a
@@ -1303,11 +1360,16 @@ RelaySetDiff {
 }
 ```
 
-A **store level** is a two-bit value. Level 0 is a relay without the attachment
-role, or a free store below `CHUNK_SIZE`. Level 1 is a free store below
-`CHUNK_STORE_MIN`. Level 2 is a free store below `CHUNK_STORE_TARGET`. Level 3
-is a free store at or above `CHUNK_STORE_TARGET`. Part 12 §12.7 owns the three
-constants.
+A **store level** is a two-bit value:
+
+| Level | Meaning |
+| --- | --- |
+| 0 | A relay without the attachment role, or a free store below `CHUNK_SIZE` |
+| 1 | A free store below `CHUNK_STORE_MIN` |
+| 2 | A free store below `CHUNK_STORE_TARGET` |
+| 3 | A free store at or above `CHUNK_STORE_TARGET` |
+
+Part 12 §12.7 owns the three constants.
 
 - **[REL-135]** A directory authority MUST publish one `RelaySetDiff` beside
   each `DirectoryRoot`. **[REL-136]** A directory authority MUST set each store
@@ -1327,8 +1389,8 @@ steps is not a raw value. Thus §10.8 does not bind it.
 Part 13 §13.8 puts a `PowChallenge` beside each descriptor. The relay signs
 that object, it sits outside the tree, and rule `ABU-064` makes each carrier
 of the relay manifest serve it beside the manifest. An authority serves no
-fetch to a client. A client that holds a descriptor fetches the
-challenge alone on the same path.
+fetch to a client. A client that holds a descriptor fetches the challenge
+alone on the same path.
 
 **[REL-059]** If the entry width, the relay count, or the fetch schedule
 changes, a revision MUST derive both rows again. The rows are the directory row
@@ -1360,27 +1422,26 @@ two roots, because a value that already exists when an operator picks
 **[REL-198]** Under the provisional directory of `REL-126`, an authority MAY
 set the layer of each relay of its own operator in the place of the function
 above, and it MAY list such a relay placed at once. The function keeps one
-operator from the position of another; a directory of one operator has no
-other, and a set of four chain relays then holds one at layer 2 and three at
+operator from the position of another. A directory of one operator has no
+other. A set of four chain relays then holds one at layer 2 and three at
 layer 3, which the function does not promise.
 
 **The pending root.** **[REL-156]** Except under `REL-198`, a directory
 authority MUST list a relay of the chain population in one root with `flags`
-bit 2 set and bit 1 clear before it places the relay. **[REL-157]** An authority MUST NOT set bit 1 in
-the same root as bit 2. **[REL-158]** A client MUST NOT select a relay whose
-entry sets bit 2 for any hop, and a relay MUST NOT open a circuit to one. A
-pending entry carries the address and the keys of the relay, thus an
-operator tests its relay against the directory, and no client routes
-through it.
+bit 2 set and bit 1 clear before it places the relay. **[REL-157]** An
+authority MUST NOT set bit 1 in the same root as bit 2. **[REL-158]** A client
+MUST NOT select a relay whose entry sets bit 2 for any hop, and a relay MUST
+NOT open a circuit to one. A pending entry carries the address and the keys of
+the relay, thus an operator tests its relay against the directory, and no
+client routes through it.
 
 - **[REL-060]** Except under `REL-198`, a directory authority MUST compute
   the layer of a relay of the chain population one time, with the function
-  above, under the root
-  that listed the relay as pending. It MUST set `flags` bit 1 of the first
-  entry that clears bit 2 when the value is 3, and it MUST keep that bit in
-  each later entry of that `relay_id`. A relay with no queue role serves no
-  last hop (`REL-150`), thus the authority MUST clear bit 1 for it, and that
-  relay is of layer 2.
+  above, under the root that listed the relay as pending. It MUST set `flags`
+  bit 1 of the first entry that clears bit 2 when the value is 3, and it MUST
+  keep that bit in each later entry of that `relay_id`. A relay with no queue
+  role serves no last hop (`REL-150`), thus the authority MUST clear bit 1 for
+  it, and that relay is of layer 2.
 - **[REL-061]** A client MUST take the layer of a candidate for hop 2 and hop
   3 from `flags` bit 1 of its entry, and a relay MUST take its own layer from
   its own entry. **[REL-151]** A client MUST reject an entry that sets bit 1
@@ -1393,16 +1454,16 @@ through it.
   sign a root over an entry whose bit 1 differs from the function.
 - **[REL-159]** Except under `REL-198`, the relays of the first root of a
   directory MUST take their layer under `GENESIS_ROOT` at epoch 0, with no
-  pending root. That root is
-  the trusted setup of the directory, and no operator submits a relay to it
-  after it exists.
+  pending root. That root is the trusted setup of the directory, and no
+  operator submits a relay to it after it exists.
 
 > *Cause.* The function is a plain hash, and it is not a **verifiable random
 > function**. A VRF proves that a holder of a secret key produced an output,
-> and this assignment has no secret and no prover. Each party holds the same consensus root and
-> computes the same value, thus a plain hash gives the full property and a proof
-> carries no information. The root is multi-signed and no operator predicts
-> it, thus an operator cannot select a position by a choice of `relay_id`.
+> and this assignment has no secret and no prover. Each party holds the same
+> consensus root and computes the same value, thus a plain hash gives the full
+> property and a proof carries no information. The root is multi-signed and no
+> operator predicts it, thus an operator cannot select a position by a choice
+> of `relay_id`.
 > That argument needs the binding root to come after the choice, and the
 > pending root of `REL-156` is what makes it come after.
 >
@@ -1423,25 +1484,26 @@ through it.
 > schedule of Part 3 §3.4.4 takes the layer as `hop_index`. A queue relay
 > that the hash moves to layer 2 refuses each circuit that ends at it, and
 > its queues are out of reach for that hour. Thus the layer is a fact of the
-> admission. The entry carries it under the 5-of-7
-> multi-signature, as it carries the ingress flag. The operator still selects
-> no position: the root of the function comes after the key of the relay. An
-> operator can select layer 2 with a descriptor that offers no queue role.
-> Layer 2 sees no client address and no queue, thus that choice gives the
-> least.
+> admission. The entry carries it under the 5-of-7 multi-signature, as it
+> carries the ingress flag.
 >
-> The plain hash also keeps the primitive register closed. Part 5 §5.1 registers
-> `ECVRF-Edwards25519-SHA512-TAI` as AUX-3 for two uses, and neither one is this
-> assignment. Keccak is primitive 6 of the message core, thus the function above
-> adds nothing. §10.4.1 keeps AUX-3, because a probe selection **does** need a
-> secret key and a proof.
+> The operator still selects no position: the root of the function comes after
+> the key of the relay. An operator can select layer 2 with a descriptor that
+> offers no queue role. Layer 2 sees no client address and no queue, thus that
+> choice gives the least.
 >
-> This function uses the label `"umbra/v1/relay-layer"`, and Part 5 §5.11 holds
-> it. The label `"umbra/v1/relay-descriptor"` already names the descriptor
-> signature, and Part 5 rule `CRY-031` forbids two object types under one
-> label. §10.5.3 gives the leaf hash and the node hash no label. The two tree
-> prefixes `0x00` and `0x01` stay in §10.5.3, and they separate a leaf from a
-> node inside the tree.
+> The plain hash also keeps the primitive register closed. Part 5 §5.1
+> registers `ECVRF-Edwards25519-SHA512-TAI` as AUX-3 for two uses, and neither
+> one is this assignment. Keccak is primitive 6 of the message core, thus the
+> function above adds nothing. §10.4.1 keeps AUX-3, because a probe selection
+> **does** need a secret key and a proof.
+>
+> This function uses the label `"umbra/v1/relay-layer"`, and Part 5 §5.11
+> holds it. The label `"umbra/v1/relay-descriptor"` already names the
+> descriptor signature, and Part 5 rule `CRY-031` forbids two object types
+> under one label. §10.5.3 gives the leaf hash and the node hash no label. The
+> two tree prefixes `0x00` and `0x01` stay in §10.5.3, and they separate a
+> leaf from a node inside the tree.
 
 **[REL-150]** A client MUST NOT use a relay at hop 3 when `roles` bit 0 of its
 descriptor is not set. The last relay of a circuit serves the commands of the
@@ -1455,6 +1517,7 @@ each relay a value, thus a client MUST NOT read the layer of a relay with
 carrier. The manifest is one root and a set of entries, each with its proof
 under that root. A carrier gives the whole relay set, or a part of it: an
 invitation of a contact carries the few relays that the first circuits need.
+
 A **whole manifest** holds each leaf of the tree, and a **partial manifest**
 holds fewer. The root carries no count of the leaves, and it needs none. The
 root of §10.5.3 over the entries of a manifest, in their order, equals the
@@ -1494,27 +1557,34 @@ the root adds 17 KB to 24 KB.
 - **[REL-147]** A client MUST reject the whole manifest when one entry fails
   `REL-050`, `REL-051`, `REL-057` or `REL-144`, when two entries are not in
   ascending order of `relay_id`, when a `step_count` is above 16, or when a
-  `side` is not `0x00` or `0x01`. A manifest that the client rejects MUST leave
-  four values as they were. The values are the accepted root, the highest
-  epoch, the clock correction of §10.5.2, and the pins of §10.6.1. A client
-  writes each of them to its store after its last test of the manifest. A
-  client MUST compute the root of §10.5.3 over the entries of the manifest. A
-  client MUST take a manifest whose computed root differs from the signed
-  `root` as a partial manifest. A client MUST NOT take its relay set from a
-  partial manifest. A client MUST NOT end or fill a pin under `REL-153` and
-  `REL-154` from a partial manifest. A partial manifest is for the first
-  circuits of a client that holds no relay set, and no rule makes a client
-  use one. The HTTPS form of Part 3 §3.10 gives the whole relay set, thus a
-  v1 client rejects a partial manifest from that carrier.
+  `side` is not `0x00` or `0x01`.
+
+  A manifest that the client rejects MUST leave four values as they were:
+  the accepted root, the highest epoch, the clock correction of §10.5.2, and
+  the pins of §10.6.1. A client writes each of them to its store after its
+  last test of the manifest.
+
+  A client MUST compute the root of §10.5.3 over the entries of the manifest.
+  Then:
+  - A client MUST take a manifest whose computed root differs from the signed
+    `root` as a partial manifest.
+  - A client MUST NOT take its relay set from a partial manifest.
+  - A client MUST NOT end or fill a pin under `REL-153` and `REL-154` from a
+    partial manifest.
+
+  A partial manifest is for the first circuits of a client that holds no
+  relay set, and no rule makes a client use one. The HTTPS form of Part 3
+  §3.10 gives the whole relay set, thus a v1 client rejects a partial manifest
+  from that carrier.
 - **[REL-148]** A client MUST reject an entry whose `valid_after` is above
   the `epoch` of the root. That entry alone goes, and it still counts as a
-  leaf in the root that `REL-147` computes; the manifest stays.
+  leaf in the root that `REL-147` computes. The manifest stays.
 - The report queues and the removals sit after the entries and outside the
   root. Each one carries the signatures of §10.4.2, thus a carrier makes
   none, and `REL-168` and `REL-184` bound what a repeat or an older one
-  does. A carrier can leave one out, and a client does not see that. A manifest
-  with no report queue drops each report under `REL-169`. A manifest with no
-  removal leaves a removed link in the chains of that client.
+  does. A carrier can leave one out, and a client does not see that. A
+  manifest with no report queue drops each report under `REL-169`. A manifest
+  with no removal leaves a removed link in the chains of that client.
 - **[REL-149]** A client MUST reject a manifest whose root names a
   `bloc_hash` that differs from the hash of the `BlocList` that the client
   holds. The blocs decide invariant 2 of Part 3 §3.4.6, and a client that
@@ -1537,7 +1607,8 @@ the root adds 17 KB to 24 KB.
 
 ## 10.6 Path selection: hard constraints, and the class weight alone
 
-**[REL-011]** A client MUST reject a chain if two of its relays share one of these items:
+**[REL-011]** A client MUST reject a chain if two of its relays share one of
+these items:
 
 - a family certificate
 - an IPv4 /16 or an IPv6 /48
@@ -1552,21 +1623,24 @@ chain of one operator comes after each chain of different operators.
 The directory enforces two ceilings in each **population** of each bloc.
 §10.5.4 defines the ingress population and the chain population. The **family
 ceiling** is 3 % of the population, or one relay when one relay is larger.
-**[REL-139]** A directory authority MUST NOT list relays of one family above
-the family ceiling in one population of one bloc. **[REL-140]** A directory
-authority MUST NOT list an ASN above 10 % of one population of one bloc. Thus
-no measurement error and no reputation bug can concentrate a path inside one
-bloc. The provisional directory of `REL-126` holds the relays of the project
-alone, and neither ceiling binds it.
+
+- **[REL-139]** A directory authority MUST NOT list relays of one family above
+  the family ceiling in one population of one bloc.
+- **[REL-140]** A directory authority MUST NOT list an ASN above 10 % of one
+  population of one bloc.
+
+Thus no measurement error and no reputation bug can concentrate a path inside
+one bloc. The provisional directory of `REL-126` holds the relays of the
+project alone, and neither ceiling binds it.
 
 A family declaration uses the **family certificate of §10.6.3**, which has the
 shape of Tor proposal 321. That certificate is mandatory in v1. UMBRA does not
 use an O(n²) list in the `MyFamily` style.
 
 The layer assignment comes from the consensus root at the admission of the
-relay (§10.5.4), and the directory sets the ingress flag (§10.5.3). Thus an operator **cannot select its
-position**. This property removes the KAX17 strategy, which collects the
-ingress positions and the middle positions.
+relay (§10.5.4), and the directory sets the ingress flag (§10.5.3). Thus an
+operator **cannot select its position**. This property removes the KAX17
+strategy, which collects the ingress positions and the middle positions.
 
 The diversity fields do not authenticate themselves. Thus admission to the
 directory needs a signed operator dossier. That dossier holds these fields:
@@ -1579,8 +1653,8 @@ directory needs a signed operator dossier. That dossier holds these fields:
 - the jurisdiction of operation
 - a contact for abuse and for legal process
 
-**[REL-012]** Directory authorities MUST verify the dossier before the first listing. **[REL-013]** They
-MUST verify it again at a material change.
+**[REL-012]** Directory authorities MUST verify the dossier before the first
+listing. **[REL-013]** They MUST verify it again at a material change.
 
 This dossier does not stop a shell company. It also does not stop a false
 declaration by a state-level adversary. It changes such an act into detectable
@@ -1613,31 +1687,34 @@ of the pin on the client clock of §10.5.2, and a confirmed flag. A pin is
   that relay holds `flags` bit 0 and the lifetime of the pin runs. It MUST
   end a pin for no other cause, and `REL-014` names the cause that tempts.
 - **[REL-154]** A client MUST fill an open place with a random draw from the
-  ingress eligible relays of the accepted set, weighted under `REL-196`. The two pins MUST NOT share an
-  `operator_id` or a `family_id`, because one operator with the two pins sees
-  each connection of that client for 60 days. A set with one eligible relay
-  gives one pin, and the second place stays open. Part 3 rules `NET-344` and
-  `NET-345` relax the operator bound in a provisional directory.
+  ingress eligible relays of the accepted set, weighted under `REL-196`. The
+  two pins MUST NOT share an `operator_id` or a `family_id`, because one
+  operator with the two pins sees each connection of that client for 60 days. A
+  set with one eligible relay gives one pin, and the second place stays open.
+  Part 3 rules `NET-344` and `NET-345` relax the operator bound in a provisional
+  directory.
 - **[REL-155]** A client MUST NOT dial an ingress relay that is no pin. After
   a dial of one pin that failed, the next run MUST dial the other pin. Thus
   the loss of one ingress relay does not stop delivery (U6).
 - The invariants of Part 3 §3.4.6 can forbid a chain from one pin to the
   relay of one queue. A client that holds a link to each pin builds that
-  circuit from the other one. The v1 reference client holds one
-  link in a run, and rule `NET-315` of Part 3 makes that queue wait.
+  circuit from the other one. The v1 reference client holds one link in a
+  run, and rule `NET-315` of Part 3 makes that queue wait.
 
 ### 10.6.2 Relay replacement does not follow local performance
 
-**[REL-014]** A client MUST NOT replace a relay because of a local performance measurement.
-This rule is the direct lesson of Herrmann and Grothoff.
+**[REL-014]** A client MUST NOT replace a relay because of a local performance
+measurement. This rule is the direct lesson of Herrmann and Grothoff.
 
 - A relay set is **fixed for an epoch and comes from the directory**.
 - A draw from the same layer, weighted under `REL-196`, replaces a failed
-  relay. **[REL-015]** The client MUST NOT select "the fastest peer that I have seen".
+  relay. **[REL-015]** The client MUST NOT select "the fastest peer that I
+  have seen".
 - Replacements have a rate limit of a maximum of one in each epoch for each
   layer, with hysteresis.
-- **[REL-016]** A client MUST report **repeated forced replacement to the directory as a link
-  fault**. **[REL-017]** A client MUST NOT absorb such an event silently.
+- **[REL-016]** A client MUST report **repeated forced replacement to the
+  directory as a link fault**. **[REL-017]** A client MUST NOT absorb such an
+  event silently.
 
 An adversary that runs a DoS against the current relays of a client gets nothing
 more than a slow client.
@@ -1663,8 +1740,8 @@ FamilyCert {
 }
 ```
 
-Each member signs this preimage with the `identity_pk` of its descriptor. Part 5
-§5.11 holds the label:
+Each member signs this preimage with the `identity_pk` of its descriptor.
+Part 5 §5.11 holds the label:
 
 ```
 "umbra/v1/relay-family" || version || family_name || member_count ||
@@ -1675,7 +1752,7 @@ members || valid_after
   declares, with the `identity_pk` of its own descriptor. **[REL-086]** A relay
   MUST set `family_id` of its descriptor to the SHA3-256 of that certificate.
   A relay that declares no family sets `family_id` to 32 zero bytes.
-  **[REL-209]** A client MUST read a `family_id` of 32 zero bytes as no
+- **[REL-209]** A client MUST read a `family_id` of 32 zero bytes as no
   family. Two relays with that value share no family under `REL-011`,
   `REL-154`, Part 3 `NET-345`, and the placement list of Part 12 §12.4.2.
   Else each relay with no family would count as one family with each other
@@ -1704,10 +1781,10 @@ members || valid_after
 >
 > The client does not verify the certificate. A client that verifies it
 > fetches up to `FAMILY_MAX` signatures, which is 212 KB, to test one fact
-> that the authority tested at admission.
-> The authority verifies the certificate one time, and the signed root
-> carries `family_id` in the entry. The relay signs `family_id` in its own
-> descriptor, thus no authority moves a relay into a family.
+> that the authority tested at admission. The authority verifies the
+> certificate one time, and the signed root carries `family_id` in the entry.
+> The relay signs `family_id` in its own descriptor, thus no authority moves a
+> relay into a family.
 
 **The jurisdiction bloc.** A bloc is a set of ISO 3166-1 alpha-2 codes whose
 states share a legal-assistance arrangement or an intelligence-sharing
@@ -1744,24 +1821,30 @@ it orders the blocs by their first code. The list of §10.12 is 66 bytes.
   new list is a new `DirectoryRoot`.
 - The list has a **feasibility floor**. The floor holds when `BLOC_MIN` blocs
   or more each hold `BLOC_LAYER_SHARE` or more of the ingress population and
-  of the chain population. **[REL-142]** A directory authority MUST NOT
-  publish a `BlocList` under which the current relay set does not reach the
-  floor. This rule does not bind under the provisional directory of `REL-126`,
-  whose clients relax invariant 2 under Part 3 rule `NET-350`. The directory
-  authorities MUST NOT raise `independent_count` of `REL-125` to
-  `AUTHORITY_FLOOR` or above while the relay set of the root holds an ingress
-  relay from which no chain satisfies invariants 1 to 3 of Part 3 §3.4.6, with
-  or without the relaxation of `NET-200`. The count of the authorities under
-  different control and the count of the relay operators are two facts. The
-  first one ends the bootstrap relaxation under Part 3 rule `NET-341`, and the
-  second one is what a chain needs. A key set at the floor over a relay set of
-  one operator would make each client fail closed under `NET-033`. Thus the
-  authorities hold the count below the floor until the relay set carries a
-  chain from each ingress. The directory stays provisional until then. The
-  count is a statement of the authorities about themselves, and no client can
-  check it. Part 2 §2.6 assumption 6 states that limit. §10.11 gives `BLOC_MIN`
-  as 3 and `BLOC_LAYER_SHARE` as 10 %. Part 3 §3.4.6 gives the client rule for
-  a relay set below the floor.
+  of the chain population. §10.11 gives `BLOC_MIN` as 3 and
+  `BLOC_LAYER_SHARE` as 10 %. Part 3 §3.4.6 gives the client rule for a relay
+  set below the floor.
+
+  **[REL-142]** A directory authority MUST NOT publish a `BlocList` under
+  which the current relay set does not reach the floor. This rule does not
+  bind under the provisional directory of `REL-126`, whose clients relax
+  invariant 2 under Part 3 rule `NET-350`.
+
+  The directory authorities MUST NOT raise `independent_count` of `REL-125`
+  to `AUTHORITY_FLOOR` or above while the relay set of the root holds an
+  ingress relay from which no chain satisfies invariants 1 to 3 of Part 3
+  §3.4.6, with or without the relaxation of `NET-200`.
+
+  The count of the authorities under different control and the count of the
+  relay operators are two facts. The first one ends the bootstrap relaxation
+  under Part 3 rule `NET-341`, and the second one is what a chain needs. A key
+  set at the floor over a relay set of one operator would make each client
+  fail closed under `NET-033`. Thus the authorities hold the count below the
+  floor until the relay set carries a chain from each ingress. The directory
+  stays provisional until then.
+
+  The count is a statement of the authorities about themselves, and no client
+  can check it. Part 2 §2.6 assumption 6 states that limit.
 
 > *Cause.* A rule on a jurisdiction **code** and a rule on a jurisdiction
 > **bloc** select different chains, and `NET-033` makes that difference a
@@ -1772,8 +1855,8 @@ it orders the blocs by their first code. The list of §10.12 is 66 bytes.
 > A list with no encoding and no hash is an object that no signature covers.
 > `REL-094` then binds nothing, and `NET-033` fails closed against a
 > constraint that no client can read. §10.12 holds the list, `bloc_hash` puts
-> it under the root, and
-> the floor states when the list is one that a client can satisfy.
+> it under the root, and the floor states when the list is one that a client
+> can satisfy.
 
 ## 10.7 Sybil defense
 
@@ -1786,8 +1869,8 @@ before it becomes eligible for a user cell:
 - **14 days** for the ingress layer. The directory sets `flags` bit 0 of the
   entry of §10.5.3 at the end of that period, under `REL-130`.
 
-The growth limit of one class in each epoch adds to this delay. Thus the path of
-a relay to real influence takes **weeks**. That delay is the property that
+The growth limit of one class in each epoch adds to this delay. Thus the path
+of a relay to real influence takes **weeks**. That delay is the property that
 defeats a flash Sybil flood. KAX17 collected more than 900 relays and operated
 from 2017 to 2021, because no such ramp existed.
 
@@ -1806,19 +1889,21 @@ function**:
 
 The alerts go to a human, but the system **makes them automatically**. In 2026
 the Sybil detection of Tor stays manual, and that is the cause that KAX17
-operated for four years. Add active probing with loop cover. Six of the Sybil
-groups in the USENIX 2016 study were invisible to a passive descriptor analysis.
+operated for four years.
+
+Add active probing with loop cover. Six of the Sybil groups in the USENIX 2016
+study were invisible to a passive descriptor analysis.
 
 ## 10.8 Publish no raw per-relay traffic counter
 
-A relay gives a statistic to the directory. **[REL-018]** That statistic MUST pass through
-**two-aggregator additive secret sharing and Laplace noise**. The calibration of
-PeerFlow applies, which is `b = σ/ε` with σ = 1 MiB and ε = 0.1.
+A relay gives a statistic to the directory. **[REL-018]** That statistic MUST
+pass through **two-aggregator additive secret sharing and Laplace noise**. The
+calibration of PeerFlow applies, which is `b = σ/ε` with σ = 1 MiB and ε = 0.1.
 
-**[REL-019]** A directory authority MUST NOT publish a raw per-relay counter. **[REL-020]** A directory
-authority MUST publish the noised value only. The bandwidth classes of §10.2,
-the measurement of §10.3, and the Sybil detection of §10.7.2 each read the
-noised value.
+**[REL-019]** A directory authority MUST NOT publish a raw per-relay counter.
+**[REL-020]** A directory authority MUST publish the noised value only. The
+bandwidth classes of §10.2, the measurement of §10.3, and the Sybil detection
+of §10.7.2 each read the noised value.
 
 The carried-chain count of §10.4.2 is such a statistic, and it is a count and
 not a byte volume. Its scale is σ = 1 chain at the same ε, thus `b` is 10
@@ -1860,9 +1945,9 @@ each relay, with the `relay_id` of that relay.
   other authority with HTTP status 403 and no body. A relay MUST refuse a query
   that names another `relay_id` with no body. That query MUST NOT count in the
   bound of `REL-186`.
-- **[REL-193]** An aggregator MUST add an integer sample of Laplace(`b`) to each
-  share that it takes, before any other party reads the share.
-  **[REL-194]** An authority MUST read the chain count of a relay as the sum of
+- **[REL-193]** An aggregator MUST add an integer sample of Laplace(`b`) to
+  each share that it takes, before any other party reads the share.
+- **[REL-194]** An authority MUST read the chain count of a relay as the sum of
   the two noised shares modulo 2⁶⁴, read as a signed value, and it MUST read a
   negative sum as 0.
 - **[REL-195]** An authority MUST compute the fault rate of `REL-080` for an
@@ -1877,9 +1962,9 @@ each relay, with the `relay_id` of that relay.
 >
 > A query that names no relay verifies at each relay. Each relay takes the
 > two queries of an epoch, one of each aggregator. A relay that sends both to
-> `/stat` of another relay then reads share 0 and share 1 of it. Their sum is the count before any noise, which is
-> the raw counter that `REL-019` forbids. A query that names its relay reads no
-> share at another one.
+> `/stat` of another relay then reads share 0 and share 1 of it. Their sum is
+> the count before any noise, which is the raw counter that `REL-019` forbids.
+> A query that names its relay reads no share at another one.
 
 Implement the PrivEx-S2 construction directly, which is about 300 lines. Do
 **not** take a dependency on `draft-ietf-ppm-dap`. That draft is at draft-19,
@@ -1902,35 +1987,42 @@ The deployed Tor measurements show these results:
 - −660 ms (−23.5 %) for an interactive stream
 
 **UMBRA rejects the Torchestra-style separation of interactive and bulk
-connections at the relay layer.** Torchestra gives a delay improvement of 32–40
-%. But two connection classes are two traffic populations that an observer can
-tell apart at each hop. That objection is the same anonymity-set partitioning
-objection that withdrew the 2-hop Fast mode in Part 3 §3.4.2.
+connections at the relay layer.** Torchestra gives a delay improvement of
+32–40 %. But two connection classes are two traffic populations that an
+observer can tell apart at each hop. That objection is the same anonymity-set
+partitioning objection that withdrew the 2-hop Fast mode in Part 3 §3.4.2.
 
-> Note that this rule does *not* conflict with the requirement in Part 3 §3.8. A
-> **client** separates interactive traffic from bulk traffic. That
-> separation is between the client and its ingress relay. At that point the
-> observer sees one client. The rejected design makes separate populations *in*
-> the relay fabric, where the separation divides each user.
+> Note that this rule does *not* conflict with the requirement in Part 3 §3.8.
+> A **client** separates interactive traffic from bulk traffic. That separation
+> is between the client and its ingress relay. At that point the observer sees
+> one client. The rejected design makes separate populations *in* the relay
+> fabric, where the separation divides each user.
 
 ### 10.9.1 The outbound budget of a queue relay
 
-**[REL-021]** **An operator MUST size the outbound budget of a queue relay against 7 200
-cells.** That count is the emission of one held session of 2 h. Part 3 §3.5.2
-makes the inbound pacing clock mandatory, and Part 3 §3.9 sets `PACING_MEAN` to
-1 s. One tick emits one cell, thus a held session of 2 h emits 7 200 cells.
+**[REL-021]** **An operator MUST size the outbound budget of a queue relay
+against 7 200 cells.** That count is the emission of one held session of 2 h.
+Part 3 §3.5.2 makes the inbound pacing clock mandatory, and Part 3 §3.9 sets
+`PACING_MEAN` to 1 s. One tick emits one cell, thus a held session of 2 h emits
+7 200 cells.
 
-**[REL-022]** An operator MUST NOT size that budget against the real message count. Almost
-every one of those cells is cover. Under the Part 3 §3.12 mix model 26 ticks of
-the 7 200 carry a real receive, and the other 7 174 carry cover. A real receive
-carries the modal text, which needs bucket `B1`.
+**[REL-022]** An operator MUST NOT size that budget against the real message
+count. Almost every one of those cells is cover. Under the Part 3 §3.12 mix
+model 26 ticks of the 7 200 carry a real receive, and the other 7 174 carry
+cover. A real receive carries the modal text, which needs bucket `B1`.
 
-**[REL-023]** **An operator MUST size the byte budget of that session against 4 071 936
-bytes.** That total holds 7 174 × 560 = 4 017 440 bytes of `B0` cover. It also
-holds 26 × 2 096 = 54 496 bytes of `B1` delivery. The sum is about 4.07 MB, and
-Part 6 §6.9 gives the wire cost of each bucket. **[REL-024]** An operator MUST NOT size that
-budget at the `B0` cost of all 7 200 cells. That figure is 4 032 000 bytes, and
-it is about 1 percent low.
+**[REL-023]** **An operator MUST size the byte budget of that session against
+4 071 936 bytes.** That total holds two parts:
+
+| Part | Bytes |
+| --- | --- |
+| `B0` cover | 7 174 × 560 = 4 017 440 |
+| `B1` delivery | 26 × 2 096 = 54 496 |
+
+The sum is about 4.07 MB, and Part 6 §6.9 gives the wire cost of each bucket.
+
+**[REL-024]** An operator MUST NOT size that budget at the `B0` cost of all
+7 200 cells. That figure is 4 032 000 bytes, and it is about 1 percent low.
 
 Part 3 §3.6.3 puts this load on the relay deliberately. The relay runs on mains
 power with flat-rate bandwidth, and the phone does not originate the cover. A
@@ -1940,9 +2032,9 @@ operator that sizes against such a figure runs out of egress capacity.
 ## 10.10 The Notification Delivery Relay is a separate track
 
 The NDR (Part 8) is **not** part of this reputation system. A deployment
-operates one NDR, and a reputation score over one party carries no information:
-a client has no second NDR to select instead. The NDR holds a different kind of
-trust, and no reputation score measures it.
+operates one NDR, and a reputation score over one party carries no
+information: a client has no second NDR to select instead. The NDR holds a
+different kind of trust, and no reputation score measures it.
 
 A combination with the general relay reputation implies a substitutability that
 UMBRA does not have. A later version that lets a third party operate an NDR
