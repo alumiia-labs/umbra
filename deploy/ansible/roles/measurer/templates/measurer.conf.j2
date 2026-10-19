@@ -19,3 +19,7 @@ sockets=4
 unlisted=/etc/umbra-signer/descriptors/{{ relay.name }}.desc,{{ place }}
 {% endfor %}
 {% endfor %}
+{% for relay in umbra_outside_relays %}
+{% set place = 'ingress' if relay.role == 'entry' else relay.role %}
+unlisted=/etc/umbra-signer/descriptors/{{ relay.name }}.desc,{{ place }}
+{% endfor %}

@@ -76,6 +76,14 @@ signer:
   # Revoked measurer certificates (Part 10 REL-105).
   #   - { id: "<32 hex characters>", not_after: <epoch> }
   revokedMeasurers: []
+  # The relays of other operators, such as a relay at home, which this chart
+  # does not run. Put the descriptor of each one in network.descriptors.
+  # The signer lists each one as pending for 4 days and then takes its
+  # layer from the directory; an entry relay gets the entry role after 14
+  # days (Part 10 §10.5.4, §10.7.1). The operator name takes no comma and
+  # no space.
+  #   - { name: home-1, role: middle, class: 0, operator: alice }
+  outsideRelays: []
 
 measurer:
   # The rate of the plan of the signer server, in Mbit/s.

@@ -340,17 +340,20 @@ directory_conf() {
 # --- The signer (roles/signer) ----------------------------------------------
 
 # UMBRA_RELAYS lists each relay of the network: <name>,<role>,<class>, with
-# a space between two relays.
+# a space between two relays. A fourth field names the operator of a relay
+# of another operator; with none, the relay is of UMBRA_OPERATOR. The
+# measurer has no UMBRA_OPERATOR and reads no operator.
 relay_list() {
     need UMBRA_RELAYS
-    local entry name role class
+    local entry name role class operator extra
     for entry in $UMBRA_RELAYS; do
-        IFS=, read -r name role class <<< "$entry"
-        [[ "$name" =~ ^[a-z0-9-]+$ && "$class" =~ ^[0-3]$ ]] ||
-            die "UMBRA_RELAYS: $entry is not <name>,<role>,<class>"
+        IFS=, read -r name role class operator extra <<< "$entry"
+        operator=${operator:-${UMBRA_OPERATOR:-}}
+        [[ "$name" =~ ^[a-z0-9-]+$ && "$class" =~ ^[0-3]$ && -z "$extra" ]] ||
+            die "UMBRA_RELAYS: $entry is not <name>,<role>,<class>[,<operator>]"
         case $role in
-            entry) echo "$name ingress $class" ;;
-            middle | exit) echo "$name $role $class" ;;
+            entry) echo "$name ingress $class $operator" ;;
+            middle | exit) echo "$name $role $class $operator" ;;
             *) die "UMBRA_RELAYS: the role of $name is entry, middle or exit" ;;
         esac
     done
@@ -382,7 +385,7 @@ signer_keys() {
 
 sign_conf() {
     need UMBRA_OPERATOR
-    local name place class missing="" list
+    local name place class operator missing="" list
     list=$(relay_list) || return 1
 
     conf_dir
@@ -390,15 +393,19 @@ sign_conf() {
         echo "keys=$SIGNER_KEYS"
         echo "out=$OUT"
         echo "keychain=$SIGNER_HOME/keychain"
-        while read -r name place class; do
+        # Part 10 REL-198: the signer places the relays of its own operator
+        # at once, and each other relay waits in its pending root.
+        echo "own_operator=$UMBRA_OPERATOR"
+        while read -r name place class operator; do
             [ -s "$DESCRIPTORS/$name.desc" ] || missing="$missing $name"
-            echo "relay=$DESCRIPTORS/$name.desc,$UMBRA_OPERATOR,$class,$place"
+            echo "relay=$DESCRIPTORS/$name.desc,$operator,$class,$place"
         done <<< "$list"
         echo "report_queue=0,$AUTHORITY/report-queue.bin"
         echo "verdicts=$AUTHORITY/verdicts"
         echo "results=$MEASURER/results"
         mkdir -p "$SIGNER_HOME/state"
         echo "class_state=$SIGNER_HOME/state/class_state"
+        echo "admission_state=$SIGNER_HOME/state/admission_state"
         local revoked
         for revoked in ${UMBRA_REVOKED_MEASURERS:-}; do
             echo "revoked=$revoked"
@@ -537,7 +544,7 @@ authority_run() {
 # --- The measurer (roles/measurer) ------------------------------------------
 
 measurer_conf() {
-    local name place class list
+    local name place class operator list
     list=$(relay_list) || return 1
 
     if [ ! -s "$MEASURER/keys/measurer.seed" ]; then
@@ -556,7 +563,7 @@ measurer_conf() {
         echo "sockets=4"
         # A relay that failed the test of C0 is in no manifest. The measurer
         # tests it all the same, thus a later pass lists it again.
-        while read -r name place class; do
+        while read -r name place class operator; do
             echo "unlisted=$DESCRIPTORS/$name.desc,$place"
         done <<< "$list"
         trust_line

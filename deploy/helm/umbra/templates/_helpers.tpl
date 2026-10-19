@@ -154,13 +154,18 @@ capabilities:
 {{- end -}}
 
 {{- /* Each relay of the network for the signer and the measurer:
-       <name>,<role>,<class>, with a space between two. */ -}}
+       <name>,<role>,<class>[,<operator>], with a space between two. A relay
+       of a server is of the operator of the chart. A relay of
+       signer.outsideRelays names its operator. */ -}}
 {{- define "umbra.relayList" -}}
 {{- $list := list -}}
 {{- range .Values.servers -}}
 {{- range .relays -}}
 {{- $list = append $list (printf "%s,%s,%v" .name .role .class) -}}
 {{- end -}}
+{{- end -}}
+{{- range .Values.signer.outsideRelays -}}
+{{- $list = append $list (printf "%s,%s,%v,%s" .name .role .class .operator) -}}
 {{- end -}}
 {{- join " " $list -}}
 {{- end -}}

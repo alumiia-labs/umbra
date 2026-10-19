@@ -56,7 +56,7 @@
       {% for name in umbra_relay_names | unique
          if umbra_relay_names | select('equalto', name) | list | length > 1 %}{{ name }} {% endfor %}
   vars:
-    umbra_relay_names: "{{ groups['relays'] | map('extract', hostvars, 'relays') | flatten | map(attribute='name') | list }}"
+    umbra_relay_names: "{{ (groups['relays'] | map('extract', hostvars, 'relays') | flatten + umbra_outside_relays) | map(attribute='name') | list }}"
   run_once: true
   delegate_to: localhost
 

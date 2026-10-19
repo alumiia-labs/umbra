@@ -22,6 +22,15 @@ umbra_asn: 0                         # FILL, the AS number of the provider (OVH:
 umbra_operator: umbra-project
 umbra_family: ""                     # FILL
 
+# The relays of other operators, such as a relay at home, which this
+# playbook does not install. Put the descriptor of each one in
+# {{ umbra_out }}/descriptors/<name>.desc. The signer lists each one as
+# pending for 4 days and then takes its layer from the directory; an entry
+# relay gets the entry role after 14 days (Part 10 §10.5.4, §10.7.1). The
+# operator name takes no comma.
+#   - { name: home-1, role: middle, class: 0, operator: alice }
+umbra_outside_relays: []
+
 # The directory of the Linux binaries on this machine, which
 # scripts/build-linux.sh writes.
 umbra_bin_dir: "{{ playbook_dir }}/../../target/deploy/bin"

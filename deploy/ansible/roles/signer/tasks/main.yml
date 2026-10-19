@@ -27,7 +27,8 @@
     - { path: /etc/umbra-signer, owner: root, mode: "0755" }
     - { path: /etc/umbra-signer/descriptors, owner: root, mode: "0755" }
     - { path: /var/www/umbra/.well-known/umbra, owner: umbra-signer, mode: "0755" }
-    # The listed class of each relay, which the signer writes (REL-001).
+    # The listed class of each relay (REL-001) and the first pending root
+    # of each relay of another operator (REL-156), which the signer writes.
     - { path: /var/lib/umbra-signer/state, owner: umbra-signer, mode: "0755" }
 
 - name: The binary of the signer that runs now stays as umbra-signer.prev
@@ -90,7 +91,7 @@
     src: "{{ umbra_out }}/descriptors/{{ item }}.desc"
     dest: "/etc/umbra-signer/descriptors/{{ item }}.desc"
     mode: "0644"
-  loop: "{{ groups['relays'] | map('extract', hostvars, 'relays') | flatten | map(attribute='name') | list }}"
+  loop: "{{ (groups['relays'] | map('extract', hostvars, 'relays') | flatten + umbra_outside_relays) | map(attribute='name') | list }}"
 
 # The relay lines change when a relay comes or goes, or a class changes;
 # phase 2 restarts each relay then (roles/relay).

@@ -37,11 +37,13 @@
 //! keys=/etc/umbra-signer/keys
 //! out=/var/www/umbra/.well-known/umbra
 //! keychain=/var/lib/umbra-signer/keychain
+//! own_operator=<operator name>
 //! relay=<descriptor file>,<operator name>,<class 0 to 3>,<ingress|middle|exit>
 //! report_queue=<authority index>,<queue file>
 //! verdicts=<file of verdicts>
 //! results=<file of class test results>
 //! class_state=<file of the listed classes>
+//! admission_state=<file of the pending roots>
 //! revoked=<measurer_id in hex>,<not_after epoch>
 //! ```
 //!
@@ -69,12 +71,33 @@
 //! signs a provisional directory alone (Part 10 §10.2).
 //!
 //! The `relay` line repeats. Its last field is the place of the relay: the
-//! ingress role, layer 2, or layer 3. Under a provisional directory each
-//! relay is of the one operator, thus the signer sets the layers
-//! (`REL-198`), and a network of four chain relays gets one at layer 2 and
-//! three at layer 3 in place of the draw of a hash. The signer refuses to
-//! place a relay under a key set of `AUTHORITY_FLOOR` independent keys or
-//! more.
+//! ingress role, layer 2, or layer 3. The `own_operator` line names the
+//! operator of this signer. The signer sets the layer of each relay of that
+//! operator and lists it placed at once (`REL-198`). A network of four chain
+//! relays of that operator thus gets one at layer 2 and three at layer 3 in
+//! place of the draw of a hash. With no `own_operator` line, each relay is
+//! of the operator of the signer. The signer refuses to place a relay under
+//! a key set of `AUTHORITY_FLOOR` independent keys or more.
+//!
+//! A relay of another operator takes the admission of Part 10 §10.5.4 and
+//! the staging of §10.7.1:
+//!
+//! 1. The first root that the signer publishes for it lists it as pending
+//!    (`REL-156`). No client and no relay routes through it (`REL-158`).
+//! 2. It stays pending for 4 days, `CHAIN_STAGING_EPOCHS`.
+//! 3. Then the signer places it in the layer that the hash of §10.5.4 gives
+//!    under the first root that listed it as pending (`REL-060`). The place
+//!    of its `relay` line sets no layer.
+//! 4. A relay with the place `ingress` gets the ingress flag after 14 days,
+//!    `INGRESS_STAGING_EPOCHS`, when its class is C1 or above (`REL-130`).
+//!    Before that it is a relay of the chain population, and steps 1 to 3
+//!    apply to it.
+//!
+//! The `admission_state` file holds one line for each relay of another
+//! operator: `<relay_id in hex> <root in hex> <epoch>`, the first root that
+//! listed it as pending. Settings with a relay of another operator need the
+//! `admission_state` line. A new key gives a new `relay_id`, thus a new
+//! admission. The line of a relay that left the settings leaves the file.
 //!
 //! The output directory takes `manifest`, served at
 //! `/.well-known/umbra/manifest`, and `keyset.bin`. Each file is written
@@ -90,7 +113,9 @@
 //! the same relay set. It prints a line with `kept=other` when the settings
 //! changed since, and the next epoch signs the new set. `sign --force`
 //! signs a second root for the epoch. Use it to take a relay out now, and
-//! accept that warning.
+//! accept that warning. The `class_state` file and the `admission_state`
+//! file change only when a root goes out, thus a pending root in the file is
+//! a published one.
 //!
 //! A relay with the attachment role declares `CHUNK_STORE_MIN` or more
 //! (Part 12 `ATT-088`). The bootstrap period of Part 3 `NET-340` relaxes
@@ -108,7 +133,7 @@ use std::{
 use umbra_core::directory::{
     authority::{entry_of, keyset_bytes_with, sign_manifest_revoking, Admission, Listing},
     bloc::BlocList,
-    descriptor::{RelayDescriptor, RelayEntry},
+    descriptor::{roles, RelayDescriptor, RelayEntry},
     manifest::{RelayManifest, RelaySet},
     measure::{issue_cert, staged_class, verified_class, ClassResult, Staged},
     path::{select, Candidate},
@@ -435,7 +460,7 @@ fn rotate(
 }
 
 /// The place of one relay.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Place {
     Ingress,
     Middle,
@@ -449,13 +474,17 @@ struct Admitted {
     place: Place,
 }
 
+/// An opaque value for each beneficial control (`REL-128`).
+fn operator_id_of(name: &str) -> [u8; 32] {
+    sha3_256(&[b"umbra/operator", name.as_bytes()])
+}
+
 fn read_relay(value: &str) -> Option<Admitted> {
     let [file, operator, class, place]: [&str; 4] =
         value.split(',').collect::<Vec<_>>().try_into().ok()?;
     Some(Admitted {
         descriptor: std::fs::read(file).ok()?,
-        // An opaque value for each beneficial control (`REL-128`).
-        operator_id: sha3_256(&[b"umbra/operator", operator.as_bytes()]),
+        operator_id: operator_id_of(operator),
         class: class.parse().ok()?,
         place: match place {
             "ingress" => Place::Ingress,
@@ -577,6 +606,125 @@ fn listed_class(
     }
 }
 
+/// The staging of the chain role and the queue role, in epochs: 4 days
+/// (Part 10 §10.7.1). A relay of another operator stays pending for it.
+const CHAIN_STAGING_EPOCHS: u64 = 4 * 86_400 / EPOCH_SECONDS;
+/// The staging of the ingress layer, in epochs: 14 days (Part 10 §10.7.1).
+const INGRESS_STAGING_EPOCHS: u64 = 14 * 86_400 / EPOCH_SECONDS;
+
+/// The first root that listed a relay as pending (`REL-156`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingRoot {
+    /// The `root` field of that `DirectoryRoot`.
+    root: [u8; 32],
+    /// Its epoch.
+    epoch: u64,
+}
+
+/// The first pending root of each relay of another operator, as the
+/// `admission_state` file holds them: `<relay_id in hex> <root in hex>
+/// <epoch>`.
+type AdmissionState = std::collections::BTreeMap<[u8; 32], PendingRoot>;
+
+fn read_admission_state(text: &str) -> AdmissionState {
+    text.lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let relay = hex32(words.next()?)?;
+            let root = hex32(words.next()?)?;
+            let epoch = words.next()?.parse().ok()?;
+            Some((relay, PendingRoot { root, epoch }))
+        })
+        .collect()
+}
+
+fn admission_state_text(state: &AdmissionState) -> String {
+    state
+        .iter()
+        .map(|(relay, first)| {
+            format!(
+                "{} {} {}\n",
+                to_hex(relay),
+                to_hex(&first.root),
+                first.epoch
+            )
+        })
+        .collect()
+}
+
+/// How a root lists one relay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stage {
+    admission: Admission,
+    /// The `is_ingress` of its `Listing`.
+    is_ingress: bool,
+}
+
+/// The stage of a relay of the place `place` in a root of `epoch`. A relay
+/// of the own operator takes its place at once (`REL-198`). A relay of
+/// another operator is pending until `CHAIN_STAGING_EPOCHS` passed since
+/// its first pending root `first`, and it then takes the layer of that root
+/// (`REL-060`). It gets the ingress flag after `INGRESS_STAGING_EPOCHS`.
+fn stage_of(own: bool, place: Place, first: Option<&PendingRoot>, epoch: u64) -> Stage {
+    if own {
+        let admission = match place {
+            Place::Exit => Admission::Fixed { layer: 3 },
+            Place::Ingress | Place::Middle => Admission::Fixed { layer: 2 },
+        };
+        return Stage {
+            admission,
+            is_ingress: place == Place::Ingress,
+        };
+    }
+
+    let Some(first) = first else {
+        return Stage {
+            admission: Admission::Pending,
+            is_ingress: false,
+        };
+    };
+
+    // A clock that went back gives a stage of 0 epochs, not a wrap.
+    let staged = epoch.saturating_sub(first.epoch);
+    let admission = if staged >= CHAIN_STAGING_EPOCHS {
+        Admission::Placed {
+            root: first.root,
+            epoch: first.epoch,
+        }
+    } else {
+        Admission::Pending
+    };
+    Stage {
+        admission,
+        is_ingress: place == Place::Ingress && staged >= INGRESS_STAGING_EPOCHS,
+    }
+}
+
+/// The admission state after a root of `epoch` with the tree root `root`
+/// went out. `outside` holds each relay of another operator in the
+/// settings, and `listed` those of them that the root lists. A held line
+/// stays. A listed relay with no line takes this root as its first pending
+/// root. A relay that left the settings, or took a new key, loses its line.
+fn next_admission_state(
+    held: &AdmissionState,
+    outside: &[[u8; 32]],
+    listed: &[[u8; 32]],
+    root: [u8; 32],
+    epoch: u64,
+) -> AdmissionState {
+    outside
+        .iter()
+        .filter_map(|relay_id| {
+            let first = held.get(relay_id).copied().or_else(|| {
+                listed
+                    .contains(relay_id)
+                    .then_some(PendingRoot { root, epoch })
+            })?;
+            Some((*relay_id, first))
+        })
+        .collect()
+}
+
 /// Whether the verdict `removal` is inside its life at `epoch`
 /// (`REL-183`). A verdict of a later epoch is not, and an epoch near the end
 /// of its range wraps nothing.
@@ -670,6 +818,15 @@ fn published(held: Option<&[u8]>, fresh: &[u8]) -> Published {
 }
 
 fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| "the clock is before 1970")?
+        .as_secs();
+    sign_at(settings, force, now)
+}
+
+/// As `sign`, at the Unix time `now`.
+fn sign_at(settings: &str, force: bool, now: u64) -> Result<(), &'static str> {
     let text = std::fs::read_to_string(settings).map_err(|_| "the settings file does not read")?;
     let mut key_dir = None;
     let mut out = None;
@@ -680,6 +837,8 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
     let mut removed: Vec<LinkRemoval> = Vec::new();
     let mut results: Option<Vec<ClassResult>> = None;
     let mut class_state_file: Option<PathBuf> = None;
+    let mut own_operator: Option<[u8; 32]> = None;
+    let mut admission_state_file: Option<PathBuf> = None;
     let mut revoked: Vec<([u8; 16], u64)> = Vec::new();
 
     for line in text
@@ -718,6 +877,8 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
                     .extend(held.lines().filter_map(ClassResult::parse));
             }
             Some(("class_state", value)) => class_state_file = Some(PathBuf::from(value)),
+            Some(("own_operator", value)) => own_operator = Some(operator_id_of(value)),
+            Some(("admission_state", value)) => admission_state_file = Some(PathBuf::from(value)),
             Some(("revoked", value)) => {
                 let (id, not_after) = value
                     .split_once(',')
@@ -783,10 +944,6 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
         return Err("the key set is no provisional directory, thus the signer places no relay");
     }
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| "the clock is before 1970")?
-        .as_secs();
     let epoch = now / EPOCH_SECONDS;
 
     // REL-106: a revoked measurer stays in the root until the `not_after`
@@ -811,6 +968,17 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
         }
         (_, Some(path)) => read_class_state(&std::fs::read_to_string(path).unwrap_or_default()),
         (None, None) => ClassState::new(),
+    };
+
+    // §10.5.4: a relay of another operator takes its layer from its first
+    // pending root. With no own_operator line, each relay is of the signer.
+    let is_own = |relay: &Admitted| own_operator.is_none_or(|own| own == relay.operator_id);
+    let admission_held = match &admission_state_file {
+        Some(path) => read_admission_state(&std::fs::read_to_string(path).unwrap_or_default()),
+        None if relays.iter().any(|relay| !is_own(relay)) => return Err(
+            "a relay of another operator needs a line: admission_state=<file of the pending roots>",
+        ),
+        None => AdmissionState::new(),
     };
 
     // REL-188: the dense-subgraph search over the removed links of their
@@ -840,14 +1008,27 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
     }
 
     let mut entries = Vec::with_capacity(relays.len());
+    let mut outside = Vec::new();
+    let mut outside_listed = Vec::new();
     for relay in &relays {
+        let descriptor =
+            RelayDescriptor::parse(&relay.descriptor).map_err(|_| "a descriptor does not parse")?;
+        let relay_id = descriptor.relay_id;
+        let own = is_own(relay);
+        if !own {
+            outside.push(relay_id);
+        }
+
+        // An outside ingress relay gets its flag after 14 days. The signer
+        // checks its offer now, thus the fault does not wait 14 days.
+        if relay.place == Place::Ingress && descriptor.roles & roles::INGRESS_OFFERED == 0 {
+            return Err("an ingress relay offers no ingress role");
+        }
+
         // §10.2: the class that the results verify, at or below the class
         // that the operator declares.
         let class = match &results {
             Some(results) => {
-                let relay_id = RelayDescriptor::parse(&relay.descriptor)
-                    .map_err(|_| "a descriptor does not parse")?
-                    .relay_id;
                 let listed = listed_class(&relay_id, relay.class, results, &mut class_state, epoch);
                 let Some(listed) = listed else {
                     println!(
@@ -861,41 +1042,44 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
             None => relay.class,
         };
 
+        let stage = stage_of(own, relay.place, admission_held.get(&relay_id), epoch);
         let listing = Listing {
             descriptor: &relay.descriptor,
             operator_id: relay.operator_id,
             class,
-            is_ingress: matches!(relay.place, Place::Ingress),
+            is_ingress: stage.is_ingress,
         };
 
-        let admission = match relay.place {
-            Place::Exit => Admission::Fixed { layer: 3 },
-            Place::Ingress | Place::Middle => Admission::Fixed { layer: 2 },
-        };
-
-        let entry = entry_of(&listing, admission)
+        let entry = entry_of(&listing, stage.admission)
             .map_err(|_| "a descriptor does not verify, or its class is above the declared one")?;
 
         let read = RelayEntry::parse(&entry).map_err(|_| "an entry does not verify")?;
-        if expelled.contains(&read.descriptor.relay_id) {
-            println!("relay {} expelled", to_hex(&read.descriptor.relay_id));
+        if expelled.contains(&relay_id) {
+            println!("relay {} expelled", to_hex(&relay_id));
             continue;
         }
 
-        if matches!(relay.place, Place::Ingress) && !read.ingress() {
+        if stage.is_ingress && !read.ingress() {
             // §10.6.1: an ingress relay that a class test took below C1
             // keeps its listing and loses the flag.
             if class >= relay.class {
-                return Err("an ingress relay is below class 1 or offers no ingress role");
+                return Err("an ingress relay is below class 1");
             }
             println!(
                 "relay {} is below class 1 after a class test, and it is no ingress relay",
-                to_hex(&read.descriptor.relay_id)
+                to_hex(&relay_id)
             );
         }
 
-        if matches!(relay.place, Place::Exit) && read.layer() != 3 {
+        if own && relay.place == Place::Exit && read.layer() != 3 {
             return Err("an exit relay offers no queue role and no chain role");
+        }
+
+        if !own && relay.place == Place::Ingress && !stage.is_ingress {
+            println!(
+                "relay {} of another operator waits for the ingress flag (§10.7.1)",
+                to_hex(&relay_id)
+            );
         }
 
         // ATT-088: the floor of the chunk store applies from the first
@@ -906,14 +1090,18 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
         // authority that signs under `AUTHORITY_FLOOR` keys or more applies
         // the floor.
         println!(
-            "relay {} ingress={} layer={} class={} host={}",
-            to_hex(&read.descriptor.relay_id),
+            "relay {} ingress={} layer={} class={} host={} pending={}",
+            to_hex(&relay_id),
             read.ingress(),
             read.layer(),
             read.class,
             read.descriptor.host_str(),
+            read.pending(),
         );
         entries.push(entry);
+        if !own {
+            outside_listed.push(relay_id);
+        }
     }
 
     let signers: Vec<u8> = (0u8..).take(AUTHORITY_COUNT).collect();
@@ -992,6 +1180,9 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
     let parsed = RelayManifest::parse(&manifest).map_err(|_| "the manifest does not parse")?;
     let set = RelaySet::accept(&mut consensus, &parsed, &BlocList::v1(), now)
         .map_err(|_| "the manifest does not verify; check the clock of each relay")?;
+    let tree_root = DirectoryRoot::parse(parsed.root)
+        .map_err(|_| "the root does not parse")?
+        .root;
 
     // REL-147: each client and each relay takes a whole set alone.
     if !set.is_whole {
@@ -1040,6 +1231,17 @@ fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
     // root of its epoch moved no class.
     if let Some(path) = &class_state_file {
         write_whole(path, class_state_text(&class_state).as_bytes(), false)?;
+    }
+
+    // REL-156: a kept root never went out, thus it is no first pending root.
+    if let Some(path) = &admission_state_file {
+        let admission_next =
+            next_admission_state(&admission_held, &outside, &outside_listed, tree_root, epoch);
+        write_whole(
+            path,
+            admission_state_text(&admission_next).as_bytes(),
+            false,
+        )?;
     }
 
     println!(
@@ -1136,7 +1338,7 @@ fn main() -> ExitCode {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use umbra_core::directory::{authority::sign_manifest_under, descriptor::roles};
+    use umbra_core::directory::{authority::sign_manifest_under, layer::layer};
 
     fn keys(tag: u8) -> Vec<SigningKey> {
         (0u8..)
@@ -1206,6 +1408,311 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    /// A fresh directory with the keys of a signer in `keys`.
+    fn signer_home() -> PathBuf {
+        let mut tag = [0u8; 8];
+        OsRng.try_fill_bytes(&mut tag).unwrap();
+        let home = std::env::temp_dir().join(format!("umbra-signer-test-{}", to_hex(&tag)));
+        std::fs::create_dir_all(&home).unwrap();
+        keygen(&home.join("keys"), FIRST_KEYSET_EPOCH).unwrap();
+        home
+    }
+
+    /// Writes the descriptor of the relay `seed` into `home`, and gives its
+    /// `relay` line and its `relay_id`.
+    fn relay_line(
+        home: &Path,
+        seed: u8,
+        relay_roles: u8,
+        operator: &str,
+        place: &str,
+    ) -> (String, [u8; 32]) {
+        let bytes = descriptor(seed, relay_roles, 0);
+        let file = home.join(format!("relay-{seed}.desc"));
+        std::fs::write(&file, &bytes).unwrap();
+
+        let relay_id = RelayDescriptor::parse(&bytes).unwrap().relay_id;
+        let line = format!("relay={},{operator},1,{place}", file.display());
+        (line, relay_id)
+    }
+
+    /// Writes the settings of the signer in `home`, of the operator `home`,
+    /// with the relay lines `relays`, and gives the path of the file.
+    fn write_settings(home: &Path, relays: &[&str]) -> String {
+        let mut text = format!(
+            "keys={}\nout={}\nown_operator=home\nadmission_state={}\n",
+            home.join("keys").display(),
+            home.join("out").display(),
+            home.join("admission_state").display(),
+        );
+        for line in relays {
+            text.push_str(line);
+            text.push('\n');
+        }
+
+        let path = home.join("sign.conf");
+        std::fs::write(&path, text).unwrap();
+        path.to_str().unwrap().to_owned()
+    }
+
+    /// The Unix time of a run inside `epoch`.
+    fn at(epoch: u64) -> u64 {
+        epoch * EPOCH_SECONDS + 60
+    }
+
+    /// How the published manifest lists one relay.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Listed {
+        ingress: bool,
+        layer: u8,
+        pending: bool,
+    }
+
+    /// Each relay of the manifest that the signer in `home` published, and
+    /// the tree root of that manifest.
+    fn published_in(home: &Path) -> (std::collections::BTreeMap<[u8; 32], Listed>, [u8; 32]) {
+        let bytes = std::fs::read(home.join("out").join("manifest")).unwrap();
+        let manifest = RelayManifest::parse(&bytes).unwrap();
+        let tree_root = DirectoryRoot::parse(manifest.root).unwrap().root;
+
+        let listed = manifest
+            .entries
+            .iter()
+            .map(|proven| {
+                let entry = RelayEntry::parse(proven.entry).unwrap();
+                let listed = Listed {
+                    ingress: entry.ingress(),
+                    layer: entry.layer(),
+                    pending: entry.pending(),
+                };
+                (entry.descriptor.relay_id, listed)
+            })
+            .collect();
+        (listed, tree_root)
+    }
+
+    fn admission_state_in(home: &Path) -> AdmissionState {
+        read_admission_state(
+            &std::fs::read_to_string(home.join("admission_state")).unwrap_or_default(),
+        )
+    }
+
+    #[test]
+    fn a_relay_of_another_operator_waits_in_its_pending_root() {
+        on_a_signing_stack(|| {
+            let home = signer_home();
+            let chain_roles = roles::QUEUE | roles::CHAIN;
+            let (own_line, own_id) = relay_line(&home, 1, chain_roles, "home", "exit");
+            // The place of an outside relay sets no layer.
+            let (other_line, other_id) = relay_line(&home, 2, chain_roles, "alice", "exit");
+            let settings = write_settings(&home, &[&own_line, &other_line]);
+            let first = 500_000;
+
+            // REL-198: the own relay is placed at once. REL-156: the first
+            // root lists the outside relay as pending.
+            sign_at(&settings, false, at(first)).unwrap();
+            let (listed, pending_root) = published_in(&home);
+            let placed_own = Listed {
+                ingress: false,
+                layer: 3,
+                pending: false,
+            };
+            assert_eq!(listed.get(&own_id), Some(&placed_own));
+            assert!(listed.get(&other_id).unwrap().pending);
+            assert_eq!(listed.get(&other_id).unwrap().layer, 2);
+
+            let first_root = PendingRoot {
+                root: pending_root,
+                epoch: first,
+            };
+            let state = admission_state_in(&home);
+            assert_eq!(state.get(&other_id), Some(&first_root));
+            assert!(!state.contains_key(&own_id));
+
+            // §10.7.1: the relay stays pending for 4 days.
+            sign_at(&settings, false, at(first + CHAIN_STAGING_EPOCHS - 1)).unwrap();
+            assert!(published_in(&home).0.get(&other_id).unwrap().pending);
+            assert_eq!(admission_state_in(&home), state);
+
+            // REL-060: then it takes the layer of the first pending root.
+            sign_at(&settings, false, at(first + CHAIN_STAGING_EPOCHS)).unwrap();
+            let (listed, _) = published_in(&home);
+            let placed_other = Listed {
+                ingress: false,
+                layer: layer(&pending_root, first, &other_id),
+                pending: false,
+            };
+            assert_eq!(listed.get(&other_id), Some(&placed_other));
+            assert_eq!(listed.get(&own_id), Some(&placed_own));
+            assert_eq!(admission_state_in(&home), state);
+
+            std::fs::remove_dir_all(&home).unwrap();
+        });
+    }
+
+    #[test]
+    fn an_outside_ingress_relay_gets_its_flag_after_14_days() {
+        on_a_signing_stack(|| {
+            let home = signer_home();
+            let ingress_roles = roles::INGRESS_OFFERED | roles::CHAIN;
+            let (own_line, own_id) = relay_line(&home, 1, ingress_roles, "home", "ingress");
+            let (other_line, other_id) = relay_line(&home, 2, ingress_roles, "bob", "ingress");
+            let settings = write_settings(&home, &[&own_line, &other_line]);
+            let first = 500_000;
+
+            sign_at(&settings, false, at(first)).unwrap();
+            let (listed, _) = published_in(&home);
+            assert!(listed.get(&own_id).unwrap().ingress);
+            let other = listed.get(&other_id).unwrap();
+            assert!(other.pending && !other.ingress);
+
+            // After 4 days it is a relay of layer 2 in the chain population,
+            // and no client takes it at hop 1 (REL-133).
+            let chain_relay = Listed {
+                ingress: false,
+                layer: 2,
+                pending: false,
+            };
+            sign_at(&settings, false, at(first + CHAIN_STAGING_EPOCHS)).unwrap();
+            assert_eq!(published_in(&home).0.get(&other_id), Some(&chain_relay));
+            sign_at(&settings, false, at(first + INGRESS_STAGING_EPOCHS - 1)).unwrap();
+            assert_eq!(published_in(&home).0.get(&other_id), Some(&chain_relay));
+
+            // REL-130: the flag comes at the end of the 14 days.
+            sign_at(&settings, false, at(first + INGRESS_STAGING_EPOCHS)).unwrap();
+            let ingress = Listed {
+                ingress: true,
+                layer: 1,
+                pending: false,
+            };
+            assert_eq!(published_in(&home).0.get(&other_id), Some(&ingress));
+
+            std::fs::remove_dir_all(&home).unwrap();
+        });
+    }
+
+    #[test]
+    fn a_kept_root_is_no_pending_root() {
+        on_a_signing_stack(|| {
+            let home = signer_home();
+            let chain_roles = roles::QUEUE | roles::CHAIN;
+            let (own_line, _) = relay_line(&home, 1, chain_roles, "home", "exit");
+            let (other_line, other_id) = relay_line(&home, 2, chain_roles, "alice", "middle");
+            let epoch = 500_000;
+
+            let settings = write_settings(&home, &[&own_line]);
+            sign_at(&settings, false, at(epoch)).unwrap();
+
+            // REL-160: the epoch has a root of the old settings, and the
+            // signer keeps it. No root listed the new relay as pending.
+            let settings = write_settings(&home, &[&own_line, &other_line]);
+            sign_at(&settings, false, at(epoch)).unwrap();
+            assert!(!published_in(&home).0.contains_key(&other_id));
+            assert!(admission_state_in(&home).is_empty());
+
+            // The next epoch publishes the pending root.
+            sign_at(&settings, false, at(epoch + 1)).unwrap();
+            let (listed, pending_root) = published_in(&home);
+            assert!(listed.get(&other_id).unwrap().pending);
+            let state = admission_state_in(&home);
+            let first_root = PendingRoot {
+                root: pending_root,
+                epoch: epoch + 1,
+            };
+            assert_eq!(state.get(&other_id), Some(&first_root));
+
+            // A second run of that epoch keeps its root and the state.
+            sign_at(&settings, false, at(epoch + 1)).unwrap();
+            assert_eq!(published_in(&home).1, pending_root);
+            assert_eq!(admission_state_in(&home), state);
+
+            // An outside relay needs the file of the pending roots.
+            let path = home.join("no-state.conf");
+            let text = std::fs::read_to_string(&settings).unwrap();
+            let without: String = text
+                .lines()
+                .filter(|line| !line.starts_with("admission_state="))
+                .map(|line| format!("{line}\n"))
+                .collect();
+            std::fs::write(&path, without).unwrap();
+            let refused = sign_at(path.to_str().unwrap(), false, at(epoch + 2));
+            assert!(refused.unwrap_err().contains("admission_state"));
+
+            std::fs::remove_dir_all(&home).unwrap();
+        });
+    }
+
+    #[test]
+    fn the_staging_takes_4_days_and_14_days() {
+        assert_eq!(CHAIN_STAGING_EPOCHS, 96);
+        assert_eq!(INGRESS_STAGING_EPOCHS, 336);
+
+        // REL-198: the own relay takes its place at once.
+        let own = |place| stage_of(true, place, None, 700);
+        let fixed = |layer| Admission::Fixed { layer };
+        assert_eq!(own(Place::Exit).admission, fixed(3));
+        assert_eq!(own(Place::Middle).admission, fixed(2));
+        assert_eq!(own(Place::Ingress).admission, fixed(2));
+        assert!(own(Place::Ingress).is_ingress);
+        assert!(!own(Place::Exit).is_ingress);
+
+        // An outside relay with no pending root is pending.
+        let first = PendingRoot {
+            root: [0x5C; 32],
+            epoch: 1_000,
+        };
+        let outside = |place, epoch| stage_of(false, place, Some(&first), epoch);
+        assert_eq!(
+            stage_of(false, Place::Exit, None, 700).admission,
+            Admission::Pending
+        );
+
+        let placed = Admission::Placed {
+            root: first.root,
+            epoch: first.epoch,
+        };
+        assert_eq!(outside(Place::Exit, 1_095).admission, Admission::Pending);
+        assert_eq!(outside(Place::Exit, 1_096).admission, placed);
+        // A clock that went back gives no wrap.
+        assert_eq!(outside(Place::Exit, 999).admission, Admission::Pending);
+
+        // The ingress flag waits 14 days, and the place ingress alone gets it.
+        assert!(!outside(Place::Ingress, 1_335).is_ingress);
+        assert_eq!(outside(Place::Ingress, 1_335).admission, placed);
+        assert!(outside(Place::Ingress, 1_336).is_ingress);
+        assert!(!outside(Place::Middle, 1_336).is_ingress);
+    }
+
+    #[test]
+    fn a_new_relay_id_starts_its_admission_again() {
+        let old_key = [1u8; 32];
+        let new_key = [2u8; 32];
+        let gone = [3u8; 32];
+        let unlisted = [4u8; 32];
+        let first = PendingRoot {
+            root: [0xA1; 32],
+            epoch: 900,
+        };
+        let held: AdmissionState = [(old_key, first), (gone, first)].into_iter().collect();
+
+        // The relay took a new key, and another relay left the settings.
+        let root = [0xB2; 32];
+        let next = next_admission_state(&held, &[new_key, unlisted], &[new_key], root, 950);
+        let restarted = PendingRoot { root, epoch: 950 };
+        assert_eq!(next.get(&new_key), Some(&restarted));
+        assert!(!next.contains_key(&old_key));
+        assert!(!next.contains_key(&gone));
+        // A relay that no root listed has no pending root.
+        assert!(!next.contains_key(&unlisted));
+
+        // A held line stays when a later root lists the relay.
+        let later = next_admission_state(&next, &[new_key], &[new_key], [0xC3; 32], 951);
+        assert_eq!(later, next);
+
+        // The file holds the same state.
+        assert_eq!(read_admission_state(&admission_state_text(&later)), later);
     }
 
     #[test]
