@@ -47,7 +47,8 @@ One semantic version applies to the Android app, the Rust crates, the specificat
 | Rust crates | `version` of each path dependency in each `crates/*/Cargo.toml`. |
 | Specification | The `**Version:**` line and the `**Date:**` line of each `spec/NN-*.md` part. |
 | Web site | `version` in `site/package.json`. |
-| Helm chart | `version` and `appVersion` in `deploy/helm/umbra/Chart.yaml`. |
+| Helm chart | `version` and `appVersion` in `deploy/helm/umbra-relay/Chart.yaml`. |
+| Relay image | The image tag of `UMBRA_IMAGE` in `compose.yaml`. |
 
 - Run `cargo check` after the change. This command updates `Cargo.lock`.
 - Run `python scripts/reqindex.py` after a change to a specification rule.

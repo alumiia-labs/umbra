@@ -2,9 +2,9 @@
 
 These playbooks install the launch network on Debian: four servers at
 OVHcloud US, over three sites. A server can run two relays; the inventory
-lists the relays of each server. The same network runs in containers:
-`deploy/docker/README.md` gives Docker Compose, and `deploy/helm/README.md`
-gives Kubernetes.
+lists the relays of each server. A person who runs one relay of their own
+uses `deploy/relay/README.md`, and this playbook admits that relay (see
+"Admitting a relay of another operator").
 
 | Server | Site | Runs |
 |---|---|---|
@@ -346,6 +346,33 @@ sudo /usr/local/sbin/umbra-restart umbra-relay@<name>.service <port>
 
 The next run copies `target/deploy/bin` again. Build the older commit with
 `scripts/build-linux.sh` first, or the run brings the new binary back.
+
+## Admitting a relay of another operator
+
+A person who runs a relay of `deploy/relay` opens a relay request on GitHub
+with its join request. Admit it so:
+
+1. Check the dossier (Part 10 `REL-012`): the operator, the control, the
+   contact, the country, and the AS number of the address (`whois`). Check
+   that no listed relay of another operator has the same family value.
+2. Put the text of the request, from BEGIN to END, in a file, and run:
+
+   ```sh
+   python scripts/relay-admit.py request.txt
+   ```
+
+   It writes the descriptor to `build/descriptors/<name>.desc`, and it
+   prints the line of the relay.
+3. Add that line to `umbra_outside_relays` in `group_vars/all.yml`, and run
+   `ansible-playbook site.yml`. An entry relay carries its address, which
+   the firewall of the two gateways then lets in.
+
+The signer lists the relay as pending in the next root, places it at its
+layer from a hash after 4 days, and gives an entry relay the entry role
+after 14 days (Part 10 §10.5.4, §10.7.1). `admission_state` under
+`/var/lib/umbra-signer/state` holds its first pending root: do not edit it.
+A new descriptor with the same key keeps the admission; a new key starts it
+again. To take the relay out, remove its line and run the playbook.
 
 ## Taking a relay out
 

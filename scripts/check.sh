@@ -76,6 +76,9 @@ python scripts/deps.py --check
 python scripts/vectors.py --check
 python scripts/sitebuild.py --check
 
+step "network keys of the relay image"
+python scripts/deploycheck.py
+
 step "specification consistency"
 python scripts/speccheck.py --quiet
 

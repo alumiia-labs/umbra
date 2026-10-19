@@ -27,8 +27,10 @@ umbra_family: ""                     # FILL
 # {{ umbra_out }}/descriptors/<name>.desc. The signer lists each one as
 # pending for 4 days and then takes its layer from the directory; an entry
 # relay gets the entry role after 14 days (Part 10 §10.5.4, §10.7.1). The
-# operator name takes no comma.
+# operator name takes no comma. An entry relay also takes its IPv4
+# address, which the firewall of the gateways lets in.
 #   - { name: home-1, role: middle, class: 0, operator: alice }
+#   - { name: home-2, role: entry, class: 1, operator: bob, address: 198.51.100.7 }
 umbra_outside_relays: []
 
 # The directory of the Linux binaries on this machine, which

@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1
-# The server image of UMBRA, and the test network of scripts/devnet.sh.
+# The relay image of UMBRA, and the test network of scripts/devnet.sh.
 #
-#   docker compose build                               # the server image
+#   docker compose build                               # the relay image
 #   docker compose -f compose.devnet.yaml up --build   # the test network
 #
-# deploy/docker/README.md gives the deployment of the server image.
+# deploy/relay/README.md gives the steps of a relay.
 #
 # The compiler is inside the trust boundary (Part 14 §14.5.1), thus a digest
 # pins each image, and the toolchain is the one of rust-toolchain.toml. A new
@@ -27,18 +27,22 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         install -m 0755 "target/release/$bin" "/out/$bin"; \
     done
 
-# The binaries on a small base, under a user with no privilege. curl
-# fetches the first manifest of a relay, and nginx serves the manifest of
-# the signer.
-FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS servers
+# The relay on a small base, under a user with no privilege. curl fetches
+# the first manifest.
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS relay
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl nginx-light \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --create-home --home-dir /umbra --shell /usr/sbin/nologin umbra
-COPY --from=build /out/ /usr/local/bin/
-COPY deploy/docker/umbra-entry.sh /usr/local/bin/umbra-entry
+COPY --from=build /out/umbra-relay /usr/local/bin/umbra-relay
+COPY deploy/relay/entry.sh /usr/local/bin/umbra-entry
+# The public values of the network. The key set is the one that the release
+# app pins.
+COPY deploy/relay/network.env /usr/local/share/umbra/network.env
+COPY android/app/src/release/assets/umbra-keyset.bin /usr/local/share/umbra/keyset.bin
 # A checkout on Windows can give the script CRLF line ends.
-RUN sed -i 's/\r$//' /usr/local/bin/umbra-entry && chmod 0755 /usr/local/bin/umbra-entry
+RUN sed -i 's/\r$//' /usr/local/bin/umbra-entry /usr/local/share/umbra/network.env \
+    && chmod 0755 /usr/local/bin/umbra-entry
 USER umbra
 WORKDIR /umbra
 ENTRYPOINT ["umbra-entry"]
@@ -46,8 +50,9 @@ ENTRYPOINT ["umbra-entry"]
 # The test network: seven relays, the NDR, the directory, the authority, and
 # the measurer in one container. Its seeds are in the repository, thus it
 # protects nothing.
-FROM servers AS devnet
+FROM relay AS devnet
 USER root
+COPY --from=build /out/ /usr/local/bin/
 # devnet.sh compares the keys of the network with the fixtures through python3.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 \

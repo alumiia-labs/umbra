@@ -17,5 +17,5 @@ android/gradlew text eol=lf
 # each platform.
 tests/vectors/** text eol=lf
 # The scripts and templates of a container run on Linux.
-deploy/docker/** text eol=lf
+deploy/relay/** text eol=lf
 deploy/helm/** text eol=lf

@@ -7,7 +7,7 @@
 # build the release app. The release build fails without these files.
 #
 #   bash scripts/release-network.sh                     # deploy/ansible/build
-#   bash scripts/release-network.sh deploy/helm/build   # deploy/helm/collect.sh
+#   bash scripts/release-network.sh <directory>         # another build directory
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -15,7 +15,7 @@ build="${1:-$root/deploy/ansible/build}"
 assets="$root/android/app/src/release/assets"
 for file in keyset.bin ndr-key-config.hex directory-pins.hex network.properties; do
     if [ ! -s "$build/$file" ]; then
-        echo "missing $build/$file: run ansible-playbook site.yml or deploy/helm/collect.sh first" >&2
+        echo "missing $build/$file: run ansible-playbook site.yml first" >&2
         exit 1
     fi
 done
@@ -75,5 +75,12 @@ echo "shipped_epoch=$epoch"
 for file in umbra-keyset.bin umbra-ndr-key.bin umbra-directory-pins.bin umbra-network.properties; do
     mv "$stage/$file" "$assets/$file"
 done
+
+# The relay image takes the same keys (deploy/relay).
+relay_env="$root/deploy/relay/network.env"
+ndr_hex="$(tr -d ' \n\r' < "$build/ndr-key-config.hex")"
+pins_hex="$(tr -d ' \n\r' < "$build/directory-pins.hex")"
+sed -i -e "s/^UMBRA_NDR_KEY_CONFIG=.*/UMBRA_NDR_KEY_CONFIG=$ndr_hex/" \
+    -e "s/^UMBRA_DIRECTORY_PINS=.*/UMBRA_DIRECTORY_PINS=$pins_hex/" "$relay_env"
 
 ls -l "$assets"

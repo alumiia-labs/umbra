@@ -1,0 +1,11 @@
+# One UMBRA relay of your own on Kubernetes or k3s, which joins the public
+# network. deploy/relay/README.md gives the steps.
+apiVersion: v2
+name: umbra-relay
+description: One relay of your own for the public UMBRA network
+type: application
+version: 0.38.0
+appVersion: "0.38.0"
+home: https://umbrachat.app
+sources:
+  - https://github.com/alumiia-labs/umbra

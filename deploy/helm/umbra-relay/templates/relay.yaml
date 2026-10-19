@@ -1,0 +1,100 @@
+{{- /* The relay, on one node, under the network of the host: it states the
+       address of the node, and it sees the address of each client. */ -}}
+{{- $relay := .Values.relay }}
+{{- if not (regexMatch "^[a-z0-9-]+$" $relay.name) }}
+{{- fail "relay.name: a-z, 0-9 and -" }}
+{{- end }}
+{{- if not (has $relay.role (list "middle" "exit" "entry")) }}
+{{- fail "relay.role: middle, exit or entry" }}
+{{- end }}
+{{- if or (not $relay.host) (not $relay.address) }}
+{{- fail "relay.host and relay.address: the DNS name of the relay and its public IPv4 address" }}
+{{- end }}
+{{- $exit := eq $relay.role "exit" }}
+{{- $memory := ternary .Values.memory.exit .Values.memory.relay $exit }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    {{- include "relay.labels" . | nindent 4 }}
+    app.kubernetes.io/component: relay
+spec:
+  replicas: 1
+  # One pod holds the port and the store of the relay.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: relay
+  template:
+    metadata:
+      labels:
+        {{- include "relay.labels" . | nindent 8 }}
+        app.kubernetes.io/component: relay
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- with .Values.node }}
+      nodeSelector:
+        kubernetes.io/hostname: {{ . }}
+      {{- end }}
+      securityContext:
+        supplementalGroups: [10000]
+      initContainers:
+        {{- include "relay.init" . | nindent 8 }}
+      containers:
+        - name: relay
+          image: {{ include "relay.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["relay"]
+          env:
+            - { name: UMBRA_RELAY_NAME, value: {{ $relay.name | quote }} }
+            - { name: UMBRA_RELAY_ROLE, value: {{ $relay.role | quote }} }
+            - { name: UMBRA_RELAY_CLASS, value: {{ $relay.class | quote }} }
+            - { name: UMBRA_PUBLIC_HOST, value: {{ $relay.host | quote }} }
+            - { name: UMBRA_PUBLIC_ADDRESS, value: {{ $relay.address | quote }} }
+            - { name: UMBRA_PUBLIC_PORT, value: {{ $relay.port | quote }} }
+            - { name: UMBRA_OPERATOR, value: {{ .Values.operator | quote }} }
+            - { name: UMBRA_CONTACT, value: {{ .Values.contact | quote }} }
+            - { name: UMBRA_COUNTRY, value: {{ .Values.country | quote }} }
+            - { name: UMBRA_ASN, value: {{ .Values.asn | quote }} }
+            # 64 zeros: the relay declares no family (Part 10 REL-209).
+            - { name: UMBRA_FAMILY, value: {{ .Values.family | default (repeat 64 "0") | quote }} }
+            - { name: UMBRA_CHUNK_CAPACITY, value: {{ .Values.chunkCapacity | int64 | quote }} }
+          ports:
+            - name: relay
+              containerPort: {{ $relay.port }}
+          resources:
+            requests:
+              memory: {{ $memory.request }}
+            limits:
+              memory: {{ $memory.limit }}
+          securityContext:
+            runAsUser: 10001
+            runAsGroup: 10001
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - { name: run, mountPath: /run/umbra }
+            - { name: tmp, mountPath: /tmp }
+            - { name: root, mountPath: /var/lib/umbra, subPath: relay }
+            - { name: root, mountPath: /etc/umbra/tls, subPath: tls, readOnly: true }
+      volumes:
+        {{- include "relay.root" . | nindent 8 }}
+        - name: run
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Mi
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi

@@ -19,7 +19,7 @@ protocol or the code. Do not use UMBRA where a failure puts a person at risk.
 | `spec/` | The specification, in 15 parts. `spec/req-index.md` lists each rule. |
 | `crates/` | The Rust core, the relay, and the FFI layer. |
 | `android/` | The Android app, in Kotlin and Compose. |
-| `deploy/` | The deployment of a relay network: Ansible playbooks, Docker files, and a Helm chart. |
+| `deploy/` | One relay of your own (`deploy/relay`, `deploy/helm/umbra-relay`), and the Ansible playbooks of the servers of the network. |
 | `site/` | The web site of the invitation links. |
 | `brand/` | The logo files. |
 | `scripts/` | The build scripts and the check scripts. |
@@ -39,13 +39,12 @@ bash scripts/check.sh           # the full check set of each commit
 
 `android/README.md` gives the build of the app.
 
-A relay network runs in three forms:
+**Run a relay.** You can run one relay of the public network on your own
+machine, as a home server or a homelab, with `compose.yaml` or the Helm
+chart in `deploy/helm/umbra-relay`. `deploy/relay/README.md` gives the
+steps and the join request.
 
-| Form | Where to start |
-| --- | --- |
-| Debian servers | `deploy/ansible/README.md` |
-| Docker | `compose.yaml` and `deploy/docker/README.md` |
-| Kubernetes | The Helm chart in `deploy/helm/umbra` |
+The servers of the network itself run from `deploy/ansible`.
 
 **The test network.** This command runs a test network of seven relays on
 this machine, with no Rust toolchain:

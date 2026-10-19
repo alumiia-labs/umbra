@@ -1,25 +1,23 @@
-{{- /* The certificate of each server, from Let's Encrypt: certbot answers
+{{- /* The certificate of relay.host, from Let's Encrypt: certbot answers
        the challenge on port 80 of the node, renews twice a day, and writes
-       each new certificate to <root>/tls. Each service starts again with
-       it. */ -}}
+       each new certificate to <root>/tls. The relay starts again with it. */ -}}
 {{- if .Values.certbot }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: {{ .Release.Name }}-certbot
   labels:
-    {{- include "umbra.labels" . | nindent 4 }}
+    {{- include "relay.labels" . | nindent 4 }}
 data:
   certbot.sh: |
     {{- .Files.Get "files/certbot.sh" | nindent 4 }}
-{{- range $server := .Values.servers }}
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: certbot-{{ $server.name }}
+  name: {{ .Release.Name }}-certbot
   labels:
-    {{- include "umbra.labels" $ | nindent 4 }}
+    {{- include "relay.labels" . | nindent 4 }}
     app.kubernetes.io/component: certbot
 spec:
   replicas: 1
@@ -27,29 +25,30 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app.kubernetes.io/instance: {{ $.Release.Name }}
-      umbra.app/certbot: {{ $server.name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: certbot
   template:
     metadata:
       labels:
-        {{- include "umbra.labels" $ | nindent 8 }}
+        {{- include "relay.labels" . | nindent 8 }}
         app.kubernetes.io/component: certbot
-        umbra.app/certbot: {{ $server.name }}
     spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       automountServiceAccountToken: false
       enableServiceLinks: false
+      {{- with .Values.node }}
       nodeSelector:
-        kubernetes.io/hostname: {{ include "umbra.node" $server }}
+        kubernetes.io/hostname: {{ . }}
+      {{- end }}
       initContainers:
-        {{- include "umbra.init" $ | nindent 8 }}
+        {{- include "relay.init" . | nindent 8 }}
       containers:
         - name: certbot
-          image: {{ $.Values.certbotImage }}
+          image: {{ .Values.certbotImage }}
           command: ["sh", "/umbra/certbot.sh"]
           env:
-            - { name: UMBRA_FQDN, value: {{ printf "%s.%s" $server.name $.Values.domain | quote }} }
+            - { name: UMBRA_FQDN, value: {{ .Values.relay.host | quote }} }
           # Certbot answers on port 80 and writes files for other users.
           securityContext:
             allowPrivilegeEscalation: false
@@ -66,12 +65,8 @@ spec:
             - { name: root, mountPath: /etc/umbra/tls, subPath: tls }
             - { name: script, mountPath: /umbra, readOnly: true }
       volumes:
-        - name: root
-          hostPath:
-            path: {{ $.Values.root }}
-            type: DirectoryOrCreate
+        {{- include "relay.root" . | nindent 8 }}
         - name: script
           configMap:
-            name: {{ $.Release.Name }}-certbot
-{{- end }}
+            name: {{ .Release.Name }}-certbot
 {{- end }}

@@ -1,0 +1,35 @@
+name: Relay request
+description: Ask the network to admit a relay that you run (deploy/relay).
+labels: ["relay"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        deploy/relay/README.md gives the steps before this request.
+        This issue is public. The dossier of a relay operator is a public record (Part 3 §3.10.1, Part 10 §10.6).
+  - type: textarea
+    id: request
+    attributes:
+      label: Join request
+      description: Paste the whole output of `docker compose run --rm relay join`, from BEGIN to END.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: control
+    attributes:
+      label: Control of the relay
+      description: Who controls the relay and the machine (Part 10 §10.6, the beneficial-control declaration). Name each other relay of the UMBRA network that the same person or group controls.
+    validations:
+      required: true
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Terms
+      options:
+        - label: The relay has 100 Mbit/s or more in both directions for the class that it states.
+          required: true
+        - label: I keep the relay up to date, and I tell the network on this issue before I stop it.
+          required: true
+        - label: The facts of this request are true.
+          required: true

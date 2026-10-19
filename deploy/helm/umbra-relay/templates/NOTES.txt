@@ -1,0 +1,13 @@
+The relay {{ .Values.relay.name }} starts{{ with .Values.node }} on the node {{ . }}{{ end }}.
+
+1. Read its log until it signed its descriptor:
+
+     kubectl logs -f deploy/{{ .Release.Name }}
+
+2. Make the join request, and paste it into a relay request on GitHub
+   (deploy/relay/README.md, "Steps"):
+
+     kubectl exec deploy/{{ .Release.Name }} -- umbra-entry join
+
+Until the network admits the relay, it stops at each start and waits 10
+minutes. That is correct.

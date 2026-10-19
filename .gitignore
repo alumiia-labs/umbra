@@ -10,7 +10,6 @@ target/
 deploy/ansible/inventory.yml
 deploy/ansible/build/
 
-# The settings of one server for compose.yaml, and what the Helm chart's
-# collect script gave back.
+# The settings and the state of the relay of compose.yaml: its keys.
 /.env
-deploy/helm/build/
+/data/

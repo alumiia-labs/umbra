@@ -10,6 +10,9 @@ table inet filter
 delete table inet filter
 
 {% set relay_addresses = groups['relays'] | map('extract', hostvars, 'ansible_host') | list %}
+{# An outside entry relay forwards the OHTTP requests of phones to the
+   gateways too (NTF-002). #}
+{% set relay_addresses = relay_addresses + (umbra_outside_relays | selectattr('role', 'equalto', 'entry') | map(attribute='address') | list) %}
 {% set ns = namespace(relay_addresses6=[]) %}
 {% for host in groups['relays'] if hostvars[host].umbra_ipv6 is defined %}
 {% set ns.relay_addresses6 = ns.relay_addresses6 + [hostvars[host].umbra_ipv6] %}

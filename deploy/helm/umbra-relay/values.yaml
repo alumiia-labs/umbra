@@ -1,0 +1,55 @@
+# The settings of your relay. deploy/relay/relay.env.example explains each
+# value under its UMBRA_ name.
+
+image:
+  repository: ghcr.io/alumiia-labs/umbra-relay
+  # Empty: the appVersion of the chart.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# The node that runs the relay, by its kubernetes.io/hostname. Its address
+# is the public address of the relay. Empty: any node, for a cluster of one
+# node.
+node: ""
+
+relay:
+  # a-z, 0-9 and -.
+  name: ""
+  # middle, exit or entry.
+  role: middle
+  # 0 = 100, 1 = 250, 2 = 500, 3 = 1000 Mbit/s, in both directions.
+  class: 0
+  # A DNS name with an A record to the public IPv4 address, and that address.
+  host: ""
+  address: ""
+  # An entry relay takes 443, which needs
+  # net.ipv4.ip_unprivileged_port_start=443 on the node.
+  port: 9443
+
+# The facts of the dossier (Part 10 §10.6), for the join request.
+operator: ""
+contact: ""
+# ISO 3166-1 alpha-2, as DE or US.
+country: ""
+# The number of the autonomous system of your provider.
+asn: ""
+# Empty: no family. Two relays or more of yours: one value from
+# `openssl rand -hex 32` for each.
+family: ""
+
+# The bytes that an exit relay holds for files, in memory.
+chunkCapacity: 1073741824
+
+# The directory on the node for the keys, the queues, and the certificate.
+root: /srv/umbra-relay
+
+# certbot gets the certificate of relay.host from Let's Encrypt on port 80
+# of the node. Set false, and put cert.pem and key.pem in <root>/tls, for
+# your own certificate.
+certbot: true
+certbotImage: certbot/certbot:v5.8.0@sha256:f70ad0adbb7e117f0fe42a63c553f28ea451edabc0148757b6efcd9735acaa20
+
+memory:
+  relay: { request: 512Mi, limit: 1400Mi }
+  # Two times chunkCapacity and 300 MiB more.
+  exit: { request: 1Gi, limit: 2500Mi }
