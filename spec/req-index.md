@@ -2418,7 +2418,7 @@ Source: `spec/11-private-groups.md`
 | `GRP-298` | §11.4.3 | MUST | An admin that promotes a member to `admin` or above | An admin that promotes a member to `admin` or above MUST post a one-slot epoch-key record of the current epoch for that member with `own_count` = `GROUP_REPLICAS`, directly after the granting epoch. |  |  |
 | `GRP-299` | §11.6 | MUST NOT | A member | A member MUST NOT send a receipt of Part 6 §6.6.9 kind `0x06` or kind `0x07` in a group. |  |  |
 | `GRP-300` | §11.6 | MUST NOT | A member | A member MUST NOT send a typing indicator of kind `0x08` in a group. |  |  |
-| `GRP-301` | §11.6 | MUST NOT | A client | A client MUST NOT show a `delivered` or a `read` state for a group record; the states of Part 14 §14.9.1 that a group record reaches are `queued`, `accepted`, and `failed`. |  |  |
+| `GRP-301` | §11.6 | MUST NOT | A client | A client MUST NOT show a `delivered` or a `read` state for a group record. |  |  |
 | `GRP-302` | §11.7 | MUST | A receiver | A receiver MUST take that pair from the record that its verified tag attributes. |  |  |
 | `GRP-303` | §11.7 | MUST NOT | A receiver | A receiver MUST NOT take an order from a count of the arrivals or from `seq`. |  |  |
 | `GRP-304` | §11.9 | MUST NOT | A granter | A granter MUST NOT give a role at `moderator` or above when the roster already holds `ROLE_HOLDER_MAX` such members. |  |  |
@@ -2491,7 +2491,7 @@ Source: `spec/11-private-groups.md`
 | `GRP-377` | §11.4.3 | MUST NOT | A member | A member MUST NOT answer a `KeyRequest` from an index that the current roster does not hold. |  |  |
 | `GRP-378` | §11.4.3 | MUST | A member | A member MUST discard an epoch request above that rate. |  |  |
 | `GRP-379` | §11.4.3 | MUST | A receiver | A receiver MUST NOT take the owner credentials of a slot whose rotator holds a role below `admin`, because only an admin holds `own_sk`. |  |  |
-| `GRP-380` | §11.4.1 | MAY | An implementation | An implementation MAY draw that delay as `mean × ln(2^32 / (u + 1))` from one uniform 32-bit `u`, with a logarithm from the bit length and a sixteen-entry table of the fraction; the shape of the distribution is what the backoff needs, and not its precision. |  |  |
+| `GRP-380` | §11.4.1 | MAY | An implementation | An implementation MAY draw that delay as `mean × ln(2^32 / (u + 1))` from one uniform 32-bit `u`, with a logarithm from the bit length and a sixteen-entry table of the fraction. |  |  |
 | `GRP-381` | §11.9.2 | MUST | A verifier | A verifier MUST run every check of an epoch before it records that epoch as a successor of its predecessor, thus a rejected epoch never counts as one of the two successors of `GRP-070`. |  |  |
 | `GRP-382` | §11.9.2 | MUST | A plain epoch that adds or removes a member | A plain epoch that adds or removes a member MUST come from a member at `admin` or above, and a self-removal from the member that leaves; a verifier MUST discard each other plain epoch under `GRP-066`. |  |  |
 | `GRP-383` | §11.4.2 | MUST | The `slot` field of the epoch-key record header | The `slot` field of the epoch-key record header MUST carry `t_{e+1}`, and a member MUST take `t_e` of `GRP-224` from that field. |  |  |
@@ -2530,7 +2530,7 @@ Source: `spec/11-private-groups.md`
 | `GRP-416` | §11.9.4 | MUST NOT | (unstated) | It MUST publish the change of that epoch as it applies to the new head, and it MUST NOT publish a change that the roster holds already. |  |  |
 | `GRP-417` | §11.9.4 | MUST | A client | A client MUST keep the roster before the head of its chain, and the member that made the head, until the next roster epoch, in the store as well. |  |  |
 | `GRP-418` | §11.9.4 | MUST | (unstated) | A plain epoch binds no maker, thus two self-removals at one predecessor carry the same bytes and remove two members. |  |  |
-| `GRP-419` | §11.9.4 | MUST | An admin whose add another epoch displaced | An admin whose add another epoch displaced MUST add the joiner again, under the index of the new head, before it sends the admit; the joiner waits in the list of joiners again. |  |  |
+| `GRP-419` | §11.9.4 | MUST | An admin whose add another epoch displaced | An admin whose add another epoch displaced MUST add the joiner again, under the index of the new head, before it sends the admit. |  |  |
 | `GRP-420` | §11.9.4 | MUST | An admin | An admin MUST keep the joiner of each admit that it sent while the add stays the head of its roster, thus an epoch that displaces the add after the admit puts the joiner in the list of joiners again. |  |  |
 | `GRP-421` | §11.9.4 | MUST | A joiner | A joiner MUST take a second admit of the admin that admitted it while its own add is the head of its roster, and the group of that admit MUST take the place of the group that it holds, as an exception to `GRP-153`. |  |  |
 | `GRP-422` | §11.4.1 | MUST | (unstated) | A member that holds a trigger since the `roster_epoch` of its current epoch, and that the trigger does not exclude, MUST rotate before it posts a record other than a roster object. |  |  |
