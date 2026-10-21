@@ -68,6 +68,7 @@ object Modes {
     private const val PREFERENCES = "modes"
     private const val MODE = "mode"
     private const val PREVIEW = "preview"
+    private const val KEEP_NOTICE = "keep-notice"
     private const val PHASE = "phase"
 
     /** Whether the callback of the network is in place. */
@@ -101,6 +102,14 @@ object Modes {
 
     fun setPreview(context: Context, isOn: Boolean) {
         preferences(context).edit().putBoolean(PREVIEW, isOn).apply()
+    }
+
+    /** Whether the notice of the service comes back after a swipe. */
+    fun keepsNotice(context: Context): Boolean = preferences(context).getBoolean(KEEP_NOTICE, true)
+
+    fun setKeepNotice(context: Context, isOn: Boolean) {
+        preferences(context).edit().putBoolean(KEEP_NOTICE, isOn).apply()
+        if (isOn) Notifier.showCarrier(context)
     }
 
     fun setMode(context: Context, mode: NotifyMode) {
@@ -238,6 +247,7 @@ fun NotificationsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     var mode by remember { mutableStateOf(Modes.mode(context)) }
     var preview by remember { mutableStateOf(Modes.preview(context)) }
+    var keepsNotice by remember { mutableStateOf(Modes.keepsNotice(context)) }
 
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.common_notifications), onBack = onBack)
@@ -267,6 +277,20 @@ fun NotificationsScreen(onBack: () -> Unit) {
                         )
                     }
                 }
+
+                // The battery line stays here after the card of the chat list went.
+                if (choice == NotifyMode.Direct && mode == choice && Battery.state != BatteryState.Unrestricted) {
+                    Text(
+                        batteryLine(),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Palette.TextSecondary,
+                        modifier = Modifier.padding(start = PressInset + 34.dp),
+                    )
+                    InlineButton(
+                        stringResource(R.string.battery_allow),
+                        modifier = Modifier.padding(start = PressInset + 34.dp, bottom = 12.dp),
+                    ) { Battery.open(context) }
+                }
                 HorizontalDivider(color = Palette.Divider)
             }
 
@@ -275,6 +299,11 @@ fun NotificationsScreen(onBack: () -> Unit) {
             ToggleRow(stringResource(R.string.modes_show_sender_and_text), preview) {
                 preview = it
                 Modes.setPreview(context, it)
+            }
+            HorizontalDivider(color = Palette.Divider)
+            ToggleRow(stringResource(R.string.modes_keep_notice), keepsNotice) {
+                keepsNotice = it
+                Modes.setKeepNotice(context, it)
             }
             HorizontalDivider(color = Palette.Divider)
         }

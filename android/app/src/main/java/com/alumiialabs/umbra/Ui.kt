@@ -542,6 +542,7 @@ private fun ChatsTab(push: (Screen) -> Unit) {
     Column(Modifier.fillMaxSize()) {
         // A degraded state has its one line above the title.
         ConnectionNote()
+        BatteryPrompt()
         GroupOfferPrompt()
         IntroductionPrompt()
         RosterForkPrompt()

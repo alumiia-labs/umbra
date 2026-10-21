@@ -44,6 +44,8 @@ class DeliveryService : Service() {
         }
 
         Core.carrierRuns(this, true)
+        // The platform posted the notice again with the start.
+        Notifier.showCarrier(this)
         if (watches) Watcher.start(this)
 
         // A process that the platform starts again holds a locked client.

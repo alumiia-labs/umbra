@@ -185,5 +185,6 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         cover.visibility = View.GONE
+        Battery.read(this)
     }
 }

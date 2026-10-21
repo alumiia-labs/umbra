@@ -1115,4 +1115,8 @@
     <string name="modes_direct">Direct</string>
     <string name="modes_private">Private</string>
     <string name="modes_show_sender_and_text">Show sender and text</string>
+    <string name="modes_keep_notice">Keep connection notice</string>
+    <string name="battery_optimized">Battery optimization can delay messages in Direct mode.</string>
+    <string name="battery_restricted">The battery restriction can stop Direct mode.</string>
+    <string name="battery_allow">Allow</string>
 </resources>

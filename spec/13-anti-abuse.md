@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 13: Anti-Abuse Without Identifiers
 
 **Status:** Draft
-**Version:** 0.39.0
+**Version:** 0.40.0
 **Date:** 2026-10-21
 
 ---

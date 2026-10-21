@@ -121,9 +121,30 @@ object Notifier {
         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
     )
 
+    /** Whether the user swiped the notice away while the setting lets it go. */
+    @Volatile
+    private var isCarrierHidden = false
+
     /** Shows the current state of the client and of its link in the notice of the service. */
     fun refreshCarrier(context: Context) {
+        if (isCarrierHidden) return
+
         manager(context).notify(CARRIER_ID, carrier(context))
+    }
+
+    /** The user swiped the notice away. It comes back while the setting keeps it. */
+    fun carrierDismissed(context: Context) {
+        if (Modes.keepsNotice(context)) {
+            refreshCarrier(context)
+        } else {
+            isCarrierHidden = true
+        }
+    }
+
+    /** Ends a hide: the service started again, or the setting keeps the notice now. */
+    fun showCarrier(context: Context) {
+        isCarrierHidden = false
+        if (Core.carrierHolds) refreshCarrier(context)
     }
 
     /**
@@ -321,11 +342,10 @@ object Notifier {
 
 /**
  * Since Android 14 the user can swipe away the notice of a foreground service,
- * and the service runs on. The notice comes back while the service runs,
- * because it is the one sign of the connection.
+ * and the service runs on.
  */
 class CarrierDismissed : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (Core.carrierHolds) Notifier.refreshCarrier(context)
+        if (Core.carrierHolds) Notifier.carrierDismissed(context)
     }
 }
