@@ -1461,19 +1461,21 @@ object Core {
                 if (!isVisible && client != null && mode != NotifyMode.Off) {
                     // GRP-229: while the clock may be wrong, no alert
                     // shows a preview (Part 14 §14.9.2).
-                    val preview = Modes.preview(app) && chats.none { it.isClockSuspect } &&
-                        !WakeStore.isClockSuspect(app)
+                    val clockHolds = chats.none { it.isClockSuspect } && !WakeStore.isClockSuspect(app)
                     val title = chats.firstOrNull { it.conversation.id.contentEquals(event.conversation) }?.title
                     // The worker reads the handle of the message, thus the
                     // worker frees the event after that read.
                     worker.execute {
                         try {
                             if (client.shouldAlert(event.message)) {
-                                // NTF-083: the sender and the text only when
-                                // the user turned the preview on.
+                                // NTF-149, DEV-344: the conversation takes the
+                                // place of the setting of the device.
+                                val held = client.previewSetting(event.conversation).toInt()
+                                val showsSender = clockHolds && previewShows(held and 3, Modes.showsSender(app))
+                                val showsText = clockHolds && previewShows(held shr 2 and 3, Modes.showsText(app))
                                 // IMP-017: the text stays a CharArray, and
                                 // the alert wipes it after the post.
-                                val text = if (preview) {
+                                val text = if (showsText) {
                                     val sink = CharSink()
                                     runCatching { client.msgRender(event.message, sink) }
                                     sink.chars
@@ -1484,7 +1486,7 @@ object Core {
                                     // A lock that came since takes the text
                                     // of no alert to the shade.
                                     if (phase == Phase.Open) {
-                                        Notifier.message(app, Conversation(event.conversation), title.takeIf { preview }, text)
+                                        Notifier.message(app, Conversation(event.conversation), title.takeIf { showsSender }, text)
                                     } else {
                                         text?.fill('\u0000')
                                     }
@@ -2546,6 +2548,23 @@ object Core {
     }
 
     /** The notification setting of a conversation (Part 7 §7.5.9). */
+    /** The field of `DEV-345`: 0 takes the setting of the device, 1 shows, and 2 hides. */
+    private fun previewShows(field: Int, device: Boolean): Boolean = when (field) {
+        PREVIEW_SHOW -> true
+        PREVIEW_HIDE -> false
+        else -> device
+    }
+
+    /** The sender in bits 0 and 1, and the text in bits 2 and 3, of a conversation (`DEV-344`). */
+    fun previewSetting(conversation: Conversation, onLoaded: (Int) -> Unit) = call { client ->
+        val value = client.previewSetting(conversation.id).toInt()
+        main.post { onLoaded(value) }
+    }
+
+    fun setPreviewSetting(conversation: Conversation, value: Int) = call { client ->
+        client.setPreviewSetting(conversation.id, value.toUByte())
+    }
+
     fun alertSetting(conversation: Conversation, onLoaded: (UByte) -> Unit) = call { client ->
         val value = client.alertSetting(conversation.id)
         main.post { onLoaded(value) }

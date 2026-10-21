@@ -82,6 +82,8 @@ object Modes {
     private const val DELIVERY = "delivery"
     private const val DELAYED = "delayed"
     private const val PREVIEW = "preview"
+    private const val SHOW_SENDER = "show-sender"
+    private const val SHOW_TEXT = "show-text"
     private const val KEEP_NOTICE = "keep-notice"
     private const val PHASE = "phase"
 
@@ -129,11 +131,23 @@ object Modes {
     fun offered(context: Context): List<Delivery> =
         Delivery.entries.filter { it != Delivery.Google || Push.isAvailable(context) }
 
-    /** Whether an alert shows the sender and the text. Off by default. */
-    fun preview(context: Context): Boolean = preferences(context).getBoolean(PREVIEW, false)
+    /**
+     * Whether an alert shows the sender, and whether it shows the text, on
+     * this device (`NTF-149`). Each is off by default. The one switch of an
+     * earlier build gives the two.
+     */
+    fun showsSender(context: Context): Boolean =
+        preferences(context).let { it.getBoolean(SHOW_SENDER, it.getBoolean(PREVIEW, false)) }
 
-    fun setPreview(context: Context, isOn: Boolean) {
-        preferences(context).edit().putBoolean(PREVIEW, isOn).apply()
+    fun showsText(context: Context): Boolean =
+        preferences(context).let { it.getBoolean(SHOW_TEXT, it.getBoolean(PREVIEW, false)) }
+
+    fun setShowsSender(context: Context, isOn: Boolean) {
+        preferences(context).edit().putBoolean(SHOW_SENDER, isOn).apply()
+    }
+
+    fun setShowsText(context: Context, isOn: Boolean) {
+        preferences(context).edit().putBoolean(SHOW_TEXT, isOn).apply()
     }
 
     /** Whether the notice of the service comes back after a swipe. */
@@ -284,7 +298,8 @@ fun NotificationsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     var delivery by remember { mutableStateOf(Modes.delivery(context)) }
     var isDelayed by remember { mutableStateOf(Modes.isDelayed(context)) }
-    var preview by remember { mutableStateOf(Modes.preview(context)) }
+    var showsSender by remember { mutableStateOf(Modes.showsSender(context)) }
+    var showsText by remember { mutableStateOf(Modes.showsText(context)) }
     var keepsNotice by remember { mutableStateOf(Modes.keepsNotice(context)) }
 
     Column(Modifier.fillMaxSize()) {
@@ -349,9 +364,14 @@ fun NotificationsScreen(onBack: () -> Unit) {
 
             // NTF-082: the controls of the high-risk configuration sit on
             // this one screen.
-            ToggleRow(stringResource(R.string.modes_show_sender_and_text), preview) {
-                preview = it
-                Modes.setPreview(context, it)
+            ToggleRow(stringResource(R.string.modes_show_sender), showsSender) {
+                showsSender = it
+                Modes.setShowsSender(context, it)
+            }
+            HorizontalDivider(color = Palette.Divider)
+            ToggleRow(stringResource(R.string.modes_show_text), showsText) {
+                showsText = it
+                Modes.setShowsText(context, it)
             }
             HorizontalDivider(color = Palette.Divider)
             ToggleRow(stringResource(R.string.modes_keep_notice), keepsNotice) {

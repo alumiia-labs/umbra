@@ -7268,6 +7268,27 @@ impl Handle {
         Ok(())
     }
 
+    /// Whether an alert of a conversation shows the sender, in bits 0 and
+    /// 1, and the text, in bits 2 and 3: 0 the setting of the device, 1
+    /// show, 2 hide (Part 7 `DEV-344`).
+    pub fn preview_setting(&self, conversation: Vec<u8>) -> Result<u8, FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        Ok(locked(&self.inner).client.preview_setting(conversation)?)
+    }
+
+    /// Sets the sender and the text of the alerts of a conversation, for
+    /// each device of the set.
+    pub fn set_preview_setting(&self, conversation: Vec<u8>, value: u8) -> Result<(), FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let mut inner = locked(&self.inner);
+        let Inner { client, bridge, .. } = &mut *inner;
+        client.set_preview_setting(conversation, value, &mut OsRng)?;
+        if let Some(running) = bridge {
+            running.flush(client, &mut OsRng)?;
+        }
+        Ok(())
+    }
+
     /// Whether a message that arrived gives a notification under the
     /// setting and the mute of its conversation.
     pub fn should_alert(&self, message: Arc<MsgHandle>) -> Result<bool, FfiError> {

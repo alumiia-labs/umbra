@@ -46,6 +46,9 @@ fun AlertsScreen(chat: Chat, onBack: () -> Unit) {
     val context = LocalContext.current
     var chosen by remember { mutableStateOf<UByte?>(null) }
     LaunchedEffect(chat.conversation) { Core.alertSetting(chat.conversation) { chosen = it } }
+    var preview by remember { mutableStateOf<Int?>(null) }
+    var editing by remember { mutableStateOf<Int?>(null) }
+    LaunchedEffect(chat.conversation) { Core.previewSetting(chat.conversation) { preview = it } }
     val choices = if (chat.isGroup) listOf(ALERT_ALL, ALERT_MENTIONS, ALERT_NONE) else listOf(ALERT_ALL, ALERT_NONE)
 
     Column(Modifier.fillMaxSize()) {
@@ -72,6 +75,41 @@ fun AlertsScreen(chat: Chat, onBack: () -> Unit) {
                     HorizontalDivider(color = Palette.Divider)
                 }
             }
+
+            // DEV-344: the sender and the text of this conversation.
+            preview?.let { held ->
+                Spacer(Modifier.height(12.dp))
+                EntryRow(RowEntry("eye", stringResource(R.string.alerts_sender), previewLabel(held and 3)) { editing = 0 })
+                HorizontalDivider(color = Palette.Divider)
+                EntryRow(RowEntry("comment", stringResource(R.string.alerts_text), previewLabel(held shr 2 and 3)) { editing = 2 })
+                HorizontalDivider(color = Palette.Divider)
+
+                editing?.let { shift ->
+                    ActionSheet(
+                        stringResource(if (shift == 0) R.string.alerts_sender else R.string.alerts_text),
+                        listOf(PREVIEW_DEFAULT, PREVIEW_SHOW, PREVIEW_HIDE).map { field ->
+                            RowEntry(if (held shr shift and 3 == field) "check" else "eye", previewLabel(field)) {
+                                val next = held and (3 shl shift).inv() or (field shl shift)
+                                preview = next
+                                Core.setPreviewSetting(chat.conversation, next)
+                            }
+                        },
+                        onDismiss = { editing = null },
+                    )
+                }
+            }
         }
     }
+}
+
+/** The sender and the text of an alert take these values (`DEV-345`). */
+const val PREVIEW_DEFAULT = 0
+const val PREVIEW_SHOW = 1
+const val PREVIEW_HIDE = 2
+
+@Composable
+private fun previewLabel(field: Int): String = when (field) {
+    PREVIEW_SHOW -> stringResource(R.string.alerts_show)
+    PREVIEW_HIDE -> stringResource(R.string.alerts_hide)
+    else -> stringResource(R.string.alerts_default)
 }

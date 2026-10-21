@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 7: Device Sets, History Sync, and Revocation
 
 **Status:** Draft
-**Version:** 0.41.0
+**Version:** 0.42.0
 **Date:** 2026-10-21
 
 ---
@@ -1975,6 +1975,17 @@ setting that decides **what the device shows**, and it is per conversation.
   `u64` of milliseconds of the Unix time. An end of 0 is no mute, and an end
   of `2^64 - 1` is a mute with no end. A receiver MUST take a value of one
   byte as the setting with no mute.
+- **[DEV-344]** A user MAY set for each conversation whether an alert shows
+  the sender, and whether it shows the text. Each of the two is `default`,
+  `show`, or `hide`. A `default` takes the setting of the device of Part 8
+  `NTF-149`, and each other value takes the place of that setting for the
+  conversation.
+- **[DEV-345]** The item of `DEV-332` MUST carry the two as one byte after
+  the end of the mute: bits 0 and 1 hold the sender, and bits 2 and 3 hold
+  the text, each as `default` 0, `show` 1, or `hide` 2. The other bits are
+  zero. A client MUST write the value with no such byte when the two are
+  `default`. A receiver MUST take a value with no such byte as `default`
+  for the two, and it MUST reject a field of 3 and a bit above bit 3.
 
 > *Cause.* Part 8 §8.3 sets the mode for each profile. With that mode alone, a
 > user that joins one busy group has to choose between a silent device and a

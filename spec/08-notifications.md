@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 8: Notifications and Mobile Delivery
 
 **Status:** Draft
-**Version:** 0.41.0
+**Version:** 0.42.0
 **Date:** 2026-10-21
 
 ---
@@ -635,6 +635,10 @@ wake inside the interval. One phase across two networks links the two, and Part
   controls, and a shortcut that sets them adds nothing that the user cannot do.
 - **[NTF-083]** A build MUST ship Direct mode with the content preview off as
   the default of each Profile.
+- **[NTF-149]** The content preview MUST be two settings of the device: the
+  sender, and the text. Each is off in the shipped default. Part 7 `DEV-344`
+  lets a conversation take the place of each one. The setting of the device
+  stays on the device, because each device has its own lock screen.
 
 > *Cause.* A user at the first launch cannot weigh a threat model, and U1 of
 > Part 2 §2.4 permits no security decision before the inbox. Thus onboarding
@@ -696,8 +700,9 @@ the carrier of Direct mode and of a device that holds no FCM. The poll of
   while a view is on the screen or the service runs. The delay before a new
   run MUST double from 2 s to a ceiling of 30 s, and a run that reaches the
   ready state MUST set it back to 2 s.
-- **[NTF-119]** A message alert MUST show no text of the message and no name
-  of a contact while the content preview is off (`NTF-083`). On the lock
+- **[NTF-119]** A message alert MUST show no name of a contact while the
+  sender is off, and no text of the message while the text is off
+  (`NTF-149`). On the lock
   screen it MUST show that an alert exists, and no more. A setting of the
   platform that shows the full content of each alert on the lock screen does
   not change that. Thus the Android client posts the bare alert while the

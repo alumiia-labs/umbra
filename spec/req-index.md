@@ -74,8 +74,8 @@ column when a crate implements the requirement and a test covers it.
 | `IDN` | 136 | 46 | 1 | 0 | 5 | **188** |
 | `CRY` | 120 | 27 | 0 | 0 | 1 | **148** |
 | `WIR` | 417 | 88 | 0 | 0 | 7 | **512** |
-| `DEV` | 224 | 96 | 0 | 0 | 13 | **333** |
-| `NTF` | 86 | 29 | 0 | 0 | 3 | **118** |
+| `DEV` | 225 | 96 | 0 | 0 | 14 | **335** |
+| `NTF` | 87 | 29 | 0 | 0 | 3 | **119** |
 | `DIS` | 136 | 36 | 0 | 0 | 3 | **175** |
 | `REL` | 171 | 34 | 1 | 0 | 3 | **209** |
 | `GRP` | 234 | 65 | 0 | 0 | 5 | **304** |
@@ -83,7 +83,7 @@ column when a crate implements the requirement and a test covers it.
 | `ABU` | 71 | 29 | 1 | 0 | 0 | **101** |
 | `IMP` | 117 | 41 | 1 | 0 | 2 | **161** |
 | `SEC` | 4 | 3 | 0 | 0 | 1 | **8** |
-| **All** | 2146 | 639 | 7 | 0 | 59 | **2851** |
+| **All** | 2148 | 639 | 7 | 0 | 60 | **2854** |
 
 ## SCP — Scope and Conventions
 
@@ -1712,6 +1712,8 @@ Source: `spec/07-device-sets.md`
 | `DEV-341` | §7.5.11 | MUST | The client | The client MUST publish the removal as the item of the removal of a contact in the table of §7.5.3, under the subject of `DEV-226`, with the value `0x01`. |  |  |
 | `DEV-342` | §7.5.11 | MUST | The interface | The interface MUST ask for a confirmation, and it MUST state this line: "They are not told." |  |  |
 | `DEV-343` | §7.5.11 | MUST | When the device holds a share of the contact, the interface | When the device holds a share of the contact, the interface MUST also state this line: "The recovery piece that they gave you is deleted too." The other paths of §7.5.7 apply. |  |  |
+| `DEV-344` | §7.5.9 | MAY | A user | A user MAY set for each conversation whether an alert shows the sender, and whether it shows the text. |  |  |
+| `DEV-345` | §7.5.9 | MUST | The item of `DEV-332` | The item of `DEV-332` MUST carry the two as one byte after the end of the mute: bits 0 and 1 hold the sender, and bits 2 and 3 hold the text, each as `default` 0, `show` 1, or `hide` 2. |  |  |
 
 ## NTF — Notifications
 
@@ -1807,7 +1809,7 @@ Source: `spec/08-notifications.md`
 | `NTF-116` | §8.4.1 | MUST | A client that carries its wakes over a persistent socket | A client that carries its wakes over a persistent socket MUST hold that socket in a `specialUse` foreground service, with a notice that the user can see for the whole time. |  |  |
 | `NTF-117` | §8.4.1 | MUST | That service | That service MUST hold no key and no socket of its own. |  |  |
 | `NTF-118` | §8.4.1 | MUST | A client | A client MUST start a new run after a run ends with a fault, while a view is on the screen or the service runs. |  |  |
-| `NTF-119` | §8.4.1 | MUST | A message alert | A message alert MUST show no text of the message and no name of a contact while the content preview is off (`NTF-083`). |  |  |
+| `NTF-119` | §8.4.1 | MUST | A message alert | A message alert MUST show no name of a contact while the sender is off, and no text of the message while the text is off (`NTF-149`). |  |  |
 | `NTF-120` | §8.4.1 | MUST | A client | A client MUST end the service at a lock, because a locked client holds no key that reads a queue (Part 14 rule `IMP-127`). |  |  |
 | `NTF-121` | §8.4.1 | MUST NOT | A record that arrives | A record that arrives MUST NOT start the idle time of the auto-lock again. |  |  |
 | `NTF-122` | §8.2.7 | MUST | A party | A party MUST pad each request to `NDR_REQUEST_LEN` with zero bytes, and the NDR MUST refuse a request whose padding is not zero. |  |  |
@@ -1837,6 +1839,7 @@ Source: `spec/08-notifications.md`
 | `NTF-146` | §8.4.3 | MUST | A queue relay | A queue relay MUST send at most one `NWAKE` for one queue inside one `WAKE_COALESCE_WINDOW`. |  |  |
 | `NTF-147` | §8.3 | MUST | The settings | The settings MUST offer the delivery as one choice of three, in this order: Direct, Google, None. |  |  |
 | `NTF-148` | §8.3 | MUST | The interface | The interface MUST name Instant mode "Google", thus the name states the party that sees each push. |  |  |
+| `NTF-149` | §8.3 | MUST | The content preview | The content preview MUST be two settings of the device: the sender, and the text. |  |  |
 
 ## DIS — Discovery, Handles, and Key Transparency
 

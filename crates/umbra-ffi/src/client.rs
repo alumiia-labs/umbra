@@ -51,7 +51,10 @@ mod timers;
 mod tokens;
 mod typing;
 
-pub use alerts::{ALERT_ALL, ALERT_MENTIONS, ALERT_NONE, MUTE_FOREVER};
+pub use alerts::{
+    ALERT_ALL, ALERT_MENTIONS, ALERT_NONE, MUTE_FOREVER, PREVIEW_DEFAULT, PREVIEW_HIDE,
+    PREVIEW_SHOW,
+};
 pub use backup::{BackupUpload, PendingBackup, RestoredBackup, RootWrite};
 pub use catch_up::CatchUp;
 pub use dead::DeadWork;
@@ -7501,6 +7504,76 @@ mod tests {
         );
         assert_eq!(client.alert_setting(conversation).unwrap(), ALERT_NONE);
         assert_eq!(client.muted_until(conversation).unwrap(), MUTE_FOREVER);
+        client.audit().unwrap();
+    }
+
+    /// DEV-344, DEV-345: the sender and the text of a conversation share the
+    /// item of the mute, and a mute and a setting keep them.
+    #[test]
+    fn the_preview_of_a_conversation_shares_the_item_of_the_mute() {
+        use super::{ALERT_ALL, ALERT_MENTIONS, PREVIEW_HIDE, PREVIEW_SHOW};
+        use umbra_core::devset::engine::SyncEngine;
+
+        let (mut client, mut rng, _, conversation) = client_with_contact(410);
+        let (tablet, _) = link_device(&mut client, &mut rng);
+        let own = client.device_identity().unwrap().unwrap().device_id;
+        let channel = ContactId([0x7C; 32]);
+        let subject = client.subject_of(conversation).unwrap().unwrap();
+        assert_eq!(client.preview_setting(conversation).unwrap(), 0);
+
+        // The sender shows, and the text hides.
+        let preview = PREVIEW_SHOW | PREVIEW_HIDE << 2;
+        client
+            .set_preview_setting(conversation, preview, &mut rng)
+            .unwrap();
+        let sends: Vec<_> = core::iter::from_fn(|| client.take_sync_send()).collect();
+        assert_eq!(sends.len(), 1);
+        let value = [[0u8].as_slice(), &[0; 8], &[preview]].concat();
+        assert!(carries(&sends[0].app, &value));
+
+        client
+            .set_alert_setting(conversation, ALERT_MENTIONS, &mut rng)
+            .unwrap();
+        client
+            .set_muted_until(conversation, 60_000, &mut rng)
+            .unwrap();
+        assert_eq!(client.preview_setting(conversation).unwrap(), preview);
+
+        // A field of 3, and a bit above bit 3, change nothing.
+        for wrong in [0x03, 0x10] {
+            assert!(client
+                .set_preview_setting(conversation, wrong, &mut rng)
+                .is_err());
+        }
+
+        let mut engine = SyncEngine::new(tablet, &[own]).unwrap();
+        let mut take = |client: &mut TestClient, value: &[u8], msg_id: u8| {
+            let item = engine
+                .relay_mutable(
+                    super::alerts::ITEM_ALERT,
+                    &subject,
+                    value,
+                    1_000 + u64::from(msg_id),
+                    tablet,
+                    [msg_id; 16],
+                    10,
+                )
+                .unwrap();
+            let carried = record(AppKind::DeviceSet, [msg_id; 16], &item.body);
+            client
+                .commit_network(&[], &[(channel, carried)], T0, &mut rng)
+                .unwrap();
+        };
+
+        // A value with no preview byte is the default of the device.
+        take(&mut client, &[ALERT_ALL], 1);
+        assert_eq!(client.preview_setting(conversation).unwrap(), 0);
+        let hidden = [[ALERT_ALL].as_slice(), &[0; 8], &[PREVIEW_HIDE]].concat();
+        take(&mut client, &hidden, 2);
+        assert_eq!(client.preview_setting(conversation).unwrap(), PREVIEW_HIDE);
+        let wrong = [[ALERT_ALL].as_slice(), &[0; 8], &[0x0F]].concat();
+        take(&mut client, &wrong, 3);
+        assert_eq!(client.preview_setting(conversation).unwrap(), PREVIEW_HIDE);
         client.audit().unwrap();
     }
 

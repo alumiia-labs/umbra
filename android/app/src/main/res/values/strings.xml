@@ -314,6 +314,11 @@
     <!-- Alerts.kt: the notification setting of a conversation. -->
     <string name="alerts_all_messages">All messages</string>
     <string name="alerts_mentions_only">Mentions only</string>
+    <string name="alerts_sender">Sender</string>
+    <string name="alerts_text">Text</string>
+    <string name="alerts_default">Default</string>
+    <string name="alerts_show">Show</string>
+    <string name="alerts_hide">Hide</string>
 
     <!-- Conversation view: the top bar and the list. -->
     <string name="chat_thread">Thread</string>
@@ -1116,7 +1121,8 @@
     <string name="modes_direct_delayed">Direct, delayed</string>
     <string name="modes_none">None</string>
     <string name="modes_delayed">Delayed</string>
-    <string name="modes_show_sender_and_text">Show sender and text</string>
+    <string name="modes_show_sender">Show sender</string>
+    <string name="modes_show_text">Show text</string>
     <string name="modes_keep_notice">Keep connection notice</string>
     <string name="battery_optimized">Battery optimization can delay messages in Direct mode.</string>
     <string name="battery_restricted">The battery restriction can stop Direct mode.</string>
