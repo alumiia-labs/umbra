@@ -109,9 +109,17 @@ object Notifier {
             .setSmallIcon(R.drawable.ic_stat_umbra)
             .setContentTitle(context.getString(title))
             .setContentIntent(openApp(context))
+            .setDeleteIntent(carrierDismissed(context))
             .setOngoing(true)
             .build()
     }
+
+    private fun carrierDismissed(context: Context): PendingIntent = PendingIntent.getBroadcast(
+        context,
+        0,
+        Intent(context, CarrierDismissed::class.java),
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+    )
 
     /** Shows the current state of the client and of its link in the notice of the service. */
     fun refreshCarrier(context: Context) {
@@ -308,5 +316,16 @@ object Notifier {
         manager.activeNotifications
             .filter { it.tag == MESSAGE_TAG || it.id == LOCKED_ID }
             .forEach { manager.cancel(it.tag, it.id) }
+    }
+}
+
+/**
+ * Since Android 14 the user can swipe away the notice of a foreground service,
+ * and the service runs on. The notice comes back while the service runs,
+ * because it is the one sign of the connection.
+ */
+class CarrierDismissed : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        if (Core.carrierHolds) Notifier.refreshCarrier(context)
     }
 }

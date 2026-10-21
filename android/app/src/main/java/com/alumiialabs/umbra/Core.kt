@@ -305,7 +305,8 @@ object Core {
     private var ingressPair: Set<String>? = null
 
     /** Whether the foreground service of the socket carrier runs. */
-    private var carrierHolds = false
+    var carrierHolds = false
+        private set
     private var lastTouchMs = 0L
     private var retryDelayMs = FIRST_RETRY_MS
 

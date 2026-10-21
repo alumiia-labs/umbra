@@ -85,6 +85,10 @@
                 android:value="An end-to-end encrypted messenger holds one connection to its relay, thus a message arrives with no push provider." />
         </service>
 
+        <receiver
+            android:name=".CarrierDismissed"
+            android:exported="false" />
+
         <!-- Part 8 §8.3: the fixed clock of Private mode. -->
         <receiver
             android:name=".PrivateClock"
