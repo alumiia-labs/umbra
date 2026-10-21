@@ -14,7 +14,7 @@ pub(super) const ITEM_FLAGS: u8 = 10;
 /// Bit 0 of the flags (`DEV-329`).
 const FLAG_PIN: u8 = 0x01;
 
-const FLAGS: &[u8] = b"flags/";
+pub(super) const FLAGS: &[u8] = b"flags/";
 
 fn flags_key(conversation: ConversationId) -> Vec<u8> {
     [FLAGS, conversation.0.as_slice()].concat()

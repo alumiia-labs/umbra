@@ -36,6 +36,7 @@ mod pictures;
 mod pins;
 mod polls;
 mod quota;
+mod remove_contact;
 mod renewal_guard;
 mod reset;
 mod retention;
@@ -5575,6 +5576,152 @@ mod tests {
 
         // ABU-027, ABU-028: no record of the blocked contact is in a view.
         assert_eq!(client.messages(conversation).unwrap().len(), 1);
+    }
+
+    /// DEV-337, DEV-339, DEV-340: a removal erases each row of the contact,
+    /// and sends nothing to it. The node of the run brings back no state
+    /// and no record, and a push of its queue shows nothing.
+    #[test]
+    fn a_removed_contact_leaves_no_row_and_comes_back_through_no_path() {
+        use umbra_core::{notify::wakekey::WakeTable, store::record::TableId};
+        use umbra_wire::ndr::TokenCarrier;
+
+        let (mut client, mut rng, contact, conversation) = client_with_contact(420);
+        client
+            .set_push_token(Some((TokenCarrier::Fcm, "fcm-token")), &mut rng)
+            .unwrap();
+        client
+            .queues_to_bind(&[(contact.0, [0xA1; 32])], T0 / 1_000, &mut rng)
+            .unwrap();
+        let binding = client.binding_of(&contact.0).unwrap().unwrap();
+        client
+            .commit_network(
+                &[],
+                &[(contact, record(AppKind::Text, [1; 16], b"hello"))],
+                T0,
+                &mut rng,
+            )
+            .unwrap();
+        client
+            .set_contact_name(conversation, "Dana", &mut rng)
+            .unwrap();
+        client.set_pinned(conversation, true, &mut rng).unwrap();
+        client.set_blocked(conversation, true, &mut rng).unwrap();
+        while client.next_event().is_some() {}
+
+        client.remove_contact(conversation, &mut rng).unwrap();
+        assert!(client.take_outgoing().is_none());
+        assert!(client.conversations().unwrap().is_empty());
+        assert!(client.summaries().unwrap().is_empty());
+        assert!(client.stored_network().unwrap().contacts.is_empty());
+        assert!(!client.is_pinned(conversation).unwrap());
+        assert!(!client.is_blocked(conversation).unwrap());
+        let events: Vec<Event> = core::iter::from_fn(|| client.next_event()).collect();
+        assert!(events.contains(&Event::WakeTable));
+        let store = &client.open_ref().unwrap().store;
+        for table in 0..=0x58 {
+            let rows = store.list(TableId(table), Some(&conversation.0)).unwrap();
+            assert!(rows.is_empty(), "table {table:#04x}");
+        }
+
+        // The node of this run still holds the contact.
+        let change = StateChange::Contact {
+            contact,
+            state: contact_state(5),
+        };
+        let again = record(AppKind::Text, [2; 16], b"again");
+        client
+            .commit_network(&[change], &[(contact, again)], T0 + 1_000, &mut rng)
+            .unwrap();
+        assert!(client.conversations().unwrap().is_empty());
+        assert!(client.messages(conversation).unwrap().is_empty());
+
+        let table = WakeTable::parse(&client.wake_table().unwrap()).unwrap();
+        assert_eq!(table.aliases, [(binding.queue_alias, super::WAKE_SILENT)]);
+        client.audit().unwrap();
+    }
+
+    /// DEV-341: the removal goes to each device as one item. A device that
+    /// takes it erases the contact. A later identity entry, and a record of
+    /// that subject, make no conversation again.
+    #[test]
+    fn a_removal_goes_to_each_device_and_no_later_entry_brings_the_contact_back() {
+        use umbra_core::{
+            devset::{
+                engine::SyncEngine,
+                sync::{
+                    IdentityEntry, Origin, AUTHOR_PEER, ITEM_CONTACT_REMOVED, ITEM_IDENTITY_ENTRY,
+                    SCOPE_PAIRWISE,
+                },
+            },
+            session::node::stored_contact_salt,
+            store::record::TableId,
+        };
+
+        // A removal on one device goes as one item.
+        let (mut client, mut rng, _, conversation) = client_with_contact(421);
+        link_device(&mut client, &mut rng);
+        client.remove_contact(conversation, &mut rng).unwrap();
+        assert_eq!(core::iter::from_fn(|| client.take_sync_send()).count(), 1);
+
+        // A device takes the removal of another one.
+        let (mut client, mut rng, _, conversation) = client_with_contact(422);
+        let (tablet, _) = link_device(&mut client, &mut rng);
+        let own = client.device_identity().unwrap().unwrap().device_id;
+        let channel = ContactId([0x7C; 32]);
+        let subject = client.subject_of(conversation).unwrap().unwrap();
+        let row = Zeroizing::new(
+            client
+                .open_ref()
+                .unwrap()
+                .store
+                .get(TableId::CONTACT, &conversation.0)
+                .unwrap()
+                .unwrap(),
+        );
+        let entry = IdentityEntry {
+            salt: stored_contact_salt(&row[32..]).unwrap(),
+            conversation: row[..32].try_into().unwrap(),
+        };
+
+        let mut engine = SyncEngine::new(tablet, &[own]).unwrap();
+        let mut item = |kind: u8, value: &[u8], msg_id: u8| {
+            let lamport = 1_000 + u64::from(msg_id);
+            let item = engine
+                .relay_mutable(kind, &subject, value, lamport, tablet, [msg_id; 16], 10)
+                .unwrap();
+            record(AppKind::DeviceSet, [msg_id; 16], &item.body)
+        };
+        let removal = item(ITEM_CONTACT_REMOVED, &[1], 1);
+        let entry = item(ITEM_IDENTITY_ENTRY, &entry.encode(), 2);
+        client
+            .commit_network(&[], &[(channel, removal)], T0, &mut rng)
+            .unwrap();
+        assert!(client.conversations().unwrap().is_empty());
+        client
+            .commit_network(&[], &[(channel, entry)], T0, &mut rng)
+            .unwrap();
+        assert!(client.conversations().unwrap().is_empty());
+
+        let origin = Origin {
+            scope: SCOPE_PAIRWISE,
+            subject,
+            author: AUTHOR_PEER,
+        };
+        let inner = record(AppKind::Text, [3; 16], b"late");
+        let published = engine.publish(&inner, origin, [3; 16], 0, 20).unwrap();
+        let carried = record(AppKind::DeviceSet, [3; 16], &published.body);
+        client
+            .commit_network(&[], &[(channel, carried)], T0, &mut rng)
+            .unwrap();
+        assert!(client.conversations().unwrap().is_empty());
+        let held = client
+            .open_ref()
+            .unwrap()
+            .store
+            .list(super::sync::PAIRWISE_HELD, None);
+        assert!(held.unwrap().is_empty());
+        client.audit().unwrap();
     }
 
     #[test]

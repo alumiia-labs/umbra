@@ -13,7 +13,7 @@ use super::Client;
 use crate::{ConversationId, Error};
 
 /// The draft of each conversation, as UTF-8, by the conversation.
-const DRAFTS: TableId = TableId(0x49);
+pub(super) const DRAFTS: TableId = TableId(0x49);
 /// The row of the draft text in the mutable state of §7.5.3, the twelfth
 /// row of its table.
 pub(super) const ITEM_DRAFT: u8 = 12;

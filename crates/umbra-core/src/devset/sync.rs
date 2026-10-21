@@ -141,6 +141,9 @@ pub const ITEM_GROUP_REKEY: u8 = 15;
 /// the writer side of its queue, and the renewal guard (`DEV-319`), under
 /// the subject of the contact.
 pub const ITEM_CHANNEL: u8 = 16;
+/// The item of the removal of a contact, under the subject of the contact
+/// (`DEV-341`). Its one value is `0x01`, and it is terminal.
+pub const ITEM_CONTACT_REMOVED: u8 = 17;
 /// The length of the writer side of a queue in [`ChannelEntry`]: the
 /// `SenderId`, the `QS_auth` private key, the queue end-to-end key, and the
 /// `relay_id`.

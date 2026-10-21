@@ -61,7 +61,7 @@ fn answered_key(conversation: ConversationId, index: u16) -> Vec<u8> {
 /// The setting that counts the key requests of a peer that this device
 /// answered, before the conversation (`WIR-338`). The value is the start of
 /// the 24 hours, then the count.
-const SERVED_SETTING: &[u8] = b"key-served/";
+pub(super) const SERVED_SETTING: &[u8] = b"key-served/";
 
 impl<B: Backend, E: SecureElement> Client<B, E> {
     /// The node sealed a record of `message` under `index`.

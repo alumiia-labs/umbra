@@ -41,7 +41,7 @@ use crate::{ConversationId, Delivery, Error, Event, MsgRef};
 
 /// Each message that a deletion of another device names after a restore,
 /// by its row, with its conversation. It waits for the user (`DEV-118`).
-const HELD_DELETIONS: TableId = TableId(0x4D);
+pub(super) const HELD_DELETIONS: TableId = TableId(0x4D);
 /// A restore made this store, thus the deletions of the other devices wait.
 pub(super) const HOLDS_DELETIONS: &[u8] = b"restore-holds-deletions";
 /// The roster epoch and the count of the deletions of each other device.

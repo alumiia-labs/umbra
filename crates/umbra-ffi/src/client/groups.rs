@@ -4404,7 +4404,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// The key of the row that holds the hash of the roster key that the
     /// offer of one contact named as its admin.
-    fn offer_key(conversation: ConversationId, from: ConversationId) -> Vec<u8> {
+    pub(super) fn offer_key(conversation: ConversationId, from: ConversationId) -> Vec<u8> {
         [conversation.0.as_slice(), b"offer-admin", from.0.as_slice()].concat()
     }
 

@@ -150,6 +150,26 @@ fun ContactDetailsScreen(chat: Chat, onBack: () -> Unit, onMessage: () -> Unit, 
                     push(Screen.BlockContact(chat.conversation))
                 },
             )
+
+            // DEV-342, DEV-343: the views of the contact close when it
+            // leaves the list.
+            var isDeleting by remember { mutableStateOf(false) }
+            HorizontalDivider(color = Palette.Divider)
+            EntryRow(RowEntry("trash-can", stringResource(R.string.verify_delete_contact)) { isDeleting = true })
+            if (isDeleting) {
+                val context = LocalContext.current
+                val notTold = stringResource(R.string.umbra_ui_dev_342)
+                ActionSheet(
+                    stringResource(R.string.verify_delete_contact_q, chat.title),
+                    listOf(
+                        RowEntry("trash-can", stringResource(R.string.verify_delete_contact)) {
+                            Core.removeContact(context, chat.conversation)
+                        },
+                    ),
+                    note = if (held != null) "$notTold ${stringResource(R.string.umbra_ui_dev_343)}" else notTold,
+                    onDismiss = { isDeleting = false },
+                )
+            }
         }
     }
 }

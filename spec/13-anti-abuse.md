@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 13: Anti-Abuse Without Identifiers
 
 **Status:** Draft
-**Version:** 0.38.2
+**Version:** 0.39.0
 **Date:** 2026-10-21
 
 ---
@@ -704,6 +704,8 @@ section gives one. The answer is local, and it needs no relay and no report.
 - **[ABU-023]** A client MUST NOT send a record to the blocked party that names
   the block. **[ABU-024]** A client MUST NOT change the queue set of that
   contact at the block.
+- Part 7 §7.5.11 gives the removal of a contact. A removal follows `ABU-023`
+  and `ABU-025` too, and it erases the conversation.
 
 **The queue stays alive, and the block makes no signal.**
 

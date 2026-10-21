@@ -7551,6 +7551,25 @@ impl Handle {
         Ok(())
     }
 
+    /// Removes a contact from each device of the set (Part 7 §7.5.11).
+    /// Nothing goes to the contact. A group and a sync channel are
+    /// `Malformed`.
+    pub fn remove_contact(&self, conversation: Vec<u8>) -> Result<(), FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let mut inner = locked(&self.inner);
+        let Inner { client, bridge, .. } = &mut *inner;
+        client.remove_contact(conversation, &mut OsRng)?;
+        if let Some(running) = bridge {
+            running.forget(&conversation);
+            running.flush(client, &mut OsRng)?;
+        }
+
+        // ATT-161: the chunks of a file that this device uploaded go too.
+        inner.pump_transfers();
+        inner.pump_groups();
+        Ok(())
+    }
+
     /// Asks the contact to delete a message that this device sent, and
     /// puts a placeholder in its place here. One such request leaves in
     /// each 10 seconds for one conversation, and a request before that

@@ -39,7 +39,7 @@ fn hold_wait(sends: u32) -> u64 {
 /// `HOLD_RETRY` counts to its next send and the time of its first `LIMIT`,
 /// both in seconds. It also holds the count of its `LIMIT` answers. A
 /// record that no full queue holds has none.
-const HELD_SETTING: &[u8] = b"held/";
+pub(super) const HELD_SETTING: &[u8] = b"held/";
 
 /// The length of the value of [`HELD_SETTING`].
 const HELD_LEN: usize = 8 + 8 + 4;

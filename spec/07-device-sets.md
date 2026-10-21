@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 7: Device Sets, History Sync, and Revocation
 
 **Status:** Draft
-**Version:** 0.38.2
+**Version:** 0.39.0
 **Date:** 2026-10-21
 
 ---
@@ -1042,6 +1042,7 @@ that declares no class.
   | The state of a group that the device that owns the channels made or joined after a link | Each group |
   | The re-key of the member in a group after a removal | Each group |
   | The channel of a contact, as a renewal needs it (`DEV-319`) | Each pairwise identity |
+  | The removal of a contact (`DEV-341`). This item is terminal | Each pairwise identity |
 
   **[DEV-197]** A client MUST converge each item of that table across the device
   set. **[DEV-198]** A later version that adds a chat-list item MUST add a
@@ -2039,6 +2040,68 @@ messages of each other member. `DEV-323` gives the order of two records.
 - The policy stops no copy of the text, no screenshot, and no save of a
   file. Part 15 §15.3 holds the row.
 - In v1 the policy covers the forward of Part 6 §6.6.5 and no other action.
+
+### 7.5.11 The removal of a contact
+
+A user can remove a contact from each device of the set. The removal is a
+local act, as the block of Part 13 §13.12 is. **No record goes to the
+contact, and the contact cannot tell the removal from a peer that is offline.**
+
+**What the removal erases.**
+
+- **[DEV-337]** A user MAY remove a pairwise contact. The client MUST then
+  erase from the device each message and each file of that conversation,
+  the stored channel and its pairwise salt, the verification state, and
+  each setting, timer, draft, and waiting record of that conversation. It
+  MUST erase each record that names the contact in the tables of a group,
+  and each introduction that names it. Part 4 `IDN-047` binds a retention
+  limit, and it does not bind this act.
+- **[DEV-338]** The client MUST erase the share of Part 4 §4.7.3 that the
+  contact gave to the user. That act ends the hold of `IDN-189`. A share
+  of the user that the contact holds stays valid, thus the client MUST keep
+  the row of that holder for `IDN-192`.
+- **[DEV-339]** The client MUST NOT send a record to the contact at the
+  removal, and it MUST NOT send `DEL` on a queue of that contact. Part 13
+  `ABU-025` gives the cause.
+
+**What the removal stops.**
+
+- **[DEV-340]** The client MUST NOT read a queue of a removed contact in a
+  later run. In the run of the removal it MUST discard each record and each
+  state change of that contact, as it does for a channel that a revocation
+  ended (§7.7). The wake table of Part 8 `NTF-135` MUST name each queue of
+  that contact with the silent value of Part 13 `ABU-029`.
+- **[DEV-341]** The client MUST publish the removal as the item of the
+  removal of a contact in the table of §7.5.3, under the subject of
+  `DEV-226`, with the value `0x01`. A device MUST apply that item at any
+  `lamport`, and it MUST apply the erasure of `DEV-337` and `DEV-338`. A
+  device that took the item MUST reject each later item of the local
+  identity table and each channel item of that subject, and it MUST
+  discard each synced record of that subject.
+
+**What the interface states.**
+
+- **[DEV-342]** The interface MUST ask for a confirmation, and it MUST state
+  this line: "They are not told."
+- **[DEV-343]** When the device holds a share of the contact, the interface
+  MUST also state this line: "The recovery piece that they gave you is
+  deleted too."
+- The other paths of §7.5.7 apply. A restore of a backup from before the
+  removal brings the contact back.
+
+> *Cause.* A notice of the removal, or a `DEL`, tells a hostile party when to
+> come back under a new identity. Part 13 §13.12 rejects that signal for a
+> block, and a removal is the same act for that party. The item is terminal,
+> because the device that owns the channels publishes the identity entry of
+> each contact at each run (`DEV-294`), and a last-writer value would race
+> with it. A new invitation makes a new channel with a new salt, thus a new
+> subject, and a removal does not bind it.
+
+The contact can still send to the queue that the removal leaves. The relay
+holds each such record until `MSG_TTL`, and an accepted `SEND` keeps the
+queue alive (Part 3 `NET-195`). A contact that sends faster than the records
+lapse fills `QUEUE_QUOTA`, and its next send then fails. A peer that went
+offline gives the same failure, thus that failure does not name the removal.
 
 ## 7.6 What contacts see
 

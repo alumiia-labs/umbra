@@ -13,7 +13,7 @@ use umbra_crypto::rand_core::CryptoRng;
 use super::Client;
 use crate::{ConversationId, Error};
 
-const MODE_SETTING: &[u8] = b"mode/";
+pub(super) const MODE_SETTING: &[u8] = b"mode/";
 
 fn mode_key(conversation: ConversationId) -> Vec<u8> {
     [MODE_SETTING, conversation.0.as_slice()].concat()

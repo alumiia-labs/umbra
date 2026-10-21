@@ -29,7 +29,7 @@ const CONTACT_BLOCK: u8 = 1;
 const MEMBER_BLOCK: u8 = 2;
 const DISCARDED: u8 = 3;
 
-fn contact_key(conversation: ConversationId) -> Vec<u8> {
+pub(super) fn contact_key(conversation: ConversationId) -> Vec<u8> {
     [conversation.0.as_slice(), &[CONTACT_BLOCK]].concat()
 }
 

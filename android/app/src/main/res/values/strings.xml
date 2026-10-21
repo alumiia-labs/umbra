@@ -612,6 +612,9 @@
     <!-- The contact details. -->
     <string name="verify_contact_details">Contact details</string>
     <string name="verify_edit_name">Edit name</string>
+    <string name="verify_delete_contact">Delete contact</string>
+    <!-- %1$s is the name of the contact. -->
+    <string name="verify_delete_contact_q">Delete %1$s?</string>
     <string name="verify_verify_again">Verify again</string>
     <string name="verify_verify_contact">Verify contact</string>
     <string name="verify_introduce">Introduce to a contact</string>

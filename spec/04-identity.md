@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 4: Identity
 
 **Status:** Draft
-**Version:** 0.38.2
+**Version:** 0.39.0
 **Date:** 2026-10-21
 
 ---
@@ -1327,6 +1327,7 @@ The body is **36 bytes**. The `share` field is the payload of the
   share on a group channel or to more than one holder.
 - **[IDN-189]** A holder MUST keep the last share of each contact, and it MUST
   give a share back only as `RecoveryDigits` of type `0x0003` on its screen.
+  The removal of the contact ends that hold (Part 7 `DEV-338`).
   **[IDN-190]** A holder MUST NOT send a share on any channel. The user that
   lost a device has no channel, and a channel that an attacker took gives the
   share to the attacker.

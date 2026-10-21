@@ -62,7 +62,7 @@ const ENGINE_KEY: &[u8] = b"engine";
 /// Each synced record of a conversation whose identity entry did not come
 /// yet, under a random row: the subject, the order of its arrival, its
 /// deadline or 0, whether the user wrote it, then the record (`DEV-294`).
-const PAIRWISE_HELD: TableId = TableId(0x51);
+pub(super) const PAIRWISE_HELD: TableId = TableId(0x51);
 /// Each record that the engine took and the store did not take yet, in the
 /// commit of the engine (`DEV-013`).
 const SYNC_INBOX: TableId = TableId(0x52);
@@ -953,7 +953,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
 
         let subject: [u8; 32] = key.try_into().map_err(|_| Error::Malformed)?;
+
+        // DEV-341: a removal is terminal, thus no later entry or channel of
+        // that contact makes it again.
+        let is_entry = item == ITEM_IDENTITY_ENTRY || item == ITEM_CHANNEL;
+        if is_entry && self.is_removed_subject(&subject)? {
+            return Ok(());
+        }
+
         match item {
+            umbra_core::devset::sync::ITEM_CONTACT_REMOVED => {
+                self.apply_contact_removal(subject, rng)?
+            }
             ITEM_IDENTITY_ENTRY => {
                 let entry = IdentityEntry::parse(value)?;
 
@@ -1330,6 +1341,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         // DEV-299: the state of the group is on its way on
                         // the chunk path, and its records wait for it.
                         self.hold_group_record(&origin.subject, &inner, expires_in, now, rng)?;
+                    } else if self.is_removed_subject(&origin.subject)? {
+                        // DEV-341: a record of a removed contact goes.
                     } else {
                         // DEV-294: the identity entry of the conversation
                         // comes as an item, and it can come after a record.

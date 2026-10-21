@@ -277,6 +277,12 @@ impl Bridge {
         self.contacts.get(conversation).copied()
     }
 
+    /// Drops a removed contact from the run (Part 7 `DEV-340`), thus no
+    /// later command of this run names it.
+    pub fn forget(&mut self, conversation: &ConversationId) {
+        self.contacts.remove(conversation);
+    }
+
     fn contact_of(&self, conversation: &ConversationId) -> Result<ContactId, Error> {
         self.contacts
             .get(conversation)

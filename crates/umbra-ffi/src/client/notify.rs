@@ -741,6 +741,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
         }
 
+        // DEV-340: the queue of a removed contact names no conversation,
+        // and a push of it shows nothing.
+        let removed = self.removed_queues()?;
+        let store = &self.open_ref()?.store;
         let mut aliases = Vec::new();
         let mut muted = Vec::new();
         for queue in store
@@ -752,7 +756,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .iter()
                 .find(|(recipient, _)| *recipient == queue.recipient_id)
                 .map_or([0; 16], |(_, conversation)| *conversation);
-            if silent.contains(&ConversationId(conversation)) {
+            if silent.contains(&ConversationId(conversation))
+                || removed.contains(&queue.recipient_id)
+            {
                 aliases.push((queue.alias, WAKE_SILENT));
                 continue;
             }

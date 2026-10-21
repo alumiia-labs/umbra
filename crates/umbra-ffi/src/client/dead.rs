@@ -34,7 +34,7 @@ use super::{info_of, Client, ConversationId, Outgoing, MESSAGE_PREFIX, QUEUE_ID_
 use crate::{Delivery, Error, MsgRef};
 
 /// The dead-channel state of each contact, by conversation.
-const DEAD_CHANNEL: TableId = TableId(0x1E);
+pub(super) const DEAD_CHANNEL: TableId = TableId(0x1E);
 
 /// `DEAD_CHANNEL_SILENCE` of Part 3 §3.2.4, in milliseconds.
 pub const DEAD_CHANNEL_SILENCE_MS: u64 = 7 * 86_400 * 1_000;
@@ -50,7 +50,7 @@ const BLOB_RELAYS: usize = umbra_core::attach::BACKUP_REPLICAS;
 /// That time is the first relay acknowledgment that no record of the peer
 /// followed yet, in milliseconds. A conversation with no such
 /// acknowledgment holds none.
-const UNANSWERED_SETTING: &[u8] = b"unanswered/";
+pub(super) const UNANSWERED_SETTING: &[u8] = b"unanswered/";
 
 /// The row: the flag of a dead channel, the time it died, the address of
 /// the new queue, the week, the credential and the relays of the blob of

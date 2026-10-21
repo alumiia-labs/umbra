@@ -580,6 +580,15 @@ object Core {
         main.post { revision++ }
     }
 
+    /** Part 7 §7.5.11: the contact leaves each device of the set, and it is not told. */
+    fun removeContact(context: Context, conversation: Conversation) = call { client ->
+        client.removeContact(conversation.id)
+        // The wake table names the queue of a removed contact silent.
+        refreshWake(context)
+        main.post { revision++ }
+        refreshChats()
+    }
+
     fun blockedMembers(conversation: Conversation, onResult: (List<UShort>) -> Unit) = call { client ->
         val members = client.blockedMembers(conversation.id)
         main.post { onResult(members) }

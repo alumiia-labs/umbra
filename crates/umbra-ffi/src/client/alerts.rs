@@ -27,7 +27,7 @@ pub(super) const ITEM_ALERT: u8 = 2;
 /// The end of a mute that has no end (`DEV-332`).
 pub const MUTE_FOREVER: u64 = u64::MAX;
 
-const ALERT_SETTING: &[u8] = b"alert/";
+pub(super) const ALERT_SETTING: &[u8] = b"alert/";
 
 fn alert_key(conversation: ConversationId) -> Vec<u8> {
     [ALERT_SETTING, conversation.0.as_slice()].concat()

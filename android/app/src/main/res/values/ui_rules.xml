@@ -54,6 +54,8 @@
     <string name="umbra_ui_att_157">The original keeps its metadata, such as a place and a time.</string>
     <string name="umbra_ui_abu_040">They can still send. Their messages reach this device and are dropped unread.</string>
     <string name="umbra_ui_abu_041">They are not told.</string>
+    <string name="umbra_ui_dev_342">They are not told.</string>
+    <string name="umbra_ui_dev_343">The recovery piece that they gave you is deleted too.</string>
     <string name="umbra_ui_imp_047">The file leaves the encrypted store. Each app and service of this device can read it there.</string>
     <string name="umbra_ui_imp_050">The backup of Android carries no UMBRA data.</string>
 </resources>

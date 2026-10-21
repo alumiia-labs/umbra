@@ -74,7 +74,7 @@ column when a crate implements the requirement and a test covers it.
 | `IDN` | 136 | 46 | 1 | 0 | 5 | **188** |
 | `CRY` | 120 | 27 | 0 | 0 | 1 | **148** |
 | `WIR` | 417 | 88 | 0 | 0 | 7 | **512** |
-| `DEV` | 220 | 94 | 0 | 0 | 12 | **326** |
+| `DEV` | 224 | 96 | 0 | 0 | 13 | **333** |
 | `NTF` | 84 | 29 | 0 | 0 | 3 | **116** |
 | `DIS` | 136 | 36 | 0 | 0 | 3 | **175** |
 | `REL` | 171 | 34 | 1 | 0 | 3 | **209** |
@@ -83,7 +83,7 @@ column when a crate implements the requirement and a test covers it.
 | `ABU` | 71 | 29 | 1 | 0 | 0 | **101** |
 | `IMP` | 117 | 41 | 1 | 0 | 2 | **161** |
 | `SEC` | 4 | 3 | 0 | 0 | 1 | **8** |
-| **All** | 2140 | 637 | 7 | 0 | 58 | **2842** |
+| **All** | 2144 | 639 | 7 | 0 | 59 | **2849** |
 
 ## SCP — Scope and Conventions
 
@@ -1705,6 +1705,13 @@ Source: `spec/07-device-sets.md`
 | `DEV-334` | §7.5.7 | MAY | A user | A user MAY delete a whole pairwise conversation for everyone in one act. |  |  |
 | `DEV-335` | §7.5.6 | MUST | A receiver of a deletion of scope `0x03` from its contact | A receiver of a deletion of scope `0x03` from its contact MUST delete each message of the contact in that conversation that it holds. |  |  |
 | `DEV-336` | §7.5.6 | MUST | The receiver | The receiver MUST keep the request as one row of the conversation, and that row names the contact as the party that deleted the conversation. |  |  |
+| `DEV-337` | §7.5.11 | MAY | A user | A user MAY remove a pairwise contact. |  |  |
+| `DEV-338` | §7.5.11 | MUST | The client | The client MUST erase the share of Part 4 §4.7.3 that the contact gave to the user. |  |  |
+| `DEV-339` | §7.5.11 | MUST NOT | The client | The client MUST NOT send a record to the contact at the removal, and it MUST NOT send `DEL` on a queue of that contact. |  |  |
+| `DEV-340` | §7.5.11 | MUST NOT | The client | The client MUST NOT read a queue of a removed contact in a later run. |  |  |
+| `DEV-341` | §7.5.11 | MUST | The client | The client MUST publish the removal as the item of the removal of a contact in the table of §7.5.3, under the subject of `DEV-226`, with the value `0x01`. |  |  |
+| `DEV-342` | §7.5.11 | MUST | The interface | The interface MUST ask for a confirmation, and it MUST state this line: "They are not told." |  |  |
+| `DEV-343` | §7.5.11 | MUST | When the device holds a share of the contact, the interface | When the device holds a share of the contact, the interface MUST also state this line: "The recovery piece that they gave you is deleted too." The other paths of §7.5.7 apply. |  |  |
 
 ## NTF — Notifications
 
