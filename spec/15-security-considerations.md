@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 15: Security Considerations and Known Limitations
 
 **Status:** Draft
-**Version:** 0.40.0
+**Version:** 0.41.0
 **Date:** 2026-10-21
 
 ---
@@ -222,6 +222,7 @@ browser. UMBRA accepts this residual, and §15.3 holds the row.
 | A record written to a live subscription whose link was lost already gets no push | The user, as latency to the next subscription of that queue | Part 8 rule `NTF-128`. The record stays in the queue and the next subscription takes it. The relay cannot tell a lost link from an orderly end, and a reason field in `CircuitDestroy` is a planned change of a later version |
 | The conversation of each push that arrives, at a device seized in the AFU state, from the wake table of `NTF-135` | A6 | Part 8 §8.4.1. The table holds the blob roots and the queue aliases, and no queue key, ratchet, or message. A new root each 7 days under `NTF-007` bounds it. UMBRA accepts this residual |
 | The arrivals at each queue of a device in Direct mode, from the watch table of `NTF-145` at a device seized in the AFU state. The party can watch each queue until the next rotation of its root | A6 | Part 8 §8.4.3. The table holds the relays and the notifier secrets, which see an arrival and read, fetch, and acknowledge no record. A new root each 7 days under `NTF-007` ends each notifier key. Only an unlocked client of the set rotates a root, thus for a set of one seized device the watch lasts until a restore moves its queues. UMBRA accepts this residual |
+| The battery cost of Direct mode, the default, is not measured | The user, as battery use. No party learns more from it | Part 8 `NTF-141`. The held socket and the watch of Part 8 §8.4.3 cost battery that no measurement bounds yet. The project took Direct mode as the default with that cost open. §8.8 states the result after the measurement |
 | The time of each wake of a locked client in Direct mode | The ingress relay, and a local observer | Part 8 §8.4.3. The watch carries no cover traffic, thus a cell toward the device at a quiet time is an arrival. The ingress relay learns no account, no queue, and no conversation. UMBRA accepts this residual, against the push time that Instant mode gives Google |
 | A queue is watched, and the notifier identifiers of one watch circuit belong to one device | The queue relay | Part 8 §8.4.3. One circuit carries at most `MAX_QUEUES_PER_SESSION` watches, which is the bound of a transport session (Part 3 §3.2.5) |
 | A record that arrives while no watch of its queue lives gets no wake when its queue relay restarts before the next `NSUB` | The user, as latency to the unlock | Part 8 §8.4.3. The next `NSUB` gives the wake of each other such record (`NTF-146`). The relay holds that mark in memory alone |

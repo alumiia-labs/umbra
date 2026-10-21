@@ -1111,9 +1111,11 @@
     <string name="notify_open_to_take">Messages wait for the unlock.</string>
 
     <!-- Notification modes -->
-    <string name="modes_instant">Instant</string>
+    <string name="modes_google">Google</string>
     <string name="modes_direct">Direct</string>
-    <string name="modes_private">Private</string>
+    <string name="modes_direct_delayed">Direct, delayed</string>
+    <string name="modes_none">None</string>
+    <string name="modes_delayed">Delayed</string>
     <string name="modes_show_sender_and_text">Show sender and text</string>
     <string name="modes_keep_notice">Keep connection notice</string>
     <string name="battery_optimized">Battery optimization can delay messages in Direct mode.</string>

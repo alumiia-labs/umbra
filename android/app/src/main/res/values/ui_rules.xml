@@ -28,10 +28,10 @@
     <string name="umbra_ui_dev_137">Revocation acts on the future only. A revoked device keeps the data that it synced.</string>
     <string name="umbra_ui_dev_326">The other app hides the forward action. A person can still copy a message or take a screenshot.</string>
     <string name="umbra_ui_dev_218">Anyone in this chat can copy, photograph, or save a message before it disappears.</string>
-    <string name="umbra_ui_ntf_009">A message arrives at once. Google learns when each one arrives.</string>
-    <string name="umbra_ui_ntf_009_direct">A message arrives at once while UMBRA is unlocked, over its own connection. Google learns nothing about arrivals. While UMBRA is locked, an alert shows that a message waits, with no name.</string>
-    <string name="umbra_ui_ntf_009_private">A message arrives on a fixed clock of about 30 minutes. Google learns nothing about arrivals.</string>
-    <string name="umbra_ui_ntf_009_off">A message arrives when you open UMBRA.</string>
+    <string name="umbra_ui_ntf_009">At once. Google learns when each message arrives.</string>
+    <string name="umbra_ui_ntf_009_direct">At once, over UMBRA\'s own connection. No Google.</string>
+    <string name="umbra_ui_ntf_009_private">Checks every 30 minutes, so the timing shows nothing. Nothing arrives while UMBRA is locked.</string>
+    <string name="umbra_ui_ntf_009_off">When you open UMBRA.</string>
     <string name="umbra_ui_dis_084">A different party now holds %1$s.</string>
     <string name="umbra_ui_wir_341">A message did not open, and its sender holds it no more.</string>
     <string name="umbra_ui_net_103">Some messages did not arrive.</string>

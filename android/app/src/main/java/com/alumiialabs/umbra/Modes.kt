@@ -41,32 +41,46 @@ import java.security.SecureRandom
  * no token and takes each record over its own connection. Private mode
  * holds no token, and the device wakes on a fixed clock that no arrival
  * moves. Off drains when the user opens the app. The mode is a setting of
- * this device.
+ * this device, and the user sets it as a [Delivery] and a delay
+ * (`NTF-147`).
  */
-enum class NotifyMode(private val labelId: Int, private val words: Int) {
-    // NTF-009: the trade of each mode, in one honest line.
-    Instant(R.string.modes_instant, R.string.umbra_ui_ntf_009),
-    Direct(R.string.modes_direct, R.string.umbra_ui_ntf_009_direct),
-    Private(R.string.modes_private, R.string.umbra_ui_ntf_009_private),
-    Off(R.string.common_off, R.string.umbra_ui_ntf_009_off),
+enum class NotifyMode(private val labelId: Int) {
+    // NTF-148: the screen names Instant mode after the party that sees each push.
+    Instant(R.string.modes_google),
+    Direct(R.string.modes_direct),
+    Private(R.string.modes_direct_delayed),
+    Off(R.string.modes_none),
     ;
 
-    /** The name of the mode. */
+    /** The name of the mode, as the settings list shows it. */
     val label: String
         get() = UiText.get(labelId)
-
-    /** The trade of the mode in one line. */
-    val trade: String
-        get() = UiText.get(words)
 
     /** Instant and Direct hold the persistent socket while the client is open. */
     val holdsConnection: Boolean
         get() = this == Instant || this == Direct
 }
 
+/** The delivery of `NTF-147`, in the order of the screen. */
+enum class Delivery(private val labelId: Int, private val words: Int) {
+    // NTF-009: the trade of each delivery, in one honest line.
+    Direct(R.string.modes_direct, R.string.umbra_ui_ntf_009_direct),
+    Google(R.string.modes_google, R.string.umbra_ui_ntf_009),
+    None(R.string.modes_none, R.string.umbra_ui_ntf_009_off),
+    ;
+
+    val label: String
+        get() = UiText.get(labelId)
+
+    val trade: String
+        get() = UiText.get(words)
+}
+
 object Modes {
     private const val PREFERENCES = "modes"
     private const val MODE = "mode"
+    private const val DELIVERY = "delivery"
+    private const val DELAYED = "delayed"
     private const val PREVIEW = "preview"
     private const val KEEP_NOTICE = "keep-notice"
     private const val PHASE = "phase"
@@ -81,21 +95,39 @@ object Modes {
         context.applicationContext.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
 
     /**
-     * The mode of this device. A build ships Instant (`NTF-083`). A build
-     * with no FCM holds no Instant mode, thus Direct takes its place
-     * (`NTF-140`).
+     * The mode of this device, from the delivery and the delay. A build ships
+     * Direct (`NTF-083`). A build with no FCM holds no Instant mode, thus
+     * Direct takes its place (`NTF-140`).
      */
-    fun mode(context: Context): NotifyMode {
-        val held = preferences(context).getString(MODE, null)?.let { name ->
-            NotifyMode.entries.firstOrNull { it.name == name }
-        } ?: NotifyMode.Instant
-
-        return if (held == NotifyMode.Instant && !Push.isAvailable(context)) NotifyMode.Direct else held
+    fun mode(context: Context): NotifyMode = when (delivery(context)) {
+        Delivery.Direct -> if (isDelayed(context)) NotifyMode.Private else NotifyMode.Direct
+        Delivery.Google -> if (Push.isAvailable(context)) NotifyMode.Instant else NotifyMode.Direct
+        Delivery.None -> NotifyMode.Off
     }
 
-    /** The modes that this build offers (`NTF-140`). */
-    fun offered(context: Context): List<NotifyMode> =
-        NotifyMode.entries.filter { it != NotifyMode.Instant || Push.isAvailable(context) }
+    fun delivery(context: Context): Delivery {
+        val preferences = preferences(context)
+        preferences.getString(DELIVERY, null)?.let { name ->
+            Delivery.entries.firstOrNull { it.name == name }?.let { return it }
+        }
+
+        // The mode of an earlier build gives the delivery and the delay.
+        return when (preferences.getString(MODE, null)) {
+            NotifyMode.Instant.name -> Delivery.Google
+            NotifyMode.Off.name -> Delivery.None
+            else -> Delivery.Direct
+        }
+    }
+
+    /** Whether the fixed clock of Private mode holds the delivery. Google takes no delay (`NTF-147`). */
+    fun isDelayed(context: Context): Boolean {
+        val preferences = preferences(context)
+        return preferences.getBoolean(DELAYED, preferences.getString(MODE, null) == NotifyMode.Private.name)
+    }
+
+    /** The deliveries that this build offers (`NTF-140`). */
+    fun offered(context: Context): List<Delivery> =
+        Delivery.entries.filter { it != Delivery.Google || Push.isAvailable(context) }
 
     /** Whether an alert shows the sender and the text. Off by default. */
     fun preview(context: Context): Boolean = preferences(context).getBoolean(PREVIEW, false)
@@ -112,8 +144,13 @@ object Modes {
         if (isOn) Notifier.showCarrier(context)
     }
 
-    fun setMode(context: Context, mode: NotifyMode) {
-        preferences(context).edit().putString(MODE, mode.name).apply()
+    fun setDelivery(context: Context, delivery: Delivery) {
+        preferences(context).edit().putString(DELIVERY, delivery.name).apply()
+        apply(context)
+    }
+
+    fun setDelayed(context: Context, isOn: Boolean) {
+        preferences(context).edit().putBoolean(DELAYED, isOn).apply()
         apply(context)
     }
 
@@ -245,7 +282,8 @@ class PrivateClock : BroadcastReceiver() {
 @Composable
 fun NotificationsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
-    var mode by remember { mutableStateOf(Modes.mode(context)) }
+    var delivery by remember { mutableStateOf(Modes.delivery(context)) }
+    var isDelayed by remember { mutableStateOf(Modes.isDelayed(context)) }
     var preview by remember { mutableStateOf(Modes.preview(context)) }
     var keepsNotice by remember { mutableStateOf(Modes.keepsNotice(context)) }
 
@@ -259,13 +297,13 @@ fun NotificationsScreen(onBack: () -> Unit) {
                         .fillMaxWidth()
                         .pressShadeInColumn()
                         .press(role = Role.RadioButton) {
-                            mode = choice
-                            Modes.setMode(context, choice)
+                            delivery = choice
+                            Modes.setDelivery(context, choice)
                         }
                         .padding(horizontal = PressInset, vertical = 14.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    RadioMark(isChosen = mode == choice)
+                    RadioMark(isChosen = delivery == choice)
                     Spacer(Modifier.width(14.dp))
                     Column {
                         Text(choice.label)
@@ -279,7 +317,7 @@ fun NotificationsScreen(onBack: () -> Unit) {
                 }
 
                 // The battery line stays here after the card of the chat list went.
-                if (choice == NotifyMode.Direct && mode == choice && Battery.state != BatteryState.Unrestricted) {
+                if (choice == Delivery.Direct && delivery == choice && !isDelayed && Battery.state != BatteryState.Unrestricted) {
                     Text(
                         batteryLine(),
                         style = MaterialTheme.typography.bodySmall,
@@ -294,8 +332,23 @@ fun NotificationsScreen(onBack: () -> Unit) {
                 HorizontalDivider(color = Palette.Divider)
             }
 
-            // NTF-082: the two controls of the high-risk configuration sit
-            // on this one screen.
+            // NTF-147: the delay is its own switch, and None takes none.
+            if (delivery == Delivery.Direct) {
+                ToggleRow(stringResource(R.string.modes_delayed), isDelayed) {
+                    isDelayed = it
+                    Modes.setDelayed(context, it)
+                }
+                Text(
+                    stringResource(R.string.umbra_ui_ntf_009_private),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Palette.TextSecondary,
+                    modifier = Modifier.padding(start = PressInset, end = PressInset, bottom = 12.dp),
+                )
+                HorizontalDivider(color = Palette.Divider)
+            }
+
+            // NTF-082: the controls of the high-risk configuration sit on
+            // this one screen.
             ToggleRow(stringResource(R.string.modes_show_sender_and_text), preview) {
                 preview = it
                 Modes.setPreview(context, it)

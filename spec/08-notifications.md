@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 8: Notifications and Mobile Delivery
 
 **Status:** Draft
-**Version:** 0.40.0
+**Version:** 0.41.0
 **Date:** 2026-10-21
 
 ---
@@ -499,7 +499,29 @@ own work with the four limits below, and it holds them in memory alone.
 
 ## 8.3 The four modes
 
-UMBRA ships the four modes. The user selects one for the device.
+UMBRA ships the four modes. The user selects one for the device, through
+the two controls below.
+
+**The choice on the screen.** The settings show the delivery as one choice,
+and the delay as one switch beside it. The pair gives the mode.
+
+| Delivery | Delayed off | Delayed on |
+| --- | --- | --- |
+| Direct | Direct mode | Private mode |
+| Google | Instant mode | Not offered |
+| None | Off mode | Not offered |
+
+- **[NTF-147]** The settings MUST offer the delivery as one choice of three,
+  in this order: Direct, Google, None. They MUST offer Delayed as a separate
+  switch, and they MUST NOT show that switch with None.
+- **[NTF-148]** The interface MUST name Instant mode "Google", thus the name
+  states the party that sees each push. The mode names of this part stay the
+  names of the specification.
+
+> *Cause.* The fixed clock of Private mode is a property of the timing, and
+> not a second carrier. A user who reads the delivery and the delay as two
+> controls sees which party is on the path and what the timing shows, and
+> each mode keeps its rules below.
 
 | Mode | The carrier on Android |
 | --- | --- |
@@ -515,7 +537,7 @@ UMBRA ships the four modes. The user selects one for the device.
 | Latency | ~1 s | ~1 s. After the lock, an alert at ~1 s and the record at the unlock | up to the interval, and longer when the platform defers the timer | until the user opens the application |
 | Google learns | The wake time for each event, on a device with FCM | Nothing: the client holds no push token | Nothing: the client holds no push token | Nothing: the client holds no push token |
 | A locked client | Shows which conversation waits (`NTF-136`), and fetches nothing | Shows which conversation waits through its watch (`NTF-144`), and fetches nothing | Receives nothing and shows nothing until the unlock | Receives nothing until the unlock |
-| Default | The shipped default of a build with FCM | The shipped default of a build with no FCM (`NTF-140`) | The high-risk configuration | Never a default |
+| Default | Never a default | The shipped default of each build (`NTF-083`) | The high-risk configuration | Never a default |
 
 **A locked client in Private mode receives nothing.** Part 14 rule `IMP-119`
 locks the client after 15 minutes with no action of the user, and a locked
@@ -538,16 +560,19 @@ No party of the push path is on the path of a record or of a wake.
   Instant mode. That build MUST offer Direct mode in its place, and it MUST
   ship Direct mode as the default.
 - **[NTF-141]** An implementation MUST measure the battery cost of Direct
-  mode over 24 h on a mid-range Android device before a revision makes it
-  the default of a build with FCM.
+  mode over 24 h on a mid-range Android device, and §8.8 MUST state the
+  result. Direct mode is the default before that measurement, by a decision
+  of the project on 2026-10-21. Part 15 §15.3 records that the cost is not
+  measured.
 
 > *Cause.* Instant mode gives Google the time of each push, and Part 8 §8.7
 > states what that time shows. Direct mode removes Google from the path, and
 > it keeps the latency of Instant mode while the client is unlocked. A locked
 > client holds no key that reads a queue (`NTF-120`), thus in Direct mode it
 > holds the watch of §8.4.3, which sees an arrival and reads nothing. The
-> held socket and the watch cost battery that no measurement bounds yet,
-> thus `NTF-141` puts a measurement before a change of the default.
+> held socket and the watch cost battery that no measurement bounds yet.
+> The project took Direct mode as the default with that cost open, because
+> a default that tells Google the time of each message is the larger harm.
 
 **A run with no view.** In Private mode and in Off mode a client holds no run
 while no view is on the screen. A client MAY keep the run for 30 s after the
@@ -606,11 +631,10 @@ wake inside the interval. One phase across two networks links the two, and Part
   **[NTF-010]** the UI MUST NOT hide Private mode.
 - **[NTF-011]** Onboarding MUST NOT ask the user to select a threat model.
 - **[NTF-082]** The settings MUST offer the high-risk configuration, which is
-  Private notifications with the content preview off: one screen holds the two
-  controls, and a shortcut that sets both adds nothing that the user cannot do.
-- **[NTF-083]** A build MUST ship Instant mode with the content preview off as
-  the default of each Profile. That default applies to each build that holds
-  FCM, and `NTF-140` gives the mode of a build with no FCM.
+  Private notifications with the content preview off: one screen holds the
+  controls, and a shortcut that sets them adds nothing that the user cannot do.
+- **[NTF-083]** A build MUST ship Direct mode with the content preview off as
+  the default of each Profile.
 
 > *Cause.* A user at the first launch cannot weigh a threat model, and U1 of
 > Part 2 §2.4 permits no security decision before the inbox. Thus onboarding

@@ -75,7 +75,7 @@ column when a crate implements the requirement and a test covers it.
 | `CRY` | 120 | 27 | 0 | 0 | 1 | **148** |
 | `WIR` | 417 | 88 | 0 | 0 | 7 | **512** |
 | `DEV` | 224 | 96 | 0 | 0 | 13 | **333** |
-| `NTF` | 84 | 29 | 0 | 0 | 3 | **116** |
+| `NTF` | 86 | 29 | 0 | 0 | 3 | **118** |
 | `DIS` | 136 | 36 | 0 | 0 | 3 | **175** |
 | `REL` | 171 | 34 | 1 | 0 | 3 | **209** |
 | `GRP` | 234 | 65 | 0 | 0 | 5 | **304** |
@@ -83,7 +83,7 @@ column when a crate implements the requirement and a test covers it.
 | `ABU` | 71 | 29 | 1 | 0 | 0 | **101** |
 | `IMP` | 117 | 41 | 1 | 0 | 2 | **161** |
 | `SEC` | 4 | 3 | 0 | 0 | 1 | **8** |
-| **All** | 2144 | 639 | 7 | 0 | 59 | **2849** |
+| **All** | 2146 | 639 | 7 | 0 | 59 | **2851** |
 
 ## SCP — Scope and Conventions
 
@@ -1771,8 +1771,8 @@ Source: `spec/08-notifications.md`
 | `NTF-079` | §8.2.3 | MUST | One open that succeeds | One open that succeeds MUST reset the count. |  |  |
 | `NTF-080` | §8.2.5 | MUST | A device | A device MUST rotate one handle group of §8.2.1 at a time. |  |  |
 | `NTF-081` | §8.2.5 | MUST NOT | A device | A device MUST NOT rotate two handle groups inside one session. |  |  |
-| `NTF-082` | §8.3 | MUST | The settings | The settings MUST offer the high-risk configuration, which is Private notifications with the content preview off: one screen holds the two controls, and a shortcut that sets both adds nothing that the user cannot do. |  |  |
-| `NTF-083` | §8.3 | MUST | A build | A build MUST ship Instant mode with the content preview off as the default of each Profile. |  |  |
+| `NTF-082` | §8.3 | MUST | The settings | The settings MUST offer the high-risk configuration, which is Private notifications with the content preview off: one screen holds the controls, and a shortcut that sets them adds nothing that the user cannot do. |  |  |
+| `NTF-083` | §8.3 | MUST | A build | A build MUST ship Direct mode with the content preview off as the default of each Profile. |  |  |
 | `NTF-084` | §8.2.3 | MUST | The client | The client MUST then establish `k_ntf_root` again at the next foreground session. |  |  |
 | `NTF-086` | §8.4.2 | MUST | A queue relay | A queue relay MUST set the same `PUSH_TTL_MESSAGE` for a digest push. |  |  |
 | `NTF-087` | §8.3 | MUST | An implementation | An implementation MUST measure the wake cost of the fixed clock on a mid-range Android device, with a power monitor, before a revision re-tunes the cadence of Private mode. |  |  |
@@ -1829,12 +1829,14 @@ Source: `spec/08-notifications.md`
 | `NTF-138` | §8.2.7 | MUST | The NDR | The NDR MUST drop a registration `NDR_REG_TTL` after the `NREG` that made or last moved it, and it MUST answer `gone` to an `NPUSH` for it from then on. |  |  |
 | `NTF-139` | §8.3 | MUST | A client in Direct mode | A client in Direct mode MUST hold no push token. |  |  |
 | `NTF-140` | §8.3 | MUST NOT | A build with no push carrier of a platform | A build with no push carrier of a platform MUST NOT offer Instant mode. |  |  |
-| `NTF-141` | §8.3 | MUST | An implementation | An implementation MUST measure the battery cost of Direct mode over 24 h on a mid-range Android device before a revision makes it the default of a build with FCM. |  |  |
+| `NTF-141` | §8.3 | MUST | An implementation | An implementation MUST measure the battery cost of Direct mode over 24 h on a mid-range Android device, and §8.8 MUST state the result. |  |  |
 | `NTF-142` | §8.4.3 | MUST | A client in Direct mode | A client in Direct mode MUST bind each inbound queue with `NKEY` and `NBIND`, as Instant mode does, under the notifier key of §8.2.4. |  |  |
 | `NTF-143` | §8.4.3 | MUST | The binding of a client with no push token | The binding of a client with no push token MUST name `WATCH_HANDLE`, which is 16 zero bytes, and a `k_tok` of 32 zero bytes. |  |  |
 | `NTF-144` | §8.4.3 | MUST | A queue relay | A queue relay MUST send each record that no live subscription takes (`NTF-128`) as an `NWAKE` on the circuit of a live watch of its queue, with the blob of §8.2.2 sealed under the binding of the queue, and it MUST then send no `NPUSH` for that record. |  |  |
 | `NTF-145` | §8.4.3 | MUST | A client in Direct mode | A client in Direct mode MUST hold a **watch table** outside `K_store`: the ingress relay of its last run, the relay set of its last run, and the relay, the `notifier_id`, and the notifier secret of each bound queue. |  |  |
 | `NTF-146` | §8.4.3 | MUST | A queue relay | A queue relay MUST send at most one `NWAKE` for one queue inside one `WAKE_COALESCE_WINDOW`. |  |  |
+| `NTF-147` | §8.3 | MUST | The settings | The settings MUST offer the delivery as one choice of three, in this order: Direct, Google, None. |  |  |
+| `NTF-148` | §8.3 | MUST | The interface | The interface MUST name Instant mode "Google", thus the name states the party that sees each push. |  |  |
 
 ## DIS — Discovery, Handles, and Key Transparency
 
