@@ -40,6 +40,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -53,6 +54,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.border
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import androidx.compose.ui.text.style.TextAlign
@@ -77,7 +79,7 @@ import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animate
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.fadeIn
@@ -1061,11 +1063,14 @@ private fun Bubble(
 
     // A slide to the right answers the message. The bubble follows the
     // finger a short way, and it springs back at the release.
-    val slide = remember { Animatable(0f) }
+    // A drag step sets the offset at once. A step in a later coroutine can
+    // run after the release and stop the spring, and the bubble stays out.
+    var slide by remember { mutableFloatStateOf(0f) }
+    var springBack by remember { mutableStateOf<Job?>(null) }
     val scope = rememberCoroutineScope()
     val haptics = LocalHapticFeedback.current
     val reach = with(LocalDensity.current) { SLIDE_REACH.toPx() }
-    val isPast = slide.value >= reach * SLIDE_POINT
+    val isPast = slide >= reach * SLIDE_POINT
 
     // The tick tells the finger that a release now starts the answer.
     LaunchedEffect(isPast) {
@@ -1074,8 +1079,7 @@ private fun Bubble(
 
     val drag = rememberDraggableState { delta ->
         // The finger moves more than the bubble, thus the end feels firm.
-        val next = (slide.value + delta * 0.55f).coerceIn(0f, reach)
-        scope.launch { slide.snapTo(next) }
+        slide = (slide + delta * 0.55f).coerceIn(0f, reach)
     }
 
     // A jump to a message shows it for a moment, and the mark fades.
@@ -1090,15 +1094,22 @@ private fun Bubble(
             state = drag,
             enabled = onReply != null,
             orientation = Orientation.Horizontal,
+            onDragStarted = { springBack?.cancel() },
             onDragStopped = {
-                if (slide.value >= reach * SLIDE_POINT) onReply?.invoke()
-                slide.animateTo(0f, spring(stiffness = Spring.StiffnessMediumLow))
+                if (slide >= reach * SLIDE_POINT) onReply?.invoke()
+
+                // The bubble scope runs the spring, thus a cancel of the gesture cannot stop it.
+                springBack = scope.launch {
+                    animate(slide, 0f, animationSpec = spring(stiffness = Spring.StiffnessMediumLow)) { value, _ ->
+                        slide = value
+                    }
+                }
             },
         ),
         contentAlignment = Alignment.CenterStart,
     ) {
         // The arrow grows behind the bubble as the slide goes on.
-        val progress = (slide.value / (reach * SLIDE_POINT)).coerceIn(0f, 1f)
+        val progress = (slide / (reach * SLIDE_POINT)).coerceIn(0f, 1f)
         FaIcon(
             "reply",
             size = 18.dp,
@@ -1113,7 +1124,7 @@ private fun Bubble(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .offset { IntOffset(slide.value.roundToInt(), 0) }
+                .offset { IntOffset(slide.roundToInt(), 0) }
                 .padding(vertical = 4.dp),
             horizontalArrangement = if (isOutgoing) Arrangement.End else Arrangement.Start,
         ) {
