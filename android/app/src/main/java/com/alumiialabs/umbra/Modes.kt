@@ -331,34 +331,33 @@ fun NotificationsScreen(onBack: () -> Unit) {
                     }
                 }
 
-                // The battery line stays here after the card of the chat list went.
+                // The battery line stays here after the card of the chat list
+                // went. It starts on the column of the labels of the choices.
                 if (choice == Delivery.Direct && delivery == choice && !isDelayed && Battery.state != BatteryState.Unrestricted) {
-                    Text(
-                        batteryLine(),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Palette.TextSecondary,
-                        modifier = Modifier.padding(start = PressInset + 34.dp),
-                    )
-                    InlineButton(
-                        stringResource(R.string.battery_allow),
-                        modifier = Modifier.padding(start = PressInset + 34.dp, bottom = 12.dp),
-                    ) { Battery.open(context) }
+                    Column(Modifier.padding(start = RadioLabelInset, bottom = 12.dp)) {
+                        Text(
+                            batteryLine(),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Palette.TextSecondary,
+                            modifier = Modifier.subline(),
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        InlineButton(stringResource(R.string.battery_allow)) { Battery.open(context) }
+                    }
                 }
                 HorizontalDivider(color = Palette.Divider)
             }
 
             // NTF-147: the delay is its own switch, and None takes none.
             if (delivery == Delivery.Direct) {
-                ToggleRow(stringResource(R.string.modes_delayed), isDelayed) {
+                ToggleRow(
+                    stringResource(R.string.modes_delayed),
+                    isDelayed,
+                    detail = stringResource(R.string.umbra_ui_ntf_009_private),
+                ) {
                     isDelayed = it
                     Modes.setDelayed(context, it)
                 }
-                Text(
-                    stringResource(R.string.umbra_ui_ntf_009_private),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Palette.TextSecondary,
-                    modifier = Modifier.padding(start = PressInset, end = PressInset, bottom = 12.dp),
-                )
                 HorizontalDivider(color = Palette.Divider)
             }
 

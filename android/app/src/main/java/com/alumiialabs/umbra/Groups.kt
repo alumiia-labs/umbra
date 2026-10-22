@@ -1,6 +1,5 @@
 package com.alumiialabs.umbra
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -580,12 +579,7 @@ fun IntroductionPrompt() {
         ?.title
         ?: stringResource(R.string.common_a_contact)
 
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .background(Palette.Incoming)
-            .padding(horizontal = 20.dp, vertical = 12.dp),
-    ) {
+    PromptCard {
         if (intro.isOffer) {
             Text(stringResource(R.string.group_intro_offer, from, intro.name))
         } else {
@@ -616,12 +610,7 @@ fun IntroductionPrompt() {
 fun GroupOfferPrompt() {
     // GRP-328: an admission whose roster did not verify shows as failed.
     Core.failedAdmissions.firstOrNull()?.let { failed ->
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .background(Palette.Incoming)
-                .padding(horizontal = 20.dp, vertical = 12.dp),
-        ) {
+        PromptCard {
             Text(stringResource(R.string.group_join_failed, failed.name))
             Text(
                 stringResource(R.string.group_roster_not_verified),
@@ -641,12 +630,7 @@ fun GroupOfferPrompt() {
         ?.title
         ?: stringResource(R.string.common_a_contact)
 
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .background(Palette.Incoming)
-            .padding(horizontal = 20.dp, vertical = 12.dp),
-    ) {
+    PromptCard {
         Text(stringResource(R.string.group_offer, from, offer.name))
         Text(
             stringResource(R.string.group_offer_note),

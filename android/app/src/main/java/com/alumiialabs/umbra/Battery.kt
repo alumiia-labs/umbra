@@ -7,13 +7,9 @@ import android.content.Intent
 import android.net.Uri
 import android.os.PowerManager
 import android.provider.Settings
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -84,18 +80,13 @@ object Battery {
         context.applicationContext.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
 }
 
-/** The battery line of Direct mode, as the one card of the chat list. */
+/** The battery line of Direct mode, as a card of the chat list. */
 @Composable
 fun BatteryPrompt() {
     val context = LocalContext.current
     if (Battery.isNoted || !Battery.slowsDirect(context)) return
 
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .background(Palette.Incoming)
-            .padding(horizontal = 20.dp, vertical = 12.dp),
-    ) {
+    PromptCard {
         Text(batteryLine())
         Spacer(Modifier.height(8.dp))
         Row {

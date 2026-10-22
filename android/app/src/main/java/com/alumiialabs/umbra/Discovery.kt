@@ -499,17 +499,12 @@ fun RequestsPrompt(push: (Screen) -> Unit) {
     val count = Core.contactRequests.size
     if (count == 0) return
 
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .background(Palette.Incoming)
-            .press { push(Screen.Requests) }
-            .padding(horizontal = 20.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        FaIcon("user-plus", size = 18.dp, tint = Palette.Text)
-        Spacer(Modifier.width(14.dp))
-        Text(pluralStringResource(R.plurals.discovery_contact_requests_count, count, count))
+    PromptCard(onClick = { push(Screen.Requests) }) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            FaIcon("user-plus", size = 18.dp, tint = Palette.Text)
+            Spacer(Modifier.width(14.dp))
+            Text(pluralStringResource(R.plurals.discovery_contact_requests_count, count, count))
+        }
     }
 }
 

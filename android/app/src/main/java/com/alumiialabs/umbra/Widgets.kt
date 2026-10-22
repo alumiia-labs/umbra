@@ -31,6 +31,7 @@ import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -592,6 +593,27 @@ fun Note(text: String, isError: Boolean = false) {
     }
 }
 
+/**
+ * A prompt at the top of the chat list. It has the inset and the rounded
+ * ground of [Note], and a gap above it, thus two prompts or a note and a
+ * prompt never touch.
+ */
+@Composable
+fun PromptCard(onClick: (() -> Unit)? = null, content: @Composable ColumnScope.() -> Unit) {
+    val shape = RoundedCornerShape(12.dp)
+
+    Column(
+        Modifier
+            .padding(start = 20.dp, end = 20.dp, top = 12.dp)
+            .fillMaxWidth()
+            .clip(shape)
+            .background(Palette.Incoming)
+            .then(if (onClick != null) Modifier.press(onClick = onClick) else Modifier)
+            .padding(12.dp),
+        content = content,
+    )
+}
+
 /** The large rounded icon above the headline of a full view, in the middle of its row. */
 @Composable
 fun HeroIcon(name: String) {
@@ -992,7 +1014,7 @@ fun EntryRow(entry: RowEntry, afterClick: () -> Unit = {}) {
 
 /** A row with a title and a switch. The row takes the tap. */
 @Composable
-fun ToggleRow(title: String, isOn: Boolean, onChange: (Boolean) -> Unit) {
+fun ToggleRow(title: String, isOn: Boolean, detail: String? = null, onChange: (Boolean) -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -1001,7 +1023,18 @@ fun ToggleRow(title: String, isOn: Boolean, onChange: (Boolean) -> Unit) {
             .padding(horizontal = PressInset, vertical = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(title, Modifier.weight(1f))
+        Column(Modifier.weight(1f)) {
+            Text(title)
+            detail?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Palette.TextSecondary,
+                    modifier = Modifier.subline(),
+                )
+            }
+        }
+        Spacer(Modifier.width(12.dp))
         SwitchMark(isOn)
     }
 }

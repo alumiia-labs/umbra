@@ -53,12 +53,7 @@ fun RosterForkPrompt() {
     val fork = Core.rosterForks.firstOrNull() ?: return
     val name = fork.label.ifEmpty { stringResource(R.string.devices_a_removed_device) }
 
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .background(Palette.Incoming)
-            .padding(horizontal = 20.dp, vertical = 12.dp),
-    ) {
+    PromptCard {
         Text(
             when (fork.kind.toInt()) {
                 1 -> stringResource(R.string.devices_fork_two_versions, name)
@@ -87,12 +82,7 @@ fun HeldDeletionsPrompt() {
     val count = Core.heldDeletions
     if (count == 0) return
 
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .background(Palette.Incoming)
-            .padding(horizontal = 20.dp, vertical = 12.dp),
-    ) {
+    PromptCard {
         Text(pluralStringResource(R.plurals.devices_held_deletions, count, count))
         Spacer(Modifier.height(8.dp))
         Row {

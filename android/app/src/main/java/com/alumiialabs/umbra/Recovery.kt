@@ -8,7 +8,6 @@ import android.view.WindowManager
 import android.widget.TextView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -89,13 +88,16 @@ fun RecoveryPromptLine(push: (Screen) -> Unit) {
     // backup, and the prompt shows there.
     if (!RecoveryPrompt.isDue(context) || !Core.ownsChannels) return
 
+    // The inset and the shape of a prompt card, in the color of a selection:
+    // this is the one ask that a lost device makes urgent.
     Row(
         Modifier
+            .padding(horizontal = 20.dp, vertical = 8.dp)
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp)
-            .background(Palette.Container, RoundedCornerShape(16.dp))
-            .clickable(role = Role.Button) { push(Screen.RecoveryCode) }
-            .padding(start = 16.dp, top = 12.dp, bottom = 12.dp, end = 8.dp),
+            .clip(RoundedCornerShape(12.dp))
+            .background(Palette.Container)
+            .press(role = Role.Button) { push(Screen.RecoveryCode) }
+            .padding(start = 12.dp, top = 12.dp, bottom = 12.dp, end = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         FaIcon("key", size = 18.dp, tint = Palette.Action)

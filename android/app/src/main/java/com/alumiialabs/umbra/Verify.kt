@@ -5,7 +5,6 @@ import android.content.ClipboardManager
 import android.content.Context
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -33,6 +32,7 @@ import androidx.compose.runtime.setValue
 import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
@@ -464,13 +464,15 @@ fun VerifyPrompt(push: (Screen) -> Unit) {
     val (conversation, _) = Core.verifyCode ?: return
     val chat = Core.chats.firstOrNull { it.conversation == conversation } ?: return
 
+    // The shape of the recovery line: both ask for one act of the user.
     Row(
         Modifier
+            .padding(horizontal = 20.dp, vertical = 8.dp)
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp)
-            .background(Palette.Container, RoundedCornerShape(16.dp))
-            .clickable(role = Role.Button) { push(Screen.VerifyCode(conversation, starts = false)) }
-            .padding(horizontal = 16.dp, vertical = 12.dp),
+            .clip(RoundedCornerShape(12.dp))
+            .background(Palette.Container)
+            .press(role = Role.Button) { push(Screen.VerifyCode(conversation, starts = false)) }
+            .padding(12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         FaIcon("shield-check", size = 18.dp, tint = Palette.Action)
