@@ -124,12 +124,7 @@ fun NewPollScreen(chat: Chat, onBack: () -> Unit) {
             ToggleRow(stringResource(R.string.poll_more_than_one_answer), multiple) { multiple = it }
             HorizontalDivider(color = Palette.Divider)
 
-            Text(
-                stringResource(R.string.poll_ends),
-                style = MaterialTheme.typography.labelLarge,
-                color = Palette.TextSecondary,
-                modifier = Modifier.padding(top = 16.dp, bottom = 4.dp),
-            )
+            SectionLabel(stringResource(R.string.poll_ends))
             for ((seconds, title) in PollPeriods) {
                 Row(
                     Modifier

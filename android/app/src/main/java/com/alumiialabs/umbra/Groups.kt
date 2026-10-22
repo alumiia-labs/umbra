@@ -1,6 +1,5 @@
 package com.alumiialabs.umbra
 
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -77,141 +76,223 @@ fun NewGroupScreen(onBack: () -> Unit, onMade: (Conversation) -> Unit) {
     }
 }
 
-/** What this device holds of a group. */
+/**
+ * What this device holds of a group, in the order of the contact details:
+ * the settings, then the members, then the way out. A tap on a member opens
+ * a sheet, thus no part of a group takes a view of its own.
+ */
 @Composable
-fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
+fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, onLeft: () -> Unit, push: (Screen) -> Unit) {
     var members by remember { mutableStateOf(listOf<FfiGroupMember>()) }
-    LaunchedEffect(chat.conversation.label, chat.members) {
+    var blocked by remember { mutableStateOf(setOf<UShort>()) }
+    // A change of a role touches no count, thus its answer reads the roster again.
+    var reload by remember { mutableStateOf(0) }
+    LaunchedEffect(chat.conversation.label, chat.members, Core.revision, reload) {
         Core.groupMembers(chat.conversation) { members = it }
+        Core.blockedMembers(chat.conversation) { blocked = it.toSet() }
     }
 
     // GRP-310: an admin alone brings a contact in.
-    val isAdmin = members.any { it.isSelf && it.role >= FfiRole.ADMIN }
+    val own = members.firstOrNull { it.isSelf }
+    val isAdmin = own != null && own.role >= FfiRole.ADMIN
 
-    var timer by remember { mutableStateOf<UInt?>(null) }
-    var alert by remember { mutableStateOf<UByte?>(null) }
     var noForward by remember { mutableStateOf<Boolean?>(null) }
     LaunchedEffect(chat.conversation, Core.revision) {
         Core.forwardRules(chat.conversation) { noForward = it.own }
-        Core.timer(chat.conversation) { timer = it.seconds }
-        Core.alertSetting(chat.conversation) { alert = it }
     }
+
+    var sheet by remember { mutableStateOf<GroupSheet?>(null) }
+    var showsAll by remember { mutableStateOf(false) }
 
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.group_details), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
             Spacer(Modifier.height(12.dp))
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Avatar(chat, size = 56)
-                Spacer(Modifier.width(14.dp))
-                Column {
-                    Text(chat.title, style = MaterialTheme.typography.titleLarge)
-                    Text(
-                        groupSubtitle(chat),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = Palette.TextSecondary,
-                    )
-                }
-            }
-            Spacer(Modifier.height(20.dp))
-            FactRow("user-group", stringResource(R.string.group_members), chat.members.toString())
-            FactRow("file-lines", stringResource(R.string.group_identifier), chat.conversation.label)
-            Spacer(Modifier.height(8.dp))
-
-            // The members, an invitation, and the way out.
-            EntryRow(
-                RowEntry("user-group", stringResource(R.string.group_members_and_roles)) {
-                    push(Screen.GroupMembers(chat.conversation))
-                },
-            )
-            EntryRow(
-                RowEntry("photo-film", stringResource(R.string.common_media_and_files)) {
-                    push(Screen.Media(chat.conversation))
-                },
-            )
-
-            alert?.let {
-                EntryRow(
-                    RowEntry("bell", stringResource(R.string.common_notifications), alertLabel(it)) {
-                        push(Screen.Alerts(chat.conversation))
-                    },
+            Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                Avatar(chat, size = EDITABLE_PICTURE_SIZE)
+                Spacer(Modifier.height(12.dp))
+                Text(chat.title, style = MaterialTheme.typography.headlineMedium)
+                Text(
+                    groupSubtitle(chat),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Palette.TextSecondary,
                 )
             }
+            Spacer(Modifier.height(16.dp))
 
+            EntryRow(RowEntry("photo-film", stringResource(R.string.common_media_and_files)) { push(Screen.Media(chat.conversation)) })
+            HorizontalDivider(color = Palette.Divider)
+            FactRow("file-lines", stringResource(R.string.group_identifier), chat.conversation.label)
+
+            SectionLabel(stringResource(R.string.common_notifications))
+            AlertRows(chat)
+
+            SectionLabel(stringResource(R.string.details_privacy))
             // DEV-248: an admin alone sets the timer of a group.
-            timer?.let {
-                if (chat.isMember && isAdmin) {
-                    EntryRow(
-                        RowEntry("clock", stringResource(R.string.common_disappearing_messages), timerLabel(it)) {
-                            push(Screen.Disappearing(chat.conversation))
-                        },
-                    )
-                } else {
-                    FactRow("clock", stringResource(R.string.common_disappearing_messages), timerLabel(it))
-                }
-            }
-
+            DisappearingRow(chat, mayChange = chat.isMember && isAdmin)
             // DEV-325: an admin alone sets the forward policy of a group.
             noForward?.let {
                 if (chat.isMember && isAdmin) {
-                    ToggleRow(stringResource(R.string.group_no_forwarding), it) { on ->
+                    HorizontalDivider(color = Palette.Divider)
+                    ToggleRow(stringResource(R.string.group_no_forwarding), it, icon = "share-nodes") { on ->
                         noForward = on
                         Core.setForwardProhibited(chat.conversation, on)
                     }
                     // DEV-326: the policy is a request and no enforcement.
                     if (it) Note(UiText.get(R.string.umbra_ui_dev_326))
                 } else if (it) {
+                    HorizontalDivider(color = Palette.Divider)
                     FactRow("share-nodes", stringResource(R.string.group_forwarding), stringResource(R.string.common_off))
                 }
             }
 
-            if (chat.isMember) {
-                if (isAdmin) {
-                    EntryRow(
-                        RowEntry("user-plus", stringResource(R.string.group_invite_contact)) {
-                            push(Screen.InviteToGroup(chat.conversation))
-                        },
-                    )
-                }
-                EntryRow(
-                    RowEntry("xmark", stringResource(R.string.common_leave_group)) {
-                        push(Screen.LeaveGroup(chat.conversation))
-                    },
-                )
+            SectionLabel(stringResource(R.string.group_members_title, members.size))
+            if (chat.isMember && isAdmin && !chat.isClosed) {
+                EntryRow(RowEntry("user-plus", stringResource(R.string.group_add_members)) { push(Screen.InviteToGroup(chat.conversation)) })
+                HorizontalDivider(color = Palette.Divider)
             }
-
             val waiting = Core.groupJoiners.filter { it.groupId.toList() == chat.groupId.toList() }
             for (joiner in waiting) {
                 JoinerRow(joiner)
+                HorizontalDivider(color = Palette.Divider)
+            }
+            // A large group shows its first members, and the rest at a tap.
+            val shown = if (showsAll) members else members.take(MEMBERS_SHOWN)
+            shown.forEachIndexed { index, member ->
+                if (index > 0) HorizontalDivider(color = Palette.Divider)
+                // Each other member opens its sheet: its block (Part 13
+                // §13.12), and for an admin its role and its removal
+                // (`ABU-039`).
+                MemberRow(member, isPressable = !member.isSelf) { sheet = GroupSheet.Member(member) }
+            }
+            if (members.size > shown.size) {
+                HorizontalDivider(color = Palette.Divider)
+                EntryRow(
+                    RowEntry("user-group", stringResource(R.string.group_show_all_members, members.size)) { showsAll = true },
+                    leads = false,
+                )
             }
 
-            if (chat.isLapsed) {
-                Spacer(Modifier.height(12.dp))
-                Note(stringResource(R.string.group_lapsed_note))
-            } else if (chat.isClosed) {
-                Spacer(Modifier.height(12.dp))
-                Note(stringResource(R.string.group_closed_note))
-            } else if (chat.ownerNeeded) {
-                Spacer(Modifier.height(12.dp))
-                // GRP-184: the group keeps two owners, thus a silent owner
-                // leaves only after another member becomes one.
-                Note(stringResource(R.string.group_owner_silent_note))
-            } else if (chat.isReturning) {
-                Spacer(Modifier.height(12.dp))
-                Note(stringResource(R.string.group_returning_note))
-            } else if (chat.needsInvitation) {
-                Spacer(Modifier.height(12.dp))
-                Note(UiText.get(R.string.umbra_ui_grp_374))
-            } else if (!chat.isMember) {
-                Spacer(Modifier.height(12.dp))
-                Note(stringResource(R.string.group_not_member_note))
-            } else if (!chat.isReady) {
-                Spacer(Modifier.height(12.dp))
-                // A technical fact that the user cannot see anywhere else.
-                Note(stringResource(R.string.group_relay_silent_note))
+            if (chat.isMember) {
+                Spacer(Modifier.height(20.dp))
+                EntryRow(RowEntry("xmark", stringResource(R.string.common_leave_group)) { sheet = GroupSheet.Leave }, leads = false)
             }
+
+            GroupStateNote(chat)
+            Spacer(Modifier.height(20.dp))
         }
     }
+
+    val close = { sheet = null }
+    when (val open = sheet) {
+        is GroupSheet.Member -> {
+            val member = open.member
+            val name = memberName(member)
+            val isBlocked = member.index in blocked
+            // GRP-382: a removal reaches a member below moderator.
+            val mayEdit = own != null && isAdmin && !chat.isClosed && member.role <= own.role
+            if (!mayEdit) {
+                BlockSheet(name, isBlocked, onSet = { Core.setMemberBlocked(chat.conversation, member.index, it) }, onDismiss = close)
+            } else {
+                ActionSheet(
+                    name,
+                    buildList {
+                        add(RowEntry("user-group", stringResource(R.string.group_role), roleLabel(member.role)) { sheet = GroupSheet.Role(member) })
+                        if (member.role <= FfiRole.MEMBER) {
+                            add(RowEntry("xmark", stringResource(R.string.group_remove_from_group)) { sheet = GroupSheet.Remove(member) })
+                        }
+                        add(
+                            RowEntry("ban", stringResource(if (isBlocked) R.string.common_unblock else R.string.common_block)) {
+                                sheet = GroupSheet.Block(member)
+                            },
+                        )
+                    },
+                    onDismiss = close,
+                )
+            }
+        }
+        is GroupSheet.Role -> {
+            val member = open.member
+            val choices = if (own?.role == FfiRole.OWNER) RoleChoices + OwnerChoice else RoleChoices
+            ChoiceSheet(
+                stringResource(R.string.group_role_of, memberName(member)),
+                choices.map { (role, detail) ->
+                    SheetChoice(roleLabel(role), role == member.role, stringResource(detail)) {
+                        if (role != member.role) Core.setGroupRole(chat.conversation, member.index, role) { reload++ }
+                    }
+                },
+                onDismiss = close,
+            )
+        }
+        // GRP-264: the group starts a new epoch in the same action.
+        is GroupSheet.Remove -> ActionSheet(
+            stringResource(R.string.group_remove_title, memberName(open.member)),
+            listOf(
+                RowEntry("xmark", stringResource(R.string.group_remove_member)) {
+                    Core.removeFromGroup(chat.conversation, open.member.index) { reload++ }
+                },
+            ),
+            note = stringResource(R.string.group_remove_body),
+            onDismiss = close,
+        )
+        is GroupSheet.Block -> BlockSheet(
+            memberName(open.member),
+            open.member.index in blocked,
+            onSet = { Core.setMemberBlocked(chat.conversation, open.member.index, it) },
+            onDismiss = close,
+        )
+        // GRP-051: a group keeps an owner, thus its last owner stays.
+        GroupSheet.Leave -> {
+            val isLastOwner = own?.role == FfiRole.OWNER && members.count { it.role == FfiRole.OWNER } <= 1
+            ActionSheet(
+                stringResource(R.string.group_leave_title, chat.title),
+                if (isLastOwner) {
+                    emptyList()
+                } else {
+                    listOf(
+                        RowEntry("xmark", stringResource(R.string.common_leave_group)) {
+                            Core.leaveGroup(chat.conversation) { onLeft() }
+                        },
+                    )
+                },
+                note = stringResource(if (isLastOwner) R.string.group_one_owner_note else R.string.group_leave_body),
+                onDismiss = close,
+            )
+        }
+        null -> Unit
+    }
+}
+
+/** The members that the group details show before a tap shows the rest. */
+private const val MEMBERS_SHOWN = 8
+
+/** The sheets that a row of the group details opens. */
+private sealed interface GroupSheet {
+    data class Member(val member: FfiGroupMember) : GroupSheet
+    data class Role(val member: FfiGroupMember) : GroupSheet
+    data class Remove(val member: FfiGroupMember) : GroupSheet
+    data class Block(val member: FfiGroupMember) : GroupSheet
+    data object Leave : GroupSheet
+}
+
+/** The one line of a state of the group that the user cannot see elsewhere. */
+@Composable
+private fun GroupStateNote(chat: Chat) {
+    val line = when {
+        chat.isLapsed -> stringResource(R.string.group_lapsed_note)
+        chat.isClosed -> stringResource(R.string.group_closed_note)
+        // GRP-184: the group keeps two owners, thus a silent owner leaves
+        // only after another member becomes one.
+        chat.ownerNeeded -> stringResource(R.string.group_owner_silent_note)
+        chat.isReturning -> stringResource(R.string.group_returning_note)
+        chat.needsInvitation -> UiText.get(R.string.umbra_ui_grp_374)
+        !chat.isMember -> stringResource(R.string.group_not_member_note)
+        // A technical fact that the user cannot see anywhere else.
+        !chat.isReady -> stringResource(R.string.group_relay_silent_note)
+        else -> return
+    }
+    Spacer(Modifier.height(12.dp))
+    Note(line)
 }
 
 /** One contact that asked to come in (§11.9.1 step 3). */
@@ -278,68 +359,13 @@ private fun memberName(member: FfiGroupMember): String {
         ?: UiText.get(R.string.common_member_number, member.index.toInt())
 }
 
-/**
- * Each member of the group with its role. An admin opens the
- * removal of a member below it.
- */
 @Composable
-fun GroupMembersScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
-    var members by remember { mutableStateOf(listOf<FfiGroupMember>()) }
-    LaunchedEffect(chat.conversation.label, chat.members) {
-        Core.groupMembers(chat.conversation) { members = it }
-    }
-
-    val own = members.firstOrNull { it.isSelf }
-    val mayRemove = own != null && own.role >= FfiRole.ADMIN && !chat.isClosed
-
-    Column(Modifier.fillMaxSize()) {
-        BackBar(stringResource(R.string.group_members_title, members.size), onBack = onBack)
-        LazyColumn {
-            items(members, key = { it.index.toInt() }) { member ->
-                val editable = mayRemove && !member.isSelf && member.role <= own!!.role
-                // Each other member opens its block (Part 13 §13.12), and an
-                // admin opens its role and its removal beside it (`ABU-039`).
-                MemberRow(member, !member.isSelf) {
-                    push(
-                        if (editable) {
-                            Screen.MemberRole(
-                                chat.conversation,
-                                member.index,
-                                memberName(member),
-                                member.role,
-                                own!!.role,
-                            )
-                        } else {
-                            Screen.BlockMember(chat.conversation, member.index, memberName(member))
-                        },
-                    )
-                }
-            }
-            if (chat.isMember && mayRemove) {
-                item {
-                    Spacer(Modifier.height(12.dp))
-                    Column(Modifier.padding(horizontal = 20.dp)) {
-                        SecondaryButton(stringResource(R.string.group_add_members)) {
-                            push(Screen.InviteToGroup(chat.conversation))
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun MemberRow(member: FfiGroupMember, removable: Boolean, onRemove: () -> Unit) {
-    val row = Modifier.fillMaxWidth()
-    val pressable = if (removable) {
-        row.pressShadeInList().press(onClick = onRemove).padding(horizontal = PressInset)
-    } else {
-        row.padding(horizontal = 20.dp)
-    }
+private fun MemberRow(member: FfiGroupMember, isPressable: Boolean, onPress: () -> Unit) {
+    val row = Modifier.fillMaxWidth().pressShadeInColumn()
+    val pressable = if (isPressable) row.press(onClick = onPress) else row
 
     Row(
-        pressable.padding(vertical = 12.dp),
+        pressable.padding(horizontal = PressInset, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         // A member that is a contact shows the picture of that contact.
@@ -361,9 +387,6 @@ private fun MemberRow(member: FfiGroupMember, removable: Boolean, onRemove: () -
                 color = Palette.TextSecondary,
             )
         }
-        if (removable) {
-            FaIcon("chevron-right", size = 14.dp, tint = Palette.TextSecondary)
-        }
     }
 }
 
@@ -377,152 +400,13 @@ private val RoleChoices = listOf(
 /** An owner also names owners, which the group keeps at two or more. */
 private val OwnerChoice = FfiRole.OWNER to R.string.group_role_owner_detail
 
-/**
- * The role of one member, and the way to its removal. A removal reaches a
- * member below `moderator` (`GRP-382`).
- */
-@Composable
-fun MemberRoleScreen(
-    chat: Chat,
-    index: UShort,
-    name: String,
-    role: FfiRole,
-    ownRole: FfiRole,
-    onBack: () -> Unit,
-    push: (Screen) -> Unit,
-) {
-    var chosen by remember { mutableStateOf(role) }
-    val choices = if (ownRole == FfiRole.OWNER) RoleChoices + OwnerChoice else RoleChoices
-    var isSaving by remember { mutableStateOf(false) }
-
-    Column(Modifier.fillMaxSize()) {
-        BackBar(stringResource(R.string.group_member_role), onBack = onBack)
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
-            Spacer(Modifier.height(12.dp))
-            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                LetterAvatar(name, index.toInt(), size = 80)
-            }
-            Spacer(Modifier.height(16.dp))
-            Text(name, style = MaterialTheme.typography.headlineMedium)
-            Spacer(Modifier.height(8.dp))
-
-            for ((choice, detail) in choices) {
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .pressShadeInColumn()
-                        .press(role = androidx.compose.ui.semantics.Role.RadioButton) {
-                            chosen = choice
-                        }
-                        .padding(horizontal = PressInset, vertical = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    RadioMark(isChosen = chosen == choice)
-                    Spacer(Modifier.width(14.dp))
-                    Column {
-                        Text(roleLabel(choice))
-                        Text(
-                            stringResource(detail),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Palette.TextSecondary,
-                        )
-                    }
-                }
-                HorizontalDivider(color = Palette.Divider)
-            }
-
-            Spacer(Modifier.height(16.dp))
-            PrimaryButton(stringResource(R.string.group_save_role), enabled = chosen != role && !isSaving) {
-                isSaving = true
-                Core.setGroupRole(chat.conversation, index, chosen) { onBack() }
-            }
-            if (role <= FfiRole.MEMBER) {
-                Spacer(Modifier.height(10.dp))
-                SecondaryButton(stringResource(R.string.group_remove_from_group)) {
-                    push(Screen.RemoveMember(chat.conversation, index, name))
-                }
-            }
-            QuietButton(stringResource(R.string.common_block)) { push(Screen.BlockMember(chat.conversation, index, name)) }
-        }
-    }
-}
-
-/**
- * The removal of one member. The group starts a new epoch in the same
- * action, thus the member reads no later record (`GRP-264`).
- */
-@Composable
-fun RemoveMemberScreen(
-    chat: Chat,
-    index: UShort,
-    name: String,
-    onBack: () -> Unit,
-    onDone: () -> Unit,
-) {
-    var isRemoving by remember { mutableStateOf(false) }
-
-    Column(Modifier.fillMaxSize()) {
-        BackBar(stringResource(R.string.group_membership), onBack = onBack)
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
-            Headline(
-                stringResource(R.string.group_remove_title, name),
-                stringResource(R.string.group_remove_body),
-            )
-            Spacer(Modifier.height(20.dp))
-            DangerButton(stringResource(R.string.group_remove_member), enabled = !isRemoving) {
-                isRemoving = true
-                Core.removeFromGroup(chat.conversation, index) { onDone() }
-            }
-            QuietButton(stringResource(R.string.common_cancel), onBack)
-        }
-    }
-}
-
-/**
- * The way out of a group. An owner leaves only after it gave the role to
- * another member (`GRP-051`).
- */
-@Composable
-fun LeaveGroupScreen(chat: Chat, onBack: () -> Unit, onLeft: () -> Unit) {
-    var members by remember { mutableStateOf(listOf<FfiGroupMember>()) }
-    LaunchedEffect(chat.conversation.label) {
-        Core.groupMembers(chat.conversation) { members = it }
-    }
-
-    var isLeaving by remember { mutableStateOf(false) }
-    val own = members.firstOrNull { it.isSelf }
-    val owners = members.count { it.role == FfiRole.OWNER }
-    val lastOwner = own?.role == FfiRole.OWNER && owners <= 1
-
-    Column(Modifier.fillMaxSize()) {
-        BackBar(stringResource(R.string.common_leave_group), onBack = onBack)
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
-            Headline(
-                stringResource(R.string.group_leave_title, chat.title),
-                stringResource(R.string.group_leave_body),
-            )
-            Spacer(Modifier.height(20.dp))
-            if (lastOwner) {
-                // GRP-051: a group keeps an owner, thus this one stays.
-                Note(stringResource(R.string.group_one_owner_note))
-                Spacer(Modifier.height(16.dp))
-            }
-            DangerButton(stringResource(R.string.common_leave_group), enabled = !isLeaving && !lastOwner) {
-                isLeaving = true
-                Core.leaveGroup(chat.conversation) { onLeft() }
-            }
-            QuietButton(stringResource(R.string.group_stay), onBack)
-        }
-    }
-}
-
 /** The contacts of this device, one of which takes an offer of the group. */
 @Composable
 fun InviteToGroupScreen(chat: Chat, onBack: () -> Unit) {
     var invited by remember { mutableStateOf(setOf<List<Byte>>()) }
 
     Column(Modifier.fillMaxSize()) {
-        BackBar(stringResource(R.string.group_invite_contact), onBack = onBack)
+        BackBar(stringResource(R.string.group_add_members), onBack = onBack)
 
         val contacts = Core.chats.filter { !it.isGroup }
         if (contacts.isEmpty()) {

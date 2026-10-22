@@ -3,18 +3,12 @@ package com.alumiialabs.umbra
 import android.text.format.DateUtils
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -27,7 +21,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import uniffi.umbra_ffi.ConversationTimer
@@ -103,70 +96,52 @@ fun TimerLine(line: Line, chat: Chat) {
 }
 
 /**
- * The timer of one conversation (Part 7 §7.5.8). The view shows who set the
- * current value and when (`DEV-206`), and that a party can keep a copy
- * (`DEV-218`).
+ * The timer row of one conversation (Part 7 §7.5.8). Its sheet shows who
+ * set the current value and when (`DEV-206`), and that a party can keep a
+ * copy (`DEV-218`). A party that may not change it sees the value alone.
  */
 @Composable
-fun DisappearingScreen(chat: Chat, onBack: () -> Unit) {
+fun DisappearingRow(chat: Chat, mayChange: Boolean) {
     var current by remember { mutableStateOf<ConversationTimer?>(null) }
-    var chosen by remember { mutableStateOf(0u) }
-    LaunchedEffect(chat.conversation, Core.revision) {
-        Core.timer(chat.conversation) {
-            if (current == null) chosen = it.seconds
-            current = it
-        }
-    }
-    val context = LocalContext.current
+    var isChoosing by remember { mutableStateOf(false) }
+    LaunchedEffect(chat.conversation, Core.revision) { Core.timer(chat.conversation) { current = it } }
+    val now = current ?: return
+    val title = stringResource(R.string.common_disappearing_messages)
 
-    Column(Modifier.fillMaxSize()) {
-        BackBar(stringResource(R.string.common_disappearing_messages), onBack = onBack)
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
-            current?.let { now ->
-                if (now.setAtMs != 0uL) {
-                    val at = DateUtils.formatDateTime(
-                        context,
-                        now.setAtMs.toLong(),
-                        DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_SHOW_TIME,
-                    )
-                    Spacer(Modifier.height(12.dp))
-                    Text(
-                        when {
-                            now.byUser -> stringResource(R.string.timer_set_by_you, at)
-                            chat.isGroup -> stringResource(R.string.timer_set_by_admin, at)
-                            else -> stringResource(R.string.timer_set_by, chat.title, at)
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Palette.TextSecondary,
-                    )
-                }
-                Spacer(Modifier.height(8.dp))
-                for ((seconds, title) in TimerChoices) {
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .pressShadeInColumn()
-                            .press(role = Role.RadioButton) { chosen = seconds }
-                            .padding(horizontal = PressInset, vertical = 14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        RadioMark(isChosen = chosen == seconds)
-                        Spacer(Modifier.width(14.dp))
-                        Text(stringResource(title))
-                    }
-                    HorizontalDivider(color = Palette.Divider)
-                }
-                Spacer(Modifier.height(14.dp))
-                PrimaryButton(stringResource(R.string.common_save), enabled = chosen != now.seconds) {
-                    Core.setTimer(chat.conversation, chosen)
-                    onBack()
-                }
-                Spacer(Modifier.height(14.dp))
-                // DEV-218: a fact that the interface must state.
-                Note(UiText.get(R.string.umbra_ui_dev_218))
-            }
+    if (!mayChange) {
+        FactRow("clock", title, timerLabel(now.seconds))
+        return
+    }
+
+    EntryRow(RowEntry("clock", title, timerLabel(now.seconds)) { isChoosing = true }, leads = false)
+    if (!isChoosing) return
+
+    val context = LocalContext.current
+    val setBy = if (now.setAtMs == 0uL) {
+        null
+    } else {
+        val at = DateUtils.formatDateTime(
+            context,
+            now.setAtMs.toLong(),
+            DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_SHOW_TIME,
+        )
+        when {
+            now.byUser -> stringResource(R.string.timer_set_by_you, at)
+            chat.isGroup -> stringResource(R.string.timer_set_by_admin, at)
+            else -> stringResource(R.string.timer_set_by, chat.title, at)
         }
     }
+    ChoiceSheet(
+        title,
+        TimerChoices.map { (seconds, label) ->
+            // The same value again sends no change to the other party.
+            SheetChoice(stringResource(label), seconds == now.seconds) {
+                if (seconds != now.seconds) Core.setTimer(chat.conversation, seconds)
+            }
+        },
+        note = listOfNotNull(setBy?.let { "$it." }, UiText.get(R.string.umbra_ui_dev_218)).joinToString(" "),
+        onDismiss = { isChoosing = false },
+    )
 }
 
 /** The time that remains to a timed message, in its largest unit. */

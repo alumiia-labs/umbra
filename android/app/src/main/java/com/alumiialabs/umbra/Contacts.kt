@@ -76,37 +76,16 @@ fun AddContactScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             }
 
             Spacer(Modifier.height(12.dp))
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .pressShadeInColumn()
-                    .press { push(Screen.UseInvitation) }
-                    .padding(horizontal = PressInset, vertical = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                FaIcon("qrcode", size = 20.dp, tint = Palette.Text)
-                Spacer(Modifier.width(16.dp))
-                Text(stringResource(R.string.contacts_use_invitation_instead))
-            }
-
+            EntryRow(RowEntry("qrcode", stringResource(R.string.contacts_use_invitation_instead)) { push(Screen.UseInvitation) })
+            HorizontalDivider(color = Palette.Divider)
             // The group of Part 11 starts beside the contacts.
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .pressShadeInColumn()
-                    .press { push(Screen.NewGroup) }
-                    .padding(horizontal = PressInset, vertical = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                FaIcon("user-group", size = 20.dp, tint = Palette.Text)
-                Spacer(Modifier.width(16.dp))
-                Text(stringResource(R.string.contacts_new_private_group))
-            }
-
+            EntryRow(RowEntry("user-group", stringResource(R.string.contacts_new_private_group)) { push(Screen.NewGroup) })
             // Part 9: a link for many people, and a name to look up.
             if (Core.ownsChannels) {
-                OpenRow("link", stringResource(R.string.contacts_reusable_link)) { push(Screen.PublicLinks) }
-                OpenRow("globe", stringResource(R.string.common_your_handle), Core.myHandle) { push(Screen.Handle) }
+                HorizontalDivider(color = Palette.Divider)
+                EntryRow(RowEntry("link", stringResource(R.string.discovery_reusable_links)) { push(Screen.PublicLinks) })
+                HorizontalDivider(color = Palette.Divider)
+                HandleRow(push)
             }
         }
     }

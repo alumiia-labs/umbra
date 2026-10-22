@@ -29,7 +29,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -43,30 +42,53 @@ import androidx.compose.ui.unit.sp
 import uniffi.umbra_ffi.ForwardRules
 import uniffi.umbra_ffi.Receipts
 
-/** The details of one contact: who it is, and what the user can do with it. */
+/**
+ * The details of one contact: who it is, its settings, and what the user
+ * can do with it. Each setting of the conversation sits here, as each one
+ * of a group sits in the group details.
+ */
 @Composable
 fun ContactDetailsScreen(chat: Chat, onBack: () -> Unit, onMessage: () -> Unit, push: (Screen) -> Unit) {
+    val context = LocalContext.current
+    var sheet by remember { mutableStateOf<ContactSheet?>(null) }
+
+    var receipts by remember { mutableStateOf<Receipts?>(null) }
+    var mode by remember { mutableStateOf<Int?>(null) }
+    var forward by remember { mutableStateOf<ForwardRules?>(null) }
+    var held by remember { mutableStateOf<uniffi.umbra_ffi.FfiHeldShare?>(null) }
+    var isBlocked by remember { mutableStateOf(false) }
+    var introduced by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(chat.conversation) {
+        Core.privacyMode(chat.conversation) { mode = it }
+        Core.receipts(chat.conversation) { receipts = it }
+    }
+    LaunchedEffect(chat.conversation, Core.revision) {
+        Core.forwardRules(chat.conversation) { forward = it }
+        Core.heldShare(chat.conversation) { held = it }
+        Core.isBlocked(chat.conversation) { isBlocked = it }
+    }
+
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.verify_contact_details), onBack = onBack)
-        Column(
-            Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
             Spacer(Modifier.height(12.dp))
-            // Part 9 §9.8: the user gives the contact a picture.
-            EditablePicture(
-                hasPicture = chat.picture != null,
-                onSet = { square -> Core.setContactPicture(chat.conversation, square) },
-            ) { Avatar(chat, size = EDITABLE_PICTURE_SIZE) }
-            Spacer(Modifier.height(12.dp))
-            Text(chat.title, style = MaterialTheme.typography.headlineMedium)
-            if (chat.isVerified) {
-                Spacer(Modifier.height(6.dp))
-                VerifiedMark()
+            Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                // Part 9 §9.8: the user gives the contact a picture.
+                EditablePicture(
+                    hasPicture = chat.picture != null,
+                    onSet = { square -> Core.setContactPicture(chat.conversation, square) },
+                ) { Avatar(chat, size = EDITABLE_PICTURE_SIZE) }
+                Spacer(Modifier.height(12.dp))
+                Text(chat.title, style = MaterialTheme.typography.headlineMedium)
+                if (chat.isVerified) {
+                    Spacer(Modifier.height(6.dp))
+                    VerifiedMark()
+                }
             }
             Spacer(Modifier.height(16.dp))
             PrimaryButton(stringResource(R.string.common_message), onClick = onMessage)
             Spacer(Modifier.height(8.dp))
+
             EntryRow(RowEntry("pen", stringResource(R.string.verify_edit_name)) { push(Screen.EditName(chat.conversation)) })
             HorizontalDivider(color = Palette.Divider)
             EntryRow(
@@ -77,48 +99,59 @@ fun ContactDetailsScreen(chat: Chat, onBack: () -> Unit, onMessage: () -> Unit, 
                     } else {
                         stringResource(R.string.verify_verify_contact)
                     },
-                ) {
-                    push(Screen.Verify(chat.conversation))
-                },
+                ) { push(Screen.Verify(chat.conversation)) },
             )
             HorizontalDivider(color = Palette.Divider)
-            EntryRow(
-                RowEntry("photo-film", stringResource(R.string.common_media_and_files)) {
-                    push(Screen.Media(chat.conversation))
-                },
-            )
-            HorizontalDivider(color = Palette.Divider)
-            EntryRow(
-                RowEntry("gear", stringResource(R.string.common_conversation_settings)) {
-                    push(Screen.ConversationSettings(chat.conversation))
-                },
-            )
+            EntryRow(RowEntry("photo-film", stringResource(R.string.common_media_and_files)) { push(Screen.Media(chat.conversation)) })
 
-            // Part 6 §6.6.7: an introduction asks the other contact first.
-            var isIntroducing by remember { mutableStateOf(false) }
-            var introduced by remember { mutableStateOf<String?>(null) }
-            HorizontalDivider(color = Palette.Divider)
-            EntryRow(
-                RowEntry("user-plus", stringResource(R.string.verify_introduce), introduced) { isIntroducing = true },
-            )
-            if (isIntroducing) {
-                ActionSheet(
-                    stringResource(R.string.verify_introduce_title, chat.title),
-                    Core.chats.filter { !it.isGroup && !it.conversation.id.contentEquals(chat.conversation.id) }
-                        .map { other ->
-                            RowEntry("comment", other.title) {
-                                Core.requestIntroduction(to = other, about = chat) {
-                                    introduced = UiText.get(R.string.verify_asked, other.title)
-                                }
-                            }
-                        },
-                    onDismiss = { isIntroducing = false },
+            SectionLabel(stringResource(R.string.common_notifications))
+            AlertRows(chat)
+
+            SectionLabel(stringResource(R.string.details_privacy))
+            DisappearingRow(chat, mayChange = true)
+            // Part 3 §3.9, NET-081: the mode is a control of speed and of
+            // timing cover. A group takes the mode of the device.
+            mode?.let {
+                HorizontalDivider(color = Palette.Divider)
+                EntryRow(
+                    RowEntry("hourglass-half", stringResource(R.string.verify_delivery_speed), modeLabel(it)) {
+                        sheet = ContactSheet.Speed
+                    },
+                    leads = false,
                 )
             }
+            receipts?.let { now ->
+                val change = { next: Receipts ->
+                    receipts = next
+                    Core.setReceipts(chat.conversation, next)
+                }
+                HorizontalDivider(color = Palette.Divider)
+                ToggleRow(stringResource(R.string.verify_delivery_receipts), now.delivery, icon = "check") {
+                    change(Receipts(it, now.read))
+                }
+                HorizontalDivider(color = Palette.Divider)
+                ToggleRow(stringResource(R.string.verify_read_receipts), now.read, icon = "eye") {
+                    change(Receipts(now.delivery, it))
+                }
+            }
+            // DEV-321: the user prohibits the forward of the messages of the
+            // user. DEV-326: the limit of the policy shows while it is on.
+            forward?.let { now ->
+                HorizontalDivider(color = Palette.Divider)
+                ToggleRow(stringResource(R.string.verify_no_forwarding), now.own, icon = "share-nodes") { on ->
+                    forward = ForwardRules(on, now.peer)
+                    Core.setForwardProhibited(chat.conversation, on)
+                }
+                if (now.own) Note(UiText.get(R.string.umbra_ui_dev_326))
+            }
 
+            Spacer(Modifier.height(20.dp))
+            // Part 6 §6.6.7: an introduction asks the other contact first.
+            EntryRow(
+                RowEntry("user-plus", stringResource(R.string.verify_introduce), introduced) { sheet = ContactSheet.Introduce },
+                leads = false,
+            )
             // Part 4 §4.7.3: a piece of the recovery of this contact.
-            var held by remember { mutableStateOf<uniffi.umbra_ffi.FfiHeldShare?>(null) }
-            LaunchedEffect(chat.conversation, Core.revision) { Core.heldShare(chat.conversation) { held = it } }
             held?.let { share ->
                 HorizontalDivider(color = Palette.Divider)
                 EntryRow(
@@ -131,154 +164,77 @@ fun ContactDetailsScreen(chat: Chat, onBack: () -> Unit, onMessage: () -> Unit, 
                             share.count.toInt(),
                             share.threshold.toInt(),
                         ),
-                    ) {
-                        push(Screen.HeldShare(chat.conversation))
-                    },
+                    ) { push(Screen.HeldShare(chat.conversation)) },
                 )
             }
-
             HorizontalDivider(color = Palette.Divider)
-            var isBlocked by remember { mutableStateOf(false) }
-            LaunchedEffect(chat.conversation, Core.revision) {
-                Core.isBlocked(chat.conversation) { isBlocked = it }
-            }
             EntryRow(
-                RowEntry(
-                    "ban",
-                    if (isBlocked) stringResource(R.string.common_unblock) else stringResource(R.string.common_block),
-                ) {
-                    push(Screen.BlockContact(chat.conversation))
+                RowEntry("ban", stringResource(if (isBlocked) R.string.common_unblock else R.string.common_block)) {
+                    sheet = ContactSheet.Block
                 },
+                leads = false,
             )
-
-            // DEV-342, DEV-343: the views of the contact close when it
-            // leaves the list.
-            var isDeleting by remember { mutableStateOf(false) }
             HorizontalDivider(color = Palette.Divider)
-            EntryRow(RowEntry("trash-can", stringResource(R.string.verify_delete_contact)) { isDeleting = true })
-            if (isDeleting) {
-                val context = LocalContext.current
-                val notTold = stringResource(R.string.umbra_ui_dev_342)
-                ActionSheet(
-                    stringResource(R.string.verify_delete_contact_q, chat.title),
-                    listOf(
-                        RowEntry("trash-can", stringResource(R.string.verify_delete_contact)) {
-                            Core.removeContact(context, chat.conversation)
-                        },
-                    ),
-                    note = if (held != null) "$notTold ${stringResource(R.string.umbra_ui_dev_343)}" else notTold,
-                    onDismiss = { isDeleting = false },
-                )
-            }
-        }
-    }
-}
-
-/** The settings of one conversation: its timer, and the receipts that this device sends. */
-@Composable
-fun ConversationSettingsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
-    var receipts by remember { mutableStateOf<Receipts?>(null) }
-    var timer by remember { mutableStateOf<UInt?>(null) }
-    var alert by remember { mutableStateOf<UByte?>(null) }
-    var mode by remember { mutableStateOf<Int?>(null) }
-    var isChoosingMode by remember { mutableStateOf(false) }
-    var forward by remember { mutableStateOf<ForwardRules?>(null) }
-
-    // DEV-326: the limit of the policy shows when the user turns it on.
-    var forwardNotice by remember { mutableStateOf(false) }
-    LaunchedEffect(forwardNotice) {
-        if (forwardNotice) {
-            delay(6_000)
-            forwardNotice = false
+            EntryRow(
+                RowEntry("trash-can", stringResource(R.string.verify_delete_contact)) { sheet = ContactSheet.Delete },
+                leads = false,
+            )
+            Spacer(Modifier.height(20.dp))
         }
     }
 
-    LaunchedEffect(chat.conversation, Core.revision) { Core.forwardRules(chat.conversation) { forward = it } }
-    LaunchedEffect(chat.conversation) { Core.privacyMode(chat.conversation) { mode = it } }
-    LaunchedEffect(chat.conversation) { Core.receipts(chat.conversation) { receipts = it } }
-    LaunchedEffect(chat.conversation, Core.revision) { Core.alertSetting(chat.conversation) { alert = it } }
-    LaunchedEffect(chat.conversation, Core.revision) { Core.timer(chat.conversation) { timer = it.seconds } }
-
-    val change = { next: Receipts ->
-        receipts = next
-        Core.setReceipts(chat.conversation, next)
-    }
-
-    Column(Modifier.fillMaxSize()) {
-        BackBar(stringResource(R.string.common_conversation_settings), onBack = onBack)
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
-            alert?.let {
-                EntryRow(
-                    RowEntry("bell", stringResource(R.string.common_notifications), alertLabel(it)) {
-                        push(Screen.Alerts(chat.conversation))
-                    },
-                )
-                HorizontalDivider(color = Palette.Divider)
-            }
-            timer?.let {
-                EntryRow(
-                    RowEntry("clock", stringResource(R.string.common_disappearing_messages), timerLabel(it)) {
-                        push(Screen.Disappearing(chat.conversation))
-                    },
-                )
-                HorizontalDivider(color = Palette.Divider)
-            }
-
-            // Part 3 §3.9, NET-081: the mode is a control of speed and of
-            // timing cover. A group takes the mode of the device.
-            if (!chat.isGroup) {
-                mode?.let {
-                    EntryRow(
-                        RowEntry("hourglass-half", stringResource(R.string.verify_delivery_speed), modeLabel(it)) {
-                            isChoosingMode = true
-                        },
-                    )
-                    HorizontalDivider(color = Palette.Divider)
-                }
-            }
-
-            // The switches stay in one group, below the rows that open a screen.
-            receipts?.let { now ->
-                ToggleRow(stringResource(R.string.verify_delivery_receipts), now.delivery) { change(Receipts(it, now.read)) }
-                HorizontalDivider(color = Palette.Divider)
-                ToggleRow(stringResource(R.string.verify_read_receipts), now.read) { change(Receipts(now.delivery, it)) }
-                HorizontalDivider(color = Palette.Divider)
-            }
-
-            // DEV-321: the user prohibits the forward of the messages of
-            // the user. A group has its switch in the group details.
-            if (!chat.isGroup) {
-                forward?.let { now ->
-                    ToggleRow(stringResource(R.string.verify_no_forwarding), now.own) { on ->
-                        forward = ForwardRules(on, now.peer)
-                        forwardNotice = on
-                        Core.setForwardProhibited(chat.conversation, on)
-                    }
-                }
-            }
-
-            if (forwardNotice) {
-                Spacer(Modifier.height(12.dp))
-                Note(UiText.get(R.string.umbra_ui_dev_326))
-            }
-        }
-    }
-
-    if (isChoosingMode) {
-        ActionSheet(
-            title = stringResource(R.string.verify_delivery_speed),
-            entries = listOf(0, 1, 2).map { choice ->
-                RowEntry("hourglass-half", modeLabel(choice)) {
+    val close = { sheet = null }
+    when (sheet) {
+        ContactSheet.Speed -> ChoiceSheet(
+            stringResource(R.string.verify_delivery_speed),
+            listOf(0, 1, 2).map { choice ->
+                SheetChoice(modeLabel(choice), mode == choice) {
                     mode = choice
                     Core.keepPrivacyMode(chat.conversation, choice)
-                    isChoosingMode = false
                 }
             },
             note = stringResource(R.string.verify_speed_note),
-            onDismiss = { isChoosingMode = false },
+            onDismiss = close,
         )
+        ContactSheet.Introduce -> ActionSheet(
+            stringResource(R.string.verify_introduce_title, chat.title),
+            Core.chats.filter { !it.isGroup && !it.conversation.id.contentEquals(chat.conversation.id) }
+                .map { other ->
+                    RowEntry("comment", other.title) {
+                        Core.requestIntroduction(to = other, about = chat) {
+                            introduced = UiText.get(R.string.verify_asked, other.title)
+                        }
+                    }
+                },
+            onDismiss = close,
+        )
+        ContactSheet.Block -> BlockSheet(
+            chat.title,
+            isBlocked,
+            onSet = { blocked -> Core.setBlocked(context, chat.conversation, blocked) },
+            onDismiss = close,
+        )
+        // DEV-342, DEV-343: the views of the contact close when it leaves
+        // the list.
+        ContactSheet.Delete -> {
+            val notTold = stringResource(R.string.umbra_ui_dev_342)
+            ActionSheet(
+                stringResource(R.string.verify_delete_contact_q, chat.title),
+                listOf(
+                    RowEntry("trash-can", stringResource(R.string.verify_delete_contact)) {
+                        Core.removeContact(context, chat.conversation)
+                    },
+                ),
+                note = if (held != null) "$notTold ${stringResource(R.string.umbra_ui_dev_343)}" else notTold,
+                onDismiss = close,
+            )
+        }
+        null -> Unit
     }
 }
+
+/** The sheets that a row of the contact details opens. */
+private enum class ContactSheet { Speed, Introduce, Block, Delete }
 
 private fun modeLabel(mode: Int): String = when (mode) {
     0 -> UiText.get(R.string.verify_speed_fast)

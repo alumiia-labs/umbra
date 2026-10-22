@@ -247,8 +247,9 @@ fun ConnectionScreen(onBack: () -> Unit) {
 /** A row with a line icon, a title and a smaller line. It leads nowhere. */
 @Composable
 fun FactRow(icon: String, title: String, detail: String) {
+    // The row takes no press, and its text stays in line with the rows that do.
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = PressInset, vertical = 14.dp),
+        Modifier.fillMaxWidth().pressShadeInColumn().padding(horizontal = PressInset, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         FaIcon(icon, size = 20.dp, tint = Palette.Text)

@@ -41,9 +41,11 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -55,6 +57,7 @@ import androidx.compose.material3.ModalBottomSheetProperties
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -845,7 +848,6 @@ class RowEntry(
  * A sheet from the bottom with a handle, a title, and one row for each
  * entry. The app uses no popup menu.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ActionSheet(
     title: String,
@@ -854,8 +856,72 @@ fun ActionSheet(
     top: (@Composable () -> Unit)? = null,
     onDismiss: () -> Unit,
 ) {
+    Sheet(title, note, onDismiss) {
+        if (top != null) {
+            top()
+            Spacer(Modifier.height(8.dp))
+        }
+        entries.forEachIndexed { index, entry ->
+            if (index > 0) HorizontalDivider(color = Palette.Divider)
+            EntryRow(entry, leads = false, afterClick = onDismiss)
+        }
+    }
+}
+
+/** One answer of a [ChoiceSheet]. */
+class SheetChoice(
+    val title: String,
+    val isChosen: Boolean,
+    val detail: String? = null,
+    val onChoose: () -> Unit,
+)
+
+/**
+ * The choice of one value from a short list. A tap sets the value and
+ * closes the sheet, thus a setting with a few values takes no view of its
+ * own and no save.
+ */
+@Composable
+fun ChoiceSheet(title: String, choices: List<SheetChoice>, note: String? = null, onDismiss: () -> Unit) {
+    Sheet(title, note, onDismiss) {
+        choices.forEachIndexed { index, choice ->
+            if (index > 0) HorizontalDivider(color = Palette.Divider)
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .pressShadeInColumn()
+                    .press(role = Role.RadioButton) {
+                        onDismiss()
+                        choice.onChoose()
+                    }
+                    .padding(horizontal = PressInset, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                RadioMark(isChosen = choice.isChosen)
+                Spacer(Modifier.width(14.dp))
+                Column {
+                    Text(choice.title)
+                    choice.detail?.let {
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Palette.TextSecondary,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** The frame of each sheet: the handle, the title, the rows, and a note. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun Sheet(title: String, note: String?, onDismiss: () -> Unit, rows: @Composable () -> Unit) {
     ModalBottomSheet(
         onDismissRequest = onDismiss,
+        // A sheet opens to its full height, thus its note shows with no drag.
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         // IMP-055: a sheet is a window of its own, above the cover. Before
         // Android 13 no call keeps the task snapshot from it, thus there
         // the sheet takes no snapshot at all.
@@ -877,17 +943,12 @@ fun ActionSheet(
             )
         },
     ) {
-        Column(Modifier.padding(start = 20.dp, end = 20.dp, bottom = 24.dp)) {
+        // A long list of a sheet, such as the contacts of an introduction,
+        // scrolls inside the sheet.
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(start = 20.dp, end = 20.dp, bottom = 24.dp)) {
             Text(title, style = MaterialTheme.typography.headlineSmall)
             Spacer(Modifier.height(12.dp))
-            if (top != null) {
-                top()
-                Spacer(Modifier.height(8.dp))
-            }
-            entries.forEachIndexed { index, entry ->
-                if (index > 0) HorizontalDivider(color = Palette.Divider)
-                EntryRow(entry, afterClick = onDismiss)
-            }
+            rows()
             if (note != null) {
                 Spacer(Modifier.height(12.dp))
                 Note(note)
@@ -972,9 +1033,12 @@ fun Modifier.pressLong(onClick: () -> Unit, onLongClick: () -> Unit): Modifier {
     )
 }
 
-/** A row with a line icon, a title, a smaller line, and a chevron. */
+/**
+ * A row with a line icon, a title, and a smaller line. A row that opens a
+ * view has a chevron. A row that acts, or opens a sheet, has none.
+ */
 @Composable
-fun EntryRow(entry: RowEntry, afterClick: () -> Unit = {}) {
+fun EntryRow(entry: RowEntry, leads: Boolean = true, afterClick: () -> Unit = {}) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -998,21 +1062,34 @@ fun EntryRow(entry: RowEntry, afterClick: () -> Unit = {}) {
                 )
             }
         }
-        FaIcon("chevron-right", size = 14.dp, tint = Palette.TextSecondary)
+        if (leads) FaIcon("chevron-right", size = 14.dp, tint = Palette.TextSecondary)
     }
 }
 
-/** A row with a title and a switch. The row takes the tap. */
+/**
+ * A row with a title and a switch. The row takes the tap. Among rows with
+ * icons it takes one too, thus each title starts on one line.
+ */
 @Composable
-fun ToggleRow(title: String, isOn: Boolean, detail: String? = null, onChange: (Boolean) -> Unit) {
+fun ToggleRow(
+    title: String,
+    isOn: Boolean,
+    detail: String? = null,
+    icon: String? = null,
+    onChange: (Boolean) -> Unit,
+) {
     Row(
         Modifier
             .fillMaxWidth()
             .pressShadeInColumn()
             .pressToggle(isOn, onChange)
-            .padding(horizontal = PressInset, vertical = 16.dp),
+            .padding(horizontal = PressInset, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (icon != null) {
+            FaIcon(icon, size = 20.dp, tint = Palette.Text)
+            Spacer(Modifier.width(16.dp))
+        }
         Column(Modifier.weight(1f)) {
             Text(title)
             detail?.let {
@@ -1026,6 +1103,17 @@ fun ToggleRow(title: String, isOn: Boolean, detail: String? = null, onChange: (B
         Spacer(Modifier.width(12.dp))
         SwitchMark(isOn)
     }
+}
+
+/** The name of a group of rows. It starts on the line of the row icons. */
+@Composable
+fun SectionLabel(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.labelLarge,
+        color = Palette.TextSecondary,
+        modifier = Modifier.fillMaxWidth().padding(top = 20.dp, bottom = 4.dp),
+    )
 }
 
 /**

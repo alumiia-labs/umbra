@@ -25,6 +25,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -57,16 +58,13 @@ sealed interface Screen {
     data object YourInvitation : Screen
     data object UseInvitation : Screen
     data object ScanInvitation : Screen
-    data object AppLock : Screen
     data object Connection : Screen
-    data object AutoLock : Screen
     data object Notifications : Screen
     data object Setup : Screen
     data object ResetIdentity : Screen
     data object SocialRecovery : Screen
     data object UserHalf : Screen
     data class HeldShare(val conversation: Conversation) : Screen
-    data object AutoDownload : Screen
     data object ChangePassphrase : Screen
     data object RecoveryCode : Screen
     data object RootSeed : Screen
@@ -86,12 +84,7 @@ sealed interface Screen {
     data class Search(val scope: Conversation?) : Screen
     data class ContactDetails(val conversation: Conversation) : Screen
     data class EditName(val conversation: Conversation) : Screen
-    data class BlockContact(val conversation: Conversation) : Screen
-    data class BlockMember(val conversation: Conversation, val index: UShort, val name: String) : Screen
-    data class ConversationSettings(val conversation: Conversation) : Screen
-    data class Disappearing(val conversation: Conversation) : Screen
     data class NewPoll(val conversation: Conversation) : Screen
-    data class Alerts(val conversation: Conversation) : Screen
     data class Verify(val conversation: Conversation) : Screen
     data class VerifyCode(val conversation: Conversation, val starts: Boolean) : Screen
     data class SafetyNumber(val conversation: Conversation) : Screen
@@ -101,20 +94,6 @@ sealed interface Screen {
     data class Media(val conversation: Conversation) : Screen
     data class GroupDetails(val conversation: Conversation) : Screen
     data class InviteToGroup(val conversation: Conversation) : Screen
-    data class GroupMembers(val conversation: Conversation) : Screen
-    data class RemoveMember(
-        val conversation: Conversation,
-        val index: UShort,
-        val name: String,
-    ) : Screen
-    data class LeaveGroup(val conversation: Conversation) : Screen
-    data class MemberRole(
-        val conversation: Conversation,
-        val index: UShort,
-        val name: String,
-        val role: uniffi.umbra_ffi.FfiRole,
-        val ownRole: uniffi.umbra_ffi.FfiRole,
-    ) : Screen
 
     /** The conversation of a view of one contact. */
     val contact: Conversation?
@@ -122,13 +101,8 @@ sealed interface Screen {
             is Chat -> conversation
             is ContactDetails -> conversation
             is EditName -> conversation
-            is BlockContact -> conversation
-            is BlockMember -> conversation
-            is ConversationSettings -> conversation
             is HeldShare -> conversation
-            is Disappearing -> conversation
             is NewPoll -> conversation
-            is Alerts -> conversation
             is Verify -> conversation
             is VerifyCode -> conversation
             is SafetyNumber -> conversation
@@ -138,10 +112,6 @@ sealed interface Screen {
             is Media -> conversation
             is GroupDetails -> conversation
             is InviteToGroup -> conversation
-            is GroupMembers -> conversation
-            is RemoveMember -> conversation
-            is LeaveGroup -> conversation
-            is MemberRole -> conversation
             else -> null
         }
 }
@@ -214,9 +184,7 @@ private fun OpenApp() {
             Screen.YourInvitation -> YourInvitationScreen(pop)
             Screen.UseInvitation -> UseInvitationScreen(pop, push)
             Screen.ScanInvitation -> ScanInvitationScreen(pop)
-            Screen.AppLock -> AppLockScreen(pop, push)
             Screen.Connection -> ConnectionScreen(pop)
-            Screen.AutoLock -> AutoLockScreen(pop)
             Screen.Notifications -> NotificationsScreen(pop)
             Screen.Setup -> SetupScreen(pop, push)
             Screen.ResetIdentity -> ResetIdentityScreen(pop)
@@ -226,7 +194,6 @@ private fun OpenApp() {
                 stringResource(R.string.main_user_half_body),
                 pop,
             ) { Core.userHalf(it) }
-            Screen.AutoDownload -> AutoDownloadScreen(pop)
             Screen.ChangePassphrase -> ChangePassphraseScreen(pop)
             Screen.RecoveryCode -> RecoveryCodeScreen(pop, push)
             // IDN-003: the seed that rebuilds the identity and no contact.
@@ -281,34 +248,20 @@ private fun ContactView(
             push = push,
         )
         is Screen.EditName -> RenameContactScreen(chat, pop)
-        is Screen.BlockContact -> BlockContactScreen(chat, pop)
-        is Screen.BlockMember -> BlockMemberScreen(chat, top.index, top.name, pop)
-        is Screen.ConversationSettings -> ConversationSettingsScreen(chat, pop, push)
         is Screen.HeldShare -> SecretDigitsScreen(
             stringResource(R.string.main_held_share_title, chat.title),
             stringResource(R.string.main_held_share_body, chat.title),
             pop,
         ) { Core.heldShareDigits(chat.conversation, it) }
-        is Screen.Disappearing -> DisappearingScreen(chat, pop)
         is Screen.NewPoll -> NewPollScreen(chat, pop)
-        is Screen.Alerts -> AlertsScreen(chat, pop)
         is Screen.Verify -> VerifyScreen(chat, pop, push)
         is Screen.VerifyCode -> VerifyCodeScreen(chat, top.starts, pop)
         is Screen.SafetyNumber -> SafetyNumberScreen(chat, pop)
         is Screen.Photo -> PhotoScreen(top.line, chat, pop)
         is Screen.Video -> VideoScreen(top.line, pop)
         is Screen.Media -> MediaScreen(chat, pop, push)
-        is Screen.GroupDetails -> GroupDetailsScreen(chat, pop, push)
+        is Screen.GroupDetails -> GroupDetailsScreen(chat, pop, onLeft = { setStack(listOf()) }, push = push)
         is Screen.InviteToGroup -> InviteToGroupScreen(chat, pop)
-        is Screen.GroupMembers -> GroupMembersScreen(chat, pop, push)
-        is Screen.RemoveMember -> RemoveMemberScreen(chat, top.index, top.name, pop) {
-            // The role view of a member that left shows nothing true.
-            val under = stack.dropLast(1).lastOrNull()
-            setStack(stack.dropLast(if (under is Screen.MemberRole) 2 else 1))
-        }
-        is Screen.LeaveGroup -> LeaveGroupScreen(chat, pop) { setStack(listOf()) }
-        is Screen.MemberRole ->
-            MemberRoleScreen(chat, top.index, top.name, top.role, top.ownRole, pop, push)
         is Screen.ScanSafetyNumber -> ScanSafetyNumberScreen(chat, pop)
         else -> Unit
     }
@@ -679,7 +632,6 @@ private fun ChatOptions(
             add(RowEntry("circle-info", stringResource(R.string.main_group_details)) { push(Screen.GroupDetails(chat.conversation)) })
         } else {
             add(RowEntry("circle-info", stringResource(R.string.main_contact_details)) { push(Screen.ContactDetails(chat.conversation)) })
-            add(RowEntry("gear", stringResource(R.string.common_conversation_settings)) { push(Screen.ConversationSettings(chat.conversation)) })
         }
         add(RowEntry("trash-can", stringResource(R.string.main_delete_conversation)) { onDelete(chat) })
     }
@@ -844,113 +796,139 @@ fun EmptyState(title: String) {
     )
 }
 
+/**
+ * The settings of this device in four groups. A setting with a few values
+ * opens a sheet and a switch turns in place, thus a view of its own holds
+ * more than one control.
+ */
 @Composable
 private fun SettingsTab(push: (Screen) -> Unit) {
+    val context = LocalContext.current
+    var sheet by remember { mutableStateOf<SettingSheet?>(null) }
+
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
         TabTitle(stringResource(R.string.main_tab_settings))
-        // This row leads to the settings of the lock. The lock
-        // itself is the icon of the bar.
-        SettingRow("lock", stringResource(R.string.main_app_lock), stringResource(R.string.main_app_lock_detail)) { push(Screen.AppLock) }
-        SettingRow("bell", stringResource(R.string.common_notifications), Modes.mode(LocalContext.current).label) { push(Screen.Notifications) }
-
-        var isChoosingLook by remember { mutableStateOf(false) }
-        SettingRow("circle-half-stroke", stringResource(R.string.main_appearance), Appearances.choice.label) { isChoosingLook = true }
-        if (isChoosingLook) {
-            val context = LocalContext.current
-            ActionSheet(
-                title = stringResource(R.string.main_appearance),
-                entries = Appearance.entries.map { look ->
-                    RowEntry(if (look == Appearances.choice) "check" else "circle-half-stroke", look.label) {
-                        Appearances.choose(context, look)
-                        isChoosingLook = false
-                    }
+        Column(Modifier.padding(horizontal = 20.dp)) {
+            SectionLabel(stringResource(R.string.settings_general))
+            EntryRow(
+                RowEntry("circle-half-stroke", stringResource(R.string.main_appearance), Appearances.choice.label) {
+                    sheet = SettingSheet.Appearance
                 },
-                onDismiss = { isChoosingLook = false },
+                leads = false,
             )
-        }
-
-        SettingRow(
-            "comment",
-            stringResource(R.string.main_typing_indicators),
-            stringResource(if (Core.typingEnabled) R.string.common_on else R.string.common_off),
-        ) {
-            Core.turnTyping(!Core.typingEnabled)
-        }
-
-        // DEV-020: the setting states its trade where the user sets it.
-        var isChoosingAge by remember { mutableStateOf(false) }
-        SettingRow("clock", stringResource(R.string.main_keep_history), historyLabel(Core.historyAge)) { isChoosingAge = true }
-        if (isChoosingAge) {
-            ActionSheet(
-                title = stringResource(R.string.main_keep_history),
-                entries = HISTORY_AGES.map { seconds ->
-                    RowEntry("clock", historyLabel(seconds)) {
-                        Core.keepHistoryFor(seconds)
-                        isChoosingAge = false
-                    }
-                },
-                note = stringResource(R.string.main_keep_history_note),
-                onDismiss = { isChoosingAge = false },
-            )
-        }
-
-        // DEV-202: a draft on the other devices is text that no one sent.
-        if (Core.devices.size > 1) {
-            SettingRow(
-                "pen",
-                stringResource(R.string.main_draft_sync),
-                stringResource(if (Core.draftSync) R.string.common_on else R.string.common_off),
-            ) {
-                Core.turnDraftSync(!Core.draftSync)
+            HorizontalDivider(color = Palette.Divider)
+            EntryRow(RowEntry("bell", stringResource(R.string.common_notifications), Modes.mode(context).label) { push(Screen.Notifications) })
+            HorizontalDivider(color = Palette.Divider)
+            ToggleRow(stringResource(R.string.main_typing_indicators), Core.typingEnabled, icon = "comment") { Core.turnTyping(it) }
+            // DEV-202: a draft on the other devices is text that no one sent.
+            if (Core.devices.size > 1) {
+                HorizontalDivider(color = Palette.Divider)
+                ToggleRow(stringResource(R.string.main_draft_sync), Core.draftSync, icon = "pen") { Core.turnDraftSync(it) }
             }
-        }
 
-        SettingRow("download", stringResource(R.string.main_automatic_download), autoDownloadLabel(Core.autoDownloadLimit, Core.autoDownloadWifiOnly)) {
-            push(Screen.AutoDownload)
-        }
-
-        val context = LocalContext.current
-        LaunchedEffect(Unit) { Core.readBackup() }
-        val backupAt = Core.lastBackupAt
-        val backup = if (backupAt == null) {
-            stringResource(R.string.main_no_backup_yet)
-        } else {
-            stringResource(R.string.main_last_backup, timeLabel(context, backupAt * 1_000))
-        }
-
-        // The recovery code and the backups belong to the device that owns
-        // the channels (Part 7 §7.7).
-        if (Core.ownsChannels) {
-            SettingRow("key", stringResource(R.string.common_recovery_code), backup) { push(Screen.RecoveryCode) }
-        }
-        SettingRow("laptop", stringResource(R.string.main_linked_devices), devicesLabel(Core.devices.size)) { push(Screen.Devices) }
-        if (Core.ownsChannels) {
-            SettingRow(
-                "rotate",
-                stringResource(R.string.common_reset_identity),
-                stringResource(R.string.main_reset_identity_detail),
-            ) { push(Screen.ResetIdentity) }
-        }
-
-        // DEV-008: a device leaves each set by an explicit local wipe.
-        var isErasing by remember { mutableStateOf(false) }
-        SettingRow(
-            "trash-can",
-            stringResource(R.string.main_erase_this_device),
-            stringResource(R.string.main_erase_detail),
-        ) { isErasing = true }
-        if (isErasing) {
-            ActionSheet(
-                stringResource(R.string.main_erase_q),
-                listOf(RowEntry("trash-can", stringResource(R.string.main_erase_this_device)) { Core.eraseDevice(context) }),
-                note = stringResource(R.string.main_erase_note),
-                onDismiss = { isErasing = false },
+            SectionLabel(stringResource(R.string.settings_storage))
+            EntryRow(
+                RowEntry("clock", stringResource(R.string.main_keep_history), historyLabel(Core.historyAge)) {
+                    sheet = SettingSheet.History
+                },
+                leads = false,
             )
+            HorizontalDivider(color = Palette.Divider)
+            EntryRow(
+                RowEntry("download", stringResource(R.string.main_automatic_download), downloadLimitLabel(Core.autoDownloadLimit)) {
+                    sheet = SettingSheet.Download
+                },
+                leads = false,
+            )
+            // IMP-168: with no automatic download, no file waits for Wi-Fi.
+            if (Core.autoDownloadLimit != 0uL) {
+                HorizontalDivider(color = Palette.Divider)
+                ToggleRow(stringResource(R.string.lock_only_on_wifi), Core.autoDownloadWifiOnly, icon = "wifi") {
+                    Core.setAutoDownload(Core.autoDownloadLimit, it)
+                }
+            }
+
+            SectionLabel(stringResource(R.string.settings_security))
+            EntryRow(RowEntry("key", stringResource(R.string.common_change_passphrase)) { push(Screen.ChangePassphrase) })
+            HorizontalDivider(color = Palette.Divider)
+            EntryRow(
+                RowEntry("lock", stringResource(R.string.lock_auto_lock), autoLockLabel(Core.autoLockSeconds)) {
+                    sheet = SettingSheet.AutoLock
+                },
+                leads = false,
+            )
+
+            SectionLabel(stringResource(R.string.settings_identity))
+            LaunchedEffect(Unit) { Core.readBackup() }
+            val backupAt = Core.lastBackupAt
+            val backup = if (backupAt == null) {
+                stringResource(R.string.main_no_backup_yet)
+            } else {
+                stringResource(R.string.main_last_backup, timeLabel(context, backupAt * 1_000))
+            }
+            // The recovery code and the backups belong to the device that
+            // owns the channels (Part 7 §7.7).
+            if (Core.ownsChannels) {
+                EntryRow(RowEntry("shield-halved", stringResource(R.string.common_recovery_code), backup) { push(Screen.RecoveryCode) })
+                HorizontalDivider(color = Palette.Divider)
+            }
+            EntryRow(RowEntry("laptop", stringResource(R.string.main_linked_devices), devicesLabel(Core.devices.size)) { push(Screen.Devices) })
+            HorizontalDivider(color = Palette.Divider)
+            if (Core.ownsChannels) {
+                EntryRow(
+                    RowEntry("rotate", stringResource(R.string.common_reset_identity), stringResource(R.string.main_reset_identity_detail)) {
+                        push(Screen.ResetIdentity)
+                    },
+                )
+                HorizontalDivider(color = Palette.Divider)
+            }
+            // DEV-008: a device leaves each set by an explicit local wipe.
+            EntryRow(
+                RowEntry("trash-can", stringResource(R.string.main_erase_this_device), stringResource(R.string.main_erase_detail)) {
+                    sheet = SettingSheet.Erase
+                },
+                leads = false,
+            )
+            Spacer(Modifier.height(20.dp))
         }
 
         LaunchedEffect(Unit) { Core.readDevices() }
     }
+
+    val close = { sheet = null }
+    when (sheet) {
+        SettingSheet.Appearance -> ChoiceSheet(
+            stringResource(R.string.main_appearance),
+            Appearance.entries.map { look ->
+                SheetChoice(look.label, look == Appearances.choice) { Appearances.choose(context, look) }
+            },
+            onDismiss = close,
+        )
+        // DEV-020: the setting states its trade where the user sets it.
+        SettingSheet.History -> ChoiceSheet(
+            stringResource(R.string.main_keep_history),
+            HISTORY_AGES.map { seconds ->
+                SheetChoice(historyLabel(seconds), historyLabel(seconds) == historyLabel(Core.historyAge)) {
+                    Core.keepHistoryFor(seconds)
+                }
+            },
+            note = stringResource(R.string.main_keep_history_note),
+            onDismiss = close,
+        )
+        SettingSheet.Download -> AutoDownloadSheet(close)
+        SettingSheet.AutoLock -> AutoLockSheet(close)
+        SettingSheet.Erase -> ActionSheet(
+            stringResource(R.string.main_erase_q),
+            listOf(RowEntry("trash-can", stringResource(R.string.main_erase_this_device)) { Core.eraseDevice(context) }),
+            note = stringResource(R.string.main_erase_note),
+            onDismiss = close,
+        )
+        null -> Unit
+    }
 }
+
+/** The sheets that a row of the settings opens. */
+private enum class SettingSheet { Appearance, History, Download, AutoLock, Erase }
 
 /** The periods of the history that the settings offer, in seconds. */
 private val HISTORY_AGES = listOf(86_400L, 30L * 86_400, 365L * 86_400, -1L)
@@ -967,29 +945,6 @@ private fun historyLabel(seconds: Long): String = when {
 private fun devicesLabel(count: Int): String = when (count) {
     0, 1 -> UiText.get(R.string.main_no_other_device)
     else -> UiText.plural(R.plurals.main_other_devices, count - 1, count - 1)
-}
-
-@Composable
-private fun SettingRow(icon: String, title: String, detail: String, onClick: (() -> Unit)?) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .pressShadeInList()
-            .then(if (onClick != null) Modifier.press(onClick = onClick) else Modifier)
-            .padding(horizontal = PressInset, vertical = 14.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        FaIcon(icon, size = 20.dp, tint = Palette.Text)
-        Spacer(Modifier.width(18.dp))
-        Column {
-            Text(title)
-            Text(
-                detail,
-                style = MaterialTheme.typography.bodySmall,
-                color = Palette.TextSecondary,
-            )
-        }
-    }
 }
 
 /** `MSG_TTL` of Part 3: no record waits at a relay for longer. */

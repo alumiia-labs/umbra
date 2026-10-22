@@ -18,7 +18,6 @@
     <string name="common_delete">Delete</string>
     <string name="common_accept">Accept</string>
     <string name="common_you">You</string>
-    <string name="common_on">On</string>
     <string name="common_off">Off</string>
     <string name="common_photo">Photo</string>
     <string name="common_video">Video</string>
@@ -39,7 +38,6 @@
     <string name="common_umbra_link">UMBRA link</string>
     <string name="common_disappearing_messages">Disappearing messages</string>
     <string name="common_media_and_files">Media and files</string>
-    <string name="common_conversation_settings">Conversation settings</string>
     <string name="common_leave_group">Leave group</string>
     <string name="common_delete_on_my_devices">Delete on my devices</string>
     <string name="common_remove_for_everyone">Remove for everyone</string>
@@ -141,8 +139,11 @@
     <string name="main_no_contacts">No contacts yet.</string>
 
     <!-- Ui.kt: the settings tab. -->
-    <string name="main_app_lock">App lock</string>
-    <string name="main_app_lock_detail">Passphrase and auto-lock</string>
+    <!-- The groups of the rows of the settings tab. -->
+    <string name="settings_general">General</string>
+    <string name="settings_storage">Storage</string>
+    <string name="settings_security">Security</string>
+    <string name="settings_identity">Identity</string>
     <string name="main_typing_indicators">Typing indicators</string>
     <string name="main_appearance">Appearance</string>
     <string name="main_appearance_system">Same as the phone</string>
@@ -314,6 +315,7 @@
     <!-- Alerts.kt: the notification setting of a conversation. -->
     <string name="alerts_all_messages">All messages</string>
     <string name="alerts_mentions_only">Mentions only</string>
+    <string name="alerts_notify_for">Notify for</string>
     <string name="alerts_sender">Sender</string>
     <string name="alerts_text">Text</string>
     <string name="alerts_default">Default</string>
@@ -502,12 +504,9 @@
 
     <!-- The group details. -->
     <string name="group_details">Group details</string>
-    <string name="group_members">Members</string>
     <string name="group_identifier">Group identifier</string>
-    <string name="group_members_and_roles">Members and roles</string>
     <string name="group_no_forwarding">No forwarding</string>
     <string name="group_forwarding">Forwarding</string>
-    <string name="group_invite_contact">Invite a contact</string>
     <string name="group_lapsed_note">Your membership lapsed while this device was away. Ask a member for a new invitation.</string>
     <string name="group_closed_note">The relays of this group hold it no more. It takes no new message.</string>
     <string name="group_owner_silent_note">An owner has been silent for 30 days. Make another member an owner.</string>
@@ -540,12 +539,14 @@
     <string name="group_add_members">Add members</string>
 
     <!-- The role of one member. -->
-    <string name="group_member_role">Member role</string>
-    <string name="group_save_role">Save role</string>
+    <string name="group_role">Role</string>
+    <!-- %1$s is the name of a member. -->
+    <string name="group_role_of">Role of %1$s</string>
+    <!-- %1$d is the count of all members. -->
+    <string name="group_show_all_members">Show all %1$d members</string>
     <string name="group_remove_from_group">Remove from group</string>
 
     <!-- The removal of one member. %1$s is the name of the member. -->
-    <string name="group_membership">Group membership</string>
     <string name="group_remove_title">Remove %1$s?</string>
     <string name="group_remove_body">They read no message of this group after this. The messages and the files they already hold stay with them.</string>
     <string name="group_remove_member">Remove member</string>
@@ -554,7 +555,6 @@
     <string name="group_leave_title">Leave %1$s?</string>
     <string name="group_leave_body">You read no new message of this group after this. The members keep the messages you already sent.</string>
     <string name="group_one_owner_note">This group has one owner. Give the role to another member first.</string>
-    <string name="group_stay">Stay in group</string>
 
     <!-- The invitation of a contact to a group. -->
     <string name="group_no_contacts">No contacts yet.</string>
@@ -636,6 +636,8 @@
     <string name="verify_delivery_receipts">Send delivery receipts</string>
     <string name="verify_read_receipts">Send read receipts</string>
     <string name="verify_no_forwarding">No forwarding</string>
+    <!-- The group of the privacy settings of a contact and of a group. -->
+    <string name="details_privacy">Privacy</string>
     <string name="verify_speed_note">Each relay holds a message for a random time: none when fast, about 0.15 s when balanced, and about 0.7 s when slow. A longer hold makes the timing of your messages harder to match. Files of this conversation take the same speed.</string>
     <!-- The delivery speeds. -->
     <string name="verify_speed_fast">Fast</string>
@@ -765,7 +767,6 @@
     <string name="contacts_invitation_needs_connection">Connecting. An invitation needs a connection.</string>
     <string name="contacts_use_invitation_instead">Use an invitation instead</string>
     <string name="contacts_new_private_group">New private group</string>
-    <string name="contacts_reusable_link">Reusable link</string>
 
     <!-- Contacts: the invitation of the user. -->
     <string name="contacts_your_invitation">Your invitation</string>
@@ -961,9 +962,7 @@
         <item quantity="one">After %1$d minute of inactivity</item>
         <item quantity="other">After %1$d minutes of inactivity</item>
     </plurals>
-    <string name="lock_app_lock">App lock</string>
     <string name="lock_auto_lock">Auto-lock</string>
-    <string name="lock_lock_now">Lock now</string>
     <string name="lock_no_message_while_locked">While UMBRA is locked, no message arrives.</string>
     <string name="lock_message_waits_while_locked">While UMBRA is locked, an alert shows that a message waits. The message arrives at the unlock.</string>
 
@@ -972,7 +971,6 @@
     <string name="lock_download_up_to">Up to %1$d MB</string>
     <string name="lock_download_any_size">Any size</string>
     <!-- %1$s is a download limit, for example "Up to 5 MB". -->
-    <string name="lock_download_wifi_only_suffix">%1$s · Wi-Fi only</string>
     <string name="lock_automatic_download">Automatic download</string>
     <string name="lock_only_on_wifi">Only on Wi-Fi</string>
     <string name="lock_download_note">A download at a tap tells the relays of the file when you opened the chat.</string>

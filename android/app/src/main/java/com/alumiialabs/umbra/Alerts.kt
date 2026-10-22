@@ -1,15 +1,5 @@
 package com.alumiialabs.umbra
 
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -18,12 +8,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.unit.dp
 
 /** The notification settings of Part 7 §7.5.9, as the core numbers them. */
 const val ALERT_ALL: UByte = 0u
@@ -38,69 +24,73 @@ fun alertLabel(value: UByte): String = when (value) {
 }
 
 /**
- * The notification setting of one conversation. A pairwise conversation
- * has no mention, thus it offers two choices.
+ * The notification rows of one conversation: the alerts, and the sender and
+ * the text of an alert (`DEV-344`). Each row opens a sheet. A pairwise
+ * conversation has no mention, thus it offers two alert choices.
  */
 @Composable
-fun AlertsScreen(chat: Chat, onBack: () -> Unit) {
+fun AlertRows(chat: Chat) {
     val context = LocalContext.current
-    var chosen by remember { mutableStateOf<UByte?>(null) }
-    LaunchedEffect(chat.conversation) { Core.alertSetting(chat.conversation) { chosen = it } }
+    var alert by remember { mutableStateOf<UByte?>(null) }
     var preview by remember { mutableStateOf<Int?>(null) }
-    var editing by remember { mutableStateOf<Int?>(null) }
-    LaunchedEffect(chat.conversation) { Core.previewSetting(chat.conversation) { preview = it } }
-    val choices = if (chat.isGroup) listOf(ALERT_ALL, ALERT_MENTIONS, ALERT_NONE) else listOf(ALERT_ALL, ALERT_NONE)
+    var editing by remember { mutableStateOf<AlertSheet?>(null) }
+    LaunchedEffect(chat.conversation, Core.revision) {
+        Core.alertSetting(chat.conversation) { alert = it }
+        Core.previewSetting(chat.conversation) { preview = it }
+    }
+    val held = alert ?: return
+    val shown = preview ?: return
 
-    Column(Modifier.fillMaxSize()) {
-        BackBar(stringResource(R.string.common_notifications), onBack = onBack)
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
-            Spacer(Modifier.height(8.dp))
-            chosen?.let { held ->
-                for (value in choices) {
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .pressShadeInColumn()
-                            .press(role = Role.RadioButton) {
-                                chosen = value
-                                Core.setAlert(context, chat.conversation, value)
-                            }
-                            .padding(horizontal = PressInset, vertical = 14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        RadioMark(isChosen = held == value)
-                        Spacer(Modifier.width(14.dp))
-                        Text(alertLabel(value))
+    EntryRow(
+        RowEntry("bell", stringResource(R.string.alerts_notify_for), alertLabel(held)) { editing = AlertSheet.Alerts },
+        leads = false,
+    )
+    HorizontalDivider(color = Palette.Divider)
+    EntryRow(
+        RowEntry("user-group", stringResource(R.string.alerts_sender), previewLabel(shown and 3)) { editing = AlertSheet.Sender },
+        leads = false,
+    )
+    HorizontalDivider(color = Palette.Divider)
+    EntryRow(
+        RowEntry("comment", stringResource(R.string.alerts_text), previewLabel(shown shr 2 and 3)) { editing = AlertSheet.Text },
+        leads = false,
+    )
+
+    val close = { editing = null }
+    when (val open = editing) {
+        AlertSheet.Alerts -> {
+            val choices = if (chat.isGroup) listOf(ALERT_ALL, ALERT_MENTIONS, ALERT_NONE) else listOf(ALERT_ALL, ALERT_NONE)
+            ChoiceSheet(
+                stringResource(R.string.alerts_notify_for),
+                choices.map { value ->
+                    SheetChoice(alertLabel(value), held == value) {
+                        alert = value
+                        Core.setAlert(context, chat.conversation, value)
                     }
-                    HorizontalDivider(color = Palette.Divider)
-                }
-            }
-
-            // DEV-344: the sender and the text of this conversation.
-            preview?.let { held ->
-                Spacer(Modifier.height(12.dp))
-                EntryRow(RowEntry("eye", stringResource(R.string.alerts_sender), previewLabel(held and 3)) { editing = 0 })
-                HorizontalDivider(color = Palette.Divider)
-                EntryRow(RowEntry("comment", stringResource(R.string.alerts_text), previewLabel(held shr 2 and 3)) { editing = 2 })
-                HorizontalDivider(color = Palette.Divider)
-
-                editing?.let { shift ->
-                    ActionSheet(
-                        stringResource(if (shift == 0) R.string.alerts_sender else R.string.alerts_text),
-                        listOf(PREVIEW_DEFAULT, PREVIEW_SHOW, PREVIEW_HIDE).map { field ->
-                            RowEntry(if (held shr shift and 3 == field) "check" else "eye", previewLabel(field)) {
-                                val next = held and (3 shl shift).inv() or (field shl shift)
-                                preview = next
-                                Core.setPreviewSetting(chat.conversation, next)
-                            }
-                        },
-                        onDismiss = { editing = null },
-                    )
-                }
-            }
+                },
+                onDismiss = close,
+            )
         }
+        AlertSheet.Sender, AlertSheet.Text -> {
+            val shift = if (open == AlertSheet.Sender) 0 else 2
+            ChoiceSheet(
+                stringResource(if (open == AlertSheet.Sender) R.string.alerts_sender else R.string.alerts_text),
+                listOf(PREVIEW_DEFAULT, PREVIEW_SHOW, PREVIEW_HIDE).map { field ->
+                    SheetChoice(previewLabel(field), shown shr shift and 3 == field) {
+                        val next = shown and (3 shl shift).inv() or (field shl shift)
+                        preview = next
+                        Core.setPreviewSetting(chat.conversation, next)
+                    }
+                },
+                onDismiss = close,
+            )
+        }
+        null -> Unit
     }
 }
+
+/** The sheets of the notification rows. */
+private enum class AlertSheet { Alerts, Sender, Text }
 
 /** The sender and the text of an alert take these values (`DEV-345`). */
 const val PREVIEW_DEFAULT = 0

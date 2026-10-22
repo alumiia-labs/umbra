@@ -125,6 +125,7 @@ fun RecoveryCodeScreen(onBack: () -> Unit, push: (Screen) -> Unit = {}) {
             EntryRow(
                 RowEntry("user-group", stringResource(R.string.recovery_with_contacts)) { push(Screen.SocialRecovery) },
             )
+            HorizontalDivider(color = Palette.Divider)
             EntryRow(RowEntry("key", stringResource(R.string.recovery_root_seed)) { push(Screen.RootSeed) })
         }
     }
@@ -224,12 +225,7 @@ fun SocialRecoveryScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             }
 
             if (count >= 2) {
-                Text(
-                    stringResource(R.string.recovery_pieces_needed),
-                    style = MaterialTheme.typography.labelLarge,
-                    color = Palette.TextSecondary,
-                    modifier = Modifier.padding(top = 16.dp, bottom = 4.dp),
-                )
+                SectionLabel(stringResource(R.string.recovery_pieces_needed))
                 for (k in 2..count) {
                     Row(
                         Modifier

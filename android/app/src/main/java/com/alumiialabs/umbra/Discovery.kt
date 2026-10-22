@@ -54,42 +54,13 @@ private val LinkPeriods = listOf(
     0uL to R.string.common_no_end,
 )
 
-/** A row of a list that opens a view. */
+/** The row of the handle of the user, in the profile and in the add view. */
 @Composable
-fun OpenRow(icon: String, title: String, detail: String? = null, onClick: () -> Unit) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .pressShadeInColumn()
-            .press(onClick = onClick)
-            .padding(horizontal = PressInset, vertical = 14.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        FaIcon(icon, size = 20.dp, tint = Palette.Text)
-        Spacer(Modifier.width(16.dp))
-        Column(Modifier.weight(1f)) {
-            Text(title)
-            if (detail != null) {
-                Text(
-                    detail,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Palette.TextSecondary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-        }
-    }
-}
-
-/** The small label above a list of a view. */
-@Composable
-private fun SectionLabel(text: String) {
-    Text(
-        text,
-        style = MaterialTheme.typography.labelMedium,
-        color = Palette.TextSecondary,
-        modifier = Modifier.padding(horizontal = PressInset, vertical = 8.dp),
+fun HandleRow(push: (Screen) -> Unit) {
+    EntryRow(
+        RowEntry("globe", stringResource(R.string.common_your_handle), Core.myHandle ?: stringResource(R.string.discovery_none)) {
+            push(Screen.Handle)
+        },
     )
 }
 
@@ -206,13 +177,10 @@ fun PublicLinksScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             Note(UiText.get(R.string.umbra_ui_idn_010))
 
             if (Core.publicLinks.isNotEmpty()) {
-                Spacer(Modifier.height(20.dp))
                 SectionLabel(stringResource(R.string.discovery_your_links))
-                for (link in Core.publicLinks) {
-                    OpenRow("link", shortLink(link.link), remaining(link.expiresAt)) {
-                        push(Screen.PublicLinkView(link.id.toList()))
-                    }
-                    HorizontalDivider(color = Palette.Divider)
+                Core.publicLinks.forEachIndexed { index, link ->
+                    if (index > 0) HorizontalDivider(color = Palette.Divider)
+                    EntryRow(RowEntry("link", shortLink(link.link), remaining(link.expiresAt)) { push(Screen.PublicLinkView(link.id.toList())) })
                 }
             }
             Spacer(Modifier.height(20.dp))
@@ -367,12 +335,9 @@ fun ProfileScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             ProfileFields()
             Spacer(Modifier.height(16.dp))
             HorizontalDivider(color = Palette.Divider)
-            OpenRow(
-                "globe",
-                stringResource(R.string.common_your_handle),
-                Core.myHandle ?: stringResource(R.string.discovery_none),
-            ) { push(Screen.Handle) }
-            OpenRow("link", stringResource(R.string.discovery_reusable_links)) { push(Screen.PublicLinks) }
+            HandleRow(push)
+            HorizontalDivider(color = Palette.Divider)
+            EntryRow(RowEntry("link", stringResource(R.string.discovery_reusable_links)) { push(Screen.PublicLinks) })
         }
     }
 }

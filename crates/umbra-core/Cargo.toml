@@ -22,12 +22,12 @@ sockets-test = []
 
 [dependencies]
 precis-profiles = { version = "0.2.0", default-features = false, optional = true }
-umbra-crypto = { version = "0.43.3", path = "../umbra-crypto" }
-umbra-wire = { version = "0.43.3", path = "../umbra-wire" }
-umbra-onion = { version = "0.43.3", path = "../umbra-onion" }
-umbra-queue = { version = "0.43.3", path = "../umbra-queue" }
-umbra-transport = { version = "0.43.3", path = "../umbra-transport" }
+umbra-crypto = { version = "0.44.0", path = "../umbra-crypto" }
+umbra-wire = { version = "0.44.0", path = "../umbra-wire" }
+umbra-onion = { version = "0.44.0", path = "../umbra-onion" }
+umbra-queue = { version = "0.44.0", path = "../umbra-queue" }
+umbra-transport = { version = "0.44.0", path = "../umbra-transport" }
 
 [dev-dependencies]
 # The tests of an issuer of cross-relay tokens generate its RSA keys.
-umbra-crypto = { version = "0.43.3", path = "../umbra-crypto", features = ["keygen"] }
+umbra-crypto = { version = "0.44.0", path = "../umbra-crypto", features = ["keygen"] }
