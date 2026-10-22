@@ -109,12 +109,12 @@ object Notifier {
             .setSmallIcon(R.drawable.ic_stat_umbra)
             .setContentTitle(context.getString(title))
             .setContentIntent(openApp(context))
-            .setDeleteIntent(carrierDismissed(context))
+            .setDeleteIntent(carrierDismissIntent(context))
             .setOngoing(true)
             .build()
     }
 
-    private fun carrierDismissed(context: Context): PendingIntent = PendingIntent.getBroadcast(
+    private fun carrierDismissIntent(context: Context): PendingIntent = PendingIntent.getBroadcast(
         context,
         0,
         Intent(context, CarrierDismissed::class.java),
