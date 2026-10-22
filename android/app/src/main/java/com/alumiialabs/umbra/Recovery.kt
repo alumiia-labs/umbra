@@ -211,7 +211,6 @@ fun SocialRecoveryScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                     ),
                     style = MaterialTheme.typography.bodySmall,
                     color = Palette.TextSecondary,
-                    modifier = Modifier.subline(),
                 )
             }
 
@@ -229,7 +228,7 @@ fun SocialRecoveryScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                     stringResource(R.string.recovery_pieces_needed),
                     style = MaterialTheme.typography.labelLarge,
                     color = Palette.TextSecondary,
-                    modifier = Modifier.padding(top = 16.dp, bottom = 4.dp).subline(),
+                    modifier = Modifier.padding(top = 16.dp, bottom = 4.dp),
                 )
                 for (k in 2..count) {
                     Row(

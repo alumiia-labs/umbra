@@ -117,7 +117,6 @@ fun AutoLockScreen(onBack: () -> Unit) {
                                 stringResource(it),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = Palette.TextSecondary,
-                                modifier = Modifier.subline(),
                             )
                         }
                     }

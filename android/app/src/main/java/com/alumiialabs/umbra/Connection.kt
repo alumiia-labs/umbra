@@ -259,7 +259,6 @@ fun FactRow(icon: String, title: String, detail: String) {
                 detail,
                 style = MaterialTheme.typography.bodySmall,
                 color = Palette.TextSecondary,
-                modifier = Modifier.subline(),
             )
         }
     }

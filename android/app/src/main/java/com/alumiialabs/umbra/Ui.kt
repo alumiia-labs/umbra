@@ -748,7 +748,7 @@ private fun ChatRowContent(chat: Chat) {
                 overflow = TextOverflow.Ellipsis,
             )
             chat.preview?.let {
-                Row(Modifier.subline(), verticalAlignment = Alignment.CenterVertically) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     // Part 6 §6.6.5: the newest message answers a message.
                     if (chat.isPreviewReply) {
                         FaIcon("reply", label = stringResource(R.string.main_reply), size = 11.dp, tint = Palette.TextSecondary)
@@ -987,7 +987,6 @@ private fun SettingRow(icon: String, title: String, detail: String, onClick: (()
                 detail,
                 style = MaterialTheme.typography.bodySmall,
                 color = Palette.TextSecondary,
-                modifier = Modifier.subline(),
             )
         }
     }

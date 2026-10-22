@@ -279,7 +279,7 @@ private fun ResultRow(result: Core.Found, showsChat: Boolean, names: Map<UShort,
             // The contact of a conversation of two is its title, thus the
             // line repeats no name for it.
             val showsSender = showsChat && (result.isOutgoing || chat?.isGroup == true)
-            Snippet(result, if (showsSender) stringResource(R.string.search_sender_prefix, sender) else "", Modifier.subline())
+            Snippet(result, if (showsSender) stringResource(R.string.search_sender_prefix, sender) else "")
         }
     }
 }

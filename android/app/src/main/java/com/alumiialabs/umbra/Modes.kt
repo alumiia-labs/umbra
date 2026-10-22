@@ -326,7 +326,6 @@ fun NotificationsScreen(onBack: () -> Unit) {
                             choice.trade,
                             style = MaterialTheme.typography.bodySmall,
                             color = Palette.TextSecondary,
-                            modifier = Modifier.subline(),
                         )
                     }
                 }
@@ -339,7 +338,6 @@ fun NotificationsScreen(onBack: () -> Unit) {
                             batteryLine(),
                             style = MaterialTheme.typography.bodySmall,
                             color = Palette.TextSecondary,
-                            modifier = Modifier.subline(),
                         )
                         Spacer(Modifier.height(8.dp))
                         InlineButton(stringResource(R.string.battery_allow)) { Battery.open(context) }

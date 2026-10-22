@@ -110,7 +110,6 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                         groupSubtitle(chat),
                         style = MaterialTheme.typography.bodyMedium,
                         color = Palette.TextSecondary,
-                        modifier = Modifier.subline(),
                     )
                 }
             }
@@ -246,7 +245,6 @@ private fun JoinerRow(joiner: FfiGroupOffer) {
                 },
                 style = MaterialTheme.typography.labelMedium,
                 color = Palette.TextSecondary,
-                modifier = Modifier.subline(),
             )
         }
         if (!joiner.isAdded || isStuck) {
@@ -361,7 +359,6 @@ private fun MemberRow(member: FfiGroupMember, removable: Boolean, onRemove: () -
                 roleLabel(member.role),
                 style = MaterialTheme.typography.bodyMedium,
                 color = Palette.TextSecondary,
-                modifier = Modifier.subline(),
             )
         }
         if (removable) {
@@ -428,7 +425,6 @@ fun MemberRoleScreen(
                             stringResource(detail),
                             style = MaterialTheme.typography.bodySmall,
                             color = Palette.TextSecondary,
-                            modifier = Modifier.subline(),
                         )
                     }
                 }
@@ -588,7 +584,6 @@ fun IntroductionPrompt() {
                 stringResource(R.string.group_intro_note),
                 style = MaterialTheme.typography.labelMedium,
                 color = Palette.TextSecondary,
-                modifier = Modifier.subline(),
             )
         }
 
@@ -616,7 +611,6 @@ fun GroupOfferPrompt() {
                 stringResource(R.string.group_roster_not_verified),
                 style = MaterialTheme.typography.labelMedium,
                 color = Palette.TextSecondary,
-                modifier = Modifier.subline(),
             )
             Spacer(Modifier.height(8.dp))
             InlineButton(stringResource(R.string.common_dismiss)) { Core.dismissFailedAdmission(failed) }
@@ -636,7 +630,6 @@ fun GroupOfferPrompt() {
             stringResource(R.string.group_offer_note),
             style = MaterialTheme.typography.labelMedium,
             color = Palette.TextSecondary,
-            modifier = Modifier.subline(),
         )
         Spacer(Modifier.height(8.dp))
         InlineButton(stringResource(R.string.group_join)) { Core.acceptGroupOffer(offer) }

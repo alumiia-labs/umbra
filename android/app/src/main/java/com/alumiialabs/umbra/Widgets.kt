@@ -408,14 +408,6 @@ fun PlatformText(
 }
 
 /**
- * The inset of a small line under a larger one: a subtitle under a title, a
- * preview under a name, the time under a message. A large letter has more
- * side bearing than a small one, thus the small line looks outdented with no
- * inset.
- */
-fun Modifier.subline(): Modifier = padding(horizontal = 3.dp)
-
-/**
  * The press shade of each row: square, and across the whole width that the
  * row holds, thus it meets the shade of its neighbors as the shade of a tab
  * does. The content of a row starts `PressInset` inside the shade, 20 dp
@@ -833,7 +825,6 @@ fun BackBar(
                         it,
                         style = MaterialTheme.typography.labelMedium,
                         color = Palette.TextSecondary,
-                        modifier = Modifier.subline(),
                     )
                 }
             }
@@ -1004,7 +995,6 @@ fun EntryRow(entry: RowEntry, afterClick: () -> Unit = {}) {
                     it,
                     style = MaterialTheme.typography.bodySmall,
                     color = Palette.TextSecondary,
-                    modifier = Modifier.subline(),
                 )
             }
         }
@@ -1030,7 +1020,6 @@ fun ToggleRow(title: String, isOn: Boolean, detail: String? = null, onChange: (B
                     it,
                     style = MaterialTheme.typography.bodySmall,
                     color = Palette.TextSecondary,
-                    modifier = Modifier.subline(),
                 )
             }
         }

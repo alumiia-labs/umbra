@@ -128,7 +128,7 @@ fun NewPollScreen(chat: Chat, onBack: () -> Unit) {
                 stringResource(R.string.poll_ends),
                 style = MaterialTheme.typography.labelLarge,
                 color = Palette.TextSecondary,
-                modifier = Modifier.padding(top = 16.dp, bottom = 4.dp).subline(),
+                modifier = Modifier.padding(top = 16.dp, bottom = 4.dp),
             )
             for ((seconds, title) in PollPeriods) {
                 Row(
@@ -192,7 +192,7 @@ fun NewPollScreen(chat: Chat, onBack: () -> Unit) {
                     stringResource(R.string.poll_period_bounds),
                     style = MaterialTheme.typography.bodySmall,
                     color = if (count.isNotEmpty() && !isInBounds) Palette.Error else Palette.TextSecondary,
-                    modifier = Modifier.padding(bottom = 8.dp).subline(),
+                    modifier = Modifier.padding(bottom = 8.dp),
                 )
             }
 
@@ -316,7 +316,6 @@ fun PollContent(line: Line, poll: FfiPoll, modifier: Modifier = Modifier) {
             pollFooter(poll),
             style = MaterialTheme.typography.labelSmall,
             color = Palette.TextSecondary,
-            modifier = Modifier.subline(),
         )
     }
 }

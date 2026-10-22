@@ -65,7 +65,6 @@ fun RosterForkPrompt() {
             stringResource(R.string.devices_fork_advice, name),
             style = MaterialTheme.typography.labelMedium,
             color = Palette.TextSecondary,
-            modifier = Modifier.subline(),
         )
         Spacer(Modifier.height(8.dp))
         InlineButton(stringResource(R.string.common_dismiss)) { Core.dismissRosterFork(fork) }
@@ -157,7 +156,6 @@ fun DevicesScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                                 stringResource(R.string.devices_this_device),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = Palette.TextSecondary,
-                                modifier = Modifier.subline(),
                             )
                         }
                     }

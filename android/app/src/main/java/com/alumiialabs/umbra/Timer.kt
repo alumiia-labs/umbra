@@ -138,7 +138,6 @@ fun DisappearingScreen(chat: Chat, onBack: () -> Unit) {
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = Palette.TextSecondary,
-                        modifier = Modifier.subline(),
                     )
                 }
                 Spacer(Modifier.height(8.dp))

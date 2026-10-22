@@ -1370,7 +1370,7 @@ private fun BubbleContent(
             style = MaterialTheme.typography.labelSmall,
             color = if (state == FAILED) Palette.Error else Palette.TextSecondary,
             // The time of a photo keeps the place that the time of a text has.
-            modifier = if (isPhoto) Modifier.padding(end = 10.dp, bottom = 4.dp).subline() else Modifier.subline(),
+            modifier = if (isPhoto) Modifier.padding(end = 10.dp, bottom = 4.dp) else Modifier,
         )
     }
 }

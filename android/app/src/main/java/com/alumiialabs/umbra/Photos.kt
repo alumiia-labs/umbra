@@ -514,7 +514,6 @@ fun PhotoScreen(line: Line, chat: Chat, onBack: () -> Unit) {
                             ),
                             style = MaterialTheme.typography.labelMedium,
                             color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.8f),
-                            modifier = Modifier.subline(),
                         )
                     }
                 }

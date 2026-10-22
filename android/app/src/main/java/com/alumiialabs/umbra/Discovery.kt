@@ -76,7 +76,6 @@ fun OpenRow(icon: String, title: String, detail: String? = null, onClick: () -> 
                     color = Palette.TextSecondary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.subline(),
                 )
             }
         }
@@ -476,7 +475,6 @@ private fun RequestRow(context: Context, request: ContactRequestInfo) {
                     color = Palette.TextSecondary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.subline(),
                 )
             }
         }
