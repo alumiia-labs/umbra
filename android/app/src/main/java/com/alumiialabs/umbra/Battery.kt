@@ -80,11 +80,3 @@ fun batteryLine(): String =
     } else {
         stringResource(R.string.battery_optimized)
     }
-
-/** The cost of the battery state under the switch of the notification settings. */
-@Composable
-fun batteryDetail(): String? = when (Battery.state) {
-    BatteryState.Unrestricted -> null
-    BatteryState.Optimized -> stringResource(R.string.battery_late)
-    BatteryState.Restricted -> stringResource(R.string.battery_stops)
-}

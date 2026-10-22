@@ -352,7 +352,7 @@ fun NotificationsScreen(onBack: () -> Unit) {
                 ToggleRow(
                     stringResource(R.string.battery_background),
                     Battery.state == BatteryState.Unrestricted,
-                    detail = batteryDetail(),
+                    detail = stringResource(R.string.battery_keeps),
                 ) { Battery.open(context) }
                 HorizontalDivider(color = Palette.Divider)
             }

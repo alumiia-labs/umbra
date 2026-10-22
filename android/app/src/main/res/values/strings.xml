@@ -1128,8 +1128,7 @@
     <string name="battery_restricted">The battery restriction can stop Direct mode.</string>
     <string name="battery_allow">Allow</string>
     <string name="battery_background">Run in the background</string>
-    <string name="battery_late">Messages can arrive late.</string>
-    <string name="battery_stops">Android can stop Direct mode.</string>
+    <string name="battery_keeps">Keeps the connection open when the screen is off.</string>
     <!-- Setup: the one card of the chat list and the steps behind it. -->
     <string name="setup_finish">Finish setup</string>
     <!-- %1$d is the count of the steps that wait. -->
