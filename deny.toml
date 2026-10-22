@@ -54,14 +54,16 @@ allow-wildcard-paths = false
 # workspace pins. Its reason starts with the date of the entry; scripts/deps.py
 # fails the check on an entry older than 90 days. The first four come from
 # hashx 0.10.0 (under equix, AUX-8), which still builds on blake2 0.10.
-# They go when hashx moves to the digest 0.11 line. The last one is of the
-# build register: no binary links it.
+# They go when hashx moves to the digest 0.11 line. The syn entry is of the
+# build register: no binary links it. The sha3 entry is a newer version that
+# ml-kem 0.3.3 pulls; the workspace stays on 0.11 until hmac and hkdf take it.
 skip = [
   { crate = "blake2@0.10.6", reason = "2026-10-16: hashx 0.10.0 pulls blake2 0.10" },
   { crate = "digest@0.10.7", reason = "2026-10-16: blake2 0.10.6, under hashx 0.10.0, pulls digest 0.10" },
   { crate = "block-buffer@0.10.4", reason = "2026-10-16: digest 0.10.7, under hashx 0.10.0, pulls block-buffer 0.10" },
   { crate = "crypto-common@0.1.7", reason = "2026-10-16: digest 0.10.7, under hashx 0.10.0, pulls crypto-common 0.1" },
   { crate = "syn@2.0.119", reason = "2026-10-09: the proc-macros curve25519-dalek-derive 0.1.1, visibility 0.1.1 and zeroize_derive 1.5.0 pull syn 2" },
+  { crate = "sha3@0.12.0", reason = "2026-10-22: ml-kem 0.3.3 pulls sha3 0.12; hmac 0.13 of the workspace takes sha3 0.11" },
 ]
 # The allow list closes the graph. Register R1 is the message core of Part 5
 # §5.1. An entry marked `build` is a proc-macro, a build script, or a crate

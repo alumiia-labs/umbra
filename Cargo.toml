@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/umbra-crypto", "crates/umbra-wire", "crates/umbra-onion", "crates/umbra-queue", "crates/umbra-transport", "crates/umbra-core", "crates/umbra-relay", "crates/umbra-ffi"]
 
 [workspace.package]
-version = "0.45.0"
+version = "0.45.1"
 edition = "2021"
 rust-version = "1.99"
 license = "AGPL-3.0-only"
