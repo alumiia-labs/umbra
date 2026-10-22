@@ -55,12 +55,13 @@ object Battery {
 
     /**
      * Opens the system answer. An optimized app asks for the exemption in one
-     * dialog. A restriction has its switch on the page of the app alone.
+     * dialog. A restriction, and the return to optimization, have their
+     * switch on the page of the app alone.
      */
     fun open(context: Context) {
         val app = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", context.packageName, null))
         val ask = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${context.packageName}"))
-        val intent = if (state == BatteryState.Restricted) app else ask
+        val intent = if (state == BatteryState.Optimized) ask else app
         try {
             context.startActivity(intent)
         } catch (absent: ActivityNotFoundException) {
@@ -79,3 +80,11 @@ fun batteryLine(): String =
     } else {
         stringResource(R.string.battery_optimized)
     }
+
+/** The cost of the battery state under the switch of the notification settings. */
+@Composable
+fun batteryDetail(): String? = when (Battery.state) {
+    BatteryState.Unrestricted -> null
+    BatteryState.Optimized -> stringResource(R.string.battery_late)
+    BatteryState.Restricted -> stringResource(R.string.battery_stops)
+}

@@ -216,9 +216,6 @@ fun AutoDownloadScreen(onBack: () -> Unit) {
     }
 }
 
-/** The start of the label of a choice: the mark and the 14 dp after it. */
-val RadioLabelInset = 34.dp
-
 /** The mark of one choice of a list. */
 @Composable
 fun RadioMark(isChosen: Boolean) {

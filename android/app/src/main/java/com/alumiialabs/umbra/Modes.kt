@@ -330,19 +330,6 @@ fun NotificationsScreen(onBack: () -> Unit) {
                     }
                 }
 
-                // The battery line stays here after the card of the chat list
-                // went. It starts on the column of the labels of the choices.
-                if (choice == Delivery.Direct && delivery == choice && !isDelayed && Battery.state != BatteryState.Unrestricted) {
-                    Column(Modifier.padding(start = RadioLabelInset, bottom = 12.dp)) {
-                        Text(
-                            batteryLine(),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Palette.TextSecondary,
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        InlineButton(stringResource(R.string.battery_allow)) { Battery.open(context) }
-                    }
-                }
                 HorizontalDivider(color = Palette.Divider)
             }
 
@@ -356,6 +343,17 @@ fun NotificationsScreen(onBack: () -> Unit) {
                     isDelayed = it
                     Modes.setDelayed(context, it)
                 }
+                HorizontalDivider(color = Palette.Divider)
+            }
+
+            // The switch shows the system setting, and a tap opens it. A
+            // delayed check needs no held connection.
+            if (delivery == Delivery.Direct && !isDelayed) {
+                ToggleRow(
+                    stringResource(R.string.battery_background),
+                    Battery.state == BatteryState.Unrestricted,
+                    detail = batteryDetail(),
+                ) { Battery.open(context) }
                 HorizontalDivider(color = Palette.Divider)
             }
 
