@@ -61,6 +61,7 @@ sealed interface Screen {
     data object Connection : Screen
     data object AutoLock : Screen
     data object Notifications : Screen
+    data object Setup : Screen
     data object ResetIdentity : Screen
     data object SocialRecovery : Screen
     data object UserHalf : Screen
@@ -204,7 +205,6 @@ private fun OpenApp() {
     val top = stack.lastOrNull()
     Column(Modifier.fillMaxSize()) {
         if (top !is Screen.VerifyCode) VerifyPrompt(push)
-        if (top == null) RecoveryPromptLine(push)
         when (top) {
             null -> TabsScreen(tab, onTab = { tab = it }, push)
             Screen.AddContact -> AddContactScreen(pop, push)
@@ -218,6 +218,7 @@ private fun OpenApp() {
             Screen.Connection -> ConnectionScreen(pop)
             Screen.AutoLock -> AutoLockScreen(pop)
             Screen.Notifications -> NotificationsScreen(pop)
+            Screen.Setup -> SetupScreen(pop, push)
             Screen.ResetIdentity -> ResetIdentityScreen(pop)
             Screen.SocialRecovery -> SocialRecoveryScreen(pop, push)
             Screen.UserHalf -> SecretDigitsScreen(
@@ -542,7 +543,7 @@ private fun ChatsTab(push: (Screen) -> Unit) {
     Column(Modifier.fillMaxSize()) {
         // A degraded state has its one line above the title.
         ConnectionNote()
-        BatteryPrompt()
+        SetupPrompt(push)
         GroupOfferPrompt()
         IntroductionPrompt()
         RosterForkPrompt()

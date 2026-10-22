@@ -7,19 +7,11 @@ import android.content.Intent
 import android.net.Uri
 import android.os.PowerManager
 import android.provider.Settings
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.width
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.unit.dp
 
 /** The battery setting of the app in the system settings. */
 enum class BatteryState { Unrestricted, Optimized, Restricted }
@@ -78,26 +70,6 @@ object Battery {
 
     private fun preferences(context: Context) =
         context.applicationContext.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
-}
-
-/** The battery line of Direct mode, as a card of the chat list. */
-@Composable
-fun BatteryPrompt() {
-    val context = LocalContext.current
-    if (Battery.isNoted || !Battery.slowsDirect(context)) return
-
-    PromptCard {
-        Text(batteryLine())
-        Spacer(Modifier.height(8.dp))
-        Row {
-            InlineButton(stringResource(R.string.battery_allow)) {
-                Battery.note(context)
-                Battery.open(context)
-            }
-            Spacer(Modifier.width(12.dp))
-            InlineButton(stringResource(R.string.common_dismiss)) { Battery.note(context) }
-        }
-    }
 }
 
 @Composable

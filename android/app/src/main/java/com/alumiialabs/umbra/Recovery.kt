@@ -8,7 +8,6 @@ import android.view.WindowManager
 import android.widget.TextView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -19,7 +18,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
@@ -32,7 +30,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
@@ -77,43 +74,6 @@ object RecoveryPrompt {
             .putBoolean(SEEN, true)
             .apply()
         isHiddenNow = true
-    }
-}
-
-/** The line that asks for the recovery code. It never blocks a view (`IDN-051`). */
-@Composable
-fun RecoveryPromptLine(push: (Screen) -> Unit) {
-    val context = LocalContext.current
-    // The code of a linked device is the code of the device that owns the
-    // backup, and the prompt shows there.
-    if (!RecoveryPrompt.isDue(context) || !Core.ownsChannels) return
-
-    // The inset and the shape of a prompt card, in the color of a selection:
-    // this is the one ask that a lost device makes urgent.
-    Row(
-        Modifier
-            .padding(horizontal = 20.dp, vertical = 8.dp)
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(Palette.Container)
-            .press(role = Role.Button) { push(Screen.RecoveryCode) }
-            .padding(start = 12.dp, top = 12.dp, bottom = 12.dp, end = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        FaIcon("key", size = 18.dp, tint = Palette.Action)
-        Spacer(Modifier.width(12.dp))
-        Text(stringResource(R.string.recovery_write_down_code), Modifier.weight(1f))
-        Box(
-            Modifier
-                .size(36.dp)
-                .clip(CircleShape)
-                .press(role = Role.Button, label = stringResource(R.string.common_dismiss)) {
-                    RecoveryPrompt.dismiss(context)
-                },
-            contentAlignment = Alignment.Center,
-        ) {
-            FaIcon("xmark", label = stringResource(R.string.common_dismiss), size = 14.dp, tint = Palette.TextSecondary)
-        }
     }
 }
 

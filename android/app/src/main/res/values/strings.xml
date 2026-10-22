@@ -873,7 +873,7 @@
     </plurals>
 
     <!-- Recovery: the prompt and the views of the recovery code. -->
-    <string name="recovery_write_down_code">Write down your recovery code</string>
+    <string name="recovery_write_down_code">Write down your recovery code.</string>
     <string name="recovery_with_contacts">Recovery with contacts</string>
     <string name="recovery_root_seed">Root seed</string>
     <!-- %1$d is the count of pieces that a restore needs. The text sits between two rule texts. -->
@@ -1127,4 +1127,18 @@
     <string name="battery_optimized">Battery optimization can delay messages in Direct mode.</string>
     <string name="battery_restricted">The battery restriction can stop Direct mode.</string>
     <string name="battery_allow">Allow</string>
+    <!-- Setup: the one card of the chat list and the steps behind it. -->
+    <string name="setup_finish">Finish setup</string>
+    <!-- %1$d is the count of the steps that wait. -->
+    <plurals name="setup_left">
+        <item quantity="one">%1$d left</item>
+        <item quantity="other">%1$d left</item>
+    </plurals>
+    <string name="setup_title">Setup</string>
+    <!-- %1$d is the number of the step, %2$d the count of steps. -->
+    <string name="setup_step">%1$d of %2$d</string>
+    <string name="setup_skip">Skip</string>
+    <string name="setup_recovery_body">On a new phone, it restores your backup.</string>
+    <string name="setup_recovery_show">Show the code</string>
+    <string name="setup_battery_title">Let UMBRA run in the background.</string>
 </resources>
