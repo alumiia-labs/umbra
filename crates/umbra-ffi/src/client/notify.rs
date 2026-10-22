@@ -9,10 +9,15 @@
 //! again under its removal secret (`NTF-124`). A group rotates each 7 days
 //! and at each change of the contact set, one group in one run
 //! (`NTF-007`, `NTF-008`, `NTF-080`, `NTF-081`).
+//!
+//! A device in Periodic mode holds no handle group. It holds one timer
+//! registration of its own token at the NDR, which wakes it on a fixed
+//! clock, and it binds its queues for the watch as Direct mode does
+//! (`NTF-150` to `NTF-153`).
 
 use umbra_core::notify::ndr::next_removal;
 use umbra_core::{
-    notify::{binding::Binding, MAX_QUEUES_PER_HANDLE, ROTATE_INTERVAL, WATCH_HANDLE},
+    notify::{binding::Binding, HANDLE_LEN, MAX_QUEUES_PER_HANDLE, ROTATE_INTERVAL, WATCH_HANDLE},
     store::{engine::Backend, record::TableId, wrap::SecureElement},
 };
 use umbra_crypto::{
@@ -49,6 +54,14 @@ pub(super) const CONTACT_SET_SETTING: &[u8] = b"push-contact-set";
 /// Whether this device binds its queues for the watch of a locked client
 /// (Direct mode, `NTF-142`): one byte, 1 for on.
 const WATCH_SETTING: &[u8] = b"push-watch";
+/// The push token of the timer of Periodic mode, as the NDR takes it
+/// (`NTF-150`). A device holds this token or the one of Instant mode, and
+/// never both (`NTF-151`).
+pub(super) const TIMER_TOKEN_SETTING: &[u8] = b"push-timer-token";
+/// The timer registration: its handle, its removal secret, its state, and
+/// the time of its last `NTIMER` (`NTF-152`).
+const TIMER_SETTING: &[u8] = b"push-timer";
+const TIMER_LEN: usize = HANDLE_LEN + 32 + 1 + 8;
 
 const RELAY_LEN: usize = 32 + 32 + 2;
 /// A group row of the first form, before the root and the rotation time.
@@ -93,6 +106,48 @@ struct Group {
     root: Option<Secret<32>>,
     /// The time of the last rotation, or 0.
     rotated_at: u64,
+}
+
+/// The timer registration of Periodic mode (`NTF-150`).
+struct Timer {
+    handle: [u8; HANDLE_LEN],
+    removal: Secret<32>,
+    state: u8,
+    /// The time of the last `NTIMER` that the NDR took, or 0.
+    registered_at: u64,
+}
+
+impl Timer {
+    fn encode(&self) -> Zeroizing<Vec<u8>> {
+        Zeroizing::new(
+            [
+                self.handle.as_slice(),
+                self.removal.expose(),
+                &[self.state],
+                &self.registered_at.to_be_bytes(),
+            ]
+            .concat(),
+        )
+    }
+
+    fn parse(bytes: &[u8]) -> Result<Self, Error> {
+        if bytes.len() != TIMER_LEN {
+            return Err(Error::Malformed);
+        }
+
+        let mut at = 0;
+        let handle = take(bytes, &mut at)?;
+        let removal = Secret::new(take(bytes, &mut at)?);
+        let [state] = take(bytes, &mut at)?;
+        let registered_at = u64::from_be_bytes(take(bytes, &mut at)?);
+
+        Ok(Timer {
+            handle,
+            removal,
+            state,
+            registered_at,
+        })
+    }
 }
 
 struct Queue {
@@ -263,6 +318,24 @@ pub struct NdrCall {
     /// The digest of the push token that a registration carries, or zero
     /// bytes for a removal.
     pub token: [u8; 32],
+    /// Whether the call is of the timer of Periodic mode (`NTF-150`).
+    pub is_timer: bool,
+    /// The time at which the call left.
+    pub at: u64,
+}
+
+/// A push token as the NDR takes it, or no bytes for none (`NTF-123`).
+fn plain_token(token: Option<(TokenCarrier, &str)>) -> Result<Vec<u8>, Error> {
+    let Some((carrier, target)) = token else {
+        return Ok(Vec::new());
+    };
+
+    // NTF-123: a token of the carrier, printable ASCII.
+    let mut plain = [0u8; PUSH_TOKEN_MAX];
+    let n = encode_token(carrier, target.as_bytes(), &mut plain).map_err(|_| Error::TooLong)?;
+    let plain = plain.get(..n).ok_or(Error::Malformed)?.to_vec();
+    umbra_wire::ndr::parse_token(&plain).map_err(|_| Error::Malformed)?;
+    Ok(plain)
 }
 
 fn random<const N: usize, R: CryptoRng + ?Sized>(rng: &mut R) -> [u8; N] {
@@ -284,25 +357,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// Takes a new push token of a carrier, or none when the platform took
     /// it back. Each group that the NDR holds registers again under the new
-    /// one, or leaves with none.
+    /// one, or leaves with none. A token ends the timer of Periodic mode
+    /// (`NTF-151`).
     pub fn set_push_token<R: CryptoRng + ?Sized>(
         &mut self,
         token: Option<(TokenCarrier, &str)>,
         rng: &mut R,
     ) -> Result<(), Error> {
-        let plain = match token {
-            Some((carrier, target)) => {
-                // NTF-123: a token of the carrier, printable ASCII, and an
-                // https URL for UnifiedPush.
-                let mut plain = [0u8; PUSH_TOKEN_MAX];
-                let n = encode_token(carrier, target.as_bytes(), &mut plain)
-                    .map_err(|_| Error::TooLong)?;
-                let plain = plain.get(..n).ok_or(Error::Malformed)?.to_vec();
-                umbra_wire::ndr::parse_token(&plain).map_err(|_| Error::Malformed)?;
-                plain
-            }
-            None => Vec::new(),
-        };
+        let plain = plain_token(token)?;
+        if !plain.is_empty() {
+            self.set_timer_token(None, rng)?;
+        }
         if self.push_token()?.unwrap_or_default() == plain {
             return Ok(());
         }
@@ -316,6 +381,180 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
 
         self.put_rows(&rows, rng)
+    }
+
+    /// The push token of the timer of Periodic mode, as the NDR takes it,
+    /// if any (`NTF-150`).
+    pub fn timer_token(&self) -> Result<Option<Vec<u8>>, Error> {
+        let open = self.open_ref()?;
+        let row = open.store.row_id(SETTINGS, TIMER_TOKEN_SETTING);
+        Ok(open
+            .store
+            .get(SETTINGS, &row)?
+            .filter(|token| !token.is_empty()))
+    }
+
+    /// Whether the NDR holds the timer under the present token.
+    pub fn timer_registered(&self) -> Result<bool, Error> {
+        Ok(self.timer_token()?.is_some()
+            && self.timer()?.is_some_and(|timer| timer.state == REGISTERED))
+    }
+
+    /// The timer registration, if one is held or waits.
+    fn timer(&self) -> Result<Option<Timer>, Error> {
+        let open = self.open_ref()?;
+        let row = open.store.row_id(SETTINGS, TIMER_SETTING);
+        Ok(open
+            .store
+            .get(SETTINGS, &row)?
+            .and_then(|bytes| Timer::parse(&bytes).ok()))
+    }
+
+    /// Takes the push token of the timer of Periodic mode, or none when the
+    /// mode left. The NDR holds the timer under a handle of its own, which
+    /// names no queue, and a token of the timer ends each handle group
+    /// (`NTF-150`, `NTF-151`).
+    pub fn set_timer_token<R: CryptoRng + ?Sized>(
+        &mut self,
+        token: Option<(TokenCarrier, &str)>,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let plain = plain_token(token)?;
+        if !plain.is_empty() {
+            self.set_push_token(None, rng)?;
+        }
+        if self.timer_token()?.unwrap_or_default() == plain {
+            return Ok(());
+        }
+
+        let mut rows = vec![(
+            SETTINGS,
+            TIMER_TOKEN_SETTING.to_vec(),
+            Zeroizing::new(plain.clone()),
+        )];
+        let mut deleted = Vec::new();
+        match (self.timer()?, plain.is_empty()) {
+            // A new token moves the timer that the NDR holds.
+            (Some(mut timer), _) if timer.state == REGISTERED => {
+                timer.state = STALE;
+                rows.push((SETTINGS, TIMER_SETTING.to_vec(), timer.encode()));
+            }
+            // A timer that the NDR never held leaves with the token.
+            (Some(timer), true) if timer.state == UNREGISTERED => {
+                deleted.push((SETTINGS, TIMER_SETTING.to_vec()));
+            }
+            (Some(_), _) => {}
+            (None, false) => {
+                let timer = Timer {
+                    handle: random(rng),
+                    removal: Secret::new(random(rng)),
+                    state: UNREGISTERED,
+                    registered_at: 0,
+                };
+                rows.push((SETTINGS, TIMER_SETTING.to_vec(), timer.encode()));
+            }
+            (None, true) => {}
+        }
+
+        self.write_rows(&rows, &deleted, rng)
+    }
+
+    /// The call of the timer that waits for the NDR, if any: an `NTIMER`
+    /// for a timer that it does not hold under the present token or that
+    /// it took more than `ROTATE_INTERVAL` ago, or an `NUNREG` for a timer
+    /// whose token left (`NTF-152`).
+    fn timer_call(&self, now: u64) -> Result<Option<NdrCall>, Error> {
+        let Some(timer) = self.timer()? else {
+            return Ok(None);
+        };
+
+        let mut out = Box::new([0u8; NDR_REQUEST_LEN]);
+        let Some(plain) = self.timer_token()? else {
+            if timer.state == UNREGISTERED {
+                return Ok(None);
+            }
+
+            NdrRequest::Unregister {
+                handle: timer.handle,
+                removal: Secret::new(*timer.removal.expose()),
+            }
+            .encode(&mut out)
+            .map_err(|_| Error::Malformed)?;
+            return Ok(Some(NdrCall {
+                handle: timer.handle,
+                is_removal: true,
+                advances: false,
+                request: out,
+                token: [0; 32],
+                is_timer: true,
+                at: now,
+            }));
+        };
+
+        let fresh = now.saturating_sub(timer.registered_at) < ROTATE_INTERVAL;
+        if timer.state == REGISTERED && fresh {
+            return Ok(None);
+        }
+
+        // NTF-124: a timer that the NDR holds moves on its removal secret,
+        // and the move takes the next secret of the chain.
+        let advances = timer.state != UNREGISTERED;
+        let removal = if advances {
+            next_removal(&timer.removal)
+        } else {
+            Secret::new(*timer.removal.expose())
+        };
+        NdrRequest::Timer {
+            handle: timer.handle,
+            token: &plain,
+            removal_hash: sha3_256(&[removal.expose()]),
+            prior: Secret::new(*timer.removal.expose()),
+        }
+        .encode(&mut out)
+        .map_err(|_| Error::Malformed)?;
+
+        Ok(Some(NdrCall {
+            handle: timer.handle,
+            is_removal: false,
+            advances,
+            request: out,
+            token: sha3_256(&[plain.as_slice()]),
+            is_timer: true,
+            at: now,
+        }))
+    }
+
+    /// The NDR took a call of the timer.
+    fn timer_call_taken<R: CryptoRng + ?Sized>(
+        &mut self,
+        call: &NdrCall,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let Some(mut timer) = self.timer()?.filter(|timer| timer.handle == call.handle) else {
+            return Ok(());
+        };
+
+        if call.advances {
+            timer.removal = next_removal(&timer.removal);
+        }
+
+        let current = self
+            .timer_token()?
+            .map(|token| sha3_256(&[token.as_slice()]));
+        if call.is_removal {
+            // A token that came back since the removal registers anew.
+            if current.is_none() {
+                return self.write_rows(&[], &[(SETTINGS, TIMER_SETTING.to_vec())], rng);
+            }
+            timer.state = UNREGISTERED;
+        } else if current == Some(call.token) {
+            timer.state = REGISTERED;
+            timer.registered_at = call.at;
+        } else {
+            timer.state = STALE;
+        }
+
+        self.put_rows(&[(SETTINGS, TIMER_SETTING.to_vec(), timer.encode())], rng)
     }
 
     /// Writes rows under their natural keys in one batch.
@@ -1028,12 +1267,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
     }
 
-    /// The requests that wait for the NDR: an `NREG` for each group that
-    /// it does not hold under the present endpoint, or an `NUNREG` for each
-    /// group it holds when the platform took the endpoint back.
-    pub fn ndr_calls_due<R: CryptoRng + ?Sized>(&self, rng: &mut R) -> Result<Vec<NdrCall>, Error> {
+    /// The requests that wait for the NDR at `now`: an `NREG` for each group
+    /// that it does not hold under the present endpoint, or an `NUNREG` for
+    /// each group it holds when the platform took the endpoint back, and the
+    /// call of the timer of Periodic mode.
+    pub fn ndr_calls_due<R: CryptoRng + ?Sized>(
+        &self,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<Vec<NdrCall>, Error> {
         let token = self.push_token()?;
-        let mut calls = Vec::new();
+        let mut calls: Vec<NdrCall> = self.timer_call(now)?.into_iter().collect();
         for group in self.notify_groups()? {
             let request = match (&token, group.state) {
                 // NTF-007: the handle that a rotation replaced leaves.
@@ -1051,6 +1295,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         advances: false,
                         request: out,
                         token: [0; 32],
+                        is_timer: false,
+                        at: now,
                     }
                 }
                 (Some(_), REGISTERED) | (None, UNREGISTERED) => continue,
@@ -1093,6 +1339,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         advances,
                         request: out,
                         token: sha3_256(&[plain.as_slice()]),
+                        is_timer: false,
+                        at: now,
                     }
                 }
                 (None, _) => {
@@ -1109,6 +1357,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         advances: false,
                         request: out,
                         token: [0; 32],
+                        is_timer: false,
+                        at: now,
                     }
                 }
             };
@@ -1125,6 +1375,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         call: &NdrCall,
         rng: &mut R,
     ) -> Result<Vec<[u8; 32]>, Error> {
+        if call.is_timer {
+            return self.timer_call_taken(call, rng).map(|()| Vec::new());
+        }
+
         let Some(mut group) = self
             .notify_groups()?
             .into_iter()

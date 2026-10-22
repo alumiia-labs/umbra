@@ -1624,7 +1624,10 @@ object Core {
                 }
                 // A lock takes the text of each alert off the shade.
                 Notifier.clear(app)
-                if (!isVisible && !(watches && carrierHolds)) Notifier.locked(app)
+                // NTF-120: a tick of Periodic mode shows which conversation
+                // waits, thus that mode takes no notice.
+                val ticks = Modes.mode(app) == NotifyMode.Periodic
+                if (!isVisible && !(watches && carrierHolds) && !ticks) Notifier.locked(app)
             }
             is FfiEvent.IntegrityFault -> fault = UiText.get(R.string.core_store_no_verify)
             // The drain thread wrote the table already.
@@ -1822,7 +1825,7 @@ object Core {
      */
     private fun holdsWakeTable(app: Context) = when (Modes.mode(app)) {
         NotifyMode.Instant -> Push.isAvailable(app)
-        NotifyMode.Direct -> true
+        NotifyMode.Direct, NotifyMode.Periodic -> true
         else -> false
     }
 
@@ -1850,7 +1853,8 @@ object Core {
 
         // A run that named no relay yet gives no watch table, and the one of
         // the last write stays.
-        val watch = if (Modes.mode(app) == NotifyMode.Direct) {
+        // NTF-145, NTF-153: Direct mode and Periodic mode watch.
+        val watch = if (Modes.mode(app) == NotifyMode.Direct || Modes.mode(app) == NotifyMode.Periodic) {
             try {
                 client.watchTable()
             } catch (offline: FfiException) {
@@ -1905,6 +1909,9 @@ object Core {
 
     /** The FCM token of this device goes to the core (Part 8 §8.2.7). */
     fun setFcmToken(token: String) = call { it.setFcmToken(token) }
+
+    /** The FCM token of the timer of Periodic mode goes to the core (Part 8 §8.2.8). */
+    fun setFcmTimerToken(token: String) = call { it.setFcmTimerToken(token) }
 
     /** The key-change notice that waits in a conversation (Part 4 §4.5.1). */
     fun keyChange(conversation: Conversation, onLoaded: (FfiKeyChange?) -> Unit) = call { client ->
@@ -2017,8 +2024,11 @@ object Core {
         call { it.typing(conversation.id, started) }
     }
 
-    /** Private mode and Off hold no token, thus the NDR holds no handle. */
-    fun clearPushToken() = call { it.setFcmToken(null) }
+    /** Direct mode, Private mode, and Off hold no token, thus the NDR holds no handle and no timer. */
+    fun clearPushToken() = call {
+        it.setFcmToken(null)
+        it.setFcmTimerToken(null)
+    }
 
     /** A push came: an open client with no run starts one and drains. */
     fun wake(context: Context) {

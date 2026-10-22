@@ -31,6 +31,7 @@
     <string name="umbra_ui_ntf_009">At once. Google learns when each message arrives.</string>
     <string name="umbra_ui_ntf_009_direct">At once, over UMBRA\'s own connection. No Google.</string>
     <string name="umbra_ui_ntf_009_private">Checks every 30 minutes, so the timing shows nothing. Nothing arrives while UMBRA is locked.</string>
+    <string name="umbra_ui_ntf_009_periodic">Checks every 30 minutes. Google sees the checks, and not when a message arrives.</string>
     <string name="umbra_ui_ntf_009_off">When you open UMBRA.</string>
     <string name="umbra_ui_dis_084">A different party now holds %1$s.</string>
     <string name="umbra_ui_wir_341">A message did not open, and its sender holds it no more.</string>

@@ -341,11 +341,12 @@ impl Fcm {
         Some((token, now.saturating_add(life)))
     }
 
-    /// Sends one data message of high priority to `token` with the blob in
-    /// base64url and the expiry of the push (`NTF-065`), with no collapse
-    /// key (`NTF-088`). Gives what FCM did with it ([`sent_of`]). The body
-    /// holds the push token, thus the send wipes it at its end (§8.2.1).
-    pub async fn send(&self, token: &str, blob: &[u8], ttl: u32) -> Sent {
+    /// Sends one data message to `token` with the expiry of the push
+    /// (`NTF-065`) and no collapse key (`NTF-088`): the blob in base64url at
+    /// high priority, or the tick of the fixed clock at normal priority
+    /// (`NTF-039`, `NTF-150`). Gives what FCM did with it ([`sent_of`]). The
+    /// body holds the push token, thus the send wipes it at its end (§8.2.1).
+    pub async fn send(&self, token: &str, blob: Option<&[u8]>, ttl: u32) -> Sent {
         let Some(access) = self.access_token().await else {
             return Sent::Refused;
         };
@@ -372,16 +373,23 @@ impl Fcm {
 }
 
 /// The body of one send (`NTF-130`). It takes its full length at the start,
-/// thus no shorter copy of the push token stays in freed memory.
-fn message_of(token: &str, blob: &[u8], ttl: u32) -> Zeroizing<String> {
+/// thus no shorter copy of the push token stays in freed memory. A tick
+/// carries the one field `t`, and Doze may defer it (`NTF-039`).
+fn message_of(token: &str, blob: Option<&[u8]>, ttl: u32) -> Zeroizing<String> {
     let quoted = Zeroizing::new(json_quote(token));
     let mut message = Zeroizing::new(String::with_capacity(quoted.len().saturating_add(256)));
 
     message.push_str("{\"message\":{\"token\":");
     message.push_str(&quoted);
-    message.push_str(",\"data\":{\"b\":");
-    message.push_str(&json_quote(&base64url(blob)));
-    message.push_str("},\"android\":{\"priority\":\"HIGH\",\"ttl\":\"");
+    match blob {
+        Some(blob) => {
+            message.push_str(",\"data\":{\"b\":");
+            message.push_str(&json_quote(&base64url(blob)));
+            message.push_str("},\"android\":{\"priority\":\"HIGH\",\"ttl\":\"");
+        }
+        None => message
+            .push_str(",\"data\":{\"t\":\"1\"},\"android\":{\"priority\":\"NORMAL\",\"ttl\":\""),
+    }
     message.push_str(&ttl.to_string());
     message.push_str("s\"}}}");
     message
@@ -433,8 +441,18 @@ mod tests {
     fn the_body_of_a_send_is_a_data_message_of_high_priority() {
         // NTF-130: one data field, no `notification` field.
         assert_eq!(
-            message_of("tok\"en", b"foo", 3_600).as_str(),
+            message_of("tok\"en", Some(b"foo"), 3_600).as_str(),
             r#"{"message":{"token":"tok\"en","data":{"b":"Zm9v"},"android":{"priority":"HIGH","ttl":"3600s"}}}"#
+        );
+    }
+
+    #[test]
+    fn the_body_of_a_tick_names_no_content_and_takes_normal_priority() {
+        // NTF-039, NTF-150: the tick of the fixed clock is no high-priority
+        // message, and its one field carries nothing.
+        assert_eq!(
+            message_of("token", None, 1_800).as_str(),
+            r#"{"message":{"token":"token","data":{"t":"1"},"android":{"priority":"NORMAL","ttl":"1800s"}}}"#
         );
     }
 }

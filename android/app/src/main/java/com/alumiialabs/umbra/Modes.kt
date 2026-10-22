@@ -36,12 +36,13 @@ import androidx.work.WorkManager as Work
 import java.security.SecureRandom
 
 /**
- * The four modes of Part 8 §8.3, and the content preview of `NTF-083`.
+ * The five modes of Part 8 §8.3, and the content preview of `NTF-083`.
  * Instant mode registers the push token of the platform. Direct mode holds
  * no token and takes each record over its own connection. Private mode
  * holds no token, and the device wakes on a fixed clock that no arrival
- * moves. Off drains when the user opens the app. The mode is a setting of
- * this device, and the user sets it as a [Delivery] and a delay
+ * moves. Periodic mode keeps that clock at the NDR, which wakes the device
+ * over FCM (§8.2.8). Off drains when the user opens the app. The mode is a
+ * setting of this device, and the user sets it as a [Delivery] and a delay
  * (`NTF-147`).
  */
 enum class NotifyMode(private val labelId: Int) {
@@ -49,6 +50,7 @@ enum class NotifyMode(private val labelId: Int) {
     Instant(R.string.modes_google),
     Direct(R.string.modes_direct),
     Private(R.string.modes_direct_delayed),
+    Periodic(R.string.modes_google_delayed),
     Off(R.string.modes_none),
     ;
 
@@ -93,6 +95,12 @@ object Modes {
     /** The fixed clock of Private mode (§8.3). */
     private const val PRIVATE_PERIOD_MS = 30 * 60 * 1_000L
 
+    /** The longest watch of a locked client at one tick (`PERIODIC_WATCH_MAX`), in ms. */
+    const val PERIODIC_WATCH = 15_000L
+
+    /** The time that a tick holds the process for the wake session of an open client (`NTF-012`), in ms. */
+    const val WAKE_HOLD = 8_000L
+
     private fun preferences(context: Context) =
         context.applicationContext.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
 
@@ -103,7 +111,11 @@ object Modes {
      */
     fun mode(context: Context): NotifyMode = when (delivery(context)) {
         Delivery.Direct -> if (isDelayed(context)) NotifyMode.Private else NotifyMode.Direct
-        Delivery.Google -> if (Push.isAvailable(context)) NotifyMode.Instant else NotifyMode.Direct
+        Delivery.Google -> when {
+            !Push.isAvailable(context) -> NotifyMode.Direct
+            isDelayed(context) -> NotifyMode.Periodic
+            else -> NotifyMode.Instant
+        }
         Delivery.None -> NotifyMode.Off
     }
 
@@ -121,7 +133,10 @@ object Modes {
         }
     }
 
-    /** Whether the fixed clock of Private mode holds the delivery. Google takes no delay (`NTF-147`). */
+    /**
+     * Whether a fixed clock holds the delivery: the timer of the platform
+     * with Direct, and the clock of the NDR with Google (`NTF-147`).
+     */
     fun isDelayed(context: Context): Boolean {
         val preferences = preferences(context)
         return preferences.getBoolean(DELAYED, preferences.getString(MODE, null) == NotifyMode.Private.name)
@@ -181,6 +196,16 @@ object Modes {
                 WakeStore.deleteWatch(app)
                 Push.opened(app)
                 Poll.schedule(app)
+                Core.refreshWake(app)
+            }
+            NotifyMode.Periodic -> {
+                // NTF-153: the clock of the NDR wakes the device, thus no
+                // timer, no socket, and no poll. A locked client watches at
+                // each tick, thus its queues bind for the watch.
+                cancelClock(app)
+                Core.setWatch(true)
+                Work.getInstance(app).cancelUniqueWork(Poll.NAME)
+                Push.opened(app)
                 Core.refreshWake(app)
             }
             NotifyMode.Direct -> {
@@ -292,6 +317,27 @@ class PrivateClock : BroadcastReceiver() {
     }
 }
 
+/**
+ * One tick of the clock of the NDR in Periodic mode (`NTF-153`). An open
+ * client drains each queue in a wake session. A locked client starts the
+ * watch from its table for a short time, and each blob shows which
+ * conversation waits. The receiver of FCM runs this on a thread of its own,
+ * and the process lives while it waits.
+ */
+object PeriodicTick {
+    fun run(context: Context) {
+        val app = context.applicationContext
+        if (Modes.mode(app) != NotifyMode.Periodic) return
+
+        if (Core.isOpen()) {
+            Core.wake(app)
+            Thread.sleep(Modes.WAKE_HOLD)
+        } else {
+            Watcher.brief(app, Modes.PERIODIC_WATCH)
+        }
+    }
+}
+
 /** The mode of this device, each with its trade in one line (`NTF-009`). */
 @Composable
 fun NotificationsScreen(onBack: () -> Unit) {
@@ -334,11 +380,17 @@ fun NotificationsScreen(onBack: () -> Unit) {
             }
 
             // NTF-147: the delay is its own switch, and None takes none.
-            if (delivery == Delivery.Direct) {
+            if (delivery != Delivery.None) {
                 ToggleRow(
                     stringResource(R.string.modes_delayed),
                     isDelayed,
-                    detail = stringResource(R.string.umbra_ui_ntf_009_private),
+                    detail = stringResource(
+                        if (delivery == Delivery.Google) {
+                            R.string.umbra_ui_ntf_009_periodic
+                        } else {
+                            R.string.umbra_ui_ntf_009_private
+                        },
+                    ),
                 ) {
                     isDelayed = it
                     Modes.setDelayed(context, it)

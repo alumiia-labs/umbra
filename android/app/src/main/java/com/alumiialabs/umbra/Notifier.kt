@@ -95,8 +95,10 @@ object Notifier {
         val watches = !Core.isOpen() && Modes.mode(context) == NotifyMode.Direct
         val title = when {
             watches -> R.string.notify_locked
-            // Private mode holds no connection between two wakes of its clock.
-            Modes.mode(context) == NotifyMode.Private -> R.string.notify_unlocked
+            // Private mode and Periodic mode hold no connection between two
+            // wakes of their clock.
+            Modes.mode(context) == NotifyMode.Private || Modes.mode(context) == NotifyMode.Periodic ->
+                R.string.notify_unlocked
             else -> when (Core.linkState) {
                 LinkState.Connected -> R.string.notify_holds_connection
                 LinkState.Connecting -> R.string.connection_connecting

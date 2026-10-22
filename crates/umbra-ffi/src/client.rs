@@ -8000,6 +8000,6 @@ mod tests {
             .unwrap();
         batch.commit().unwrap();
         assert!(client.wake_table().is_ok());
-        assert_eq!(client.ndr_calls_due(&mut rng).unwrap().len(), 1);
+        assert_eq!(client.ndr_calls_due(0, &mut rng).unwrap().len(), 1);
     }
 }

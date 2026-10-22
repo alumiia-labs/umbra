@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 14: Implementation Requirements and Assurance
 
 **Status:** Draft
-**Version:** 0.44.0
+**Version:** 0.45.0
 **Date:** 2026-10-22
 
 ---
@@ -719,7 +719,8 @@ The core keeps the UniFFI annotations and holds no platform assumption, thus a
 later platform adds a shell and no core change. An iOS version has to revisit
 four items:
 
-1. the notification extension of Part 8;
+1. the notification extension of Part 8. A background push of the platform
+   can carry the ticks of Periodic mode (Part 8 §8.2.8) with no alert;
 2. the secure-element entanglement of §14.6.4;
 3. the file protection and the backup exclusion of §14.6.6;
 4. the reproducible build of a static library.

@@ -50,9 +50,9 @@ object WakeStore {
 
     private fun watchFile(context: Context) = File(context.noBackupFilesDir, WATCH_FILE)
 
-    /** Whether the mode holds a wake table: Instant and Direct (`NTF-137`). */
+    /** Whether the mode holds a wake table: Instant, Direct, and Periodic (`NTF-137`). */
     private fun holdsTable(context: Context) =
-        Modes.mode(context).let { it == NotifyMode.Instant || it == NotifyMode.Direct }
+        Modes.mode(context).let { it == NotifyMode.Instant || it == NotifyMode.Direct || it == NotifyMode.Periodic }
 
     // The worker and the receiver of FCM both reach the key, and two makes
     // of one alias would leave a table that no key opens.
@@ -95,7 +95,9 @@ object WakeStore {
      */
     @Synchronized
     fun writeWatch(context: Context, table: ByteArray) {
-        if (Modes.mode(context) != NotifyMode.Direct || table.isEmpty()) {
+        // NTF-145: Direct mode and Periodic mode hold the watch table.
+        val watches = Modes.mode(context).let { it == NotifyMode.Direct || it == NotifyMode.Periodic }
+        if (!watches || table.isEmpty()) {
             deleteWatch(context)
             return
         }

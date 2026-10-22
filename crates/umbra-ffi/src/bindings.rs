@@ -353,6 +353,9 @@ pub struct PushStatus {
     pub bound_queues: u32,
     /// The handle groups that the NDR holds.
     pub registered_groups: u32,
+    /// Whether the NDR holds the timer of Periodic mode under the present
+    /// token (Part 8 `NTF-150`).
+    pub timer: bool,
 }
 
 /// The link-fault counts of this device (Part 10 §10.4.2), for the view of
@@ -2911,11 +2914,11 @@ impl Inner {
         let (Some((route, tls)), Some(spawner)) = (self.ndr.clone(), self.spawner.clone()) else {
             return;
         };
-        let Ok(calls) = self.client.ndr_calls_due(&mut OsRng) else {
+        let now = unix_now();
+        let Ok(calls) = self.client.ndr_calls_due(now, &mut OsRng) else {
             return;
         };
 
-        let now = unix_now();
         for call in calls {
             // A call that failed waits for its backoff.
             if self
@@ -5198,6 +5201,7 @@ impl Handle {
             carrier: carrier.to_owned(),
             bound_queues: u32::try_from(bound).unwrap_or(u32::MAX),
             registered_groups: u32::try_from(registered).unwrap_or(u32::MAX),
+            timer: inner.client.timer_registered()?,
         })
     }
 
@@ -5315,6 +5319,23 @@ impl Handle {
     /// with the NDR under it, or leaves (Part 8 §8.2.7).
     pub fn set_fcm_token(&self, token: Option<String>) -> Result<(), FfiError> {
         self.set_push_token(token.as_deref().map(|token| (TokenCarrier::Fcm, token)))
+    }
+
+    /// Takes the FCM registration token of the timer of Periodic mode, or
+    /// none when the mode left (Part 8 `NTF-150`). The NDR wakes this device
+    /// on a fixed clock under it, and each handle group of Instant mode
+    /// leaves (`NTF-151`).
+    pub fn set_fcm_timer_token(&self, token: Option<String>) -> Result<(), FfiError> {
+        let mut inner = locked(&self.inner);
+        inner.client.set_timer_token(
+            token.as_deref().map(|token| (TokenCarrier::Fcm, token)),
+            &mut OsRng,
+        )?;
+
+        // A new token goes to the NDR at once, whatever the earlier calls.
+        inner.ndr_retry.clear();
+        inner.pump_ndr();
+        Ok(())
     }
 
     /// Verifies a relay manifest of Part 10 §10.5.5 under the key set that
@@ -8066,6 +8087,8 @@ guard relay1.example.org"
             advances: false,
             request: Box::new([0; _]),
             token: [0; 32],
+            is_timer: false,
+            at: 0,
         };
         let waits = std::thread::scope(|scope| {
             let inner = locked(&handle.inner);

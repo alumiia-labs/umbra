@@ -189,6 +189,9 @@ fun ConnectionScreen(onBack: () -> Unit) {
                         // Part 8 §8.3: the mode decides the carrier.
                         Modes.mode(context) == NotifyMode.Direct -> stringResource(R.string.connection_push_direct)
                         Modes.mode(context) == NotifyMode.Private -> stringResource(R.string.connection_push_private)
+                        Modes.mode(context) == NotifyMode.Periodic -> stringResource(
+                            if (it.timer) R.string.connection_push_periodic else R.string.connection_push_periodic_waiting,
+                        )
                         Modes.mode(context) == NotifyMode.Off -> stringResource(R.string.connection_push_off)
                         it.carrier.isEmpty() -> stringResource(R.string.connection_push_polling)
                         else -> stringResource(

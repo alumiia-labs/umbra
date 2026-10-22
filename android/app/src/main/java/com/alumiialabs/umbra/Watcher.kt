@@ -12,7 +12,8 @@ import uniffi.umbra_ffi.startWatch
  * notifier credential of each queue and no key of the store, thus it sees
  * that a record arrived and reads none. It runs under the foreground
  * service, and each blob shows that a message waits in its conversation,
- * as a push of Instant mode does (`NTF-136`).
+ * as a push of Instant mode does (`NTF-136`). In Periodic mode it runs for
+ * a short time at each tick alone (`NTF-153`).
  */
 object Watcher : WatchListener {
     // A start reads the keystore, thus it runs off the main thread, and one
@@ -54,6 +55,33 @@ object Watcher : WatchListener {
                 Notifier.locked(app)
             }
         }
+    }
+
+    /**
+     * The watch of one tick of Periodic mode (`NTF-153`): it runs for `ms`
+     * at most and then ends. The caller waits for it on a thread of its
+     * own. A watch that runs already serves the tick.
+     */
+    fun brief(context: Context, ms: Long) {
+        val app = context.applicationContext
+        this.app = app
+        val started = worker.submit<Boolean> {
+            if (watch != null) return@submit false
+
+            val table = WakeStore.readWatch(app) ?: return@submit false
+            watch = try {
+                startWatch(table, this)
+            } catch (refused: FfiException) {
+                null
+            } finally {
+                table.fill(0)
+            }
+            watch != null
+        }.get()
+        if (!started) return
+
+        Thread.sleep(ms)
+        stop()
     }
 
     /** Ends the watch: at the unlock, and when the service ends. */
@@ -98,7 +126,9 @@ object Watcher : WatchListener {
                 }
                 watch = null
 
-                if (!Core.isOpen()) {
+                // NTF-120: the watch of Direct mode ended for good. The
+                // next tick of Periodic mode tries again.
+                if (!Core.isOpen() && Modes.mode(app) == NotifyMode.Direct) {
                     DeliveryService.stop(app)
                     Notifier.locked(app)
                 }

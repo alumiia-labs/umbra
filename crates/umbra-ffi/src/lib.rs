@@ -2053,7 +2053,7 @@ mod tests {
         let binding = client.binding_of(&[0; 32]).unwrap().unwrap();
         assert_eq!(binding.handle, WATCH_HANDLE);
         assert_eq!(binding.k_tok.expose(), &[0; 32]);
-        assert!(client.ndr_calls_due(&mut rng).unwrap().is_empty());
+        assert!(client.ndr_calls_due(0, &mut rng).unwrap().is_empty());
 
         // The notifier secret is stable, and differs for each queue.
         let one = client.notifier_secret(&[0; 32]).unwrap().unwrap();
@@ -2150,7 +2150,7 @@ mod tests {
 
         // Each group registers once, and the NDR opens its token.
         let mut ndr = Ndr::default();
-        let calls = client.ndr_calls_due(&mut rng).unwrap();
+        let calls = client.ndr_calls_due(0, &mut rng).unwrap();
         assert_eq!(calls.len(), 3);
         for call in &calls {
             assert_eq!(
@@ -2159,7 +2159,7 @@ mod tests {
             );
             client.ndr_call_taken(call, &mut rng).unwrap();
         }
-        assert!(client.ndr_calls_due(&mut rng).unwrap().is_empty());
+        assert!(client.ndr_calls_due(0, &mut rng).unwrap().is_empty());
 
         // NTF-125: a bind that the registration overtook binds once more
         // after its report, and a queue that was bound binds again.
@@ -2192,7 +2192,7 @@ mod tests {
         client
             .set_push_token(Some((TokenCarrier::Fcm, second)), &mut rng)
             .unwrap();
-        let calls = client.ndr_calls_due(&mut rng).unwrap();
+        let calls = client.ndr_calls_due(0, &mut rng).unwrap();
         assert_eq!(calls.len(), 3);
         for call in &calls {
             assert_eq!(
@@ -2207,7 +2207,7 @@ mod tests {
         );
 
         client.set_push_token(None, &mut rng).unwrap();
-        let calls = client.ndr_calls_due(&mut rng).unwrap();
+        let calls = client.ndr_calls_due(0, &mut rng).unwrap();
         assert!(calls.iter().all(|call| call.is_removal));
         for call in &calls {
             assert_eq!(
@@ -2217,7 +2217,86 @@ mod tests {
             client.ndr_call_taken(call, &mut rng).unwrap();
         }
         assert!(ndr.is_empty());
-        assert!(client.ndr_calls_due(&mut rng).unwrap().is_empty());
+        assert!(client.ndr_calls_due(0, &mut rng).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_timer_registers_alone_and_moves_on_its_chain() {
+        use umbra_core::notify::{ndr::Ndr, ROTATE_INTERVAL, WATCH_HANDLE};
+        use umbra_wire::ndr::{NdrResponse, TokenCarrier};
+        const NOW: u64 = 1_700_000_000;
+        let mut rng = Rng(93);
+        let mut client = new_client(&mut rng);
+        let queues: Vec<([u8; 32], [u8; 32])> = (0..3u8).map(|i| ([i; 32], [0xA1; 32])).collect();
+        let mut ndr = Ndr::default();
+        let serve = |client: &mut Client<_, _>, ndr: &mut Ndr, at: u64, rng: &mut Rng| {
+            let calls = client.ndr_calls_due(at, rng).unwrap();
+            for call in &calls {
+                assert_eq!(ndr.handle(&call.request[..], at).0, NdrResponse::Taken);
+                client.ndr_call_taken(call, rng).unwrap();
+            }
+            calls.len()
+        };
+
+        // An Instant token first: its groups register.
+        client
+            .set_push_token(Some((TokenCarrier::Fcm, "fcm-instant")), &mut rng)
+            .unwrap();
+        client.queues_to_bind(&queues, 0, &mut rng).unwrap();
+        assert_eq!(serve(&mut client, &mut ndr, NOW, &mut rng), 1);
+
+        // NTF-151: the token of the timer ends each group, and the timer
+        // registers under a handle of its own.
+        client.set_watch(true, &mut rng).unwrap();
+        client
+            .set_timer_token(Some((TokenCarrier::Fcm, "fcm-periodic")), &mut rng)
+            .unwrap();
+        assert!(client.push_token().unwrap().is_none());
+        let calls = client.ndr_calls_due(NOW, &mut rng).unwrap();
+        assert_eq!(calls.iter().filter(|call| call.is_timer).count(), 1);
+        assert_eq!(calls.iter().filter(|call| call.is_removal).count(), 1);
+        assert_eq!(serve(&mut client, &mut ndr, NOW, &mut rng), 2);
+        assert_eq!(ndr.timers(), 1);
+        assert_eq!(ndr.len(), 1);
+        assert!(client.ndr_calls_due(NOW, &mut rng).unwrap().is_empty());
+
+        // NTF-143: the queues bind for the watch, under no handle of the NDR.
+        let unbound = client.queues_to_bind(&queues, 0, &mut rng).unwrap();
+        client.binds_sent(&unbound);
+        assert_eq!(
+            client.binding_of(&[0; 32]).unwrap().unwrap().handle,
+            WATCH_HANDLE
+        );
+
+        // NTF-152: the timer moves on its chain at a new token, and again
+        // after `ROTATE_INTERVAL`, with no answer lost on the way.
+        client
+            .set_timer_token(Some((TokenCarrier::Fcm, "fcm-periodic-2")), &mut rng)
+            .unwrap();
+        assert_eq!(serve(&mut client, &mut ndr, NOW + 1, &mut rng), 1);
+        let ticks = ndr.ticks(NOW, NOW + 1_800);
+        assert_eq!(&ticks[0].target[..], b"fcm-periodic-2");
+        assert!(client.ndr_calls_due(NOW + 2, &mut rng).unwrap().is_empty());
+        assert_eq!(
+            serve(&mut client, &mut ndr, NOW + 1 + ROTATE_INTERVAL, &mut rng),
+            1
+        );
+        assert!(client
+            .ndr_calls_due(NOW + 2 + ROTATE_INTERVAL, &mut rng)
+            .unwrap()
+            .is_empty());
+
+        // The end of the mode removes the timer, and nothing waits after it.
+        client.set_timer_token(None, &mut rng).unwrap();
+        assert_eq!(
+            serve(&mut client, &mut ndr, NOW + 3 + ROTATE_INTERVAL, &mut rng),
+            1
+        );
+        assert!(ndr.is_empty());
+        assert!(client
+            .ndr_calls_due(NOW + 4 + ROTATE_INTERVAL, &mut rng)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -3040,7 +3119,7 @@ mod tests {
             client.queue_bound(&queue.0, &mut rng).unwrap();
         }
         let mut ndr = Ndr::default();
-        for call in client.ndr_calls_due(&mut rng).unwrap() {
+        for call in client.ndr_calls_due(0, &mut rng).unwrap() {
             assert_eq!(
                 ndr.handle(&call.request[..], 1_700_000_000).0,
                 NdrResponse::Taken
@@ -3070,7 +3149,7 @@ mod tests {
         assert_eq!(after.queue_alias, before.queue_alias);
 
         // The new handle registers and the old one leaves the NDR.
-        let calls = client.ndr_calls_due(&mut rng).unwrap();
+        let calls = client.ndr_calls_due(0, &mut rng).unwrap();
         assert_eq!(calls.len(), 2);
         for call in &calls {
             assert_eq!(
@@ -3079,7 +3158,7 @@ mod tests {
             );
             client.ndr_call_taken(call, &mut rng).unwrap();
         }
-        assert!(client.ndr_calls_due(&mut rng).unwrap().is_empty());
+        assert!(client.ndr_calls_due(0, &mut rng).unwrap().is_empty());
 
         let push = |binding: &umbra_core::notify::binding::Binding| {
             let mut out = [0u8; NDR_REQUEST_LEN];

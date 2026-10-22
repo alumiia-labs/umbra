@@ -2,7 +2,7 @@
 //! token blinding and the handle groups, the binding that gives a queue
 //! relay what it seals with, the push scheduler of a queue relay, the
 //! digest gate of a group-queue relay, the Notification Delivery
-//! Relay (`ndr`), and the wake rules of the three modes at the client.
+//! Relay (`ndr`), and the wake rules of the modes at the client.
 //!
 //! Each type takes the time and the random values it needs as arguments.
 
@@ -47,6 +47,12 @@ pub const WAKE_SESSION_MAX: u64 = 6;
 /// The daily drain of a rendezvous queue in Private mode (`NTF-046`), in
 /// seconds.
 pub const RENDEZVOUS_DRAIN_PRIVATE: u64 = 86_400;
+/// `PERIODIC_INTERVAL`: the fixed clock of the NDR in Periodic mode
+/// (`NTF-150`), in seconds. It is the clock of Private mode.
+pub const PERIODIC_INTERVAL: u64 = 1_800;
+/// `PERIODIC_WATCH_MAX`: the longest watch of a locked client at one tick of
+/// Periodic mode (`NTF-153`), in seconds.
+pub const PERIODIC_WATCH_MAX: u64 = 15;
 
 /// The epoch of the key schedule at `now`.
 pub const fn epoch_of(now: u64) -> u32 {

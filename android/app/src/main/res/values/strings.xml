@@ -939,6 +939,8 @@
     <string name="connection_push">Push</string>
     <string name="connection_push_direct">Direct · own connection, no token</string>
     <string name="connection_push_private">Private · fixed clock, no token</string>
+    <string name="connection_push_periodic">Periodic · the clock of the NDR</string>
+    <string name="connection_push_periodic_waiting">Periodic · the timer waits for the NDR</string>
     <string name="connection_push_off">Off · no token</string>
     <string name="connection_push_polling">Polling</string>
     <!-- %1$s is the name of a push carrier. %2$d is a count of groups. %3$d is a count of queues. NDR is the name of a server role. -->
@@ -1117,6 +1119,7 @@
     <string name="modes_google">Google</string>
     <string name="modes_direct">Direct</string>
     <string name="modes_direct_delayed">Direct, delayed</string>
+    <string name="modes_google_delayed">Google, delayed</string>
     <string name="modes_none">None</string>
     <string name="modes_delayed">Delayed</string>
     <string name="modes_show_sender">Show sender</string>

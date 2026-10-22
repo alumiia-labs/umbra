@@ -1,6 +1,6 @@
 //! The requests of the Notification Delivery Relay (Part 8 §8.2.7).
 //!
-//! The NDR takes one request shape for each of its three kinds, padded to
+//! The NDR takes one request shape for each of its four kinds, padded to
 //! `NDR_REQUEST_LEN`, thus the OHTTP relay in front of it cannot tell a
 //! registration from a push by its size (`NTF-122`).
 
@@ -27,6 +27,7 @@ pub const BLOB_LEN: usize = 69;
 const KIND_REGISTER: u8 = 0x01;
 const KIND_UNREGISTER: u8 = 0x02;
 const KIND_PUSH: u8 = 0x03;
+const KIND_TIMER: u8 = 0x04;
 
 /// The handle of a binding that serves a watch alone (Part 8 `NTF-143`). No
 /// request to the NDR names it.
@@ -55,6 +56,19 @@ pub enum NdrRequest<'a> {
         /// The removal secret whose hash the registration holds.
         removal: Secret<32>,
     },
+    /// `NTIMER`: holds the plain push token `token` under `handle`, for the
+    /// pushes of the fixed clock of Periodic mode (Part 8 `NTF-150`).
+    /// `prior` is as in `NREG`.
+    Timer {
+        /// The handle, which names no queue.
+        handle: [u8; HANDLE_LEN],
+        /// The plain push token, the carrier byte first.
+        token: &'a [u8],
+        /// `SHA3-256` of the removal secret of this registration.
+        removal_hash: [u8; 32],
+        /// The removal secret of the registration that this one replaces.
+        prior: Secret<32>,
+    },
     /// `NPUSH`: the push of a queue relay.
     Push {
         /// The handle.
@@ -74,6 +88,7 @@ impl NdrRequest<'_> {
         match self {
             NdrRequest::Register { handle, .. }
             | NdrRequest::Unregister { handle, .. }
+            | NdrRequest::Timer { handle, .. }
             | NdrRequest::Push { handle, .. } => handle,
         }
     }
@@ -110,6 +125,23 @@ impl NdrRequest<'_> {
                 w.u8(KIND_UNREGISTER)?;
                 w.put(handle)?;
                 w.put(removal.expose())?;
+            }
+            NdrRequest::Timer {
+                handle,
+                token,
+                removal_hash,
+                prior,
+            } => {
+                if !(2..=PUSH_TOKEN_MAX).contains(&token.len()) {
+                    return Err(Error::Capacity);
+                }
+
+                w.u8(KIND_TIMER)?;
+                w.put(handle)?;
+                w.u16(u16::try_from(token.len()).map_err(|_| Error::Capacity)?)?;
+                w.put(token)?;
+                w.put(removal_hash)?;
+                w.put(prior.expose())?;
             }
             NdrRequest::Push {
                 handle,
@@ -164,6 +196,19 @@ impl NdrRequest<'_> {
                 handle,
                 removal: Secret::new(r.array::<32>()?),
             },
+            KIND_TIMER => {
+                let len = usize::from(r.u16()?);
+                if !(2..=PUSH_TOKEN_MAX).contains(&len) {
+                    return Err(Error::Malformed);
+                }
+
+                NdrRequest::Timer {
+                    handle,
+                    token: r.take(len)?,
+                    removal_hash: r.array::<32>()?,
+                    prior: Secret::new(r.array::<32>()?),
+                }
+            }
             KIND_PUSH => NdrRequest::Push {
                 handle,
                 k_tok: Secret::new(r.array::<32>()?),
@@ -268,6 +313,8 @@ mod tests {
     #[test]
     fn each_kind_fills_one_length_and_reads_back() {
         let ct = [7u8; 300];
+        // The longest token fits beside the removal secrets.
+        let longest = [9u8; PUSH_TOKEN_MAX];
         let requests = [
             NdrRequest::Register {
                 handle: [1; 16],
@@ -286,6 +333,12 @@ mod tests {
                 ttl: 86_400,
                 blob: [6; BLOB_LEN],
             },
+            NdrRequest::Timer {
+                handle: [1; 16],
+                token: &longest,
+                removal_hash: [3; 32],
+                prior: Secret::new([8; 32]),
+            },
         ];
         for request in &requests {
             let mut out = [0u8; NDR_REQUEST_LEN];
@@ -303,6 +356,12 @@ mod tests {
             panic!("not a registration");
         };
         assert_eq!(ct_token, &ct[..]);
+
+        requests[3].encode(&mut out).unwrap();
+        let NdrRequest::Timer { token, .. } = NdrRequest::parse(&out).unwrap() else {
+            panic!("not a timer");
+        };
+        assert_eq!(token, &longest[..]);
     }
 
     #[test]
@@ -320,7 +379,7 @@ mod tests {
         assert!(NdrRequest::parse(&padded).is_err());
 
         let mut kind = out;
-        kind[0] = 0x04;
+        kind[0] = 0x05;
         assert!(NdrRequest::parse(&kind).is_err());
 
         assert!(NdrRequest::parse(&out[..NDR_REQUEST_LEN - 1]).is_err());
@@ -334,6 +393,14 @@ mod tests {
             prior: Secret::new([0; 32]),
         };
         assert_eq!(register.encode(&mut out), Err(Error::Capacity));
+
+        let timer = NdrRequest::Timer {
+            handle: [1; 16],
+            token: &too_long[..PUSH_TOKEN_MAX + 1],
+            removal_hash: [3; 32],
+            prior: Secret::new([0; 32]),
+        };
+        assert_eq!(timer.encode(&mut out), Err(Error::Capacity));
     }
 
     #[test]

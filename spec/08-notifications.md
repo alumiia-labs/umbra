@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 8: Notifications and Mobile Delivery
 
 **Status:** Draft
-**Version:** 0.44.0
+**Version:** 0.45.0
 **Date:** 2026-10-22
 
 ---
@@ -15,8 +15,9 @@ three carriers. FCM puts Google on the path of each push, and a legal process
 against Google can obtain the account behind a registration token. A client
 in Direct mode, and a device with no FCM, take the wakes from the socket and
 the poll, and no platform party is on that path. A locked client in Direct
-mode takes its wakes from a watch of its own (§8.4.3). UMBRA carries no
-UnifiedPush.
+mode takes its wakes from a watch of its own (§8.4.3). A client in Periodic
+mode takes one FCM wake in each 30 minutes from the clock of the NDR, and
+no arrival moves that clock (§8.2.8). UMBRA carries no UnifiedPush.
 
 Thus the design goal of UMBRA is **not** to hide from the push provider that a
 build carries. The goal is this:
@@ -32,6 +33,11 @@ wiretap, a prospective logging order against the NDR, or collusion between the
 NDR and the queue relay can recover the token-to-queue mapping. Private
 notification mode exists because the instant path cannot meet the stronger
 claim.
+
+The timer of Periodic mode (§8.2.8) is the one push token that the NDR holds
+in the clear. It is no binding of `NTF-001`: the timer names no queue, no
+contact, and no messaging identity, and the device that holds it holds no
+handle group of §8.2.1 under the same token (`NTF-151`).
 
 The empirical baseline for the field is poor. A PETS 2024 study of 21 secure
 messengers (Samarin and others, arXiv:2407.10589) found that 20 of the 21 used
@@ -364,13 +370,13 @@ Part 2 §2.4.2 goal S1 sets the latency of each mode.
 ### 8.2.7 The requests of the NDR
 
 §8.2.1 names a registration and a push, and this section gives their formats.
-The NDR takes three requests. `NDR_REQUEST_LEN` is 640 bytes and
+The NDR takes four requests. `NDR_REQUEST_LEN` is 640 bytes and
 `PUSH_TOKEN_MAX` is 512 bytes. Each request travels inside the OHTTP of
 `NTF-002`, and the NDR answers each with a response of 16 bytes.
 
 ```
 NdrRequest {                      // NDR_REQUEST_LEN = 640 bytes
-    kind          u8              // 0x01 NREG, 0x02 NUNREG, 0x03 NPUSH
+    kind          u8              // 0x01 NREG, 0x02 NUNREG, 0x03 NPUSH, 0x04 NTIMER
     handle        [16]u8
     body                          // by kind, below
     padding                       // zero bytes to 640
@@ -379,6 +385,8 @@ NREG   body: nonce [24]u8, ct_len u16, ct_token [ct_len]u8 (17..=528),
              removal_hash [32]u8, prior [32]u8
 NUNREG body: removal [32]u8
 NPUSH  body: k_tok [32]u8, ttl u32, blob [69]u8
+NTIMER body: token_len u16, token [token_len]u8 (2..=512),
+             removal_hash [32]u8, prior [32]u8
 
 NdrResponse { status u8, padding [15]u8 }  // 0x00 taken, 0x01 refused, 0x02 gone
 PushToken   { carrier u8, target }         // the plaintext of ct_token, at most 512 bytes
@@ -402,8 +410,9 @@ PushToken   { carrier u8, target }         // the plaintext of ct_token, at most
 
   The NDR MUST drop a registration at an `NUNREG` whose `removal` opens it,
   MUST answer `taken` to an `NUNREG` for a handle that it does not hold, and
-  MUST refuse any other `NUNREG`. The NDR MUST take an `NREG` for a
-  handle that it holds only when `prior` opens that registration. A secret
+  MUST refuse any other `NUNREG`. The NDR MUST take an `NREG` or an
+  `NTIMER` for a handle that it holds only when `prior` opens that
+  registration. A secret
   opens a registration when its `SHA3-256`, or the `SHA3-256` of the next
   secret of the chain, equals the `removal_hash` held: the second form
   repeats a move whose answer the device did not see.
@@ -435,7 +444,8 @@ PushToken   { carrier u8, target }         // the plaintext of ct_token, at most
 
 **The bounds of the NDR.** A first `NREG` carries no admission, and the OHTTP
 relay hides its sender, thus the NDR cannot bound one device. It bounds its
-own work with the four limits below, and it holds them in memory alone.
+own work with the four limits below, and it holds them in memory alone. A
+first `NTIMER` is a new handle under each limit, as a first `NREG` is.
 
 - The NDR holds at most 2^20 registrations. It takes an `NREG` that moves a
   handle that it holds. An `NREG` for one more handle at the bound takes the
@@ -492,14 +502,68 @@ own work with the four limits below, and it holds them in memory alone.
   account of the deployment, and it MUST NOT give that account or its token to
   any other party.
 
+  A tick of the clock of §8.2.8 is a data message with the one data field
+  `t`, whose value is `1`, with `android.priority` `NORMAL` and
+  `android.ttl` `PERIODIC_INTERVAL` (`NTF-039`).
+
 > *Cause of `NTF-124`.* A queue relay knows each handle of its queues. A
 > removal or a replacement that needed the handle alone would let that relay
 > end the pushes of a device, or point them at a token of its own. The hash
 > of a secret that only the device holds closes both.
 
-## 8.3 The four modes
+### 8.2.8 The timer of Periodic mode
 
-UMBRA ships the four modes. The user selects one for the device, through
+A client in Periodic mode wakes on a fixed clock, as a client in Private
+mode does. The clock runs at the NDR, and FCM carries each tick. Thus the
+platform starts the client for each tick, and no timer of the platform has
+to wake it.
+
+- **[NTF-150]** The NDR MUST hold the plain push token of an `NTIMER` under
+  its handle, and it MUST send one tick to that token in each
+  `PERIODIC_INTERVAL`, at the phase of the handle. The phase is the first 8
+  bytes of the handle as a big-endian integer, modulo `PERIODIC_INTERVAL`
+  in seconds. A tick carries no blob and no field that differs between two
+  ticks, and the arrival of a message does not move it. The NDR MUST refuse
+  an `NPUSH` for a timer, and it MUST NOT send a tick whose time passed
+  while it did not run. The rules `NTF-125`, `NTF-134`, and `NTF-138` apply
+  to a timer as they apply to an `NREG`.
+- **[NTF-151]** A device MUST NOT hold a timer and a handle group of §8.2.1
+  at the same time. A device MUST take a new push token of the platform when
+  it enters Periodic mode, and when it leaves the mode for Instant mode.
+- **[NTF-152]** A device MUST send its `NTIMER` again under the chain of
+  `NTF-124` at each new push token, and at least once in each
+  `ROTATE_INTERVAL`. It MUST send the `NUNREG` of its timer when it leaves
+  Periodic mode.
+
+| Parameter | Value |
+| --- | --- |
+| `PERIODIC_INTERVAL` | 1 800 s, the cadence of Private mode in §8.3 |
+| `PERIODIC_WATCH_MAX` | 15 s, the longest watch of a locked client at one tick (`NTF-153`) |
+
+> *Cause.* The NDR must hold a token that it can read, because no queue
+> relay brings a `k_tok` for a tick. Thus the timer holds no queue: a party
+> that seizes the NDR reads a list of push tokens of devices in Periodic
+> mode, and each token names no queue, no contact, and no identity. Google
+> already maps each token of the application to its account. `NTF-151` keeps
+> the token of a timer apart from the tokens that a queue relay can open
+> under a `k_tok`. Without it, a prospective logging order against the NDR
+> in Instant mode would give the token of each handle, and the stored timer
+> would then name the same device after it changed the mode.
+>
+> The phase comes from the handle, thus the NDR stores no phase, and a
+> restart keeps each clock. The handle is random, thus the phases of the
+> devices spread over the interval.
+
+> *Residual.* The NDR and Google see a tick for each device in each 30
+> minutes, and the ingress relay sees the session that follows each tick.
+> Over a day, the phase of a timer is one value for that device, as the
+> phase of Private mode is (Part 15 §15.3). The NDR draws no new phase at a
+> network change, because the device keeps its handle. A device that leaves
+> the mode and enters it again takes a new handle, and thus a new phase.
+
+## 8.3 The five modes
+
+UMBRA ships the five modes. The user selects one for the device, through
 the two controls below.
 
 **The choice on the screen.** The settings show the delivery as one choice,
@@ -508,15 +572,16 @@ and the delay as one switch beside it. The pair gives the mode.
 | Delivery | Delayed off | Delayed on |
 | --- | --- | --- |
 | Direct | Direct mode | Private mode |
-| Google | Instant mode | Not offered |
+| Google | Instant mode | Periodic mode |
 | None | Off mode | Not offered |
 
 - **[NTF-147]** The settings MUST offer the delivery as one choice of three,
   in this order: Direct, Google, None. They MUST offer Delayed as a separate
   switch, and they MUST NOT show that switch with None.
 - **[NTF-148]** The interface MUST name Instant mode "Google", thus the name
-  states the party that sees each push. The mode names of this part stay the
-  names of the specification.
+  states the party that sees each push. It MUST name Periodic mode "Google"
+  with the delay on, thus the name states the party that sees each tick. The
+  mode names of this part stay the names of the specification.
 
 > *Cause.* The fixed clock of Private mode is a property of the timing, and
 > not a second carrier. A user who reads the delivery and the delay as two
@@ -528,16 +593,17 @@ and the delay as one switch beside it. The pair gives the mode.
 | Instant | FCM, the persistent socket of §8.4.1, and the poll of `NTF-131` |
 | Direct | The persistent socket of §8.4.1 and the poll of `NTF-131` while the client is unlocked, and the watch of §8.4.3 after the lock. The client holds no push token |
 | Private | A timer of the platform on a fixed clock. Each tick starts one run that drains each queue and ends. The client holds no push token, no socket between two ticks, and no poll |
+| Periodic | The tick of the clock of the NDR (§8.2.8), over normal-priority FCM. An unlocked client drains each queue and ends. A locked client holds the watch of §8.4.3 for one short session. The client holds no socket between two ticks and no poll |
 | Off | None. A run starts when the user opens the application |
 
-| | **Instant** | **Direct** | **Private** | **Off** |
-| --- | --- | --- | --- | --- |
-| Mechanism | One push for each event | Each record over the own socket of the client | Constant-rate wakes | Drain when the user opens the application |
-| Cadence | On arrival | On arrival | Fixed 30 min | — |
-| Latency | ~1 s | ~1 s. After the lock, an alert at ~1 s and the record at the unlock | up to the interval, and longer when the platform defers the timer | until the user opens the application |
-| Google learns | The wake time for each event, on a device with FCM | Nothing: the client holds no push token | Nothing: the client holds no push token | Nothing: the client holds no push token |
-| A locked client | Shows which conversation waits (`NTF-136`), and fetches nothing | Shows which conversation waits through its watch (`NTF-144`), and fetches nothing | Receives nothing and shows nothing until the unlock | Receives nothing until the unlock |
-| Default | Never a default | The shipped default of each build (`NTF-083`) | The high-risk configuration | Never a default |
+| | **Instant** | **Direct** | **Private** | **Periodic** | **Off** |
+| --- | --- | --- | --- | --- | --- |
+| Mechanism | One push for each event | Each record over the own socket of the client | Constant-rate wakes | Constant-rate ticks from the NDR | Drain when the user opens the application |
+| Cadence | On arrival | On arrival | Fixed 30 min | Fixed 30 min | — |
+| Latency | ~1 s | ~1 s. After the lock, an alert at ~1 s and the record at the unlock | up to the interval, and longer when the platform defers the timer | up to the interval, and longer when Doze defers the tick | until the user opens the application |
+| Google learns | The wake time for each event, on a device with FCM | Nothing: the client holds no push token | Nothing: the client holds no push token | A tick in each interval, and no arrival time | Nothing: the client holds no push token |
+| A locked client | Shows which conversation waits (`NTF-136`), and fetches nothing | Shows which conversation waits through its watch (`NTF-144`), and fetches nothing | Receives nothing and shows nothing until the unlock | Shows which conversation waits through the watch of each tick (`NTF-153`), and fetches nothing | Receives nothing until the unlock |
+| Default | Never a default | The shipped default of each build (`NTF-083`) | The high-risk configuration | Never a default | Never a default |
 
 **A locked client in Private mode receives nothing.** Part 14 rule `IMP-119`
 locks the client after 15 minutes with no action of the user, and a locked
@@ -564,6 +630,27 @@ No party of the push path is on the path of a record or of a wake.
   result. Direct mode is the default before that measurement, by a decision
   of the project on 2026-10-21. Part 15 §15.3 records that the cost is not
   measured.
+
+**Periodic mode is Private mode with the clock at the NDR.** The NDR sends
+each tick under §8.2.8, and the platform starts the client for it. Thus a
+locked client takes the tick too, and it can show which conversation waits.
+
+- **[NTF-153]** A client in Periodic mode MUST bind each inbound queue for
+  the watch as `NTF-142` binds it in Direct mode, and it MUST hold the wake
+  table of `NTF-135` and the watch table of `NTF-145`. At a tick, an
+  unlocked client MUST start one run that drains each queue under Part 3
+  §3.7 item 4 and then ends. At a tick, a locked client MUST start the
+  watch of §8.4.3 from its watch table, MUST show each blob under
+  `NTF-136`, and MUST end the watch inside `PERIODIC_WATCH_MAX`. A client in
+  Periodic mode MUST NOT hold the watch between two ticks.
+
+> *Cause of `NTF-153`.* At an `NSUB` the queue relay sends one `NWAKE` for
+> each arrival that got no wake yet (`NTF-146`). Thus a short watch at each
+> tick shows each arrival since the last tick one time, and the next tick
+> shows it no second time. A locked client holds no key that reads a queue,
+> thus the tick shows the conversation and fetches nothing, as the watch of
+> Direct mode does. The bound of the session is the time that the platform
+> gives the receiver of a data message.
 
 > *Cause.* Instant mode gives Google the time of each push, and Part 8 §8.7
 > states what that time shows. Direct mode removes Google from the path, and
@@ -714,15 +801,16 @@ the carrier of Direct mode and of a device that holds no FCM. The poll of
   sound, that no message arrives until the unlock. A client in Direct mode
   MUST NOT end the service at a lock and MUST NOT show that one-time
   notice. The service carries the watch of §8.4.3, and its notice names
-  the locked state alone.
+  the locked state alone. A client in Periodic mode MUST NOT show that
+  one-time notice, because each tick shows which conversation waits.
 - **[NTF-131]** A client that holds no push carrier MAY poll: a periodic
   job of the platform, no more often than its least period, starts a run of
   an open client that has none, and that run drains each queue under
   Part 3 §3.7 item 4. A locked client holds no key of a queue, thus a poll
   of a locked client MUST do nothing. The Android build holds FCM and this
   poll beside the persistent socket in Instant mode, and this poll beside
-  the persistent socket in Direct mode. It ends the poll in Private mode and
-  in Off mode.
+  the persistent socket in Direct mode. It ends the poll in Private mode, in
+  Periodic mode, and in Off mode.
 - **[NTF-121]** A record that arrives MUST NOT start the idle time of the
   auto-lock again. An action of the user alone does that. Thus a peer that
   writes each 10 minutes does not keep `K_store` in RAM.
@@ -733,9 +821,10 @@ after 15 minutes with no action of the user. A locked client holds no
 section delivers a record to it. The **wake key** lets it open the blob of
 §8.2.2 all the same, and show which conversation waits.
 
-- **[NTF-135]** An Android client in Instant mode or in Direct mode MUST hold a
-  **wake table** outside `K_store`: each `k_ntf_root` that a binding of §8.2.3
-  uses, and each `queue_alias` with the conversation of its queue. It MUST seal
+- **[NTF-135]** An Android client in Instant mode, in Direct mode, or in
+  Periodic mode MUST hold a **wake table** outside `K_store`: each
+  `k_ntf_root` that a binding of §8.2.3 uses, and each `queue_alias` with the
+  conversation of its queue. It MUST seal
   the table under a key of the platform keystore that needs no user
   authentication, and it MUST write the table again while it is open, after each
   change of a binding and when it leaves the foreground.
@@ -753,7 +842,8 @@ section delivers a record to it. The **wake key** lets it open the blob of
   which stays at the relay until the unlock.
 - **[NTF-137]** A client MUST delete the wake table and its keystore key at a
   local wipe of Part 7 `DEV-008`, and when the mode changes to Private mode
-  or Off mode. A change between Instant mode and Direct mode keeps them.
+  or Off mode. A change between Instant mode, Direct mode, and Periodic mode
+  keeps them.
 
 > *Cause.* Without a wake key, each push to a locked client shows a line that
 > names nothing, and the record waits for the unlock in silence. A client
@@ -765,6 +855,8 @@ section delivers a record to it. The **wake key** lets it open the blob of
 
 **Private mode does not use FCM on Android.** §8.3 wakes the device on a fixed
 clock of 30 minutes, and a message arrival does not change that clock.
+Periodic mode keeps that clock at the NDR and carries each tick over
+normal-priority FCM (§8.2.8).
 
 - **[NTF-038]** A client MUST carry a Private-mode wake on a timer of the
   platform that no arrival moves. Each tick MUST start one run of an
@@ -795,9 +887,11 @@ settings. v1 does not ask for that permission.
 > high-priority FCM shows 48 to 72 notifications each day that name nothing.
 >
 > A normal-priority FCM message is the other option, and Doze defers it. The
-> note below states that limit, and a deferred wake destroys the fixed cadence
-> that gives Private mode its property. A timer on the device has neither
-> problem, and it puts no party on the path. A persistent socket is not a
+> note below states that limit. Doze defers a tick as a function of the state
+> of the device, and not of an arrival, thus the deferral gives an observer no
+> arrival time. It makes the latency longer, and Periodic mode takes that
+> trade. A timer on the device has neither problem, and it puts no party on
+> the path. A persistent socket is not a
 > carrier of this mode. A socket that stays open between two ticks would
 > give the ingress relay a session for the whole day in the place of one
 > short session for each tick.
@@ -928,12 +1022,13 @@ of an `NPUSH`, and the client opens it with the wake table of `NTF-135`.
   time. A message among them outranks a digest. At an `NSUB`, the relay
   MUST send one `NWAKE` at once when an arrival that no subscription took
   got no wake yet. A subscription of the queue ends each wake that waits.
-- **[NTF-145]** A client in Direct mode MUST hold a **watch table** outside
-  `K_store`: the ingress relay of its last run, the relay set of its last
-  run, and the relay, the `notifier_id`, and the notifier secret of each
-  bound queue. It MUST seal the table as `NTF-135` seals the wake table,
-  write it again after each change of a binding, and delete it when the
-  mode leaves Direct mode and at a local wipe.
+- **[NTF-145]** A client in Direct mode or in Periodic mode MUST hold a
+  **watch table** outside `K_store`: the ingress relay of its last run, the
+  relay set of its last run, and the relay, the `notifier_id`, and the
+  notifier secret of each bound queue. It MUST seal the table as `NTF-135`
+  seals the wake table, write it again after each change of a binding, and
+  delete it when the mode leaves Direct mode and Periodic mode, and at a
+  local wipe.
 
 > *Cause.* Without the watch, a locked client in Direct mode shows nothing
 > until the unlock, and the user must keep UMBRA unlocked to learn of a
@@ -1171,6 +1266,11 @@ documentation that the user reads:
 > of its connection sees the time of each such alert. In Private mode a
 > locked UMBRA receives nothing until you unlock it.
 >
+> In Periodic mode Google learns that a given Google account has UMBRA
+> installed, and it sees one wake in each 30 minutes. The wake times do not
+> follow your messages. The Notification Delivery Relay of UMBRA holds your
+> push token for those wakes, and that token names no queue and no contact.
+>
 > In Instant mode, the Notification Delivery Relay of UMBRA learns the mapping
 > token↔handle↔arrival time. It learns this mapping transiently and in memory
 > only. A queue relay learns the handle, `k_tok`, the `notifier_id`, and the
@@ -1209,7 +1309,7 @@ documentation that the user reads:
 
 ## 8.8 Estimated cost
 
-| Metric | Instant mode | Private mode |
+| Metric | Instant mode | Private mode and Periodic mode |
 | --- | --- | --- |
 | Median notification latency | 0.8–2.0 s | ≤ the interval |
 | p95, the alert | ~4 s | ≤ the interval |
@@ -1238,7 +1338,9 @@ cost, and these two rows repeat that derivation. Part 3 §3.6.2 gives about
 
 The two Private figures count one promotion for each wake, which is the upper
 bound of §8.3, and `NTF-087` puts a measurement before a revision re-tunes the
-cadence.
+cadence. Periodic mode makes the same count of wakes. A locked client in
+Periodic mode builds the circuits of a watch at each tick, and no
+measurement bounds that cost yet.
 
 **The cheaper mode depends on the arrival count, and this table states that
 plainly.** Private mode at 30 min costs less battery than Instant mode above 48

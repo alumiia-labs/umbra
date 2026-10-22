@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 2: Threat Model and Security Goals
 
 **Status:** Draft
-**Version:** 0.44.0
+**Version:** 0.45.0
 **Date:** 2026-10-22
 
 ---
@@ -592,7 +592,7 @@ drops a leak is the failure mode that this note prevents.
 | **Group-queue relay** | That a group queue exists, the count of its reader sessions and its writer sessions, the arrival time and the bucket of each record, the exact member count at each rotation from the slot count of the epoch-key record, the count of notify registrations, and the `relay_id` of each registered notify queue. It holds `GROUP_RETENTION` of ciphertext (Part 3 §3.2.7, Part 3 §3.11) | The identity of any member, the pairwise queue of any member, the sender of a record, the content, and the membership list |
 | **Two colluding relays (ingress and queue)** | That a client at IP address X delivered to queue Q at time T | The recipient identity and the content. But this condition is a real deanonymization risk. Refer to the path constraints in Part 10 |
 | **Notification Relay (NDR)** | An opaque and rotating push registration. That *some* queue that it monitors had activity. The platform push token | Which queue, which user, the content, and the contact graph |
-| **Google (FCM), in Instant mode on a device with FCM. No platform party in Direct mode, in Private mode, in Off mode, and on a device with no FCM** | The device push token, the application identity, and the wakeup time and count. Each push has one form and one expiry, thus not which wake is a group message. Over many wakes, the wake times of two accounts that write to each other link the two accounts (Part 8 §8.7) | The content and the queue. One wake shows no contact and no sender |
+| **Google (FCM), in Instant mode and in Periodic mode on a device with FCM. No platform party in Direct mode, in Private mode, in Off mode, and on a device with no FCM** | The device push token, the application identity, and the wakeup time and count. In Periodic mode each wake is a tick of a fixed clock, and it shows no arrival (Part 8 §8.2.8). Each push has one form and one expiry, thus not which wake is a group message. Over many wakes, the wake times of two accounts that write to each other link the two accounts (Part 8 §8.7) | The content and the queue. One wake shows no contact and no sender |
 | **The project** | The data that its own relays learn (above), and aggregate directory statistics | No more data than another operator gets. It holds no user database, because no user database exists |
 | **Directory Authority** | Relay descriptors and measurements | Nothing about users. Clients get the full directory, or they use a privacy-preserving mechanism (Part 10) |
 | **A contact** | All the data that you send to that contact, and that you are you | Your other contacts, your Pairwise Addresses with them, and your Public Address if you do not share it |

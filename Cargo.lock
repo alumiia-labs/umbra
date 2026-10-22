@@ -696,9 +696,9 @@ dependencies = [
 
 [[package]]
 name = "inout"
-version = "0.2.3"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8c0d789294fb457b791f7797a04478704788f30b407e5d0b01deaa846572d9f"
+checksum = "3b5cf4372d022092674a83b8febf5865f7a573cc0c5baec5e49c879b6a20978f"
 dependencies = [
  "hybrid-array",
 ]
@@ -1194,9 +1194,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.15"
+version = "0.103.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
+checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
 dependencies = [
  "aws-lc-rs",
  "ring",
@@ -1576,7 +1576,7 @@ dependencies = [
 
 [[package]]
 name = "umbra-core"
-version = "0.44.0"
+version = "0.45.0"
 dependencies = [
  "precis-profiles",
  "umbra-crypto",
@@ -1588,7 +1588,7 @@ dependencies = [
 
 [[package]]
 name = "umbra-crypto"
-version = "0.44.0"
+version = "0.45.0"
 dependencies = [
  "argon2",
  "chacha20poly1305",
@@ -1612,7 +1612,7 @@ dependencies = [
 
 [[package]]
 name = "umbra-ffi"
-version = "0.44.0"
+version = "0.45.0"
 dependencies = [
  "getrandom 0.4.3",
  "rusqlite",
@@ -1630,7 +1630,7 @@ dependencies = [
 
 [[package]]
 name = "umbra-onion"
-version = "0.44.0"
+version = "0.45.0"
 dependencies = [
  "aes",
  "ctr",
@@ -1646,7 +1646,7 @@ dependencies = [
 
 [[package]]
 name = "umbra-queue"
-version = "0.44.0"
+version = "0.45.0"
 dependencies = [
  "umbra-crypto",
  "umbra-wire",
@@ -1654,7 +1654,7 @@ dependencies = [
 
 [[package]]
 name = "umbra-relay"
-version = "0.44.0"
+version = "0.45.0"
 dependencies = [
  "aws-lc-rs",
  "getrandom 0.4.3",
@@ -1672,7 +1672,7 @@ dependencies = [
 
 [[package]]
 name = "umbra-transport"
-version = "0.44.0"
+version = "0.45.0"
 dependencies = [
  "quinn",
  "rustls",
@@ -1685,7 +1685,7 @@ dependencies = [
 
 [[package]]
 name = "umbra-wire"
-version = "0.44.0"
+version = "0.45.0"
 dependencies = [
  "serde_json",
  "umbra-crypto",
@@ -1933,9 +1933,9 @@ dependencies = [
 
 [[package]]
 name = "webpki-roots"
-version = "1.0.9"
+version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
+checksum = "1c1c8e20c8a38fc7d65abfe74eb7280e4aa667e8eec8bc84996d2874810748d9"
 dependencies = [
  "rustls-pki-types",
 ]

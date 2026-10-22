@@ -5,6 +5,10 @@
 //! registration. A push brings `k_tok`; the token opens for that one post
 //! and leaves memory with it. The server writes no log line that names a
 //! handle, a token, or an address (§8.2.1).
+//!
+//! A timer registration of Periodic mode holds its plain token, and the
+//! clock of the server pushes to it once in each `PERIODIC_INTERVAL`
+//! (`NTF-150`).
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -325,7 +329,8 @@ impl SqliteNdrStore {
                 ct_token      BLOB NOT NULL,
                 removal_hash  BLOB NOT NULL,
                 registered_at INTEGER NOT NULL DEFAULT 0,
-                pushed        INTEGER NOT NULL DEFAULT 0
+                pushed        INTEGER NOT NULL DEFAULT 0,
+                timer         INTEGER NOT NULL DEFAULT 0
             ) WITHOUT ROWID;",
         ))?;
 
@@ -354,6 +359,13 @@ impl SqliteNdrStore {
             ))?;
         }
 
+        // Nor does it hold a timer of Periodic mode (`NTF-150`).
+        if !has_column("timer")? {
+            fault(connection.execute_batch(
+                "ALTER TABLE registrations ADD COLUMN timer INTEGER NOT NULL DEFAULT 0;",
+            ))?;
+        }
+
         Ok(SqliteNdrStore { connection })
     }
 }
@@ -361,17 +373,22 @@ impl SqliteNdrStore {
 impl NdrStore for SqliteNdrStore {
     fn load(&mut self) -> Result<Vec<([u8; HANDLE_LEN], Held)>, StoreFault> {
         let mut statement = fault(self.connection.prepare(
-            "SELECT handle, nonce, ct_token, removal_hash, registered_at, pushed
+            "SELECT handle, nonce, ct_token, removal_hash, registered_at, pushed, timer
              FROM registrations",
         ))?;
         let rows = fault(statement.query_map([], |row| {
             Ok((
-                row.get::<_, Vec<u8>>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, Vec<u8>>(2)?,
-                row.get::<_, Vec<u8>>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, i64>(5)?,
+                (
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                ),
+                (
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                ),
             ))
         }))?;
 
@@ -379,7 +396,7 @@ impl NdrStore for SqliteNdrStore {
         let now = store_time(unix_now());
         let mut out = Vec::new();
         for row in rows {
-            let (handle, nonce, ct_token, removal_hash, at, pushed) = fault(row)?;
+            let ((handle, nonce, ct_token, removal_hash), (at, pushed, timer)) = fault(row)?;
             out.push((
                 handle.try_into().map_err(|_| StoreFault)?,
                 Held {
@@ -388,6 +405,7 @@ impl NdrStore for SqliteNdrStore {
                     removal_hash: removal_hash.try_into().map_err(|_| StoreFault)?,
                     registered_at: u64::try_from(at).ok().filter(|at| *at > 0).unwrap_or(now),
                     pushed: pushed != 0,
+                    timer: timer != 0,
                 },
             ));
         }
@@ -408,15 +426,16 @@ impl NdrStore for SqliteNdrStore {
                 // second. A registration then lives at most one grain more.
                 NdrChange::Registered { handle, held } => fault(transaction.execute(
                     "INSERT OR REPLACE INTO registrations
-                     (handle, nonce, ct_token, removal_hash, registered_at, pushed)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                     (handle, nonce, ct_token, removal_hash, registered_at, pushed, timer)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                     params![
                         handle.as_slice(),
                         held.nonce.as_slice(),
                         held.ct_token,
                         held.removal_hash.as_slice(),
                         i64::try_from(store_time(held.registered_at)).unwrap_or(i64::MAX),
-                        i64::from(held.pushed)
+                        i64::from(held.pushed),
+                        i64::from(held.timer)
                     ],
                 ))?,
                 NdrChange::Unregistered { handle } => fault(transaction.execute(
@@ -449,6 +468,12 @@ pub struct Gateway {
 
 /// How often the NDR drops the registrations past their time (`NTF-138`).
 const SWEEP_EVERY: Duration = Duration::from_secs(3_600);
+/// How often the clock of Periodic mode takes the ticks that came due
+/// (`NTF-150`). A tick leaves at most this late after its phase.
+const CLOCK_STEP: Duration = Duration::from_secs(5);
+/// The ticks at the provider at once. One million timers make about 560
+/// ticks in each second, and a post takes a fraction of a second.
+const TICKS_AT_ONCE: usize = 256;
 
 /// The time now, in seconds.
 fn unix_now() -> u64 {
@@ -544,7 +569,9 @@ impl State {
         }
 
         let (handle, registers) = match NdrRequest::parse(plain) {
-            Ok(NdrRequest::Register { handle, .. }) => (handle, true),
+            Ok(NdrRequest::Register { handle, .. } | NdrRequest::Timer { handle, .. }) => {
+                (handle, true)
+            }
             Ok(NdrRequest::Unregister { handle, .. } | NdrRequest::Push { handle, .. }) => {
                 (handle, false)
             }
@@ -606,6 +633,25 @@ impl State {
         Some((answer, delivery))
     }
 
+    /// The ticks of the fixed clock that came due after `from` and by `to`
+    /// (`NTF-150`), with the count of the `NREG` requests at that time.
+    fn ticks(&self, from: u64, to: u64) -> (Vec<Delivery>, u64) {
+        if self.broken {
+            return (Vec::new(), self.guard.moves);
+        }
+        (self.ndr.ticks(from, to), self.guard.moves)
+    }
+
+    /// A tick went to the provider. The store keeps the first one of a
+    /// registration, thus a restart keeps its place at the bound.
+    fn ticked(&mut self, handle: [u8; HANDLE_LEN]) -> Option<()> {
+        if self.broken || !self.ndr.took_push(&handle) {
+            return Some(());
+        }
+        let pushed = self.ndr.take_changes();
+        self.commit(&pushed, unix_now())
+    }
+
     /// The provider named the target of a push gone (`NTF-125`). The count
     /// of the `NREG` requests was `mark` when the push started. A handle
     /// that an `NREG` moved since then holds another token now, thus its
@@ -620,16 +666,68 @@ impl State {
 }
 
 /// Posts the blob to FCM as a data message of high priority, with the
-/// expiry (`NTF-065`). The NDR posts to no other provider (`NTF-134`), and
-/// an NDR with no FCM account posts nothing.
+/// expiry (`NTF-065`), or a tick of the clock at normal priority
+/// (`NTF-150`). The NDR posts to no other provider (`NTF-134`), and an NDR
+/// with no FCM account posts nothing.
 async fn deliver(delivery: &Delivery, fcm: Option<&Fcm>) -> Sent {
     let Ok(target) = core::str::from_utf8(&delivery.target) else {
         return Sent::Refused;
     };
 
     match (delivery.carrier, fcm) {
-        (TokenCarrier::Fcm, Some(fcm)) => fcm.send(target, &delivery.blob, delivery.ttl).await,
+        (TokenCarrier::Fcm, Some(fcm)) => {
+            fcm.send(
+                target,
+                delivery.blob.as_ref().map(<[u8; 69]>::as_slice),
+                delivery.ttl,
+            )
+            .await
+        }
         _ => Sent::Refused,
+    }
+}
+
+/// Runs the clock of Periodic mode: each tick that came due goes to the
+/// provider, at most `TICKS_AT_ONCE` of them at once (`NTF-150`). A tick
+/// whose time passed while the server was down goes nowhere, thus a restart
+/// sends no burst.
+async fn run_clock(state: Arc<Mutex<State>>, fcm: Option<Arc<Fcm>>) {
+    let held = Arc::new(tokio::sync::Semaphore::new(TICKS_AT_ONCE));
+    let mut last = unix_now();
+
+    loop {
+        tokio::time::sleep(CLOCK_STEP).await;
+        let now = unix_now();
+        let (due, mark) = match state.lock() {
+            Ok(state) => state.ticks(last, now),
+            Err(_) => (Vec::new(), 0),
+        };
+        last = now;
+
+        for delivery in due {
+            let Ok(permit) = held.clone().acquire_owned().await else {
+                return;
+            };
+            let state = state.clone();
+            let fcm = fcm.clone();
+
+            tokio::spawn(async move {
+                let _permit = permit;
+                let sent =
+                    tokio::time::timeout(CONNECTION_TIME, deliver(&delivery, fcm.as_deref())).await;
+                let Ok(mut state) = state.lock() else {
+                    return;
+                };
+                match sent {
+                    Ok(Sent::Taken) => drop(state.ticked(delivery.handle)),
+                    // NTF-125: the provider named the token gone, thus the
+                    // timer ends, unless a move gave it another token.
+                    Ok(Sent::Gone) => drop(state.provider_gone(delivery.handle, mark)),
+                    // A tick that did not go waits for the next interval.
+                    Ok(Sent::Refused) | Err(_) => {}
+                }
+            });
+        }
     }
 }
 
@@ -729,6 +827,8 @@ pub async fn run_ndr(
         }
     });
 
+    tokio::spawn(run_clock(state.clone(), fcm.clone()));
+
     let gateway = Arc::new(gateway);
     let held = Arc::new(tokio::sync::Semaphore::new(CONNECTION_MAX));
 
@@ -823,6 +923,7 @@ mod tests {
             removal_hash: [6; 32],
             registered_at: 1_700_000_000,
             pushed: false,
+            timer: false,
         };
 
         store
@@ -848,7 +949,20 @@ mod tests {
             .unwrap();
 
         held.pushed = true;
-        assert!(again.load().unwrap().contains(&([8; HANDLE_LEN], held)));
+        assert!(again
+            .load()
+            .unwrap()
+            .contains(&([8; HANDLE_LEN], held.clone())));
+
+        // NTF-150: a timer keeps its kind across a restart.
+        held.timer = true;
+        again
+            .commit(&[NdrChange::Registered {
+                handle: [9; HANDLE_LEN],
+                held: held.clone(),
+            }])
+            .unwrap();
+        assert!(again.load().unwrap().contains(&([9; HANDLE_LEN], held)));
         drop(again);
 
         let _ = std::fs::remove_dir_all(&directory);
@@ -1188,5 +1302,53 @@ mod tests {
         // A push that starts after the move drops it.
         assert_eq!(state.provider_gone(handle, state.guard.moves), Some(true));
         assert!(state.ndr.is_empty());
+    }
+
+    #[test]
+    fn a_timer_takes_a_place_under_the_rate_and_ticks_on_the_clock() {
+        use umbra_core::notify::{ndr::phase_of, PERIODIC_INTERVAL};
+
+        let mut state = state();
+        state.new_handles_max = (1, 1);
+        let mut plain = [0u8; PUSH_TOKEN_MAX];
+        let n = encode_token(TokenCarrier::Fcm, b"fcm-timer", &mut plain).unwrap();
+        let timer = |handle: [u8; HANDLE_LEN]| {
+            encode(&NdrRequest::Timer {
+                handle,
+                token: &plain[..n],
+                removal_hash: sha3_256(&[&[9u8; 32]]),
+                prior: Secret::new([9; 32]),
+            })
+        };
+
+        // A first `NTIMER` is a new handle under the rate of its minute.
+        assert_eq!(
+            state
+                .request_from([1; 32], &timer([1; HANDLE_LEN]), NOW)
+                .unwrap()
+                .0,
+            NdrResponse::Taken
+        );
+        assert_eq!(
+            state
+                .request_from([2; 32], &timer([2; HANDLE_LEN]), NOW)
+                .unwrap()
+                .0,
+            NdrResponse::Refused
+        );
+
+        // NTF-150: its tick comes once in an interval, and the first one
+        // marks the registration.
+        let (due, _) = state.ticks(NOW, NOW + PERIODIC_INTERVAL);
+        assert_eq!(due.len(), 1);
+        assert_eq!(&due[0].target[..], b"fcm-timer");
+        assert!(due[0].blob.is_none());
+        let phase = phase_of(&[1; HANDLE_LEN]);
+        let at = NOW - NOW % PERIODIC_INTERVAL + PERIODIC_INTERVAL + phase;
+        assert_eq!(state.ticks(at - 1, at).0.len(), 1);
+        assert!(state.ticks(at, at + 1).0.is_empty());
+
+        assert_eq!(state.ticked([1; HANDLE_LEN]), Some(()));
+        assert!(state.guard.oldest_unpushed(&[0; HANDLE_LEN]).is_none());
     }
 }

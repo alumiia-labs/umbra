@@ -75,7 +75,7 @@ column when a crate implements the requirement and a test covers it.
 | `CRY` | 120 | 27 | 0 | 0 | 1 | **148** |
 | `WIR` | 417 | 88 | 0 | 0 | 7 | **512** |
 | `DEV` | 225 | 96 | 0 | 0 | 14 | **335** |
-| `NTF` | 87 | 29 | 0 | 0 | 3 | **119** |
+| `NTF` | 90 | 30 | 0 | 0 | 3 | **123** |
 | `DIS` | 136 | 36 | 0 | 0 | 3 | **175** |
 | `REL` | 171 | 34 | 1 | 0 | 3 | **209** |
 | `GRP` | 234 | 65 | 0 | 0 | 5 | **304** |
@@ -83,7 +83,7 @@ column when a crate implements the requirement and a test covers it.
 | `ABU` | 71 | 29 | 1 | 0 | 0 | **101** |
 | `IMP` | 117 | 41 | 1 | 0 | 2 | **161** |
 | `SEC` | 4 | 3 | 0 | 0 | 1 | **8** |
-| **All** | 2148 | 639 | 7 | 0 | 60 | **2854** |
+| **All** | 2151 | 640 | 7 | 0 | 60 | **2858** |
 
 ## SCP — Scope and Conventions
 
@@ -1825,7 +1825,7 @@ Source: `spec/08-notifications.md`
 | `NTF-132` | §8.5.2 | MUST | (unstated) | A client that leaves a group, that the group removes, or whose group closes MUST send a `GNUNREG` for its notify queue to each replica while it holds a read key of the group. |  |  |
 | `NTF-133` | §8.5.2 | MUST | A client | A client MUST end a notify queue that it drops with a `DEL` of Part 6 §6.4. |  |  |
 | `NTF-134` | §8.2.7 | MUST | An NDR | An NDR MUST refuse an `NPUSH` whose carrier it does not serve, and it MUST NOT post to an address that no provider of its own names. |  |  |
-| `NTF-135` | §8.4.1 | MUST | An Android client in Instant mode | An Android client in Instant mode or in Direct mode MUST hold a **wake table** outside `K_store`: each `k_ntf_root` that a binding of §8.2.3 uses, and each `queue_alias` with the conversation of its queue. |  |  |
+| `NTF-135` | §8.4.1 | MUST | An Android client in Instant mode | An Android client in Instant mode, in Direct mode, or in Periodic mode MUST hold a **wake table** outside `K_store`: each `k_ntf_root` that a binding of §8.2.3 uses, and each `queue_alias` with the conversation of its queue. |  |  |
 | `NTF-136` | §8.4.1 | MUST | A locked client | A locked client MUST open each blob of a push or of a watch with that table under `NTF-075` to `NTF-079`. |  |  |
 | `NTF-137` | §8.4.1 | MUST | A client | A client MUST delete the wake table and its keystore key at a local wipe of Part 7 `DEV-008`, and when the mode changes to Private mode or Off mode. |  |  |
 | `NTF-138` | §8.2.7 | MUST | The NDR | The NDR MUST drop a registration `NDR_REG_TTL` after the `NREG` that made or last moved it, and it MUST answer `gone` to an `NPUSH` for it from then on. |  |  |
@@ -1835,11 +1835,15 @@ Source: `spec/08-notifications.md`
 | `NTF-142` | §8.4.3 | MUST | A client in Direct mode | A client in Direct mode MUST bind each inbound queue with `NKEY` and `NBIND`, as Instant mode does, under the notifier key of §8.2.4. |  |  |
 | `NTF-143` | §8.4.3 | MUST | The binding of a client with no push token | The binding of a client with no push token MUST name `WATCH_HANDLE`, which is 16 zero bytes, and a `k_tok` of 32 zero bytes. |  |  |
 | `NTF-144` | §8.4.3 | MUST | A queue relay | A queue relay MUST send each record that no live subscription takes (`NTF-128`) as an `NWAKE` on the circuit of a live watch of its queue, with the blob of §8.2.2 sealed under the binding of the queue, and it MUST then send no `NPUSH` for that record. |  |  |
-| `NTF-145` | §8.4.3 | MUST | A client in Direct mode | A client in Direct mode MUST hold a **watch table** outside `K_store`: the ingress relay of its last run, the relay set of its last run, and the relay, the `notifier_id`, and the notifier secret of each bound queue. |  |  |
+| `NTF-145` | §8.4.3 | MUST | A client in Direct mode | A client in Direct mode or in Periodic mode MUST hold a **watch table** outside `K_store`: the ingress relay of its last run, the relay set of its last run, and the relay, the `notifier_id`, and the notifier secret of each bound queue. |  |  |
 | `NTF-146` | §8.4.3 | MUST | A queue relay | A queue relay MUST send at most one `NWAKE` for one queue inside one `WAKE_COALESCE_WINDOW`. |  |  |
 | `NTF-147` | §8.3 | MUST | The settings | The settings MUST offer the delivery as one choice of three, in this order: Direct, Google, None. |  |  |
 | `NTF-148` | §8.3 | MUST | The interface | The interface MUST name Instant mode "Google", thus the name states the party that sees each push. |  |  |
 | `NTF-149` | §8.3 | MUST | The content preview | The content preview MUST be two settings of the device: the sender, and the text. |  |  |
+| `NTF-150` | §8.2.8 | MUST | The NDR | The NDR MUST hold the plain push token of an `NTIMER` under its handle, and it MUST send one tick to that token in each `PERIODIC_INTERVAL`, at the phase of the handle. |  |  |
+| `NTF-151` | §8.2.8 | MUST NOT | A device | A device MUST NOT hold a timer and a handle group of §8.2.1 at the same time. |  |  |
+| `NTF-152` | §8.2.8 | MUST | A device | A device MUST send its `NTIMER` again under the chain of `NTF-124` at each new push token, and at least once in each `ROTATE_INTERVAL`. |  |  |
+| `NTF-153` | §8.3 | MUST | A client in Periodic mode | A client in Periodic mode MUST bind each inbound queue for the watch as `NTF-142` binds it in Direct mode, and it MUST hold the wake table of `NTF-135` and the watch table of `NTF-145`. |  |  |
 
 ## DIS — Discovery, Handles, and Key Transparency
 
