@@ -98,7 +98,8 @@ fun TimerLine(line: Line, chat: Chat) {
 /**
  * The timer row of one conversation (Part 7 §7.5.8). Its sheet shows who
  * set the current value and when (`DEV-206`), and that a party can keep a
- * copy (`DEV-218`). A party that may not change it sees the value alone.
+ * copy (`DEV-218`). A party that may not change it sees the same sheet with
+ * no choice.
  */
 @Composable
 fun DisappearingRow(chat: Chat, mayChange: Boolean) {
@@ -107,11 +108,6 @@ fun DisappearingRow(chat: Chat, mayChange: Boolean) {
     LaunchedEffect(chat.conversation, Core.revision) { Core.timer(chat.conversation) { current = it } }
     val now = current ?: return
     val title = stringResource(R.string.common_disappearing_messages)
-
-    if (!mayChange) {
-        FactRow("clock", title, timerLabel(now.seconds))
-        return
-    }
 
     EntryRow(RowEntry("clock", title, timerLabel(now.seconds)) { isChoosing = true }, leads = false)
     if (!isChoosing) return
@@ -131,6 +127,13 @@ fun DisappearingRow(chat: Chat, mayChange: Boolean) {
             else -> stringResource(R.string.timer_set_by, chat.title, at)
         }
     }
+    val note = listOfNotNull(setBy?.let { "$it." }, UiText.get(R.string.umbra_ui_dev_218)).joinToString(" ")
+
+    if (!mayChange) {
+        ActionSheet(title, emptyList(), note = note, onDismiss = { isChoosing = false })
+        return
+    }
+
     ChoiceSheet(
         title,
         TimerChoices.map { (seconds, label) ->
@@ -139,7 +142,7 @@ fun DisappearingRow(chat: Chat, mayChange: Boolean) {
                 if (seconds != now.seconds) Core.setTimer(chat.conversation, seconds)
             }
         },
-        note = listOfNotNull(setBy?.let { "$it." }, UiText.get(R.string.umbra_ui_dev_218)).joinToString(" "),
+        note = note,
         onDismiss = { isChoosing = false },
     )
 }

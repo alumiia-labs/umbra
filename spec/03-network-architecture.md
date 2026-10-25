@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 3: Network Architecture
 
 **Status:** Draft
-**Version:** 0.45.1
-**Date:** 2026-10-22
+**Version:** 0.46.0
+**Date:** 2026-10-23
 
 ---
 
@@ -240,7 +240,10 @@ of a client brings one back. Thus the queues of a relay outlive its process.
   the commit of the queue, the `QUOTA` follows the commit of the record, and
   the `ILINK` and the `IBLOB` of Part 6 §6.4 follow the commit of the
   invitation. A `QUOTA` for a record that the store does not hold is a false
-  acknowledgment under Part 6 rule `WIR-496`.
+  acknowledgment under Part 6 rule `WIR-496`. A relay MAY commit the changes
+  of the inputs that wait together, and then send the answers of that group
+  in their order. One sync of the disk for each input lets a party that
+  sends an `ACK` or a `SEND` in each cell hold the relay in its syncs.
 - **[NET-299]** A relay MUST commit the changes of one command as a whole or
   not at all. A relay whose store takes no commit MUST stop, and it MUST NOT
   answer the command.
@@ -254,7 +257,10 @@ of a client brings one back. Thus the queues of a relay outlive its process.
   correlation point. It MUST hold each invitation with its blob. It MUST NOT
   hold a circuit, a session, a subscription, an address of a client, or a link
   between two queues. Each of those ends with its process, and §3.11 gives a
-  queue relay none of the last two.
+  queue relay none of the last two. The bindings of one handle group of Part 8
+  `NTF-031` are the one exception: they share the handle in Instant mode and
+  `k_ntf_root` in each mode, thus they group at most `MAX_QUEUES_PER_HANDLE`
+  queues of one device until the rotation of Part 8 `NTF-007`.
 - **[NET-301]** A relay MUST write each time to its store as a multiple of
   `STORE_TIME_GRAIN`, which is 3 600 s, rounded up. A lifetime that a restart
   reads from the store then ends no earlier than its own, and at most one grain
@@ -277,6 +283,9 @@ of a client brings one back. Thus the queues of a relay outlive its process.
 - **[NET-303]** At its start a relay MUST drop a stored queue whose form does
   not parse, whose record sits at or below its last `ACK`, or whose record
   sits at or above its next sequence number. It MUST serve each other queue.
+  It MUST also drop each stored group queue, invitation, and chunk whose form
+  does not parse, and it MUST serve each other one. One such row MUST NOT stop
+  the start of the relay.
 
 > *Cause.* A client stores its ratchets, thus a restart of a client costs
 > nothing. A relay that holds each queue in RAM loses each contact at a restart.
@@ -1445,6 +1454,15 @@ causes does not occur.
   refill of each build budget of `NET-332`, on a clock that does not step
   back. A step of the wall clock then ends no circuit early and holds no
   build back.
+- **[NET-370]** A client MUST measure the age of a circuit on a monotonic
+  source under Part 1 rule `SCP-018`. The age of a circuit is an exception to
+  Part 1 rule `SCP-019`: a clock movement MUST NOT start it again, because the
+  relay does not start its age again. A client that counts on the device clock
+  moves each time of a circuit by each difference between the device clock
+  and the monotonic source, and not only at a clock movement. These times are
+  the age, the wait of a build, the wait of a replaced circuit, the delay of
+  the rendezvous builds of Part 9 `DIS-015`, and each back-off of a build or of
+  a `SUB`.
 - **[NET-321]** A relay MUST count the cells of a circuit in each direction, the
   build cells included, and MUST end the circuit when one count passes
   `CIRCUIT_MAX_CELLS`. A client MUST stop using a circuit when one of its two
@@ -1556,8 +1574,8 @@ limits, as the rules below state.
 | `LINK_CIRCUITS_MAX` | 256 circuits on one client link at an ingress relay |
 | `LINK_BUILD_BURST` | 64 build cells on one client link at once |
 | `LINK_BUILD_RATE` | 1 build cell each second on one client link after its burst |
-| `RELAY_LINK_BUILD_BURST` | 8 192 build cells at once on one link of a relay of the layer before |
-| `RELAY_LINK_BUILD_RATE` | 1 024 build cells each second on one such link after its burst |
+| `RELAY_LINK_BUILD_BURST` | 8 192 build cells at once on one link of a relay of the layer before, and on the links of that relay together, which a relay keeps after each link of that relay closed |
+| `RELAY_LINK_BUILD_RATE` | 1 024 build cells each second on one such link after its burst, and on the links of one such relay together |
 | `SOURCE_BUILD_BURST` | 256 build cells at once on the links of one address, which a relay keeps after each link of that address closed |
 | `SOURCE_BUILD_RATE` | 4 build cells each second on the links of one address after its burst |
 | `SOURCE_BUDGETS_MAX` | 65 536 addresses whose build count a relay holds at once. The addresses above it share one count |
@@ -1616,6 +1634,11 @@ limits, as the rules below state.
   many clients. Thus the relay MUST give a build cell on it no answer when the
   link spent `RELAY_LINK_BUILD_BURST` builds and got none back at
   `RELAY_LINK_BUILD_RATE`. `LINK_CIRCUITS_MAX` does not apply to that link.
+  The relay MUST also give a build cell on it no answer when the links whose
+  `RelayHello` names the same relay spent `RELAY_LINK_BUILD_BURST` builds
+  together and got none back at `RELAY_LINK_BUILD_RATE`. The count of a relay
+  MUST outlive its links, thus a new link of that relay gets no new burst. A
+  relay MAY forget a count that is full again.
 
   A relay MUST give no answer to a build cell on a link that it dialed. A
   relay that holds no relay set, as in a test network, cannot tell a relay
@@ -1639,7 +1662,11 @@ limits, as the rules below state.
 
 > *Cause of `NET-332` and `NET-361`.* A budget of one link alone ends with its
 > link: a party that closes each link after its burst gets a fresh burst on
-> the next connection, up to `RELAY_CONN_PER_IP` links at once. A replayed
+> the next connection, up to `RELAY_CONN_PER_IP` links at once. A relay of the
+> layer before can do the same, and its address holds more links for a time
+> under `NET-334`. Each build with a random hello costs one key agreement, thus
+> 32 links of one relay forced more than one second of agreements in each
+> second. The count of each relay bounds that. A replayed
 > `HopHello` opens a circuit under a fresh `er` and yields no key, as §3.4.3
 > states. It still costs the relay the key agreement and the encapsulation
 > of the handshake, and it costs the sender nothing. The relay runs each
@@ -1689,6 +1716,8 @@ limits, as the rules below state.
   MUST then take a place of its address as each other connection does. The
   relay MUST close it when the address holds `RELAY_CONN_PER_IP`. A link of a
   relay of the layer before lives on so, and one address holds few of them.
+  The links of one relay share one build count under `NET-332`, thus more
+  links give that relay no more builds.
   If the relay counted no connection of such an address, each host at the
   address of a listed relay would hold connections with no bound.
 
@@ -2248,6 +2277,55 @@ that fills a link end the circuits of each other client on it. A party that
 fills a link with many circuits, each below one part in 256 of the bound, is
 not told from the others. A link whose peer reads nothing ends at the timeout
 of its write.
+
+**[NET-365]** A relay MUST hold the backlog of a `SUB` or a `GSUB` at or below
+`DRAIN_THRESHOLD` as a place in its queue, as it holds a drain. It MUST also
+hold each record that arrives at a live subscription as a place in its queue.
+It MUST hold no copy of the record of a place. It MUST read each record from
+the queue at the tick of `NET-291` that sends it. The backlog goes after the
+answers of the commands that came before its `SUB`. A live record goes after
+the entries that wait at its arrival. A second backlog of one queue on one
+circuit takes the place of the first one. The answers that wait for the clock
+of one circuit MUST NOT hold more than 2 MiB. An answer above that bound drops,
+and its command goes again. A relay MUST NOT drop a place. When a relay bounds
+the count of the entries that wait for one clock, a live record above that
+count joins the last place of its queue. A live record of a queue with no such
+place takes a place above that count. The place of a backlog also goes above
+that count.
+
+> *Cause of `NET-365`.* A `SUB` is 84 bytes, thus one `B3` cell holds about 389
+> of them. A relay that copied a backlog of 60 `B3` records for each `SUB` built
+> about 765 MB for one such cell. The clock sends one cell each second, thus
+> those copies stayed for many minutes, and some hundred circuits filled the
+> memory of the relay. A place in the queue costs no memory while it waits. A
+> record that an `ACK` covers before its tick then goes nowhere. The bound of
+> 2 MiB holds twice the chunk answers of the download window of Part 12.
+>
+> A live record has no command that goes again. A relay that drops one leaves
+> a hole, and under Part 6 rule `WIR-112` the client cannot `ACK` past it until
+> its next `SUB`. Each later record then goes above that hole. A contact that
+> sends 64 `B3` records in some seconds fills 2 MiB of copies. A copy of each
+> post for each circuit that subscribed to a group queue also grows with the
+> count of its readers. A backlog left a subscription, and a backlog with no
+> place would leave the same hole. Above a full count, a queue takes one place
+> of each kind at most, thus the places above it stay few.
+
+**[NET-375]** The answers that wait for the clocks of all circuits of one relay
+MUST NOT hold more than `RELAY_ANSWER_BYTES_MAX` together.
+`RELAY_ANSWER_BYTES_MAX` is 64 MiB. A place of `NET-365` holds no answer. For
+an answer above that bound, a relay MUST drop the newest answer of the circuit
+that holds the most answer bytes, until the answer fits. When no other circuit
+holds more than the circuit of the answer would hold with it, the relay MUST
+drop that answer. The command of each dropped answer goes again.
+
+> *Cause of `NET-375`.* The bound of `NET-365` holds for one circuit.
+> `RELAY_CIRCUITS_MAX` circuits of 2 MiB each hold 1 TiB, and the
+> `SOURCE_BUILD_BURST` circuits that one address builds at once hold 512 MiB.
+> The deployment kits stop an entry relay or a middle relay at 1 400 MiB of
+> memory. An exit relay gets 2 500 MiB, and its chunk store holds 1 GiB of
+> that. A launch server of 4 GB runs two relays. The circuit that holds the most
+> loses first, thus a party with many circuits takes no answer of a circuit
+> that holds less than each of its own.
 
 **[NET-364]** A relay MUST close a link whose backlog stays above
 `LINK_DRAIN_MARK` for a whole `LINK_DRAIN_WINDOW` while the relay writes less
@@ -3805,7 +3883,10 @@ group queue of §3.2.7 lowers the build count, and the rule stays, because a
 spare circuit buys a wake nothing.
 
 **[NET-100]** **A client MUST NOT hold a push-wake session longer than 6 s,
-because U4 then fails.** U4 permits 100 000 000 bytes each month, which is about
+because U4 then fails.** The watch of a locked client at a tick of Periodic
+mode is no push-wake session: it carries no cover cell, it runs at most once in
+each `PERIODIC_INTERVAL`, and Part 8 `PERIODIC_WATCH_MAX` bounds it
+(`NTF-153`). U4 permits 100 000 000 bytes each month, which is about
 3 333 333 bytes each day. At a session length *W* the 289 session opens of the
 184 wakes give 289 × *W* pacing ticks. Of those ticks 289 carry a real
 delivery, and each other tick carries a `B0` cover cell.

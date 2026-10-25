@@ -3,6 +3,8 @@
 //! A group has no total order across senders, thus the count is the local
 //! view and no agreed count (`GRP-146`, `GRP-147`, `WIR-191`).
 
+use std::collections::BTreeSet;
+
 use umbra_core::store::{
     engine::Backend,
     record::{RowId, TableId},
@@ -348,6 +350,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if closes_at != 0 && now > closes_at {
             return Err(Error::Closed);
         }
+        self.refuse_observer(conversation, AppKind::PollVote)?;
 
         let vote = PollVote {
             target: parsed.msg_id,
@@ -487,9 +490,21 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         poll: &MsgRef,
         conversation: ConversationId,
     ) -> Result<Vec<RowId>, Error> {
+        self.votes_on(&BTreeSet::from([poll.0]), conversation)
+    }
+
+    /// The rows of the votes in a conversation on each poll of `polls`.
+    pub(super) fn votes_on(
+        &self,
+        polls: &BTreeSet<RowId>,
+        conversation: ConversationId,
+    ) -> Result<Vec<RowId>, Error> {
         let mut rows = Vec::new();
         for (row, value) in self.open_ref()?.store.list(VOTES, Some(&conversation.0))? {
-            if value.get(16..32) == Some(poll.0.as_slice()) {
+            let poll = value
+                .get(16..32)
+                .and_then(|bytes| RowId::try_from(bytes).ok());
+            if poll.is_some_and(|poll| polls.contains(&poll)) {
                 rows.push(row);
             }
         }

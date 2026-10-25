@@ -33,7 +33,9 @@
 //! The relays are those of the manifest, which must verify under the key
 //! set. An `unlisted` line names a relay that the manifest does not list,
 //! as a relay that failed the test of C0: the measurer tests it too, thus
-//! a later pass lists it again. The line repeats.
+//! a later pass lists it again. The line repeats. A line whose descriptor
+//! file does not read or parse gives no relay: the run tests each other
+//! relay, says why on the standard error, and ends with status 1.
 //!
 //! `capacity` bounds the tests. A test of a class needs 2.25 times the
 //! rate of the class. The measurer tests each relay at the highest class
@@ -165,6 +167,8 @@ struct Settings {
     sockets: usize,
     scale: u64,
     tls: Arc<rustls::ClientConfig>,
+    /// The `unlisted` lines that gave no relay to test.
+    unread: usize,
 }
 
 fn layer_of_place(place: &str) -> Option<u8> {
@@ -201,10 +205,21 @@ fn listed(manifest: &Path, keyset: &Path) -> Result<Vec<Target>, &'static str> {
     Ok(targets)
 }
 
+/// The relay of the `unlisted` line `value`: `<descriptor file>,<place>`.
+fn unlisted_target(value: &str) -> Result<Target, &'static str> {
+    let (file, place) = value
+        .split_once(',')
+        .ok_or("an unlisted line does not parse")?;
+    let layer = layer_of_place(place).ok_or("an unlisted line does not parse")?;
+    let descriptor = std::fs::read(file).map_err(|_| "a descriptor file does not read")?;
+    Target::of(&descriptor, layer).ok_or("a descriptor file does not parse")
+}
+
 fn read_settings(path: &str) -> Result<Settings, &'static str> {
     let text = std::fs::read_to_string(path).map_err(|_| "the settings file does not read")?;
     let mut values: BTreeMap<&str, &str> = BTreeMap::new();
     let mut unlisted = Vec::new();
+    let mut unread = 0usize;
 
     for line in text.lines() {
         // A comment follows a value on its line, as in the form above.
@@ -214,17 +229,15 @@ fn read_settings(path: &str) -> Result<Settings, &'static str> {
         }
 
         match line.split_once('=') {
-            Some(("unlisted", value)) => {
-                let (file, place) = value
-                    .split_once(',')
-                    .ok_or("an unlisted line does not parse")?;
-                let layer = layer_of_place(place).ok_or("an unlisted line does not parse")?;
-                let descriptor =
-                    std::fs::read(file).map_err(|_| "a descriptor file does not read")?;
-                unlisted.push(
-                    Target::of(&descriptor, layer).ok_or("a descriptor file does not parse")?,
-                );
-            }
+            Some(("unlisted", value)) => match unlisted_target(value) {
+                Ok(target) => unlisted.push(target),
+                // One bad line of a relay of another operator stops no test
+                // of each other relay.
+                Err(cause) => {
+                    eprintln!("{cause}, and the run does not test that relay: {value}");
+                    unread = unread.saturating_add(1);
+                }
+            },
             Some((
                 name @ ("key" | "cert" | "manifest" | "keyset" | "results" | "capacity" | "slot"
                 | "sockets" | "trust" | "host_alias" | "scale"),
@@ -307,6 +320,7 @@ fn read_settings(path: &str) -> Result<Settings, &'static str> {
         sockets: usize::try_from(number("sockets", SOCKETS as u64)?).unwrap_or(SOCKETS),
         scale: number("scale", 1)?.max(1),
         tls,
+        unread,
     })
 }
 
@@ -413,7 +427,8 @@ async fn run(settings: Settings, only: Option<([u8; 32], u8)>) -> Result<bool, &
         );
     }
 
-    let mut is_whole = true;
+    // A run that skipped a line ends with a failure, thus the alert names it.
+    let mut is_whole = settings.unread == 0;
     for slot in slots {
         let slot: Vec<(Target, u8)> = slot
             .into_iter()
@@ -511,5 +526,84 @@ fn run_main() -> ExitCode {
             eprintln!("{cause}");
             ExitCode::from(1)
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use umbra_core::directory::descriptor::{roles, RelayDescriptor, HOST_LEN};
+
+    /// The signed descriptor of the relay `seed`.
+    fn descriptor(seed: u8) -> Vec<u8> {
+        let mut host = [0u8; HOST_LEN];
+        host[..9].copy_from_slice(b"localhost");
+
+        RelayDescriptor {
+            relay_id: [0; 32],
+            identity_pk: &[],
+            ntor_pk: [seed; 32],
+            addr_v4: [127, seed, 0, 1],
+            addr_v6: [0; 16],
+            port: 443,
+            host,
+            asn: u32::from(seed),
+            jurisdiction: *b"US",
+            family_id: [seed; 32],
+            capacity_class: 0,
+            roles: roles::QUEUE | roles::CHAIN,
+            chunk_store_gib: 0,
+            valid_after: 0,
+            sig: &[],
+        }
+        .sign(&SigningKey::from_seed(Secret::new([seed; 32])), &mut OsRng)
+        .unwrap()
+    }
+
+    #[test]
+    fn one_bad_unlisted_line_stops_no_run() {
+        let work = || {
+            let mut tag = [0u8; 8];
+            OsRng.try_fill_bytes(&mut tag).unwrap();
+            let home = std::env::temp_dir().join(format!("umbra-measurer-test-{}", to_hex(&tag)));
+            std::fs::create_dir_all(&home).unwrap();
+
+            std::fs::write(home.join("measurer.seed"), to_hex(&[7; 32])).unwrap();
+            std::fs::write(home.join("measurer.cert"), b"cert").unwrap();
+            std::fs::write(home.join("good.desc"), descriptor(1)).unwrap();
+            std::fs::write(home.join("bad.desc"), b"no descriptor").unwrap();
+
+            let file = |name: &str| home.join(name).display().to_string();
+            let text = format!(
+                "key={}\ncert={}\nresults={}\ncapacity=500\n\
+                 unlisted={},exit\nunlisted={},middle\nunlisted={},exit\n\
+                 unlisted={},nowhere\n",
+                file("measurer.seed"),
+                file("measurer.cert"),
+                file("results"),
+                file("good.desc"),
+                file("none.desc"),
+                file("bad.desc"),
+                file("good.desc"),
+            );
+            std::fs::write(home.join("measurer.conf"), text).unwrap();
+
+            // A missing file, a file that does not parse, and a place that
+            // does not exist leave the relay of each other line in the run.
+            let settings = read_settings(&file("measurer.conf")).unwrap();
+            assert_eq!(settings.targets.len(), 1);
+            assert_eq!(settings.unread, 3);
+
+            std::fs::remove_dir_all(&home).unwrap();
+        };
+
+        // An ML-DSA-65 signature needs more than the stack of a test thread.
+        std::thread::Builder::new()
+            .stack_size(STACK_BYTES)
+            .spawn(work)
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

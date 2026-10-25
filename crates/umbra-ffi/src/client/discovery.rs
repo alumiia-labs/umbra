@@ -124,7 +124,9 @@ fn encode_earlier_roots(roots: &[EarlierRoot]) -> Result<Zeroizing<Vec<u8>>, Err
 /// The form of an entry with no rotation of its queue yet.
 const PUBLISHED_V1: u8 = 0x01;
 /// The form with the time of the queue and the queue before it.
-const PUBLISHED_VERSION: u8 = 0x02;
+const PUBLISHED_V2: u8 = 0x02;
+/// The form with the write that waits for its answer.
+const PUBLISHED_VERSION: u8 = 0x03;
 const REQUEST_VERSION: u8 = 0x01;
 
 /// The kind of a published entry.
@@ -134,6 +136,16 @@ pub enum EntryKind {
     Address,
     /// A `DirectoryEntry` of Part 9 §9.3: a handle.
     Handle,
+}
+
+/// A write of an entry that the store took before its request left, and
+/// that the log does not show yet (`DIS-205`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingWrite {
+    /// The registration of the entry at its version.
+    Register,
+    /// The tombstone of the entry at the version after its own.
+    Retire,
 }
 
 /// One entry that this device publishes.
@@ -173,6 +185,9 @@ pub struct Published {
     /// Whether the directory shows a version of the label that this device
     /// did not write (`DIS-138`).
     pub foreign: bool,
+    /// A write that left with no answer, which the upkeep settles against
+    /// the log (`DIS-205`).
+    pub pending: Option<PendingWrite>,
 }
 
 impl Published {
@@ -204,6 +219,11 @@ impl Published {
         }
 
         out.push(u8::from(self.foreign));
+        out.push(match self.pending {
+            None => 0,
+            Some(PendingWrite::Register) => 1,
+            Some(PendingWrite::Retire) => 2,
+        });
 
         Ok(out)
     }
@@ -211,7 +231,7 @@ impl Published {
     fn parse(bytes: &[u8]) -> Result<Self, Error> {
         let mut r = Cursor(bytes);
         let version = r.u8()?;
-        if version != PUBLISHED_VERSION && version != PUBLISHED_V1 {
+        if ![PUBLISHED_V1, PUBLISHED_V2, PUBLISHED_VERSION].contains(&version) {
             return Err(Error::Integrity);
         }
 
@@ -235,6 +255,7 @@ impl Published {
             queue_since: 0,
             previous: None,
             foreign: false,
+            pending: None,
         };
         if version == PUBLISHED_V1 {
             out.queue_since = out.created_at;
@@ -245,6 +266,15 @@ impl Published {
             }
 
             out.foreign = r.u8()? == 1;
+        }
+
+        if version == PUBLISHED_VERSION {
+            out.pending = match r.u8()? {
+                0 => None,
+                1 => Some(PendingWrite::Register),
+                2 => Some(PendingWrite::Retire),
+                _ => return Err(Error::Integrity),
+            };
         }
 
         r.end()?;
@@ -575,6 +605,27 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
 
         encode_earlier_roots(&roots).map(Some)
+    }
+
+    /// The writes that mark each published entry for its tombstone, for the
+    /// commit of a reset (Part 7 `DEV-357`). The upkeep sends each tombstone
+    /// under `DIS-205` until the log shows it.
+    pub(super) fn tombstone_marks(&self) -> Result<Vec<super::devices::RowWrite>, Error> {
+        let store = &self.open_ref()?.store;
+        let mut writes = Vec::new();
+        for entry in self.published()? {
+            let marked = Published {
+                pending: Some(PendingWrite::Retire),
+                ..entry
+            };
+            writes.push(super::devices::RowWrite::Put(
+                PUBLISHED,
+                store.row_id(PUBLISHED, &marked.id),
+                marked.encode()?,
+            ));
+        }
+
+        Ok(writes)
     }
 
     /// The earlier roots with each name that an entry of `published` can
@@ -1010,4 +1061,53 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
 struct StoredRequest {
     bundle: Zeroizing<Vec<u8>>,
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_row_of_the_form_before_reads_with_no_write_that_waits() {
+        let entry = Published {
+            id: [1; 16],
+            kind: EntryKind::Handle,
+            index: 0,
+            rotation: 2,
+            label: b"@ada#1234".to_vec(),
+            name: b"@ada#1234".to_vec(),
+            queue: [2; 32],
+            rendezvous: vec![3; 8],
+            version: 4,
+            created_at: 100,
+            expires_at: 0,
+            renewed_at: 100,
+            queue_since: 200,
+            previous: Some(([5; 32], 300)),
+            foreign: true,
+            pending: Some(PendingWrite::Retire),
+        };
+        let row = entry.encode().unwrap();
+        assert_eq!(Published::parse(&row).unwrap(), entry);
+
+        // DIS-205: a row of an earlier build holds no write that waits.
+        let mut earlier = row.to_vec();
+        earlier[0] = PUBLISHED_V2;
+        earlier.pop();
+        assert_eq!(
+            Published::parse(&earlier).unwrap(),
+            Published {
+                pending: None,
+                ..entry
+            }
+        );
+
+        // A mark that no build writes is a fault of the store.
+        let mut unknown = row.to_vec();
+        if let Some(last) = unknown.last_mut() {
+            *last = 9;
+        }
+        assert!(Published::parse(&unknown).is_err());
+    }
 }

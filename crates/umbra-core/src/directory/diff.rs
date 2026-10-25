@@ -8,7 +8,7 @@ use umbra_wire::codec::{Reader, Writer};
 
 use crate::Error;
 
-/// The free store of an attachment relay, in two bits.
+/// The declared store of an attachment relay, in two bits (`REL-136`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum StoreLevel {

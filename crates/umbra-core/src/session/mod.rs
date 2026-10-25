@@ -453,4 +453,131 @@ mod tests {
         changed[40] ^= 1;
         assert!(session.receive_cell(&changed).is_err());
     }
+
+    /// The record of a file at the ref limit of Part 12 `ATT-072`, with the
+    /// largest name, preview, and caption that the wire holds, or with no
+    /// preview.
+    fn file_record(preview: bool) -> Vec<u8> {
+        use umbra_wire::{
+            app::{AppKind, AppMessage},
+            descriptor::{
+                AttachmentBody, ChunkRef, FileDescriptor, Level, CAPTION_MAX, FILE_NAME_MAX,
+                PREVIEW_MAX,
+            },
+        };
+
+        let refs = crate::attach::MESSAGE_DESCRIPTOR_REFS;
+        let descriptor = FileDescriptor {
+            level: Level::Data,
+            commit: [1; 32],
+            file_key: Secret::new([2; 32]),
+            file_nonce: [3; 24],
+            digest: [4; 32],
+            media_seconds: 0,
+            padded_size: u32::try_from(refs).unwrap() * 32_650,
+            mime_class: umbra_wire::descriptor::class::VIDEO,
+            pixel_w: 0,
+            pixel_h: 0,
+            refs: (0..refs)
+                .map(|_| ChunkRef {
+                    relay_id: [5; 32],
+                    chunk_id: [6; 32],
+                    cred_pk: [7; 32],
+                    replicas: [[8; 12], [9; 12]],
+                })
+                .collect(),
+        };
+        let name = "n".repeat(FILE_NAME_MAX);
+        let caption = "c".repeat(CAPTION_MAX);
+        let mut jpeg = alloc::vec![0x11; PREVIEW_MAX];
+        jpeg[..3].copy_from_slice(&[0xFF, 0xD8, 0xFF]);
+        jpeg[PREVIEW_MAX - 2..].copy_from_slice(&[0xFF, 0xD9]);
+        let attachment = AttachmentBody {
+            descriptor,
+            name: Some(name.as_str().into()),
+            preview: preview.then_some(jpeg.as_slice()),
+            caption: Some(caption.as_str()),
+        };
+        let mut body = alloc::vec![0u8; attachment.len()];
+        attachment.encode(&mut body).unwrap();
+
+        let record = AppMessage {
+            kind: AppKind::Attachment,
+            msg_id: [10; 16],
+            sent_at: 1,
+            body: &body,
+        };
+        let mut app = alloc::vec![0u8; record.len()];
+        record.encode(&mut app).unwrap();
+        app
+    }
+
+    /// `inner` as the sync channel carries it, with an entry for each device
+    /// of a full set (Part 7 §7.5.3).
+    fn synced(inner: &[u8]) -> Vec<u8> {
+        use crate::devset::{
+            sync::{CausalContext, Origin, SyncedRecord, AUTHOR_USER, SCOPE_PAIRWISE},
+            MAX_DEVICES,
+        };
+        use umbra_wire::app::{AppKind, AppMessage};
+
+        let record = SyncedRecord {
+            context: CausalContext {
+                lamport: 1,
+                vector: (0..MAX_DEVICES)
+                    .map(|device| ([u8::try_from(device).unwrap(); 16], 1))
+                    .collect(),
+                expires_in: 0,
+            },
+            origin: Origin {
+                scope: SCOPE_PAIRWISE,
+                subject: [12; 32],
+                author: AUTHOR_USER,
+            },
+            inner,
+        };
+        let mut body = alloc::vec![0u8; inner.len() + 512];
+        let used = record.encode(&mut body).unwrap();
+        body.truncate(used);
+
+        let outer = AppMessage {
+            kind: AppKind::DeviceSet,
+            msg_id: [13; 16],
+            sent_at: 0,
+            body: &body,
+        };
+        let mut app = alloc::vec![0u8; outer.len()];
+        outer.encode(&mut app).unwrap();
+        app
+    }
+
+    #[test]
+    fn a_file_record_at_the_ref_limit_fits_b3_with_its_frame_and_on_the_sync_channel() {
+        use crate::attach::MESSAGE_BODY_MAX;
+        use umbra_wire::bucket::APP_HEADER;
+
+        let (alice_ratchet, _) = ratchets();
+        let (_, alice_out, _) = queue(40);
+        let (_, _, alice_in) = queue(60);
+        let alice = PairwiseChannel::new(alice_ratchet, alice_out, alice_in);
+
+        // ATT-021, ATT-072: the record to the contact fits B3 with the frame
+        // of the default chunk, with the largest trailer.
+        let full = file_record(true);
+        assert_eq!(alice.bucket_for(full.len()), Some(Bucket::B3));
+
+        // ATT-208: on the sync channel of a full set the largest trailer
+        // fits no bucket, and the record with no preview fits B3.
+        assert!(full.len() - APP_HEADER > MESSAGE_BODY_MAX);
+        assert_eq!(alice.bucket_for(synced(&full).len()), None);
+        let lean = file_record(false);
+        assert!(lean.len() - APP_HEADER <= MESSAGE_BODY_MAX);
+        assert_eq!(alice.bucket_for(synced(&lean).len()), Some(Bucket::B3));
+
+        // MESSAGE_BODY_MAX is the bound of that channel to the byte.
+        let at_bound = alloc::vec![0u8; APP_HEADER + MESSAGE_BODY_MAX];
+        assert_eq!(alice.bucket_for(synced(&at_bound).len()), Some(Bucket::B3));
+        let above = alloc::vec![0u8; APP_HEADER + MESSAGE_BODY_MAX + 1];
+        assert_eq!(alice.bucket_for(synced(&above).len()), None);
+    }
 }

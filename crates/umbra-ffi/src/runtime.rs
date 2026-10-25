@@ -155,6 +155,9 @@ pub enum Command {
         /// The time of the fetch.
         now: u64,
     },
+    /// The chains of the circuits of the group task and of the transfer
+    /// task, whose relays the chains of this run put last (`NET-310`).
+    OtherChains(Vec<[[u8; 32]; 3]>),
     /// Sets the privacy mode of the conversation of a contact (Part 3
     /// §3.9, `NET-028`).
     SetClass {
@@ -977,6 +980,52 @@ fn clock_stepped(before: (i64, bool), after: (i64, bool)) -> bool {
     }
 }
 
+/// The difference in seconds that two readings of [`clock_offset`] show
+/// with no movement of a clock: each reading counts whole seconds.
+const OFFSET_JITTER: i64 = 1;
+
+/// The reading of [`clock_offset`] that the times of the circuits of one
+/// node follow (Part 3 `NET-370`). A node counts the age of a circuit on
+/// the device clock, and the relays count it on a clock that does not step
+/// back. Thus each difference between the device clock and the monotonic
+/// source moves each time of a circuit by the same step (Part 1 `SCP-018`).
+#[derive(Default)]
+pub(crate) struct CircuitClock {
+    seen: Option<(i64, bool)>,
+}
+
+impl CircuitClock {
+    /// A clock that compares against the last reading of an earlier run:
+    /// a circuit that a run resumes keeps the times of that run.
+    fn after(seen: Option<(i64, bool)>) -> Self {
+        CircuitClock { seen }
+    }
+
+    /// The step by which each time of a circuit moves at `now`, or none.
+    pub(crate) fn step(&mut self, now: u64) -> Option<i64> {
+        self.moved(clock_offset(now))
+    }
+
+    /// As [`CircuitClock::step`], for a reading of [`clock_offset`].
+    fn moved(&mut self, offset: (i64, bool)) -> Option<i64> {
+        let Some(seen) = self.seen.filter(|seen| seen.1 == offset.1) else {
+            self.seen = Some(offset);
+            return None;
+        };
+
+        let moved = offset.0.saturating_sub(seen.0);
+        if moved.saturating_abs() <= OFFSET_JITTER {
+            return None;
+        }
+
+        // A source that stops in a sleep falls behind the device clock by
+        // each sleep, and the relays count that sleep as the device clock
+        // does. Only a device clock that fell behind such a source moved.
+        self.seen = Some(offset);
+        (offset.1 || moved < 0).then_some(moved)
+    }
+}
+
 /// The time to the next slot of a Poisson clock.
 fn cover_delay(rng: &mut OsRng) -> Duration {
     let mut bytes = [0u8; 4];
@@ -1177,6 +1226,7 @@ pub async fn run_client(
     let mut clock_seen = *CLOCK_SEEN
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut circuit_clock = CircuitClock::after(clock_seen);
 
     let ended = 'run: loop {
         // WIR-254, WIR-339: the indices of the records of the user, and the
@@ -1284,6 +1334,10 @@ pub async fn run_client(
                 }
                 Some(Command::Challenges { book, now }) => {
                     node.set_challenges(book, now);
+                    Vec::new()
+                }
+                Some(Command::OtherChains(chains)) => {
+                    node.set_other_chains(chains);
                     Vec::new()
                 }
                 Some(Command::Wake) => {
@@ -1398,6 +1452,9 @@ pub async fn run_client(
                     let _ = updates.send(Update::ClockMoved);
                 }
                 clock_seen = Some(offset);
+                if let Some(step) = circuit_clock.moved(offset) {
+                    node.circuit_clock_moved(step);
+                }
                 *CLOCK_SEEN
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(offset);
@@ -1704,7 +1761,10 @@ pub async fn run_client(
             // to no contact fail that one command.
             match command {
                 // The loop above takes these commands.
-                Command::Foreground(_) | Command::Wake | Command::Challenges { .. } => {}
+                Command::Foreground(_)
+                | Command::Wake
+                | Command::Challenges { .. }
+                | Command::OtherChains(_) => {}
                 Command::SetClass { contact, class } => node.set_contact_class(&contact, class),
                 Command::Invite => {
                     if node.invite_link(&mut rng).is_err() {
@@ -2224,6 +2284,39 @@ mod tests {
         let now = unix_now();
         let (offset, _) = clock_offset(now);
         assert!(offset.abs() <= skew);
+    }
+
+    #[test]
+    fn the_times_of_a_circuit_follow_each_step_of_the_device_clock() {
+        // NET-370: the first reading of a node moves nothing, and a reading
+        // in whole seconds moves by one second with no step.
+        let mut clock = CircuitClock::default();
+        assert_eq!(clock.moved((40, true)), None);
+        assert_eq!(clock.moved((41, true)), None);
+        assert_eq!(clock.moved((39, true)), None);
+
+        // On a source that counts the sleep, each step below CLOCK_SKEW
+        // moves the times, in each direction.
+        assert_eq!(clock.moved((40 - 1_800, true)), Some(-1_800));
+        assert_eq!(clock.moved((40 - 1_799, true)), None);
+        assert_eq!(clock.moved((40, true)), Some(1_800));
+
+        // A slow drift moves the times when it reaches two seconds.
+        let mut clock = CircuitClock::after(Some((0, true)));
+        assert_eq!(clock.moved((1, true)), None);
+        assert_eq!(clock.moved((2, true)), Some(2));
+        assert_eq!(clock.moved((3, true)), None);
+
+        // On a source that stops in a sleep, a device clock that ran ahead
+        // shows a sleep, which the relays count too. One that fell behind
+        // moved back.
+        let mut clock = CircuitClock::after(Some((0, false)));
+        assert_eq!(clock.moved((8 * 3_600, false)), None);
+        assert_eq!(clock.moved((8 * 3_600 - 600, false)), Some(-600));
+
+        // Two readings of two sources compare no more.
+        assert_eq!(clock.moved((-90_000, true)), None);
+        assert_eq!(clock.moved((-90_000, true)), None);
     }
 
     #[test]

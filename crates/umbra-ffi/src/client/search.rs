@@ -11,7 +11,7 @@ use umbra_wire::app::{AppKind, AppMessage, Channel};
 use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 use zeroize::{Zeroize, Zeroizing};
 
-use super::{conversation_of, info_of, is_request, shown_text, Client, MESSAGE_PREFIX};
+use super::{conversation_of, info_of, is_request, shown_text, Client, MESSAGE_PREFIX, MOD_HIDE};
 use crate::{ConversationId, Error, MsgRef};
 
 /// The largest count of results of one query (`IMP-179`).
@@ -671,6 +671,15 @@ fn is_searched(plain: &[u8]) -> Result<bool, Error> {
 }
 
 impl<B: Backend, E: SecureElement> Client<B, E> {
+    /// Whether a moderator hid the message. A hidden message stays out of
+    /// the default view (Part 11 §11.9.6), thus a search shows it no more
+    /// than the conversation does.
+    fn is_hidden(&self, message: &MsgRef) -> Result<bool, Error> {
+        Ok(self
+            .moderation_of(message)?
+            .is_some_and(|(state, _)| state == MOD_HIDE))
+    }
+
     /// Starts a build of the search index. The index that a build made
     /// before stays in use until this build ends.
     pub fn search_begin(&mut self) -> Result<(), Error> {
@@ -705,7 +714,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if conversation_of(&plain)? != conversation {
                 return Err(Error::Integrity);
             }
-            if !is_searched(&plain)? {
+            if !is_searched(&plain)? || self.is_hidden(&MsgRef(row))? {
                 continue;
             }
             let Ok(text) = searched_text(&plain) else {
@@ -761,7 +770,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             };
 
             let plain = Zeroizing::new(plain);
-            if conversation_of(&plain)? != doc.entry.conversation || !is_searched(&plain)? {
+            if conversation_of(&plain)? != doc.entry.conversation
+                || !is_searched(&plain)?
+                || self.is_hidden(&doc.entry.message)?
+            {
                 continue;
             }
 

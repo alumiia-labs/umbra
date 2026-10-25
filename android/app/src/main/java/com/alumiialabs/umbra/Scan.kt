@@ -125,6 +125,15 @@ fun ScanSafetyNumberScreen(chat: Chat, onBack: () -> Unit) {
     }
 }
 
+/** Whether the device has a camera. */
+fun hasCamera(context: Context) = context.packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)
+
+/**
+ * Whether the device has a back camera, which the scanner takes alone. A
+ * device with none shows no entry to a scan.
+ */
+fun hasBackCamera(context: Context) = context.packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA)
+
 /**
  * The camera of the device in a frame, and the text of the first QR code
  * that it sees. The view asks for the camera when it opens and at no other
@@ -137,16 +146,23 @@ fun Scanner(onText: (String) -> Unit) {
         val state = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA)
         mutableStateOf(state == PackageManager.PERMISSION_GRANTED)
     }
+    // A device with no camera pastes a link and compares a short code. The
+    // scan takes the back camera alone, thus a device with no back camera
+    // asks for no permission. A camera that does not start ends no thread.
+    val isAbsent = remember { !hasCamera(context) }
+    var isFailed by remember { mutableStateOf(!hasBackCamera(context)) }
     val ask = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { isAllowed = it }
-    LaunchedEffect(Unit) { if (!isAllowed) ask.launch(Manifest.permission.CAMERA) }
+    LaunchedEffect(Unit) { if (!isAllowed && !isAbsent && !isFailed) ask.launch(Manifest.permission.CAMERA) }
 
     val frame = RoundedCornerShape(24.dp)
     Box(
         Modifier.fillMaxWidth().aspectRatio(1f).clip(frame).background(Palette.Container),
         contentAlignment = Alignment.Center,
     ) {
-        if (isAllowed) {
-            CameraFrames(onText)
+        if (isAbsent || isFailed) {
+            FaIcon("qrcode", size = 40.dp, tint = Palette.TextSecondary)
+        } else if (isAllowed) {
+            CameraFrames(onText, onFailed = { isFailed = true })
             // The dashed square shows where the code goes.
             Box(
                 Modifier.fillMaxSize().padding(48.dp).drawBehind {
@@ -165,7 +181,13 @@ fun Scanner(onText: (String) -> Unit) {
         }
     }
 
-    if (!isAllowed) {
+    if (isAbsent) {
+        Spacer(Modifier.height(12.dp))
+        Note(stringResource(R.string.scan_camera_absent))
+    } else if (isFailed) {
+        Spacer(Modifier.height(12.dp))
+        Note(stringResource(R.string.scan_camera_not_started))
+    } else if (!isAllowed) {
         Spacer(Modifier.height(12.dp))
         Note(stringResource(R.string.scan_no_camera), isError = true)
         Spacer(Modifier.height(12.dp))
@@ -174,10 +196,11 @@ fun Scanner(onText: (String) -> Unit) {
 }
 
 @Composable
-private fun CameraFrames(onText: (String) -> Unit) {
+private fun CameraFrames(onText: (String) -> Unit, onFailed: () -> Unit) {
     val context = LocalContext.current
     val owner = LocalLifecycleOwner.current
     val deliver by rememberUpdatedState(onText)
+    val showFailure by rememberUpdatedState(onFailed)
     val analysis = remember { Executors.newSingleThreadExecutor { Thread(it, "umbra-scan") } }
     val preview = remember {
         PreviewView(context).apply {
@@ -210,6 +233,18 @@ private fun CameraFrames(onText: (String) -> Unit) {
             // The start of the camera can end after the user left the view.
             if (isLeft) return@addListener
 
+            // A device with no back camera fails the start of CameraX, or
+            // it has no camera to bind.
+            val provider = try {
+                providers.get().takeIf { it.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA) }
+            } catch (failed: Exception) {
+                null
+            }
+            if (provider == null) {
+                showFailure()
+                return@addListener
+            }
+
             val picture = Preview.Builder().build().also { it.surfaceProvider = preview.surfaceProvider }
             val frames = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -221,9 +256,13 @@ private fun CameraFrames(onText: (String) -> Unit) {
                 if (text != null && isFound.compareAndSet(false, true)) main.post { deliver(text) }
             }
 
-            val provider = providers.get()
-            provider.unbindAll()
-            provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, picture, frames)
+            try {
+                provider.unbindAll()
+                provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, picture, frames)
+            } catch (refused: Exception) {
+                showFailure()
+                return@addListener
+            }
             bound = picture to frames
         }, ContextCompat.getMainExecutor(context))
 
@@ -233,7 +272,7 @@ private fun CameraFrames(onText: (String) -> Unit) {
         onDispose {
             isLeft = true
             preview.previewStreamState.removeObserver(watcher)
-            if (providers.isDone) providers.get().unbindAll()
+            if (providers.isDone) runCatching { providers.get().unbindAll() }
             analysis.shutdown()
         }
     }

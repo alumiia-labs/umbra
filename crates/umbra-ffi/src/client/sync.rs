@@ -135,6 +135,35 @@ fn counter_ref(counter: u64) -> [u8; 16] {
     out
 }
 
+/// The record of a file with no preview, when its body is above
+/// `MESSAGE_BODY_MAX` with one (Part 12 `ATT-209`). The result is none for
+/// each other record: a body that the parser does not take goes as it came.
+fn without_preview(record: &AppMessage<'_>) -> Result<Option<Zeroizing<Vec<u8>>>, Error> {
+    if record.kind != AppKind::Attachment
+        || record.body.len() <= umbra_core::attach::MESSAGE_BODY_MAX
+    {
+        return Ok(None);
+    }
+    let Ok(mut attachment) = umbra_wire::descriptor::AttachmentBody::parse(record.body) else {
+        return Ok(None);
+    };
+    if attachment.preview.take().is_none() {
+        return Ok(None);
+    }
+
+    let mut body = Zeroizing::new(vec![0u8; attachment.len()]);
+    attachment.encode(&mut body)?;
+    let lighter = AppMessage {
+        kind: record.kind,
+        msg_id: record.msg_id,
+        sent_at: record.sent_at,
+        body: &body,
+    };
+    let mut app = Zeroizing::new(vec![0u8; lighter.len()]);
+    lighter.encode(&mut app)?;
+    Ok(Some(app))
+}
+
 /// The messages of `conversation` that a record names: the message of the
 /// record itself, and the target of an edit, which carries its text.
 fn record_messages<B: Backend>(
@@ -453,10 +482,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             author: if from_user { AUTHOR_USER } else { AUTHOR_PEER },
         };
 
+        // ATT-209: a contact can send a record of a file that fits its own
+        // channel and no `SyncedRecord`, as a sender before `ATT-208` does.
+        // The copy of the set leaves its preview out, and the store of this
+        // device keeps the record whole.
+        let lighter = without_preview(&parsed)?;
+        let inner = lighter.as_deref().map_or(app, Vec::as_slice);
+
         // DEV-242: a timed record carries the rest of its period.
         let expires_in = self.expires_in_of(conversation, app, now)?;
         let counter = engine.counter().saturating_add(1);
-        let published = engine.publish(app, origin, counter_ref(counter), expires_in, now)?;
+        let published = engine.publish(inner, origin, counter_ref(counter), expires_in, now)?;
         self.put_engine(&engine, Some((published.counter, &published.body)), rng)?;
         let channels = self.peer_channels()?;
         let mut first = message;
@@ -1375,8 +1411,22 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         continue;
                     }
 
+                    // DEV-341: a record of this batch that came before the
+                    // removal of its contact goes with the contact.
+                    let removed = match <[u8; 32]>::try_from(key.as_slice()) {
+                        Ok(subject) if item == umbra_core::devset::sync::ITEM_CONTACT_REMOVED => {
+                            self.conversation_of_subject(&subject).ok().flatten()
+                        }
+                        _ => None,
+                    };
+
                     // An item that does not apply ends no batch.
                     let _ = self.apply_mutable(item, &key, &value, rng);
+                    if let Some(conversation) = removed {
+                        if self.is_ended_channel(conversation).unwrap_or(false) {
+                            out.retain(|synced: &Synced| synced.conversation != conversation);
+                        }
+                    }
                 }
                 // An epoch that does not verify changes nothing.
                 Ok(Taken::Control {

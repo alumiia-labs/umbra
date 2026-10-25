@@ -6,6 +6,7 @@
 //! runs. A proof of work of an issuance takes some seconds.
 
 use std::{
+    collections::BTreeMap,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -48,9 +49,13 @@ use umbra_wire::{
 
 use super::{locked, unix_now, FfiError, Handle};
 use crate::{
-    client::{EntryKind, Published},
+    client::{EntryKind, PendingWrite, Published},
     runtime::OsRng,
 };
+
+/// The search keys that one link holds. A device publishes a few labels,
+/// and the issuer label changes once in each epoch.
+const SEARCH_KEYS_HELD: usize = 64;
 
 /// The pinned route to the directory, with the keys of `DIS-163`.
 #[derive(Clone)]
@@ -64,6 +69,10 @@ pub struct DirectoryLink {
     /// The key set of the log that a signed rotation gave, or none for the
     /// pinned set (`DIS-199`).
     keyset: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+    /// The search key of each label of this device and of each issuer
+    /// label that a call evaluated under the pinned VOPRF key (`DIS-204`).
+    /// Each link of one route shares it.
+    search_keys: Arc<std::sync::Mutex<BTreeMap<Vec<u8>, [u8; 64]>>>,
 }
 
 impl From<DirError> for FfiError {
@@ -173,6 +182,7 @@ impl DirectoryLink {
             tls,
             held: Arc::default(),
             keyset: Arc::default(),
+            search_keys: Arc::default(),
         })
     }
 
@@ -200,6 +210,46 @@ impl DirectoryLink {
     /// (`DIS-164`).
     fn search_key(&self, input: &[u8]) -> Result<[u8; 64], FfiError> {
         Ok(reader::search_key(self, input, &mut OsRng)?)
+    }
+
+    /// The search key of a label of this device or of an issuer: the held
+    /// one, or one evaluation that the link then holds (`DIS-204`). A held
+    /// key costs the directory no evaluation and this device no proof of
+    /// work. The output of the VOPRF for one input under the pinned key does
+    /// not change.
+    fn held_search_key(&self, input: &[u8]) -> Result<[u8; 64], FfiError> {
+        let held = self
+            .search_keys
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(input)
+            .copied();
+        if let Some(key) = held {
+            return Ok(key);
+        }
+
+        let key = self.search_key(input)?;
+        let mut keys = self
+            .search_keys
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if keys.len() >= SEARCH_KEYS_HELD {
+            keys.clear();
+        }
+        keys.insert(input.to_vec(), key);
+        Ok(key)
+    }
+
+    /// The newest entry of a label of this device under a fresh head, read
+    /// under its held search key (`DIS-137`, `DIS-204`).
+    fn find_own(&self, input: &[u8]) -> Result<Found, FfiError> {
+        let search_key = self.held_search_key(input)?;
+        let found = reader::find_under(self, &search_key)?;
+        if found.degraded {
+            return Err(FfiError::Stale);
+        }
+
+        Ok(found)
     }
 
     /// The lookup proof of a search key under the newest head, after the
@@ -318,23 +368,6 @@ impl DirectoryLink {
         Ok(reader::vrf_key(self)?)
     }
 
-    /// The newest entry of a label input, verified under the log. A head
-    /// past its freshness gives `Stale` here.
-    pub fn find(&self, input: &[u8]) -> Result<Found, FfiError> {
-        Ok(self.find_keyed(input)?.0)
-    }
-
-    /// The newest entry of a label input and its search key, under a fresh
-    /// head.
-    fn find_keyed(&self, input: &[u8]) -> Result<(Found, [u8; 64]), FfiError> {
-        let found = self.find_read(input)?;
-        if found.0.degraded {
-            return Err(FfiError::Stale);
-        }
-
-        Ok(found)
-    }
-
     /// The newest entry of a label input and its search key. A head past its
     /// freshness gives the degraded read of `DIS-067`, which `Found` marks.
     fn find_read(&self, input: &[u8]) -> Result<(Found, [u8; 64]), FfiError> {
@@ -346,7 +379,7 @@ impl DirectoryLink {
     pub fn token(&self) -> Result<Vec<u8>, FfiError> {
         let epoch = epoch_number(unix_now());
         let input = issuer_label_input(TYPE_FIRST_PARTY, epoch);
-        let search_key = self.search_key(&input)?;
+        let search_key = self.held_search_key(&input)?;
         let (proof, head, _) = self.lookup(&search_key)?;
 
         let mut keys = IssuerKeys::default();
@@ -375,57 +408,82 @@ impl DirectoryLink {
         dirclient::token_bytes(token).map_err(|_| FfiError::Malformed)
     }
 
-    /// Registers a label under a token (`DIS-101`), with the lease of a
+    /// Registers a label under `token` (`DIS-101`), with the lease of a
     /// timed link (`DIS-172`). The registration challenge proves `key`
     /// (`DIS-197`), and it names the version of the entry that `entry_of`
-    /// writes. The result is that version.
-    pub fn register(
+    /// writes. `keep` runs before the registration leaves, and a fault of
+    /// it sends nothing (`DIS-205`). The result is that version, or the
+    /// fault with what it left at the directory.
+    #[allow(clippy::too_many_arguments)]
+    fn register(
         &self,
+        token: &[u8],
         input: &[u8],
         name: &[u8],
         key: &KeyPair,
         entry_of: impl FnOnce(u32) -> Result<Vec<u8>, FfiError>,
         lease: Option<u32>,
-    ) -> Result<u32, FfiError> {
-        // The proof of work of the token comes first, thus the challenge
-        // lives through it.
-        let token = self.token()?;
+        keep: impl FnOnce(u32) -> Result<(), FfiError>,
+    ) -> Result<u32, (WriteFault, FfiError)> {
+        // A fault before the registration request leaves registers nothing.
+        let (body, version_new) = (|| {
+            let challenge = self.register_challenge(input, key, token)?;
+            let (challenge, purpose) =
+                dirclient::parse_register_challenge(&challenge).map_err(|_| FfiError::Malformed)?;
+            let Purpose::Write { version_new } = purpose else {
+                return Err(FfiError::Malformed);
+            };
 
-        let body = dirclient::register_challenge_body(input, &key.public().to_bytes())
-            .map_err(|_| FfiError::Malformed)?;
-        let challenge = self.send(Kind::Challenge, &body)?;
-        let (challenge, purpose) =
-            dirclient::parse_register_challenge(&challenge).map_err(|_| FfiError::Malformed)?;
-        let Purpose::Write { version_new } = purpose else {
-            return Err(FfiError::Malformed);
-        };
+            let entry = entry_of(version_new)?;
+            let ans = answer(purpose, key, name, &challenge, Some(&entry))
+                .map_err(|_| FfiError::Unverified)?;
+            let body = dirclient::register_body(token, input, &entry, &ans, lease)
+                .map_err(|_| FfiError::Malformed)?;
 
-        let entry = entry_of(version_new)?;
-        let ans = answer(purpose, key, name, &challenge, Some(&entry))
-            .map_err(|_| FfiError::Unverified)?;
-        let body = dirclient::register_body(&token, input, &entry, &ans, lease)
+            keep(version_new)?;
+            Ok((body, version_new))
+        })()
+        .map_err(|error| (WriteFault::Refused, error))?;
+
+        match self.send(Kind::Register, &body) {
+            Ok(_) => Ok(version_new),
+            // The directory answered, and its answer names a refusal.
+            Err(
+                error @ (FfiError::Busy
+                | FfiError::Stale
+                | FfiError::NotFound
+                | FfiError::Unverified),
+            ) => Err((WriteFault::Refused, error)),
+            // A link that ended, or an answer that does not parse.
+            Err(error) => Err((WriteFault::Unknown, error)),
+        }
+    }
+
+    /// The registration challenge of `key` for a label, paid with `token`
+    /// (`DIS-203`). A directory of an earlier build reads no token in it, and
+    /// the registration spends the token there.
+    fn register_challenge(
+        &self,
+        input: &[u8],
+        key: &KeyPair,
+        token: &[u8],
+    ) -> Result<Vec<u8>, FfiError> {
+        let key = key.public().to_bytes();
+        let paid = dirclient::register_challenge_body(input, &key, Some(token))
             .map_err(|_| FfiError::Malformed)?;
-        self.send(Kind::Register, &body)?;
-        Ok(version_new)
+        match self.send(Kind::Challenge, &paid) {
+            Err(FfiError::Malformed) => {
+                let body = dirclient::register_challenge_body(input, &key, None)
+                    .map_err(|_| FfiError::Malformed)?;
+                self.send(Kind::Challenge, &body)
+            }
+            answered => answered,
+        }
     }
 
     /// Writes the next version of a label under the key of the version
-    /// that `version` names (`DIS-093`). A tombstone entry retires the
-    /// label (`DIS-171`).
-    pub fn write(
-        &self,
-        input: &[u8],
-        name: &[u8],
-        key: &KeyPair,
-        version: u32,
-        entry: &[u8],
-    ) -> Result<(), FfiError> {
-        self.write_staged(input, name, key, version, entry)
-            .map_err(|(_, error)| error)
-    }
-
-    /// The write of [`DirectoryLink::write`], with what a fault left at the
-    /// directory.
+    /// that `version` names (`DIS-093`), with what a fault left at the
+    /// directory. A tombstone entry retires the label (`DIS-171`).
     fn write_staged(
         &self,
         input: &[u8],
@@ -622,6 +680,18 @@ fn signer_of<'a>(
 /// (`DIS-166`), and an epoch closes at each `DIRECTORY_EPOCH`.
 const WRITE_SETTLE: u64 = 2 * DIRECTORY_EPOCH;
 
+/// What the upkeep does with an entry after a write of it that waits for
+/// its answer settled (`DIS-205`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Settled {
+    /// The upkeep of the entry ends for this run.
+    Done,
+    /// The log still shows the held version: the tombstone goes again.
+    Retire,
+    /// The upkeep of the entry goes on.
+    Upkeep,
+}
+
 /// The version of the log that the upkeep read for an entry.
 struct Shown {
     version: u32,
@@ -778,6 +848,13 @@ impl Handle {
         let start = Instant::now();
         loop {
             let mut inner = locked(&self.inner);
+
+            // A lock ends the wait at once. The caller can hold keys of the
+            // store, and the runtime stops at a lock.
+            if !inner.client.is_unlocked() {
+                return Err(FfiError::Locked);
+            }
+
             if let Some(made) = inner.rendezvous_ready.remove(&tag) {
                 return Ok(made);
             }
@@ -800,7 +877,10 @@ impl Handle {
         }
     }
 
-    /// Registers an entry on a new rendezvous queue, and keeps it.
+    /// Registers an entry on a new rendezvous queue, and keeps it. The
+    /// store takes the entry with its mark before the registration leaves,
+    /// thus a label that the directory takes always has its row, and a lock
+    /// before that point sends nothing (`DIS-205`).
     #[allow(clippy::too_many_arguments)]
     fn publish(
         &self,
@@ -821,40 +901,22 @@ impl Handle {
             u32::try_from(seconds).unwrap_or(u32::MAX)
         });
 
-        let (queue, rendezvous) = self.new_rendezvous()?;
-        let registered = (|| {
-            let key = locked(&self.inner).client.entry_key(kind, index, 0)?;
-            let address = QueueAddress::parse(&rendezvous).map_err(|_| FfiError::Malformed)?;
-            link.register(
-                &label,
-                &name,
-                &key,
-                |version| entry_of(&key, address, version),
-                lease,
-            )
-        })();
-        let version = match registered {
-            Ok(version) => version,
-            Err(error) => {
-                self.end_rendezvous(queue);
-                return Err(error);
-            }
-        };
-
-        let now = unix_now();
         let mut id = [0u8; 16];
         OsRng
             .try_fill_bytes(&mut id)
             .map_err(|_| FfiError::Storage)?;
-        let entry = Published {
+
+        let (queue, rendezvous) = self.new_rendezvous()?;
+        let now = unix_now();
+        let row = |version: u32, pending: Option<PendingWrite>| Published {
             id,
             kind,
             index,
             rotation: 0,
-            label,
-            name,
+            label: label.clone(),
+            name: name.clone(),
             queue,
-            rendezvous,
+            rendezvous: rendezvous.clone(),
             version,
             created_at: now,
             expires_at,
@@ -862,12 +924,59 @@ impl Handle {
             queue_since: now,
             previous: None,
             foreign: false,
+            pending,
         };
 
-        locked(&self.inner)
-            .client
-            .put_published(&entry, &mut OsRng)?;
-        Ok(entry)
+        let registered = (|| {
+            // The proof of work of the token takes seconds. The entry key
+            // leaves the store after it, thus a lock in that time finds no
+            // key in memory, and the challenge lives through no proof.
+            let token = link.token().map_err(|error| (WriteFault::Refused, error))?;
+            let key = locked(&self.inner)
+                .client
+                .entry_key(kind, index, 0)
+                .map_err(|error| (WriteFault::Refused, FfiError::from(error)))?;
+            let address = QueueAddress::parse(&rendezvous)
+                .map_err(|_| (WriteFault::Refused, FfiError::Malformed))?;
+            let keep = |version: u32| -> Result<(), FfiError> {
+                let entry = row(version, Some(PendingWrite::Register));
+                Ok(locked(&self.inner)
+                    .client
+                    .put_published(&entry, &mut OsRng)?)
+            };
+            link.register(
+                &token,
+                &label,
+                &name,
+                &key,
+                |version| entry_of(&key, address, version),
+                lease,
+                keep,
+            )
+        })();
+
+        match registered {
+            Ok(version) => {
+                // A lock here leaves the mark, and the upkeep reads the log.
+                let entry = row(version, None);
+                let mut inner = locked(&self.inner);
+                if kind == EntryKind::Handle {
+                    inner.client.set_profile_blob_due(true, &mut OsRng)?;
+                }
+                inner.client.put_published(&entry, &mut OsRng)?;
+                Ok(entry)
+            }
+            // The directory holds no version of this device: the row, when
+            // the store took it, goes with the queue.
+            Err((WriteFault::Refused, error)) => {
+                let _ = locked(&self.inner).client.drop_published(&id, &mut OsRng);
+                self.end_rendezvous(queue);
+                Err(error)
+            }
+            // The registration left with no answer: the row keeps its mark
+            // and its queue for the upkeep.
+            Err((WriteFault::Unknown, error)) => Err(error),
+        }
     }
 
     /// Proves each tree head that a contact gossiped and that no held head
@@ -990,7 +1099,10 @@ impl Handle {
             .set_profile_blob_due(false, &mut OsRng)?)
     }
 
-    /// Writes the tombstone of an entry (`DIS-171`) and ends its queue.
+    /// Writes the tombstone of an entry (`DIS-171`) and ends its queue. The
+    /// store takes the mark of the tombstone before the write leaves. Thus
+    /// a tombstone whose answer did not come shows at the upkeep as a
+    /// version of this device, and not as a takeover (`DIS-205`).
     fn retire(&self, link: &DirectoryLink, entry: &Published) -> Result<(), FfiError> {
         let key = locked(&self.inner)
             .client
@@ -1024,13 +1136,96 @@ impl Handle {
             }
         };
 
-        match link.write(&entry.label, &entry.name, &key, entry.version, &tombstone) {
+        let marked = Published {
+            pending: Some(PendingWrite::Retire),
+            ..entry.clone()
+        };
+        if entry.pending != marked.pending {
+            locked(&self.inner)
+                .client
+                .put_published(&marked, &mut OsRng)?;
+        }
+
+        match link.write_staged(&entry.label, &entry.name, &key, entry.version, &tombstone) {
             // A label that the directory tombstoned already, or holds no
             // more, is retired.
-            Ok(()) | Err(FfiError::NotFound | FfiError::Stale) => {}
-            Err(error) => return Err(error),
+            Ok(()) | Err((_, FfiError::NotFound | FfiError::Stale)) => self.retired(entry),
+            // The log holds the version before for certain, thus the store
+            // goes back to the entry as it stood.
+            Err((WriteFault::Refused, error)) => {
+                let _ = locked(&self.inner).client.put_published(entry, &mut OsRng);
+                Err(error)
+            }
+            // The directory may hold the tombstone: the mark stays, and the
+            // upkeep reads the log.
+            Err((WriteFault::Unknown, error)) => Err(error),
         }
-        self.end_entry(entry)
+    }
+
+    /// Ends an entry that the directory retired, and drops it. The
+    /// tombstone of a handle took its blob (`DIS-178`), and a later handle
+    /// takes a new link.
+    fn retired(&self, entry: &Published) -> Result<(), FfiError> {
+        self.end_entry(entry)?;
+        if entry.kind == EntryKind::Handle {
+            let mut inner = locked(&self.inner);
+            inner.client.drop_handle_fragment()?;
+            inner.client.set_profile_blob_due(false, &mut OsRng)?;
+        }
+        Ok(())
+    }
+
+    /// Settles a write of an entry that left with no answer against the
+    /// log (`DIS-205`). A registration that the log shows as this device
+    /// wrote it holds. One that the log does not show after `WRITE_SETTLE`
+    /// did not reach the directory, and its entry goes. A tombstone at the
+    /// version after the held one is the retirement of this device. A log
+    /// that still shows the held version takes the tombstone again.
+    fn settle_pending(
+        &self,
+        entry: &Published,
+        standing: Standing,
+        shown: Option<&Shown>,
+        now: u64,
+    ) -> Settled {
+        match entry.pending {
+            Some(PendingWrite::Register) => {
+                if standing == Standing::Own {
+                    let held = Published {
+                        pending: None,
+                        ..entry.clone()
+                    };
+                    let mut inner = locked(&self.inner);
+
+                    // §9.3.1: the profile of a new handle goes beside it,
+                    // also when the answer to its registration did not come.
+                    let is_due = entry.kind != EntryKind::Handle
+                        || inner.client.set_profile_blob_due(true, &mut OsRng).is_ok();
+                    if is_due {
+                        let _ = inner.client.put_published(&held, &mut OsRng);
+                    }
+                } else if now.saturating_sub(entry.created_at) >= WRITE_SETTLE {
+                    let _ = self.end_entry(entry);
+                }
+                Settled::Done
+            }
+            Some(PendingWrite::Retire) => {
+                let is_own_tombstone = shown.is_some_and(|shown| {
+                    entry.version.checked_add(1) == Some(shown.version)
+                        && shown.key == [0; ENTRY_PK_LEN]
+                });
+                if is_own_tombstone {
+                    let _ = self.retired(entry);
+                    Settled::Done
+                } else if standing == Standing::Own {
+                    Settled::Retire
+                } else {
+                    // Another version is no write of this device (DIS-138).
+                    Settled::Upkeep
+                }
+            }
+            None => Settled::Upkeep,
+        }
     }
 
     /// Ends the queues of an entry that the directory holds no more, and
@@ -1073,6 +1268,7 @@ impl Handle {
             rendezvous,
             queue_since: now,
             previous: Some((entry.queue, now.saturating_add(ROTATE_GRACE))),
+            pending: None,
             ..entry.clone()
         };
 
@@ -1207,7 +1403,7 @@ impl Handle {
             return Ok(false);
         }
 
-        let found = link.find(&entry.label)?;
+        let found = link.find_own(&entry.label)?;
 
         // A look that ends for certain ends the look of the restore; one
         // that a fault of the network ended goes again at the next upkeep.
@@ -1253,6 +1449,7 @@ impl Handle {
             rendezvous,
             queue_since: now,
             previous: None,
+            pending: None,
             ..entry.clone()
         };
 
@@ -1308,7 +1505,7 @@ impl Handle {
         link: &DirectoryLink,
         entry: &Published,
     ) -> Result<(Standing, Option<Shown>), FfiError> {
-        let found = link.find(&entry.label)?;
+        let found = link.find_own(&entry.label)?;
         let (Some(bytes), Some(version)) = (found.entry, found.version) else {
             return Ok((Standing::Foreign, None));
         };
@@ -1361,6 +1558,7 @@ impl Handle {
         let _ = self.check_gossiped_heads(&link);
 
         let entries = locked(&self.inner).client.published()?;
+        let owed = locked(&self.inner).client.rendezvous_owed(&mut OsRng)?;
         for mut entry in entries {
             if entry.expires_at != 0 && now >= entry.expires_at {
                 // DIS-172: the directory ended the lease and wrote the
@@ -1374,7 +1572,28 @@ impl Handle {
             // a restored handle finds its current key before it shows as
             // held by another party.
             let mut is_staged = false;
-            if let Ok((standing, shown)) = self.entry_standing(&link, &entry) {
+            let read = self.entry_standing(&link, &entry);
+
+            // DIS-205: a write that left with no answer settles first, and it
+            // waits for a read of the log.
+            if entry.pending.is_some() {
+                let settled = match &read {
+                    Ok((standing, shown)) => {
+                        self.settle_pending(&entry, *standing, shown.as_ref(), now)
+                    }
+                    Err(_) => Settled::Done,
+                };
+                match settled {
+                    Settled::Done => continue,
+                    Settled::Retire => {
+                        let _ = self.retire(&link, &entry);
+                        continue;
+                    }
+                    Settled::Upkeep => {}
+                }
+            }
+
+            if let Ok((standing, shown)) = read {
                 is_staged = standing == Standing::Staged;
 
                 // DEV-306: the log shows the held version under its key,
@@ -1438,6 +1657,20 @@ impl Handle {
                     entry.previous = None;
                     inner.client.put_published(&entry, &mut OsRng)?;
                 }
+            }
+
+            // DEV-347: a queue that a removed device knew takes its successor
+            // now. That device knew a queue in its grace too, and it ends
+            // first: one queue waits at a time.
+            if owed.contains(&entry.queue) && !is_staged {
+                if let Some((previous, _)) = entry.previous.take() {
+                    self.end_rendezvous(previous);
+                    let mut inner = locked(&self.inner);
+                    let _ = inner.client.unbind_queue(&previous, &mut OsRng);
+                    inner.client.put_published(&entry, &mut OsRng)?;
+                }
+                let _ = self.rotate_queue(&link, &entry, now);
+                continue;
             }
 
             // DIS-133: a queue of `RENDEZVOUS_ROTATE` takes its successor. A
@@ -1707,9 +1940,6 @@ impl Handle {
             match published {
                 Ok(entry) => {
                     // §9.3.1: the profile of the new handle goes beside it.
-                    let _ = locked(&self.inner)
-                        .client
-                        .set_profile_blob_due(true, &mut OsRng);
                     let _ = self.publish_profile_blob(&link);
                     return Ok(via_text(&entry));
                 }
@@ -1759,6 +1989,7 @@ impl Handle {
             rendezvous,
             queue_since: now,
             previous: Some((entry.queue, now.saturating_add(ROTATE_GRACE))),
+            pending: None,
             ..entry.clone()
         };
         self.write_version(&link, &entry, &rotated, &old, &new, entry.version)?;
@@ -1783,13 +2014,10 @@ impl Handle {
             .into_iter()
             .find(|entry| entry.kind == EntryKind::Handle)
             .ok_or(FfiError::NotFound)?;
-        self.retire(&link, &entry)?;
 
-        // DIS-178: the tombstone took the blob, and a later handle takes a
+        // DIS-178: the tombstone takes the blob, and a later handle takes a
         // new link.
-        let mut inner = locked(&self.inner);
-        inner.client.drop_handle_fragment()?;
-        Ok(inner.client.set_profile_blob_due(false, &mut OsRng)?)
+        self.retire(&link, &entry)
     }
 
     /// Sends a contact request to a reusable link, an `umbra:pub:` string,
@@ -2130,5 +2358,104 @@ mod tests {
         // DIS-139: a version under no key of this device takes no write.
         let shown = other.public().to_bytes();
         assert!(signer_of(&shown, &held, Some(&before)).is_none());
+    }
+
+    /// An entry at version 2 whose write `pending` waits for its answer.
+    fn waiting(id: u8, kind: EntryKind, pending: PendingWrite, at: u64) -> Published {
+        Published {
+            id: [id; 16],
+            kind,
+            index: 1,
+            rotation: 0,
+            label: vec![id],
+            name: vec![id],
+            queue: [id; 32],
+            rendezvous: vec![0; 8],
+            version: 2,
+            created_at: at,
+            expires_at: 0,
+            renewed_at: at,
+            queue_since: at,
+            previous: None,
+            foreign: false,
+            pending: Some(pending),
+        }
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_write_with_no_answer_settles_against_the_log() {
+        let (handle, directory) = super::super::tests::open("settle");
+        let now = 1_800_000_000;
+        let put = |entry: &Published| {
+            locked(&handle.inner)
+                .client
+                .put_published(entry, &mut OsRng)
+                .unwrap();
+        };
+        let held = |id: u8| {
+            locked(&handle.inner)
+                .client
+                .published()
+                .unwrap()
+                .into_iter()
+                .find(|entry| entry.id == [id; 16])
+        };
+
+        // DIS-205: a registration that the log shows holds, and its mark
+        // goes.
+        let shown = waiting(1, EntryKind::Address, PendingWrite::Register, now);
+        put(&shown);
+        let settled = handle.settle_pending(&shown, Standing::Own, None, now);
+        assert_eq!(settled, Settled::Done);
+        assert_eq!(held(1).unwrap().pending, None);
+
+        // §9.3.1: a handle that the log shows takes its profile blob.
+        let blob_due = || locked(&handle.inner).client.profile_blob_due().unwrap();
+        let claimed = waiting(5, EntryKind::Handle, PendingWrite::Register, now);
+        put(&claimed);
+        assert!(!blob_due());
+        handle.settle_pending(&claimed, Standing::Own, None, now);
+        assert_eq!(held(5).unwrap().pending, None);
+        assert!(blob_due());
+
+        // One that the log does not show waits for `WRITE_SETTLE`, and then
+        // its entry goes.
+        let lost = waiting(2, EntryKind::Address, PendingWrite::Register, now);
+        put(&lost);
+        handle.settle_pending(&lost, Standing::Foreign, None, now + 1);
+        assert!(held(2).is_some());
+        handle.settle_pending(&lost, Standing::Foreign, None, now + WRITE_SETTLE);
+        assert!(held(2).is_none());
+
+        // DIS-138: the tombstone of this device at the next version is no
+        // takeover, and the entry ends.
+        let retiring = waiting(3, EntryKind::Handle, PendingWrite::Retire, now);
+        put(&retiring);
+        let tombstone = Shown {
+            version: 3,
+            key: [0; ENTRY_PK_LEN],
+        };
+        let settled = handle.settle_pending(&retiring, Standing::Foreign, Some(&tombstone), now);
+        assert_eq!(settled, Settled::Done);
+        assert!(held(3).is_none());
+        assert!(handle.directory_warnings().unwrap().is_empty());
+
+        // A log that still shows the held version takes the tombstone
+        // again, and each other version is a version of another party.
+        let link = waiting(4, EntryKind::Address, PendingWrite::Retire, now);
+        put(&link);
+        let settled = handle.settle_pending(&link, Standing::Own, None, now);
+        assert_eq!(settled, Settled::Retire);
+        let other = Shown {
+            version: 3,
+            key: [5; ENTRY_PK_LEN],
+        };
+        let settled = handle.settle_pending(&link, Standing::Foreign, Some(&other), now);
+        assert_eq!(settled, Settled::Upkeep);
+        assert!(held(4).is_some());
+
+        drop(handle);
+        let _ = std::fs::remove_dir_all(&directory);
     }
 }

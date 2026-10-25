@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 10: Relay Directory, Measurement, and Selection
 
 **Status:** Draft
-**Version:** 0.45.1
-**Date:** 2026-10-22
+**Version:** 0.46.0
+**Date:** 2026-10-23
 
 ---
 
@@ -53,21 +53,65 @@ takes in.
   before a class test verifies C0 or above for it, and it MUST remove a relay
   whose class test verifies below C0. A relay of UMBRA is a server of a data
   center or of equal quality, and a slow relay slows each circuit that
-  crosses it.
+  crosses it. Under the provisional directory, `REL-206` and `REL-210` give
+  the exceptions.
 - **The class under a provisional directory.** The directory of `REL-126`
-  holds the relays of one operator, and the measurers of that operator test
-  them. **[REL-206]** Under that directory, an authority MUST list a relay
-  of its own operator at the class that the operator declares, with three
-  exceptions:
+  holds the relays of its own operator, and the measurers of that operator
+  test them. It can also hold relays of other operators, which that
+  operator admits under `REL-012`. **[REL-206]** Under that directory, an
+  authority MUST list a relay of its own operator at the class that the
+  operator declares, with four exceptions:
   1. A class test of that relay that failed at a class lists the relay below
      that class, until a newer test at that class or above passes.
   2. A class test that failed at C0 removes the relay under `REL-197`, until
      such a newer test passes.
   3. A class rises under `REL-001` alone.
+  4. **[REL-223]** A relay with no passed class test inside `MEASURE_STALE`
+     MUST be listed at C0 while another relay of its own operator at the same
+     place has such a test and keeps that place in the root. The place is the
+     one that `REL-198` sets: an ingress relay, another relay of layer 2, or a
+     relay of layer 3. An ingress relay keeps its place only with the ingress
+     flag of §10.6.1. The period runs from the latest of its last passed
+     test, its first listing, and the last rise of its class. The relay stays
+     listed at its place.
 
-  A relay with no test thus keeps the declared class. The first clause of
-  `REL-197` and the removal of `REL-098` bind a directory at
-  `AUTHORITY_FLOOR`, which lists no class that no test verified.
+  A new relay of its own operator with no test thus keeps the declared
+  class for `MEASURE_STALE` at least. The first clause of `REL-197` and the
+  removal of `REL-098` bind a directory at `AUTHORITY_FLOOR`, which lists no
+  class that no test verified.
+
+  A relay that refuses each measurement session would otherwise keep a
+  class that no test verified (`REL-223`). A removal under `REL-098` would
+  end that relay: a relay that no root lists does not start, and the
+  measurer then never reaches it. A relay of layer 3 holds queues, and a
+  move to pending would take them out of reach. A measurer that stops
+  leaves each relay with no recent test. The condition on another relay of
+  the place keeps the rule out of that case. A tested ingress relay below C1
+  has no ingress flag, and it does not count. Thus the rule never takes the
+  last ingress flag of the root.
+- **The class of a relay of another operator.** **[REL-210]** Under the
+  provisional directory, an authority MUST list a relay of another
+  operator only at a class that a passed class test verified, at or below
+  the declared class. A pass older than `MEASURE_STALE` verifies no class
+  (`REL-098`). Until a test verifies C0, the authority MUST list the relay
+  as pending (`REL-156`) at C0, and it MUST NOT place it. `REL-197` and
+  `REL-098` thus bind the placement of that relay: a relay that a test
+  takes below C0, or that has no verifying report inside `MEASURE_STALE`,
+  goes back to pending. The first class after a test verifies C0 MUST be
+  C0, and the class rises from there under `REL-001`. Exception 1 of
+  `REL-206` holds for that relay too.
+
+  The owner of the directory cannot check the declared class of another
+  operator. A claim of C3 on a link of C0 would take the weight 20 in the
+  place of 2 under `REL-196`. An entry relay with that claim would also
+  pass the floor of §10.6.1 at the one position that sees a client
+  address. A measurer that tests C0 alone thus keeps each relay of another
+  operator at C0, and no such relay is ingress eligible until a measurer
+  verifies C1 for it. A relay takes its place from its own entry
+  (`REL-061`), and a measurer reaches it at the address of that entry. A
+  relay out of each root would thus never get the test that places it. A
+  pending entry carries no weight, because no client and no relay routes
+  through it (`REL-158`).
 - **The selection is weighted by class.** **[REL-196]** A client MUST order
   the relays of a draw at random in proportion to the rate of their class,
   with the weights 2, 5, 10, and 20 for C0 to C3. The draws are the hops of
@@ -93,7 +137,8 @@ takes in.
   relay has no verifying report inside `MEASURE_STALE`, a directory authority
   MUST remove it from the listing until a class test verifies it again. The
   directory authority measures each of the two periods from the slot of the
-  last verifying report. §10.11 gives the two values.
+  last verifying report. §10.11 gives the two values. Under the provisional
+  directory, `REL-206` and `REL-210` give the exceptions.
 
 This rule limits the payoff of one bandwidth-inflation step to **2.5×**, which
 is one class step in one 7-day epoch. The ladder has three steps, thus the
@@ -307,7 +352,10 @@ the measurer.
   measurement candidate of Part 3 rule `NET-353` spends one attempt at its
   build, and a `MEAS_OPEN` on another circuit spends one when it arrives. A
   `MEAS_OPEN` that opens a session or joins one gives its attempt back. One
-  spent attempt comes back each `MEAS_ATTEMPT_PERIOD`. While an address
+  spent attempt comes back each `MEAS_ATTEMPT_PERIOD`. A relay MAY hold the
+  counts of a bounded number of addresses. The count of a new address then
+  MUST take the place of the count whose first spent attempt is the oldest. A
+  full set of counts MUST NOT refuse a new address. While an address
   holds `MEAS_ATTEMPT_BURST` spent attempts, a relay MUST verify no
   `MEAS_OPEN` of that address, and a relay of layer 2 or 3 MUST give a build
   cell of that address on a link with no `RelayHello` no answer. A relay
@@ -944,7 +992,7 @@ own operator, on the machine of that operator. A result holds these values:
 - the consensus epoch of the slot.
 
 A provisional directory takes the results of the measurers of its own operator
-under `REL-206`.
+under `REL-206` and `REL-210`.
 
 > This rule is the operational lesson from the live consensus of Tor. Only 5 of
 > the 9 authorities give a bandwidth value, because the combination of the two
@@ -1343,7 +1391,7 @@ A proof is the sibling hash of each level, from the leaf to the root. A set of
 about 3 000 relays gives a proof of 12 hashes, which is 384 bytes.
 
 **The relay-set diff.** A client that holds the tree of one epoch needs the
-change to the next, and it needs the free store of each attachment relay. One
+change to the next, and it needs the store of each attachment relay. One
 unsigned object carries both:
 
 ```
@@ -1364,17 +1412,18 @@ A **store level** is a two-bit value:
 
 | Level | Meaning |
 | --- | --- |
-| 0 | A relay without the attachment role, or a free store below `CHUNK_SIZE` |
-| 1 | A free store below `CHUNK_STORE_MIN` |
-| 2 | A free store below `CHUNK_STORE_TARGET` |
-| 3 | A free store at or above `CHUNK_STORE_TARGET` |
+| 0 | A relay without the attachment role |
+| 1 | A declared store below `CHUNK_STORE_MIN` |
+| 2 | A declared store below `CHUNK_STORE_TARGET` |
+| 3 | A declared store at or above `CHUNK_STORE_TARGET` |
 
 Part 12 §12.7 owns the three constants.
 
 - **[REL-135]** A directory authority MUST publish one `RelaySetDiff` beside
   each `DirectoryRoot`. **[REL-136]** A directory authority MUST set each store
-  level from the free store that the relay reported in that epoch. Rule
-  `ATT-091` of Part 12 gives the report.
+  level from the `chunk_store_gib` of the descriptor of the relay (Part 12
+  `ATT-087`). No relay reports its free store to an authority, and a full
+  relay refuses a registration under Part 12 rule `ATT-091`.
 - No signature covers the diff. The two lists are a hint, and `REL-057`
   verifies each entry against the signed root. A false store level costs a
   writer one failed `CNEW` or `BNEW` under Part 12, and it costs nothing else.
@@ -1383,8 +1432,8 @@ Part 12 §12.7 owns the three constants.
 At 3 000 relays the levels are 750 bytes. At about 8 changes in each epoch the
 two lists are 256 bytes. With the 23-byte fixed part one diff is 1 029 bytes,
 and the 8 fetches of one day cost 8 232 bytes. Part 3 §3.12 carries that
-figure. A free store is not a traffic counter, and a two-bit level at 100 GiB
-steps is not a raw value. Thus §10.8 does not bind it.
+figure. A declared store is not a traffic counter, and a two-bit level at
+100 GiB steps is not a raw value. Thus §10.8 does not bind it.
 
 Part 13 §13.8 puts a `PowChallenge` beside each descriptor. The relay signs
 that object, it sits outside the tree, and rule `ABU-064` makes each carrier
@@ -1411,12 +1460,19 @@ function of the consensus at the **admission** of the relay:
 
 ```
 layer(relay_id) = 2 + ( SHA3-256( "umbra/v1/relay-layer"
-                                || root || BE64(epoch) || relay_id ) mod 2 )
+                                || seed || BE64(epoch) || relay_id ) mod 2 )
+seed            = SHA3-256( the encoded DirectoryRoot, its sigs included )
 ```
 
-Here `root` and `epoch` are the fields of the `DirectoryRoot` that first
-lists the relay, and that root lists it as **pending**. An admission takes
-two roots, because a value that already exists when an operator picks
+Here `seed` and `epoch` come from the `DirectoryRoot` of §10.5.2 that first
+lists the relay, and that root lists it as **pending**. `seed` covers the
+whole root in the one encoding that the authorities publish, with the
+`AuthoritySig` of each authority that signed it, in the order of
+`REL-030`. A root verifies with 5 of its signatures, thus a carrier can
+drop one, and that copy gives another hash. A party that computes the
+function again under `REL-152` thus takes the root from the authorities,
+and not from a carrier. An admission takes two
+roots, because a value that already exists when an operator picks
 `relay_id` is a value that the operator grinds against.
 
 **[REL-198]** Under the provisional directory of `REL-126`, an authority MAY
@@ -1424,7 +1480,10 @@ set the layer of each relay of its own operator in the place of the function
 above, and it MAY list such a relay placed at once. The function keeps one
 operator from the position of another. A directory of one operator has no
 other. A set of four chain relays then holds one at layer 2 and three at
-layer 3, which the function does not promise.
+layer 3, which the function does not promise. A relay of its own operator is
+a relay that the operator of the authority runs. A name in the request of
+another party never makes a relay one of its own: the authority sets the
+operator of that relay from its dossier under `REL-128`.
 
 **The pending root.** **[REL-156]** Except under `REL-198`, a directory
 authority MUST list a relay of the chain population in one root with `flags`
@@ -1439,9 +1498,15 @@ client routes through it.
   the layer of a relay of the chain population one time, with the function
   above, under the root that listed the relay as pending. It MUST set `flags`
   bit 1 of the first entry that clears bit 2 when the value is 3, and it MUST
-  keep that bit in each later entry of that `relay_id`. A relay with no queue
-  role serves no last hop (`REL-150`), thus the authority MUST clear bit 1 for
-  it, and that relay is of layer 2.
+  keep that bit in each later entry of that `relay_id` that clears bit 2. A
+  relay that goes back to pending under `REL-210` thus takes the same layer
+  again. Two kinds of relay
+  serve no layer 3, thus the authority MUST clear bit 1 for each, and each
+  is of layer 2:
+  1. A relay with no queue role serves no last hop (`REL-150`).
+  2. A relay that offers the ingress role (`roles` bit 2) can get bit 0
+     under `REL-130` later, and `REL-151` rejects bit 1 beside bit 0. The
+     queues of a relay at layer 3 would go out of reach at that change.
 - **[REL-061]** A client MUST take the layer of a candidate for hop 2 and hop
   3 from `flags` bit 1 of its entry, and a relay MUST take its own layer from
   its own entry. **[REL-151]** A client MUST reject an entry that sets bit 1
@@ -1450,22 +1515,40 @@ client routes through it.
 - **[REL-062]** A relay MUST NOT declare its own layer, and a descriptor
   carries no layer field.
 - The roots are a public record, thus each party can compute the function
-  again for each listed relay. **[REL-152]** A directory authority MUST NOT
-  sign a root over an entry whose bit 1 differs from the function.
+  again for each relay that the function placed. **[REL-152]** Except under
+  `REL-198`, a directory authority MUST NOT sign a root over an entry whose
+  bit 1 differs from the value that `REL-060` gives.
 - **[REL-159]** Except under `REL-198`, the relays of the first root of a
-  directory MUST take their layer under `GENESIS_ROOT` at epoch 0, with no
-  pending root. That root is the trusted setup of the directory, and no
-  operator submits a relay to it after it exists.
+  directory MUST take their layer under the seed `GENESIS_ROOT` at epoch 0,
+  with no pending root. That root is the trusted setup of the directory, and
+  no operator submits a relay to it after it exists.
 
 > *Cause.* The function is a plain hash, and it is not a **verifiable random
 > function**. A VRF proves that a holder of a secret key produced an output,
 > and this assignment has no secret and no prover. Each party holds the same
 > consensus root and computes the same value, thus a plain hash gives the full
-> property and a proof carries no information. The root is multi-signed and no
-> operator predicts it, thus an operator cannot select a position by a choice
-> of `relay_id`.
+> property and a proof carries no information. The seed covers the signatures
+> of the root, and each authority signs with a fresh signature nonce (Part 5
+> §5.9). Thus no operator predicts the seed, and an operator cannot select a
+> position by a choice of `relay_id` or of another byte of its descriptor.
 > That argument needs the binding root to come after the choice, and the
 > pending root of `REL-156` is what makes it come after.
+>
+> The `root` field of a `DirectoryRoot` is no such value. It covers the
+> entries alone, and the operator of a pending relay knows each entry of its
+> pending root: the other entries are public, and its own entry holds its
+> descriptor. That operator could compute the field for each descriptor that
+> it could sign, and it could submit the one that gives layer 3.
+>
+> An authority that adds the last signature to a root can sign again until
+> the seed gives the layer that it wants, and `REL-152` does not detect that.
+> A provisional directory holds each key at one operator, which `REL-198`
+> lets set the layers of its own relays. A directory of independent
+> authorities needs a commitment of each authority before the pending root to
+> close that path, and v1 defines none. The value that such a commitment
+> reveals then takes the place of `seed`. Such a directory also collects
+> its signatures from more than one party, thus one encoding of a root is
+> no longer a given.
 >
 > The last root **before** the first root that lists a relay cannot bind the
 > function. That root exists while the operator still chooses `relay_id`, and
@@ -1487,10 +1570,10 @@ client routes through it.
 > admission. The entry carries it under the 5-of-7 multi-signature, as it
 > carries the ingress flag.
 >
-> The operator still selects no position: the root of the function comes after
+> The operator still selects no position: the seed of the function comes after
 > the key of the relay. An operator can select layer 2 with a descriptor that
-> offers no queue role. Layer 2 sees no client address and no queue, thus that
-> choice gives the least.
+> offers no queue role, or that offers the ingress role. Layer 2 sees no client
+> address and no queue, thus that choice gives the least.
 >
 > The plain hash also keeps the primitive register closed. Part 5 §5.1
 > registers `ECVRF-Edwards25519-SHA512-TAI` as AUX-3 for two uses, and neither
@@ -1630,15 +1713,22 @@ ceiling** is 3 % of the population, or one relay when one relay is larger.
   population of one bloc.
 
 Thus no measurement error and no reputation bug can concentrate a path inside
-one bloc. The provisional directory of `REL-126` holds the relays of the
-project alone, and neither ceiling binds it.
+one bloc.
+
+**[REL-211]** Under the provisional directory of `REL-126`, an authority MAY
+list relays above the two ceilings. The relays of its own operator fill that
+directory at the start, and a few hosting networks hold them all. The two
+ceilings would remove most of them, and the network would then have no chain.
+That directory can also list relays of other operators. The owner checks the
+dossier of each one under `REL-012`, and each client shows the provisional
+state. The ceilings bind a directory at `AUTHORITY_FLOOR`.
 
 A family declaration uses the **family certificate of §10.6.3**, which has the
 shape of Tor proposal 321. That certificate is mandatory in v1. UMBRA does not
 use an O(n²) list in the `MyFamily` style.
 
-The layer assignment comes from the consensus root at the admission of the
-relay (§10.5.4), and the directory sets the ingress flag (§10.5.3). Thus an
+The layer assignment comes from the signed consensus root at the admission of
+the relay (§10.5.4), and the directory sets the ingress flag (§10.5.3). Thus an
 operator **cannot select its position**. This property removes the KAX17
 strategy, which collects the ingress positions and the middle positions.
 
@@ -2051,7 +2141,7 @@ relay with the notification role, and this section then applies to it.
 | --- | --- |
 | Capacity classes | C0 100 / C1 250 / C2 500 / C3 1 000 Mbit/s, in both directions; no relay below C0 is listed (§10.2) |
 | Selection weights | 2 / 5 / 10 / 20 for C0 to C3 (§10.2) |
-| `GENESIS_ROOT` | 32 zero bytes: the root under which the relays of the first root take their layer (`REL-159`) |
+| `GENESIS_ROOT` | 32 zero bytes: the seed under which the relays of the first root take their layer (`REL-159`) |
 | Class growth cap | 1 class up in each 7-day epoch, and a demotion applies at the next consensus (§10.2) |
 | `MEASURE_INTERVAL` | 7 d between two class tests of one relay (§10.2) |
 | `MEASURE_STALE` | 21 d without a verifying report, then no listing until a test verifies the relay again (§10.2) |

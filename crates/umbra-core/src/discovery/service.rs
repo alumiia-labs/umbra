@@ -103,6 +103,10 @@ pub enum DirEvent {
         nonce: [u8; 32],
         /// The time of the close, which the head carries.
         at: u64,
+        /// The root of the prefix tree of the epoch, or none in a store of
+        /// an earlier build. A replay takes it and hashes no tree for the
+        /// epoch.
+        root: Option<[u8; 32]>,
     },
     /// The state of one label after a change.
     Label {
@@ -205,6 +209,8 @@ struct Pending {
     /// The version of the label at the issue. A write moves the key, and a
     /// challenge sealed to the key before ends with it.
     version: u32,
+    /// Whether a token paid for the registration challenge (`DIS-203`).
+    paid: bool,
 }
 
 /// The purpose byte of a `Challenge` request, which keys its pending
@@ -217,13 +223,80 @@ const BLOB: u8 = 0x03;
 /// thus two parties that register one label end no challenge of the other.
 const REGISTER: u8 = super::dirclient::REGISTER_PURPOSE;
 
-/// The registration challenges that wait at once. A request for one costs
-/// an encapsulation and no token, thus the count has a bound.
+/// The registration challenges with no token that wait at once. A request
+/// for one costs an encapsulation and no token, thus the count has a
+/// bound. Only a client of an earlier build asks for one (`DIS-203`).
 const REGISTER_PENDING_MAX: usize = 4_096;
 
-/// The seeds of the lookup proofs of work that one epoch holds
-/// (`DIS-200`). Each one cost a proof of work at `POW_LOOKUP_FLOOR`.
+/// The registration challenges that a token paid and that wait at once
+/// (`DIS-203`). The bound holds the memory. At it the oldest paid
+/// challenge goes, and no count refuses a paid challenge.
+const REGISTER_PAID_MAX: usize = 16_384;
+
+/// The seeds of the lookup proofs of work that the directory holds
+/// (`DIS-200`). Each one cost a proof of work at `POW_LOOKUP_FLOOR`. At the
+/// bound a random one goes (`DIS-202`).
 const LOOKUP_SEEDS_MAX: usize = 1 << 18;
+
+/// The seeds of the lookup proofs of work that the directory took
+/// (`DIS-200`). A seed of an epoch before the one before the clock serves
+/// no request, and it goes. At the bound a random seed goes, and no count
+/// refuses a lookup (`DIS-202`).
+struct LookupSeeds {
+    held: BTreeSet<(u32, [u8; 32])>,
+    /// The seeds of `held` in no order, thus a random one goes in one step.
+    list: Vec<(u32, [u8; 32])>,
+    /// The epoch of the clock at the last seed.
+    epoch: u32,
+    max: usize,
+}
+
+impl LookupSeeds {
+    fn new(max: usize) -> Self {
+        LookupSeeds {
+            held: BTreeSet::new(),
+            list: Vec::new(),
+            epoch: 0,
+            max,
+        }
+    }
+
+    fn is_held(&self, epoch: u32, seed: &[u8; 32]) -> bool {
+        self.held.contains(&(epoch, *seed))
+    }
+
+    /// Holds the seed of `epoch` at the epoch `now` of the clock.
+    fn hold<R: CryptoRng + ?Sized>(&mut self, now: u32, epoch: u32, seed: [u8; 32], rng: &mut R) {
+        if now != self.epoch {
+            let oldest = now.saturating_sub(1);
+            self.held.retain(|(epoch, _)| *epoch >= oldest);
+            self.list.retain(|(epoch, _)| *epoch >= oldest);
+            self.epoch = now;
+        }
+
+        if self.held.contains(&(epoch, seed)) {
+            return;
+        }
+
+        // A drop in a fixed order lets a party with one solution more than
+        // the bound send its solutions again in that order, and each one
+        // passes. A random drop hides which of its seeds is free.
+        while !self.list.is_empty() && self.list.len() >= self.max {
+            let len = u64::try_from(self.list.len()).unwrap_or(u64::MAX);
+            let index = usize::try_from(rng.next_u64() % len).unwrap_or(0);
+            let dropped = self.list.swap_remove(index);
+            self.held.remove(&dropped);
+        }
+
+        self.held.insert((epoch, seed));
+        self.list.push((epoch, seed));
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.list.len()
+    }
+}
 
 /// The rotations of the log key set that one answer to a `KeySet` request
 /// holds. Each one is near 16 KB, and the largest answer is 96 KiB.
@@ -247,10 +320,13 @@ pub struct Directory {
     epoch_seconds: u64,
     labels: BTreeMap<Vec<u8>, LabelRecord>,
     challenges: BTreeMap<(Vec<u8>, u8), Pending>,
+    /// The registration challenges that wait at once: with no token, and
+    /// paid (`DIS-203`).
+    register_max: (usize, usize),
     spent: SpendSet,
     /// The seed of each lookup proof of work that an evaluation took, for
     /// this epoch and the one before it (`DIS-200`).
-    lookup_seeds: SpendSet,
+    lookup_seeds: LookupSeeds,
     /// Each `SignedLogKeySet` from the first set after the genesis set to
     /// the set of the signers, in order (`DIS-198`).
     keyset_chain: Vec<Vec<u8>>,
@@ -326,8 +402,9 @@ impl Directory {
             epoch_seconds,
             labels: BTreeMap::new(),
             challenges: BTreeMap::new(),
+            register_max: (REGISTER_PENDING_MAX, REGISTER_PAID_MAX),
             spent: SpendSet::default(),
-            lookup_seeds: SpendSet::default(),
+            lookup_seeds: LookupSeeds::new(LOOKUP_SEEDS_MAX),
             keyset_chain: Vec::new(),
             issuer_seed: keys.issuer_seed,
             cross_relay: keys.cross_relay,
@@ -384,6 +461,12 @@ impl Directory {
     }
 
     /// Takes the stored events of an earlier run, in order.
+    ///
+    /// A closed epoch takes the root that its close kept, and the prefix
+    /// tree seals one time, at the newest epoch. Thus a restart costs each
+    /// version one time, and not each leaf at each epoch since the first
+    /// one. The auditors checked each epoch at its close, and they take the
+    /// log as it stands.
     pub fn replay<R: CryptoRng + ?Sized>(
         &mut self,
         events: &[DirEvent],
@@ -402,7 +485,16 @@ impl Directory {
                             .insert((issuer.token_type, issuer.epoch));
                     }
                 }
-                DirEvent::Closed { nonce, at } => self.advance(*nonce, *at)?,
+                DirEvent::Closed { nonce, at, root } => {
+                    match root {
+                        Some(root) => self.operator.replay_epoch(*nonce, *root)?,
+                        // An epoch of an earlier build seals as at its close.
+                        None => {
+                            self.operator.close_epoch(*nonce)?;
+                        }
+                    }
+                    self.last_close = Some(*at);
+                }
                 DirEvent::Label { search_key, state } => {
                     self.labels
                         .insert(search_key.clone(), LabelRecord::parse(state)?);
@@ -411,6 +503,13 @@ impl Directory {
                 DirEvent::Spent { epoch, nonce } => self.spent.restore(*epoch, *nonce),
             }
         }
+
+        // A root that the seal does not give again is a fault of the store.
+        self.operator.seal_newest()?;
+        self.auditors = [
+            Auditor::following(&self.operator),
+            Auditor::following(&self.operator),
+        ];
 
         self.events.clear();
 
@@ -649,7 +748,11 @@ impl Directory {
 
         self.advance(nonce, now)?;
         self.sign_head(now, rng)?;
-        self.events.push(DirEvent::Closed { nonce, at: now });
+        self.events.push(DirEvent::Closed {
+            nonce,
+            at: now,
+            root: self.operator.newest_root(),
+        });
 
         self.challenges
             .retain(|_, pending| now.saturating_sub(pending.at) < CHALLENGE_TTL);
@@ -718,13 +821,9 @@ impl Directory {
                 // DIS-200: a seed serves one evaluation, thus a request that
                 // comes again costs no proof check and no evaluation.
                 if solution.effort < POW_LOOKUP_FLOOR
-                    || self.lookup_seeds.is_spent(seed_epoch, &solution.seed)
+                    || self.lookup_seeds.is_held(seed_epoch, &solution.seed)
                 {
                     return Err(Status::Refused);
-                }
-
-                if self.lookup_seeds.count(seed_epoch) >= LOOKUP_SEEDS_MAX {
-                    return Err(Status::Busy);
                 }
 
                 pow::verify(
@@ -736,9 +835,10 @@ impl Directory {
                 )
                 .map_err(|_| Status::Refused)?;
 
+                // DIS-202: a full set drops a random seed. A refusal here
+                // would stop each lookup until the epoch ends (§9.4.1).
                 self.lookup_seeds
-                    .spend(epoch, seed_epoch, solution.seed)
-                    .map_err(|_| Status::Refused)?;
+                    .hold(epoch, seed_epoch, solution.seed, rng);
             }
             AdmissionKind::None => return Err(Status::Refused),
         }
@@ -1040,15 +1140,29 @@ impl Directory {
             return Err(Status::Stale);
         }
 
+        // DIS-203: a challenge that a token paid needs no second token. A
+        // challenge that the bound dropped gets no token check.
+        let slot = Self::register_slot(&search_key, &key);
+        let is_paid = self
+            .challenges
+            .get(&(slot.clone(), REGISTER))
+            .ok_or(Status::Stale)?
+            .paid;
+        let spend = if is_paid {
+            None
+        } else {
+            Some(self.check_token(token, now)?)
+        };
+
         // DIS-197: the registrant holds the private half of the key of the
         // entry, and the answer binds the entry.
-        let (token_epoch, nonce) = self.check_token(token, now)?;
-        let slot = Self::register_slot(&search_key, &key);
         self.answer_pending(&slot, REGISTER, version, &answer, Some(&entry), now)?;
 
         // The token spends after each check that can refuse, thus a refused
         // registration keeps it.
-        self.commit_spend(token_epoch, nonce, now)?;
+        if let Some((token_epoch, nonce)) = spend {
+            self.commit_spend(token_epoch, nonce, now)?;
+        }
 
         if self
             .stage(&search_key, entry, rng)
@@ -1072,7 +1186,8 @@ impl Directory {
     /// Issues the registration challenge of `DIS-197`: an encapsulation to
     /// the key of the entry that registers, as the write challenge of
     /// §9.9.3 for the version that the registration gives. The answer
-    /// carries that version after the challenge.
+    /// carries that version after the challenge. A request with a token
+    /// pays for its challenge with that token (`DIS-203`).
     fn register_challenge<R: CryptoRng + ?Sized>(
         &mut self,
         r: &mut Reader<'_>,
@@ -1081,41 +1196,63 @@ impl Directory {
     ) -> Result<Vec<u8>, Status> {
         let input = take_var16(r).map_err(|_| Status::Malformed)?.to_vec();
         let key: [u8; 1_216] = r.array().map_err(|_| Status::Malformed)?;
+
+        // A client of an earlier build sends no token.
+        let token = if r.remaining() == 0 {
+            None
+        } else {
+            Some(r.take(FIRST_PARTY_LEN).map_err(|_| Status::Malformed)?)
+        };
         r.finish().map_err(|_| Status::Malformed)?;
 
         if key == [0; 1_216] {
             return Err(Status::Refused);
         }
 
-        // DIS-169: an address names the hash of its key.
         let name = match input.strip_prefix(labels::ADDRESS_INDEX) {
+            // DIS-169: an address names the hash of its key.
             Some(address) => {
                 let address: [u8; 20] = address.try_into().map_err(|_| Status::Malformed)?;
                 identity::address::check(&address, &key).map_err(|_| Status::Refused)?;
                 address.to_vec()
             }
-            None => input.clone(),
+            // DIS-091: a name that no registration takes gets no challenge.
+            None => {
+                let text = core::str::from_utf8(&input).map_err(|_| Status::Malformed)?;
+                let handle = Handle::parse(text, &self.profile).map_err(|_| Status::Refused)?;
+                if handle.label_input() != input {
+                    return Err(Status::Refused);
+                }
+                input.clone()
+            }
         };
 
         let search_key = self.voprf.evaluate_direct(&input).to_vec();
         let version = self.register_version(&search_key, now)?;
         let slot = (Self::register_slot(&search_key, &key), REGISTER);
 
-        // DIS-194: a live challenge goes again.
+        // DIS-194: a live challenge goes again, and it spends no token.
         if let Some(pending) = self.challenges.get(&slot) {
             if pending.version == version && now.saturating_sub(pending.at) < CHALLENGE_TTL {
                 return Ok(pending.out.clone());
             }
         }
 
-        let waiting = self
-            .challenges
-            .iter()
-            .filter(|((_, purpose), pending)| {
-                *purpose == REGISTER && now.saturating_sub(pending.at) < CHALLENGE_TTL
-            })
-            .count();
-        if waiting >= REGISTER_PENDING_MAX {
+        let paid = match token {
+            Some(token) => Some(self.check_token(token, now)?),
+            None => None,
+        };
+
+        // DIS-203: a challenge with no token takes no place of a paid one.
+        let (unpaid_max, paid_max) = self.register_max;
+        let bound = if paid.is_some() { paid_max } else { unpaid_max };
+        let is_peer = |((_, purpose), pending): &(&(Vec<u8>, u8), &Pending)| {
+            *purpose == REGISTER
+                && pending.paid == paid.is_some()
+                && now.saturating_sub(pending.at) < CHALLENGE_TTL
+        };
+        let is_full = self.challenges.iter().filter(is_peer).count() >= bound;
+        if is_full && paid.is_none() {
             return Err(Status::Busy);
         }
 
@@ -1132,6 +1269,28 @@ impl Directory {
         let mut out = issued.bytes().to_vec();
         out.extend_from_slice(&version.to_be_bytes());
 
+        // The token spends after each check of the challenge that can
+        // refuse, thus a refused challenge keeps it.
+        if let Some((token_epoch, nonce)) = paid {
+            self.commit_spend(token_epoch, nonce, now)?;
+        }
+
+        // DIS-203: a full bound of paid challenges drops the oldest one. A
+        // refusal would stop each registration while a party pays the bound
+        // in tokens in each `CHALLENGE_TTL`. A drop makes it pay the bound in
+        // the seconds between a challenge and its registration.
+        if is_full {
+            let oldest = self
+                .challenges
+                .iter()
+                .filter(is_peer)
+                .min_by_key(|(_, pending)| pending.at)
+                .map(|(slot, _)| slot.clone());
+            if let Some(oldest) = oldest {
+                self.challenges.remove(&oldest);
+            }
+        }
+
         self.challenges.insert(
             slot,
             Pending {
@@ -1139,6 +1298,7 @@ impl Directory {
                 at: now,
                 out: out.clone(),
                 version,
+                paid: paid.is_some(),
             },
         );
         Ok(out)
@@ -1224,6 +1384,7 @@ impl Directory {
                 at: now,
                 out: out.clone(),
                 version,
+                paid: false,
             },
         );
         Ok(out)
@@ -1787,7 +1948,8 @@ mod tests {
     }
 
     /// A registration whose challenge goes to `claimed`, answered by
-    /// `holder`.
+    /// `holder`. The challenge carries no token, as the request of an
+    /// earlier build.
     #[allow(clippy::too_many_arguments)]
     fn register_as(
         dir: &mut Directory,
@@ -1800,7 +1962,8 @@ mod tests {
         now: u64,
         rng: &mut Rng,
     ) -> Result<Vec<u8>, DirError> {
-        let body = dirclient::register_challenge_body(input, &claimed.public().to_bytes()).unwrap();
+        let body =
+            dirclient::register_challenge_body(input, &claimed.public().to_bytes(), None).unwrap();
         let bytes = call(dir, Kind::Challenge, &body, now, rng)?;
         let (challenge, purpose) = dirclient::parse_register_challenge(&bytes).unwrap();
         let name = input.strip_prefix(labels::ADDRESS_INDEX).unwrap_or(input);
@@ -2536,6 +2699,250 @@ mod tests {
     }
 
     #[test]
+    fn a_full_seed_set_drops_a_random_seed_and_still_evaluates() {
+        let mut rng = Rng(36);
+        let (mut dir, _) = directory();
+        dir.tick(T0, &mut rng).unwrap();
+        dir.lookup_seeds = LookupSeeds::new(2);
+        let pk = *dir.voprf_public();
+        let epoch = epoch_number(T0);
+        let bodies: Vec<Vec<u8>> = (0..3)
+            .map(|_| {
+                dirclient::evaluate_request(b"@ivy#1", &pk, epoch, None, &mut rng)
+                    .unwrap()
+                    .1
+            })
+            .collect();
+        let is_held = |dir: &Directory, body: &[u8]| {
+            let blinded: [u8; 32] = body[body.len() - 32..].try_into().unwrap();
+            dir.lookup_seeds
+                .is_held(epoch, &lookup_seed(epoch, &blinded))
+        };
+
+        // DIS-202: a full set refuses no lookup.
+        for body in &bodies {
+            call(&mut dir, Kind::Evaluate, body, T0, &mut rng).unwrap();
+        }
+        assert_eq!(dir.lookup_seeds.len(), 2);
+        assert!(is_held(&dir, &bodies[2]));
+
+        // DIS-200: each seed that the set holds serves no second evaluation.
+        let held: Vec<&Vec<u8>> = bodies.iter().filter(|body| is_held(&dir, body)).collect();
+        assert_eq!(held.len(), 2);
+        for body in held {
+            assert_eq!(
+                call(&mut dir, Kind::Evaluate, body, T0 + 1, &mut rng),
+                Err(DirError::Status(Status::Refused))
+            );
+        }
+
+        // A party with one solution more than the bound sends them again in
+        // a fixed order. A drop of the oldest seed lets each one pass, and a
+        // random drop does not.
+        let mut passed = 0;
+        for body in bodies.iter().cycle().take(30) {
+            if call(&mut dir, Kind::Evaluate, body, T0 + 2, &mut rng).is_ok() {
+                passed += 1;
+            }
+            assert_eq!(dir.lookup_seeds.len(), 2);
+        }
+        assert!(passed < 30, "{passed} replays passed");
+
+        // A seed of an epoch before the one before the clock goes.
+        let later = T0 + 2 * crate::abuse::EPOCH_SECONDS;
+        let (_, body) =
+            dirclient::evaluate_request(b"@ivy#1", &pk, epoch_number(later), None, &mut rng)
+                .unwrap();
+        call(&mut dir, Kind::Evaluate, &body, later, &mut rng).unwrap();
+        assert_eq!(dir.lookup_seeds.len(), 1);
+    }
+
+    #[test]
+    fn a_token_pays_for_a_registration_challenge_and_a_flood_with_none_stops_no_paid_one() {
+        let mut rng = Rng(37);
+        let (mut dir, keyset) = directory();
+        dir.tick(T0, &mut rng).unwrap();
+        dir.register_max = (1, 1);
+        let epoch = epoch_number(T0);
+        let root = RootIdentity::new(Secret::new([37; 32]));
+        let hk = root.handle_key(0, 0);
+        let pk = hk.public().to_bytes();
+        let paid = tokens(&mut dir, epoch, 2, T0, &mut rng);
+        let nonce = |token: &[u8]| Token::parse(token).unwrap().nonce;
+
+        // DIS-091: a name that no registration takes gets no challenge.
+        let body = dirclient::register_challenge_body(&[7; 8], &pk, None).unwrap();
+        assert_eq!(
+            call(&mut dir, Kind::Challenge, &body, T0, &mut rng),
+            Err(DirError::Status(Status::Refused))
+        );
+
+        // Challenges with no token fill their own bound.
+        let flood = root.handle_key(1, 0).public().to_bytes();
+        for (input, status) in [(b"@flood#1001", None), (b"@flood#1002", Some(Status::Busy))] {
+            let body = dirclient::register_challenge_body(input, &flood, None).unwrap();
+            let result = call(&mut dir, Kind::Challenge, &body, T0, &mut rng);
+            assert_eq!(result.err(), status.map(DirError::Status));
+        }
+
+        // DIS-203: a challenge with a token takes a place of its own, and
+        // the token spends with it.
+        let input = b"@ivan#1001";
+        let entry = handle_entry(input, &hk, 0);
+        let body = dirclient::register_challenge_body(input, &pk, Some(&paid[0])).unwrap();
+        let bytes = call(&mut dir, Kind::Challenge, &body, T0, &mut rng).unwrap();
+        assert!(dir.spent.is_spent(epoch, &nonce(&paid[0])));
+
+        // A spent token pays for no other challenge, and a repeat of the
+        // live one gets it again (DIS-194).
+        let other = dirclient::register_challenge_body(b"@ivan#1002", &pk, Some(&paid[0])).unwrap();
+        assert_eq!(
+            call(&mut dir, Kind::Challenge, &other, T0 + 1, &mut rng),
+            Err(DirError::Status(Status::Refused))
+        );
+        let again = dirclient::register_challenge_body(input, &pk, Some(&paid[1])).unwrap();
+        assert_eq!(
+            call(&mut dir, Kind::Challenge, &again, T0 + 1, &mut rng).unwrap(),
+            bytes
+        );
+        assert!(!dir.spent.is_spent(epoch, &nonce(&paid[1])));
+
+        // The registration under the paid challenge spends no second token.
+        let (challenge, purpose) = dirclient::parse_register_challenge(&bytes).unwrap();
+        let ans = answer(purpose, &hk, input, &challenge, Some(&entry)).unwrap();
+        let register = dirclient::register_body(&paid[1], input, &entry, &ans, None).unwrap();
+        call(&mut dir, Kind::Register, &register, T0 + 1, &mut rng).unwrap();
+        assert!(!dir.spent.is_spent(epoch, &nonce(&paid[1])));
+
+        let now = T0 + DIRECTORY_EPOCH;
+        dir.tick(now, &mut rng).unwrap();
+        assert_eq!(
+            read(&mut dir, &keyset, input, now, &mut rng).unwrap(),
+            entry
+        );
+    }
+
+    #[test]
+    fn a_full_bound_of_paid_challenges_drops_the_oldest_one() {
+        let mut rng = Rng(39);
+        let (mut dir, keyset) = directory();
+        dir.tick(T0, &mut rng).unwrap();
+        dir.register_max = (1, 1);
+        let paid = tokens(&mut dir, epoch_number(T0), 2, T0, &mut rng);
+        let root = RootIdentity::new(Secret::new([39; 32]));
+        let mut claims = Vec::new();
+        for (i, input) in [b"@jade#1001", b"@jade#1002"].into_iter().enumerate() {
+            let hk = root.handle_key(0, u32::try_from(i).unwrap());
+            let body =
+                dirclient::register_challenge_body(input, &hk.public().to_bytes(), Some(&paid[i]))
+                    .unwrap();
+            let now = T0 + u64::try_from(i).unwrap();
+            let bytes = call(&mut dir, Kind::Challenge, &body, now, &mut rng).unwrap();
+            claims.push((input, hk, bytes));
+        }
+
+        // DIS-203: the second paid challenge took the place of the first one,
+        // and the registration under the first one ends.
+        for (i, (input, hk, bytes)) in claims.iter().enumerate() {
+            let entry = handle_entry(*input, hk, 0);
+            let (challenge, purpose) = dirclient::parse_register_challenge(bytes).unwrap();
+            let ans = answer(purpose, hk, *input, &challenge, Some(&entry)).unwrap();
+            let body = dirclient::register_body(&paid[i], *input, &entry, &ans, None).unwrap();
+            let result = call(&mut dir, Kind::Register, &body, T0 + 2, &mut rng);
+            let expected = if i == 0 {
+                Err(DirError::Status(Status::Stale))
+            } else {
+                Ok(Vec::new())
+            };
+            assert_eq!(result, expected);
+        }
+
+        let now = T0 + DIRECTORY_EPOCH;
+        dir.tick(now, &mut rng).unwrap();
+        assert!(read(&mut dir, &keyset, b"@jade#1001", now, &mut rng).is_none());
+        assert!(read(&mut dir, &keyset, b"@jade#1002", now, &mut rng).is_some());
+    }
+
+    #[test]
+    fn a_replay_takes_the_root_of_each_epoch_and_checks_the_newest_one() {
+        let mut rng = Rng(38);
+        let (mut dir, keyset) = directory();
+        dir.tick(T0, &mut rng).unwrap();
+        let root = RootIdentity::new(Secret::new([38; 32]));
+        let hk = root.handle_key(0, 0);
+        let spent = tokens(&mut dir, epoch_number(T0), 2, T0, &mut rng);
+        let first = b"@jade#1001";
+        let entry1 = handle_entry(first, &hk, 0);
+        register(&mut dir, &spent[0], first, &entry1, &hk, None, T0, &mut rng).unwrap();
+        dir.tick(T0 + DIRECTORY_EPOCH, &mut rng).unwrap();
+        let second = b"@jade#1002";
+        let entry2 = handle_entry(second, &hk, 0);
+        let at = T0 + DIRECTORY_EPOCH + 1;
+        register(
+            &mut dir, &spent[1], second, &entry2, &hk, None, at, &mut rng,
+        )
+        .unwrap();
+        dir.tick(T0 + 2 * DIRECTORY_EPOCH, &mut rng).unwrap();
+        let now = T0 + 3 * DIRECTORY_EPOCH;
+        dir.tick(now, &mut rng).unwrap();
+        let events = dir.take_events();
+
+        // Each close keeps its root.
+        let kept = events
+            .iter()
+            .filter(|event| matches!(event, DirEvent::Closed { root: Some(_), .. }))
+            .count();
+        assert_eq!(kept, 4);
+
+        let replay = |events: &[DirEvent], rng: &mut Rng| {
+            let (keys, _) = keys();
+            let mut again = Directory::new(keys, DIRECTORY_EPOCH, ascii_profile).unwrap();
+            again.replay(events, rng).map(|()| again)
+        };
+
+        // A store of an earlier build kept no root for its first epochs.
+        let mut mixed = events.clone();
+        for event in mixed
+            .iter_mut()
+            .filter(|event| matches!(event, DirEvent::Closed { .. }))
+            .take(2)
+        {
+            if let DirEvent::Closed { root, .. } = event {
+                assert!(root.is_some());
+                *root = None;
+            }
+        }
+
+        for events in [&events, &mixed] {
+            let mut again = replay(events, &mut rng).unwrap();
+            assert_eq!(again.operator.head(), dir.operator.head());
+            assert_eq!(again.auditors, dir.auditors);
+            assert_eq!(
+                read(&mut again, &keyset, first, now, &mut rng).unwrap(),
+                entry1
+            );
+            assert_eq!(
+                read(&mut again, &keyset, second, now, &mut rng).unwrap(),
+                entry2
+            );
+
+            // The auditors of the replay check the next epoch.
+            again.tick(now + DIRECTORY_EPOCH, &mut rng).unwrap();
+        }
+
+        // A newest root that the seal does not give again starts nothing.
+        let mut broken = events.clone();
+        if let Some(DirEvent::Closed { root, .. }) = broken
+            .iter_mut()
+            .rev()
+            .find(|event| matches!(event, DirEvent::Closed { .. }))
+        {
+            *root = Some([9; 32]);
+        }
+        assert!(replay(&broken, &mut rng).is_err());
+    }
+
+    #[test]
     fn an_epoch_that_an_auditor_refuses_keeps_its_versions_for_the_next_one() {
         let mut rng = Rng(33);
         let (mut dir, keyset) = directory();
@@ -2611,6 +3018,43 @@ mod tests {
         fn set_keyset(&self, keyset: Vec<u8>) {
             *self.keyset.borrow_mut() = keyset;
         }
+    }
+
+    #[test]
+    fn a_held_search_key_reads_the_entry_with_no_evaluation() {
+        use crate::discovery::reader;
+
+        let mut rng = Rng(39);
+        let (mut dir, keyset) = directory();
+        dir.tick(T0, &mut rng).unwrap();
+        let pins = dirclient::DirectoryPins {
+            key_config: Vec::new(),
+            keyset: keyset.clone(),
+            vrf_public: *dir.vrf_public(),
+            voprf_public: *dir.voprf_public(),
+        };
+        let local = Local {
+            dir: core::cell::RefCell::new(dir),
+            rng: core::cell::RefCell::new(Rng(40)),
+            pins,
+            held: core::cell::Cell::new(None),
+            keyset: core::cell::RefCell::new(keyset),
+            now: core::cell::Cell::new(T0 + 1),
+        };
+
+        // DIS-204: one input gives one search key under one key, thus a read
+        // under the held key costs no evaluation and no proof of work.
+        let input = issuer_label_input(TYPE_FIRST_PARTY, epoch_number(T0));
+        let (found, key) = reader::find_keyed(&local, &input, &mut rng).unwrap();
+        assert!(found.entry.is_some());
+        assert_eq!(local.dir.borrow().lookup_seeds.len(), 1);
+
+        let again = reader::find_under(&local, &key).unwrap();
+        assert_eq!((again.entry, again.version), (found.entry, found.version));
+        assert_eq!(local.dir.borrow().lookup_seeds.len(), 1);
+
+        let (_, evaluated) = reader::find_keyed(&local, &input, &mut rng).unwrap();
+        assert_eq!(evaluated, key);
     }
 
     #[test]

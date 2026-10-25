@@ -9,6 +9,8 @@ import android.os.Build
 import android.os.Bundle
 import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
+import android.view.WindowManager
+import android.view.contentcapture.ContentCaptureManager
 import android.widget.FrameLayout
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -49,6 +51,10 @@ class MainActivity : ComponentActivity() {
         cover = View(this).apply { visibility = View.GONE }
         paintWindow(Appearances.isDark)
         lifecycleScope.launch { snapshotFlow { Appearances.isDark }.collect(::paintWindow) }
+        lifecycleScope.launch {
+            snapshotFlow { Core.restoreNote != null || Core.joinNote != null || Core.joinCode != null }
+                .collect(::holdScreen)
+        }
 
         val root = FrameLayout(this)
         // No autofill service reads a view of the app. A service that sees
@@ -57,6 +63,9 @@ class MainActivity : ComponentActivity() {
         root.importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             root.importantForContentCapture = View.IMPORTANT_FOR_CONTENT_CAPTURE_NO_EXCLUDE_DESCENDANTS
+        } else {
+            // IMP-057: Android 10 has no such flag on a view.
+            getSystemService(ContentCaptureManager::class.java)?.setContentCaptureEnabled(false)
         }
         root.addView(content, MATCH_PARENT, MATCH_PARENT)
         root.addView(cover, MATCH_PARENT, MATCH_PARENT)
@@ -90,6 +99,19 @@ class MainActivity : ComponentActivity() {
         val ground = Palette.Surface.toArgb()
         window.setBackgroundDrawable(ColorDrawable(ground))
         cover.setBackgroundColor(ground)
+    }
+
+    /**
+     * A restore or a link waits minutes for the network. Its last step needs
+     * the key of the keystore, which works on an unlocked device alone
+     * (Part 14 §14.6.4), thus the screen stays on for the wait.
+     */
+    private fun holdScreen(isWaiting: Boolean) {
+        if (isWaiting) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -185,6 +207,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         cover.visibility = View.GONE
+        Core.resumed()
         Battery.read(this)
     }
 }

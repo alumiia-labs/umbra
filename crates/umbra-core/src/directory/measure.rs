@@ -52,6 +52,9 @@ pub const CLUSTER_SAMPLE: usize = 4;
 /// The 7-day epoch of the class growth cap, in consensus epochs
 /// (`REL-001`).
 pub const CLASS_STEP_EPOCHS: u64 = 168;
+/// `MEASURE_STALE`: the age of the last verifying report after which a
+/// relay has no verified class, in consensus epochs: 21 days (`REL-098`).
+pub const MEASURE_STALE: u64 = 21 * 24;
 
 /// The fixed part of a `MeasurerCert`, before `sig_count`.
 const CERT_FIXED_LEN: usize = 1 + 16 + VERIFYING_KEY_LEN + 8;
@@ -342,7 +345,7 @@ impl ClassResult {
 /// A failed test at a class is evidence against that class and each one
 /// above it, until a newer test at that class or above passes. A class with
 /// no evidence against it stays as declared: this is the rule of a
-/// provisional directory (§10.2).
+/// provisional directory for a relay of its own operator (`REL-206`).
 pub fn verified_class(relay_id: &[u8; 32], declared: u8, results: &[ClassResult]) -> Option<u8> {
     let own = || results.iter().filter(|result| result.relay_id == *relay_id);
     let lowest_failed = own()
@@ -360,6 +363,31 @@ pub fn verified_class(relay_id: &[u8; 32], declared: u8, results: &[ClassResult]
         Some(0) => None,
         Some(failed) => Some(declared.min(failed - 1)),
     }
+}
+
+/// The highest class that a passed test verified for the relay `relay_id`
+/// at `epoch`, at or below `declared`, or none when no passed test verifies
+/// C0 (`REL-210`, `REL-197`). A failed test is evidence against its class
+/// and each one above it, as in [`verified_class`]. A class with no test
+/// stays out: the claim of an operator is no test. A pass of the slot
+/// `MEASURE_STALE` epochs before `epoch` or earlier verifies nothing
+/// (`REL-098`), thus a relay that stops to answer the measurer keeps no
+/// class.
+pub fn tested_class(
+    relay_id: &[u8; 32],
+    declared: u8,
+    results: &[ClassResult],
+    epoch: u64,
+) -> Option<u8> {
+    let bound = verified_class(relay_id, declared, results)?;
+    let passed = results
+        .iter()
+        .filter(|result| result.relay_id == *relay_id && result.passed)
+        .filter(|result| epoch.saturating_sub(result.epoch) < MEASURE_STALE)
+        .map(|result| result.class)
+        .max()?;
+
+    Some(passed.min(bound))
 }
 
 /// The class of one relay in the listing, and the consensus epoch of its
@@ -629,6 +657,66 @@ mod tests {
         assert_eq!(verified_class(&id, 2, &above), Some(2));
         // The declared class is the upper bound (`REL-129`).
         assert_eq!(verified_class(&id, 1, &[result(3, true, 5)]), Some(1));
+    }
+
+    #[test]
+    fn a_relay_of_another_operator_takes_a_tested_class_alone() {
+        let id = [1u8; 32];
+        let result = |class, passed, epoch| ClassResult {
+            relay_id: id,
+            class,
+            passed,
+            epoch,
+        };
+        let tested = |declared, results: &[ClassResult]| tested_class(&id, declared, results, 10);
+        // REL-197: no test, or a test of another relay, lists nothing.
+        assert_eq!(tested(3, &[]), None);
+        let other = ClassResult {
+            relay_id: [2; 32],
+            ..result(3, true, 9)
+        };
+        assert_eq!(tested(3, &[other]), None);
+        // REL-210: a pass at C0 verifies C0 and no class above it.
+        assert_eq!(tested(3, &[result(0, true, 5)]), Some(0));
+        assert_eq!(tested(3, &[result(2, true, 5)]), Some(2));
+        // The declared class stays the upper bound (`REL-129`).
+        assert_eq!(tested(1, &[result(3, true, 5)]), Some(1));
+        // A newer failure takes the class below the failed one.
+        let failed = [result(2, true, 5), result(2, false, 6)];
+        assert_eq!(tested(3, &failed), Some(1));
+        let failed = [result(0, true, 5), result(0, false, 6)];
+        assert_eq!(tested(3, &failed), None);
+        // A newer pass heals an older failure.
+        let healed = [result(0, false, 5), result(0, true, 6)];
+        assert_eq!(tested(3, &healed), Some(0));
+    }
+
+    #[test]
+    fn a_pass_older_than_measure_stale_verifies_no_class() {
+        let id = [1u8; 32];
+        let result = |class, passed, epoch| ClassResult {
+            relay_id: id,
+            class,
+            passed,
+            epoch,
+        };
+        assert_eq!(MEASURE_STALE, 504);
+
+        // REL-098: a pass of C2 verifies C2 for 21 days, and a relay that
+        // stops to answer the measurer then has no class.
+        let once = [result(2, true, 1_000)];
+        assert_eq!(
+            tested_class(&id, 3, &once, 1_000 + MEASURE_STALE - 1),
+            Some(2)
+        );
+        assert_eq!(tested_class(&id, 3, &once, 1_000 + MEASURE_STALE), None);
+
+        // A fresh pass at a lower class gives that class alone.
+        let later = [result(2, true, 1_000), result(0, true, 1_400)];
+        assert_eq!(tested_class(&id, 3, &later, 1_000 + MEASURE_STALE), Some(0));
+
+        // A clock that went back keeps the pass.
+        assert_eq!(tested_class(&id, 3, &once, 900), Some(2));
     }
 
     #[test]

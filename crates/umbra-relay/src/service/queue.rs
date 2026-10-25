@@ -1,7 +1,7 @@
 //! The pairwise queues of one relay (Part 3 §3.2, Part 6 §6.4): `NEW`,
 //! `SEND`, `SUB`, `UNSUB`, `ACK`, `NKEY`, `NSUB`, and `DEL`, with the
-//! answer of each one, the push of a `MSG` to the circuit that subscribed,
-//! and the `NWAKE` of a watch (Part 8 §8.4.3).
+//! answer of each one, the arrival of a record at the circuit that
+//! subscribed, and the `NWAKE` of a watch (Part 8 §8.4.3).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -44,7 +44,7 @@ use umbra_wire::{
     queue::msg_from_send,
 };
 
-use super::{answer, Drain, Drains, Outbound, Reply};
+use super::{answer, Arrival, Drain, Drains, Outbound, Reply};
 use crate::{
     circuits::CircuitKey,
     store::{Loaded, StoreChange, StoredInvitation as Invitation},
@@ -74,6 +74,8 @@ pub struct QueueService {
     /// The `NWAKE` commands of [`QueueService::push_tick`], which wait for
     /// the node.
     wake_out: Vec<Reply>,
+    /// The records that live subscriptions took, which wait for the node.
+    arrivals: Vec<Arrival>,
     /// The changes since the last [`QueueService::take_changes`].
     changes: Vec<StoreChange>,
     /// The notification state of a queue relay (Part 8 §8.2.3).
@@ -253,6 +255,12 @@ impl QueueService {
     /// circuits of their watches.
     pub fn take_wakes(&mut self) -> Vec<Reply> {
         core::mem::take(&mut self.wake_out)
+    }
+
+    /// The records that live subscriptions took since the last call, for
+    /// the circuits of those subscriptions (`NET-365`).
+    pub fn take_arrivals(&mut self) -> Vec<Arrival> {
+        core::mem::take(&mut self.arrivals)
     }
 
     /// The pushes due at `now`: the end of a coalescing window and each
@@ -464,9 +472,10 @@ impl QueueService {
     }
 
     /// Stores one record that a sender authorized, and gives the capacity
-    /// left and the `MSG` of a live subscription. A record that no live
-    /// subscription takes goes to the push scheduler (`NTF-128`), as a
-    /// digest when `digest` is set (`NTF-086`).
+    /// left and the `NWAKE` of a live watch. A live subscription takes the
+    /// record as an arrival ([`QueueService::take_arrivals`]). A record that
+    /// no live subscription takes goes to the push scheduler (`NTF-128`), as
+    /// a digest when `digest` is set (`NTF-086`).
     fn store_record<R: CryptoRng + ?Sized>(
         &mut self,
         recipient_id: [u8; 32],
@@ -490,15 +499,15 @@ impl QueueService {
 
         self.head_changed(recipient_id);
 
-        let live = self.subscribers.get(&recipient_id).and_then(|subscriber| {
-            msg_of(recipient_id, seq, record, rng).map(|outbound| Reply {
-                circuit: *subscriber,
-                outbound,
-            })
-        });
-
-        if live.is_some() {
-            return Ok((remaining, live));
+        // NET-365: the node reads the record from the queue at its tick,
+        // thus the subscription holds no copy of it.
+        if let Some(circuit) = self.subscribers.get(&recipient_id).copied() {
+            self.arrivals.push(Arrival {
+                circuit,
+                queue_id: recipient_id,
+                seq,
+            });
+            return Ok((remaining, None));
         }
 
         // NTF-146: the arrival waits for a wake, thus a watch that starts
@@ -521,7 +530,7 @@ impl QueueService {
         self.on_arrival(recipient_id, digest, now);
         self.seal_due(now, rng);
 
-        Ok((remaining, live))
+        Ok((remaining, None))
     }
 
     /// The `NWAKE` of the arrivals that wait in the wake state of a queue,
@@ -604,7 +613,8 @@ impl QueueService {
     /// One `SEND` of another relay, from an `UMBRA_DEPOSIT` capsule: the
     /// digest of a group (`WIR-526`). Its auth derives from the static key
     /// of this relay, a `corr_id` that came before drops, and no answer
-    /// goes back. The result is the `MSG` of a live subscription.
+    /// goes back. The result is the `NWAKE` of a live watch, and a live
+    /// subscription takes the record as an arrival.
     pub fn deposit<R: CryptoRng + ?Sized>(
         &mut self,
         command: &Command<'_>,
@@ -704,13 +714,8 @@ impl QueueService {
 
     /// Records the head of a queue after a change of it.
     fn head_changed(&mut self, recipient_id: [u8; 32]) {
-        if let Some(queue) = self.queues.get(&recipient_id) {
-            let mut writer = Writer::new();
-            queue.export_head(&mut writer);
-            self.changes.push(StoreChange::Queue {
-                recipient_id,
-                head: writer.finish().to_vec(),
-            });
+        if let Some(head) = self.head_of(&recipient_id) {
+            self.changes.push(StoreChange::Queue { recipient_id, head });
         }
     }
 
@@ -754,10 +759,10 @@ impl QueueService {
         self.queues.is_empty()
     }
 
-    /// Handles one command of the queue range on `circuit`. A `SUB` with a
-    /// backlog above `DRAIN_THRESHOLD` gives no `MSG`. It leaves a drain in
-    /// `drains`, and the node asks for its records in steps
-    /// ([`QueueService::drain_step`]).
+    /// Handles one command of the queue range on `circuit`. A `SUB` gives
+    /// no `MSG`. It leaves its backlog in `drains`, and the node asks for
+    /// its records in steps ([`QueueService::drain_step`]): a drain above
+    /// `DRAIN_THRESHOLD`, and a paced backlog at or below it.
     #[allow(clippy::too_many_arguments)]
     pub fn handle<R: CryptoRng + ?Sized>(
         &mut self,
@@ -812,7 +817,7 @@ impl QueueService {
                 let queue = self.queues.get(&recipient_id).ok_or(Reject::Rejected)?;
                 session.accept(command, &queue.keys().qs_auth_pk)?;
 
-                let (remaining, live) =
+                let (remaining, wake) =
                     self.store_record(recipient_id, command.payload, false, now, rng)?;
 
                 // WIR-496: the QUOTA is the relay acknowledgment.
@@ -823,7 +828,7 @@ impl QueueService {
                     &remaining.to_be_bytes(),
                 )];
 
-                replies.extend(live);
+                replies.extend(wake);
                 Ok(replies)
             }
             Cmd::Iget => {
@@ -923,6 +928,7 @@ impl QueueService {
             self.free_places(session);
         }
 
+        let before = self.head_of(&recipient_id);
         let replies = self.owner_command(circuit, session, drains, command, now, rng)?;
 
         // A subscription and an acknowledgment drain the queue.
@@ -930,10 +936,24 @@ impl QueueService {
             self.on_drain(&recipient_id);
         }
 
-        // Each command of the owner moves the head: the time of the last
-        // activity at the least. A `DEL` left no queue, and then no head.
-        self.head_changed(recipient_id);
+        // NET-298: each commit is one sync of the disk on the task of the
+        // node. A command that changed no stored field, as a repeated
+        // `SUB`, an `UNSUB`, or an `ACK` at or below the last one, thus
+        // writes no head. The store rounds the time of the last activity
+        // to the hour, and most subscriptions do not move it. A `DEL` left
+        // no queue, and then no head.
+        if self.head_of(&recipient_id) != before {
+            self.head_changed(recipient_id);
+        }
         Ok(replies)
+    }
+
+    /// The stored form of the head of a queue.
+    fn head_of(&self, recipient_id: &[u8; 32]) -> Option<Vec<u8>> {
+        let queue = self.queues.get(recipient_id)?;
+        let mut writer = Writer::new();
+        queue.export_head(&mut writer);
+        Some(writer.finish().to_vec())
     }
 
     /// A command that `QR_auth` authorized.
@@ -989,28 +1009,24 @@ impl QueueService {
                     state.pending = None;
                 }
 
-                match named {
-                    Some(left) => {
-                        drains.hold(Drain {
-                            queue_id: recipient_id,
-                            after: queue.last_ack(),
-                            end: queue.next_seq(),
-                            left,
-                        });
-                        Ok(Vec::new())
-                    }
-                    None => {
-                        drains.end(&recipient_id);
-                        // WIR-110: each record that no ACK covers goes out.
-                        Ok(queue
-                            .pending()
-                            .filter_map(|stored| {
-                                msg_of(recipient_id, stored.seq, &stored.bytes, rng)
-                            })
-                            .map(|outbound| Reply { circuit, outbound })
-                            .collect())
-                    }
+                // WIR-110: each record that no ACK covers goes out. The
+                // node reads each one from the queue at its step (`NET-349`)
+                // or at its tick (`NET-365`), thus a `SUB` copies no record.
+                let backlog = Drain {
+                    queue_id: recipient_id,
+                    after: queue.last_ack(),
+                    end: queue.next_seq(),
+                    left: named.unwrap_or(0),
+                };
+
+                if named.is_some() {
+                    drains.hold(backlog);
+                } else if queue.pending().next().is_some() {
+                    drains.pace(backlog);
+                } else {
+                    drains.end(&recipient_id);
                 }
+                Ok(Vec::new())
             }
             Cmd::Unsub => {
                 // An `UNSUB` on another circuit leaves the subscription, as
@@ -1036,8 +1052,9 @@ impl QueueService {
                     return Err(Reject::Rejected);
                 }
 
-                // An ACK at or below the last one moves nothing, thus it
-                // costs the store no commit.
+                // An ACK at or below the last one moves nothing. It
+                // changes no head either, thus it costs the store no
+                // commit.
                 if seq <= queue.last_ack() {
                     return Ok(Vec::new());
                 }
@@ -1394,6 +1411,21 @@ mod tests {
             signer: &StaticSecret,
             now: u64,
         ) -> Result<Vec<Reply>, Reject> {
+            let mut replies = self.handle_at(cmd, queue_id, payload, signer, now)?;
+            replies.extend(self.arrived());
+            replies.extend(self.paced(CIRCUIT));
+            Ok(replies)
+        }
+
+        /// One command on `CIRCUIT`, with no tick after it.
+        fn handle_at(
+            &mut self,
+            cmd: Cmd,
+            queue_id: [u8; 32],
+            payload: &[u8],
+            signer: &StaticSecret,
+            now: u64,
+        ) -> Result<Vec<Reply>, Reject> {
             self.corr += 1;
             let mut command = Command {
                 cmd,
@@ -1419,6 +1451,45 @@ mod tests {
             )
         }
 
+        /// The records of each backlog that the last command paced on
+        /// `circuit`, as the ticks of the node read them from the queue
+        /// (`NET-365`).
+        fn paced(&mut self, circuit: CircuitKey) -> Vec<Reply> {
+            let mut replies = Vec::new();
+            for queue_id in self.drains.take_fresh() {
+                while let Some(backlog) = self.drains.paced_mut(&queue_id) {
+                    let (records, ended) =
+                        self.service.drain_step(&circuit, backlog, 1, &mut self.rng);
+                    let records = records.into_iter();
+                    replies.extend(records.map(|outbound| Reply { circuit, outbound }));
+
+                    if ended {
+                        self.drains.end_paced(&queue_id);
+                    }
+                }
+            }
+            replies
+        }
+
+        /// The `MSG` of each record that a live subscription took, as the
+        /// tick of the node reads it from the queue (`NET-365`).
+        fn arrived(&mut self) -> Vec<Reply> {
+            let mut replies = Vec::new();
+            for arrival in self.service.take_arrivals() {
+                let circuit = arrival.circuit;
+                let mut place = arrival.place();
+                let (records, _) = self
+                    .service
+                    .drain_step(&circuit, &mut place, 1, &mut self.rng);
+                replies.extend(
+                    records
+                        .into_iter()
+                        .map(|outbound| Reply { circuit, outbound }),
+                );
+            }
+            replies
+        }
+
         /// One command on `circuit`, whose session is `session`.
         fn send_on(
             &mut self,
@@ -1441,7 +1512,7 @@ mod tests {
             command.sign(&key, b"").unwrap();
 
             let accepts = Accepts::CrossRelay(&self.issuer);
-            self.service.handle(
+            let mut replies = self.service.handle(
                 circuit,
                 session,
                 &mut self.drains,
@@ -1450,7 +1521,11 @@ mod tests {
                 &command,
                 NOW,
                 &mut self.rng,
-            )
+            )?;
+
+            replies.extend(self.arrived());
+            replies.extend(self.paced(circuit));
+            Ok(replies)
         }
     }
 
@@ -1970,6 +2045,10 @@ mod tests {
             )
             .unwrap();
 
+        // NET-365: the record leaves at a tick of the new circuit.
+        assert!(replies.is_empty());
+        let replies = bench.paced(spare);
+
         assert_eq!(of(&replies), [spare]);
         assert_eq!(payloads(&replies)[0].0, Cmd::Msg);
         assert_eq!(bench.service.subscribers[&ids.recipient_id], spare);
@@ -1987,6 +2066,85 @@ mod tests {
         bench.send(Cmd::Send, ids.sender_id, &record, &qs).unwrap();
         bench.service.push_tick(NOW + 3, &mut Rng(10));
         assert!(bench.service.take_ndr_pushes().is_empty());
+    }
+
+    #[test]
+    fn a_repeated_sub_copies_no_record_and_each_record_leaves_once() {
+        let mut bench = Bench::new();
+        let (ids, qr, qs) = bound_queue(&mut bench);
+        let record = vec![0x55; Bucket::B3.l6_record()];
+        for _ in 0..5 {
+            bench.send(Cmd::Send, ids.sender_id, &record, &qs).unwrap();
+        }
+
+        // NET-365: a `SUB` of a backlog at or below the threshold copies no
+        // record. Before this, each `SUB` of one cell copied the whole
+        // backlog again, and the outbox of the circuit held each copy.
+        for _ in 0..50 {
+            let replies = bench
+                .handle_at(Cmd::Sub, ids.recipient_id, &[], &qr, NOW)
+                .unwrap();
+            assert!(replies.is_empty());
+        }
+
+        // The circuit holds one backlog of the queue, and the ticks read
+        // each record of it one time.
+        let seqs: Vec<u32> = payloads(&bench.paced(CIRCUIT))
+            .iter()
+            .map(|(cmd, payload)| {
+                assert_eq!(*cmd, Cmd::Msg);
+                u32::from_be_bytes(payload[..4].try_into().unwrap())
+            })
+            .collect();
+        assert_eq!(seqs, [1, 2, 3, 4, 5]);
+        assert!(bench.paced(CIRCUIT).is_empty());
+    }
+
+    #[test]
+    fn a_command_that_changes_no_stored_field_writes_no_head() {
+        let mut bench = Bench::new();
+        let (ids, qr, qs) = bound_queue(&mut bench);
+        let record = vec![0x55; Bucket::B0.l6_record()];
+        bench.send(Cmd::Send, ids.sender_id, &record, &qs).unwrap();
+        bench.send(Cmd::Send, ids.sender_id, &record, &qs).unwrap();
+        bench.service.take_changes();
+
+        // NET-298: a repeated `SUB` in the same hour changes no stored
+        // field. An `ACK` that moves the cursor changes the head.
+        bench.send(Cmd::Sub, ids.recipient_id, &[], &qr).unwrap();
+        bench.send(Cmd::Sub, ids.recipient_id, &[], &qr).unwrap();
+        assert!(bench.service.take_changes().is_empty());
+
+        bench
+            .send(Cmd::Ack, ids.recipient_id, &1u32.to_be_bytes(), &qr)
+            .unwrap();
+        let changes = bench.service.take_changes();
+        assert!(changes.contains(&StoreChange::Acked {
+            recipient_id: ids.recipient_id,
+            seq: 1
+        }));
+        assert!(changes
+            .iter()
+            .any(|change| matches!(change, StoreChange::Queue { .. })));
+
+        // An `ACK` at the last one and an `UNSUB` cost the store no commit.
+        // Before this, each command of the owner wrote the head again.
+        bench
+            .send(Cmd::Ack, ids.recipient_id, &1u32.to_be_bytes(), &qr)
+            .unwrap();
+        bench.send(Cmd::Unsub, ids.recipient_id, &[], &qr).unwrap();
+        assert!(bench.service.take_changes().is_empty());
+
+        // A subscription in a later hour moves the stored time of the
+        // last activity.
+        let later = NOW + umbra_queue::params::STORE_TIME_GRAIN;
+        bench
+            .send_at(Cmd::Sub, ids.recipient_id, &[], &qr, later)
+            .unwrap();
+        assert!(matches!(
+            bench.service.take_changes()[..],
+            [StoreChange::Queue { .. }]
+        ));
     }
 
     #[test]

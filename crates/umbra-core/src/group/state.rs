@@ -58,6 +58,28 @@ const PENDING_MAX: usize = 8;
 /// is small, and a record of a higher epoch leaves first.
 const WAITING_MAX: usize = 4;
 
+/// The sets of owner credentials that a member keeps the hash of after it
+/// replaced them (`GRP-429`). Each replacement follows a roster change, and
+/// a delivery of an older set names a lower roster epoch.
+const REPLACED_OWNERS_MAX: usize = 8;
+
+/// The hash of a set of owner credentials. A member keeps it for each set
+/// that it replaced, thus no copy of an older delivery gives that set back
+/// (`GRP-429`).
+fn owners_hash(owners: &[Secret<32>]) -> [u8; 32] {
+    let parts: Vec<&[u8]> = owners
+        .iter()
+        .map(|owner| owner.expose().as_slice())
+        .collect();
+    sha3_256(&parts)
+}
+
+/// Whether a slot hands the owner credentials alone: its epoch secret is
+/// zero (`GRP-400`).
+fn is_delivery(payload: &SlotPayload) -> bool {
+    umbra_crypto::ct_eq(payload.epoch_secret.expose(), &[0; 32])
+}
+
 const BUCKETS: [Bucket; 4] = [Bucket::B0, Bucket::B1, Bucket::B2, Bucket::B3];
 
 /// The smallest bucket that holds a dense tag vector of `members` tags and
@@ -190,6 +212,13 @@ pub struct Group {
     /// each member of role `admin` or above holds them (`GRP-188`,
     /// `GRP-190`). A plain member holds none.
     owners: Option<[Secret<32>; GROUP_REPLICAS]>,
+    /// The roster epoch of the owner credentials that this member holds:
+    /// of the record of `GRP-400` that gave them, or of its own draw. A
+    /// delivery of a lower roster epoch gives an older set (`GRP-429`).
+    owners_epoch: u32,
+    /// The hash of each set of owner credentials that this member held and
+    /// replaced, the newest last (`GRP-429`).
+    replaced_owners: Vec<[u8; 32]>,
     replicas: Option<Replicas>,
     /// The head of the roster chain that the last roster object displaced
     /// (`GRP-117`). The client takes it, and publishes it again when this
@@ -256,6 +285,8 @@ impl Group {
             receiver: Receiver::new(0),
             pairs: PairCache::default(),
             owners: Some(owners),
+            owners_epoch: 0,
+            replaced_owners: Vec::new(),
             replicas: None,
         })
     }
@@ -285,6 +316,8 @@ impl Group {
             receiver: Receiver::new(admitted.index),
             pairs: PairCache::default(),
             owners: None,
+            owners_epoch: 0,
+            replaced_owners: Vec::new(),
             replicas: Some(Replicas::from_admit(admitted.replicas)),
         })
     }
@@ -343,6 +376,12 @@ impl Group {
             w.u32(held.start_slot);
             w.u64(held.arrived_at);
             w.var(&held.body)?;
+        }
+
+        w.u32(self.owners_epoch);
+        w.u32(super::roster::count(self.replaced_owners.len())?);
+        for hash in &self.replaced_owners {
+            w.bytes(hash);
         }
 
         Ok(w.finish())
@@ -432,6 +471,20 @@ impl Group {
             }
         }
 
+        // A form before the order of the owner credentials ends here, and
+        // its first delivery takes their place as before (`GRP-429`).
+        let mut owners_epoch = 0;
+        let mut replaced_owners = Vec::new();
+        if r.end().is_err() {
+            owners_epoch = r.u32()?;
+            for _ in 0..r.u32()? {
+                if replaced_owners.len() >= REPLACED_OWNERS_MAX {
+                    return Err(Error::Malformed);
+                }
+                replaced_owners.push(r.array()?);
+            }
+        }
+
         r.end()?;
 
         let previous = previous_index
@@ -455,6 +508,8 @@ impl Group {
             receiver,
             pairs: PairCache::default(),
             owners,
+            owners_epoch,
+            replaced_owners,
             replicas,
         })
     }
@@ -473,6 +528,15 @@ impl Group {
     /// joined holds the hash of it alone, thus the key comes from the seed.
     pub fn own_roster_pk(&self) -> Vec<u8> {
         self.keys.roster().verifying_key().to_bytes().to_vec()
+    }
+
+    /// `GroupRosterKey_g.pk` of the creator, which an offer carries
+    /// (`GRP-062`, `GRP-428`). A roster stored before it kept that key
+    /// takes it from `path`, the entries of the authority path that the
+    /// client keeps.
+    pub fn creator_roster_pk(&mut self, path: &[&[u8]]) -> Option<Vec<u8>> {
+        self.roster.learn_creator_roster_pk(path);
+        self.roster.creator_roster_pk().map(<[u8]>::to_vec)
     }
 
     /// The roster.
@@ -527,7 +591,7 @@ impl Group {
     ) -> Result<Vec<u8>, Error> {
         // GRP-415: an index that left the active set posts nothing; each
         // member drops its record under GRP-257.
-        if self.own_role().is_none() {
+        if self.own_role().is_none() || !self.may_post(app) {
             return Err(Error::NoPath);
         }
 
@@ -589,7 +653,10 @@ impl Group {
         now: u64,
         rng: &mut R,
     ) -> Result<Vec<u8>, Error> {
-        if self.own_role().is_none() || roster_epoch > self.roster.epoch_index() {
+        if self.own_role().is_none()
+            || !self.may_post(app)
+            || roster_epoch > self.roster.epoch_index()
+        {
             return Err(Error::NoPath);
         }
 
@@ -648,6 +715,17 @@ impl Group {
             .member(self.own_index)
             .filter(|member| member.active)
             .map(|member| member.role)
+    }
+
+    /// Whether this member may post an `AppMessage` of `kind`. Each member
+    /// rejects the record of an observer but a few kinds (`GRP-425`), thus
+    /// an observer posts no other one (`GRP-442`).
+    pub fn may_send(&self, kind: umbra_wire::app::AppKind) -> bool {
+        self.own_role() != Some(Role::Observer) || super::receive::observer_may_send(kind)
+    }
+
+    fn may_post(&self, app: &[u8]) -> bool {
+        self.own_role() != Some(Role::Observer) || super::receive::observer_may_post(app)
     }
 
     /// Reads one record that a `GMSG` carried. The bucket comes from the
@@ -709,25 +787,20 @@ impl Group {
             return Err(Error::Unverified);
         }
 
-        // Each owner whose key this roster holds can be the creator of the
-        // path. This member is the creator when it holds index 0, which the
-        // creation gave and no later object gives (`GRP-306`). The key of
-        // each other member starts no path: a snapshot with no role holder
-        // but that member would verify with no grant at all.
-        let mut keys: Vec<Vec<u8>> = self
-            .roster
-            .active()
-            .filter(|member| member.role == Role::Owner)
-            .filter_map(|member| member.roster_pk.clone())
-            .collect();
-        if self.own_index == 0 {
-            keys.push(self.own_roster_pk());
-        }
+        // GRP-428: the path starts at the creator alone, whether or not the
+        // creator is still in the group or an owner. This member is the
+        // creator when it holds index 0, which the creation gave and no
+        // later object gives (`GRP-306`). The key of each other member
+        // starts no path: a snapshot with no role holder but that member
+        // would verify with no grant at all.
+        let key = match self.roster.creator_roster_pk() {
+            Some(key) => key.to_vec(),
+            None if self.own_index == 0 => self.own_roster_pk(),
+            None => return Err(Error::Unverified),
+        };
 
-        let mut roster = keys
-            .iter()
-            .find_map(|key| Roster::from_snapshot(&snapshot, &snapshot.chain_hash, key, now).ok())
-            .ok_or(Error::Unverified)?;
+        let mut roster =
+            Roster::from_snapshot(&snapshot, &key, now).map_err(|_| Error::Unverified)?;
 
         // GRP-320: the snapshot names the active members alone, and a
         // member that left can hold the highest index.
@@ -1792,10 +1865,20 @@ impl Group {
     fn install_opened(&mut self, opened: Opened, now: u64) -> Result<(), Error> {
         // GRP-400: a slot with no epoch secret hands the owner credentials
         // and installs no epoch. Only a slot of the current epoch holds it.
-        if umbra_crypto::ct_eq(opened.payload.epoch_secret.expose(), &[0; 32]) {
+        if is_delivery(&opened.payload) {
             if opened.epoch != self.epochs.epoch() || opened.payload.own_sks.len() != GROUP_REPLICAS
             {
                 return Err(Error::Unverified);
+            }
+
+            // GRP-429: a delivery of a roster that this member does not hold
+            // yet waits for it, as an epoch-key record does (`GRP-357`).
+            // Thus the order below compares two roster epochs that this
+            // member holds, and a delivery that came late cannot pass one
+            // that came early.
+            if opened.roster_epoch > self.roster.epoch_index() {
+                self.keep_pending(opened);
+                return Err(Error::NoPath);
             }
 
             // GRP-379, GRP-401: only an admin of the roster that stands
@@ -1810,7 +1893,14 @@ impl Group {
                 return Err(Error::Unverified);
             }
 
-            self.take_owners(&opened.payload);
+            // GRP-429: the tag binds no credential, and a member can post an
+            // old delivery again in another bucket. A newer delivery names a
+            // higher roster epoch, and a set that this member replaced stays
+            // out.
+            if opened.roster_epoch < self.owners_epoch || !self.take_owners(&opened.payload) {
+                return Err(Error::Stale);
+            }
+            self.owners_epoch = opened.roster_epoch;
 
             // GRP-372: a slot for the new index ends the keys before it.
             if opened.is_current {
@@ -1864,10 +1954,24 @@ impl Group {
     }
 
     /// Keeps an opened slot of an epoch above the current one that does not
-    /// install yet. Its rotator is an active member, thus a member that
+    /// install yet, or a delivery of owner credentials of the current epoch
+    /// (`GRP-429`). Its rotator is an active member, thus a member that
     /// left fills no place, and the oldest one leaves at the bound.
     fn keep_pending(&mut self, opened: Opened) {
         let rotator = opened.payload.rotator;
+        let delivery = is_delivery(&opened.payload);
+        // Two deliveries share the zero secret, thus their roster epoch and
+        // their credentials tell them apart.
+        let same_delivery = |held: &Opened| {
+            held.roster_epoch == opened.roster_epoch
+                && held.payload.own_sks.len() == opened.payload.own_sks.len()
+                && held
+                    .payload
+                    .own_sks
+                    .iter()
+                    .zip(&opened.payload.own_sks)
+                    .all(|(a, b)| umbra_crypto::ct_eq(a.expose(), b.expose()))
+        };
         let is_known = self.pending.iter().any(|held| {
             held.epoch == opened.epoch
                 && held.payload.rotator == rotator
@@ -1875,11 +1979,14 @@ impl Group {
                     held.payload.epoch_secret.expose(),
                     opened.payload.epoch_secret.expose(),
                 )
+                && (!delivery || same_delivery(held))
         });
-        if is_known
-            || opened.epoch <= self.epochs.epoch()
-            || !self.roster.member(rotator).is_some_and(|m| m.active)
-        {
+        let is_past = if delivery {
+            opened.epoch < self.epochs.epoch()
+        } else {
+            opened.epoch <= self.epochs.epoch()
+        };
+        if is_known || is_past || !self.roster.member(rotator).is_some_and(|m| m.active) {
             return;
         }
 
@@ -1950,9 +2057,10 @@ impl Group {
     }
 
     /// Tries each epoch that waits again, in the order of the epochs
-    /// (`GRP-357`). An epoch that installs gives `Outcome::EpochInstalled`,
-    /// and a chunked record that this member fetches now comes back as the
-    /// `Outcome::EpochKey` that it was.
+    /// (`GRP-357`), and each delivery of owner credentials that waits for
+    /// its roster (`GRP-429`). An epoch that installs gives
+    /// `Outcome::EpochInstalled`, and a chunked record that this member
+    /// fetches now comes back as the `Outcome::EpochKey` that it was.
     fn retry_epochs(&mut self, now: u64) -> Vec<Outcome> {
         let mut out = Vec::new();
         let mut pending = core::mem::take(&mut self.pending);
@@ -1962,8 +2070,10 @@ impl Group {
                 continue;
             }
             let epoch = held.epoch;
-            // A slot that waits again went back to the list.
-            if self.install_opened(held, now).is_ok() {
+            let delivery = is_delivery(&held.payload);
+            // A slot that waits again went back to the list. A delivery of
+            // owner credentials installs no epoch (`GRP-400`).
+            if self.install_opened(held, now).is_ok() && !delivery {
                 out.push(Outcome::EpochInstalled { epoch });
             }
         }
@@ -1993,15 +2103,42 @@ impl Group {
         out
     }
 
-    /// Takes the owner credentials of a slot that carries them.
-    fn take_owners(&mut self, payload: &SlotPayload) {
-        if payload.own_sks.len() == GROUP_REPLICAS {
-            let mut owners = [Secret::<32>::zeroed(), Secret::<32>::zeroed()];
-            for (held, given) in owners.iter_mut().zip(payload.own_sks.iter()) {
-                *held = Secret::new(*given.expose());
-            }
-            self.owners = Some(owners);
+    /// Takes the owner credentials of a slot that carries them. A set that
+    /// this member held and replaced stays out (`GRP-429`). The result says
+    /// whether this member holds the set of the slot now.
+    fn take_owners(&mut self, payload: &SlotPayload) -> bool {
+        if payload.own_sks.len() != GROUP_REPLICAS {
+            return false;
         }
+        let given = owners_hash(&payload.own_sks);
+        if self.replaced_owners.contains(&given) {
+            return false;
+        }
+
+        let mut owners = [Secret::<32>::zeroed(), Secret::<32>::zeroed()];
+        for (held, given) in owners.iter_mut().zip(payload.own_sks.iter()) {
+            *held = Secret::new(*given.expose());
+        }
+        if let Some(old) = self.owners.replace(owners) {
+            if owners_hash(&old) != given {
+                self.note_replaced(&old);
+            }
+        }
+        true
+    }
+
+    /// Keeps the hash of a set of owner credentials that this member no
+    /// longer holds (`GRP-429`).
+    fn note_replaced(&mut self, old: &[Secret<32>]) {
+        let hash = owners_hash(old);
+        if self.replaced_owners.contains(&hash) {
+            return;
+        }
+
+        if self.replaced_owners.len() >= REPLACED_OWNERS_MAX {
+            self.replaced_owners.remove(0);
+        }
+        self.replaced_owners.push(hash);
     }
 
     /// Draws a new owner credential for each replica and holds it here,
@@ -2017,6 +2154,11 @@ impl Group {
             rng.fill_bytes(owner.expose_mut());
         }
         self.owners = Some(owners);
+
+        // GRP-429: the new set is of the roster that stands, and the old
+        // one comes back from no delivery.
+        self.note_replaced(&old);
+        self.owners_epoch = self.owners_epoch.max(self.roster.epoch_index());
         Ok(old)
     }
 
@@ -2663,7 +2805,6 @@ mod tests {
         };
         let add = creator.add_object(&record).unwrap();
         let control = GroupControl::parse(&add).unwrap();
-        let add_hash = control.epoch_hash();
         assert_eq!(
             creator.apply_control(&control, 0, now).unwrap(),
             Applied::Added(1)
@@ -2678,8 +2819,7 @@ mod tests {
         let snapshot = RosterSnapshot::parse(&snapshot_bytes).unwrap();
         let creator_pk = creator.keys.roster().verifying_key().to_bytes();
         let admitted =
-            crate::group::join::accept_admit(&invitation, &snapshot, &add_hash, &creator_pk, now)
-                .unwrap();
+            crate::group::join::accept_admit(&invitation, &snapshot, &creator_pk, now).unwrap();
         let member = Group::joined(admitted, &joiner_keys.seed).unwrap();
         (creator, member, add)
     }
@@ -2840,7 +2980,6 @@ mod tests {
         };
         let add = creator.add_object(&record).unwrap();
         let control = GroupControl::parse(&add).unwrap();
-        let add_hash = control.epoch_hash();
         assert_eq!(
             creator.apply_control(&control, 0, now).unwrap(),
             Applied::Added(2)
@@ -2854,8 +2993,7 @@ mod tests {
         let snapshot = RosterSnapshot::parse(&snapshot_bytes).unwrap();
         let creator_pk = creator.keys.roster().verifying_key().to_bytes();
         let admitted =
-            crate::group::join::accept_admit(&invitation, &snapshot, &add_hash, &creator_pk, now)
-                .unwrap();
+            crate::group::join::accept_admit(&invitation, &snapshot, &creator_pk, now).unwrap();
         let third = Group::joined(admitted, &THIRD_SEED).unwrap();
         (creator, member, third)
     }
@@ -2915,7 +3053,6 @@ mod tests {
         };
         let add = creator.add_object(&record).unwrap();
         let control = GroupControl::parse(&add).unwrap();
-        let add_hash = control.epoch_hash();
         creator.apply_control(&control, 0, later).unwrap();
         member.apply_control(&control, 0, later).unwrap();
         let admit_bytes = member.admit_for(2, b"", later).unwrap();
@@ -2927,8 +3064,7 @@ mod tests {
         let snapshot = RosterSnapshot::parse(&snapshot_bytes).unwrap();
         let creator_pk = creator.keys.roster().verifying_key().to_bytes();
         let admitted =
-            crate::group::join::accept_admit(&invitation, &snapshot, &add_hash, &creator_pk, later)
-                .unwrap();
+            crate::group::join::accept_admit(&invitation, &snapshot, &creator_pk, later).unwrap();
         let mut third = Group::joined(admitted, &THIRD_SEED).unwrap();
         let mut rng = Rng(43);
         let post = creator
@@ -3547,7 +3683,6 @@ mod tests {
         };
         let add = creator.add_object(&record).unwrap();
         let control = GroupControl::parse(&add).unwrap();
-        let add_hash = control.epoch_hash();
         assert_eq!(
             creator.apply_control(&control, 0, now).unwrap(),
             Applied::Added(2)
@@ -3561,8 +3696,7 @@ mod tests {
         let snapshot = RosterSnapshot::parse(&snapshot_bytes).unwrap();
         let creator_pk = creator.keys.roster().verifying_key().to_bytes();
         let admitted =
-            crate::group::join::accept_admit(&invitation, &snapshot, &add_hash, &creator_pk, now)
-                .unwrap();
+            crate::group::join::accept_admit(&invitation, &snapshot, &creator_pk, now).unwrap();
         let mut joiner = Group::joined(admitted, &LATE_SEED).unwrap();
         assert!(joiner.owes_rotation(now).is_none());
         assert!(!joiner.rotation_called(now));
@@ -3668,7 +3802,8 @@ mod tests {
                 group.apply_control(&control, 0, now).unwrap(),
                 Applied::Granted {
                     index: 2,
-                    role: Role::Moderator
+                    role: Role::Moderator,
+                    before: Role::Member
                 }
             );
         }
@@ -3774,7 +3909,6 @@ mod tests {
             })
             .unwrap();
         let control = GroupControl::parse(&add).unwrap();
-        let add_hash = control.epoch_hash();
         creator.apply_control(&control, 0, now).unwrap();
         let admit = creator.admit_for(3, b"", now).unwrap();
         let invitation = umbra_wire::group::control::GroupInvitation::parse(
@@ -3785,18 +3919,14 @@ mod tests {
         let snapshot_bytes = creator.snapshot(&path).unwrap();
         let snapshot = RosterSnapshot::parse(&snapshot_bytes).unwrap();
         let admitted =
-            crate::group::join::accept_admit(&invitation, &snapshot, &add_hash, &creator_pk, now)
-                .unwrap();
+            crate::group::join::accept_admit(&invitation, &snapshot, &creator_pk, now).unwrap();
         assert_eq!(admitted.roster.member(2).unwrap().role, Role::Moderator);
 
         // GRP-399: with no path, the role of the moderator stands on
         // nothing, and the snapshot fails.
         let bare = creator.snapshot(&[]).unwrap();
         let bare = RosterSnapshot::parse(&bare).unwrap();
-        assert!(
-            crate::group::join::accept_admit(&invitation, &bare, &add_hash, &creator_pk, now)
-                .is_err()
-        );
+        assert!(crate::group::join::accept_admit(&invitation, &bare, &creator_pk, now).is_err());
     }
 
     #[test]
@@ -3897,13 +4027,12 @@ mod tests {
                 })
                 .unwrap();
             let control = GroupControl::parse(&add).unwrap();
-            let add_hash = control.epoch_hash();
             let Applied::Added(index) = creator.apply_control(&control, 0, now).unwrap() else {
                 panic!("the add added nobody");
             };
-            last = Some((index, add_hash, keys));
+            last = Some((index, keys));
         }
-        let (index, add_hash, keys) = last.unwrap();
+        let (index, keys) = last.unwrap();
         let admit = creator.admit_for(index, b"", now).unwrap();
         let invitation = umbra_wire::group::control::GroupInvitation::parse(
             GroupControl::parse(&admit).unwrap().payload,
@@ -3913,8 +4042,7 @@ mod tests {
         let snapshot = RosterSnapshot::parse(&snapshot_bytes).unwrap();
         let creator_pk = creator.keys.roster().verifying_key().to_bytes();
         let admitted =
-            crate::group::join::accept_admit(&invitation, &snapshot, &add_hash, &creator_pk, now)
-                .unwrap();
+            crate::group::join::accept_admit(&invitation, &snapshot, &creator_pk, now).unwrap();
         let mut member = Group::joined(admitted, &keys.seed).unwrap();
 
         // A removal leaves 29 members, and the rotation goes on the chunk
@@ -4823,6 +4951,334 @@ mod tests {
         assert_eq!(member.own_role(), Some(Role::Member));
     }
 
+    /// A joiner of the keys of `seed` that `admin` adds and admits, with a
+    /// snapshot of `path` that it verifies under `creator_pk`. Each of
+    /// `others` applies the add.
+    fn admit_with(
+        admin: &mut Group,
+        others: &mut [&mut Group],
+        seed: u8,
+        path: &[u8],
+        creator_pk: &[u8],
+        now: u64,
+    ) -> Result<Group, Error> {
+        let (keys, kem_pk) = join_of(admin, seed);
+        let add = admin
+            .add_object(&JoinRecord {
+                group_id: *admin.group_id(),
+                keys: keys.wire_keys(&kem_pk),
+            })
+            .unwrap();
+        let control = GroupControl::parse(&add).unwrap();
+        let sender = admin.own_index();
+        let Applied::Added(index) = admin.apply_control(&control, sender, now).unwrap() else {
+            panic!("the add added nobody");
+        };
+        spread(&add, sender, others, now);
+
+        let admit = admin.admit_for(index, b"", now).unwrap();
+        let invitation = umbra_wire::group::control::GroupInvitation::parse(
+            GroupControl::parse(&admit).unwrap().payload,
+        )
+        .unwrap();
+        let snapshot_bytes = admin.snapshot(path).unwrap();
+        let snapshot = RosterSnapshot::parse(&snapshot_bytes).unwrap();
+        let admitted = crate::group::join::accept_admit(&invitation, &snapshot, creator_pk, now)?;
+        Group::joined(admitted, &keys.seed)
+    }
+
+    /// Moves `group` to the keys of `seed`, and each of `others` applies
+    /// the re-key (`GRP-365`, `GRP-367`). The result is the record.
+    fn rekey_of(group: &mut Group, others: &mut [&mut Group], seed: u8, now: u64) -> Vec<u8> {
+        let (fresh, _) = join_of(group, seed);
+        let object = group
+            .rekey_object(&fresh, &mut Rng(u64::from(seed)))
+            .unwrap();
+        let old = group.own_index();
+        spread(&object, old, others, now);
+        group.adopt_rekey(&object, &fresh.seed, now).unwrap();
+        object
+    }
+
+    #[test]
+    fn a_joiner_verifies_the_roles_of_an_admin_and_of_a_creator_that_rekeyed() {
+        let now = 1_700_000_000;
+        let (mut creator, mut member, mut third) = trio(now);
+        let mut rng = Rng(83);
+        let creator_pk = creator.own_roster_pk();
+
+        // The creator makes the member at index 1 an admin. A device
+        // revocation of that admin moves it to index 3 with its role.
+        let to_admin = creator.grant(1, Role::Admin, &mut rng).unwrap();
+        spread(
+            &to_admin,
+            0,
+            &mut [&mut creator, &mut member, &mut third],
+            now,
+        );
+        let admin_moved = rekey_of(&mut member, &mut [&mut creator, &mut third], 0x71, now);
+        assert_eq!(member.own_index(), 3);
+        assert_eq!(creator.roster().member(3).unwrap().role, Role::Admin);
+
+        // The admin grants from its new index.
+        let to_moderator = member.grant(2, Role::Moderator, &mut rng).unwrap();
+        spread(
+            &to_moderator,
+            3,
+            &mut [&mut creator, &mut member, &mut third],
+            now,
+        );
+
+        // GRP-399, GRP-426: with no re-key on the path, no grant names the
+        // admin at index 3, and the snapshot fails.
+        let grants: Vec<&[u8]> = alloc::vec![&to_admin, &to_moderator];
+        let (bare, _) = member.roster().authority_path(&grants).unwrap();
+        let snapshot = member.snapshot(&bare).unwrap();
+        let snapshot = RosterSnapshot::parse(&snapshot).unwrap();
+        assert!(Roster::from_snapshot(&snapshot, &creator_pk, now).is_err());
+
+        // GRP-427: the re-key goes on the path, and a fourth member that
+        // the admin admits verifies each role.
+        let kept: Vec<&[u8]> = alloc::vec![&to_admin, &admin_moved, &to_moderator];
+        let (path, positions) = member.roster().authority_path(&kept).unwrap();
+        assert_eq!(positions, alloc::vec![0, 1, 2]);
+        let mut fourth = admit_with(
+            &mut member,
+            &mut [&mut creator, &mut third],
+            0x72,
+            &path,
+            &creator_pk,
+            now,
+        )
+        .unwrap();
+        assert_eq!(fourth.own_index(), 4);
+        assert_eq!(fourth.roster().member(3).unwrap().role, Role::Admin);
+        assert_eq!(fourth.roster().member(2).unwrap().role, Role::Moderator);
+
+        // The creator re-keys to index 5, and the offer still carries the
+        // key of the creation (GRP-428).
+        let creator_moved = rekey_of(
+            &mut creator,
+            &mut [&mut member, &mut third, &mut fourth],
+            0x73,
+            now,
+        );
+        assert_eq!(creator.own_index(), 5);
+        assert_eq!(creator.creator_roster_pk(&[]), Some(creator_pk.clone()));
+        assert_eq!(fourth.creator_roster_pk(&[]), Some(creator_pk.clone()));
+
+        // A fifth member that the creator admits at its new index verifies
+        // the path. The third member misses that add.
+        let kept: Vec<&[u8]> = alloc::vec![&to_admin, &admin_moved, &to_moderator, &creator_moved];
+        let (path, positions) = creator.roster().authority_path(&kept).unwrap();
+        assert_eq!(positions, alloc::vec![0, 1, 2, 3]);
+        let fifth = admit_with(
+            &mut creator,
+            &mut [&mut member, &mut fourth],
+            0x74,
+            &path,
+            &creator_pk,
+            now,
+        )
+        .unwrap();
+        assert_eq!(fifth.roster().member(5).unwrap().role, Role::Owner);
+        assert_eq!(fifth.roster().member(3).unwrap().role, Role::Admin);
+
+        // GRP-329: the third member, behind the roster, takes the snapshot
+        // under the key of the creator, which left index 0.
+        third
+            .recover_roster(&creator.snapshot(&path).unwrap(), now)
+            .unwrap();
+        assert_eq!(third.roster().epoch_index(), creator.roster().epoch_index());
+    }
+
+    #[test]
+    fn a_member_that_joined_after_the_creator_left_invites_and_recovers() {
+        let now = 1_700_000_000;
+        let (mut creator, mut member, mut third) = trio(now);
+        let mut rng = Rng(89);
+        let creator_pk = creator.own_roster_pk();
+
+        // GRP-067: the creator names the member at index 1 an owner, and it
+        // leaves.
+        let to_owner = creator.grant(1, Role::Owner, &mut rng).unwrap();
+        spread(
+            &to_owner,
+            0,
+            &mut [&mut creator, &mut member, &mut third],
+            now,
+        );
+        let leave = creator.leave_object().unwrap();
+        spread(&leave, 0, &mut [&mut creator, &mut member, &mut third], now);
+
+        // The owner admits a fourth member, whose roster holds no entry of
+        // the creator and keeps its key (GRP-428).
+        let offered = member.creator_roster_pk(&[]).unwrap();
+        assert_eq!(offered, creator_pk);
+        let (path, _) = member.roster().authority_path(&[&to_owner]).unwrap();
+        let fourth =
+            admit_with(&mut member, &mut [&mut third], 0x75, &path, &offered, now).unwrap();
+        assert!(fourth.roster().member(0).is_none());
+        let mut fourth =
+            Group::restore(&fourth.export().unwrap(), &Secret::new([0x75; 32])).unwrap();
+        assert_eq!(fourth.creator_roster_pk(&[]), Some(creator_pk.clone()));
+
+        // The owner makes the fourth member an admin, and that admin offers
+        // the group with the key of the creator.
+        let to_admin = member.grant(3, Role::Admin, &mut rng).unwrap();
+        spread(
+            &to_admin,
+            1,
+            &mut [&mut member, &mut third, &mut fourth],
+            now,
+        );
+        let offered = fourth.creator_roster_pk(&[]).unwrap();
+        let (path, _) = fourth
+            .roster()
+            .authority_path(&[&to_owner, &to_admin])
+            .unwrap();
+        let fifth =
+            admit_with(&mut fourth, &mut [&mut member], 0x76, &path, &offered, now).unwrap();
+        assert_eq!(fifth.roster().member(3).unwrap().role, Role::Admin);
+
+        // GRP-330: the third member missed that add. It verifies the path
+        // under the key of the creator, which no owner of its roster holds.
+        third
+            .recover_roster(&member.snapshot(&path).unwrap(), now)
+            .unwrap();
+        assert_eq!(third.roster().active_count(), 4);
+    }
+
+    #[test]
+    fn a_copy_of_an_older_owner_delivery_gives_no_credentials_back() {
+        let now = 1_700_000_000;
+        let (mut creator, mut member, mut third) = trio(now);
+        let mut rng = Rng(97);
+        let to_admin = creator.grant(2, Role::Admin, &mut rng).unwrap();
+        spread(
+            &to_admin,
+            0,
+            &mut [&mut creator, &mut member, &mut third],
+            now,
+        );
+        let install = |group: &mut Group, bytes: &[u8]| {
+            let record = parse_record(bytes);
+            group.install_epoch_key(record.epoch, record.slot, record.body, now)
+        };
+
+        let first = creator.owner_delivery(2, &mut rng).unwrap();
+        install(&mut third, &first).unwrap();
+
+        // A roster change, and GRP-401: the admin draws new credentials and
+        // hands them to the other admin.
+        let to_moderator = creator.grant(1, Role::Moderator, &mut rng).unwrap();
+        spread(
+            &to_moderator,
+            0,
+            &mut [&mut creator, &mut member, &mut third],
+            now,
+        );
+        creator.replace_owners(&mut rng).unwrap();
+        let second = creator.owner_delivery(2, &mut rng).unwrap();
+        install(&mut third, &second).unwrap();
+        let held = *creator.owner(0).unwrap().expose();
+        assert_eq!(*third.owner(0).unwrap().expose(), held);
+
+        // GRP-429: a member posts the first delivery again in a larger
+        // bucket. The tag binds no credential, and the slot opens. Its
+        // roster epoch is below the one of the credentials held.
+        let record = parse_record(&first);
+        let mut body = record.body.to_vec();
+        body.resize(Bucket::B3.group_body(), 0);
+        let copy = GroupQueueRecord {
+            kind: RecordKind::EpochKey,
+            epoch: record.epoch,
+            slot: record.slot,
+            nonce: [0; 12],
+            body: &body,
+        };
+        let mut replay = alloc::vec![0u8; Bucket::B3.group_record()];
+        let n = copy.encode(Bucket::B3, &mut replay).unwrap();
+        replay.truncate(n);
+        assert_ne!(replay.len(), first.len());
+        let Outcome::EpochKey {
+            epoch,
+            start_slot,
+            body,
+        } = third.receive(&replay, now).unwrap()
+        else {
+            panic!("the copy is no epoch-key record");
+        };
+        assert_eq!(
+            third.install_epoch_key(epoch, start_slot, &body, now),
+            Err(Error::Stale)
+        );
+        assert_eq!(*third.owner(0).unwrap().expose(), held);
+
+        // A copy of the delivery of the set that it holds changes nothing.
+        install(&mut third, &second).unwrap();
+
+        // A set that it held and replaced stays out at one roster epoch too.
+        creator.replace_owners(&mut rng).unwrap();
+        let third_set = creator.owner_delivery(2, &mut rng).unwrap();
+        install(&mut third, &third_set).unwrap();
+        let held = *creator.owner(1).unwrap().expose();
+        assert_eq!(install(&mut third, &second), Err(Error::Stale));
+        assert_eq!(*third.owner(1).unwrap().expose(), held);
+
+        // The stored form keeps the order.
+        let mut back = Group::restore(&third.export().unwrap(), &THIRD).unwrap();
+        assert_eq!(install(&mut back, &first), Err(Error::Stale));
+        assert_eq!(install(&mut back, &second), Err(Error::Stale));
+        assert_eq!(*back.owner(1).unwrap().expose(), held);
+    }
+
+    #[test]
+    fn an_owner_delivery_ahead_of_the_roster_waits_and_an_older_one_stays_out() {
+        let now = 1_700_000_000;
+        let (mut creator, mut member, mut third) = trio(now);
+        let mut rng = Rng(101);
+        let to_admin = creator.grant(2, Role::Admin, &mut rng).unwrap();
+        spread(
+            &to_admin,
+            0,
+            &mut [&mut creator, &mut member, &mut third],
+            now,
+        );
+        let install = |group: &mut Group, bytes: &[u8]| {
+            let record = parse_record(bytes);
+            group.install_epoch_key(record.epoch, record.slot, record.body, now)
+        };
+
+        // GRP-401: two roster changes, and after each one the admin draws
+        // new credentials. The third member holds neither change yet.
+        let to_moderator = creator.grant(1, Role::Moderator, &mut rng).unwrap();
+        spread(&to_moderator, 0, &mut [&mut creator, &mut member], now);
+        creator.replace_owners(&mut rng).unwrap();
+        let first = creator.owner_delivery(2, &mut rng).unwrap();
+        let to_member = creator.grant(1, Role::Member, &mut rng).unwrap();
+        spread(&to_member, 0, &mut [&mut creator, &mut member], now);
+        creator.replace_owners(&mut rng).unwrap();
+        let second = creator.owner_delivery(2, &mut rng).unwrap();
+
+        // GRP-429: the newer delivery comes first, and the older one after
+        // it. Each waits for its roster.
+        assert_eq!(install(&mut third, &second), Err(Error::NoPath));
+        assert_eq!(install(&mut third, &first), Err(Error::NoPath));
+        assert!(third.owner(0).is_none());
+
+        // The roster arrives, and the newer set stands. The older one names
+        // a lower roster epoch, and it stays out.
+        spread(&to_moderator, 0, &mut [&mut third], now);
+        spread(&to_member, 0, &mut [&mut third], now);
+        assert!(third.retry_held(now).is_empty());
+        let held = *creator.owner(0).unwrap().expose();
+        assert_eq!(*third.owner(0).unwrap().expose(), held);
+        assert_eq!(install(&mut third, &first), Err(Error::Stale));
+        install(&mut third, &second).unwrap();
+        assert_eq!(*third.owner(0).unwrap().expose(), held);
+    }
+
     #[test]
     fn a_second_roster_object_of_the_head_maker_reaches_the_roster_and_each_reader_orders_the_two()
     {
@@ -5005,17 +5461,26 @@ mod tests {
         let now = 1_700_000_000;
         let (mut creator, mut member, _) = pair(now);
         let mut rng = Rng(83);
+        let said = member
+            .post(&text("before the demotion"), now, &mut rng)
+            .unwrap();
         let grant = creator.grant(1, Role::Observer, &mut rng).unwrap();
         let grant = GroupControl::parse(&grant).unwrap();
         creator.apply_control(&grant, 0, now).unwrap();
         member.apply_control(&grant, 0, now).unwrap();
         assert_eq!(member.own_role(), Some(Role::Observer));
 
-        // §11.9: an observer reads the group and posts nothing to it.
-        let said = member
-            .post(&text("from an observer"), now, &mut rng)
-            .unwrap();
+        // §11.9: an observer reads the group and posts nothing to it. Each
+        // member rejects its record (GRP-425), thus it builds none
+        // (GRP-442).
         assert_eq!(creator.receive(&said, now), Err(Error::Unverified));
+        assert_eq!(
+            member.post(&text("from an observer"), now, &mut rng),
+            Err(Error::NoPath)
+        );
+        assert!(!member.may_send(umbra_wire::app::AppKind::PollVote));
+        assert!(member.may_send(umbra_wire::app::AppKind::Delete));
+        assert!(creator.may_send(umbra_wire::app::AppKind::Text));
 
         // Its roster objects still apply.
         let leave = member.leave_object().unwrap();

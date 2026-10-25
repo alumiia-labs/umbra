@@ -7,6 +7,8 @@ message, a contact, or a name.
 
 For Kubernetes or k3s, use the Helm chart `deploy/helm/umbra-relay`. The
 steps below are the same, and its `values.yaml` holds the settings.
+[The image on Kubernetes](#the-image-on-kubernetes) gives the build when
+no image of this version is published.
 
 ## What your machine needs
 
@@ -51,6 +53,9 @@ steps below are the same, and its `values.yaml` holds the settings.
    docker compose pull    # or: docker compose build
    ```
 
+   When `pull` reports `denied` or `not found`, no image of this version is
+   published yet. Then run `docker compose build`.
+
 4. Start the relay.
 
    ```sh
@@ -76,22 +81,31 @@ steps below are the same, and its `values.yaml` holds the settings.
 ## After the request
 
 The owner of the network checks the request (Part 10 `REL-012`), and adds
-the relay to the signer. Then the relay goes through the admission of Part
-10 §10.5.4 and §10.7.1:
+the relay to the signer. The owner sets the operator name from your
+dossier. Then the relay goes through the admission of Part 10 §10.5.4 and
+§10.7.1:
 
 | Time | State |
 | --- | --- |
-| The first hour | The manifest lists the relay as pending. Your relay sees its own entry, and no client uses it. |
-| 4 days | The directory places the relay at its layer from a hash. You do not select the layer. |
-| 14 days | An entry relay gets the ingress flag. Phones then reach it. |
+| The first hour | The manifest lists the relay as pending at class 0. Your relay sees its own entry and starts, and no client uses it. |
+| The first test | The measurer of the network tests the relay at class 0. It runs one time in each 7 days. |
+| 4 days, and a passed test | The directory places the relay at its layer from a hash. You do not select the layer. An entry relay is a middle relay until it gets the ingress flag. |
+| 14 days | An entry relay with a tested class of 1 or more gets the ingress flag. Phones then reach it. |
 
-The network tests the class of the relay. A relay that fails the test of
-its class goes to a lower class. A relay that fails class 0 leaves the
-manifest.
+The network lists the relay at a class that a test verified, and not at
+the class of the request (Part 10 `REL-210`). The first class is class 0,
+and the class rises by one step in each 7 days at most, to the highest
+class that a test verified. The measurer of the network tests class 0
+alone today. Thus your relay stays at class 0, and an entry relay gets no
+ingress flag until a measurer can test class 1. A relay that fails the
+test of a class goes below that class. A relay that fails class 0, or that
+passes no test in 21 days, goes back to pending, and no client uses it. A
+later pass places it again at the same layer.
 
 ## Keep it running
 
-- **Updates.** `git pull`, then `docker compose pull` and `docker compose up -d`.
+- **Updates.** `git pull`, then `docker compose pull` (or `docker compose
+  build`) and `docker compose up -d`.
 - **A new address.** A new IPv4 address, name, port, class, or role makes a
   new descriptor. The relay signs it at its next start. Run `join` again,
   and put the new block in a comment on your request. Until the signer has
@@ -103,6 +117,23 @@ manifest.
   group 10000, and mode 0640 for the key. The relay starts again when the
   files change.
 - **Stop.** `docker compose down`, and tell the owner on your request.
+
+## The image on Kubernetes
+
+The chart takes `ghcr.io/alumiia-labs/umbra-relay` with the version of the
+chart as its tag. When no image of this version is published, the pod
+stays in `ImagePullBackOff`. Then build the image on a machine with Docker
+and the architecture of the node, and import it on the node. On k3s:
+
+```sh
+version=$(sed -n 's/^appVersion: "\(.*\)"$/\1/p' deploy/helm/umbra-relay/Chart.yaml)
+docker build --target relay -t "ghcr.io/alumiia-labs/umbra-relay:$version" .
+docker save "ghcr.io/alumiia-labs/umbra-relay:$version" | ssh <node> sudo k3s ctr images import -
+```
+
+The pull policy of the chart is `IfNotPresent`, thus the node uses the
+imported image. Another cluster reads the image from a registry: push it
+there, and set `image.repository`.
 
 ## A port below 1024
 

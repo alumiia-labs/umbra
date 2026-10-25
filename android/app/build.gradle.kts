@@ -1,4 +1,9 @@
+import com.android.build.api.artifact.SingleArtifact
+import com.android.build.api.variant.BuiltArtifactsLoader
+import java.io.File
 import java.util.Properties
+import javax.inject.Inject
+import org.gradle.process.ExecOperations
 
 plugins {
     alias(libs.plugins.android.application)
@@ -15,7 +20,7 @@ if (file("google-services.json").exists()) {
 // The semantic version of the app, the same as the Rust workspace and the
 // specification. The version code grows with each one: major, minor, then
 // patch, three digits each.
-val appVersion = "0.45.1"
+val appVersion = "0.46.0"
 val (versionMajor, versionMinor, versionPatch) = appVersion.split(".").map(String::toInt)
 
 // The network file of the release, which scripts/release-network.sh writes
@@ -199,6 +204,52 @@ val checkReleaseNetwork = tasks.register("checkReleaseNetwork") {
 
 tasks.matching { it.name == "preReleaseBuild" }.configureEach { dependsOn(checkReleaseNetwork) }
 
+// IMP-022 of Part 14 §14.6.2: scripts/apkcheck.sh checks each APK of a
+// release after its build, and a fault ends the build.
+abstract class CheckApk : DefaultTask() {
+    @get:InputFiles
+    abstract val apks: DirectoryProperty
+
+    @get:Internal
+    abstract val loader: Property<BuiltArtifactsLoader>
+
+    @get:InputFile
+    abstract val script: RegularFileProperty
+
+    @get:Input
+    abstract val bash: Property<String>
+
+    /** The SDK that the script takes its zipalign from. */
+    @get:Internal
+    abstract val sdk: DirectoryProperty
+
+    @get:Inject
+    abstract val execOperations: ExecOperations
+
+    @TaskAction
+    fun check() {
+        val built = loader.get().load(apks.get())
+            ?: throw GradleException("No APK in ${apks.get().asFile}")
+
+        for (apk in built.elements) {
+            execOperations.exec {
+                environment("ANDROID_HOME", sdk.get().asFile.absolutePath)
+                commandLine(bash.get(), script.get().asFile.absolutePath, apk.outputFile)
+            }
+        }
+    }
+}
+
+// The bash that runs a script of the repository. On Windows it is the one of
+// Git for Windows: the bash of System32 starts WSL, which reads no Windows
+// path. -Pumbra.bash names another one.
+val scriptBash = (project.findProperty("umbra.bash") as String?) ?: run {
+    val isWindows = System.getProperty("os.name").startsWith("Windows")
+    val roots = listOfNotNull(System.getenv("ProgramFiles"), System.getenv("LOCALAPPDATA")?.let { "$it\\Programs" })
+    val gitBash = roots.map { File(it, "Git\\bin\\bash.exe") }.firstOrNull { it.isFile }
+    if (isWindows && gitBash != null) gitBash.absolutePath else "bash"
+}
+
 // The debug build trusts the test authority of the repository and dials the
 // network of scripts/devnet.sh. The release build holds neither.
 abstract class CopyTestAuthority : DefaultTask() {
@@ -249,6 +300,19 @@ androidComponents {
             copyTestAuthority,
             CopyTestAuthority::output,
         )
+    }
+
+    val sdkDirectory = sdkComponents.sdkDirectory
+    onVariants(selector().withBuildType("release")) { variant ->
+        val title = variant.name.replaceFirstChar { it.uppercaseChar() }
+        val checkApk = tasks.register<CheckApk>("check${title}Apk") {
+            apks.set(variant.artifacts.get(SingleArtifact.APK))
+            loader.set(variant.artifacts.getBuiltArtifactsLoader())
+            script.set(rootProject.layout.projectDirectory.file("../scripts/apkcheck.sh"))
+            bash.set(scriptBash)
+            sdk.set(sdkDirectory)
+        }
+        tasks.matching { it.name == "assemble$title" }.configureEach { finalizedBy(checkApk) }
     }
 }
 

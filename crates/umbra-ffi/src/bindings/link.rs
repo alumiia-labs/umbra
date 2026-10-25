@@ -653,7 +653,9 @@ impl Inner {
             | TransferUpdate::Failed { tag }
             | TransferUpdate::Interrupted { tag }
             | TransferUpdate::Gone { tag } => *tag,
-            TransferUpdate::Faults(_) | TransferUpdate::Erased { .. } => return Some(update),
+            TransferUpdate::Faults(_)
+            | TransferUpdate::Erased { .. }
+            | TransferUpdate::Chains(_) => return Some(update),
         };
 
         if !matches!(
@@ -1356,9 +1358,10 @@ impl Handle {
     }
 
     /// Whether this device owns the channels of the set, thus whether it
-    /// can offer a link (`DEV-287`).
+    /// can offer a link (`DEV-287`). A row that does not read keeps no
+    /// store closed (`IMP-188`).
     pub fn owns_channels(&self) -> Result<bool, FfiError> {
-        Ok(locked(&self.inner).client.owns_channels()?)
+        Ok(locked(&self.inner).client.owns_channels_shown()?)
     }
 
     /// Each hole in the synced history, which the view shows and does not

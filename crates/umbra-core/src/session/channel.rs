@@ -770,6 +770,24 @@ impl PairwiseChannel {
         Ok(writer.finish())
     }
 
+    /// The `RecipientId` of each inbound queue in a stored channel: the
+    /// current one, and the one that a rotation replaced. It reads no
+    /// ratchet.
+    pub fn stored_inbounds(bytes: &[u8]) -> Result<Vec<[u8; 32]>, Error> {
+        let mut reader = Reader::new(bytes);
+        let version = reader.u8()?;
+        if !matches!(version, 0x01 | 0x02 | STORED_VERSION) {
+            return Err(Error::Malformed);
+        }
+
+        Outbound::restore(&mut reader)?;
+        let mut queues = alloc::vec![*Inbound::restore(&mut reader)?.recipient_id()];
+        if version != 0x01 && reader.u8()? == 1 {
+            queues.push(*Inbound::restore(&mut reader)?.recipient_id());
+        }
+        Ok(queues)
+    }
+
     /// A channel over a ratchet that the handshake of Part 5 §5.4 made.
     pub fn new(ratchet: Ratchet, outbound: Outbound, inbound: Inbound) -> Self {
         PairwiseChannel {

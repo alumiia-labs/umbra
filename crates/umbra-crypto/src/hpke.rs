@@ -13,8 +13,8 @@ use chacha20poly1305::{
     aead::{AeadInOut, KeyInit},
     ChaCha20Poly1305, Nonce, Tag,
 };
-use hkdf::SimpleHkdf;
-use hmac::digest::{common::BlockSizeUser, Digest, OutputSizeUser};
+use hkdf::Hkdf;
+use hmac::{digest::OutputSizeUser, EagerHash};
 use rand_core::CryptoRng;
 use sha3::Sha3_256;
 use zeroize::{Zeroize, Zeroizing};
@@ -70,8 +70,10 @@ impl KemSuite for UmbraKem {
     }
 }
 
-/// The hash bound of a KDF.
-pub trait KdfHash: Digest + BlockSizeUser + Clone {
+/// The hash bound of a KDF. A hash with a block core gives an HMAC that
+/// holds two hash states, which wipe at a drop, and no copy of the padded
+/// key, which `SimpleHmac` holds with no wipe.
+pub trait KdfHash: EagerHash {
     /// The kdf_id of the suite id.
     const KDF_ID: u16;
 }
@@ -115,7 +117,7 @@ fn labeled_extract<H: KdfHash>(suite: &[u8], salt: &[u8], label: &[u8], ikm: &[u
     labeled.extend_from_slice(label);
     labeled.extend_from_slice(ikm);
 
-    let (mut prk, _) = SimpleHkdf::<H>::extract(Some(salt), &labeled);
+    let (mut prk, _) = Hkdf::<H>::extract(Some(salt), &labeled);
     let out = prk.to_vec();
     prk.zeroize();
     out
@@ -130,7 +132,7 @@ fn labeled_expand<H: KdfHash>(
     out: &mut [u8],
 ) -> Result<(), Error> {
     let len = u16::try_from(out.len()).map_err(|_| Error::Length)?;
-    let kdf = SimpleHkdf::<H>::from_prk(prk).map_err(|_| Error::Length)?;
+    let kdf = Hkdf::<H>::from_prk(prk).map_err(|_| Error::Length)?;
     kdf.expand_multi_info(&[&len.to_be_bytes(), b"HPKE-v1", suite, label, info], out)
         .map_err(|_| Error::Length)
 }

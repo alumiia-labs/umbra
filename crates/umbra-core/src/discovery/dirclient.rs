@@ -293,12 +293,21 @@ pub fn parse_head(body: &[u8]) -> Result<(Vec<u8>, Vec<[u8; 32]>), Error> {
 /// The purpose byte of a registration challenge (`DIS-197`).
 pub const REGISTER_PURPOSE: u8 = 0x04;
 
-/// The body of a registration challenge: the label input and the key of the
-/// entry that registers (`DIS-197`). The directory encapsulates to that key.
-pub fn register_challenge_body(label_input: &[u8], entry_pk: &[u8]) -> Result<Vec<u8>, Error> {
+/// The body of a registration challenge: the label input, the key of the
+/// entry that registers (`DIS-197`), and the token that pays for the
+/// challenge (`DIS-203`). The directory encapsulates to that key. A body
+/// with no token is the form of an earlier build.
+pub fn register_challenge_body(
+    label_input: &[u8],
+    entry_pk: &[u8],
+    token: Option<&[u8]>,
+) -> Result<Vec<u8>, Error> {
     let mut body = vec![REGISTER_PURPOSE];
     put_var16(&mut body, label_input)?;
     body.extend_from_slice(entry_pk);
+    if let Some(token) = token {
+        body.extend_from_slice(token);
+    }
     Ok(body)
 }
 

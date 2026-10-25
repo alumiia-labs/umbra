@@ -297,6 +297,19 @@ impl PrefixTree {
         self.leaves.contains_key(index)
     }
 
+    /// Whether the last seal ran under `nonce`, with no leaf after it.
+    pub(crate) fn is_sealed(&self, nonce: &[u8; 32]) -> bool {
+        self.cache_nonce.as_ref() == Some(nonce)
+    }
+
+    /// The same leaves with no cache of a seal.
+    pub(crate) fn leaves_only(&self) -> Self {
+        PrefixTree {
+            leaves: self.leaves.clone(),
+            ..PrefixTree::default()
+        }
+    }
+
     fn sorted(&self) -> Vec<([u8; 32], [u8; 32])> {
         self.leaves.iter().map(|(i, c)| (*i, *c)).collect()
     }

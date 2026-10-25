@@ -224,11 +224,13 @@ private fun fit(text: String, bytes: Int): String {
 /**
  * A poll in its bubble: the question, each option with its share, and the
  * count that this device holds. A group has no order across senders, thus
- * the count is the local view and the bubble says so (`GRP-148`).
+ * the count is the local view and the bubble says so (`GRP-148`). Each
+ * member rejects the vote of an observer (`GRP-425`), thus `mayVote` is
+ * false for one.
  */
 @Composable
-fun PollContent(line: Line, poll: FfiPoll, modifier: Modifier = Modifier) {
-    val canVote = !poll.closed && !line.info.deleted
+fun PollContent(line: Line, poll: FfiPoll, modifier: Modifier = Modifier, mayVote: Boolean = true) {
+    val canVote = mayVote && !poll.closed && !line.info.deleted
     val top = poll.counts.maxOrNull()?.takeIf { it > 0u } ?: 1u
     val chosen = poll.mine.map { it.toUByte() }
 

@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 9: Discovery, Handles, and Key Transparency
 
 **Status:** Draft
-**Version:** 0.45.1
-**Date:** 2026-10-22
+**Version:** 0.46.0
+**Date:** 2026-10-23
 
 ---
 
@@ -612,14 +612,35 @@ auditor holds the intent of the holder.
     action.
 
     The check is one lookup of §9.4 for each published label at each head.
-    The token or the proof of work of §9.4.1 pays for it. Part 3 §3.12 does not
-    count it, because a published label is an opt-in surface.
+    Part 3 §3.12 does not count it, because a published label is an opt-in
+    surface. **[DIS-204]** A client SHOULD hold the search key of each label
+    that it publishes, for as long as it holds the VOPRF key of the
+    directory. Its check then sends the lookup alone, and the token or the
+    proof of work of §9.4.1 pays for the first evaluation alone. The output
+    of the VOPRF for one input under one key does not change.
+
+    **[DIS-205]** A client MUST keep a registration or a tombstone of its
+    own in its store, with a mark, before the request leaves. The mark names
+    a version that the client published under `DIS-138`. At its upkeep the
+    client settles each mark against the log:
+
+    - A registration that the log shows holds. A registration that the log
+      does not show after two epochs did not reach the directory, and its
+      entry leaves the store with its rendezvous queue.
+    - A tombstone at the version after the held one retires the entry.
+      While the log shows the held version, the client sends the tombstone
+      again.
 
     > *Cause.* Without this check, no holder reads its own entry. A directory
     > under an order can then insert a key under a handle. Each stranger
     > reaches the new key, and no alarm fires at the holder. The
     > auditors of §9.5.2 verify the tree and not the intent of a holder, thus
     > the holder is the only monitor of its own label.
+    >
+    > An answer can go missing after the directory took the request. Without
+    > `DIS-205`, the client then holds no entry for a label that the
+    > directory registered for it, or it reads its own tombstone as a
+    > takeover.
 
 **The key-set rotation.**
 
@@ -832,7 +853,9 @@ the same user.
 > circuits that carry no other queue, no handshake record, and no group
 > command. It builds them at a random delay of 20 s to 120 s after the start of
 > a run, and it builds the circuits of the contacts at once. Each rendezvous
-> queue has a notification handle of its own (Part 8 `NTF-043`).
+> queue has a notification handle of its own (Part 8 `NTF-043`). The watch
+> of a locked client in Direct mode starts each session of a rendezvous
+> queue at such a delay too (Part 8 `NTF-142`).
 
 ## 9.7 A key change propagates in each pairwise session, and no root signs it
 
@@ -951,7 +974,8 @@ holds nothing worth a second crawl.
 
 - **[DIS-133]** A client MUST publish a new rendezvous queue for each published
   entry at each `RENDEZVOUS_ROTATE`. **[DIS-134]** The client MUST keep the
-  previous queue for `ROTATE_GRACE` of Part 3 §3.2.6 after the write.
+  previous queue for `ROTATE_GRACE` of Part 3 §3.2.6 after the write. A
+  rotation of Part 7 `DEV-347` ends a queue that is still in its grace.
   **[DIS-135]** The client MUST drain both queues under Part 8 §8.2.6 during
   that period. Thus a stranger that resolved the entry before the write reaches
   the holder, and one queue relay holds the hello count of one period only.
@@ -1148,7 +1172,20 @@ write. `DIS-094`, `DIS-097` and `DIS-100` give the same for an entry. Part 5
   `Challenge` request of purpose `0x04` carries the key, and the directory
   answers it with the version after the challenge. The directory MUST refuse
   a registration without a correct `ans`, and it MUST spend the token only
-  after each other test of the registration passed.
+  after each other test of the registration passed. A token that a
+  challenge spent under `DIS-203` is such a token.
+- **[DIS-203]** A client MUST put the token of a registration in its
+  `Challenge` request of purpose `0x04`. A directory MUST verify that token
+  before it issues the challenge, and it MUST spend the token when it issues
+  the challenge, after each other test of the challenge passed. A
+  registration that answers a challenge that a token paid MUST NOT spend a
+  second token. A directory MUST refuse such a challenge for a label input
+  that a registration cannot take under `DIS-091` or `DIS-169`. A directory
+  MAY bound the count of the paid challenges that wait. At that bound it
+  MUST drop the oldest paid challenge, and it MUST NOT refuse a paid
+  challenge for that count. A directory MAY issue a challenge with no token
+  to a client of an earlier build, under a bound of its own that no paid
+  challenge counts.
 - **[DIS-102]** A directory MUST NOT run the challenge for the tombstone of a
   lapsed lease. The directory publishes that version itself.
 
@@ -1164,6 +1201,16 @@ write. `DIS-094`, `DIS-097` and `DIS-100` give the same for an entry. Part 5
 > holder cannot swap the entry after the answer. A lapsed lease needs no
 > challenge, because the directory writes the tombstone and no other party
 > does.
+>
+> A challenge with no token costs its requester nothing, and it costs the
+> directory one encapsulation and a place of a bound. Without `DIS-203`, a
+> party that asks for some challenges each second holds each place, and no
+> user registers a handle or a link. Under `DIS-203` each place costs a
+> proof of work at `POW_EFFORT_MAX`, and a request with no token holds no
+> place of a paid one. A refusal at the bound of paid challenges still fails
+> closed for each user while a party pays the bound in tokens in each
+> `CHALLENGE_TTL`. A drop of the oldest challenge makes that party pay the
+> bound in the seconds between a challenge and its registration.
 
 ## 9.10 The directory service
 
@@ -1204,7 +1251,7 @@ DirResponse {                     // padded to the smallest DIR_RESPONSE_SIZES v
 | `0x02` Lookup | `search_key [64]u8` | `head_len u16`, the newest `SignedTreeHead`, `blob_len u16`, the sealed blob of §9.3.1 or nothing, the `LookupProof` |
 | `0x03` Head | `from_size u64`, 0 for none | `head_len u16`, the newest `SignedTreeHead`, `count u8`, `count` hashes of the consistency proof from `from_size` |
 | `0x04` Register | `token [162]u8`, `label_len u16`, the label input, `entry_len u16`, the entry, `answer [32]u8` of `DIS-197`, and optionally `lease u32` | empty |
-| `0x05` Challenge | `purpose u8` (0x01 renew, 0x02 write, 0x03 blob, 0x04 registration), `label_len u16`, the label input, and for a registration the key of the entry `[1216]u8` | the 1 136 bytes of §9.9.1 or §9.9.3, then `lease_epoch u64` for a renewal or `label_version u32` for a registration |
+| `0x05` Challenge | `purpose u8` (0x01 renew, 0x02 write, 0x03 blob, 0x04 registration), `label_len u16`, the label input, and for a registration the key of the entry `[1216]u8` and the `token [162]u8` of `DIS-203` | the 1 136 bytes of §9.9.1 or §9.9.3, then `lease_epoch u64` for a renewal or `label_version u32` for a registration |
 | `0x06` Write | `label_len u16`, the label input, `answer [32]u8`, `entry_len u16`, the entry | empty |
 | `0x07` Renew | `label_len u16`, the label input, `answer [32]u8` | empty |
 | `0x08` Blob | `label_len u16`, the label input, `answer [32]u8`, `blob_len u16`, the sealed blob of §9.3.1 or nothing | empty |
@@ -1241,9 +1288,26 @@ lookup hides it.
   second request with that element gains nothing, because it gets the same
   element back.
 - **[DIS-200]** A directory MUST hold the seed of each solution that it
-  took for this epoch and the one before it, and it MUST refuse a solution
-  whose seed it holds before it verifies that solution. A second request
-  then costs the directory no Equi-X check, no evaluation, and no proof.
+  took for this epoch and the one before it, under the bound of `DIS-202`,
+  and it MUST refuse a solution whose seed it holds before it verifies that
+  solution. A second request then costs the directory no Equi-X check, no
+  evaluation, and no proof.
+- **[DIS-202]** A directory MUST NOT refuse a lookup for the count of the
+  seeds that it holds. A directory MAY bound that count, and at its bound it
+  MUST drop a seed that it picks at random from the seeds that it holds.
+
+> *Cause.* A refusal at a count fails closed, and §9.4.1 forbids that. A
+> party that pays for enough solutions would stop each lookup, each
+> registration, and each self-check of `DIS-137` until the epoch ends. A seed
+> that the bound drops serves one more evaluation of its blinded element,
+> and that evaluation shows nothing new. A drop in a fixed order lets a party
+> with one solution more than the bound send its solutions again in that
+> order, and each one passes with no new proof of work. A random drop hides
+> which of its seeds is free. The party then sends requests that the
+> directory refuses before the Equi-X check, and only the share of its
+> solutions that the directory does not hold passes. A large bound keeps
+> that share low.
+
 - **[DIS-166]** A directory MUST stage a registration, a write, and a renewal
   for the next epoch of the log, and a client MUST read its own version under
   `DIS-137` at the first head after it. **[DIS-167]** A directory MUST close an

@@ -201,8 +201,11 @@ object Modes {
             NotifyMode.Periodic -> {
                 // NTF-153: the clock of the NDR wakes the device, thus no
                 // timer, no socket, and no poll. A locked client watches at
-                // each tick, thus its queues bind for the watch.
+                // each tick, thus its queues bind for the watch. The token
+                // of Instant mode leaves first, or a queue binds under its
+                // handle (`NTF-143`).
                 cancelClock(app)
+                Core.setFcmToken(null)
                 Core.setWatch(true)
                 Work.getInstance(app).cancelUniqueWork(Poll.NAME)
                 Push.opened(app)

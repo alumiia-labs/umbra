@@ -1,3 +1,7 @@
 allowBuilds:
   esbuild: true
   workerd: true
+# miniflare pins undici 7.29.1, which GHSA-xjj6-f33q-929c and two moderate
+# advisories name. Remove this line when miniflare takes 7.30.1 or later.
+overrides:
+  undici: 7.30.1

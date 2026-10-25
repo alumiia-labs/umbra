@@ -320,8 +320,7 @@ object Files {
                 muxer.stop()
 
                 val bytes = Os.fstat(memory).st_size
-                blankPlatformVersion(memory, bytes)
-                blankTimes(memory, bytes)
+                blankMoov(memory, bytes)
                 if (bytes > MAX_FILE_SIZE) return -1
 
                 val (shownW, shownH) = if (rotation % 180 == 0) width to height else height to width
@@ -401,8 +400,7 @@ object Files {
             val bytes = Os.fstat(memory).st_size
             if (bytes == 0L || bytes > MAX_FILE_SIZE) return -1
 
-            blankPlatformVersion(memory, bytes)
-            blankTimes(memory, bytes)
+            blankMoov(memory, bytes)
 
             val seconds = ((micros + 500_000) / 1_000_000).coerceIn(1, 65_535)
             Os.lseek(memory, 0, android.system.OsConstants.SEEK_SET)
@@ -430,12 +428,12 @@ object Files {
     }
 
     /**
-     * The muxer of the platform writes the time of the encode into the
-     * header of the file, of each track, and of each medium: `mvhd`,
-     * `tkhd`, and `mdhd` in `moov`. Each such time becomes zero, thus the
-     * file names no time (`ATT-155`).
+     * The muxer of the platform writes the time of the encode and the
+     * version of the system into `moov`. The box sits at the start of a
+     * short file and at the end of a long one, thus the walk of the top
+     * boxes finds it (`ATT-155`).
      */
-    private fun blankTimes(memory: java.io.FileDescriptor, size: Long) {
+    private fun blankMoov(memory: java.io.FileDescriptor, size: Long) {
         var at = 0L
         val header = ByteArray(16)
 
@@ -459,6 +457,7 @@ object Files {
                 val moov = ByteArray(boxSize.toInt())
                 if (!readFully(memory, moov, 0, moov.size, at)) return
                 blankTimesIn(moov, headerSize, moov.size)
+                blankPlatformVersion(moov)
                 Os.pwrite(memory, moov, 0, moov.size, at)
                 return
             }
@@ -467,7 +466,10 @@ object Files {
         }
     }
 
-    /** Zeroes the times of each `mvhd`, `tkhd`, and `mdhd` in a run of boxes. */
+    /**
+     * Zeroes the times of each `mvhd`, `tkhd`, and `mdhd` in a run of boxes:
+     * the header of the file, of each track, and of each medium.
+     */
     private fun blankTimesIn(bytes: ByteArray, from: Int, to: Int) {
         var at = from
 
@@ -504,41 +506,30 @@ object Files {
 
     /**
      * The muxer of the platform writes the key `com.android.version` with
-     * the version of the system into the file. That value names the device,
-     * thus it becomes zeros of the same length, and the file keeps its
-     * structure (`ATT-155`). The metadata sits in the `moov` box at the end.
+     * the version of the system into the metadata of `moov`. That value
+     * names the device, thus it becomes zeros of the same length, and the
+     * file keeps its structure (`ATT-155`).
      */
-    private fun blankPlatformVersion(memory: java.io.FileDescriptor, size: Long) {
+    private fun blankPlatformVersion(moov: ByteArray) {
         val version = Build.VERSION.RELEASE.toByteArray(Charsets.US_ASCII)
         if (version.isEmpty()) return
 
-        val span = minOf(size, 1L shl 20).toInt()
-        val start = size - span
-        val tail = ByteArray(span)
-        var read = 0
-        while (read < span) {
-            val count = Os.pread(memory, tail, read, span - read, start + read)
-            if (count <= 0) return
-            read += count
-        }
-
         val key = "com.android.version".toByteArray(Charsets.US_ASCII)
-        if (indexOf(tail, key, 0) < 0) return
+        if (indexOf(moov, key, 0) < 0) return
 
-        val list = indexOf(tail, "ilst".toByteArray(Charsets.US_ASCII), 0)
+        val list = indexOf(moov, "ilst".toByteArray(Charsets.US_ASCII), 0)
         if (list < 0) return
 
         // A `data` atom of a UTF-8 value: the type 1, the locale 0, then the text.
         val header = "data".toByteArray(Charsets.US_ASCII) + byteArrayOf(0, 0, 0, 1, 0, 0, 0, 0)
-        var at = indexOf(tail, header, list)
+        var at = indexOf(moov, header, list)
         while (at >= 0) {
             val value = at + header.size
-            if (tail.copyOfRange(value, minOf(value + version.size, tail.size)).contentEquals(version)) {
-                val zeros = ByteArray(version.size) { '0'.code.toByte() }
-                Os.pwrite(memory, zeros, 0, zeros.size, start + value)
+            if (moov.copyOfRange(value, minOf(value + version.size, moov.size)).contentEquals(version)) {
+                moov.fill('0'.code.toByte(), value, value + version.size)
                 return
             }
-            at = indexOf(tail, header, at + 1)
+            at = indexOf(moov, header, at + 1)
         }
     }
 
@@ -942,7 +933,13 @@ fun VideoScreen(line: Line, onBack: () -> Unit) {
                 player.setDataSource(data)
                 player.setOnPreparedListener {
                     length = it.duration.coerceAtLeast(1).toFloat()
-                    if (it.videoHeight > 0) ratio = it.videoWidth.toFloat() / it.videoHeight
+
+                    // The container of a peer can give a display width of 0,
+                    // and aspectRatio throws on a ratio that is not positive.
+                    val shownW = it.videoWidth
+                    val shownH = it.videoHeight
+                    if (shownW > 0 && shownH > 0) ratio = (shownW.toFloat() / shownH).coerceIn(0.25f, 4f)
+
                     isReady = true
                     it.start()
                     isPlaying = true
@@ -1141,7 +1138,9 @@ fun MediaScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
     var lines by remember(chat.conversation) { mutableStateOf<List<Line>?>(null) }
     LaunchedEffect(chat.conversation, Core.revision) {
         Core.load(chat.conversation) { loaded ->
-            lines = loaded.filter { it.info.file != null && !it.info.deleted }.reversed()
+            // Part 11 §11.9.6: a hidden file stays out of each view but the
+            // tap in its conversation.
+            lines = loaded.filter { it.info.file != null && !it.info.deleted && it.info.moderation != MOD_HIDE }.reversed()
         }
     }
 
@@ -1234,7 +1233,7 @@ private fun MediaCell(line: Line, modifier: Modifier, onOpen: () -> Unit) {
     val image = when {
         !isHeld -> if (file.hasPreview) Core.preview(line) else null
         isVideo -> Core.frame(line)
-        else -> Core.image(line)
+        else -> Core.image(line, isCell = true)
     }
 
     Box(

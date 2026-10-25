@@ -1544,6 +1544,14 @@ fn two_apps_take_their_network_from_a_signed_manifest() {
         );
     }
 
+    // Part 3 §3.10: before a run, the kept manifest names the host of each
+    // stored pin. A store with no pin names none.
+    assert_eq!(
+        alice.ingress_hosts(manifest.clone()).unwrap(),
+        ["localhost", "localhost"]
+    );
+    assert!(bob.ingress_hosts(manifest.clone()).unwrap().is_empty());
+
     // The first pin of Dave refuses the dial. The next run takes the second
     // pin, and the client comes online (Part 10 §10.6.1).
     let dave = launch(&directory, "dave.db", 4);
@@ -1696,6 +1704,8 @@ fn a_network_of_one_operator_carries_a_contact_while_the_directory_is_provisiona
     assert!(connection.standby.is_some());
     assert_eq!(connection.one_operator.len(), connection.circuits.len());
     assert!(connection.one_operator.iter().all(|shared| *shared));
+    // NET-201: each circuit names whether two of its hops share a bloc.
+    assert_eq!(connection.one_bloc.len(), connection.circuits.len());
     alice.disconnect();
     bob.disconnect();
 
@@ -1884,14 +1894,15 @@ fn the_authority_tool_holds_its_report_queue_in_a_network_of_one_operator() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
-/// Waits for the end of one transfer, and drops each progress update.
+/// Waits for the end of one transfer, and drops each progress update and
+/// each report of the chains of the task.
 fn transfer_end(
     updates: &mut tokio::sync::mpsc::UnboundedReceiver<TransferUpdate>,
 ) -> TransferUpdate {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(60) {
         match updates.try_recv() {
-            Ok(TransferUpdate::Progress { .. }) => {}
+            Ok(TransferUpdate::Progress { .. } | TransferUpdate::Chains(_)) => {}
             Ok(end) => return end,
             Err(_) => std::thread::sleep(Duration::from_millis(20)),
         }
@@ -1985,6 +1996,7 @@ fn a_file_goes_through_the_relays_of_a_signed_network() {
             guard.clone(),
             tls.clone(),
             holders.clone(),
+            std::sync::Arc::default(),
             std::sync::Arc::default(),
             task_commands,
             task_updates,
@@ -2204,6 +2216,8 @@ fn group_update(updates: &mut tokio::sync::mpsc::UnboundedReceiver<GroupUpdate>)
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(60) {
         match updates.try_recv() {
+            // The chains of the task go to the other nodes of a client.
+            Ok(GroupUpdate::Chains(_)) => {}
             Ok(update) => return update,
             Err(_) => std::thread::sleep(Duration::from_millis(20)),
         }
@@ -2383,7 +2397,9 @@ fn a_contact_that_reset_its_identity_joins_a_group_and_reads_it() {
     wait_for_contact(&bob);
 
     // DEV-263: Bob resets, and his run starts again under the new root.
-    bob.clone().reset_identity().unwrap();
+    bob.clone()
+        .reset_identity(Arc::new(View::default()))
+        .unwrap();
     bob.disconnect();
     bob.clone().connect(networks[1].clone()).unwrap();
 
@@ -2439,7 +2455,10 @@ fn a_contact_that_reset_its_identity_joins_a_group_and_reads_it() {
 
     // DEV-263: a reset of a member re-keys the group that it holds, and the
     // group carries on in both directions.
-    let counts = bob.clone().reset_identity().unwrap();
+    let counts = bob
+        .clone()
+        .reset_identity(Arc::new(View::default()))
+        .unwrap();
     assert_eq!(counts.groups, 1);
     bob.disconnect();
     bob.clone().connect(networks[1].clone()).unwrap();
@@ -2788,7 +2807,6 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
     };
     let add = creator.add_object(&join_record).unwrap();
     let add_control = umbra_wire::group::control::GroupControl::parse(&add).unwrap();
-    let add_hash = add_control.epoch_hash();
     assert_eq!(
         creator.apply_control(&add_control, 0, now).unwrap(),
         Applied::Added(1)
@@ -2799,7 +2817,7 @@ fn two_members_talk_in_a_group_over_the_relays_of_a_signed_network() {
         umbra_wire::group::control::GroupInvitation::parse(admit_control.payload).unwrap();
     let snapshot_bytes = creator.snapshot(&[]).unwrap();
     let snapshot = umbra_wire::group::control::RosterSnapshot::parse(&snapshot_bytes).unwrap();
-    let admitted = accept_admit(&invitation, &snapshot, &add_hash, &creator_pk, now).unwrap();
+    let admitted = accept_admit(&invitation, &snapshot, &creator_pk, now).unwrap();
     let mut member = Group::joined(admitted, &joiner.seed).unwrap();
 
     // One message of the creator goes to each replica (`GRP-194`).
@@ -3107,6 +3125,7 @@ fn update_name(update: &GroupUpdate) -> &'static str {
         GroupUpdate::Reset => "reset",
         GroupUpdate::Ended => "ended",
         GroupUpdate::Faults(_) => "faults",
+        GroupUpdate::Chains(_) => "chains",
     }
 }
 

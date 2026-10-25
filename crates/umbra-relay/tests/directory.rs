@@ -207,8 +207,10 @@ async fn a_token_registers_a_handle_that_a_lookup_reads_under_a_signed_head() {
     let used = entry.encode(&mut encoded).unwrap();
     encoded.truncate(used);
 
-    // DIS-197: the registration challenge proves the key of the entry.
-    let body = dirclient::register_challenge_body(input, &hk.public().to_bytes()).unwrap();
+    // DIS-197: the registration challenge proves the key of the entry, and
+    // the token pays for it (DIS-203).
+    let body =
+        dirclient::register_challenge_body(input, &hk.public().to_bytes(), Some(&token)).unwrap();
     let challenge = client.send(Kind::Challenge, &body).await.unwrap();
     let (challenge, purpose) = dirclient::parse_register_challenge(&challenge).unwrap();
 

@@ -101,7 +101,7 @@ pub enum Taken {
     /// A sync acknowledgment of the peer. A resend starts (`DEV-071`).
     Acknowledged,
     /// A control record that another module applies: a roster epoch, an
-    /// ownership claim, a catch-up descriptor, or a seed update.
+    /// ownership claim, or a catch-up descriptor.
     Control {
         /// The type.
         control_type: ControlType,

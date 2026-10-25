@@ -59,8 +59,8 @@ pub use backup::{BackupUpload, PendingBackup, RestoredBackup, RootWrite};
 pub use catch_up::CatchUp;
 pub use dead::DeadWork;
 pub use devices::{DeviceInfo, REVOCATION_NOTICE_TTL};
-pub use discovery::{ContactRequest, EntryKind, Published, PROFILE_NAME_MAX};
-pub use files::{DownloadJob, ErasureJob, FileExtras, FileInfo, FileState, UploadJob};
+pub use discovery::{ContactRequest, EntryKind, PendingWrite, Published, PROFILE_NAME_MAX};
+pub use files::{DownloadJob, ErasureJob, FileExtras, FileInfo, FileState, OpenUploads, UploadJob};
 use files::{FileQueues, CHUNK_CRED, ERASE_DUE, FILE_DATA, FILE_STATE};
 pub use forward::{ForwardSetting, ForwardSide};
 pub use gossip::{GossipWarning, HeadCheck};
@@ -314,6 +314,9 @@ const REF_ORPHAN_MAX: usize = 4_096;
 /// `DELETE_RATE_LIMIT`: one record of kind `0x05` in this time, in seconds,
 /// for each conversation.
 const DELETE_RATE_LIMIT: u64 = 10;
+/// The messages of one deletion batch of a long history. A batch takes
+/// about twelve rows of each message, and one checkpoint of the log.
+const DELETE_BATCH: usize = 512;
 /// The name of the time of the last deletion request of a conversation,
 /// before its identifier.
 const LAST_DELETE_SETTING: &[u8] = b"last-delete/";
@@ -427,8 +430,8 @@ impl Stamp {
 /// The setting that holds the floor of [`Stamp`].
 const STAMP_FLOOR: &[u8] = b"insertion-stamp";
 /// The row of the local identity that marks a store whose set of tables
-/// carries a MAC (`IDN-193`). The row sits beside the root seed, thus a
-/// party that drops it drops the identity too.
+/// carries a MAC (`IDN-193`). A party that drops it with each MAC row
+/// leaves the root seed, and `IDN-200` finds that store.
 const SET_MARK: &[u8] = b"table-set";
 
 enum State<B: Backend> {
@@ -489,6 +492,9 @@ pub struct Client<B: Backend, E: SecureElement> {
     /// each sync channel (`DEV-229`). A channel takes them once for one
     /// head, thus a copy of an epoch that comes again starts no echo.
     roster_chain_sent: BTreeMap<ConversationId, u64>,
+    /// The conversations that a removal erased, until the bridge of the
+    /// run drops them (`DEV-340`).
+    erased: Vec<ConversationId>,
 }
 
 /// One record for the commit path: of a contact, or of the sync channel.
@@ -820,9 +826,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut store = Store::unlock(backend, store_key)?;
         let row = store.row_id(TableId::LOCAL_IDENTITY, ROOT_KEY);
         let mark = store.row_id(TableId::LOCAL_IDENTITY, SET_MARK);
+        let repaired = store.row_id(SETTINGS, notify::PUSH_REPAIRED_SETTING);
         let mut batch = store.begin();
         batch.put(TableId::LOCAL_IDENTITY, row, None, seed.expose(), rng)?;
         batch.put(TableId::LOCAL_IDENTITY, mark, None, &[1], rng)?;
+
+        // A store of this build holds no push path of an earlier build.
+        // Without the mark, the repair at its first unlock would drop each
+        // binding of its first run.
+        batch.put(SETTINGS, repaired, None, &[1], rng)?;
         batch.commit()?;
 
         let mut client = Client {
@@ -848,6 +860,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             rotation_asked: 0,
             rotation_guarded: BTreeSet::new(),
             roster_chain_sent: BTreeMap::new(),
+            erased: Vec::new(),
             files: FileQueues::default(),
             groups: groups::GroupQueues::default(),
             auto_lock: AutoLock::new(now),
@@ -882,6 +895,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             rotation_asked: 0,
             rotation_guarded: BTreeSet::new(),
             roster_chain_sent: BTreeMap::new(),
+            erased: Vec::new(),
             files: FileQueues::default(),
             groups: groups::GroupQueues::default(),
             auto_lock: AutoLock::new(now),
@@ -906,15 +920,23 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// locked. A table whose MAC does not match gives an
     /// [`Event::IntegrityFault`], and the client does not continue
     /// silently (`IDN-039`, `IDN-040`).
+    ///
+    /// The result is success only when the client is unlocked after the
+    /// call (`IMP-188`). An open client checks the passphrase too.
     pub fn unlock(&mut self, passphrase: &[u16], now: u64) -> Result<(), Error> {
-        let State::Locked(_) = self.state else {
-            return Ok(());
-        };
-
         let store_key = self
             .header
             .unwrap(&passphrase_bytes(passphrase)?, &self.element)
             .map_err(|_| Error::WrongPassphrase)?;
+        match self.state {
+            State::Locked(_) => {}
+            State::Unlocked(_) => {
+                self.drop_stale_lock();
+                self.auto_lock.touch(now);
+                return Ok(());
+            }
+            State::Closed => return Err(Error::Closed),
+        }
         let State::Locked(backend) = core::mem::replace(&mut self.state, State::Closed) else {
             return Err(Error::Closed);
         };
@@ -935,6 +957,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let mark = store.row_id(TableId::LOCAL_IDENTITY, SET_MARK);
             let set_marked = store.get(TableId::LOCAL_IDENTITY, &mark)?.is_some();
             if set_marked && !store.indexed() {
+                return Err(Error::Integrity);
+            }
+
+            // IDN-200: the commit of the root seed wrote a table MAC, thus
+            // a store with no table MAC lost each one, and its mark too.
+            if store.table_ids().is_empty() {
                 return Err(Error::Integrity);
             }
 
@@ -970,14 +998,59 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             set_marked,
         }));
 
-        // Each record that waited for the send path at the lock waits again.
-        self.requeue_waiting()?;
-        self.requeue_transfers()?;
-        let seconds = self.auto_lock_seconds()?;
-        self.apply_auto_lock(seconds);
+        // IMP-188: a step below that fails leaves no key in RAM, thus the
+        // platform, which shows the lock view at the fault, shows no open
+        // store under it.
+        if let Err(error) = self.resume_queues() {
+            self.drop_key();
+            return Err(error);
+        }
+
+        self.drop_stale_lock();
         self.auto_lock.touch(now);
 
         Ok(())
+    }
+
+    /// The steps of an unlock after the store opened: each record that
+    /// waited for the send path at the lock waits again, the auto-lock
+    /// takes its setting, and each other setting that the platform shows
+    /// with the open store reads.
+    ///
+    /// The passphrase and the table MACs passed, thus a row that does not
+    /// read here is a fault of that row. It stops no step and no unlock,
+    /// and the user learns of it one time (`IDN-039`, `IMP-188`). An unlock
+    /// that failed for it would fail at each try, and the store would not
+    /// open again. Only a fault of the storage gives an error.
+    fn resume_queues(&mut self) -> Result<(), Error> {
+        let waiting = row_fault(self.requeue_rows())?.unwrap_or(false);
+        let transfers = row_fault(self.requeue_transfer_rows())?.unwrap_or(false);
+        let setting = row_fault(self.auto_lock_setting())?;
+        self.apply_auto_lock(setting.unwrap_or(AUTO_LOCK_DEFAULT));
+        let shown = self.shown_settings_read()?;
+        if !waiting || !transfers || setting.is_none() || !shown {
+            self.events.push_back(Event::IntegrityFault);
+        }
+
+        Ok(())
+    }
+
+    /// Whether each setting that the platform reads with the open store,
+    /// other than the auto-lock, reads. A read of one that does not read
+    /// gives the value of no row (`IMP-188`).
+    fn shown_settings_read(&self) -> Result<bool, Error> {
+        let limit = row_fault(self.auto_download_setting())?;
+        let unmetered = row_fault(self.unmetered_setting())?;
+        let owns = row_fault(self.owns_channels())?;
+        let backup = row_fault(self.last_backup_at())?;
+
+        Ok(limit.is_some() && unmetered.is_some() && owns.is_some() && backup.is_some())
+    }
+
+    /// Drops each lock event that waits. The client is open, thus such an
+    /// event would show the lock view over an open store (`IMP-188`).
+    fn drop_stale_lock(&mut self) {
+        self.events.retain(|event| *event != Event::Locked);
     }
 
     /// Moves a store of an earlier build to the current form of its records
@@ -1038,42 +1111,66 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // caller keeps the floor.
         #[cfg(feature = "runtime")]
         let _ = self.keep_stamp(&mut crate::runtime::OsRng);
-        if let State::Unlocked(open) = core::mem::replace(&mut self.state, State::Closed) {
-            self.state = State::Locked(open.store.lock());
 
-            // IMP-126, IMP-127: each queue in RAM leaves with the key, and
-            // its plaintext is wiped. The store holds each record again at
-            // the unlock: the send queue in its rows, and a sync record in
-            // its retained body, which the next run sends again. A sync
-            // acknowledgment or a catch-up descriptor that waited goes at
-            // the next record of its peer. The marks of the records that a
-            // peer handed hold no text, and they stay.
-            for outgoing in &mut self.outgoing {
-                outgoing.app.zeroize();
-            }
-            for send in &mut self.sync_out {
-                send.app.zeroize();
-            }
+        // ATT-204: the chunks of each upload that runs go to the store while
+        // it is open, and their task sends nothing more. drop_key gives the
+        // file queues a new list for the run after the unlock.
+        #[cfg(feature = "runtime")]
+        if self.is_unlocked() {
+            self.keep_open_uploads(&mut crate::runtime::OsRng);
+        }
 
-            self.outgoing.clear();
-            self.sync_out.clear();
-            self.subjects.clear();
-            self.typing_sent.clear();
-            self.held_sends.clear();
-            self.limit_sends.clear();
-            self.slot_sends.clear();
-            self.roster_chain_sent.clear();
-
-            // A file job holds the file in the clear, and a group job an
-            // owner credential, thus both leave the memory with the key.
-            // The store brings them back at the unlock.
-            self.files = FileQueues::default();
-            self.groups = groups::GroupQueues::default();
-
-            // IMP-177: the search index leaves the memory with the key.
-            self.search = search::Search::default();
+        if self.drop_key() {
             self.events.push_back(Event::Locked);
         }
+    }
+
+    /// The lock with no event: `K_store` and each queue leave RAM. The
+    /// result says whether the client was unlocked. A locked client keeps
+    /// its backend.
+    fn drop_key(&mut self) -> bool {
+        if !self.is_unlocked() {
+            return false;
+        }
+        let State::Unlocked(open) = core::mem::replace(&mut self.state, State::Closed) else {
+            return false;
+        };
+        self.state = State::Locked(open.store.lock());
+
+        // IMP-126, IMP-127: each queue in RAM leaves with the key, and its
+        // plaintext is wiped. The store holds each record again at the
+        // unlock: the send queue in its rows, and a sync record in its
+        // retained body, which the next run sends again. A sync
+        // acknowledgment or a catch-up descriptor that waited goes at the
+        // next record of its peer. The marks of the records that a peer
+        // handed hold no text, and they stay.
+        for outgoing in &mut self.outgoing {
+            outgoing.app.zeroize();
+        }
+        for send in &mut self.sync_out {
+            send.app.zeroize();
+        }
+
+        self.outgoing.clear();
+        self.sync_out.clear();
+        self.subjects.clear();
+        self.typing_sent.clear();
+        self.held_sends.clear();
+        self.limit_sends.clear();
+        self.slot_sends.clear();
+        self.roster_chain_sent.clear();
+        self.erased.clear();
+
+        // A file job holds the file in the clear, and a group job an owner
+        // credential, thus both leave the memory with the key. The store
+        // brings them back at the unlock.
+        self.files = FileQueues::default();
+        self.groups = groups::GroupQueues::default();
+
+        // IMP-177: the search index leaves the memory with the key.
+        self.search = search::Search::default();
+
+        true
     }
 
     /// The clock of the platform. An idle client locks itself.
@@ -2483,7 +2580,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             settle(if is_session {
                 self.on_session_key_request(conversation, &body, now_ms, rng)
             } else {
-                self.on_pairwise_key_request(&body, now_ms, rng)
+                self.on_pairwise_key_request(conversation, &body, now_ms, rng)
             });
         }
         for (conversation, body) in supplies {
@@ -2685,7 +2782,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// The idle time of the auto-lock, in seconds. Zero means that the
     /// platform locks when the app leaves the screen. With no stored value
     /// the default of `IMP-119` holds.
+    ///
+    /// A value that does not read takes that default too. The platform
+    /// reads this value before it shows an open store, and the unlock told
+    /// the user of the fault already (`IMP-188`).
     pub fn auto_lock_seconds(&self) -> Result<u64, Error> {
+        Ok(row_fault(self.auto_lock_setting())?.unwrap_or(AUTO_LOCK_DEFAULT))
+    }
+
+    /// The stored idle time of the auto-lock, or an error for a value that
+    /// does not read.
+    fn auto_lock_setting(&self) -> Result<u64, Error> {
         let store = &self.open_ref()?.store;
         let row = store.row_id(SETTINGS, AUTO_LOCK_SETTING);
         let Some(plain) = store.get(SETTINGS, &row)? else {
@@ -2700,7 +2807,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// The largest padded size of a received file whose download starts at
     /// once (`IMP-167`). Zero turns the automatic download off, and
     /// `u64::MAX` downloads each file.
+    ///
+    /// A value that does not read takes the default, as the auto-lock
+    /// does, and the unlock told the user of the fault (`IMP-188`).
     pub fn auto_download_limit(&self) -> Result<u64, Error> {
+        Ok(row_fault(self.auto_download_setting())?.unwrap_or(AUTO_DOWNLOAD_DEFAULT))
+    }
+
+    /// The stored automatic download limit, or an error for a value that
+    /// does not read.
+    fn auto_download_setting(&self) -> Result<u64, Error> {
         let store = &self.open_ref()?.store;
         let row = store.row_id(SETTINGS, AUTO_DOWNLOAD_SETTING);
         let Some(plain) = store.get(SETTINGS, &row)? else {
@@ -2713,8 +2829,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     }
 
     /// Whether the automatic download waits for a network with no cost by
-    /// the byte (`IMP-168`). Off with no stored value.
+    /// the byte (`IMP-168`). Off with no stored value, and off for a value
+    /// that does not read (`IMP-188`).
     pub fn unmetered_only(&self) -> Result<bool, Error> {
+        Ok(row_fault(self.unmetered_setting())?.unwrap_or(false))
+    }
+
+    fn unmetered_setting(&self) -> Result<bool, Error> {
         let store = &self.open_ref()?.store;
         let row = store.row_id(SETTINGS, UNMETERED_ONLY_SETTING);
         Ok(store
@@ -2950,10 +3071,22 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(stored_contact_keys(state, &self.root_identity()?)?)
     }
 
-    /// The 60-digit safety number of a conversation, in groups of five
-    /// (Part 4 §4.5). It needs no network.
-    pub fn safety_number(&self, conversation: ConversationId) -> Result<String, Error> {
+    /// The two keys that a verification compares: the key of this device,
+    /// and the key of the contact. While a key-change notice waits, the key
+    /// of the contact is the new key, thus the user checks that key before
+    /// the answer (`IDN-090`).
+    fn compared_keys(&self, conversation: ConversationId) -> Result<([u8; 32], [u8; 32]), Error> {
         let (own, peer) = self.identity_keys(conversation)?;
+        let peer = self.waiting_key(conversation)?.unwrap_or(peer);
+
+        Ok((own, peer))
+    }
+
+    /// The 60-digit safety number of a conversation, in groups of five
+    /// (Part 4 §4.5), under the key that a verification compares. It needs
+    /// no network.
+    pub fn safety_number(&self, conversation: ConversationId) -> Result<String, Error> {
+        let (own, peer) = self.compared_keys(conversation)?;
         Ok(safety_number(&own, &peer))
     }
 
@@ -3047,7 +3180,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// Compares a safety number that the user scanned or typed with the
     /// number of this device, by its digits alone. A match is a
-    /// verification by the user, and the store takes the state.
+    /// verification by the user, and the store takes the state. While a
+    /// key-change notice waits, the match is for the new key, and it counts
+    /// from the acceptance on (`IDN-175`).
     pub fn verify_by_number<R: CryptoRng + ?Sized>(
         &mut self,
         conversation: ConversationId,
@@ -3056,7 +3191,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         rng: &mut R,
     ) -> Result<bool, Error> {
         let digits = |text: &str| -> Vec<u8> { text.bytes().filter(u8::is_ascii_digit).collect() };
-        let (own, peer) = self.identity_keys(conversation)?;
+        let (own, peer) = self.compared_keys(conversation)?;
         if digits(given) != digits(&safety_number(&own, &peer)) {
             return Ok(false);
         }
@@ -3312,13 +3447,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     }
 
     /// Removes each message of `messages` as [`Client::delete_if_held`]
-    /// does, and drops their copies for the other devices in one pass.
+    /// does, and drops their copies for the other devices in one pass. A
+    /// long history goes in batches of `DELETE_BATCH`, thus it takes one
+    /// commit and one checkpoint for each batch, and not for each message
+    /// (`DEV-337`).
     pub(crate) fn delete_all_held(&mut self, messages: &[MsgRef]) -> Result<(), Error> {
-        for message in messages {
-            match self.remove_message(message, true) {
-                Ok(()) | Err(Error::NotFound) => {}
-                Err(error) => return Err(error),
-            }
+        for part in messages.chunks(DELETE_BATCH) {
+            self.remove_messages(part, true)?;
         }
 
         self.drop_sync_sent_of(messages)
@@ -3342,59 +3477,106 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// The removal of [`Client::delete_for_me`]. `erases` says whether the
     /// chunks of a file that this device uploaded go at their relays too.
     fn remove_message(&mut self, message: &MsgRef, erases: bool) -> Result<(), Error> {
-        self.outgoing.retain(|waiting| waiting.message != *message);
-        self.files.uploads.retain(|job| job.message != *message);
-        self.files.downloads.retain(|job| job.message != *message);
-        let conversation = self.conversation_of_message(message)?;
-        let reactions = self.reaction_rows(message, conversation)?;
-        let votes = self.vote_rows(message, conversation)?;
-        let erasure = if erases {
-            Some(self.file_erasures(message)?)
-        } else {
-            None
-        };
+        if self.remove_messages(core::slice::from_ref(message), erases)? == 0 {
+            return Err(Error::NotFound);
+        }
+
+        Ok(())
+    }
+
+    /// Removes each message of `messages` that the store holds, in one
+    /// batch, and gives their count. A message that a deletion took first
+    /// counts as done.
+    fn remove_messages(&mut self, messages: &[MsgRef], erases: bool) -> Result<usize, Error> {
+        let targets: BTreeSet<RowId> = messages.iter().map(|message| message.0).collect();
+        self.outgoing
+            .retain(|waiting| !targets.contains(&waiting.message.0));
+        self.files
+            .uploads
+            .retain(|job| !targets.contains(&job.message.0));
+        self.files
+            .downloads
+            .retain(|job| !targets.contains(&job.message.0));
+
+        let mut held = Vec::with_capacity(messages.len());
+        let mut conversations = BTreeSet::new();
+        for message in messages {
+            match self.conversation_of_message(message) {
+                Ok(conversation) => {
+                    conversations.insert(conversation);
+                    held.push(*message);
+                }
+                Err(Error::NotFound) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if held.is_empty() {
+            return Ok(0);
+        }
+
+        // One read of the reactions and the votes of a conversation serves
+        // each message of the batch.
+        let mut reactions = Vec::new();
+        let mut votes = Vec::new();
+        for conversation in conversations {
+            reactions.extend(self.reactions_to(&targets, conversation)?);
+            votes.extend(self.votes_on(&targets, conversation)?);
+        }
 
         // ATT-161: a deletion takes the hold, thus the copy of the
         // credentials is due. The end of the history period erases no
         // chunk, and it takes the copy too.
-        let erase_rows = match &erasure {
-            Some(erasure) => erasure.rows(message),
-            None => self.erase_rows(message)?.to_vec(),
-        };
+        let mut erasures = Vec::new();
+        let mut erase_rows = Vec::new();
+        for message in &held {
+            if erases {
+                let erasure = self.file_erasures(message)?;
+                erase_rows.extend(erasure.rows(message));
+                erasures.push((*message, erasure));
+            } else {
+                erase_rows.extend(self.erase_rows(message)?);
+            }
+        }
+
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         for row in reactions {
             batch.delete(REACTION, row);
         }
-        for row in erase_rows {
-            batch.delete(ERASE_DUE, row);
-        }
-
-        batch.delete(TableId::MESSAGE, message.0);
-        batch.delete(OUTBOX, message.0);
-        batch.delete(REVISION, message.0);
-        batch.delete(FAILURE, message.0);
-        batch.delete(timers::DEADLINES, message.0);
-        batch.delete(polls::POLLS, message.0);
-        batch.delete(groups::MENTIONED, message.0);
-        batch.delete(moderation::MODERATED, message.0);
-        batch.delete(group_changes::GROUP_SENDER, message.0);
         for row in votes {
             batch.delete(polls::VOTES, row);
         }
-        for table in [FILE_STATE, FILE_DATA, CHUNK_CRED] {
-            batch.delete(table, message.0);
+        for row in erase_rows {
+            batch.delete(ERASE_DUE, row);
+        }
+        for message in &held {
+            for table in [
+                TableId::MESSAGE,
+                OUTBOX,
+                REVISION,
+                FAILURE,
+                timers::DEADLINES,
+                polls::POLLS,
+                groups::MENTIONED,
+                moderation::MODERATED,
+                group_changes::GROUP_SENDER,
+                FILE_STATE,
+                FILE_DATA,
+                CHUNK_CRED,
+            ] {
+                batch.delete(table, message.0);
+            }
         }
 
         batch.commit()?;
 
         // ATT-161: a deletion of a record with a file that this device
         // uploaded erases each chunk at its relays.
-        if let Some(erasure) = erasure {
-            self.start_erasures(message, erasure);
+        for (message, erasure) in erasures {
+            self.start_erasures(&message, erasure);
         }
 
-        Ok(())
+        Ok(held.len())
     }
 
     /// Removes a message as [`Client::delete_for_me`] does, and takes a row
@@ -3576,12 +3758,22 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         message: &MsgRef,
         conversation: ConversationId,
     ) -> Result<Vec<RowId>, Error> {
+        self.reactions_to(&BTreeSet::from([message.0]), conversation)
+    }
+
+    /// The rows of the reactions in a conversation to each message of
+    /// `targets`.
+    fn reactions_to(
+        &self,
+        targets: &BTreeSet<RowId>,
+        conversation: ConversationId,
+    ) -> Result<Vec<RowId>, Error> {
         let open = self.open_ref()?;
         let mut rows = Vec::new();
         for (row, plain) in open.store.list(REACTION, Some(&conversation.0))? {
             let reference = plain.get(16..32).ok_or(Error::Integrity)?;
             let natural = [conversation.0.as_slice(), reference].concat();
-            if open.store.row_id(TableId::MESSAGE, &natural) == message.0 {
+            if targets.contains(&open.store.row_id(TableId::MESSAGE, &natural)) {
                 rows.push(row);
             }
         }
@@ -3608,6 +3800,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
         // An edit in a group is one group record (Part 7 §7.5.6).
         let is_group = self.is_group(draft.conversation())?;
+        self.refuse_observer(draft.conversation(), AppKind::Edit)?;
         let open = self.open_mut()?;
         let plain = Zeroizing::new(
             open.store
@@ -3745,6 +3938,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .get(MESSAGE_PREFIX..)
             .ok_or(Error::Integrity)?
             .to_vec();
+        if self.is_group(conversation)? {
+            let kind = AppMessage::parse(&app, Channel::Group)?.kind;
+            self.refuse_observer(conversation, kind)?;
+        }
+
         *plain.get_mut(1).ok_or(Error::Integrity)? = Delivery::Queued as u8;
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
@@ -4174,39 +4372,34 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// Puts each record that waits in the store back into the send queue.
     /// A run of the network that ended took records that no relay
     /// accepted, and the next run sends them again under their `msg_id`.
+    ///
+    /// A record that does not read stays in the store, and it holds back no
+    /// other record. The call gives one [`Event::IntegrityFault`] for it
+    /// (`IDN-039`).
     pub fn requeue_waiting(&mut self) -> Result<(), Error> {
+        if !self.requeue_rows()? {
+            self.events.push_back(Event::IntegrityFault);
+        }
+
+        Ok(())
+    }
+
+    /// The work of [`Client::requeue_waiting`], and whether each record
+    /// that waits read.
+    fn requeue_rows(&mut self) -> Result<bool, Error> {
         self.outgoing.clear();
 
         // A new run sends each record that waits when it is ready, and
         // no slot of a run that ended holds one back.
         self.slot_sends.clear();
-        let store = &self.open_ref()?.store;
         let mut waiting_records = Vec::new();
-        for (row, _) in store.list(OUTBOX, None)? {
-            let Some(plain) = store.get(TableId::MESSAGE, &row)? else {
-                continue;
-            };
-
-            let plain = Zeroizing::new(plain);
-            let conversation = conversation_of(&plain)?;
-
-            // A record of a group takes the run of the group queues.
-            if self.is_group(conversation)? {
-                continue;
+        let mut is_sound = true;
+        for (row, _) in self.open_ref()?.store.list(OUTBOX, None)? {
+            match row_fault(self.waiting_record(row))? {
+                Some(Some(record)) => waiting_records.push(record),
+                Some(None) => {}
+                None => is_sound = false,
             }
-
-            let info = info_of(&plain)?;
-            waiting_records.push((
-                info.stored_at_ms,
-                Outgoing {
-                    message: MsgRef(row),
-                    conversation,
-                    app: plain
-                        .get(MESSAGE_PREFIX..)
-                        .ok_or(Error::Integrity)?
-                        .to_vec(),
-                },
-            ));
         }
 
         // The order of the store is the order of a keyed hash.
@@ -4214,7 +4407,37 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         self.outgoing
             .extend(waiting_records.into_iter().map(|(_, record)| record));
 
-        Ok(())
+        Ok(is_sound)
+    }
+
+    /// The record of one row of `OUTBOX` for the send queue, with the time
+    /// of its store. A record that left gives none.
+    fn waiting_record(&self, row: RowId) -> Result<Option<(u64, Outgoing)>, Error> {
+        let store = &self.open_ref()?.store;
+        let Some(plain) = store.get(TableId::MESSAGE, &row)? else {
+            return Ok(None);
+        };
+
+        let plain = Zeroizing::new(plain);
+        let conversation = conversation_of(&plain)?;
+
+        // A record of a group takes the run of the group queues.
+        if self.is_group(conversation)? {
+            return Ok(None);
+        }
+
+        let info = info_of(&plain)?;
+        Ok(Some((
+            info.stored_at_ms,
+            Outgoing {
+                message: MsgRef(row),
+                conversation,
+                app: plain
+                    .get(MESSAGE_PREFIX..)
+                    .ok_or(Error::Integrity)?
+                    .to_vec(),
+            },
+        )))
     }
 
     /// `K_rng_harden` of this store (Part 5 §5.2, Part 14 `IMP-093`). It
@@ -4445,6 +4668,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<MsgRef, Error> {
+        // DEV-340: a contact that a removal erased takes no record, as from
+        // a view that is still open on it.
+        if !is_group && self.is_ended_channel(conversation)? {
+            return Err(Error::NotFound);
+        }
+
         // IDN-025: a conversation with a key change that waits takes no
         // message before the answer of the user.
         if !is_group && self.key_change(conversation)?.is_some() {
@@ -4516,6 +4745,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<MsgRef, Error> {
+        // DEV-340: as in `send_app`.
+        if self.is_ended_channel(conversation)? {
+            return Err(Error::NotFound);
+        }
+        self.refuse_observer(conversation, AppKind::Attachment)?;
+
         // The stored record holds the caption alone until the upload ends,
         // and the body with the descriptor takes its place then.
         let record = AppMessage {
@@ -5267,6 +5502,16 @@ fn conversation_of(plain: &[u8]) -> Result<ConversationId, Error> {
     Ok(ConversationId(bytes))
 }
 
+/// The value of a read, or none for a row that does not read or parse. A
+/// fault of the storage, and each other error, stays an error.
+fn row_fault<T>(read: Result<T, Error>) -> Result<Option<T>, Error> {
+    match read {
+        Ok(value) => Ok(Some(value)),
+        Err(Error::Integrity | Error::Malformed) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 /// The row identifier type of the store, for a platform crate that names a
 /// conversation.
 pub type ConversationRow = RowId;
@@ -5727,6 +5972,128 @@ mod tests {
         client.audit().unwrap();
     }
 
+    /// DEV-337, DEV-340: a removal erases a long history in a few deletion
+    /// batches, with each reaction and each note of the conversation. The
+    /// bridge of the run drops the contact, and an open view sends nothing.
+    #[test]
+    fn a_removal_erases_a_long_history_in_a_few_batches() {
+        use super::{State, TableId};
+        let (mut client, mut rng, contact, conversation) = client_with_contact(334);
+        let mut received: Vec<(ContactId, Vec<u8>)> = (1..=40u8)
+            .map(|n| (contact, record(AppKind::Text, [n; 16], b"held")))
+            .collect();
+        received.push((
+            contact,
+            record(AppKind::Reaction, [41; 16], &reaction_body([3; 16], "👍")),
+        ));
+        client.commit_network(&[], &received, T0, &mut rng).unwrap();
+        client.delivery_gap(conversation, T0, &mut rng).unwrap();
+        assert_eq!(client.messages(conversation).unwrap().len(), 40);
+
+        let deletions = |client: &mut TestClient| {
+            client.lock();
+            let State::Locked(backend) = &client.state else {
+                panic!("the client did not lock");
+            };
+            let count = backend.deletion_batches;
+            client.unlock(&units("correct horse"), 1_000).unwrap();
+            count
+        };
+        let before = deletions(&mut client);
+        client.remove_contact(conversation, &mut rng).unwrap();
+        assert_eq!(client.take_erased(), [conversation]);
+        assert!(client.take_erased().is_empty());
+        let mut draft = client.new_draft(conversation);
+        draft.set_text(&units("late")).unwrap();
+        assert_eq!(
+            client.send_draft(draft, T0 + 1, &mut rng).err(),
+            Some(Error::NotFound)
+        );
+        let taken = deletions(&mut client) - before;
+        assert!(taken <= 4, "{taken} deletion batches");
+
+        let store = &client.open_ref().unwrap().store;
+        for table in 0..=0x58 {
+            let rows = store.list(TableId(table), Some(&conversation.0)).unwrap();
+            assert!(rows.is_empty(), "table {table:#04x}");
+        }
+        client.audit().unwrap();
+    }
+
+    /// DEV-341: a removal that finds no conversation of its subject drops
+    /// each synced record of that subject that waits for its identity
+    /// entry. A record of a contact before its removal in one batch goes
+    /// with the contact.
+    #[test]
+    fn a_removal_drops_each_synced_record_of_its_subject() {
+        use umbra_core::devset::{
+            engine::SyncEngine,
+            sync::{Origin, AUTHOR_PEER, ITEM_CONTACT_REMOVED, SCOPE_PAIRWISE},
+        };
+
+        let held = |client: &TestClient| {
+            client
+                .open_ref()
+                .unwrap()
+                .store
+                .list(super::sync::PAIRWISE_HELD, None)
+                .unwrap()
+                .len()
+        };
+        let (mut client, mut rng, _, conversation) = client_with_contact(423);
+        let (tablet, _) = link_device(&mut client, &mut rng);
+        let own = client.device_identity().unwrap().unwrap().device_id;
+        let channel = ContactId([0x7C; 32]);
+        let mut engine = SyncEngine::new(tablet, &[own]).unwrap();
+        let mut synced = |subject: [u8; 32], msg_id: u8| {
+            let origin = Origin {
+                scope: SCOPE_PAIRWISE,
+                subject,
+                author: AUTHOR_PEER,
+            };
+            let inner = record(AppKind::Text, [msg_id; 16], b"synced");
+            let published = engine.publish(&inner, origin, [msg_id; 16], 0, 20).unwrap();
+            let carried = record(AppKind::DeviceSet, [msg_id; 16], &published.body);
+            let lamport = 1_000 + u64::from(msg_id);
+            let removal = engine
+                .relay_mutable(
+                    ITEM_CONTACT_REMOVED,
+                    &subject,
+                    &[1],
+                    lamport,
+                    tablet,
+                    [msg_id + 1; 16],
+                    10,
+                )
+                .unwrap();
+            let removal = record(AppKind::DeviceSet, [msg_id + 1; 16], &removal.body);
+            (carried, removal)
+        };
+
+        // The record of a subject with no conversation waits, and the
+        // removal of that subject takes it.
+        let unknown = [0x55; 32];
+        let (carried, removal) = synced(unknown, 3);
+        client
+            .commit_network(&[], &[(channel, carried)], T0, &mut rng)
+            .unwrap();
+        assert_eq!(held(&client), 1);
+        client
+            .commit_network(&[], &[(channel, removal)], T0, &mut rng)
+            .unwrap();
+        assert!(client.is_removed_subject(&unknown).unwrap());
+        assert_eq!(held(&client), 0);
+
+        let subject = client.subject_of(conversation).unwrap().unwrap();
+        let (carried, removal) = synced(subject, 5);
+        client
+            .commit_network(&[], &[(channel, carried), (channel, removal)], T0, &mut rng)
+            .unwrap();
+        assert!(client.conversations().unwrap().is_empty());
+        assert!(client.messages(conversation).unwrap().is_empty());
+        client.audit().unwrap();
+    }
+
     #[test]
     fn the_owner_forwards_no_edit_that_it_rejected_and_the_copies_keep_their_order() {
         let (mut client, mut rng, contact, _) = client_with_contact(303);
@@ -6063,6 +6430,48 @@ mod tests {
     }
 
     #[test]
+    fn a_hole_above_the_rate_of_key_requests_shows_one_gap_in_a_day() {
+        use super::NOTE_GAP;
+
+        let (mut client, mut rng, _, conversation) = client_with_contact(424);
+        let rate = umbra_core::group::KEY_REQUEST_RATE as u16;
+        let day = 86_400_000;
+        let gaps = |client: &TestClient| {
+            client
+                .roster_notes(conversation)
+                .unwrap()
+                .iter()
+                .filter(|note| note.kind == NOTE_GAP)
+                .count()
+        };
+        for index in 0..rate {
+            assert!(client
+                .lost_record(conversation, index, T0, &mut rng)
+                .unwrap());
+        }
+        assert_eq!(gaps(&client), 0);
+
+        // WIR-572: a hole above the rate gets no request, and the
+        // conversation shows a gap. Before, the record went with no trace.
+        assert!(!client
+            .lost_record(conversation, rate, T0 + 1_000, &mut rng)
+            .unwrap());
+        assert_eq!(gaps(&client), 1);
+
+        // One gap stands for each such hole of that day.
+        assert!(!client
+            .lost_record(conversation, rate + 1, T0 + 2_000, &mut rng)
+            .unwrap());
+        assert_eq!(gaps(&client), 1);
+
+        // The row of the gap takes no place of the rate, and the requests
+        // go again after the day.
+        assert!(client
+            .lost_record(conversation, rate + 2, T0 + day, &mut rng)
+            .unwrap());
+    }
+
+    #[test]
     fn a_receiver_answers_key_requests_up_to_the_rate_and_one_supply_is_one_note() {
         let (mut client, mut rng, contact, conversation) = client_with_contact(310);
         let rate = umbra_core::group::KEY_REQUEST_RATE as usize;
@@ -6264,6 +6673,103 @@ mod tests {
         client.audit().unwrap();
     }
 
+    #[test]
+    fn a_removal_of_a_device_owes_each_rendezvous_queue_that_it_knew_a_successor() {
+        use super::Published;
+        let (mut client, mut rng, _, _) = client_with_contact(320);
+        let handle = held_handle();
+        let link = Published {
+            id: [6; 16],
+            kind: super::EntryKind::Address,
+            queue: [0x41; 32],
+            ..handle.clone()
+        };
+        client.put_published(&handle, &mut rng).unwrap();
+        client.put_published(&link, &mut rng).unwrap();
+        let (tablet, _) = link_device(&mut client, &mut rng);
+        assert!(client.rendezvous_owed(&mut rng).unwrap().is_empty());
+
+        // DEV-347: the snapshot of the link gave the tablet the reader of
+        // each rendezvous queue, thus each one owes a successor.
+        client.revoke_device(tablet, &mut rng).unwrap();
+        let mut owed = client.rendezvous_owed(&mut rng).unwrap();
+        owed.sort_unstable();
+        assert_eq!(owed, [handle.queue, link.queue]);
+
+        // An entry made after the removal owes nothing.
+        let later = Published {
+            id: [7; 16],
+            queue: [0x42; 32],
+            ..link.clone()
+        };
+        client.put_published(&later, &mut rng).unwrap();
+        assert_eq!(client.rendezvous_owed(&mut rng).unwrap().len(), 2);
+
+        // The handle moves to a new queue, and the link ends: the debt ends
+        // with them, and its row leaves the store.
+        let moved = Published {
+            queue: [0x43; 32],
+            version: 2,
+            previous: Some((handle.queue, 9_000)),
+            ..handle.clone()
+        };
+        client.put_published(&moved, &mut rng).unwrap();
+        assert_eq!(client.rendezvous_owed(&mut rng).unwrap(), [link.queue]);
+        client.drop_published(&link.id, &mut rng).unwrap();
+        assert!(client.rendezvous_owed(&mut rng).unwrap().is_empty());
+        assert!(client
+            .setting(super::devices::RENDEZVOUS_OWED)
+            .unwrap()
+            .is_none());
+        client.audit().unwrap();
+    }
+
+    /// DEV-357, §7.7.1: a party that held the store before a reset holds the
+    /// earlier root, thus the reset marks each published entry for its
+    /// tombstone in the commit of the new root, and the upkeep sends it
+    /// under DIS-205. Before this, an entry whose retire call failed stayed
+    /// under the key of the earlier root, and the upkeep renewed it.
+    #[test]
+    fn a_reset_marks_each_published_entry_for_its_tombstone() {
+        use super::{PendingWrite, Published};
+        let (mut client, mut rng, _, _) = client_with_contact(321);
+        let handle = held_handle();
+        let link = Published {
+            id: [6; 16],
+            kind: super::EntryKind::Address,
+            index: 1,
+            rotation: 0,
+            queue: [0x41; 32],
+            pending: Some(PendingWrite::Register),
+            ..handle.clone()
+        };
+        client.put_published(&handle, &mut rng).unwrap();
+        client.put_published(&link, &mut rng).unwrap();
+        let key = entry_public(&client, super::EntryKind::Address, 1, 0);
+
+        client.reset_identity(T0, &mut rng).unwrap();
+        let marked = client.published().unwrap();
+        assert_eq!(marked.len(), 2);
+        for entry in &marked {
+            let before = if entry.id == handle.id {
+                &handle
+            } else {
+                &link
+            };
+            assert_eq!(
+                *entry,
+                Published {
+                    pending: Some(PendingWrite::Retire),
+                    ..before.clone()
+                }
+            );
+        }
+
+        // DEV-306: the key of the earlier root signs each tombstone.
+        assert_eq!(entry_public(&client, super::EntryKind::Address, 1, 0), key);
+        client.audit().unwrap();
+    }
+
     /// The stored form of a contact with the renewal guard `guard`, as a
     /// node gives it after it set that guard.
     fn guarded_state(contact: &ContactId, guard: u8) -> Zeroizing<Vec<u8>> {
@@ -6432,6 +6938,7 @@ mod tests {
             queue_since: 100,
             previous: None,
             foreign: false,
+            pending: None,
         }
     }
 
@@ -6588,6 +7095,108 @@ mod tests {
         client.drop_published(&link.id, &mut rng).unwrap();
         assert!(client.earlier_roots_row().unwrap().is_none());
         client.audit().unwrap();
+    }
+
+    /// The object of a backup write at the relays, as the transfer gives it.
+    fn uploaded_backup(tag: u8) -> umbra_core::attach::transfer::Uploaded {
+        use umbra_core::attach::{transfer::ChunkCredential, CHUNK_SIZE};
+        use umbra_crypto::secret::Secret;
+        use umbra_wire::descriptor::{ChunkRef, FileDescriptor, Level};
+
+        umbra_core::attach::transfer::Uploaded {
+            descriptor: FileDescriptor {
+                level: Level::Data,
+                file_key: Secret::new([tag; 32]),
+                file_nonce: [2; 24],
+                commit: [3; 32],
+                digest: [4; 32],
+                media_seconds: 0,
+                padded_size: CHUNK_SIZE as u32,
+                mime_class: 0,
+                pixel_w: 0,
+                pixel_h: 0,
+                refs: vec![ChunkRef {
+                    relay_id: [5; 32],
+                    chunk_id: [tag; 32],
+                    cred_pk: [7; 32],
+                    replicas: [[0; 12]; 2],
+                }],
+            },
+            credentials: vec![ChunkCredential {
+                chunk_id: [tag; 32],
+                cred: Secret::new([8; 32]),
+                relays: vec![[5; 32], [9; 32]],
+            }],
+        }
+    }
+
+    #[test]
+    fn a_reset_makes_a_new_recovery_code_and_ends_the_backup_of_the_old_one() {
+        let (mut client, mut rng, _, conversation) = client_with_contact(317);
+        let second = ContactId([0x6B; 32]);
+        let change = StateChange::Contact {
+            contact: second,
+            state: contact_state(6),
+        };
+        client.commit_network(&[change], &[], T0, &mut rng).unwrap();
+        let second = client.conversation_for(&second.0).unwrap();
+        client
+            .split_social(&[conversation, second], 2, T0, &mut rng)
+            .unwrap();
+        assert_eq!(client.shares_given().unwrap().len(), 2);
+
+        let now = T0 / 1_000;
+        let week = 3_000;
+        let code = client.recovery_code(&mut rng).unwrap().bytes();
+        let upload = client.backup_due(now, true).unwrap().unwrap();
+        client
+            .backup_uploaded(upload.pending, &uploaded_backup(1), 168 * 3_000, &mut rng)
+            .unwrap();
+        let old = client.backup_credentials(week, &mut rng).unwrap();
+        assert!(client.last_backup_at().unwrap().is_some());
+
+        client.reset_identity(T0, &mut rng).unwrap();
+
+        // DEV-346: a new code, and no state of the backup of the old one.
+        // The shares of the old code open nothing, thus the split ends.
+        let fresh = client.recovery_code(&mut rng).unwrap().bytes();
+        assert_ne!(fresh.expose(), code.expose());
+        let new = client.backup_credentials(week, &mut rng).unwrap();
+        assert_ne!(new.handle, old.handle);
+        assert_ne!(new.key.expose(), old.key.expose());
+        assert!(client.last_backup_at().unwrap().is_none());
+        assert!(client.shares_given().unwrap().is_empty());
+
+        // The next backup is a full object under the new code, at once.
+        let upload = client.backup_due(now + 60, true).unwrap().unwrap();
+        assert!(upload.pending.is_full());
+        client.audit().unwrap();
+    }
+
+    #[test]
+    fn a_full_backup_root_takes_its_full_object_at_the_drawn_time() {
+        use umbra_core::identity::BACKUP_ROOT_ENTRIES;
+        let (mut client, mut rng, _, _) = client_with_contact(318);
+        let mut now = T0 / 1_000;
+
+        // IDN-185: the early clock fills a root inside its window. Each
+        // write comes after the draw of the one before it.
+        for tag in 0..BACKUP_ROOT_ENTRIES {
+            let upload = client.backup_due(now, true).unwrap().unwrap();
+            assert_eq!(upload.pending.is_full(), tag == 0);
+            let tag = u8::try_from(tag).unwrap();
+            client
+                .backup_uploaded(upload.pending, &uploaded_backup(tag), 168 * 3_000, &mut rng)
+                .unwrap();
+            now += umbra_core::identity::BACKUP_EARLY_INTERVAL * 3 / 2 + 1;
+        }
+
+        // IDN-081: the full object of a full root waits for its own draw,
+        // and does not follow the last write at once.
+        let last = now - (umbra_core::identity::BACKUP_EARLY_INTERVAL * 3 / 2 + 1);
+        assert!(client.backup_due(last + 60, true).unwrap().is_none());
+        let upload = client.backup_due(now, true).unwrap().unwrap();
+        assert!(upload.pending.is_full());
     }
 
     #[test]
@@ -6810,6 +7419,202 @@ mod tests {
         assert_eq!(client.next_event(), Some(Event::IntegrityFault));
     }
 
+    /// IMP-188: an unlock gives success only for an unlocked client, and
+    /// each call checks the passphrase.
+    #[test]
+    fn an_unlock_checks_the_passphrase_at_each_call() {
+        use super::Event;
+        let (mut client, _, _, conversation) = client_with_contact(332);
+        let wrong = units("any text");
+
+        // An open client takes no other passphrase.
+        assert_eq!(client.unlock(&wrong, 1_000), Err(Error::WrongPassphrase));
+        assert!(client.is_unlocked());
+
+        // A second lock keeps the backend, thus the passphrase opens it.
+        client.lock();
+        client.lock();
+        assert_eq!(client.unlock(&wrong, 1_000), Err(Error::WrongPassphrase));
+        client.unlock(&units("correct horse"), 1_000).unwrap();
+        assert!(client.is_unlocked());
+
+        // The lock event that no thread read leaves at the unlock.
+        assert!(core::iter::from_fn(|| client.next_event()).all(|event| event != Event::Locked));
+
+        // A locked client takes no other passphrase, and it stays locked.
+        client.lock();
+        assert_eq!(client.unlock(&wrong, 1_000), Err(Error::WrongPassphrase));
+        assert!(!client.is_unlocked());
+        assert!(matches!(client.messages(conversation), Err(Error::Locked)));
+    }
+
+    /// IMP-188: a row that does not read after the store opened stops no
+    /// unlock. The user learns of it one time, and each other record waits
+    /// again.
+    #[test]
+    fn a_row_that_does_not_read_after_the_open_stops_no_unlock() {
+        use super::{
+            files::FILE_STATE, Event, TableId, AUTO_LOCK_DEFAULT, AUTO_LOCK_SETTING, OUTBOX,
+            SETTINGS,
+        };
+        let (mut client, mut rng, _, conversation) = client_with_contact(334);
+        let mut draft = client.new_draft(conversation);
+        draft.set_text(&units("waits for its relay")).unwrap();
+        let sent = client.send_draft(draft, T0, &mut rng).unwrap();
+        while client.take_outgoing().is_some() {}
+        client.set_auto_lock(60, &mut rng).unwrap();
+
+        // A record that waits, the state of a file, and the setting of the
+        // auto-lock, each in a form that does not parse.
+        let open = client.open_mut().unwrap();
+        let short = open.store.row_id(TableId::MESSAGE, b"short");
+        let setting = open.store.row_id(SETTINGS, AUTO_LOCK_SETTING);
+        let mut batch = open.store.begin();
+        batch
+            .put(
+                TableId::MESSAGE,
+                short,
+                Some(conversation.0),
+                &[1, 2],
+                &mut rng,
+            )
+            .unwrap();
+        batch.put(OUTBOX, short, None, &[], &mut rng).unwrap();
+        batch
+            .put(FILE_STATE, short, Some(conversation.0), &[9], &mut rng)
+            .unwrap();
+        batch
+            .put(SETTINGS, setting, None, &[0; 3], &mut rng)
+            .unwrap();
+        batch.commit().unwrap();
+        client.lock();
+        while client.next_event().is_some() {}
+
+        client.unlock(&units("correct horse"), 1_000).unwrap();
+        assert!(client.is_unlocked());
+        assert_eq!(client.next_event(), Some(Event::IntegrityFault));
+        assert_eq!(client.next_event(), None);
+        assert_eq!(
+            client.take_outgoing().map(|record| record.message),
+            Some(sent)
+        );
+        assert!(client.take_outgoing().is_none());
+        assert!(client.info(&sent).is_ok());
+
+        // The auto-lock takes the default of IMP-119, and not the setting
+        // in RAM from before the lock.
+        assert_eq!(client.auto_lock_seconds(), Ok(AUTO_LOCK_DEFAULT));
+        client.tick(1_000 + 61);
+        assert!(client.is_unlocked());
+        client.tick(1_000 + AUTO_LOCK_DEFAULT);
+        assert!(!client.is_unlocked());
+
+        // The start of a run reads the queues again, and the rows still
+        // stop nothing.
+        client.unlock(&units("correct horse"), 2_000).unwrap();
+        while client.next_event().is_some() {}
+        client.requeue_waiting().unwrap();
+        client.requeue_transfers().unwrap();
+        assert_eq!(client.next_event(), Some(Event::IntegrityFault));
+        assert_eq!(client.next_event(), Some(Event::IntegrityFault));
+        assert_eq!(client.next_event(), None);
+        assert_eq!(
+            client.take_outgoing().map(|record| record.message),
+            Some(sent)
+        );
+    }
+
+    /// IMP-188: a setting that the platform reads with the open store and
+    /// that does not read gives its value of no row, thus the platform
+    /// shows the store. The unlock tells the user of the fault one time.
+    #[test]
+    fn a_setting_that_does_not_read_keeps_no_store_closed() {
+        use super::{Event, AUTO_DOWNLOAD_DEFAULT, AUTO_DOWNLOAD_SETTING, SETTINGS};
+        let (mut client, mut rng, _, _) = client_with_contact(335);
+        client.set_auto_download_limit(1_000, &mut rng).unwrap();
+
+        let open = client.open_mut().unwrap();
+        let setting = open.store.row_id(SETTINGS, AUTO_DOWNLOAD_SETTING);
+        let mut batch = open.store.begin();
+        batch
+            .put(SETTINGS, setting, None, &[0; 3], &mut rng)
+            .unwrap();
+        batch.commit().unwrap();
+        client.lock();
+        while client.next_event().is_some() {}
+
+        client.unlock(&units("correct horse"), 1_000).unwrap();
+        assert!(client.is_unlocked());
+        assert_eq!(client.next_event(), Some(Event::IntegrityFault));
+        assert_eq!(client.next_event(), None);
+
+        assert_eq!(client.auto_download_limit(), Ok(AUTO_DOWNLOAD_DEFAULT));
+        assert_eq!(client.unmetered_only(), Ok(false));
+        assert_eq!(client.owns_channels_shown(), Ok(true));
+        assert_eq!(client.last_backup_at(), Ok(None));
+    }
+
+    /// IMP-188: the platform tells the cost of the network before it shows
+    /// the open store, thus a file row that does not read fails no call.
+    #[test]
+    fn a_file_row_that_does_not_read_fails_no_change_of_the_network() {
+        use super::{files::FILE_STATE, Event, FileState, TableId};
+        let (mut client, mut rng, _, _) = client_with_contact(336);
+        client.set_unmetered_only(true, &mut rng).unwrap();
+
+        // A state row that is too short, and a held file whose message row
+        // does not read.
+        let open = client.open_mut().unwrap();
+        let short = open.store.row_id(FILE_STATE, b"short");
+        let held = open.store.row_id(FILE_STATE, b"held");
+        let held_row = [&[FileState::Held as u8][..], &[0; 7], &7u64.to_be_bytes()].concat();
+        let mut batch = open.store.begin();
+        batch
+            .put(FILE_STATE, short, None, &[0; 3], &mut rng)
+            .unwrap();
+        batch
+            .put(FILE_STATE, held, None, &held_row, &mut rng)
+            .unwrap();
+        batch
+            .put(TableId::MESSAGE, held, None, &[0; 3], &mut rng)
+            .unwrap();
+        batch.commit().unwrap();
+        while client.next_event().is_some() {}
+
+        assert_eq!(client.set_metered(false, &mut rng), Ok(0));
+        assert_eq!(client.next_event(), Some(Event::IntegrityFault));
+        assert_eq!(client.next_event(), None);
+    }
+
+    /// IDN-200: a party with the file that drops each table MAC and the
+    /// mark of IDN-193 leaves the root seed, and the unlock fails.
+    #[test]
+    fn a_store_with_rows_and_no_table_mac_does_not_unlock() {
+        use super::{Event, State, TableId, SET_MARK};
+        let (mut client, _, _, _) = client_with_contact(333);
+        let mark = client
+            .open_ref()
+            .unwrap()
+            .store
+            .row_id(TableId::LOCAL_IDENTITY, SET_MARK);
+        let header = *client.header();
+        client.lock();
+        let State::Locked(backend) = &mut client.state else {
+            panic!("the client did not lock");
+        };
+        let mut rows = backend.rows_mut().clone();
+        assert!(rows.remove(&(TableId::LOCAL_IDENTITY, mark)).is_some());
+        let mut stripped = MemoryBackend::default();
+        *stripped.rows_mut() = rows;
+
+        let mut opened = TestClient::open(stripped, Element([1; 32]), header, 1_000);
+        assert_eq!(
+            opened.unlock(&units("correct horse"), 1_000),
+            Err(Error::Integrity)
+        );
+        assert_eq!(opened.next_event(), Some(Event::IntegrityFault));
+    }
+
     #[test]
     fn a_row_that_names_another_owner_ends_no_batch_and_the_user_learns_of_it_once() {
         use super::{Event, TableId};
@@ -6951,6 +7756,276 @@ mod tests {
             Err(Error::Malformed)
         ));
         client.audit().unwrap();
+    }
+
+    #[test]
+    fn an_upload_with_no_record_keeps_the_erase_of_its_chunks() {
+        use umbra_core::attach::transfer::{ChunkCredential, Shape, Uploaded};
+        use umbra_crypto::secret::Secret;
+        use umbra_wire::descriptor::{ChunkRef, FileDescriptor, Level};
+        let uploaded = |seed: u8| {
+            let file_key = Secret::new([seed; 32]);
+            let file_nonce = [seed; 24];
+            Uploaded {
+                descriptor: FileDescriptor {
+                    level: Level::Data,
+                    commit: umbra_core::attach::seal::commit(&file_key, &file_nonce),
+                    file_key,
+                    file_nonce,
+                    digest: [seed; 32],
+                    media_seconds: 0,
+                    padded_size: 32_650,
+                    mime_class: 1,
+                    pixel_w: 0,
+                    pixel_h: 0,
+                    refs: vec![ChunkRef {
+                        relay_id: [0x31; 32],
+                        chunk_id: [seed; 32],
+                        cred_pk: [0x33; 32],
+                        replicas: [[0x34; 12], [0x35; 12]],
+                    }],
+                },
+                credentials: vec![ChunkCredential {
+                    chunk_id: [seed; 32],
+                    cred: Secret::new([0x36; 32]),
+                    relays: vec![[0x31; 32], [0x37; 32], [0x38; 32]],
+                }],
+            }
+        };
+        let due = |client: &mut TestClient| {
+            client.requeue_transfers().unwrap();
+            let mut due = Vec::new();
+            while let Some(job) = client.take_erasure() {
+                due.push(job.chunk_id[0]);
+            }
+            due
+        };
+        let (mut client, mut rng, _, conversation) = client_with_contact(315);
+
+        // The user deletes a message while its file goes up.
+        let mut draft = client.new_draft(conversation);
+        draft
+            .attach(Zeroizing::new(vec![7; 64]), Shape::default())
+            .unwrap();
+        let message = client.send_draft(draft, T0, &mut rng).unwrap();
+        client.take_upload().unwrap();
+        client.delete_for_me(&message).unwrap();
+        assert!(client.take_erasure().is_none());
+
+        // ATT-204: the upload ends with no record to name its chunks, thus
+        // they go at their relays, also after a new start.
+        assert!(client
+            .upload_done(&message, &uploaded(7), &mut rng)
+            .is_err());
+        assert_eq!(client.take_erasure().unwrap().chunk_id, [7; 32]);
+        assert_eq!(due(&mut client), [7]);
+        client.chunk_erased(&[7; 32]).unwrap();
+        assert!(due(&mut client).is_empty());
+
+        // An upload that a run or a failure ended keeps them the same way.
+        client
+            .keep_abandoned(&uploaded(8).credentials, &mut rng)
+            .unwrap();
+        assert_eq!(due(&mut client), [8]);
+        client.chunk_erased(&[8; 32]).unwrap();
+        assert!(due(&mut client).is_empty());
+        client.audit().unwrap();
+    }
+
+    #[cfg(feature = "runtime")]
+    #[test]
+    fn a_lock_keeps_the_erase_of_the_chunks_of_each_upload_that_runs() {
+        use umbra_core::attach::transfer::ChunkCredential;
+        use umbra_crypto::secret::Secret;
+        let credential = |seed: u8, relays: &[[u8; 32]]| ChunkCredential {
+            chunk_id: [seed; 32],
+            cred: Secret::new([0x36; 32]),
+            relays: relays.to_vec(),
+        };
+        let (mut client, mut rng, _, _) = client_with_contact(316);
+
+        // Three uploads run, and the chunk of the third took a new relay.
+        let open = client.open_uploads();
+        {
+            let mut list = open.lock().unwrap();
+            assert!(list.note(1, vec![credential(7, &[[0x31; 32]])]));
+            assert!(list.note(2, vec![credential(8, &[[0x31; 32]])]));
+            assert!(list.note(3, vec![credential(9, &[[0x31; 32], [0x37; 32]])]));
+            assert!(list.note(3, vec![credential(9, &[[0x31; 32], [0x38; 32]])]));
+        }
+
+        // ATT-204: the record of an upload that ended well names its chunks,
+        // and a failure keeps the chunks of its upload for the erase.
+        client.upload_named(1);
+        client.upload_left(2, &mut rng).unwrap();
+        assert_eq!(client.take_erasure().unwrap().chunk_id, [8; 32]);
+        assert!(client.take_erasure().is_none());
+
+        // The lock writes the chunk of the upload that runs to the store,
+        // and the task of that upload sends nothing more.
+        client.lock();
+        {
+            let mut list = open.lock().unwrap();
+            assert!(list.is_closed());
+            assert!(!list.note(4, vec![credential(10, &[[0x31; 32]])]));
+        }
+
+        // The run after the unlock erases it at each relay that it took.
+        client.unlock(&units("correct horse"), 2_000).unwrap();
+        assert!(!client.open_uploads().lock().unwrap().is_closed());
+        let mut due = Vec::new();
+        while let Some(job) = client.take_erasure() {
+            due.push((job.chunk_id[0], job.relays));
+        }
+        due.sort();
+        assert_eq!(
+            due,
+            [
+                (8, vec![[0x31; 32]]),
+                (9, vec![[0x31; 32], [0x37; 32], [0x38; 32]])
+            ]
+        );
+        client.audit().unwrap();
+    }
+
+    #[cfg(feature = "runtime")]
+    #[test]
+    fn a_chunk_that_a_late_note_puts_in_two_rows_leaves_at_one_erase() {
+        use umbra_core::attach::transfer::ChunkCredential;
+        use umbra_crypto::secret::Secret;
+        let credential = |seed: u8, relay: u8| ChunkCredential {
+            chunk_id: [seed; 32],
+            cred: Secret::new([0x36; 32]),
+            relays: vec![[relay; 32]],
+        };
+        let (mut client, mut rng, _, _) = client_with_contact(317);
+        let due = |client: &mut TestClient| {
+            let mut due = Vec::new();
+            while let Some(mut job) = client.take_erasure() {
+                job.relays.sort_unstable();
+                due.push((job.chunk_id[0], job.relays));
+            }
+            due.sort();
+            due
+        };
+
+        // ATT-204: a stop of the run took upload 3 out of the list, and its
+        // task noted chunk 9 at a new relay before it ended. The lock then
+        // writes chunk 9 a second time, under the first chunk of upload 2.
+        let open = client.open_uploads();
+        assert!(open.lock().unwrap().note(3, vec![credential(9, 0x31)]));
+        client.upload_left(3, &mut rng).unwrap();
+        assert!(open.lock().unwrap().note(2, vec![credential(5, 0x31)]));
+        assert!(open.lock().unwrap().note(3, vec![credential(9, 0x37)]));
+        client.lock();
+        client.unlock(&units("correct horse"), 2_000).unwrap();
+
+        // Chunk 9 goes once to the relays of the two rows, and its one
+        // answer takes the two rows away.
+        assert_eq!(
+            due(&mut client),
+            [(5, vec![[0x31; 32]]), (9, vec![[0x31; 32], [0x37; 32]])]
+        );
+        client.chunk_erased(&[5; 32]).unwrap();
+        client.chunk_erased(&[9; 32]).unwrap();
+        client.lock();
+        client.unlock(&units("correct horse"), 2_000).unwrap();
+        assert!(due(&mut client).is_empty());
+
+        // A second write of a row under one first chunk adds to the row.
+        client
+            .keep_abandoned(&[credential(11, 0x31)], &mut rng)
+            .unwrap();
+        client
+            .keep_abandoned(&[credential(11, 0x38)], &mut rng)
+            .unwrap();
+        client.lock();
+        client.unlock(&units("correct horse"), 2_000).unwrap();
+        assert_eq!(due(&mut client), [(11, vec![[0x31; 32], [0x38; 32]])]);
+        client.audit().unwrap();
+    }
+
+    #[test]
+    fn a_file_record_at_the_ref_limit_leaves_its_preview_out_for_the_sync_channel() {
+        use umbra_core::attach::{
+            transfer::{ChunkCredential, Shape, Uploaded},
+            MESSAGE_BODY_MAX, MESSAGE_DESCRIPTOR_REFS,
+        };
+        use umbra_crypto::secret::Secret;
+        use umbra_wire::descriptor::{
+            class, AttachmentBody, ChunkRef, FileDescriptor, Level, CAPTION_MAX, PREVIEW_MAX,
+        };
+        let uploaded = |refs: usize| {
+            let file_key = Secret::new([0x41; 32]);
+            let file_nonce = [0x42; 24];
+            Uploaded {
+                descriptor: FileDescriptor {
+                    level: Level::Data,
+                    commit: umbra_core::attach::seal::commit(&file_key, &file_nonce),
+                    file_key,
+                    file_nonce,
+                    digest: [0x43; 32],
+                    media_seconds: 9,
+                    padded_size: u32::try_from(refs).unwrap() * 32_650,
+                    mime_class: class::VIDEO,
+                    pixel_w: 640,
+                    pixel_h: 480,
+                    refs: (0..refs)
+                        .map(|_| ChunkRef {
+                            relay_id: [0x31; 32],
+                            chunk_id: [0x44; 32],
+                            cred_pk: [0x33; 32],
+                            replicas: [[0x34; 12], [0x35; 12]],
+                        })
+                        .collect(),
+                },
+                credentials: vec![ChunkCredential {
+                    chunk_id: [0x44; 32],
+                    cred: Secret::new([0x36; 32]),
+                    relays: vec![[0x31; 32]],
+                }],
+            }
+        };
+        let (mut client, mut rng, _, conversation) = client_with_contact(318);
+        let mut preview = vec![0x11; PREVIEW_MAX];
+        preview[..3].copy_from_slice(&[0xFF, 0xD8, 0xFF]);
+        preview[PREVIEW_MAX - 2..].copy_from_slice(&[0xFF, 0xD9]);
+        let mut sent = |refs: usize, client: &mut TestClient| {
+            let mut draft = client.new_draft(conversation);
+            let shape = Shape {
+                mime_class: class::VIDEO,
+                media_seconds: 9,
+                pixel_w: 640,
+                pixel_h: 480,
+            };
+            draft.attach(Zeroizing::new(vec![7; 64]), shape).unwrap();
+            draft.set_file_preview(&preview).unwrap();
+            draft.set_text(&units(&"c".repeat(CAPTION_MAX))).unwrap();
+            let message = client.send_draft(draft, T0, &mut rng).unwrap();
+            client.take_upload().unwrap();
+            client
+                .upload_done(&message, &uploaded(refs), &mut rng)
+                .unwrap();
+            let app = client.take_outgoing().unwrap().app;
+            let parsed = AppMessage::parse(&app, Channel::Pairwise).unwrap();
+            let body = AttachmentBody::parse(parsed.body).unwrap();
+            (
+                parsed.body.len(),
+                body.preview.is_some(),
+                body.caption.is_some(),
+            )
+        };
+
+        // ATT-208: with the preview, the body at the ref limit passes the
+        // bound of the sync channel, thus the preview stays out.
+        let (len, has_preview, has_caption) = sent(MESSAGE_DESCRIPTOR_REFS, &mut client);
+        assert!(len <= MESSAGE_BODY_MAX);
+        assert!(!has_preview);
+        assert!(has_caption);
+
+        // A smaller file keeps its preview.
+        let (_, has_preview, _) = sent(12, &mut client);
+        assert!(has_preview);
     }
 
     #[test]

@@ -59,9 +59,11 @@ object Push {
 
         // NTF-151: a change between Instant mode and Periodic mode takes a
         // new token, thus the token of the timer was never the token of a
-        // handle group.
+        // handle group. A delete that failed leaves Firebase with the old
+        // token, and a fetch would give it again. Thus the fetch waits for
+        // a delete that took, and the next open tries the change again.
         if (heldFor != null && heldFor != mode.name) {
-            firebase.deleteToken().addOnCompleteListener { fetch(context, mode) }
+            firebase.deleteToken().addOnSuccessListener { fetch(context, mode) }
         } else {
             fetch(context, mode)
         }

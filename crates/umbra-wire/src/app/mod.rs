@@ -97,7 +97,8 @@ pub enum AppKind {
     VerifyCommit = 0x36,
     /// A `VerifyReveal`, 32 bytes.
     VerifyReveal = 0x37,
-    /// A `RenewalGuard` of Part 3 §3.2.6, 36 bytes.
+    /// A `RenewalGuard` of Part 3 §3.2.6, 37 bytes
+    /// ([`guard::RENEWAL_GUARD_LEN`]).
     RenewalGuard = 0x38,
     /// A `ForwardPolicy` of §6.6.13, 6 bytes.
     ForwardPolicy = 0x39,

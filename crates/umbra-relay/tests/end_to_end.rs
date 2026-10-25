@@ -1357,6 +1357,81 @@ fn a_long_backlog_leaves_in_steps_and_a_refused_sub_leaves_no_subscription() {
 }
 
 #[test]
+fn a_cell_of_many_subs_gives_each_record_of_a_short_backlog_once() {
+    let mut network = Network::new();
+    let mut alice = Client::connect(&mut network, 0);
+    let mut bob = Client::connect(&mut network, 1);
+    let (bob_in, to_bob) = bob.new_queue(&mut network, 60);
+
+    for sent in 1..=5u16 {
+        let record = record_for(&alice, &to_bob, Bucket::B0, sent);
+        alice.session.queue(record, 100 + u64::from(sent)).unwrap();
+        alice.flush(&mut network);
+        network.tick();
+        alice.drain(&mut network);
+    }
+
+    assert!(messages(&bob.drain(&mut network)).is_empty());
+
+    // The backlog is below the threshold, thus it leaves on the pacing
+    // clock (`NET-365`). Each `SUB` of the cells takes the place of the
+    // backlog before it. Before this, each one copied the whole backlog
+    // into the outbox of the circuit, and the ticks sent each copy.
+    for asked in 0..40u8 {
+        let sub = bob_in
+            .subscribe(bob.session.relay_session_pk(), [asked; 16])
+            .unwrap();
+        bob.session.queue(sub, 1_000 + u64::from(asked)).unwrap();
+    }
+    bob.flush(&mut network);
+
+    let mut taken = Vec::new();
+    for _ in 0..20 {
+        network.tick();
+        taken.extend(messages(&bob.drain(&mut network)));
+    }
+
+    assert_eq!(taken, [1, 2, 3, 4, 5]);
+}
+
+#[test]
+fn a_burst_of_large_records_reaches_a_live_subscription_whole() {
+    let mut network = Network::new();
+    let mut alice = Client::connect(&mut network, 0);
+    let mut bob = Client::connect(&mut network, 1);
+    let (bob_in, to_bob) = bob.new_queue(&mut network, 60);
+
+    let sub = bob_in
+        .subscribe(bob.session.relay_session_pk(), [1; 16])
+        .unwrap();
+    bob.session.queue(sub, 1_000).unwrap();
+    bob.flush(&mut network);
+    network.tick();
+    assert!(messages(&bob.drain(&mut network)).is_empty());
+
+    // NET-365: a contact sends `B3` records faster than the clock of the
+    // subscription sends them. Each one waits as a place in the queue.
+    // Before this, each one was a copy among the answers of the circuit,
+    // and the bound of 2 MiB dropped each record after the 64th. The client
+    // could not `ACK` past the first hole until its next `SUB`.
+    let count = 80u16;
+    for sent in 1..=count {
+        let record = record_for(&alice, &to_bob, Bucket::B3, sent);
+        alice.session.queue(record, 100 + u64::from(sent)).unwrap();
+    }
+    alice.flush(&mut network);
+
+    let mut taken = Vec::new();
+    for _ in 0..2 * count {
+        network.tick();
+        taken.extend(messages(&bob.drain(&mut network)));
+        alice.drain(&mut network);
+    }
+
+    assert_eq!(taken, (1..=u32::from(count)).collect::<Vec<u32>>());
+}
+
+#[test]
 fn the_drains_of_one_link_take_its_room_in_turns() {
     let mut network = Network::new();
     let mut alice = Client::connect(&mut network, 0);

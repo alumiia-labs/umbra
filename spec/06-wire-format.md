@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 6: Wire Format and Encoding
 
 **Status:** Draft
-**Version:** 0.45.1
-**Date:** 2026-10-22
+**Version:** 0.46.0
+**Date:** 2026-10-23
 
 ---
 
@@ -388,9 +388,13 @@ record that arrives takes its push (Part 8 rule `NTF-128`).
 - **[WIR-546]** A queue relay that receives a `CircuitPause` for a circuit
   that ends at it MUST end each subscription of that circuit, as the end of a
   circuit ends it. It MUST stop the pacing clock of that circuit, and it MUST
-  NOT send a cell on it. It MUST keep the circuit, the `RelaySession` key of
-  it, and the state of its commands. The first forward cell of the client
-  that the relay serves on the circuit starts the pacing clock again.
+  NOT send a cell on it. It MUST drop each answer and each place of Part 3
+  rule `NET-365` that waits for that clock: a command whose answer drops goes
+  again, and the resume of `WIR-547` sends each `SUB` again. The records of a
+  dropped place stay in their queue. It MUST keep the circuit, the
+  `RelaySession` key of it, and the state of its commands. The first forward
+  cell of the client that the relay serves on the circuit starts the pacing
+  clock again.
 - **[WIR-234]** A client MUST set `resume_count` to 1 at the first resume of a
   session. **[WIR-235]** A client MUST increase `resume_count` by one at each
   later resume of that session. **[WIR-236]** A client MUST compute `auth` with
@@ -1067,9 +1071,9 @@ RenewalRecord {                   // the content of an L6 record of kind 0x06
      received each message of that queue at or below `s`.
    - **[WIR-113]** If the lowest sequence number that a recipient did not
      receive is `h`, that recipient MUST set `s` below `h`.
-   - **[WIR-114]** A recipient MUST count a record that it stored under rule 8
-     as received. An undecryptable record is a received record, and it is not a
-     hole.
+   - **[WIR-114]** A recipient MUST count a record that it cannot decrypt, and
+     that it handled under rule 8, as received. An undecryptable record is a
+     received record, and it is not a hole.
    - **[WIR-115]** A recipient MUST NOT acknowledge a `MSG` before it commits
      that record to the local database. The hello of a contact request (Part 9
      §9.6) arrives on a rendezvous queue, and its request is no row of the queue
@@ -1099,9 +1103,24 @@ RenewalRecord {                   // the content of an L6 record of kind 0x06
    > tell that the message existed. `ACK_HOLE_TIMEOUT` trades that outcome
    > against a queue that a hostile relay can freeze.
 
-8. **[WIR-050]** A recipient MUST store a record that it cannot decrypt before
-   it acknowledges a later record. Thus a decryption retry after a ratchet
-   repair stays possible, and the key request of §6.6.11 can recover the record.
+8. **[WIR-050]** A recipient MUST keep the `send_index` of a record that it
+   cannot decrypt before it acknowledges a later record. Thus the key request
+   of §6.6.11 can recover the record. **[WIR-571]** A recipient MAY also store
+   the record. **[WIR-572]** A recipient that rule `WIR-337` keeps from the
+   request for such a record MUST show a delivery gap for that conversation,
+   as rule `WIR-117` does. It MUST show one in each 24 hours in which such a
+   record of the peer arrives.
+
+   > *Cause.* A stored copy opens only under a key that the recipient still
+   > holds. A record fails here when a limit of Part 5 §5.5.4 dropped its
+   > skipped key, or when another session sealed it. No later state of the
+   > ratchet brings such a key back, thus the request is the recovery, and it
+   > needs the `send_index` alone (`WIR-254`). A record above the rate has no
+   > recovery, and the gap tells the user. One gap for each day, and not one
+   > for each record, keeps a peer that sends many such records from filling
+   > the view. The request leaves in a slot after the record, and the `ACK`
+   > of a later record can leave first. Part 15 §15.3 holds the residual of
+   > a process that ends between the two.
 9. **[WIR-051]** A recipient MAY use a hole in the sequence to find that a relay
    did not deliver a message. **[WIR-052]** A recipient MUST NOT treat the
    sequence as proof of a loss, because the relay assigns the sequence.
@@ -2146,8 +2165,9 @@ each action after its label, and `author_hint` stays out of it.
 > and no vector of `WIR-479` can exist. The layouts follow the preimages, thus a
 > verifier reads the signed bytes from the record in one pass.
 
-The authority path is each granting epoch of Part 11 §11.9.2 on the path of
-every current role holder, concatenated, as `GRP-068` keeps it.
+The authority path is each granting epoch of Part 11 §11.9.2, and each
+`RekeyRecord` of a role holder, on the path of every current role holder,
+concatenated, as `GRP-068` and `GRP-427` keep it.
 
 The sizes as an `AppMessage` set the bucket of each record:
 
@@ -2222,9 +2242,10 @@ RosterSnapshot {                  // an object on the chunk path of Part 12 §12
 ```
 
 **[WIR-493]** The `path` MUST be a sequence of `BE16(len) || GroupControl`
-entries, each a granting epoch of Part 11 §11.9.2 under its wrapper, in
-chain order; a parser MUST reject a `path` that ends inside an entry or that
-holds a `control_type` other than `0x04`.
+entries, each a granting epoch of Part 11 §11.9.2 or a `RekeyRecord` of Part
+11 §11.12 under its wrapper, in chain order. A parser MUST reject a `path`
+that ends inside an entry, that holds a `control_type` other than `0x04` or
+`0x09`, or that holds a `RekeyRecord` with zero chain fields.
 
 ```
 MemberKemKey {                    // 1 218 bytes

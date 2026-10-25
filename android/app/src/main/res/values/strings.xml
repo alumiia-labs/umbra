@@ -759,6 +759,8 @@
     <string name="devices_link">Link</string>
     <string name="devices_paste_code_instead">Paste the code instead</string>
     <string name="devices_scan_the_code">Scan the code</string>
+    <!-- The step after the passphrase on a device with no back camera. -->
+    <string name="devices_paste_the_code">Paste the code</string>
 
     <!-- Contacts: the view that adds a contact. -->
     <string name="contacts_add_contact">Add contact</string>
@@ -839,6 +841,8 @@
     <string name="discovery_reusable_link_qr">The reusable link as a QR code</string>
     <string name="discovery_retiring">Retiring</string>
     <string name="discovery_retire_link">Retire link</string>
+    <string name="discovery_retire_link_question">Retire this link?</string>
+    <string name="discovery_retire_link_note">Nobody can send a request with this link after this. A new link has a new address.</string>
     <string name="discovery_writing_link_end">Writing the end of the link.</string>
 
     <!-- Discovery: the handle of the user. -->
@@ -851,6 +855,9 @@
     <string name="discovery_umbra_handle">UMBRA handle</string>
     <string name="discovery_reset_contact_requests">Reset contact requests</string>
     <string name="discovery_release_handle">Release handle</string>
+    <!-- %1$s is the handle of the user. -->
+    <string name="discovery_release_handle_question">Release %1$s?</string>
+    <string name="discovery_release_handle_note">Nobody can send a request to this handle after this. After 180 days, another person can claim it.</string>
     <string name="discovery_writing_release">Writing the release.</string>
 
     <!-- Discovery: the profile of the user. -->
@@ -907,7 +914,9 @@
     <string name="recovery_reset_new_key">Each contact gets your new key, and cannot write to you until they accept it.</string>
     <string name="recovery_reset_groups">Each group moves you to new keys.</string>
     <string name="recovery_reset_links_end">Your public links and your handle end.</string>
+    <string name="recovery_reset_code_changes">The recovery code changes.</string>
     <string name="recovery_reset_messages_stay">Your messages and your contacts stay.</string>
+    <string name="recovery_reset_code_note">The old code and its shares open no new backup.</string>
     <string name="recovery_remove_other_devices">Remove your other devices first.</string>
     <string name="recovery_reset_question">Reset your identity?</string>
     <string name="recovery_cannot_undo">You cannot undo this.</string>
@@ -1001,6 +1010,9 @@
     <string name="scan_again">Scan again</string>
     <string name="scan_no_camera">UMBRA has no access to the camera.</string>
     <string name="scan_allow_camera">Allow the camera</string>
+    <string name="scan_camera_absent">This device has no camera.</string>
+    <!-- The device has no back camera, or the camera failed at its start. -->
+    <string name="scan_camera_not_started">The camera does not start.</string>
 
     <!-- Core: the words for a file with no text -->
     <string name="core_file_voice_message">Voice message</string>
@@ -1048,6 +1060,8 @@
     <string name="core_not_link_code">This is not the code of a link.</string>
     <!-- %1$s holds the technical name of the fault. -->
     <string name="core_link_failed_kind">The link failed: %1$s.</string>
+    <!-- A link or a restore ends, because the device stayed locked. -->
+    <string name="core_device_stayed_locked">The device stayed locked.</string>
 
     <!-- Core: the restore of a backup -->
     <string name="core_looking_for_backup">Looking for the backup…</string>

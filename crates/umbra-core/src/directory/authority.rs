@@ -35,7 +35,8 @@ pub enum Admission {
     /// (`REL-060`). `GENESIS_ROOT` at epoch 0 places the relays of the
     /// first root of a directory (`REL-159`).
     Placed {
-        /// The root that listed the relay as pending.
+        /// The seed of the root that listed the relay as pending, which
+        /// `layer::layer_seed` gives.
         root: [u8; 32],
         /// Its epoch.
         epoch: u64,
@@ -99,13 +100,16 @@ pub fn entry_of(listing: &Listing<'_>, admission: Admission) -> Result<Vec<u8>, 
 /// admission.
 fn chain_flags(descriptor: &RelayDescriptor<'_>, admission: Admission) -> Result<u8, Error> {
     let exit_roles = roles::QUEUE | roles::CHAIN;
+    // REL-060: a relay that offers the ingress role can get bit 0 later,
+    // and a client rejects bit 0 beside bit 1 (REL-151). Its queues would
+    // then go out of reach.
+    let can_serve_layer_3 = descriptor.roles & exit_roles == exit_roles
+        && descriptor.roles & roles::INGRESS_OFFERED == 0;
     let flags = match admission {
         // REL-156: the first root of a chain relay places it nowhere.
         Admission::Pending => flags::PENDING,
         Admission::Placed { root, epoch } => {
-            if descriptor.roles & exit_roles == exit_roles
-                && layer(&root, epoch, &descriptor.relay_id) == 3
-            {
+            if can_serve_layer_3 && layer(&root, epoch, &descriptor.relay_id) == 3 {
                 flags::LAYER_3
             } else {
                 0
@@ -369,6 +373,37 @@ mod tests {
         assert!(RelayEntry::parse(&both).is_ok());
         both[flags] = 0x08;
         assert!(RelayEntry::parse(&both).is_err());
+    }
+
+    #[test]
+    fn a_relay_that_offers_the_ingress_role_takes_no_layer_3() {
+        // The layer of each placement of `relay_roles`, under 32 epochs.
+        let layers = |seed, relay_roles| {
+            let bytes = descriptor(seed, relay_roles);
+            (0..32u64)
+                .map(|epoch| {
+                    let admission = Admission::Placed {
+                        root: [0x5C; 32],
+                        epoch,
+                    };
+                    let entry = entry_of(&listing(&bytes, false), admission).unwrap();
+                    let read = RelayEntry::parse(&entry).unwrap();
+                    let hashed = layer(&[0x5C; 32], epoch, &read.descriptor.relay_id);
+                    (read.layer(), hashed)
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // REL-060: the ingress flag of day 14 would drop bit 1 (REL-151),
+        // and the queues of the relay would go out of reach. Thus the
+        // relay stays at layer 2 when the hash gives 3.
+        let offers_ingress = layers(13, roles::QUEUE | roles::CHAIN | roles::INGRESS_OFFERED);
+        assert!(offers_ingress.iter().any(|(_, hashed)| *hashed == 3));
+        assert!(offers_ingress.iter().all(|(listed, _)| *listed == 2));
+
+        // With no ingress offer, the entry follows the hash.
+        let exit = layers(13, roles::QUEUE | roles::CHAIN);
+        assert!(exit.iter().all(|(listed, hashed)| listed == hashed));
     }
 
     #[test]

@@ -28,7 +28,7 @@ use umbra_transport::{
 use umbra_wire::descriptor::FileDescriptor;
 use zeroize::Zeroizing;
 
-use crate::runtime::OsRng;
+use crate::{client::OpenUploads, runtime::OsRng};
 
 /// How long the task keeps its connection with no transfer.
 pub const IDLE_END: Duration = Duration::from_secs(60);
@@ -46,6 +46,10 @@ pub enum TransferCommand {
         /// The time of the fetch.
         now: u64,
     },
+    /// The chains of the circuits of the pairwise run of this client. A
+    /// chain of the transfer node puts their relays last (Part 3
+    /// `NET-310`). No update follows.
+    Chains(Vec<[[u8; 32]; 3]>),
     /// The privacy mode of the transfer of `tag`, which comes before its
     /// `Upload` or `Download`: its circuits take that mode (Part 12
     /// `ATT-167`). A transfer with none takes Balanced.
@@ -207,6 +211,9 @@ pub enum TransferUpdate {
         /// The chunk.
         chunk_id: [u8; 32],
     },
+    /// The chains of the circuits of this task, at each change. The other
+    /// nodes of the client put their relays last (`NET-310`).
+    Chains(Vec<[[u8; 32]; 3]>),
 }
 
 enum Active {
@@ -215,6 +222,36 @@ enum Active {
     Down(Box<Download>),
     Write(Box<HandleWrite>),
     Read(Box<HandleRead>),
+}
+
+/// Notes each chunk that `upload` started or moved since the last call in
+/// the list of the caller (`ATT-204`). The caller keeps those credentials
+/// until the upload ends, thus a lock or a failure leaves no chunk with no
+/// erase.
+fn note(open: &std::sync::Mutex<OpenUploads>, tag: u64, upload: &mut Upload) {
+    let started = upload.take_started();
+    if started.is_empty() {
+        return;
+    }
+
+    if let Ok(mut open) = open.lock() {
+        open.note(tag, started);
+    }
+}
+
+/// The first tick of an upload, which sends its first registrations. A tick
+/// that fails can have sent some of them, thus the list takes them also
+/// then (`ATT-204`).
+fn first_tick(
+    node: &mut ClientNode,
+    mut upload: Upload,
+    tag: u64,
+    open: &std::sync::Mutex<OpenUploads>,
+    rng: &mut OsRng,
+) -> Option<Upload> {
+    let ticked = upload.tick(node, rng);
+    note(open, tag, &mut upload);
+    ticked.ok().map(|()| upload)
 }
 
 /// The solutions that an upload makes ahead for one relay at the most. A
@@ -291,13 +328,16 @@ async fn solve_ahead(node: &mut ClientNode, upload: &Upload) {
 }
 
 /// Runs the transfers until the link ends, or until no transfer is left for
-/// [`IDLE_END`]. Each transfer that is open at the end fails.
+/// [`IDLE_END`]. Each transfer that is open at the end fails. The run notes
+/// the chunks of each upload in `open`, and it ends when a lock closes it.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_transfers(
     mut node: ClientNode,
     guard: Dial,
     tls: Arc<ClientConfig>,
     relays: Vec<AttachmentRelay>,
     hold_offs: Arc<std::sync::Mutex<HoldOffs>>,
+    open: Arc<std::sync::Mutex<OpenUploads>>,
     mut commands: mpsc::UnboundedReceiver<TransferCommand>,
     updates: mpsc::UnboundedSender<TransferUpdate>,
 ) {
@@ -386,7 +426,23 @@ pub async fn run_transfers(
     let mut is_ready = false;
     let mut idle_since = tokio::time::Instant::now();
     let mut tick = tokio::time::interval(TICK);
+    let mut circuit_clock = crate::runtime::CircuitClock::default();
+    let mut shown_chains: Vec<[[u8; 32]; 3]> = Vec::new();
     'run: loop {
+        // ATT-204: a lock wrote the chunks of the list to the store, and no
+        // command of a chunk that the store does not hold leaves.
+        if open.lock().is_ok_and(|open| open.is_closed()) {
+            break 'run;
+        }
+
+        // NET-310: the other nodes of the client learn the chains of this
+        // one.
+        let chains = node.chains();
+        if chains != shown_chains {
+            shown_chains.clone_from(&chains);
+            let _ = updates.send(TransferUpdate::Chains(chains));
+        }
+
         for capsule in node.take_capsules() {
             if link.send(&capsule).await.is_err() {
                 break 'run;
@@ -409,7 +465,12 @@ pub async fn run_transfers(
                 None => break 'run,
             },
             _ = tick.tick() => {
-                node.set_challenge_clock(crate::runtime::unix_now());
+                // NET-370: a circuit keeps the age that its relays count.
+                let now = crate::runtime::unix_now();
+                if let Some(step) = circuit_clock.step(now) {
+                    node.circuit_clock_moved(step);
+                }
+                node.set_challenge_clock(now);
                 if active.is_empty() && early.is_empty() {
                     if idle_since.elapsed() >= IDLE_END {
                         break 'run;
@@ -424,7 +485,11 @@ pub async fn run_transfers(
                     node.set_chunk_class(classes.get(tag).copied().unwrap_or_default());
                     let ticked = match transfer {
                         Active::One(fetch) => fetch.tick(&mut node, &mut rng),
-                        Active::Up(upload) => upload.tick(&mut node, &mut rng),
+                        Active::Up(upload) => {
+                            let ticked = upload.tick(&mut node, &mut rng);
+                            note(&open, *tag, upload);
+                            ticked
+                        }
                         Active::Down(download) => download.tick(&mut node, &mut rng),
                         Active::Write(write) => write.tick(&mut node, &mut rng),
                         // A read that no relay answered ends at a tick.
@@ -527,9 +592,10 @@ pub async fn run_transfers(
                                     plain: Zeroizing::new(plain),
                                 },
                             }),
-                        Active::Up(upload) => upload
-                            .on_outcome(&mut node, handle, outcome, &mut rng)
-                            .map(|progress| match progress {
+                        Active::Up(upload) => {
+                            let step = upload.on_outcome(&mut node, handle, outcome, &mut rng);
+                            note(&open, tag, upload);
+                            step.map(|progress| match progress {
                                 Progress::Running(done, total) => {
                                     TransferUpdate::Progress { tag, done, total }
                                 }
@@ -537,7 +603,8 @@ pub async fn run_transfers(
                                     tag,
                                     uploaded: Box::new(uploaded),
                                 },
-                            }),
+                            })
+                        }
                         Active::Down(download) => {
                             match download.on_outcome(&mut node, handle, outcome, &mut rng) {
                                 Ok(Progress::Running(done, total)) => {
@@ -655,19 +722,16 @@ pub async fn run_transfers(
                 }
                 TransferCommand::Upload { tag, plain, shape } => {
                     node.set_chunk_class(classes.get(&tag).copied().unwrap_or_default());
-                    let mut started = Upload::new(&plain, shape, &relays, &mut rng);
-                    if let Ok(upload) = &started {
-                        solve_ahead(&mut node, upload).await;
+                    let mut started = None;
+                    if let Ok(upload) = Upload::new(&plain, shape, &relays, &mut rng) {
+                        solve_ahead(&mut node, &upload).await;
+                        started = first_tick(&mut node, upload, tag, &open, &mut rng);
                     }
-                    started = started.and_then(|mut upload| {
-                        upload.tick(&mut node, &mut rng)?;
-                        Ok(upload)
-                    });
                     match started {
-                        Ok(upload) => {
+                        Some(upload) => {
                             active.insert(tag, Active::Up(Box::new(upload)));
                         }
-                        Err(_) => {
+                        None => {
                             classes.remove(&tag);
                             let _ = updates.send(TransferUpdate::Failed { tag });
                         }
@@ -676,6 +740,7 @@ pub async fn run_transfers(
                 TransferCommand::Challenges { book, now } => {
                     node.set_challenges(book, now);
                 }
+                TransferCommand::Chains(chains) => node.set_other_chains(chains),
                 TransferCommand::Erase {
                     chunk_id,
                     cred,
@@ -742,25 +807,22 @@ pub async fn run_transfers(
                     // ATT-167: each start takes a mode of its own, not the mode
                     // of the transfer before it.
                     node.set_chunk_class(umbra_core::session::node::DelayClass::default());
-                    let mut started = Upload::with_class(
+                    let mut started = None;
+                    if let Ok(upload) = Upload::with_class(
                         &plain,
                         Shape::default(),
                         &relays,
                         Class::BACKUP,
                         &mut rng,
-                    );
-                    if let Ok(upload) = &started {
-                        solve_ahead(&mut node, upload).await;
+                    ) {
+                        solve_ahead(&mut node, &upload).await;
+                        started = first_tick(&mut node, upload, tag, &open, &mut rng);
                     }
-                    started = started.and_then(|mut upload| {
-                        upload.tick(&mut node, &mut rng)?;
-                        Ok(upload)
-                    });
                     match started {
-                        Ok(upload) => {
+                        Some(upload) => {
                             active.insert(tag, Active::Up(Box::new(upload)));
                         }
-                        Err(_) => {
+                        None => {
                             let _ = updates.send(TransferUpdate::Failed { tag });
                         }
                     }
@@ -844,6 +906,11 @@ pub async fn run_transfers(
         active.len(),
         early.len()
     ));
+
+    // The circuits of the task end with it.
+    if !shown_chains.is_empty() {
+        let _ = updates.send(TransferUpdate::Chains(Vec::new()));
+    }
 
     drain(&mut commands, &mut early);
     fail_each(&active, &early);

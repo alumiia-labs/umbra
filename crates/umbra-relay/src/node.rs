@@ -59,7 +59,7 @@ use crate::{
         group::GroupService,
         nack,
         queue::{NdrPush, QueueService},
-        DigestDue, Drains, Outbound, Reply,
+        Arrival, DigestDue, Drain, Drains, Outbound, Reply,
     },
     store::{Loaded, StoreChange},
 };
@@ -249,7 +249,7 @@ enum Framing {
 struct Endpoint {
     session: Session,
     range: Option<Range>,
-    outbox: VecDeque<Outbound>,
+    outbox: Outbox,
     /// The drains of the circuit (`NET-037`), whose records leave in steps
     /// at each clock tick, thus one drain fills no link backlog. A drain
     /// holds no record.
@@ -272,11 +272,23 @@ const VERIFIES_PER_MINUTE: u32 = 32;
 /// stays inside the bound.
 pub const DEPOSITS_PER_MINUTE: u32 = 32;
 
-/// The answers that wait for the pacing clock of one circuit. The clock
+/// The entries that wait for the pacing clock of one circuit. The clock
 /// sends one cell each second (`NET-291`), thus a circuit that asks for
-/// more loses the newest: a record leaves its queue only at its `ACK`, and
-/// a command that took no answer goes again.
+/// more loses its newest answers: a command that took no answer goes again.
+/// A place of a record or of a backlog never drops (`NET-365`).
 const OUTBOX_MAX: usize = 1_024;
+/// The bytes of the answers that wait for the pacing clock of one circuit
+/// (`NET-365`). Before this bound, the count above was the one bound, and
+/// 1 024 `B3` answers held 32 MiB for each circuit. The bound holds twice
+/// the chunks of `MAX_CONCURRENT_DOWN`, thus a download loses no answer. A
+/// place holds no record, thus it counts no byte.
+const OUTBOX_BYTES_MAX: usize = 2 << 20;
+/// `RELAY_ANSWER_BYTES_MAX`: the bytes of the answers that wait for the
+/// pacing clocks of all circuits of one relay together (`NET-375`). The
+/// bound of one circuit times `RELAY_CIRCUITS_MAX` is 1 TiB, and the 256
+/// circuits that one address builds at once hold 512 MiB. A relay of the
+/// kit stops at 1 400 MiB.
+const RELAY_ANSWER_BYTES_MAX: usize = 64 << 20;
 /// The bytes of the answers that one tick of the pacing clock sends on one
 /// attachment circuit (`NET-360`).
 const ANSWER_STEP: usize = 256 << 10;
@@ -381,19 +393,271 @@ impl Waits {
     }
 }
 
+/// One entry that waits for the pacing clock of a circuit.
+enum Queued {
+    /// An encoded command.
+    Ready(Outbound),
+    /// The place of the paced backlog of a queue (`Drains::pace`). Each
+    /// tick reads the next record of it from the queue.
+    Backlog([u8; 32]),
+    /// The place of the records that arrived at a live subscription, above
+    /// `after` and below `end` (`NET-365`). Each tick reads the next one of
+    /// them from the queue.
+    Live(Drain),
+}
+
+/// The entries that wait for the pacing clock of one circuit, and the
+/// bytes of the encoded commands among them.
+#[derive(Default)]
+struct Outbox {
+    entries: VecDeque<Queued>,
+    bytes: usize,
+}
+
+impl Outbox {
+    /// Puts one answer on the pacing clock, at the front for a `NACK`
+    /// (`WIR-322`). An answer above `OUTBOX_MAX` or `OUTBOX_BYTES_MAX`
+    /// drops, and its command goes again.
+    fn post(&mut self, outbound: Outbound, first: bool) {
+        let len = outbound.encoded.len();
+        if !self.takes(len) {
+            return;
+        }
+
+        self.bytes = self.bytes.saturating_add(len);
+        if first {
+            self.entries.push_front(Queued::Ready(outbound));
+        } else {
+            self.entries.push_back(Queued::Ready(outbound));
+        }
+    }
+
+    /// Whether an answer of `len` bytes fits under `OUTBOX_MAX` and
+    /// `OUTBOX_BYTES_MAX`.
+    fn takes(&self, len: usize) -> bool {
+        self.entries.len() < OUTBOX_MAX && self.bytes.saturating_add(len) <= OUTBOX_BYTES_MAX
+    }
+
+    /// Puts the place of the paced backlog of `queue_id` on the pacing
+    /// clock. A place of that queue that waits already serves the new
+    /// backlog, thus a repeated `SUB` adds no entry. A place goes in above
+    /// `OUTBOX_MAX` too. The `SUB` of the backlog left a subscription, and
+    /// with no place each later record would go above a backlog that never
+    /// left. The outbox holds one such place for each queue at most.
+    fn post_backlog(&mut self, queue_id: [u8; 32]) {
+        let is_held = self
+            .entries
+            .iter()
+            .any(|queued| matches!(queued, Queued::Backlog(held) if *held == queue_id));
+
+        if !is_held {
+            self.entries.push_back(Queued::Backlog(queue_id));
+        }
+    }
+
+    /// Puts the place of a record that arrived at a live subscription on
+    /// the pacing clock (`NET-365`). A record that follows the place of its
+    /// queue at the back joins that place. A full outbox drops no record:
+    /// the record joins the last place of its queue, or it takes a place
+    /// above `OUTBOX_MAX` when its queue has none. A dropped record would
+    /// leave a hole that the client cannot `ACK` past until its next `SUB`.
+    fn post_live(&mut self, arrival: &Arrival) {
+        let end = arrival.seq.saturating_add(1);
+
+        if let Some(Queued::Live(live)) = self.entries.back_mut() {
+            if live.queue_id == arrival.queue_id && live.end == arrival.seq {
+                live.end = end;
+                return;
+            }
+        }
+
+        if self.entries.len() >= OUTBOX_MAX {
+            let last = self
+                .entries
+                .iter_mut()
+                .rev()
+                .find_map(|queued| match queued {
+                    Queued::Live(live) if live.queue_id == arrival.queue_id => Some(live),
+                    _ => None,
+                });
+
+            if let Some(live) = last {
+                live.end = live.end.max(end);
+                return;
+            }
+        }
+
+        self.entries.push_back(Queued::Live(arrival.place()));
+    }
+
+    /// Drops the newest answer, whose command goes again, and gives its
+    /// bytes (`NET-375`). A place never drops.
+    fn drop_newest(&mut self) -> usize {
+        let newest = self
+            .entries
+            .iter()
+            .rposition(|queued| matches!(queued, Queued::Ready(_)));
+
+        let Some(Queued::Ready(outbound)) = newest.and_then(|index| self.entries.remove(index))
+        else {
+            return 0;
+        };
+
+        let len = outbound.encoded.len();
+        self.bytes = self.bytes.saturating_sub(len);
+        len
+    }
+
+    /// Puts the record of a backlog at the front, for the tick that sends
+    /// it now. It is one record, and it leaves at once.
+    fn push_record(&mut self, outbound: Outbound) {
+        self.bytes = self.bytes.saturating_add(outbound.encoded.len());
+        self.entries.push_front(Queued::Ready(outbound));
+    }
+
+    /// The encoded command at the front.
+    fn front_ready(&self) -> Option<&Outbound> {
+        match self.entries.front() {
+            Some(Queued::Ready(outbound)) => Some(outbound),
+            _ => None,
+        }
+    }
+
+    /// Takes the encoded command at the front.
+    fn pop_ready(&mut self) -> Option<Outbound> {
+        self.front_ready()?;
+
+        let Some(Queued::Ready(outbound)) = self.entries.pop_front() else {
+            return None;
+        };
+
+        self.bytes = self.bytes.saturating_sub(outbound.encoded.len());
+        Some(outbound)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.bytes = 0;
+    }
+}
+
+/// The bytes of the answers that wait in the outbox of each circuit, the
+/// same counts in their order, and their sum (`NET-375`).
+#[derive(Default)]
+struct AnswerBytes {
+    by_circuit: BTreeMap<CircuitKey, usize>,
+    ranked: BTreeSet<(usize, CircuitKey)>,
+    total: usize,
+}
+
+impl AnswerBytes {
+    /// Sets the count of `circuit`.
+    fn set(&mut self, circuit: CircuitKey, bytes: usize) {
+        let before = self.of(&circuit);
+        if before == bytes {
+            return;
+        }
+
+        self.ranked.remove(&(before, circuit));
+        self.total = self.total.saturating_sub(before).saturating_add(bytes);
+
+        if bytes == 0 {
+            self.by_circuit.remove(&circuit);
+        } else {
+            self.by_circuit.insert(circuit, bytes);
+            self.ranked.insert((bytes, circuit));
+        }
+    }
+
+    fn of(&self, circuit: &CircuitKey) -> usize {
+        self.by_circuit.get(circuit).copied().unwrap_or(0)
+    }
+
+    /// The circuit that holds the most, with its bytes.
+    fn heaviest(&self) -> Option<(CircuitKey, usize)> {
+        self.ranked
+            .last()
+            .map(|(bytes, circuit)| (*circuit, *bytes))
+    }
+}
+
 impl Endpoint {
     /// Puts one answer on the pacing clock, at the front for a `NACK`
     /// (`WIR-322`).
     fn post(&mut self, outbound: Outbound, first: bool) {
-        if self.outbox.len() >= OUTBOX_MAX {
-            return;
-        }
+        self.outbox.post(outbound, first);
+    }
 
-        if first {
-            self.outbox.push_front(outbound);
-        } else {
-            self.outbox.push_back(outbound);
+    /// Gives each backlog that the last command paced its place after the
+    /// answers of that command.
+    fn place_backlogs(&mut self) {
+        for queue_id in self.drains.take_fresh() {
+            self.outbox.post_backlog(queue_id);
         }
+    }
+
+    /// Reads the next record of each place at the front of the outbox,
+    /// until an encoded command is at the front or no entry waits
+    /// (`NET-365`). A place whose queue left, or whose subscription ended,
+    /// gives no record.
+    fn read_backlog<R: CryptoRng + ?Sized>(
+        &mut self,
+        circuit: &CircuitKey,
+        queues: &QueueService,
+        groups: &GroupService,
+        rng: &mut R,
+    ) {
+        loop {
+            let (records, ended) = match self.outbox.entries.front_mut() {
+                Some(Queued::Backlog(queue_id)) => {
+                    let queue_id = *queue_id;
+                    match self.drains.paced_mut(&queue_id) {
+                        Some(backlog) => {
+                            let step = step_one(self.range, circuit, backlog, queues, groups, rng);
+                            if step.1 {
+                                self.drains.end_paced(&queue_id);
+                            }
+                            step
+                        }
+                        None => (Vec::new(), true),
+                    }
+                }
+                Some(Queued::Live(live)) => {
+                    step_one(self.range, circuit, live, queues, groups, rng)
+                }
+                Some(Queued::Ready(_)) | None => return,
+            };
+
+            if ended {
+                self.outbox.entries.pop_front();
+            }
+
+            if let Some(record) = records.into_iter().next() {
+                self.outbox.push_record(record);
+                return;
+            }
+        }
+    }
+}
+
+/// The next record of a place in the outbox, read from its queue, and
+/// whether the place ended. A room of one byte gives one record at most.
+fn step_one<R: CryptoRng + ?Sized>(
+    range: Option<Range>,
+    circuit: &CircuitKey,
+    place: &mut Drain,
+    queues: &QueueService,
+    groups: &GroupService,
+    rng: &mut R,
+) -> (Vec<Outbound>, bool) {
+    match range {
+        Some(Range::Queue) => queues.drain_step(circuit, place, 1, rng),
+        Some(Range::Group) => groups.drain_step(place, 1, rng),
+        Some(Range::Attachment) | None => (Vec::new(), true),
     }
 }
 
@@ -450,8 +714,9 @@ fn fits(
     held.saturating_add(waiting).saturating_add(len) <= limit / part.max(1)
 }
 
-/// The addresses whose measurement attempts a relay counts at once. An
-/// address above this count holds no attempt.
+/// The addresses whose measurement attempts a relay counts at once. A new
+/// address above this count takes the place of the count whose first
+/// spent attempt is the oldest (`REL-205`).
 const MEAS_ATTEMPT_SOURCES_MAX: usize = 4_096;
 /// The part of the bound of a link that the echoes of a measurement
 /// session fill at most: one part in this many. An echo above it drops
@@ -527,6 +792,8 @@ pub struct RelayNode {
     delayed_seq: u64,
     circuits: CircuitTable,
     endpoints: BTreeMap<CircuitKey, Endpoint>,
+    /// The bytes of the answers that wait at each endpoint (`NET-375`).
+    answer_bytes: AnswerBytes,
     gate: RelayGate,
     queues: QueueService,
     groups: GroupService,
@@ -639,6 +906,7 @@ impl RelayNode {
             delayed_seq: 0,
             circuits: CircuitTable::new(config.relay, config.static_secret, config.layer),
             endpoints: BTreeMap::new(),
+            answer_bytes: AnswerBytes::default(),
             gate: RelayGate::new(relay_id),
             queues,
             groups: GroupService::default(),
@@ -740,7 +1008,7 @@ impl RelayNode {
     }
 
     /// Whether the party of `link` holds a measurement attempt at `now`
-    /// (`REL-069`).
+    /// (`REL-069`). A party with no count holds each attempt.
     fn attempt_left(&mut self, link: LinkId, now: u64) -> bool {
         let holder = self.attempt_holder(link);
         match self.measure_attempts.get_mut(&holder) {
@@ -748,13 +1016,39 @@ impl RelayNode {
                 attempts.refill(now);
                 attempts.spent < MEAS_ATTEMPT_BURST
             }
-            None => self.measure_attempts.len() < MEAS_ATTEMPT_SOURCES_MAX,
+            None => true,
         }
     }
 
-    /// Spends one measurement attempt of the party of `link`.
+    /// Spends one measurement attempt of the party of `link`. A new party
+    /// in a full count takes a place. The counts whose attempts each came
+    /// back leave first, and then the count whose first spent attempt is
+    /// the oldest. Before this, a full count refused each new address. A
+    /// party with many addresses then kept a measurer of a new address
+    /// out of each session.
     fn attempt_take(&mut self, link: LinkId, now: u64) {
         let holder = self.attempt_holder(link);
+
+        let is_new = !self.measure_attempts.contains_key(&holder);
+        if is_new && self.measure_attempts.len() >= MEAS_ATTEMPT_SOURCES_MAX {
+            self.measure_attempts.retain(|_, attempts| {
+                attempts.refill(now);
+                attempts.spent > 0
+            });
+        }
+
+        if is_new && self.measure_attempts.len() >= MEAS_ATTEMPT_SOURCES_MAX {
+            let oldest = self
+                .measure_attempts
+                .iter()
+                .min_by_key(|(_, attempts)| attempts.since)
+                .map(|(held, _)| *held);
+
+            if let Some(oldest) = oldest {
+                self.measure_attempts.remove(&oldest);
+            }
+        }
+
         let attempts = self.measure_attempts.entry(holder).or_insert(Attempts {
             spent: 0,
             since: now,
@@ -1229,8 +1523,8 @@ impl RelayNode {
         outputs
     }
 
-    /// Takes one deposit into a queue of this relay (`WIR-526`): the `MSG`
-    /// of a live subscription goes to its circuit, and a push follows an
+    /// Takes one deposit into a queue of this relay (`WIR-526`): a live
+    /// subscription takes the record at its circuit, and a push follows an
     /// arrival that no subscription took.
     fn take_deposit<R: CryptoRng + ?Sized>(
         &mut self,
@@ -1243,10 +1537,10 @@ impl RelayNode {
         };
 
         if let Some(reply) = self.queues.deposit(&command, &self.static_secret, now, rng) {
-            if let Some(endpoint) = self.endpoints.get_mut(&reply.circuit) {
-                endpoint.post(reply.outbound, false);
-            }
+            self.post_answer(reply.circuit, reply.outbound, false);
         }
+
+        self.post_arrivals();
 
         self.queues
             .take_ndr_pushes()
@@ -1282,11 +1576,8 @@ impl RelayNode {
         self.queues.push_tick(now, rng);
 
         // NTF-146: the wake at the end of the window of a watch.
-        for reply in self.queues.take_wakes() {
-            if let Some(endpoint) = self.endpoints.get_mut(&reply.circuit) {
-                endpoint.post(reply.outbound, false);
-            }
-        }
+        let wakes = self.queues.take_wakes();
+        self.post(wakes);
 
         let mut outputs: Vec<Output> = self
             .queues
@@ -1927,6 +2218,10 @@ impl RelayNode {
     /// The client of a circuit that ends here paused its session
     /// (`WIR-546`). The subscriptions of the circuit end, thus a new record
     /// of its queues takes its push. The circuit and its session stay.
+    ///
+    /// The answers that wait go too. The client forgets each command that
+    /// waited for an answer, and its resume sends each `SUB` again. Before
+    /// this, a paused circuit held its answers until `CIRCUIT_MAX_AGE`.
     fn endpoint_paused(&mut self, circuit: &CircuitKey, now: u64) {
         self.queues.circuit_paused(circuit, now);
         self.groups.circuit_paused(circuit);
@@ -1934,7 +2229,9 @@ impl RelayNode {
         if let Some(endpoint) = self.endpoints.get_mut(circuit) {
             endpoint.paused = true;
             endpoint.drains.end_all();
+            endpoint.outbox.clear();
         }
+        self.recount(circuit);
     }
 
     fn frame(&mut self, link: LinkId, cell: &[u8]) -> Option<Output> {
@@ -2116,7 +2413,7 @@ impl RelayNode {
                     content,
                 } => {
                     self.wake_endpoint(&circuit);
-                    let (paced, digests) = self.serve(circuit, bucket, &content, now, rng);
+                    let digests = self.serve(circuit, bucket, &content, now, rng);
 
                     outputs.extend(self.deliver_digests(digests, now, rng));
                     // ATT-102: one copy for each target of a `CREP`.
@@ -2127,12 +2424,6 @@ impl RelayNode {
                             .into_iter()
                             .map(Output::NdrPush),
                     );
-
-                    for reply in paced {
-                        if let Some(endpoint) = self.endpoints.get_mut(&reply.circuit) {
-                            endpoint.post(reply.outbound, false);
-                        }
-                    }
 
                     // NET-360: an answer of an attachment circuit follows
                     // the command of its own client, thus it waits for no
@@ -2196,6 +2487,7 @@ impl RelayNode {
     fn endpoint_closed(&mut self, circuit: &CircuitKey, now: u64) {
         self.measure_closed(circuit, now);
         self.endpoints.remove(circuit);
+        self.recount(circuit);
         self.paced_new.remove(circuit);
         self.queues.circuit_closed(circuit, now);
         self.groups.circuit_closed(circuit);
@@ -2290,7 +2582,7 @@ impl RelayNode {
             Endpoint {
                 session: Session::for_circuit(&circuit.circ_id, secret),
                 range: None,
-                outbox: VecDeque::new(),
+                outbox: Outbox::default(),
                 drains: Drains::default(),
                 loops: 0,
                 paused: false,
@@ -2301,13 +2593,17 @@ impl RelayNode {
         true
     }
 
-    /// Serves the commands of one `DATA` cell. The result holds the paced
-    /// replies and the digests. A `SUB` or a `GSUB` of a backlog above
-    /// `DRAIN_THRESHOLD` gives no reply. Its service leaves a drain at the
-    /// circuit, and the records leave in the steps of the clock
-    /// (`NET-037`). A drain that the service refused gets its `NACK` with
-    /// the reason `LIMIT` as each rejected command does. The service left
-    /// no subscription for it and copied no record.
+    /// Serves the commands of one `DATA` cell, puts each answer on the
+    /// pacing clock of its circuit, and gives the digests. A `SUB` or a
+    /// `GSUB` gives no record. Its service leaves the backlog at the
+    /// circuit. A backlog above `DRAIN_THRESHOLD` leaves in the steps of
+    /// the clock of the relay (`NET-037`), and each other one leaves on the
+    /// pacing clock, one record at each tick, in its place among the
+    /// answers (`NET-365`). A record that a `SEND` or a `GPOST` gives a live
+    /// subscription waits as a place in its queue too. A drain that the
+    /// service refused gets its `NACK` with the reason `LIMIT` as each
+    /// rejected command does. The service left no subscription for it and
+    /// copied no record.
     fn serve<R: CryptoRng + ?Sized>(
         &mut self,
         circuit: CircuitKey,
@@ -2315,13 +2611,12 @@ impl RelayNode {
         content: &[u8],
         now: u64,
         rng: &mut R,
-    ) -> (Vec<Reply>, Vec<DigestDue>) {
+    ) -> Vec<DigestDue> {
         // WIR-318: a cell whose commands do not parse gets no answer.
         let Ok(commands) = unpack(content, bucket) else {
-            return (Vec::new(), Vec::new());
+            return Vec::new();
         };
 
-        let mut paced = Vec::new();
         let mut digests = Vec::new();
 
         for command in &commands {
@@ -2329,14 +2624,17 @@ impl RelayNode {
             match outcome {
                 Ok((replies, due)) => {
                     digests.extend(due);
-                    paced.extend(replies);
+                    self.post(replies);
                 }
                 Err(reject) => {
                     // WIR-322: a NACK goes before each pending MSG.
-                    if let Some(endpoint) = self.endpoints.get_mut(&circuit) {
-                        endpoint.post(nack(circuit, command, reject).outbound, true);
-                    }
+                    self.post_answer(circuit, nack(circuit, command, reject).outbound, true);
                 }
+            }
+
+            self.post_arrivals();
+            if let Some(endpoint) = self.endpoints.get_mut(&circuit) {
+                endpoint.place_backlogs();
             }
         }
 
@@ -2348,7 +2646,83 @@ impl RelayNode {
         {
             self.draining.insert(circuit);
         }
-        (paced, digests)
+        digests
+    }
+
+    /// Puts each reply on the pacing clock of its circuit.
+    fn post(&mut self, replies: Vec<Reply>) {
+        for reply in replies {
+            self.post_answer(reply.circuit, reply.outbound, false);
+        }
+    }
+
+    /// Puts one answer on the pacing clock of `circuit`, at the front for a
+    /// `NACK` (`WIR-322`). The answers of all circuits hold at most
+    /// `RELAY_ANSWER_BYTES_MAX` together (`NET-375`). Above it, the newest
+    /// answer of the circuit that holds the most drops. When no other
+    /// circuit holds more than this one would, this answer drops. Each such
+    /// command goes again.
+    fn post_answer(&mut self, circuit: CircuitKey, outbound: Outbound, first: bool) {
+        // An answer above the bound of its own circuit drops first, thus it
+        // takes no answer of another circuit for nothing.
+        let len = outbound.encoded.len();
+        let takes = self
+            .endpoints
+            .get(&circuit)
+            .is_some_and(|endpoint| endpoint.outbox.takes(len));
+        if !takes {
+            return;
+        }
+
+        while self.answer_bytes.total.saturating_add(len) > RELAY_ANSWER_BYTES_MAX {
+            let mine = self.answer_bytes.of(&circuit).saturating_add(len);
+            let Some((heavy, bytes)) = self.answer_bytes.heaviest() else {
+                break;
+            };
+
+            if heavy == circuit || bytes <= mine {
+                return;
+            }
+
+            if let Some(endpoint) = self.endpoints.get_mut(&heavy) {
+                endpoint.outbox.drop_newest();
+            }
+
+            // The count of a circuit that ended falls to zero here. A count
+            // that does not move ends the loop.
+            self.recount(&heavy);
+            if self.answer_bytes.of(&heavy) == bytes {
+                return;
+            }
+        }
+
+        if let Some(endpoint) = self.endpoints.get_mut(&circuit) {
+            endpoint.post(outbound, first);
+        }
+        self.recount(&circuit);
+    }
+
+    /// Counts the bytes of the answers of `circuit` again, after a change
+    /// of its outbox (`NET-375`).
+    fn recount(&mut self, circuit: &CircuitKey) {
+        let bytes = self
+            .endpoints
+            .get(circuit)
+            .map_or(0, |endpoint| endpoint.outbox.bytes);
+        self.answer_bytes.set(*circuit, bytes);
+    }
+
+    /// Puts each record that a live subscription took on the pacing clock
+    /// of its circuit, as a place in its queue (`NET-365`).
+    fn post_arrivals(&mut self) {
+        let mut arrivals = self.queues.take_arrivals();
+        arrivals.extend(self.groups.take_arrivals());
+
+        for arrival in &arrivals {
+            if let Some(endpoint) = self.endpoints.get_mut(&arrival.circuit) {
+                endpoint.outbox.post_live(arrival);
+            }
+        }
     }
 
     fn serve_one<R: CryptoRng + ?Sized>(
@@ -2431,16 +2805,16 @@ impl RelayNode {
 
         let mut actions = Vec::new();
         let mut sent = 0usize;
-        let mut next = endpoint.outbox.pop_front();
+        let mut next = endpoint.outbox.pop_ready();
 
         while let Some(outbound) = next.take() {
             let bucket = outbound.bucket;
             let mut content = outbound.encoded;
 
-            while endpoint.outbox.front().is_some_and(|more| {
+            while endpoint.outbox.front_ready().is_some_and(|more| {
                 is_bulk && content.len().saturating_add(more.encoded.len()) <= bucket.command_area()
             }) {
-                if let Some(more) = endpoint.outbox.pop_front() {
+                if let Some(more) = endpoint.outbox.pop_ready() {
                     content.extend(more.encoded);
                 }
             }
@@ -2453,7 +2827,7 @@ impl RelayNode {
                 // it at once, thus the client builds again with no wait
                 // for the sweep.
                 actions.extend(self.circuits.shed(circuit.link, circuit.circ_id));
-                return actions;
+                break;
             };
 
             actions.push(action);
@@ -2461,13 +2835,15 @@ impl RelayNode {
 
             let has_step = endpoint
                 .outbox
-                .front()
+                .front_ready()
                 .is_some_and(|more| sent.saturating_add(more.bucket.cell_len()) <= ANSWER_STEP);
 
             if has_room && has_step {
-                next = endpoint.outbox.pop_front();
+                next = endpoint.outbox.pop_ready();
             }
         }
+
+        self.recount(circuit);
         actions
     }
 
@@ -2502,6 +2878,8 @@ impl RelayNode {
         else {
             return Vec::new();
         };
+
+        endpoint.read_backlog(circuit, &self.queues, &self.groups, rng);
 
         if !endpoint.outbox.is_empty() {
             let actions = self.answers(circuit);
@@ -3165,5 +3543,277 @@ mod tests {
             .take_changes()
             .iter()
             .any(|change| matches!(change, StoreChange::Record { .. })));
+    }
+
+    #[test]
+    fn an_outbox_holds_bounded_bytes_and_one_place_for_each_backlog() {
+        let mut outbox = Outbox::default();
+        let step = 32 << 10;
+        let answer = || Outbound {
+            bucket: Bucket::B3,
+            encoded: vec![0; step],
+        };
+
+        // NET-365: the answers that wait hold `OUTBOX_BYTES_MAX` at most,
+        // and one more drops. Before this, 1 024 of them stayed.
+        let fits = OUTBOX_BYTES_MAX / step;
+        for _ in 0..=fits {
+            outbox.post(answer(), false);
+        }
+
+        assert_eq!(outbox.entries.len(), fits);
+        assert_eq!(outbox.bytes, OUTBOX_BYTES_MAX);
+
+        // The place of a backlog holds no record, and a second backlog of
+        // one queue takes the place that waits.
+        outbox.post_backlog([1; 32]);
+        outbox.post_backlog([1; 32]);
+        assert_eq!(outbox.entries.len(), fits + 1);
+        assert_eq!(outbox.bytes, OUTBOX_BYTES_MAX);
+
+        // An answer that leaves gives its bytes back.
+        assert!(outbox.pop_ready().is_some());
+        assert_eq!(outbox.bytes, OUTBOX_BYTES_MAX - step);
+
+        outbox.clear();
+        assert!(outbox.is_empty());
+        assert_eq!(outbox.bytes, 0);
+    }
+
+    fn arrival(queue: u8, seq: u32) -> Arrival {
+        Arrival {
+            circuit: CircuitKey {
+                link: 1,
+                circ_id: [1; 16],
+            },
+            queue_id: [queue; 32],
+            seq,
+        }
+    }
+
+    /// The span of the place of a live record at `index`.
+    fn live_span(outbox: &Outbox, index: usize) -> ([u8; 32], u32, u32) {
+        match outbox.entries.get(index) {
+            Some(Queued::Live(live)) => (live.queue_id, live.after, live.end),
+            _ => panic!("no place of a live record at {index}"),
+        }
+    }
+
+    #[test]
+    fn a_live_record_is_a_place_and_a_full_outbox_drops_none() {
+        let mut outbox = Outbox::default();
+        let small = || Outbound {
+            bucket: Bucket::B0,
+            encoded: vec![0; 64],
+        };
+
+        // NET-365: the records that follow one another at the back share
+        // one place, and a place counts no byte. Before this, each one was
+        // a copy, and 64 `B3` records filled the bytes of the circuit.
+        for seq in 1..=100 {
+            outbox.post_live(&arrival(1, seq));
+        }
+
+        assert_eq!(outbox.entries.len(), 1);
+        assert_eq!(outbox.bytes, 0);
+        assert_eq!(live_span(&outbox, 0), ([1; 32], 0, 101));
+
+        // A record after an answer takes a place of its own, thus it goes
+        // after that answer.
+        outbox.post(small(), false);
+        outbox.post_live(&arrival(1, 101));
+        assert_eq!(live_span(&outbox, 2), ([1; 32], 100, 102));
+
+        while outbox.entries.len() < OUTBOX_MAX {
+            outbox.post(small(), false);
+        }
+
+        outbox.post(small(), false);
+        assert_eq!(outbox.entries.len(), OUTBOX_MAX);
+
+        // A full outbox drops the answer, whose command goes again. A record
+        // has no command that goes again: it joins the last place of its
+        // queue. Before this, it dropped, and the client could not `ACK`
+        // past it until its next `SUB`.
+        outbox.post_live(&arrival(1, 102));
+        assert_eq!(outbox.entries.len(), OUTBOX_MAX);
+        assert_eq!(live_span(&outbox, 2), ([1; 32], 100, 103));
+
+        // A record of a queue with no place takes one above the count, and
+        // the next record of that queue joins it.
+        outbox.post_live(&arrival(2, 7));
+        outbox.post_live(&arrival(2, 8));
+        assert_eq!(outbox.entries.len(), OUTBOX_MAX + 1);
+        assert_eq!(live_span(&outbox, OUTBOX_MAX), ([2; 32], 6, 9));
+
+        // The backlog of a `SUB` takes its place above the count too.
+        outbox.post_backlog([3; 32]);
+        outbox.post_backlog([3; 32]);
+        assert_eq!(outbox.entries.len(), OUTBOX_MAX + 2);
+        assert_eq!(outbox.bytes, (OUTBOX_MAX - 2) * small().encoded.len());
+    }
+
+    #[test]
+    fn a_backlog_keeps_its_place_when_the_outbox_is_full() {
+        let circ_id = [5; 16];
+        let mut endpoint = Endpoint {
+            session: Session::for_circuit(&circ_id, StaticSecret::from([9; 32])),
+            range: Some(Range::Queue),
+            outbox: Outbox::default(),
+            drains: Drains::default(),
+            loops: 0,
+            paused: false,
+        };
+
+        while endpoint.outbox.entries.len() < OUTBOX_MAX {
+            endpoint.post(
+                Outbound {
+                    bucket: Bucket::B0,
+                    encoded: vec![0; 64],
+                },
+                false,
+            );
+        }
+
+        // NET-349, NET-365: the `SUB` left a subscription, thus its backlog
+        // keeps its place. Before this, a full outbox ended the backlog, and
+        // each later record went above a backlog that never left.
+        let queue_id = [4; 32];
+        endpoint.drains.pace(Drain {
+            queue_id,
+            after: 0,
+            end: 6,
+            left: 0,
+        });
+        endpoint.place_backlogs();
+
+        assert!(endpoint.drains.paced_mut(&queue_id).is_some());
+        assert!(matches!(
+            endpoint.outbox.entries.back(),
+            Some(Queued::Backlog(held)) if *held == queue_id
+        ));
+    }
+
+    #[test]
+    fn the_answers_of_all_circuits_hold_a_bounded_count_of_bytes() {
+        let mut node = RelayNode::new(relay_config(7));
+        let key = |link: u64| CircuitKey {
+            link,
+            circ_id: [5; 16],
+        };
+        let open = |node: &mut RelayNode, link: u64| {
+            let endpoint = Endpoint {
+                session: Session::for_circuit(&[5; 16], StaticSecret::from([9; 32])),
+                range: Some(Range::Queue),
+                outbox: Outbox::default(),
+                drains: Drains::default(),
+                loops: 0,
+                paused: false,
+            };
+            node.endpoints.insert(key(link), endpoint);
+        };
+        let reply = |link: u64, len: usize| Reply {
+            circuit: key(link),
+            outbound: Outbound {
+                bucket: Bucket::B3,
+                encoded: vec![0; len],
+            },
+        };
+        let held = |node: &RelayNode, link: u64| node.endpoints[&key(link)].outbox.bytes;
+        let total = |node: &RelayNode| {
+            let sum: usize = node.endpoints.values().map(|held| held.outbox.bytes).sum();
+            assert_eq!(sum, node.answer_bytes.total);
+            sum
+        };
+
+        // Each circuit stays below its own bound, and together they fill
+        // the bound of the relay. Before this, nothing bounded the sum, and
+        // the circuits of one address held 512 MiB.
+        let step = 32 << 10;
+        let half = OUTBOX_BYTES_MAX / 2;
+        let circuits = RELAY_ANSWER_BYTES_MAX / half;
+        for link in 0..circuits as u64 {
+            open(&mut node, link);
+            node.post((0..half / step).map(|_| reply(link, step)).collect());
+        }
+        assert_eq!(total(&node), RELAY_ANSWER_BYTES_MAX);
+
+        // One circuit more fills nothing above the bound.
+        let more = circuits as u64;
+        open(&mut node, more);
+        node.post(vec![reply(more, step), reply(more, step)]);
+        assert_eq!(total(&node), RELAY_ANSWER_BYTES_MAX);
+        assert_eq!(held(&node, more), 2 * step);
+
+        // NET-375: each of its answers took the newest answer of a circuit
+        // that held the most, thus two circuits lost one answer each.
+        let lost = (0..circuits as u64)
+            .filter(|link| held(&node, *link) < half)
+            .count();
+        assert_eq!(lost, 2);
+
+        // A circuit that holds the most loses its own new answer, and it
+        // takes no answer of a circuit that holds as much.
+        node.post(vec![reply(0, step)]);
+        assert_eq!(held(&node, 0), half);
+        assert_eq!(total(&node), RELAY_ANSWER_BYTES_MAX);
+
+        // A small answer of a circuit that holds less goes in.
+        node.post(vec![reply(more, 100)]);
+        assert_eq!(held(&node, more), 2 * step + 100);
+        assert!(total(&node) <= RELAY_ANSWER_BYTES_MAX);
+
+        // An answer above the bound of its own circuit takes no answer of
+        // another circuit.
+        let crowded = more + 1;
+        open(&mut node, crowded);
+        node.post((0..OUTBOX_MAX).map(|_| reply(crowded, 0)).collect());
+        let before = total(&node);
+        node.post(vec![reply(crowded, step)]);
+        assert_eq!(total(&node), before);
+
+        // An ended circuit and a paused one give their bytes back.
+        node.endpoint_closed(&key(1), 1_000);
+        node.endpoint_paused(&key(2), 1_000);
+        assert_eq!(held(&node, 2), 0);
+        assert_eq!(node.answer_bytes.of(&key(1)), 0);
+        assert_eq!(total(&node), RELAY_ANSWER_BYTES_MAX - step + 100 - 2 * half);
+    }
+
+    #[test]
+    fn a_full_count_of_attempts_takes_a_new_address_in() {
+        let mut node = RelayNode::new(relay_config(7));
+        let source_of = |index: u64| {
+            let mut source = [0u8; 16];
+            source[..8].copy_from_slice(&index.to_be_bytes());
+            source
+        };
+
+        // REL-205: each address of a full count spent one attempt. The
+        // first one spent its attempt first.
+        for index in 0..MEAS_ATTEMPT_SOURCES_MAX as u64 {
+            let link = 10 + index;
+            let now = if index == 0 { 100 } else { 101 };
+            node.set_source(link, source_of(index));
+            assert!(node.attempt_left(link, now));
+            node.attempt_take(link, now);
+        }
+
+        assert_eq!(node.measure_attempts.len(), MEAS_ATTEMPT_SOURCES_MAX);
+
+        // A new address holds its attempt, and its count takes the place of
+        // the oldest one. Before this, a full count refused each new
+        // address, thus a measurer at one got no session.
+        node.set_source(1, [0xEE; 16]);
+        assert!(node.attempt_left(1, 130));
+        node.attempt_take(1, 130);
+
+        assert_eq!(node.measure_attempts.len(), MEAS_ATTEMPT_SOURCES_MAX);
+        assert!(node
+            .measure_attempts
+            .contains_key(&Holder::Source([0xEE; 16])));
+        assert!(!node
+            .measure_attempts
+            .contains_key(&Holder::Source(source_of(0))));
     }
 }

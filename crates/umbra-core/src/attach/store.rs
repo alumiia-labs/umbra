@@ -3,13 +3,16 @@
 //! egress budget of §12.11. The relay authenticates a command before it
 //! calls the store, with the credentials that the store hands it.
 
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, BTreeSet},
+    vec::Vec,
+};
 
 use umbra_queue::Reject;
 
 use super::{
-    seal, BACKUP_TTL, CHUNK_EGRESS_BUDGET_DAY, CHUNK_FETCH_RATE, CHUNK_LIFE_MAX, CHUNK_SIZE,
-    CHUNK_STORE_TARGET, CHUNK_TTL, QUOTA_WINDOW, UPLOAD_QUOTA_DAY,
+    pending_share, seal, trim_target, BACKUP_TTL, CHUNK_EGRESS_BUDGET_DAY, CHUNK_FETCH_RATE,
+    CHUNK_LIFE_MAX, CHUNK_PENDING_TTL, CHUNK_SIZE, CHUNK_TTL, QUOTA_WINDOW, UPLOAD_QUOTA_DAY,
 };
 
 /// The class of a chunk, which fixes its erase time and nothing else.
@@ -78,6 +81,8 @@ pub struct ChunkStore {
     capacity: u64,
     target: u64,
     pending: BTreeMap<[u8; 32], Registration>,
+    /// The pending registrations, oldest first.
+    pending_order: BTreeSet<(u64, [u8; 32])>,
     held: BTreeMap<[u8; 32], Held>,
     quota: BTreeMap<[u8; 32], (u64, u64)>,
     egress_day: u64,
@@ -88,9 +93,9 @@ pub struct ChunkStore {
 const CHUNK_BYTES: u64 = CHUNK_SIZE as u64;
 
 impl ChunkStore {
-    /// A store of `capacity` bytes at `CHUNK_STORE_TARGET`.
+    /// A store of `capacity` bytes at its trim target (`ATT-201`).
     pub const fn new(capacity: u64) -> Self {
-        Self::with_target(capacity, CHUNK_STORE_TARGET)
+        Self::with_target(capacity, trim_target(capacity))
     }
 
     /// A store of `capacity` bytes whose trim starts at `target`.
@@ -99,6 +104,7 @@ impl ChunkStore {
             capacity,
             target,
             pending: BTreeMap::new(),
+            pending_order: BTreeSet::new(),
             held: BTreeMap::new(),
             quota: BTreeMap::new(),
             egress_day: 0,
@@ -159,10 +165,23 @@ impl ChunkStore {
         u64::try_from(self.held.len()).map_or(u64::MAX, |n| n.saturating_mul(CHUNK_BYTES))
     }
 
-    /// Whether the held chunks are above `CHUNK_STORE_TARGET`, which the
-    /// relay signals as a capacity fault (`ATT-091`). A pending registration
-    /// holds no bytes and does not count here, thus a flood of
-    /// registrations erases no chunk (`ATT-090`).
+    /// The bytes that the pending registrations reserve.
+    fn pending_bytes(&self) -> u64 {
+        u64::try_from(self.pending.len()).map_or(u64::MAX, |n| n.saturating_mul(CHUNK_BYTES))
+    }
+
+    /// Takes a pending registration out of the store.
+    fn take_pending(&mut self, chunk_id: &[u8; 32]) -> Option<Registration> {
+        let registration = self.pending.remove(chunk_id)?;
+        self.pending_order
+            .remove(&(registration.registered_at, *chunk_id));
+        Some(registration)
+    }
+
+    /// Whether the held chunks are above the trim target, where the trim
+    /// may erase attachment chunks (`ATT-168`). No directory learns of it
+    /// (`ATT-091`). A pending registration holds no bytes and does not count
+    /// here, thus a flood of registrations erases no chunk (`ATT-090`).
     pub fn over_target(&self) -> bool {
         self.held_bytes() > self.target
     }
@@ -200,6 +219,17 @@ impl ChunkStore {
         if self.pending.contains_key(&chunk_id) || self.held.contains_key(&chunk_id) {
             return Err(Reject::Rejected);
         }
+
+        // ATT-200: registrations with no bytes that fill the store make
+        // room for a new one, and no held chunk leaves for them. The new
+        // one counts in the share: a store whose held chunks are at the
+        // trim target then still takes it.
+        let pending_after = self.pending_bytes().saturating_add(CHUNK_BYTES);
+        if self.free() < CHUNK_BYTES && pending_after > pending_share(self.capacity) {
+            if let Some(&(_, oldest)) = self.pending_order.first() {
+                self.take_pending(&oldest);
+            }
+        }
         if self.free() < CHUNK_BYTES {
             return Err(Reject::Busy);
         }
@@ -213,6 +243,7 @@ impl ChunkStore {
         }
         counter.1 = counter.1.saturating_add(CHUNK_BYTES);
 
+        self.pending_order.insert((now, chunk_id));
         self.pending.insert(
             chunk_id,
             Registration {
@@ -230,7 +261,7 @@ impl ChunkStore {
             return Err(Reject::Rejected);
         }
 
-        let registration = self.pending.remove(&chunk_id).ok_or(Reject::Rejected)?;
+        let registration = self.take_pending(&chunk_id).ok_or(Reject::Rejected)?;
         let erase_at = match registration.class {
             Class::Attachment => now
                 .saturating_add(CHUNK_TTL)
@@ -316,7 +347,7 @@ impl ChunkStore {
         if self.held.remove(chunk_id).is_some() {
             self.erased.push(*chunk_id);
             Ok(())
-        } else if self.pending.remove(chunk_id).is_some() {
+        } else if self.take_pending(chunk_id).is_some() {
             Ok(())
         } else {
             Err(Reject::Rejected)
@@ -358,8 +389,8 @@ impl ChunkStore {
     }
 
     /// Erases each chunk past its erase time, each registration that
-    /// `CHUNK_TTL` released, and each quota counter past its window
-    /// (`ATT-046`, `ATT-094`). Returns the count erased.
+    /// `CHUNK_PENDING_TTL` released, and each quota counter past its window
+    /// (`ATT-046`, `ATT-094`, `ATT-181`). Returns the count erased.
     pub fn sweep(&mut self, now: u64) -> usize {
         let before = self.held.len().saturating_add(self.pending.len());
         let erased = &mut self.erased;
@@ -371,8 +402,12 @@ impl ChunkStore {
             keep
         });
 
-        self.pending
-            .retain(|_, r| now.saturating_sub(r.registered_at) < CHUNK_TTL);
+        while let Some(&(registered_at, chunk_id)) = self.pending_order.first() {
+            if now.saturating_sub(registered_at) < CHUNK_PENDING_TTL {
+                break;
+            }
+            self.take_pending(&chunk_id);
+        }
         self.quota
             .retain(|_, (start, _)| now.saturating_sub(*start) < QUOTA_WINDOW);
 
@@ -382,40 +417,27 @@ impl ChunkStore {
     /// Erases attachment chunks, oldest renewal first, until the held chunks
     /// are at the target. A backup-class chunk stays (`ATT-168`, `ATT-179`).
     /// A pending registration holds no bytes, thus it makes no chunk leave
-    /// (`ATT-090`). When the registrations alone pass the target, the oldest
-    /// of them leave in place of a chunk. Returns the count of the chunks
-    /// erased.
+    /// (`ATT-090`). Returns the count of the chunks erased.
     pub fn trim(&mut self) -> usize {
         let most = usize::try_from(self.target / CHUNK_BYTES).unwrap_or(usize::MAX);
-        let excess = self.pending.len().saturating_sub(most);
-        if excess > 0 {
-            let mut oldest: Vec<(u64, [u8; 32])> = self
-                .pending
-                .iter()
-                .map(|(id, registration)| (registration.registered_at, *id))
-                .collect();
-            oldest.sort_unstable();
-            for (_, id) in oldest.into_iter().take(excess) {
-                self.pending.remove(&id);
-            }
+        let excess = self.held.len().saturating_sub(most);
+        if excess == 0 {
+            return 0;
         }
 
+        let mut oldest: Vec<(u64, [u8; 32])> = self
+            .held
+            .iter()
+            .filter(|(_, h)| h.class == Class::Attachment)
+            .map(|(id, h)| (h.renewed_at, *id))
+            .collect();
+        oldest.sort_unstable();
+
         let mut erased = 0usize;
-        while self.over_target() {
-            let oldest = self
-                .held
-                .iter()
-                .filter(|(_, h)| h.class == Class::Attachment)
-                .min_by_key(|(_, h)| h.renewed_at)
-                .map(|(id, _)| *id);
-            match oldest {
-                Some(id) => {
-                    self.held.remove(&id);
-                    self.erased.push(id);
-                    erased = erased.saturating_add(1);
-                }
-                None => break,
-            }
+        for (_, id) in oldest.into_iter().take(excess) {
+            self.held.remove(&id);
+            self.erased.push(id);
+            erased = erased.saturating_add(1);
         }
 
         erased
@@ -492,11 +514,14 @@ mod tests {
         assert_eq!(store.erase_at(&[1; 32]), Some(200 + BACKUP_TTL));
         assert_eq!(store.renew(&[1; 32], 300), Err(Reject::Rejected));
 
-        // A pending registration with no bytes leaves at CHUNK_TTL.
+        // ATT-181: a pending registration with no bytes leaves at
+        // CHUNK_PENDING_TTL.
         store
             .register([2; 32], Class::Attachment, creds(2), [9; 32], [6; 32], 100)
             .unwrap();
-        assert_eq!(store.sweep(100 + CHUNK_TTL), 1);
+        assert_eq!(store.sweep(100 + CHUNK_PENDING_TTL - 1), 0);
+        assert!(store.registration(&[2; 32]).is_some());
+        assert_eq!(store.sweep(100 + CHUNK_PENDING_TTL), 1);
         assert!(store.registration(&[2; 32]).is_none());
         store.delete(&[1; 32]).unwrap();
         assert_eq!(store.held_count(), 0);
@@ -505,12 +530,13 @@ mod tests {
     #[test]
     fn the_free_space_the_quota_the_egress_and_the_rate_bound_the_store() {
         let mut store = ChunkStore::new(2 * CHUNK_BYTES);
-        store
-            .register([1; 32], Class::Attachment, creds(1), [9; 32], [7; 32], 0)
-            .unwrap();
-        store
-            .register([2; 32], Class::Attachment, creds(2), [9; 32], [7; 32], 0)
-            .unwrap();
+        let chunk = alloc::vec![3u8; CHUNK_SIZE];
+        for id in [[1; 32], [2; 32]] {
+            store
+                .register(id, Class::Attachment, creds(1), [9; 32], [7; 32], 0)
+                .unwrap();
+            store.put(id, &chunk, 0).unwrap();
+        }
         assert_eq!(
             store.register([3; 32], Class::Attachment, creds(3), [9; 32], [7; 32], 0),
             Err(Reject::Busy)
@@ -540,7 +566,6 @@ mod tests {
         )
         .unwrap();
 
-        let chunk = alloc::vec![3u8; CHUNK_SIZE];
         big.put([0; 32], &chunk, 20).unwrap();
         assert_eq!(big.held_count(), 1);
         for _ in 0..CHUNK_FETCH_RATE {
@@ -582,15 +607,16 @@ mod tests {
         assert!(store.credentials(&second).is_none());
     }
 
+    fn id(i: u32) -> [u8; 32] {
+        let mut id = [0u8; 32];
+        id[..4].copy_from_slice(&i.to_be_bytes());
+        id
+    }
+
     #[test]
     fn a_pending_registration_makes_no_held_chunk_leave() {
-        let mut store = ChunkStore::with_target(u64::MAX, 4 * CHUNK_BYTES);
+        let mut store = ChunkStore::with_target(8 * CHUNK_BYTES, 4 * CHUNK_BYTES);
         let chunk = alloc::vec![5u8; CHUNK_SIZE];
-        let id = |i: u32| {
-            let mut id = [0u8; 32];
-            id[..4].copy_from_slice(&i.to_be_bytes());
-            id
-        };
 
         for i in 0..4 {
             store
@@ -619,8 +645,8 @@ mod tests {
         assert_eq!(store.held_count(), 4);
         assert!(store.registration(&id(12)).is_some());
 
-        // The registrations alone pass the target: the oldest of them
-        // leave, and each chunk stays.
+        // ATT-200: the registrations fill the store, and the oldest of them
+        // leave for new ones. Each chunk stays.
         for i in 13..16 {
             store
                 .register(
@@ -641,6 +667,94 @@ mod tests {
         assert!(store.registration(&id(12)).is_some());
         assert!(store.registration(&id(15)).is_some());
         assert!(store.take_erased().is_empty());
+    }
+
+    #[test]
+    fn a_flood_of_registrations_blocks_no_upload_and_ends_at_its_life() {
+        let mut store = ChunkStore::new(64 * CHUNK_BYTES);
+        let chunk = alloc::vec![6u8; CHUNK_SIZE];
+
+        // Registrations that never send bytes fill the store.
+        for i in 0..64 {
+            store
+                .register(id(i), Class::Attachment, creds(2), [8; 32], [7; 32], 0)
+                .unwrap();
+        }
+        assert_eq!(store.free(), 0);
+
+        // ATT-200: an honest registration takes the place of the oldest
+        // one, and its bytes go in.
+        store
+            .register(id(100), Class::Attachment, creds(1), [9; 32], [7; 32], 10)
+            .unwrap();
+        assert!(store.registration(&id(0)).is_none());
+        store.put(id(100), &chunk, 20).unwrap();
+
+        // ATT-181: the flood leaves at CHUNK_PENDING_TTL, and not at
+        // CHUNK_TTL.
+        assert_eq!(store.sweep(CHUNK_PENDING_TTL - 1), 0);
+        assert_eq!(store.sweep(CHUNK_PENDING_TTL), 63);
+        assert_eq!(store.held_count(), 1);
+        assert_eq!(store.free(), 63 * CHUNK_BYTES);
+    }
+
+    #[test]
+    fn a_store_at_its_trim_target_takes_a_registration_in_place_of_the_oldest() {
+        // The held chunks are at the trim target of ATT-201, and the
+        // registrations fill the share that is left.
+        let mut store = ChunkStore::new(64 * CHUNK_BYTES);
+        let chunk = alloc::vec![8u8; CHUNK_SIZE];
+        for i in 0..56 {
+            store
+                .register(id(i), Class::Attachment, creds(1), [9; 32], [7; 32], 0)
+                .unwrap();
+            store.put(id(i), &chunk, u64::from(i)).unwrap();
+        }
+        for i in 100..108 {
+            store
+                .register(id(i), Class::Attachment, creds(2), [8; 32], [7; 32], 60)
+                .unwrap();
+        }
+        assert_eq!(store.free(), 0);
+        assert!(!store.over_target());
+
+        // ATT-200: a new registration takes the place of the oldest one,
+        // and no chunk leaves.
+        store
+            .register(id(200), Class::Attachment, creds(3), [7; 32], [7; 32], 70)
+            .unwrap();
+        assert!(store.registration(&id(100)).is_none());
+        assert!(store.registration(&id(200)).is_some());
+        assert_eq!(store.held_count(), 56);
+        assert!(store.take_erased().is_empty());
+    }
+
+    #[test]
+    fn a_store_below_the_target_trims_a_flood_of_bytes() {
+        // ATT-201: a store smaller than CHUNK_STORE_TARGET trims at seven
+        // eighths of its size.
+        let mut store = ChunkStore::new(64 * CHUNK_BYTES);
+        let chunk = alloc::vec![7u8; CHUNK_SIZE];
+        for i in 0..64 {
+            store
+                .register(id(i), Class::Attachment, creds(2), [8; 32], [7; 32], 0)
+                .unwrap();
+            store.put(id(i), &chunk, u64::from(i)).unwrap();
+        }
+        assert_eq!(
+            store.register(id(100), Class::Attachment, creds(1), [9; 32], [7; 32], 70),
+            Err(Reject::Busy)
+        );
+
+        // ATT-168: the oldest renewals leave, and the store takes new
+        // registrations again.
+        assert!(store.over_target());
+        assert_eq!(store.trim(), 8);
+        assert!(store.credentials(&id(7)).is_none());
+        assert!(store.credentials(&id(8)).is_some());
+        store
+            .register(id(100), Class::Attachment, creds(1), [9; 32], [7; 32], 70)
+            .unwrap();
     }
 
     #[test]

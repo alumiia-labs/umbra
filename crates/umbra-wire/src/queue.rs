@@ -240,7 +240,7 @@ impl<'a> RenewalRecord<'a> {
 )]
 mod tests {
     use super::*;
-    use alloc::vec;
+    use alloc::{vec, vec::Vec};
     use umbra_crypto::secret::Secret;
 
     #[test]
@@ -318,8 +318,71 @@ mod tests {
         }
     }
 
+    /// A `B0` record that a sender with no rule writes: a raw kind byte,
+    /// and `edit` changes the plaintext before the seal.
+    fn raw_record(key: &QueueKey, kind: u8, inner: &[u8], edit: impl Fn(&mut [u8])) -> Vec<u8> {
+        let nonce = [3u8; 12];
+        let mut record = vec![0u8; Bucket::B0.l6_record()];
+        record[0] = VERSION;
+        record[1..13].copy_from_slice(&nonce);
+
+        let tag_at = record.len() - TAG_LEN;
+        let plain = &mut record[13..tag_at];
+        plain[..2].copy_from_slice(&u16::try_from(inner.len()).unwrap().to_be_bytes());
+        plain[2] = kind;
+        plain[PLAIN_PREFIX..PLAIN_PREFIX + inner.len()].copy_from_slice(inner);
+        edit(plain);
+
+        let tag = key.seal(&nonce, VERSION, &[2; 32], plain).unwrap();
+        record[tag_at..].copy_from_slice(&tag);
+        record
+    }
+
     #[test]
-    fn a_short_record_keeps_its_true_length_and_rejects_a_bad_kind() {
+    fn a_reserved_or_unknown_kind_and_a_fill_byte_are_rejected() {
+        let key = QueueKey::derive(&Secret::new([1; 32]), &[2; 32]);
+        let mut out = vec![0u8; 400];
+        let good = raw_record(&key, L6Kind::Ratchet as u8, b"short", |_| {});
+        assert_eq!(
+            open(&key, &[2; 32], &good, Bucket::B0, &mut out),
+            Ok((L6Kind::Ratchet, 5))
+        );
+
+        // WIR-023: the retired kinds 0x02 and 0x03, and the unknown ones.
+        for kind in [0x00, 0x02, 0x03, 0x09, 0xFF] {
+            let record = raw_record(&key, kind, b"short", |_| {});
+            assert_eq!(
+                open(&key, &[2; 32], &record, Bucket::B0, &mut out),
+                Err(Error::Malformed),
+                "kind {kind:#04x}"
+            );
+        }
+
+        // WIR-028: a fill byte that is not zero, at the first and at the
+        // last position of the fill.
+        let first_fill = PLAIN_PREFIX + 5;
+        for at in [first_fill, Bucket::B0.l6_record() - 13 - TAG_LEN - 1] {
+            let record = raw_record(&key, L6Kind::Ratchet as u8, b"short", |plain| {
+                plain[at] = 1;
+            });
+            assert_eq!(
+                open(&key, &[2; 32], &record, Bucket::B0, &mut out),
+                Err(Error::Malformed)
+            );
+        }
+
+        // A true length above the plaintext.
+        let record = raw_record(&key, L6Kind::Ratchet as u8, b"short", |plain| {
+            plain[..2].copy_from_slice(&u16::MAX.to_be_bytes());
+        });
+        assert_eq!(
+            open(&key, &[2; 32], &record, Bucket::B0, &mut out),
+            Err(Error::Malformed)
+        );
+    }
+
+    #[test]
+    fn a_short_record_keeps_its_true_length_and_rejects_a_changed_record() {
         let key = QueueKey::derive(&Secret::new([1; 32]), &[2; 32]);
         let mut send = vec![0u8; Bucket::B0.l6_record()];
         seal(

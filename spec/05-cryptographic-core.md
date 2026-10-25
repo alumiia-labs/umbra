@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 5: Cryptographic Core
 
 **Status:** Draft
-**Version:** 0.45.1
-**Date:** 2026-10-22
+**Version:** 0.46.0
+**Date:** 2026-10-23
 
 ---
 
@@ -1155,7 +1155,8 @@ code.
 > each of the three widths, and each vector MUST hold a loss pattern that drops
 > *r* chunks.
 
-**The chunk size is adaptive:**
+**The chunk width is fixed for each epoch.** The table gives the condition
+for each width:
 
 | Condition | Chunk `w` | Chunks/epoch | Heals in | Cost for each message | `B0` text |
 | --- | --- | --- | --- | --- | --- |
@@ -1166,12 +1167,29 @@ code.
 The PQ braid frame is 7 bytes plus the chunk width (Part 6 §6.5). Thus the width
 128 costs 135 bytes, the width 64 costs 71 bytes, and the width 32 costs 39
 bytes. The width 128 gives 91 bytes of `B0` text, the width 64 gives 155 bytes,
-and the width 32 gives 187 bytes. **[CRY-018]** A client MUST select the chunk
-width so that the record fits the smallest bucket that holds the message.
-**[CRY-019]** If no permitted width gives a fit, the client MUST send the record
-with `pq_frame_len = 0`. **[CRY-020]** The client MUST then send the chunk on a
-later record. Such a record shows no epoch number, and rule `CRY-148` gives how
-the peer takes it at a DH step.
+and the width 32 gives 187 bytes.
+
+**[CRY-018]** A client MUST select the chunk width of an epoch when it starts
+that epoch, and it MUST send each chunk of the epoch at that width. One
+codeword has one width (`CRY-077`), thus a chunk of another width is no
+position of that codeword. **[CRY-154]** A receiver MUST take the width of a
+peer epoch from the first chunk of that epoch that it absorbs. It MUST ignore
+a later chunk of that epoch at another width, as a frame with a fault
+(`CRY-092`). The next epoch can take another width.
+
+A client selects the smallest bucket that holds the record with the frame of
+its epoch. **[CRY-019]** If no bucket holds the record with that frame, the
+client MAY send the record with `pq_frame_len = 0`, except where `CRY-146`
+applies. **[CRY-020]** The client MUST then send the chunk on a later record.
+Such a record shows no epoch number, and rule `CRY-148` gives how the peer
+takes it at a DH step.
+
+> *Cause of one width for each epoch.* The erasure code makes one codeword at
+> one width, and a receiver rebuilds the material from *k* positions of that
+> codeword. A width for each record needs a codeword at each width, and a
+> receiver that holds chunks of two codewords cannot join them. The cost is a
+> larger bucket for some records: at the width 64, a text of 170 bytes takes
+> `B1`, and at the width 32 it fits `B0`.
 
 **[CRY-021]** **UMBRA MUST NOT use the retransmit-until-acknowledged strategy of
 Apple PQ3.** A conversation is unbalanced when a phone or a linked desktop is
@@ -1591,7 +1609,6 @@ the list gives its cause. The label names the object type and its lifetime:
 "umbra/v1/record-key"
 "umbra/v1/at-rest-wrap"
 "umbra/v1/table-mac"
-"umbra/v1/sync-seed"
 "umbra/v1/link-offer"
 "umbra/v1/link-hello"
 "umbra/v1/link-transcript"
@@ -1839,13 +1856,11 @@ the cause. §5.1 closes the primitive register in the same manner.
 > credential under `"umbra/v1/chunk-read"`. Each of the six names one object
 > type.
 
-> *The cause of the three platform-surface labels.* Part 14 §14.6.4 derives a
+> *The cause of the two platform-surface labels.* Part 14 §14.6.4 derives a
 > record key under `"umbra/v1/record-key"`, and `"umbra/v1/storage"` names the
-> master key above it. Part 7 §7.7 derives a sync channel seed after a
-> revocation under `"umbra/v1/sync-seed"`, and `"umbra/v1/device-set"` names
-> the membership key. Part 9 §9.9.3 derives a write authorization under
+> master key above it. Part 9 §9.9.3 derives a write authorization under
 > `"umbra/v1/handle-write"`, and `"umbra/v1/handle-renew"` names the renewal.
-> Each of the three names one object type.
+> Each of the two names one object type.
 
 > *The cause of the two at-rest labels.* Part 14 §14.6.4 derives the wrap key
 > of `K_store` from the secure-element secret under `"umbra/v1/at-rest-wrap"`.

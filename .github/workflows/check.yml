@@ -48,5 +48,6 @@ jobs:
       - name: cargo-deny at its pinned version
         run: cargo install cargo-deny --version "$CARGO_DENY_VERSION" --locked
 
+      # The audit of the site lock takes the Node and npm of the runner image.
       - name: The full check set
         run: bash scripts/check.sh

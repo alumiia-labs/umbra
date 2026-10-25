@@ -165,6 +165,10 @@ pub enum GroupCommand {
         /// The owner credential of this replica.
         own: Secret<32>,
     },
+    /// The chains of the circuits of the pairwise run of this client. A
+    /// chain of the group node puts their relays last (Part 3 `NET-310`).
+    /// It has no answer.
+    Chains(Vec<[[u8; 32]; 3]>),
 }
 
 impl GroupCommand {
@@ -276,6 +280,7 @@ impl GroupCommand {
                 group_queue_id: *group_queue_id,
                 own: Secret::new(*own.expose()),
             },
+            GroupCommand::Chains(chains) => GroupCommand::Chains(chains.clone()),
         }
     }
 }
@@ -356,8 +361,8 @@ impl GroupCommand {
                     payment: payment.clone(),
                 },
             )),
-            // The receive arms take the challenges.
-            GroupCommand::Challenges { .. } => None,
+            // The receive arms take the challenges and the chains.
+            GroupCommand::Challenges { .. } | GroupCommand::Chains(_) => None,
             GroupCommand::Post {
                 tag,
                 relay,
@@ -510,6 +515,9 @@ pub enum GroupUpdate {
     /// The session ended, and a new one starts after a backoff. Each
     /// subscription ended with the old session.
     Reset,
+    /// The chains of the circuits of this task, at each change. The other
+    /// nodes of the client put their relays last (`NET-310`).
+    Chains(Vec<[[u8; 32]; 3]>),
     /// The task ended, because the caller dropped the commands.
     Ended,
 }
@@ -587,6 +595,7 @@ pub async fn run_groups(
                 () = &mut wait => break false,
                 command = commands.recv() => match command {
                     Some(GroupCommand::Challenges { book, now }) => node.set_challenges(book, now),
+                    Some(GroupCommand::Chains(chains)) => node.set_other_chains(chains),
                     Some(command) => carried.early.push(command),
                     None => break true,
                 },
@@ -655,7 +664,17 @@ async fn session(
 
     let mut ready_since: Option<tokio::time::Instant> = None;
     let mut tick = tokio::time::interval(TICK);
+    let mut circuit_clock = crate::runtime::CircuitClock::default();
+    let mut shown_chains: Vec<[[u8; 32]; 3]> = Vec::new();
     let end = 'run: loop {
+        // NET-310: the other nodes of the client learn the chains of this
+        // one.
+        let chains = node.chains();
+        if chains != shown_chains {
+            shown_chains.clone_from(&chains);
+            let _ = updates.send(GroupUpdate::Chains(chains));
+        }
+
         for capsule in node.take_capsules() {
             if link.send(&capsule).await.is_err() {
                 break 'run End::Lost;
@@ -673,6 +692,10 @@ async fn session(
             command = commands.recv() => match command {
                 Some(GroupCommand::Challenges { book, now }) => {
                     node.set_challenges(book, now);
+                    Vec::new()
+                }
+                Some(GroupCommand::Chains(chains)) => {
+                    node.set_other_chains(chains);
                     Vec::new()
                 }
                 Some(command) => {
@@ -694,7 +717,11 @@ async fn session(
                 carried.early.extend(due.into_iter().map(|(_, command)| command));
 
                 // CIRCUIT_BUILD_TIMEOUT: a build that no relay answers ends.
+                // NET-370: a circuit keeps the age that its relays count.
                 let now = crate::runtime::unix_now();
+                if let Some(step) = circuit_clock.step(now) {
+                    node.circuit_clock_moved(step);
+                }
                 node.set_challenge_clock(now);
                 node.on_tick(now)
             }
@@ -852,6 +879,11 @@ async fn session(
     // session, under the tag the caller gave it.
     for held in pending.values() {
         let _ = updates.send(GroupUpdate::Unsent { tag: held.tag });
+    }
+
+    // The circuits of the session end with it.
+    if !shown_chains.is_empty() {
+        let _ = updates.send(GroupUpdate::Chains(Vec::new()));
     }
 
     (end, ready_since.is_some())

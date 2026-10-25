@@ -274,8 +274,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let object = group
             .moderate(&[(action, target)], rng)
             .map_err(|_| Error::Malformed)?;
-        self.post_group_control(conversation, &object, now_ms, rng)?;
-        self.apply_own_roster_object(conversation, &object, now_ms, rng)?;
+        self.post_own_object(conversation, &object, now_ms, rng)?;
 
         Ok(())
     }

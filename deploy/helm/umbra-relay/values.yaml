@@ -1,10 +1,13 @@
 # The settings of your relay. deploy/relay/relay.env.example explains each
 # value under its UMBRA_ name.
 
+# deploy/relay/README.md, "The image on Kubernetes", gives the build when no
+# image of this version is published.
 image:
   repository: ghcr.io/alumiia-labs/umbra-relay
   # Empty: the appVersion of the chart.
   tag: ""
+  # An image that the node imported needs IfNotPresent or Never.
   pullPolicy: IfNotPresent
 
 # The node that runs the relay, by its kubernetes.io/hostname. Its address

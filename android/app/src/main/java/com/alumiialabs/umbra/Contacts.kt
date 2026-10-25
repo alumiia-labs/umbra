@@ -174,6 +174,8 @@ fun QrCode(link: String, description: String = stringResource(R.string.contacts_
 
 @Composable
 fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
+    val context = LocalContext.current
+    val canScan = remember { hasBackCamera(context) }
     var pasted by remember { mutableStateOf("") }
     var isWaiting by remember { mutableStateOf(false) }
     var name by remember { mutableStateOf("") }
@@ -230,7 +232,7 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             Spacer(Modifier.height(24.dp))
             Headline(stringResource(R.string.contacts_someone_invited_you))
             Spacer(Modifier.height(20.dp))
-            if (!isWaiting) {
+            if (!isWaiting && canScan) {
                 PrimaryButton(stringResource(R.string.contacts_scan_qr_code), enabled = Core.online) {
                     push(Screen.ScanInvitation)
                 }

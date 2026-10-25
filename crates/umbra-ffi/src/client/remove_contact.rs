@@ -17,22 +17,22 @@ use umbra_crypto::rand_core::CryptoRng;
 use zeroize::Zeroizing;
 
 use super::{
-    alerts, block, dead, devices, drafts, groups, intros, key_changes, key_supply, modes,
-    own_delete, pictures, pins, quota, reset, retention, social, sync, timers, Client,
-    CONVERSATION, LAST_DELETE_SETTING, PENDING, PUBLISH_PENDING, RECEIPT, RECEIPT_SETTING,
-    SETTINGS,
+    alerts, block, dead, devices, drafts, groups, intros, key_changes, key_supply, modes, notify,
+    own_delete, pending_copy, pictures, pins, quota, reset, retention, roster_notes, social, sync,
+    timers, Client, CONVERSATION, LAST_DELETE_SETTING, PENDING, PUBLISH_PENDING, RECEIPT,
+    RECEIPT_SETTING, SETTINGS,
 };
 use crate::{ConversationId, Error, Event, MsgRef};
 
 /// Each contact that the user removed, under its conversation: the subject
-/// of `DEV-226`, then the `RecipientId` of its queue. The subject keeps the
-/// sync channel from bringing it back (`DEV-341`), and the queue names its
-/// push silent (`DEV-340`).
+/// of `DEV-226`, then the `RecipientId` of each of its queues. The subject
+/// keeps the sync channel from bringing it back (`DEV-341`), and each queue
+/// names its push silent (`DEV-340`).
 pub(super) const REMOVED_CONTACTS: TableId = TableId(0x58);
 const SUBJECT_LEN: usize = 32;
 
 /// The tables whose rows of a conversation carry it in the owner column.
-const OWNED: [TableId; 11] = [
+const OWNED: [TableId; 12] = [
     RECEIPT,
     PENDING,
     timers::TIMERS,
@@ -44,6 +44,7 @@ const OWNED: [TableId; 11] = [
     social::SHARES_HELD,
     groups::GROUP_JOIN,
     intros::INTROS,
+    roster_notes::ROSTER_NOTES,
 ];
 
 /// The tables that hold one row for a conversation, under its identifier
@@ -105,15 +106,38 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Ok(());
         }
 
+        // DEV-341: a record of the subject that waits for its identity
+        // entry waits for an entry that the guard refuses, thus it goes.
+        let held = self.held_records(&subject)?;
+
         // The row of a guard that names no conversation takes a key from
         // the subject.
         let open = self.open_mut()?;
         let row = open.store.row_id(REMOVED_CONTACTS, &subject);
         let value = [subject.as_slice(), &[0; 32]].concat();
         let mut batch = open.store.begin();
+        for (table, held_row) in held {
+            batch.delete(table, held_row);
+        }
         batch.put(REMOVED_CONTACTS, row, None, &value, rng)?;
 
         Ok(batch.commit()?)
+    }
+
+    /// The synced records of `subject` that wait for the identity entry
+    /// of their conversation (`DEV-294`).
+    fn held_records(&self, subject: &[u8; 32]) -> Result<Vec<(TableId, RowId)>, Error> {
+        Ok(self
+            .open_ref()?
+            .store
+            .list(sync::PAIRWISE_HELD, None)?
+            .into_iter()
+            .filter_map(|(row, plain)| {
+                let plain = Zeroizing::new(plain);
+                (plain.get(..SUBJECT_LEN) == Some(subject.as_slice()))
+                    .then_some((sync::PAIRWISE_HELD, row))
+            })
+            .collect())
     }
 
     /// Whether the user removed the contact that `subject` names.
@@ -126,15 +150,24 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .any(|(_, value)| value.get(..SUBJECT_LEN) == Some(subject.as_slice())))
     }
 
-    /// The `RecipientId` of the queue of each removed contact.
+    /// Each conversation that a removal erased since the last call, from
+    /// this device or from another one. The bridge of the run drops each
+    /// one, thus no later record of the run goes to it (`DEV-340`).
+    pub fn take_erased(&mut self) -> Vec<ConversationId> {
+        core::mem::take(&mut self.erased)
+    }
+
+    /// The `RecipientId` of each queue of each removed contact. A row of an
+    /// earlier build holds the first queue alone.
     pub(super) fn removed_queues(&self) -> Result<Vec<[u8; 32]>, Error> {
         Ok(self
             .open_ref()?
             .store
             .list(REMOVED_CONTACTS, None)?
             .iter()
-            .filter_map(|(_, value)| value.get(SUBJECT_LEN..)?.try_into().ok())
-            .filter(|recipient: &[u8; 32]| *recipient != [0; 32])
+            .filter_map(|(_, value)| value.get(SUBJECT_LEN..))
+            .flat_map(|recipients| recipients.as_chunks::<32>().0.to_vec())
+            .filter(|recipient| *recipient != [0; 32])
             .collect())
     }
 
@@ -147,12 +180,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         subject: [u8; 32],
         rng: &mut R,
     ) -> Result<(), Error> {
+        // DEV-340: each queue of the contact, the one of a rotation too.
         let store = &self.open_ref()?.store;
-        let recipient: [u8; 32] = store
+        let recipients: Vec<u8> = store
             .get(TableId::CONTACT, &conversation.0)?
             .map(Zeroizing::new)
-            .and_then(|row| row.get(..32).and_then(|id| id.try_into().ok()))
-            .unwrap_or([0; 32]);
+            .map(|row| notify::contact_queues(&row).concat())
+            .unwrap_or_else(|| vec![0; 32]);
 
         // A control record is a row of the conversation too, thus the list
         // takes each row and not the messages of a view alone.
@@ -176,13 +210,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
         batch.delete(TableId::CONTACT, conversation.0);
         batch.put(devices::ENDED_CHANNELS, conversation.0, None, &[1], rng)?;
-        let value = [subject.as_slice(), &recipient].concat();
+        let value = [subject.as_slice(), &recipients].concat();
         batch.put(REMOVED_CONTACTS, conversation.0, None, &value, rng)?;
         batch.commit()?;
 
         self.subjects.remove(&conversation);
         self.outgoing
             .retain(|waiting| waiting.conversation != conversation);
+        self.erased.push(conversation);
         self.events.push_back(Event::Conversations);
         self.events.push_back(Event::WakeTable);
 
@@ -245,10 +280,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
         }
 
-        // These rows name the contact in their value: a record that waits
-        // for the other devices, a deletion that waits for its target, a
-        // record of the sync channel that waits for its conversation, and
-        // the third party of an introduction.
+        // A record that waits for the other devices names the contact
+        // after its place in the order.
+        for (row, plain) in store.list(PUBLISH_PENDING, None)? {
+            let plain = Zeroizing::new(plain);
+            if pending_copy(&plain).is_some_and(|(_, held, _)| held == conversation) {
+                rows.push((PUBLISH_PENDING, row));
+            }
+        }
+
+        // These rows name the contact in their value: a deletion that
+        // waits for its target, and the third party of an introduction.
         let names = |table: TableId, at: core::ops::Range<usize>, value: &[u8]| {
             store.list(table, None).map(|listed| {
                 listed
@@ -261,10 +303,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     .collect::<Vec<_>>()
             })
         };
-        rows.extend(names(PUBLISH_PENDING, 0..16, &id)?);
         rows.extend(names(own_delete::HELD_DELETIONS, 0..16, &id)?);
-        rows.extend(names(sync::PAIRWISE_HELD, 0..32, subject)?);
         rows.extend(names(intros::INTROS, 17..33, &id)?);
+        rows.extend(self.held_records(subject)?);
 
         // A group names the contact behind a member, and the admin of an
         // offer that the contact sent.

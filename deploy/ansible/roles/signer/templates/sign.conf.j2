@@ -5,7 +5,9 @@ out=/var/www/umbra/.well-known/umbra
 keychain=/var/lib/umbra-signer/keychain
 # Part 10 REL-198: the signer places the relays of its own operator at once.
 # Each relay of another operator waits in its pending root (§10.5.4), and
-# admission_state holds the first pending root of each one.
+# admission_state holds the first pending root of each one. An outside_relay
+# line is of another operator whatever its name, and the signer places it
+# after a passed test alone, at a class that a test verified (REL-210).
 own_operator={{ umbra_operator }}
 {% for host in groups['relays'] %}
 {% for relay in hostvars[host]['relays'] %}
@@ -15,7 +17,7 @@ relay=/etc/umbra-signer/descriptors/{{ relay.name }}.desc,{{ umbra_operator }},{
 {% endfor %}
 {% for relay in umbra_outside_relays %}
 {% set place = 'ingress' if relay.role == 'entry' else relay.role %}
-relay=/etc/umbra-signer/descriptors/{{ relay.name }}.desc,{{ relay.operator }},{{ relay.class }},{{ place }}
+outside_relay=/etc/umbra-signer/descriptors/{{ relay.name }}.desc,{{ relay.operator }},{{ relay.class }},{{ place }}
 {% endfor %}
 admission_state=/var/lib/umbra-signer/state/admission_state
 # The report queue and the verdicts of the authority tool

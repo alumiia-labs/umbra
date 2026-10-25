@@ -665,6 +665,9 @@ pub struct ParkedSession {
     ingress: [u8; 32],
     range: Range,
     circuits: Vec<ParkedCircuit>,
+    /// Whether a `DEL` went in the session. A run that continues it sends
+    /// none (`WIR-045`).
+    del_sent: bool,
 }
 
 impl ParkedSession {
@@ -904,6 +907,9 @@ struct QueueKeys {
     handle: u64,
     /// The circuit that carries the `NEW`.
     slot: usize,
+    /// `RelaySession_pk` of that circuit. A spare can take the slot before
+    /// the `IDS` comes back on the replaced circuit (`NET-288`).
+    session_pk: [u8; 32],
     /// Whether the `NEW` carried a token, thus a second `ADMISSION` ends it.
     paid: bool,
 }
@@ -1008,7 +1014,12 @@ enum Waiting {
     /// A `SEND` of flight 3 to this contact.
     LastFlight([u8; 32]),
     /// A `SEND` of the first ratchet record to this contact (`NET-292`).
-    Opening([u8; 32]),
+    Opening {
+        contact: [u8; 32],
+        /// Whether it left after a relay took flight 3. One that left
+        /// before can reach the queue of the peer before that flight.
+        late: bool,
+    },
     /// A `SEND` of the renewal guard of this counter to this contact
     /// (`NET-354`).
     Guard {
@@ -1517,6 +1528,29 @@ pub fn stored_channel_end(state: &[u8]) -> Result<Option<ChannelEnd>, Error> {
         guard_seq: tail.guard.seq,
         guard_secret: tail.guard.secret,
     }))
+}
+
+/// The `RecipientId` of each inbound queue of a stored contact: the
+/// current one, and the one that a rotation replaced (Part 3 §3.2.6). A
+/// rotation keeps the contact under its first queue, thus the contact
+/// names neither of them after it. A contact with no channel of its own
+/// holds none.
+pub fn stored_contact_queues(state: &[u8]) -> Result<Vec<[u8; 32]>, Error> {
+    let mut reader = Reader::new(state);
+    let version = match state.first() {
+        Some(&SHADOW_VERSION) => return Ok(Vec::new()),
+        _ => contact_version(&mut reader)?,
+    };
+    if matches!(version, BARE_VERSION | BARE_GUARD_VERSION) {
+        return Ok(Vec::new());
+    }
+
+    let _salt: [u8; 16] = reader.array()?;
+    let _peer_static: [u8; 32] = reader.array()?;
+    if version != 0x01 {
+        let _inbound_relay: [u8; 32] = reader.array()?;
+    }
+    PairwiseChannel::stored_inbounds(reader.var()?)
 }
 
 /// Whether a renewal bundle of the peer waits for the answer of the user
@@ -2071,9 +2105,12 @@ pub struct ClientNode {
     /// Each contact whose queue this device acknowledged above a hole
     /// (`WIR-116`), for the gap that its conversation shows.
     gaps: Vec<ContactId>,
-    /// A `DEL` went in this run, which is one transport session: no second
-    /// one goes (`WIR-045`).
+    /// A `DEL` went in this run, or in the session of an earlier run that
+    /// this run continues. No second one goes in the run (`WIR-045`).
     del_sent: bool,
+    /// The chains of the circuits of the other nodes of this client, which
+    /// the runtime gives (`NET-310`).
+    other_chains: Vec<[[u8; 32]; HOPS]>,
     /// The privacy mode of each circuit that this node builds for no
     /// contact of another mode (Part 3 §3.9). Each hop of a circuit reads
     /// its mode (`NET-336`).
@@ -2239,6 +2276,7 @@ impl ClientNode {
             moved: BTreeSet::new(),
             gaps: Vec::new(),
             del_sent: false,
+            other_chains: Vec::new(),
             delay_class: DelayClass::default(),
             contact_classes: BTreeMap::new(),
             chunk_class: DelayClass::default(),
@@ -2618,13 +2656,14 @@ impl ClientNode {
     }
 
     /// Sends the `DEL` of one queue end whose delay ended, on a circuit to
-    /// its relay, when no other `DEL` went in this run (`WIR-045`). With no
-    /// such circuit one starts, and a later check sends. A queue that a
-    /// rotation replaced takes its `DEL` on the circuit that reads it. That
-    /// circuit first gives no record of the queue for [`DRAIN_QUIET`],
-    /// because the `DEL` erases each record that the queue still holds
-    /// (`NET-178`). A `DEL` has no answer, thus the store drops the queue
-    /// end at the next call, when the command left.
+    /// its relay, when no other `DEL` went in this run or in the session
+    /// that it continues (`WIR-045`). With no such circuit one starts, and
+    /// a later check sends. A queue that a rotation replaced takes its
+    /// `DEL` on the circuit that reads it. That circuit first gives no
+    /// record of the queue for [`DRAIN_QUIET`], because the `DEL` erases
+    /// each record that the queue still holds (`NET-178`). A `DEL` has no
+    /// answer, thus the store drops the queue end at the next call, when
+    /// the command left.
     fn send_due_del<R: CryptoRng + ?Sized>(&mut self, now: u64, rng: &mut R) -> Result<(), Error> {
         if self.del_sent {
             return Ok(());
@@ -3345,11 +3384,13 @@ impl ClientNode {
             return Ok(());
         };
 
-        // One that waits for its `QUOTA` goes no second time.
-        let is_out = self
-            .waiting
-            .values()
-            .any(|waiting| matches!(waiting, Waiting::Opening(held) if *held == contact));
+        // One that waits for its `QUOTA` goes no second time. A record that
+        // left before a relay took flight 3 gives way to one behind it.
+        let late = held.flight.is_empty();
+        let is_out = self.waiting.values().any(|waiting| {
+            matches!(waiting, Waiting::Opening { contact: held, late: was_late }
+                if *held == contact && (*was_late || !late))
+        });
         let waits = |(_, waiting): &(Sealed, Waiting)| matches!(waiting, Waiting::LastFlight(held) if *held == contact);
         if !held.opens || held.stale || is_out || self.held_records.iter().any(waits) {
             return Ok(());
@@ -3366,7 +3407,7 @@ impl ClientNode {
         };
         let mut app = Zeroizing::new(alloc::vec![0u8; record.len()]);
         record.encode(&mut app)?;
-        self.send_now(contact, &app, Waiting::Opening(contact), now, rng)
+        self.send_now(contact, &app, Waiting::Opening { contact, late }, now, rng)
     }
 
     /// A renewal record of the peer arrived (`NET-327`). The static key
@@ -4187,9 +4228,12 @@ impl ClientNode {
             (false, false) => 1,
         };
         for step in 0..steps {
+            // NET-028: the new queue lives on a circuit of the mode of the
+            // node, as each other queue of this node does.
             let ready = self.slots.iter().position(|slot| {
                 let exit = slot.chain.and_then(|chain| chain.last().copied());
                 slot.is_general()
+                    && slot.class == self.delay_class
                     && slot.is_ready()
                     && slot.has_room()
                     && exit
@@ -4739,17 +4783,23 @@ impl ClientNode {
     /// As [`ClientNode::assign`], on a rendezvous circuit when
     /// `rendezvous` holds, and on a general one otherwise (`DIS-014`).
     fn assign_to(&mut self, queue: [u8; 32], relay: [u8; 32], rendezvous: bool) {
+        // NET-028: a queue of this node lives on a circuit of its mode.
+        let class = self.delay_class;
         let serves = |slot: &&mut Slot| {
-            slot.rendezvous == rendezvous && slot.has_room() && slot.ends_at(&relay)
+            slot.rendezvous == rendezvous
+                && slot.class == class
+                && slot.has_room()
+                && slot.ends_at(&relay)
         };
         let slot = match self.slots.iter_mut().find(serves) {
             Some(slot) => slot,
             None => {
-                self.slots.push(if rendezvous {
+                let empty = if rendezvous {
                     Slot::for_rendezvous(None)
                 } else {
                     Slot::empty(None)
-                });
+                };
+                self.slots.push(Slot { class, ..empty });
                 match self.slots.last_mut() {
                     Some(slot) => slot,
                     None => return,
@@ -5229,6 +5279,7 @@ impl ClientNode {
             ingress: self.ingress.key.relay_id,
             range: self.range,
             circuits,
+            del_sent: self.del_sent,
         })
     }
 
@@ -5294,7 +5345,10 @@ impl ClientNode {
         }
 
         let ParkedSession {
-            mut link, circuits, ..
+            mut link,
+            circuits,
+            del_sent,
+            ..
         } = parked;
         let mut capsule = alloc::vec![0u8; 64];
         let used = link.resume(now, &mut capsule).map_err(|_| Error::NoPath)?;
@@ -5302,6 +5356,9 @@ impl ClientNode {
         self.capsules.push_back(capsule);
         self.link = Some(link);
         self.clock = now;
+        // WIR-045 counts the `DEL` commands of the transport session, and
+        // the session of an earlier run goes on here.
+        self.del_sent |= del_sent;
 
         // The division of the queues of this run gives way to the one
         // that the kept circuits hold. A queue stays on the circuit that
@@ -5368,6 +5425,9 @@ impl ClientNode {
     pub fn resume_failed(&mut self) {
         self.resuming = false;
         self.link = None;
+        // The `DEL` of the parked session counts no more: the new session
+        // holds none, and no `DEL` leaves while a resume waits.
+        self.del_sent = false;
         self.capsules.clear();
         self.waiting.clear();
         self.watched_waits.clear();
@@ -6164,10 +6224,15 @@ impl ClientNode {
         } else {
             self.rendezvous.values().map(|held| held.relay).collect()
         };
+        // NET-310: a spare under build, a replaced circuit that still reads,
+        // and a circuit of another node are circuits of this client too.
         let uses = |relay: &[u8; 32]| {
             self.slots
                 .iter()
+                .chain(self.spares.iter().map(|spare| &spare.slot))
                 .filter_map(|slot| slot.chain)
+                .chain(self.retiring.iter().map(|held| held.chain))
+                .chain(self.other_chains.iter().copied())
                 .filter(|chain| chain.contains(relay))
                 .count()
         };
@@ -6428,14 +6493,15 @@ impl ClientNode {
 
         let user_handle = self.handle();
         // DIS-014: a rendezvous queue lives on a circuit of its own kind.
+        // NET-028: a queue of this node lives on a circuit of its mode.
         let rendezvous = matches!(purpose, Purpose::Rendezvous);
-        let with_room =
-            |slot: &Slot| slot.rendezvous == rendezvous && slot.is_ready() && slot.has_room();
+        let class = self.delay_class;
+        let of_kind = |slot: &Slot| slot.rendezvous == rendezvous && slot.class == class;
+        let with_room = |slot: &Slot| of_kind(slot) && slot.is_ready() && slot.has_room();
         let Some(slot) = self.slots.iter().position(with_room) else {
             self.deferred.push_back((purpose, user_handle));
-            let is_building = |slot: &Slot| {
-                slot.rendezvous == rendezvous && matches!(slot.circuit, Circuit::Building { .. })
-            };
+            let is_building =
+                |slot: &Slot| of_kind(slot) && matches!(slot.circuit, Circuit::Building { .. });
             if !self.slots.iter().any(is_building) {
                 if rendezvous {
                     self.add_rendezvous_circuit(rng)?;
@@ -6469,6 +6535,7 @@ impl ClientNode {
             purpose,
             handle: user_handle,
             slot: self.current,
+            session_pk: [0; 32],
             paid: false,
         };
         self.send_new(Box::new(keys), Admission::NONE, rng)
@@ -6477,15 +6544,16 @@ impl ClientNode {
     /// Sends the `NEW` of `keys` on the current circuit.
     fn send_new<R: CryptoRng + ?Sized>(
         &mut self,
-        keys: Box<QueueKeys>,
+        mut keys: Box<QueueKeys>,
         admission: Admission<'_>,
         rng: &mut R,
     ) -> Result<(), Error> {
+        keys.session_pk = self.session_pk()?;
         let encoded = new_queue_command(
             &keys.qr_auth,
             &StaticSecret::from(keys.qs_auth),
             admission,
-            &self.session_pk()?,
+            &keys.session_pk,
             random(rng),
         )?;
         self.queue_command(encoded, Waiting::Queue(keys))?;
@@ -6526,9 +6594,18 @@ impl ClientNode {
             (None, _) => None,
         };
         let Some((kind, body)) = paid else {
-            if let Purpose::Rotate { contact, .. } = keys.purpose {
-                self.rotating.remove(&contact);
-                return Ok(Vec::new());
+            match keys.purpose {
+                Purpose::Rotate { contact, .. } => {
+                    self.rotating.remove(&contact);
+                    return Ok(Vec::new());
+                }
+                // NET-326, NET-327: the renewal runs again at a later check,
+                // or at the next bundle of the peer.
+                Purpose::Renew { contact } | Purpose::RenewAccept { contact, .. } => {
+                    self.renewal_ended(&contact);
+                    return Ok(Vec::new());
+                }
+                _ => {}
             }
 
             return Ok(alloc::vec![ClientEvent::Rejected {
@@ -7748,7 +7825,7 @@ impl ClientNode {
             };
             // The guard waits in the contact too, and a later check sends
             // it.
-            if !matches!(waiting, Waiting::Opening(_) | Waiting::Guard { .. }) {
+            if !matches!(waiting, Waiting::Opening { .. } | Waiting::Guard { .. }) {
                 let held = self.contacts.get_mut(&contact).ok_or(Error::NoPath)?;
                 held.waiting_sends.push_back((app.to_vec(), user_handle));
             }
@@ -7776,7 +7853,7 @@ impl ClientNode {
                     user: Some(handle),
                 }
             }
-            Waiting::Opening(contact) => Waiting::Opening(contact),
+            Waiting::Opening { contact, late } => Waiting::Opening { contact, late },
             Waiting::Guard { contact, seq } => Waiting::Guard { contact, seq },
             Waiting::Carried(slot) => Waiting::Node {
                 contact,
@@ -8127,6 +8204,9 @@ impl ClientNode {
     /// deletes a record on an interrupted duration (Part 1 `SCP-018` to
     /// `SCP-021`). The age of each skipped key of each contact starts again
     /// as well, thus no key goes before its record arrives (`CRY-098`).
+    ///
+    /// The times of the circuits do not start again: the runtime moves them
+    /// with [`ClientNode::circuit_clock_moved`] (`NET-370`).
     pub fn clock_moved(&mut self, now: u64) {
         self.clock_moved_at = self.clock_moved_at.max(now);
         for (id, contact) in &mut self.contacts {
@@ -8135,6 +8215,57 @@ impl ClientNode {
                 self.moved.insert(*id);
             }
         }
+    }
+
+    /// Takes a difference of `step` seconds between the movement of the
+    /// device clock and the movement of the monotonic source. Each time of
+    /// a circuit moves by it, thus each circuit keeps the age that its
+    /// relays count (`NET-370`). These are its age, the wait of its build,
+    /// the wait of a replaced circuit, the delay of the rendezvous builds,
+    /// and each back-off of a build or of a `SUB`. The runtime gives each
+    /// difference before the tick, and not only a clock movement of Part 1
+    /// §1.9.
+    pub fn circuit_clock_moved(&mut self, step: i64) {
+        let moved = |at: &mut u64| *at = at.saturating_add_signed(step);
+        let slots = self
+            .slots
+            .iter_mut()
+            .chain(self.spares.iter_mut().map(|spare| &mut spare.slot));
+        for slot in slots {
+            for at in slot.born.iter_mut().chain(slot.building_since.iter_mut()) {
+                moved(at);
+            }
+        }
+        for spare in &mut self.spares {
+            moved(&mut spare.since);
+        }
+        for held in &mut self.retiring {
+            moved(&mut held.until);
+        }
+        if let Some(at) = &mut self.rendezvous_at {
+            moved(at);
+        }
+
+        let builds = self
+            .rebuilds
+            .values_mut()
+            .chain(self.spare_tries.values_mut());
+        for (_, at) in builds {
+            moved(at);
+        }
+        // A time of zero names a `SUB` that is out, and no wait.
+        for (_, at) in self.subs_again.values_mut().filter(|(_, at)| *at != 0) {
+            moved(at);
+            *at = (*at).max(1);
+        }
+    }
+
+    /// Takes the chains of the circuits of the other nodes of this client:
+    /// of the pairwise, group, and transfer nodes, each but this one. A new
+    /// chain of this node puts their relays last where the relay set
+    /// permits it (`NET-310`).
+    pub fn set_other_chains(&mut self, chains: Vec<[[u8; 32]; HOPS]>) {
+        self.other_chains = chains;
     }
 
     /// Takes whether the key set of the directory is provisional, which
@@ -8792,9 +8923,13 @@ impl ClientNode {
         rng: &mut R,
     ) -> Result<Vec<ClientEvent>, Error> {
         let ready = self.current;
-        // Each queue that waited for room goes to a circuit of its kind.
+        // Each queue that waited for room goes to a circuit of its kind. A
+        // circuit of another mode takes none of them (`NET-028`), and the
+        // build of `make_queue` serves them.
         let rendezvous = self.slot()?.rendezvous;
-        let of_kind = |purpose: &Purpose| matches!(purpose, Purpose::Rendezvous) == rendezvous;
+        let is_own_mode = self.slot()?.class == self.delay_class;
+        let of_kind =
+            |purpose: &Purpose| is_own_mode && matches!(purpose, Purpose::Rendezvous) == rendezvous;
         while self.slot()?.has_room() {
             let Some(at) = self
                 .deferred
@@ -8957,14 +9092,20 @@ impl ClientNode {
                 // that the relay took.
                 self.send_opening(contact, now, rng)?;
             }
-            (Some(Waiting::Opening(contact)), Cmd::Quota) => {
-                // A record that a relay took before flight 3 opens
-                // no chain, and it goes again behind that flight.
-                if let Some(held) = self.contacts.get_mut(&contact) {
-                    if held.flight.is_empty() {
+            (Some(Waiting::Opening { contact, late }), Cmd::Quota) => {
+                // NET-292: a record that left before a relay took flight 3
+                // can open no chain, and one more goes behind that flight.
+                let taken = self
+                    .contacts
+                    .get(&contact)
+                    .is_some_and(|held| held.flight.is_empty());
+                if late {
+                    if let Some(held) = self.contacts.get_mut(&contact) {
                         held.opens = false;
                         self.moved.insert(contact);
                     }
+                } else if taken {
+                    self.send_opening(contact, now, rng)?;
                 }
 
                 self.send_guard(contact, now, rng)?;
@@ -9109,7 +9250,7 @@ impl ClientNode {
                 }
                 return Ok(out);
             }
-            Some(Waiting::LastFlight(contact) | Waiting::Opening(contact)) => {
+            Some(Waiting::LastFlight(contact) | Waiting::Opening { contact, .. }) => {
                 if matches!(reason, Reject::Rejected | Reject::Version) {
                     // The queue of the peer is gone. The address
                     // of this device goes to its next queue
@@ -9264,11 +9405,14 @@ impl ClientNode {
         rng: &mut R,
     ) -> Result<Vec<ClientEvent>, Error> {
         let ids = IdsPayload::parse(payload)?;
-        let session_pk = self.session_pk()?;
-        // NET-288.
-        if ids.relay_session_pk != session_pk {
+        // NET-288: the `IDS` comes on the circuit that carried the `NEW`.
+        // That can be a replaced circuit, and the slot holds its spare.
+        if ids.relay_session_pk != keys.session_pk {
             return Err(Error::Unverified);
         }
+
+        // The `SUB` and each later command go on the circuit of the slot.
+        let session_pk = self.session_pk()?;
 
         // The session of the circuit serves the queue from its `NEW`.
         if let Some(slot) = self.slots.get_mut(keys.slot) {
@@ -10259,11 +10403,32 @@ mod tests {
         busy: u32,
         /// Whether a relay answers a `NEW` with a `QUOTA`.
         wrong_ids: bool,
+        /// The `NEW` commands that the relays refuse with `ADMISSION` from
+        /// here on.
+        admissions: u32,
         /// The `SUB` commands that the relays refuse with `LIMIT` from
         /// here on. A relay keeps no subscription after such a refusal.
         sub_limits: u32,
         /// The circuit of each loop cell that a relay took.
         loops: Vec<[u8; 16]>,
+        /// The circuits whose forward cells wait at their hops, as for a
+        /// long delay of a hop, and those cells with their party.
+        slow: BTreeSet<[u8; 16]>,
+        held_cells: Vec<(usize, Vec<u8>)>,
+        /// The circuits whose answers wait at the relay, and those answers.
+        slow_back: BTreeSet<[u8; 16]>,
+        held_answers: Vec<HeldAnswer>,
+    }
+
+    /// An answer of a relay that waits on a slow circuit.
+    struct HeldAnswer {
+        party: usize,
+        circ_id: [u8; 16],
+        bucket: Bucket,
+        cmd: Cmd,
+        corr_id: [u8; 16],
+        queue_id: [u8; 32],
+        payload: Vec<u8>,
     }
 
     fn node_of(seed: u8, operator: Option<u8>, exits: &[u8]) -> ClientNode {
@@ -10313,8 +10478,13 @@ mod tests {
                 log: Vec::new(),
                 busy: 0,
                 wrong_ids: false,
+                admissions: 0,
                 sub_limits: 0,
                 loops: Vec::new(),
+                slow: BTreeSet::new(),
+                held_cells: Vec::new(),
+                slow_back: BTreeSet::new(),
+                held_answers: Vec::new(),
             }
         }
 
@@ -10395,9 +10565,14 @@ mod tests {
             }
         }
 
-        /// Makes the circuit of one slot ready, as the three `EXTENDED`
-        /// cells of its build do.
-        fn make_ready(&mut self, party: usize, index: usize) {
+        /// A ready circuit `circ_id` of a party that ends at `relay`, with a
+        /// session key of its own. The relays know its far end.
+        fn ready_session(
+            &mut self,
+            party: usize,
+            circ_id: [u8; 16],
+            relay: [u8; 32],
+        ) -> Box<CircuitSession> {
             self.made = self.made.wrapping_add(1);
             let tag = self.made;
             let secrets = [
@@ -10412,16 +10587,7 @@ mod tests {
             ];
             let session_sk = StaticSecret::from([tag | 1; 32]);
             let session_pk = *umbra_crypto::x25519::PublicKey::from(&session_sk).as_bytes();
-            let held = &mut self.parties[party];
-            let slot = &mut held.node.slots[index];
-            let circ_id = slot.circ_id().unwrap();
-            let relay = slot.chain.unwrap()[2];
-            slot.circuit = Circuit::Ready(Box::new(CircuitSession::new(
-                Onion::new(&secrets, circ_id),
-                session_pk,
-                Range::Queue,
-            )));
-            held.circuits.insert(
+            self.parties[party].circuits.insert(
                 circ_id,
                 Far {
                     hops,
@@ -10429,9 +10595,98 @@ mod tests {
                     session_pk,
                 },
             );
+            Box::new(CircuitSession::new(
+                Onion::new(&secrets, circ_id),
+                session_pk,
+                Range::Queue,
+            ))
+        }
+
+        /// Makes the circuit of one slot ready, as the three `EXTENDED`
+        /// cells of its build do.
+        fn make_ready(&mut self, party: usize, index: usize) {
+            let slot = &self.parties[party].node.slots[index];
+            let circ_id = slot.circ_id().unwrap();
+            let relay = slot.chain.unwrap()[2];
+            let session = self.ready_session(party, circ_id, relay);
+            let held = &mut self.parties[party];
+            held.node.slots[index].circuit = Circuit::Ready(session);
             held.node.current = index;
             let events = held.node.circuit_ready(self.now, &mut self.rng).unwrap();
             held.events.extend(events);
+        }
+
+        /// A spare circuit to the relay of the slot `of` holds its three
+        /// hops, and it takes the place of the circuit of that slot. The
+        /// result is the replaced circuit.
+        fn replace(&mut self, party: usize, of: usize) -> [u8; 16] {
+            let node = &self.parties[party].node;
+            let old = node.slots[of].circ_id().unwrap();
+            let chain = node.slots[of].chain.unwrap();
+            let mut circ_id = old;
+            circ_id[0] ^= 0xFF;
+            let spare = Slot {
+                circuit: Circuit::Ready(self.ready_session(party, circ_id, chain[2])),
+                chain: Some(chain),
+                ..Slot::empty(Some(chain[2]))
+            };
+            let now = self.now;
+            self.parties[party]
+                .node
+                .replace_circuit(of, spare, now, now, &mut self.rng)
+                .unwrap();
+            old
+        }
+
+        /// Parks the session of a client at the end of its run, and starts
+        /// a new run from its store that continues that session (`WIR-361`).
+        /// The result says whether the node resumed. The caller runs the net.
+        fn resume(&mut self, party: usize) -> bool {
+            self.commit(party);
+            let now = self.now;
+            let held = &mut self.parties[party];
+            let parked = held.node.park(now).unwrap();
+            held.node = node_of(held.seed, held.operator, &held.exits);
+            for state in held.contacts.values() {
+                held.node.restore_contact(state).unwrap();
+            }
+            for state in held.invitations.values() {
+                held.node.restore_invitation(state).unwrap();
+            }
+            held.node.resumed(parked, now, &mut self.rng).unwrap()
+        }
+
+        /// The forward cells of a slow circuit reach its relay, in their
+        /// order.
+        fn release(&mut self, circ_id: [u8; 16]) {
+            self.slow.remove(&circ_id);
+            let (due, held): (Vec<_>, Vec<_>) = core::mem::take(&mut self.held_cells)
+                .into_iter()
+                .partition(|(_, cell)| cell[..16] == circ_id);
+            self.held_cells = held;
+            for (party, cell) in due {
+                self.on_cell(party, &cell);
+            }
+        }
+
+        /// The answers of a slow circuit reach its client, in their order.
+        fn release_back(&mut self, circ_id: [u8; 16]) {
+            self.slow_back.remove(&circ_id);
+            let (due, held): (Vec<_>, Vec<_>) = core::mem::take(&mut self.held_answers)
+                .into_iter()
+                .partition(|held| held.circ_id == circ_id);
+            self.held_answers = held;
+            for held in due {
+                self.answer(
+                    held.party,
+                    held.circ_id,
+                    held.bucket,
+                    held.cmd,
+                    held.corr_id,
+                    held.queue_id,
+                    &held.payload,
+                );
+            }
         }
 
         /// One turn of one client: its store, its capsules, and its builds.
@@ -10509,9 +10764,20 @@ mod tests {
                 return;
             };
 
+            let cell = cell.to_vec();
+            if self.slow.contains(&cell[..16]) {
+                self.held_cells.push((party, cell));
+                return;
+            }
+
+            self.on_cell(party, &cell);
+        }
+
+        /// One forward cell reaches the relay at the end of its circuit.
+        fn on_cell(&mut self, party: usize, cell: &[u8]) {
             let circ_id: [u8; 16] = cell[..16].try_into().unwrap();
             // A cell of a build, or of a circuit of an earlier run.
-            let Some(far) = held.circuits.get_mut(&circ_id) else {
+            let Some(far) = self.parties[party].circuits.get_mut(&circ_id) else {
                 return;
             };
 
@@ -10573,6 +10839,10 @@ mod tests {
                         queue_id,
                         &[0; 4],
                     );
+                }
+                Cmd::New if self.admissions > 0 => {
+                    self.admissions -= 1;
+                    self.nack(party, circ_id, corr_id, queue_id, Reason::Admission);
                 }
                 Cmd::New => {
                     self.made = self.made.wrapping_add(1);
@@ -10729,6 +10999,19 @@ mod tests {
             queue_id: [u8; 32],
             payload: &[u8],
         ) {
+            if self.slow_back.contains(&circ_id) {
+                self.held_answers.push(HeldAnswer {
+                    party,
+                    circ_id,
+                    bucket,
+                    cmd,
+                    corr_id,
+                    queue_id,
+                    payload: payload.to_vec(),
+                });
+                return;
+            }
+
             let held = &mut self.parties[party];
             // A circuit of an earlier run carries nothing.
             let Some(far) = held.circuits.get_mut(&circ_id) else {
@@ -11532,6 +11815,37 @@ mod tests {
             .unwrap();
         net.run();
         assert_eq!(messages(&net.take(ALICE)), 1);
+    }
+
+    /// NTF-135: the store of a contact names each of its queues, thus the
+    /// wake table maps a queue after a rotation to its conversation.
+    #[test]
+    fn a_stored_contact_names_each_of_its_queues_across_a_rotation() {
+        let mut net = Net::new();
+        let [alice, bob] = contacts(&mut net);
+        let (first, _, _) = net.node(ALICE).inbound_queue(&alice).unwrap();
+        let stored =
+            |net: &Net| stored_contact_queues(&net.parties[ALICE].contacts[&alice.0]).unwrap();
+        assert_eq!(stored(&net), [first]);
+
+        net.node(ALICE).rotate_now(&alice).unwrap();
+        rotate(&mut net, ALICE, &alice);
+        let (second, _, _) = net.node(ALICE).inbound_queue(&alice).unwrap();
+        assert_ne!(second, first);
+        assert_eq!(stored(&net), [second, first]);
+
+        // Bob writes to the new queue, and the rotation ends (NET-177).
+        net.take(ALICE);
+        let now = net.now;
+        net.node(BOB)
+            .send(&bob, &text(1), now, &mut Rng(3))
+            .unwrap();
+        net.run();
+        assert!(!net.node(ALICE).inbound_queue(&alice).unwrap().2);
+        assert_eq!(stored(&net), [second]);
+        assert!(stored_contact_queues(&shadow_contact_state(&[1; 16]))
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -12816,5 +13130,292 @@ mod tests {
         let now = net.now;
         net.node(ALICE).rotate_due(now, &mut Rng(52)).unwrap();
         assert_eq!(net.node(ALICE).sweep_time(&alice), None);
+    }
+
+    #[test]
+    fn an_ids_on_a_circuit_that_a_spare_replaced_makes_its_queue() {
+        let mut net = Net::new();
+        net.join(0x41, 3, None, &EXITS);
+        // The `NEW` of an invitation waits at the hops of the one circuit,
+        // and a spare takes the place of that circuit meanwhile.
+        let old = net.node(ALICE).slots[0].circ_id().unwrap();
+        net.slow.insert(old);
+        net.node(ALICE).invite(&mut Rng(1)).unwrap();
+        net.run();
+        assert_eq!(net.replace(ALICE, 0), old);
+        assert_eq!(net.node(ALICE).retiring.len(), 1);
+
+        // NET-288: the `IDS` comes back on the replaced circuit, under the
+        // key of that circuit. The queue serves on the new circuit.
+        net.release(old);
+        net.run();
+        let events = net.take(ALICE);
+        assert!(
+            matches!(events[..], [ClientEvent::Invitation { .. }]),
+            "{events:?}"
+        );
+        let slot = &net.node(ALICE).slots[0];
+        assert_eq!((slot.queues.len(), slot.reserved), (1, 0));
+        let new = slot.circ_id().unwrap();
+        let readers: Vec<_> = net.queues.values().map(|held| held.reader).collect();
+        assert_eq!(readers, [Some((ALICE, new))]);
+    }
+
+    /// Alice ends two notify queues, and the first `DEL` leaves. The
+    /// result is the time of that `DEL`.
+    fn one_of_two_dels_sent(net: &mut Net) -> u64 {
+        contacts(net);
+        for seed in 0..2 {
+            net.node(ALICE).make_notify_queue(&mut Rng(seed)).unwrap();
+        }
+        net.run();
+        let queues: Vec<[u8; 32]> = net
+            .take(ALICE)
+            .iter()
+            .filter_map(|event| match event {
+                ClientEvent::NotifyQueue { recipient_id, .. } => Some(*recipient_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(queues.len(), 2);
+        for queue in &queues {
+            net.node(ALICE)
+                .end_notify_queue(queue, &mut Rng(3))
+                .unwrap();
+        }
+        let now = net.now;
+        net.node(ALICE).rotate_due(now, &mut Rng(4)).unwrap();
+        net.run();
+        assert_eq!(net.count(ALICE, Cmd::Del), 1);
+        // The store drops the queue end at the next call.
+        net.node(ALICE).on_tick(now);
+        net.run();
+        assert_eq!(net.parties[ALICE].invitations.len(), 1);
+        now
+    }
+
+    #[test]
+    fn a_run_that_continues_a_session_sends_no_second_del_in_it() {
+        let mut net = Net::new();
+        let now = one_of_two_dels_sent(&mut net);
+
+        // WIR-045, WIR-361: the next run continues the transport session of
+        // the first `DEL`, thus the other one waits.
+        assert!(net.resume(ALICE));
+        net.run();
+        for turn in 0..3 {
+            net.node(ALICE)
+                .rotate_due(now + 1 + turn, &mut Rng(5))
+                .unwrap();
+            net.run();
+        }
+        assert_eq!(net.count(ALICE, Cmd::Del), 1);
+        assert_eq!(net.node(ALICE).ending_queues().len(), 1);
+
+        // A run of a new session sends it.
+        net.restart(ALICE);
+        net.run();
+        for turn in 0..3 {
+            net.node(ALICE)
+                .rotate_due(now + 10 + turn, &mut Rng(6))
+                .unwrap();
+            net.run();
+        }
+        assert_eq!(net.count(ALICE, Cmd::Del), 2);
+        assert!(net.node(ALICE).ending_queues().is_empty());
+    }
+
+    #[test]
+    fn a_resume_that_fails_gives_its_del_to_the_new_session() {
+        let mut net = Net::new();
+        let now = one_of_two_dels_sent(&mut net);
+        assert!(net.resume(ALICE));
+
+        // WIR-547: no relay confirms the resume, and the run opens a new
+        // session on a new connection. That session sends the `DEL`.
+        net.node(ALICE).resume_failed();
+        let held = &mut net.parties[ALICE];
+        held.link = None;
+        held.circuits.clear();
+        for queue in net.queues.values_mut() {
+            if queue.reader.is_some_and(|(reader, _)| reader == ALICE) {
+                queue.reader = None;
+            }
+        }
+        net.node(ALICE).connected(&mut Rng(5)).unwrap();
+        net.run();
+        for turn in 0..3 {
+            net.node(ALICE)
+                .rotate_due(now + 1 + turn, &mut Rng(6))
+                .unwrap();
+            net.run();
+        }
+        assert_eq!(net.count(ALICE, Cmd::Del), 2);
+        assert!(net.node(ALICE).ending_queues().is_empty());
+    }
+
+    #[test]
+    fn a_renewal_that_no_admission_pays_for_runs_again_at_a_later_check() {
+        let mut net = Net::new();
+        let [alice, _] = contacts(&mut net);
+        // ABU-048: a relay under load refuses the `NEW` of the renewal, and
+        // this device holds no token and no challenge of that relay.
+        net.admissions = 1;
+        offer(&mut net, &alice);
+        let asked = net.take(ALICE).iter().find_map(|event| match event {
+            ClientEvent::AdmissionAsked { handle } => Some(*handle),
+            _ => None,
+        });
+        let events = net
+            .node(ALICE)
+            .admit_queue(asked.unwrap(), None, &mut Rng(7))
+            .unwrap();
+        // NET-326: no caller holds the handle of a renewal. The renewal
+        // ends, and a later check starts the next one.
+        assert!(events.is_empty());
+        assert!(!net.node(ALICE).renewing.contains(&alice.0));
+        offer(&mut net, &alice);
+        assert!(net
+            .take(ALICE)
+            .contains(&ClientEvent::ChannelRenewed { contact: alice }));
+        assert!(!net.node(ALICE).is_stale(&alice));
+    }
+
+    #[test]
+    fn a_first_ratchet_record_that_passed_flight_3_goes_again_behind_it() {
+        let mut net = Net::new();
+        net.join(0x41, 3, None, &EXITS);
+        net.join(0x61, 3, None, &EXITS);
+        // A second circuit of Bob to relay 3 serves no queue of his.
+        net.node(BOB)
+            .add_circuit(Some([3; 32]), &mut Rng(1))
+            .unwrap();
+        net.run();
+        // A sync channel of two devices holds no guard record, which would
+        // open the chain of the inviter as well.
+        net.node(ALICE).invite_device(&mut Rng(2)).unwrap();
+        net.run();
+        let events = net.take(ALICE);
+        let [ClientEvent::Invitation { bundle, .. }] = &events[..] else {
+            panic!("{events:?}");
+        };
+
+        net.node(BOB)
+            .accept_device(bundle.clone(), &mut Rng(3))
+            .unwrap();
+        // Flight 1 reaches Alice, and her flight 2 reaches Bob.
+        net.turn(BOB);
+        net.turn(ALICE);
+        // Flight 3 waits at the hops of the circuit of the queue of Bob. The
+        // first ratchet record goes on his other circuit, and it reaches
+        // Alice first: she drops it. Its `QUOTA` comes after the one of
+        // flight 3.
+        let [first, second] = [0, 1].map(|index| net.node(BOB).slots[index].circ_id().unwrap());
+        net.slow.insert(first);
+        net.slow_back.insert(second);
+        net.turn(BOB);
+        net.release(first);
+        net.release_back(second);
+        net.run();
+
+        // NET-292: the record goes again behind flight 3, and it opens the
+        // chain of Alice.
+        let alice = ready_contact(&net.take(ALICE)).unwrap();
+        assert!(net.node(ALICE).contacts[&alice.0].channel.can_send());
+        let bob = ready_contact(&net.take(BOB)).unwrap();
+        assert!(!net.node(BOB).contacts[&bob.0].opens);
+    }
+
+    #[test]
+    fn a_queue_of_the_node_waits_for_a_circuit_of_the_mode_of_the_node() {
+        let mut net = Net::new();
+        net.join(0x41, 3, None, &EXITS);
+        // The circuit of the node has no room, and a circuit of the mode of
+        // one conversation builds.
+        net.node(ALICE).slots[0].reserved = MAX_QUEUES_PER_SESSION;
+        net.node(ALICE)
+            .circuit_in([4; 32], DelayClass::Private, &mut Rng(1))
+            .unwrap();
+        net.node(ALICE).invite(&mut Rng(2)).unwrap();
+        net.run();
+        let events = net.take(ALICE);
+        assert!(
+            matches!(events[..], [ClientEvent::Invitation { .. }]),
+            "{events:?}"
+        );
+        // NET-028: the queue lives on a circuit of the mode of the node.
+        let serving: Vec<DelayClass> = net
+            .node(ALICE)
+            .slots
+            .iter()
+            .filter(|slot| !slot.queues.is_empty())
+            .map(|slot| slot.class)
+            .collect();
+        assert_eq!(serving, [DelayClass::Balanced]);
+    }
+
+    #[test]
+    fn a_chain_leaves_out_the_relays_of_a_spare_that_builds() {
+        for seed in 0..16 {
+            let mut net = Net::new();
+            net.join(0x41, 3, None, &EXITS);
+            for number in [6, 7] {
+                net.node(ALICE).relays.push(candidate(number, 2));
+            }
+            // The spare of the one circuit leaves out relay 2, which that
+            // circuit holds.
+            let now = net.now;
+            net.node(ALICE).start_spare(0, now, &mut Rng(seed)).unwrap();
+            let spare = net.node(ALICE).spares[0].slot.chain.unwrap()[1];
+            assert_ne!(spare, [2; 32], "seed {seed}");
+            // NET-310: a new circuit leaves out the relay of the spare too.
+            net.node(ALICE)
+                .add_circuit(Some([4; 32]), &mut Rng(seed + 100))
+                .unwrap();
+            let chain = net.node(ALICE).slots.last().unwrap().chain.unwrap();
+            assert!(chain[1] != spare && chain[1] != [2; 32], "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn a_chain_leaves_out_the_relays_of_the_circuits_of_another_node() {
+        for seed in 0..16 {
+            let mut net = Net::new();
+            net.join(0x41, 3, None, &EXITS);
+            for number in [6, 7] {
+                net.node(ALICE).relays.push(candidate(number, 2));
+            }
+            // NET-310: a circuit of another node of this client holds
+            // relay 6, and the one circuit of this node holds relay 2.
+            net.node(ALICE)
+                .set_other_chains(alloc::vec![[[1; 32], [6; 32], [3; 32]]]);
+            net.node(ALICE)
+                .add_circuit(Some([4; 32]), &mut Rng(seed))
+                .unwrap();
+            let chain = net.node(ALICE).slots.last().unwrap().chain.unwrap();
+            assert_eq!(chain[1], [7; 32], "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn a_step_of_the_device_clock_keeps_the_age_of_each_circuit() {
+        let mut net = Net::new();
+        net.join(0x41, 3, None, &EXITS);
+        let start = net.now + 86_400;
+        assert!(net.node(ALICE).on_tick(start).is_empty());
+        // NET-370: at 3 h 40 min the device clock steps back by 30 min, which
+        // is no clock movement of Part 1. The circuit keeps its age, and it
+        // ends at the margin that its relays count. The delay of the
+        // rendezvous builds moves as well.
+        let at = start + 3 * 3_600 + 40 * 60;
+        assert!(net.node(ALICE).on_tick(at).is_empty());
+        net.node(ALICE).rendezvous_at = Some(at + 60);
+        let step = 30 * 60;
+        net.node(ALICE)
+            .circuit_clock_moved(-i64::try_from(step).unwrap());
+        assert_eq!(net.node(ALICE).rendezvous_at, Some(at + 60 - step));
+        let aged = start + CIRCUIT_MAX_AGE - CIRCUIT_AGE_MARGIN - step;
+        assert!(net.node(ALICE).on_tick(aged - 1).is_empty());
+        assert_eq!(net.node(ALICE).on_tick(aged), [ClientEvent::CircuitAged]);
     }
 }

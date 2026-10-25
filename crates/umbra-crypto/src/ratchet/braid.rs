@@ -233,6 +233,8 @@ impl Braid {
             self.collector = Some(Collector::new(width));
         }
 
+        // CRY-154: one codeword has one width, thus the epoch keeps the
+        // width of its first chunk.
         let collector = self.collector.as_mut().ok_or(Error::Ratchet)?;
         if collector.width() != width {
             return Err(Error::Ratchet);
@@ -477,7 +479,8 @@ impl Ratchet {
         Ok(Self { session, braid })
     }
 
-    /// Starts both ratchets from a completed handshake.
+    /// Starts both ratchets from a completed handshake. Each own epoch of
+    /// the session takes `width` (`CRY-018`).
     pub fn new<R: CryptoRng + ?Sized>(
         keys: SessionKeys,
         role: Role,
@@ -847,6 +850,25 @@ mod tests {
         assert!(b.peer_epoch() >= 1);
         assert!(a.epoch() >= 2, "initiator epoch {}", a.epoch());
         assert!(a.mixed() >= 1);
+    }
+
+    #[test]
+    fn a_chunk_of_another_width_inside_an_epoch_is_a_frame_with_a_fault() {
+        let (mut a, mut b, mut rng) = pair(b"width", Width::W64);
+        let first = send(&mut a, &mut rng, b"first", 0);
+        assert_eq!(recv(&mut b, &mut rng, &first, 0).unwrap(), b"first");
+        assert_eq!(b.peer_epoch(), 1);
+
+        // CRY-154: the epoch keeps the width of its first chunk. A sender
+        // that breaks CRY-018 loses the chunk and not the record.
+        a.braid.width = Width::W32;
+        let mut record = vec![0u8; a.overhead_with_frame() + 5];
+        let n = a.send(b"other", true, 1, &mut rng, &mut record).unwrap();
+        let mut out = vec![0u8; n];
+        let opened = b.receive(&record[..n], 1, &mut rng, &mut out).unwrap();
+        assert_eq!(&out[..opened.len], b"other");
+        assert_eq!(opened.peer_epoch, None);
+        assert_eq!(b.braid.collector.as_ref().unwrap().width(), Width::W64);
     }
 
     #[test]

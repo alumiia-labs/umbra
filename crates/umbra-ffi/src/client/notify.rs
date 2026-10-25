@@ -18,6 +18,7 @@
 use umbra_core::notify::ndr::next_removal;
 use umbra_core::{
     notify::{binding::Binding, HANDLE_LEN, MAX_QUEUES_PER_HANDLE, ROTATE_INTERVAL, WATCH_HANDLE},
+    session::node::stored_contact_queues,
     store::{engine::Backend, record::TableId, wrap::SecureElement},
 };
 use umbra_crypto::{
@@ -61,6 +62,21 @@ pub(super) const TIMER_TOKEN_SETTING: &[u8] = b"push-timer-token";
 /// The timer registration: its handle, its removal secret, its state, and
 /// the time of its last `NTIMER` (`NTF-152`).
 const TIMER_SETTING: &[u8] = b"push-timer";
+/// The mark that the push path of a store of an earlier build had its one
+/// repair (`Client::repair_push_path`): one byte, 1. A new store holds it
+/// from its first commit.
+pub(super) const PUSH_REPAIRED_SETTING: &[u8] = b"push-repaired";
+/// The settings of the push path, which belong to this device alone: no
+/// backup and no link carries them (Part 4 `IDN-180`). A copy of the timer
+/// on another device would end the timer of this one with its `NUNREG`.
+pub(super) const DEVICE_SETTINGS: [&[u8]; 6] = [
+    PUSH_TOKEN_SETTING,
+    CONTACT_SET_SETTING,
+    WATCH_SETTING,
+    TIMER_TOKEN_SETTING,
+    TIMER_SETTING,
+    PUSH_REPAIRED_SETTING,
+];
 const TIMER_LEN: usize = HANDLE_LEN + 32 + 1 + 8;
 
 const RELAY_LEN: usize = 32 + 32 + 2;
@@ -301,8 +317,10 @@ impl Queue {
 type Row = (TableId, Vec<u8>, Zeroizing<Vec<u8>>);
 
 /// One watch of a locked client: the relay of the queue, its
-/// `notifier_id`, and its notifier secret (`NTF-145`).
-pub type WatchEntry = ([u8; 32], [u8; 32], Secret<32>);
+/// `notifier_id`, its notifier secret (`NTF-145`), and whether it runs on
+/// a circuit of its own, as the watch of a rendezvous queue does
+/// (`NTF-142`).
+pub type WatchEntry = ([u8; 32], [u8; 32], Secret<32>, bool);
 
 /// One request that waits for the NDR, with what its answer changes.
 pub struct NdrCall {
@@ -338,6 +356,23 @@ fn plain_token(token: Option<(TokenCarrier, &str)>) -> Result<Vec<u8>, Error> {
     Ok(plain)
 }
 
+/// Each inbound queue of a contact row: the contact, and each queue that
+/// its stored channel reads (`NTF-135`). A rotation keeps the contact under
+/// its first queue, thus the contact alone misses the queues after it.
+pub(super) fn contact_queues(plain: &[u8]) -> Vec<[u8; 32]> {
+    let Some((contact, state)) = plain.split_first_chunk::<32>() else {
+        return Vec::new();
+    };
+
+    let mut queues = vec![*contact];
+    for queue in stored_contact_queues(state).unwrap_or_default() {
+        if !queues.contains(&queue) {
+            queues.push(queue);
+        }
+    }
+    queues
+}
+
 fn random<const N: usize, R: CryptoRng + ?Sized>(rng: &mut R) -> [u8; N] {
     let mut out = [0u8; N];
     rng.fill_bytes(&mut out);
@@ -368,10 +403,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         if !plain.is_empty() {
             self.set_timer_token(None, rng)?;
         }
-        if self.push_token()?.unwrap_or_default() == plain {
+        let held = self.push_token()?.unwrap_or_default();
+        if held == plain {
             return Ok(());
         }
 
+        // NTF-143: a binding names the handle of its group under a token,
+        // and `WATCH_HANDLE` with none. Thus each queue binds again when a
+        // token comes or leaves, and the caller binds them at once.
+        let moves_bindings = held.is_empty() != plain.is_empty();
         let mut rows = vec![(SETTINGS, PUSH_TOKEN_SETTING.to_vec(), Zeroizing::new(plain))];
         for mut group in self.notify_groups()? {
             if group.state == REGISTERED {
@@ -379,8 +419,28 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 rows.push((NOTIFY_GROUP, group.handle.to_vec(), group.encode()));
             }
         }
+        if moves_bindings {
+            rows.extend(self.unbound_queues()?);
+        }
 
         self.put_rows(&rows, rng)
+    }
+
+    /// The row of each queue with no binding: its handle changed, thus it
+    /// binds again under a new `NKEY`.
+    fn unbound_queues(&self) -> Result<Vec<Row>, Error> {
+        let mut rows = Vec::new();
+        for (_, bytes) in self.open_ref()?.store.list(NOTIFY_QUEUE, None)? {
+            let Ok(mut queue) = Queue::parse(&bytes) else {
+                continue;
+            };
+
+            queue.bound = false;
+            queue.notifier_id = None;
+            rows.push((NOTIFY_QUEUE, queue.recipient_id.to_vec(), queue.encode()));
+        }
+
+        Ok(rows)
     }
 
     /// The push token of the timer of Periodic mode, as the NDR takes it,
@@ -946,12 +1006,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut conversations = self.group_notify_conversations()?;
         let store = &self.open_ref()?.store;
 
-        // A contact row starts with the RecipientId of its inbound queue.
+        // A contact row starts with the contact, which is the RecipientId
+        // of its first queue. A rotation gives it a new queue under the
+        // same contact, thus the stored channel names each queue.
         for (row, plain) in store.list(TableId::CONTACT, None)? {
             let plain = Zeroizing::new(plain);
-            if let Some(recipient) = plain.get(..32).and_then(|id| <[u8; 32]>::try_from(id).ok()) {
-                conversations.push((recipient, row));
-            }
+            conversations.extend(contact_queues(&plain).into_iter().map(|queue| (queue, row)));
         }
 
         // ABU-029, DEV-219: a locked client reads no setting, thus the
@@ -1129,14 +1189,43 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             WATCH_SETTING.to_vec(),
             Zeroizing::new(vec![u8::from(on)]),
         )];
-        for (_, bytes) in self.open_ref()?.store.list(NOTIFY_QUEUE, None)? {
-            let Ok(mut queue) = Queue::parse(&bytes) else {
-                continue;
-            };
+        rows.extend(self.unbound_queues()?);
 
-            queue.bound = false;
-            queue.notifier_id = None;
-            rows.push((NOTIFY_QUEUE, queue.recipient_id.to_vec(), queue.encode()));
+        self.put_rows(&rows, rng)
+    }
+
+    /// Repairs the push path of a store of an earlier build, one time. Such
+    /// a build bound a queue of Periodic mode under the handle of Instant
+    /// mode, and the `gone` of that handle ended the binding at the relay
+    /// (`NTF-143`). A device linked from it could also remove the timer of
+    /// this device at the NDR (`NTF-152`). In both cases the store holds the
+    /// binding and the timer as fresh, thus no later step binds the queue or
+    /// moves the timer again. Each queue of the watch therefore binds again
+    /// at the next run, and a held timer moves at the next call to the NDR.
+    ///
+    /// Until the run binds a queue again, the watch table holds no entry for
+    /// it. A rendezvous queue binds after the delay of Part 9 `DIS-015`, thus
+    /// a lock in that time gives the locked device no wake for it until the
+    /// next unlock. This happens one time, and no record is lost. A store of
+    /// this build holds the mark from its first commit and takes no repair.
+    pub fn repair_push_path<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) -> Result<(), Error> {
+        let open = self.open_ref()?;
+        let mark = open.store.row_id(SETTINGS, PUSH_REPAIRED_SETTING);
+        if open.store.get(SETTINGS, &mark)?.is_some() {
+            return Ok(());
+        }
+
+        let mut rows = vec![(
+            SETTINGS,
+            PUSH_REPAIRED_SETTING.to_vec(),
+            Zeroizing::new(vec![1u8]),
+        )];
+        if self.locked_watch()? && self.push_token()?.is_none() {
+            rows.extend(self.unbound_queues()?);
+        }
+        if let Some(mut timer) = self.timer()?.filter(|timer| timer.state == REGISTERED) {
+            timer.state = STALE;
+            rows.push((SETTINGS, TIMER_SETTING.to_vec(), timer.encode()));
         }
 
         self.put_rows(&rows, rng)
@@ -1200,8 +1289,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 continue;
             };
 
+            // DIS-014: the relay can resolve a rendezvous queue to its
+            // published entry, thus its watch shares no circuit.
             if let Some(secret) = self.notifier_secret(&queue.recipient_id)? {
-                out.push((group.relay_id, notifier_id, secret));
+                let apart = group.class == RENDEZVOUS;
+                out.push((group.relay_id, notifier_id, secret, apart));
             }
         }
 
@@ -1448,5 +1540,418 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         self.binds_sent(&again);
 
         Ok(again)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+mod tests {
+    use umbra_core::{
+        identity::backup::{BackupObject, BackupRow},
+        notify::wakekey::WakeTable,
+        session::{
+            channel::Inbound,
+            node::{ContactId, StateChange},
+        },
+        store::{
+            engine::MemoryBackend,
+            wrap::{Cost, SecureElement},
+        },
+        Error as CoreError,
+    };
+    use umbra_crypto::{
+        hmac::{digest::KeyInit, Hmac, Mac},
+        rand_core::{TryCryptoRng, TryRng},
+        sha2::Sha256,
+        stored::Writer,
+        x25519::StaticSecret,
+    };
+
+    use super::*;
+    use crate::client::RestoredBackup;
+
+    struct Rng(u64);
+
+    impl TryRng for Rng {
+        type Error = core::convert::Infallible;
+
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+            Ok(self.try_next_u64()? as u32)
+        }
+
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            Ok(self.0 >> 11 ^ self.0 << 7)
+        }
+
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+            for chunk in dst.chunks_mut(8) {
+                let bytes = self.try_next_u64()?.to_le_bytes();
+                chunk.copy_from_slice(&bytes[..chunk.len()]);
+            }
+
+            Ok(())
+        }
+    }
+
+    impl TryCryptoRng for Rng {}
+
+    struct Element([u8; 32]);
+
+    impl SecureElement for Element {
+        fn keyed(&self, input: &[u8]) -> Result<[u8; 32], CoreError> {
+            let mut mac =
+                Hmac::<Sha256>::new_from_slice(&self.0).map_err(|_| CoreError::Malformed)?;
+            mac.update(input);
+            Ok(mac.finalize().into_bytes().into())
+        }
+    }
+
+    type Device = Client<MemoryBackend, Element>;
+
+    const T0: u64 = 1_700_000_000;
+    const RELAY: [u8; 32] = [0xA1; 32];
+    const CONTACT: [u8; 32] = [9; 32];
+    const ROTATED: [u8; 32] = [0x21; 32];
+
+    fn units(text: &str) -> Vec<u16> {
+        text.encode_utf16().collect()
+    }
+
+    fn new_client(seed: Option<Secret<32>>, rng: &mut Rng) -> Device {
+        let passphrase = units("correct horse");
+        let cost = Cost { m_kib: 64, t: 1 };
+        match seed {
+            Some(seed) => Client::create_with_seed(
+                MemoryBackend::default(),
+                Element([1; 32]),
+                &passphrase,
+                cost,
+                1_000,
+                seed,
+                rng,
+            ),
+            None => Client::create(
+                MemoryBackend::default(),
+                Element([1; 32]),
+                &passphrase,
+                cost,
+                1_000,
+                rng,
+            ),
+        }
+        .unwrap()
+    }
+
+    /// A stored contact of an early form whose channel reads `inbound`, and
+    /// `previous` while a rotation runs. The channel ends after its queues,
+    /// because the wake table reads no ratchet.
+    fn contact_state(inbound: [u8; 32], previous: Option<[u8; 32]>) -> Zeroizing<Vec<u8>> {
+        let end = |queue: [u8; 32]| {
+            Inbound::new(
+                queue,
+                [3; 32],
+                StaticSecret::from([4; 32]),
+                &Secret::new([5; 32]),
+                0,
+            )
+        };
+        let mut channel = Writer::new();
+        channel.u8(0x03);
+        // The writer side of the queue of the peer.
+        channel.bytes(&[7; 128]);
+        end(inbound).export(&mut channel).unwrap();
+        channel.u8(u8::from(previous.is_some()));
+        if let Some(previous) = previous {
+            end(previous).export(&mut channel).unwrap();
+        }
+
+        let mut state = Writer::new();
+        state.u8(0x01);
+        state.bytes(&[5; 16]);
+        state.bytes(&[5; 32]);
+        state.var(&channel.finish()).unwrap();
+        state.finish()
+    }
+
+    /// A client with one contact whose channel reads `inbound` and
+    /// `previous`, and the conversation of that contact.
+    fn client_with_contact(
+        inbound: [u8; 32],
+        previous: Option<[u8; 32]>,
+        rng: &mut Rng,
+    ) -> (Device, ConversationId) {
+        let mut client = new_client(None, rng);
+        let change = StateChange::Contact {
+            contact: ContactId(CONTACT),
+            state: contact_state(inbound, previous),
+        };
+        client
+            .commit_network(&[change], &[], T0 * 1_000, rng)
+            .unwrap();
+        let conversation = client.conversation_for(&CONTACT).unwrap();
+        (client, conversation)
+    }
+
+    /// Each alias of the wake table with the conversation that it names.
+    fn aliases(client: &Device) -> Vec<([u8; 16], [u8; 16])> {
+        WakeTable::parse(&client.wake_table().unwrap())
+            .unwrap()
+            .aliases
+            .clone()
+    }
+
+    /// NTF-135, ABU-029, DEV-331: a rotation gives a contact a new queue
+    /// under the same contact. The alias of that queue names the
+    /// conversation, and it is silent while the contact is blocked, muted
+    /// with no end, or removed (`DEV-340`). Before this, the table matched
+    /// the queue to the contact alone, and the alias named no conversation.
+    #[test]
+    fn the_queue_of_a_rotation_names_its_conversation_and_follows_its_settings() {
+        let mut rng = Rng(7);
+        let (mut client, conversation) = client_with_contact(ROTATED, Some(CONTACT), &mut rng);
+        client
+            .set_push_token(Some((TokenCarrier::Fcm, "fcm-token")), &mut rng)
+            .unwrap();
+        let queues = [(ROTATED, RELAY), (CONTACT, RELAY)];
+        assert_eq!(
+            client.queues_to_bind(&queues, T0, &mut rng).unwrap().len(),
+            2
+        );
+        let alias = client.binding_of(&ROTATED).unwrap().unwrap().queue_alias;
+        let first = client.binding_of(&CONTACT).unwrap().unwrap().queue_alias;
+
+        let mut held = aliases(&client);
+        held.sort_unstable();
+        let mut expected = [(alias, conversation.0), (first, conversation.0)];
+        expected.sort_unstable();
+        assert_eq!(held, expected);
+
+        // The rotation ends: the first queue leaves.
+        client.unbind_queue(&CONTACT, &mut rng).unwrap();
+        let change = StateChange::Contact {
+            contact: ContactId(CONTACT),
+            state: contact_state(ROTATED, None),
+        };
+        client
+            .commit_network(&[change], &[], T0 * 1_000 + 1, &mut rng)
+            .unwrap();
+        assert_eq!(aliases(&client), [(alias, conversation.0)]);
+
+        client
+            .set_muted_until(conversation, super::super::MUTE_FOREVER, &mut rng)
+            .unwrap();
+        assert_eq!(aliases(&client), [(alias, WAKE_SILENT)]);
+        client.set_muted_until(conversation, 0, &mut rng).unwrap();
+        client.set_blocked(conversation, true, &mut rng).unwrap();
+        assert_eq!(aliases(&client), [(alias, WAKE_SILENT)]);
+        client.set_blocked(conversation, false, &mut rng).unwrap();
+        assert_eq!(aliases(&client), [(alias, conversation.0)]);
+
+        client.remove_contact(conversation, &mut rng).unwrap();
+        assert_eq!(aliases(&client), [(alias, WAKE_SILENT)]);
+    }
+
+    /// NTF-143, NTF-153: the handle of a binding changes when a push token
+    /// comes or leaves, thus each queue binds again. Before this, a queue
+    /// that bound under the handle of Instant mode kept it in Periodic mode,
+    /// and a `gone` of that handle ended its watch.
+    #[test]
+    fn a_token_that_comes_or_leaves_binds_each_queue_again() {
+        let mut rng = Rng(8);
+        let mut client = new_client(None, &mut rng);
+        let queues = [(ROTATED, RELAY)];
+        let bind = |client: &mut Device, rng: &mut Rng| {
+            let unbound = client.queues_to_bind(&queues, T0, rng).unwrap();
+            for queue in &unbound {
+                client.queue_bound(queue, rng).unwrap();
+            }
+            unbound
+        };
+
+        // Instant mode, then the watch of Periodic mode before its token.
+        client
+            .set_push_token(Some((TokenCarrier::Fcm, "instant")), &mut rng)
+            .unwrap();
+        assert_eq!(bind(&mut client, &mut rng), [ROTATED]);
+        client.set_watch(true, &mut rng).unwrap();
+        assert_eq!(bind(&mut client, &mut rng), [ROTATED]);
+        assert_ne!(
+            client.binding_of(&ROTATED).unwrap().unwrap().handle,
+            WATCH_HANDLE
+        );
+
+        // The token of the timer ends the token of Instant mode.
+        client
+            .set_timer_token(Some((TokenCarrier::Fcm, "timer")), &mut rng)
+            .unwrap();
+        assert_eq!(bind(&mut client, &mut rng), [ROTATED]);
+        assert_eq!(
+            client.binding_of(&ROTATED).unwrap().unwrap().handle,
+            WATCH_HANDLE
+        );
+
+        // A change of the token of one mode keeps the handle.
+        client
+            .set_timer_token(Some((TokenCarrier::Fcm, "timer-2")), &mut rng)
+            .unwrap();
+        assert!(bind(&mut client, &mut rng).is_empty());
+
+        // Back to Instant mode while the watch is still on.
+        client
+            .set_push_token(Some((TokenCarrier::Fcm, "instant-2")), &mut rng)
+            .unwrap();
+        assert_eq!(bind(&mut client, &mut rng), [ROTATED]);
+        assert_ne!(
+            client.binding_of(&ROTATED).unwrap().unwrap().handle,
+            WATCH_HANDLE
+        );
+    }
+
+    /// NTF-143, NTF-152: a store of an earlier build can hold a queue bound
+    /// under the handle of Instant mode, which the relay dropped at its
+    /// `gone`, and a fresh timer that a linked device removed at the NDR.
+    /// The store shows both as fresh, thus nothing bound or moved them again
+    /// for up to `ROTATE_INTERVAL`. The repair binds each queue of the watch
+    /// again and moves the timer again, one time.
+    #[test]
+    fn the_first_unlock_repairs_the_push_path_of_an_earlier_build() {
+        let mut rng = Rng(10);
+        let mut client = new_client(None, &mut rng);
+        // An earlier build made the store with no mark.
+        client.remove_setting(PUSH_REPAIRED_SETTING).unwrap();
+        let queues = [(ROTATED, RELAY)];
+        let bind = |client: &mut Device, rng: &mut Rng| {
+            let unbound = client.queues_to_bind(&queues, T0, rng).unwrap();
+            for queue in &unbound {
+                client.queue_bound(queue, rng).unwrap();
+                client.set_notifier_id(queue, [0x33; 32], rng).unwrap();
+            }
+            unbound
+        };
+        let timer_call = |client: &Device, now: u64, rng: &mut Rng| {
+            client
+                .ndr_calls_due(now, rng)
+                .unwrap()
+                .into_iter()
+                .find(|call| call.is_timer)
+        };
+
+        // Periodic mode: the queue binds for the watch, and the NDR holds the
+        // timer.
+        client.set_watch(true, &mut rng).unwrap();
+        client
+            .set_timer_token(Some((TokenCarrier::Fcm, "timer")), &mut rng)
+            .unwrap();
+        assert_eq!(bind(&mut client, &mut rng), [ROTATED]);
+        let call = timer_call(&client, T0, &mut rng).unwrap();
+        client.ndr_call_taken(&call, &mut rng).unwrap();
+        assert!(client.timer_registered().unwrap());
+        assert!(bind(&mut client, &mut rng).is_empty());
+        assert!(timer_call(&client, T0 + 60, &mut rng).is_none());
+        assert_eq!(client.watch_entries().unwrap().len(), 1);
+
+        // The repair: the queue binds again, and the timer moves again on
+        // the next secret of its chain.
+        client.repair_push_path(&mut rng).unwrap();
+        assert!(client.watch_entries().unwrap().is_empty());
+        assert_eq!(bind(&mut client, &mut rng), [ROTATED]);
+        let call = timer_call(&client, T0 + 60, &mut rng).unwrap();
+        assert!(!call.is_removal);
+        assert!(call.advances);
+        client.ndr_call_taken(&call, &mut rng).unwrap();
+        assert!(client.timer_registered().unwrap());
+
+        // It runs one time.
+        client.repair_push_path(&mut rng).unwrap();
+        assert!(bind(&mut client, &mut rng).is_empty());
+        assert!(timer_call(&client, T0 + 120, &mut rng).is_none());
+        assert_eq!(client.watch_entries().unwrap().len(), 1);
+    }
+
+    /// A new store, and one that a restore or a link makes, holds the mark
+    /// of the repair from its first commit. Before this, the first unlock
+    /// of such a store dropped each binding of the watch, and a lock before
+    /// the run bound them again gave the locked device no wake.
+    #[test]
+    fn a_store_of_this_build_takes_no_repair() {
+        let mut rng = Rng(11);
+        let queues = [(ROTATED, RELAY)];
+        for seed in [None, Some(Secret::new([7; 32]))] {
+            let mut client = new_client(seed, &mut rng);
+            client.set_watch(true, &mut rng).unwrap();
+            let unbound = client.queues_to_bind(&queues, T0, &mut rng).unwrap();
+            assert_eq!(unbound, [ROTATED]);
+            client.queue_bound(&ROTATED, &mut rng).unwrap();
+            client
+                .set_notifier_id(&ROTATED, [0x33; 32], &mut rng)
+                .unwrap();
+            assert_eq!(client.watch_entries().unwrap().len(), 1);
+
+            client.repair_push_path(&mut rng).unwrap();
+            assert_eq!(client.watch_entries().unwrap().len(), 1);
+            assert!(client
+                .queues_to_bind(&queues, T0, &mut rng)
+                .unwrap()
+                .is_empty());
+        }
+    }
+
+    /// IDN-180, NTF-152: no backup carries the timer of Periodic mode, its
+    /// token, or the watch, and a restore of an object of an earlier build
+    /// takes none of them. Before this, a linked device sent the `NUNREG`
+    /// of the timer of the device that it came from.
+    #[test]
+    fn no_backup_carries_the_push_path_of_its_device() {
+        let mut rng = Rng(9);
+        let mut client = new_client(None, &mut rng);
+        client.set_watch(true, &mut rng).unwrap();
+        client
+            .set_timer_token(Some((TokenCarrier::Fcm, "timer")), &mut rng)
+            .unwrap();
+        let call = client.ndr_calls_due(T0, &mut rng).unwrap().remove(0);
+        assert!(call.is_timer);
+        client.ndr_call_taken(&call, &mut rng).unwrap();
+        assert!(client.timer_registered().unwrap());
+
+        let store = &client.open_ref().unwrap().store;
+        let local: Vec<_> = DEVICE_SETTINGS
+            .iter()
+            .map(|key| store.row_id(SETTINGS, key))
+            .collect();
+        let held: Vec<_> = DEVICE_SETTINGS
+            .iter()
+            .filter_map(|key| {
+                let row = store.row_id(SETTINGS, key);
+                let plain = store.get(SETTINGS, &row).unwrap()?;
+                Some(BackupRow::Put {
+                    table: SETTINGS,
+                    row,
+                    owner: None,
+                    plain: Zeroizing::new(plain),
+                })
+            })
+            .collect();
+        assert_eq!(held.len(), 4);
+
+        let upload = client.backup_due(T0, true).unwrap().unwrap();
+        let mut full = BackupObject::parse(&upload.plain).unwrap();
+        assert!(!full.rows.iter().any(|row| matches!(
+            row,
+            BackupRow::Put { table, row, .. } if *table == SETTINGS && local.contains(row)
+        )));
+
+        // An object of an earlier build carried them.
+        full.rows.extend(held);
+        let restored = RestoredBackup::assemble(&[full.encode().unwrap()]).unwrap();
+        let mut other = new_client(Some(restored.seed()), &mut rng);
+        other.apply_restore(&restored, &mut rng).unwrap();
+        assert!(other.timer_token().unwrap().is_none());
+        assert!(other.timer().unwrap().is_none());
+        assert!(!other.locked_watch().unwrap());
+        assert!(other.ndr_calls_due(T0, &mut rng).unwrap().is_empty());
     }
 }

@@ -619,6 +619,61 @@ impl LogOperator {
         }
     }
 
+    /// The root of the prefix tree at the newest epoch, which the store
+    /// keeps for a replay.
+    pub fn newest_root(&self) -> Option<[u8; 32]> {
+        self.epochs.last().map(|(_, root)| *root)
+    }
+
+    /// Closes an epoch of a replay under the prefix root that its close
+    /// kept. The staged versions enter the prefix tree, and no part of the
+    /// tree is hashed. [`LogOperator::seal_newest`] checks the root of the
+    /// newest epoch after the last one.
+    pub fn replay_epoch(&mut self, nonce: [u8; 32], prefix_root: [u8; 32]) -> Result<(), Error> {
+        if self.used_nonces.contains(&nonce) {
+            return Err(Error::Stale);
+        }
+
+        for (search_key, stored) in core::mem::take(&mut self.staged) {
+            let version = self
+                .newest
+                .get(&search_key)
+                .map_or(0, |v| v.saturating_add(1));
+            let output = self.vrf.hash(&vrf_input(&search_key, version))?;
+            self.tree.insert(
+                index_of(&output),
+                commitment(&stored.opening, &stored.entry),
+            )?;
+            self.newest.insert(search_key.clone(), version);
+            self.stored.insert((search_key, version), stored);
+        }
+
+        let leaf = epoch_leaf(&nonce, &prefix_root);
+        self.used_nonces.insert(nonce);
+        self.epochs.push((nonce, prefix_root));
+        self.log_nodes.push(leaf);
+        self.newest_path = self.log_frontier.push_proving(leaf);
+        Ok(())
+    }
+
+    /// Seals the prefix tree under the nonce of the newest epoch, for the
+    /// proofs of that epoch, when no seal holds it yet. A root that differs
+    /// from the kept one names a store that does not hold this log.
+    pub fn seal_newest(&mut self) -> Result<(), Error> {
+        let Some((nonce, root)) = self.epochs.last().copied() else {
+            return Ok(());
+        };
+
+        if self.tree.is_sealed(&nonce) {
+            return Ok(());
+        }
+
+        if self.tree.seal(&nonce) != root {
+            return Err(Error::Unverified);
+        }
+        Ok(())
+    }
+
     /// The update of the open epoch: the staged leaves enter the prefix
     /// tree, which `indexes` names for an undo, and nothing else changes.
     #[allow(clippy::type_complexity)]
@@ -733,6 +788,16 @@ pub struct Auditor {
 }
 
 impl Auditor {
+    /// An auditor that holds the log of `operator` as it stands: a replay
+    /// takes it for the epochs that each auditor checked at their close.
+    pub fn following(operator: &LogOperator) -> Self {
+        Auditor {
+            tree: operator.tree.leaves_only(),
+            log: operator.log_frontier.clone(),
+            used_nonces: operator.used_nonces.clone(),
+        }
+    }
+
     /// Verifies one epoch, and returns the log root that the auditor signs
     /// in the head of that epoch. The nonce is fresh (`DIS-008`), each new
     /// index is new, thus no leaf changed and no leaf left, and the log

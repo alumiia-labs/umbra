@@ -178,15 +178,19 @@ fn is_roster_object(app: &[u8]) -> bool {
         })
 }
 
-/// Whether an observer may post an `AppMessage` (§11.9): a roster object, a
-/// request or a supply of a key, and the deletion of its own message.
-fn observer_may_post(app: &[u8]) -> bool {
-    AppMessage::parse(app, Channel::Group).is_ok_and(|message| {
-        matches!(
-            message.kind,
-            AppKind::GroupControl | AppKind::KeyRequest | AppKind::KeySupply | AppKind::Delete
-        )
-    })
+/// Whether an observer may post an `AppMessage` of `kind` (`GRP-425`): a
+/// roster object, a request or a supply of a key, and the deletion of its
+/// own message.
+pub fn observer_may_send(kind: AppKind) -> bool {
+    matches!(
+        kind,
+        AppKind::GroupControl | AppKind::KeyRequest | AppKind::KeySupply | AppKind::Delete
+    )
+}
+
+/// Whether an observer may post an `AppMessage` (§11.9).
+pub(crate) fn observer_may_post(app: &[u8]) -> bool {
+    AppMessage::parse(app, Channel::Group).is_ok_and(|message| observer_may_send(message.kind))
 }
 
 /// Whether an `AppMessage` is a request or a supply of a key (§11.4.3).

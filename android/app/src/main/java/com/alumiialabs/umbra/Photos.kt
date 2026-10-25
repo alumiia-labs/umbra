@@ -281,13 +281,13 @@ object Photos {
      * The decoder of `IMP-166`. It bounds the size of the decode, and it
      * overwrites the bytes when the decode ends.
      */
-    class Decoder : FileSink {
+    class Decoder(private val sideMax: Int = SHOWN_SIDE_MAX) : FileSink {
         var image: ImageBitmap? = null
 
         // An exception that crosses into Rust ends the process.
         override fun put(bytes: ByteArray) {
             try {
-                image = bounded(bytes, SHOWN_SIDE_MAX)
+                image = bounded(bytes, sideMax)
             } catch (fault: Exception) {
                 image = null
             } finally {

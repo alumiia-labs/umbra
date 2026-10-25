@@ -42,8 +42,9 @@ operator, one provider, and one country carry the traffic.
   - A server with two relays states the share of each: class 1 (250 Mbit/s)
     for each on a 500 Mbit/s plan. An entry relay needs class 1 or more.
   - The measurer on the signer tests class 0 alone on a 500 Mbit/s plan
-    ("Measurement" below). The class of each relay above class 0 stays the
-    one that the inventory states.
+    ("Measurement" below). The class of each relay of the inventory above
+    class 0 stays the one that the inventory states. A relay of another
+    operator stays at class 0 (Part 10 `REL-210`).
   - A relay server needs 4 GB of memory or more. An exit relay holds the
     bytes of each file chunk in memory, thus `umbra_chunk_capacity` is 1 GiB
     and not a part of the disk. See "Memory" below before you raise it.
@@ -249,7 +250,8 @@ manifest of an hour rejects a second one for it. Thus:
     `<relay_id> <class> <pass|fail> <epoch>`. The signer reads the file
     each hour. A failed test at a class lists the relay below that class
     in the next manifest. A failed test at class 0 takes the relay out of
-    the manifest. A later pass lists it again, and its class then rises by
+    the manifest, and a relay of another operator back to pending
+    (`REL-210`). A later pass lists it again, and its class then rises by
     one step in each 7 days at most (`REL-001`);
     `/var/lib/umbra-signer/state/class_state` holds the class and the
     epoch of the last step of each relay. An entry relay below class 1
@@ -258,9 +260,11 @@ manifest of an hour rejects a second one for it. Thus:
     class 0, 562.5 for class 1, 1 125 for class 2, and 2 250 for class 3.
     The signer server has 500 Mbit/s (`umbra_measurer_capacity`). It thus
     tests class 0 alone, two relays in one slot. No test of this
-    deployment verifies class 1 or above, and each relay keeps the class
-    of the inventory above class 0. Part 10 §10.2 permits that under the
-    provisional directory alone.
+    deployment verifies class 1 or above. Each relay of the inventory
+    keeps its class above class 0, which Part 10 `REL-206` permits under
+    the provisional directory alone. A relay of another operator takes no
+    class that no test verified (`REL-210`). It thus stays at class 0, and
+    an entry relay of another operator gets no ingress flag.
   - The six relays share one network (one ASN), thus they are one cluster
     of Part 10 §10.3. The rule puts 4 relays of such a cluster in one
     slot. The capacity holds 2, thus a run takes 3 slots, and the measurer
@@ -355,24 +359,45 @@ with its join request. Admit it so:
 1. Check the dossier (Part 10 `REL-012`): the operator, the control, the
    contact, the country, and the AS number of the address (`whois`). Check
    that no listed relay of another operator has the same family value.
+   Set the operator name from the beneficial control of the dossier
+   (`REL-128`). It is never `umbra_operator`, and two relays of one control
+   take one name.
 2. Put the text of the request, from BEGIN to END, in a file, and run:
 
    ```sh
    python scripts/relay-admit.py request.txt
    ```
 
-   It writes the descriptor to `build/descriptors/<name>.desc`, and it
-   prints the line of the relay.
+   It compares the descriptor with the facts of the request, and it
+   refuses the operator name of the network. It also refuses a name or a
+   `relay_id` that another relay holds. It writes the descriptor to
+   `build/descriptors/<name>.desc`, and it prints the line of the relay. A
+   request with the name and the key of an admitted relay replaces its
+   descriptor: that is a new address of the same relay.
 3. Add that line to `umbra_outside_relays` in `group_vars/all.yml`, and run
    `ansible-playbook site.yml`. An entry relay carries its address, which
    the firewall of the two gateways then lets in.
 
-The signer lists the relay as pending in the next root, places it at its
-layer from a hash after 4 days, and gives an entry relay the entry role
-after 14 days (Part 10 §10.5.4, §10.7.1). `admission_state` under
+The signer writes the relay as an `outside_relay` line, thus it is never a
+relay of the own operator. The next root lists it as pending at class 0.
+The relay then starts, and the measurer tests it at class 0 at its next
+run. The measurer runs one time in each 7 days. To test the relay sooner,
+run `sudo systemctl start umbra-measurer.service` on the signer server
+after the relay started. The signer places the relay at its layer from a
+hash after 4 days, and after a test passed (`REL-197`, `REL-210`). It gives
+an entry relay the entry role after 14 days, when a test verified class 1
+for it (Part 10 §10.5.4, §10.7.1). A relay that fails class 0, or that
+passes no test in 21 days, goes back to pending (`REL-098`). A later pass
+places it again at the same layer. `admission_state` under
 `/var/lib/umbra-signer/state` holds its first pending root: do not edit it.
 A new descriptor with the same key keeps the admission; a new key starts it
 again. To take the relay out, remove its line and run the playbook.
+
+A fault of the line of an outside relay, as a descriptor that does not
+parse, leaves that relay out of the root and stops no run. The log of
+`umbra-signer` gives the cause. The measurer tests each other relay, and
+its run then ends with a failure, thus `umbra-alert@umbra-measurer` tells
+you.
 
 ## Taking a relay out
 

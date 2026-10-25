@@ -183,6 +183,14 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
         composer.onChange = { if (!chat.isGroup) Core.typing(conversation, !composer.isEmpty) }
     }
 
+    // A text that the app puts into the field is no typing of the user.
+    val putText: (CharArray) -> Unit = { chars ->
+        val typing = composer.onChange
+        composer.onChange = null
+        composer.set(chars)
+        composer.onChange = typing
+    }
+
     // The message under the finger, the message whose links show, the message
     // to forward, and the message that the composer answers.
     var chosen by remember(conversation) { mutableStateOf<Line?>(null) }
@@ -226,8 +234,25 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
 
     val context = LocalContext.current
 
-    // The message whose text the composer changes.
+    // The message whose text the composer changes, and the text that the
+    // composer held before the edit. That text comes back at the end of the
+    // edit (Part 7 §7.5.3).
     var edited by remember(conversation) { mutableStateOf<Line?>(null) }
+    var heldDraft by remember(conversation) { mutableStateOf<CharArray?>(null) }
+    val putBackDraft: () -> Unit = {
+        heldDraft?.let { draft ->
+            putText(draft)
+            draft.fill('\u0000')
+        }
+        heldDraft = null
+    }
+    val endEdit: () -> Unit = {
+        if (edited != null) {
+            composer.clear()
+            edited = null
+            putBackDraft()
+        }
+    }
 
     // The message that the user wants to delete.
     var deleting by remember(conversation) { mutableStateOf<Line?>(null) }
@@ -280,6 +305,27 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
         Core.rosterNotes(conversation) { rosterNotes = it }
     }
 
+    // GRP-425: each member rejects a post of an observer.
+    val isObserver = chat.isGroup && ownRole == FfiRole.OBSERVER
+    // GRP-338: the device that owns the channels makes each moderation epoch.
+    val mayModerate = chat.isGroup && !chat.isClosed && (ownRole ?: FfiRole.MEMBER) >= FfiRole.MODERATOR && Core.ownsChannels
+
+    // GRP-425: a group where this member is an observer takes no forward.
+    var forwardGroups by remember(conversation) { mutableStateOf(emptySet<Conversation>()) }
+    LaunchedEffect(forwarding) {
+        forwardGroups = emptySet()
+        if (forwarding == null) return@LaunchedEffect
+
+        val groups = Core.chats.filter { it.isGroup && it.isMember && !it.isClosed && it.conversation != conversation }
+        for (group in groups) {
+            Core.groupMembers(group.conversation) { members ->
+                if (members.firstOrNull { it.isSelf }?.role != FfiRole.OBSERVER) {
+                    forwardGroups = forwardGroups + group.conversation
+                }
+            }
+        }
+    }
+
     var notice by remember(conversation) { mutableStateOf<String?>(null) }
     val save = rememberSave()
     // The sheet of the plus: a photo, a video, or a file.
@@ -313,21 +359,28 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
     }
 
     // Part 7 §7.5.3: the draft comes back at the open, and it stays when
-    // the view closes or the app leaves the screen. An edit is no draft.
+    // the view closes or the app leaves the screen. An edit is no draft:
+    // the text before the edit is.
     LaunchedEffect(conversation) {
         Core.readDraft(conversation) { chars ->
-            composer.set(chars)
+            putText(chars)
             chars.fill('\u0000')
         }
     }
+    val keepDraft: () -> Unit = {
+        val draft = if (edited == null) composer.copy() else heldDraft?.copyOf() ?: CharArray(0)
+        Core.keepDraft(conversation, draft)
+    }
     DisposableEffect(owner, conversation) {
         val keeper = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP && edited == null) Core.keepDraft(conversation, composer.copy())
+            if (event == Lifecycle.Event.ON_STOP) keepDraft()
         }
         owner.lifecycle.addObserver(keeper)
         onDispose {
             owner.lifecycle.removeObserver(keeper)
-            if (edited == null) Core.keepDraft(conversation, composer.copy())
+            keepDraft()
+            heldDraft?.fill('\u0000')
+            heldDraft = null
         }
     }
 
@@ -352,7 +405,10 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
     forwarding?.let { line ->
         ActionSheet(
             stringResource(R.string.chat_forward_to),
-            Core.chats.filter { !it.conversation.id.contentEquals(conversation.id) && !it.isClosed && it.isMember }.map { target ->
+            Core.chats.filter {
+                !it.conversation.id.contentEquals(conversation.id) && !it.isClosed && it.isMember &&
+                    (!it.isGroup || it.conversation in forwardGroups)
+            }.map { target ->
                 RowEntry(if (target.isGroup) "user-group" else "comment", target.title) {
                     Core.forward(line.handle, target.conversation) { notice = UiText.get(R.string.chat_forwarded_to, target.title) }
                 }
@@ -380,7 +436,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
         } else if (line.info.moderation == MOD_HIDE && line.key !in revealed) {
             // A hidden message that the user did not open gives no content.
             buildList {
-                if (chat.isGroup && (ownRole ?: FfiRole.MEMBER) >= FfiRole.MODERATOR) {
+                if (mayModerate) {
                     add(RowEntry("eye", stringResource(R.string.chat_show_for_everyone)) { Core.moderate(line.handle, MOD_UNHIDE) })
                     add(RowEntry("ban", stringResource(R.string.common_remove_for_everyone)) { removing = line })
                 }
@@ -389,26 +445,28 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
         } else {
             buildList {
                 // IMP-075: a failed text goes again at the action of the user.
-                if (line.info.outgoing && line.info.delivery.toInt() == FAILED && line.info.file == null) {
+                if (line.info.outgoing && line.info.delivery.toInt() == FAILED && line.info.file == null && !isObserver) {
                     add(RowEntry("rotate", stringResource(R.string.chat_send_again)) { Core.sendAgain(line.handle) })
                 }
                 add(
                     RowEntry("reply", stringResource(R.string.chat_reply)) {
-                        edited = null
+                        endEdit()
                         answered = line
                     },
                 )
                 // The core says whether the text can change: a text of this
                 // device, inside 24 hours, below the limit of revisions.
-                if (line.info.editable) {
+                if (line.info.editable && !isObserver) {
                     add(
                         RowEntry("pen", stringResource(R.string.chat_edit)) {
                             answered = null
+                            // A second edit keeps the draft of the first one.
+                            if (edited == null) heldDraft = composer.copy().takeIf { it.isNotEmpty() }
                             edited = line
                             // IMP-017: the field copies the text, and zeros
                             // overwrite this copy.
                             val copy = line.text.copyOf()
-                            composer.set(copy)
+                            putText(copy)
                             copy.fill('\u0000')
                         },
                     )
@@ -427,13 +485,14 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                     add(RowEntry("download", stringResource(R.string.chat_save_to_device)) { save(line) })
                 }
                 // ATT-054: the sender sends a file again as a new upload.
-                if (file != null && line.info.outgoing && file.state.toInt() == FILE_READY) {
+                if (file != null && line.info.outgoing && file.state.toInt() == FILE_READY && !isObserver) {
                     add(RowEntry("rotate", stringResource(R.string.chat_send_again)) { Core.resendFile(line.handle) })
                 }
 
                 // GRP-085: a hide is the first act of a moderator, and a
-                // remove asks again (GRP-086).
-                if (chat.isGroup && (ownRole ?: FfiRole.MEMBER) >= FfiRole.MODERATOR) {
+                // remove asks again (GRP-086). A closed group takes no act
+                // (GRP-434).
+                if (mayModerate) {
                     if (line.info.moderation == MOD_HIDE) {
                         add(RowEntry("eye", stringResource(R.string.chat_show_for_everyone)) { Core.moderate(line.handle, MOD_UNHIDE) })
                     } else {
@@ -603,6 +662,11 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
 
         // GRP-050, GRP-070, GRP-089: each change of a group shows at its time.
         val notes = remember(modNotes, rosterNotes, memberNames) { chatNotes(modNotes, rosterNotes, memberNames) }
+
+        // Part 11 §11.9.6: a hidden message shows no text until the user
+        // opens it, and the quote of a reply to it shows none either.
+        val hiddenKeys = remember(lines) { lines.filter { it.info.moderation == MOD_HIDE }.map { it.key }.toSet() }
+        val isStillHidden = { key: List<Byte> -> key in hiddenKeys && key !in revealed }
         LazyColumn(
             state = listState,
             modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp),
@@ -679,9 +743,12 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                         else -> line.quote?.let { quote -> { jumpTo(quote.key) } }
                     },
                     onLongPress = { chosen = line },
-                    // A placeholder has no content to answer.
-                    onReply = if (line.info.deleted) null else ({ answered = line }),
+                    // A placeholder has no content to answer, and a hidden
+                    // message that the user did not open gives none.
+                    onReply = if (line.info.deleted || isStillHidden(line.key)) null else ({ answered = line }),
                     isRevealed = line.key in revealed,
+                    isQuoteHidden = line.quote?.let { isStillHidden(it.key) } == true,
+                    mayVote = !isObserver,
                     // A group names the sender of a run of its messages.
                     author = line.info.sender?.takeIf {
                         chat.isGroup && (before == null || before.info.outgoing || before.info.sender != it)
@@ -847,7 +914,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
 
         // IDN-025: a key change blocks the conversation until the answer.
         keyChange?.let { pending ->
-            KeyChangePanel(chat, pending)
+            KeyChangePanel(chat, pending) { push(Screen.Verify(conversation)) }
             return@Column
         }
 
@@ -886,9 +953,8 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                     }
 
                     ComposerHeader(header.value.first, header.value.second, quoted.value) {
-                        if (edited != null) composer.clear()
+                        endEdit()
                         answered = null
-                        edited = null
                     }
                 }
 
@@ -976,6 +1042,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
 
                             answered = null
                             edited = null
+                            putBackDraft()
                         }
                     },
                 contentAlignment = Alignment.Center,
@@ -1056,6 +1123,8 @@ private fun Bubble(
     onLongPress: () -> Unit,
     onReply: (() -> Unit)?,
     isRevealed: Boolean = false,
+    isQuoteHidden: Boolean = false,
+    mayVote: Boolean = true,
     author: String? = null,
     quoteAuthor: String? = null,
 ) {
@@ -1145,7 +1214,7 @@ private fun Bubble(
                     onLongClick = onLongPress,
                     // The options of a poll take their own press.
                     isOver = line.poll == null,
-                ) { BubbleContent(line, chat, isRevealed, author, quoteAuthor) }
+                ) { BubbleContent(line, chat, isRevealed, isQuoteHidden, mayVote, author, quoteAuthor) }
                 if (line.reactions.isNotEmpty()) ReactionPills(line)
             }
         }
@@ -1219,6 +1288,8 @@ private fun BubbleContent(
     line: Line,
     chat: Chat,
     isRevealed: Boolean = false,
+    isQuoteHidden: Boolean = false,
+    mayVote: Boolean = true,
     author: String? = null,
     quoteAuthor: String? = null,
 ) {
@@ -1284,6 +1355,7 @@ private fun BubbleContent(
             QuoteBlock(
                 author = quoteAuthor,
                 text = quote?.text,
+                isHidden = isQuoteHidden,
                 modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
             )
         }
@@ -1310,7 +1382,7 @@ private fun BubbleContent(
                 )
             }
         } else if (!isGone && line.poll != null) {
-            PollContent(line, line.poll, Modifier.align(Alignment.Start))
+            PollContent(line, line.poll, Modifier.align(Alignment.Start), mayVote = mayVote)
         } else if (!isGone) {
             // WIR-177: a forward says so, and it names no earlier sender.
             if (line.info.forwardDepth.toInt() > 0) {
@@ -1379,10 +1451,10 @@ private fun BubbleContent(
  * The message that a message answers, as each messenger shows it: a bar in
  * the accent color, the name of the author, and the start of the text. An
  * answer to a message that this device does not hold has no author
- * (`WIR-173`).
+ * (`WIR-173`). A message that a moderator hid shows its placeholder words.
  */
 @Composable
-private fun QuoteBlock(author: String?, text: CharArray?, modifier: Modifier = Modifier) {
+private fun QuoteBlock(author: String?, text: CharArray?, modifier: Modifier = Modifier, isHidden: Boolean = false) {
     Row(
         modifier
             .height(IntrinsicSize.Min)
@@ -1401,7 +1473,14 @@ private fun QuoteBlock(author: String?, text: CharArray?, modifier: Modifier = M
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            if (text == null) {
+            if (isHidden) {
+                Text(
+                    stringResource(R.string.core_hidden_message),
+                    style = MaterialTheme.typography.bodySmall,
+                    fontStyle = FontStyle.Italic,
+                    color = Palette.TextSecondary,
+                )
+            } else if (text == null) {
                 Text(
                     stringResource(R.string.chat_message_not_on_device),
                     style = MaterialTheme.typography.bodySmall,

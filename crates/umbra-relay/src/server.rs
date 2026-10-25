@@ -369,6 +369,199 @@ fn unix_now() -> u64 {
         .map_or(0, |elapsed| elapsed.as_secs())
 }
 
+/// The inputs that one commit of the store serves at most (`NET-298`). The
+/// node task takes each input that waits after the first one, up to this
+/// count, and commits their changes together. Before this, each input took
+/// its own commit and its own sync of the disk. A party that sent a `SEND`
+/// or an `ACK` in each forward cell then held the node task in the syncs,
+/// and each other circuit of the relay waited.
+const INPUTS_PER_COMMIT: usize = 64;
+
+/// The links of the node task: the writer of each one, the count of its
+/// backlog, and the connections that a resume moved.
+#[derive(Default)]
+struct Links {
+    writers: BTreeMap<LinkId, LinkWriter>,
+    gauges: Gauges,
+    adopted: Adopted,
+}
+
+/// Gives one input to the node and gives its outputs, or none when the
+/// relay stops.
+fn take_input(
+    node: &mut RelayNode,
+    links: &mut Links,
+    input: Input,
+    rng: &mut OsRng,
+) -> Option<Vec<Output>> {
+    let outputs = match input {
+        Input::Opened {
+            link,
+            writer,
+            source,
+        } => {
+            links.adopted.open.insert(link);
+            links.gauges.insert(link, &writer);
+            links.writers.insert(link, writer);
+            node.opened(link, unix_now());
+            if let Some(source) = source {
+                node.set_source(link, source);
+            }
+            Vec::new()
+        }
+        Input::DialFailed { relay_id } => {
+            node.dial_failed(relay_id, unix_now());
+            Vec::new()
+        }
+        Input::Placed(placed) => {
+            // A relay takes its layer at its start. A set that moves it ends
+            // this run, and the supervisor starts the next one in the new
+            // layer.
+            if placed.layer != node.layer() {
+                eprintln!("the relay set gives this relay another layer, and the relay stops");
+                return None;
+            }
+
+            let placed = *placed;
+            node.set_next_layer(placed.next_layer);
+            node.set_previous_layer(placed.previous_layer);
+            node.set_queue_relays(placed.queue_relays);
+            node.set_relay_identities(placed.identities);
+            node.set_carriers(placed.carriers);
+            node.set_measurer_trust(placed.measurer_trust);
+            node.set_loop_relays(&placed.loop_relays);
+
+            // REL-174: the link of a relay that left the layer before closes.
+            node.close_strangers(unix_now())
+        }
+        Input::Dialed {
+            link,
+            relay_id,
+            writer,
+        } => {
+            links.gauges.insert(link, &writer);
+            links.writers.insert(link, writer);
+
+            let mut session_id = [0u8; 8];
+            let mut secret = [0u8; 32];
+            let _ = rng.try_fill_bytes(&mut session_id);
+            let _ = rng.try_fill_bytes(&mut secret);
+
+            node.dialed(
+                link,
+                relay_id,
+                session_id,
+                Secret::new(secret),
+                unix_now(),
+                rng,
+            )
+        }
+        Input::Capsule { link, bytes } => match links.adopted.name_of(link) {
+            Some(link) => node.on_capsule(link, &bytes, unix_now(), rng),
+            None => Vec::new(),
+        },
+        Input::Closed { link } => match links.adopted.closed(link) {
+            Some(link) => {
+                links.writers.remove(&link);
+                links.gauges.remove(link);
+                node.link_closed(link, unix_now())
+            }
+            None => Vec::new(),
+        },
+        Input::NdrGone { handle } => {
+            node.ndr_gone(&handle);
+            Vec::new()
+        }
+        Input::IssuerKey { epoch, key } => {
+            node.set_issuer_key(epoch, *key);
+            Vec::new()
+        }
+        Input::ReceiptQuery { query, reply } => {
+            match node.receipt_answer(&query, unix_now()) {
+                // An answer that does not encode gives no reply, and the
+                // connection answers 503 (`REL-179`).
+                QueryAnswer::Given(answer) => {
+                    if let Ok(body) = answer.encode() {
+                        let _ = reply.send(QueryAnswer::Given(body));
+                    }
+                }
+                QueryAnswer::Above => {
+                    let _ = reply.send(QueryAnswer::Above);
+                }
+                QueryAnswer::Elsewhere => {
+                    let _ = reply.send(QueryAnswer::Elsewhere);
+                }
+            }
+            Vec::new()
+        }
+        Input::StatQuery { query, reply } => {
+            let answer = match node.stat_answer(&query, unix_now()) {
+                QueryAnswer::Given(answer) => QueryAnswer::Given(answer.encode().to_vec()),
+                QueryAnswer::Above => QueryAnswer::Above,
+                QueryAnswer::Elsewhere => QueryAnswer::Elsewhere,
+            };
+            let _ = reply.send(answer);
+            Vec::new()
+        }
+    };
+    Some(outputs)
+}
+
+/// Whether `outputs` move a session to another connection. The node task
+/// reads the next input under that move, thus such an input ends a group of
+/// inputs (`WIR-241`).
+fn moves_session(outputs: &[Output]) -> bool {
+    outputs
+        .iter()
+        .any(|output| matches!(output, Output::Adopt { .. }))
+}
+
+/// Hands each output of the node to its link or to the process around it,
+/// in their order.
+fn send_outputs(
+    outputs: Vec<Output>,
+    links: &mut Links,
+    requests: &mpsc::UnboundedSender<Request>,
+) {
+    for output in outputs {
+        match output {
+            Output::Send { link, capsule } => {
+                // NET-349: the node framed no cell for a link at its bound.
+                // A capsule that finds no room here is thus one above the
+                // slack of a peer that reads nothing. It goes nowhere, and
+                // the link ends at its write timeout: a full backlog never
+                // closes a link that circuits share.
+                if let Some(writer) = links.writers.get(&link) {
+                    let _ = writer.queue(capsule);
+                }
+            }
+            Output::Close { link } => {
+                links.writers.remove(&link);
+                links.gauges.remove(link);
+            }
+            // WIR-241, WIR-242: the writer of the new connection takes the
+            // place of the old one, which closes when it drops.
+            Output::Adopt { link, as_link } => {
+                links.adopted.adopt(link, as_link);
+                links.gauges.remove(link);
+                if let Some(writer) = links.writers.remove(&link) {
+                    links.gauges.insert(as_link, &writer);
+                    links.writers.insert(as_link, writer);
+                }
+            }
+            Output::Dial { relay_id } => {
+                let _ = requests.send(Request::Dial(relay_id));
+            }
+            Output::Push { relay_id, capsule } => {
+                let _ = requests.send(Request::Push { relay_id, capsule });
+            }
+            Output::NdrPush(push) => {
+                let _ = requests.send(Request::NdrPush(push));
+            }
+        }
+    }
+}
+
 /// Runs the node until each sender of `inputs` closes, or until the store
 /// fails. `store` takes the changes of each call of the node before an
 /// output of that call leaves (`NET-298`). A relay that cannot write stops,
@@ -381,17 +574,14 @@ pub async fn run_node(
     mut store: Box<dyn RelayStore>,
 ) {
     let mut rng = OsRng;
-    let mut writers: BTreeMap<LinkId, LinkWriter> = BTreeMap::new();
+    let mut links = Links::default();
 
     // NET-349: the node reads the backlog of a link before it frames a cell.
-    let gauges = Gauges::default();
-    node.set_backlog(Box::new(gauges.clone()));
+    node.set_backlog(Box::new(links.gauges.clone()));
 
     // NET-320, NET-332: a step of the wall clock ends no circuit early and
     // holds no build back.
     node.use_monotonic_clock();
-
-    let mut adopted = Adopted::default();
 
     // NET-035, NET-036: the next tick of each paced circuit, and the same
     // ticks in their order. A tick reads the circuits that are due alone.
@@ -419,103 +609,17 @@ pub async fn run_node(
     let mut last_challenge: Option<tokio::time::Instant> = None;
 
     loop {
-        let outputs = tokio::select! {
+        let mut stops = false;
+        let mut outputs = tokio::select! {
             input = inputs.recv() => match input {
                 None => return,
-                Some(Input::Opened { link, writer, source }) => {
-                    adopted.open.insert(link);
-                    gauges.insert(link, &writer);
-                    writers.insert(link, writer);
-                    node.opened(link, unix_now());
-                    if let Some(source) = source {
-                        node.set_source(link, source);
+                Some(input) => match take_input(&mut node, &mut links, input, &mut rng) {
+                    Some(outputs) => outputs,
+                    None => {
+                        stops = true;
+                        Vec::new()
                     }
-                    Vec::new()
-                }
-                Some(Input::DialFailed { relay_id }) => {
-                    node.dial_failed(relay_id, unix_now());
-                    Vec::new()
-                }
-                Some(Input::Placed(placed)) => {
-                    // A relay takes its layer at its start. A set that moves
-                    // it ends this run, and the supervisor starts the next
-                    // one in the new layer.
-                    if placed.layer != node.layer() {
-                        eprintln!("the relay set gives this relay another layer, and the relay stops");
-                        return;
-                    }
-
-                    let placed = *placed;
-                    node.set_next_layer(placed.next_layer);
-                    node.set_previous_layer(placed.previous_layer);
-                    node.set_queue_relays(placed.queue_relays);
-                    node.set_relay_identities(placed.identities);
-                    node.set_carriers(placed.carriers);
-                    node.set_measurer_trust(placed.measurer_trust);
-                    node.set_loop_relays(&placed.loop_relays);
-
-                    // REL-174: the link of a relay that left the layer
-                    // before closes.
-                    node.close_strangers(unix_now())
-                }
-                Some(Input::Dialed { link, relay_id, writer }) => {
-                    gauges.insert(link, &writer);
-                    writers.insert(link, writer);
-
-                    let mut session_id = [0u8; 8];
-                    let mut secret = [0u8; 32];
-                    let _ = rng.try_fill_bytes(&mut session_id);
-                    let _ = rng.try_fill_bytes(&mut secret);
-
-                    node.dialed(link, relay_id, session_id, Secret::new(secret), unix_now(), &mut rng)
-                }
-                Some(Input::Capsule { link, bytes }) => match adopted.name_of(link) {
-                    Some(link) => node.on_capsule(link, &bytes, unix_now(), &mut rng),
-                    None => Vec::new(),
                 },
-                Some(Input::Closed { link }) => match adopted.closed(link) {
-                    Some(link) => {
-                        writers.remove(&link);
-                        gauges.remove(link);
-                        node.link_closed(link, unix_now())
-                    }
-                    None => Vec::new(),
-                },
-                Some(Input::NdrGone { handle }) => {
-                    node.ndr_gone(&handle);
-                    Vec::new()
-                }
-                Some(Input::IssuerKey { epoch, key }) => {
-                    node.set_issuer_key(epoch, *key);
-                    Vec::new()
-                }
-                Some(Input::ReceiptQuery { query, reply }) => {
-                    match node.receipt_answer(&query, unix_now()) {
-                        // An answer that does not encode gives no reply,
-                        // and the connection answers 503 (`REL-179`).
-                        QueryAnswer::Given(answer) => {
-                            if let Ok(body) = answer.encode() {
-                                let _ = reply.send(QueryAnswer::Given(body));
-                            }
-                        }
-                        QueryAnswer::Above => {
-                            let _ = reply.send(QueryAnswer::Above);
-                        }
-                        QueryAnswer::Elsewhere => {
-                            let _ = reply.send(QueryAnswer::Elsewhere);
-                        }
-                    }
-                    Vec::new()
-                }
-                Some(Input::StatQuery { query, reply }) => {
-                    let answer = match node.stat_answer(&query, unix_now()) {
-                        QueryAnswer::Given(answer) => QueryAnswer::Given(answer.encode().to_vec()),
-                        QueryAnswer::Above => QueryAnswer::Above,
-                        QueryAnswer::Elsewhere => QueryAnswer::Elsewhere,
-                    };
-                    let _ = reply.send(answer);
-                    Vec::new()
-                }
             },
             _ = clock.tick() => {
                 let now = unix_now();
@@ -587,7 +691,27 @@ pub async fn run_node(
             }
         };
 
-        // NET-298: the changes of a call commit before an output of it
+        // NET-298: each input that waits joins this commit, and the outputs
+        // of the group leave after it in their order. A move of a session
+        // ends the group, because the next input reads under that move.
+        let mut taken = 1;
+        let mut moved = moves_session(&outputs);
+        while !stops && !moved && taken < INPUTS_PER_COMMIT {
+            let Ok(input) = inputs.try_recv() else {
+                break;
+            };
+
+            taken += 1;
+            match take_input(&mut node, &mut links, input, &mut rng) {
+                Some(more) => {
+                    moved = moves_session(&more);
+                    outputs.extend(more);
+                }
+                None => stops = true,
+            }
+        }
+
+        // NET-298: the changes of the group commit before an output of it
         // leaves. A commit writes to the disk, thus it runs on a thread for
         // blocking work, and the runtime threads serve the sockets meanwhile.
         let changes = node.take_changes();
@@ -610,45 +734,12 @@ pub async fn run_node(
             let _ = requests.send(Request::Challenges(bundle));
         }
 
-        for output in outputs {
-            match output {
-                Output::Send { link, capsule } => {
-                    // NET-349: the node framed no cell for a link at its
-                    // bound. A capsule that finds no room here is thus one
-                    // above the slack of a peer that reads nothing. It goes
-                    // nowhere, and the link ends at its write timeout: a
-                    // full backlog never closes a link that circuits share.
-                    if let Some(writer) = writers.get(&link) {
-                        let _ = writer.queue(capsule);
-                    }
-                }
-                Output::Close { link } => {
-                    writers.remove(&link);
-                    gauges.remove(link);
-                }
-                // WIR-241, WIR-242: the writer of the new connection takes
-                // the place of the old one, which closes when it drops.
-                Output::Adopt { link, as_link } => {
-                    adopted.adopt(link, as_link);
-                    gauges.remove(link);
-                    if let Some(writer) = writers.remove(&link) {
-                        gauges.insert(as_link, &writer);
-                        writers.insert(as_link, writer);
-                    }
-                }
-                Output::Dial { relay_id } => {
-                    let _ = requests.send(Request::Dial(relay_id));
-                }
-                Output::Push { relay_id, capsule } => {
-                    let _ = requests.send(Request::Push { relay_id, capsule });
-                }
-                Output::NdrPush(push) => {
-                    let _ = requests.send(Request::NdrPush(push));
-                }
-            }
-        }
-
+        send_outputs(outputs, &mut links, &requests);
         node.flushed();
+
+        if stops {
+            return;
+        }
     }
 }
 
@@ -2668,5 +2759,131 @@ mod tests {
             };
             assert_eq!(out[..len], [2u8; CAPSULE_LEN]);
         }
+    }
+
+    /// A store in RAM that counts its commits.
+    #[derive(Default)]
+    struct CountedStore {
+        commits: Arc<AtomicUsize>,
+        held: Arc<Mutex<crate::store::Loaded>>,
+    }
+
+    impl RelayStore for CountedStore {
+        fn load(&mut self) -> Result<crate::store::Loaded, crate::store::StoreFault> {
+            Ok(self.held.lock().unwrap().clone())
+        }
+
+        fn commit(
+            &mut self,
+            changes: &[crate::store::StoreChange],
+        ) -> Result<(), crate::store::StoreFault> {
+            self.commits.fetch_add(1, Ordering::Relaxed);
+            let mut held = self.held.lock().unwrap();
+            for change in changes {
+                held.apply(change);
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_burst_of_inputs_takes_one_commit() {
+        use umbra_core::{notify::digest::NotifyDigest, session::channel::Outbound as Sealing};
+        use umbra_crypto::{
+            handshake::nk::RelayStatic,
+            stored::Writer,
+            x25519::{PublicKey as XPublic, StaticSecret},
+        };
+        use umbra_queue::relay::queue::{Queue, QueueKeys};
+        use umbra_wire::{
+            address::QueueAddress,
+            capsule::{self, CapsuleType},
+            queue::L6Kind,
+        };
+
+        const BURST: u8 = 16;
+        let now = unix_now();
+
+        // The relay holds one queue, and a digest of another relay goes
+        // into it with no session (`WIR-526`). Each deposit stores a record.
+        let qs = StaticSecret::from([0x51; 32]);
+        let keys = QueueKeys {
+            recipient_id: [0x52; 32],
+            sender_id: [0x53; 32],
+            qr_auth_pk: [0x54; 32],
+            qs_auth_pk: *XPublic::from(&qs).as_bytes(),
+        };
+        let mut head = Writer::new();
+        Queue::new(keys, now).export_head(&mut head);
+
+        let mut loaded = crate::store::Loaded::default();
+        loaded.queues.insert(
+            [0x52; 32],
+            crate::store::StoredQueue {
+                head: head.finish().to_vec(),
+                records: Vec::new(),
+            },
+        );
+
+        let static_secret = StaticSecret::from([0xB5; 32]);
+        let relay = RelayStatic {
+            s: *XPublic::from(&static_secret).as_bytes(),
+            relay_id: [0xB5; 32],
+        };
+        let relay_key = relay.s;
+        let node = RelayNode::restored(
+            crate::node::Config {
+                relay,
+                static_secret,
+                layer: 3,
+                chunk_capacity: 0,
+            },
+            loaded,
+        );
+
+        let address = QueueAddress {
+            relay_id: [0xB5; 32],
+            sender_id: [0x53; 32],
+            qs_auth_sk: Secret::new([0x51; 32]),
+            qe: Secret::new([0x55; 32]),
+        };
+
+        // The burst waits in the channel before the node task reads it.
+        let (inputs, node_inputs) = mpsc::channel(64);
+        for index in 0..BURST {
+            let mut inner = [0u8; 34];
+            let used = NotifyDigest {
+                id: [0x56; 32],
+                post_count: 1,
+            }
+            .encode(&mut inner)
+            .unwrap();
+
+            let sealed = Sealing::new(&address)
+                .seal_record(L6Kind::NotifyDigest, &inner[..used], [index; 12])
+                .unwrap();
+            let encoded = sealed.sign(&relay_key, [index; 16]).unwrap();
+
+            let mut bytes = vec![0u8; capsule::HEADER_LEN + encoded.len()];
+            let used = capsule::encode(CapsuleType::Deposit, &encoded, &mut bytes).unwrap();
+            bytes.truncate(used);
+            inputs
+                .send(Input::Capsule { link: 4, bytes })
+                .await
+                .unwrap();
+        }
+        drop(inputs);
+
+        let store = CountedStore::default();
+        let commits = store.commits.clone();
+        let held = store.held.clone();
+        let (requests, _requests) = mpsc::unbounded_channel();
+        run_node(node, node_inputs, requests, 1_000, Box::new(store)).await;
+
+        // NET-298: the records of the burst are durable, and one sync of
+        // the disk took them all. Before this, each deposit took its own.
+        let records = held.lock().unwrap().queues[&[0x52; 32]].records.len();
+        assert_eq!(records, usize::from(BURST));
+        assert_eq!(commits.load(Ordering::Relaxed), 1);
     }
 }

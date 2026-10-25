@@ -93,6 +93,17 @@
     mode: "0644"
   loop: "{{ (groups['relays'] | map('extract', hostvars, 'relays') | flatten + umbra_outside_relays) | map(attribute='name') | list }}"
 
+# Part 10 REL-128: the operator of an outside relay comes from its dossier.
+# The name of the own operator there would be a false declaration, and the
+# signer leaves such a line out of each root.
+- name: No relay of another operator takes the name of the own operator
+  ansible.builtin.assert:
+    that: umbra_outside_relays | selectattr('operator', 'equalto', umbra_operator) | list | length == 0
+    fail_msg: >-
+      An item of umbra_outside_relays names {{ umbra_operator }}, the operator
+      of this network. Set the operator of each outside relay from its
+      dossier, with a name of its own.
+
 # The relay lines change when a relay comes or goes, or a class changes;
 # phase 2 restarts each relay then (roles/relay).
 - name: The settings of the signer are there

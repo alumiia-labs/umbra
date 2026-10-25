@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 11: Private Groups (2–500)
 
 **Status:** Draft
-**Version:** 0.45.1
-**Date:** 2026-10-22
+**Version:** 0.46.0
+**Date:** 2026-10-23
 
 ---
 
@@ -314,6 +314,19 @@ oldest record first when the retention or the quota bound is reached.
     second, the client installs a later epoch.
   - A client MUST show a message that it could not send to a closed group as
     `failed`. A client MUST NOT leave that message `queued`.
+  - **[GRP-434]** A client MUST refuse a roster object of its own in a group
+    that it shows as closed, or as lapsed under `GRP-297`, and MUST NOT apply
+    it. `GRP-389` applies an object after the record that carries it, and such
+    a group takes no record. The self-removal of `GRP-067` waits until the
+    group opens under `GRP-210` or `GRP-405`. An own roster object that
+    another epoch displaces in such a group goes again under `GRP-119` when
+    the group opens.
+  - **[GRP-436]** A client MUST keep each sealed record with no message of a
+    group that it shows as closed or as lapsed. It MUST send that record when
+    the group opens again, under the ARQ of Part 3 rule `NET-271`, while the
+    group holds its write credential. Such a record holds a roster object or a
+    key that the client applied already. A record whose write credential the
+    group no longer holds MUST NOT go.
 
   The client counts the refusals of one session:
   - A replica that refuses a record of the group with `REJECTED` counts one
@@ -483,9 +496,11 @@ open the records before the join.
 - **[GRP-228]** A receiver MUST accept a content record only when its `slot`
   is in `[t_now − GROUP_SLOT_WINDOW, t_now + GROUP_SLOT_SKEW]`.
   `GROUP_SLOT_SKEW` is 2 slots. **[GRP-229]** A receiver MUST store a record
-  outside that window in the manner of Part 6 rule `WIR-050`, and retry it
-  after the next clock check: a clock movement of Part 1 §1.9, or the hour
-  that brings its slot inside the window. A record above the window is
+  outside that window before it moves the cursor of its replica past the
+  record (`GRP-202`), and retry it after the next clock check: a clock
+  movement of Part 1 §1.9, or the hour that brings its slot inside the
+  window. Such a record waits under the bound of `GRP-253`, and a discarded
+  one shows a gap under `GRP-254`. A record above the window is
   evidence of a clock movement, and Part 14 §14.9.2 gives the `clock` line. A
   record below it came late, as after a time offline, and names no clock.
 - **[GRP-230]** After a rotation to `e + 1`, a receiver MUST keep the state of
@@ -1191,7 +1206,12 @@ the epoch the member lacks, and `index` is 0.
   pairwise channel MUST answer it at once when `GRP-404` permits, because no
   other member read it, and MUST post it otherwise as a group record that
   keeps the `index` of `WIR-523`, thus another member answers under the
-  backoff. The supply is sealed to the key of the member that `index` names,
+  backoff. That post counts against the rate of Part 6 rule `WIR-464` of the
+  member that posts it. **[GRP-437]** A member MUST NOT post more than half of
+  `KEY_REQUEST_RATE` such requests for one group in each 24 h, and MUST
+  discard a request above that bound. A peer that names an epoch that no
+  member supplies then leaves the member half of the rate for its own
+  requests. The supply is sealed to the key of the member that `index` names,
   thus a false `index` gains nothing.
 
   The one-slot record carries the `roster_epoch` of the rotation of its epoch,
@@ -1206,7 +1226,11 @@ the epoch the member lacks, and `index` is 0.
   does not hold, and a member that holds no `K_e` of that epoch MUST NOT
   answer it. **[GRP-295]** A member MUST NOT send more than
   `KEY_REQUEST_RATE` epoch requests for one group in each 24 h. **[GRP-378]**
-  A member MUST discard an epoch request above that rate. §11.10 gives 8.
+  A member MUST discard an epoch request above that rate. The rate counts the
+  requests that one member posts on the group queue, and the requests of one
+  peer on a pairwise channel under Part 6 rule `WIR-338`. The `index` of a
+  request does not select the rate, thus one party does not spend the answers
+  of each member. §11.10 gives 8.
 - **[GRP-297]** If no path exists, the member MUST show the group as
   "membership lapsed", and it needs a new invitation. **[GRP-405]** A member
   that shows a group as lapsed and then installs the epoch it lacked MUST
@@ -1229,7 +1253,31 @@ MUST cover that value. A receiver MUST take `own_sks` from a slot whose
 slot of an epoch other than its current one or with `own_count` 0. It MUST
 reject such a slot whose rotator is not an active member at `admin` or
 above in its current roster. The `roster_epoch` that the record names does not
-change this rule.
+change this rule, and `GRP-429` orders two such records.
+
+**[GRP-429]** A receiver MUST keep the `roster_epoch` of the record of
+`GRP-400` that gave it the owner credentials that it holds, and the current
+`roster_epoch` when it draws them itself under `GRP-401`. A receiver MUST
+NOT take `own_sks` from a record of `GRP-400` whose `roster_epoch` is below
+that value. A receiver MUST hold a record of `GRP-400` whose `roster_epoch`
+is above its own roster, as `GRP-357` holds an epoch-key record, and MUST
+try it again after each roster record that it applies. A receiver MUST NOT
+take `own_sks`, from any slot, that equal a set that it held and replaced.
+It MUST keep a hash of each of the last 8 sets that it replaced for that
+check.
+
+> *Cause of `GRP-429`.* The `tag` of a slot binds no `own_sks`, and an
+> epoch-key record has no AEAD over its body. Thus any member can post an old
+> delivery again, in a larger bucket that gives new bytes. A receiver that
+> takes the older set fails each `GKEY` and `GDEL`, and its next rotation
+> hands that set to each admin. Then no admin can move the relay credentials
+> after a removal. Each replacement of `GRP-401` and `GRP-402` follows a roster
+> change, thus the newer delivery names the higher `roster_epoch`. A receiver
+> whose roster lags holds each delivery until its roster reaches it. If not,
+> a newer delivery that comes first sets a value below the older one, and the
+> older set passes. Two deliveries at one `roster_epoch` get no order
+> from it. The hash of a replaced set covers that case at a member that held
+> the older set.
 
 **The owner credentials after an admin leaves them.** `own_sk` is a secret of
 the relay and not of an epoch, thus a rotation of §11.4 leaves it where it was.
@@ -1509,7 +1557,10 @@ receiver MUST reject a content record from a member that holds `observer`
 in its current roster, unless it carries a roster object, a `KeyRequest`,
 a `KeySupply`, or a deletion of the author of §11.9.6. Thus an observer
 still leaves, re-keys, takes a missed epoch, and deletes a message that it
-sent before its demotion.
+sent before its demotion. **[GRP-442]** A client MUST NOT build a content
+record that `GRP-425` makes each receiver reject. It MUST refuse such an
+act of the user while the member holds `observer`. A message that waited
+for its record when the role fell MUST show that it did not go.
 
 **[GRP-051]** A group MUST have two or more members with the `owner` role. One
 owner is one point of failure for the administration, and U6 does not permit
@@ -1672,6 +1723,9 @@ Each epoch carries `epoch_index` and `previous_epoch_hash`.
 - **[GRP-389]** A member that posts a roster object MUST build the record that
   carries it under the roster epoch that stands before that object, and MUST
   apply the object to its own roster after it built that record.
+  **[GRP-435]** The member MUST store that record and its own roster after the
+  object in one commit. A stop between the two would send an object that its
+  own roster never holds, or hold an object that no record carries.
 
 > *Cause.* The tag vector of a content record covers the active set of the
 > `roster_epoch` that the record names, and §11.3.5 gives each receiver its
@@ -1722,13 +1776,16 @@ a member, or it takes that role away.
   that member before it verifies the signature under it. **[GRP-399]** A
   verifier of a snapshot MUST reject it when a member at `moderator` or
   above is neither the creator nor the grantee of that role in the last
-  granting epoch of the path that names it. The path starts at the creator,
+  granting epoch of the path that names it. A member that a `RekeyRecord` of
+  the path moved to its index, with no later grant for that index, holds the
+  role that the record moved (`GRP-426`). The path starts at the creator,
   under the roster key of the invitation, at index 0 when no entry holds
   that key. The verifier MUST compare the `roster_pk_hash` of each such
-  entry, and not its role alone: the creator is the entry of that key, and a
-  grantee is the entry of the `grantee_roster_pk_hash` of its grant. An
-  entry with keys of its own at the index of a creator that left holds no
-  role.
+  entry, and not its role alone. The creator is the entry of that key, or
+  of the new keys of a re-key of the creator on the path. A grantee is the
+  entry of the `grantee_roster_pk_hash` of its grant. A member that a re-key
+  moved is the entry of its new keys. An entry with keys of its own at the
+  index of a creator that left holds no role.
 
 > *Cause of `GRP-316`.* The alternative is a grant at `moderator` or above
 > that carries the key of the grantee. The roster holds only the hash of the
@@ -1792,6 +1849,17 @@ keeps no member in a group against its will.
 
 - **[GRP-068]** A member MUST retain each granting epoch on the authority path
   to a current role.
+- **[GRP-427]** A member MUST also retain the `RekeyRecord` of §11.12 of each
+  member at `moderator` or above, as an entry of that path. A re-key moves a
+  role with no granting epoch (`GRP-367`). Thus the path of a role that a
+  re-key moved runs through that record to the grant or the creation of the
+  index before it. A member MUST discard such a record that no path holds,
+  as `GRP-069` discards a grant.
+- **[GRP-430]** A member that takes a snapshot under `GRP-330` MUST retain
+  each entry of its path under `GRP-068` and `GRP-427`. That member missed
+  each roster record of its gap, and a grant or a re-key among them is on no
+  other path that it holds. Without them, each snapshot that it builds later
+  fails `GRP-399`.
 - **[GRP-069]** A member MUST discard a granting epoch that a later granting
   epoch supersedes, after that member verified the successor.
 
@@ -1800,6 +1868,33 @@ keeps no member in a group against its will.
 > That proof covers each grant that each administrator made for the life of
 > the group. This rule keeps the verification of a new joiner and removes the
 > unbounded history.
+
+- **[GRP-441]** A verifier MUST apply a granting epoch that gives a member the
+  role that it holds as each other grant. A client MUST post such an epoch
+  only when its authority path does not back that role under `GRP-399` and
+  the path with that epoch backs it. The epoch is then the entry of the path
+  to that role. A client MUST NOT show such an epoch as a change of role.
+- **[GRP-443]** Before an admin posts an add under `GRP-310`, it MUST post
+  the epoch of `GRP-441` for each role holder that its path does not back,
+  when `GRP-441` permits that epoch and the roster takes it.
+
+> *Cause of `GRP-441`.* A client of an earlier build kept no `RekeyRecord`
+> (`GRP-427`). A role holder that re-keyed under such a client has no entry on
+> the path of a member that did not keep that record, and each snapshot of
+> that member fails `GRP-399`. A demotion and a second promotion repair an
+> admin or a moderator. The owner floor of `GRP-051` can stop the demotion of
+> an owner, and a grant of the role that the member holds needs no demotion.
+> The joiner rejects a snapshot that one role holder fails (`GRP-327`), and the
+> admin sees no sign of it. Thus `GRP-443` repairs the path before each add,
+> with no act of the user.
+>
+> A granter needs a path of its own, and only an owner gives `owner`
+> (`GRP-063`). Thus an owner whose `RekeyRecord` no device keeps has no
+> repair when no other owner has a path. An example is a sole owner that
+> re-keyed two times or more under such a client. Each snapshot of that group
+> fails, thus it admits no member, and no member recovers its roster from a
+> snapshot. Its members still read and post. A new group is the repair.
+> Part 15 §15.3 records this residual.
 
 ### 11.9.4 Conflict, fork, and rate
 
@@ -2215,38 +2310,89 @@ and the authority path of §11.9.3 at the moment of its admission. The
 - `chain_hash`, the hash of the roster epoch it describes;
 - the roster entries;
 - the `kem_pk` of every active member;
-- the authority path, as the granting epochs on the path of every current role
-  holder in chain order.
+- the authority path, as the granting epochs and the `RekeyRecord`s on the
+  path of every current role holder in chain order (§11.9.3).
 
 - **[GRP-323]** The inviting admin MUST write a snapshot at the `roster_epoch`
   of the add, or reuse one it wrote at that same `roster_epoch`.
   **[GRP-324]** The admin MUST put the authority path in the snapshot object
   and not in the admit. **[GRP-325]** An admit MUST carry no granting epoch.
-- **[GRP-326]** A joiner MUST verify `chain_hash` against the hash of the
-  roster epoch that the add record names, verify each granting epoch of the
-  path under §11.9.2, and verify each `kem_pk` against the `kem_pk_hash` of
-  its entry. A joiner MUST verify that the entry at the `index` of its admit
-  holds its own `pair_pk`, `kem_pk_hash`, and `roster_pk_hash`. Under the entry
-  of another member it finds no tag and no slot for itself.
+- **[GRP-326]** A joiner MUST verify that the `roster_epoch` of the snapshot
+  is the `roster_epoch` of its admit, and MUST take `chain_hash` as the hash
+  of the head of its roster. It MUST verify each granting epoch of the path
+  under §11.9.2, and verify each `kem_pk` against the `kem_pk_hash` of its
+  entry. A joiner MUST verify that the entry at the `index` of its admit holds
+  its own `pair_pk`, `kem_pk_hash`, and `roster_pk_hash`. Under the entry of
+  another member it finds no tag and no slot for itself. The add record names
+  the roster epoch before the joiner, thus it holds no tag for the joiner, and
+  no record that the joiner can verify gives the hash. Each later roster
+  object chains from `chain_hash` under `GRP-315`, and `GRP-440` checks it.
 - **[GRP-403]** A joiner MUST verify the path in chain order from the creator
   as `owner`, MUST take the role of a granter from the path at that point, and
   MUST take the key hash of a granter from its entry or, for a granter that
-  left the group, from the grant of the path that named it. A grant stays
-  valid after its granter lost its role.
+  left the group, from the grant or the `RekeyRecord` of the path that named
+  it. A grant stays valid after its granter lost its role.
+- **[GRP-426]** A joiner MUST take a `RekeyRecord` on the path as the move of a
+  role under `GRP-367`. It MUST verify the record under Part 6 rule `WIR-478`
+  against the key hash that the path gives `old_index` at that point. It
+  MUST then give `new_index` the role of `old_index` and the new
+  `roster_pk_hash`. After the record, `old_index` grants nothing
+  (`GRP-063`). A joiner MUST reject a record when it holds no key hash for
+  its `old_index` at that point, or when its `new_index` is not above
+  `old_index`.
+
+> *Cause of `GRP-426` and `GRP-427`.* A device revocation re-keys each group of
+> the user (`GRP-345`). No granting epoch names the new index of a role holder
+> after its re-key. Without the record on the path, each later snapshot fails
+> `GRP-399`, and the group admits no member and recovers no roster. A creator
+> that re-keyed has no grant at all, and no member can grant it its role
+> again. The record carries the old roster key and a signature under it, thus
+> a joiner verifies it as it verifies a grant. The path grows by one record for
+> each re-key of a role holder since the last grant that names its index.
 - **[GRP-327]** A joiner MUST reject a snapshot that fails one of those
   checks. **[GRP-328]** A joiner MUST show a rejected snapshot as a failed
   admission.
+- **[GRP-440]** A member whose roster stands at the roster epoch of the
+  snapshot that it took MUST ask for a snapshot under `GRP-329` when it reads
+  a roster object of the next roster epoch that names a predecessor other
+  than `chain_hash` and passes each other check on that predecessor. This
+  applies to the snapshot of an admission and to one of `GRP-330`.
+
+> *Cause of `GRP-440`.* No record that the joiner verifies gives `chain_hash`
+> (`GRP-326`), thus a false one passes each check of the admission. Each later
+> roster object then fails its chain check. Each record of a later roster
+> epoch waits under `GRP-252` and goes after `GROUP_ROSTER_WAIT`, and the
+> member misses each roster change with no sign. A snapshot after that object
+> gives the head that the other members hold. The object of one faulty member
+> costs one request in each day under `GRP-433`.
+
 - **[GRP-329]** A member that restores from a backup and lacks a `kem_pk`
   MUST fetch the newest snapshot named by any admit it holds, or ask an admin
   with a `KeyRequest` of scope `0x03`. Scope `0x03` means "the roster
   snapshot".
+
+  **[GRP-433]** A member that asked and took no snapshot that verified MUST
+  ask again one day after its last request, and MUST NOT ask more often. A
+  fetch that fails and a snapshot that does not verify count as no answer.
+  The member MUST stop asking `GROUP_RETENTION` after its first request, and
+  a later gap of `GRP-208` starts a new recovery. A notice and a fetch that
+  fails do not move the time of the first request.
 - **[GRP-330]** An admin that reads a `KeyRequest` of scope `0x03` MUST answer
   with a `SnapshotNotice` (type `0x08`) as a group record that carries a fresh
   descriptor at the current `roster_epoch`.
 
   A member that takes such a snapshot MUST verify its path from the roster key
-  of an owner that its own roster holds. It MUST verify the path from its own
-  roster key only when it holds index 0, which the creation gave.
+  of the creator, whether or not the creator is still a member or an owner.
+  A member MUST verify the path from its own roster key only when it holds
+  index 0, which the creation gave. **[GRP-428]** A member MUST keep the
+  roster key of the creator for the life of the group: from the creation, or
+  from the offer of its admission. An admin MUST put that key in each offer
+  under `GRP-062`.
+
+  > *Cause of `GRP-428`.* A snapshot holds the active members alone. A creator
+  > that left or re-keyed has no entry there, thus a later member finds its
+  > key in no entry. The key of another owner starts no path, because the
+  > path holds the grants of the creator.
 
   A snapshot holds the active members alone, thus the highest index that the
   group ever used can lie above each entry. As an exception to `GRP-320`, that

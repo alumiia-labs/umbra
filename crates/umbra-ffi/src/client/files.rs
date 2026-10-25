@@ -8,7 +8,10 @@
 //! past the deletion of the message, until each relay erased its chunk
 //! (`ATT-161`).
 
-use std::collections::{BTreeMap, VecDeque};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    sync::{Arc, Mutex},
+};
 
 use umbra_core::{
     attach::{
@@ -28,8 +31,10 @@ use umbra_wire::{
 };
 use zeroize::Zeroizing;
 
-use super::{conversation_of, info_of, outbox_row, Client, Outgoing, MESSAGE_PREFIX, OUTBOX};
-use crate::{draft::DraftFile, Delivery, Error, Event, MsgRef};
+use super::{
+    conversation_of, info_of, outbox_row, row_fault, Client, Outgoing, MESSAGE_PREFIX, OUTBOX,
+};
+use crate::{draft::DraftFile, ConversationId, Delivery, Error, Event, MsgRef};
 
 /// The state and the shape of the file of a message.
 pub(super) const FILE_STATE: TableId = TableId(0x0F);
@@ -44,7 +49,9 @@ pub(super) const CHUNK_CRED: TableId = TableId(0x11);
 /// due. The copy stays until each relay answered the `CDEL`, across each
 /// lock and each new start. `CHUNK_LIFE_MAX` after the upload ends it too.
 /// A message that leaves with no erase of its chunks takes the copy and the
-/// hold along, thus no credential outlives its message there.
+/// hold along, thus no credential outlives its message there. An upload
+/// that ends with no record writes a copy with no hold under its first
+/// chunk, and that copy is due at once (`ATT-204`).
 pub(super) const ERASE_DUE: TableId = TableId(0x55);
 /// The first byte of a credentials row of `ERASE_DUE` (`IMP-130`). The time
 /// of the upload in seconds follows it, and then the credentials as a row
@@ -64,6 +71,12 @@ const ERASE_HEAD: usize = 1 + 8;
 /// The natural key of the row of `ERASE_DUE` of one link object.
 fn link_key(chunk_id: &[u8; 32]) -> Vec<u8> {
     [b"link".as_slice(), chunk_id.as_slice()].concat()
+}
+
+/// The natural key of the row of `ERASE_DUE` of the chunks of an upload
+/// that ended with no record, by its first chunk.
+fn left_key(chunk_id: &[u8; 32]) -> Vec<u8> {
+    [b"left".as_slice(), chunk_id.as_slice()].concat()
 }
 
 /// The natural key of the hold row of a message.
@@ -181,12 +194,85 @@ pub(super) struct FileQueues {
     pub uploads: VecDeque<UploadJob>,
     pub downloads: VecDeque<DownloadJob>,
     pub erasures: VecDeque<ErasureJob>,
-    /// The row of `ERASE_DUE` of each chunk whose `CDEL` has no answer yet,
-    /// and the count of those chunks for each row.
-    pub erasing: BTreeMap<[u8; 32], RowId>,
+    /// The rows of `ERASE_DUE` of each chunk whose `CDEL` has no answer
+    /// yet, and the count of those chunks for each row. A chunk can sit in
+    /// two rows: a task that a stop of its run did not end yet notes it
+    /// again, and a lock then writes it once more.
+    pub erasing: BTreeMap<[u8; 32], BTreeSet<RowId>>,
     pub erase_left: BTreeMap<RowId, usize>,
     /// Whether the platform said that the network costs by the byte.
     pub is_metered: bool,
+    /// The chunks of each upload that runs, which the transfer task writes.
+    pub open_uploads: Arc<Mutex<OpenUploads>>,
+}
+
+impl FileQueues {
+    /// Notes that the row `row` waits for the answer of the `CDEL` of
+    /// `chunk_id`.
+    fn waits_for(&mut self, chunk_id: &[u8; 32], row: RowId) {
+        self.erasing.entry(*chunk_id).or_default().insert(row);
+    }
+}
+
+/// The chunks of each upload that runs, by the tag of its transfer
+/// (`ATT-204`). The transfer task notes each chunk at its start and at each
+/// new relay. A lock stops that task with no update, and the store then
+/// takes no write. Thus the lock writes these chunks to the store first,
+/// and closes the list: a task whose list is closed sends no command.
+#[derive(Default)]
+pub struct OpenUploads {
+    uploads: BTreeMap<u64, BTreeMap<[u8; 32], ChunkCredential>>,
+    is_closed: bool,
+}
+
+impl OpenUploads {
+    /// Notes chunks of the upload of `tag`. A chunk noted before keeps its
+    /// relays and takes the new ones. The result is false when a lock
+    /// closed the list: the chunks then must not leave the device.
+    pub fn note(&mut self, tag: u64, credentials: Vec<ChunkCredential>) -> bool {
+        if self.is_closed {
+            return false;
+        }
+
+        let chunks = self.uploads.entry(tag).or_default();
+        for credential in credentials {
+            match chunks.get_mut(&credential.chunk_id) {
+                Some(noted) => {
+                    for relay in credential.relays {
+                        if !noted.relays.contains(&relay) {
+                            noted.relays.push(relay);
+                        }
+                    }
+                }
+                None => {
+                    chunks.insert(credential.chunk_id, credential);
+                }
+            }
+        }
+        true
+    }
+
+    /// Whether a lock closed the list.
+    pub fn is_closed(&self) -> bool {
+        self.is_closed
+    }
+
+    /// Takes the chunks of the upload of `tag` out of the list.
+    pub fn take(&mut self, tag: u64) -> Vec<ChunkCredential> {
+        self.uploads
+            .remove(&tag)
+            .map(|chunks| chunks.into_values().collect())
+            .unwrap_or_default()
+    }
+
+    /// Closes the list, and takes the chunks of each upload out of it.
+    pub fn close(&mut self) -> Vec<ChunkCredential> {
+        self.is_closed = true;
+        core::mem::take(&mut self.uploads)
+            .into_values()
+            .flat_map(BTreeMap::into_values)
+            .collect()
+    }
 }
 
 /// The name and the preview that the body of a file carries (`WIR-531`,
@@ -401,6 +487,59 @@ fn read_credentials_row(row: &[u8]) -> Result<Vec<ErasureJob>, Error> {
     Ok(jobs)
 }
 
+/// The credentials of a row of an upload that ended with no record, with
+/// `part` added to those that `held` names, and the time of the row. A chunk
+/// of both rows takes the relays of the two, and the earlier time stays.
+fn merge_left(
+    held: Option<Vec<u8>>,
+    part: &[ChunkCredential],
+    now: u64,
+) -> Result<(u64, Vec<ChunkCredential>), Error> {
+    let held = Zeroizing::new(held.unwrap_or_default());
+    let mut at = now;
+    let mut merged = Vec::new();
+    if let Some((head, row)) = held.split_at_checked(ERASE_HEAD) {
+        if head.first() == Some(&ERASE_VERSION) {
+            if let Some(time) = head
+                .get(1..)
+                .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+            {
+                at = u64::from_be_bytes(time).min(now);
+            }
+            merged = read_credentials_row(row)?
+                .into_iter()
+                .map(|job| ChunkCredential {
+                    chunk_id: job.chunk_id,
+                    cred: job.cred,
+                    relays: job.relays,
+                })
+                .collect();
+        }
+    }
+
+    for credential in part {
+        match merged
+            .iter_mut()
+            .find(|held: &&mut ChunkCredential| held.chunk_id == credential.chunk_id)
+        {
+            Some(held) => {
+                for relay in &credential.relays {
+                    if !held.relays.contains(relay) {
+                        held.relays.push(*relay);
+                    }
+                }
+            }
+            None => merged.push(ChunkCredential {
+                chunk_id: credential.chunk_id,
+                cred: Secret::new(*credential.cred.expose()),
+                relays: credential.relays.clone(),
+            }),
+        }
+    }
+
+    Ok((at, merged))
+}
+
 impl<B: Backend, E: SecureElement> Client<B, E> {
     /// The next file for the transfer task to upload.
     pub fn take_upload(&mut self) -> Option<UploadJob> {
@@ -500,6 +639,44 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         uploaded: &Uploaded,
         rng: &mut R,
     ) -> Result<(), Error> {
+        let (conversation, app) = match self.commit_upload(message, uploaded, rng) {
+            Ok(committed) => committed,
+            Err(error) => {
+                // No record names the chunks, thus they go at their relays.
+                // A message that a deletion took during its upload is such
+                // a case.
+                let _ = self.keep_abandoned(&uploaded.credentials, rng);
+                return Err(error);
+            }
+        };
+
+        // A file of a group goes to the group queue, and on no pairwise
+        // channel (Part 11 §11.2).
+        if self.is_group(conversation)? {
+            let sent_at = AppMessage::parse(&app, Channel::Pairwise)?.sent_at;
+            self.queue_group_post(conversation, Some(*message), &app, sent_at, rng)?;
+        } else {
+            self.outgoing.push_back(Outgoing {
+                message: *message,
+                conversation,
+                app: app.to_vec(),
+            });
+        }
+
+        self.events.push_back(Event::File { message: *message });
+
+        Ok(())
+    }
+
+    /// Commits the record with the descriptor, the credentials, and the
+    /// state of an upload in one batch, and gives the conversation and the
+    /// record.
+    fn commit_upload<R: CryptoRng + ?Sized>(
+        &mut self,
+        message: &MsgRef,
+        uploaded: &Uploaded,
+        rng: &mut R,
+    ) -> Result<(ConversationId, Zeroizing<Vec<u8>>), Error> {
         let info = self.file_info(message)?.ok_or(Error::NotFound)?;
         let extras = self.file_extras(message)?;
         let now = self.clock;
@@ -536,12 +713,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             Ok(_) => None,
             Err(_) => return Err(Error::Integrity),
         };
-        let attachment = AttachmentBody {
+        let mut attachment = AttachmentBody {
             descriptor,
             name: extras.name.as_deref().map(std::borrow::Cow::Borrowed),
             preview: extras.preview.as_deref(),
             caption,
         };
+
+        // ATT-208: each other device of the set takes the record on its sync
+        // channel, and a record at the ref limit holds the preview there no
+        // more. The view of this device keeps it.
+        if attachment.len() > umbra_core::attach::MESSAGE_BODY_MAX {
+            attachment.preview = None;
+        }
         let mut body = Zeroizing::new(vec![0u8; attachment.len()]);
         attachment.encode(&mut body)?;
         let app = {
@@ -588,22 +772,102 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         )?;
         batch.commit()?;
 
-        // A file of a group goes to the group queue, and on no pairwise
-        // channel (Part 11 §11.2).
-        if self.is_group(conversation)? {
-            let sent_at = AppMessage::parse(&app, Channel::Pairwise)?.sent_at;
-            self.queue_group_post(conversation, Some(*message), &app, sent_at, rng)?;
-        } else {
-            self.outgoing.push_back(Outgoing {
-                message: *message,
-                conversation,
-                app: app.to_vec(),
-            });
+        Ok((conversation, app))
+    }
+
+    /// Keeps the erase of the chunks of an upload that ended with no record
+    /// that names them: a run that ended, a lock, a failure, or a message
+    /// that left during the upload (`ATT-204`). The rows are due at once,
+    /// thus they take no hold. Each one stays across a lock and a new start
+    /// until each relay answered its `CDEL`, and `CHUNK_LIFE_MAX` ends it
+    /// too.
+    pub fn keep_abandoned<R: CryptoRng + ?Sized>(
+        &mut self,
+        credentials: &[ChunkCredential],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let now = self.clock;
+
+        // The count of a credentials row is two bytes wide.
+        for part in credentials.chunks(usize::from(u16::MAX)) {
+            let Some(first) = part.first() else {
+                continue;
+            };
+            let open = self.open_mut()?;
+            let row = open.store.row_id(ERASE_DUE, &left_key(&first.chunk_id));
+
+            // A task that a stop of its run did not end yet can note a chunk
+            // again after the first write, thus a second write adds to it.
+            let (at, merged) = merge_left(open.store.get(ERASE_DUE, &row)?, part, now)?;
+            let row_bytes = credentials_row(&merged)?;
+            let mut value = Zeroizing::new(Vec::with_capacity(
+                ERASE_HEAD.saturating_add(row_bytes.len()),
+            ));
+            value.push(ERASE_VERSION);
+            value.extend_from_slice(&at.to_be_bytes());
+            value.extend_from_slice(&row_bytes);
+
+            let mut batch = open.store.begin();
+            batch.put(ERASE_DUE, row, None, &value, rng)?;
+            batch.commit()?;
+
+            let jobs = read_credentials_row(&row_bytes)?;
+            self.erase_from(row, jobs);
         }
 
-        self.events.push_back(Event::File { message: *message });
-
         Ok(())
+    }
+
+    /// The list of the chunks of the uploads that run, for the transfer
+    /// task (`ATT-204`). A lock closes it, and the next run takes a new one.
+    pub fn open_uploads(&self) -> Arc<Mutex<OpenUploads>> {
+        Arc::clone(&self.files.open_uploads)
+    }
+
+    /// The upload of `tag` ended with no record that names its chunks: a
+    /// failure, or a run that ended (`ATT-204`). The store keeps the
+    /// credential of each chunk that it started until each relay answered
+    /// the `CDEL`. A transfer that is no upload changes nothing.
+    pub fn upload_left<R: CryptoRng + ?Sized>(
+        &mut self,
+        tag: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let left = self
+            .files
+            .open_uploads
+            .lock()
+            .map(|mut open| open.take(tag))
+            .unwrap_or_default();
+        if left.is_empty() {
+            return Ok(());
+        }
+
+        self.keep_abandoned(&left, rng)
+    }
+
+    /// The upload of `tag` ended with its file at the relays. Its work
+    /// keeps the credentials that it needs, thus the list drops them.
+    pub fn upload_named(&mut self, tag: u64) {
+        if let Ok(mut open) = self.files.open_uploads.lock() {
+            open.take(tag);
+        }
+    }
+
+    /// Writes the chunks of each upload that runs to the store before a
+    /// lock takes its key, and closes the list (`ATT-204`). The task of
+    /// those uploads then sends no command, and the erase goes in the run
+    /// after the unlock.
+    pub fn keep_open_uploads<R: CryptoRng + ?Sized>(&mut self, rng: &mut R) {
+        let left = self
+            .files
+            .open_uploads
+            .lock()
+            .map(|mut open| open.close())
+            .unwrap_or_default();
+        if !left.is_empty() {
+            let _ = self.keep_abandoned(&left, rng);
+        }
     }
 
     /// The upload of the file of a message ended with no result, and the
@@ -623,7 +887,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(())
     }
 
-    /// The file of a received message arrived, and its digest holds.
+    /// The file of a received message arrived, and its digest holds. The
+    /// bytes and the state go in one batch: a state that says ready with no
+    /// bytes would lose the file, because no tap fetches it again.
     pub fn download_done<R: CryptoRng + ?Sized>(
         &mut self,
         message: &MsgRef,
@@ -631,10 +897,25 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         rng: &mut R,
     ) -> Result<(), Error> {
         let size = u64::try_from(file.len()).unwrap_or(u64::MAX);
-        let conversation = self.put_file_state(message, FileState::Ready, size, rng)?;
+        let info = self.file_info(message)?.ok_or(Error::NotFound)?;
+        let extras = self.file_extras(message)?;
         let open = self.open_mut()?;
+        let plain = Zeroizing::new(
+            open.store
+                .get(TableId::MESSAGE, &message.0)?
+                .ok_or(Error::NotFound)?,
+        );
+        let conversation = conversation_of(&plain)?;
+
         let mut batch = open.store.begin();
-        batch.put(FILE_DATA, message.0, Some(conversation), file, rng)?;
+        batch.put(FILE_DATA, message.0, Some(conversation.0), file, rng)?;
+        batch.put(
+            FILE_STATE,
+            message.0,
+            Some(conversation.0),
+            &state_row(FileState::Ready, &info.shape, size, &extras),
+            rng,
+        )?;
         batch.commit()?;
         self.events.push_back(Event::File { message: *message });
 
@@ -783,6 +1064,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// network with no such cost, each file that waits at or below the
     /// limit starts its download, when the user limits the automatic
     /// download to that network (`IMP-168`). The result counts them.
+    ///
+    /// A file whose rows do not read stays held, and it holds back no other
+    /// file. The call gives one [`Event::IntegrityFault`] for it (`IDN-039`).
     pub fn set_metered<R: CryptoRng + ?Sized>(
         &mut self,
         is_metered: bool,
@@ -795,22 +1079,33 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
         let limit = self.auto_download_limit()?;
         let store = &self.open_ref()?.store;
-        let mut waiting = Vec::new();
-        for (row, state) in store.list(FILE_STATE, None)? {
-            let info = read_state_row(&state)?;
+        let held_download = |row: &RowId, state: &[u8]| -> Result<Option<FileDescriptor>, Error> {
+            let info = read_state_row(state)?;
             if info.state != FileState::Held || info.size > limit {
-                continue;
+                return Ok(None);
             }
-            let Some(plain) = store.get(TableId::MESSAGE, &row)? else {
-                continue;
+            let Some(plain) = store.get(TableId::MESSAGE, row)? else {
+                return Ok(None);
             };
 
             let plain = Zeroizing::new(plain);
             let app = plain.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;
-            let parsed = AppMessage::parse(app, Channel::Pairwise)?;
-            if let Some(descriptor) = fetchable(parsed.body) {
-                waiting.push((MsgRef(row), descriptor));
+            Ok(fetchable(AppMessage::parse(app, Channel::Pairwise)?.body))
+        };
+
+        // IMP-188: the platform calls this before it shows the open store,
+        // and it locks the store again at a fault of the call.
+        let mut waiting = Vec::new();
+        let mut is_sound = true;
+        for (row, state) in store.list(FILE_STATE, None)? {
+            match row_fault(held_download(&row, &state))? {
+                Some(Some(descriptor)) => waiting.push((MsgRef(row), descriptor)),
+                Some(None) => {}
+                None => is_sound = false,
             }
+        }
+        if !is_sound {
+            self.events.push_back(Event::IntegrityFault);
         }
 
         let count = waiting.len();
@@ -845,7 +1140,21 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// Puts each transfer that an earlier run left open into its queue
     /// again: the store holds the file of an upload, and the record holds
     /// the descriptor of a download.
+    ///
+    /// A file whose rows do not read stays in the store, and it holds back
+    /// no other file. The call gives one [`Event::IntegrityFault`] for it
+    /// (`IDN-039`).
     pub fn requeue_transfers(&mut self) -> Result<(), Error> {
+        if !self.requeue_transfer_rows()? {
+            self.events.push_back(Event::IntegrityFault);
+        }
+
+        Ok(())
+    }
+
+    /// The work of [`Client::requeue_transfers`], and whether the rows of
+    /// each file read.
+    pub(super) fn requeue_transfer_rows(&mut self) -> Result<bool, Error> {
         self.files.uploads.clear();
         self.files.downloads.clear();
         let rows: Vec<RowId> = self
@@ -855,12 +1164,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .into_iter()
             .map(|(row, _)| row)
             .collect();
+        let mut is_sound = true;
         for row in rows {
-            self.requeue_file(&MsgRef(row))?;
+            if row_fault(self.requeue_file(&MsgRef(row)))?.is_none() {
+                is_sound = false;
+            }
         }
 
         // ATT-161: each `CDEL` that an earlier run did not complete.
-        self.requeue_erasures()
+        self.requeue_erasures()?;
+
+        Ok(is_sound)
     }
 
     /// Puts the chunks of each due row of `ERASE_DUE` into the work list
@@ -963,7 +1277,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.commit()?;
 
         // The answer to a `CDEL` of this run takes the row away.
-        self.files.erasing.insert(*chunk_id, row);
+        self.files.waits_for(chunk_id, row);
         self.files.erase_left.insert(row, 1);
 
         Ok(())
@@ -1014,7 +1328,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for (row, jobs) in due {
             self.files.erase_left.insert(row, jobs.len());
             for job in jobs {
-                self.files.erasing.insert(job.chunk_id, row);
+                self.files.waits_for(&job.chunk_id, row);
                 out.push(job);
             }
         }
@@ -1027,17 +1341,25 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     fn erase_from(&mut self, row: RowId, jobs: Vec<ErasureJob>) {
         let files = &mut self.files;
         for job in &jobs {
-            files.erasing.insert(job.chunk_id, row);
+            files.waits_for(&job.chunk_id, row);
         }
 
+        // A chunk of two rows takes one `CDEL` to the relays of the two.
         files.erase_left.insert(row, jobs.len());
         for job in jobs {
-            if !files
+            let waiting = files
                 .erasures
-                .iter()
-                .any(|waiting| waiting.chunk_id == job.chunk_id)
-            {
-                files.erasures.push_back(job);
+                .iter_mut()
+                .find(|waiting| waiting.chunk_id == job.chunk_id);
+            match waiting {
+                Some(waiting) => {
+                    for relay in job.relays {
+                        if !waiting.relays.contains(&relay) {
+                            waiting.relays.push(relay);
+                        }
+                    }
+                }
+                None => files.erasures.push_back(job),
             }
         }
     }
@@ -1047,22 +1369,33 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// answer a lock or a new start lost goes again, and a relay that holds
     /// it no more answers that too.
     pub fn chunk_erased(&mut self, chunk_id: &[u8; 32]) -> Result<(), Error> {
-        let Some(row) = self.files.erasing.remove(chunk_id) else {
+        let Some(rows) = self.files.erasing.remove(chunk_id) else {
             return Ok(());
         };
 
-        let left = self.files.erase_left.get(&row).copied().unwrap_or(0);
-        if left > 1 {
-            self.files.erase_left.insert(row, left.saturating_sub(1));
+        let mut done = Vec::new();
+        for row in rows {
+            let left = self.files.erase_left.get(&row).copied().unwrap_or(0);
+            if left > 1 {
+                self.files.erase_left.insert(row, left.saturating_sub(1));
+            } else {
+                self.files.erase_left.remove(&row);
+                done.push(row);
+            }
+        }
+        if done.is_empty() {
             return Ok(());
         }
 
-        self.files.erase_left.remove(&row);
         let open = self.open_mut()?;
-        let hold = open.store.row_id(ERASE_DUE, &hold_key(&row));
+        let holds: Vec<RowId> = done
+            .iter()
+            .map(|row| open.store.row_id(ERASE_DUE, &hold_key(row)))
+            .collect();
         let mut batch = open.store.begin();
-        batch.delete(ERASE_DUE, row);
-        batch.delete(ERASE_DUE, hold);
+        for row in done.into_iter().chain(holds) {
+            batch.delete(ERASE_DUE, row);
+        }
 
         Ok(batch.commit()?)
     }
@@ -1160,7 +1493,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     pub(super) fn start_erasures(&mut self, message: &MsgRef, erasure: FileErasure) {
         if erasure.is_kept && !erasure.jobs.is_empty() {
             for job in &erasure.jobs {
-                self.files.erasing.insert(job.chunk_id, message.0);
+                self.files.waits_for(&job.chunk_id, message.0);
             }
 
             self.files.erase_left.insert(message.0, erasure.jobs.len());

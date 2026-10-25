@@ -198,13 +198,12 @@ impl Admitted {
     }
 }
 
-/// Verifies an admit against the fetched snapshot and the hash of the add
-/// record, and installs the epoch from the slot key. The joiner then
+/// Verifies an admit against the fetched snapshot at the roster epoch of
+/// the add, and installs the epoch from the slot key. The joiner then
 /// checks the entry of its index with [`Admitted::for_seed`].
 pub fn accept_admit(
     invitation: &GroupInvitation<'_>,
     snapshot: &RosterSnapshot<'_>,
-    add_record_hash: &[u8; 32],
     creator_roster_pk: &[u8],
     now: u64,
 ) -> Result<Admitted, Error> {
@@ -229,7 +228,7 @@ pub fn accept_admit(
         return Err(Error::Unverified);
     }
 
-    let roster = Roster::from_snapshot(snapshot, add_record_hash, creator_roster_pk, now)?;
+    let roster = Roster::from_snapshot(snapshot, creator_roster_pk, now)?;
     if !roster.member(*index).is_some_and(|m| m.active) {
         return Err(Error::Unverified);
     }
@@ -413,7 +412,7 @@ mod tests {
             path: &[],
         };
 
-        let admitted = accept_admit(&invitation, &snapshot, &add_hash, &creator_pk, 50)
+        let admitted = accept_admit(&invitation, &snapshot, &creator_pk, 50)
             .unwrap()
             .for_seed(&joiner.seed)
             .unwrap();
@@ -434,11 +433,34 @@ mod tests {
         );
         assert!(joiner_chain.record_key(119).is_err());
 
+        // GRP-440: no record that the joiner verifies gives `chain_hash`,
+        // thus a false one passes the admit. The next roster object of a
+        // member names the true head, and it shows the false one.
+        let third = JoinKeys::make(&mut rng).unwrap();
+        let third_join = third.join_record(group).unwrap();
+        let third_join =
+            JoinRecord::parse(GroupControl::parse(&third_join).unwrap().payload).unwrap();
+        let next = add_epoch(&roster, &third_join).unwrap();
+        let next = GroupControl::parse(&next).unwrap();
+        let next_slot = crate::group::slot_of(60);
+        let mut joined = admitted.roster.clone();
+        assert!(!joined.breaks_snapshot(&next, 0, next_slot, 60));
+        assert_eq!(
+            joined.apply(&next, 0, 60).unwrap(),
+            crate::group::roster::Applied::Added(2)
+        );
+
         let wrong = RosterSnapshot {
             chain_hash: [0; 32],
             ..snapshot
         };
-        assert!(accept_admit(&invitation, &wrong, &add_hash, &creator_pk, 50).is_err());
+        let mut misled = accept_admit(&invitation, &wrong, &creator_pk, 50)
+            .unwrap()
+            .roster;
+        assert!(misled.breaks_snapshot(&next, 0, next_slot, 60));
+        // An add from the index of the joiner shows nothing: it is no admin.
+        assert!(!misled.breaks_snapshot(&next, 1, next_slot, 60));
+        assert_eq!(misled.apply(&next, 0, 60), Err(Error::NoPath));
 
         // GRP-326: the entry at the index of the admit holds the keys of
         // the joiner. An admit with the index of another member fails.
@@ -466,18 +488,16 @@ mod tests {
             chain_hash: add_hash,
             ..wrong
         };
-        let under_other = accept_admit(&other, &whole, &add_hash, &creator_pk, 50).unwrap();
+        let under_other = accept_admit(&other, &whole, &creator_pk, 50).unwrap();
         assert!(!under_other.holds_keys(&joiner.keys));
         assert_eq!(
             under_other.for_seed(&joiner.seed).err(),
             Some(Error::Unverified)
         );
-        assert!(
-            accept_admit(&invitation, &whole, &add_hash, &creator_pk, 50)
-                .unwrap()
-                .for_seed(&joiner.seed)
-                .is_ok()
-        );
+        assert!(accept_admit(&invitation, &whole, &creator_pk, 50)
+            .unwrap()
+            .for_seed(&joiner.seed)
+            .is_ok());
 
         // GRP-320: an admin builds no add for a pair key of low order.
         let kem = joiner.keys.kem().public().to_bytes();

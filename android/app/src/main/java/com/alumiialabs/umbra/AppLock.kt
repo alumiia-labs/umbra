@@ -62,7 +62,7 @@ fun AutoLockSheet(onDismiss: () -> Unit) {
             }
         },
         note = stringResource(
-            if (Modes.mode(context).holdsConnection) {
+            if (alertsWhileLocked(Modes.mode(context))) {
                 R.string.lock_message_waits_while_locked
             } else {
                 R.string.lock_no_message_while_locked
@@ -71,6 +71,14 @@ fun AutoLockSheet(onDismiss: () -> Unit) {
         onDismiss = onDismiss,
     )
 }
+
+/**
+ * Whether a locked client shows that a message waits. Periodic mode holds no
+ * connection, and it watches at each tick (Part 8 `NTF-153`). Private mode
+ * and Off receive nothing while locked (§8.3).
+ */
+private fun alertsWhileLocked(mode: NotifyMode): Boolean =
+    mode.holdsConnection || mode == NotifyMode.Periodic
 
 private val MIB = 1_024uL * 1_024uL
 

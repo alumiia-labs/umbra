@@ -11,14 +11,17 @@
 //! The open client writes the watch table, and the platform seals it under
 //! its keystore beside the wake table (`NTF-145`). The node of the watch
 //! makes no contact, thus its root identity is a fresh value that names
-//! nothing.
+//! nothing. The watch of a rendezvous queue runs on a node and a link of
+//! its own, thus no circuit carries it beside another queue (`NTF-142`).
+//! In Direct mode each of its sessions also starts at a delay of its own,
+//! as the run starts its rendezvous circuits (Part 9 `DIS-015`).
 
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use umbra_core::session::node::{ClientEvent, ClientNode};
 use umbra_crypto::{
     hierarchy::RootIdentity,
@@ -52,15 +55,23 @@ const RELINK_FIRST: Duration = Duration::from_secs(2);
 /// The longest wait before a new link, as `NTF-118` bounds a run.
 const RELINK_MAX: Duration = Duration::from_secs(30);
 
-/// The form of the table.
-const VERSION: u8 = 1;
+/// The shortest delay of a session of a watch that runs apart, and the
+/// span of the random part above it (Part 9 `DIS-015`).
+const APART_WAIT_MIN: u64 = 20;
+const APART_WAIT_SPAN: u64 = 101;
 
-/// One watch: the relay of the queue, its `notifier_id`, and its notifier
-/// secret.
+/// The form of the table. The form before it holds no mark of a watch
+/// that runs apart, and no delay of such a watch.
+const VERSION: u8 = 2;
+const VERSION_V1: u8 = 1;
+
+/// One watch: the relay of the queue, its `notifier_id`, its notifier
+/// secret, and whether it runs on a circuit of its own.
 struct Entry {
     relay: [u8; 32],
     notifier_id: [u8; 32],
     secret: Secret<32>,
+    apart: bool,
 }
 
 /// What the watch needs while the client is locked (`NTF-145`): the
@@ -72,6 +83,10 @@ pub struct WatchTable {
     root_ca_path: Option<String>,
     bootstrap: bool,
     entries: Vec<Entry>,
+    /// Whether each watch that runs apart starts each session at a random
+    /// delay (Direct mode). The watch of a tick of Periodic mode ends
+    /// before such a delay (`PERIODIC_WATCH_MAX`).
+    apart_delay: bool,
 }
 
 fn put_text(w: &mut Writer, text: &str) -> Result<(), FfiError> {
@@ -207,6 +222,7 @@ impl WatchTable {
         root_ca_path: Option<String>,
         bootstrap: bool,
         entries: Vec<crate::client::WatchEntry>,
+        apart_delay: bool,
     ) -> Self {
         WatchTable {
             guard,
@@ -215,12 +231,14 @@ impl WatchTable {
             bootstrap,
             entries: entries
                 .into_iter()
-                .map(|(relay, notifier_id, secret)| Entry {
+                .map(|(relay, notifier_id, secret, apart)| Entry {
                     relay,
                     notifier_id,
                     secret,
+                    apart,
                 })
                 .collect(),
+            apart_delay,
         }
     }
 
@@ -232,15 +250,15 @@ impl WatchTable {
             .map(relay_size)
             .fold(relay_size(&self.guard), usize::saturating_add);
         let path = self.root_ca_path.as_ref().map_or(0, String::len);
-        let entries = self.entries.len().saturating_mul(96);
+        let entries = self.entries.len().saturating_mul(97);
         [relays, path, entries]
             .into_iter()
             .fold(32, usize::saturating_add)
     }
 
     /// The bytes that the platform seals. The writer holds the notifier
-    /// secrets, thus it takes its full size first: a growth would free a
-    /// copy of them that no one wipes (`IMP-124`).
+    /// secrets, thus it takes its full size first, and no growth copies
+    /// them (`IMP-124`).
     pub fn encode(&self) -> Result<Zeroizing<Vec<u8>>, FfiError> {
         let mut w = Writer::with_capacity(self.size());
         w.u8(VERSION);
@@ -261,7 +279,9 @@ impl WatchTable {
             w.bytes(&entry.relay);
             w.bytes(&entry.notifier_id);
             w.bytes(entry.secret.expose());
+            w.flag(entry.apart);
         }
+        w.flag(self.apart_delay);
 
         Ok(w.finish())
     }
@@ -270,7 +290,8 @@ impl WatchTable {
     pub fn parse(bytes: &[u8]) -> Result<Self, FfiError> {
         let bad = |_| FfiError::Malformed;
         let mut r = Reader::new(bytes);
-        if r.u8().map_err(bad)? != VERSION {
+        let version = r.u8().map_err(bad)?;
+        if version != VERSION && version != VERSION_V1 {
             return Err(FfiError::Malformed);
         }
 
@@ -295,8 +316,10 @@ impl WatchTable {
                 relay: r.array().map_err(bad)?,
                 notifier_id: r.array().map_err(bad)?,
                 secret: Secret::new(r.array().map_err(bad)?),
+                apart: version == VERSION && r.flag().map_err(bad)?,
             });
         }
+        let apart_delay = version == VERSION && r.flag().map_err(bad)?;
 
         r.end().map_err(bad)?;
         Ok(WatchTable {
@@ -305,6 +328,7 @@ impl WatchTable {
             root_ca_path,
             bootstrap,
             entries,
+            apart_delay,
         })
     }
 
@@ -316,6 +340,32 @@ impl WatchTable {
     /// Whether the table holds no watch.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// The table of each node of the watch: one for each watch that runs
+    /// apart, and one for all the others. The flag of a lane says whether
+    /// each of its sessions starts at a random delay.
+    fn lanes(self) -> Vec<(WatchTable, bool)> {
+        let apart_delay = self.apart_delay;
+        let lane = |entries: Vec<Entry>| WatchTable {
+            guard: self.guard.clone(),
+            relays: self.relays.clone(),
+            root_ca_path: self.root_ca_path.clone(),
+            bootstrap: self.bootstrap,
+            entries,
+            apart_delay,
+        };
+
+        let (apart, shared): (Vec<Entry>, Vec<Entry>) =
+            self.entries.into_iter().partition(|entry| entry.apart);
+        let mut lanes: Vec<(WatchTable, bool)> = apart
+            .into_iter()
+            .map(|entry| (lane(vec![entry]), apart_delay))
+            .collect();
+        if !shared.is_empty() {
+            lanes.push((lane(shared), false));
+        }
+        lanes
     }
 }
 
@@ -398,6 +448,14 @@ enum End {
     Down,
 }
 
+/// The delay before a session of a lane that runs apart: 20 s to 120 s,
+/// as the run delays its rendezvous circuits (Part 9 `DIS-015`).
+fn apart_wait(rng: &mut OsRng) -> Duration {
+    let mut draw = [0u8; 1];
+    let _ = rng.try_fill_bytes(&mut draw);
+    Duration::from_secs(APART_WAIT_MIN + u64::from(u8::from_be_bytes(draw)) % APART_WAIT_SPAN)
+}
+
 /// The wait before the next session (`NTF-118`): it doubles from
 /// [`RELINK_FIRST`] up to [`RELINK_MAX`], and a session that reached the
 /// ready state sets it back.
@@ -410,35 +468,88 @@ fn next_wait(backoff: &mut Duration, was_ready: bool) -> Duration {
     wait
 }
 
-/// Runs the watch until the platform stops it. A session that ends starts
-/// again after a backoff.
+/// Runs the watch until the platform stops it. Each lane of the table runs
+/// on a node and a link of its own (`NTF-142`). A lane that reaches no
+/// relay ends the watch.
 async fn run_watch(
     table: WatchTable,
     listener: Arc<dyn WatchListener>,
     mut stopped: mpsc::UnboundedReceiver<()>,
 ) {
     crate::devlog::line(format!("watch: start, {} queues", table.len()));
+    let (stop, lane_stop) = watch::channel(false);
+    let mut lanes = tokio::task::JoinSet::new();
+    for (lane, delayed) in table.lanes() {
+        lanes.spawn(run_lane(lane, delayed, listener.clone(), lane_stop.clone()));
+    }
+
+    let mut is_down = false;
+    loop {
+        tokio::select! {
+            _ = stopped.recv() => break,
+            ended = lanes.join_next() => match ended {
+                Some(Ok(true)) => {
+                    is_down = true;
+                    break;
+                }
+                Some(_) => {}
+                None => break,
+            },
+        }
+    }
+
+    let _ = stop.send(true);
+    while lanes.join_next().await.is_some() {}
+    if is_down {
+        crate::devlog::line("watch: down".to_owned());
+        let _ = listener.down();
+    }
+
+    crate::devlog::line("watch: end".to_owned());
+}
+
+/// Runs one lane until the watch stops. A session that ends starts again
+/// after a backoff. A `delayed` lane starts each session at a random delay,
+/// thus the queue relay sees its circuit start at a time of its own. The
+/// result is whether the lane reaches no relay.
+async fn run_lane(
+    table: WatchTable,
+    delayed: bool,
+    listener: Arc<dyn WatchListener>,
+    mut stop: watch::Receiver<bool>,
+) -> bool {
     let mut backoff = RELINK_FIRST;
     loop {
-        let (end, was_ready) = session(&table, listener.as_ref(), &mut stopped).await;
+        if delayed {
+            tokio::select! {
+                () = tokio::time::sleep(apart_wait(&mut OsRng)) => {}
+                () = stopped(&mut stop) => return false,
+            }
+        }
+
+        let (end, was_ready) = session(&table, listener.as_ref(), &mut stop).await;
         match end {
             End::Lost => {}
-            End::Closed => break,
-            End::Down => {
-                crate::devlog::line("watch: down".to_owned());
-                let _ = listener.down();
-                break;
-            }
+            End::Closed => return false,
+            End::Down => return true,
         }
 
         let wait = next_wait(&mut backoff, was_ready);
         tokio::select! {
             () = tokio::time::sleep(wait) => {}
-            _ = stopped.recv() => break,
+            () = stopped(&mut stop) => return false,
         }
     }
+}
 
-    crate::devlog::line("watch: end".to_owned());
+/// Waits for the stop of the watch.
+async fn stopped(stop: &mut watch::Receiver<bool>) {
+    let _ = stop.wait_for(|stopped| *stopped).await;
+}
+
+/// Whether the watch stopped.
+fn is_stopped(stop: &watch::Receiver<bool>) -> bool {
+    *stop.borrow()
 }
 
 /// One session: one link, the circuits to the relays of the watches, and
@@ -447,7 +558,7 @@ async fn run_watch(
 async fn session(
     table: &WatchTable,
     listener: &dyn WatchListener,
-    stopped: &mut mpsc::UnboundedReceiver<()>,
+    stop: &mut watch::Receiver<bool>,
 ) -> (End, bool) {
     let mut rng = OsRng;
     let Ok((mut node, dial, tls)) = node_of(table, &mut rng) else {
@@ -459,7 +570,13 @@ async fn session(
     let _ = rng.try_fill_bytes(&mut key);
     let _ = rng.try_fill_bytes(&mut mask);
     let plan = Plan::Only(Wire::Tcp);
-    let connected = native::connect(&dial, tls, plan, key, mask, Duration::from_secs(10)).await;
+
+    // NTF-153: a stop ends a dial too, thus a brief watch holds the
+    // network no longer than its bound.
+    let connected = tokio::select! {
+        connected = native::connect(&dial, tls, plan, key, mask, Duration::from_secs(10)) => connected,
+        () = stopped(stop) => return (End::Closed, false),
+    };
     let Ok(mut link) = connected else {
         return (End::Lost, false);
     };
@@ -475,7 +592,12 @@ async fn session(
     let mut is_ready = false;
     let mut ticks = 0u32;
     let mut tick = tokio::time::interval(TICK);
+    let mut circuit_clock = crate::runtime::CircuitClock::default();
     let end = 'run: loop {
+        // A stop sends nothing more but the end of the session.
+        if is_stopped(stop) {
+            break 'run End::Closed;
+        }
         for capsule in node.take_capsules() {
             if link.send(&capsule).await.is_err() {
                 break 'run End::Lost;
@@ -489,13 +611,18 @@ async fn session(
                 },
                 Err(_) => break 'run End::Lost,
             },
-            _ = stopped.recv() => break 'run End::Closed,
+            () = stopped(stop) => break 'run End::Closed,
             _ = tick.tick() => {
                 ticks = ticks.wrapping_add(1);
                 if ticks.is_multiple_of(RETRY_TICKS) && node.watches_wait() {
                     let _ = node.retry_watches(&mut rng);
                 }
-                node.on_tick(crate::runtime::unix_now())
+                // NET-370: a circuit keeps the age that its relays count.
+                let now = crate::runtime::unix_now();
+                if let Some(step) = circuit_clock.step(now) {
+                    node.circuit_clock_moved(step);
+                }
+                node.on_tick(now)
             }
         };
 
@@ -598,7 +725,11 @@ mod tests {
             vec![endpoint(1, 1), endpoint(2, 2), endpoint(3, 3)],
             Some("/data/ca.pem".to_owned()),
             true,
-            vec![([3; 32], [4; 32], Secret::new([5; 32]))],
+            vec![
+                ([3; 32], [4; 32], Secret::new([5; 32]), false),
+                ([3; 32], [6; 32], Secret::new([7; 32]), true),
+            ],
+            true,
         );
         let bytes = table.encode().unwrap();
 
@@ -615,15 +746,97 @@ mod tests {
         assert!(back.relays[0].roles.unwrap().ingress);
         assert_eq!(back.root_ca_path.as_deref(), Some("/data/ca.pem"));
         assert!(back.bootstrap);
-        assert_eq!(back.len(), 1);
+        assert_eq!(back.len(), 2);
         assert_eq!(back.entries[0].notifier_id, [4; 32]);
         assert_eq!(back.entries[0].secret.expose(), &[5; 32]);
+        assert!(!back.entries[0].apart);
+        assert!(back.entries[1].apart);
+        assert!(back.apart_delay);
         assert_eq!(back.encode().unwrap(), bytes);
 
         // A table with bytes after its end does not parse.
         let mut long = bytes.to_vec();
         long.push(0);
         assert!(WatchTable::parse(&long).is_err());
+    }
+
+    /// NTF-142, DIS-014: the watch of a rendezvous queue runs on a node of
+    /// its own, thus no circuit carries it beside a pairwise queue. A table
+    /// of the earlier form holds no such watch.
+    #[test]
+    fn a_watch_that_runs_apart_takes_a_lane_of_its_own() {
+        let entry = |id: u8, apart: bool| ([3; 32], [id; 32], Secret::new([id; 32]), apart);
+        let table = |entries| {
+            WatchTable::new(
+                endpoint(1, 1),
+                vec![endpoint(2, 2)],
+                None,
+                false,
+                entries,
+                false,
+            )
+        };
+
+        let lanes = table(vec![entry(4, false), entry(5, true), entry(6, false)]).lanes();
+        let ids: Vec<Vec<[u8; 32]>> = lanes
+            .iter()
+            .map(|(lane, _)| lane.entries.iter().map(|entry| entry.notifier_id).collect())
+            .collect();
+        assert_eq!(ids, [vec![[5; 32]], vec![[4; 32], [6; 32]]]);
+        assert!(lanes
+            .iter()
+            .all(|(lane, _)| lane.guard.host == "r1.example"));
+        assert_eq!(table(vec![entry(5, true)]).lanes().len(), 1);
+
+        // The form before the marks: a version byte of 1, and no flag of an
+        // entry or of the delay.
+        let bytes = table(vec![entry(4, false)]).encode().unwrap();
+        let mut earlier = bytes.to_vec();
+        earlier[0] = VERSION_V1;
+        earlier.truncate(earlier.len() - 2);
+        let back = WatchTable::parse(&earlier).unwrap();
+        assert_eq!(back.len(), 1);
+        assert!(!back.entries[0].apart);
+        assert!(!back.apart_delay);
+        assert_eq!(back.entries[0].notifier_id, [4; 32]);
+    }
+
+    /// DIS-015, NTF-142: in Direct mode the lane of a rendezvous queue
+    /// starts each session at a random delay of 20 s to 120 s, thus its
+    /// circuit does not start with the circuit of the pairwise queues. The
+    /// watch of a tick of Periodic mode ends before such a delay, and its
+    /// lanes start at once.
+    #[test]
+    fn a_lane_that_runs_apart_in_direct_mode_starts_at_a_delay_of_its_own() {
+        let entry = |id: u8, apart: bool| ([3; 32], [id; 32], Secret::new([id; 32]), apart);
+        let table = |apart_delay| {
+            WatchTable::new(
+                endpoint(1, 1),
+                vec![endpoint(2, 2)],
+                None,
+                false,
+                vec![entry(4, false), entry(5, true), entry(6, true)],
+                apart_delay,
+            )
+        };
+
+        let delayed: Vec<bool> = table(true)
+            .lanes()
+            .iter()
+            .map(|(_, delayed)| *delayed)
+            .collect();
+        assert_eq!(delayed, [true, true, false]);
+        assert!(table(false).lanes().iter().all(|(_, delayed)| !delayed));
+
+        // The table keeps the choice of its mode.
+        let back = WatchTable::parse(&table(true).encode().unwrap()).unwrap();
+        assert!(back.apart_delay);
+        let back = WatchTable::parse(&table(false).encode().unwrap()).unwrap();
+        assert!(!back.apart_delay);
+
+        let waits: Vec<u64> = (0..256).map(|_| apart_wait(&mut OsRng).as_secs()).collect();
+        assert!(waits.iter().all(|wait| (20..=120).contains(wait)));
+        assert!(waits.iter().any(|wait| *wait != waits[0]));
     }
 
     #[test]
@@ -654,7 +867,7 @@ mod tests {
 
     #[test]
     fn a_table_that_reaches_no_relay_starts_no_watch() {
-        let entries = || vec![([3; 32], [4; 32], Secret::new([5; 32]))];
+        let entries = || vec![([3; 32], [4; 32], Secret::new([5; 32]), false)];
         let start = |table: WatchTable| {
             start_watch(table.encode().unwrap().to_vec(), Arc::new(Nobody)).err()
         };
@@ -662,7 +875,7 @@ mod tests {
         // NTF-120: a guard with no IPv4 address.
         let mut guard = endpoint(1, 1);
         guard.ipv4 = vec![10, 0, 0];
-        let table = WatchTable::new(guard, vec![endpoint(2, 2)], None, false, entries());
+        let table = WatchTable::new(guard, vec![endpoint(2, 2)], None, false, entries(), true);
         assert_eq!(start(table), Some(FfiError::Malformed));
 
         // A root certificate file that an update of the app removed.
@@ -672,6 +885,7 @@ mod tests {
             Some("/no/such/root-ca.pem".to_owned()),
             false,
             entries(),
+            true,
         );
         assert_eq!(start(table), Some(FfiError::Storage));
     }

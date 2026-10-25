@@ -254,8 +254,17 @@ private fun VerifiedMark() {
 /** The ways to verify a contact: the code of the two keys, and the short code. */
 @Composable
 fun VerifyScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
+    val context = LocalContext.current
+    val canScan = remember { hasBackCamera(context) }
     var number by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(chat.conversation) { Core.safetyNumber(chat.conversation) { number = it } }
+    // IDN-090: while a new key waits, the QR code and the scan check that
+    // key. The short code reads the key that the channel holds, thus it
+    // waits for the answer.
+    var isKeyWaiting by remember { mutableStateOf(false) }
+    LaunchedEffect(chat.conversation, Core.revision) {
+        Core.safetyNumber(chat.conversation) { number = it }
+        Core.keyChange(chat.conversation) { isKeyWaiting = it != null }
+    }
 
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.verify_verify_contact), onBack = onBack)
@@ -270,15 +279,20 @@ fun VerifyScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                 Spacer(Modifier.height(20.dp))
             }
 
-            // IDN-140: the scan is the first way, and the short code the second.
-            PrimaryButton(stringResource(R.string.verify_scan_code_of, chat.title)) {
-                push(Screen.ScanSafetyNumber(chat.conversation))
+            // IDN-140: the scan is the first way, and the short code the
+            // second. A device with no back camera has the second alone.
+            if (canScan) {
+                PrimaryButton(stringResource(R.string.verify_scan_code_of, chat.title)) {
+                    push(Screen.ScanSafetyNumber(chat.conversation))
+                }
+                Spacer(Modifier.height(8.dp))
             }
-            Spacer(Modifier.height(8.dp))
-            SecondaryButton(stringResource(R.string.verify_compare_short_code)) {
-                push(Screen.VerifyCode(chat.conversation, starts = true))
+            if (!isKeyWaiting) {
+                SecondaryButton(stringResource(R.string.verify_compare_short_code)) {
+                    push(Screen.VerifyCode(chat.conversation, starts = true))
+                }
+                Spacer(Modifier.height(8.dp))
             }
-            Spacer(Modifier.height(8.dp))
             EntryRow(
                 RowEntry("key", stringResource(R.string.verify_full_safety_number)) {
                     push(Screen.SafetyNumber(chat.conversation))
@@ -441,12 +455,12 @@ fun VerifyPrompt(push: (Screen) -> Unit) {
 /**
  * The blocking notice of a key change (Part 4 §4.5.1). It states that an
  * acceptance ends the healing of the channel (`IDN-089`), and it offers the
- * new safety number for a comparison first (`IDN-090`). The acceptance is
- * no default action (`IDN-091`), and it answers for this contact alone
- * (`IDN-092`).
+ * new safety number and the verification of the new key first (`IDN-090`).
+ * The acceptance is no default action (`IDN-091`), and it answers for this
+ * contact alone (`IDN-092`).
  */
 @Composable
-fun KeyChangePanel(chat: Chat, pending: uniffi.umbra_ffi.FfiKeyChange) {
+fun KeyChangePanel(chat: Chat, pending: uniffi.umbra_ffi.FfiKeyChange, onVerify: () -> Unit) {
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
         Text(stringResource(R.string.verify_new_key, chat.title), style = MaterialTheme.typography.titleMedium)
         Spacer(Modifier.height(6.dp))
@@ -462,6 +476,8 @@ fun KeyChangePanel(chat: Chat, pending: uniffi.umbra_ffi.FfiKeyChange) {
             fontFamily = Fonts.Mono,
         )
         Spacer(Modifier.height(12.dp))
+        SecondaryButton(stringResource(R.string.verify_verify_contact), onClick = onVerify)
+        Spacer(Modifier.height(8.dp))
         SecondaryButton(stringResource(R.string.verify_accept_new_key)) { Core.acceptKeyChange(chat.conversation) }
     }
 }

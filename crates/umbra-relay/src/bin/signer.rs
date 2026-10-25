@@ -39,6 +39,7 @@
 //! keychain=/var/lib/umbra-signer/keychain
 //! own_operator=<operator name>
 //! relay=<descriptor file>,<operator name>,<class 0 to 3>,<ingress|middle|exit>
+//! outside_relay=<descriptor file>,<operator name>,<class 0 to 3>,<ingress|middle|exit>
 //! report_queue=<authority index>,<queue file>
 //! verdicts=<file of verdicts>
 //! results=<file of class test results>
@@ -63,41 +64,84 @@
 //! signer lists a relay at the class that the results verify, at or below
 //! the class of its `relay` line. A failed test at a class takes the relay
 //! below that class at the next manifest (`REL-095`), until a newer test
-//! at that class or above passes. A failed test at C0 takes the relay out
-//! of the listing (`REL-197`). A class rises by one step in each 168
-//! epochs at most (`REL-001`), and the `class_state` file holds the listed
-//! class of each relay and the epoch of its last step for that rule. A
-//! relay with no result keeps the class of its `relay` line: this signer
-//! signs a provisional directory alone (Part 10 §10.2).
+//! at that class or above passes. A failed test at C0 takes a relay of the
+//! own operator out of the listing (`REL-197`). A class rises by one step
+//! in each 168 epochs at most (`REL-001`), and the `class_state` file holds
+//! the listed class of each relay and the epoch of its last step for that
+//! rule. A relay of the own operator with no result keeps the class of its
+//! `relay` line: this signer signs a provisional directory alone
+//! (`REL-206`).
+//!
+//! A relay of the own operator with no passed test inside `MEASURE_STALE`
+//! drops to C0 while another relay of the own operator at its place has
+//! such a test and keeps that place in the root (`REL-223`, `REL-098`). An
+//! ingress relay keeps its place with the ingress flag alone, thus at C1 or
+//! above. The period starts at the latest of its last pass, its first
+//! listing, and the last rise of its class, thus a new relay keeps its
+//! class until the measurer had its time. The relay stays listed at its
+//! place, thus the measurer still reaches it, and its class rises again
+//! under `REL-001` after a pass. A measurer that stops moves no class,
+//! because then no relay at that place has a recent pass.
+//!
+//! A relay of another operator takes no class that no test verified
+//! (`REL-210`). Until a passed test verifies C0 for it, the signer lists it
+//! as pending at C0. Its entry gives the relay its place to start, thus the
+//! measurer reaches it, and no client and no relay routes through it
+//! (`REL-158`). The signer places it only after that pass (`REL-197`). A
+//! pass older than `MEASURE_STALE` verifies nothing (`REL-098`), thus a
+//! relay that stops to answer the measurer goes back to pending. Its class
+//! starts at C0 and rises under `REL-001` to the highest class that a
+//! passed test verified, at or below the class of its line and of its
+//! descriptor. A measurer that tests C0 alone thus keeps it at C0, and an
+//! entry relay of another operator then gets no ingress flag.
 //!
 //! The `relay` line repeats. Its last field is the place of the relay: the
 //! ingress role, layer 2, or layer 3. The `own_operator` line names the
 //! operator of this signer. The signer sets the layer of each relay of that
 //! operator and lists it placed at once (`REL-198`). A network of four chain
 //! relays of that operator thus gets one at layer 2 and three at layer 3 in
-//! place of the draw of a hash. With no `own_operator` line, each relay is
-//! of the operator of the signer. The signer refuses to place a relay under
-//! a key set of `AUTHORITY_FLOOR` independent keys or more.
+//! place of the draw of a hash. With no `own_operator` line, each `relay`
+//! line is of the operator of the signer. The signer refuses to place a
+//! relay under a key set of `AUTHORITY_FLOOR` independent keys or more.
+//!
+//! An `outside_relay` line names a relay of another operator, whatever the
+//! name of its operator. The owner sets that name from the dossier
+//! (`REL-128`), thus a name in a request never makes a relay one of the own
+//! operator. The signer leaves out an `outside_relay` line that names the
+//! own operator. A `relay` line with the name of another operator is a
+//! relay of another operator too.
 //!
 //! A relay of another operator takes the admission of Part 10 §10.5.4 and
 //! the staging of §10.7.1:
 //!
 //! 1. The first root that the signer publishes for it lists it as pending
 //!    (`REL-156`). No client and no relay routes through it (`REL-158`).
-//! 2. It stays pending for 4 days, `CHAIN_STAGING_EPOCHS`.
+//! 2. It stays pending for 4 days, `CHAIN_STAGING_EPOCHS`, and until a
+//!    passed test verifies C0 for it.
 //! 3. Then the signer places it in the layer that the hash of §10.5.4 gives
-//!    under the first root that listed it as pending (`REL-060`). The place
-//!    of its `relay` line sets no layer.
+//!    under the seed of the first root that listed it as pending
+//!    (`REL-060`). The place of its line sets no layer. A relay that offers
+//!    the ingress role takes layer 2. A relay that goes back to pending
+//!    takes the same layer again.
 //! 4. A relay with the place `ingress` gets the ingress flag after 14 days,
 //!    `INGRESS_STAGING_EPOCHS`, when its class is C1 or above (`REL-130`).
 //!    Before that it is a relay of the chain population, and steps 1 to 3
 //!    apply to it.
 //!
 //! The `admission_state` file holds one line for each relay of another
-//! operator: `<relay_id in hex> <root in hex> <epoch>`, the first root that
-//! listed it as pending. Settings with a relay of another operator need the
+//! operator: `<relay_id in hex> <seed in hex> <epoch>`, of the first root
+//! that listed it as pending. The seed is the hash of that root with its
+//! signatures (`layer_seed`). A line of an earlier signer holds the `root`
+//! field of that root, and the relay keeps the layer that it gives
+//! (`REL-060`). Settings with a relay of another operator need the
 //! `admission_state` line. A new key gives a new `relay_id`, thus a new
 //! admission. The line of a relay that left the settings leaves the file.
+//!
+//! A fault of a relay of another operator leaves that relay out of the
+//! root, and the standard error says why. The run goes on, thus one bad
+//! line from a request stops no manifest. Of two lines with one `relay_id`,
+//! the first one stays, and the relays of the own operator come first. A
+//! fault of a relay of the own operator stops the run.
 //!
 //! The output directory takes `manifest`, served at
 //! `/.well-known/umbra/manifest`, and `keyset.bin`. Each file is written
@@ -120,7 +164,8 @@
 //! A relay with the attachment role declares `CHUNK_STORE_MIN` or more
 //! (Part 12 `ATT-088`). The bootstrap period of Part 3 `NET-340` relaxes
 //! that floor: under a provisional directory a relay may declare less. This
-//! signer signs a provisional directory alone, thus it applies no floor.
+//! signer signs a provisional directory alone, thus it applies no floor. It
+//! applies no family ceiling and no ASN ceiling either (`REL-211`).
 
 #![forbid(unsafe_code)]
 
@@ -134,9 +179,12 @@ use umbra_core::directory::{
     authority::{entry_of, keyset_bytes_with, sign_manifest_revoking, Admission, Listing},
     bloc::BlocList,
     descriptor::{roles, RelayDescriptor, RelayEntry},
+    layer::layer_seed,
     manifest::{RelayManifest, RelaySet},
-    measure::{issue_cert, staged_class, verified_class, ClassResult, Staged},
-    path::{select, Candidate},
+    measure::{
+        issue_cert, staged_class, tested_class, verified_class, ClassResult, Staged, MEASURE_STALE,
+    },
+    path::{select, Candidate, INGRESS_CLASS_MIN},
     removal::{peel, LinkRemoval, LINK_REMOVALS_MAX, LINK_REMOVAL_EPOCHS},
     report::{ReportQueue, QUEUE_ADDRESS_LEN},
     root::{Consensus, DirectoryKeySet, DirectoryRoot},
@@ -468,10 +516,15 @@ enum Place {
 }
 
 struct Admitted {
+    /// The descriptor file, which the log names.
+    file: String,
     descriptor: Vec<u8>,
     operator_id: [u8; 32],
     class: u8,
     place: Place,
+    /// The line is an `outside_relay` line: a relay of another operator,
+    /// whatever the name of its operator.
+    outside: bool,
 }
 
 /// An opaque value for each beneficial control (`REL-128`).
@@ -479,10 +532,11 @@ fn operator_id_of(name: &str) -> [u8; 32] {
     sha3_256(&[b"umbra/operator", name.as_bytes()])
 }
 
-fn read_relay(value: &str) -> Option<Admitted> {
+fn read_relay(value: &str, outside: bool) -> Option<Admitted> {
     let [file, operator, class, place]: [&str; 4] =
         value.split(',').collect::<Vec<_>>().try_into().ok()?;
     Some(Admitted {
+        file: file.to_owned(),
         descriptor: std::fs::read(file).ok()?,
         operator_id: operator_id_of(operator),
         class: class.parse().ok()?,
@@ -492,6 +546,7 @@ fn read_relay(value: &str) -> Option<Admitted> {
             "exit" => Place::Exit,
             _ => return None,
         },
+        outside,
     })
 }
 
@@ -575,19 +630,22 @@ fn class_state_text(state: &ClassState) -> String {
 
 /// The class that a manifest of `epoch` lists for the relay `relay_id` of
 /// the declared class `declared`, or none for a relay that the results
-/// take out of the listing (`REL-197`). The state takes the listed class
-/// and the epoch of its last step (`REL-001`, `REL-095`).
+/// take out of the listing (`REL-197`). A relay that `lapsed` takes C0
+/// (`REL-223`). The state takes the listed class and the epoch of its last
+/// step (`REL-001`, `REL-095`).
 fn listed_class(
     relay_id: &[u8; 32],
     declared: u8,
     results: &[ClassResult],
     state: &mut ClassState,
     epoch: u64,
+    lapsed: bool,
 ) -> Option<u8> {
     let before = state.get(relay_id).copied();
 
     match verified_class(relay_id, declared, results) {
         Some(verified) => {
+            let verified = if lapsed { 0 } else { verified };
             let staged = staged_class(before, verified, epoch);
             state.insert(*relay_id, staged);
             Some(staged.class)
@@ -606,6 +664,82 @@ fn listed_class(
     }
 }
 
+/// Whether the relay `relay_id` of the own operator, `relay`, has a passed
+/// test inside `MEASURE_STALE` at `epoch` and keeps its place in the root of
+/// `epoch` (`REL-223`). The relay has a recent pass, thus it does not lapse,
+/// and its listed class comes from `state` and the results alone.
+fn keeps_tested_place(
+    relay_id: &[u8; 32],
+    relay: &Admitted,
+    results: &[ClassResult],
+    state: &ClassState,
+    epoch: u64,
+) -> bool {
+    if tested_class(relay_id, relay.class, results, epoch).is_none() {
+        return false;
+    }
+
+    let Some(verified) = verified_class(relay_id, relay.class, results) else {
+        return false;
+    };
+    let listed = staged_class(state.get(relay_id).copied(), verified, epoch).class;
+
+    // §10.6.1: an ingress relay below C1 has no flag, thus it does not
+    // serve the place of a relay that lapses.
+    relay.place != Place::Ingress || listed >= INGRESS_CLASS_MIN
+}
+
+/// Whether the relay `relay_id` of the own operator has no passed test
+/// inside `MEASURE_STALE` at `epoch` (`REL-223`). The period runs from the
+/// latest of its last pass, its first listing, and the last rise of its
+/// class, which `state` holds. A relay that `state` does not hold is new,
+/// thus it has not lapsed.
+fn has_lapsed(
+    relay_id: &[u8; 32],
+    results: &[ClassResult],
+    state: &ClassState,
+    epoch: u64,
+) -> bool {
+    let reported = results.iter().any(|result| {
+        result.relay_id == *relay_id
+            && result.passed
+            && epoch.saturating_sub(result.epoch) < MEASURE_STALE
+    });
+    let listed_long = state
+        .get(relay_id)
+        .is_some_and(|held| epoch.saturating_sub(held.stepped_at) >= MEASURE_STALE);
+
+    !reported && listed_long
+}
+
+/// The class that a manifest of `epoch` lists for the relay `relay_id` of
+/// another operator, or none while no passed test of the last
+/// `MEASURE_STALE` epochs verifies C0 for it (`REL-210`, `REL-098`). The
+/// first class is C0, and it rises under `REL-001` to the highest class
+/// that a passed test verified, at or below `declared`.
+fn tested_listing(
+    relay_id: &[u8; 32],
+    declared: u8,
+    results: &[ClassResult],
+    state: &mut ClassState,
+    epoch: u64,
+) -> Option<u8> {
+    let Some(tested) = tested_class(relay_id, declared, results, epoch) else {
+        // A relay that comes back starts at C0 again.
+        state.remove(relay_id);
+        return None;
+    };
+
+    let first = Staged {
+        class: 0,
+        stepped_at: epoch,
+    };
+    let before = state.get(relay_id).copied().unwrap_or(first);
+    let staged = staged_class(Some(before), tested, epoch);
+    state.insert(*relay_id, staged);
+    Some(staged.class)
+}
+
 /// The staging of the chain role and the queue role, in epochs: 4 days
 /// (Part 10 §10.7.1). A relay of another operator stays pending for it.
 const CHAIN_STAGING_EPOCHS: u64 = 4 * 86_400 / EPOCH_SECONDS;
@@ -615,14 +749,16 @@ const INGRESS_STAGING_EPOCHS: u64 = 14 * 86_400 / EPOCH_SECONDS;
 /// The first root that listed a relay as pending (`REL-156`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PendingRoot {
-    /// The `root` field of that `DirectoryRoot`.
+    /// The seed of the layer function under that `DirectoryRoot`, which
+    /// `layer_seed` gives. A line of an earlier signer holds its `root`
+    /// field.
     root: [u8; 32],
     /// Its epoch.
     epoch: u64,
 }
 
 /// The first pending root of each relay of another operator, as the
-/// `admission_state` file holds them: `<relay_id in hex> <root in hex>
+/// `admission_state` file holds them: `<relay_id in hex> <seed in hex>
 /// <epoch>`.
 type AdmissionState = std::collections::BTreeMap<[u8; 32], PendingRoot>;
 
@@ -700,7 +836,7 @@ fn stage_of(own: bool, place: Place, first: Option<&PendingRoot>, epoch: u64) ->
     }
 }
 
-/// The admission state after a root of `epoch` with the tree root `root`
+/// The admission state after a root of `epoch` with the layer seed `root`
 /// went out. `outside` holds each relay of another operator in the
 /// settings, and `listed` those of them that the root lists. A held line
 /// stays. A listed relay with no line takes this root as its first pending
@@ -817,6 +953,196 @@ fn published(held: Option<&[u8]>, fresh: &[u8]) -> Published {
     }
 }
 
+/// What one run of `sign` holds for each relay that it lists.
+struct SignRun<'a> {
+    epoch: u64,
+    results: Option<&'a [ClassResult]>,
+    admission_held: &'a AdmissionState,
+    expelled: &'a [[u8; 32]],
+    /// The places of the relays of the own operator that a passed test
+    /// inside `MEASURE_STALE` verified and that the root keeps (`REL-223`).
+    tested_places: &'a [Place],
+}
+
+/// The descriptor of `relay`, whose `relay_id` no relay line of `seen`
+/// holds.
+fn descriptor_of<'a>(
+    relay: &'a Admitted,
+    own_operator: Option<[u8; 32]>,
+    seen: &[[u8; 32]],
+) -> Result<RelayDescriptor<'a>, &'static str> {
+    // REL-128: the owner sets the operator of an outside relay from its
+    // dossier. The name of the own operator there is a false declaration,
+    // and it would give the relay the operator_id of the project.
+    if relay.outside && own_operator == Some(relay.operator_id) {
+        return Err("an outside_relay line names the own operator");
+    }
+
+    let descriptor =
+        RelayDescriptor::parse(&relay.descriptor).map_err(|_| "a descriptor does not parse")?;
+
+    // REL-055: a root lists each relay one time. The relays of the own
+    // operator come first, thus a copy of one of their descriptors in a
+    // request gives way.
+    if seen.contains(&descriptor.relay_id) {
+        return Err("two relay lines hold one relay_id");
+    }
+
+    Ok(descriptor)
+}
+
+/// The entry of `relay` in the root of `run.epoch`, or none for a relay
+/// that this root does not list.
+fn entry_for(
+    run: &SignRun<'_>,
+    relay: &Admitted,
+    descriptor: &RelayDescriptor<'_>,
+    own: bool,
+    class_state: &mut ClassState,
+) -> Result<Option<Vec<u8>>, &'static str> {
+    let relay_id = descriptor.relay_id;
+
+    // An outside ingress relay gets its flag after 14 days. The signer
+    // checks its offer now, thus the fault does not wait 14 days.
+    if relay.place == Place::Ingress && descriptor.roles & roles::INGRESS_OFFERED == 0 {
+        return Err("an ingress relay offers no ingress role");
+    }
+
+    let first = run.admission_held.get(&relay_id);
+    let (class, stage) = if own {
+        // REL-206: the class that the results verify, at or below the
+        // class that the operator declares.
+        let class = match run.results {
+            Some(results) => {
+                // REL-223: a measurer that stops leaves each relay with no
+                // recent test. The drop thus needs another relay that a
+                // recent test verified and that keeps this place.
+                let lapsed = run.tested_places.contains(&relay.place)
+                    && has_lapsed(&relay_id, results, class_state, run.epoch);
+                if lapsed {
+                    println!(
+                        "relay {} has no passed class test inside MEASURE_STALE, \
+                         and it is listed at C0",
+                        to_hex(&relay_id)
+                    );
+                }
+                listed_class(
+                    &relay_id,
+                    relay.class,
+                    results,
+                    class_state,
+                    run.epoch,
+                    lapsed,
+                )
+            }
+            None => Some(relay.class),
+        };
+        let Some(class) = class else {
+            println!(
+                "relay {} failed the class test of C0 and is not listed",
+                to_hex(&relay_id)
+            );
+            return Ok(None);
+        };
+        (class, stage_of(own, relay.place, first, run.epoch))
+    } else {
+        // REL-210: the claim of another operator is no test. REL-129: the
+        // descriptor bounds the class too.
+        let declared = relay.class.min(descriptor.capacity_class);
+        let results = run.results.unwrap_or_default();
+        match tested_listing(&relay_id, declared, results, class_state, run.epoch) {
+            Some(class) => (class, stage_of(own, relay.place, first, run.epoch)),
+            None => {
+                // The pending entry gives the relay its place to start, and
+                // the measurer reaches it there. Out of the root, it would
+                // never get the test that places it. No circuit crosses a
+                // pending relay (REL-158).
+                println!(
+                    "relay {} of another operator has no passed class test of C0, \
+                     and it stays pending",
+                    to_hex(&relay_id)
+                );
+                let pending = Stage {
+                    admission: Admission::Pending,
+                    is_ingress: false,
+                };
+                (0, pending)
+            }
+        }
+    };
+
+    let listing = Listing {
+        descriptor: &relay.descriptor,
+        operator_id: relay.operator_id,
+        class,
+        is_ingress: stage.is_ingress,
+    };
+
+    let entry = entry_of(&listing, stage.admission)
+        .map_err(|_| "a descriptor does not verify, or its class is above the declared one")?;
+
+    let read = RelayEntry::parse(&entry).map_err(|_| "an entry does not verify")?;
+    if run.expelled.contains(&relay_id) {
+        println!("relay {} expelled", to_hex(&relay_id));
+        return Ok(None);
+    }
+
+    if stage.is_ingress && !read.ingress() {
+        // §10.6.1: an ingress relay that a class test took below C1
+        // keeps its listing and loses the flag.
+        if own && class >= relay.class {
+            return Err("an ingress relay is below class 1");
+        }
+        let cause = if own {
+            "is below class 1 after its class tests"
+        } else {
+            "of another operator has no tested class of C1"
+        };
+        println!(
+            "relay {} {cause}, and it is no ingress relay",
+            to_hex(&relay_id)
+        );
+    }
+
+    if own && relay.place == Place::Exit && read.layer() != 3 {
+        return Err("an exit relay offers no queue role and no chain role");
+    }
+
+    if !own && relay.place == Place::Ingress && !stage.is_ingress {
+        println!(
+            "relay {} of another operator waits for the ingress flag (§10.7.1)",
+            to_hex(&relay_id)
+        );
+    }
+
+    // ATT-088: the floor of the chunk store applies from the first
+    // directory that is not provisional (Part 3 `NET-340` to `NET-345`).
+    // This signer signs a provisional directory alone (`REL-198`).
+    // It thus holds no check of the floor: the one that stood here ran
+    // after the refusal of each other key set and refused nothing. An
+    // authority that signs under `AUTHORITY_FLOOR` keys or more applies
+    // the floor.
+    println!(
+        "relay {} ingress={} layer={} class={} host={} pending={}",
+        to_hex(&relay_id),
+        read.ingress(),
+        read.layer(),
+        read.class,
+        read.descriptor.host_str(),
+        read.pending(),
+    );
+    Ok(Some(entry))
+}
+
+/// Says why the root leaves out the relay of another operator `relay`.
+/// The run goes on, thus one bad line from a request stops no manifest.
+fn say_left_out(relay: &Admitted, cause: &str) {
+    eprintln!(
+        "{}: a relay of another operator is not in this root: {cause}",
+        relay.file
+    );
+}
+
 fn sign(settings: &str, force: bool) -> Result<(), &'static str> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -851,8 +1177,15 @@ fn sign_at(settings: &str, force: bool, now: u64) -> Result<(), &'static str> {
             Some(("out", value)) => out = Some(PathBuf::from(value)),
             Some(("keychain", value)) => keychain = Some(PathBuf::from(value)),
             Some(("relay", value)) => {
-                relays.push(read_relay(value).ok_or("a relay line does not parse")?);
+                relays.push(read_relay(value, false).ok_or("a relay line does not parse")?);
             }
+            Some(("outside_relay", value)) => match read_relay(value, true) {
+                Some(relay) => relays.push(relay),
+                // One bad line of a request stops no manifest.
+                None => {
+                    eprintln!("an outside_relay line does not parse, and no root lists it: {value}")
+                }
+            },
             Some(("verdicts", value)) => {
                 // A file that does not exist yet holds no verdict.
                 let held = std::fs::read_to_string(value).unwrap_or_default();
@@ -971,8 +1304,11 @@ fn sign_at(settings: &str, force: bool, now: u64) -> Result<(), &'static str> {
     };
 
     // §10.5.4: a relay of another operator takes its layer from its first
-    // pending root. With no own_operator line, each relay is of the signer.
-    let is_own = |relay: &Admitted| own_operator.is_none_or(|own| own == relay.operator_id);
+    // pending root. With no own_operator line, each relay line is of the
+    // signer. A name in a request never makes a relay one of its own.
+    let is_own = |relay: &Admitted| {
+        !relay.outside && own_operator.is_none_or(|own| own == relay.operator_id)
+    };
     let admission_held = match &admission_state_file {
         Some(path) => read_admission_state(&std::fs::read_to_string(path).unwrap_or_default()),
         None if relays.iter().any(|relay| !is_own(relay)) => return Err(
@@ -1007,97 +1343,63 @@ fn sign_at(settings: &str, force: bool, now: u64) -> Result<(), &'static str> {
         );
     }
 
+    // The relays of the own operator come first, and a fault of one of them
+    // stops the run. A fault of a relay of another operator leaves that
+    // relay out.
+    let mut ordered: Vec<&Admitted> = relays.iter().collect();
+    ordered.sort_by_key(|relay| !is_own(relay));
+
+    // REL-223: the places where a recent test verified a relay of the own
+    // operator that this root keeps at that place.
+    let tested_places: Vec<Place> = relays
+        .iter()
+        .filter(|relay| is_own(relay))
+        .filter_map(|relay| {
+            let relay_id = RelayDescriptor::parse(&relay.descriptor).ok()?.relay_id;
+            let results = results.as_deref()?;
+            let keeps = keeps_tested_place(&relay_id, relay, results, &class_state, epoch);
+            (keeps && !expelled.contains(&relay_id)).then_some(relay.place)
+        })
+        .collect();
+
+    let run = SignRun {
+        epoch,
+        results: results.as_deref(),
+        admission_held: &admission_held,
+        expelled: &expelled,
+        tested_places: &tested_places,
+    };
     let mut entries = Vec::with_capacity(relays.len());
+    let mut seen = Vec::with_capacity(relays.len());
     let mut outside = Vec::new();
     let mut outside_listed = Vec::new();
-    for relay in &relays {
-        let descriptor =
-            RelayDescriptor::parse(&relay.descriptor).map_err(|_| "a descriptor does not parse")?;
-        let relay_id = descriptor.relay_id;
+    for relay in ordered {
         let own = is_own(relay);
+        let descriptor = match descriptor_of(relay, own_operator, &seen) {
+            Ok(descriptor) => descriptor,
+            Err(cause) if own => return Err(cause),
+            Err(cause) => {
+                say_left_out(relay, cause);
+                continue;
+            }
+        };
+
+        let relay_id = descriptor.relay_id;
+        seen.push(relay_id);
         if !own {
             outside.push(relay_id);
         }
 
-        // An outside ingress relay gets its flag after 14 days. The signer
-        // checks its offer now, thus the fault does not wait 14 days.
-        if relay.place == Place::Ingress && descriptor.roles & roles::INGRESS_OFFERED == 0 {
-            return Err("an ingress relay offers no ingress role");
-        }
-
-        // §10.2: the class that the results verify, at or below the class
-        // that the operator declares.
-        let class = match &results {
-            Some(results) => {
-                let listed = listed_class(&relay_id, relay.class, results, &mut class_state, epoch);
-                let Some(listed) = listed else {
-                    println!(
-                        "relay {} failed the class test of C0 and is not listed",
-                        to_hex(&relay_id)
-                    );
-                    continue;
-                };
-                listed
+        let entry = match entry_for(&run, relay, &descriptor, own, &mut class_state) {
+            Ok(Some(entry)) => entry,
+            Ok(None) => continue,
+            Err(cause) if own => return Err(cause),
+            Err(cause) => {
+                say_left_out(relay, cause);
+                continue;
             }
-            None => relay.class,
         };
 
-        let stage = stage_of(own, relay.place, admission_held.get(&relay_id), epoch);
-        let listing = Listing {
-            descriptor: &relay.descriptor,
-            operator_id: relay.operator_id,
-            class,
-            is_ingress: stage.is_ingress,
-        };
-
-        let entry = entry_of(&listing, stage.admission)
-            .map_err(|_| "a descriptor does not verify, or its class is above the declared one")?;
-
-        let read = RelayEntry::parse(&entry).map_err(|_| "an entry does not verify")?;
-        if expelled.contains(&relay_id) {
-            println!("relay {} expelled", to_hex(&relay_id));
-            continue;
-        }
-
-        if stage.is_ingress && !read.ingress() {
-            // §10.6.1: an ingress relay that a class test took below C1
-            // keeps its listing and loses the flag.
-            if class >= relay.class {
-                return Err("an ingress relay is below class 1");
-            }
-            println!(
-                "relay {} is below class 1 after a class test, and it is no ingress relay",
-                to_hex(&relay_id)
-            );
-        }
-
-        if own && relay.place == Place::Exit && read.layer() != 3 {
-            return Err("an exit relay offers no queue role and no chain role");
-        }
-
-        if !own && relay.place == Place::Ingress && !stage.is_ingress {
-            println!(
-                "relay {} of another operator waits for the ingress flag (§10.7.1)",
-                to_hex(&relay_id)
-            );
-        }
-
-        // ATT-088: the floor of the chunk store applies from the first
-        // directory that is not provisional (Part 3 `NET-340` to `NET-345`).
-        // This signer signs a provisional directory alone (`REL-198`).
-        // It thus holds no check of the floor: the one that stood here ran
-        // after the refusal of each other key set and refused nothing. An
-        // authority that signs under `AUTHORITY_FLOOR` keys or more applies
-        // the floor.
-        println!(
-            "relay {} ingress={} layer={} class={} host={} pending={}",
-            to_hex(&relay_id),
-            read.ingress(),
-            read.layer(),
-            read.class,
-            read.descriptor.host_str(),
-            read.pending(),
-        );
         entries.push(entry);
         if !own {
             outside_listed.push(relay_id);
@@ -1180,9 +1482,9 @@ fn sign_at(settings: &str, force: bool, now: u64) -> Result<(), &'static str> {
     let parsed = RelayManifest::parse(&manifest).map_err(|_| "the manifest does not parse")?;
     let set = RelaySet::accept(&mut consensus, &parsed, &BlocList::v1(), now)
         .map_err(|_| "the manifest does not verify; check the clock of each relay")?;
-    let tree_root = DirectoryRoot::parse(parsed.root)
-        .map_err(|_| "the root does not parse")?
-        .root;
+    // REL-060: the seed covers the signatures of the root, thus no operator
+    // knows it when it submits its descriptor.
+    let seed = layer_seed(parsed.root);
 
     // REL-147: each client and each relay takes a whole set alone.
     if !set.is_whole {
@@ -1236,7 +1538,7 @@ fn sign_at(settings: &str, force: bool, now: u64) -> Result<(), &'static str> {
     // REL-156: a kept root never went out, thus it is no first pending root.
     if let Some(path) = &admission_state_file {
         let admission_next =
-            next_admission_state(&admission_held, &outside, &outside_listed, tree_root, epoch);
+            next_admission_state(&admission_held, &outside, &outside_listed, seed, epoch);
         write_whole(
             path,
             admission_state_text(&admission_next).as_bytes(),
@@ -1438,14 +1740,54 @@ mod tests {
         (line, relay_id)
     }
 
+    /// The line of an outside relay, from the `relay` line `line`.
+    fn outside(line: &str) -> String {
+        format!("outside_{line}")
+    }
+
+    /// Writes the class tests of the measurer into `home`: a pass of each
+    /// relay of `passes` at its class, in the epoch before `epoch`.
+    fn write_results(home: &Path, passes: &[([u8; 32], u8)], epoch: u64) {
+        let text: String = passes
+            .iter()
+            .map(|(relay_id, class)| {
+                let result = ClassResult {
+                    relay_id: *relay_id,
+                    class: *class,
+                    passed: true,
+                    epoch: epoch - 1,
+                };
+                format!("{}\n", result.line())
+            })
+            .collect();
+        std::fs::write(home.join("results"), text).unwrap();
+    }
+
+    /// Adds one class test of the relay `relay_id` to the results in `home`.
+    fn add_result(home: &Path, relay_id: [u8; 32], class: u8, passed: bool, epoch: u64) {
+        let result = ClassResult {
+            relay_id,
+            class,
+            passed,
+            epoch,
+        };
+        let mut text = std::fs::read_to_string(home.join("results")).unwrap();
+        text.push_str(&result.line());
+        text.push('\n');
+        std::fs::write(home.join("results"), text).unwrap();
+    }
+
     /// Writes the settings of the signer in `home`, of the operator `home`,
     /// with the relay lines `relays`, and gives the path of the file.
     fn write_settings(home: &Path, relays: &[&str]) -> String {
         let mut text = format!(
-            "keys={}\nout={}\nown_operator=home\nadmission_state={}\n",
+            "keys={}\nout={}\nown_operator=home\nadmission_state={}\nresults={}\n\
+             class_state={}\n",
             home.join("keys").display(),
             home.join("out").display(),
             home.join("admission_state").display(),
+            home.join("results").display(),
+            home.join("class_state").display(),
         );
         for line in relays {
             text.push_str(line);
@@ -1471,11 +1813,11 @@ mod tests {
     }
 
     /// Each relay of the manifest that the signer in `home` published, and
-    /// the tree root of that manifest.
+    /// the layer seed of that manifest.
     fn published_in(home: &Path) -> (std::collections::BTreeMap<[u8; 32], Listed>, [u8; 32]) {
         let bytes = std::fs::read(home.join("out").join("manifest")).unwrap();
         let manifest = RelayManifest::parse(&bytes).unwrap();
-        let tree_root = DirectoryRoot::parse(manifest.root).unwrap().root;
+        let seed = layer_seed(manifest.root);
 
         let listed = manifest
             .entries
@@ -1490,7 +1832,14 @@ mod tests {
                 (entry.descriptor.relay_id, listed)
             })
             .collect();
-        (listed, tree_root)
+        (listed, seed)
+    }
+
+    /// The `root` field of the manifest that the signer in `home` published.
+    fn tree_root_in(home: &Path) -> [u8; 32] {
+        let bytes = std::fs::read(home.join("out").join("manifest")).unwrap();
+        let manifest = RelayManifest::parse(&bytes).unwrap();
+        DirectoryRoot::parse(manifest.root).unwrap().root
     }
 
     fn admission_state_in(home: &Path) -> AdmissionState {
@@ -1509,11 +1858,17 @@ mod tests {
             let (other_line, other_id) = relay_line(&home, 2, chain_roles, "alice", "exit");
             let settings = write_settings(&home, &[&own_line, &other_line]);
             let first = 500_000;
+            write_results(&home, &[], first);
 
             // REL-198: the own relay is placed at once. REL-156: the first
-            // root lists the outside relay as pending.
+            // root lists the outside relay as pending before any test, thus
+            // the relay can start and the measurer can reach it.
             sign_at(&settings, false, at(first)).unwrap();
             let (listed, pending_root) = published_in(&home);
+
+            // REL-060: the seed covers the signatures. The `root` field
+            // covers the entries alone, and the operator computes it.
+            assert_ne!(pending_root, tree_root_in(&home));
             let placed_own = Listed {
                 ingress: false,
                 layer: 3,
@@ -1532,6 +1887,7 @@ mod tests {
             assert!(!state.contains_key(&own_id));
 
             // §10.7.1: the relay stays pending for 4 days.
+            write_results(&home, &[(other_id, 0)], first + 2);
             sign_at(&settings, false, at(first + CHAIN_STAGING_EPOCHS - 1)).unwrap();
             assert!(published_in(&home).0.get(&other_id).unwrap().pending);
             assert_eq!(admission_state_in(&home), state);
@@ -1553,6 +1909,53 @@ mod tests {
     }
 
     #[test]
+    fn an_outside_relay_takes_its_layer_after_a_pass_alone() {
+        on_a_signing_stack(|| {
+            let home = signer_home();
+            let chain_roles = roles::QUEUE | roles::CHAIN;
+            let (own_line, _) = relay_line(&home, 1, chain_roles, "home", "exit");
+            let (other_line, other_id) = relay_line(&home, 2, chain_roles, "alice", "exit");
+            let settings = write_settings(&home, &[&own_line, &outside(&other_line)]);
+            let first = 500_000;
+            write_results(&home, &[], first);
+
+            sign_at(&settings, false, at(first)).unwrap();
+            let (_, pending_root) = published_in(&home);
+            let state = admission_state_in(&home);
+            assert_eq!(state.get(&other_id).unwrap().root, pending_root);
+
+            // REL-197: the 4 days passed, and no test verified C0 yet.
+            sign_at(&settings, false, at(first + CHAIN_STAGING_EPOCHS + 10)).unwrap();
+            assert!(published_in(&home).0.get(&other_id).unwrap().pending);
+
+            // The first pass places it under its first pending root.
+            let passed = first + CHAIN_STAGING_EPOCHS + 20;
+            write_results(&home, &[(other_id, 0)], passed);
+            sign_at(&settings, false, at(passed)).unwrap();
+            let placed = Listed {
+                ingress: false,
+                layer: layer(&pending_root, first, &other_id),
+                pending: false,
+            };
+            assert_eq!(published_in(&home).0.get(&other_id), Some(&placed));
+
+            // REL-098: a relay that stops to answer the measurer goes back
+            // to pending, thus no circuit crosses it.
+            let stale = passed - 1 + MEASURE_STALE;
+            sign_at(&settings, false, at(stale)).unwrap();
+            assert!(published_in(&home).0.get(&other_id).unwrap().pending);
+
+            // A new pass places it again at the same layer.
+            write_results(&home, &[(other_id, 0)], stale + 1);
+            sign_at(&settings, false, at(stale + 1)).unwrap();
+            assert_eq!(published_in(&home).0.get(&other_id), Some(&placed));
+            assert_eq!(admission_state_in(&home), state);
+
+            std::fs::remove_dir_all(&home).unwrap();
+        });
+    }
+
+    #[test]
     fn an_outside_ingress_relay_gets_its_flag_after_14_days() {
         on_a_signing_stack(|| {
             let home = signer_home();
@@ -1561,11 +1964,20 @@ mod tests {
             let (other_line, other_id) = relay_line(&home, 2, ingress_roles, "bob", "ingress");
             let settings = write_settings(&home, &[&own_line, &other_line]);
             let first = 500_000;
+            write_results(&home, &[], first);
 
             sign_at(&settings, false, at(first)).unwrap();
             let (listed, _) = published_in(&home);
             assert!(listed.get(&own_id).unwrap().ingress);
             let other = listed.get(&other_id).unwrap();
+            assert!(other.pending && !other.ingress);
+
+            // REL-210: the measurer reaches the pending relay, and a test
+            // verifies C1. The class starts at C0, and it takes one step
+            // after 7 days (REL-001).
+            write_results(&home, &[(other_id, 1)], first + 10);
+            sign_at(&settings, false, at(first + 10)).unwrap();
+            let other = published_in(&home).0.remove(&other_id).unwrap();
             assert!(other.pending && !other.ingress);
 
             // After 4 days it is a relay of layer 2 in the chain population,
@@ -1683,6 +2095,318 @@ mod tests {
         assert_eq!(outside(Place::Ingress, 1_335).admission, placed);
         assert!(outside(Place::Ingress, 1_336).is_ingress);
         assert!(!outside(Place::Middle, 1_336).is_ingress);
+    }
+
+    #[test]
+    fn a_relay_of_another_operator_takes_no_class_that_no_test_verified() {
+        on_a_signing_stack(|| {
+            let home = signer_home();
+            let chain_roles = roles::QUEUE | roles::CHAIN;
+            let ingress_roles = roles::INGRESS_OFFERED | roles::CHAIN;
+            let (own_line, own_id) = relay_line(&home, 1, chain_roles, "home", "exit");
+            let (untested_line, untested_id) =
+                relay_line(&home, 2, ingress_roles, "alice", "ingress");
+            let (tested_line, tested_id) = relay_line(&home, 3, ingress_roles, "bob", "ingress");
+            let settings = write_settings(
+                &home,
+                &[&own_line, &outside(&untested_line), &outside(&tested_line)],
+            );
+            let first = 500_000;
+
+            // The launch measurer tests C0 alone. The claim of C1 is no
+            // test, and each relay of another operator is pending at C0.
+            write_results(&home, &[(tested_id, 0)], first);
+            sign_at(&settings, false, at(first)).unwrap();
+            let (listed, _) = published_in(&home);
+            assert!(listed.contains_key(&own_id));
+            assert!(listed.get(&untested_id).unwrap().pending);
+            assert!(listed.get(&tested_id).unwrap().pending);
+
+            // REL-130: after 14 days the entry relay stays a chain relay,
+            // because no test verified C1 for it. REL-197: the relay with
+            // no passed test stays pending.
+            sign_at(&settings, false, at(first + INGRESS_STAGING_EPOCHS)).unwrap();
+            let (listed, _) = published_in(&home);
+            let chain_relay = Listed {
+                ingress: false,
+                layer: 2,
+                pending: false,
+            };
+            assert_eq!(listed.get(&tested_id), Some(&chain_relay));
+            assert!(listed.get(&untested_id).unwrap().pending);
+            let state =
+                read_class_state(&std::fs::read_to_string(home.join("class_state")).unwrap());
+            assert_eq!(state.get(&tested_id).unwrap().class, 0);
+            assert!(!state.contains_key(&untested_id));
+
+            // Each entry carries C0, whatever the claim.
+            let bytes = std::fs::read(home.join("out").join("manifest")).unwrap();
+            let manifest = RelayManifest::parse(&bytes).unwrap();
+            for proven in &manifest.entries {
+                let entry = RelayEntry::parse(proven.entry).unwrap();
+                if entry.descriptor.relay_id != own_id {
+                    assert_eq!(entry.class, 0);
+                }
+            }
+
+            std::fs::remove_dir_all(&home).unwrap();
+        });
+    }
+
+    #[test]
+    fn one_bad_line_of_another_operator_stops_no_root() {
+        on_a_signing_stack(|| {
+            let home = signer_home();
+            let chain_roles = roles::QUEUE | roles::CHAIN;
+            let (own_line, own_id) = relay_line(&home, 1, chain_roles, "home", "exit");
+            let (good_line, good_id) = relay_line(&home, 2, chain_roles, "alice", "middle");
+            let (named_line, named_id) = relay_line(&home, 3, chain_roles, "home", "exit");
+            let (no_offer_line, no_offer_id) =
+                relay_line(&home, 4, chain_roles, "carol", "ingress");
+
+            // A request that copies the descriptor of a listed relay.
+            let copy_line = own_line.replace(",home,", ",mallory,");
+            let missing = format!("relay={},dave,1,middle", home.join("none.desc").display());
+            let settings = write_settings(
+                &home,
+                &[
+                    &own_line,
+                    &outside(&good_line),
+                    &outside(&named_line),
+                    &outside(&no_offer_line),
+                    &outside(&copy_line),
+                    &outside(&missing),
+                ],
+            );
+            let epoch = 500_000;
+            let passes = [(own_id, 0), (good_id, 0), (named_id, 0), (no_offer_id, 0)];
+            write_results(&home, &passes, epoch);
+
+            sign_at(&settings, false, at(epoch)).unwrap();
+            let (listed, _) = published_in(&home);
+            let placed_own = Listed {
+                ingress: false,
+                layer: 3,
+                pending: false,
+            };
+            assert_eq!(listed.get(&own_id), Some(&placed_own));
+            assert!(listed.get(&good_id).unwrap().pending);
+
+            // REL-128: a request that names the own operator takes no place
+            // of it. Each bad line stays out, and the root goes out.
+            assert!(!listed.contains_key(&named_id));
+            assert!(!listed.contains_key(&no_offer_id));
+            assert_eq!(listed.len(), 2);
+
+            let state = admission_state_in(&home);
+            assert!(state.contains_key(&good_id));
+            assert!(!state.contains_key(&own_id));
+
+            // A fault of a relay of the own operator stops the run.
+            let (bad_own, _) = relay_line(&home, 5, chain_roles, "home", "ingress");
+            let settings = write_settings(&home, &[&own_line, &bad_own]);
+            let refused = sign_at(&settings, false, at(epoch + 1));
+            assert!(refused.unwrap_err().contains("ingress"));
+
+            std::fs::remove_dir_all(&home).unwrap();
+        });
+    }
+
+    /// The class and the ingress flag of each relay of the manifest that the
+    /// signer in `home` published.
+    fn classes_in(home: &Path) -> std::collections::BTreeMap<[u8; 32], (u8, bool)> {
+        let bytes = std::fs::read(home.join("out").join("manifest")).unwrap();
+        let manifest = RelayManifest::parse(&bytes).unwrap();
+        manifest
+            .entries
+            .iter()
+            .map(|proven| {
+                let entry = RelayEntry::parse(proven.entry).unwrap();
+                (entry.descriptor.relay_id, (entry.class, entry.ingress()))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_own_relay_with_no_recent_pass_drops_to_c0_while_another_of_its_place_has_one() {
+        on_a_signing_stack(|| {
+            let home = signer_home();
+            let ingress_roles = roles::INGRESS_OFFERED | roles::CHAIN;
+            let (one_line, one) = relay_line(&home, 1, ingress_roles, "home", "ingress");
+            let (two_line, two) = relay_line(&home, 2, ingress_roles, "home", "ingress");
+            let settings = write_settings(&home, &[&one_line, &two_line]);
+            let first = 500_000;
+            let kept = Some(&(1, true));
+            let dropped = Some(&(0, false));
+
+            // REL-206: with no test, each relay keeps its declared class.
+            write_results(&home, &[], first);
+            sign_at(&settings, false, at(first)).unwrap();
+            let listed = classes_in(&home);
+            assert_eq!((listed.get(&one), listed.get(&two)), (kept, kept));
+
+            // REL-223: the measurer reaches relay one and not relay two.
+            // Before this, relay two kept its class and its ingress flag.
+            let later = first + MEASURE_STALE;
+            write_results(&home, &[(one, 0)], later);
+            sign_at(&settings, false, at(later)).unwrap();
+            let listed = classes_in(&home);
+            assert_eq!((listed.get(&one), listed.get(&two)), (kept, dropped));
+
+            // A measurer that stops moves no class, thus the network keeps
+            // its ingress relays. The class of relay two rises again under
+            // REL-001.
+            let stopped = later + MEASURE_STALE;
+            sign_at(&settings, false, at(stopped)).unwrap();
+            let listed = classes_in(&home);
+            assert_eq!((listed.get(&one), listed.get(&two)), (kept, kept));
+
+            // A new relay keeps its class until the measurer had its time.
+            // The rise of relay two starts a new period for it too.
+            let (three_line, three) = relay_line(&home, 3, ingress_roles, "home", "ingress");
+            let settings = write_settings(&home, &[&one_line, &two_line, &three_line]);
+            write_results(&home, &[(one, 0)], stopped + 1);
+            sign_at(&settings, false, at(stopped + 1)).unwrap();
+            let listed = classes_in(&home);
+            assert_eq!(
+                (listed.get(&one), listed.get(&two), listed.get(&three)),
+                (kept, kept, kept)
+            );
+
+            // After the period, each relay that the measurer did not reach
+            // drops, and the one that it reached keeps the flag.
+            let end = stopped + 1 + MEASURE_STALE;
+            write_results(&home, &[(one, 0)], end);
+            sign_at(&settings, false, at(end)).unwrap();
+            let listed = classes_in(&home);
+            assert_eq!(
+                (listed.get(&one), listed.get(&two), listed.get(&three)),
+                (kept, dropped, dropped)
+            );
+
+            std::fs::remove_dir_all(&home).unwrap();
+        });
+    }
+
+    #[test]
+    fn an_own_ingress_relay_keeps_its_flag_while_the_tested_one_has_none() {
+        on_a_signing_stack(|| {
+            let home = signer_home();
+            let ingress_roles = roles::INGRESS_OFFERED | roles::CHAIN;
+            let (one_line, one) = relay_line(&home, 1, ingress_roles, "home", "ingress");
+            let (two_line, two) = relay_line(&home, 2, ingress_roles, "home", "ingress");
+            let settings = write_settings(&home, &[&one_line, &two_line]);
+            let first = 500_000;
+            let kept = Some(&(1, true));
+            let dropped = Some(&(0, false));
+
+            write_results(&home, &[], first);
+            sign_at(&settings, false, at(first)).unwrap();
+
+            // REL-223: relay one passes C0 and fails C1, thus it is listed
+            // at C0 with no ingress flag. A drop of relay two would leave
+            // the root with no ingress relay.
+            let later = first + MEASURE_STALE;
+            write_results(&home, &[(one, 0)], later);
+            add_result(&home, one, 1, false, later - 1);
+            sign_at(&settings, false, at(later)).unwrap();
+            let listed = classes_in(&home);
+            assert_eq!((listed.get(&one), listed.get(&two)), (dropped, kept));
+
+            // A newer pass at C1 gives relay one its flag again, and relay
+            // two then drops.
+            let again = later + 1;
+            add_result(&home, one, 1, true, later);
+            sign_at(&settings, false, at(again)).unwrap();
+            let listed = classes_in(&home);
+            assert_eq!((listed.get(&one), listed.get(&two)), (kept, dropped));
+
+            std::fs::remove_dir_all(&home).unwrap();
+        });
+    }
+
+    #[test]
+    fn a_tested_class_rises_one_step_in_one_week_from_c0() {
+        let relay = [7u8; 32];
+        let result = |class, passed, epoch| ClassResult {
+            relay_id: relay,
+            class,
+            passed,
+            epoch,
+        };
+        let mut state = ClassState::new();
+
+        // REL-197: no passed test, no listing.
+        assert_eq!(tested_listing(&relay, 3, &[], &mut state, 1_000), None);
+        assert!(state.is_empty());
+
+        // REL-210, REL-001: the first listing is at C0, and the class rises
+        // one step in each 168 epochs to the tested class.
+        let mut results = vec![result(2, true, 999)];
+        let at = |state: &mut ClassState, results: &[ClassResult], epoch| {
+            tested_listing(&relay, 3, results, state, epoch)
+        };
+        assert_eq!(at(&mut state, &results, 1_000), Some(0));
+        assert_eq!(at(&mut state, &results, 1_167), Some(0));
+        assert_eq!(at(&mut state, &results, 1_168), Some(1));
+        assert_eq!(at(&mut state, &results, 1_335), Some(1));
+        assert_eq!(at(&mut state, &results, 1_336), Some(2));
+        assert_eq!(at(&mut state, &results, 1_400), Some(2));
+
+        // A pass at C0 alone holds the relay at C0.
+        let mut low = ClassState::new();
+        let c0 = [result(0, true, 999)];
+        assert_eq!(tested_listing(&relay, 3, &c0, &mut low, 1_000), Some(0));
+        assert_eq!(tested_listing(&relay, 3, &c0, &mut low, 1_400), Some(0));
+
+        // A listing of an earlier signer at the declared class falls at once.
+        let mut earlier: ClassState = [(
+            relay,
+            Staged {
+                class: 3,
+                stepped_at: 10,
+            },
+        )]
+        .into_iter()
+        .collect();
+        assert_eq!(tested_listing(&relay, 3, &c0, &mut earlier, 1_000), Some(0));
+
+        // REL-197: a failed test at C0 leaves no class, and a newer pass
+        // gives C0 first again.
+        results.push(result(0, false, 1_401));
+        assert_eq!(at(&mut state, &results, 1_402), None);
+        assert!(state.is_empty());
+        results.push(result(2, true, 1_403));
+        assert_eq!(at(&mut state, &results, 1_404), Some(0));
+        assert_eq!(at(&mut state, &results, 1_572), Some(1));
+
+        // REL-098: with no pass inside MEASURE_STALE, the class is gone,
+        // and a later pass starts at C0 again.
+        assert_eq!(at(&mut state, &results, 1_403 + MEASURE_STALE), None);
+        assert!(state.is_empty());
+        results.push(result(2, true, 2_000));
+        assert_eq!(at(&mut state, &results, 2_001), Some(0));
+    }
+
+    #[test]
+    fn two_signatures_of_one_relay_set_give_two_layer_seeds() {
+        on_a_signing_stack(|| {
+            // REL-060: an operator that knows each entry of its pending
+            // root still knows no seed of it.
+            let keys = keys(0x50);
+            let entries = [entry(1), entry(2)];
+            let one = manifest(&keys, 700, &entries);
+            let other = manifest(&keys, 700, &entries);
+            let root_of = |bytes: &[u8]| {
+                let parsed = RelayManifest::parse(bytes).unwrap();
+                let root = DirectoryRoot::parse(parsed.root).unwrap().root;
+                (root, layer_seed(parsed.root))
+            };
+            let (one_root, one_seed) = root_of(&one);
+            let (other_root, other_seed) = root_of(&other);
+            assert_eq!(one_root, other_root);
+            assert_ne!(one_seed, other_seed);
+        });
     }
 
     #[test]
@@ -1842,13 +2566,16 @@ mod tests {
         let mut state = ClassState::new();
         // No result: the relay takes the class that its operator declares
         // (§10.2, the provisional directory).
-        assert_eq!(listed_class(&relay, 2, &[], &mut state, 1_000), Some(2));
+        assert_eq!(
+            listed_class(&relay, 2, &[], &mut state, 1_000, false),
+            Some(2)
+        );
 
         // REL-095, REL-096: a failed test at C1 lists the relay at C0 in
         // the next manifest, two steps at once.
         let mut results = vec![result(1, false, 1_001)];
         assert_eq!(
-            listed_class(&relay, 2, &results, &mut state, 1_002),
+            listed_class(&relay, 2, &results, &mut state, 1_002, false),
             Some(0)
         );
 
@@ -1857,23 +2584,23 @@ mod tests {
         // 168 epochs after the first listing.
         results.push(result(1, true, 1_003));
         assert_eq!(
-            listed_class(&relay, 2, &results, &mut state, 1_004),
+            listed_class(&relay, 2, &results, &mut state, 1_004, false),
             Some(0)
         );
         assert_eq!(
-            listed_class(&relay, 2, &results, &mut state, 1_168),
+            listed_class(&relay, 2, &results, &mut state, 1_168, false),
             Some(1)
         );
         assert_eq!(
-            listed_class(&relay, 2, &results, &mut state, 1_169),
+            listed_class(&relay, 2, &results, &mut state, 1_169, false),
             Some(1)
         );
         assert_eq!(
-            listed_class(&relay, 2, &results, &mut state, 1_335),
+            listed_class(&relay, 2, &results, &mut state, 1_335, false),
             Some(1)
         );
         assert_eq!(
-            listed_class(&relay, 2, &results, &mut state, 1_336),
+            listed_class(&relay, 2, &results, &mut state, 1_336, false),
             Some(2)
         );
 
@@ -1891,14 +2618,17 @@ mod tests {
         // REL-197: a failed test at C0 takes the relay out of the listing,
         // and a newer pass lists it at C0 first.
         results.push(result(0, false, 1_400));
-        assert_eq!(listed_class(&relay, 2, &results, &mut state, 1_401), None);
+        assert_eq!(
+            listed_class(&relay, 2, &results, &mut state, 1_401, false),
+            None
+        );
         results.push(result(0, true, 1_402));
         assert_eq!(
-            listed_class(&relay, 2, &results, &mut state, 1_403),
+            listed_class(&relay, 2, &results, &mut state, 1_403, false),
             Some(0)
         );
         assert_eq!(
-            listed_class(&relay, 2, &results, &mut state, 1_504),
+            listed_class(&relay, 2, &results, &mut state, 1_504, false),
             Some(1)
         );
     }

@@ -35,6 +35,8 @@ const WAIT: Duration = Duration::from_secs(10);
 const TOKEN_RETRY: u64 = 5;
 /// The error code of FCM for a registration token that is gone.
 const UNREGISTERED: &str = "UNREGISTERED";
+/// The error code of FCM for a request with a field that is not valid.
+const INVALID_ARGUMENT: &str = "INVALID_ARGUMENT";
 
 /// What FCM did with one push.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +45,9 @@ pub enum Sent {
     Taken,
     /// FCM named the registration token gone (`NTF-125`).
     Gone,
+    /// FCM named the registration token one that it never gave, as a token
+    /// that a party made up. The push did not go.
+    Invalid,
     /// The push did not go, and the token stays.
     Refused,
 }
@@ -51,16 +56,24 @@ pub enum Sent {
 /// token that is gone, and for other faults too, as a project that does
 /// not exist. Thus the token is gone only when the error body names
 /// `UNREGISTERED`, and a fault of the settings drops no registration
-/// (`NTF-130`).
+/// (`NTF-130`). A status 400 names the token not valid only when its body
+/// names the registration token: a fault of another field of the message
+/// is a fault of the NDR, and it says nothing of the token.
 pub fn sent_of(status: u16, body: &[u8]) -> Sent {
+    let field = |key: &str| {
+        core::str::from_utf8(body)
+            .ok()
+            .and_then(|body| json_string(body, key))
+    };
+
     match status {
         200..=299 => Sent::Taken,
-        404 => {
-            let code = core::str::from_utf8(body)
-                .ok()
-                .and_then(|body| json_string(body, "errorCode"));
-            if code.as_deref() == Some(UNREGISTERED) {
-                Sent::Gone
+        404 if field("errorCode").as_deref() == Some(UNREGISTERED) => Sent::Gone,
+        400 if field("errorCode").as_deref() == Some(INVALID_ARGUMENT) => {
+            let names_token = field("field").as_deref() == Some("message.token")
+                || field("message").is_some_and(|text| text.contains("registration token"));
+            if names_token {
+                Sent::Invalid
             } else {
                 Sent::Refused
             }
@@ -435,6 +448,21 @@ mod tests {
         assert_eq!(sent_of(200, b"{}"), Sent::Taken);
         assert_eq!(sent_of(400, gone), Sent::Refused);
         assert_eq!(sent_of(503, b""), Sent::Refused);
+    }
+
+    #[test]
+    fn a_token_is_not_valid_only_when_the_error_body_names_the_token() {
+        // The body of FCM for a token that it never gave.
+        let invalid = br#"{"error":{"code":400,"message":"The registration token is not a valid FCM registration token","status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.firebase.fcm.v1.FcmError","errorCode":"INVALID_ARGUMENT"}]}}"#;
+        assert_eq!(sent_of(400, invalid), Sent::Invalid);
+        let by_field = br#"{"error":{"code":400,"message":"Invalid value","status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.firebase.fcm.v1.FcmError","errorCode":"INVALID_ARGUMENT"},{"@type":"type.googleapis.com/google.rpc.BadRequest","fieldViolations":[{"field":"message.token","description":"Invalid value"}]}]}}"#;
+        assert_eq!(sent_of(400, by_field), Sent::Invalid);
+
+        // A fault of another field is a fault of the NDR, and the token
+        // stays.
+        let ttl = br#"{"error":{"code":400,"message":"Invalid value at 'message.android.ttl'","status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.firebase.fcm.v1.FcmError","errorCode":"INVALID_ARGUMENT"},{"@type":"type.googleapis.com/google.rpc.BadRequest","fieldViolations":[{"field":"message.android.ttl","description":"Invalid value"}]}]}}"#;
+        assert_eq!(sent_of(400, ttl), Sent::Refused);
+        assert_eq!(sent_of(404, invalid), Sent::Refused);
     }
 
     #[test]

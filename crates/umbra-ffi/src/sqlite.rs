@@ -1,7 +1,8 @@
 //! The SQLite backend of Part 14 §14.6.4: plain SQLite from the bundled
 //! library, with each record sealed by the application. The database
 //! indexes on the keyed surrogates only, runs under `secure_delete`, and
-//! truncates its write-ahead log after a deletion batch.
+//! after a deletion batch gives its free pages back and truncates its
+//! write-ahead log.
 
 use std::{
     collections::BTreeMap,
@@ -40,6 +41,12 @@ const SCHEMA: &str = "
         header BLOB NOT NULL
     );
 ";
+
+/// The value of `PRAGMA auto_vacuum` for the mode of `IMP-201`.
+const AUTO_VACUUM_INCREMENTAL: i64 = 2;
+/// The live bytes above which an open of an earlier file leaves its mode,
+/// since the `VACUUM` of the change holds them in memory on Android.
+const VACUUM_LIVE_MAX: u64 = 64 << 20;
 
 /// The three columns of one row: the identifier, the owner, and the
 /// sealed record.
@@ -143,13 +150,64 @@ impl SqliteBackend {
 
         let connection = &backend.connection;
         storage(connection.pragma_update(None, "secure_delete", "ON"))?;
+        // A new file takes the mode before its first table (IMP-201).
+        storage(connection.pragma_update(None, "auto_vacuum", "INCREMENTAL"))?;
         storage(connection.pragma_update(None, "journal_mode", "WAL"))?;
         storage(connection.execute_batch(SCHEMA))?;
+        // A second connection can keep the change or the release from its
+        // end. Each one goes again at a later open, thus neither stops this
+        // one.
+        let _ = backend.take_incremental_mode();
+        backend.release_free_pages();
 
         // IMP-043: a checkpoint that an earlier run left undone runs now,
         // and at the next batch when a reader keeps it from its end.
         backend.checkpoint();
         Ok(backend)
+    }
+
+    /// Moves a file of an earlier build to the mode of `IMP-201`. The
+    /// change needs one `VACUUM`, which copies the live pages into memory
+    /// on Android, thus a store with more live bytes waits for a later open.
+    fn take_incremental_mode(&self) -> Result<(), Error> {
+        let mode: i64 = storage(
+            self.connection
+                .query_row("PRAGMA auto_vacuum", [], |row| row.get(0)),
+        )?;
+        if mode == AUTO_VACUUM_INCREMENTAL || self.live_bytes()? > VACUUM_LIVE_MAX {
+            return Ok(());
+        }
+
+        storage(self.connection.execute_batch("VACUUM"))
+    }
+
+    /// The bytes of the pages that hold data.
+    fn live_bytes(&self) -> Result<u64, Error> {
+        let pragma = |name: &str| -> Result<u64, Error> {
+            let value: i64 = storage(self.connection.query_row(
+                &format!("PRAGMA {name}"),
+                [],
+                |row| row.get(0),
+            ))?;
+            u64::try_from(value).map_err(|_| Error::Storage)
+        };
+
+        let pages = pragma("page_count")?.saturating_sub(pragma("freelist_count")?);
+        Ok(pages.saturating_mul(pragma("page_size")?))
+    }
+
+    /// Gives each free page back to the file system (`IMP-201`). The file
+    /// shrinks at the next checkpoint. A release that fails changes no
+    /// row, and `secure_delete` has already cleared each free page, thus
+    /// the pages wait for the next release.
+    fn release_free_pages(&self) {
+        let Ok(mut statement) = self.connection.prepare("PRAGMA incremental_vacuum") else {
+            return;
+        };
+        let Ok(mut steps) = statement.query([]) else {
+            return;
+        };
+        while let Ok(Some(_)) = steps.next() {}
     }
 
     /// Whether the file at `path` holds the header of its wrap, read with a
@@ -384,6 +442,9 @@ impl Backend for SqliteBackend {
         }
 
         storage(transaction.commit())?;
+        if batch.deletion {
+            self.release_free_pages();
+        }
         if batch.deletion || replaces_channel || self.checkpoint_due {
             // IMP-043: no frame of the deleted record stays in the log. The
             // batch holds with its commit; a checkpoint that a reader kept
@@ -406,7 +467,8 @@ mod tests {
 
     #[test]
     fn a_file_counts_as_closed_after_its_last_connection_closed() {
-        let directory = std::env::temp_dir().join(format!("umbra-ffi-c-{}", std::process::id()));
+        let directory =
+            std::env::temp_dir().join(format!("umbra-ffi-count-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join("count.db");
         let _ = std::fs::remove_file(&path);
@@ -651,6 +713,8 @@ mod tests {
             .unwrap()
             .unwrap()
             .sealed;
+        // The scan reads each file of the directory, thus no other test may
+        // use the directory: a file of another test can be locked or gone.
         let holds = |needle: &[u8]| {
             std::fs::read_dir(&directory).unwrap().any(|entry| {
                 let bytes = std::fs::read(entry.unwrap().path()).unwrap();
@@ -682,6 +746,104 @@ mod tests {
             b"the next state!"
         );
         drop(store);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// Rows of 64 KiB, as the bytes of a file are in `FILE_DATA`.
+    fn file_rows(count: u8) -> Vec<Write> {
+        (0..count)
+            .map(|index| {
+                Write::Put(
+                    TableId::MESSAGE,
+                    StoredRow {
+                        row_id: [index; umbra_core::store::record::ROW_ID_LEN],
+                        owner: None,
+                        sealed: vec![index; 64 << 10],
+                    },
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_deletion_gives_its_pages_back_to_the_file_system() {
+        let directory = std::env::temp_dir().join(format!("umbra-ffi-v-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("vacuum.db");
+        let _ = std::fs::remove_file(&path);
+        let mut backend = SqliteBackend::open(path.to_str().unwrap()).unwrap();
+
+        let writes = file_rows(64);
+        backend
+            .apply(&Batch {
+                writes,
+                deletion: false,
+            })
+            .unwrap();
+        backend.checkpoint();
+        assert!(std::fs::metadata(&path).unwrap().len() > 4 << 20);
+
+        let writes = (0..64)
+            .map(|index| {
+                Write::Delete(
+                    TableId::MESSAGE,
+                    [index; umbra_core::store::record::ROW_ID_LEN],
+                )
+            })
+            .collect();
+        backend
+            .apply(&Batch {
+                writes,
+                deletion: true,
+            })
+            .unwrap();
+        let left = std::fs::metadata(&path).unwrap().len();
+        assert!(left < 1 << 20, "the file keeps {left} bytes");
+
+        drop(backend);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_file_of_an_earlier_build_takes_the_mode_and_shrinks_at_its_open() {
+        let directory = std::env::temp_dir().join(format!("umbra-ffi-e-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("earlier.db");
+        let _ = std::fs::remove_file(&path);
+
+        // An earlier build set no auto_vacuum, thus a deletion left each
+        // freed page in the file.
+        let earlier = Connection::open(&path).unwrap();
+        earlier.pragma_update(None, "journal_mode", "WAL").unwrap();
+        earlier.execute_batch(SCHEMA).unwrap();
+        for write in file_rows(64) {
+            let Write::Put(table, row) = write else {
+                unreachable!()
+            };
+            earlier
+                .execute(
+                    "INSERT INTO rows (table_id, row_id, sealed) VALUES (?1, ?2, ?3)",
+                    params![table.0, row.row_id.as_slice(), row.sealed],
+                )
+                .unwrap();
+        }
+        earlier.execute("DELETE FROM rows", []).unwrap();
+        earlier
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .unwrap();
+        drop(earlier);
+        assert!(std::fs::metadata(&path).unwrap().len() > 4 << 20);
+
+        let backend = SqliteBackend::open(path.to_str().unwrap()).unwrap();
+        let mode: i64 = backend
+            .connection
+            .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, AUTO_VACUUM_INCREMENTAL);
+        let left = std::fs::metadata(&path).unwrap().len();
+        assert!(left < 1 << 20, "the file keeps {left} bytes");
+
+        drop(backend);
         let _ = std::fs::remove_dir_all(&directory);
     }
 }

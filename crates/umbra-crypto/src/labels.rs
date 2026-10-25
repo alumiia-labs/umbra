@@ -92,7 +92,6 @@ labels! {
     RECORD_KEY = "umbra/v1/record-key";
     AT_REST_WRAP = "umbra/v1/at-rest-wrap";
     TABLE_MAC = "umbra/v1/table-mac";
-    SYNC_SEED = "umbra/v1/sync-seed";
     LINK_OFFER = "umbra/v1/link-offer";
     LINK_HELLO = "umbra/v1/link-hello";
     LINK_TRANSCRIPT = "umbra/v1/link-transcript";

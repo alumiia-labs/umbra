@@ -1,6 +1,6 @@
-//! Device sets, Part 7: the roster chain, the ownership claims, the sync
-//! seed, the convergence machines of the sync channel, the edit and
-//! deletion rules, and the revocation steps.
+//! Device sets, Part 7: the roster chain, the ownership claims, the
+//! convergence machines of the sync channel, the edit and deletion rules,
+//! and the revocation steps.
 
 pub mod claim;
 pub mod edits;
@@ -8,7 +8,6 @@ pub mod engine;
 pub mod link;
 pub mod revocation;
 pub mod roster;
-pub mod seed;
 pub mod sync;
 
 /// `MAX_DEVICES`.

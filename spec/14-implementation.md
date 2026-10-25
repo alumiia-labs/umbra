@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 14: Implementation Requirements and Assurance
 
 **Status:** Draft
-**Version:** 0.45.1
-**Date:** 2026-10-22
+**Version:** 0.46.0
+**Date:** 2026-10-23
 
 ---
 
@@ -17,7 +17,7 @@ umbra/
 │   ├── umbra-queue/      queue commands, subscriptions, ARQ          → umbra-wire
 │   ├── umbra-transport/  TLS (QUIC deferred), session layer, wire    → umbra-wire
 │   ├── umbra-core/       orchestration, state machine, storage       → all above
-│   ├── umbra-ffi/        UniFFI surface, coarse-grained only         → umbra-core
+│   ├── umbra-ffi/        UniFFI surface, coarse-grained only         → umbra-core, umbra-simd
 │   ├── umbra-web/        wasm-bindgen surface, browser socket, store → umbra-core
 │   ├── umbra-relay/      relay node and server binary                → umbra-core
 │   └── umbra-simd/       the ONLY crate permitted `unsafe`           → nothing
@@ -28,13 +28,13 @@ umbra/
 
 The dependency direction is strictly downward. A cycle is a build failure.
 
-Two crates of the layout do not exist in the reference implementation today:
+One crate of the layout does not exist in the reference implementation
+today: `umbra-web` waits for the web client, which is deferred (Part 1 §1.1).
 
-- `umbra-web` waits for the web client, which is deferred (Part 1 §1.1).
-- `umbra-simd` waits for a SIMD path, which no crate needs yet.
-
-Thus each crate of the workspace forbids `unsafe` today, and the exception
-below has no crate to apply to.
+`umbra-simd` holds no SIMD path yet, because no crate needs one. It holds the
+wiping allocator of `IMP-200` alone. `umbra-ffi` takes it under the `bindings`
+feature alone. Each other crate of the workspace forbids `unsafe`, and §14.3
+gives the exception.
 
 ## 14.2 Dependency policy
 
@@ -70,13 +70,13 @@ of §14.2.4 writes.
 
 | Crate | Configuration |
 | --- | --- |
-| `ml-kem` 0.3 | `default-features = false`, `features = ["zeroize"]` |
+| `ml-kem` 0.3 | `default-features = false`, `features = ["zeroize"]`, version 0.3.3 or later. The CBD sampling of 0.3.2 has a table lookup that depends on a secret, and the `sha3` 0.12 edge of the `sha3` row is for 0.3.3 alone |
 | `ml-dsa` 0.1 | `default-features = false`, `features = ["rand_core", "zeroize"]`. **[IMP-004]** An implementation **MUST** turn the `pkcs8` default off. If it stays on, the build inherits `der`, `spki`, `pkcs8`, and `const-oid` |
 | `x25519-dalek` 3 | `default-features = false`, `features = ["static_secrets", "reusable_secrets", "zeroize"]`. **[IMP-174]** An implementation **MUST** turn `zeroize` on: with it off, a secret scalar and a shared secret stay in memory after a drop (Part 5 `CRY-059`). |
-| `chacha20poly1305` 0.11 | `default-features = false` |
+| `chacha20poly1305` 0.11 | `default-features = false`, `features = ["zeroize"]`, thus a cipher object wipes its copy of the key and the ChaCha20 state at a drop. That feature does not reach `poly1305` 0.9, thus `umbra-crypto` names it with a direct edge and `features = ["zeroize"]`, and the one-time Poly1305 key is wiped too |
 | `aes` + `polyval` | for the onion UIV+ layer only |
-| `sha3` 0.11 | pin to 0.11 to match `ml-kem` and to prevent a duplicate `sha3` 0.12; `features = ["zeroize"]` |
-| `hkdf` 0.13, `hmac` 0.13 | generic over `Sha3_256`; `hmac` with `features = ["zeroize"]`, thus a keyed state is wiped |
+| `sha3` 0.11 and 0.12, `shake` 0.1 | The workspace takes `sha3` 0.11, because the block-level `Hmac` of the next row needs its block core, and 0.12 has none. `ml-kem` 0.3.3 takes `sha3` 0.12 and `shake`, and `ml-dsa` takes `shake`. Thus R1 holds two versions of `sha3`, each version charges the R1 cap, and the skip list of `deny.toml` holds 0.12 (§14.2.7). Each takes `features = ["zeroize"]`. No crate of the graph turns that feature on for 0.12 and for `shake`, thus `umbra-crypto` names the two with a direct edge |
+| `hkdf` 0.13, `hmac` 0.13 | generic over `Sha3_256`; `hmac` with `features = ["zeroize"]`, thus a keyed state is wiped. Use the block-level `Hmac` and `Hkdf`. `SimpleHmac` and `SimpleHkdf` keep the padded key in a field with no wipe |
 | `subtle` 2, `zeroize` 1 | |
 
 ### 14.2.2 Register R2: the auxiliary primitives
@@ -90,9 +90,9 @@ counts one time.
 | # | Primitive | Likely pure-Rust crate | New crates (estimate) |
 | --- | --- | --- | --- |
 | AUX-1 | Blind RSA-2048 | in-workspace over `crypto-bigint`, which gives the modular arithmetic and nothing else; no `rsa` crate, and no key generation in the client | **1** |
-| AUX-2 | ristretto255 with SHA512 | `curve25519-dalek`, which R1 holds already, plus `sha2` | **1–3** |
+| AUX-2 | ristretto255 with SHA512 | `curve25519-dalek`, which R1 holds already, plus `sha2` with `features = ["zeroize"]` | **1–3** |
 | AUX-3 | ECVRF-Edwards25519-SHA512-TAI | a vendored module, and no crate (Part 9 §9.12) | **0–1** |
-| AUX-4 | Argon2id | `argon2`, `blake2`, `base64ct` | **3–5** |
+| AUX-4 | Argon2id | `argon2` with `features = ["alloc", "zeroize"]`, `blake2` with `features = ["zeroize"]`, `base64ct`. The feature of `argon2` does not reach `blake2`, thus `umbra-crypto` names `blake2` with a direct edge, and the hash state that computes H0 is wiped | **3–5** |
 | AUX-5 | A keyed function in the secure element | a platform adapter, and no crate. Android uses the HMAC-SHA256 key of StrongBox | **0** |
 | AUX-6 | HPKE under OHTTP | in-workspace, over `UMBRA-KEM` | **0–2** |
 | AUX-7 | XChaCha20-Poly1305 | `chacha20poly1305`, which R1 holds already | **0** |
@@ -246,17 +246,34 @@ examine a primitive removal after them.
 - The repository holds `Cargo.lock`.
 - `cargo-deny` checks each crate and version against the RustSec advisory
   database.
+- A CI job checks each package of the lock of the web site against the
+  advisory database of the npm registry (`pnpm audit`). A known fault of high
+  or critical severity **fails the build**. The dependency graph of GitHub
+  does not hold the packages of that lock, thus no other alert comes for
+  them.
+- Dependabot gives the Gradle graph of the Android app version updates, but
+  no advisory alerts. The dependency graph of GitHub holds no Maven package.
+  Thus the person who makes a release checks the advisories of each Android
+  library first (`android/README.md`).
 - A CI job generates `DEPENDENCIES.md` again, and compares it against the
   committed file. A difference **fails the build**.
 - **A cooling-off window of 14 to 30 days** for an update that is not a
-  security update.
+  security update. A CI job reads the publish time of each registry version
+  of `Cargo.lock` from the sparse index of crates.io. The job fails the build
+  on a version that is younger than 14 days at the time of the job. An
+  exemption skips the window for one version, and names its advisory, its
+  upstream security fix, or its yank. The job reads the whole lock and not
+  its history. Thus a push of several commits, a merge, and a rebase get the
+  same check. A dependency commit takes each update with
+  `cargo update -p <crate> --precise <version>`, and not with a full refresh.
 
 > In August 2026 the `arrayref`, `internment`, and `append-only-vec` compromise
 > injected a typosquatted `proc-macro1`. The `build.rs` of that crate executed a
 > remote payload. Those releases were live for **86–107 minutes**. A cooling-off
-> window with offline vendored builds gives UMBRA immunity to that attack.
-> `cargo-vet` does not, because the median audit lag is 29 days and 40 % of the
-> RustSec fix-versions get no audit.
+> window keeps such a release out of `Cargo.lock`, because the registry removes
+> it long before the window ends. `cargo-vet` does not give this protection,
+> because the median audit lag is 29 days and 40 % of the RustSec fix-versions
+> get no audit.
 
 ### 14.2.8 The transport stack
 
@@ -303,8 +320,11 @@ client build does not.
   workspace also carries `unsafe_code = "forbid"` in `[workspace.lints.rust]`.
   This is the real enforcement. It is a compiler error and not a suggestion.
 - The one exception is `umbra-simd`. That crate uses `#![deny(unsafe_code)]`
-  with explicit `#[allow]` sites. **[IMP-016]** That crate MUST give
-  byte-identical output to the portable path.
+  with explicit `#[allow]` sites, and a `SAFETY` comment on each unsafe block.
+  An inner `#[allow]` cannot lower a `forbid`, thus that crate copies the
+  other lints of the workspace and does not take its table. **[IMP-016]** That
+  crate MUST give byte-identical output to the portable path. The allocator of
+  `IMP-200` gives no output, thus `IMP-016` applies to a SIMD path alone.
 - Examine a full removal of runtime SIMD detection on mobile. That removal drops
   `cpufeatures` and `libc`. It removes 672 `unsafe` tokens, and it gives a
   uniform graph of 35 crates across the three targets. Keep the detection only if
@@ -320,6 +340,13 @@ client build does not.
   `Display`, `Serialize`, or `Clone`, unless a written cause permits one.
 - Prefer heap storage in a `Box`. The guidance of `zeroize` itself warns about
   move semantics and about stack spills.
+- Turn on the `zeroize` feature of each crate that holds a key or a hash state
+  over a key. A crate wipes such a state at a drop only under that feature, and
+  only a direct edge turns the feature on for a crate deeper in the graph. The
+  rows of §14.2.1 and §14.2.2 give each feature.
+- Give Argon2id its block memory in a buffer that wipes itself at a drop. The
+  `argon2` crate gives its own memory back to the allocator with no wipe, and
+  the last block of that memory gives the output with no password.
 - A security-critical pair is one unit at the type level. A keypair is one type,
   and it is not two parameters. The `ed25519-dalek` CVE-2022-50237 permitted the
   full extraction of a private key from two signatures. The cause was an API
@@ -441,6 +468,7 @@ has a cause, and Part 15 §15.3 holds one row for the set.
 | The bundle of an invitation, as the paragraph below states | The platform shows it as a link or as a QR code |
 | The question and the options of a poll | **This one is a limit and not a design.** A poll is message text, and in v1 it crosses as a string in each direction. A later version moves it behind a `Draft` and a `TextSink`, and it removes this row |
 | The wake table of Part 8 rule `NTF-135`, as bytes | The platform seals it under a keystore key that needs no unlock, and the core cannot reach that key |
+| The watch table of Part 8 rule `NTF-145`, as bytes | The platform seals it beside the wake table under the same key, and the watch of `NTF-142` reads it after the lock |
 | The bytes of a file and of a preview, under `IMP-166` | The decoder and the player of the platform read bytes |
 
 **[IMP-165]** The file of a draft MUST cross the surface as a path that the
@@ -456,7 +484,9 @@ one time for each decode, into a sink of the platform. This is an exception to
 platform read a byte array or a stream, and a decoder inside the core would
 hand over pixels, which are the same plaintext.
 
-- The core MUST overwrite its copy after the call.
+- The core MUST overwrite each copy that it holds after the call. The
+  allocator of `IMP-200` overwrites the buffer that UniFFI lowers the bytes
+  through at its free.
 - A media player reads a video in ranges, thus the core MAY hold one copy of
   the file in its memory for the time that the player is open, and give each
   range that the player asks for. The core MUST overwrite that copy when the
@@ -488,9 +518,32 @@ lock fails.
   `CharArray` type, thus the generated Kotlin takes a list of code units. The
   Kotlin wrapper of the app MUST fill that list from a `CharArray`, and it
   MUST overwrite the `CharArray` after the call. The list is an object on the
-  JVM heap for the length of the call, and so is the buffer that UniFFI
-  lowers each value through in either direction. Part 15 §15.3 holds that
-  residual.
+  JVM heap for the length of the call.
+
+  UniFFI lowers each value through a native buffer in either direction. It
+  frees that buffer, the value that it consumed, and each smaller buffer of
+  a growth with no overwrite. UniFFI 0.32 gives the core no hook to
+  overwrite them: each converter trait of UniFFI is an unsafe trait, and the
+  crate of the surface forbids unsafe code (§14.3). The same holds for the
+  bytes of `IMP-125` and `IMP-166`, and for the tables of Part 8 `NTF-135`
+  and `NTF-145`.
+
+  **[IMP-200]** The native library of the client MUST overwrite each block of
+  its Rust heap with zero bytes before it frees that block. A reallocation
+  MUST overwrite each byte that it gives back: the old block of a move, and
+  the tail of a block that shrinks in place. The `bindings` feature of
+  `umbra-ffi` sets the `GlobalAlloc` of `umbra-simd` as the global allocator
+  for this. Thus no freed native buffer of UniFFI holds a value after the
+  call or after a lock. The list of code units on the JVM heap stays, and
+  Part 15 §15.3 holds that residual.
+
+  > *Cause.* UniFFI gives no hook that names its buffers, thus the allocator
+  > overwrites each block of the library, and not the buffers of UniFFI
+  > alone. The wipe costs one pass of writes over each block at its free.
+  > The allocator keeps the default reallocation of `GlobalAlloc`: a new
+  > block, a copy, and a free of the old block. The reallocation of the
+  > system allocator can move a block or shrink it in place. It then frees
+  > the old block or the tail with no overwrite.
 - **[IMP-125]** The secure-element step of §14.6.4 MUST cross as one callback
   that takes the input of the keyed function and returns its 32 bytes. The
   Android keystore has a Java interface only, thus this one value crosses as
@@ -700,7 +753,10 @@ release. Run a full Kotlin regression after an increment. UniFFI is before
 - Ship `arm64-v8a` only for v1.
 - CI has two hard gates. **[IMP-021]** `llvm-objdump -p libumbra.so | grep
   LOAD` MUST show `align 2**14` or higher. **[IMP-022]**
-  `zipalign -v -c -P 16 4` MUST pass.
+  `zipalign -v -c -P 16 4` MUST pass. The reference client runs the first
+  gate in `scripts/android.sh` on each library, and the second in
+  `scripts/apkcheck.sh`, which its release build runs on each APK.
+  `scripts/android.sh` also refuses an NDK other than the pinned one.
 - If a build has to use NDK r27 or older, inject `-Wl,-z,max-page-size=16384
   -Wl,-z,common-page-size=16384` through RUSTFLAGS explicitly. `cargo-ndk` does
   not do this for you.
@@ -837,6 +893,36 @@ WrapHeader {                      // 97 bytes
   passphrase change. It MUST write the new header beside the database before
   it uses that header, because a client that holds a header which the file
   does not hold locks the user out at the next launch.
+- **[IMP-188]** An unlock MUST check the passphrase against the header, also
+  when the client is unlocked already. An unlock that fails after that check
+  MUST leave the client locked, with no key of the store in RAM. At an unlock
+  that succeeds, a lock event that waits in the event stream MUST leave it.
+  A row of a send queue, of a transfer, or of a setting that the platform
+  reads to show the open store can fail to read after the store opened.
+  Those settings are the auto-lock, the two limits of the automatic download
+  (`IMP-167`, `IMP-168`), the ownership of the channels (Part 7 `DEV-287`),
+  and the time of the last backup. Such a row MUST NOT fail the unlock, and
+  a read of such a setting for a view MUST NOT fail. The start of the held
+  downloads on a network with no cost by the byte (`IMP-168`) MUST NOT fail
+  for a row of a transfer. The unlock MUST report the row one time in the
+  manner of Part 4 `IDN-039`, and the row stays in the store. A read of a
+  setting for a view, and each read of the auto-lock and of the two limits,
+  takes the value with no row. For the auto-lock, that value is the default
+  of `IMP-119`. An act of the device set, and the start of a run, read the
+  stored ownership of the channels, and they fail on a row that does not
+  read.
+
+  > *Cause.* The platform can show the lock view over an open store, as
+  > after a fault of the first read of its views. An unlock that gives
+  > success there with no check opens the store to any text. A lock event of
+  > an earlier lock that the platform reads after the unlock shows the lock
+  > view over an open store. A row fault after the open is in the file, and
+  > the passphrase and the table MACs passed already. An unlock that fails
+  > for it fails at each try, and only a restore opens the history again. A
+  > setting read, or a start of the held downloads, that fails before the
+  > platform shows the store does the same, because the platform locks the
+  > store again at that fault. A wrong ownership of the channels would let
+  > two devices read one queue, thus an act and a run take no default.
 
 **The database** uses `rusqlite` with the `bundled` feature, which is plain
 SQLite. The application adds XChaCha20-Poly1305 for each record, with a key
@@ -934,6 +1020,19 @@ in the two versions, and `K_rec` is the same.
   client applies a deletion batch, it MUST run
   `PRAGMA wal_checkpoint(TRUNCATE)`. Part 6 §6.8 rule `WIR-356` gives the test
   that checks the raw file.
+- **[IMP-201]** A client MUST open the database with
+  `PRAGMA auto_vacuum=INCREMENTAL`, and it MUST run `PRAGMA incremental_vacuum`
+  after a deletion batch, before the checkpoint of `IMP-043`. A file of an
+  earlier build MUST take the mode with one `VACUUM` at an open, when its live
+  pages hold `VACUUM_LIVE_MAX` = 64 MiB or less.
+
+> *Cause.* The bytes of each file are rows of the store (table `0x10`). Without
+> the mode, SQLite keeps each freed page in the file for a later write. Thus a
+> deleted history keeps its size on the disk, and the size of the file shows the
+> largest history that the device held. The `VACUUM` of a change copies the live
+> pages, and the SQLite of the Android library keeps that copy in memory. A file
+> of an earlier build with more live bytes keeps its freed pages for later
+> writes until its live part falls below the bound.
 
 > *Cause.* Part 7 rule `DEV-099` tells a device to discard the record key. A
 > record key from `K_store`, the table identifier, and the row identifier
@@ -1019,7 +1118,7 @@ read flight 1 already drops the copy (Part 6 `WIR-503`).
 | `0x15` | Group Member | The contact behind a member index, for each member that an admin of this device brought in. The roster names no contact, thus a member that another admin added has no row here and the view shows its index alone. A row holds the pairwise conversation, and its owner column names the group. |
 | `0x16` | Group Presence | The activity clocks of §11.9.7: for each member that an admin of this device watches, the time of its last record or presence record, and for each group, the time of the last record of this device. The row `watch` of a group holds the time up to which an admin of this device watched that group. A gap of 10 minutes or more in it moves the clock of each member forward by that gap (`GRP-396`). A row holds a `BE64` of seconds, and its owner column names the group. |
 | `0x17` | Group Owners | For each group, the member indices that held the owner credentials of this device when it last took or drew them (`GRP-401`). A member that leaves that set leaves with credentials that the relay still takes, thus its departure calls for new ones. The row `gkey` of a group holds what this device knows of its `GKEY` commands, after a version byte: for each replica the `write_pk` of the epoch whose `GKEY` arrived there, and each owner credential that the current one replaced and whose `GKEY` did not arrive yet, the oldest first (`GRP-361`, `GRP-363`, `GRP-401`). The owner column names the group. |
-| `0x18` | Group Grants | The granting epochs on the authority path to a current role (`GRP-068`). A row holds one `GroupControl`, under the group and the `epoch_index` of the grant, and its owner column names the group. A grant on no path leaves when the next snapshot is built (`GRP-069`). |
+| `0x18` | Group Grants | The granting epochs and the `RekeyRecord`s on the authority path to a current role (`GRP-068`, `GRP-427`). A row holds one `GroupControl`, under the group and the `epoch_index` of the object, and its owner column names the group. An object on no path leaves when the next snapshot is built (`GRP-069`). |
 | `0x19` | Notify Relay | The root of each queue relay: `relay_id`, `k_ntf_root`, `relay_idx`. A group row of an earlier build took the root of its relay. Each group holds a root of its own now, thus the root is 32 zero bytes once each group row holds its root. |
 | `0x1A` | Notify Group | Each handle group: `handle`, `relay_id`, `k_tok`, the removal secret, the registration state, and the count of its queues. |
 | `0x1B` | Notify Queue | Each queue with a binding: `recipient_id`, `handle`, `queue_alias`, and whether its `NBIND` left. |
@@ -1063,13 +1162,13 @@ read flight 1 already drops the copy (Part 6 `WIR-503`).
 | `0x41` | Group Unsent | Each record of this device that no replica accepted yet, as it was sealed, with its credentials, its message, and its place in the order of the posts. The next session sends the same bytes (`GRP-392`). A roster object moves the group of this device at its seal, thus a lost one splits the group. A presence is no such record. |
 | `0x42` | Intros | One row for each introduction that waits: the kind, the conversation of the other party of the record, the third conversation of a request of this device, the two names, and the invitation of an offer. |
 | `0x43` | Send Index | The message of this device that each `send_index` of a conversation named, under the row of the conversation and the index. The index wraps at 65 536, and a later record takes the place of an earlier one. |
-| `0x44` | Key Asked | Each key request of this device, under the conversation and the index, with the time of the request for its rate (`WIR-337`, `WIR-347`), and a mark of one byte beside it when its supply came. A request older than 24 hours names another record, since the index wraps. |
+| `0x44` | Key Asked | Each key request of this device, under the conversation and the index, with the time of the request for its rate (`WIR-337`, `WIR-347`), and a mark of one byte beside it when its supply came. A request older than 24 hours names another record, since the index wraps. A group key request to the peer (Part 11 `GRP-290`, `GRP-329`) names no index: its time takes the oldest of `KEY_REQUEST_RATE` places under the conversation, and the rate counts it with the others. One row of 9 bytes under the conversation holds the time of the last gap of a hole above the rate (Part 6 `WIR-572`), and the rate does not count it. |
 | `0x45` | Roster Hashes | The SHA3-256 of each roster epoch that this device applied, by its index (`DEV-228`). |
 | `0x46` | Roster Parent | The `Parent` of the head, in one row. |
 | `0x47` | Roster Forks | Each fork that the view shows, by its index, its signer and its kind. |
 | `0x48` | Sync Holes | Each hole of a source device, by the device: the device, the first and the last counter, the time that this device first saw it, and the label. |
 | `0x49` | Drafts | The draft of each conversation, as UTF-8, by the conversation. |
-| `0x4A` | Recovery | The state of the recovery of each group: `WANTED` and the time of the request, or `NOTICED`, the roster epoch and the descriptor. |
+| `0x4A` | Recovery | The state of the recovery of each group: `WANTED`, the time of the last request and the time of the first request (Part 11 `GRP-433`), or `NOTICED`, the time of the first request, the roster epoch and the descriptor. A `WANTED` row of an earlier build holds one time, which is both, and a `NOTICED` row of an earlier build holds no time. |
 | `0x4B` | Catchup In | The descriptor of each catch-up object that a peer sent, by the conversation of its sync channel. |
 | `0x4C` | Sync Origin | The source device and the causal counter of each message that a peer synced, by the row of the message. |
 | `0x4D` | Held Deletions | Each message that a deletion of another device names after a restore, by its row, with its conversation. It waits for the user (`DEV-118`). |
@@ -1363,6 +1462,9 @@ screenshot.
   service that saves the passphrase holds it outside the device, and a
   content-capture service reads each text of a view. The reference client
   sets the two on the root view, thus on each view of the application.
+  Android 10 has no content-capture flag on a view, thus there the client
+  calls `ContentCaptureManager.setContentCaptureEnabled(false)` for its
+  activity.
 
 **The accessibility tree.**
 

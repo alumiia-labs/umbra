@@ -95,6 +95,8 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, onLeft: () -> Unit, push:
     // GRP-310: an admin alone brings a contact in.
     val own = members.firstOrNull { it.isSelf }
     val isAdmin = own != null && own.role >= FfiRole.ADMIN
+    // GRP-338: the device that owns the channels makes each roster change.
+    val owns = Core.ownsChannels
 
     var noForward by remember { mutableStateOf<Boolean?>(null) }
     LaunchedEffect(chat.conversation, Core.revision) {
@@ -147,13 +149,13 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, onLeft: () -> Unit, push:
             }
 
             SectionLabel(stringResource(R.string.group_members_title, members.size))
-            if (chat.isMember && isAdmin && !chat.isClosed) {
+            if (chat.isMember && isAdmin && !chat.isClosed && owns) {
                 EntryRow(RowEntry("user-plus", stringResource(R.string.group_add_members)) { push(Screen.InviteToGroup(chat.conversation)) })
                 HorizontalDivider(color = Palette.Divider)
             }
             val waiting = Core.groupJoiners.filter { it.groupId.toList() == chat.groupId.toList() }
             for (joiner in waiting) {
-                JoinerRow(joiner)
+                JoinerRow(joiner, mayAdmit = owns)
                 HorizontalDivider(color = Palette.Divider)
             }
             // A large group shows its first members, and the rest at a tap.
@@ -173,7 +175,8 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, onLeft: () -> Unit, push:
                 )
             }
 
-            if (chat.isMember) {
+            // GRP-434: a closed group takes no self-removal until it opens.
+            if (chat.isMember && owns && !chat.isClosed) {
                 Spacer(Modifier.height(20.dp))
                 EntryRow(RowEntry("xmark", stringResource(R.string.common_leave_group)) { sheet = GroupSheet.Leave }, leads = false)
             }
@@ -190,7 +193,7 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, onLeft: () -> Unit, push:
             val name = memberName(member)
             val isBlocked = member.index in blocked
             // GRP-382: a removal reaches a member below moderator.
-            val mayEdit = own != null && isAdmin && !chat.isClosed && member.role <= own.role
+            val mayEdit = own != null && isAdmin && !chat.isClosed && owns && member.role <= own.role
             if (!mayEdit) {
                 BlockSheet(name, isBlocked, onSet = { Core.setMemberBlocked(chat.conversation, member.index, it) }, onDismiss = close)
             } else {
@@ -217,8 +220,10 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, onLeft: () -> Unit, push:
             ChoiceSheet(
                 stringResource(R.string.group_role_of, memberName(member)),
                 choices.map { (role, detail) ->
+                    // GRP-441: the role that the member holds goes again when
+                    // the path of this device does not back it.
                     SheetChoice(roleLabel(role), role == member.role, stringResource(detail)) {
-                        if (role != member.role) Core.setGroupRole(chat.conversation, member.index, role) { reload++ }
+                        Core.setGroupRole(chat.conversation, member.index, role) { reload++ }
                     }
                 },
                 onDismiss = close,
@@ -241,9 +246,12 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, onLeft: () -> Unit, push:
             onSet = { Core.setMemberBlocked(chat.conversation, open.member.index, it) },
             onDismiss = close,
         )
-        // GRP-051: a group keeps an owner, thus its last owner stays.
+        // GRP-051, GRP-067: a group keeps an owner, thus its last owner
+        // stays while another member stays. The last member leaves.
         GroupSheet.Leave -> {
-            val isLastOwner = own?.role == FfiRole.OWNER && members.count { it.role == FfiRole.OWNER } <= 1
+            val isLastOwner = own?.role == FfiRole.OWNER &&
+                members.count { it.role == FfiRole.OWNER } <= 1 &&
+                members.size > 1
             ActionSheet(
                 stringResource(R.string.group_leave_title, chat.title),
                 if (isLastOwner) {
@@ -297,7 +305,7 @@ private fun GroupStateNote(chat: Chat) {
 
 /** One contact that asked to come in (§11.9.1 step 3). */
 @Composable
-private fun JoinerRow(joiner: FfiGroupOffer) {
+private fun JoinerRow(joiner: FfiGroupOffer, mayAdmit: Boolean) {
     val name = Core.chats
         .firstOrNull { it.conversation.id.contentEquals(joiner.from) }
         ?.title
@@ -328,7 +336,7 @@ private fun JoinerRow(joiner: FfiGroupOffer) {
                 color = Palette.TextSecondary,
             )
         }
-        if (!joiner.isAdded || isStuck) {
+        if ((!joiner.isAdded || isStuck) && mayAdmit) {
             Spacer(Modifier.width(12.dp))
             InlineButton(
                 if (isStuck) stringResource(R.string.common_try_again) else stringResource(R.string.group_let_in),

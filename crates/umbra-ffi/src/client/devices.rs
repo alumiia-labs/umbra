@@ -48,6 +48,10 @@ const REMOVED_FROM_SET: &[u8] = b"removed-from-set";
 /// 2c), under the settings: the conversation of each one in turn. A
 /// conversation leaves the row when its queue rotated.
 pub(super) const ROTATION_OWED: &[u8] = b"rotation-owed";
+/// The rendezvous queues that a revocation owes a successor (`DEV-347`),
+/// under the settings: the `RecipientId` of each one, 32 bytes each. A queue
+/// leaves the row when no published entry names it as its current queue.
+pub(super) const RENDEZVOUS_OWED: &[u8] = b"rendezvous-owed";
 /// The sync channel of each revoked device that still waits for the notice
 /// of its revocation (`DEV-313`), under the settings. The value holds the
 /// conversation of the channel and then the device, in turn.
@@ -128,6 +132,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(store
             .get(DEVICE_SELF, &row)?
             .is_none_or(|plain| plain.first() == Some(&1)))
+    }
+
+    /// [`Client::owns_channels`] for a view. A row that does not read gives
+    /// the value of no row, and the unlock told the user of the fault
+    /// (`IMP-188`). Each act of the set reads the strict value.
+    pub fn owns_channels_shown(&self) -> Result<bool, Error> {
+        Ok(super::row_fault(self.owns_channels())?.unwrap_or(true))
     }
 
     pub(super) fn put_device_identity<R: CryptoRng + ?Sized>(
@@ -321,15 +332,35 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok((identity, bytes))
     }
 
-    /// Keeps a device set that [`Client::new_device_set`] made.
-    pub(super) fn keep_device_set<R: CryptoRng + ?Sized>(
-        &mut self,
+    /// The writes that keep a device set that [`Client::new_device_set`]
+    /// made: this device as the owner of the channels, and the roster epoch
+    /// with its hash (`DEV-228`). A reset puts them in the commit of the new
+    /// root, thus a fault leaves no new root with the set of the old one.
+    /// An epoch 0 follows no head, thus it takes no parent and keeps no
+    /// epoch below it.
+    pub(super) fn device_set_writes(
+        &self,
         identity: &DeviceIdentity,
         roster: &[u8],
-        rng: &mut R,
-    ) -> Result<(), Error> {
-        self.put_device_identity(identity, true, rng)?;
-        self.put_roster(roster, rng)
+    ) -> Result<Vec<RowWrite>, Error> {
+        let epoch = Roster::parse(roster)?.epoch;
+        let mut owner = Zeroizing::new(vec![1u8]);
+        owner.extend_from_slice(&identity.encode());
+
+        let store = &self.open_ref()?.store;
+        Ok(vec![
+            RowWrite::Put(DEVICE_SELF, store.row_id(DEVICE_SELF, SELF_KEY), owner),
+            RowWrite::Put(
+                DEVICE_ROSTER,
+                store.row_id(DEVICE_ROSTER, ROSTER_KEY),
+                Zeroizing::new(roster.to_vec()),
+            ),
+            RowWrite::Put(
+                ROSTER_HASHES,
+                store.row_id(ROSTER_HASHES, &epoch.to_be_bytes()),
+                Zeroizing::new(Roster::hash(roster).to_vec()),
+            ),
+        ])
     }
 
     /// Signs the roster epoch that adds the device of `hello`, and gives
@@ -484,7 +515,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// contact gets a new queue (Part 7 §7.7 step 2c). The revoked device
     /// gets the notice on its sync channel (`DEV-313`). A take-over renews
     /// each channel (`DEV-316`), and a renewal makes each queue new, thus
-    /// it owes no rotation.
+    /// it owes no rotation of a contact. Each rendezvous queue that the
+    /// device knew takes a successor in both cases (`DEV-347`).
     pub(super) fn owe_revocation<R: CryptoRng + ?Sized>(
         &mut self,
         device: DeviceId,
@@ -498,16 +530,21 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         } else {
             Vec::new()
         };
+        let rendezvous = self.rendezvous_to_owe()?;
         let mut leaving = self.setting(LEAVING_CHANNELS)?.unwrap_or_default();
         let notice_key = [REVOCATION_NOTICE, device.as_slice()].concat();
         let notice = [super::unix_now_seconds().to_be_bytes().as_slice(), epoch].concat();
         let open = self.open_mut()?;
         let owed_row = open.store.row_id(SETTINGS, ROTATION_OWED);
+        let rendezvous_row = open.store.row_id(SETTINGS, RENDEZVOUS_OWED);
         let leaving_row = open.store.row_id(SETTINGS, LEAVING_CHANNELS);
         let notice_row = open.store.row_id(SETTINGS, &notice_key);
         let mut batch = open.store.begin();
         if !owed.is_empty() {
             batch.put(SETTINGS, owed_row, None, &owed, rng)?;
+        }
+        if !rendezvous.is_empty() {
+            batch.put(SETTINGS, rendezvous_row, None, &rendezvous, rng)?;
         }
         if let Some(channel) = channel {
             leaving.extend_from_slice(&channel.0);
@@ -538,6 +575,50 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if !is_held && !peers.contains(&ConversationId(row)) {
                 owed.extend_from_slice(&row);
             }
+        }
+
+        Ok(owed)
+    }
+
+    /// The row of the owed rendezvous rotations with the current queue of
+    /// each published entry in it: the snapshot of a link carries each one
+    /// (`DEV-287`).
+    fn rendezvous_to_owe(&self) -> Result<Vec<u8>, Error> {
+        let mut owed = self.setting(RENDEZVOUS_OWED)?.unwrap_or_default();
+        for entry in self.published()? {
+            if !owed.as_chunks::<32>().0.contains(&entry.queue) {
+                owed.extend_from_slice(&entry.queue);
+            }
+        }
+
+        Ok(owed)
+    }
+
+    /// The rendezvous queues that a revocation still owes a successor, for
+    /// the upkeep of the directory (`DEV-347`). A queue that no published
+    /// entry names as its current queue owes nothing, and it leaves the
+    /// row: a rotation of any cause, or the end of the entry, took it.
+    pub fn rendezvous_owed<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+    ) -> Result<Vec<[u8; 32]>, Error> {
+        let Some(held) = self.setting(RENDEZVOUS_OWED)? else {
+            return Ok(Vec::new());
+        };
+
+        let current: Vec<[u8; 32]> = self.published()?.iter().map(|entry| entry.queue).collect();
+        let owed: Vec<[u8; 32]> = held
+            .as_chunks::<32>()
+            .0
+            .iter()
+            .filter(|queue| current.contains(queue))
+            .copied()
+            .collect();
+        let kept = owed.concat();
+        if kept.is_empty() {
+            self.remove_setting(RENDEZVOUS_OWED)?;
+        } else if kept != held {
+            self.put_setting(RENDEZVOUS_OWED, &kept, rng)?;
         }
 
         Ok(owed)
@@ -850,12 +931,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .filter(|device| !previous.revoked.contains(device))
             .copied()
             .collect();
-        // Step 2c: the device that owns the channels owes each contact a
-        // new queue, whichever device signed the epoch.
+        // Step 2c: the device that owns the channels owes each contact and
+        // each published entry a new queue, whichever device signed the
+        // epoch (DEV-347).
         if !gone.is_empty() && self.owns_channels()? {
             let owed = self.rotations_to_owe()?;
             if !owed.is_empty() {
                 self.put_setting(ROTATION_OWED, &owed, rng)?;
+            }
+            let rendezvous = self.rendezvous_to_owe()?;
+            if !rendezvous.is_empty() {
+                self.put_setting(RENDEZVOUS_OWED, &rendezvous, rng)?;
             }
 
             self.rotation_asked = 0;

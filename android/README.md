@@ -31,6 +31,15 @@ cd android && ./gradlew :app:assembleDebug
 `app/src/main/kotlin-generated`. Git ignores the two, because a build makes
 them again. Run the script again after each change of `umbra-ffi`.
 
+The script refuses an NDK of a version other than `ndkVersion`, and it
+checks each library for 16 KB pages (Part 14 `IMP-021`). The release build
+checks its APK for the same pages (`IMP-022`). To check another APK, run the
+same script:
+
+```sh
+scripts/apkcheck.sh android/app/build/outputs/apk/debug/app-debug.apk
+```
+
 ## Release build
 
 A release takes its network from the deployment (`deploy/ansible`). Run
@@ -55,6 +64,29 @@ The release build fails in these conditions:
 - The host is no host name, or is the host of the devnet.
 
 Run the script again before each release, thus the epoch is a recent one.
+
+After `assembleRelease`, the task `checkReleaseApk` runs
+`scripts/apkcheck.sh` on the APK (Part 14 `IMP-022`). A fault ends the
+build. The script needs the build-tools 35 or newer. On Windows, the task
+runs the bash of Git for Windows. `-Pumbra.bash=<path>` names another bash.
+
+No alert of GitHub reads the Gradle graph (Part 14 §14.2.7). Thus check
+each library of the release build against the advisory database before you
+give out the build. Run this from `android/` after the build; it needs `gh`
+with a login:
+
+```sh
+grep -oE '(groupId|artifactId|version): "[^"]*"' \
+    app/build/outputs/sdk-dependencies/release/sdkDependencies.txt |
+  cut -d'"' -f2 | paste - - - |
+  while read -r group artifact version; do
+    gh api "advisories?ecosystem=maven&affects=$group:$artifact@$version" \
+      --jq ".[] | \"$group:$artifact@$version \(.ghsa_id) \(.severity)\""
+  done
+```
+
+Each line of the output is an advisory. Update the library, or write down
+why the advisory does not apply to the app.
 
 A release ships the `arm64-v8a` library alone. The `x86_64` library is for
 the emulator, and the debug build alone holds it.

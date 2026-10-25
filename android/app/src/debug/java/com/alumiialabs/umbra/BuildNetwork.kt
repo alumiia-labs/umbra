@@ -74,6 +74,18 @@ object BuildNetwork {
     var isProvisional = false
         private set
 
+    /** Whether the last network that `network` gave came from the kept manifest. */
+    @Volatile
+    var isFromKept = false
+        private set
+
+    /**
+     * Whether a run from the kept manifest failed. The debug build asks its
+     * carrier first at each start, thus the flag changes no order here.
+     */
+    @Volatile
+    var isKeptSuspect = false
+
     private fun descriptorFile(context: Context) = File(context.filesDir, DESCRIPTOR)
 
     /** The descriptor of a deployed test network, or null for the local one. */
@@ -98,11 +110,22 @@ object BuildNetwork {
 
     /**
      * One call runs at a time. The call writes the kept manifest, and the
-     * network thread and the restore thread both come here.
+     * network thread and the restore thread both come here. The devnet has
+     * one carrier on the machine of the developer, thus each start, a wake
+     * too, asks it first, and the order of the release build does not apply.
      */
+    @Suppress("UNUSED_PARAMETER")
     @Synchronized
-    fun network(context: Context, client: Handle): Network? {
-        imported(context)?.let { return parseNetwork(it, null) }
+    fun network(
+        context: Context,
+        client: Handle,
+        isWake: Boolean = false,
+        ingress: List<String> = emptyList(),
+    ): Network? {
+        imported(context)?.let {
+            isFromKept = false
+            return parseNetwork(it, null)
+        }
 
         // The TLS stack of the Rust side reads a file, and an asset is none.
         val authority = File(context.filesDir, AUTHORITY)
@@ -135,7 +158,11 @@ object BuildNetwork {
                 continue
             }
 
-            if (manifest === fresh) kept.writeBytes(manifest)
+            if (manifest === fresh) {
+                kept.writeBytes(manifest)
+                isKeptSuspect = false
+            }
+            isFromKept = manifest !== fresh
             isClockCorrected = verified.isClockCorrected
             isProvisional = verified.isProvisional
 

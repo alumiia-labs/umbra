@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 13: Anti-Abuse Without Identifiers
 
 **Status:** Draft
-**Version:** 0.45.1
-**Date:** 2026-10-22
+**Version:** 0.46.0
+**Date:** 2026-10-23
 
 ---
 
@@ -29,13 +29,14 @@ client that holds no credential. The carrier is where the credential travels.
 | A group-queue creation, `GNEW` of Part 6 §6.4.5 | Any relay | A token of §13.3, of the type that the relay advertises | The issuer of §13.9 | The proof of work of §13.8 | The `Admission` at the end of the payload |
 | An allocation of attachment storage, `CNEW` and `BNEW` of Part 12 §12.3.3 | An attachment relay | A token of §13.3 | The issuer of §13.9 | The proof of work of §13.8, at `POW_CHUNK_FLOOR` or above, and one solution for `POW_CHUNK_ALLOWANCE` registrations | The `Admission` at the end of the payload |
 | A contact request at a Public Address or at a handle, by the hello of Part 9 §9.6 | The addressee client | A cross-relay token of §13.3.1 | The issuer of §13.9 | The proof of work of §13.8, at `HELLO_POW_EFFORT` | The `Admission` at the end of the hello, inside its AEAD |
-| A handle registration, Part 9 §9.9 | The handle directory | One first-party token of §13.3.2 | The issuer of §13.9 | None | The registration request of Part 9 §9.9 |
+| A handle registration, Part 9 §9.9 | The handle directory | One first-party token of §13.3.2 | The issuer of §13.9 | None | The registration challenge of Part 9 `DIS-203`, or the registration request of a client of an earlier build |
 | An OPRF evaluation of a lookup, Part 9 §9.4.1 | The handle directory | One first-party token of §13.3.2 | The issuer of §13.9 | The proof of work of §13.8, at `POW_LOOKUP_FLOOR` or above | The lookup request of Part 9 §9.4 |
 
 A handle registration has no fallback. A proof of work prices a squat in
 computation, and a squat is a purchase of a name and not a surge. Part 1
-§1.8 lists the registration request and the lookup request, and Part 9 §9.10
-gives the layout of each.
+§1.8 lists the registration request and the lookup request. Part 9 §9.10
+gives the layout of each, and of the registration challenge of Part 9
+`DIS-203` that carries the token.
 
 **Not gated:**
 

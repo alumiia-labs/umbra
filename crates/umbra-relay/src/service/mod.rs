@@ -1,7 +1,7 @@
 //! The services of a relay at the end of a circuit: the pairwise queues,
 //! the group queues, and the chunk store. Each service takes one command
-//! and gives the commands that go back, to the circuit of the command or to
-//! the circuit of a subscriber.
+//! and gives the commands that go back. A record for the circuit of a
+//! subscriber is an arrival, which holds no copy of the record.
 
 use umbra_queue::Reject;
 use umbra_wire::{
@@ -71,11 +71,49 @@ pub struct Drain {
     pub left: usize,
 }
 
+/// One record that arrived at a queue with a live subscription, for the
+/// circuit of that subscription. The node holds it as a place in its queue
+/// and reads the record at its tick (`NET-365`). Before this, a service gave
+/// a copy of the record. One `GPOST` then held a copy for each circuit that
+/// subscribed, and the bound of the answers of a circuit dropped live
+/// records with no command that went again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Arrival {
+    /// The circuit of the subscription.
+    pub circuit: CircuitKey,
+    /// The queue: a `RecipientId` or a `GroupQueueId`.
+    pub queue_id: [u8; 32],
+    /// The sequence of the record.
+    pub seq: u32,
+}
+
+impl Arrival {
+    /// The place of the record in its queue, as a drain of that one record.
+    pub fn place(&self) -> Drain {
+        Drain {
+            queue_id: self.queue_id,
+            after: self.seq.saturating_sub(1),
+            end: self.seq.saturating_add(1),
+            left: 0,
+        }
+    }
+}
+
 /// The drains of one circuit, and the count of those it asked for in the
 /// minute that runs.
 #[derive(Debug, Default)]
 pub struct Drains {
     held: Vec<Drain>,
+    /// The backlogs at or below `DRAIN_THRESHOLD`, which leave on the
+    /// pacing clock one record at each tick (`NET-365`). Each one holds a
+    /// place in its queue and no record, as a drain does. Before this, a
+    /// `SUB` copied each record of such a backlog at once, and each `SUB`
+    /// again copied it again: one cell of `SUB` commands made the relay
+    /// build and hold many copies of one backlog.
+    paced: Vec<Drain>,
+    /// The queues of the paced backlogs since the last
+    /// [`Drains::take_fresh`], in their order.
+    fresh: Vec<[u8; 32]>,
     asked: (u64, u32),
 }
 
@@ -128,15 +166,49 @@ impl Drains {
         self.held.push(drain);
     }
 
-    /// Ends the drain of `queue_id`, if the circuit holds one.
-    pub fn end(&mut self, queue_id: &[u8; 32]) {
-        self.held.retain(|drain| drain.queue_id != *queue_id);
+    /// Holds the backlog of a `SUB` or a `GSUB` at or below
+    /// `DRAIN_THRESHOLD`, which leaves on the pacing clock. It takes the
+    /// place of an earlier drain or backlog of its queue, as
+    /// [`Drains::hold`] does.
+    pub fn pace(&mut self, backlog: Drain) {
+        self.end(&backlog.queue_id);
+        if !self.fresh.contains(&backlog.queue_id) {
+            self.fresh.push(backlog.queue_id);
+        }
+        self.paced.push(backlog);
     }
 
-    /// Ends each drain: the client of the circuit paused its session, and
-    /// its subscriptions ended with it.
+    /// The queues of the backlogs that [`Drains::pace`] took since the
+    /// last call. The node gives each one its place among the answers.
+    pub fn take_fresh(&mut self) -> Vec<[u8; 32]> {
+        core::mem::take(&mut self.fresh)
+    }
+
+    /// The paced backlog of `queue_id`, if the circuit holds one.
+    pub fn paced_mut(&mut self, queue_id: &[u8; 32]) -> Option<&mut Drain> {
+        self.paced
+            .iter_mut()
+            .find(|backlog| backlog.queue_id == *queue_id)
+    }
+
+    /// Ends the paced backlog of `queue_id`: its last record left.
+    pub fn end_paced(&mut self, queue_id: &[u8; 32]) {
+        self.paced.retain(|backlog| backlog.queue_id != *queue_id);
+    }
+
+    /// Ends the drain and the paced backlog of `queue_id`, if the circuit
+    /// holds one.
+    pub fn end(&mut self, queue_id: &[u8; 32]) {
+        self.held.retain(|drain| drain.queue_id != *queue_id);
+        self.end_paced(queue_id);
+    }
+
+    /// Ends each drain and each paced backlog: the client of the circuit
+    /// paused its session, and its subscriptions ended with it.
     pub fn end_all(&mut self) {
         self.held.clear();
+        self.paced.clear();
+        self.fresh.clear();
     }
 
     /// Ends the drain that took the last step.
@@ -146,7 +218,8 @@ impl Drains {
         }
     }
 
-    /// Whether the circuit holds no drain.
+    /// Whether the circuit holds no drain. A paced backlog does not count:
+    /// the pacing clock sends it, and the clock of the drains does not.
     pub fn is_empty(&self) -> bool {
         self.held.is_empty()
     }

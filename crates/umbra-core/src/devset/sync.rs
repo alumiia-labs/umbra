@@ -265,6 +265,14 @@ pub struct Origin {
     pub author: u8,
 }
 
+/// The bytes that a [`SyncedRecord`] adds to its `inner` with a vector of
+/// `devices` entries (§7.5.3): the sub-kind, the context, the scope, the
+/// subject, the author, and `inner_len`.
+pub const fn synced_overhead(devices: usize) -> usize {
+    let context = 1 + 8 + 1 + devices * (16 + 8) + 4;
+    1 + context + 1 + 32 + 1 + 4
+}
+
 /// A synced conversation record: the causal context, the origin, and the
 /// inner `AppMessage` bytes, the payload of kind `0x20` sub-kind `0x03`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -723,6 +731,24 @@ mod tests {
         let mut out = [0u8; 200];
         let n = rec.encode(&mut out).unwrap();
         assert_eq!(SyncedRecord::parse(&out[..n]).unwrap(), rec);
+        assert_eq!(n, synced_overhead(1) + rec.inner.len());
+
+        // Part 12 ATT-208 counts the record at the most devices.
+        let full = SyncedRecord {
+            context: CausalContext {
+                vector: (0..crate::devset::MAX_DEVICES)
+                    .map(|device| ([u8::try_from(device).unwrap(); 16], 1))
+                    .collect(),
+                ..ctx.clone()
+            },
+            ..rec.clone()
+        };
+        let mut wide = [0u8; 400];
+        let used = full.encode(&mut wide).unwrap();
+        assert_eq!(
+            used,
+            synced_overhead(crate::devset::MAX_DEVICES) + rec.inner.len()
+        );
 
         // DEV-243: a resend carries the period that remains then.
         restamp_expires_in(&mut out[..n], 42).unwrap();

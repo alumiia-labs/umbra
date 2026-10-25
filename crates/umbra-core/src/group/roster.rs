@@ -40,7 +40,43 @@ const ROSTER_VERSION_RATES: u8 = 0x04;
 
 /// Version `0x04` with the mark of each window of the rates that the
 /// roster cannot know (`GRP-076`).
-const ROSTER_VERSION: u8 = 0x05;
+const ROSTER_VERSION_MARKS: u8 = 0x05;
+
+/// Version `0x05` with the roster key of the creator (`GRP-428`).
+const ROSTER_VERSION: u8 = 0x06;
+
+/// One entry of an authority path: a granting epoch, or the re-key of a
+/// role holder (`GRP-426`).
+enum PathEntry<'a> {
+    Grant(GrantingEpoch<'a>),
+    Rekey(RekeyRecord<'a>),
+}
+
+impl<'a> PathEntry<'a> {
+    fn parse(bytes: &'a [u8]) -> Result<Self, Error> {
+        let control = GroupControl::parse(bytes)?;
+        match control.control_type {
+            ControlType::GrantingEpoch => {
+                Ok(PathEntry::Grant(GrantingEpoch::parse(control.payload)?))
+            }
+            ControlType::Rekey => {
+                let record = RekeyRecord::parse(control.payload)?;
+                if record.chain_is_zero() {
+                    return Err(Error::Malformed);
+                }
+                Ok(PathEntry::Rekey(record))
+            }
+            _ => Err(Error::Malformed),
+        }
+    }
+
+    const fn chain(&self) -> &umbra_wire::group::control::Chain {
+        match self {
+            PathEntry::Grant(grant) => &grant.chain,
+            PathEntry::Rekey(record) => &record.chain,
+        }
+    }
+}
 
 /// The entries of an authority path: `BE16(len) || GroupControl` each.
 pub fn split_path(path: &[u8]) -> Result<Vec<&[u8]>, Error> {
@@ -125,12 +161,15 @@ pub enum Applied {
     Added(u16),
     /// A member left, by removal or by self-removal; a trigger.
     Removed(Trigger),
-    /// A role changed.
+    /// A granting epoch applied.
     Granted {
         /// The member.
         index: u16,
         /// The new role.
         role: Role,
+        /// The role before. A grant of the role that the member holds
+        /// keeps it (`GRP-441`).
+        before: Role,
     },
     /// Moderation actions to apply, after the signature check, and the role
     /// of the actor for the placeholder of each target (`GRP-082`).
@@ -219,6 +258,9 @@ pub struct Displaced {
     pub hash: [u8; 32],
 }
 
+/// The role and the key hash that an authority path gives each index.
+type PathState = BTreeMap<u16, (Role, [u8; 32])>;
+
 /// The roster of one group at one member.
 #[derive(Clone)]
 pub struct Roster {
@@ -247,6 +289,10 @@ pub struct Roster {
     /// Whether the last object set the mark of [`Replaced`]. The group
     /// takes it once and gives the mark the count of its epochs.
     rival_seen: bool,
+    /// `GroupRosterKey_g.pk` of the creator, from the creation or the
+    /// offer. The path of each snapshot starts there, whether or not the
+    /// creator is still in the group (`GRP-428`).
+    creator_pk: Option<Vec<u8>>,
 }
 
 impl Roster {
@@ -255,6 +301,7 @@ impl Roster {
     pub fn genesis(group_id: [u8; 32], creator: Member, now: u64) -> Self {
         let mut members = BTreeMap::new();
         let index = creator.index;
+        let creator_pk = creator.roster_pk.clone();
         members.insert(
             index,
             Member {
@@ -283,23 +330,21 @@ impl Roster {
             open_index: None,
             rates: RosterRates::default(),
             rival_seen: false,
+            creator_pk,
         }
     }
 
-    /// The roster of a joiner from a verified snapshot (`GRP-326`): the
-    /// `chain_hash` must be the hash of the add record, each KEM key must
-    /// match its entry, and the authority path must verify from the
-    /// creator's roster key. The path is a sequence of `BE16(len) ||
-    /// GroupControl` entries in chain order.
+    /// The roster of a joiner from a verified snapshot (`GRP-326`): each
+    /// KEM key must match its entry, and the authority path must verify
+    /// from the creator's roster key. The path is a sequence of
+    /// `BE16(len) || GroupControl` entries in chain order. No record that
+    /// the joiner verifies gives `chain_hash`, thus the roster takes it as
+    /// its head, and [`Roster::breaks_snapshot`] finds a false one.
     pub fn from_snapshot(
         snapshot: &RosterSnapshot<'_>,
-        expected_chain_hash: &[u8; 32],
         creator_roster_pk: &[u8],
         now: u64,
     ) -> Result<Self, Error> {
-        if snapshot.chain_hash != *expected_chain_hash {
-            return Err(Error::Unverified);
-        }
         if snapshot.entries.len() > GROUP_MAX {
             return Err(Error::Malformed);
         }
@@ -356,10 +401,74 @@ impl Roster {
             // windows that stand came before it.
             rates: RosterRates::partial(slot_of(now)),
             rival_seen: false,
+            creator_pk: Some(creator_roster_pk.to_vec()),
         };
 
         roster.verify_path(snapshot.path, creator_roster_pk)?;
         Ok(roster)
+    }
+
+    /// Whether a roster object that does not chain here shows that the
+    /// snapshot of this roster gave a false `chain_hash` (`GRP-440`). The
+    /// roster still stands at that snapshot, and the object is the next
+    /// roster epoch from `sender`. It names another predecessor, and it
+    /// passes each other check on that predecessor.
+    pub fn breaks_snapshot(
+        &self,
+        control: &GroupControl<'_>,
+        sender: u16,
+        slot: u32,
+        now: u64,
+    ) -> bool {
+        // A creation gives the roster epoch 0, and a snapshot is at an add.
+        if self.admission_epoch == 0 || self.epoch_index != self.admission_epoch {
+            return false;
+        }
+        let Some(chain) = Self::chain_of(control) else {
+            return false;
+        };
+        if chain.group_id != self.group_id
+            || chain.epoch_index != self.epoch_index.saturating_add(1)
+            || chain.previous_epoch_hash == self.chain_hash
+            || !self.may_make(control, sender)
+        {
+            return false;
+        }
+
+        // A roster at its snapshot holds no head that `GRP-117` can move,
+        // thus one copy serves the check.
+        let mut named = self.clone();
+        named.chain_hash = chain.previous_epoch_hash;
+        named.apply_inner(control, sender, slot, now).is_ok()
+    }
+
+    /// Whether `sender` is an active member with a role that makes a roster
+    /// object of the type of `control`. These checks need no copy and no
+    /// signature, thus they come first.
+    fn may_make(&self, control: &GroupControl<'_>, sender: u16) -> bool {
+        let Some(role) = self
+            .members
+            .get(&sender)
+            .filter(|member| member.active)
+            .map(|member| member.role)
+        else {
+            return false;
+        };
+
+        let needed = match control.control_type {
+            ControlType::PlainEpoch => match PlainEpoch::parse(control.payload) {
+                Ok(PlainEpoch {
+                    op: PlainOp::SelfRemoval,
+                    ..
+                }) => return true,
+                Ok(_) => Role::Admin,
+                Err(_) => return false,
+            },
+            ControlType::GrantingEpoch => Role::Admin,
+            ControlType::ModerationEpoch => Role::Moderator,
+            _ => return true,
+        };
+        role >= needed
     }
 
     /// Opens the index of the next add or re-key (`GRP-329`). This applies
@@ -399,56 +508,115 @@ impl Roster {
     }
 
     /// Verifies the authority path of a snapshot in chain order
-    /// (`GRP-326`, `GRP-399`). The creator starts as `owner`. Each grant
-    /// needs a granter at `admin` or above at that point of the path, and
-    /// the key it carries must match the hash of the granter: from its
-    /// entry, or, for a granter that left since, from the grant that gave
-    /// it its role. Each role holder of the snapshot must hold the role
-    /// that the path gives it last.
+    /// (`GRP-326`, `GRP-399`). Each role holder of the snapshot must hold
+    /// the role that the path gives it last.
     fn verify_path(&mut self, path: &[u8], creator_roster_pk: &[u8]) -> Result<(), Error> {
         let creator_hash = sha3_256(&[creator_roster_pk]);
-        let mut creator = None;
         if let Some(member) = self
             .members
             .values_mut()
             .find(|m| m.roster_pk_hash == creator_hash)
         {
             member.set_roster_pk(creator_roster_pk)?;
-            creator = Some(member.index);
         }
 
-        let mut grants = Vec::new();
+        let (state, creator_at) = self.walk_path(path, creator_hash)?;
+        if !self
+            .members
+            .values()
+            .all(|member| Self::backed(member, &state, creator_at))
+        {
+            return Err(Error::Unverified);
+        }
+
+        Ok(())
+    }
+
+    /// Whether an authority path backs the role of the active member at
+    /// `index`, as a joiner verifies a snapshot with that path from the
+    /// roster key of the creator (`GRP-399`). A role holder that the path of
+    /// this member does not back takes its role again by a grant
+    /// (`GRP-441`).
+    pub fn path_backs(&self, path: &[u8], creator_roster_pk: &[u8], index: u16) -> bool {
+        let Some(member) = self.member(index).filter(|member| member.active) else {
+            return false;
+        };
+
+        self.walk_path(path, sha3_256(&[creator_roster_pk]))
+            .is_ok_and(|(state, creator_at)| Self::backed(member, &state, creator_at))
+    }
+
+    /// The active role holders whose role an authority path does not back,
+    /// as a joiner verifies a snapshot with that path (`GRP-399`). A path
+    /// that does not verify backs no holder (`GRP-443`).
+    pub fn unbacked(&self, path: &[u8], creator_roster_pk: &[u8]) -> Vec<u16> {
+        let walked = self.walk_path(path, sha3_256(&[creator_roster_pk])).ok();
+
+        self.active()
+            .filter(|member| match &walked {
+                Some((state, creator_at)) => !Self::backed(member, state, *creator_at),
+                None => member.role >= Role::Moderator,
+            })
+            .map(|member| member.index)
+            .collect()
+    }
+
+    /// The role and the key hash that an authority path gives each index,
+    /// and the index and the key hash of the creator at its end (`GRP-403`).
+    /// The creator starts as `owner`, and each active entry as `member`
+    /// under its own key. Each grant needs a granter at `admin` or above at
+    /// that point of the path, and the key it carries must match the hash
+    /// of the granter: from its entry, or, for a granter that left since,
+    /// from the grant that gave it its role. A re-key on the path moves the
+    /// role of its old index to its new index under the new key hash, as on
+    /// the chain (`GRP-426`).
+    fn walk_path(
+        &self,
+        path: &[u8],
+        creator_hash: [u8; 32],
+    ) -> Result<(PathState, (u16, [u8; 32])), Error> {
+        let mut entries = Vec::new();
         for bytes in split_path(path)? {
-            let control = GroupControl::parse(bytes)?;
-            if control.control_type != ControlType::GrantingEpoch {
-                return Err(Error::Malformed);
-            }
-            grants.push(GrantingEpoch::parse(control.payload)?);
+            entries.push(PathEntry::parse(bytes)?);
         }
 
-        grants.sort_by_key(|grant| grant.chain.epoch_index);
-        if grants.windows(2).any(|pair| {
-            pair.first().map(|g| g.chain.epoch_index) == pair.get(1).map(|g| g.chain.epoch_index)
+        entries.sort_by_key(|entry| entry.chain().epoch_index);
+        if entries.windows(2).any(|pair| {
+            pair.first().map(|e| e.chain().epoch_index)
+                == pair.get(1).map(|e| e.chain().epoch_index)
         }) {
             return Err(Error::Malformed);
         }
 
         // The role and the key hash of each index that the path names.
-        let mut state: BTreeMap<u16, (Role, [u8; 32])> = self
-            .members
-            .values()
+        let mut state: PathState = self
+            .active()
             .map(|member| (member.index, (Role::Member, member.roster_pk_hash)))
             .collect();
         // The creation gives the creator index 0 (`GRP-306`). A creator
         // that left the group still starts the path at that index, under
         // its own key and not under the key of an entry there.
-        let creator_index = creator.unwrap_or(0);
-        state.insert(creator_index, (Role::Owner, creator_hash));
+        let creator = self
+            .active()
+            .find(|m| m.roster_pk_hash == creator_hash)
+            .map(|m| m.index);
+        let mut creator_at = (creator.unwrap_or(0), creator_hash);
+        state.insert(creator_at.0, (Role::Owner, creator_hash));
 
-        for grant in &grants {
-            if grant.chain.group_id != self.group_id {
+        for entry in &entries {
+            if entry.chain().group_id != self.group_id {
                 return Err(Error::Unverified);
             }
+            let grant = match entry {
+                PathEntry::Grant(grant) => grant,
+                PathEntry::Rekey(record) => {
+                    Self::move_on_path(&mut state, record)?;
+                    if record.old_index == creator_at.0 {
+                        creator_at = (record.new_index, record.new_keys.roster_pk_hash);
+                    }
+                    continue;
+                }
+            };
             let (granter_role, granter_hash) =
                 *state.get(&grant.granter_index).ok_or(Error::Unverified)?;
             if granter_role < Role::Admin || grant.granter_index == grant.grantee_index {
@@ -477,18 +645,33 @@ impl Roster {
             }
         }
 
-        // GRP-399: the path backs a role holder by its key and its role. An
-        // entry with keys of its own at the index of a creator that left, or
-        // of a grantee, has no grant behind it.
-        let backed = |member: &Member| {
-            member.role < Role::Moderator
-                || member.index == creator_index && member.roster_pk_hash == creator_hash
-                || state.get(&member.index) == Some(&(member.role, member.roster_pk_hash))
-        };
-        if !self.members.values().all(backed) {
+        Ok((state, creator_at))
+    }
+
+    /// Whether the path backs the role of `member` by its key and its role
+    /// (`GRP-399`). An entry with keys of its own at the index of a creator
+    /// that left, or of a grantee, has no grant behind it. A creator that
+    /// re-keyed is the creator at its new index.
+    fn backed(member: &Member, state: &PathState, creator_at: (u16, [u8; 32])) -> bool {
+        member.role < Role::Moderator
+            || (member.index, member.roster_pk_hash) == creator_at
+            || state.get(&member.index) == Some(&(member.role, member.roster_pk_hash))
+    }
+
+    /// Applies a re-key of the authority path to the role and the key hash
+    /// of each index (`GRP-426`). The record verifies under the key hash
+    /// that the path gives its old index at that point. The new index takes
+    /// the role and the new key hash, as `GRP-367` gives them on the chain,
+    /// and the old index grants nothing after it (`GRP-063`).
+    fn move_on_path(state: &mut PathState, record: &RekeyRecord<'_>) -> Result<(), Error> {
+        let (role, hash) = *state.get(&record.old_index).ok_or(Error::Unverified)?;
+        if record.new_index <= record.old_index {
             return Err(Error::Unverified);
         }
+        record.verify(&hash).map_err(|_| Error::Unverified)?;
 
+        state.insert(record.old_index, (Role::Member, hash));
+        state.insert(record.new_index, (role, record.new_keys.roster_pk_hash));
         Ok(())
     }
 
@@ -1228,6 +1411,7 @@ impl Roster {
         if !Self::may_change(granter_role, grantee.role, epoch.role) {
             return Err(Error::Unverified);
         }
+        let before = grantee.role;
         let holders = self.active().filter(|m| m.role >= Role::Moderator).count();
         if epoch.role >= Role::Moderator
             && grantee.role < Role::Moderator
@@ -1260,6 +1444,7 @@ impl Roster {
         Ok(Applied::Granted {
             index: epoch.grantee_index,
             role: epoch.role,
+            before,
         })
     }
 
@@ -1594,6 +1779,9 @@ impl Roster {
         });
         w.option(self.open_index.as_ref(), |w, index| w.u16(*index));
         self.rates.export(w)?;
+        w.option(self.creator_pk.as_ref(), |w, key| {
+            let _ = w.var(key);
+        });
 
         Ok(())
     }
@@ -1605,6 +1793,7 @@ impl Roster {
             STORED_VERSION,
             ROSTER_VERSION_MOVES,
             ROSTER_VERSION_UNDO,
+            ROSTER_VERSION_MARKS,
             ROSTER_VERSION,
         ]
         .contains(&version)
@@ -1710,14 +1899,22 @@ impl Roster {
                 })
             })?;
             open_index = r.option(Reader::u16)?;
-            rates = RosterRates::import(r, version >= ROSTER_VERSION)?;
+            rates = RosterRates::import(r, version >= ROSTER_VERSION_MARKS)?;
         }
+
+        // GRP-428: a form before the key of the creator holds it at index
+        // 0 alone, which the creation or the offer gave.
+        let creator_pk = if version >= ROSTER_VERSION {
+            r.option(|r| r.var().map(<[u8]>::to_vec))?
+        } else {
+            members.get(&0).and_then(|member| member.roster_pk.clone())
+        };
 
         // GRP-076: a form before the marks of the rates counted nothing, or
         // it counted from a snapshot with no mark of it. The roster read no
         // object after the one at its head. Thus each object that it did
         // not count names a slot at or below the time of that head.
-        if version < ROSTER_VERSION {
+        if version < ROSTER_VERSION_MARKS {
             let head = history
                 .get(&epoch_index)
                 .map_or(0, |(_, at): &(Vec<u16>, u64)| *at);
@@ -1742,26 +1939,143 @@ impl Roster {
             open_index,
             rates,
             rival_seen: false,
+            creator_pk,
         })
     }
 
-    /// The authority path of the current roles, from the granting epochs
-    /// that a member keeps (§11.9.3, §11.9.8): the last grant of each role
-    /// holder, and for each granter the last grant before that one that
-    /// named it, back to the creator at index 0. The result is the path in
-    /// chain order and the position of each grant it holds; each other
-    /// grant is on no path and may go (`GRP-068`, `GRP-069`).
-    pub fn authority_path(&self, grants: &[&[u8]]) -> Result<(Vec<u8>, Vec<usize>), Error> {
-        let mut parsed = Vec::with_capacity(grants.len());
-        for bytes in grants {
-            let control = GroupControl::parse(bytes)?;
-            let grant = GrantingEpoch::parse(control.payload)?;
-            parsed.push((
-                grant.chain.epoch_index,
-                grant.granter_index,
-                grant.grantee_index,
-            ));
+    /// The roster key of the creator, which the creation or the offer gave
+    /// (`GRP-062`, `GRP-428`).
+    pub fn creator_roster_pk(&self) -> Option<&[u8]> {
+        self.creator_pk.as_deref()
+    }
+
+    /// Takes the roster key of the creator from the authority path that a
+    /// member keeps, for a roster stored before it kept that key. Each
+    /// entry verified under the key of its signer, and index 0 is the
+    /// creator (`GRP-306`). Thus a grant from index 0, or a re-key of it,
+    /// carries that key.
+    pub fn learn_creator_roster_pk(&mut self, entries: &[&[u8]]) {
+        if self.creator_pk.is_some() {
+            return;
         }
+
+        let carried = entries
+            .iter()
+            .copied()
+            .filter_map(|bytes| match PathEntry::parse(bytes).ok()? {
+                PathEntry::Grant(grant) => {
+                    (grant.granter_index == 0).then_some(grant.granter_roster_pk)
+                }
+                PathEntry::Rekey(record) => (record.old_index == 0).then_some(record.old_roster_pk),
+            })
+            .find(|key| {
+                self.members
+                    .get(&0)
+                    .is_none_or(|creator| sha3_256(&[key]) == creator.roster_pk_hash)
+            });
+        self.creator_pk = carried.map(<[u8]>::to_vec);
+    }
+
+    /// Whether the object that gave `applied` goes on the authority path
+    /// that a member keeps (§11.9.3, `GRP-427`): each granting epoch, and
+    /// the re-key of a member at `moderator` or above.
+    pub fn keeps_for_path(&self, applied: &Applied) -> bool {
+        match applied {
+            Applied::Granted { .. } => true,
+            Applied::Rekeyed { new, .. } => self
+                .member(*new)
+                .is_some_and(|member| member.role >= Role::Moderator),
+            _ => false,
+        }
+    }
+
+    /// Whether `entry` is the re-key that gave `index` its role and its
+    /// keys, and no entry of `kept` names `index` (`GRP-427`). A member
+    /// that re-keyed before it kept such records holds that re-key as its
+    /// last roster object alone.
+    pub fn lacks_rekey(&self, kept: &[&[u8]], index: u16, entry: &[u8]) -> bool {
+        let Some(member) = self
+            .member(index)
+            .filter(|member| member.active && member.role >= Role::Moderator)
+        else {
+            return false;
+        };
+        let Ok(PathEntry::Rekey(record)) = PathEntry::parse(entry) else {
+            return false;
+        };
+        if record.new_index != index || record.new_keys.roster_pk_hash != member.roster_pk_hash {
+            return false;
+        }
+
+        !kept.iter().any(|bytes| match PathEntry::parse(bytes) {
+            Ok(PathEntry::Grant(grant)) => grant.grantee_index == index,
+            Ok(PathEntry::Rekey(record)) => record.new_index == index,
+            Err(_) => false,
+        })
+    }
+
+    /// The roster epoch of an entry of an authority path, which orders the
+    /// path and names the entry where a member keeps it.
+    pub fn path_epoch(entry: &[u8]) -> Result<u32, Error> {
+        Ok(PathEntry::parse(entry)?.chain().epoch_index)
+    }
+
+    /// The authority path of the current roles, from the granting epochs
+    /// and the re-keys that a member keeps (§11.9.3, §11.9.8). Each role
+    /// holder takes the last grant that names it. A holder that no grant
+    /// names since a re-key moved it takes that re-key, which carries the
+    /// role of the index before (`GRP-367`, `GRP-426`). Each granter, and
+    /// each index that a re-key left, takes the same before that point,
+    /// back to the creator at index 0. The result is the path in chain
+    /// order and the position of each entry it holds; each other entry is
+    /// on no path and may go (`GRP-068`, `GRP-069`).
+    pub fn authority_path(&self, kept: &[&[u8]]) -> Result<(Vec<u8>, Vec<usize>), Error> {
+        struct Link {
+            epoch: u32,
+            from: u16,
+            to: u16,
+            rekey_hash: Option<[u8; 32]>,
+        }
+
+        let mut parsed = Vec::with_capacity(kept.len());
+        for bytes in kept {
+            parsed.push(match PathEntry::parse(bytes)? {
+                PathEntry::Grant(grant) => Link {
+                    epoch: grant.chain.epoch_index,
+                    from: grant.granter_index,
+                    to: grant.grantee_index,
+                    rekey_hash: None,
+                },
+                PathEntry::Rekey(record) => Link {
+                    epoch: record.chain.epoch_index,
+                    from: record.old_index,
+                    to: record.new_index,
+                    rekey_hash: Some(record.new_keys.roster_pk_hash),
+                },
+            });
+        }
+
+        // A re-key whose keys the roster does not hold at its new index is
+        // one that a rival or another head took the place of.
+        let stands = |link: &Link| {
+            link.rekey_hash.is_none_or(|hash| {
+                self.members
+                    .get(&link.to)
+                    .is_none_or(|member| member.roster_pk_hash == hash)
+            })
+        };
+        let last = |holder: u16, before: u32, rekey: bool| {
+            parsed
+                .iter()
+                .enumerate()
+                .filter(|(_, link)| {
+                    link.to == holder
+                        && link.epoch < before
+                        && link.rekey_hash.is_some() == rekey
+                        && stands(link)
+                })
+                .max_by_key(|(_, link)| link.epoch)
+        };
 
         let mut needed = alloc::collections::BTreeSet::new();
         let mut work: Vec<(u16, u32)> = self
@@ -1770,31 +2084,27 @@ impl Roster {
             .map(|member| (member.index, u32::MAX))
             .collect();
         while let Some((holder, before)) = work.pop() {
-            let last = parsed
-                .iter()
-                .enumerate()
-                .filter(|(_, (epoch, _, grantee))| *grantee == holder && *epoch < before)
-                .max_by_key(|(_, (epoch, _, _))| *epoch);
-            let Some((position, (epoch, granter, _))) = last else {
+            let found = last(holder, before, false).or_else(|| last(holder, before, true));
+            let Some((position, link)) = found else {
                 continue;
             };
-            if needed.insert(position) && *granter != 0 {
-                work.push((*granter, *epoch));
+            if needed.insert(position) && link.from != 0 {
+                work.push((link.from, link.epoch));
             }
         }
 
-        let mut kept: Vec<usize> = needed.into_iter().collect();
-        kept.sort_by_key(|position| parsed.get(*position).map(|(epoch, _, _)| *epoch));
+        let mut kept_positions: Vec<usize> = needed.into_iter().collect();
+        kept_positions.sort_by_key(|position| parsed.get(*position).map(|link| link.epoch));
 
         let mut path = Vec::new();
-        for position in &kept {
-            let bytes = grants.get(*position).ok_or(Error::Malformed)?;
+        for position in &kept_positions {
+            let bytes = kept.get(*position).ok_or(Error::Malformed)?;
             let len = u16::try_from(bytes.len()).map_err(|_| Error::Malformed)?;
             path.extend_from_slice(&len.to_be_bytes());
             path.extend_from_slice(bytes);
         }
 
-        Ok((path, kept))
+        Ok((path, kept_positions))
     }
 
     /// The entries of the roster at its current epoch, for a snapshot.
@@ -2063,7 +2373,8 @@ pub(crate) mod tests {
             applied,
             Applied::Granted {
                 index: 1,
-                role: Role::Owner
+                role: Role::Owner,
+                before: Role::Member
             }
         );
         assert!(roster.member(1).unwrap().roster_pk.is_none());
@@ -2089,7 +2400,8 @@ pub(crate) mod tests {
                 .unwrap(),
             Applied::Granted {
                 index: 2,
-                role: Role::Observer
+                role: Role::Observer,
+                before: Role::Member
             }
         );
 
@@ -2938,7 +3250,7 @@ pub(crate) mod tests {
             path,
         };
         let creator_pk = member(1).roster().verifying_key().to_bytes();
-        Roster::from_snapshot(&snapshot, roster.chain_hash(), &creator_pk, 9)
+        Roster::from_snapshot(&snapshot, &creator_pk, 9)
     }
 
     #[test]
@@ -2991,5 +3303,167 @@ pub(crate) mod tests {
         let mut entries = roster.entries();
         entries[0].roster_pk_hash = sha3_256(&[&fake.roster().verifying_key().to_bytes()]);
         assert!(from_entries(&roster, entries, &keys, &path).is_err());
+    }
+
+    #[test]
+    fn a_rekey_on_the_path_moves_a_role_under_the_key_that_the_path_gives_it() {
+        // The admin at index 1 re-keys to index 3 (GRP-367).
+        let mut roster = three();
+        let grant = grant_control(&roster, &member(1), 0, &member(2), 1, Role::Admin);
+        roster
+            .apply(&GroupControl::parse(&grant).unwrap(), 0, 2)
+            .unwrap();
+        let before = roster.clone();
+        let rekey = rekey_control(&roster, &member(2), 1, 9);
+        let applied = roster
+            .apply(&GroupControl::parse(&rekey).unwrap(), 1, 3)
+            .unwrap();
+        assert!(roster.keeps_for_path(&applied));
+        assert_eq!(roster.member(3).unwrap().role, Role::Admin);
+
+        // A member that kept no re-key holds it as its last object alone.
+        assert!(roster.lacks_rekey(&[&grant], 3, &rekey));
+        assert!(!roster.lacks_rekey(&[&grant, &rekey], 3, &rekey));
+        assert!(!roster.lacks_rekey(&[&grant], 2, &rekey));
+        assert!(!roster.lacks_rekey(&[], 3, &grant));
+
+        let kem = |seed: u8| member(seed).kem().public().to_bytes().to_vec();
+        let keys = [(0, kem(1)), (2, kem(3)), (3, kem(9))];
+
+        // GRP-427: the path of the admin runs through its re-key to the
+        // grant of the index before.
+        let (path, positions) = roster.authority_path(&[&rekey, &grant]).unwrap();
+        assert_eq!(positions, alloc::vec![1, 0]);
+        assert_eq!(Roster::path_epoch(&grant).unwrap(), 3);
+        assert_eq!(Roster::path_epoch(&rekey).unwrap(), 4);
+        let joined = from_entries(&roster, roster.entries(), &keys, &path).unwrap();
+        assert_eq!(joined.member(3).unwrap().role, Role::Admin);
+
+        // GRP-399: with the grant alone, no grant names index 3.
+        assert_eq!(
+            from_entries(&roster, roster.entries(), &keys, &path_of(&[&grant])).err(),
+            Some(Error::Unverified)
+        );
+
+        // GRP-426: a re-key with no role behind its old index gives none.
+        assert_eq!(
+            from_entries(&roster, roster.entries(), &keys, &path_of(&[&rekey])).err(),
+            Some(Error::Unverified)
+        );
+
+        // A re-key under another key than the path gives the old index.
+        let forged = rekey_control(&before, &member(3), 1, 9);
+        assert_eq!(
+            from_entries(
+                &roster,
+                roster.entries(),
+                &keys,
+                &path_of(&[&grant, &forged])
+            )
+            .err(),
+            Some(Error::Unverified)
+        );
+    }
+
+    #[test]
+    fn a_grant_of_the_role_that_a_member_holds_backs_that_role_again() {
+        let mut roster = three();
+        let creator_pk = member(1).roster().verifying_key().to_bytes();
+        let grant = grant_control(&roster, &member(1), 0, &member(2), 1, Role::Admin);
+        roster
+            .apply(&GroupControl::parse(&grant).unwrap(), 0, 2)
+            .unwrap();
+        assert!(roster.path_backs(&path_of(&[&grant]), &creator_pk, 1));
+        assert!(!roster.path_backs(&[], &creator_pk, 1));
+
+        // The admin re-keys to index 3, and this member kept no re-key.
+        let rekey = rekey_control(&roster, &member(2), 1, 9);
+        roster
+            .apply(&GroupControl::parse(&rekey).unwrap(), 1, 3)
+            .unwrap();
+        let (path, _) = roster.authority_path(&[&grant]).unwrap();
+        assert!(!roster.path_backs(&path, &creator_pk, 3));
+        assert_eq!(roster.unbacked(&path, &creator_pk), alloc::vec![3]);
+
+        // A kept re-key with no grant before it breaks the path, and the
+        // path then backs no holder (`GRP-443`).
+        let (broken, _) = roster.authority_path(&[&rekey]).unwrap();
+        assert_eq!(roster.unbacked(&broken, &creator_pk), alloc::vec![0, 3]);
+
+        // GRP-441: the owner gives the admin the role that it holds, and
+        // that grant is the path of the role.
+        let again = grant_control(&roster, &member(1), 0, &member(9), 3, Role::Admin);
+        assert_eq!(
+            roster
+                .apply(&GroupControl::parse(&again).unwrap(), 0, 4)
+                .unwrap(),
+            Applied::Granted {
+                index: 3,
+                role: Role::Admin,
+                before: Role::Admin
+            }
+        );
+        let (path, positions) = roster.authority_path(&[&grant, &again]).unwrap();
+        assert_eq!(positions, alloc::vec![1]);
+        assert!(roster.path_backs(&path, &creator_pk, 3));
+        assert!(roster.unbacked(&path, &creator_pk).is_empty());
+        let kem = |seed: u8| member(seed).kem().public().to_bytes().to_vec();
+        let keys = [(0, kem(1)), (2, kem(3)), (3, kem(9))];
+        let joined = from_entries(&roster, roster.entries(), &keys, &path).unwrap();
+        assert_eq!(joined.member(3).unwrap().role, Role::Admin);
+
+        // A role below `moderator` needs no path, and an index that left
+        // holds no role.
+        assert!(roster.path_backs(&[], &creator_pk, 2));
+        assert!(!roster.path_backs(&path, &creator_pk, 1));
+    }
+
+    #[test]
+    fn a_roster_keeps_the_key_of_the_creator_and_a_form_before_takes_it_from_the_path() {
+        // The creator names the member at index 1 `owner` and leaves.
+        let mut roster = three();
+        let grant = grant_control(&roster, &member(1), 0, &member(2), 1, Role::Owner);
+        roster
+            .apply(&GroupControl::parse(&grant).unwrap(), 0, 2)
+            .unwrap();
+        let leave = plain_control(&roster, PlainOp::SelfRemoval);
+        roster
+            .apply(&GroupControl::parse(&leave).unwrap(), 0, 3)
+            .unwrap();
+        let kem = |seed: u8| member(seed).kem().public().to_bytes().to_vec();
+        let keys = [(1, kem(2)), (2, kem(3))];
+        let joined = from_entries(&roster, roster.entries(), &keys, &path_of(&[&grant])).unwrap();
+        let creator_pk = member(1).roster().verifying_key().to_bytes();
+
+        // GRP-428: the roster of a joiner holds no entry of a creator that
+        // left, and it keeps the key of the offer.
+        assert!(joined.member(0).is_none());
+        assert_eq!(joined.creator_roster_pk(), Some(&creator_pk[..]));
+        let mut w = Writer::new();
+        joined.export(&mut w).unwrap();
+        let bytes = w.finish();
+        let back = Roster::import(&mut Reader::new(&bytes)).unwrap();
+        assert_eq!(back.creator_roster_pk(), Some(&creator_pk[..]));
+
+        // A form before the key holds it at index 0 alone. A roster with no
+        // such entry takes it from a grant of index 0 on its path.
+        let mut w = Writer::new();
+        export_before(&joined, &mut w);
+        let bytes = w.finish();
+        let mut old = Roster::import(&mut Reader::new(&bytes)).unwrap();
+        assert_eq!(old.creator_roster_pk(), None);
+        let other = grant_control(&roster, &member(2), 1, &member(3), 2, Role::Admin);
+        old.learn_creator_roster_pk(&[&other]);
+        assert_eq!(old.creator_roster_pk(), None);
+        old.learn_creator_roster_pk(&[&other, &grant]);
+        assert_eq!(old.creator_roster_pk(), Some(&creator_pk[..]));
+
+        // The form before of the roster of the creator holds the key at its
+        // entry.
+        let mut w = Writer::new();
+        export_before(&roster, &mut w);
+        let bytes = w.finish();
+        let old = Roster::import(&mut Reader::new(&bytes)).unwrap();
+        assert_eq!(old.creator_roster_pk(), Some(&creator_pk[..]));
     }
 }

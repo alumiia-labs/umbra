@@ -25,10 +25,13 @@ umbra_family: ""                     # FILL
 # The relays of other operators, such as a relay at home, which this
 # playbook does not install. Put the descriptor of each one in
 # {{ umbra_out }}/descriptors/<name>.desc. The signer lists each one as
-# pending for 4 days and then takes its layer from the directory; an entry
-# relay gets the entry role after 14 days (Part 10 §10.5.4, §10.7.1). The
-# operator name takes no comma. An entry relay also takes its IPv4
-# address, which the firewall of the gateways lets in.
+# pending for 4 days and until a test of class 0 passed, and then takes its
+# layer from the directory; an entry relay gets the entry role after 14
+# days (Part 10 §10.5.4, §10.7.1). The class is the upper bound, and the
+# signer lists a class that a test verified alone (REL-210). The operator
+# name comes from the dossier, takes no comma, and is not umbra_operator.
+# An entry relay also takes its IPv4 address, which the firewall of the
+# gateways lets in.
 #   - { name: home-1, role: middle, class: 0, operator: alice }
 #   - { name: home-2, role: entry, class: 1, operator: bob, address: 198.51.100.7 }
 umbra_outside_relays: []

@@ -71,6 +71,28 @@ port_check() {
     fi
 }
 
+# An exit relay reads each chunk two times into memory at its start. A lower
+# limit passes while the store is small, and then stops the relay at each
+# start when the store fills.
+memory_check() {
+    local capacity=${UMBRA_CHUNK_CAPACITY:-1073741824} limit need
+    [ "$UMBRA_RELAY_ROLE" = exit ] || return 0
+    # Bash reads a number with a leading zero as octal, and the relay reads
+    # it as decimal.
+    [[ "$capacity" =~ ^(0|[1-9][0-9]{0,14})$ ]] ||
+        die "UMBRA_CHUNK_CAPACITY is a number of bytes, with no leading zero"
+
+    # cgroup v2, then cgroup v1. A value that is not a number is no limit.
+    limit=$(cat /sys/fs/cgroup/memory.max 2>/dev/null ||
+        cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo max)
+    [[ "$limit" =~ ^[0-9]+$ ]] || return 0
+
+    need=$((2 * 10#$capacity + (300 << 20)))
+    if [ "$limit" -lt "$need" ]; then
+        die "an exit relay with UMBRA_CHUNK_CAPACITY=$capacity needs a memory limit of $((need >> 20)) MiB or more, and the limit is $((limit >> 20)) MiB: raise UMBRA_MEMORY_MAX, or memory.exit of the Helm chart"
+    fi
+}
+
 # The relay reads its certificate at its start. Thus the entry stops it when
 # certbot writes a new one, and the restart policy starts it again.
 stamp() {
@@ -217,6 +239,7 @@ fetch_manifest() {
 
 relay_run() {
     relay_conf
+    memory_check
     relay_descriptor
 
     # The key set is the root of trust of the relay, thus it comes from the

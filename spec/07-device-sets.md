@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 7: Device Sets, History Sync, and Revocation
 
 **Status:** Draft
-**Version:** 0.45.1
-**Date:** 2026-10-22
+**Version:** 0.46.0
+**Date:** 2026-10-23
 
 ---
 
@@ -65,7 +65,6 @@ RootIdentity
      │ KDF("umbra/v1/device-set")
      ▼
  K_devset
-     └── SyncChannelSeed   (derives sync queues, updated at each revocation, §7.7)
 
  Device_1 (phone)     Device_2 (laptop)     Device_3 (tablet)
    DeviceKey_1          DeviceKey_2           DeviceKey_3
@@ -92,8 +91,8 @@ over the channel of §7.4.
   **[DEV-225]** A device MUST NOT derive `device_id` from a key, from a hardware
   identifier, or from an earlier `device_id`.
 - **[DEV-143]** A device MUST make `DeviceRosterKey_i` from its own CSPRNG.
-  **[DEV-144]** A device MUST NOT derive that keypair from the `RootIdentity`,
-  from `K_devset`, or from `SyncChannelSeed`.
+  **[DEV-144]** A device MUST NOT derive that keypair from the `RootIdentity`
+  or from `K_devset`.
 - **[DEV-145]** A device MUST NOT transmit the private half of
   `DeviceRosterKey_i`. **[DEV-146]** The provisioning payload of §7.4 MUST NOT
   carry that private half.
@@ -900,9 +899,10 @@ MutableItem {                 // the body of kind 0x20 at sub-kind 0x01
 
   **[DEV-270]** A device MUST apply a `MutableItem` when its `lamport` is above
   the value held, or equal with a lower `writer`, and it MUST discard it
-  otherwise. A device MUST set `writer` to its own `device_id` in each item
-  that it writes, and a relay of `DEV-308` MUST keep the `lamport` and the
-  `writer` of the item that it carries.
+  otherwise. A terminal item is the one exception: `DEV-341` applies it at
+  any `lamport`. A device MUST set `writer` to its own `device_id` in each
+  item that it writes, and a relay of `DEV-308` MUST keep the `lamport` and
+  the `writer` of the item that it carries.
 
   **[DEV-310]** A device MAY forget the winner of a delivery item once it holds
   more than 65 536 of them, the oldest by `lamport` first, and it keeps the
@@ -1336,8 +1336,7 @@ DeviceSetControl {
     version        u8        // 0x01
     control_type   u8        // 0x01 a sync acknowledgment, 0x02 a roster epoch,
                              // 0x03 an ownership claim record,
-                             // 0x04 a catch-up descriptor,
-                             // 0x05 a sync seed update
+                             // 0x04 a catch-up descriptor, 0x05 reserved
     payload        [n]u8     // the record that `control_type` names
 }
 
@@ -1351,9 +1350,9 @@ SyncAck {
 > `0x02` names a roster epoch of §7.3.1, and the value `0x03` names an ownership
 > claim record of §7.3.1. The value `0x04` names the `FileDescriptor` of a
 > catch-up object of §7.5.1, and Part 12 §12.3 gives that structure. The value
-> `0x05` names a `SyncSeedUpdate` of §7.7. **[DEV-053]** A later version that
-> adds a device-set control record MUST give that record a new `control_type`
-> value.
+> `0x05` is reserved, and no record of v1 carries it. **[DEV-053]** A later
+> version that adds a device-set control record MUST give that record a new
+> `control_type` value.
 >
 > A cell command of Part 6 §6.3 uses the same byte values with different
 > meanings. A queue command of Part 6 §6.4 and an L6 record kind of Part 6
@@ -1945,8 +1944,8 @@ reject a timer record from a member below that role.
 
 ### 7.5.9 The notification setting is per conversation
 
-Part 8 §8.3 gives three notification modes, and a user selects one for each
-profile. That mode decides **how the device wakes**. This section gives the
+Part 8 §8.3 gives five notification modes, and a user selects one for the
+device. That mode decides **how the device wakes**. This section gives the
 setting that decides **what the device shows**, and it is per conversation.
 
 | Value | The client shows a notification for |
@@ -1964,8 +1963,8 @@ setting that decides **what the device shows**, and it is per conversation.
   a new group above `GROUP_ALL_NOTIFY_MAX` members to `mentions`. Part 11
   §11.10 gives that value.
 - **[DEV-223]** A client MUST NOT let the setting change the wake behavior of
-  Part 8 §8.3. The device wakes on the profile mode, and the setting decides
-  what the client renders after the wake.
+  Part 8 §8.3. The device wakes on the mode of the device, and the setting
+  decides what the client renders after the wake.
 - **[DEV-331]** A user MAY mute a conversation until a time, or with no end.
   A client MUST show no notification for a record of a muted conversation,
   whatever its setting. The mute ends at its time with no act of the user.
@@ -1987,7 +1986,7 @@ setting that decides **what the device shows**, and it is per conversation.
   `default`. A receiver MUST take a value with no such byte as `default`
   for the two, and it MUST reject a field of 3 and a bit above bit 3.
 
-> *Cause.* Part 8 §8.3 sets the mode for each profile. With that mode alone, a
+> *Cause.* Part 8 §8.3 sets one mode for the device. With that mode alone, a
 > user that joins one busy group has to choose between a silent device and a
 > device that wakes for each of 500 members. The setting above separates the two
 > decisions. It also costs no wake and no cell, because it acts after the drain.
@@ -2079,8 +2078,9 @@ contact, and the contact cannot tell the removal from a peer that is offline.**
 
 - **[DEV-340]** The client MUST NOT read a queue of a removed contact in a
   later run. In the run of the removal it MUST discard each record and each
-  state change of that contact, as it does for a channel that a revocation
-  ended (§7.7). The wake table of Part 8 `NTF-135` MUST name each queue of
+  state change of that contact, and it MUST send no record to it, as it does
+  for a channel that a revocation ended (§7.7). A removal that another device
+  published binds the run in which this device takes it. The wake table of Part 8 `NTF-135` MUST name each queue of
   that contact with the silent value of Part 13 `ABU-029`.
 - **[DEV-341]** The client MUST publish the removal as the item of the
   removal of a contact in the table of §7.5.3, under the subject of
@@ -2163,8 +2163,11 @@ has to be fast and complete.
      a. deletes the sync channels to the revoked device;
      b. takes the next DH ratchet step on every pairwise channel it owns, which
         follows the next record of the peer (§7.5.4);
-     c. rotates every queue the revoked device knew;
-     d. derives the sync channel seed of epoch n+1 from the seed update;
+     c. rotates every queue the revoked device knew, the rendezvous queue of
+        each published entry included (DEV-347);
+     d. keeps each other sync channel as it is: each one is the channel of
+        one pair of devices (DEV-286), and the revoked device holds no key
+        of it;
      e. starts the group re-key of Part 11 §11.12 for each group of the user;
      f. sets a new renewal guard on every pairwise channel it owns (Part 3
         NET-357).
@@ -2172,33 +2175,12 @@ has to be fast and complete.
    the claim of scope 0x03 of that epoch (§7.3.1, DEV-314).
 ```
 
-**The seed update (step 2d).** `SyncChannelSeed_0` is the seed of the diagram
-of §7.3, and `K_devset` derives it. The seed of epoch *n+1* equals the seed of
-epoch *n*, except at an epoch that revokes a device. At that epoch the signing
-device makes a new seed, and it sends the input to each remaining device.
+**The sync channels after a revocation (step 2a and step 2d).** A sync
+channel is the channel of the invitation of one link (`DEV-286`), with its
+own handshake and its own ratchet. The revoked device holds the keys of its
+own sync channel alone, and step 2a ends that channel. Thus no key of a sync
+channel changes at a revocation.
 
-```
-seed_input          <- 32 bytes from the CSPRNG of the signing device
-SyncChannelSeed_n+1  = HKDF-SHA3-256( salt = SyncChannelSeed_n, ikm = seed_input,
-                                      info = "umbra/v1/sync-seed" || BE64(n+1),
-                                      L = 32 )
-
-SyncSeedUpdate {
-    epoch          u64       // n+1, the epoch that revokes the device
-    seed_input     [32]u8
-}
-```
-
-- **[DEV-250]** The signer of an epoch with a new `revoked` entry MUST make
-  `seed_input` from its own CSPRNG. **[DEV-251]** That signer MUST send a
-  `SyncSeedUpdate` to each device in `devices` on the sync channel of that
-  pair. The record travels as a `DeviceSetControl` of §7.5.5 with
-  `control_type` `0x05`.
-- **[DEV-252]** A device MUST derive `SyncChannelSeed_n+1` with the construction
-  above, and Part 5 §5.11 holds the label. **[DEV-253]** A device MUST discard
-  a `SyncSeedUpdate` that the `signer_id` of the named epoch did not send.
-- **[DEV-254]** A device MUST NOT change the seed at an epoch with no new
-  `revoked` entry.
 - **[DEV-255]** A device MUST NOT open a sync channel to a revoked device.
   **[DEV-256]** A device MUST reject a sync channel from a revoked device.
   **[DEV-257]** After a device applies the epoch that revokes a device, it MUST
@@ -2237,15 +2219,39 @@ SyncSeedUpdate {
   the channel. The revoked device holds the chain keys and no queue to read
   them from.
 
-A `SyncSeedUpdate` is 40 bytes. With the sub-kind, the version, and the
-`control_type` the body is 43 bytes, and it fits bucket `B0` of Part 6 §6.9.
-
 **The rotations of step 2c are a debt of the store.** The device that owns
 the pairwise channels writes the list of its contacts to its store before it
 writes the epoch. Each session then asks for the rotation of each contact on
 that list, with the delay of Part 3 `NET-180`. A contact leaves the list
 when its new queue exists. Thus a revocation with no connection, and a
 session that ends before a rotation, lose no rotation.
+
+**The rendezvous queues of step 2c.** The snapshot of a link carries the
+reader of each rendezvous queue of a published entry (`DEV-287`). The
+revoked device also holds the `RootIdentity`, which gives the key that opens
+each hello (Part 9 §9.6). Thus it can read and take each hello to a handle
+or a link of the user.
+
+- **[DEV-347]** The device that owns the channels MUST write the current
+  rendezvous queue of each published entry to its store as a debt, before it
+  writes an epoch with a new `revoked` entry. A claimant writes that debt in
+  the same manner before its epoch of a take-over. The device MUST then
+  publish a new rendezvous queue for each entry of the debt at once, with no
+  wait for `RENDEZVOUS_ROTATE` of Part 9 `DIS-133`. A queue that an earlier
+  rotation replaced, and that waits for the end of its grace, MUST end at
+  that rotation. A queue leaves the debt when no published entry names it as
+  its current queue.
+
+> *The residual.* The queue that the rotation of `DEV-347` replaces keeps
+> its grace of Part 9 `DIS-134`, thus a stranger that resolved the entry
+> before the write still reaches the user. For that grace the revoked device
+> can read that queue too, and a hello that it takes there does not reach
+> the user. The absent device of a take-over can do the same. A pairwise
+> queue of step 2c has the same grace. An entry that another writer holds
+> under Part 9 `DIS-139` takes no rotation, since only the user acts on it.
+> A full identity reset of §7.7.1 ends each entry under `DEV-357` in place
+> of this rotation. UMBRA accepts this residual, and Part 15 §15.3 holds the
+> row.
 
 **The guard of step 2f goes with the rotation.** The request for the
 rotation of a contact sets the new renewal guard of that contact, one time
@@ -2261,12 +2267,6 @@ Thus that device holds the secret of the guard before, and no later one.
 > contact, thus it can offer the contact a renewal of Part 3 §3.2.6. After
 > step 2f its bundle opens no guard, and the contact asks its user before
 > a handshake runs (Part 3 `NET-355`).
-
-> *Cause.* A derivation from `K_devset` alone gives the seed that the revoked
-> device holds, because §7.3 says that device holds the `RootIdentity`. With no
-> new input, step 2d changes nothing. The random input from the signer is a
-> value that the revoked device does not see, because DEV-255 gives it no sync
-> channel. The chain over the old seed binds each update to the seed before it.
 
 **The take-over of a set whose owning device is absent.** One device owns
 the channels of a set (`DEV-287`): it reads each queue, and it sends each
@@ -2291,8 +2291,9 @@ group, links a device, revokes a device, and writes the backups.
   user no question (Part 3 `NET-355`). At the end of each renewal the
   claimant sets the next guard (Part 3 `NET-356`). The claimant then sends
   each record of the user that waited for the absent device. That renewal is
-  step 2b and step 2c of a take-over, and the claimant owes no other
-  rotation.
+  step 2b and step 2c of a take-over for each contact, and the claimant owes
+  no other rotation of a queue of a contact. It owes the rotation of each
+  rendezvous queue under `DEV-347`.
 
   In the same commit the claimant MUST make a new Recovery Code under Part 4
   §4.7.1, and it MUST erase its state of the backup. It MUST drop each sync
@@ -2453,6 +2454,22 @@ It MUST erase the root only after the log showed the version that replaced the
 last such entry under the new key, or after that entry went. A write that only
 the store took, and a write that the directory refused, erase no root.
 
+A party that held the store holds the earlier root too. It can sign a new
+version of each such entry under Part 9 `DIS-093`, and it holds the reader of
+each rendezvous queue. **[DEV-357]** A full identity reset MUST write the mark
+of a tombstone of Part 9 `DIS-205` for each entry that the device publishes,
+in the commit of the new root. The upkeep then sends each tombstone until the
+log shows it, also when no request of the interface reached the directory.
+
+> *The residual of `DEV-357`.* Until the log shows the tombstone, that party
+> can write a version of its own. The device then shows the takeover warning
+> of Part 9 `DIS-138`, and it sends no tombstone over that version
+> (`DIS-139`). After the tombstone, the party can register the label again
+> under the key of the earlier root (Part 9 `DIS-075`, `DIS-077`). For a link
+> no other party can do so, since its address comes from that key. A contact
+> that holds that key sees no takeover warning (`DIS-081`). UMBRA accepts this
+> residual, and Part 15 §15.3 holds the row.
+
 **[DEV-307]** A device set of more than one device MUST remove each other
 device under §7.7 before the reset.
 
@@ -2466,6 +2483,20 @@ device under §7.7 before the reset.
 > a seized device, and the reset gives no more. A set of one device takes the
 > new roster of `DEV-173` with no transfer of the new root to a device that
 > could be in hostile hands.
+
+**The Recovery Code changes.** The local identity table holds the Recovery
+Code beside the root seed (Part 4 §4.7.1), thus a party that held the
+`RootIdentity` can hold the code too. **[DEV-346]** A full identity reset MUST
+make a new Recovery Code under Part 4 §4.7.1, and it MUST erase its state of
+the backup, in the commit of the new root. After the reset the interface MUST
+show the new Recovery Code.
+
+> *Cause of `DEV-346`.* Each key of a backup comes from the code alone
+> (Part 4 `IDN-177`). A backup under the old code would give the new root to
+> each party that holds that code, at the next write after the reset. The
+> shares of a split of Part 4 §4.7.3 belong to the old code, and they open no
+> backup of the new one. Thus the user writes the new code down and splits it
+> again, as after a take-over (`DEV-316`).
 
 ## 7.8 Limits
 

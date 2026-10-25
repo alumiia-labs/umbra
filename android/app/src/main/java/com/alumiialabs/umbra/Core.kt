@@ -304,6 +304,16 @@ object Core {
     /** The ingress relays of the last connection that named one (`NTF-053`). */
     private var ingressPair: Set<String>? = null
 
+    /**
+     * The hosts of the two pins, the one that the next run dials first. Its
+     * carrier adds no party (Part 3 §3.10).
+     */
+    private var ingressOrder: List<String> = emptyList()
+
+    /** Whether the run that starts or stands came from the kept manifest. */
+    @Volatile
+    private var runFromKept = false
+
     /** Whether the foreground service of the socket carrier runs. */
     var carrierHolds = false
         private set
@@ -318,8 +328,12 @@ object Core {
     private const val LAST_RETRY_MS = 30_000L
     private const val STOPPED = 0
     private const val DIAL_FAILED = 1
+    private const val CIRCUIT_LOST = 3
     private const val AGED = 6
     private const val WAKE_DONE = 7
+
+    /** The causes of an end of the run that come from a relay: a dial, a link, a circuit. */
+    private val RELAY_CAUSES = DIAL_FAILED..CIRCUIT_LOST
 
     /**
      * Opens the client under the passphrase. The first launch makes the
@@ -338,8 +352,14 @@ object Core {
 
             var unlocked: Handle? = null
             try {
+                val isFirst = handle == null && waiting == null &&
+                    !storeHasHeader(File(app.filesDir, "umbra.db").absolutePath)
                 val opened = handle ?: waiting ?: launch(app, units).also { waiting = it }
-                opened.unlock(units)
+
+                // IMP-188: each unlock checks the passphrase at the cost of
+                // one try. A first launch made the store under this
+                // passphrase, and its handle is open already.
+                if (!isFirst) opened.unlock(units)
                 unlocked = opened
                 units.clear()
                 begin(app, opened)
@@ -370,6 +390,22 @@ object Core {
         handle = opened
         waiting = null
 
+        // The drain gives the clock to the auto-lock, and it takes the lock
+        // event of a fault below. Thus it runs before the first read.
+        drain(opened, app)
+
+        try {
+            showOpened(app, opened)
+        } catch (fault: FfiException) {
+            // IMP-127, IMP-188: the caller shows the fault over a locked
+            // view, thus no key stays in RAM behind it.
+            opened.lock()
+            throw fault
+        }
+    }
+
+    /** Reads the open client into the views, and starts its network. */
+    private fun showOpened(app: Context, opened: Handle) {
         // The store holds each contact, thus the list needs no network.
         val stored = summaries(opened)
         val idleSeconds = opened.autoLockSeconds().toLong()
@@ -383,7 +419,6 @@ object Core {
 
         val backupAt = opened.lastBackupAt()?.toLong()
         val owns = opened.ownsChannels()
-        drain(opened, app)
 
         main.post {
             chats.clear()
@@ -415,6 +450,10 @@ object Core {
             readTyping()
             readDraftSync()
             readHistoryAge()
+
+            // An unlock, a restore, or a link can end after the user left,
+            // and no leave of a view comes after it (`IMP-140`).
+            if (!isVisible) lockOnLeave(app)
         }
     }
 
@@ -1012,6 +1051,12 @@ object Core {
                 first.close()
                 opened = null
 
+                if (!awaitUnlockedDevice(app)) {
+                    linked.destroy()
+                    removeStoreFiles(app)
+                    joinFailed(UiText.get(R.string.core_device_stayed_locked))
+                    return@execute
+                }
                 val database = File(app.filesDir, "umbra.db")
                 val back = withUnits(held) { units ->
                     initLinked(
@@ -1249,6 +1294,12 @@ object Core {
                     first.close()
                     opened = null
 
+                    if (!awaitUnlockedDevice(app)) {
+                        restored.destroy()
+                        removeStoreFiles(app)
+                        restoreFailed(UiText.get(R.string.core_device_stayed_locked))
+                        return@execute
+                    }
                     val database = File(app.filesDir, "umbra.db")
                     val back = withUnits(held) { units ->
                         initRestored(
@@ -1282,7 +1333,10 @@ object Core {
     private fun dropStore(app: Context, opened: Handle) {
         opened.disconnect()
         opened.close()
+        removeStoreFiles(app)
+    }
 
+    private fun removeStoreFiles(app: Context) {
         for (suffix in listOf("", "-wal", "-shm", "-journal")) {
             File(app.filesDir, "umbra.db$suffix").delete()
         }
@@ -1294,6 +1348,29 @@ object Core {
     }
 
     private const val RESTORE_WAIT_MS = 10 * 60_000L
+
+    /**
+     * The key of the keystore works on an unlocked device alone (Part 14
+     * §14.6.4). The wait of a restore or of a link can end while the device
+     * is locked, thus the store of its result waits for the unlock. The
+     * result is whether the device is unlocked.
+     */
+    private fun awaitUnlockedDevice(app: Context): Boolean {
+        val keyguard = app.getSystemService(android.app.KeyguardManager::class.java) ?: return true
+        val deadline = SystemClock.elapsedRealtime() + UNLOCKED_WAIT_MS
+        while (keyguard.isDeviceLocked) {
+            if (SystemClock.elapsedRealtime() >= deadline) return false
+            Thread.sleep(500)
+        }
+
+        return true
+    }
+
+    /**
+     * The passphrase and the root seed of the result wait in RAM behind the
+     * lock of the device, thus no longer than the fetch does (`IMP-127`).
+     */
+    private const val UNLOCKED_WAIT_MS = RESTORE_WAIT_MS
 
     /**
      * The local wipe of Part 7 `DEV-008`: the run ends, and the platform
@@ -1382,6 +1459,8 @@ object Core {
                 degraded = null
                 linkFault = null
                 retryDelayMs = FIRST_RETRY_MS
+                // The relays of the kept manifest answer.
+                if (runFromKept) BuildNetwork.isKeptSuspect = false
                 readConnection(app)
                 readDirectory()
                 maintainDirectory()
@@ -1407,6 +1486,13 @@ object Core {
                     // ended so while a view shows gets a new one.
                     if (wantsNetwork()) retryLater(app)
                 } else {
+                    // REL-155: the other pin takes the next run, thus its
+                    // carrier comes first.
+                    if (event.cause.toInt() == DIAL_FAILED) ingressOrder = ingressOrder.reversed()
+                    // Part 3 §3.10: the next start asks a carrier first. A
+                    // fault of this device says nothing of the relays.
+                    if (runFromKept && event.cause.toInt() in RELAY_CAUSES) BuildNetwork.isKeptSuspect = true
+
                     // The two lines of Part 14 §14.9.2. The cause shows in the
                     // view of the connection.
                     degraded = UiText.get(
@@ -1667,7 +1753,7 @@ object Core {
     private fun cause(code: UByte): String = when (code.toInt()) {
         DIAL_FAILED -> UiText.get(R.string.core_cause_ingress_no_answer)
         2 -> UiText.get(R.string.core_cause_ingress_closed)
-        3 -> UiText.get(R.string.core_cause_circuit_ended)
+        CIRCUIT_LOST -> UiText.get(R.string.core_cause_circuit_ended)
         5 -> UiText.get(R.string.core_cause_store_no_batch)
         else -> UiText.get(R.string.core_cause_client_fault)
     }
@@ -1683,6 +1769,9 @@ object Core {
                 ingressPair = pair
                 Modes.ingressChanged(app)
             }
+
+            // Only a run that stands names the pin that it dialed.
+            read.ingress?.let { ingressOrder = listOfNotNull(it.host, read.standby?.host) }
         }
     }
 
@@ -1757,25 +1846,8 @@ object Core {
             resultUntilMs = 0L
         }
 
-        // The setting "Immediately" locks when the last view leaves.
         // NTF-135: the client writes the table before a lock can take the keys.
-        val resultGraceMs = resultUntilMs - SystemClock.elapsedRealtime()
-        if (!nowVisible && autoLockSeconds == 0L && phase == Phase.Open && resultGraceMs <= 0) {
-            lock(app)
-        } else if (!nowVisible) {
-            refreshWake(context)
-            // IMP-140: a picker of the platform takes the screen for a result
-            // of this app, and the lock waits for that result for a bounded time.
-            if (autoLockSeconds == 0L && phase == Phase.Open) {
-                resultUntilMs = 0L
-                val later = Runnable {
-                    resultLock = null
-                    if (!isVisible && phase == Phase.Open) lock(app)
-                }
-                resultLock = later
-                main.postDelayed(later, resultGraceMs)
-            }
-        }
+        if (!nowVisible && !lockOnLeave(app)) refreshWake(context)
 
         leftScreen()
         if (nowVisible && phase == Phase.Open) {
@@ -1791,6 +1863,31 @@ object Core {
     }
 
     /**
+     * The setting "Immediately" locks when the last view leaves. IMP-140: a
+     * picker of the platform takes the screen for a result of this app, and
+     * the lock waits for that result for a bounded time. The result is
+     * whether the lock ran at once.
+     */
+    private fun lockOnLeave(app: Context): Boolean {
+        if (autoLockSeconds != 0L || phase != Phase.Open) return false
+
+        val resultGraceMs = resultUntilMs - SystemClock.elapsedRealtime()
+        if (resultGraceMs <= 0) {
+            lock(app)
+            return true
+        }
+
+        resultUntilMs = 0L
+        val later = Runnable {
+            resultLock = null
+            if (!isVisible && phase == Phase.Open) lock(app)
+        }
+        resultLock = later
+        main.postDelayed(later, resultGraceMs)
+        return false
+    }
+
+    /**
      * Locks the client at once. The lock has a thread of its own: a call
      * that waits on the worker keeps `K_store` in RAM no longer (`IMP-127`).
      * Each lock writes the wake table first (`NTF-135`), and in Direct mode
@@ -1800,6 +1897,13 @@ object Core {
         val client = handle ?: return
         val app = context.applicationContext
         lockWorker.execute {
+            for (conversation in waitingDrafts.keys.toList()) {
+                try {
+                    writeDraft(client, conversation)
+                } catch (failure: Exception) {
+                    // A draft that does not go in stops no lock.
+                }
+            }
             if (holdsWakeTable(app)) writeWake(app, client)
             client.lock()
         }
@@ -1817,6 +1921,15 @@ object Core {
      */
     fun awaitsResult() {
         resultUntilMs = SystemClock.elapsedRealtime() + RESULT_GRACE_MS
+    }
+
+    /**
+     * The activity is in front again. A picker that floats over it gives
+     * the activity no stop and no start, thus the wait for a result ends
+     * here too (`IMP-140`).
+     */
+    fun resumed() {
+        resultUntilMs = 0L
     }
 
     /**
@@ -1907,8 +2020,8 @@ object Core {
         main.post { onWarnings(warnings) }
     }
 
-    /** The FCM token of this device goes to the core (Part 8 §8.2.7). */
-    fun setFcmToken(token: String) = call { it.setFcmToken(token) }
+    /** The FCM token of this device goes to the core (Part 8 §8.2.7), or none ends it. */
+    fun setFcmToken(token: String?) = call { it.setFcmToken(token) }
 
     /** The FCM token of the timer of Periodic mode goes to the core (Part 8 §8.2.8). */
     fun setFcmTimerToken(token: String) = call { it.setFcmTimerToken(token) }
@@ -2002,7 +2115,24 @@ object Core {
     fun keepDraft(conversation: Conversation, text: CharArray) {
         val units = text.map { it.code.toUShort() }
         text.fill('\u0000')
-        call { client -> client.setDraft(conversation.id, units) }
+        waitingDrafts[conversation] = units
+        call { client -> writeDraft(client, conversation) }
+    }
+
+    /**
+     * The drafts that wait for the worker. The lock has a thread of its own
+     * and can come first, thus it writes them before it locks (Part 7
+     * §7.5.3).
+     */
+    private val waitingDrafts = java.util.concurrent.ConcurrentHashMap<Conversation, List<UShort>>()
+
+    /** Writes the newest draft of a conversation that waits, if one waits. */
+    private fun writeDraft(client: Handle, conversation: Conversation) {
+        // An older draft that a worker took goes in before a newer one.
+        synchronized(waitingDrafts) {
+            val units = waitingDrafts.remove(conversation) ?: return
+            client.setDraft(conversation.id, units)
+        }
     }
 
     fun readTyping() = call { client ->
@@ -2116,20 +2246,23 @@ object Core {
     }
 
     /**
-     * Resets the identity (Part 7 §7.7.1). The network runs again under the
-     * new root, and the public links and the handle of the old root end.
+     * Resets the identity (Part 7 §7.7.1). The view gets the counts and the
+     * digits of the new recovery code (`DEV-346`), or nothing when the core
+     * refused. The network runs again under the new root, and the public
+     * links and the handle of the old root end.
      */
-    fun resetIdentity(context: Context, onDone: (String?) -> Unit) {
+    fun resetIdentity(context: Context, onDone: (String?, CharArray?) -> Unit) {
         val app = context.applicationContext
         call { client ->
+            val sink = CharSink()
             val result = try {
-                val counts = client.resetIdentity()
+                val counts = client.resetIdentity(sink)
                 val contacts = counts.contacts.toInt()
                 val groups = counts.groups.toInt()
                 UiText.plural(R.plurals.core_reset_contacts, contacts, contacts) + " " +
                     UiText.plural(R.plurals.core_reset_groups, groups, groups)
             } catch (busy: FfiException.Busy) {
-                main.post { onDone(null) }
+                main.post { onDone(null, null) }
                 return@call
             }
 
@@ -2138,7 +2271,9 @@ object Core {
                 connect(app, force = true)
                 for (link in publicLinks.toList()) retirePublicLink(link)
                 releaseHandle()
-                onDone(result)
+                // A code that did not reach the sink shows in the view of
+                // the recovery code.
+                onDone(result, sink.chars.takeIf { it.isNotEmpty() })
             }
         }
     }
@@ -2162,8 +2297,9 @@ object Core {
         wakeWaits = false
         runDropped = false
 
+        val ingress = ingressOrder
         on(networkWorker) { client ->
-            val network = BuildNetwork.network(app, client)
+            val network = BuildNetwork.network(app, client, isWake, ingress)
             if (network == null) {
                 // No manifest verified, fresh or kept, thus no run starts
                 // and no run ends to call for a retry. The backoff of a run
@@ -2184,12 +2320,16 @@ object Core {
                 return@on
             }
 
+            val isFromKept = BuildNetwork.isFromKept
+            runFromKept = isFromKept
             try {
                 // NET-100: a push wake is a session of 6 s at most.
                 if (isWake) client.connectWake(network) else client.connect(network)
             } catch (failure: FfiException) {
                 // A run that did not start calls for a retry, as one that
-                // ended does.
+                // ended does, and a kept manifest gives its turn to a
+                // carrier (Part 3 §3.10).
+                if (isFromKept) BuildNetwork.isKeptSuspect = true
                 main.post {
                     isStarting = false
                     isWakeSession = false
@@ -2952,34 +3092,41 @@ object Core {
 
     /**
      * The decoded photo of a message, or null while a worker decodes it.
-     * The images live in the memory alone, and a lock drops them
-     * (`IMP-166`).
+     * A cell of the grid of media takes a smaller decode. The images live
+     * in the memory alone, and a lock drops them (`IMP-166`).
      */
-    fun image(line: Line): androidx.compose.ui.graphics.ImageBitmap? {
-        images[line.key]?.let { return it }
+    fun image(line: Line, isCell: Boolean = false): androidx.compose.ui.graphics.ImageBitmap? {
+        val key = if (isCell) listOf<Byte>(0x63) + line.key else line.key
+        images[key]?.let { return it }
 
-        if (decoding.add(line.key)) {
+        if (decoding.add(key)) {
             call { client ->
-                val decoder = Photos.Decoder()
+                val decoder = if (isCell) Photos.Decoder(CELL_SIDE_MAX) else Photos.Decoder()
                 try {
                     client.msgFile(line.handle, decoder)
                 } catch (absent: FfiException) {
                     // The store holds no file yet. A later event asks again.
                 }
                 main.post {
-                    decoding.remove(line.key)
+                    decoding.remove(key)
                     if (phase != Phase.Open) {
                         dropImage(decoder.image)
                         return@post
                     }
-                    decoder.image?.let { images[line.key] = it }
+                    decoder.image?.let { images[key] = it }
                 }
             }
         }
         return null
     }
 
-    private val images = androidx.compose.runtime.mutableStateMapOf<List<Byte>, androidx.compose.ui.graphics.ImageBitmap>()
+    /** The longest side of the decode of a cell of the grid of media. */
+    private const val CELL_SIDE_MAX = 512
+
+    /** The longest side of the decode of a thumbnail: twice `PREVIEW_SIDE` of Part 12 §12.7. */
+    private const val PREVIEW_SIDE_MAX = 256
+
+    private val images = ImageCache(Runtime.getRuntime().maxMemory() / 4)
 
     /**
      * The thumbnail that the sender put in the record of a photo or a video
@@ -2988,9 +3135,11 @@ object Core {
     fun preview(line: Line): androidx.compose.ui.graphics.ImageBitmap? {
         previews[line.key]?.let { return it }
 
-        if (decoding.add(listOf<Byte>(0x70) + line.key)) {
+        val decodingKey = listOf<Byte>(0x70) + line.key
+        if (decoding.add(decodingKey)) {
             call { client ->
-                val decoder = Photos.Decoder()
+                // The record of a peer can name a large canvas for a small file.
+                val decoder = Photos.Decoder(PREVIEW_SIDE_MAX)
                 try {
                     client.msgPreview(line.handle, decoder)
                 } catch (absent: FfiException) {
@@ -3001,15 +3150,62 @@ object Core {
                         dropImage(decoder.image)
                         return@post
                     }
-                    decoder.image?.let { previews[line.key] = it }
+                    // A record with no preview asks no more until the lock.
+                    // A preview that the cache drops later decodes again.
+                    decoder.image?.let {
+                        decoding.remove(decodingKey)
+                        previews[line.key] = it
+                    }
                 }
             }
         }
         return null
     }
 
-    private val previews = androidx.compose.runtime.mutableStateMapOf<List<Byte>, androidx.compose.ui.graphics.ImageBitmap>()
+    private val previews = ImageCache(Runtime.getRuntime().maxMemory() / 16)
     private val decoding = mutableSetOf<List<Byte>>()
+
+    /**
+     * Decoded images under a bound on their bytes. The entry that no view
+     * read for the longest time goes first. The map is state, thus a view
+     * whose entry went decodes it again.
+     */
+    private class ImageCache(private val budget: Long) {
+        private val shown = mutableStateMapOf<List<Byte>, androidx.compose.ui.graphics.ImageBitmap>()
+
+        // The order of access: a read moves an entry to the end.
+        private val sizes = LinkedHashMap<List<Byte>, Long>(16, 0.75f, true)
+        private var held = 0L
+
+        operator fun get(key: List<Byte>): androidx.compose.ui.graphics.ImageBitmap? {
+            sizes.get(key)
+            return shown[key]
+        }
+
+        operator fun set(key: List<Byte>, image: androidx.compose.ui.graphics.ImageBitmap) {
+            sizes.remove(key)?.let { held -= it }
+            val bytes = image.asAndroidBitmap().allocationByteCount.toLong()
+            shown[key] = image
+            sizes[key] = bytes
+            held += bytes
+
+            // A view can still draw an image that goes, thus the collector
+            // and not a recycle frees it. The newest entry always stays.
+            val oldest = sizes.entries.iterator()
+            while (held > budget && sizes.size > 1) {
+                val gone = oldest.next()
+                shown.remove(gone.key)
+                held -= gone.value
+                oldest.remove()
+            }
+        }
+
+        fun clear() {
+            shown.clear()
+            sizes.clear()
+            held = 0L
+        }
+    }
 
     /** Adds a reaction of this device to a message, or takes it away. */
     fun react(message: MsgHandle, emoji: String) = call { client ->

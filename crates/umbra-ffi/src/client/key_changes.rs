@@ -103,6 +103,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(Some((key, u64::from_be_bytes(at))))
     }
 
+    /// The new key of the contact while a notice waits, or none. A notice
+    /// that an earlier build kept for a shadow contact is none.
+    pub(super) fn waiting_key(
+        &self,
+        conversation: ConversationId,
+    ) -> Result<Option<[u8; 32]>, Error> {
+        if self.is_shadow_contact(conversation)? {
+            return Ok(None);
+        }
+
+        Ok(self.held_key_change(conversation)?.map(|(key, _)| key))
+    }
+
     /// The notice that waits in a conversation, or none. While one waits the
     /// conversation takes no message of this device (`IDN-025`).
     pub fn key_change(

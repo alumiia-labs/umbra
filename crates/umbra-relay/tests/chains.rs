@@ -2299,6 +2299,176 @@ fn a_dead_channel_blob_goes_to_its_placement_and_the_peer_reads_it() {
     assert_eq!(read_handle(&mut mesh, READER, read), Some(chunk));
 }
 
+/// ATT-135, ATT-113: a handle write proves the copy at its second relay. A
+/// copy that did not arrive goes from the device (`ATT-197`), thus each
+/// relay that the write names holds the chunk. Before, the write named the
+/// relay with no copy as a holder.
+#[test]
+fn a_handle_write_proves_its_copy_and_sends_a_lost_one_itself() {
+    use umbra_core::attach::{handle::HandleWrite, place::placement_list};
+
+    const WRITER: usize = 0;
+
+    let mut mesh = Mesh::new(&[0x73]);
+    use_transfer_node(&mut mesh, WRITER, 0x73);
+    mesh.settle();
+
+    let relays: Vec<AttachmentRelay> = (3..7).map(holder).collect();
+    let handle = [0x5C; 32];
+    let read_pk = *XPublic::from(&StaticSecret::from([0x5D; 32])).as_bytes();
+    let list = placement_list(&handle, &relays);
+    mesh.loses_pushes_to = Some(list[1]);
+
+    let chunk = vec![0x3E; CHUNK_SIZE];
+    let write = HandleWrite::new(
+        handle,
+        Secret::new([0x34; 32]),
+        read_pk,
+        chunk.clone(),
+        false,
+        &relays,
+    )
+    .unwrap();
+
+    let holders = write_handle(&mut mesh, WRITER, write);
+    assert_eq!(holders, list[..2]);
+
+    let mut rng = Rng(63);
+    for relay in holders {
+        let job = ChunkJob::Fetch {
+            read: StaticSecret::from([0x5D; 32]),
+        };
+        let asked = mesh.clients[WRITER]
+            .chunk(relay, handle, job, &mut rng)
+            .unwrap();
+        assert_eq!(
+            outcome_of(&mut mesh, WRITER, asked),
+            ChunkOutcome::Fetched(chunk.clone())
+        );
+    }
+}
+
+/// ATT-207: a handle write that fails sends a `CDEL` to each relay that took
+/// its registration before it gives its fault. A later write of the handle
+/// then registers there again. Before, the registration stood at the relay,
+/// and `ATT-058` refused each new one under the handle.
+#[test]
+fn a_handle_write_that_fails_erases_its_registration_first() {
+    use umbra_core::attach::handle::HandleWrite;
+
+    const WRITER: usize = 0;
+
+    let mut mesh = Mesh::new(&[0x74]);
+    use_transfer_node(&mut mesh, WRITER, 0x74);
+    mesh.settle();
+    mesh.issue_challenges();
+
+    // The full relay refuses its registration, and no other relay can take
+    // its place.
+    let open = holder(3).relay_id;
+    let relays = [holder(3), holder(FULL_RELAY)];
+    let handle = [0x5E; 32];
+    let cred = || StaticSecret::from([0x35; 32]);
+    let read_pk = *XPublic::from(&StaticSecret::from([0x5F; 32])).as_bytes();
+    let write = HandleWrite::new(
+        handle,
+        Secret::new([0x35; 32]),
+        read_pk,
+        vec![0x3F; CHUNK_SIZE],
+        false,
+        &relays,
+    )
+    .unwrap();
+
+    fail_handle(&mut mesh, WRITER, write);
+
+    let mut rng = Rng(64);
+    let job = ChunkJob::Register {
+        cred: cred(),
+        read_pk,
+        is_backup: true,
+    };
+    let asked = mesh.clients[WRITER]
+        .chunk(open, handle, job, &mut rng)
+        .unwrap();
+    assert!(matches!(
+        outcome_of(&mut mesh, WRITER, asked),
+        ChunkOutcome::Registered(_)
+    ));
+}
+
+/// ATT-207, ATT-058: a write whose `BNEW` each relay refuses sends no
+/// `CDEL`, thus the copy of an earlier write under the handle stays. Before,
+/// the first refusal ended the write, and the `CDEL` of that end erased the
+/// copy at the other relay, whose refusal was still on its way.
+#[test]
+fn a_handle_write_that_each_relay_refuses_keeps_the_earlier_copy() {
+    use umbra_core::attach::handle::HandleWrite;
+
+    const WRITER: usize = 0;
+
+    let mut mesh = Mesh::new(&[0x75]);
+    use_transfer_node(&mut mesh, WRITER, 0x75);
+    mesh.settle();
+
+    let relays = [holder(3), holder(4)];
+    let handle = [0x60; 32];
+    let read_pk = *XPublic::from(&StaticSecret::from([0x61; 32])).as_bytes();
+    let first = vec![0x40; CHUNK_SIZE];
+    let write = |chunk: Vec<u8>| {
+        HandleWrite::new(
+            handle,
+            Secret::new([0x36; 32]),
+            read_pk,
+            chunk,
+            false,
+            &relays,
+        )
+        .unwrap()
+    };
+
+    let holders = write_handle(&mut mesh, WRITER, write(first.clone()));
+    assert_eq!(holders.len(), 2);
+
+    // A second write under the handle, as after a run that lost the answer
+    // of the first one.
+    fail_handle(&mut mesh, WRITER, write(vec![0x41; CHUNK_SIZE]));
+
+    let mut rng = Rng(65);
+    for relay in holders {
+        let job = ChunkJob::Fetch {
+            read: StaticSecret::from([0x61; 32]),
+        };
+        let asked = mesh.clients[WRITER]
+            .chunk(relay, handle, job, &mut rng)
+            .unwrap();
+        assert_eq!(
+            outcome_of(&mut mesh, WRITER, asked),
+            ChunkOutcome::Fetched(first.clone())
+        );
+    }
+}
+
+/// Runs a handle write that must fail, until it gives its fault. The mesh
+/// holds the challenges of the period.
+fn fail_handle(mesh: &mut Mesh, client: usize, mut write: umbra_core::attach::handle::HandleWrite) {
+    let mut rng = Rng(66);
+    for _ in 0..400 {
+        if write.tick(&mut mesh.clients[client], &mut rng).is_err() {
+            return;
+        }
+        for (asked, outcome) in chunk_answers(mesh, client) {
+            let node = &mut mesh.clients[client];
+            match write.on_outcome(node, asked, outcome, &mut rng) {
+                Ok(Progress::Done(_)) => panic!("the write found a relay"),
+                Ok(Progress::Running(..)) => {}
+                Err(_) => return,
+            }
+        }
+    }
+    panic!("the write did not end");
+}
+
 /// Connects one more node for transfers to the ingress, and returns its
 /// index.
 fn add_transfer_node(mesh: &mut Mesh, seed: u8) -> usize {

@@ -209,6 +209,11 @@ impl DirectoryStore for SqliteDirectoryStore {
                 CLOSED => DirEvent::Closed {
                     nonce: a.try_into().map_err(|_| StoreFault)?,
                     at: u64::from_be_bytes(b.try_into().map_err(|_| StoreFault)?),
+                    // A row of an earlier build keeps no root.
+                    root: match c.len() {
+                        0 => None,
+                        _ => Some(c.try_into().map_err(|_| StoreFault)?),
+                    },
                 },
                 _ => return Err(StoreFault),
             });
@@ -262,13 +267,13 @@ impl DirectoryStore for SqliteDirectoryStore {
                     "INSERT INTO log (kind, a, b, c) VALUES (?1, ?2, ?3, ?4)",
                     params![STAGED, search_key, entry, opening.as_slice()],
                 ))?,
-                DirEvent::Closed { nonce, at } => fault(transaction.execute(
+                DirEvent::Closed { nonce, at, root } => fault(transaction.execute(
                     "INSERT INTO log (kind, a, b, c) VALUES (?1, ?2, ?3, ?4)",
                     params![
                         CLOSED,
                         nonce.as_slice(),
                         at.to_be_bytes().as_slice(),
-                        [0u8; 0].as_slice()
+                        root.as_ref().map_or(&[][..], |root| root.as_slice())
                     ],
                 ))?,
                 DirEvent::Label { search_key, state } => fault(transaction.execute(
@@ -538,6 +543,40 @@ mod tests {
     use super::*;
 
     const NOW: u64 = 1_700_000_000;
+
+    #[test]
+    fn the_store_keeps_the_root_of_an_epoch_and_reads_a_row_with_none() {
+        let mut store = SqliteDirectoryStore::open(":memory:").unwrap();
+        let events = [
+            DirEvent::Closed {
+                nonce: [1; 32],
+                at: NOW,
+                root: Some([2; 32]),
+            },
+            DirEvent::Closed {
+                nonce: [3; 32],
+                at: NOW + 600,
+                root: None,
+            },
+        ];
+        store.commit(&events).unwrap();
+        assert_eq!(store.load().unwrap(), events);
+
+        // A root of another length is a fault of the store.
+        store
+            .connection
+            .execute(
+                "INSERT INTO log (kind, a, b, c) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    CLOSED,
+                    [4u8; 32].as_slice(),
+                    NOW.to_be_bytes().as_slice(),
+                    [5u8; 7].as_slice()
+                ],
+            )
+            .unwrap();
+        assert!(store.load().is_err());
+    }
 
     #[test]
     fn an_issuance_that_repeats_takes_the_answer_of_the_first_one() {

@@ -6,10 +6,12 @@
 //! or answers that it holds it no more (`WIR-340`), and this device then
 //! shows a delivery failure (`WIR-341`).
 //!
-//! Two limits of this client: it keeps no copy of the record that did not
-//! open, since the send again brings the content back (`WIR-050`), and a
-//! reply that goes again names no target, since the store holds the target
-//! as a reference alone after the first send.
+//! This device keeps the `send_index` of the record and no copy of it
+//! (`WIR-050`, `WIR-571`): no later key opens it, and the send again brings
+//! the content back. A hole above the rate of `WIR-337` gets no request, and
+//! the conversation shows a gap in its place (`WIR-572`). One limit of this
+//! client: a reply that goes again names no target, since the store holds
+//! the target as a reference alone after the first send.
 
 use umbra_core::store::{engine::Backend, record::TableId, wrap::SecureElement};
 use umbra_crypto::rand_core::CryptoRng;
@@ -31,7 +33,9 @@ use crate::{ConversationId, Error, MsgRef};
 /// at 65 536, and a later record takes the place of an earlier one.
 pub(super) const SEND_INDEX: TableId = TableId(0x43);
 /// Each key request of this device that waits for its supply, and the time
-/// of each request to a peer for its rate (`WIR-337`, `WIR-347`).
+/// of each request to a peer for its rate (`WIR-337`, `WIR-347`). A group
+/// request names no index of the session, thus it takes one of
+/// `KEY_REQUEST_RATE` places of the peer, which it shares.
 pub(super) const KEY_ASKED: TableId = TableId(0x44);
 
 /// The note of a record that did not open and that its sender holds no
@@ -49,6 +53,17 @@ fn index_key(conversation: ConversationId, index: u16) -> Vec<u8> {
 
 fn asked_key(conversation: ConversationId, index: u16) -> Vec<u8> {
     [conversation.0.as_slice(), b"asked", &index.to_be_bytes()].concat()
+}
+
+fn group_asked_key(conversation: ConversationId, place: u8) -> Vec<u8> {
+    [conversation.0.as_slice(), b"group-asked", &[place]].concat()
+}
+
+/// The time of the last gap that a hole above the rate showed. Its value is
+/// 9 bytes, thus the rate, which counts the values of 8 bytes, does not
+/// count it.
+fn above_rate_key(conversation: ConversationId) -> Vec<u8> {
+    [conversation.0.as_slice(), b"above-rate"].concat()
 }
 
 /// The mark of a request whose supply came, beside its row. The row of the
@@ -122,7 +137,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// A record of the contact of `conversation` did not open, and its
     /// context names `index`. One request goes for each hole, and no more
-    /// than `KEY_REQUEST_RATE` to one peer in 24 hours (`WIR-337`).
+    /// than `KEY_REQUEST_RATE` to one peer in 24 hours (`WIR-337`). A hole
+    /// above that rate shows a gap (`WIR-572`).
     pub fn lost_record<R: CryptoRng + ?Sized>(
         &mut self,
         conversation: ConversationId,
@@ -146,13 +162,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Ok(false);
         }
 
-        let recent = store
-            .list(KEY_ASKED, Some(&conversation.0))?
-            .iter()
-            .filter_map(|(_, at)| <[u8; 8]>::try_from(at.as_slice()).ok())
-            .filter(|at| now.saturating_sub(u64::from_be_bytes(*at)) < DAY)
-            .count();
-        if recent >= KEY_REQUEST_RATE {
+        if self.requests_to(conversation, now)? >= KEY_REQUEST_RATE {
+            self.gap_above_rate(conversation, now_ms, rng)?;
             return Ok(false);
         }
 
@@ -175,9 +186,100 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(true)
     }
 
+    /// Shows a delivery gap for a hole that the rate keeps from its request
+    /// (`WIR-572`). One gap in 24 hours stands for each such hole of the
+    /// peer, thus a peer that sends records that do not open fills no view.
+    fn gap_above_rate<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let now = now_ms / 1_000;
+        let store = &self.open_ref()?.store;
+        let row = store.row_id(KEY_ASKED, &above_rate_key(conversation));
+        let is_shown = store.get(KEY_ASKED, &row)?.is_some_and(|held| {
+            held.get(..8)
+                .and_then(|at| <[u8; 8]>::try_from(at).ok())
+                .is_some_and(|at| now.saturating_sub(u64::from_be_bytes(at)) < DAY)
+        });
+        if is_shown {
+            return Ok(());
+        }
+
+        // A fault between the two writes shows the gap a second time, and
+        // it loses none.
+        self.delivery_gap(conversation, now_ms, rng)?;
+        let open = self.open_mut()?;
+        let mut batch = open.store.begin();
+        let shown = [now.to_be_bytes().as_slice(), &[0]].concat();
+        batch.put(KEY_ASKED, row, Some(conversation.0), &shown, rng)?;
+
+        Ok(batch.commit()?)
+    }
+
+    /// The key requests of this device to the peer of a conversation in the
+    /// 24 hours before `now`, of each scope. A mark of a supply is one byte,
+    /// thus it does not count.
+    fn requests_to(&self, conversation: ConversationId, now: u64) -> Result<usize, Error> {
+        let store = &self.open_ref()?.store;
+        Ok(store
+            .list(KEY_ASKED, Some(&conversation.0))?
+            .iter()
+            .filter_map(|(_, at)| <[u8; 8]>::try_from(at.as_slice()).ok())
+            .filter(|at| now.saturating_sub(u64::from_be_bytes(*at)) < DAY)
+            .count())
+    }
+
+    /// Counts one group key request of this device to the peer of a
+    /// conversation, and says whether it may go. The requests of each scope
+    /// to one peer share `KEY_REQUEST_RATE` in 24 hours (`WIR-337`), since
+    /// the peer counts them together (`WIR-338`).
+    pub(super) fn asks_peer<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<bool, Error> {
+        if self.requests_to(conversation, now)? >= KEY_REQUEST_RATE {
+            return Ok(false);
+        }
+
+        // The request takes the place of the oldest one, thus the rows of
+        // one peer stay at the rate.
+        let store = &self.open_ref()?.store;
+        let mut oldest = (u64::MAX, 0u8);
+        for place in (0..KEY_REQUEST_RATE).filter_map(|place| u8::try_from(place).ok()) {
+            let row = store.row_id(KEY_ASKED, &group_asked_key(conversation, place));
+            let at = store
+                .get(KEY_ASKED, &row)?
+                .and_then(|at| <[u8; 8]>::try_from(at.as_slice()).ok())
+                .map_or(0, u64::from_be_bytes);
+            if at < oldest.0 {
+                oldest = (at, place);
+            }
+        }
+
+        let open = self.open_mut()?;
+        let row = open
+            .store
+            .row_id(KEY_ASKED, &group_asked_key(conversation, oldest.1));
+        let mut batch = open.store.begin();
+        batch.put(
+            KEY_ASKED,
+            row,
+            Some(conversation.0),
+            &now.to_be_bytes(),
+            rng,
+        )?;
+        batch.commit()?;
+
+        Ok(true)
+    }
+
     /// Counts one key request of the peer of a conversation, and says
     /// whether it is inside `KEY_REQUEST_RATE` in 24 hours (`WIR-338`).
-    fn serves_key_request<R: CryptoRng + ?Sized>(
+    pub(super) fn serves_key_request<R: CryptoRng + ?Sized>(
         &mut self,
         conversation: ConversationId,
         now: u64,

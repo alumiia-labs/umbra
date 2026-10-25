@@ -14,7 +14,7 @@ use umbra_crypto::{secret::Secret, x25519::StaticSecret};
 use super::{
     command::{ReplicaTarget, TOKEN_LEN},
     place::{placement_list, reader_probes, writer_targets, AttachmentRelay},
-    transfer::{Progress, STEP_TIMEOUT_TICKS},
+    transfer::{Progress, CHUNK_REPAIRS_MAX, STEP_TIMEOUT_TICKS, VERIFY_ATTEMPTS},
     CHUNK_SIZE,
 };
 use crate::{
@@ -29,12 +29,30 @@ enum Step {
     Register,
     Put,
     Replicate,
+    /// The proof of each copy (`ATT-113`, `ATT-135`).
+    Verify,
+    /// The `CDEL` of a write that failed (`ATT-207`).
+    Abort,
+}
+
+/// One question that waits for its answer.
+#[derive(Clone, Copy)]
+struct Question {
+    handle: u64,
+    relay: [u8; 32],
+    tick: u32,
+    /// The `CPUT` of `ATT-197` in the verify step, and not a `CVFY`.
+    is_copy: bool,
+    /// A `BNEW`, whose answer says whether the relay took the write.
+    registers: bool,
 }
 
 /// The write of one handle-addressed chunk to the first `BACKUP_REPLICAS`
 /// relays of its placement list (`ATT-133` to `ATT-135`), after a `CDEL`
 /// at each relay that can hold an earlier chunk under the same handle
-/// (`ATT-138`). The result is the relays that hold the chunk.
+/// (`ATT-138`). The result is the relays that proved that they hold the
+/// chunk. A write that fails erases what it placed before it gives its
+/// fault (`ATT-207`), thus a later write of the handle finds no copy of it.
 pub struct HandleWrite {
     handle: [u8; 32],
     cred: Secret<32>,
@@ -45,8 +63,20 @@ pub struct HandleWrite {
     /// The relays of the write, each with its token once it registered.
     targets: Vec<([u8; 32], Option<[u8; TOKEN_LEN]>)>,
     step: Step,
-    /// Each question that waits: its handle, its relay, and its tick.
-    waiting: Vec<(u64, [u8; 32], u32)>,
+    /// Each question that waits.
+    waiting: Vec<Question>,
+    /// Each copy that owes its proof, with the asks that remain
+    /// (`ATT-190`).
+    unverified: Vec<([u8; 32], u8)>,
+    /// The proofs that a later tick asks for: the relay and the tick.
+    retries: Vec<([u8; 32], u32)>,
+    /// The copies that this device sent itself (`ATT-197`).
+    copies: u8,
+    /// The relays whose registration got no answer: each one can hold it.
+    silent: Vec<[u8; 32]>,
+    /// The fault of a write that erases what it placed, which the write
+    /// gives at the end of that erase.
+    failure: Option<Error>,
     ticks: u32,
     started: bool,
 }
@@ -88,6 +118,11 @@ impl HandleWrite {
                 Step::Register
             },
             waiting: Vec::new(),
+            unverified: Vec::new(),
+            retries: Vec::new(),
+            copies: 0,
+            silent: Vec::new(),
+            failure: None,
             ticks: 0,
             started: false,
         })
@@ -95,7 +130,9 @@ impl HandleWrite {
 
     /// Whether the answer with this handle belongs to this write.
     pub fn owns(&self, handle: u64) -> bool {
-        self.waiting.iter().any(|(held, _, _)| *held == handle)
+        self.waiting
+            .iter()
+            .any(|question| question.handle == handle)
     }
 
     fn cred(&self) -> StaticSecret {
@@ -109,6 +146,8 @@ impl HandleWrite {
         job: ChunkJob,
         rng: &mut R,
     ) -> Result<(), Error> {
+        let is_copy = self.step == Step::Verify && matches!(job, ChunkJob::Put { .. });
+        let registers = matches!(job, ChunkJob::Register { .. });
         // ABU-108: the solution of a registration serves this handle
         // alone, thus the handle names the upload.
         let upload = self
@@ -117,8 +156,27 @@ impl HandleWrite {
             .map_or(0, |prefix| u64::from_be_bytes(*prefix));
 
         let handle = node.chunk_of(upload, relay, self.handle, job, rng)?;
-        self.waiting.push((handle, relay, self.ticks));
+        self.waiting.push(Question {
+            handle,
+            relay,
+            tick: self.ticks,
+            is_copy,
+            registers,
+        });
         Ok(())
+    }
+
+    fn ask_proof<R: umbra_crypto::rand_core::CryptoRng + ?Sized>(
+        &mut self,
+        node: &mut ClientNode,
+        relay: [u8; 32],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let job = ChunkJob::Verify {
+            cred: self.cred(),
+            chunk: self.chunk.clone(),
+        };
+        self.ask(node, relay, job, rng)
     }
 
     /// Sends the questions of the step, when none waits.
@@ -182,15 +240,45 @@ impl HandleWrite {
                 };
                 self.ask(node, relay, job, rng)?;
             }
+
+            // ATT-113, ATT-120: each copy proves itself. The relay of the
+            // `CPUT` proved its bytes in its answer (`ATT-186`).
+            Step::Verify => {
+                self.unverified = self
+                    .targets
+                    .iter()
+                    .skip(1)
+                    .map(|(relay, _)| (*relay, VERIFY_ATTEMPTS))
+                    .collect();
+                for (relay, _) in self.unverified.clone() {
+                    self.ask_proof(node, relay, rng)?;
+                }
+            }
+
+            // The erase of a failed write asks its relays in `abort`.
+            Step::Abort => {}
         }
 
         Ok(())
     }
 
     /// Starts the write, and ends a question that no relay answered in
-    /// `STEP_TIMEOUT_TICKS`: an erase counts as done, and a registration
-    /// moves to the next relay of the list.
+    /// `STEP_TIMEOUT_TICKS`: an erase counts as done, a registration moves
+    /// to the next relay of the list, and a proof is asked again
+    /// (`ATT-203`). A write that fails erases what it placed first
+    /// (`ATT-207`).
     pub fn tick<R: umbra_crypto::rand_core::CryptoRng + ?Sized>(
+        &mut self,
+        node: &mut ClientNode,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        match self.tick_step(node, rng) {
+            Err(error) if self.step != Step::Abort => self.abort(node, error, rng),
+            ticked => ticked,
+        }
+    }
+
+    fn tick_step<R: umbra_crypto::rand_core::CryptoRng + ?Sized>(
         &mut self,
         node: &mut ClientNode,
         rng: &mut R,
@@ -201,14 +289,25 @@ impl HandleWrite {
             return self.start_step(node, rng);
         }
 
-        let late: Vec<(u64, [u8; 32], u32)> = self
+        let late: Vec<u64> = self
             .waiting
             .iter()
-            .filter(|(_, _, at)| self.ticks.saturating_sub(*at) >= STEP_TIMEOUT_TICKS)
-            .copied()
+            .filter(|question| self.ticks.saturating_sub(question.tick) >= STEP_TIMEOUT_TICKS)
+            .map(|question| question.handle)
             .collect();
 
-        for (handle, _, _) in late {
+        // A registration with no answer can stand at its relay.
+        for question in self
+            .waiting
+            .iter()
+            .filter(|held| held.registers && late.contains(&held.handle))
+        {
+            if !self.silent.contains(&question.relay) {
+                self.silent.push(question.relay);
+            }
+        }
+
+        for handle in late {
             self.on_outcome(
                 node,
                 handle,
@@ -217,10 +316,21 @@ impl HandleWrite {
             )?;
         }
 
+        let ticks = self.ticks;
+        let (due, later): (Vec<_>, Vec<_>) = core::mem::take(&mut self.retries)
+            .into_iter()
+            .partition(|(_, at_tick)| *at_tick <= ticks);
+        self.retries = later;
+        for (relay, _) in due {
+            self.ask_proof(node, relay, rng)?;
+        }
+
         Ok(())
     }
 
     /// Takes one chunk answer. The result is the relays that hold the chunk.
+    /// A write that fails erases what it placed first, and it gives its
+    /// fault when each relay answered that `CDEL` (`ATT-207`).
     pub fn on_outcome<R: umbra_crypto::rand_core::CryptoRng + ?Sized>(
         &mut self,
         node: &mut ClientNode,
@@ -228,10 +338,125 @@ impl HandleWrite {
         outcome: ChunkOutcome,
         rng: &mut R,
     ) -> Result<Progress<Vec<[u8; 32]>>, Error> {
-        let Some(at) = self.waiting.iter().position(|(held, _, _)| *held == handle) else {
+        if self.step == Step::Abort {
+            return self.on_erased(node, handle, &outcome, rng);
+        }
+
+        match self.on_step(node, handle, outcome, rng) {
+            Err(error) => self
+                .abort(node, error, rng)
+                .map(|()| Progress::Running(0, 1)),
+            stepped => stepped,
+        }
+    }
+
+    /// Ends a write that failed with `error` (`ATT-207`). A `CDEL` goes to
+    /// each relay that took a registration of this write, or that did not
+    /// answer one. A registration that waits for its answer keeps its
+    /// place, and its answer decides. With no such relay the result is
+    /// `error` at once.
+    fn abort<R: umbra_crypto::rand_core::CryptoRng + ?Sized>(
+        &mut self,
+        node: &mut ClientNode,
+        error: Error,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let mut placed: Vec<[u8; 32]> = Vec::new();
+        let mut registering: Vec<Question> = Vec::new();
+        if self.started && self.step != Step::Erase {
+            registering = core::mem::take(&mut self.waiting)
+                .into_iter()
+                .filter(|question| question.registers && !self.silent.contains(&question.relay))
+                .collect();
+            let registered = self
+                .targets
+                .iter()
+                .filter(|(_, token)| token.is_some())
+                .map(|(relay, _)| *relay);
+            for relay in registered.chain(self.silent.iter().copied()) {
+                if !placed.contains(&relay) {
+                    placed.push(relay);
+                }
+            }
+        }
+
+        self.step = Step::Abort;
+        self.failure = Some(error);
+        self.waiting = registering;
+        self.retries.clear();
+        self.unverified.clear();
+        for relay in placed {
+            self.erase_at(node, relay, rng);
+        }
+
+        if self.waiting.is_empty() {
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Sends the `CDEL` of a failed write to one relay. A command that does
+    /// not leave stops no other one.
+    fn erase_at<R: umbra_crypto::rand_core::CryptoRng + ?Sized>(
+        &mut self,
+        node: &mut ClientNode,
+        relay: [u8; 32],
+        rng: &mut R,
+    ) {
+        let job = ChunkJob::Erase { cred: self.cred() };
+        let _ = self.ask(node, relay, job, rng);
+    }
+
+    /// Takes one answer in the erase of a write that failed. A registration
+    /// that the relay took, or that got no answer, gets its `CDEL` now. A
+    /// relay that refused it holds no part of this write, and under
+    /// `ATT-058` it can hold the copy of an earlier write. Each other answer
+    /// ends the wait for its relay. A `CDEL` that a relay refuses under load
+    /// leaves the copy there until its TTL, as one with no answer does.
+    fn on_erased<R: umbra_crypto::rand_core::CryptoRng + ?Sized>(
+        &mut self,
+        node: &mut ClientNode,
+        handle: u64,
+        outcome: &ChunkOutcome,
+        rng: &mut R,
+    ) -> Result<Progress<Vec<[u8; 32]>>, Error> {
+        let Some(at) = self
+            .waiting
+            .iter()
+            .position(|question| question.handle == handle)
+        else {
             return Ok(Progress::Running(0, 1));
         };
-        let (_, relay, _) = self.waiting.remove(at);
+        let question = self.waiting.remove(at);
+
+        let stands =
+            matches!(outcome, ChunkOutcome::Registered(_)) || self.silent.contains(&question.relay);
+        if question.registers && stands {
+            self.erase_at(node, question.relay, rng);
+        }
+
+        if self.waiting.is_empty() {
+            return Err(self.failure.unwrap_or(Error::NoPath));
+        }
+        Ok(Progress::Running(0, 1))
+    }
+
+    fn on_step<R: umbra_crypto::rand_core::CryptoRng + ?Sized>(
+        &mut self,
+        node: &mut ClientNode,
+        handle: u64,
+        outcome: ChunkOutcome,
+        rng: &mut R,
+    ) -> Result<Progress<Vec<[u8; 32]>>, Error> {
+        let Some(at) = self
+            .waiting
+            .iter()
+            .position(|question| question.handle == handle)
+        else {
+            return Ok(Progress::Running(0, 1));
+        };
+        let question = self.waiting.remove(at);
+        let relay = question.relay;
 
         match (self.step, outcome) {
             // An erase of a chunk that the relay does not hold is refused,
@@ -243,18 +468,20 @@ impl HandleWrite {
                 }
             }
 
-            // ATT-134: the next relay of the list takes the place.
+            // ATT-134: the next relay of the list takes the place. A relay
+            // that refused holds no registration of this write, and it can
+            // hold the copy of an earlier write: the erase of `ATT-207`
+            // passes it. One with no answer stays in `silent`.
             (Step::Register, _) => {
                 self.failed.push(relay);
+                self.targets.retain(|(held, _)| *held != relay);
 
                 let next = writer_targets(&self.list, &self.failed)?;
                 let replacement = next
                     .into_iter()
                     .find(|candidate| !self.targets.iter().any(|(held, _)| held == candidate))
                     .ok_or(Error::NoPath)?;
-                if let Some(target) = self.targets.iter_mut().find(|(held, _)| *held == relay) {
-                    *target = (replacement, None);
-                }
+                self.targets.push((replacement, None));
 
                 // The list order puts the lowest rank first (`ATT-135`).
                 let list = &self.list;
@@ -274,6 +501,7 @@ impl HandleWrite {
 
             (Step::Put, ChunkOutcome::Stored) => {}
             (Step::Replicate, ChunkOutcome::Replicated) => {}
+            (Step::Verify, outcome) => return self.on_proof(node, question, outcome, rng),
             // A put or a copy that failed ends the write, and the caller
             // writes again later.
             _ => return Err(Error::NoPath),
@@ -287,14 +515,85 @@ impl HandleWrite {
             Step::Erase => Step::Register,
             Step::Register => Step::Put,
             Step::Put if self.targets.len() > 1 => Step::Replicate,
-            Step::Put | Step::Replicate => {
-                return Ok(Progress::Done(
-                    self.targets.iter().map(|(relay, _)| *relay).collect(),
-                ));
-            }
+            Step::Replicate => Step::Verify,
+            Step::Put | Step::Verify => return Ok(Progress::Done(self.holders())),
+            Step::Abort => return Err(self.failure.unwrap_or(Error::NoPath)),
         };
 
         self.start_step(node, rng)?;
+        Ok(Progress::Running(0, 1))
+    }
+
+    fn holders(&self) -> Vec<[u8; 32]> {
+        self.targets.iter().map(|(relay, _)| *relay).collect()
+    }
+
+    /// Takes the answer to a proof of a copy, or to the `CPUT` that this
+    /// device sent in place of a copy that did not arrive. The write ends
+    /// when each copy proved its bytes.
+    fn on_proof<R: umbra_crypto::rand_core::CryptoRng + ?Sized>(
+        &mut self,
+        node: &mut ClientNode,
+        question: Question,
+        outcome: ChunkOutcome,
+        rng: &mut R,
+    ) -> Result<Progress<Vec<[u8; 32]>>, Error> {
+        let relay = question.relay;
+        match (question.is_copy, outcome) {
+            (false, ChunkOutcome::Verified) | (true, ChunkOutcome::Stored) => {
+                self.unverified.retain(|(held, _)| *held != relay);
+            }
+
+            // ATT-197: the copy of the first relay came while the bytes of
+            // this device were on their way, and the proof says so.
+            (true, ChunkOutcome::Refused(_)) => self.retries.push((relay, self.ticks)),
+
+            // ATT-190: the copy can be on its way still.
+            (false, ChunkOutcome::Refused(_)) => {
+                let entry = self
+                    .unverified
+                    .iter_mut()
+                    .find(|(held, _)| *held == relay)
+                    .ok_or(Error::Malformed)?;
+                entry.1 = entry.1.saturating_sub(1);
+
+                if entry.1 > 0 {
+                    // Each wait is two times the one before.
+                    let asked = u32::from(VERIFY_ATTEMPTS.saturating_sub(entry.1));
+                    let wait = 1u32 << asked.saturating_sub(1).min(8);
+                    self.retries.push((relay, self.ticks.saturating_add(wait)));
+                } else {
+                    // ATT-197: the relay holds its registration, thus the
+                    // bytes go to it from this device.
+                    entry.1 = VERIFY_ATTEMPTS;
+                    self.copies = self.copies.saturating_add(1);
+                    if self.copies > CHUNK_REPAIRS_MAX {
+                        return Err(Error::Unverified);
+                    }
+
+                    let storage_token = self
+                        .targets
+                        .iter()
+                        .find(|(held, _)| *held == relay)
+                        .and_then(|(_, token)| *token)
+                        .ok_or(Error::NoPath)?;
+                    let job = ChunkJob::Put {
+                        cred: self.cred(),
+                        storage_token,
+                        chunk: self.chunk.clone(),
+                    };
+                    self.ask(node, relay, job, rng)?;
+                }
+            }
+
+            // ATT-118: a wrong proof ends the write, and the caller writes
+            // again later.
+            _ => return Err(Error::Unverified),
+        }
+
+        if self.unverified.is_empty() {
+            return Ok(Progress::Done(self.holders()));
+        }
         Ok(Progress::Running(0, 1))
     }
 }

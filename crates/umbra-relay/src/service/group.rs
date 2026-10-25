@@ -1,7 +1,7 @@
 //! The group queues of one relay (Part 3 §3.2.7, Part 6 §6.4.5): the
 //! client commands `GNEW`, `GPOST`, `GSUB`, `GUNSUB`, `GKEY`, `GDEL`,
-//! `GNREG`, and `GNUNREG`, the answers `GIDS` and `GSEQ`, and the `GMSG`
-//! that goes to each circuit that subscribed.
+//! `GNREG`, and `GNUNREG`, the answers `GIDS` and `GSEQ`, and the arrival
+//! of each record at each circuit that subscribed.
 //!
 //! The relay holds no member list and no per-reader cursor (`NET-227`,
 //! `NET-228`). A reader names its own `from_seq` at each `GSUB`.
@@ -36,7 +36,7 @@ use umbra_wire::{
     },
 };
 
-use super::{answer, DigestDue, Drain, Drains, Outbound, Reply, BUCKETS};
+use super::{answer, Arrival, DigestDue, Drain, Drains, Outbound, Reply, BUCKETS};
 use crate::{
     circuits::CircuitKey,
     store::{Loaded, StoreChange},
@@ -105,6 +105,8 @@ pub struct GroupService {
     /// next one starts after it, thus no group queue holds the others back.
     /// Each group queue that waits takes its turn, however many wait.
     turn: Option<[u8; 32]>,
+    /// The records that the subscriptions took, which wait for the node.
+    arrivals: Vec<Arrival>,
 }
 
 /// The `GMSG` of one record, in the bucket that the record length gives.
@@ -158,6 +160,13 @@ fn accept_either(
     }
 }
 
+/// The stored form of the head of a group queue.
+fn head_of(queue: &GroupQueue) -> Vec<u8> {
+    let mut writer = Writer::new();
+    queue.export_head(&mut writer);
+    writer.finish().to_vec()
+}
+
 fn sender_id_of(queue: &[u8; QUEUE_ADDRESS_LEN]) -> [u8; 32] {
     umbra_crypto::bytes::part::<33, 32, QUEUE_ADDRESS_LEN>(queue)
 }
@@ -196,14 +205,18 @@ impl GroupService {
         core::mem::take(&mut self.changes)
     }
 
+    /// The records that the subscriptions took since the last call, for the
+    /// circuits of those subscriptions (`NET-365`).
+    pub fn take_arrivals(&mut self) -> Vec<Arrival> {
+        core::mem::take(&mut self.arrivals)
+    }
+
     /// Records the head of a group queue after a change of it.
     fn head_changed(&mut self, group_queue_id: [u8; 32]) {
         if let Some(served) = self.served.get(&group_queue_id) {
-            let mut writer = Writer::new();
-            served.queue.export_head(&mut writer);
             self.changes.push(StoreChange::GroupQueue {
                 group_queue_id,
-                head: writer.finish().to_vec(),
+                head: head_of(&served.queue),
             });
         }
     }
@@ -219,10 +232,11 @@ impl GroupService {
     }
 
     /// Handles one command of the group range on `circuit`, and returns the
-    /// answer with the `GMSG` of a fresh record and the digests it made due.
-    /// A `GSUB` with a backlog above `DRAIN_THRESHOLD` gives no `GMSG`. It
-    /// leaves a drain in `drains`, and the node asks for its records in
-    /// steps ([`GroupService::drain_step`]).
+    /// answer and the digests it made due. A fresh record is an arrival at
+    /// each circuit that subscribed ([`GroupService::take_arrivals`]).
+    /// A `GSUB` gives no `GMSG`. It leaves its backlog in `drains`, and the
+    /// node asks for its records in steps ([`GroupService::drain_step`]): a
+    /// drain above `DRAIN_THRESHOLD`, and a paced backlog at or below it.
     #[allow(clippy::too_many_arguments)]
     pub fn handle<R: CryptoRng + ?Sized>(
         &mut self,
@@ -303,7 +317,7 @@ impl GroupService {
                     .get_mut(&group_queue_id)
                     .ok_or(Reject::Rejected)?;
 
-                let mut replies = vec![answer(
+                let replies = vec![answer(
                     circuit,
                     command,
                     Cmd::Group(GroupCmd::Gseq),
@@ -313,16 +327,14 @@ impl GroupService {
                 let mut is_due = false;
                 if posted.fresh {
                     // WIR-388: each session that subscribed takes the record.
-                    for subscriber in &served.subscribers {
-                        if let Some(outbound) =
-                            gmsg_of(group_queue_id, posted.seq, command.payload, rng)
-                        {
-                            replies.push(Reply {
-                                circuit: *subscriber,
-                                outbound,
-                            });
-                        }
-                    }
+                    // NET-365: the node reads it from the queue at the tick
+                    // of each circuit, thus a post holds no copy for each.
+                    self.arrivals
+                        .extend(served.subscribers.iter().map(|subscriber| Arrival {
+                            circuit: *subscriber,
+                            queue_id: group_queue_id,
+                            seq: posted.seq,
+                        }));
 
                     // NTF-096: each registration takes its digest. NTF-098:
                     // one that the gap holds back goes at the end of the gap.
@@ -378,16 +390,19 @@ impl GroupService {
 
                 session.bind_queue(group_queue_id)?;
 
-                // NET-250: a `GSUB` is activity of the queue.
+                // NET-250: a `GSUB` is activity of the queue. The store
+                // rounds that time to the hour, thus most of them change no
+                // head, and they cost the store no commit (`NET-298`).
+                let before = head_of(&served.queue);
                 served.queue.touch(now);
-                self.changes.push(StoreChange::GroupQueue {
-                    group_queue_id,
-                    head: {
-                        let mut writer = Writer::new();
-                        served.queue.export_head(&mut writer);
-                        writer.finish().to_vec()
-                    },
-                });
+                let head = head_of(&served.queue);
+
+                if head != before {
+                    self.changes.push(StoreChange::GroupQueue {
+                        group_queue_id,
+                        head,
+                    });
+                }
 
                 let served = self
                     .served
@@ -398,30 +413,25 @@ impl GroupService {
                     served.subscribers.push(circuit);
                 }
 
-                if let Some(left) = named {
-                    drains.hold(Drain {
-                        queue_id: group_queue_id,
-                        after: from_seq,
-                        end: served.queue.next_seq(),
-                        left,
-                    });
-                    return Ok((Vec::new(), Vec::new()));
-                }
-
-                drains.end(&group_queue_id);
-
                 // WIR-387: each retained record above `from_seq`, in order.
-                Ok((
-                    served
-                        .queue
-                        .since(from_seq)
-                        .filter_map(|stored| {
-                            gmsg_of(group_queue_id, stored.seq, &stored.bytes, rng)
-                        })
-                        .map(|outbound| Reply { circuit, outbound })
-                        .collect(),
-                    Vec::new(),
-                ))
+                // The node reads each one from the queue at its step
+                // (`NET-349`) or at its tick (`NET-365`), thus a `GSUB`
+                // copies no record.
+                let backlog = Drain {
+                    queue_id: group_queue_id,
+                    after: from_seq,
+                    end: served.queue.next_seq(),
+                    left: named.unwrap_or(0),
+                };
+
+                if named.is_some() {
+                    drains.hold(backlog);
+                } else if served.queue.since(from_seq).next().is_some() {
+                    drains.pace(backlog);
+                } else {
+                    drains.end(&group_queue_id);
+                }
+                Ok((Vec::new(), Vec::new()))
             }
             GroupCmd::Gunsub => {
                 accept_either(session, command, served.queue.read_pks(now))?;
@@ -890,8 +900,28 @@ mod tests {
             }
         }
 
-        /// One authorized command of a member that holds `auth_sk`.
+        /// One authorized command of a member that holds `auth_sk`, with
+        /// the records that the ticks of the node read after it.
         fn send(
+            &mut self,
+            circuit: CircuitKey,
+            cmd: GroupCmd,
+            queue_id: [u8; 32],
+            payload: &[u8],
+            auth_sk: &StaticSecret,
+            now: u64,
+        ) -> Result<(Vec<Reply>, Vec<DigestDue>), Reject> {
+            let (mut replies, due) =
+                self.handle_at(circuit, cmd, queue_id, payload, auth_sk, now)?;
+
+            replies.extend(self.arrived());
+            replies.extend(self.paced(circuit));
+            Ok((replies, due))
+        }
+
+        /// One authorized command of a member that holds `auth_sk`, with no
+        /// tick after it.
+        fn handle_at(
             &mut self,
             circuit: CircuitKey,
             cmd: GroupCmd,
@@ -926,6 +956,41 @@ mod tests {
                 now,
                 &mut self.rng,
             )
+        }
+
+        /// The `GMSG` of each record that a subscription took, as the tick
+        /// of the node reads it from the queue (`NET-365`).
+        fn arrived(&mut self) -> Vec<Reply> {
+            let mut replies = Vec::new();
+            for arrival in self.service.take_arrivals() {
+                let circuit = arrival.circuit;
+                let mut place = arrival.place();
+                let (records, _) = self.service.drain_step(&mut place, 1, &mut self.rng);
+                replies.extend(
+                    records
+                        .into_iter()
+                        .map(|outbound| Reply { circuit, outbound }),
+                );
+            }
+            replies
+        }
+
+        /// The records of each backlog that the last command paced, as the
+        /// ticks of the node read them from the queue (`NET-365`).
+        fn paced(&mut self, circuit: CircuitKey) -> Vec<Reply> {
+            let mut replies = Vec::new();
+            for queue_id in self.drains.take_fresh() {
+                while let Some(backlog) = self.drains.paced_mut(&queue_id) {
+                    let (records, ended) = self.service.drain_step(backlog, 1, &mut self.rng);
+                    let records = records.into_iter();
+                    replies.extend(records.map(|outbound| Reply { circuit, outbound }));
+
+                    if ended {
+                        self.drains.end_paced(&queue_id);
+                    }
+                }
+            }
+            replies
         }
     }
 
@@ -1097,6 +1162,51 @@ mod tests {
             .send(CIRCUIT, GroupCmd::Gpost, id, &record(3), &write, now)
             .unwrap();
         assert_eq!(replies.len(), 1);
+    }
+
+    #[test]
+    fn a_post_gives_each_reader_a_place_in_the_queue_and_no_copy() {
+        let now = 1_000;
+        let (mut relay, id, read, write, _own) = opened(now);
+        let readers: Vec<CircuitKey> = (0..20u8)
+            .map(|index| CircuitKey {
+                link: 7,
+                circ_id: [index; 16],
+            })
+            .collect();
+
+        for reader in &readers {
+            relay
+                .send(*reader, GroupCmd::Gsub, id, &[0; 4], &read, now)
+                .unwrap();
+        }
+
+        // NET-365: the post answers its own circuit alone. Each reader takes
+        // an arrival, and its tick reads the record from the queue. Before
+        // this, the post made a copy of the record for each reader.
+        let (replies, _) = relay
+            .handle_at(CIRCUIT, GroupCmd::Gpost, id, &record(1), &write, now)
+            .unwrap();
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].circuit, CIRCUIT);
+
+        let arrivals = relay.service.take_arrivals();
+        let circuits: Vec<CircuitKey> = arrivals.iter().map(|arrival| arrival.circuit).collect();
+        assert_eq!(circuits, readers);
+        assert!(arrivals
+            .iter()
+            .all(|arrival| arrival.queue_id == id && arrival.seq == 1));
+
+        let mut place = arrivals[0].place();
+        let (records, ended) = relay.service.drain_step(&mut place, 1, &mut relay.rng);
+        assert!(ended);
+
+        let (gmsg, _) = Command::parse(&records[0].encoded, records[0].bucket).unwrap();
+        assert_eq!(gmsg.cmd, Cmd::Group(GroupCmd::Gmsg));
+        assert_eq!(
+            split_gmsg(gmsg.payload, Bucket::B0).unwrap(),
+            (1, &record(1)[..])
+        );
     }
 
     #[test]

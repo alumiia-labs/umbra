@@ -9,7 +9,7 @@
 
 use alloc::vec::Vec;
 
-use hkdf::SimpleHkdf;
+use hkdf::Hkdf;
 use rand_core::CryptoRng;
 use sha3::Sha3_256;
 use x25519_dalek::PublicKey;
@@ -42,7 +42,7 @@ fn key_of(
     }
 
     let salt = [ephemeral.as_slice(), recipient].concat();
-    let hkdf = SimpleHkdf::<Sha3_256>::new(Some(&salt), shared);
+    let hkdf = Hkdf::<Sha3_256>::new(Some(&salt), shared);
     let mut key = Secret::<32>::zeroed();
     hkdf.expand(label, key.expose_mut())
         .map_err(|_| Error::Length)?;

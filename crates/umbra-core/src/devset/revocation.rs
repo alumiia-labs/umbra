@@ -15,9 +15,6 @@ pub enum Step {
     RatchetEveryOwnedChannel,
     /// Rotate every queue the revoked device knew, with no `DEL` (2c).
     RotateQueuesKnownBy(DeviceId),
-    /// Derive the next sync channel seed from the seed update of the
-    /// signer (2d).
-    ApplySeedUpdate,
     /// Start the group re-key of Part 11 §11.12 for each group (2e,
     /// `DEV-262`).
     RekeyEveryGroup,
@@ -29,7 +26,7 @@ pub enum Step {
 }
 
 /// The steps for an applied epoch, given the epoch before it. An epoch
-/// with no new tombstone gives no step (`DEV-254`).
+/// with no new tombstone gives no step.
 pub fn steps(previous: &Roster<'_>, applied: &Roster<'_>) -> Vec<Step> {
     let new: Vec<DeviceId> = applied
         .revoked
@@ -49,7 +46,6 @@ pub fn steps(previous: &Roster<'_>, applied: &Roster<'_>) -> Vec<Step> {
     for device in &new {
         out.push(Step::RotateQueuesKnownBy(*device));
     }
-    out.push(Step::ApplySeedUpdate);
     out.push(Step::RekeyEveryGroup);
     for device in &new {
         out.push(Step::ShowDeletionsFrom(*device));
@@ -96,7 +92,7 @@ mod tests {
     use alloc::vec;
 
     #[test]
-    fn a_new_tombstone_gives_the_seven_steps_and_none_otherwise() {
+    fn a_new_tombstone_gives_the_six_steps_and_none_otherwise() {
         let kem = [0u8; 1_184];
         let pk = [0u8; 1_952];
         let sig = [0u8; 3_309];
@@ -117,9 +113,9 @@ mod tests {
         };
 
         let steps = steps(&before, &after);
-        assert_eq!(steps.len(), 7);
+        assert_eq!(steps.len(), 6);
         assert_eq!(steps[0], Step::DeleteSyncChannels([2; 16]));
-        assert_eq!(steps[6], Step::ClaimSubjectsOf([2; 16]));
+        assert_eq!(steps[5], Step::ClaimSubjectsOf([2; 16]));
         assert!(super::steps(&after, &after).is_empty());
         assert_eq!(RESET_STEPS[1], ResetStep::PublishGenesis);
     }

@@ -1,5 +1,8 @@
 The relay {{ .Values.relay.name }} starts{{ with .Values.node }} on the node {{ . }}{{ end }}.
 
+A pod in ImagePullBackOff has no published image of this version:
+deploy/relay/README.md, "The image on Kubernetes", gives the build.
+
 1. Read its log until it signed its descriptor:
 
      kubectl logs -f deploy/{{ .Release.Name }}

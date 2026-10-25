@@ -68,6 +68,18 @@ const ACCEPT_RETRY: Duration = Duration::from_millis(50);
 /// flood after a restart then took the places of the devices that had
 /// taken pushes for weeks.
 pub const REGISTRATIONS_MAX: usize = 1 << 20;
+/// The timer registrations of Periodic mode that the NDR holds at most,
+/// a part of `REGISTRATIONS_MAX` (`NTF-150`). The tick of a timer takes a
+/// push to a token that the request names in the clear, thus a party with
+/// a few real tokens marks a timer of its own with no `k_tok`. This bound
+/// keeps such timers out of the places of the handle groups. A first
+/// `NTIMER` above it takes the place of the oldest timer that never took a
+/// tick, and the NDR refuses it when each timer took one.
+pub const TIMERS_MAX: usize = REGISTRATIONS_MAX / 4;
+/// The ticks in a row whose token FCM names not valid, after which the
+/// timer leaves (`NTF-154`). A token that a party made up thus costs the
+/// NDR a few posts, and not one in each interval for `NDR_REG_TTL`.
+const TICK_INVALID_MAX: u8 = 3;
 /// The new handles that the NDR registers in one minute, over all OHTTP
 /// relays. At this rate a flood needs more than 14 hours to reach
 /// `REGISTRATIONS_MAX`, which is time for an operator to see the count
@@ -130,6 +142,12 @@ struct Guard {
     born: BTreeMap<[u8; HANDLE_LEN], (u64, bool)>,
     /// The handles that took no push, the oldest registration first.
     unpushed: BTreeSet<(u64, [u8; HANDLE_LEN])>,
+    /// The handles of the timers, and those that took no tick, the oldest
+    /// registration first.
+    timers: BTreeSet<[u8; HANDLE_LEN]>,
+    unpushed_timers: BTreeSet<(u64, [u8; HANDLE_LEN])>,
+    /// The ticks in a row of each timer whose token FCM named not valid.
+    invalid_ticks: BTreeMap<[u8; HANDLE_LEN], u8>,
     /// The window of the clock, and the pushes of each handle inside it.
     window: u64,
     pushed: BTreeMap<[u8; HANDLE_LEN], usize>,
@@ -191,28 +209,54 @@ impl Guard {
             .find(|held| held != handle)
     }
 
+    /// The oldest timer that took no tick, other than `handle`.
+    fn oldest_unpushed_timer(&self, handle: &[u8; HANDLE_LEN]) -> Option<[u8; HANDLE_LEN]> {
+        self.unpushed_timers
+            .iter()
+            .map(|(_, held)| *held)
+            .find(|held| held != handle)
+    }
+
+    /// Whether the NDR holds `handle`, and whether as a timer.
+    fn kind_of(&self, handle: &[u8; HANDLE_LEN]) -> Option<bool> {
+        self.born
+            .contains_key(handle)
+            .then(|| self.timers.contains(handle))
+    }
+
     /// The handle took a push.
     fn pushed(&mut self, handle: &[u8; HANDLE_LEN]) {
         if let Some((at, pushed)) = self.born.get_mut(handle) {
             *pushed = true;
             self.unpushed.remove(&(*at, *handle));
+            self.unpushed_timers.remove(&(*at, *handle));
         }
     }
 
-    /// Takes the time of a registration, new or moved.
-    fn registered(&mut self, handle: [u8; HANDLE_LEN], at: u64) {
+    /// Takes the time and the kind of a registration, new or moved.
+    fn registered(&mut self, handle: [u8; HANDLE_LEN], at: u64, timer: bool) {
         let pushed = match self.born.insert(handle, (at, false)) {
             Some((before, pushed)) => {
                 self.unpushed.remove(&(before, handle));
+                self.unpushed_timers.remove(&(before, handle));
                 pushed
             }
             None => false,
         };
+        if timer {
+            self.timers.insert(handle);
+        } else {
+            self.timers.remove(&handle);
+        }
+        self.invalid_ticks.remove(&handle);
 
         if pushed {
             self.born.insert(handle, (at, true));
         } else {
             self.unpushed.insert((at, handle));
+            if timer {
+                self.unpushed_timers.insert((at, handle));
+            }
         }
     }
 
@@ -220,7 +264,18 @@ impl Guard {
     fn unregistered(&mut self, handle: &[u8; HANDLE_LEN]) {
         if let Some((at, _)) = self.born.remove(handle) {
             self.unpushed.remove(&(at, *handle));
+            self.unpushed_timers.remove(&(at, *handle));
         }
+        self.timers.remove(handle);
+        self.invalid_ticks.remove(handle);
+    }
+
+    /// FCM named the token of a tick not valid. The result is whether the
+    /// timer reached `TICK_INVALID_MAX` ticks in a row.
+    fn tick_invalid(&mut self, handle: [u8; HANDLE_LEN]) -> bool {
+        let count = self.invalid_ticks.entry(handle).or_insert(0);
+        *count = count.saturating_add(1);
+        *count >= TICK_INVALID_MAX
     }
 
     /// Whether one more push of `handle` goes to the provider at `now`.
@@ -253,7 +308,7 @@ impl Guard {
                 NdrChange::Registered { handle, held } => {
                     self.moves = self.moves.saturating_add(1);
                     self.moved.insert(*handle, (self.moves, now));
-                    self.registered(*handle, held.registered_at);
+                    self.registered(*handle, held.registered_at, held.timer);
                 }
                 NdrChange::Unregistered { handle } => self.unregistered(handle),
                 NdrChange::Pushed { handle } => self.pushed(handle),
@@ -471,6 +526,10 @@ const SWEEP_EVERY: Duration = Duration::from_secs(3_600);
 /// How often the clock of Periodic mode takes the ticks that came due
 /// (`NTF-150`). A tick leaves at most this late after its phase.
 const CLOCK_STEP: Duration = Duration::from_secs(5);
+/// The latest that a tick leaves after its phase, in seconds. A tick
+/// whose time passed longer ago goes nowhere: the NDR did not run then, as
+/// at a suspend of its host or a step of its clock (`NTF-150`).
+const TICK_LATE_MAX: u64 = 60;
 /// The ticks at the provider at once. One million timers make about 560
 /// ticks in each second, and a post takes a fraction of a second.
 const TICKS_AT_ONCE: usize = 256;
@@ -486,8 +545,9 @@ struct State {
     ndr: Ndr,
     store: Box<dyn NdrStore>,
     guard: Guard,
-    /// The registrations that the NDR holds at most.
+    /// The registrations that the NDR holds at most, and the timers.
     registrations_max: usize,
+    timers_max: usize,
     /// The new handles of one minute, over all OHTTP relays and from one.
     new_handles_max: (u32, u32),
     /// A commit failed: the registrations in memory ran ahead of the store,
@@ -502,6 +562,7 @@ impl State {
             store,
             guard: Guard::default(),
             registrations_max: REGISTRATIONS_MAX,
+            timers_max: TIMERS_MAX,
             new_handles_max: (NEW_HANDLES_PER_MINUTE, NEW_HANDLES_PER_RELAY),
             broken: false,
         }
@@ -512,7 +573,7 @@ impl State {
     fn restored(held: Vec<([u8; HANDLE_LEN], Held)>, store: Box<dyn NdrStore>) -> Self {
         let mut guard = Guard::default();
         for (handle, registration) in &held {
-            guard.registered(*handle, registration.registered_at);
+            guard.registered(*handle, registration.registered_at, registration.timer);
             if registration.pushed {
                 guard.pushed(handle);
             }
@@ -568,12 +629,11 @@ impl State {
             return None;
         }
 
-        let (handle, registers) = match NdrRequest::parse(plain) {
-            Ok(NdrRequest::Register { handle, .. } | NdrRequest::Timer { handle, .. }) => {
-                (handle, true)
-            }
+        let (handle, registers, is_timer) = match NdrRequest::parse(plain) {
+            Ok(NdrRequest::Register { handle, .. }) => (handle, true, false),
+            Ok(NdrRequest::Timer { handle, .. }) => (handle, true, true),
             Ok(NdrRequest::Unregister { handle, .. } | NdrRequest::Push { handle, .. }) => {
-                (handle, false)
+                (handle, false, false)
             }
             Err(_) => return Some((NdrResponse::Refused, None)),
         };
@@ -584,6 +644,17 @@ impl State {
             return Some((NdrResponse::Refused, None));
         }
 
+        // A held handle keeps its kind. A handle group that moved to a
+        // timer would hold a place past `TIMERS_MAX`.
+        if registers
+            && self
+                .guard
+                .kind_of(&handle)
+                .is_some_and(|timer| timer != is_timer)
+        {
+            return Some((NdrResponse::Refused, None));
+        }
+
         let before = self.ndr.len();
         let (answer, delivery) = self.ndr.handle(plain, now);
 
@@ -591,6 +662,12 @@ impl State {
             // The handle is new. It stays when its minute admits it and the
             // NDR holds room, or a place that no push ever used.
             let mut stays = self.guard.admits_handle(relay, self.new_handles_max, now);
+            if stays && is_timer && self.ndr.timers() > self.timers_max {
+                match self.guard.oldest_unpushed_timer(&handle) {
+                    Some(oldest) => self.ndr.gone(oldest),
+                    None => stays = false,
+                }
+            }
             if stays && self.ndr.len() > self.registrations_max {
                 match self.guard.oldest_unpushed(&handle) {
                     Some(oldest) => self.ndr.gone(oldest),
@@ -615,13 +692,6 @@ impl State {
             if !self.guard.admits_push(delivery.handle, now) {
                 return Some((NdrResponse::Refused, None));
             }
-
-            // The store keeps the first push of a registration, thus a
-            // restart keeps its place at the bound.
-            if self.ndr.took_push(&delivery.handle) {
-                let pushed = self.ndr.take_changes();
-                self.commit(&pushed, now)?;
-            }
         }
 
         // A push that goes to the provider and a request that changed a
@@ -642,14 +712,29 @@ impl State {
         (self.ndr.ticks(from, to), self.guard.moves)
     }
 
-    /// A tick went to the provider. The store keeps the first one of a
-    /// registration, thus a restart keeps its place at the bound.
-    fn ticked(&mut self, handle: [u8; HANDLE_LEN]) -> Option<()> {
+    /// The provider took a push or a tick of `handle`. The store keeps the
+    /// first one of a registration, thus a restart keeps its place at the
+    /// bound. Before this, a push marked its place when its token opened,
+    /// and a party marked the place of a token that it made up with one
+    /// push of its own.
+    fn took_push(&mut self, handle: [u8; HANDLE_LEN]) -> Option<()> {
+        self.guard.invalid_ticks.remove(&handle);
         if self.broken || !self.ndr.took_push(&handle) {
             return Some(());
         }
         let pushed = self.ndr.take_changes();
         self.commit(&pushed, unix_now())
+    }
+
+    /// The provider named the token of a tick of `handle` not valid, and
+    /// the count of the `NREG` requests was `mark` when the tick started.
+    /// The timer leaves at `TICK_INVALID_MAX` such ticks in a row, as at
+    /// a `gone` (`NTF-154`). The result is whether it left.
+    fn tick_invalid(&mut self, handle: [u8; HANDLE_LEN], mark: u64) -> Option<bool> {
+        if !self.guard.tick_invalid(handle) {
+            return Some(false);
+        }
+        self.provider_gone(handle, mark)
     }
 
     /// The provider named the target of a push gone (`NTF-125`). The count
@@ -687,6 +772,19 @@ async fn deliver(delivery: &Delivery, fcm: Option<&Fcm>) -> Sent {
     }
 }
 
+/// The span of the ticks that one step of the clock takes at `now`, after
+/// a step that took them up to `last`, and the end of the span. A clock
+/// that went back takes no span until it passes `last` again, thus no tick
+/// goes twice. A span starts at most `TICK_LATE_MAX` before `now`, thus a
+/// clock that jumped ahead, or a host that slept, sends no burst. Before
+/// this, a span of one interval or more took each timer at once.
+fn clock_span(last: u64, now: u64) -> (u64, u64) {
+    if now <= last {
+        return (last, last);
+    }
+    (last.max(now.saturating_sub(TICK_LATE_MAX)), now)
+}
+
 /// Runs the clock of Periodic mode: each tick that came due goes to the
 /// provider, at most `TICKS_AT_ONCE` of them at once (`NTF-150`). A tick
 /// whose time passed while the server was down goes nowhere, thus a restart
@@ -697,12 +795,12 @@ async fn run_clock(state: Arc<Mutex<State>>, fcm: Option<Arc<Fcm>>) {
 
     loop {
         tokio::time::sleep(CLOCK_STEP).await;
-        let now = unix_now();
+        let (from, to) = clock_span(last, unix_now());
         let (due, mark) = match state.lock() {
-            Ok(state) => state.ticks(last, now),
+            Ok(state) => state.ticks(from, to),
             Err(_) => (Vec::new(), 0),
         };
-        last = now;
+        last = to;
 
         for delivery in due {
             let Ok(permit) = held.clone().acquire_owned().await else {
@@ -719,10 +817,11 @@ async fn run_clock(state: Arc<Mutex<State>>, fcm: Option<Arc<Fcm>>) {
                     return;
                 };
                 match sent {
-                    Ok(Sent::Taken) => drop(state.ticked(delivery.handle)),
+                    Ok(Sent::Taken) => drop(state.took_push(delivery.handle)),
                     // NTF-125: the provider named the token gone, thus the
                     // timer ends, unless a move gave it another token.
                     Ok(Sent::Gone) => drop(state.provider_gone(delivery.handle, mark)),
+                    Ok(Sent::Invalid) => drop(state.tick_invalid(delivery.handle, mark)),
                     // A tick that did not go waits for the next interval.
                     Ok(Sent::Refused) | Err(_) => {}
                 }
@@ -788,9 +887,13 @@ async fn serve(
                     NdrResponse::Refused
                 };
             }
-            Sent::Taken => {}
+            Sent::Taken => {
+                if let Ok(mut state) = state.lock() {
+                    let _ = state.took_push(delivery.handle);
+                }
+            }
             // A push that did not go, and the relay may try again.
-            Sent::Refused => answer = NdrResponse::Refused,
+            Sent::Refused | Sent::Invalid => answer = NdrResponse::Refused,
         }
     }
 
@@ -1118,8 +1221,13 @@ mod tests {
         let (_, third, third_push, _) = device(3);
         let (_, fourth, fourth_push, _) = device(4);
 
+        // The provider takes each push that goes, as `serve` reads it.
         let taken = |state: &mut State, digest: u8, plain: &[u8], now: u64| {
-            state.request_from([digest; 32], plain, now).unwrap().0
+            let (answer, delivery) = state.request_from([digest; 32], plain, now).unwrap();
+            if let Some(delivery) = delivery {
+                state.took_push(delivery.handle).unwrap();
+            }
+            answer
         };
 
         assert_eq!(taken(&mut state, 1, &first, NOW), NdrResponse::Taken);
@@ -1348,7 +1456,142 @@ mod tests {
         assert_eq!(state.ticks(at - 1, at).0.len(), 1);
         assert!(state.ticks(at, at + 1).0.is_empty());
 
-        assert_eq!(state.ticked([1; HANDLE_LEN]), Some(()));
+        assert_eq!(state.took_push([1; HANDLE_LEN]), Some(()));
         assert!(state.guard.oldest_unpushed(&[0; HANDLE_LEN]).is_none());
+    }
+
+    /// The `NTIMER` of `handle` under `token`.
+    fn timer_of(handle: [u8; HANDLE_LEN], token: &[u8]) -> [u8; NDR_REQUEST_LEN] {
+        let mut plain = [0u8; PUSH_TOKEN_MAX];
+        let n = encode_token(TokenCarrier::Fcm, token, &mut plain).unwrap();
+        encode(&NdrRequest::Timer {
+            handle,
+            token: &plain[..n],
+            removal_hash: sha3_256(&[&[9u8; 32]]),
+            prior: Secret::new([9; 32]),
+        })
+    }
+
+    #[test]
+    fn a_push_marks_its_place_only_when_the_provider_took_it() {
+        let mut state = state();
+        let (handle, register, push, _) = device(1);
+        state.request_from([1; 32], &register, NOW).unwrap();
+
+        // The token opened, and the provider did not take the push yet: a
+        // token that a party made up thus marks no place.
+        assert!(state.request_from([2; 32], &push, NOW).unwrap().1.is_some());
+        assert_eq!(state.guard.oldest_unpushed(&[0; HANDLE_LEN]), Some(handle));
+        assert!(!state.store.load().unwrap()[0].1.pushed);
+
+        assert_eq!(state.took_push(handle), Some(()));
+        assert!(state.guard.oldest_unpushed(&[0; HANDLE_LEN]).is_none());
+        assert!(state.store.load().unwrap()[0].1.pushed);
+    }
+
+    #[test]
+    fn the_timers_take_a_part_of_the_places_and_a_handle_keeps_its_kind() {
+        let mut state = state();
+        state.timers_max = 1;
+        let mut digest = 0u8;
+        let mut taken = |state: &mut State, plain: &[u8]| {
+            digest += 1;
+            state.request_from([digest; 32], plain, NOW).unwrap().0
+        };
+
+        // A second timer takes the place of the first one, which took no
+        // tick. A timer that took a tick keeps its place, and the NDR
+        // refuses one more.
+        let first = [1; HANDLE_LEN];
+        let second = [2; HANDLE_LEN];
+        assert_eq!(
+            taken(&mut state, &timer_of(first, b"a")),
+            NdrResponse::Taken
+        );
+        assert_eq!(
+            taken(&mut state, &timer_of(second, b"b")),
+            NdrResponse::Taken
+        );
+        assert_eq!(state.ndr.timers(), 1);
+        assert_eq!(state.store.load().unwrap()[0].0, second);
+        state.took_push(second).unwrap();
+        assert_eq!(
+            taken(&mut state, &timer_of([3; HANDLE_LEN], b"c")),
+            NdrResponse::Refused
+        );
+        assert_eq!(state.ndr.timers(), 1);
+
+        // The bound of the timers holds no place of a handle group.
+        let (group, register, _, _) = device(4);
+        assert_eq!(taken(&mut state, &register), NdrResponse::Taken);
+        assert_eq!(state.ndr.len(), 2);
+
+        // A held handle moves to no other kind.
+        assert_eq!(
+            taken(&mut state, &timer_of(group, b"d")),
+            NdrResponse::Refused
+        );
+        let as_group = encode(&NdrRequest::Register {
+            handle: second,
+            nonce: [4; 24],
+            ct_token: &[0; 40],
+            removal_hash: sha3_256(&[&[9u8; 32]]),
+            prior: Secret::new([9; 32]),
+        });
+        assert_eq!(taken(&mut state, &as_group), NdrResponse::Refused);
+        assert_eq!(state.ndr.timers(), 1);
+
+        // A move of the timer keeps its place.
+        assert_eq!(
+            taken(&mut state, &timer_of(second, b"f")),
+            NdrResponse::Taken
+        );
+    }
+
+    #[test]
+    fn a_timer_whose_token_is_not_valid_leaves_after_a_few_ticks() {
+        let mut state = state();
+        let handle = [1; HANDLE_LEN];
+        state
+            .request_from([1; 32], &timer_of(handle, b"made-up"), NOW)
+            .unwrap();
+
+        // A tick that the provider took sets the count back.
+        let mark = state.guard.moves;
+        assert_eq!(state.tick_invalid(handle, mark), Some(false));
+        assert_eq!(state.tick_invalid(handle, mark), Some(false));
+        state.took_push(handle).unwrap();
+        assert_eq!(state.tick_invalid(handle, mark), Some(false));
+        assert_eq!(state.tick_invalid(handle, mark), Some(false));
+        assert_eq!(state.ndr.timers(), 1);
+
+        // The third in a row ends the timer, in the NDR and in its store.
+        assert_eq!(state.tick_invalid(handle, mark), Some(true));
+        assert_eq!(state.ndr.timers(), 0);
+        assert!(state.store.load().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_clock_takes_each_tick_once_and_sends_no_burst_after_a_jump() {
+        // NTF-150: a step takes the span since the last one.
+        assert_eq!(clock_span(NOW, NOW + 5), (NOW, NOW + 5));
+
+        // A clock that went back takes nothing until it passes the last
+        // step again, thus no tick goes twice.
+        assert_eq!(clock_span(NOW, NOW - 3_600), (NOW, NOW));
+        assert_eq!(clock_span(NOW, NOW), (NOW, NOW));
+
+        // A jump ahead, or a host that slept, takes the last minute alone.
+        // Before this, a span of one interval took each timer at once.
+        let late = NOW + 2_400;
+        assert_eq!(clock_span(NOW, late), (late - TICK_LATE_MAX, late));
+
+        let mut state = state();
+        let handle = [1; HANDLE_LEN];
+        state
+            .request_from([1; 32], &timer_of(handle, b"a"), NOW)
+            .unwrap();
+        let (from, to) = clock_span(NOW, NOW + 10 * 1_800);
+        assert!(state.ticks(from, to).0.len() <= 1);
     }
 }

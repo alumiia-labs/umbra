@@ -213,9 +213,14 @@ private fun OpenApp() {
             is Screen.Search -> SearchScreen(top.scope, pop, push)
             else -> {
                 val chat = Core.chats.firstOrNull { it.conversation == top.contact }
-                // The list loads again after a lock or a new run.
+                // The list loads again after a lock or a new run. A contact
+                // that left the list takes each of its views with it, thus
+                // no view of it stays below the top.
                 if (chat == null) {
-                    LaunchedEffect(Unit) { pop() }
+                    LaunchedEffect(top) {
+                        val gone = top.contact
+                        stack = stack.filter { it.contact != gone }
+                    }
                 } else {
                     ContactView(top, chat, stack, pop, push) { stack = it }
                 }

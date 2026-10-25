@@ -117,3 +117,24 @@ impl core::fmt::Display for Error {
 }
 
 impl core::error::Error for Error {}
+
+#[cfg(test)]
+mod tests {
+    /// Part 14 §14.4: each state wipes itself at a drop only under the
+    /// `zeroize` feature of its crate. A direct edge of Cargo.toml turns that
+    /// feature on, and a removed edge fails this build. `poly1305` wipes in
+    /// its `Drop` with no marker trait, thus no bound covers it.
+    #[test]
+    fn each_key_and_hash_state_wipes_itself_at_a_drop() {
+        fn wipes_at_a_drop<T: zeroize::ZeroizeOnDrop>() {}
+
+        wipes_at_a_drop::<chacha20poly1305::ChaCha20Poly1305>();
+        wipes_at_a_drop::<chacha20poly1305::XChaCha20Poly1305>();
+        wipes_at_a_drop::<sha3::Sha3_256>();
+        wipes_at_a_drop::<sha3_v012::Sha3_512>();
+        wipes_at_a_drop::<shake::Shake256>();
+        wipes_at_a_drop::<sha2::Sha512>();
+        // The core of `Blake2b512`, which holds the chaining value.
+        wipes_at_a_drop::<blake2::Blake2bVarCore>();
+    }
+}

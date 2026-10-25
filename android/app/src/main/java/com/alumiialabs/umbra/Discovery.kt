@@ -193,6 +193,7 @@ fun PublicLinkScreen(id: List<Byte>, onBack: () -> Unit) {
     val context = LocalContext.current
     val link = Core.publicLinks.firstOrNull { it.id.toList() == id }
     var isRetiring by remember { mutableStateOf(false) }
+    var asksRetire by remember { mutableStateOf(false) }
 
     // A retired link leaves the list, and its view closes.
     LaunchedEffect(link == null) { if (link == null) onBack() }
@@ -221,13 +222,25 @@ fun PublicLinkScreen(id: List<Byte>, onBack: () -> Unit) {
             QuietButton(
                 stringResource(if (isRetiring) R.string.discovery_retiring else R.string.discovery_retire_link),
             ) {
-                if (!isRetiring) {
-                    isRetiring = true
-                    Core.retirePublicLink(link)
-                }
+                if (!isRetiring) asksRetire = true
             }
             LaunchedEffect(Core.directoryBusy) { if (!Core.directoryBusy) isRetiring = false }
             DirectoryState(stringResource(R.string.discovery_writing_link_end))
+        }
+
+        // A retired link does not come back, and a new link has a new address.
+        if (asksRetire) {
+            ActionSheet(
+                stringResource(R.string.discovery_retire_link_question),
+                listOf(
+                    RowEntry("xmark", stringResource(R.string.discovery_retire_link)) {
+                        isRetiring = true
+                        Core.retirePublicLink(link)
+                    },
+                ),
+                note = stringResource(R.string.discovery_retire_link_note),
+                onDismiss = { asksRetire = false },
+            )
         }
     }
 }
@@ -236,6 +249,7 @@ fun PublicLinkScreen(id: List<Byte>, onBack: () -> Unit) {
 fun HandleScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     var name by remember { mutableStateOf("") }
+    var asksRelease by remember { mutableStateOf(false) }
     val focus = LocalFocusManager.current
 
     LaunchedEffect(Unit) {
@@ -314,10 +328,22 @@ fun HandleScreen(onBack: () -> Unit) {
                 Spacer(Modifier.height(24.dp))
                 // Part 9 §9.9: a new key and a new rendezvous queue at one tap.
                 QuietButton(stringResource(R.string.discovery_reset_contact_requests)) { Core.rotateHandleKey() }
-                QuietButton(stringResource(R.string.discovery_release_handle)) { Core.releaseHandle() }
+                QuietButton(stringResource(R.string.discovery_release_handle)) { asksRelease = true }
                 DirectoryState(stringResource(R.string.discovery_writing_release))
             }
         }
+    }
+
+    // DIS-073, DIS-077: a released handle is free to another party after
+    // HANDLE_RESERVE.
+    val handle = Core.myHandle
+    if (asksRelease && handle != null) {
+        ActionSheet(
+            stringResource(R.string.discovery_release_handle_question, handle),
+            listOf(RowEntry("xmark", stringResource(R.string.discovery_release_handle)) { Core.releaseHandle() }),
+            note = stringResource(R.string.discovery_release_handle_note),
+            onDismiss = { asksRelease = false },
+        )
     }
 }
 

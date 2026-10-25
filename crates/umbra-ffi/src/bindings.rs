@@ -23,6 +23,7 @@ use umbra_core::{
     attach::{place::AttachmentRelay, transfer::Shape},
     directory::{
         bloc::BlocList,
+        descriptor::RelayEntry,
         manifest::{RelayManifest, RelaySet},
         path::{Candidate, INGRESS_PINS},
         root::{ClockState, Consensus, DirectoryKeySet},
@@ -239,8 +240,8 @@ impl MediaSource {
 
 /// The text of one render, held until the lock of the handle is free. A
 /// sink of the platform that runs under that lock stops each other call for
-/// its time. One that calls the handle again never returns (§14.6.1). Each
-/// part is zero bytes after its hand-over.
+/// its time. One that calls the handle again never returns (§14.6.1). A
+/// part that the sink did not take is zero bytes at its drop.
 #[derive(Default)]
 struct HeldText(Vec<Zeroizing<Vec<u16>>>);
 
@@ -253,8 +254,10 @@ impl Sink for HeldText {
 impl HeldText {
     /// Gives each part to the sink of the platform, in the order of the
     /// render. The caller holds no lock of the handle. A part moves out
-    /// whole, thus no second copy waits for a wipe. A fault of the sink
-    /// ends the hand-over, and each part after it is zero bytes at its drop.
+    /// whole, thus the core keeps no copy. UniFFI frees the moved part and
+    /// its own buffer, and the allocator overwrites each at its free
+    /// (`IMP-200`). A fault of the sink ends the hand-over, and each part
+    /// after it is zero bytes at its drop.
     fn give(self, sink: &dyn TextSink) -> Result<(), FfiError> {
         for mut part in self.0 {
             sink.put(core::mem::take(&mut *part))?;
@@ -726,6 +729,9 @@ pub struct Connection {
     /// For each circuit, whether two of its relays share an operator or a
     /// family under the bootstrap relaxation (Part 3 `NET-343`).
     pub one_operator: Vec<bool>,
+    /// For each circuit, whether two of its relays share a jurisdiction
+    /// bloc under a relaxation (Part 3 `NET-201`, `NET-350`).
+    pub one_bloc: Vec<bool>,
 }
 
 /// A network that a signed relay manifest gave.
@@ -785,6 +791,28 @@ fn endpoints_of(set: &RelaySet) -> Vec<RelayEndpoint> {
             class: Some(relay.candidate.class),
         })
         .collect()
+}
+
+/// The hosts of the ingress relays of `pins` that `entries` list, in the
+/// order of the dial of [`Handle::connect`]. After a dial that failed, the
+/// second pin is first.
+fn dial_order(pins: &[[u8; 32]], entries: &[RelayEntry<'_>], uses_second: bool) -> Vec<String> {
+    let mut hosts: Vec<String> = pins
+        .iter()
+        .filter_map(|pin| {
+            entries
+                .iter()
+                .find(|entry| entry.descriptor.relay_id == *pin)
+        })
+        .filter(|entry| entry.layer() == 1 && entry.descriptor.addr_v4 != [0; 4])
+        .take(INGRESS_PINS)
+        .map(|entry| entry.descriptor.host_str().to_owned())
+        .collect();
+    if uses_second && hosts.len() > 1 {
+        hosts.swap(0, 1);
+    }
+
+    hosts
 }
 
 /// The first line of a network descriptor. Version 1 holds three relay
@@ -958,6 +986,27 @@ fn read_facts(relay: &mut RelayEndpoint, facts: &[&str]) -> Result<(), FfiError>
 /// The facts of a relay of the set, for the selection of a chain. The
 /// operator is its own family, because a descriptor holds no family
 /// certificate.
+/// Whether two hops of one circuit share a relation that `shares` tests.
+fn any_pair(hops: &[Candidate], shares: fn(&Candidate, &Candidate) -> bool) -> bool {
+    hops.iter().enumerate().any(|(index, hop)| {
+        hops.iter()
+            .skip(index.saturating_add(1))
+            .any(|other| shares(hop, other))
+    })
+}
+
+/// Whether two hops of one circuit share an operator or a family, for the
+/// mark of the route view (Part 3 `NET-343`).
+fn shares_operator(hops: &[Candidate]) -> bool {
+    any_pair(hops, |hop, other| !hop.apart_operator(other))
+}
+
+/// Whether two hops of one circuit share a jurisdiction bloc, for the mark
+/// of the route view (Part 3 `NET-201`).
+fn shares_bloc(hops: &[Candidate]) -> bool {
+    any_pair(hops, |hop, other| hop.bloc == other.bloc)
+}
+
 pub(crate) fn relay_info(endpoint: &RelayEndpoint) -> Result<RelayInfo, FfiError> {
     let key = relay_static(endpoint)?;
     let operator =
@@ -1574,29 +1623,77 @@ impl DraftHandle {
     }
 }
 
+/// The first room of the file of a draft whose path names no size, as a
+/// pipe does. The room doubles at each step after it.
+const DRAFT_READ_ROOM: usize = 64 * 1024;
+
 /// Reads the file of a draft, and no byte past `max`, which is
 /// `DRAFT_FILE_MAX` (`ATT-022`). The size that a provider of the platform
 /// names can be absent or wrong, and the path can be a pipe with no end.
 /// Thus the bound holds at the read and not after it.
 fn read_draft_file(path: &str, max: usize) -> Result<Zeroizing<Vec<u8>>, FfiError> {
-    use std::io::Read as _;
     let file = std::fs::File::open(path).map_err(|_| FfiError::NotFound)?;
-    let bound = u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1);
-
-    // IMP-039: a buffer that grows frees each earlier copy of the file
-    // with no wipe. The named size sets the room first. A pipe names no
-    // size, and its buffer still grows.
     let named = file.metadata().map_or(0, |metadata| metadata.len());
-    let room = usize::try_from(named).unwrap_or(usize::MAX).min(max);
-    let mut plain = Zeroizing::new(Vec::with_capacity(room));
-    file.take(bound)
-        .read_to_end(&mut plain)
-        .map_err(|_| FfiError::NotFound)?;
-    if plain.len() > max {
-        return Err(FfiError::TooLong);
-    }
+    read_bounded(file, usize::try_from(named).unwrap_or(usize::MAX), max)
+}
 
-    Ok(plain)
+/// The read of [`read_draft_file`] from a source that names `named` bytes.
+///
+/// IMP-039: a buffer that grows in place frees each earlier copy of the
+/// file with no wipe. Thus a full buffer moves to a new one of twice its
+/// room, and the old one wipes itself at its drop. Each pipe of the
+/// platform names no size, and it takes this path.
+fn read_bounded(
+    mut source: impl std::io::Read,
+    named: usize,
+    max: usize,
+) -> Result<Zeroizing<Vec<u8>>, FfiError> {
+    // A byte past the bound shows a file that is too long, and a byte past
+    // the named size shows the end with no new room.
+    let bound = max.saturating_add(1);
+    let first = if named == 0 {
+        DRAFT_READ_ROOM
+    } else {
+        named.saturating_add(1)
+    };
+    // Each buffer takes its zeros one time, at its allocation. A zero fill
+    // of the free room at each read would cost the square of the size,
+    // because a pipe gives at most 64 KiB in one read.
+    let mut plain = Zeroizing::new(vec![0u8; first.min(bound)]);
+    let mut filled = 0usize;
+    loop {
+        if filled == plain.len() {
+            let room = plain
+                .len()
+                .saturating_mul(2)
+                .max(DRAFT_READ_ROOM)
+                .min(bound);
+            let mut grown = Zeroizing::new(vec![0u8; room]);
+            grown
+                .get_mut(..filled)
+                .ok_or(FfiError::Storage)?
+                .copy_from_slice(plain.get(..filled).ok_or(FfiError::Storage)?);
+            plain = grown;
+        }
+
+        let read = loop {
+            let free = plain.get_mut(filled..).ok_or(FfiError::Storage)?;
+            match source.read(free) {
+                Ok(read) => break read,
+                Err(fault) if fault.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return Err(FfiError::NotFound),
+            }
+        };
+        if read == 0 {
+            plain.truncate(filled);
+            return Ok(plain);
+        }
+
+        filled = filled.saturating_add(read);
+        if filled > max {
+            return Err(FfiError::TooLong);
+        }
+    }
 }
 
 /// The handle groups whose NDR call runs, behind a lock of its own. The
@@ -1628,6 +1725,14 @@ impl Drop for NdrFlight {
     fn drop(&mut self) {
         locked(&self.flights).remove(&self.handle);
     }
+}
+
+/// The node of the client whose chains a call names (`NET-310`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChainsOf {
+    Queues,
+    Groups,
+    Transfers,
 }
 
 struct Inner {
@@ -1662,6 +1767,16 @@ struct Inner {
     circuits: Vec<[[u8; 32]; 3]>,
     /// Whether an event tells the platform that the circuits changed.
     circuits_changed: bool,
+    /// The chains of the circuits of the group task and of the transfer
+    /// task, whose relays the chains of each other node put last
+    /// (`NET-310`).
+    group_chains: Vec<[[u8; 32]; 3]>,
+    transfer_chains: Vec<[[u8; 32]; 3]>,
+    /// The count of the starts of the group task and of the transfer task.
+    /// Each update names the start of its task, thus a task that a later
+    /// start replaced changes no state of the new one.
+    group_task: u64,
+    transfer_task: u64,
     /// This handle, for the task that brings the results of the transfers.
     me: Weak<Handle>,
     /// The runtime of the run, which also runs the transfer task.
@@ -2515,6 +2630,40 @@ impl Inner {
         // `resume_group_work` brings it back.
     }
 
+    /// The chains of the circuits of each node of the client but `own`,
+    /// which the chains of `own` put last (`NET-310`). A task that ended
+    /// holds no circuit.
+    fn other_chains(&self, own: ChainsOf) -> Vec<[[u8; 32]; 3]> {
+        let mut chains = Vec::new();
+        if own != ChainsOf::Queues {
+            chains.extend_from_slice(&self.circuits);
+        }
+        if own != ChainsOf::Groups && self.groups.is_some() {
+            chains.extend_from_slice(&self.group_chains);
+        }
+        if own != ChainsOf::Transfers && self.transfers.is_some() {
+            chains.extend_from_slice(&self.transfer_chains);
+        }
+        chains
+    }
+
+    /// Gives each node of the client the chains of the other nodes, after
+    /// a change of one of them (`NET-310`). The watch runs while the client
+    /// is locked, when no other node runs, thus it takes none.
+    fn share_chains(&self) {
+        if let Some(running) = &self.bridge {
+            let _ = running.set_other_chains(self.other_chains(ChainsOf::Queues));
+        }
+        if let Some(sender) = &self.groups {
+            let _ = sender.send(GroupCommand::Chains(self.other_chains(ChainsOf::Groups)));
+        }
+        if let Some(sender) = &self.transfers {
+            let _ = sender.send(TransferCommand::Chains(
+                self.other_chains(ChainsOf::Transfers),
+            ));
+        }
+    }
+
     fn start_groups(&mut self) -> Option<mpsc::UnboundedSender<GroupCommand>> {
         let spawner = self.spawner.clone()?;
         let guard_id = self.guard?;
@@ -2545,10 +2694,14 @@ impl Inner {
         let mut node =
             ClientNode::for_groups(ingress, candidates, self.client.root_identity().ok()?);
         node.set_bootstrap(self.bootstrap);
+        self.group_chains.clear();
+        node.set_other_chains(self.other_chains(ChainsOf::Groups));
 
         let (commands, task_commands) = mpsc::unbounded_channel();
         let (task_updates, mut updates) = mpsc::unbounded_channel();
         spawner.spawn(run_groups(node, dial, tls, task_commands, task_updates));
+        self.group_task = self.group_task.wrapping_add(1);
+        let task = self.group_task;
 
         let me = self.me.clone();
         spawner.spawn(async move {
@@ -2556,7 +2709,7 @@ impl Inner {
                 let Some(handle) = me.upgrade() else {
                     break;
                 };
-                handle.on_group_update(update);
+                handle.on_group_update(task, update);
             }
         });
 
@@ -2600,7 +2753,9 @@ impl Inner {
                 continue;
             }
             let Ok(descriptor) = umbra_wire::descriptor::FileDescriptor::parse(&descriptor) else {
-                let _ = self.client.recovery_failed(conversation, &mut OsRng);
+                let _ = self
+                    .client
+                    .recovery_failed(conversation, unix_now_ms(), &mut OsRng);
                 continue;
             };
 
@@ -2898,13 +3053,40 @@ impl Inner {
                 self.pump_groups();
             }
             GroupUpdate::Faults(_) => {}
+            GroupUpdate::Chains(chains) => {
+                self.group_chains = chains;
+                self.share_chains();
+            }
             GroupUpdate::Ended => {
                 self.groups = None;
                 self.group_tags.clear();
                 self.group_sent.clear();
                 self.group_reading.clear();
                 self.group_refusals.clear();
+                self.share_chains();
             }
+        }
+    }
+
+    /// Sends the `NKEY` of each queue of the run with no binding now, and
+    /// not at the next report of the queues: a change of the mode changes
+    /// the handle of each binding (Part 8 `NTF-143`).
+    fn bind_run_queues(&mut self) {
+        let Inner {
+            client,
+            bridge,
+            run_queues,
+            ..
+        } = self;
+        if let (Ok(unbound), Some(running)) = (
+            client.queues_to_bind(run_queues, unix_now(), &mut OsRng),
+            bridge.as_ref(),
+        ) {
+            let sent: Vec<[u8; 32]> = unbound
+                .into_iter()
+                .filter(|recipient_id| send_nkey(client, running, *recipient_id))
+                .collect();
+            client.binds_sent(&sent);
         }
     }
 
@@ -3201,6 +3383,10 @@ impl Inner {
                 let message = *message;
                 self.transfer_tags.remove(&tag);
                 self.file_progress.remove(&message);
+
+                // ATT-204: the stop gave no end of the upload, and the next
+                // run sends the file under new chunks.
+                let _ = self.client.upload_left(tag, &mut OsRng);
                 continue;
             }
             self.end_transfer(TransferUpdate::Failed { tag });
@@ -3311,6 +3497,8 @@ impl Inner {
         let mut node =
             ClientNode::for_transfers(ingress, candidates, self.client.root_identity().ok()?);
         node.set_bootstrap(self.bootstrap);
+        self.transfer_chains.clear();
+        node.set_other_chains(self.other_chains(ChainsOf::Transfers));
 
         let (commands, task_commands) = mpsc::unbounded_channel();
         let (task_updates, mut updates) = mpsc::unbounded_channel();
@@ -3320,9 +3508,12 @@ impl Inner {
             tls,
             holders,
             self.hold_offs.clone(),
+            self.client.open_uploads(),
             task_commands,
             task_updates,
         ));
+        self.transfer_task = self.transfer_task.wrapping_add(1);
+        let task = self.transfer_task;
 
         let me = self.me.clone();
         spawner.spawn(async move {
@@ -3330,7 +3521,7 @@ impl Inner {
                 let Some(handle) = me.upgrade() else {
                     break;
                 };
-                handle.on_transfer_update(update);
+                handle.on_transfer_update(task, update);
             }
         });
 
@@ -3353,6 +3544,26 @@ impl Inner {
             return;
         }
 
+        // NET-310: the chains of the transfer task go to the other nodes.
+        if let TransferUpdate::Chains(chains) = update {
+            self.transfer_chains = chains;
+            self.share_chains();
+            return;
+        }
+
+        // ATT-204: an upload that ended with no result left chunks at their
+        // relays, and the store keeps each credential until the erase. The
+        // work of an upload that ended well keeps what it needs.
+        match &update {
+            TransferUpdate::Failed { tag }
+            | TransferUpdate::Interrupted { tag }
+            | TransferUpdate::Gone { tag } => {
+                let _ = self.client.upload_left(*tag, &mut OsRng);
+            }
+            TransferUpdate::Uploaded { tag, .. } => self.client.upload_named(*tag),
+            _ => {}
+        }
+
         crate::devlog::line(match &update {
             TransferUpdate::Progress { tag, done, total } => {
                 format!("transfer {tag}: {done} of {total}")
@@ -3364,7 +3575,9 @@ impl Inner {
             TransferUpdate::Failed { tag } => format!("transfer {tag}: failed"),
             TransferUpdate::Interrupted { tag } => format!("transfer {tag}: interrupted"),
             TransferUpdate::Gone { tag } => format!("transfer {tag}: gone"),
-            TransferUpdate::Faults(_) | TransferUpdate::Erased { .. } => return,
+            TransferUpdate::Faults(_)
+            | TransferUpdate::Erased { .. }
+            | TransferUpdate::Chains(_) => return,
         });
 
         // NET-320: a file whose run ended goes again in the next run, from
@@ -3613,6 +3826,11 @@ impl Inner {
                             .is_ok();
                     }
                 }
+                // ATT-204: the work of the upload ended with its run, and no
+                // record names the chunks.
+                None => {
+                    let _ = client.keep_abandoned(&uploaded.credentials, &mut OsRng);
+                }
                 _ => {}
             },
             TransferUpdate::Downloaded { tag, plain } => match transfer_tags.remove(&tag) {
@@ -3673,7 +3891,8 @@ impl Inner {
             TransferUpdate::Gone { .. }
             | TransferUpdate::Interrupted { .. }
             | TransferUpdate::Faults(_)
-            | TransferUpdate::Erased { .. } => {}
+            | TransferUpdate::Erased { .. }
+            | TransferUpdate::Chains(_) => {}
             TransferUpdate::Failed { tag } => match transfer_tags.remove(&tag) {
                 Some(TransferWork::RestoreRoot { .. } | TransferWork::RestoreObject(_)) => {
                     restore_step = Some(RestoreStep::Failed);
@@ -3705,9 +3924,9 @@ impl Inner {
                 Some(TransferWork::CatchUpIn(channel)) => {
                     let _ = client.catch_up_failed(channel);
                 }
-                // The gap asks again later.
+                // GRP-433: the recovery asks again after its wait.
                 Some(TransferWork::RecoveryFetch(conversation)) => {
-                    let _ = client.recovery_failed(conversation, &mut OsRng);
+                    let _ = client.recovery_failed(conversation, unix_now_ms(), &mut OsRng);
                 }
                 // A chunk that did not move leaves the epoch missing, and
                 // the member asks for it (§11.4.3).
@@ -4475,6 +4694,10 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             relays: Vec::new(),
             circuits: Vec::new(),
             circuits_changed: false,
+            group_chains: Vec::new(),
+            transfer_chains: Vec::new(),
+            group_task: 0,
+            transfer_task: 0,
             me: Weak::new(),
             spawner: None,
             root_ca_path: None,
@@ -4713,24 +4936,43 @@ impl Persist for HandleStore {
 
 impl Handle {
     /// A task of the runtime gives one update of the network to the client.
-    fn on_transfer_update(&self, update: TransferUpdate) {
-        let is_progress = matches!(update, TransferUpdate::Progress { .. });
+    /// `task` names the start of the task.
+    fn on_transfer_update(&self, task: u64, update: TransferUpdate) {
+        let brings_none = matches!(
+            update,
+            TransferUpdate::Progress { .. } | TransferUpdate::Chains(_)
+        );
         let mut inner = locked(&self.inner);
+
+        // NET-310: a task that a later start replaced holds no circuit of
+        // the client. Each other update of it names work of its own.
+        if inner.transfer_task != task && matches!(update, TransferUpdate::Chains(_)) {
+            return;
+        }
+
         inner.end_transfer(update);
 
         // A snapshot that arrived brought a group with it, and that group
-        // takes its subscription now. A progress brings none, and one file
-        // gives hundreds of them: the pump for each one held the end of an
-        // upload back for minutes.
-        if !is_progress {
+        // takes its subscription now. A progress and a change of the chains
+        // bring none, and one file gives hundreds of progresses: the pump
+        // for each one held the end of an upload back for minutes.
+        if !brings_none {
             inner.pump_groups();
         }
         drop(inner);
         self.changed.notify_all();
     }
 
-    fn on_group_update(&self, update: GroupUpdate) {
+    fn on_group_update(&self, task: u64, update: GroupUpdate) {
         let mut inner = locked(&self.inner);
+
+        // NET-310: a task that a later start replaced holds no circuit of
+        // the client, and its end ends no task that runs.
+        let is_replaced = inner.group_task != task;
+        if is_replaced && matches!(update, GroupUpdate::Chains(_) | GroupUpdate::Ended) {
+            return;
+        }
+
         inner.end_group(update);
 
         // A record of a group with a descriptor asks for its file.
@@ -4775,6 +5017,7 @@ impl Handle {
 
         let ended = matches!(update, Update::Offline(_));
         let is_tick = matches!(update, Update::Tick);
+        let chains_moved = matches!(update, Update::Circuits(_));
         match &update {
             Update::Circuits(chains) => {
                 circuits.clone_from(chains);
@@ -5032,6 +5275,12 @@ impl Handle {
             inner.group_reading.clear();
         }
 
+        // NET-310: the chains of the group task and of the transfer task
+        // put the relays of these circuits last.
+        if chains_moved {
+            inner.share_chains();
+        }
+
         // A record with a descriptor asks for its file.
         inner.take_link_events();
         inner.pump_transfers();
@@ -5164,6 +5413,7 @@ impl Handle {
         // A new token goes to the NDR at once, whatever the earlier calls.
         inner.ndr_retry.clear();
         inner.pump_ndr();
+        inner.bind_run_queues();
         Ok(())
     }
 
@@ -5241,7 +5491,9 @@ impl Handle {
     /// its keystore. The caller overwrites the bytes after the seal.
     pub fn wake_table(&self) -> Result<Vec<u8>, FfiError> {
         let mut table = locked(&self.inner).client.wake_table()?;
-        // The bytes move out whole, thus no second copy waits for a wipe.
+        // The bytes move out whole, thus the core keeps no copy. UniFFI
+        // frees them, and the allocator overwrites them at the free
+        // (`IMP-200`).
         Ok(core::mem::take(&mut *table))
     }
 
@@ -5251,25 +5503,7 @@ impl Handle {
         let mut inner = locked(&self.inner);
         inner.client.set_watch(on, &mut OsRng)?;
         inner.client.wake_changed();
-
-        // A run that holds its queues binds them now, and not at its next
-        // report of them.
-        let Inner {
-            client,
-            bridge,
-            run_queues,
-            ..
-        } = &mut *inner;
-        if let (Ok(unbound), Some(running)) = (
-            client.queues_to_bind(run_queues, unix_now(), &mut OsRng),
-            bridge.as_ref(),
-        ) {
-            let sent: Vec<[u8; 32]> = unbound
-                .into_iter()
-                .filter(|recipient_id| send_nkey(client, running, *recipient_id))
-                .collect();
-            client.binds_sent(&sent);
-        }
+        inner.bind_run_queues();
         Ok(())
     }
 
@@ -5294,12 +5528,17 @@ impl Handle {
             })
             .ok_or(FfiError::Offline)?;
 
+        // DIS-015: the watch of Direct mode starts a rendezvous lane at a
+        // delay of its own. The watch of a tick of Periodic mode, which
+        // holds the timer token, ends before such a delay.
+        let apart_delay = inner.client.timer_token()?.is_none();
         let table = crate::watch::WatchTable::new(
             guard.clone(),
             inner.relays.clone(),
             inner.root_ca_path.clone(),
             inner.bootstrap,
             entries,
+            apart_delay,
         );
 
         let mut encoded = table.encode()?;
@@ -5335,6 +5574,7 @@ impl Handle {
         // A new token goes to the NDR at once, whatever the earlier calls.
         inner.ndr_retry.clear();
         inner.pump_ndr();
+        inner.bind_run_queues();
         Ok(())
     }
 
@@ -5466,6 +5706,32 @@ impl Handle {
         })
     }
 
+    /// The hosts of the pinned ingress relays as `manifest` names them, the
+    /// one that the next run dials first. The fetch of a manifest asks the
+    /// carrier on such a host first (Part 3 §3.10), also in a process that
+    /// had no connection yet. The platform gives the manifest that it kept
+    /// after a verify. The call checks no signature of the directory,
+    /// because the hosts only sort the carriers that the build ships.
+    pub fn ingress_hosts(&self, manifest: Vec<u8>) -> Result<Vec<String>, FfiError> {
+        let (pins, uses_second) = {
+            let inner = locked(&self.inner);
+            (inner.client.ingress_pins()?, inner.uses_second_pin)
+        };
+        let pins: Vec<[u8; 32]> = pins.pins().iter().map(|pin| pin.relay_id).collect();
+        if pins.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let manifest = RelayManifest::parse(&manifest).map_err(|_| FfiError::Malformed)?;
+        let entries: Vec<RelayEntry> = manifest
+            .entries
+            .iter()
+            .filter_map(|proven| RelayEntry::parse(proven.entry).ok())
+            .collect();
+
+        Ok(dial_order(&pins, &entries, uses_second))
+    }
+
     /// The state of the connection: the circuits and their relays. A
     /// [`FfiEvent::Circuits`] says that it changed.
     pub fn connection(&self) -> Result<Connection, FfiError> {
@@ -5503,6 +5769,24 @@ impl Handle {
             layer: relay.layer,
         };
 
+        // The facts of each hop of each circuit, for the marks of the route
+        // view (Part 14 §14.9.2).
+        let facts: Vec<Vec<Candidate>> = inner
+            .circuits
+            .iter()
+            .map(|chain| {
+                chain
+                    .iter()
+                    .filter_map(|relay_id| {
+                        let endpoint = inner
+                            .relays
+                            .iter()
+                            .find(|relay| relay.relay_id.as_slice() == relay_id.as_slice())?;
+                        relay_info(endpoint).ok().map(|info| info.candidate)
+                    })
+                    .collect()
+            })
+            .collect();
         let is_running = inner.bridge.is_some();
         Ok(Connection {
             is_running,
@@ -5521,27 +5805,8 @@ impl Handle {
             standby: pins.iter().find(|relay| !is_guard(relay)).map(as_hop),
             directory_epoch: inner.client.directory_epoch()?,
             admission_surge: inner.challenges.is_surge(unix_now()),
-            one_operator: inner
-                .circuits
-                .iter()
-                .map(|chain| {
-                    let hops: Vec<_> = chain
-                        .iter()
-                        .filter_map(|relay_id| {
-                            let endpoint = inner
-                                .relays
-                                .iter()
-                                .find(|relay| relay.relay_id.as_slice() == relay_id.as_slice())?;
-                            relay_info(endpoint).ok().map(|info| info.candidate)
-                        })
-                        .collect();
-                    hops.iter().enumerate().any(|(index, hop)| {
-                        hops.iter()
-                            .skip(index.saturating_add(1))
-                            .any(|other| !hop.apart_operator(other))
-                    })
-                })
-                .collect(),
+            one_operator: facts.iter().map(|hops| shares_operator(hops)).collect(),
+            one_bloc: facts.iter().map(|hops| shares_bloc(hops)).collect(),
         })
     }
 
@@ -6643,10 +6908,19 @@ impl Handle {
 
     /// Resets the identity (Part 7 §7.7.1): a new identity root, a
     /// key-change notice to each contact at its own delay, a new device
-    /// roster, and the re-key of each group. The run ends here, and the
-    /// platform starts the network again under the new root. A set of more
-    /// than one device takes none.
-    pub fn reset_identity(self: Arc<Self>) -> Result<ResetCounts, FfiError> {
+    /// roster, a new recovery code, the re-key of each group, and the end
+    /// of each published link and handle at the upkeep (`DEV-357`). The new
+    /// code goes into `sink` as [`Handle::recovery_code`] gives it
+    /// (`DEV-346`, `IMP-037`). The run ends here, and the platform starts
+    /// the network again under the new root. A set of more than one device
+    /// takes none. After the commit no error returns: a code that does not
+    /// render or reach the sink leaves the sink empty, and the view of the
+    /// recovery code shows it.
+    pub fn reset_identity(
+        self: Arc<Self>,
+        sink: Arc<dyn TextSink>,
+    ) -> Result<ResetCounts, FfiError> {
+        let mut held = HeldText::default();
         let mut inner = locked(&self.inner);
         let summary = inner.client.reset_identity(unix_now_ms(), &mut OsRng)?;
 
@@ -6656,12 +6930,19 @@ impl Handle {
         // the two on one circuit. The next run sends the re-key of each
         // group at its start (`DEV-263`).
         inner.end_run_for_ownership();
+        let rendered = inner.client.render_recovery_code(&mut held, &mut OsRng);
         drop(inner);
         if let Some(runtime) = locked(&self.runtime).take() {
             runtime.shutdown_background();
         }
         locked(&self.run_done).take();
         self.changed.notify_all();
+
+        // The reset committed, thus an error here would leave the platform
+        // with no step after the reset, and a second tap would reset again.
+        if rendered.is_ok() {
+            let _ = held.give(sink.as_ref());
+        }
         Ok(ResetCounts {
             contacts: summary.contacts,
             groups: summary.groups,
@@ -6895,7 +7176,9 @@ impl Handle {
 
     /// Gives the file of a message to a decoder of the platform
     /// (`IMP-166`). The store must hold the file: a file in another state is
-    /// `NotFound`. The copy of the core is zero bytes after the call.
+    /// `NotFound`. The core keeps no copy after the call. The allocator
+    /// overwrites the buffer that UniFFI lowers the bytes through at its
+    /// free (`IMP-200`).
     pub fn msg_file(
         &self,
         message: Arc<MsgHandle>,
@@ -6904,7 +7187,7 @@ impl Handle {
         let mut bytes = locked(&self.inner).client.file_bytes(&message.0)?;
 
         // The sink runs with no lock held: a decode takes time. The bytes
-        // move out whole, thus no second copy waits for a wipe.
+        // move out whole, thus the core keeps no copy.
         sink.put(core::mem::take(&mut *bytes))
     }
 
@@ -7741,6 +8024,10 @@ impl Handle {
         // fault, and the next unlock runs the pass again.
         let _ = inner.client.migrate_store(&mut OsRng);
 
+        // NTF-143, NTF-152: the push path of an earlier build binds and
+        // registers again, one time. A fault leaves it for the next unlock.
+        let _ = inner.client.repair_push_path(&mut OsRng);
+
         // IMP-119: the idle time starts here, on the monotonic source.
         inner.idle_watch = Some(crate::runtime::IdleClock::new());
         Ok(())
@@ -7917,7 +8204,7 @@ impl Handle {
 const _: () = assert!(Delivery::Failed as u8 == 4);
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -7935,6 +8222,173 @@ mod tests {
         // A device with no fetch yet, and a clock that moved back.
         assert!(challenges_due(fetched_at, 0));
         assert!(!challenges_due(fetched_at - 10, fetched_at));
+    }
+
+    #[test]
+    fn each_node_of_the_client_takes_the_chains_of_the_other_two() {
+        let (handle, directory) = open("chains");
+        let mut inner = locked(&handle.inner);
+        let (group_commands, mut groups) = mpsc::unbounded_channel();
+        let (transfer_commands, mut transfers) = mpsc::unbounded_channel();
+        inner.groups = Some(group_commands);
+        inner.transfers = Some(transfer_commands);
+        let chain = |seed: u8| [[seed; 32], [seed + 1; 32], [seed + 2; 32]];
+        inner.circuits = vec![chain(1)];
+        let mut group_view = || match groups.try_recv() {
+            Ok(GroupCommand::Chains(chains)) => chains,
+            _ => panic!("the group task took no chains"),
+        };
+        let mut transfer_view = || match transfers.try_recv() {
+            Ok(TransferCommand::Chains(chains)) => chains,
+            _ => panic!("the transfer task took no chains"),
+        };
+
+        // NET-310: the chains of the group task go to the transfer task,
+        // beside those of the queue run, and not back to the group task.
+        inner.end_group(GroupUpdate::Chains(vec![chain(10)]));
+        assert_eq!(group_view(), [chain(1)]);
+        assert_eq!(transfer_view(), [chain(1), chain(10)]);
+
+        // The chains of the transfer task go to the group task.
+        inner.end_transfer(TransferUpdate::Chains(vec![chain(20)]));
+        assert_eq!(group_view(), [chain(1), chain(20)]);
+        assert_eq!(transfer_view(), [chain(1), chain(10)]);
+
+        // A group task that ended holds no circuit.
+        inner.end_group(GroupUpdate::Ended);
+        assert_eq!(transfer_view(), [chain(1)]);
+
+        drop(inner);
+        drop(handle);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_task_that_a_later_start_replaced_changes_no_chains_and_ends_no_task() {
+        let (handle, directory) = open("replaced-task");
+        let (group_commands, _groups) = mpsc::unbounded_channel();
+        let (transfer_commands, _transfers) = mpsc::unbounded_channel();
+        let chain = |seed: u8| [[seed; 32], [seed + 1; 32], [seed + 2; 32]];
+        {
+            let mut inner = locked(&handle.inner);
+            inner.groups = Some(group_commands);
+            inner.transfers = Some(transfer_commands);
+            inner.group_task = 2;
+            inner.transfer_task = 2;
+            inner.group_chains = vec![chain(10)];
+            inner.transfer_chains = vec![chain(20)];
+        }
+
+        // The tasks of the first start end after the second start, and
+        // each one gives its last chains and its end.
+        handle.on_group_update(1, GroupUpdate::Chains(Vec::new()));
+        handle.on_group_update(1, GroupUpdate::Ended);
+        handle.on_transfer_update(1, TransferUpdate::Chains(vec![chain(30)]));
+        {
+            let inner = locked(&handle.inner);
+            assert!(inner.groups.is_some());
+            assert_eq!(inner.group_chains, [chain(10)]);
+            assert_eq!(inner.transfer_chains, [chain(20)]);
+        }
+
+        // The tasks of the second start change the chains.
+        handle.on_group_update(2, GroupUpdate::Chains(vec![chain(40)]));
+        handle.on_transfer_update(2, TransferUpdate::Chains(Vec::new()));
+        {
+            let inner = locked(&handle.inner);
+            assert_eq!(inner.group_chains, [chain(40)]);
+            assert!(inner.transfer_chains.is_empty());
+        }
+
+        drop(handle);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn the_route_view_marks_two_hops_of_one_bloc() {
+        let hops = |countries: [&[u8; 2]; 3]| {
+            countries.map(|country| Candidate {
+                relay_id: [country[0]; 32],
+                operator_id: [country[0]; 32],
+                family_id: [0; 32],
+                bloc: BlocList::v1().bloc_of(country),
+                asn: u32::from(country[0]),
+                v4_prefix: Some([country[0], country[1]]),
+                v6_prefix: None,
+                v4: None,
+                ingress: false,
+                chain: true,
+                queue: false,
+                layer: 2,
+                class: 0,
+            })
+        };
+
+        // NET-201: three countries of one bloc, the bloc of hop 2 under
+        // NET-200, and three blocs.
+        assert!(shares_bloc(&hops([b"US", b"GB", b"CA"])));
+        assert!(shares_bloc(&hops([b"DE", b"FR", b"US"])));
+        assert!(!shares_bloc(&hops([b"DE", b"US", b"JP"])));
+        // A country of no bloc is a bloc of its own.
+        assert!(!shares_bloc(&hops([b"JP", b"CH", b"BR"])));
+        assert!(!shares_operator(&hops([b"DE", b"US", b"JP"])));
+    }
+
+    #[test]
+    fn the_host_of_the_pin_that_the_run_dials_comes_first() {
+        use umbra_core::directory::descriptor::{flags, RelayDescriptor, HOST_LEN};
+
+        let entry = |id: u8, name: &str, flags: u8| {
+            let mut host = [0u8; HOST_LEN];
+            host[..name.len()].copy_from_slice(name.as_bytes());
+            RelayEntry {
+                descriptor: RelayDescriptor {
+                    relay_id: [id; 32],
+                    identity_pk: &[],
+                    ntor_pk: [0; 32],
+                    addr_v4: [203, 0, 113, id],
+                    addr_v6: [0; 16],
+                    port: 443,
+                    host,
+                    asn: 64_500,
+                    jurisdiction: *b"US",
+                    family_id: [id; 32],
+                    capacity_class: 2,
+                    roles: 0,
+                    chunk_store_gib: 0,
+                    valid_after: 0,
+                    sig: &[],
+                },
+                operator_id: [id; 32],
+                class: 2,
+                flags,
+            }
+        };
+        let entries = [
+            entry(1, "east-1.example.org", flags::INGRESS),
+            entry(2, "west-1.example.org", flags::INGRESS),
+            entry(3, "chain.example.org", 0),
+        ];
+        let pins = [[2; 32], [1; 32]];
+
+        // REL-155: the first pin, and the second one after a dial that
+        // failed.
+        assert_eq!(
+            dial_order(&pins, &entries, false),
+            ["west-1.example.org", "east-1.example.org"]
+        );
+        assert_eq!(
+            dial_order(&pins, &entries, true),
+            ["east-1.example.org", "west-1.example.org"]
+        );
+
+        // A pin that the manifest does not list as an ingress relay names
+        // no host.
+        assert_eq!(
+            dial_order(&[[9; 32], [1; 32]], &entries, true),
+            ["east-1.example.org"]
+        );
+        assert!(dial_order(&[[3; 32]], &entries, false).is_empty());
     }
 
     fn descriptor() -> String {
@@ -8034,6 +8488,64 @@ guard relay1.example.org"
         assert_eq!(read_draft_file(name, 8).err(), Some(FfiError::TooLong));
         std::fs::remove_file(&path).unwrap();
         assert_eq!(read_draft_file(name, 9).err(), Some(FfiError::NotFound));
+    }
+
+    /// A pipe of the platform: it gives a file in parts of at most `part`
+    /// bytes and names no size.
+    struct Pipe<'a> {
+        rest: &'a [u8],
+        part: usize,
+    }
+
+    impl<'a> Pipe<'a> {
+        fn new(file: &'a [u8], part: usize) -> Self {
+            Pipe { rest: file, part }
+        }
+    }
+
+    impl std::io::Read for Pipe<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let count = buf.len().min(self.rest.len()).min(self.part);
+            let (part, rest) = self.rest.split_at(count);
+            buf[..count].copy_from_slice(part);
+            self.rest = rest;
+            Ok(count)
+        }
+    }
+
+    /// A size that a provider names can be wrong.
+    #[test]
+    fn a_draft_file_from_a_pipe_reads_whole_and_to_its_bound() {
+        let file: Vec<u8> = (0..300_000u32).map(|at| at as u8).collect();
+        for named in [0, 10, 299_999, 300_000, 300_001, 1 << 30] {
+            let read = read_bounded(Pipe::new(&file, 1_000), named, 300_000).unwrap();
+            assert_eq!(read.as_slice(), file.as_slice(), "{named}");
+            assert_eq!(
+                read_bounded(Pipe::new(&file, 1_000), named, 299_999).err(),
+                Some(FfiError::TooLong),
+                "{named}"
+            );
+        }
+        assert!(read_bounded(Pipe::new(&[], 1_000), 0, 0)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            read_bounded(Pipe::new(&[1], 1_000), 0, 0).err(),
+            Some(FfiError::TooLong)
+        );
+    }
+
+    /// A pipe gives a file in small parts, thus a video of some MiB takes
+    /// thousands of reads. Each read writes no zeros over the free room
+    /// again: that cost grows with the square of the size.
+    #[test]
+    fn a_large_draft_file_from_a_pipe_reads_in_a_time_in_line_with_its_size() {
+        let file = vec![0x5a; 8 << 20];
+        let started = std::time::Instant::now();
+        let read = read_bounded(Pipe::new(&file, 4 * 1024), 0, DRAFT_FILE_MAX).unwrap();
+        let took = started.elapsed();
+        assert!(read.as_slice() == file.as_slice());
+        assert!(took < std::time::Duration::from_secs(4), "{took:?}");
     }
 
     #[test]
@@ -8178,6 +8690,49 @@ guard relay1.example.org"
     }
 
     #[test]
+    fn an_upload_that_ends_with_no_record_keeps_the_erase_of_its_chunks() {
+        use umbra_core::attach::transfer::ChunkCredential;
+        let (handle, directory) = open("upload-left");
+        let mut inner = locked(&handle.inner);
+        let credential = |seed: u8| ChunkCredential {
+            chunk_id: [seed; 32],
+            cred: umbra_crypto::secret::Secret::new([2; 32]),
+            relays: vec![[3; 32]],
+        };
+
+        // Three uploads run: one fails, the run of one ends, and a stop of
+        // the runtime takes the task of the third with no update.
+        let stopped = inner.next_tag(TransferWork::File {
+            message: MsgRef([9; 16]),
+            is_upload: true,
+        });
+        let open_uploads = inner.client.open_uploads();
+        let (failed, ended) = (stopped + 1, stopped + 2);
+        for (tag, seed) in [(failed, 5), (ended, 6), (stopped, 7)] {
+            assert!(open_uploads
+                .lock()
+                .unwrap()
+                .note(tag, vec![credential(seed)]));
+        }
+
+        // ATT-204: each one keeps its chunks for the erase.
+        inner.end_transfer(TransferUpdate::Failed { tag: failed });
+        inner.end_transfer(TransferUpdate::Interrupted { tag: ended });
+        inner.run = inner.run.wrapping_add(1);
+        inner.end_lost_work();
+        let mut due = Vec::new();
+        while let Some(job) = inner.client.take_erasure() {
+            due.push(job.chunk_id[0]);
+        }
+        due.sort_unstable();
+        assert_eq!(due, [5, 6, 7]);
+
+        drop(inner);
+        drop(handle);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
     fn a_locked_client_gives_no_invitation_and_no_code() {
         let (handle, directory) = open("locked-events");
         let mut inner = locked(&handle.inner);
@@ -8283,6 +8838,28 @@ guard relay1.example.org"
         let _ = std::fs::remove_dir_all(&directory);
     }
 
+    /// IMP-188: the platform can show the lock view over an open handle.
+    /// Text that is not the passphrase opens nothing there.
+    #[test]
+    fn an_unlock_of_an_open_handle_checks_the_passphrase() {
+        let (handle, directory) = open("open-unlock");
+        let wrong: Vec<u16> = "any text".encode_utf16().collect();
+        assert_eq!(handle.unlock(wrong.clone()), Err(FfiError::WrongPassphrase));
+        handle.unlock(passphrase()).unwrap();
+
+        // A lock event that no thread read does not come after the unlock.
+        handle.lock();
+        handle.lock();
+        assert_eq!(handle.unlock(wrong), Err(FfiError::WrongPassphrase));
+        handle.unlock(passphrase()).unwrap();
+        while let Some(event) = handle.next_event() {
+            assert!(!matches!(event, FfiEvent::Locked));
+        }
+        assert!(handle.auto_lock_seconds().is_ok());
+        drop(handle);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
     #[test]
     fn a_connect_that_fails_leaves_no_runtime_of_its_own() {
         let (handle, directory) = open("connect-fails");
@@ -8304,9 +8881,21 @@ guard relay1.example.org"
 
     #[test]
     fn a_reset_of_the_identity_ends_the_run() {
+        #[derive(Default)]
+        struct View(Mutex<Vec<u16>>);
+        impl TextSink for View {
+            fn put(&self, code_units: Vec<u16>) -> Result<(), FfiError> {
+                *locked(&self.0) = code_units;
+                Ok(())
+            }
+        }
+
         let (handle, directory) = open("reset-run");
         let run = locked(&handle.inner).run;
-        Arc::clone(&handle).reset_identity().unwrap();
+        let before = Arc::new(View::default());
+        handle.recovery_code(before.clone()).unwrap();
+        let after = Arc::new(View::default());
+        Arc::clone(&handle).reset_identity(after.clone()).unwrap();
         let inner = locked(&handle.inner);
 
         // No node of the old root commits after the reset.
@@ -8314,6 +8903,53 @@ guard relay1.example.org"
         assert!(inner.bridge.is_none());
         assert!(inner.spawner.is_none());
         drop(inner);
+
+        // DEV-346: the view gets the new recovery code, which the store now
+        // holds.
+        let shown = locked(&after.0).clone();
+        assert!(!shown.is_empty());
+        assert_ne!(shown, *locked(&before.0));
+        let held = Arc::new(View::default());
+        handle.recovery_code(held.clone()).unwrap();
+        assert_eq!(*locked(&held.0), shown);
+        drop(handle);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// DEV-346: the reset committed before the code goes to the view, thus
+    /// a view that refuses the code fails no reset. The view of the recovery
+    /// code shows the new code. Before this, the platform got an error, ran
+    /// no step after the reset, and kept the button of a second reset.
+    #[test]
+    fn a_reset_whose_code_reaches_no_view_gives_its_counts() {
+        #[derive(Default)]
+        struct View(Mutex<Vec<u16>>);
+        impl TextSink for View {
+            fn put(&self, code_units: Vec<u16>) -> Result<(), FfiError> {
+                *locked(&self.0) = code_units;
+                Ok(())
+            }
+        }
+        struct Refused;
+        impl TextSink for Refused {
+            fn put(&self, _code_units: Vec<u16>) -> Result<(), FfiError> {
+                Err(FfiError::Storage)
+            }
+        }
+
+        let (handle, directory) = open("reset-refused");
+        let before = Arc::new(View::default());
+        handle.recovery_code(before.clone()).unwrap();
+        let counts = Arc::clone(&handle)
+            .reset_identity(Arc::new(Refused))
+            .unwrap();
+        assert_eq!((counts.contacts, counts.groups), (0, 0));
+        assert!(locked(&handle.inner).bridge.is_none());
+
+        let after = Arc::new(View::default());
+        handle.recovery_code(after.clone()).unwrap();
+        assert!(!locked(&after.0).is_empty());
+        assert_ne!(*locked(&after.0), *locked(&before.0));
         drop(handle);
         let _ = std::fs::remove_dir_all(&directory);
     }

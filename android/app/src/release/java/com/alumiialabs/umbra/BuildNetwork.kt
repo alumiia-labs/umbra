@@ -15,11 +15,12 @@ import uniffi.umbra_ffi.VerifiedNetwork
 
 /**
  * The network of the release build. The relay directory of Part 10 gives it:
- * the build pins the key set of the directory, and each start fetches the
+ * the build pins the key set of the directory, and a start fetches the
  * signed manifest from one carrier of Part 3 §3.10 in turn, verifies it, and
- * keeps the last one that verified (`NET-318`). The assets come from
- * `scripts/release-network.sh` after a deployment; a build with none has
- * no network.
+ * keeps the last one that verified (`NET-318`). A start within one epoch of
+ * the last fetch, and each wake session, takes the kept one first, until a
+ * run from it fails. The assets come from `scripts/release-network.sh` after
+ * a deployment; a build with none has no network.
  */
 object BuildNetwork {
     private const val KEYSET = "umbra-keyset.bin"
@@ -29,6 +30,9 @@ object BuildNetwork {
     private const val MANIFEST = "umbra-manifest.bin"
     private const val HELD_KEYSET = "umbra-keyset-held.bin"
     private const val CARRIER_PORT: UShort = 443u
+
+    /** One epoch of Part 10 §10.11: the directory signs a new manifest each epoch. */
+    private const val KEPT_FRESH_MS = 60 * 60_000L
 
     /** The key of the network file that holds the epoch of `REL-045`. */
     private const val SHIPPED_EPOCH = "shipped_epoch"
@@ -40,6 +44,19 @@ object BuildNetwork {
     /** Whether the key set of the directory stands below `AUTHORITY_FLOOR` (`REL-126`). */
     var isProvisional = false
         private set
+
+    /** Whether the last network that `network` gave came from the kept manifest. */
+    @Volatile
+    var isFromKept = false
+        private set
+
+    /**
+     * Whether a run from the kept manifest failed. The carriers then come
+     * first, at a wake too: a woken client with no current relay fetches a
+     * fresh manifest (Part 3 §3.10). A fresh manifest that verifies clears it.
+     */
+    @Volatile
+    var isKeptSuspect = false
 
     private class Pinned(
         val keyset: ByteArray,
@@ -124,6 +141,13 @@ object BuildNetwork {
         return null
     }
 
+    /** The hosts of the ingress pins in the order of the next dial, as the kept manifest names them. */
+    private fun pinHosts(client: Handle, kept: File): List<String> = try {
+        if (kept.exists()) client.ingressHosts(kept.readBytes()) else emptyList()
+    } catch (unread: FfiException) {
+        emptyList()
+    }
+
     /** Writes a file under another name and renames it, thus a stop leaves the old one. */
     private fun writeWhole(file: File, bytes: ByteArray) {
         val part = File(file.parentFile, file.name + ".part")
@@ -139,9 +163,16 @@ object BuildNetwork {
      * The network of the newest manifest that verifies, or null. One call
      * runs at a time. The call writes the kept manifest and the held key
      * set, and the network thread and the restore thread both come here.
+     * The carriers on the hosts of `ingress` come first, in its order: the
+     * ingress relay learns the address and the time anyway (Part 3 §3.10).
      */
     @Synchronized
-    fun network(context: Context, client: Handle): Network? {
+    fun network(
+        context: Context,
+        client: Handle,
+        isWake: Boolean = false,
+        ingress: List<String> = emptyList(),
+    ): Network? {
         val pins = pinned(context) ?: return null
         val kept = File(context.filesDir, MANIFEST)
 
@@ -154,8 +185,13 @@ object BuildNetwork {
         // NET-318: one carrier after the other, and the web roots vouch for
         // each; the manifest carries its own signatures, thus a carrier needs
         // no trust. A carrier whose manifest does not verify gives its turn
-        // to the next one, and the kept manifest comes last.
-        val fresh = pins.carriers.asSequence().mapNotNull { (host, address) ->
+        // to the next one. The sort keeps the shipped order of the others.
+        // A process with no connection yet takes the order of the stored pins.
+        val order = ingress.ifEmpty { pinHosts(client, kept) }
+        val carriers = pins.carriers.sortedBy { (host, _) ->
+            order.indexOf(host).takeIf { it >= 0 } ?: order.size
+        }
+        val fresh = carriers.asSequence().mapNotNull { (host, address) ->
             try {
                 fetchManifest(host, address, CARRIER_PORT, null)
             } catch (unreachable: FfiException) {
@@ -163,7 +199,18 @@ object BuildNetwork {
             }
         }
         val held = sequence { kept.takeIf { it.exists() }?.readBytes()?.let { yield(it) } }
-        val candidates = fresh.map { it to true } + held.map { it to false }
+
+        // The kept manifest comes last, but first within one epoch of its
+        // fetch and at a wake session: that session lasts seconds
+        // (`NET-100`), and a carrier can take 20 s. A kept manifest that no
+        // longer verifies, or whose run failed, gives its turn to the carriers.
+        val keptAgeMs = System.currentTimeMillis() - kept.lastModified()
+        val isKeptFirst = !isKeptSuspect && (isWake || keptAgeMs in 0L until KEPT_FRESH_MS)
+        val candidates = if (isKeptFirst) {
+            held.map { it to false } + fresh.map { it to true }
+        } else {
+            fresh.map { it to true } + held.map { it to false }
+        }
 
         for ((manifest, isFresh) in candidates) {
             val verified = try {
@@ -182,7 +229,11 @@ object BuildNetwork {
                 continue
             }
 
-            if (isFresh) writeWhole(kept, manifest)
+            if (isFresh) {
+                writeWhole(kept, manifest)
+                isKeptSuspect = false
+            }
+            isFromKept = !isFresh
             isClockCorrected = verified.isClockCorrected
             isProvisional = verified.isProvisional
             return verified.network.copy(

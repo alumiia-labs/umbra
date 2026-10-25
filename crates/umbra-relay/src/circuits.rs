@@ -37,12 +37,12 @@ pub const LINK_BUILD_BURST: u32 = 64;
 /// second after its burst (`NET-332`).
 pub const LINK_BUILD_RATE: u32 = 1;
 
-/// `RELAY_LINK_BUILD_BURST`: the builds that one link of a relay of the
-/// layer before may send at once (`NET-332`). Such a link carries the
-/// circuits of many clients.
+/// `RELAY_LINK_BUILD_BURST`: the builds that the links of one relay of the
+/// layer before may send at once together (`NET-332`). Such a link carries
+/// the circuits of many clients.
 pub const RELAY_LINK_BUILD_BURST: u32 = 8_192;
-/// `RELAY_LINK_BUILD_RATE`: the builds that one such link gets back each
-/// second after its burst (`NET-332`).
+/// `RELAY_LINK_BUILD_RATE`: the builds that the links of one such relay
+/// get back together each second after their burst (`NET-332`).
 pub const RELAY_LINK_BUILD_RATE: u32 = 1_024;
 /// `RELAY_CIRCUITS_MAX`: the circuits that one relay holds at once
 /// (`NET-331`).
@@ -419,6 +419,15 @@ pub struct CircuitTable {
     /// of its address, thus a new connection gets no new burst. A count
     /// that is full again leaves, because a new one is the same.
     source_budgets: BTreeMap<[u8; 16], Tokens>,
+    /// The relay of the layer before that the hello of each link named.
+    relay_links: BTreeMap<LinkId, [u8; 32]>,
+    /// The builds of each relay of the layer before, over each link that
+    /// its hello names (`NET-332`). A count outlives the links of its
+    /// relay, as the count of an address does. Before this, each link had
+    /// a budget of its own. A relay that opened many links, or a new link
+    /// after each burst, then forced a key agreement for each build of
+    /// each budget.
+    relay_budgets: BTreeMap<[u8; 32], Tokens>,
     /// The ephemeral keys of the last hellos (`NET-361`).
     hellos: Hellos,
     /// The holder of each link that the node named one for.
@@ -460,6 +469,8 @@ impl CircuitTable {
             budgets: BTreeMap::new(),
             sources: BTreeMap::new(),
             source_budgets: BTreeMap::new(),
+            relay_links: BTreeMap::new(),
+            relay_budgets: BTreeMap::new(),
             hellos: Hellos::default(),
             holders: BTreeMap::new(),
             counts: BTreeMap::new(),
@@ -485,8 +496,14 @@ impl CircuitTable {
 
     /// Names the holder of `link`: the address of a client, or the relay
     /// of a hello that verified. A link that holds a circuit keeps the
-    /// holder of its first build.
+    /// holder of its first build. The builds of a link count against the
+    /// relay of its hello from that hello on (`NET-332`), also on a link
+    /// that built a measurement candidate before it.
     pub fn set_holder(&mut self, link: LinkId, holder: Holder) {
+        if let Holder::Relay(relay_id) = holder {
+            self.relay_links.insert(link, relay_id);
+        }
+
         if self.circuits_on(link) == 0 {
             self.holders.insert(link, holder);
         }
@@ -499,9 +516,9 @@ impl CircuitTable {
         self.sources.insert(link, source);
     }
 
-    /// Takes one build of `link` at `now` from the budget of the link and
-    /// from the budget of its address, or refuses it (`NET-331`,
-    /// `NET-332`).
+    /// Takes one build of `link` at `now` from the budget of the link, and
+    /// from the budget of its address or of the relay of its hello, or
+    /// refuses it (`NET-331`, `NET-332`).
     fn take_build(&mut self, link: LinkId, origin: Origin, now: u64) -> bool {
         let budget = self
             .budgets
@@ -532,6 +549,26 @@ impl CircuitTable {
                 .entry(key)
                 .or_insert(Tokens::full(SOURCE_BUILD_BURST, now));
             tokens.refill(now, SOURCE_BUILD_BURST, SOURCE_BUILD_RATE);
+            if tokens.builds == 0 {
+                return false;
+            }
+
+            tokens.builds -= 1;
+        }
+
+        let relay = match origin {
+            Origin::Relay => self.relay_links.get(&link).copied(),
+            Origin::Client | Origin::Barred | Origin::Measurer => None,
+        };
+
+        // The hello names a relay of the relay set, thus the map holds one
+        // count for each relay of the layer before at most.
+        if let Some(relay_id) = relay {
+            let tokens = self
+                .relay_budgets
+                .entry(relay_id)
+                .or_insert(Tokens::full(RELAY_LINK_BUILD_BURST, now));
+            tokens.refill(now, RELAY_LINK_BUILD_BURST, RELAY_LINK_BUILD_RATE);
             if tokens.builds == 0 {
                 return false;
             }
@@ -1362,6 +1399,7 @@ impl CircuitTable {
         self.budgets.remove(&link);
         self.holders.remove(&link);
         self.sources.remove(&link);
+        self.relay_links.remove(&link);
         actions
     }
 
@@ -1396,10 +1434,15 @@ impl CircuitTable {
             .map(|(key, _)| *key)
             .collect();
 
-        // NET-332: the count of an address that is full again leaves.
+        // NET-332: the count of an address or of a relay that is full
+        // again leaves.
         self.source_budgets.retain(|_, tokens| {
             tokens.refill(now, SOURCE_BUILD_BURST, SOURCE_BUILD_RATE);
             tokens.builds < SOURCE_BUILD_BURST
+        });
+        self.relay_budgets.retain(|_, tokens| {
+            tokens.refill(now, RELAY_LINK_BUILD_BURST, RELAY_LINK_BUILD_RATE);
+            tokens.builds < RELAY_LINK_BUILD_BURST
         });
 
         aged.into_iter().flat_map(|key| self.close(key)).collect()
@@ -1723,6 +1766,49 @@ mod tests {
         assert_eq!(table.source_budgets.len(), 2);
         table.expire(101 + u64::from(SOURCE_BUILD_BURST));
         assert!(table.source_budgets.is_empty());
+    }
+
+    #[test]
+    fn the_links_of_one_relay_share_its_build_count() {
+        let (_, mut table) = relay(0xB2, 2);
+        let peer = [0x51; 32];
+
+        // NET-332: two links whose hello names one relay spend one burst
+        // together. Before this, each link had a burst of its own.
+        table.set_holder(1, Holder::Relay(peer));
+        table.set_holder(2, Holder::Relay(peer));
+        for _ in 0..RELAY_LINK_BUILD_BURST / 2 {
+            assert!(table.take_build(1, Origin::Relay, 100));
+            assert!(table.take_build(2, Origin::Relay, 100));
+        }
+
+        assert!(!table.take_build(1, Origin::Relay, 100));
+        assert!(!table.take_build(2, Origin::Relay, 100));
+
+        // The count outlives the links of the relay, thus a new link gets
+        // no new burst.
+        table.link_closed(1);
+        table.link_closed(2);
+        table.set_holder(3, Holder::Relay(peer));
+        assert!(!table.take_build(3, Origin::Relay, 100));
+
+        // Another relay has a count of its own, and a link with no hello
+        // has the budget of its link alone.
+        table.set_holder(4, Holder::Relay([0x52; 32]));
+        assert!(table.take_build(4, Origin::Relay, 100));
+        assert!(table.take_build(5, Origin::Relay, 100));
+
+        // One second gives `RELAY_LINK_BUILD_RATE` builds back.
+        for _ in 0..RELAY_LINK_BUILD_RATE {
+            assert!(table.take_build(3, Origin::Relay, 101));
+        }
+        assert!(!table.take_build(3, Origin::Relay, 101));
+
+        // A count that is full again leaves the table at the sweep.
+        assert_eq!(table.relay_budgets.len(), 2);
+        let full = u64::from(RELAY_LINK_BUILD_BURST / RELAY_LINK_BUILD_RATE);
+        table.expire(101 + full);
+        assert!(table.relay_budgets.is_empty());
     }
 
     #[test]

@@ -4,23 +4,22 @@
 use alloc::vec::Vec;
 
 use umbra_wire::{
-    bucket::Bucket,
+    bucket::{Bucket, APP_HEADER},
     codec::{Reader, Writer},
-    descriptor::{ChunkRef, Level, CHUNK_REF_LEN},
+    descriptor::{ChunkRef, Level, CHUNK_REF_LEN, FIXED},
 };
 
-use super::{segment, HOT_REPLICAS, MANIFEST_REFS_PER_CHUNK, MAX_DESCRIPTOR_REFS, SEGMENT_SIZE};
+use super::{segment, HOT_REPLICAS, MANIFEST_REFS_PER_CHUNK, SEGMENT_SIZE};
 use crate::Error;
 
-/// The refs a descriptor holds at each bucket (§12.3.2). No descriptor
-/// fits `B0` (§12.6).
+/// The refs a descriptor holds at each bucket with the braid frame of the
+/// default chunk, which the channel adds to each record (`ATT-021`,
+/// §12.3.2). No descriptor fits `B0` (§12.6).
 pub const fn descriptor_refs(bucket: Bucket) -> usize {
-    match bucket {
-        Bucket::B0 => 0,
-        Bucket::B1 => 13,
-        Bucket::B2 => 64,
-        Bucket::B3 => MAX_DESCRIPTOR_REFS,
-    }
+    bucket
+        .app_default_chunk()
+        .saturating_sub(APP_HEADER + FIXED)
+        / CHUNK_REF_LEN
 }
 
 /// The level for `data_chunks` under a descriptor of `bucket_refs` refs
@@ -206,7 +205,20 @@ mod tests {
         assert_eq!(manifest_chunk_range(271), 1..=2);
         assert_eq!(manifest_chunk_range(272), 2..=3);
         assert!(!manifest_chunk_range(272).contains(&4));
-        assert_eq!(descriptor_refs(Bucket::B3), MAX_DESCRIPTOR_REFS);
+    }
+
+    #[test]
+    fn a_bucket_holds_the_refs_that_fit_with_the_frame_of_the_default_chunk() {
+        // ATT-021, §12.3.2: the frame takes 71 bytes of the cell, thus a
+        // bucket holds one ref less than with no frame at B1 and at B3.
+        let refs = Bucket::ALL.map(descriptor_refs);
+        assert_eq!(refs, [0, 12, 64, MAX_DESCRIPTOR_REFS - 1]);
+        for bucket in Bucket::ALL {
+            let body = bucket.app_default_chunk() - APP_HEADER;
+            let refs = descriptor_refs(bucket);
+            assert!(FIXED + refs * CHUNK_REF_LEN <= body);
+            assert!(FIXED + (refs + 1) * CHUNK_REF_LEN > body);
+        }
     }
 
     #[test]

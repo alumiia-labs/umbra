@@ -305,6 +305,9 @@ private fun DigitRows(digits: CharArray) {
 fun RestoreForm(onCancel: () -> Unit) {
     val context = LocalContext.current
     val passphrase = rememberPlatformField()
+    // The new store takes its passphrase twice, as the first launch does.
+    val confirm = rememberPlatformField()
+    var mismatch by remember { mutableStateOf(false) }
     val code = rememberPlatformField()
 
     // Part 4 §4.7.3: the user half and the shares of contacts, in the place
@@ -342,11 +345,21 @@ fun RestoreForm(onCancel: () -> Unit) {
         Spacer(Modifier.height(12.dp))
         FramedPlatformField(passphrase, stringResource(R.string.common_new_passphrase), isPassphrase = true)
         Spacer(Modifier.height(14.dp))
+        FramedPlatformField(confirm, stringResource(R.string.lock_confirm_new_passphrase), isPassphrase = true)
+        Spacer(Modifier.height(14.dp))
         PrimaryButton(stringResource(R.string.recovery_restore)) {
-            val digits = code.take()
+            // A mismatch keeps the code and the shares in their fields.
             val phrase = passphrase.take()
-            val taken = if (withShares) shares.take(shareCount).mapNotNull { it.take() } else emptyList()
+            val second = confirm.take()
+            mismatch = phrase == null || second == null || !phrase.contentEquals(second)
+            second?.fill('\u0000')
+            if (mismatch) {
+                phrase?.fill('\u0000')
+                return@PrimaryButton
+            }
 
+            val digits = code.take()
+            val taken = if (withShares) shares.take(shareCount).mapNotNull { it.take() } else emptyList()
             if (digits != null && phrase != null) {
                 Core.restore(context, phrase, digits, taken)
             } else {
@@ -354,6 +367,10 @@ fun RestoreForm(onCancel: () -> Unit) {
                 phrase?.fill('\u0000')
                 taken.forEach { it.fill('\u0000') }
             }
+        }
+        if (mismatch) {
+            Spacer(Modifier.height(10.dp))
+            Note(stringResource(R.string.lock_passphrases_differ), isError = true)
         }
 
         Spacer(Modifier.height(8.dp))
@@ -370,13 +387,24 @@ fun RestoreForm(onCancel: () -> Unit) {
 /**
  * The full identity reset of Part 7 §7.7.1. It is visible and slow on
  * purpose: the screen states what changes, and a second sheet asks again.
+ * After the reset it shows the new recovery code (`DEV-346`).
  */
 @Composable
 fun ResetIdentityScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     var isAsking by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<String?>(null) }
+    var digits by remember { mutableStateOf<CharArray?>(null) }
     var fault by remember { mutableStateOf<String?>(null) }
+
+    val shown = result
+    digits?.let { held ->
+        val note = listOfNotNull(shown, stringResource(R.string.recovery_reset_code_note)).joinToString(" ")
+        SecretDigitsScreen(stringResource(R.string.devices_new_recovery_code), note, onBack) { show ->
+            show(held)
+        }
+        return
+    }
 
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.common_reset_identity), onBack = onBack)
@@ -387,6 +415,7 @@ fun ResetIdentityScreen(onBack: () -> Unit) {
                 stringResource(R.string.recovery_reset_new_key),
                 stringResource(R.string.recovery_reset_groups),
                 stringResource(R.string.recovery_reset_links_end),
+                stringResource(R.string.recovery_reset_code_changes),
                 stringResource(R.string.recovery_reset_messages_stay),
             )
             for (line in changes) {
@@ -394,7 +423,7 @@ fun ResetIdentityScreen(onBack: () -> Unit) {
             }
 
             Spacer(Modifier.height(16.dp))
-            result?.let {
+            shown?.let {
                 Note(it)
                 return@Column
             }
@@ -417,11 +446,15 @@ fun ResetIdentityScreen(onBack: () -> Unit) {
             stringResource(R.string.recovery_reset_question),
             listOf(
                 RowEntry("rotate", stringResource(R.string.common_reset_identity)) {
-                    Core.resetIdentity(context) { done ->
+                    Core.resetIdentity(context) { done, code ->
                         if (done == null) {
                             fault = UiText.get(R.string.recovery_remove_other_devices)
                         } else {
                             result = done
+                            if (code != null) {
+                                RecoveryPrompt.seen(context)
+                                digits = code
+                            }
                         }
                     }
                 },

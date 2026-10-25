@@ -34,6 +34,12 @@ pub mod watch;
 #[cfg(feature = "bindings")]
 uniffi::setup_scaffolding!();
 
+// IMP-200: UniFFI frees each buffer that it lowers a value through with no
+// overwrite, thus the Android library wipes each block at its free.
+#[cfg(feature = "bindings")]
+#[global_allocator]
+static ALLOCATOR: umbra_simd::WipingAlloc = umbra_simd::WipingAlloc::new();
+
 /// A conversation, as the surrogate identifier of its row. It shows no
 /// contact to a party without `K_store`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1210,6 +1216,57 @@ mod tests {
         );
         assert_eq!(notes[2].actor_role, 5);
         let _ = conversation;
+    }
+
+    /// Part 11 §11.9.6: a hidden message stays out of the default view,
+    /// and a search is a view.
+    #[test]
+    fn a_search_shows_no_message_that_a_moderator_hid() {
+        use crate::client::{SearchOptions, MOD_HIDE, MOD_UNHIDE};
+
+        let mut rng = Rng(93);
+        let mut client = new_client(&mut rng);
+        let mut other = new_client(&mut rng);
+        let (_, member) = ready_pair(&mut client, &mut other, &mut rng);
+        let now = 1_700_000_250u64;
+        let mut draft = other.new_draft(member);
+        draft.set_text(&units("the harbor at noon")).unwrap();
+        other.send_draft(draft, now * 1_000, &mut rng).unwrap();
+        let post = other.take_group_post().unwrap();
+        let held = client
+            .on_group_record(&[0xC3; 32], 1, &post.record, (now + 1) * 1_000, &mut rng)
+            .unwrap()
+            .unwrap();
+        let build = |client: &mut Client<MemoryBackend, Element>| {
+            client.search_begin().unwrap();
+            while !client.search_step().unwrap() {}
+        };
+        let found = |client: &Client<MemoryBackend, Element>| -> Vec<MsgRef> {
+            client
+                .search(&units("harbor"), &SearchOptions::default())
+                .unwrap()
+                .into_iter()
+                .map(|hit| hit.message)
+                .collect()
+        };
+
+        build(&mut client);
+        assert_eq!(found(&client), [held]);
+
+        // The index of an earlier build still names the message, and the
+        // store decides.
+        client
+            .moderate(&held, MOD_HIDE, (now + 2) * 1_000, &mut rng)
+            .unwrap();
+        assert!(found(&client).is_empty());
+        build(&mut client);
+        assert!(found(&client).is_empty());
+
+        client
+            .moderate(&held, MOD_UNHIDE, (now + 3) * 1_000, &mut rng)
+            .unwrap();
+        build(&mut client);
+        assert_eq!(found(&client), [held]);
     }
 
     #[test]
@@ -3216,7 +3273,6 @@ mod tests {
             .unwrap();
 
         let control = GroupControl::parse(&add).unwrap();
-        let add_hash = control.epoch_hash();
         let umbra_core::group::roster::Applied::Added(index) =
             group.apply_control(&control, 0, now).unwrap()
         else {
@@ -3230,7 +3286,7 @@ mod tests {
         let path = client.authority_path(conversation, &group).unwrap();
         let snapshot_bytes = group.snapshot(&path).unwrap();
         let snapshot = RosterSnapshot::parse(&snapshot_bytes).unwrap();
-        let admitted = accept_admit(&invitation, &snapshot, &add_hash, &creator_pk, now).unwrap();
+        let admitted = accept_admit(&invitation, &snapshot, &creator_pk, now).unwrap();
 
         client.save_group(conversation, &group, rng).unwrap();
         other
@@ -4462,6 +4518,7 @@ mod tests {
         assert!(client.is_verified(conversation).unwrap());
         assert!(client.key_change(conversation).unwrap().is_none());
 
+        let before = client.safety_number(conversation).unwrap();
         let mlkem = [0x5A; 1_184];
         let notice = KeyChangeNotice {
             new_x25519_pk: [0xAB; 32],
@@ -4477,10 +4534,12 @@ mod tests {
             &mut rng,
         );
 
-        // IDN-061, IDN-062: the notice waits, and the old key holds.
+        // IDN-061, IDN-062: the notice waits, and the old key holds. IDN-090:
+        // the number that the user compares is the number of the new key.
         let pending = client.key_change(conversation).unwrap().unwrap();
         assert_eq!(pending.at_ms, 2_000_000);
-        assert_ne!(
+        assert_ne!(pending.new_safety_number, before);
+        assert_eq!(
             pending.new_safety_number,
             client.safety_number(conversation).unwrap()
         );
@@ -4508,6 +4567,61 @@ mod tests {
         let mut draft = client.new_draft(conversation);
         draft.set_text(&units("hello")).unwrap();
         assert!(client.send_draft(draft, 2_002_000, &mut rng).is_ok());
+    }
+
+    /// IDN-090, IDN-176: while a notice waits, a scan checks the new key. The
+    /// number of the old key is no match, and a match counts from the
+    /// acceptance on (IDN-175).
+    #[test]
+    fn a_scan_checks_the_key_that_waits_for_the_answer() {
+        use umbra_core::session::node::StateChange;
+        use umbra_wire::app::{keys::KeyChangeNotice, AppKind};
+
+        let mut rng = Rng(100);
+        let mut client = new_client(&mut rng);
+        let contact = ContactId([0x45; 32]);
+        let state = [&[0x01][..], &[6; 16], &[8; 32], &[0; 8]].concat();
+        let change = StateChange::Contact {
+            contact,
+            state: zeroize::Zeroizing::new(state),
+        };
+        client
+            .commit_network(&[change], &[], 1_000_000, &mut rng)
+            .unwrap();
+        let conversation = client.conversation_for(&contact.0).unwrap();
+        let old = client.safety_number(conversation).unwrap();
+
+        let mlkem = [0x5B; 1_184];
+        let notice = KeyChangeNotice {
+            new_x25519_pk: [0xAC; 32],
+            new_mlkem_pk: &mlkem,
+        };
+        let mut body = vec![0u8; 1_217];
+        notice.encode(&mut body).unwrap();
+        deliver(
+            &mut client,
+            &contact,
+            &record(AppKind::KeyChange, [4; 16], &body),
+            2_000_000,
+            &mut rng,
+        );
+        let pending = client.key_change(conversation).unwrap().unwrap();
+
+        assert!(!client
+            .verify_by_number(conversation, &old, 2_001_000, &mut rng)
+            .unwrap());
+        assert!(client
+            .verify_by_number(
+                conversation,
+                &pending.new_safety_number,
+                2_001_000,
+                &mut rng
+            )
+            .unwrap());
+        assert!(!client.is_verified(conversation).unwrap());
+
+        client.accept_key_change(conversation, &mut rng).unwrap();
+        assert!(client.is_verified(conversation).unwrap());
     }
 
     #[test]
@@ -4582,8 +4696,8 @@ mod tests {
         assert_eq!(alice.messages(with_bob).unwrap(), [kept]);
 
         // The contact holds the notice until its user accepts it.
-        deliver(&mut bob, &at_bob, &notice.app, (now + 20) * 1_000, &mut rng);
         let before = bob.safety_number(with_alice).unwrap();
+        deliver(&mut bob, &at_bob, &notice.app, (now + 20) * 1_000, &mut rng);
         let pending = bob.key_change(with_alice).unwrap().unwrap();
         assert_ne!(pending.new_safety_number, before);
         let (_, key) = bob.accept_key_change(with_alice, &mut rng).unwrap();
@@ -5505,8 +5619,33 @@ mod tests {
         let code_before = code_of(&mut laptop, &mut rng);
         let code_of_phone = code_of(&mut phone, &mut rng);
 
+        // A handle that the snapshot of the link carried, with the reader
+        // of its rendezvous queue.
+        let handle = crate::client::Published {
+            id: [3; 16],
+            kind: crate::client::EntryKind::Handle,
+            index: 0,
+            rotation: 0,
+            label: vec![1],
+            name: b"name".to_vec(),
+            queue: [4; 32],
+            rendezvous: vec![5; 8],
+            version: 1,
+            created_at: HEARD,
+            expires_at: 0,
+            renewed_at: HEARD,
+            queue_since: HEARD,
+            previous: None,
+            foreign: false,
+            pending: None,
+        };
+        laptop.put_published(&handle, &mut rng).unwrap();
+
         assert!(laptop.may_take_over(due, &mut rng).unwrap());
         let epoch = laptop.take_over(due, &mut rng).unwrap();
+
+        // DEV-347: the phone read that queue, and it takes a successor.
+        assert_eq!(laptop.rendezvous_owed(&mut rng).unwrap(), [handle.queue]);
 
         // DEV-314: the epoch revokes each other device, and its one claim
         // of scope 0x03 names the phone and gives the laptop the set.
@@ -5988,6 +6127,114 @@ mod tests {
         // A channel that names no peer starts nothing.
         let stranger = phone.conversation_for(&[0x7B; 32]).unwrap();
         phone.sync_send_lost(stranger, &mut rng).unwrap();
+    }
+
+    #[test]
+    fn a_file_record_above_the_body_bound_goes_to_the_set_with_no_preview() {
+        use umbra_core::{
+            attach::{MESSAGE_BODY_MAX, MESSAGE_DESCRIPTOR_REFS},
+            devset::{
+                link::{DeviceIdentity, LinkHello},
+                sync::SyncedRecord,
+            },
+        };
+        use umbra_crypto::secret::Secret;
+        use umbra_wire::{
+            app::{AppKind, AppMessage, Channel},
+            bucket::Bucket,
+            descriptor::{
+                class, AttachmentBody, ChunkRef, FileDescriptor, Level, CAPTION_MAX, PREVIEW_MAX,
+            },
+        };
+
+        let mut rng = Rng(174);
+        let mut phone = new_client(&mut rng);
+        phone.ensure_device_set("Phone", &mut rng).unwrap();
+        let laptop = DeviceIdentity::generate("Laptop", &mut rng);
+        let hello = LinkHello {
+            device_id: laptop.device_id,
+            device_pk: laptop.device_key().public().clone(),
+            roster_pk: laptop.roster_key().verifying_key().to_bytes().to_vec(),
+            label: laptop.label,
+            ct: umbra_crypto::kem::Ciphertext::from_bytes(&[0; umbra_crypto::kem::CIPHERTEXT_LEN])
+                .unwrap(),
+        };
+        let roster = phone.sign_linked_device(&hello, &mut rng).unwrap();
+        phone.commit_roster(&roster, &mut rng).unwrap();
+        let peer = phone.conversation_for(&[0x7A; 32]).unwrap();
+        phone
+            .set_pending_peer(laptop.device_id, &laptop.label, &mut rng)
+            .unwrap();
+        phone.mark_device_peer(peer, &mut rng).unwrap();
+        let relays = [[0xA1; 32], [0xB2; 32]];
+        let group = phone
+            .create_group("Files", relays, 1_000, &mut rng)
+            .unwrap();
+        while phone.take_sync_send().is_some() {}
+
+        let mut preview = vec![0x11; PREVIEW_MAX];
+        preview[..3].copy_from_slice(&[0xFF, 0xD8, 0xFF]);
+        preview[PREVIEW_MAX - 2..].copy_from_slice(&[0xFF, 0xD9]);
+        let caption = "c".repeat(CAPTION_MAX);
+        let file = |refs: usize, msg_id: u8| {
+            let file_key = Secret::new([0x41; 32]);
+            let file_nonce = [0x42; 24];
+            let attachment = AttachmentBody {
+                descriptor: FileDescriptor {
+                    level: Level::Data,
+                    commit: umbra_core::attach::seal::commit(&file_key, &file_nonce),
+                    file_key,
+                    file_nonce,
+                    digest: [0x43; 32],
+                    media_seconds: 9,
+                    padded_size: u32::try_from(refs).unwrap() * 32_650,
+                    mime_class: class::VIDEO,
+                    pixel_w: 640,
+                    pixel_h: 480,
+                    refs: (0..refs)
+                        .map(|_| ChunkRef {
+                            relay_id: [0x31; 32],
+                            chunk_id: [0x44; 32],
+                            cred_pk: [0x33; 32],
+                            replicas: [[0x34; 12], [0x35; 12]],
+                        })
+                        .collect(),
+                },
+                name: Some("clip.mp4".into()),
+                preview: Some(&preview),
+                caption: Some(&caption),
+            };
+            let mut body = vec![0u8; attachment.len()];
+            attachment.encode(&mut body).unwrap();
+            (body.len(), record(AppKind::Attachment, [msg_id; 16], &body))
+        };
+        let mut synced = |app: &[u8]| {
+            phone
+                .publish_sync(group, app, false, None, 1_500, &mut rng)
+                .unwrap();
+            let send = phone.take_sync_send().unwrap();
+            assert_eq!(send.peer, peer);
+            let outer = AppMessage::parse(&send.app, Channel::Pairwise).unwrap();
+            let inner = SyncedRecord::parse(outer.body).unwrap().inner;
+            let inner = AppMessage::parse(inner, Channel::Group).unwrap();
+            let body = AttachmentBody::parse(inner.body).unwrap();
+            assert!(body.caption.is_some());
+            (send.app.len(), body.preview.is_some())
+        };
+
+        // ATT-209: a sender before ATT-208 puts a full preview in a record
+        // at the ref limit. The copy of the set leaves it out, and it then
+        // fits B3 with its frame.
+        let (len, app) = file(MESSAGE_DESCRIPTOR_REFS, 1);
+        assert!(len > MESSAGE_BODY_MAX);
+        let (len, has_preview) = synced(&app);
+        assert!(!has_preview);
+        assert!(len <= Bucket::B3.app_default_chunk());
+
+        // A smaller file keeps its preview.
+        let (_, app) = file(12, 2);
+        let (_, has_preview) = synced(&app);
+        assert!(has_preview);
     }
 
     #[cfg(feature = "sqlite")]

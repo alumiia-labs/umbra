@@ -619,6 +619,51 @@ mod tests {
     }
 
     #[test]
+    fn a_record_with_a_bad_version_kind_nonce_or_length_is_rejected() {
+        let body = vec![0u8; Bucket::B0.group_body()];
+        let record = GroupQueueRecord {
+            kind: RecordKind::EpochKey,
+            epoch: 2,
+            slot: 9,
+            nonce: [0; 12],
+            body: &body,
+        };
+        let mut good = vec![0u8; Bucket::B0.group_record()];
+        record.encode(Bucket::B0, &mut good).unwrap();
+        assert!(GroupQueueRecord::parse(&good, Bucket::B0).is_ok());
+
+        // The offsets: version 0, kind 1, the nonce 10 to 21, and
+        // `body_len` 22 and 23.
+        let cases = [
+            (0, 0x00, "WIR-410: version 0x00"),
+            (0, 0x02, "WIR-410: version 0x02"),
+            (1, 0x00, "WIR-411: kind 0x00"),
+            (1, 0x03, "WIR-411: kind 0x03"),
+            (1, 0xFF, "WIR-411: kind 0xFF"),
+            (10, 0x01, "WIR-422: a nonce byte of an epoch-key record"),
+            (21, 0x80, "WIR-422: the last nonce byte"),
+            (23, 0x6F, "WIR-406: body_len one above the row"),
+            (22, 0x00, "WIR-406: body_len below the row"),
+        ];
+        for (at, value, case) in cases {
+            let mut bad = good.clone();
+            assert_ne!(bad[at], value, "{case}");
+            bad[at] = value;
+            assert_eq!(
+                GroupQueueRecord::parse(&bad, Bucket::B0).err(),
+                Some(Error::Malformed),
+                "{case}"
+            );
+        }
+
+        // A content record takes a nonce from the CSPRNG.
+        let mut content = good.clone();
+        content[1] = RecordKind::Content as u8;
+        content[10] = 0x01;
+        assert!(GroupQueueRecord::parse(&content, Bucket::B0).is_ok());
+    }
+
+    #[test]
     fn the_sparse_vector_holds_its_order() {
         let plain = ContentPlain {
             sender_index: 3,

@@ -1,6 +1,7 @@
 //! The full identity reset of Part 7 §7.7.1 on the sending side: a new
 //! identity root, a key-change notice to each contact at its own delay
-//! (Part 4 §4.5.1), a new device roster, and the re-key of each group.
+//! (Part 4 §4.5.1), a new device roster, a new recovery code, the re-key
+//! of each group, and the tombstone of each published entry.
 //!
 //! The reset keeps the storage seed. `K_store` wraps the database, and
 //! `K_set` names each stored message by `msg_ref`. A new `K_set` would
@@ -19,7 +20,8 @@ use umbra_wire::app::{keys::KeyChangeNotice, AppKind, AppMessage};
 use zeroize::Zeroizing;
 
 use super::{
-    msg_ref, outbox_row, stored_message, Client, Outgoing, OUTBOX, OUTGOING, QUEUE_ID_LEN,
+    devices::RowWrite, msg_ref, outbox_row, stored_message, Client, Outgoing, OUTBOX, OUTGOING,
+    QUEUE_ID_LEN,
 };
 use crate::{ConversationId, Delivery, Error, Event, MsgRef};
 
@@ -132,6 +134,22 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // root. Thus it still takes a hello, renews, rotates, and retires
         // each one, and it strands no handle and no link.
         let earlier_roots = self.roots_for_published()?;
+
+        // DEV-357: the party that held the store holds that root too, thus
+        // it can write a new version of each of those entries. Each one
+        // ends at the upkeep, also when no call of the platform reaches
+        // the directory.
+        let tombstones = self.tombstone_marks()?;
+
+        // DEV-263: each group takes a re-key after the commit, and no read
+        // after the commit fails the reset.
+        let groups = self.group_conversations()?.len();
+
+        // DEV-346: the party that the reset cuts off can hold the code, and
+        // a backup under that code would give it the new root.
+        let mut writes = self.new_recovery_code_writes(rng)?;
+        writes.extend(self.device_set_writes(&device, &roster)?);
+        writes.extend(tombstones);
         let open = self.open_mut()?;
         let identity_row = open
             .store
@@ -156,6 +174,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 rng,
             )?;
         }
+        for write in &writes {
+            match write {
+                RowWrite::Put(table, row, plain) => batch.put(*table, *row, None, plain, rng)?,
+                RowWrite::Delete(table, row) => batch.delete(*table, *row),
+            }
+        }
 
         for (conversation, due, app) in &notices {
             let value =
@@ -170,11 +194,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
 
         batch.commit()?;
-        self.keep_device_set(&device, &roster, rng)?;
 
-        // DEV-263: the group re-key of Part 11 §11.12 in each group.
-        let groups = self.group_conversations()?.len();
-        self.rekey_groups(now_ms, rng)?;
+        // DEV-263: the group re-key of Part 11 §11.12 in each group. A group
+        // that a rate holds back takes its re-key at a later try. An error
+        // here would tell the platform that no reset took place.
+        let _ = self.rekey_groups(now_ms, rng);
         self.events.push_back(Event::Conversations);
 
         Ok(ResetSummary {

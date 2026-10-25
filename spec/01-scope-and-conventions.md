@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 1: Scope, Conventions, and Terminology
 
 **Status:** Draft
-**Version:** 0.45.1
-**Date:** 2026-10-22
+**Version:** 0.46.0
+**Date:** 2026-10-23
 
 ---
 
@@ -466,7 +466,6 @@ a side channel that the user selects, such as a QR code scan.
 | Link QR code and provisioning payload | Part 7 §7.4 | Out of band for the code, and the chunk path of Part 12 §12.3.3 for the provision | Client |
 | `MutableItem`, kind `0x20` sub-kind `0x01` | Part 7 §7.5.3 | `AppMessage` | Client |
 | `DeviceSetControl`, `SyncAck` | Part 7 §7.5.5 | `AppMessage`, kind `0x20` sub-kind `0x02` | Client |
-| `SyncSeedUpdate` | Part 7 §7.7 | `DeviceSetControl`, type `0x05` | Client |
 | Catch-up object | Part 7 §7.5.1 | The chunk path of Part 12 §12.3.3, and `DeviceSetControl` type `0x04` carries its `FileDescriptor` | Client |
 | `NdrRequest`, `NdrResponse`, `PushToken` | Part 8 §8.2.7 | OHTTP to the NDR, Part 8 §8.2.7 | Client and NDR |
 | Notification blob | Part 8 §8.2.2 | The platform push, Part 8 §8.4, and the `NWAKE` of a watch, Part 8 §8.4.3 | Relay |

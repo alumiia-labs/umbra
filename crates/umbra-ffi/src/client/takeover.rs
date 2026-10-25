@@ -25,7 +25,6 @@ use super::{
         RowWrite, DEVICE_SELF, LINK_FLOOR_SETTING, PENDING_PEER_SETTING, SELF_KEY,
         SYNC_BUNDLE_SETTING,
     },
-    social::SHARES_GIVEN,
     sync::SYNC_SENT,
     Client, Event, QUEUE_ID_LEN, SETTINGS,
 };
@@ -338,12 +337,6 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for (row, plain) in store.list(SYNC_SENT, None)? {
             drop(Zeroizing::new(plain));
             writes.push(RowWrite::Delete(SYNC_SENT, row));
-        }
-
-        // The shares of the code that the absent device held open no
-        // backup of this device.
-        for (row, _) in store.list(SHARES_GIVEN, None)? {
-            writes.push(RowWrite::Delete(SHARES_GIVEN, row));
         }
 
         // DEV-313: the store holds the notice before it holds the epoch.

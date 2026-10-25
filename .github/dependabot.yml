@@ -1,9 +1,33 @@
 # The workflows name each action by its commit hash. These updates keep the
-# hashes current. `deny.toml` controls the Cargo and Gradle dependencies,
-# thus this file omits them.
+# hashes current. `deny.toml` controls the Cargo dependencies alone, thus
+# this file omits them, and it watches the Gradle graph of the app and the
+# npm graph of the site. The cooldown is the cooling-off window of Part 14
+# §14.2.7.
+#
+# A version update bumps a direct dependency alone. The dependency graph of
+# GitHub holds no Gradle package, and of the site lock it holds pnpm alone.
+# Thus no advisory alert comes for the others. scripts/check.sh audits the
+# site lock, and the release steps of android/README.md check the Android
+# libraries.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 14
+
+  - package-ecosystem: gradle
+    directory: /android
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+
+  - package-ecosystem: npm
+    directory: /site
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14

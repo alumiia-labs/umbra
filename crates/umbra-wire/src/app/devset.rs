@@ -2,8 +2,9 @@
 //! `DeviceSetControl` wrapper of Part 7 §7.5.5.
 //!
 //! The wrapper gives each control object a type byte in its own namespace.
-//! The roster epoch, the ownership claim, and the seed update keep their
-//! layouts in Part 7, and this module hands their bytes through.
+//! The roster epoch and the ownership claim keep their layouts in Part 7,
+//! the catch-up descriptor in Part 12, and this module hands their bytes
+//! through.
 
 use crate::{
     codec::{Reader, Writer},
@@ -35,8 +36,9 @@ pub enum ControlType {
     OwnershipClaim = 0x03,
     /// A `FileDescriptor` of a catch-up object.
     CatchUpDescriptor = 0x04,
-    /// A `SyncSeedUpdate` of Part 7 §7.7.
-    SyncSeedUpdate = 0x05,
+    /// Reserved: no record of v1 carries it, and a receiver ignores one
+    /// (Part 7 §7.5.5).
+    Reserved = 0x05,
 }
 
 impl ControlType {
@@ -46,7 +48,7 @@ impl ControlType {
             0x02 => Ok(ControlType::RosterEpoch),
             0x03 => Ok(ControlType::OwnershipClaim),
             0x04 => Ok(ControlType::CatchUpDescriptor),
-            0x05 => Ok(ControlType::SyncSeedUpdate),
+            0x05 => Ok(ControlType::Reserved),
             _ => Err(Error::Malformed),
         }
     }

@@ -32,6 +32,9 @@ pub const CHUNK_TTL: u64 = 14 * 86_400;
 /// `CHUNK_LIFE_MAX`, in seconds: a renewal keeps a chunk that a party
 /// still reads two weeks more at the most.
 pub const CHUNK_LIFE_MAX: u64 = 28 * 86_400;
+/// `CHUNK_PENDING_TTL`, in seconds: the life of a registration that waits
+/// for its bytes (`ATT-181`).
+pub const CHUNK_PENDING_TTL: u64 = 30 * 60;
 /// `BACKUP_TTL` of Part 4 §4.8, in seconds.
 pub const BACKUP_TTL: u64 = 180 * 86_400;
 /// `REPLICAS`.
@@ -47,10 +50,35 @@ pub const MAX_CONCURRENT_DOWN: usize = 32;
 /// `MAX_DESCRIPTOR_REFS`, one `B3` cell.
 pub const MAX_DESCRIPTOR_REFS: usize = 269;
 /// `MESSAGE_DESCRIPTOR_REFS`: the refs of a descriptor at level `0x00` in
-/// a record of kind `0x02`, which leaves room in one `B3` cell for the
-/// largest name and preview of Part 6 rule `WIR-531` (`ATT-072`).
-pub const MESSAGE_DESCRIPTOR_REFS: usize = MAX_DESCRIPTOR_REFS
-    - umbra_wire::descriptor::TRAILER_MAX.div_ceil(umbra_wire::descriptor::CHUNK_REF_LEN);
+/// a record of kind `0x02`. With the largest name, preview, and caption of
+/// Part 6 rules `WIR-531` and `WIR-535`, the record fits one `B3` cell with
+/// the braid frame of the default chunk (`ATT-072`, `ATT-021`).
+pub const MESSAGE_DESCRIPTOR_REFS: usize = (umbra_wire::bucket::Bucket::B3.app_default_chunk()
+    - umbra_wire::bucket::APP_HEADER
+    - umbra_wire::descriptor::FIXED
+    - umbra_wire::descriptor::TRAILER_MAX)
+    / umbra_wire::descriptor::CHUNK_REF_LEN;
+// ATT-073: a receiver takes level 0x01 only above this count, thus the
+// count of the receivers of today stays.
+const _: () = assert!(MESSAGE_DESCRIPTOR_REFS == 207);
+/// `MESSAGE_BODY_MAX`: the largest body of a record of kind `0x02` that a
+/// client sends. The record fits `B3` with the braid frame of the default
+/// chunk also as the `inner` of a `SyncedRecord` of Part 7 §7.5.3 with
+/// `MAX_DEVICES` entries, which each other device of the set takes
+/// (`ATT-208`).
+pub const MESSAGE_BODY_MAX: usize = umbra_wire::bucket::Bucket::B3.app_default_chunk()
+    - umbra_wire::bucket::APP_HEADER
+    - crate::devset::sync::synced_overhead(crate::devset::MAX_DEVICES)
+    - umbra_wire::bucket::APP_HEADER;
+// ATT-208: a record at the ref limit fits it with the largest name and
+// caption, once its preview stays out.
+const _: () = assert!(
+    umbra_wire::descriptor::FIXED
+        + MESSAGE_DESCRIPTOR_REFS * umbra_wire::descriptor::CHUNK_REF_LEN
+        + umbra_wire::descriptor::TRAILER_MAX
+        - umbra_wire::descriptor::PREVIEW_MAX
+        <= MESSAGE_BODY_MAX
+);
 /// `MANIFEST_REFS_PER_CHUNK`.
 pub const MANIFEST_REFS_PER_CHUNK: usize = 271;
 /// `MAX_DATA_CHUNKS`.
@@ -65,6 +93,24 @@ pub const QUOTA_WINDOW: u64 = 86_400;
 pub const CHUNK_STORE_MIN: u64 = 100 * 1_024 * 1_024 * 1_024;
 /// `CHUNK_STORE_TARGET`, in bytes.
 pub const CHUNK_STORE_TARGET: u64 = 200 * 1_024 * 1_024 * 1_024;
+
+/// `CHUNK_PENDING_SHARE` of a store of `capacity` bytes: one eighth, which
+/// the registrations that wait for their bytes keep (`ATT-200`).
+pub const fn pending_share(capacity: u64) -> u64 {
+    capacity / 8
+}
+
+/// The trim target of a store of `capacity` bytes: `CHUNK_STORE_TARGET`,
+/// or the store less its pending share when that is smaller (`ATT-201`).
+pub const fn trim_target(capacity: u64) -> u64 {
+    let kept = capacity.saturating_sub(pending_share(capacity));
+    if kept < CHUNK_STORE_TARGET {
+        kept
+    } else {
+        CHUNK_STORE_TARGET
+    }
+}
+
 /// `CHUNK_EGRESS_BUDGET_DAY`, in bytes.
 pub const CHUNK_EGRESS_BUDGET_DAY: u64 = 4 * CHUNK_STORE_TARGET;
 /// `CHUNK_FETCH_RATE`, fetches of one chunk in one hour.

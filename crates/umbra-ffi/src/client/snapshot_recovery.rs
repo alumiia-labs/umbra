@@ -19,7 +19,7 @@ use umbra_wire::{
         keys::{KeyRequest, KeyScope},
         AppKind, AppMessage,
     },
-    group::control::{ControlType, GroupControl, Role, SnapshotNotice},
+    group::control::{ControlType, GroupControl, Role, RosterSnapshot, SnapshotNotice},
 };
 
 use super::{groups::Before, Client};
@@ -38,13 +38,66 @@ pub struct SnapshotJob {
 }
 use crate::{ConversationId, Error};
 
-/// The state of the recovery of each group: [`WANTED`] and the time of the
-/// request, or [`NOTICED`], the roster epoch and the descriptor.
+/// The state of the recovery of each group: [`WANTED`], the time of the
+/// last request and the time of the first, or [`NOTICED_SINCE`], the time
+/// of the first request, the roster epoch and the descriptor. A row of an
+/// earlier build can be [`NOTICED`], with no time.
 const RECOVERY: TableId = TableId(0x4A);
 const WANTED: u8 = 1;
 const NOTICED: u8 = 2;
-/// A member asks again after this period with no answer, in seconds.
+const NOTICED_SINCE: u8 = 3;
+/// A member asks again after this period with no answer, in seconds
+/// (`GRP-433`).
 const ASK_AGAIN: u64 = 86_400;
+/// A recovery that no snapshot ended in this period from its first request
+/// ends, in seconds. A later gap starts a new one (`GRP-433`).
+const ASK_FOR: u64 = umbra_queue::params::GROUP_RETENTION;
+
+/// The row of a recovery that waits for a notice.
+fn wanted_row(asked: u64, first: u64) -> Vec<u8> {
+    [
+        [WANTED].as_slice(),
+        &asked.to_be_bytes(),
+        &first.to_be_bytes(),
+    ]
+    .concat()
+}
+
+/// The time of the last request and the time of the first request of a
+/// row that waits for a notice. A row of an earlier build holds one time,
+/// which is both.
+fn wanted_times(row: &[u8]) -> Option<(u64, u64)> {
+    if row.first() != Some(&WANTED) {
+        return None;
+    }
+
+    let at = |from: usize| -> Option<u64> {
+        let bytes = row.get(from..from.checked_add(8)?)?;
+        Some(u64::from_be_bytes(bytes.try_into().ok()?))
+    };
+    let asked = at(1)?;
+
+    Some((asked, at(9).unwrap_or(asked)))
+}
+
+/// The time of the first request of a recovery, or none for a row of an
+/// earlier build that holds a notice.
+fn first_asked(row: &[u8]) -> Option<u64> {
+    match row.first() {
+        Some(&WANTED) => wanted_times(row).map(|(_, first)| first),
+        Some(&NOTICED_SINCE) => Some(u64::from_be_bytes(row.get(1..9)?.try_into().ok()?)),
+        _ => None,
+    }
+}
+
+/// The descriptor of a row that holds a notice.
+fn noticed_descriptor(row: &[u8]) -> Option<&[u8]> {
+    match row.first() {
+        Some(&NOTICED) => row.get(5..),
+        Some(&NOTICED_SINCE) => row.get(13..),
+        _ => None,
+    }
+}
 
 impl<B: Backend, E: SecureElement> Client<B, E> {
     fn recovery_row(&self, conversation: ConversationId) -> Result<Option<Vec<u8>>, Error> {
@@ -85,17 +138,59 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
         let now = now_ms / 1_000;
         if let Some(held) = self.recovery_row(conversation)? {
-            let asked = held
-                .get(1..9)
-                .and_then(|bytes| bytes.try_into().ok())
-                .map(u64::from_be_bytes);
-            if held.first() == Some(&NOTICED)
+            let asked = wanted_times(&held).map(|(asked, _)| asked);
+            if noticed_descriptor(&held).is_some()
                 || asked.is_some_and(|at| now.saturating_sub(at) < ASK_AGAIN)
             {
                 return Ok(());
             }
         }
 
+        self.send_snapshot_request(conversation, now, now_ms, rng)
+    }
+
+    /// Asks again for the snapshot of a group whose last request took no
+    /// snapshot in `ASK_AGAIN`, and ends a recovery that took none in
+    /// `ASK_FOR` (`GRP-433`). A fetch that failed asks again in the same
+    /// way.
+    pub(super) fn ask_roster_again<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        if !self.owns_channels()? {
+            return Ok(());
+        }
+
+        let Some((asked, first)) = self
+            .recovery_row(conversation)?
+            .as_deref()
+            .and_then(wanted_times)
+        else {
+            return Ok(());
+        };
+
+        let now = now_ms / 1_000;
+        if now.saturating_sub(first) >= ASK_FOR {
+            return self.put_recovery(conversation, None, rng);
+        }
+        if now.saturating_sub(asked) < ASK_AGAIN {
+            return Ok(());
+        }
+
+        self.send_snapshot_request(conversation, first, now_ms, rng)
+    }
+
+    /// Sends the request of a recovery whose first request went at
+    /// `first`.
+    fn send_snapshot_request<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        first: u64,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
         let group = self.group_of(conversation)?;
 
         // WIR-523: scope 0x03 names no member, and the notice goes on the
@@ -111,15 +206,22 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let body = body.get(..n).ok_or(Error::Malformed)?.to_vec();
         drop(group);
 
+        // The time goes first, thus a send that fails waits as one that
+        // went, and the sweep sends no request at each pass.
+        let value = wanted_row(now_ms / 1_000, first);
+        self.put_recovery(conversation, Some(&value), rng)?;
+
         // A member that lacks the epoch too posts nothing, and its
-        // contacts carry the request.
+        // contacts carry the request. WIR-337: the requests to one peer
+        // share one rate over each scope.
         let _ = self.post_group_app(conversation, AppKind::KeyRequest, &body, now_ms, rng);
         for contact in self.contacts_in(conversation)? {
-            self.send_pairwise_app(contact, AppKind::KeyRequest, &body, now_ms, rng)?;
+            if self.asks_peer(contact, now_ms / 1_000, rng)? {
+                self.send_pairwise_app(contact, AppKind::KeyRequest, &body, now_ms, rng)?;
+            }
         }
 
-        let value = [[WANTED].as_slice(), &now.to_be_bytes()].concat();
-        self.put_recovery(conversation, Some(&value), rng)
+        Ok(())
     }
 
     /// A `KeyRequest` of scope `0x03` for a group of this device. An admin
@@ -243,18 +345,26 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Ok(());
         };
 
-        let wanted = self
+        let first = self
             .recovery_row(conversation)?
-            .is_some_and(|held| held.first() == Some(&WANTED));
+            .as_deref()
+            .and_then(wanted_times)
+            .map(|(_, first)| first);
+        let Some(first) = first else {
+            return Ok(());
+        };
         if !is_admin
-            || !wanted
             || notice.group_id != *group.group_id()
             || notice.roster_epoch <= group.roster().epoch_index()
         {
             return Ok(());
         }
+
+        // GRP-433: the bound counts from the first request, thus a notice
+        // whose fetch fails does not start the recovery again.
         let value = [
-            [NOTICED].as_slice(),
+            [NOTICED_SINCE].as_slice(),
+            &first.to_be_bytes(),
             &notice.roster_epoch.to_be_bytes(),
             notice.descriptor,
         ]
@@ -268,10 +378,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut fetches = Vec::new();
         for conversation in self.group_conversations()? {
             if let Some(value) = self.recovery_row(conversation)? {
-                if value.first() == Some(&NOTICED) {
-                    if let Some(descriptor) = value.get(5..) {
-                        fetches.push((conversation, descriptor.to_vec()));
-                    }
+                if let Some(descriptor) = noticed_descriptor(&value) {
+                    fetches.push((conversation, descriptor.to_vec()));
                 }
             }
         }
@@ -281,7 +389,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// The fetched snapshot: the member takes the roster, each record that
     /// waited for it opens, and the recovery ends. A snapshot that does not
-    /// verify ends it too, and the gap asks again later.
+    /// verify fails as a fetch fails.
     pub fn recovery_fetched<R: CryptoRng + ?Sized>(
         &mut self,
         conversation: ConversationId,
@@ -289,10 +397,26 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
-        self.put_recovery(conversation, None, rng)?;
         let mut group = self.group_of(conversation)?;
         let before = Before::of(&group);
-        group.recover_roster(snapshot, now_ms / 1_000)?;
+
+        // GRP-428: the path starts at the creator key, which a roster stored
+        // before it kept that key takes from the path of this device.
+        let _ = self.creator_roster_pk(conversation, &mut group);
+        if let Err(fault) = group.recover_roster(snapshot, now_ms / 1_000) {
+            self.recovery_failed(conversation, now_ms, rng)?;
+            return Err(fault.into());
+        }
+
+        // GRP-430: the path holds each grant and re-key that this member
+        // missed, and a snapshot of its own needs them. They go before the
+        // roster, thus a crash leaves no roster without its path.
+        let parsed = RosterSnapshot::parse(snapshot)?;
+        for entry in umbra_core::group::roster::split_path(parsed.path)? {
+            self.note_grant(conversation, entry, rng)?;
+        }
+
+        self.put_recovery(conversation, None, rng)?;
         let outcomes: VecDeque<_> = group.retry_held(now_ms / 1_000).into_iter().collect();
         self.take_outcomes(conversation, group, outcomes, before, false, now_ms, rng)?;
         self.events.push_back(crate::Event::Conversations);
@@ -300,12 +424,22 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(())
     }
 
-    /// The fetch of a snapshot failed: the gap asks again later.
+    /// The fetch of a snapshot failed. The recovery waits as after a
+    /// request, and it asks again after `ASK_AGAIN` (`GRP-433`). It keeps
+    /// the time of its first request, thus its bound does not move. A
+    /// recovery that ended while the fetch ran stays ended.
     pub fn recovery_failed<R: CryptoRng + ?Sized>(
         &mut self,
         conversation: ConversationId,
+        now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
-        self.put_recovery(conversation, None, rng)
+        let Some(held) = self.recovery_row(conversation)? else {
+            return Ok(());
+        };
+
+        let now = now_ms / 1_000;
+        let first = first_asked(&held).unwrap_or(now);
+        self.put_recovery(conversation, Some(&wanted_row(now, first)), rng)
     }
 }

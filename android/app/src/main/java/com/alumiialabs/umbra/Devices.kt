@@ -394,7 +394,12 @@ fun LinkDeviceScreen(onBack: () -> Unit) {
 fun JoinForm(onCancel: () -> Unit) {
     val context = LocalContext.current
     val passphrase = rememberPlatformField()
+    // The new store takes its passphrase twice, as the first launch does.
+    val confirm = rememberPlatformField()
+    var mismatch by remember { mutableStateOf(false) }
     var held by remember { mutableStateOf<CharArray?>(null) }
+    // A device with no back camera pastes the code.
+    val canScan = remember { hasBackCamera(context) }
     var isPasting by remember { mutableStateOf(false) }
     var pasted by remember { mutableStateOf("") }
     DisposableEffect(Unit) { onDispose { held?.fill('\u0000') } }
@@ -421,7 +426,7 @@ fun JoinForm(onCancel: () -> Unit) {
                 Spacer(Modifier.height(10.dp))
                 Progress()
             }
-            held != null && isPasting -> {
+            held != null && (isPasting || !canScan) -> {
                 // A ticket is no message text, thus a composable field
                 // holds it.
                 OutlinedTextField(
@@ -442,7 +447,14 @@ fun JoinForm(onCancel: () -> Unit) {
                     Core.join(context, phrase, pasted.trim())
                 }
                 Spacer(Modifier.height(8.dp))
-                SecondaryButton(stringResource(R.string.common_back)) { isPasting = false }
+                SecondaryButton(stringResource(R.string.common_back)) {
+                    if (canScan) {
+                        isPasting = false
+                    } else {
+                        held?.fill('\u0000')
+                        held = null
+                    }
+                }
             }
             held != null -> {
                 Scanner { text ->
@@ -461,7 +473,24 @@ fun JoinForm(onCancel: () -> Unit) {
             else -> {
                 FramedPlatformField(passphrase, stringResource(R.string.common_new_passphrase), isPassphrase = true)
                 Spacer(Modifier.height(14.dp))
-                PrimaryButton(stringResource(R.string.devices_scan_the_code)) { held = passphrase.take() }
+                FramedPlatformField(confirm, stringResource(R.string.lock_confirm_new_passphrase), isPassphrase = true)
+                Spacer(Modifier.height(14.dp))
+                PrimaryButton(stringResource(if (canScan) R.string.devices_scan_the_code else R.string.devices_paste_the_code)) {
+                    val first = passphrase.take()
+                    val second = confirm.take()
+                    mismatch = first == null || second == null || !first.contentEquals(second)
+                    second?.fill('\u0000')
+
+                    if (mismatch) {
+                        first?.fill('\u0000')
+                    } else {
+                        held = first
+                    }
+                }
+                if (mismatch) {
+                    Spacer(Modifier.height(10.dp))
+                    Note(stringResource(R.string.lock_passphrases_differ), isError = true)
+                }
                 Spacer(Modifier.height(8.dp))
                 SecondaryButton(stringResource(R.string.common_back), onClick = onCancel)
             }

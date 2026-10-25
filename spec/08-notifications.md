@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 8: Notifications and Mobile Delivery
 
 **Status:** Draft
-**Version:** 0.45.1
-**Date:** 2026-10-22
+**Version:** 0.46.0
+**Date:** 2026-10-23
 
 ---
 
@@ -104,7 +104,10 @@ ct_token_i = XChaCha20-Poly1305(k_tok_i, nonce, push_token, ad = handle_i)
 
 **[NTF-031]** A device in Instant mode MUST make one `k_tok` and one `handle`
 for each group of at most `MAX_QUEUES_PER_HANDLE` queues. A queue in Direct mode
-takes `WATCH_HANDLE` of `NTF-143` and no group. **[NTF-032]** A device MUST NOT
+or in Periodic mode takes `WATCH_HANDLE` of `NTF-143`, and its group holds no
+handle at the NDR. Such a device still divides its queues into groups of at
+most `MAX_QUEUES_PER_HANDLE` queues of one relay, and the queues of one group
+share the `k_ntf_root` of §8.2.4. **[NTF-032]** A device MUST NOT
 put more than `MAX_QUEUES_PER_HANDLE` queues under one handle. **[NTF-033]** A
 device MUST set `MAX_QUEUES_PER_HANDLE` equal to the `MAX_QUEUES_PER_SESSION` of
 Part 3 §3.2.5, which is 8. **[NTF-034]** A device MUST divide its queues across
@@ -307,8 +310,15 @@ with that root under `NTF-007`, and the store holds no copy of it.
 The notifier key is no queue key of Part 3 §3.2.2, and `NET-009` to `NET-014`
 do not apply to it. A queue relay that holds the binding of the queue holds
 `k_ntf_root`, thus it can derive the notifier key of each queue of that handle
-group. That relay links those queues through the handle already (`NTF-031`),
-thus the derivation links no more.
+group. In Instant mode that relay links those queues through the handle
+already (`NTF-031`), thus the derivation links no more.
+
+In Direct mode and in Periodic mode each binding names `WATCH_HANDLE`, and the
+`k_ntf_root` that the bindings of one group share is the link in the store of
+the relay. That group is the group of Instant mode: at most
+`MAX_QUEUES_PER_HANDLE` queues of one device at one relay, for the 7 days of
+`NTF-007`. The watch circuit of `NTF-142` shows the live relay the same group.
+Part 15 §15.1 holds the row of the store.
 
 The relay draws a fresh `notifier_id` at each `NKEY`, and it ends the
 credential before it.
@@ -444,8 +454,8 @@ PushToken   { carrier u8, target }         // the plaintext of ct_token, at most
 
 **The bounds of the NDR.** A first `NREG` carries no admission, and the OHTTP
 relay hides its sender, thus the NDR cannot bound one device. It bounds its
-own work with the four limits below, and it holds them in memory alone. A
-first `NTIMER` is a new handle under each limit, as a first `NREG` is.
+own work with the limits below, and it holds them in memory alone. A first
+`NTIMER` is a new handle under each limit, as a first `NREG` is.
 
 - The NDR holds at most 2^20 registrations. It takes an `NREG` that moves a
   handle that it holds. An `NREG` for one more handle at the bound takes the
@@ -454,8 +464,18 @@ first `NTIMER` is a new handle under each limit, as a first `NREG` is.
   handle lets a flood of first `NREG` requests leave each new device with no
   push for the life of a registration. The NDR keeps the mark of the first
   push of a registration in its store, and a move of the handle keeps it.
-  A restart thus keeps the place of each device that took a push, and a
-  flood after a restart takes the places of the flood before it.
+  A push marks its registration only when the provider took it, thus a token
+  that a party made up marks no place. A restart keeps the place of each
+  device that took a push, and a flood after a restart takes the places of
+  the flood before it.
+- The timers of §8.2.8 hold at most 2^18 of those places. A first `NTIMER` at
+  that bound takes the place of the oldest timer that never took a tick, and
+  the NDR refuses it when each timer took one. A tick goes to a token that the
+  request names in the clear, thus a party with a few real tokens marks
+  timers of its own with no `k_tok`. This bound keeps such timers out of the
+  places of the handle groups. A held handle keeps its kind: the NDR refuses
+  an `NREG` that names the handle of a timer, and an `NTIMER` that names the
+  handle of a group.
 - The NDR registers at most 1 200 new handles in one minute, and at most 300
   of them from one OHTTP relay. It tells an OHTTP relay by the address of the
   connection. It refuses a first `NREG` above either bound, and the device
@@ -477,7 +497,9 @@ first `NTIMER` is a new handle under each limit, as a first `NREG` is.
 
 > *Residual.* A flood of first `NREG` requests at the rate above takes the place
 > of the oldest registrations that took no push. A device that registered long
-> before and got no push is among them. A queue relay that pushes for that
+> before and got no push is among them. A flood of `NTIMER` requests under real
+> tokens fills the places of the timers, and a new device in Periodic mode then
+> gets no timer until a place frees. A queue relay that pushes for that
 > device gets the answer `gone` and drops its binding under `NTF-125`. Thus the
 > device gets no push until the rotation of `NTF-007` gives it a new handle,
 > inside 7 days.
@@ -525,8 +547,16 @@ to wake it.
   in seconds. A tick carries no blob and no field that differs between two
   ticks, and the arrival of a message does not move it. The NDR MUST refuse
   an `NPUSH` for a timer, and it MUST NOT send a tick whose time passed
-  while it did not run. The rules `NTF-125`, `NTF-134`, and `NTF-138` apply
-  to a timer as they apply to an `NREG`.
+  while it did not run. Thus it sends no tick more than `TICK_LATE_MAX` after
+  its phase, and a clock that steps back sends no tick a second time. The
+  rules `NTF-125`, `NTF-134`, and `NTF-138` apply to a timer as they apply
+  to an `NREG`.
+- **[NTF-154]** The NDR MUST drop a timer after `TICK_INVALID_MAX` ticks in a
+  row that FCM refuses with the status 400, the error code
+  `INVALID_ARGUMENT`, and an error body that names the registration token.
+  A tick that FCM takes sets the count back, and so does a move of the
+  timer. A refusal that names another field of the message is a fault of
+  the NDR, and it MUST drop no timer.
 - **[NTF-151]** A device MUST NOT hold a timer and a handle group of §8.2.1
   at the same time. A device MUST take a new push token of the platform when
   it enters Periodic mode, and when it leaves the mode for Instant mode.
@@ -539,6 +569,9 @@ to wake it.
 | --- | --- |
 | `PERIODIC_INTERVAL` | 1 800 s, the cadence of Private mode in §8.3 |
 | `PERIODIC_WATCH_MAX` | 15 s, the longest watch of a locked client at one tick (`NTF-153`) |
+| `ROTATE_INTERVAL` | 7 days, the rotation period of `NTF-007`. It is far below `NDR_REG_TTL` of `NTF-138`, thus a live timer never meets that bound |
+| `TICK_LATE_MAX` | 60 s, the latest that a tick leaves after its phase (`NTF-150`) |
+| `TICK_INVALID_MAX` | 3, the ticks in a row whose token FCM names not valid before the timer leaves (`NTF-154`) |
 
 > *Cause.* The NDR must hold a token that it can read, because no queue
 > relay brings a `k_tok` for a tick. Thus the timer holds no queue: a party
@@ -553,6 +586,12 @@ to wake it.
 > The phase comes from the handle, thus the NDR stores no phase, and a
 > restart keeps each clock. The handle is random, thus the phases of the
 > devices spread over the interval.
+>
+> A first `NTIMER` needs no proof that its sender holds the token. Without
+> `NTF-154`, a token that a party made up costs the NDR one post to FCM in
+> each interval for `NDR_REG_TTL`. A suspend of the host or a step of its
+> clock ahead would also send each timer its tick at once, and a step back
+> would send ticks a second time.
 
 > *Residual.* The NDR and Google see a tick for each device in each 30
 > minutes, and the ingress relay sees the session that follows each tick.
@@ -576,8 +615,10 @@ and the delay as one switch beside it. The pair gives the mode.
 | None | Off mode | Not offered |
 
 - **[NTF-147]** The settings MUST offer the delivery as one choice of three,
-  in this order: Direct, Google, None. They MUST offer Delayed as a separate
-  switch, and they MUST NOT show that switch with None.
+  in this order: Direct, Google, None. A build or a device with no push
+  carrier offers Direct and None alone, in that order (`NTF-140`). The
+  settings MUST offer Delayed as a separate switch, and they MUST NOT show
+  that switch with None.
 - **[NTF-148]** The interface MUST name Instant mode "Google", thus the name
   states the party that sees each push. It MUST name Periodic mode "Google"
   with the delay on, thus the name states the party that sees each tick. The
@@ -721,7 +762,7 @@ wake inside the interval. One phase across two networks links the two, and Part
   Private notifications with the content preview off: one screen holds the
   controls, and a shortcut that sets them adds nothing that the user cannot do.
 - **[NTF-083]** A build MUST ship Direct mode with the content preview off as
-  the default of each Profile.
+  the default of each device.
 - **[NTF-149]** The content preview MUST be two settings of the device: the
   sender, and the text. Each is off in the shipped default. Part 7 `DEV-344`
   lets a conversation take the place of each one. The setting of the device
@@ -754,7 +795,9 @@ the poll below carry the wakes.
 - Implement `Service.onTimeout()` and call `stopSelf()`. **[NTF-012]** **A
   client MUST NOT hold the push-wake session longer than 6 s.** Part 3 §3.12
   derives that bound from the U4 idle background budget. That bound is a
-  ceiling, and Part 3 §3.12 models a wake of 3 s.
+  ceiling, and Part 3 §3.12 models a wake of 3 s. The watch of a locked
+  client at a tick of Periodic mode is no push-wake session, and
+  `PERIODIC_WATCH_MAX` of `NTF-153` bounds it.
 - **[NTF-013]** **A client MUST NOT build a spare circuit in a push-wake
   session.** Part 3 §3.12 gives the cause, which is the same U4 budget. A wake
   needs one circuit, because no interactive send waits on a rotation.
@@ -990,8 +1033,14 @@ of an `NPUSH`, and the client opens it with the wake table of `NTF-135`.
   the `notifier_id` as the queue identifier and the notifier key as the
   signer of the deniable authenticator. The watch MUST run on a link of its
   own and on circuits of its own, with at most `MAX_QUEUES_PER_SESSION`
-  watches on one circuit (Part 3 `NET-022`). It MUST hold no key of
-  `K_store`, and it MUST end at the unlock.
+  watches on one circuit (Part 3 `NET-022`). The watch of a rendezvous queue
+  of §8.2.6 MUST run on a link and a circuit that carry no other watch, as
+  Part 9 `DIS-014` keeps its drain apart. In Direct mode each session of
+  that watch MUST start at a random delay of its own, as Part 9 `DIS-015`
+  keeps the schedule of its drain apart. The watch MUST hold no key of
+  `K_store`, and it MUST end at the unlock. At its end it MUST send nothing
+  more but the end of its sessions, and a link that it dials then MUST NOT
+  open.
 
   A queue relay MUST accept an `NSUB` only under the notifier credential that
   the queue holds, and a watch MUST end with its circuit and at the next
@@ -1009,6 +1058,16 @@ of an `NPUSH`, and the client opens it with the wake table of `NTF-135`.
   queue of the last arrival. A queue relay MUST ignore an answer `gone` for
   that handle. A party MUST NOT send a request to the NDR under that
   handle, and the NDR MUST refuse such a request.
+
+  The push token of Instant mode sets the handle of each binding. When that
+  token comes or leaves while the queues still bind, under a push token or
+  for the watch of `NTF-142`, the client MUST mark each binding stale. A run
+  that holds the queues MUST then send a new `NKEY` and `NBIND` for each one
+  at once, and a client with no run sends them at its next run. The token
+  of the timer of §8.2.8 changes no binding. Without this rule, a queue
+  keeps the handle of Instant mode after a change to Periodic mode, and the
+  `gone` of that handle ends its watch. A change to Instant mode then leaves
+  each binding under `WATCH_HANDLE`, and no push goes until the next run.
 - **[NTF-144]** A queue relay MUST send each record that no live
   subscription takes (`NTF-128`) as an `NWAKE` on the circuit of a live
   watch of its queue, with the blob of §8.2.2 sealed under the binding of
@@ -1048,7 +1107,14 @@ of an `NPUSH`, and the client opens it with the wake table of `NTF-135`.
 > ingress relay sees the time of each wake at the address of the device. It does
 > not learn the account or the queue. A queue relay learns that a queue is
 > watched, and one circuit of a watch shows it at most `MAX_QUEUES_PER_SESSION`
-> notifier identifiers, which is the bound of a transport session.
+> notifier identifiers, which is the bound of a transport session. A
+> rendezvous queue is public, thus its watch shares no circuit, and in Direct
+> mode it starts at a delay of its own. The ingress relay sees one more link
+> for each rendezvous queue. The watch of a tick of Periodic mode ends inside
+> `PERIODIC_WATCH_MAX`, which is too short for that delay, thus at a tick the
+> queue relay can match the start times of the two circuits (Part 9
+> `DIS-015`). In both modes the circuits of one watch end together, as the
+> circuits of a run end together at the lock.
 >
 > A record that arrives while no watch of its queue lives takes its wake at
 > the next `NSUB` (`NTF-146`). The relay holds that mark in memory alone,
@@ -1125,17 +1191,18 @@ ciphertext, thus it does not learn the group.
 ### 8.5.2 The notify queue of a group
 
 A group queue of Part 3 §3.2.7 holds no membership list and no `k_tok`. Thus a
-group-queue relay cannot push. A member device in Instant mode gives each
-group one notify queue of its own at a queue relay, and it registers that
-queue with each replica of the group queue. The group-queue relay writes a
-`NotifyDigest` of §8.5.1 into the notify queue, and the queue relay of the
-notify queue pushes as for any queue. Part 6 §6.4.5 gives the commands
-`GNREG` and `GNUNREG`.
+group-queue relay cannot push. A member device in Instant mode, Direct mode,
+or Periodic mode gives each group one notify queue of its own at a queue
+relay, and it registers that queue with each replica of the group queue. The
+group-queue relay writes a `NotifyDigest` of §8.5.1 into the notify queue, and
+the queue relay of the notify queue pushes as for any queue. Part 6 §6.4.5
+gives the commands `GNREG` and `GNUNREG`.
 
-- **[NTF-090]** A client in Instant mode or in Direct mode MUST make one notify
-  queue for each group at `mentions` or `all`, on each device. Part 7 §7.5.9
-  gives the setting. **[NTF-091]** A client MUST put a group notify queue under
-  a notification handle that holds no pairwise queue and no rendezvous queue.
+- **[NTF-090]** A client in Instant mode, Direct mode, or Periodic mode MUST
+  make one notify queue for each group at `mentions` or `all`, on each device.
+  Part 7 §7.5.9 gives the setting. **[NTF-091]** A client MUST put a group
+  notify queue under a notification handle that holds no pairwise queue and no
+  rendezvous queue.
 
   **[NTF-092]** A client MAY put the notify queues of several groups under one
   handle. A client SHOULD place the notify queues of different groups at
@@ -1194,7 +1261,9 @@ notify queue pushes as for any queue. Part 6 §6.4.5 gives the commands
 - **[NTF-106]** A client in Private mode or in Off mode MUST NOT register a
   group notify queue. Those modes find a record at the next drain of the
   group queue. A client in Direct mode finds a record on the `GSUB` of its
-  open client, and its watch takes the digest of a locked client.
+  open client, and its watch takes the digest of a locked client. A client
+  in Periodic mode drains the group queue at a tick, and the watch of a
+  locked client at a tick takes the digest (`NTF-153`).
 - **[NTF-107]** On a wake, a client MUST drain the notify queue under Part 6
   §6.4.3. **[NTF-108]** The client MUST then open a session to one replica of
   the group queue with `GSUB` from its cursor. Part 11 §11.2.2 gives the
@@ -1314,7 +1383,7 @@ documentation that the user reads:
 | Median notification latency | 0.8–2.0 s | ≤ the interval |
 | p95, the alert | ~4 s | ≤ the interval |
 | p95, the message content, Android, the client unlocked | ~7 s | ≤ the interval, and ~3 s more |
-| The message content, the client locked | At the unlock. The alert names the conversation under `NTF-136` | At the unlock, with no alert before it |
+| The message content, the client locked | At the unlock. The alert names the conversation under `NTF-136` | At the unlock. Private mode shows no alert before it. In Periodic mode the watch of each tick names the conversation (`NTF-153`) |
 | Radio promotions each day | One for each background arrival, which is 184 on the model day | 48 at 30 min, 72 at 20 min |
 | Battery with no arrival | 0 %/day | 2.8 %/day at 30 min, 4.3 %/day at 20 min |
 | Battery for each arrival | 9.1 mWh, which is 10.9 %/day on the model day | 0 |

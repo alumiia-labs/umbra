@@ -6,7 +6,7 @@
 //! truncates the write-ahead log. A record that an `ACK` covered and a queue
 //! that a `DEL` ended leave no bytes in the file (`WIR-039` to `WIR-042`).
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, types::Value, Connection, OptionalExtension};
 use umbra_core::attach::store::{Class, Credentials, HeldChunk};
 use umbra_queue::relay::Stored;
 
@@ -92,8 +92,45 @@ fn unsigned(value: i64) -> Result<u64, StoreFault> {
     u64::try_from(value).map_err(|_| StoreFault)
 }
 
-fn id<const N: usize>(bytes: Vec<u8>) -> Result<[u8; N], StoreFault> {
-    bytes.try_into().map_err(|_| StoreFault)
+/// The bytes of a field of a `BLOB` column, or none for another type.
+fn blob_of(value: Value) -> Option<Vec<u8>> {
+    match value {
+        Value::Blob(bytes) => Some(bytes),
+        _ => None,
+    }
+}
+
+/// An identifier of `N` bytes from a field of a `BLOB` column.
+fn id_of<const N: usize>(value: Value) -> Option<[u8; N]> {
+    blob_of(value)?.try_into().ok()
+}
+
+/// A field of an `INTEGER` column, or none for another type.
+fn int_of(value: &Value) -> Option<i64> {
+    match value {
+        Value::Integer(number) => Some(*number),
+        _ => None,
+    }
+}
+
+/// A time of an `INTEGER` column, which is never below zero.
+fn time_of(value: &Value) -> Option<u64> {
+    u64::try_from(int_of(value)?).ok()
+}
+
+/// Adds one stored record to its queue. A record that does not read makes
+/// the head of its queue empty, thus the queue does not parse and leaves
+/// the file (`NET-303`).
+fn push_record(queue: &mut StoredQueue, seq: &Value, accepted_at: &Value, bytes: Value) {
+    let seq = int_of(seq).and_then(|seq| u32::try_from(seq).ok());
+    match (seq, time_of(accepted_at), blob_of(bytes)) {
+        (Some(seq), Some(accepted_at), Some(bytes)) => queue.records.push(Stored {
+            seq,
+            accepted_at,
+            bytes,
+        }),
+        _ => queue.head.clear(),
+    }
 }
 
 impl SqliteStore {
@@ -140,23 +177,35 @@ impl RelayStore for SqliteStore {
         ))?;
 
         let mut loaded = Loaded::default();
+        // NET-303: a row whose fields do not read leaves the file, and each
+        // other row stays. Before this, one such row stopped the load, and
+        // the relay did not start.
+        let mut dropped: Vec<(&str, Value)> = Vec::new();
 
         let mut queues = fault(
             self.connection
                 .prepare("SELECT recipient_id, head FROM queues"),
         )?;
         let rows = fault(queues.query_map([], |row| {
-            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+            Ok((row.get::<_, Value>(0)?, row.get::<_, Value>(1)?))
         }))?;
 
         for row in rows {
-            let (recipient_id, head) = fault(row)?;
-            let queue = StoredQueue {
-                head,
-                records: Vec::new(),
-            };
-
-            loaded.queues.insert(id(recipient_id)?, queue);
+            let (key, head) = fault(row)?;
+            match (id_of::<32>(key.clone()), blob_of(head)) {
+                (Some(recipient_id), Some(head)) => {
+                    let queue = StoredQueue {
+                        head,
+                        records: Vec::new(),
+                    };
+                    loaded.queues.insert(recipient_id, queue);
+                }
+                // NET-302: the records of a queue that leaves go with it.
+                _ => {
+                    dropped.push(("DELETE FROM records WHERE recipient_id IS ?1", key.clone()));
+                    dropped.push(("DELETE FROM queues WHERE recipient_id IS ?1", key));
+                }
+            }
         }
 
         let mut records = fault(self.connection.prepare(
@@ -164,10 +213,10 @@ impl RelayStore for SqliteStore {
         ))?;
         let rows = fault(records.query_map([], |row| {
             Ok((
-                row.get::<_, Vec<u8>>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, Vec<u8>>(3)?,
+                row.get::<_, Value>(0)?,
+                row.get::<_, Value>(1)?,
+                row.get::<_, Value>(2)?,
+                row.get::<_, Value>(3)?,
             ))
         }))?;
 
@@ -176,22 +225,12 @@ impl RelayStore for SqliteStore {
             // NET-303: a record that does not read makes its queue one that
             // does not parse, and the other queues stay. A record of no
             // queue serves no one.
-            let Ok(recipient_id) = id::<32>(recipient_id) else {
+            let Some(queue) = id_of::<32>(recipient_id).and_then(|id| loaded.queues.get_mut(&id))
+            else {
                 continue;
             };
 
-            let Some(queue) = loaded.queues.get_mut(&recipient_id) else {
-                continue;
-            };
-
-            match (u32::try_from(seq), unsigned(accepted_at)) {
-                (Ok(seq), Ok(accepted_at)) => queue.records.push(Stored {
-                    seq,
-                    accepted_at,
-                    bytes,
-                }),
-                _ => queue.head.clear(),
-            }
+            push_record(queue, &seq, &accepted_at, bytes);
         }
 
         let mut group_queues = fault(
@@ -199,18 +238,25 @@ impl RelayStore for SqliteStore {
                 .prepare("SELECT group_queue_id, head FROM group_queues"),
         )?;
         let rows = fault(group_queues.query_map([], |row| {
-            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+            Ok((row.get::<_, Value>(0)?, row.get::<_, Value>(1)?))
         }))?;
 
         for row in rows {
-            let (group_queue_id, head) = fault(row)?;
-            loaded.group_queues.insert(
-                id(group_queue_id)?,
-                StoredQueue {
-                    head,
-                    records: Vec::new(),
-                },
-            );
+            let (key, head) = fault(row)?;
+            match (id_of::<32>(key.clone()), blob_of(head)) {
+                (Some(group_queue_id), Some(head)) => {
+                    let queue = StoredQueue {
+                        head,
+                        records: Vec::new(),
+                    };
+                    loaded.group_queues.insert(group_queue_id, queue);
+                }
+                _ => {
+                    let records = "DELETE FROM group_records WHERE group_queue_id IS ?1";
+                    dropped.push((records, key.clone()));
+                    dropped.push(("DELETE FROM group_queues WHERE group_queue_id IS ?1", key));
+                }
+            }
         }
 
         let mut group_records = fault(self.connection.prepare(
@@ -219,31 +265,22 @@ impl RelayStore for SqliteStore {
         ))?;
         let rows = fault(group_records.query_map([], |row| {
             Ok((
-                row.get::<_, Vec<u8>>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, Vec<u8>>(3)?,
+                row.get::<_, Value>(0)?,
+                row.get::<_, Value>(1)?,
+                row.get::<_, Value>(2)?,
+                row.get::<_, Value>(3)?,
             ))
         }))?;
 
         for row in rows {
             let (group_queue_id, seq, accepted_at, bytes) = fault(row)?;
-            let Ok(group_queue_id) = id::<32>(group_queue_id) else {
+            let Some(queue) =
+                id_of::<32>(group_queue_id).and_then(|id| loaded.group_queues.get_mut(&id))
+            else {
                 continue;
             };
 
-            let Some(queue) = loaded.group_queues.get_mut(&group_queue_id) else {
-                continue;
-            };
-
-            match (u32::try_from(seq), unsigned(accepted_at)) {
-                (Ok(seq), Ok(accepted_at)) => queue.records.push(Stored {
-                    seq,
-                    accepted_at,
-                    bytes,
-                }),
-                _ => queue.head.clear(),
-            }
+            push_record(queue, &seq, &accepted_at, bytes);
         }
 
         let mut invitations = fault(
@@ -252,21 +289,35 @@ impl RelayStore for SqliteStore {
         )?;
         let rows = fault(invitations.query_map([], |row| {
             Ok((
-                row.get::<_, Vec<u8>>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, Option<Vec<u8>>>(3)?,
+                row.get::<_, Value>(0)?,
+                row.get::<_, Value>(1)?,
+                row.get::<_, Value>(2)?,
+                row.get::<_, Value>(3)?,
             ))
         }))?;
 
         for row in rows {
-            let (link_id, recipient_id, at, blob) = fault(row)?;
-            let held = StoredInvitation {
-                recipient_id: id(recipient_id)?,
-                blob,
-                at: unsigned(at)?,
+            let (key, recipient_id, at, blob) = fault(row)?;
+            let blob = match blob {
+                Value::Null => Some(None),
+                Value::Blob(bytes) => Some(Some(bytes)),
+                _ => None,
             };
-            loaded.invitations.insert(id(link_id)?, held);
+
+            let held = (|| {
+                Some(StoredInvitation {
+                    recipient_id: id_of(recipient_id)?,
+                    blob: blob?,
+                    at: time_of(&at)?,
+                })
+            })();
+
+            match (id_of(key.clone()), held) {
+                (Some(link_id), Some(held)) => {
+                    loaded.invitations.insert(link_id, held);
+                }
+                _ => dropped.push(("DELETE FROM invitations WHERE link_id IS ?1", key)),
+            }
         }
 
         let mut spent = fault(
@@ -274,13 +325,14 @@ impl RelayStore for SqliteStore {
                 .prepare("SELECT epoch, nonce FROM spent ORDER BY epoch"),
         )?;
         let rows = fault(spent.query_map([], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+            Ok((row.get::<_, Value>(0)?, row.get::<_, Value>(1)?))
         }))?;
 
         for row in rows {
             let (epoch, nonce) = fault(row)?;
             // A row that does not read spends nothing.
-            if let (Ok(epoch), Ok(nonce)) = (u32::try_from(epoch), id::<32>(nonce)) {
+            let epoch = int_of(&epoch).and_then(|epoch| u32::try_from(epoch).ok());
+            if let (Some(epoch), Some(nonce)) = (epoch, id_of::<32>(nonce)) {
                 loaded.spent.insert((epoch, nonce));
             }
         }
@@ -291,40 +343,53 @@ impl RelayStore for SqliteStore {
         ))?;
         let rows = fault(chunks.query_map([], |row| {
             Ok((
-                row.get::<_, Vec<u8>>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, Vec<u8>>(2)?,
-                row.get::<_, Vec<u8>>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, i64>(5)?,
-                row.get::<_, i64>(6)?,
-                row.get::<_, Vec<u8>>(7)?,
+                row.get::<_, Value>(0)?,
+                row.get::<_, Value>(1)?,
+                row.get::<_, Value>(2)?,
+                row.get::<_, Value>(3)?,
+                row.get::<_, Value>(4)?,
+                row.get::<_, Value>(5)?,
+                row.get::<_, Value>(6)?,
+                row.get::<_, Value>(7)?,
             ))
         }))?;
 
         for row in rows {
-            let (chunk_id, class, cred_pk, read_pk, registered_at, renewed_at, erase_at, bytes) =
+            let (key, class, cred_pk, read_pk, registered_at, renewed_at, erase_at, bytes) =
                 fault(row)?;
 
-            let class = match class {
-                1 => Class::Attachment,
-                2 => Class::Backup,
-                _ => return Err(StoreFault),
-            };
+            let held = (|| {
+                let class = match int_of(&class)? {
+                    1 => Class::Attachment,
+                    2 => Class::Backup,
+                    _ => return None,
+                };
 
-            let held = HeldChunk {
-                class,
-                credentials: Credentials {
-                    cred_pk: id(cred_pk)?,
-                    read_pk: id(read_pk)?,
-                },
-                bytes,
-                registered_at: unsigned(registered_at)?,
-                renewed_at: unsigned(renewed_at)?,
-                erase_at: unsigned(erase_at)?,
-            };
+                Some(HeldChunk {
+                    class,
+                    credentials: Credentials {
+                        cred_pk: id_of(cred_pk)?,
+                        read_pk: id_of(read_pk)?,
+                    },
+                    bytes: blob_of(bytes)?,
+                    registered_at: time_of(&registered_at)?,
+                    renewed_at: time_of(&renewed_at)?,
+                    erase_at: time_of(&erase_at)?,
+                })
+            })();
 
-            loaded.chunks.insert(id(chunk_id)?, held);
+            match (id_of(key.clone()), held) {
+                (Some(chunk_id), Some(held)) => {
+                    loaded.chunks.insert(chunk_id, held);
+                }
+                _ => dropped.push(("DELETE FROM chunks WHERE chunk_id IS ?1", key)),
+            }
+        }
+
+        // Each statement above read its last row, thus no delete runs
+        // under an open read.
+        for (delete, key) in dropped {
+            fault(self.connection.execute(delete, [key]))?;
         }
 
         Ok(loaded)
@@ -1113,6 +1178,76 @@ mod tests {
             )
             .unwrap();
         assert_eq!(orphans, 0);
+    }
+
+    #[test]
+    fn a_row_that_does_not_read_leaves_the_file_and_the_others_load() {
+        let path = file("bad-rows.db");
+        let mut store = SqliteStore::open(&path).unwrap();
+        store.commit(&changes()).unwrap();
+
+        let connection = &store.connection;
+        let insert = |sql: &str, params: &[&dyn rusqlite::ToSql]| {
+            connection.execute(sql, params).unwrap();
+        };
+
+        insert(
+            "INSERT INTO queues (recipient_id, head) VALUES (?1, x'01')",
+            &[&[5u8; 31].as_slice()],
+        );
+        insert(
+            "INSERT INTO queues (recipient_id, head) VALUES (?1, 'text')",
+            &[&[6u8; 32].as_slice()],
+        );
+        insert(
+            "INSERT INTO records (recipient_id, seq, accepted_at, bytes) VALUES (?1, 1, 0, x'00')",
+            &[&[6u8; 32].as_slice()],
+        );
+        insert(
+            "INSERT INTO group_queues (group_queue_id, head) VALUES (x'07', x'07')",
+            &[],
+        );
+        insert(
+            "INSERT INTO invitations (link_id, recipient_id, at, blob) VALUES (?1, ?2, -1, NULL)",
+            &[&[9u8; 24].as_slice(), &[2u8; 32].as_slice()],
+        );
+        insert(
+            "INSERT INTO chunks
+             (chunk_id, class, cred_pk, read_pk, registered_at, renewed_at, erase_at, bytes)
+             VALUES (?1, 9, ?2, ?2, 0, 0, 0, x'00')",
+            &[&[9u8; 32].as_slice(), &[1u8; 32].as_slice()],
+        );
+        insert(
+            "UPDATE records SET bytes = 'text' WHERE recipient_id = ?1",
+            &[&[2u8; 32].as_slice()],
+        );
+
+        // NET-303: the load holds each row that reads. A record that does
+        // not read makes its queue one that does not parse. Before this,
+        // one row that did not read stopped the load.
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.queues.len(), 2);
+        assert_eq!(loaded.queues[&[1; 32]].records.len(), 1);
+        assert!(loaded.queues[&[2; 32]].head.is_empty());
+        assert_eq!(loaded.group_queues.len(), 1);
+        assert_eq!(loaded.invitations.len(), 1);
+        assert_eq!(loaded.chunks.len(), 2);
+
+        // Each row that did not read left the file.
+        let count = |table: &str| -> i64 {
+            store
+                .connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap()
+        };
+
+        assert_eq!(count("queues"), 2);
+        assert_eq!(count("records"), 2);
+        assert_eq!(count("group_queues"), 1);
+        assert_eq!(count("invitations"), 1);
+        assert_eq!(count("chunks"), 2);
     }
 
     #[test]

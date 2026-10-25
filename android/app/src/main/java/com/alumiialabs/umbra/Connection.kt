@@ -146,11 +146,8 @@ fun ConnectionScreen(onBack: () -> Unit) {
             circuits.forEachIndexed { index, hops ->
                 // NET-343: a chain of one operator under a provisional directory.
                 val shared = connection?.oneOperator?.getOrNull(index) == true
-                // NET-201: two hops of one country are in one bloc. The
-                // record of the connection names no bloc, thus two hops of
-                // two countries of one bloc show no mark here.
-                val countries = hops.map { it.country }.filter { it.isNotBlank() }
-                val oneBloc = countries.size != countries.distinct().size
+                // NET-201: two hops in one jurisdiction bloc.
+                val oneBloc = connection?.oneBloc?.getOrNull(index) == true
                 val path = hops.joinToString(" → ") { it.country }
                 val mark = when {
                     shared -> UiText.get(R.string.umbra_ui_net_343)

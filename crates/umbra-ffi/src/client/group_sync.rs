@@ -565,7 +565,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
         }
 
-        self.store_rekeyed(conversation, &group, &seed, rng)?;
+        self.store_rekeyed(conversation, &group, object, &seed, rng)?;
 
         // DEV-303: an epoch key of the new index that came on the group
         // queue before the seed waits, and it installs now.

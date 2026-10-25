@@ -258,6 +258,12 @@ impl Bridge {
         self.command(Command::Challenges { book, now })
     }
 
+    /// Gives the run the chains of the circuits of the other nodes of the
+    /// client, whose relays its chains put last (`NET-310`).
+    pub fn set_other_chains(&self, chains: Vec<[[u8; 32]; 3]>) -> Result<(), Error> {
+        self.command(Command::OtherChains(chains))
+    }
+
     /// Makes the run a push-wake session (`NET-097`, `NET-100`).
     pub fn wake(&mut self) -> Result<(), Error> {
         self.is_wake = true;
@@ -310,6 +316,12 @@ impl Bridge {
         client: &mut Client<B, E>,
         rng: &mut R,
     ) -> Result<(), Error> {
+        // DEV-340: a removal, of this device or of another one, takes the
+        // contact out of the run before the next record goes.
+        for conversation in client.take_erased() {
+            self.forget(&conversation);
+        }
+
         // IMP-076: the runtime of this bridge ended, and the update that
         // says so did not come yet. A record that waits for a connection is
         // no failure. Each one stays in the client and in its row, and the
@@ -570,6 +582,11 @@ impl Bridge {
             // WIR-455: a hole of a contact asks it for the record.
             Update::Lost { contact, index } => {
                 let conversation = client.conversation_for(&contact.0)?;
+
+                // DEV-340: an ended channel asks its peer for nothing.
+                if client.is_ended_channel(conversation)? {
+                    return Ok(None);
+                }
                 if client.lost_record(conversation, index, now_ms, rng)? {
                     self.flush(client, rng)?;
                 }

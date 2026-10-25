@@ -94,9 +94,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     }
 
     /// The writes that give this device a new recovery code and no state
-    /// of a backup (`DEV-316`). The absent device held the code before.
-    /// The next backup is a full object under a root that the absent
-    /// device cannot derive.
+    /// of a backup (`DEV-316`, `DEV-346`). Another party can hold the code
+    /// before: the absent device of a take-over, or the party that a reset
+    /// cuts off. The next backup is a full object under a root that it
+    /// cannot derive. The shares of a split belong to the old code, thus
+    /// the split ends with it (Part 4 §4.7.1).
     pub(super) fn new_recovery_code_writes<R: CryptoRng + ?Sized>(
         &self,
         rng: &mut R,
@@ -119,6 +121,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         ];
         for (row, _) in store.list(BACKUP_INDEX, None)? {
             writes.push(RowWrite::Delete(BACKUP_INDEX, row));
+        }
+        for (row, _) in store.list(super::social::SHARES_GIVEN, None)? {
+            writes.push(RowWrite::Delete(super::social::SHARES_GIVEN, row));
         }
 
         Ok(writes)
@@ -416,9 +421,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
 
         if table == super::SETTINGS {
+            if super::notify::DEVICE_SETTINGS
+                .iter()
+                .any(|key| store.row_id(super::SETTINGS, key) == *row)
+            {
+                return Ok(true);
+            }
+
             let local = [
-                super::notify::PUSH_TOKEN_SETTING,
-                super::notify::CONTACT_SET_SETTING,
                 super::INGRESS_PINS_SETTING,
                 super::AUTO_DOWNLOAD_SETTING,
                 super::UNMETERED_ONLY_SETTING,
@@ -585,9 +595,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let kind = match &state {
             None => KIND_FULL,
             Some(state) if now >= state.next_full_at => KIND_FULL,
+            Some(state) if now < state.next_delta_at || state.entries.is_empty() => {
+                return Ok(None)
+            }
+            // IDN-081: a root with no room for a delta takes a full object
+            // at the time of the next delta, thus that write keeps the delay
+            // of its own draw.
             Some(state) if state.entries.len() >= BACKUP_ROOT_ENTRIES => KIND_FULL,
-            Some(state) if now >= state.next_delta_at && !state.entries.is_empty() => KIND_DELTA,
-            Some(_) => return Ok(None),
+            Some(_) => KIND_DELTA,
         };
         let current = self.carried_rows(now, &BACKED_UP)?;
         let store = &self.open_ref()?.store;
@@ -866,6 +881,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let holds = open
             .store
             .row_id(super::SETTINGS, super::own_delete::HOLDS_DELETIONS);
+        // IDN-180: an object of an earlier build carries the push path of
+        // its device, and this device takes none of it.
+        let local: Vec<RowId> = super::notify::DEVICE_SETTINGS
+            .iter()
+            .map(|key| open.store.row_id(super::SETTINGS, key))
+            .collect();
         let mut batch = open.store.begin();
         for row in &restored.rows {
             if let BackupRow::Put {
@@ -875,6 +896,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 plain,
             } = row
             {
+                if *table == super::SETTINGS && local.contains(row) {
+                    continue;
+                }
                 batch.put(*table, *row, *owner, plain, rng)?;
             }
         }

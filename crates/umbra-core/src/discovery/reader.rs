@@ -343,21 +343,28 @@ pub fn find_keyed<C: LogChannel + ?Sized, R: TryCryptoRng + ?Sized>(
     rng: &mut R,
 ) -> Result<(Found, [u8; 64]), ReadError> {
     let search_key = search_key(channel, input, rng)?;
+    Ok((find_under(channel, &search_key)?, search_key))
+}
 
+/// The newest entry under a search key that the reader holds from an
+/// earlier evaluation, with no evaluation (`DIS-204`).
+pub fn find_under<C: LogChannel + ?Sized>(
+    channel: &C,
+    search_key: &[u8; 64],
+) -> Result<Found, ReadError> {
     // DIS-067: a head past its freshness still completes the lookup.
-    let (proof, head, blob, degraded) = lookup_read(channel, &search_key)?;
+    let (proof, head, blob, degraded) = lookup_read(channel, search_key)?;
     let entry = proof
-        .verify(&search_key, &vrf_key(channel)?, &head)
+        .verify(search_key, &vrf_key(channel)?, &head)
         .map_err(|_| ReadError::Unverified)?
         .map(<[u8]>::to_vec);
 
-    let found = Found {
+    Ok(Found {
         entry,
         version: proof.newest,
         blob,
         degraded,
-    };
-    Ok((found, search_key))
+    })
 }
 
 /// The key of the cross-relay issuer of `epoch` from the log: version 0 of

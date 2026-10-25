@@ -29,15 +29,26 @@ the root of, or else to the first subsystem in `SUBSYSTEMS`. A version that
 a default graph charges to R1 or R2 charges no register again. Another version
 of an R1 or R2 name, which only a platform crate pulls, charges R3.
 
-Usage: python scripts/deps.py [--check]
-  --check   exit 1 when the generated text differs from the committed file.
+The cooling-off window of Part 14 §14.2.7 reads the publish time of each
+registry version of Cargo.lock from the sparse index of crates.io, thus that
+mode needs the network. It measures the age at the present time. Thus the
+history of the lock does not matter: several commits in one push, a merge, a
+rebase, and a change in the work tree get the same check.
+
+Usage: python scripts/deps.py [--check | --cooling]
+  --check     exit 1 when the generated text differs from the committed file.
+  --cooling   exit 1 when Cargo.lock holds a registry version younger than
+              14 days that COOLING_EXEMPT does not name.
 """
 from __future__ import annotations
 
 import datetime as dt
+import json
 import re
 import subprocess
 import sys
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -48,7 +59,7 @@ TARGETS = [
 ]
 CAPS = {"R1": 40, "R2": 30}
 WORKSPACE = {"umbra-crypto", "umbra-wire", "umbra-onion", "umbra-queue", "umbra-transport",
-             "umbra-core", "umbra-ffi", "umbra-relay"}
+             "umbra-core", "umbra-ffi", "umbra-relay", "umbra-simd"}
 # Each platform build: package, features, target, and the R3 cap that
 # IMP-009 set at the first measurement.
 PLATFORM = [
@@ -80,6 +91,28 @@ def registers() -> dict[str, str]:
 Crate = tuple[str, str]
 ORDER = {"R1": 0, "R2": 1, "R3": 2}
 SKIP_DAYS = 90
+COOLING_DAYS = 14
+# Part 14 §14.2.7: a security fix or a yank skips the cooling-off window.
+# The key is a crate and its version. The cause starts with a date and names
+# the advisory, the upstream security fix, or the yank. An entry that names
+# no version of Cargo.lock fails the check; remove it.
+COOLING_EXEMPT: dict[Crate, str] = {
+    ("crypto-bigint", "0.7.9"): "2026-10-25: RUSTSEC-2026-0387, branches on secrets; "
+                                "0.7.6 to 0.7.8 are yanked, thus 0.7.9 is the first fix",
+    ("ctutils", "0.4.5"): "2026-10-25: crypto-bigint 0.7.9 needs it; 0.4.4 is the first "
+                          "fix of RUSTSEC-2026-0385",
+    ("ml-kem", "0.3.3"): "2026-10-23: RustCrypto/KEMs #386, the CBD sampling of 0.3.2 "
+                         "has a table lookup that depends on a secret",
+    ("rustls", "0.23.46"): "2026-10-23: RUSTSEC-2026-0346 to RUSTSEC-2026-0349; 0.23.46 "
+                           "is the first fixed version",
+    ("rustls-webpki", "0.103.16"): "2026-10-23: RUSTSEC-2026-0382, a path through a "
+                                   "distrusted emSign intermediate; the first fixed version",
+    ("tokio", "1.53.3"): "2026-10-23: RUSTSEC-2026-0386, the AsyncFd constructors break "
+                         "I/O safety; the first fixed version of the 1.53 line",
+    ("webpki-roots", "1.0.10"): "2026-10-23: RUSTSEC-2026-0381, the root of the distrusted "
+                                "emSign intermediates; the first fixed version",
+}
+INDEX = "https://index.crates.io"
 
 
 def skips() -> dict[Crate, dt.date | None]:
@@ -301,7 +334,74 @@ def skip_faults(text: str) -> list[str]:
     return faults
 
 
+def lock_versions(text: str) -> set[Crate]:
+    """Each registry crate of a Cargo.lock text, as a name and a version."""
+    out: set[Crate] = set()
+    for block in text.split("[[package]]"):
+        name = re.search(r'^name = "([^"]+)"', block, flags=re.M)
+        ver = re.search(r'^version = "([^"]+)"', block, flags=re.M)
+        if name and ver and re.search(r'^source = "registry\+', block, flags=re.M):
+            out.add((name.group(1), ver.group(1)))
+    return out
+
+
+def index_path(name: str) -> str:
+    """The path of a crate in the sparse index of crates.io."""
+    n = name.lower()
+    if len(n) <= 2:
+        return f"{len(n)}/{n}"
+    if len(n) == 3:
+        return f"3/{n[0]}/{n}"
+    return f"{n[:2]}/{n[2:4]}/{n}"
+
+
+def index_entries(name: str) -> dict[str, dict]:
+    """Each version of a crate in the sparse index of crates.io."""
+    request = urllib.request.Request(f"{INDEX}/{index_path(name)}",
+                                     headers={"User-Agent": "umbra scripts/deps.py"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        lines = response.read().decode("utf-8").splitlines()
+    return {entry["vers"]: entry for entry in map(json.loads, lines)}
+
+
+def cooling_faults() -> list[str]:
+    """Each registry version of Cargo.lock that is younger than the
+    cooling-off window and that COOLING_EXEMPT does not name, and each
+    exemption that names no version of Cargo.lock."""
+    lock = lock_versions((ROOT / "Cargo.lock").read_text(encoding="utf-8"))
+    now = dt.datetime.now(dt.timezone.utc)
+    names = sorted({name for name, _ in lock})
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        index = dict(zip(names, pool.map(index_entries, names)))
+
+    faults = []
+    for name, version in sorted(lock - set(COOLING_EXEMPT)):
+        stamp = index[name].get(version, {}).get("pubtime")
+        # Fail closed: the index gives a publish time for each version.
+        if not stamp:
+            faults.append(f"{name} {version} has no publish time in the index of crates.io")
+            continue
+
+        age = now - dt.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        if age < dt.timedelta(days=COOLING_DAYS):
+            faults.append(f"{name} {version} is {age.total_seconds() / 86_400:.1f} days old; "
+                          f"take a version of {COOLING_DAYS} days or more, or name its "
+                          "advisory or yank in COOLING_EXEMPT")
+
+    for (name, version), cause in sorted(COOLING_EXEMPT.items()):
+        if not re.match(r"\d{4}-\d{2}-\d{2}: \S", cause):
+            faults.append(f"exemption {name}@{version} has no date at the start of its cause")
+        if (name, version) not in lock:
+            faults.append(f"exemption {name}@{version} names no version of Cargo.lock")
+    return faults
+
+
 def main(argv: list[str]) -> int:
+    if "--cooling" in argv:
+        faults = cooling_faults()
+        print("\n".join(faults) if faults else "no version inside the cooling-off window")
+        return 1 if faults else 0
+
     text = render()
     path = ROOT / "DEPENDENCIES.md"
 

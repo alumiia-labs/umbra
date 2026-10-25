@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/umbra-crypto", "crates/umbra-wire", "crates/umbra-onion", "crates/umbra-queue", "crates/umbra-transport", "crates/umbra-core", "crates/umbra-relay", "crates/umbra-ffi"]
+members = ["crates/umbra-crypto", "crates/umbra-wire", "crates/umbra-onion", "crates/umbra-queue", "crates/umbra-transport", "crates/umbra-core", "crates/umbra-relay", "crates/umbra-ffi", "crates/umbra-simd"]
 
 [workspace.package]
-version = "0.45.1"
+version = "0.46.0"
 edition = "2021"
 rust-version = "1.99"
 license = "AGPL-3.0-only"
@@ -25,6 +25,11 @@ panic = "deny"
 # keep no optimization, thus a change to them builds fast.
 [profile.dev.package."*"]
 opt-level = 2
+
+# The allocator of umbra-simd wipes each block at its free, and each test of
+# the client surface runs on it. Its wipe has no optimization otherwise.
+[profile.dev.package.umbra-simd]
+opt-level = 3
 
 # A proof of work of Part 13 takes seconds in a build with no optimization.
 # Thus a debug build and each test optimize the two crates of Equi-X.

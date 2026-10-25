@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 4: Identity
 
 **Status:** Draft
-**Version:** 0.45.1
-**Date:** 2026-10-22
+**Version:** 0.46.0
+**Date:** 2026-10-23
 
 ---
 
@@ -665,6 +665,13 @@ gives the handshake a static KEM.
 > each record on the channel, and a signature would also break the offline
 > deniability of Part 5 §5.7.
 
+While a notice waits, the verification of `IDN-090` checks `new_x25519_pk`.
+The safety number that the device shows, and the number that a scan or an
+entry of `IDN-176` compares, are the numbers under that key. The state that
+such a match sets counts from the acceptance on, under `IDN-175`. The short
+code of §4.5.2 compares the key that the channel holds, thus it waits for the
+answer.
+
 ### 4.5.2 The verification ceremony
 
 Trust assumption 5 of Part 2 §2.6 rests on a ceremony that a user completes
@@ -672,9 +679,10 @@ one time. A 60-digit comparison is a ceremony that a user skips. This section
 gives two affordances, and the QR scan is the first one.
 
 - **[IDN-140]** The verification screen MUST offer the QR scan of the safety
-  number first. **[IDN-141]** The manual ceremony MUST be the short code below.
-  The 60-digit safety number stays available behind the short code, for a
-  transcript and for a comparison at a distance in time.
+  number first. A device with no camera for the scan offers no scan.
+  **[IDN-141]** The manual ceremony MUST be the short code below. The 60-digit
+  safety number stays available behind the short code, for a transcript and
+  for a comparison at a distance in time.
 
 **The short code.** Each party draws a nonce, commits to it, and reveals it
 after it holds the commit of the peer. Both parties then derive one six-digit
@@ -894,7 +902,10 @@ Thus five rules apply, and they apply to each table.
    A store of an earlier build holds no set MAC, and the client writes it at
    its next commit together with a mark in the local identity table. A client
    that holds that mark and finds no set MAC MUST treat the store as a MAC
-   mismatch under `IDN-039`.
+   mismatch under `IDN-039`. **[IDN-200]** The commit that writes the root
+   seed writes a table MAC too, thus each store with a row holds a table MAC.
+   A client that finds no table MAC at the unlock MUST treat the store as a
+   MAC mismatch under `IDN-039`.
 
    In a store of record version `0x02` the set MAC takes the second form of
    rule 3. Its `table_id` is `0x00 || 0x02`, it has no owner, and the
@@ -914,8 +925,9 @@ Thus five rules apply, and they apply to each table.
    > the file that deleted the MAC row of a table and each row of it left
    > no MAC to fail, and the unlock read the table as one that never held a
    > row. The set MAC names each table, thus that deletion fails at the
-   > unlock. The mark sits beside the root seed, thus a party that drops the
-   > mark drops the identity.
+   > unlock. A party that drops the mark and each MAC row keeps the root
+   > seed, and no commit writes the root seed with no table MAC. Thus
+   > `IDN-200` finds that store.
 5. **[IDN-039]** If a table MAC does not match at the unlock, the client MUST
    tell the user. **[IDN-040]** The client MUST NOT continue silently.
 6. The check at the unlock reads the stored `accum`, and `IDN-037` keeps a scan
@@ -1010,9 +1022,11 @@ half.
 
 A device that takes a device set over under Part 7 §7.7 makes a new code in
 the same manner (Part 7 rule `DEV-316`). The device that the set lost held
-the code before. The shares of a split of §4.7.3 belong to that code, and
-they open no backup of the new one. Thus the user writes the new code down
-and splits it again.
+the code before. A full identity reset of Part 7 §7.7.1 also makes a new code
+(Part 7 rule `DEV-346`), since the party that held the root can hold the code.
+The shares of a split of §4.7.3 belong to the old code, and they open no
+backup of the new one. Thus the user writes the new code down and splits it
+again.
 
 **[IDN-177]** A client MUST derive `BackupRootKey` with `salt` of the 20
 bytes `"umbra/v1/backup-salt"`, with `m` of exactly 64 MiB, with `t` of
