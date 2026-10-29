@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 3: Network Architecture
 
 **Status:** Draft
-**Version:** 0.46.1
+**Version:** 0.46.2
 **Date:** 2026-10-29
 
 ---

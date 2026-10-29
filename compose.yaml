@@ -16,7 +16,7 @@
 name: umbra-relay
 
 x-image: &image
-  image: ${UMBRA_IMAGE:-ghcr.io/alumiia-labs/umbra-relay:0.46.1}
+  image: ${UMBRA_IMAGE:-ghcr.io/alumiia-labs/umbra-relay:0.46.2}
   build:
     context: .
     target: relay

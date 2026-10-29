@@ -1,9 +1,12 @@
 # The check set of each commit (Part 14 `IMP-014`, `IMP-015`, §14.2.7).
-# The job holds no secret and writes nothing.
+# The job holds no secret. It writes only the build cache of main.
 name: check
 
+# A tag names a commit that a branch push checked already, thus a tag push
+# starts no check.
 on:
   push:
+    branches: ["**"]
   pull_request:
 
 permissions:
@@ -15,8 +18,14 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # Change this line to take a new version of cargo-deny.
+  # A new runner builds each time, thus incremental data and debug info only
+  # make the cache larger.
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  # Change these two lines together to take a new version of cargo-deny. The
+  # digest is the one that the release page of GitHub gives for the archive.
   CARGO_DENY_VERSION: "0.20.2"
+  CARGO_DENY_SHA256: "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"
 
 jobs:
   check:
@@ -45,9 +54,52 @@ jobs:
           rustc --version
           cargo --version
 
+      # The key holds the toolchain and the lock. A key of another lock gives
+      # the nearest earlier cache, and Cargo builds only what changed.
+      - name: Restore the build cache
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-
+
       - name: cargo-deny at its pinned version
-        run: cargo install cargo-deny --version "$CARGO_DENY_VERSION" --locked
+        run: |
+          set -euo pipefail
+          name="cargo-deny-$CARGO_DENY_VERSION-x86_64-unknown-linux-musl"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$name.tar.gz" \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/$CARGO_DENY_VERSION/$name.tar.gz"
+          echo "$CARGO_DENY_SHA256  $RUNNER_TEMP/$name.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/$name.tar.gz" -C "$RUNNER_TEMP"
+          install -m 0755 "$RUNNER_TEMP/$name/cargo-deny" "$HOME/.cargo/bin/cargo-deny"
+          cargo deny --version
 
       # The audit of the site lock takes the Node and npm of the runner image.
       - name: The full check set
         run: bash scripts/check.sh
+
+      # Only main writes the cache, thus a branch or a pull request cannot
+      # change what main builds from. The workspace crates change at each
+      # commit, thus the cache keeps only the dependencies.
+      - name: Keep only the dependencies
+        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        run: |
+          find target \( -name incremental -o -path '*/.fingerprint/umbra*' \
+            -o -path '*/build/umbra*' -o -path '*/deps/*umbra*' \) -prune -exec rm -rf {} +
+          du -sh target ~/.cargo/registry
+
+      - name: Save the build cache
+        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
