@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 15: Security Considerations and Known Limitations
 
 **Status:** Draft
-**Version:** 0.46.0
-**Date:** 2026-10-23
+**Version:** 0.46.1
+**Date:** 2026-10-29
 
 ---
 

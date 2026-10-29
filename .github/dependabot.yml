@@ -17,6 +17,12 @@ updates:
       interval: weekly
     cooldown:
       default-days: 14
+    # The init step and the analyze step of the code scan must have the same
+    # version, thus one update moves the two.
+    groups:
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
 
   - package-ecosystem: gradle
     directory: /android
