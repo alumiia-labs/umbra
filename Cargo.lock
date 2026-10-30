@@ -1595,7 +1595,7 @@ dependencies = [
 
 [[package]]
 name = "umbra-core"
-version = "0.46.2"
+version = "0.46.3"
 dependencies = [
  "precis-profiles",
  "umbra-crypto",
@@ -1607,7 +1607,7 @@ dependencies = [
 
 [[package]]
 name = "umbra-crypto"
-version = "0.46.2"
+version = "0.46.3"
 dependencies = [
  "argon2",
  "blake2 0.11.0",
@@ -1635,7 +1635,7 @@ dependencies = [
 
 [[package]]
 name = "umbra-ffi"
-version = "0.46.2"
+version = "0.46.3"
 dependencies = [
  "getrandom 0.4.3",
  "rusqlite",
@@ -1654,7 +1654,7 @@ dependencies = [
 
 [[package]]
 name = "umbra-onion"
-version = "0.46.2"
+version = "0.46.3"
 dependencies = [
  "aes",
  "ctr",
@@ -1670,7 +1670,7 @@ dependencies = [
 
 [[package]]
 name = "umbra-queue"
-version = "0.46.2"
+version = "0.46.3"
 dependencies = [
  "umbra-crypto",
  "umbra-wire",
@@ -1678,7 +1678,7 @@ dependencies = [
 
 [[package]]
 name = "umbra-relay"
-version = "0.46.2"
+version = "0.46.3"
 dependencies = [
  "aws-lc-rs",
  "getrandom 0.4.3",
@@ -1696,11 +1696,11 @@ dependencies = [
 
 [[package]]
 name = "umbra-simd"
-version = "0.46.2"
+version = "0.46.3"
 
 [[package]]
 name = "umbra-transport"
-version = "0.46.2"
+version = "0.46.3"
 dependencies = [
  "quinn",
  "rustls",
@@ -1713,7 +1713,7 @@ dependencies = [
 
 [[package]]
 name = "umbra-wire"
-version = "0.46.2"
+version = "0.46.3"
 dependencies = [
  "serde_json",
  "umbra-crypto",
