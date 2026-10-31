@@ -11,6 +11,6 @@
     "check": "python ../scripts/sitecheck.py"
   },
   "devDependencies": {
-    "wrangler": "4.151.0"
+    "wrangler": "4.151.1"
   }
 }
