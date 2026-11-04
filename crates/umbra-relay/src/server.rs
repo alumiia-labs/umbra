@@ -6,6 +6,7 @@
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque},
+    future::Future,
     net::IpAddr,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -997,17 +998,84 @@ const LINK_BACKLOG: usize = 32 << 20;
 /// The bytes that wait for one link to a relay of the next layer, which
 /// carries the circuits of many clients.
 const RELAY_LINK_BACKLOG: usize = 64 << 20;
-/// The time that one write to a link may take before the link closes.
+/// The time that one frame of a write to a link may take before the link
+/// closes.
 const LINK_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+/// The capsules that one read of the backlog of a link takes at most. A
+/// write takes the capsules that wait, and it waits for no later capsule.
+/// The first capsule of a write waits only for the seal of the others.
+const CAPSULES_PER_WRITE: usize = 64;
+
+/// The count of the first capsules of `group` that one write takes: one at
+/// the least, and each one after it that fits one write of the socket.
+fn capsules_of_write(group: &[Vec<u8>]) -> usize {
+    let mut bytes = 0usize;
+    let fitting = group.iter().take_while(|capsule| {
+        bytes = bytes.saturating_add(native::wire_len(capsule.len()));
+        bytes <= native::WRITE_HELD
+    });
+
+    fitting.count().max(1)
+}
+
+/// Runs `write`, one write of the capsules of `part`, and gives whether it
+/// ended well. A write holds its capsules for one write of the socket, thus
+/// the bytes that the socket takes show which frame it reached. Each frame
+/// has `LINK_WRITE_TIMEOUT` from the end of the frame before it, as a write
+/// of its own has. Thus a peer that reads nothing ends its link at that
+/// time, and a peer that reads slowly keeps it. The count of the backlog
+/// falls at the end of each frame.
+async fn write_part(
+    write: impl Future<Output = std::io::Result<()>>,
+    part: &[Vec<u8>],
+    state: &native::WriteState,
+    queued: &AtomicUsize,
+) -> bool {
+    tokio::pin!(write);
+
+    let start = state.sent();
+    let mut frames = part.iter();
+    let mut waiting = frames.next();
+    let mut frame_end = waiting.map_or(0, |capsule| native::wire_len(capsule.len()));
+    let mut frame_start = tokio::time::Instant::now();
+
+    loop {
+        tokio::select! {
+            biased;
+            done = &mut write => {
+                let left: usize = waiting.into_iter().chain(frames.by_ref()).map(Vec::len).sum();
+                queued.fetch_sub(left, Ordering::Relaxed);
+                return done.is_ok();
+            }
+            () = tokio::time::sleep(DRAIN_CHECK) => {
+                let now = tokio::time::Instant::now();
+                let moved = state.sent().wrapping_sub(start);
+
+                while let Some(capsule) = waiting.filter(|_| moved >= frame_end) {
+                    queued.fetch_sub(capsule.len(), Ordering::Relaxed);
+                    waiting = frames.next();
+                    let next = waiting.map_or(0, |capsule| native::wire_len(capsule.len()));
+                    frame_end = frame_end.saturating_add(next);
+                    frame_start = now;
+                }
+
+                if now.duration_since(frame_start) >= LINK_WRITE_TIMEOUT {
+                    return false;
+                }
+            }
+        }
+    }
+}
+
 /// `LINK_DRAIN_MARK`: a backlog above this many bytes must drain at
 /// `LINK_DRAIN_RATE` (`NET-364`).
 const LINK_DRAIN_MARK: usize = 1 << 20;
 /// `LINK_DRAIN_WINDOW`: the time over which the relay measures the drain of
 /// a backlog above its mark.
 const LINK_DRAIN_WINDOW: Duration = Duration::from_secs(60);
-/// The bytes that a link above its mark writes at least in one window:
-/// `LINK_DRAIN_RATE` of 16 KiB/s over `LINK_DRAIN_WINDOW`.
-const LINK_DRAIN_MIN: usize = (16 << 10) * 60;
+/// `LINK_DRAIN_RATE`: the bytes that a link above its mark writes at least
+/// in each second of a window.
+const LINK_DRAIN_RATE: usize = 16 << 10;
 
 /// The drain of the backlog of one link (`NET-364`). A peer that reads
 /// slower than `LINK_DRAIN_RATE` while its backlog stays above
@@ -1024,6 +1092,8 @@ struct DrainWatch {
 impl DrainWatch {
     /// Takes the backlog `queued` and the bytes `written` so far at `now`.
     /// The result is true for a link that drains too slowly, and it ends.
+    /// The bytes that a window needs follow its real time, thus a check that
+    /// came late gives a slow peer no pass.
     fn too_slow(&mut self, now: tokio::time::Instant, queued: usize, written: usize) -> bool {
         if queued <= LINK_DRAIN_MARK {
             self.above = None;
@@ -1033,7 +1103,9 @@ impl DrainWatch {
         match self.above {
             None => self.above = Some((now, written)),
             Some((since, at_start)) if now.duration_since(since) >= LINK_DRAIN_WINDOW => {
-                if written.wrapping_sub(at_start) < LINK_DRAIN_MIN {
+                let seconds = now.duration_since(since).as_secs();
+                let seconds = usize::try_from(seconds).unwrap_or(usize::MAX);
+                if written.wrapping_sub(at_start) < seconds.saturating_mul(LINK_DRAIN_RATE) {
                     return true;
                 }
                 self.above = Some((now, written));
@@ -1046,6 +1118,23 @@ impl DrainWatch {
 
 /// The period of the check of [`DrainWatch`].
 const DRAIN_CHECK: Duration = Duration::from_secs(1);
+
+/// Ends when the backlog `queued` of a link drains too slowly (`NET-364`).
+/// The bytes that the socket took count, thus a frame that left in part
+/// counts in part. This runs beside the writes of the link, and a write that
+/// waits holds no check back.
+async fn watch_drain(queued: &AtomicUsize, state: &native::WriteState) {
+    let mut drain = DrainWatch::default();
+    let mut check = tokio::time::interval(DRAIN_CHECK);
+
+    loop {
+        check.tick().await;
+        let held = queued.load(Ordering::Relaxed);
+        if drain.too_slow(tokio::time::Instant::now(), held, state.sent()) {
+            return;
+        }
+    }
+}
 
 /// The time that a POST has for its answer after the deadline of its
 /// request (`NET-335`).
@@ -1271,6 +1360,9 @@ pub struct Carried {
     /// The pinned route to the log, from which the relay takes the key of
     /// the cross-relay issuer of each epoch (Part 13 §13.5).
     pub issuer_reader: std::sync::Mutex<Option<crate::issuer_keys::IssuerReader>>,
+    /// The time that the node task runs, for a measurement.
+    #[cfg(feature = "sockets-test")]
+    pub node_busy: Arc<crate::busy::BusyGauge>,
 }
 
 /// The file that the authorities write each new manifest to, with the key
@@ -1720,12 +1812,15 @@ pub async fn serve_connection<S>(
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let deadline = tokio::time::Instant::now() + carried.limits.handshake_timeout;
-    serve_connection_until(stream, link, node, carried, deadline, None).await;
+    let socket = native::Coalesced::new(stream);
+    let state = socket.state();
+    serve_connection_until(socket, link, node, carried, deadline, None, state).await;
 }
 
 /// [`serve_connection`] under a deadline that the accept set: the TLS
 /// handshake and the request share `RELAY_HANDSHAKE_TIMEOUT` (`NET-335`).
-/// `source` is the address of the peer as the caps count it.
+/// `source` is the address of the peer as the caps count it. `state` is what
+/// the [`native::Coalesced`] stream under `stream` shares with this task.
 pub async fn serve_connection_until<S>(
     mut stream: S,
     link: LinkId,
@@ -1733,6 +1828,7 @@ pub async fn serve_connection_until<S>(
     carried: Arc<Carried>,
     deadline: tokio::time::Instant,
     source: Option<[u8; 16]>,
+    state: Arc<native::WriteState>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -1883,6 +1979,10 @@ pub async fn serve_connection_until<S>(
         return;
     }
 
+    // The reads below go straight to `inbound`.
+    drop(chunk);
+    state.read_ahead();
+
     let (writer, mut outbound, queued) = LinkWriter::new(LINK_BACKLOG);
     let opened = Input::Opened {
         link,
@@ -1894,9 +1994,6 @@ pub async fn serve_connection_until<S>(
         return;
     }
 
-    let mut capsule = vec![0u8; MAX_CAPSULE];
-    let written = AtomicUsize::new(0);
-
     // The two directions run side by side. A peer writes its capsules
     // before it reads, as a client run does. A write of this relay that
     // stopped each read would then wait for that peer while the peer waits
@@ -1905,11 +2002,12 @@ pub async fn serve_connection_until<S>(
     let reads = async {
         loop {
             // Each complete frame in the buffer is one capsule.
+            let mut taken = 0usize;
             loop {
-                match websocket::decode(&inbound, true, &mut capsule) {
-                    Ok(Some((len, used))) => {
-                        inbound.drain(..used);
-                        let bytes = capsule.get(..len).unwrap_or(&[]).to_vec();
+                let rest = inbound.get(taken..).unwrap_or(&[]);
+                match websocket::decode_owned(rest, true, MAX_CAPSULE) {
+                    Ok(Some((bytes, used))) => {
+                        taken = taken.saturating_add(used);
                         if node.send(Input::Capsule { link, bytes }).await.is_err() {
                             return;
                         }
@@ -1919,52 +2017,47 @@ pub async fn serve_connection_until<S>(
                 }
             }
 
-            match reader.read(&mut chunk).await {
-                Ok(n) if n > 0 => inbound.extend_from_slice(chunk.get(..n).unwrap_or(&[])),
+            inbound.drain(..taken);
+            inbound.reserve(native::READ_ROOM);
+
+            match reader.read_buf(&mut inbound).await {
+                Ok(n) if n > 0 => {}
                 _ => return,
             }
         }
     };
 
     let writes = async {
-        while let Some(bytes) = outbound.recv().await {
-            let mut frame = vec![0u8; websocket::frame_len(bytes.len(), false)];
-            let Ok(used) = websocket::encode(&bytes, None, &mut frame) else {
-                return;
-            };
+        let mut group = Vec::with_capacity(CAPSULES_PER_WRITE);
+        let mut frame = Vec::new();
 
-            // A peer that reads nothing holds no task: the write ends at
-            // its bound, and the link closes. With no flush, the TLS session
-            // can hold the last capsule until the next one.
-            let write = async {
-                writer.write_all(frame.get(..used).unwrap_or(&[])).await?;
-                writer.flush().await
-            };
+        while outbound.recv_many(&mut group, CAPSULES_PER_WRITE).await > 0 {
+            while !group.is_empty() {
+                let count = capsules_of_write(&group);
+                let part = group.get(..count).unwrap_or(&[]);
 
-            if !matches!(
-                tokio::time::timeout(LINK_WRITE_TIMEOUT, write).await,
-                Ok(Ok(()))
-            ) {
-                return;
-            }
+                // With no flush, the TLS session can hold the last capsule
+                // until the next one.
+                let write = async {
+                    if part.len() > 1 {
+                        state.hold();
+                    }
 
-            queued.fetch_sub(bytes.len(), Ordering::Relaxed);
-            written.fetch_add(bytes.len(), Ordering::Relaxed);
-        }
-    };
+                    for bytes in part {
+                        frame.resize(websocket::frame_len(bytes.len(), false), 0);
+                        let used = websocket::encode(bytes, None, &mut frame)
+                            .map_err(std::io::Error::other)?;
+                        writer.write_all(frame.get(..used).unwrap_or(&[])).await?;
+                    }
 
-    // NET-364: a link whose backlog drains too slowly ends.
-    let watch = async {
-        let mut drain = DrainWatch::default();
-        let mut check = tokio::time::interval(DRAIN_CHECK);
-        loop {
-            check.tick().await;
-            let (held, sent) = (
-                queued.load(Ordering::Relaxed),
-                written.load(Ordering::Relaxed),
-            );
-            if drain.too_slow(tokio::time::Instant::now(), held, sent) {
-                return;
+                    writer.flush().await
+                };
+
+                if !write_part(write, part, &state, &queued).await {
+                    return;
+                }
+
+                group.drain(..count);
             }
         }
     };
@@ -1973,7 +2066,8 @@ pub async fn serve_connection_until<S>(
     tokio::select! {
         () = reads => {}
         () = writes => {}
-        () = watch => {}
+        // NET-364: a link whose backlog drains too slowly ends.
+        () = watch_drain(&queued, &state) => {}
     }
 
     let _ = node.send(Input::Closed { link }).await;
@@ -2101,8 +2195,10 @@ pub async fn accept_loop(
             // one byte took a place among the handshakes for the whole of
             // RELAY_HANDSHAKE_TIMEOUT.
             let first = deadline.min(accepted_at + limits.first_bytes_timeout);
+            let socket = native::Coalesced::new(tcp);
+            let state = socket.state();
             let hello =
-                tokio_rustls::LazyConfigAcceptor::new(rustls::server::Acceptor::default(), tcp);
+                tokio_rustls::LazyConfigAcceptor::new(rustls::server::Acceptor::default(), socket);
             let Ok(Ok(start)) = tokio::time::timeout_at(first, hello).await else {
                 return;
             };
@@ -2160,8 +2256,15 @@ pub async fn accept_loop(
                 return;
             };
 
-            let serve =
-                serve_connection_until(stream, this_link, node, carried, deadline, Some(source));
+            let serve = serve_connection_until(
+                stream,
+                this_link,
+                node,
+                carried,
+                deadline,
+                Some(source),
+                state,
+            );
             tokio::pin!(serve);
 
             if let Some(until_open) = peer_place {
@@ -2207,9 +2310,8 @@ pub async fn dial_next(
     let _ = rng.try_fill_bytes(&mut mask);
 
     let plan = Plan::Only(Wire::Tcp);
-    let Ok(mut connection) =
-        native::connect(&target, tls, plan, key, mask, Duration::from_secs(10)).await
-    else {
+    let dialed = native::connect(&target, tls, plan, key, mask, Duration::from_secs(10)).await;
+    let Ok(native::Link::Tcp(connection)) = dialed else {
         // NET-319: the node dials again while a body waits for this relay.
         let _ = node.send(Input::DialFailed { relay_id }).await;
         return;
@@ -2226,39 +2328,47 @@ pub async fn dial_next(
         return;
     }
 
-    // NET-364: the next hop drains the backlog of its link too.
-    let mut drain = DrainWatch::default();
-    let mut check = tokio::time::interval(DRAIN_CHECK);
-    let mut written = 0usize;
+    // The two directions run side by side, as on an accepted link. A write
+    // that waits for the next hop holds no read and no check of its drain
+    // back, and a cell of one client does not shape the cells of another.
+    let (mut reader, mut writer) = connection.split();
+    let state = writer.state();
 
-    loop {
-        tokio::select! {
-            received = connection.recv() => match received {
-                Ok(bytes) => {
-                    if node.send(Input::Capsule { link, bytes }).await.is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            },
-            next = outbound.recv() => match next {
-                Some(bytes) => {
-                    let sent = tokio::time::timeout(LINK_WRITE_TIMEOUT, connection.send(&bytes)).await;
-                    if !matches!(sent, Ok(Ok(()))) {
-                        break;
-                    }
-                    queued.fetch_sub(bytes.len(), Ordering::Relaxed);
-                    written = written.wrapping_add(bytes.len());
-                }
-                None => break,
-            },
-            _ = check.tick() => {
-                let held = queued.load(Ordering::Relaxed);
-                if drain.too_slow(tokio::time::Instant::now(), held, written) {
-                    break;
-                }
+    let reads = async {
+        while let Ok(bytes) = reader.recv().await {
+            if node.send(Input::Capsule { link, bytes }).await.is_err() {
+                return;
             }
         }
+    };
+
+    let writes = async {
+        let mut group: Vec<Vec<u8>> = Vec::with_capacity(CAPSULES_PER_WRITE);
+
+        while outbound.recv_many(&mut group, CAPSULES_PER_WRITE).await > 0 {
+            while !group.is_empty() {
+                let count = capsules_of_write(&group);
+                let part = group.get(..count).unwrap_or(&[]);
+
+                let write = async {
+                    let sent = writer.send_all(part).await;
+                    sent.map_err(|_| std::io::ErrorKind::BrokenPipe.into())
+                };
+
+                if !write_part(write, part, &state, &queued).await {
+                    return;
+                }
+
+                group.drain(..count);
+            }
+        }
+    };
+
+    tokio::select! {
+        () = reads => {}
+        () = writes => {}
+        // NET-364: the next hop drains the backlog of its link too.
+        () = watch_drain(&queued, &state) => {}
     }
 
     let _ = node.send(Input::Closed { link }).await;
@@ -2304,7 +2414,10 @@ pub async fn run_relay(
 
     // NET-167: the relays that the dialer reaches are the next layer.
     node.set_next_layer(next_hops.keys().copied().collect());
-    let node_task = tokio::spawn(run_node(node, node_inputs, requests, pacing_mean_ms, store));
+    let node_work = run_node(node, node_inputs, requests, pacing_mean_ms, store);
+    #[cfg(feature = "sockets-test")]
+    let node_work = crate::busy::Timed::new(carried.node_busy.clone(), node_work);
+    let node_task = tokio::spawn(node_work);
 
     // ABU-099: the keys of the issuer come from the log, on a thread of
     // their own, since each read blocks.
@@ -2535,6 +2648,7 @@ mod tests {
 
     #[test]
     fn a_link_whose_backlog_drains_too_slowly_ends_after_one_window() {
+        const WINDOW_BYTES: usize = LINK_DRAIN_RATE * 60;
         let start = tokio::time::Instant::now();
         let at = |seconds: u64| start + Duration::from_secs(seconds);
         let full = LINK_DRAIN_MARK + 1;
@@ -2554,14 +2668,336 @@ mod tests {
         // window.
         let mut watch = DrainWatch::default();
         assert!(!watch.too_slow(at(0), full, 0));
-        assert!(!watch.too_slow(at(60), full, LINK_DRAIN_MIN));
-        assert!(!watch.too_slow(at(120), full, 2 * LINK_DRAIN_MIN));
+        assert!(!watch.too_slow(at(60), full, WINDOW_BYTES));
+        assert!(!watch.too_slow(at(120), full, 2 * WINDOW_BYTES));
 
         // A backlog that fell below the mark starts a new window.
-        assert!(!watch.too_slow(at(130), LINK_DRAIN_MARK, 2 * LINK_DRAIN_MIN));
-        assert!(!watch.too_slow(at(131), full, 2 * LINK_DRAIN_MIN));
-        assert!(!watch.too_slow(at(190), full, 2 * LINK_DRAIN_MIN));
-        assert!(watch.too_slow(at(191), full, 2 * LINK_DRAIN_MIN));
+        assert!(!watch.too_slow(at(130), LINK_DRAIN_MARK, 2 * WINDOW_BYTES));
+        assert!(!watch.too_slow(at(131), full, 2 * WINDOW_BYTES));
+        assert!(!watch.too_slow(at(190), full, 2 * WINDOW_BYTES));
+        assert!(watch.too_slow(at(191), full, 2 * WINDOW_BYTES));
+
+        // A check that came late needs the bytes of its real time: the
+        // bytes of one window pass no window of 300 s.
+        let mut watch = DrainWatch::default();
+        assert!(!watch.too_slow(at(0), full, 0));
+        assert!(watch.too_slow(at(300), full, WINDOW_BYTES));
+
+        let mut watch = DrainWatch::default();
+        assert!(!watch.too_slow(at(0), full, 0));
+        assert!(!watch.too_slow(at(300), full, 5 * WINDOW_BYTES));
+    }
+
+    // `tokio/test-util` stays out of the graph of `deny.toml`, thus these tests
+    // have a feature of their own.
+    #[cfg(feature = "paused-clock")]
+    mod slow_peers {
+        use super::*;
+
+        /// A next hop that this relay dialed, on a socket with a small window.
+        struct NextHop {
+            writer: LinkWriter,
+            inputs: mpsc::Receiver<Input>,
+        }
+
+        /// Dials a next hop that reads `rate` bytes each second, and sends one
+        /// capsule `answer_after` the first byte of the run. The clock then runs
+        /// paused, and a real delay of the loopback fires no timeout.
+        async fn next_hop(rate: usize, answer_after: Option<Duration>) -> NextHop {
+            let fixture = |name: &str| {
+                format!(
+                    "{}/../../tests/fixtures/tls/{name}",
+                    env!("CARGO_MANIFEST_DIR")
+                )
+            };
+
+            let acceptor = tls_acceptor(&fixture("leaf.pem"), &fixture("leaf.key")).unwrap();
+            let socket = tokio::net::TcpSocket::new_v4().unwrap();
+            socket.set_recv_buffer_size(32 << 10).unwrap();
+            socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let port = socket.local_addr().unwrap().port();
+            let listener = socket.listen(8).unwrap();
+
+            tokio::spawn(async move {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let mut stream = acceptor.accept(tcp).await.unwrap();
+                let mut inbound = Vec::new();
+                let mut chunk = vec![0u8; 4_096];
+
+                let request = loop {
+                    if let Ok(Some((request, _))) = upgrade::parse_request(&inbound) {
+                        break request;
+                    }
+
+                    let n = stream.read(&mut chunk).await.unwrap();
+                    inbound.extend_from_slice(&chunk[..n]);
+                };
+
+                stream
+                    .write_all(upgrade::response(&request.key).as_bytes())
+                    .await
+                    .unwrap();
+                stream.flush().await.unwrap();
+
+                if let Some(wait) = answer_after {
+                    tokio::time::sleep(wait).await;
+                    let mut frame = vec![0u8; 64];
+                    let used = websocket::encode(&[7u8; 32], None, &mut frame).unwrap();
+                    stream.write_all(&frame[..used]).await.unwrap();
+                    stream.flush().await.unwrap();
+                }
+
+                if rate == 0 {
+                    std::future::pending::<()>().await;
+                }
+
+                let mut slice = vec![0u8; rate / 10];
+                loop {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    if stream.read_exact(&mut slice).await.is_err() {
+                        break;
+                    }
+                }
+            });
+
+            let (node, mut inputs) = mpsc::channel(64);
+            let tls = native::tls_config_with_root_file(&fixture("ca.pem")).unwrap();
+            let dial = Dial {
+                host: "localhost".into(),
+                addr_v4: Some([127, 0, 0, 1]),
+                addr_v6: None,
+                port,
+            };
+            tokio::spawn(dial_next([1; 32], dial, 3, tls, node));
+
+            let writer = match inputs.recv().await {
+                Some(Input::Dialed { writer, .. }) => writer,
+                _ => panic!("no link"),
+            };
+
+            // Each idle turn of the runtime moves the clock by one step at most.
+            tokio::time::pause();
+            tokio::spawn(async {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            });
+
+            NextHop { writer, inputs }
+        }
+
+        impl NextHop {
+            /// The seconds until the link closes, inside `horizon` seconds.
+            async fn closes_after(&mut self, horizon: u64) -> Option<f64> {
+                let start = tokio::time::Instant::now();
+                let closed = tokio::time::timeout(Duration::from_secs(horizon), async {
+                    while let Some(input) = self.inputs.recv().await {
+                        if matches!(input, Input::Closed { .. }) {
+                            return;
+                        }
+                    }
+                });
+
+                closed.await.ok().map(|()| start.elapsed().as_secs_f64())
+            }
+
+            /// Queues `count` capsules of `len` bytes.
+            fn queue(&self, count: usize, len: usize) {
+                for _ in 0..count {
+                    assert!(self.writer.queue(vec![0u8; len]));
+                }
+            }
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn a_next_hop_below_the_drain_rate_ends_at_the_end_of_its_window() {
+            // NET-364: the times of the code before the groups are 61 s, 68 s,
+            // and 124 s. A group of writes then held each peer open for ever.
+            for rate in [9_000, 10_000, 1_200] {
+                let mut hop = next_hop(rate, None).await;
+                hop.queue(1_800, 32_786);
+
+                // A socket stack with a large send buffer takes no byte for
+                // 30 s at this rate, and the write timeout then comes first.
+                // Thus this test proves `NET-364` on a dialed link on Windows
+                // alone, where the link closes at 60 s. On Linux, thus in CI,
+                // it proves only `closed <= 70`, because the link of `dial_next`
+                // is TLS over a real socket and takes no stream with a small
+                // buffer. `an_accepted_link_holds_the_same_bounds` proves the
+                // rule on each system, on the link type that takes one.
+                let closed = hop.closes_after(150).await.expect("the link stayed open");
+                println!("next hop at {rate} B/s closes at {closed:.0} s");
+                assert!(closed <= 70.0, "{rate} B/s: {closed} s");
+                tokio::time::resume();
+            }
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_peer_at_the_drain_rate_keeps_its_link() {
+            // NET-364: each byte counts as the socket takes it. A count at the
+            // end of a write of 230 KB closed these peers at 60 s.
+            for rate in [16_500, 18_500] {
+                let (writer, mut node) = accepted_peer(rate).await;
+                for _ in 0..300 {
+                    assert!(writer.queue(vec![0u8; 32_786]));
+                }
+
+                assert_eq!(link_ends_after(&mut node, 190).await, None, "{rate} B/s");
+            }
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn a_slow_next_hop_below_the_mark_keeps_its_link() {
+            let mut hop = next_hop(3_000, None).await;
+            hop.queue(9, 32_786);
+
+            // Each frame takes 11 s, inside its `LINK_WRITE_TIMEOUT`, and the
+            // whole write takes 100 s.
+            assert_eq!(hop.closes_after(125).await, None);
+            assert_eq!(hop.writer.queued.load(Ordering::Relaxed), 0);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn the_timeout_of_a_write_bounds_one_frame() {
+            // The cause note of `NET-364`: a peer that ends a `B3` frame in each
+            // 30 s keeps its link below the mark, whatever a group holds.
+            let (writer, mut node) = accepted_peer(1_200).await;
+            for _ in 0..20 {
+                assert!(writer.queue(vec![0u8; 32_786]));
+            }
+            assert_eq!(link_ends_after(&mut node, 200).await, None);
+
+            // A peer that takes 41 s for each frame does not.
+            let (writer, mut node) = accepted_peer(800).await;
+            for _ in 0..25 {
+                assert!(writer.queue(vec![0u8; 32_786]));
+            }
+            assert!(link_ends_after(&mut node, 200).await.is_some());
+
+            // One group holds many `B1` frames, and it takes far more than the
+            // timeout at 300 B/s. Each frame takes about 7 s, thus the link
+            // stays: the clock starts again at the end of each frame.
+            let (writer, mut node) = accepted_peer(300).await;
+            for _ in 0..31 {
+                assert!(writer.queue(vec![0u8; 2_048]));
+            }
+            assert_eq!(link_ends_after(&mut node, 200).await, None);
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn a_next_hop_that_reads_nothing_ends_at_the_write_timeout() {
+            let mut hop = next_hop(0, None).await;
+            hop.queue(6_000, 530);
+
+            // One frame of a write ends the link. A bound for the whole write
+            // would take 64 times the timeout, and the drain check 60 s.
+            let closed = hop.closes_after(120).await.expect("the link stayed open");
+            println!("next hop that reads nothing closes at {closed:.0} s");
+            assert!((29.0..=45.0).contains(&closed), "{closed} s");
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn a_write_that_waits_for_the_next_hop_stops_no_read() {
+            let mut hop = next_hop(0, Some(Duration::from_secs(5))).await;
+            hop.queue(1_800, 32_786);
+
+            let start = tokio::time::Instant::now();
+            let taken = loop {
+                match hop.inputs.recv().await {
+                    Some(Input::Capsule { bytes, .. }) => break bytes,
+                    Some(Input::Closed { .. }) | None => panic!("no read in the write"),
+                    Some(_) => {}
+                }
+            };
+
+            assert_eq!(taken, vec![7u8; 32]);
+            assert!(start.elapsed() < Duration::from_secs(20));
+        }
+
+        /// An accepted link over a stream of 8 KiB, whose peer reads `rate`
+        /// bytes each second. The clock runs paused.
+        async fn accepted_peer(rate: usize) -> (LinkWriter, mpsc::Receiver<Input>) {
+            let (inputs, mut node) = mpsc::channel(8);
+            let (mut peer, server) = tokio::io::duplex(8 << 10);
+            tokio::spawn(serve_connection(server, 7, inputs, Arc::default()));
+
+            let key = [5u8; 16];
+            peer.write_all(upgrade::request("relay.example", &key).as_bytes())
+                .await
+                .unwrap();
+
+            let mut inbound = Vec::new();
+            loop {
+                let mut chunk = [0u8; 1_024];
+                let n = peer.read(&mut chunk).await.unwrap();
+                inbound.extend_from_slice(&chunk[..n]);
+                if upgrade::parse_response(&inbound, &key).unwrap().is_some() {
+                    break;
+                }
+            }
+
+            let Some(Input::Opened { writer, .. }) = node.recv().await else {
+                panic!("the connection did not open");
+            };
+
+            tokio::spawn(async move {
+                if rate == 0 {
+                    std::future::pending::<()>().await;
+                }
+
+                let mut slice = vec![0u8; rate / 10];
+                loop {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    if peer.read_exact(&mut slice).await.is_err() {
+                        break;
+                    }
+                }
+            });
+
+            (writer, node)
+        }
+
+        /// The seconds until `node` hears of the end of the link.
+        async fn link_ends_after(node: &mut mpsc::Receiver<Input>, horizon: u64) -> Option<u64> {
+            let start = tokio::time::Instant::now();
+            let closed = tokio::time::timeout(Duration::from_secs(horizon), async {
+                while let Some(input) = node.recv().await {
+                    if matches!(input, Input::Closed { .. }) {
+                        return;
+                    }
+                }
+            });
+
+            closed.await.ok().map(|()| start.elapsed().as_secs())
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn an_accepted_link_holds_the_same_bounds() {
+            // NET-364: a peer below the rate ends with its window.
+            let (writer, mut node) = accepted_peer(9_000).await;
+            for _ in 0..200 {
+                assert!(writer.queue(vec![0u8; 32_786]));
+            }
+            let closed = link_ends_after(&mut node, 150).await.unwrap();
+            assert!((59..=63).contains(&closed), "{closed} s");
+
+            // A peer that reads 3 KiB/s below the mark keeps its link, and each
+            // frame leaves the count of the backlog as it ends.
+            let (writer, mut node) = accepted_peer(3_000).await;
+            for _ in 0..9 {
+                assert!(writer.queue(vec![0u8; 32_786]));
+            }
+            assert_eq!(link_ends_after(&mut node, 125).await, None);
+            assert_eq!(writer.queued.load(Ordering::Relaxed), 0);
+
+            // A peer that reads nothing ends at the timeout of one frame.
+            let (writer, mut node) = accepted_peer(0).await;
+            for _ in 0..1_000 {
+                assert!(writer.queue(vec![0u8; 530]));
+            }
+            let closed = link_ends_after(&mut node, 120).await.unwrap();
+            assert!((30..=32).contains(&closed), "{closed} s");
+        }
     }
 
     #[test]
@@ -2587,6 +3023,22 @@ mod tests {
         // An IPv4 address and the IPv6 address that maps it are one.
         let mapped = IpAddr::from([0, 0, 0, 0, 0, 0xffff, 0xcb00, 0x7101]).to_canonical();
         assert_eq!(address_key(mapped), address_key(v4(1)));
+    }
+
+    #[test]
+    fn a_write_takes_one_capsule_at_the_least_and_stays_inside_its_bytes() {
+        let small = vec![0u8; 530];
+        let large = vec![0u8; 32_786];
+
+        assert_eq!(capsules_of_write(&vec![small; 64]), 64);
+
+        // A `B1` write fills one write of the socket, and each frame stays
+        // whole in it (`WIR-225`).
+        assert_eq!(capsules_of_write(&vec![vec![0u8; 2_066]; 64]), 31);
+
+        // A `B3` capsule goes alone, as on a link with no group.
+        assert_eq!(capsules_of_write(&vec![large.clone(); 64]), 1);
+        assert_eq!(capsules_of_write(&[large]), 1);
     }
 
     #[test]

@@ -209,8 +209,7 @@ impl ChunkService {
             ChunkCmd::Cget => {
                 let read_pk = self.credentials(&chunk_id)?.read_pk;
                 session.accept(command, &read_pk)?;
-                let chunk = self.store.get(&chunk_id, now)?.to_vec();
-                Ok(reply(ChunkCmd::Cdat, &chunk))
+                Ok(reply(ChunkCmd::Cdat, self.store.get(&chunk_id, now)?))
             }
             ChunkCmd::Crnw => {
                 // ATT-126: a renewal has no answer, and a refused one has
@@ -470,6 +469,48 @@ mod tests {
 
             out
         }
+    }
+
+    /// The cost of one chunk at the service, with no cell and no store.
+    #[test]
+    #[ignore = "a timing run"]
+    fn perf_a_chunk_goes_in_and_comes_out() {
+        const CHUNKS: u8 = 40;
+        let cred = StaticSecret::from([3; 32]);
+        let read = StaticSecret::from([4; 32]);
+        let chunk = vec![0x5A; CHUNK_SIZE];
+        let mut puts = Vec::new();
+        let mut gets = Vec::new();
+
+        for _ in 0..5 {
+            let mut bench = Bench::new();
+            let register = bench.register_payload(&cred, &read);
+
+            for index in 0..CHUNKS {
+                let id = [index; 32];
+                let (cid, _) = bench.send(ChunkCmd::Cnew, id, &register, &cred, b"");
+                let token = payload_of(cid, ChunkCmd::Cid);
+
+                let start = std::time::Instant::now();
+                let (put, _) = bench.send(ChunkCmd::Cput, id, &chunk, &cred, &token);
+                puts.push(start.elapsed());
+                payload_of(put, ChunkCmd::Cprf);
+                drop(bench.service.take_changes());
+
+                let start = std::time::Instant::now();
+                let (got, _) = bench.send(ChunkCmd::Cget, id, &[], &read, b"");
+                gets.push(start.elapsed());
+                assert!(got.is_ok());
+            }
+        }
+
+        puts.sort();
+        gets.sort();
+        println!(
+            "chunk service: CPUT {:?}, CGET {:?}",
+            puts[puts.len() / 2],
+            gets[gets.len() / 2]
+        );
     }
 
     #[test]

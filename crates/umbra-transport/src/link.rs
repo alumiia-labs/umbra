@@ -334,7 +334,9 @@ impl RelayLink {
         if self.top.is_none_or(|top| frame.seq > top) {
             self.top = Some(frame.seq);
             let floor = frame.seq.saturating_sub(span);
-            self.accepted = self.accepted.split_off(&floor);
+            while self.accepted.first().is_some_and(|seq| *seq < floor) {
+                self.accepted.pop_first();
+            }
         }
         Ok(Some(frame.cell))
     }

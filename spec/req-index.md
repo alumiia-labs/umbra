@@ -70,7 +70,7 @@ column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 264 | 91 | 1 | 0 | 9 | **365** |
+| `NET` | 264 | 92 | 1 | 0 | 9 | **366** |
 | `IDN` | 137 | 46 | 1 | 0 | 5 | **189** |
 | `CRY` | 121 | 27 | 0 | 0 | 1 | **149** |
 | `WIR` | 418 | 88 | 0 | 0 | 8 | **514** |
@@ -79,11 +79,11 @@ column when a crate implements the requirement and a test covers it.
 | `DIS` | 138 | 37 | 1 | 0 | 3 | **179** |
 | `REL` | 173 | 34 | 1 | 0 | 4 | **212** |
 | `GRP` | 244 | 69 | 0 | 0 | 5 | **318** |
-| `ATT` | 153 | 46 | 2 | 0 | 3 | **204** |
+| `ATT` | 153 | 47 | 2 | 0 | 3 | **205** |
 | `ABU` | 71 | 29 | 1 | 0 | 0 | **101** |
 | `IMP` | 120 | 41 | 1 | 0 | 2 | **164** |
 | `SEC` | 4 | 3 | 0 | 0 | 1 | **8** |
-| **All** | 2181 | 645 | 8 | 0 | 62 | **2896** |
+| **All** | 2181 | 647 | 8 | 0 | 62 | **2898** |
 
 ## SCP — Scope and Conventions
 
@@ -506,6 +506,7 @@ Source: `spec/03-network-architecture.md`
 | `NET-365` | §3.5.2 | MUST | A relay | A relay MUST hold the backlog of a `SUB` or a `GSUB` at or below `DRAIN_THRESHOLD` as a place in its queue, as it holds a drain. |  |  |
 | `NET-370` | §3.4.3 | MUST | A client | A client MUST measure the age of a circuit on a monotonic source under Part 1 rule `SCP-018`. |  |  |
 | `NET-375` | §3.5.2 | MUST NOT | (unstated) | The answers that wait for the clocks of all circuits of one relay MUST NOT hold more than `RELAY_ANSWER_BYTES_MAX` together. |  |  |
+| `NET-376` | §3.5.2 | MUST NOT | A relay | A relay MUST NOT pack answers of two ranges into one cell (Part 6 rule `WIR-108`). |  |  |
 
 ## IDN — Identity
 
@@ -2749,7 +2750,7 @@ Source: `spec/12-attachments.md`
 | `ATT-162` | §12.7.1 | MUST | A revision | A revision MUST hold `BACKUP_TTL` of Part 4 §4.8 at or above `BACKUP_LOOKBACK` weekly epochs less one epoch. |  |  |
 | `ATT-163` | §12.7.1 | MUST | A revision | A revision MUST hold `BACKUP_TTL` above `BACKUP_FULL_INTERVAL` plus `BACKUP_HISTORY_DAYS`. |  |  |
 | `ATT-164` | §12.7.2 | MUST NOT | A client | A client MUST NOT hold more than 128 `CPUT` in flight. |  |  |
-| `ATT-165` | §12.7.2 | MUST NOT | A client | A client MUST NOT hold more than 32 `CGET` in flight. |  |  |
+| `ATT-165` | §12.7.2 | MUST NOT | A client | A client MUST NOT hold more than 128 `CGET` of its downloads in flight. |  |  |
 | `ATT-166` | §12.7.2 | MUST | A client | A client MUST send the `CREP` of a chunk while the `CPUT` of the next chunk is in flight. |  |  |
 | `ATT-167` | §12.7.2 | MUST | A client | A client MUST build the attachment circuit of §12.8 in the privacy mode of the conversation that carries the descriptor. |  |  |
 | `ATT-168` | §12.10 | MAY | A relay above `CHUNK_STORE_TARGET` | A relay above its trim target MAY erase attachment chunks before `CHUNK_TTL`, oldest renewal first. |  |  |
@@ -2791,6 +2792,7 @@ Source: `spec/12-attachments.md`
 | `ATT-207` | §12.4.2 | MUST | A writer whose write under `h` fails | A writer whose write under `h` fails MUST send `CDEL` to each relay that took its `BNEW`, or that gave no answer to it, and to no other relay. |  |  |
 | `ATT-208` | §12.3.4 | MUST | A client | A client MUST leave the preview out of the record of a file when the body of that record, with the preview, is above `MESSAGE_BODY_MAX`. |  |  |
 | `ATT-209` | §12.3.4 | MUST | (unstated) | A device that publishes a record of a file to the other devices of its set (Part 7 §7.5.3) MUST leave the preview out of the `inner` when the body of that record is above `MESSAGE_BODY_MAX`. |  |  |
+| `ATT-210` | §12.7.2 | MUST NOT | (unstated) | A client MUST start a download with a window of 32 `CGET`, and it MUST move that window at each chunk answer, and at each `CGET` with no answer inside the bound of `ATT-190`, as `ATT-198` moves the window of an upload. |  |  |
 
 ## ABU — Anti-Abuse Without Identifiers
 

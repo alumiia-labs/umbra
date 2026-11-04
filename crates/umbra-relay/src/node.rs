@@ -282,16 +282,27 @@ const OUTBOX_MAX: usize = 1_024;
 /// 1 024 `B3` answers held 32 MiB for each circuit. The bound holds twice
 /// the chunks of `MAX_CONCURRENT_DOWN`, thus a download loses no answer. A
 /// place holds no record, thus it counts no byte.
-const OUTBOX_BYTES_MAX: usize = 2 << 20;
+const OUTBOX_BYTES_MAX: usize = 8 << 20;
+/// The bytes of one chunk answer: the command header and the chunk.
+const CHUNK_ANSWER: usize = 84 + umbra_core::attach::CHUNK_SIZE;
+const _: () = assert!(
+    OUTBOX_BYTES_MAX >= 2 * umbra_core::attach::MAX_CONCURRENT_DOWN * CHUNK_ANSWER,
+    "NET-365: the bound holds twice the answers of the download window"
+);
 /// `RELAY_ANSWER_BYTES_MAX`: the bytes of the answers that wait for the
 /// pacing clocks of all circuits of one relay together (`NET-375`). The
-/// bound of one circuit times `RELAY_CIRCUITS_MAX` is 1 TiB, and the 256
-/// circuits that one address builds at once hold 512 MiB. A relay of the
-/// kit stops at 1 400 MiB.
+/// bound of one circuit times `RELAY_CIRCUITS_MAX` is 4 TiB, and the 256
+/// circuits that one address builds at once hold 2 048 MiB. A relay of the
+/// kit stops at 1 400 MiB, thus this bound holds for one address too.
 const RELAY_ANSWER_BYTES_MAX: usize = 64 << 20;
 /// The bytes of the answers that one tick of the pacing clock sends on one
 /// attachment circuit (`NET-360`).
 const ANSWER_STEP: usize = 256 << 10;
+/// `ANSWER_MARK`: the bytes of a link above which an answer waits for a tick
+/// and a tick sends one cell (`NET-360`). It holds the `CGET` window of one
+/// client and one step. The cells of the other circuits of the link wait
+/// behind these bytes, thus the bound of a link is no bound for this mark.
+pub const ANSWER_MARK: usize = 9 << 19;
 /// The bytes of a drain that one clock tick sends on one circuit. The
 /// records of one step are the one copy of a backlog that the relay makes.
 /// They go to their link in the same call. The drains of a link thus
@@ -712,6 +723,23 @@ fn fits(
 
     let waiting = framed.get(&link).copied().unwrap_or(0);
     held.saturating_add(waiting).saturating_add(len) <= limit / part.max(1)
+}
+
+/// The range of an encoded command, from its command byte.
+fn range_of(encoded: &[u8]) -> Option<Range> {
+    let byte = *encoded.get(1)?;
+    Cmd::from_byte(byte).ok().map(Range::of)
+}
+
+/// Whether the answers of a circuit go with no wait on `link`: the bytes
+/// that wait there and one step stay under `ANSWER_MARK` (`NET-360`).
+fn is_calm(backlog: Option<&dyn Backlog>, framed: &BTreeMap<LinkId, usize>, link: LinkId) -> bool {
+    let Some((held, _)) = backlog.and_then(|backlog| backlog.of(link)) else {
+        return true;
+    };
+
+    let waiting = framed.get(&link).copied().unwrap_or(0);
+    held.saturating_add(waiting).saturating_add(ANSWER_STEP) <= ANSWER_MARK
 }
 
 /// The addresses whose measurement attempts a relay counts at once. A new
@@ -1995,13 +2023,12 @@ impl RelayNode {
 
                 match cell {
                     Ok(Some(cell)) => {
-                        let cell = cell.to_vec();
                         // REL-175: a cell of a relay link counts for its
                         // receipt.
                         let mut outputs = Vec::new();
                         if let Some(key) = self.pow_key.as_ref() {
                             let own = self.relay.relay_id;
-                            for signed in self.receipts.cell_taken(link, &cell, &own, key, now, rng)
+                            for signed in self.receipts.cell_taken(link, cell, &own, key, now, rng)
                             {
                                 outputs.extend(capsule_output(link, CapsuleType::Receipt, &signed));
                             }
@@ -2011,7 +2038,7 @@ impl RelayNode {
                         if let Some(circ_id) = cell.first_chunk::<16>() {
                             if self.loops.owns(link, *circ_id) {
                                 let at = self.table_now(now);
-                                let cells = self.loops.on_cell(link, &cell, at, rng);
+                                let cells = self.loops.on_cell(link, cell, at, rng);
                                 outputs.extend(self.send_loop_cells(cells, now, rng));
                                 return outputs;
                             }
@@ -2020,7 +2047,7 @@ impl RelayNode {
                         self.circuits.set_clock_ms(clock_ms());
                         let origin = self.origin(link, now);
                         let at = self.table_now(now);
-                        let actions = self.circuits.on_cell(link, &cell, origin, at, rng);
+                        let actions = self.circuits.on_cell(link, cell, origin, at, rng);
                         outputs.extend(self.run(actions, now, rng));
                         outputs
                     }
@@ -2554,6 +2581,8 @@ impl RelayNode {
             if entry.key().0 > now_ms {
                 break;
             }
+            #[cfg(feature = "sockets-test")]
+            crate::hops::released(self.layer, now_ms.saturating_sub(entry.key().0));
             let (circuit, action) = entry.remove();
             self.circuits.released(&circuit);
             due.push(action);
@@ -2616,6 +2645,17 @@ impl RelayNode {
         let Ok(commands) = unpack(content, bucket) else {
             return Vec::new();
         };
+
+        #[cfg(feature = "sockets-test")]
+        {
+            const CGET: u8 = 0x73;
+            let fetches: Vec<[u8; 32]> = commands
+                .iter()
+                .filter(|command| command.cmd == umbra_wire::command::Cmd::Attachment(CGET))
+                .map(|command| command.queue_id)
+                .collect();
+            crate::hops::served(&fetches);
+        }
 
         let mut digests = Vec::new();
 
@@ -2794,14 +2834,7 @@ impl RelayNode {
         };
 
         let is_bulk = endpoint.range == Some(Range::Attachment);
-        let has_room = is_bulk
-            && fits(
-                self.backlog.as_deref(),
-                &self.framed,
-                circuit.link,
-                ANSWER_STEP,
-                DRAIN_CALM_PART,
-            );
+        let has_room = is_bulk && is_calm(self.backlog.as_deref(), &self.framed, circuit.link);
 
         let mut actions = Vec::new();
         let mut sent = 0usize;
@@ -2811,8 +2844,14 @@ impl RelayNode {
             let bucket = outbound.bucket;
             let mut content = outbound.encoded;
 
+            // NET-376, WIR-108: a cell holds the answers of one range. A `NACK` of a
+            // chunk command thus goes in a cell of its own, because a client
+            // drops a cell of two ranges and its circuit with it.
+            let range = range_of(&content);
             while endpoint.outbox.front_ready().is_some_and(|more| {
-                is_bulk && content.len().saturating_add(more.encoded.len()) <= bucket.command_area()
+                is_bulk
+                    && range_of(&more.encoded) == range
+                    && content.len().saturating_add(more.encoded.len()) <= bucket.command_area()
             }) {
                 if let Some(more) = endpoint.outbox.pop_ready() {
                     content.extend(more.encoded);
@@ -2853,13 +2892,7 @@ impl RelayNode {
         self.endpoints
             .get(circuit)
             .is_some_and(|endpoint| !endpoint.paused && endpoint.range == Some(Range::Attachment))
-            && fits(
-                self.backlog.as_deref(),
-                &self.framed,
-                circuit.link,
-                ANSWER_STEP,
-                DRAIN_CALM_PART,
-            )
+            && is_calm(self.backlog.as_deref(), &self.framed, circuit.link)
     }
 
     /// One tick of the pacing clock of a circuit (`NET-035`, `NET-036`):
@@ -3256,6 +3289,42 @@ mod tests {
     }
 
     impl umbra_crypto::rand_core::TryCryptoRng for Rng {}
+
+    struct OneLink(usize);
+
+    impl Backlog for OneLink {
+        fn of(&self, _: LinkId) -> Option<(usize, usize)> {
+            Some((self.0, 32 << 20))
+        }
+    }
+
+    #[test]
+    fn the_mark_of_the_answers_holds_one_window_and_the_drains_keep_theirs() {
+        const CELL: usize = 32_860;
+        let none = BTreeMap::new();
+        let window = umbra_core::attach::MAX_CONCURRENT_DOWN * CELL;
+
+        // NET-360: the window of one client stays in the first branch.
+        assert!(is_calm(Some(&OneLink(window)), &none, 1));
+        assert!(is_calm(Some(&OneLink(ANSWER_MARK - ANSWER_STEP)), &none, 1));
+        assert!(!is_calm(
+            Some(&OneLink(ANSWER_MARK - ANSWER_STEP + 1)),
+            &none,
+            1
+        ));
+
+        // The bytes that the runtime did not count yet count too.
+        let framed = BTreeMap::from([(1, 1)]);
+        assert!(!is_calm(
+            Some(&OneLink(ANSWER_MARK - ANSWER_STEP)),
+            &framed,
+            1
+        ));
+
+        // NET-349: a drain still reads one quarter of the bound of its link.
+        let above = OneLink(ANSWER_MARK);
+        assert!(fits(Some(&above), &none, 1, DRAIN_STEP, DRAIN_CALM_PART));
+    }
 
     #[test]
     fn a_copy_is_one_replica_capsule_and_a_relay_takes_it_with_no_session() {

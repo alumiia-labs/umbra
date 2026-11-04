@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 2: Threat Model and Security Goals
 
 **Status:** Draft
-**Version:** 0.46.3
-**Date:** 2026-10-29
+**Version:** 0.47.0
+**Date:** 2026-11-01
 
 ---
 
@@ -423,7 +423,8 @@ revision that adds a trade MUST add a row to this table.
 | A forward is a new upload under a fresh key. Thus a relay joins no two conversations at one chunk, and the sender pays the upload again | Part 12 §12.3 |
 | A receiver renders the verified segments of a media object before the digest check. Thus a player starts early, and a truncated object shows its end late | Part 12 §12.3.1 |
 | A relay serves at most four times its store in a day and one chunk at most 60 times an hour. Thus a popular object moves to six replicas that its author pays for | Part 12 §12.11 |
-| A bulk circuit runs in the mode of its conversation, thus a Private-mode upload of 250 MiB takes about 7.5 minutes at a 5 Mbit/s uplink | Part 12 §12.7.2 |
+| A bulk circuit runs in the mode of its conversation, thus a Private-mode upload of 250 MiB takes about 13 minutes at a 5 Mbit/s uplink | Part 12 §12.7.2 |
+| A relay link is one queue for all circuits, thus a message waits behind the answers of a download on it. `ANSWER_MARK` holds that wait to about 377 ms at class C0 on the link of an exit, with some hundred bulk circuits at most, and U2 then gives a p50 of 1.97 s and a p95 of 4.27 s. The mark does not reach the link of a middle relay or of an ingress relay. Two full windows on such a link at class C0 give 673 ms, a p50 of 2.27 s, and a p95 of 4.57 s, and U2 fails in that case | Part 3 §3.5.2 |
 | A holder reads its own label at each tree head, thus a compelled insertion under that label raises the takeover warning at the holder, and each published label costs one metered lookup for each head | Part 9 §9.5.2 |
 | The invitation link names one invitation host, thus that host learns each browser open of a link by a party without the client | Part 4 §4.3.1 |
 | Private notifications wake the device on a fixed clock and open each queue-relay session. The idle background then rises to 149.22 MB or 196.68 MB each month. U4b names no target in v1. A locked client in Private mode receives nothing until the unlock | Part 3 §3.12, Part 8 §8.3 |

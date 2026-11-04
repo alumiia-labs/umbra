@@ -34,7 +34,8 @@ cargo test --locked -p umbra-transport --features native
 
 step "relay server, host only"
 cargo clippy --locked -p umbra-relay --features native --all-targets -- -D warnings
-cargo test --locked -p umbra-relay --features native
+cargo clippy --locked -p umbra-relay --features paused-clock --all-targets -- -D warnings
+cargo test --locked -p umbra-relay --features paused-clock
 
 step "client surface, host only"
 # The SQLite library and the UniFFI scaffolding build on the host. The cross

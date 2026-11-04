@@ -6,7 +6,17 @@
 //! (`NET-214`, `NET-215`), TLS 1.3 only (`IMP-068`), no resumption and no
 //! early data (`NET-073`), and GREASE ECH.
 
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    io,
+    net::SocketAddr,
+    pin::Pin,
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    },
+    task::{ready, Context, Poll},
+    time::Duration,
+};
 
 use rustls::{
     client::{EchGreaseConfig, EchMode, Resumption},
@@ -18,7 +28,7 @@ use rustls::{
     RootCertStore,
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
     net::TcpStream,
     time::timeout,
 };
@@ -357,13 +367,305 @@ fn read_carried(inbound: &[u8]) -> Result<Vec<u8>, NativeError> {
     Ok(body.to_vec())
 }
 
+/// The bytes that a [`Coalesced`] stream holds before it writes. A group of
+/// frames stays at or below it. A TLS session seals only part of a write when
+/// its own buffer holds 64 KiB, and the rest then takes another record. With
+/// this bound no frame waits for the socket in the middle of a group, thus
+/// that buffer stays empty, and each frame takes its own record under
+/// backpressure too (`WIR-225`).
+pub const WRITE_HELD: usize = 64 << 10;
+/// The capacity of its buffer that a [`Coalesced`] stream keeps after a
+/// write. A link that had a burst then costs the relay little while it idles.
+const HELD_KEPT: usize = 4 << 10;
+/// The plain bytes of one TLS record (RFC 8446 §5.1).
+const RECORD_PLAIN: usize = 16 << 10;
+/// What one TLS record adds: the header, the content type, and the tag.
+const RECORD_ADDS: usize = 22;
+/// The bytes that a [`Coalesced`] stream asks of its socket in one read. The
+/// TLS session reads 4 KiB at a time. A `B3` cell then took nine reads.
+const READ_AHEAD: usize = 32 << 10;
+/// The room for one read in a buffer of capsules.
+pub const READ_ROOM: usize = 16 << 10;
+
+/// The bytes on the socket for a capsule of `capsule_len` bytes, in a masked
+/// frame. An unmasked frame takes 4 bytes less.
+pub const fn wire_len(capsule_len: usize) -> usize {
+    let frame = websocket::frame_len(capsule_len, true);
+    frame + frame.div_ceil(RECORD_PLAIN) * RECORD_ADDS
+}
+
+/// What a writer of a link and the [`Coalesced`] stream under its TLS session
+/// share.
+#[derive(Debug, Default)]
+pub struct WriteState {
+    holding: AtomicBool,
+    reads_ahead: AtomicBool,
+    sent: AtomicUsize,
+}
+
+impl WriteState {
+    /// The stream holds each write from now on, until the next flush.
+    pub fn hold(&self) {
+        self.holding.store(true, Ordering::Relaxed);
+    }
+
+    /// The stream reads ahead from now on. A socket before its upgrade
+    /// holds no buffer for it (`NET-333`).
+    pub fn read_ahead(&self) {
+        self.reads_ahead.store(true, Ordering::Relaxed);
+    }
+
+    /// The bytes that the socket took so far. The count wraps.
+    pub fn sent(&self) -> usize {
+        self.sent.load(Ordering::Relaxed)
+    }
+}
+
+/// The socket under a TLS session. Between a [`WriteState::hold`] and the
+/// next flush it holds what the session writes, thus the records of a group
+/// of capsules take one write of the socket. Each other write goes straight
+/// through, thus the handshake and an alert keep their place on the wire. An
+/// alert that the session seals while a group is held waits for that group,
+/// and it is lost when the link ends first.
+///
+/// A TLS session seals one record at each write to it while its own buffer
+/// holds room. A group at or below [`WRITE_HELD`] keeps that buffer empty,
+/// thus each frame takes its own record (`WIR-225`, `WIR-227`). No byte
+/// waits for a later byte: a caller holds only the capsules that wait, and
+/// it flushes after them. After [`WriteState::read_ahead`] the stream also
+/// reads ahead, thus some records take one read of the socket.
+pub struct Coalesced<S> {
+    stream: S,
+    state: Arc<WriteState>,
+    held: Vec<u8>,
+    written: usize,
+    ahead: Vec<u8>,
+    ahead_used: usize,
+    ahead_filled: usize,
+}
+
+impl<S> Coalesced<S> {
+    /// The stream over `stream`.
+    pub fn new(stream: S) -> Self {
+        Coalesced {
+            stream,
+            state: Arc::default(),
+            held: Vec::new(),
+            written: 0,
+            ahead: Vec::new(),
+            ahead_used: 0,
+            ahead_filled: 0,
+        }
+    }
+
+    /// What this stream shares with the writer of its link.
+    pub fn state(&self) -> Arc<WriteState> {
+        self.state.clone()
+    }
+}
+
+impl<S: AsyncWrite + Unpin> Coalesced<S> {
+    /// Writes each byte that waits to the socket.
+    fn write_held(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        while let Some(rest) = self
+            .held
+            .get(self.written..)
+            .filter(|rest| !rest.is_empty())
+        {
+            let count = ready!(Pin::new(&mut self.stream).poll_write(cx, rest))?;
+            if count == 0 {
+                return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
+            }
+
+            self.written = self.written.saturating_add(count);
+            self.state.sent.fetch_add(count, Ordering::Relaxed);
+        }
+
+        self.written = 0;
+        self.held.clear();
+        if self.held.capacity() > HELD_KEPT {
+            self.held = Vec::new();
+        }
+
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Coalesced<S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        out: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+
+        if this.ahead.is_empty() {
+            if !this.state.reads_ahead.load(Ordering::Relaxed) {
+                return Pin::new(&mut this.stream).poll_read(cx, out);
+            }
+
+            this.ahead = vec![0u8; READ_AHEAD];
+        }
+
+        if this.ahead_used == this.ahead_filled {
+            let mut room = ReadBuf::new(&mut this.ahead);
+            ready!(Pin::new(&mut this.stream).poll_read(cx, &mut room))?;
+            this.ahead_filled = room.filled().len();
+            this.ahead_used = 0;
+        }
+
+        let waiting = this
+            .ahead
+            .get(this.ahead_used..this.ahead_filled)
+            .unwrap_or(&[]);
+        let count = waiting.len().min(out.remaining());
+        out.put_slice(waiting.get(..count).unwrap_or(&[]));
+        this.ahead_used = this.ahead_used.saturating_add(count);
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Coalesced<S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+
+        if !this.state.holding.load(Ordering::Relaxed) {
+            ready!(this.write_held(cx))?;
+            let count = ready!(Pin::new(&mut this.stream).poll_write(cx, bytes))?;
+            this.state.sent.fetch_add(count, Ordering::Relaxed);
+            return Poll::Ready(Ok(count));
+        }
+
+        if this.held.len() >= WRITE_HELD {
+            ready!(this.write_held(cx))?;
+        }
+
+        this.held.extend_from_slice(bytes);
+        Poll::Ready(Ok(bytes.len()))
+    }
+
+    // A frame that goes alone takes its records in one write of the socket,
+    // as with no stream here. A `B3` frame is three records.
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+
+        if !this.state.holding.load(Ordering::Relaxed) {
+            ready!(this.write_held(cx))?;
+            let count = ready!(Pin::new(&mut this.stream).poll_write_vectored(cx, bufs))?;
+            this.state.sent.fetch_add(count, Ordering::Relaxed);
+            return Poll::Ready(Ok(count));
+        }
+
+        let first = bufs.iter().find(|buf| !buf.is_empty());
+        Pin::new(this).poll_write(cx, first.map_or(&[], |buf| &**buf))
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.stream.is_write_vectored()
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        ready!(this.write_held(cx))?;
+        this.state.holding.store(false, Ordering::Relaxed);
+        Pin::new(&mut this.stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        ready!(this.write_held(cx))?;
+        Pin::new(&mut this.stream).poll_shutdown(cx)
+    }
+}
+
+/// The TLS stream of a [`TcpLink`].
+type LinkStream = tokio_rustls::client::TlsStream<Coalesced<TcpStream>>;
+
+/// The mask of frame number `counter` from the seed of a link.
+fn mask_of(seed: &[u8; 4], counter: u64) -> [u8; 4] {
+    // A fresh mask for each frame, from the seed and a counter. The mask
+    // hides nothing from TLS; RFC 6455 wants it different for each frame.
+    let c = counter.to_le_bytes();
+    [
+        seed[0] ^ c[0],
+        seed[1] ^ c[1],
+        seed[2] ^ c[2],
+        seed[3] ^ c[3],
+    ]
+}
+
+/// Writes `capsule` as one masked frame, thus in one TLS record when it
+/// fits one (`WIR-225`). The caller flushes.
+async fn write_frame<W: AsyncWrite + Unpin>(
+    stream: &mut W,
+    capsule: &[u8],
+    mask: &[u8; 4],
+    frame: &mut Vec<u8>,
+) -> Result<(), NativeError> {
+    frame.resize(websocket::frame_len(capsule.len(), true), 0);
+    let used = websocket::encode(capsule, Some(mask), frame)?;
+    stream.write_all(frame.get(..used).unwrap_or(&[])).await?;
+    Ok(())
+}
+
+/// The stream, the mask, and the buffer of the frames of one link.
+struct FrameWriter<W> {
+    stream: W,
+    state: Arc<WriteState>,
+    frame: Vec<u8>,
+    mask: [u8; 4],
+    counter: u64,
+}
+
+impl<W: AsyncWrite + Unpin> FrameWriter<W> {
+    /// Sends each capsule of `capsules` in its own frame and its own TLS
+    /// record. Frames share one write of the socket up to `WRITE_HELD`
+    /// bytes. A larger group flushes between two frames, thus no frame
+    /// waits for the socket with the session in the middle of a group. A
+    /// frame that goes alone has nothing to share a write with, and the
+    /// stream holds no copy of it.
+    async fn write_group<C: AsRef<[u8]>>(&mut self, capsules: &[C]) -> Result<(), NativeError> {
+        let mut waiting = 0usize;
+        if capsules.len() > 1 {
+            self.state.hold();
+        }
+
+        for capsule in capsules {
+            let capsule = capsule.as_ref();
+            let wire = wire_len(capsule.len());
+
+            if waiting > 0 && waiting.saturating_add(wire) > WRITE_HELD {
+                self.stream.flush().await?;
+                self.state.hold();
+                waiting = 0;
+            }
+
+            self.counter = self.counter.wrapping_add(1);
+            let mask = mask_of(&self.mask, self.counter);
+            write_frame(&mut self.stream, capsule, &mask, &mut self.frame).await?;
+            waiting = waiting.saturating_add(wire);
+        }
+
+        self.stream.flush().await?;
+        Ok(())
+    }
+}
+
 /// A TCP connection after the TLS handshake and the upgrade. Each capsule
 /// travels in one masked WebSocket frame.
 pub struct TcpLink {
-    stream: tokio_rustls::client::TlsStream<TcpStream>,
+    writer: FrameWriter<LinkStream>,
     inbound: Vec<u8>,
-    mask: [u8; 4],
-    counter: u64,
+    /// The bytes of `inbound` that earlier capsules took.
+    taken: usize,
 }
 
 impl TcpLink {
@@ -379,7 +681,9 @@ impl TcpLink {
         tcp.set_nodelay(true)?;
         let name = ServerName::try_from(dial.host.clone()).map_err(|_| Error::Refused)?;
         let connector = tokio_rustls::TlsConnector::from(config);
-        let mut stream = connector.connect(name, tcp).await?;
+        let socket = Coalesced::new(tcp);
+        let state = socket.state();
+        let mut stream = connector.connect(name, socket).await?;
 
         stream
             .write_all(upgrade::request(&dial.host, &key).as_bytes())
@@ -405,57 +709,45 @@ impl TcpLink {
         };
 
         inbound.drain(..used);
+        state.read_ahead();
         Ok(TcpLink {
-            stream,
+            writer: FrameWriter {
+                stream,
+                state,
+                frame: Vec::new(),
+                mask: mask_seed,
+                counter: 0,
+            },
             inbound,
-            mask: mask_seed,
-            counter: 0,
+            taken: 0,
         })
-    }
-
-    fn next_mask(&mut self) -> [u8; 4] {
-        // A fresh mask for each frame, from the seed and a counter. The mask
-        // hides nothing from TLS; RFC 6455 wants it different for each frame.
-        self.counter = self.counter.wrapping_add(1);
-        let c = self.counter.to_le_bytes();
-        [
-            self.mask[0] ^ c[0],
-            self.mask[1] ^ c[1],
-            self.mask[2] ^ c[2],
-            self.mask[3] ^ c[3],
-        ]
     }
 
     /// Sends one capsule.
     pub async fn send(&mut self, capsule: &[u8]) -> Result<(), NativeError> {
-        let mask = self.next_mask();
-        let mut frame = vec![0u8; websocket::frame_len(capsule.len(), true)];
-        let n = websocket::encode(capsule, Some(&mask), &mut frame)?;
-        frame.truncate(n);
-
-        self.stream.write_all(&frame).await?;
-        self.stream.flush().await?;
-        Ok(())
+        self.writer
+            .write_group(core::slice::from_ref(&capsule))
+            .await
     }
 
-    /// Receives one capsule.
+    /// Receives one capsule. A caller may drop this call while it waits:
+    /// the bytes of a frame stay in `inbound`.
     pub async fn recv(&mut self) -> Result<Vec<u8>, NativeError> {
-        let mut out = vec![0u8; MAX_CAPSULE];
         loop {
-            if let Some((len, used)) = websocket::decode(&self.inbound, false, &mut out)? {
-                self.inbound.drain(..used);
-                out.truncate(len);
-                return Ok(out);
+            let rest = self.inbound.get(self.taken..).unwrap_or(&[]);
+            if let Some((capsule, used)) = websocket::decode_owned(rest, false, MAX_CAPSULE)? {
+                self.taken = self.taken.saturating_add(used);
+                return Ok(capsule);
             }
 
-            let mut chunk = [0u8; 4_096];
-            let n = self.stream.read(&mut chunk).await?;
+            self.inbound.drain(..self.taken);
+            self.taken = 0;
+            self.inbound.reserve(READ_ROOM);
+
+            let n = self.writer.stream.read_buf(&mut self.inbound).await?;
             if n == 0 {
                 return Err(Error::Refused.into());
             }
-
-            self.inbound
-                .extend_from_slice(chunk.get(..n).unwrap_or(&[]));
         }
     }
 }
@@ -465,90 +757,68 @@ impl TcpLink {
     /// the same time: the measurer of Part 10 §10.3 sends at its rate
     /// while the echoes come back.
     pub fn split(self) -> (TcpReader, TcpWriter) {
-        let (read, write) = tokio::io::split(self.stream);
+        let writer = self.writer;
+        let (read, write) = tokio::io::split(writer.stream);
         (
             TcpReader {
                 stream: read,
                 inbound: self.inbound,
-                scratch: vec![0u8; MAX_CAPSULE],
+                taken: self.taken,
             },
-            TcpWriter {
+            TcpWriter(FrameWriter {
                 stream: write,
-                mask: self.mask,
-                counter: self.counter,
-            },
+                state: writer.state,
+                frame: writer.frame,
+                mask: writer.mask,
+                counter: writer.counter,
+            }),
         )
     }
 }
 
 /// The receiving half of a [`TcpLink`].
 pub struct TcpReader {
-    stream: tokio::io::ReadHalf<tokio_rustls::client::TlsStream<TcpStream>>,
+    stream: tokio::io::ReadHalf<LinkStream>,
     inbound: Vec<u8>,
-    scratch: Vec<u8>,
+    /// The bytes of `inbound` that earlier capsules took.
+    taken: usize,
 }
 
 impl TcpReader {
     /// Receives one capsule.
     pub async fn recv(&mut self) -> Result<Vec<u8>, NativeError> {
-        let mut consumed = 0usize;
         loop {
-            let rest = self.inbound.get(consumed..).unwrap_or(&[]);
-            if let Some((len, used)) = websocket::decode(rest, false, &mut self.scratch)? {
-                self.inbound.drain(..consumed.saturating_add(used));
-                return Ok(self.scratch.get(..len).unwrap_or(&[]).to_vec());
+            let rest = self.inbound.get(self.taken..).unwrap_or(&[]);
+            if let Some((capsule, used)) = websocket::decode_owned(rest, false, MAX_CAPSULE)? {
+                self.taken = self.taken.saturating_add(used);
+                return Ok(capsule);
             }
 
-            self.inbound.drain(..consumed);
-            consumed = 0;
+            self.inbound.drain(..self.taken);
+            self.taken = 0;
+            self.inbound.reserve(READ_ROOM);
 
-            let mut chunk = [0u8; 16_384];
-            let n = self.stream.read(&mut chunk).await?;
+            let n = self.stream.read_buf(&mut self.inbound).await?;
             if n == 0 {
                 return Err(Error::Refused.into());
             }
-
-            self.inbound
-                .extend_from_slice(chunk.get(..n).unwrap_or(&[]));
         }
     }
 }
 
 /// The sending half of a [`TcpLink`].
-pub struct TcpWriter {
-    stream: tokio::io::WriteHalf<tokio_rustls::client::TlsStream<TcpStream>>,
-    mask: [u8; 4],
-    counter: u64,
-}
+pub struct TcpWriter(FrameWriter<tokio::io::WriteHalf<LinkStream>>);
 
 impl TcpWriter {
-    /// Sends each capsule of `capsules`, one frame for each, in one write.
+    /// Sends each capsule of `capsules` in its own frame and its own TLS
+    /// record, in as few writes of the socket as `WRITE_HELD` gives.
     pub async fn send_all(&mut self, capsules: &[Vec<u8>]) -> Result<(), NativeError> {
-        let mut frames = Vec::new();
-        for capsule in capsules {
-            self.counter = self.counter.wrapping_add(1);
-            let c = self.counter.to_le_bytes();
-            let mask = [
-                self.mask[0] ^ c[0],
-                self.mask[1] ^ c[1],
-                self.mask[2] ^ c[2],
-                self.mask[3] ^ c[3],
-            ];
+        self.0.write_group(capsules).await
+    }
 
-            let start = frames.len();
-            let len = websocket::frame_len(capsule.len(), true);
-            frames.resize(start.saturating_add(len), 0);
-            let n = websocket::encode(
-                capsule,
-                Some(&mask),
-                frames.get_mut(start..).unwrap_or(&mut []),
-            )?;
-            frames.truncate(start.saturating_add(n));
-        }
-
-        self.stream.write_all(&frames).await?;
-        self.stream.flush().await?;
-        Ok(())
+    /// What this writer shares with the socket of its link.
+    pub fn state(&self) -> Arc<WriteState> {
+        self.0.state.clone()
     }
 }
 
@@ -738,9 +1008,385 @@ pub async fn connect(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
+    use std::sync::Mutex;
+
+    use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
+    use tokio::io::DuplexStream;
+
     use super::*;
+
+    /// A socket that keeps each write that reaches it.
+    struct Recorder {
+        stream: DuplexStream,
+        writes: Arc<Mutex<Vec<Vec<u8>>>>,
+    }
+
+    impl AsyncRead for Recorder {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            out: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.get_mut().stream).poll_read(cx, out)
+        }
+    }
+
+    impl AsyncWrite for Recorder {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let this = self.get_mut();
+            let count = ready!(Pin::new(&mut this.stream).poll_write(cx, bytes))?;
+            let taken = bytes.get(..count).unwrap().to_vec();
+            this.writes.lock().unwrap().push(taken);
+            Poll::Ready(Ok(count))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.get_mut().stream).poll_flush(cx)
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.get_mut().stream).poll_shutdown(cx)
+        }
+    }
+
+    /// A socket that keeps its writes, and the writes it keeps.
+    fn recorder() -> (Recorder, DuplexStream, Arc<Mutex<Vec<Vec<u8>>>>) {
+        let (stream, peer) = tokio::io::duplex(1 << 20);
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let socket = Recorder {
+            stream,
+            writes: writes.clone(),
+        };
+        (socket, peer, writes)
+    }
+
+    #[tokio::test]
+    async fn a_coalesced_stream_writes_at_a_flush_and_at_its_bound() {
+        let (socket, mut peer, writes) = recorder();
+        let mut stream = Coalesced::new(socket);
+        let state = stream.state();
+
+        // With no group, each write goes straight through.
+        stream.write_all(b"first").await.unwrap();
+        assert_eq!(*writes.lock().unwrap(), [b"first".to_vec()]);
+        assert_eq!(state.sent(), 5);
+        writes.lock().unwrap().clear();
+
+        state.hold();
+        stream.write_all(b"one").await.unwrap();
+        stream.write_all(b"two").await.unwrap();
+        assert!(writes.lock().unwrap().is_empty());
+
+        stream.flush().await.unwrap();
+        assert_eq!(*writes.lock().unwrap(), [b"onetwo".to_vec()]);
+
+        // What waits stays below the bound, whatever a caller writes
+        // before its flush.
+        state.hold();
+        let block = vec![0x5A; 40 << 10];
+        for _ in 0..3 {
+            stream.write_all(&block).await.unwrap();
+        }
+        assert_eq!(writes.lock().unwrap().len(), 2);
+
+        stream.flush().await.unwrap();
+        assert_eq!(writes.lock().unwrap().len(), 3);
+        assert!(stream.held.capacity() <= HELD_KEPT);
+
+        // A socket before its upgrade holds no buffer of a read.
+        peer.write_all(b"before").await.unwrap();
+        let mut taken = [0u8; 6];
+        stream.read_exact(&mut taken).await.unwrap();
+        assert_eq!(&taken, b"before");
+        assert!(stream.ahead.is_empty());
+
+        // A read takes what the peer wrote, in its order, across the reads
+        // of a TLS session.
+        state.read_ahead();
+        peer.write_all(&vec![7; READ_AHEAD + 10]).await.unwrap();
+        let mut taken = vec![0u8; READ_AHEAD + 10];
+        stream.read_exact(&mut taken).await.unwrap();
+        assert_eq!(taken, vec![7; READ_AHEAD + 10]);
+        assert_eq!(stream.ahead.len(), READ_AHEAD);
+
+        // A shutdown writes what waits.
+        state.hold();
+        stream.write_all(b"end").await.unwrap();
+        stream.shutdown().await.unwrap();
+        assert_eq!(writes.lock().unwrap().last().unwrap(), b"end");
+    }
+
+    /// The lengths of the application records in `wire`.
+    fn record_lengths(wire: &[u8]) -> Vec<usize> {
+        let mut lengths = Vec::new();
+        let mut rest = wire;
+        while let Some((head, tail)) = rest.split_first_chunk::<5>() {
+            assert_eq!(head[0], 23);
+            let len = usize::from(u16::from_be_bytes([head[3], head[4]]));
+            lengths.push(len);
+            rest = tail.get(len..).unwrap();
+        }
+
+        assert!(rest.is_empty());
+        lengths
+    }
+
+    fn fixture(name: &str) -> String {
+        format!(
+            "{}/../../tests/fixtures/tls/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        )
+    }
+
+    fn server_config() -> Arc<rustls::ServerConfig> {
+        let certs: Vec<CertificateDer<'static>> =
+            CertificateDer::pem_file_iter(fixture("leaf.pem"))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+        let key = PrivateKeyDer::from_pem_file(fixture("leaf.key")).unwrap();
+        let provider = Arc::new(aws_lc_rs::default_provider());
+        let config = rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .unwrap();
+        Arc::new(config)
+    }
+
+    type Writes = Arc<Mutex<Vec<Vec<u8>>>>;
+    type Client = tokio_rustls::client::TlsStream<Coalesced<Recorder>>;
+    type Server = tokio_rustls::server::TlsStream<DuplexStream>;
+
+    /// The two ends of a TLS session over a socket that holds `capacity`
+    /// bytes, under the default send bound of the session.
+    async fn tls_pair(capacity: usize) -> (Client, Server, Writes) {
+        let (stream, peer) = tokio::io::duplex(capacity);
+        let writes = Writes::default();
+        let socket = Recorder {
+            stream,
+            writes: writes.clone(),
+        };
+
+        let connector = tokio_rustls::TlsConnector::from(
+            tls_config_with_root_file(&fixture("ca.pem")).unwrap(),
+        );
+        let name = ServerName::try_from("localhost").unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(server_config());
+
+        let (client, server) = tokio::join!(
+            connector.connect(name, Coalesced::new(socket)),
+            acceptor.accept(peer)
+        );
+
+        writes.lock().unwrap().clear();
+        (client.unwrap(), server.unwrap(), writes)
+    }
+
+    fn frame_writer(client: Client) -> FrameWriter<Client> {
+        let state = client.get_ref().0.state();
+        FrameWriter {
+            stream: client,
+            state,
+            frame: Vec::new(),
+            mask: [1, 2, 3, 4],
+            counter: 0,
+        }
+    }
+
+    /// How a run of frames of `capsule_len` bytes took its records.
+    fn frames_off_count(wire: &[u8], capsule_len: usize) -> (usize, usize) {
+        let frame_len = websocket::frame_len(capsule_len, true);
+        let count = frame_len.div_ceil(RECORD_PLAIN);
+        let mut plain: Vec<usize> = record_lengths(wire).iter().map(|len| len - 17).collect();
+        // The `close_notify` of the shutdown.
+        plain.pop();
+
+        let (mut frames, mut off) = (0usize, 0usize);
+        let (mut in_frame, mut records) = (0usize, 0usize);
+
+        for len in plain {
+            in_frame += len;
+            records += 1;
+            assert!(in_frame <= frame_len, "two frames share a record");
+
+            if in_frame == frame_len {
+                frames += 1;
+                off += usize::from(records != count);
+                in_frame = 0;
+                records = 0;
+            }
+        }
+
+        assert_eq!(in_frame, 0);
+        (frames, off)
+    }
+
+    /// Drains the far end slowly, thus the socket of a run stays full.
+    fn slow_reader(mut server: Server) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut chunk = vec![0u8; 1_024];
+            while matches!(server.read(&mut chunk).await, Ok(n) if n > 0) {
+                tokio::task::yield_now().await;
+            }
+        })
+    }
+
+    /// The bucket capsules, with the frames of one group and the groups of
+    /// one run: a group is 132 KB, 255 KB, or 230 KB, above each default of
+    /// the stack.
+    const BURSTS: [(usize, usize, usize); 6] = [
+        (530, 64, 6),
+        (2_066, 64, 6),
+        (8_210, 31, 3),
+        (32_786, 7, 3),
+        (530, 1, 64),
+        (32_786, 1, 16),
+    ];
+
+    #[tokio::test]
+    async fn each_frame_keeps_its_record_on_a_socket_that_stays_full() {
+        for (capsule_len, frames, groups) in BURSTS {
+            let (client, server, writes) = tls_pair(4 << 10).await;
+            let reader = slow_reader(server);
+            let mut writer = frame_writer(client);
+            let capsules = vec![vec![0xA5u8; capsule_len]; frames];
+
+            for _ in 0..groups {
+                writer.write_group(&capsules).await.unwrap();
+            }
+
+            // A frame that goes alone leaves no copy in the stream.
+            if frames == 1 {
+                assert_eq!(writer.stream.get_ref().0.held.capacity(), 0);
+            }
+
+            writer.stream.shutdown().await.unwrap();
+            drop(writer);
+            reader.await.unwrap();
+
+            let wire = writes.lock().unwrap().concat();
+            let (whole, off) = frames_off_count(&wire, capsule_len);
+            assert_eq!((whole, off), (frames * groups, 0), "{capsule_len}");
+        }
+    }
+
+    /// One group of `frames` frames with no flush between them, on a socket
+    /// that stays full. The result is the count of the frames that took
+    /// another count of records than `WIR-225` and `WIR-226` give.
+    async fn one_held_group(capsule_len: usize, frames: usize) -> usize {
+        let (client, server, writes) = tls_pair(4 << 10).await;
+        let reader = slow_reader(server);
+        let mut writer = frame_writer(client);
+        let capsule = vec![0xA5u8; capsule_len];
+        let mut frame = Vec::new();
+
+        writer.state.hold();
+        for _ in 0..frames {
+            write_frame(&mut writer.stream, &capsule, &[1, 2, 3, 4], &mut frame)
+                .await
+                .unwrap();
+        }
+
+        writer.stream.flush().await.unwrap();
+        writer.stream.shutdown().await.unwrap();
+        drop(writer);
+        reader.await.unwrap();
+
+        let wire = writes.lock().unwrap().concat();
+        let (whole, off) = frames_off_count(&wire, capsule_len);
+        assert_eq!(whole, frames);
+        off
+    }
+
+    #[tokio::test]
+    async fn a_held_group_stays_whole_up_to_the_bound_of_one_write() {
+        // WIR-225: a group of 260 KB splits a frame under the default send
+        // bound. This shows that the test finds that fault.
+        assert!(one_held_group(2_066, 124).await > 0);
+
+        // The largest group of each bucket inside `WRITE_HELD`.
+        for (capsule_len, frames) in [(530, 64), (2_066, 31), (8_210, 7), (32_786, 1)] {
+            assert!(frames * wire_len(capsule_len) <= WRITE_HELD);
+            assert_eq!(
+                one_held_group(capsule_len, frames).await,
+                0,
+                "{capsule_len}"
+            );
+        }
+    }
+
+    /// What a peer gets for a broken `ClientHello`.
+    async fn answer_to_a_broken_hello<S>(ours: S, mut peer: DuplexStream) -> Vec<u8>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let bad = [
+            0x16u8, 0x03, 0x03, 0x00, 0x06, 0x01, 0x00, 0x00, 0x02, 0xFF, 0xFF,
+        ];
+        peer.write_all(&bad).await.unwrap();
+
+        let accept =
+            tokio_rustls::LazyConfigAcceptor::new(rustls::server::Acceptor::default(), ours);
+        assert!(accept.await.is_err());
+
+        let mut got = Vec::new();
+        let _ = peer.read_to_end(&mut got).await;
+        got
+    }
+
+    #[tokio::test]
+    async fn an_alert_of_a_handshake_reaches_the_wire_as_on_a_plain_socket() {
+        let (ours, peer) = tokio::io::duplex(1 << 16);
+        let plain = answer_to_a_broken_hello(ours, peer).await;
+        assert_eq!(plain[..3], [0x15, 0x03, 0x03]);
+
+        let (ours, peer) = tokio::io::duplex(1 << 16);
+        let coalesced = answer_to_a_broken_hello(Coalesced::new(ours), peer).await;
+        assert_eq!(coalesced, plain);
+    }
+
+    #[tokio::test]
+    async fn a_b3_frame_that_goes_alone_takes_one_write_of_its_three_records() {
+        let (client, _server, writes) = tls_pair(1 << 20).await;
+        let mut writer = frame_writer(client);
+
+        writer.write_group(&[vec![0xA5u8; 32_786]]).await.unwrap();
+
+        let writes = writes.lock().unwrap();
+        let wire = writes.concat();
+        assert_eq!(record_lengths(&wire).len(), 3);
+        assert_eq!(wire.len(), wire_len(32_786));
+    }
+
+    #[tokio::test]
+    async fn each_frame_keeps_its_own_record_and_a_group_takes_one_write() {
+        let (client, _server, writes) = tls_pair(1 << 20).await;
+        let mut writer = frame_writer(client);
+
+        // Two `B0` capsules and one `B3` capsule.
+        let capsules = [vec![0xA5u8; 530], vec![0xA5; 530], vec![0xA5; 32_786]];
+        writer.write_group(&capsules).await.unwrap();
+
+        // WIR-225, WIR-226, WIR-227: each record holds one frame or a part
+        // of the one frame that fits no record. The inner content type and
+        // the tag add 17 bytes to each record, and the header adds 5.
+        let writes = writes.lock().unwrap();
+        assert_eq!(writes.len(), 1);
+
+        let lengths = record_lengths(&writes[0]);
+        let plain: Vec<usize> = lengths.iter().map(|len| len - 17).collect();
+        assert_eq!(plain.len(), 5);
+        assert_eq!(plain[..2], [538, 538]);
+        assert_eq!(plain[2..].iter().sum::<usize>(), 32_794);
+    }
 
     #[test]
     fn a_quic_stream_gives_each_capsule_whole_with_its_header() {

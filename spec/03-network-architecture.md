@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 3: Network Architecture
 
 **Status:** Draft
-**Version:** 0.46.3
-**Date:** 2026-10-29
+**Version:** 0.47.0
+**Date:** 2026-11-01
 
 ---
 
@@ -1477,8 +1477,9 @@ causes does not occur.
   `CIRCUIT_BULK_CELL_MARGIN` as the margin. `NET-360` sends the answers of such
   a circuit with no pacing wait, thus each command that waits for its answer
   brings a cell toward the client. The margin holds the commands of one upload
-  window and its registrations. The client reads the circuit until each answer
-  came, and it sends its next commands on a new circuit.
+  window and its registrations, and one download window of 128 `CGET` takes
+  one part in 16 of it. The client reads the circuit until each answer came,
+  and it sends its next commands on a new circuit.
 - **[NET-322]** A relay that ends a circuit MUST tell each neighbor of it
   with the `CircuitDestroy` of Part 6 §6.2.3, on each link of the circuit
   but the one that ended it: a link that closed for good, a `CircuitDestroy`,
@@ -2204,10 +2205,23 @@ relay MUST send the answers to the commands of one cell when it serves that
 cell, with no wait for a tick, up to 256 KiB of cells. It MUST pack the answers
 that fit one cell into that cell, as Part 6 §6.4.1 packs the commands of a
 client. An answer above that step waits for a tick, and a tick sends each
-answer that waits, up to 256 KiB of cells. While the backlog of the link holds
-more than one quarter of its bound, an answer MUST wait for a tick, and a tick
-MUST send one cell only. With no answer that waits, the tick sends the cover
-cell of `NET-035`.
+answer that waits, up to 256 KiB of cells. While the backlog of the link and
+that step hold more than `ANSWER_MARK`, an answer MUST wait for a tick, and a
+tick MUST send one cell only. `ANSWER_MARK` is 4.5 MiB. With no answer that
+waits, the tick sends the cover cell of `NET-035`. **[NET-376]** A relay MUST
+NOT pack answers of two ranges into one cell (Part 6 rule `WIR-108`). A `NACK`
+is of the queue range, thus the `NACK` of a chunk command takes a cell of its
+own.
+
+> *Cause of `NET-376`.* A client reads a cell of two ranges as malformed, and
+> it ends the circuit of that cell. A `NACK` and a small answer of Part 12 fit
+> one `B0` cell. They met in one cell when the commands of one cell got both,
+> or when both waited for one tick. On loopback, a test build whose uploads
+> packed each of their chunk commands lost a circuit in this manner in two of
+> three runs of 64 MiB. A cell for each range costs one more cell for such a
+> refusal. A client that sends one command in each cell got that cell
+> already, and the cell follows a command of the same client, as the cause of
+> `NET-360` states.
 
 > *Cause.* An answer on an attachment circuit follows a command of the client
 > of that circuit, and it follows no arrival from another party. The cells of
@@ -2220,8 +2234,42 @@ cell of `NET-035`.
 > chunk of a file wait about 7 ticks, and 8 MB then take about 13 minutes. Each
 > answer at one tick leaves one wait of `PACING_MEAN` in each step of an
 > upload: its registrations, each turn of its window, its proofs, and its
-> manifest chunk. Part 12 §12.8 keeps these circuits apart from the circuits of
-> the messages, thus the rule changes no delivery of a message.
+> manifest chunk.
+>
+> Part 12 §12.8 keeps these circuits apart from the circuits of the messages on
+> the link of a client. A relay link is one queue for all circuits, thus a cell
+> of a message waits behind the answers on that link:
+>
+> | Bytes that wait on one relay link | C0, 100 Mbit/s | C1, 250 Mbit/s | C2, 500 Mbit/s | C3, 1 000 Mbit/s |
+> | --- | --- | --- | --- | --- |
+> | A window of 32, 1 051 520 | 84 ms | 34 ms | 17 ms | 8 ms |
+> | A window of 128, 4 206 080 | 336 ms | 135 ms | 67 ms | 34 ms |
+> | `ANSWER_MARK`, 4 718 592 | 377 ms | 151 ms | 75 ms | 38 ms |
+> | Two windows of 128, 8 412 160 | 673 ms | 269 ms | 135 ms | 67 ms |
+>
+> The margin of U2 in Part 2 §2.4 is 0.4 s at the p50, and it is the one
+> allowance for each queue of each client. Thus `ANSWER_MARK` is about the one
+> window that Part 12 rule `ATT-165` gives one client, with one step: all
+> downloads of a client together hold 128 `CGET`, which is 4.0 MiB of answers.
+> One client thus stays in the first branch of this rule on a link that it has
+> alone. A further 8 cells on that link reach the second branch, and each
+> circuit on that link then sends about one cell for each tick until the
+> backlog falls. The mark is no hard bound: a tick still sends one cell on each
+> circuit, thus 381 bulk circuits with answers fill a link of class C0 at its
+> rate, and the backlog grows past the mark. Their answers grow late, and Part 12 rule `ATT-210` closes
+> their windows. The drains of `NET-349` keep their own mark, thus this mark
+> changes no drain.
+>
+> The mark holds for the cells that a relay starts, thus it reaches the link
+> of an exit relay alone. The link of a middle relay and the link of an ingress
+> relay carry the cells of each exit with no such mark, up to the bound of that
+> link. The last row of the table is then possible, and U2 fails at class C0 in
+> that case. The queue stands only while that relay link binds the transfer. A
+> slow client holds its queue on its own connection, and the relay links stay
+> free. The real correction is a relay that serves the circuits of one link in
+> turns, thus a cell of a quiet circuit waits behind no backlog of a bulk
+> circuit. This specification does not make that change. Part 2 §2.4 states the
+> cost.
 
 **The clock governs each held session.** A push-wake session is a held session,
 thus the clock runs during it. The one exception is the reconnect drain of §3.7
@@ -2286,7 +2334,7 @@ the queue at the tick of `NET-291` that sends it. The backlog goes after the
 answers of the commands that came before its `SUB`. A live record goes after
 the entries that wait at its arrival. A second backlog of one queue on one
 circuit takes the place of the first one. The answers that wait for the clock
-of one circuit MUST NOT hold more than 2 MiB. An answer above that bound drops,
+of one circuit MUST NOT hold more than 8 MiB. An answer above that bound drops,
 and its command goes again. A relay MUST NOT drop a place. When a relay bounds
 the count of the entries that wait for one clock, a live record above that
 count joins the last place of its queue. A live record of a queue with no such
@@ -2299,12 +2347,24 @@ that count.
 > those copies stayed for many minutes, and some hundred circuits filled the
 > memory of the relay. A place in the queue costs no memory while it waits. A
 > record that an `ACK` covers before its tick then goes nowhere. The bound of
-> 2 MiB holds twice the chunk answers of the download window of Part 12.
+> 8 MiB holds twice the chunk answers of the download window of Part 12: 256
+> answers of 32 734 bytes are 7.99 MiB. An answer waits only while its link is
+> above `ANSWER_MARK` or above the step of `NET-360`, thus a calm link holds none
+> of them. An answer that drops costs its client the wait of Part 12 rule
+> `ATT-190`, and that wait closes its window.
+>
+> A larger window has a cost for a client that shares such a link. A party that
+> holds the link of an exit above `ANSWER_MARK` for 30 s, with chunks of its
+> own, holds each circuit there at one cell for each tick. A client with 128
+> answers on one circuit then has 98 answers past the bound of `ATT-190`, and a
+> window of 32 had 2. Each one takes the next replica of Part 12 rule `ATT-019`,
+> unless its answer comes while its chunk waits for a place (`ATT-210`). The
+> window closes at 15 s, but a relay cannot take a `CGET` back.
 >
 > A live record has no command that goes again. A relay that drops one leaves
 > a hole, and under Part 6 rule `WIR-112` the client cannot `ACK` past it until
 > its next `SUB`. Each later record then goes above that hole. A contact that
-> sends 64 `B3` records in some seconds fills 2 MiB of copies. A copy of each
+> sends 256 `B3` records in some seconds fills 8 MiB of copies. A copy of each
 > post for each circuit that subscribed to a group queue also grows with the
 > count of its readers. A backlog left a subscription, and a backlog with no
 > place would leave the same hole. Above a full count, a queue takes one place
@@ -2319,13 +2379,25 @@ holds more than the circuit of the answer would hold with it, the relay MUST
 drop that answer. The command of each dropped answer goes again.
 
 > *Cause of `NET-375`.* The bound of `NET-365` holds for one circuit.
-> `RELAY_CIRCUITS_MAX` circuits of 2 MiB each hold 1 TiB, and the
-> `SOURCE_BUILD_BURST` circuits that one address builds at once hold 512 MiB.
+> `RELAY_CIRCUITS_MAX` circuits of 8 MiB each hold 4 TiB, and the
+> `SOURCE_BUILD_BURST` circuits that one address builds at once hold 2 048 MiB.
 > The deployment kits stop an entry relay or a middle relay at 1 400 MiB of
 > memory. An exit relay gets 2 500 MiB, and its chunk store holds 1 GiB of
-> that. A launch server of 4 GB runs two relays. The circuit that holds the most
-> loses first, thus a party with many circuits takes no answer of a circuit
-> that holds less than each of its own.
+> that. A launch server of 4 GB runs two relays. Thus this bound, and not the
+> bound of one circuit, keeps the answers of one address inside each kit, and
+> 64 MiB is 4.6 % of 1 400 MiB. Eight full circuits reach it. The circuit that
+> holds the most loses first, thus a party with many circuits takes no answer
+> of a circuit that holds less than each of its own.
+>
+> This bound holds answers and nothing else. A forward cell that waits for its
+> delay under `NET-338` and `NET-339` counts under `NET-362`.
+> `RELAY_DELAYED_MAX` cells of `B3` are 4 GiB, which is above each kit. A party
+> reaches that sum only if it sends it inside the delay of the cells. A full
+> circuit of Private mode holds its cells about 5.3 s, the largest of 1 024
+> draws. Thus a link of 1 Gbit/s fills about 660 MB of cells, and a relay with a
+> faster link than its class has less margin. A `CGET` is one `B0` cell, thus a
+> download window holds 70 KiB at one hop. An upload window of 128 `CPUT` holds
+> 4.0 MiB. The honest use of each bound stays far below the kit.
 
 **[NET-364]** A relay MUST close a link whose backlog stays above
 `LINK_DRAIN_MARK` for a whole `LINK_DRAIN_WINDOW` while the relay writes less
@@ -2993,8 +3065,8 @@ that circuit from the `delay_class` of its own `HopHello` (§3.4.3).
   `NET-322`, after the cells of that circuit that wait. A cell that dropped
   with no end would break the chain of each layer after it. A relay MUST
   drop each forward cell of a circuit whose end waits for its delayed cells.
-  An upload window of Part 12 holds 128 cells at most, thus a client of
-  ordinary use stays far under each bound.
+  An upload window and a download window of Part 12 each hold 128 cells at
+  most, thus a client of ordinary use stays far under each bound.
 - The delay of the third hop is the delay of `NET-039`. The backward
   direction takes the inbound pacing of §3.5.2 and no per-hop delay.
 

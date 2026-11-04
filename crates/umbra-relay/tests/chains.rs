@@ -38,7 +38,7 @@ use umbra_crypto::{
 };
 use umbra_relay::{
     circuits::LinkId,
-    node::{Config, Output, RelayNode},
+    node::{Backlog, Config, Output, RelayNode, ANSWER_MARK},
 };
 use umbra_wire::{
     app::{AppKind, AppMessage, Channel},
@@ -458,6 +458,48 @@ fn meet(mesh: &mut Mesh) -> [ContactId; 2] {
     ]
 }
 
+/// The cost of one text: the send at its client, and the whole way to the
+/// other client in one process. The way holds each cover tick of a turn.
+#[test]
+#[ignore = "a timing run"]
+fn perf_a_text_crosses_the_chain() {
+    use std::time::{Duration, Instant};
+
+    let mut mesh = Mesh::new(&[1, 2]);
+    let [_, bob_sees_alice] = meet(&mut mesh);
+    let app = text(7, &"x".repeat(120));
+    let mut sends: Vec<Duration> = Vec::new();
+    let mut ways: Vec<Duration> = Vec::new();
+
+    for round in 0..200u64 {
+        let start = Instant::now();
+        mesh.clients[1]
+            .send(&bob_sees_alice, &app, mesh.now, &mut Rng(1_000 + round))
+            .unwrap();
+        sends.push(start.elapsed());
+
+        let start = Instant::now();
+        let mut arrived = false;
+        for _ in 0..64 {
+            mesh.step();
+            if !texts_of(mesh.take_events(0)).is_empty() {
+                arrived = true;
+                break;
+            }
+        }
+        assert!(arrived);
+        ways.push(start.elapsed());
+    }
+
+    sends.sort();
+    ways.sort();
+    println!(
+        "text: send at the client {:?}, the whole way {:?}",
+        sends[sends.len() / 2],
+        ways[ways.len() / 2]
+    );
+}
+
 /// The end of the first chain of a client.
 fn exit_of(node: &ClientNode) -> [u8; 32] {
     node.chains()[0][2]
@@ -872,6 +914,35 @@ fn a_chunk_goes_to_one_relay_and_that_relay_makes_the_two_copies() {
         ChunkOutcome::Refused(_)
     ));
 
+    // NET-376, WIR-108: a proof and a refusal that wait for one tick leave in
+    // a cell of each range. One cell of both ranges would end the circuit.
+    mesh.relays[4].set_backlog(Box::new(AboveMark));
+    let verify = || ChunkJob::Verify {
+        cred: cred(),
+        chunk: chunk.clone(),
+    };
+    let proven = mesh.clients[CLIENT]
+        .chunk(second, chunk_id, verify(), &mut rng)
+        .unwrap();
+    let unknown = mesh.clients[CLIENT]
+        .chunk(second, [0xC5; 32], verify(), &mut rng)
+        .unwrap();
+
+    mesh.settle();
+    let events = mesh.take_events(CLIENT);
+    assert!(!events.contains(&ClientEvent::CircuitLost), "{events:?}");
+    let outcome = |handle: u64| {
+        events.iter().find_map(|event| match event {
+            ClientEvent::Chunk {
+                handle: of,
+                outcome,
+            } if *of == handle => Some(outcome.clone()),
+            _ => None,
+        })
+    };
+    assert_eq!(outcome(proven), Some(ChunkOutcome::Verified));
+    assert!(matches!(outcome(unknown), Some(ChunkOutcome::Refused(_))));
+
     // A node of queues sends no chunk command (`WIR-107`).
     let mut queues = client(0x62);
     let refused = queues.chunk(first, chunk_id, ChunkJob::Erase { cred: cred() }, &mut rng);
@@ -902,6 +973,101 @@ fn chunk_answers(mesh: &mut Mesh, client: usize) -> Vec<(u64, ChunkOutcome)> {
             _ => None,
         })
         .collect()
+}
+
+/// The backlog of a link above the mark of the answers.
+struct AboveMark;
+
+impl Backlog for AboveMark {
+    fn of(&self, _: LinkId) -> Option<(usize, usize)> {
+        Some((ANSWER_MARK, 32 << 20))
+    }
+}
+
+#[test]
+fn a_link_above_the_mark_sends_no_answer_at_a_command_and_one_cell_at_a_tick() {
+    const SENDER: usize = 0;
+    const RECEIVER: usize = 1;
+
+    let mut mesh = Mesh::new(&[0x63, 0x64]);
+    use_transfer_node(&mut mesh, SENDER, 0x63);
+    use_transfer_node(&mut mesh, RECEIVER, 0x64);
+    mesh.settle();
+
+    let relays: Vec<AttachmentRelay> = (3..6)
+        .map(|index| {
+            let info = relay_info(index).candidate;
+            AttachmentRelay {
+                relay_id: info.relay_id,
+                operator_id: info.operator_id,
+                family_id: info.family_id,
+            }
+        })
+        .collect();
+
+    let plain: Vec<u8> = (0..SEGMENT_SIZE * 11).map(|i| (i % 251) as u8).collect();
+    let mut rng = Rng(11);
+    let mut upload = Upload::new(&plain, Shape::default(), &relays, &mut rng).unwrap();
+    upload.tick(&mut mesh.clients[SENDER], &mut rng).unwrap();
+
+    let mut uploaded: Option<Uploaded> = None;
+    for _ in 0..400 {
+        for (handle, outcome) in chunk_answers(&mut mesh, SENDER) {
+            let node = &mut mesh.clients[SENDER];
+            if let Progress::Done(done) =
+                upload.on_outcome(node, handle, outcome, &mut rng).unwrap()
+            {
+                uploaded = Some(done);
+            }
+        }
+
+        if uploaded.is_some() {
+            break;
+        }
+
+        let node = &mut mesh.clients[SENDER];
+        upload.ask_proofs(node, &mut rng).unwrap();
+    }
+    let uploaded = uploaded.expect("the upload ends");
+
+    // NET-360: each exit reads a link above its mark from here on.
+    for relay in 3..6 {
+        mesh.relays[relay].set_backlog(Box::new(AboveMark));
+    }
+
+    let mut download = Download::new(&uploaded.descriptor, &relays, &mut rng).unwrap();
+    download
+        .tick(&mut mesh.clients[RECEIVER], &mut rng)
+        .unwrap();
+
+    let chunks = uploaded.descriptor.refs.len();
+    let mut answers = 0;
+    let mut turns = 0;
+    let mut fetched = None;
+
+    while fetched.is_none() {
+        turns += 1;
+        assert!(turns < 400, "the download ends");
+
+        // A served `CGET` sends no answer, and one tick sends one cell on
+        // each of the three circuits. One step would send each chunk here.
+        let turn = chunk_answers(&mut mesh, RECEIVER);
+        assert!(turn.len() <= relays.len(), "{} answers", turn.len());
+
+        for (handle, outcome) in turn {
+            answers += 1;
+            let node = &mut mesh.clients[RECEIVER];
+            if let Progress::Done(bytes) = download
+                .on_outcome(node, handle, outcome, &mut rng)
+                .unwrap()
+            {
+                fetched = Some(bytes);
+            }
+        }
+    }
+
+    assert_eq!(answers, chunks);
+    assert!(fetched.unwrap() == plain);
 }
 
 #[test]
@@ -959,6 +1125,9 @@ fn a_file_goes_up_from_one_client_and_comes_down_at_another() {
         if uploaded.is_some() {
             break;
         }
+
+        let node = &mut mesh.clients[SENDER];
+        upload.ask_proofs(node, &mut rng).unwrap();
     }
 
     let uploaded = uploaded.expect("the upload ends");
@@ -2852,6 +3021,9 @@ fn a_backup_object_takes_two_replicas_and_its_manifest_above_seven_chunks() {
         if uploaded.is_some() {
             break;
         }
+
+        let node = &mut mesh.clients[WRITER];
+        upload.ask_proofs(node, &mut rng).unwrap();
     }
 
     let uploaded = uploaded.expect("the upload ends");

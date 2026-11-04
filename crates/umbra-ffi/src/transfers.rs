@@ -11,11 +11,12 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use tokio::sync::mpsc;
 use umbra_core::{
-    abuse::pow::PowSolution,
     attach::{
         handle::{HandleRead, HandleWrite},
         place::{AttachmentRelay, HoldOffs},
-        transfer::{ChunkFetch, Class, Download, Progress, Shape, Upload, Uploaded},
+        transfer::{
+            ChunkFetch, Class, Download, DownloadBudget, Progress, Shape, Upload, Uploaded,
+        },
     },
     session::node::{ChunkJob, ChunkOutcome, ClientEvent, ClientNode},
 };
@@ -28,13 +29,21 @@ use umbra_transport::{
 use umbra_wire::descriptor::FileDescriptor;
 use zeroize::Zeroizing;
 
-use crate::{client::OpenUploads, runtime::OsRng};
+use crate::{
+    client::OpenUploads,
+    runtime::OsRng,
+    solves::{Solved, Solves, UploadSolves},
+};
 
 /// How long the task keeps its connection with no transfer.
 pub const IDLE_END: Duration = Duration::from_secs(60);
 /// The tick of the drivers: a proof that a replica did not hold yet goes
 /// again at the next one.
 const TICK: Duration = Duration::from_secs(1);
+/// The clock of the first ask for a proof, which waits for one whole turn. A
+/// `CVFY` that overtakes its copy waits for a tick (`ATT-190`), and the link
+/// of the last chunk of a phase is idle, thus its `CVFY` nearly always does.
+const PROOF_TURN: Duration = Duration::from_millis(100);
 
 /// What the caller asks of the task.
 pub enum TransferCommand {
@@ -218,7 +227,7 @@ pub enum TransferUpdate {
 
 enum Active {
     One(Box<ChunkFetch>),
-    Up(Box<Upload>),
+    Up(Box<Upload>, UploadSolves),
     Down(Box<Download>),
     Write(Box<HandleWrite>),
     Read(Box<HandleRead>),
@@ -229,6 +238,9 @@ enum Active {
 /// until the upload ends, thus a lock or a failure leaves no chunk with no
 /// erase.
 fn note(open: &std::sync::Mutex<OpenUploads>, tag: u64, upload: &mut Upload) {
+    #[cfg(feature = "sockets-test")]
+    crate::probe::upload(upload);
+
     let started = upload.take_started();
     if started.is_empty() {
         return;
@@ -254,77 +266,94 @@ fn first_tick(
     ticked.ok().map(|()| upload)
 }
 
-/// The solutions that an upload makes ahead for one relay at the most. A
-/// solution serves while its challenge is the newest, thus a stock for a
-/// long upload ends unused.
-const SOLVE_AHEAD_MAX: usize = 8;
+/// Starts `upload`. Its solves run beside the task, thus a registration
+/// with no solution waits and no answer does.
+fn start_upload(
+    node: &mut ClientNode,
+    upload: Upload,
+    tag: u64,
+    open: &std::sync::Mutex<OpenUploads>,
+    rng: &mut OsRng,
+) -> Option<Active> {
+    let solves = UploadSolves::new(node, &upload);
+    let name = solves.name();
 
-/// Solves the puzzles of the registrations of `upload` at one time, on the
-/// threads of the device (`ABU-107`). One solve after the other took about
-/// half the time of an upload of 8 MB. A registration with no stock solves
-/// at its send, as before.
-async fn solve_ahead(node: &mut ClientNode, upload: &Upload) {
-    let allowance = usize::from(umbra_core::abuse::POW_CHUNK_ALLOWANCE);
+    #[cfg(feature = "sockets-test")]
+    crate::probe::point(crate::probe::Point::Solved);
 
-    // Each job: the relay, the seed, the effort, and the solutions to make.
-    let mut jobs: Vec<([u8; 32], [u8; 32], u32, usize)> = Vec::new();
-    for (relay, count) in upload.registrations() {
-        let Some((seed, effort)) = node.chunk_admissions().work(&relay) else {
-            continue;
-        };
-
-        let solves = count.div_ceil(allowance).min(SOLVE_AHEAD_MAX);
-        jobs.push((relay, seed, effort, solves));
-    }
-    if jobs.is_empty() {
-        return;
+    let started = first_tick(node, upload, tag, open, rng);
+    if started.is_none() {
+        node.end_upload(name);
     }
 
-    let solved = tokio::task::spawn_blocking(move || {
-        let threads = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
-        let jobs = std::sync::Mutex::new(jobs);
-        let solved = std::sync::Mutex::new(Vec::new());
+    started.map(|upload| Active::Up(Box::new(upload), solves))
+}
 
-        std::thread::scope(|scope| {
-            for _ in 0..threads {
-                scope.spawn(|| loop {
-                    // The job with the most left takes the next attempt.
-                    let next = jobs.lock().ok().and_then(|jobs| {
-                        jobs.iter()
-                            .filter(|job| job.3 > 0)
-                            .max_by_key(|job| job.3)
-                            .copied()
-                    });
-                    let Some((relay, seed, effort, _)) = next else {
-                        break;
-                    };
-                    let Ok(found) = PowSolution::attempt(&relay, &seed, effort, &mut OsRng) else {
-                        break;
-                    };
-                    let Some(solution) = found else {
-                        continue;
-                    };
-                    let (Ok(mut jobs), Ok(mut solved)) = (jobs.lock(), solved.lock()) else {
-                        break;
-                    };
-
-                    if let Some(job) = jobs.iter_mut().find(|job| job.0 == relay && job.3 > 0) {
-                        job.3 = job.3.saturating_sub(1);
-                        solved.push((relay, solution));
-                    }
-                });
-            }
-        });
-
-        solved.into_inner().unwrap_or_default()
-    })
-    .await
-    .unwrap_or_default();
-
-    let name = upload.admission_name();
-    for (relay, solution) in solved {
-        node.chunk_admissions().stock(name, relay, solution);
+/// Takes `tag` out of `active`. An upload stops its solves, and none of its
+/// registrations leaves after this.
+fn end_transfer(node: &mut ClientNode, active: &mut BTreeMap<u64, Active>, tag: u64) {
+    if let Some(Active::Up(_, solves)) = active.remove(&tag) {
+        node.end_upload(solves.name());
     }
+}
+
+/// Ends an upload that failed outside a step of a chunk.
+fn fail_upload(
+    node: &mut ClientNode,
+    active: &mut BTreeMap<u64, Active>,
+    classes: &mut BTreeMap<u64, umbra_core::session::node::DelayClass>,
+    updates: &mpsc::UnboundedSender<TransferUpdate>,
+    tag: u64,
+) {
+    crate::devlog::line(format!("transfers: tag {tag} failed apart from a step"));
+    end_transfer(node, active, tag);
+    classes.remove(&tag);
+    let _ = updates.send(TransferUpdate::Failed { tag });
+}
+
+/// Takes one result of the solves. A registration that it frees can fail its
+/// upload, and the result is then the tag of that upload.
+fn on_solved(
+    solved: Solved,
+    solves: &mut Solves,
+    node: &mut ClientNode,
+    active: &mut BTreeMap<u64, Active>,
+    rng: &mut OsRng,
+) -> Option<u64> {
+    let name = match &solved {
+        Solved::One { name, .. } => *name,
+        Solved::Ended { name, .. } => {
+            solves.ended();
+            *name
+        }
+    };
+
+    // The result of an upload that ended goes with it.
+    let (tag, own) = active
+        .iter_mut()
+        .find_map(|(tag, transfer)| match transfer {
+            Active::Up(_, own) if own.name() == name => Some((*tag, own)),
+            _ => None,
+        })?;
+
+    match solved {
+        Solved::One {
+            relay, solution, ..
+        } => {
+            #[cfg(feature = "sockets-test")]
+            crate::probe::solved_ahead(1);
+
+            own.cover(&relay);
+            node.chunk_admissions().stock(name, relay, solution);
+        }
+
+        // A batch that made nothing makes nothing again, thus the waiting
+        // registrations take the path of a solve at their send.
+        Solved::Ended { count: 0, .. } => node.chunk_admissions().end_apart(name),
+        Solved::Ended { .. } => {}
+    }
+
+    node.release_unsolved(name, rng).err().map(|_| tag)
 }
 
 /// Runs the transfers until the link ends, or until no transfer is left for
@@ -358,6 +387,10 @@ pub async fn run_transfers(
     };
 
     let mut active: BTreeMap<u64, Active> = BTreeMap::new();
+    let mut solves = Solves::new();
+
+    // ATT-165: the bound holds for the client, and this run is its one run.
+    let budget = std::sync::Arc::new(DownloadBudget::default());
 
     // ATT-167: the mode of each transfer, which the node takes before each
     // call into it.
@@ -423,9 +456,14 @@ pub async fn run_transfers(
         return;
     }
 
+    #[cfg(feature = "sockets-test")]
+    crate::probe::point(crate::probe::Point::Connected);
+
     let mut is_ready = false;
     let mut idle_since = tokio::time::Instant::now();
     let mut tick = tokio::time::interval(TICK);
+    let mut proof_turn = tokio::time::interval(PROOF_TURN);
+    proof_turn.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut circuit_clock = crate::runtime::CircuitClock::default();
     let mut shown_chains: Vec<[[u8; 32]; 3]> = Vec::new();
     'run: loop {
@@ -443,12 +481,29 @@ pub async fn run_transfers(
             let _ = updates.send(TransferUpdate::Chains(chains));
         }
 
+        solves.top_up(
+            &mut node,
+            active.values_mut().filter_map(|transfer| match transfer {
+                Active::Up(_, solves) => Some(solves),
+                _ => None,
+            }),
+        );
+
+        #[cfg(feature = "sockets-test")]
+        crate::probe::sent(&mut node);
+
         for capsule in node.take_capsules() {
             if link.send(&capsule).await.is_err() {
                 break 'run;
             }
         }
 
+        #[cfg(feature = "sockets-test")]
+        crate::probe::lap(crate::probe::Lap::Send);
+
+        let has_proofs = active
+            .values()
+            .any(|transfer| matches!(transfer, Active::Up(upload, _) if upload.has_proofs()));
         let events = tokio::select! {
             received = link.recv() => match received {
                 Ok(bytes) => match node.on_capsule(&bytes, crate::runtime::unix_now(), &mut rng) {
@@ -464,6 +519,30 @@ pub async fn run_transfers(
                 }
                 None => break 'run,
             },
+            solved = solves.recv() => {
+                let failed = solved.and_then(|solved| {
+                    on_solved(solved, &mut solves, &mut node, &mut active, &mut rng)
+                });
+                if let Some(tag) = failed {
+                    fail_upload(&mut node, &mut active, &mut classes, &updates, tag);
+                }
+                Vec::new()
+            }
+            _ = proof_turn.tick(), if has_proofs => {
+                let mut failed = Vec::new();
+                for (tag, transfer) in &mut active {
+                    if let Active::Up(upload, _) = transfer {
+                        node.set_chunk_class(classes.get(tag).copied().unwrap_or_default());
+                        if upload.ask_proofs(&mut node, &mut rng).is_err() {
+                            failed.push(*tag);
+                        }
+                    }
+                }
+                for tag in failed {
+                    fail_upload(&mut node, &mut active, &mut classes, &updates, tag);
+                }
+                Vec::new()
+            }
             _ = tick.tick() => {
                 // NET-370: a circuit keeps the age that its relays count.
                 let now = crate::runtime::unix_now();
@@ -485,8 +564,12 @@ pub async fn run_transfers(
                     node.set_chunk_class(classes.get(tag).copied().unwrap_or_default());
                     let ticked = match transfer {
                         Active::One(fetch) => fetch.tick(&mut node, &mut rng),
-                        Active::Up(upload) => {
-                            let ticked = upload.tick(&mut node, &mut rng);
+                        // ABU-069: a period that ended frees each waiting
+                        // registration, thus a tick looks at them.
+                        Active::Up(upload, solves) => {
+                            let ticked = node
+                                .release_unsolved(solves.name(), &mut rng)
+                                .and_then(|()| upload.tick(&mut node, &mut rng));
                             note(&open, *tag, upload);
                             ticked
                         }
@@ -509,7 +592,7 @@ pub async fn run_transfers(
 
                 for tag in failed {
                     crate::devlog::line(format!("transfers: tag {tag} failed at a tick"));
-                    active.remove(&tag);
+                    end_transfer(&mut node, &mut active, tag);
                     classes.remove(&tag);
                     let _ = updates.send(TransferUpdate::Failed { tag });
                 }
@@ -530,12 +613,18 @@ pub async fn run_transfers(
             }
         };
 
+        #[cfg(feature = "sockets-test")]
+        crate::probe::lap(crate::probe::Lap::Receive);
+
         // The node commits nothing: a transfer node holds no contact. The
         // changes leave it, thus they do not pile up.
         let _ = node.take_changes();
         for event in events {
             match event {
                 ClientEvent::CircuitReady => {
+                    #[cfg(feature = "sockets-test")]
+                    crate::probe::point(crate::probe::Point::CircuitReady);
+
                     crate::devlog::line("transfers: circuit ready");
                     is_ready = true;
                 }
@@ -544,6 +633,9 @@ pub async fn run_transfers(
                     break 'run;
                 }
                 ClientEvent::Chunk { handle, outcome } => {
+                    #[cfg(feature = "sockets-test")]
+                    crate::probe::answered(handle, &outcome);
+
                     // ATT-161: the answer of a `CDEL`. A relay that erased
                     // the chunk and a relay that holds none under the
                     // credential are both done (`WIR-317`). A relay under
@@ -567,7 +659,7 @@ pub async fn run_transfers(
                     let owner = active.iter().find_map(|(tag, transfer)| {
                         let owns = match transfer {
                             Active::One(fetch) => fetch.owns(handle),
-                            Active::Up(upload) => upload.owns(handle),
+                            Active::Up(upload, _) => upload.owns(handle),
                             Active::Down(download) => download.owns(handle),
                             Active::Write(write) => write.owns(handle),
                             Active::Read(read) => read.owns(handle),
@@ -592,7 +684,7 @@ pub async fn run_transfers(
                                     plain: Zeroizing::new(plain),
                                 },
                             }),
-                        Active::Up(upload) => {
+                        Active::Up(upload, _) => {
                             let step = upload.on_outcome(&mut node, handle, outcome, &mut rng);
                             note(&open, tag, upload);
                             step.map(|progress| match progress {
@@ -606,7 +698,12 @@ pub async fn run_transfers(
                             })
                         }
                         Active::Down(download) => {
-                            match download.on_outcome(&mut node, handle, outcome, &mut rng) {
+                            let step = download.on_outcome(&mut node, handle, outcome, &mut rng);
+
+                            #[cfg(feature = "sockets-test")]
+                            crate::probe::window(download.window());
+
+                            match step {
                                 Ok(Progress::Running(done, total)) => {
                                     Ok(TransferUpdate::Progress { tag, done, total })
                                 }
@@ -668,7 +765,7 @@ pub async fn run_transfers(
                             progress.insert(tag, (*done, *total)) != Some((*done, *total))
                         }
                         _ => {
-                            active.remove(&tag);
+                            end_transfer(&mut node, &mut active, tag);
                             progress.remove(&tag);
                             classes.remove(&tag);
                             true
@@ -687,6 +784,10 @@ pub async fn run_transfers(
                 _ => {}
             }
         }
+
+        #[cfg(feature = "sockets-test")]
+        crate::probe::lap(crate::probe::Lap::Answers);
+
         if !is_ready {
             continue;
         }
@@ -724,12 +825,14 @@ pub async fn run_transfers(
                     node.set_chunk_class(classes.get(&tag).copied().unwrap_or_default());
                     let mut started = None;
                     if let Ok(upload) = Upload::new(&plain, shape, &relays, &mut rng) {
-                        solve_ahead(&mut node, &upload).await;
-                        started = first_tick(&mut node, upload, tag, &open, &mut rng);
+                        #[cfg(feature = "sockets-test")]
+                        crate::probe::point(crate::probe::Point::Sealed);
+
+                        started = start_upload(&mut node, upload, tag, &open, &mut rng);
                     }
                     match started {
                         Some(upload) => {
-                            active.insert(tag, Active::Up(Box::new(upload)));
+                            active.insert(tag, upload);
                         }
                         None => {
                             classes.remove(&tag);
@@ -790,7 +893,8 @@ pub async fn run_transfers(
                     let (holds, now) = held();
                     let started =
                         Download::new_backup(&descriptor, &relays, &mut rng).and_then(|download| {
-                            let mut download = download.with_hold_offs(&holds, now);
+                            let mut download =
+                                download.with_budget(&budget).with_hold_offs(&holds, now);
                             download.tick(&mut node, &mut rng)?;
                             Ok(download)
                         });
@@ -815,12 +919,11 @@ pub async fn run_transfers(
                         Class::BACKUP,
                         &mut rng,
                     ) {
-                        solve_ahead(&mut node, &upload).await;
-                        started = first_tick(&mut node, upload, tag, &open, &mut rng);
+                        started = start_upload(&mut node, upload, tag, &open, &mut rng);
                     }
                     match started {
                         Some(upload) => {
-                            active.insert(tag, Active::Up(Box::new(upload)));
+                            active.insert(tag, upload);
                         }
                         None => {
                             let _ = updates.send(TransferUpdate::Failed { tag });
@@ -878,7 +981,8 @@ pub async fn run_transfers(
                     let (holds, now) = held();
                     let started =
                         Download::new(&descriptor, &relays, &mut rng).and_then(|download| {
-                            let mut download = download.with_hold_offs(&holds, now);
+                            let mut download =
+                                download.with_budget(&budget).with_hold_offs(&holds, now);
                             download.tick(&mut node, &mut rng)?;
                             Ok(download)
                         });
@@ -893,6 +997,16 @@ pub async fn run_transfers(
                     }
                 }
             }
+        }
+
+        #[cfg(feature = "sockets-test")]
+        crate::probe::lap(crate::probe::Lap::Commands);
+    }
+
+    // The solves stop before the wait for the send below.
+    for transfer in active.values() {
+        if let Active::Up(_, solves) = transfer {
+            solves.stop();
         }
     }
 

@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 13: Anti-Abuse Without Identifiers
 
 **Status:** Draft
-**Version:** 0.46.3
-**Date:** 2026-10-29
+**Version:** 0.47.0
+**Date:** 2026-11-01
 
 ---
 
@@ -567,8 +567,9 @@ It carries a solution even when the effort is 0.
   handle-addressed chunk. Part 12 §12.9 states what the relay learns of the
   chunks of one upload.
 
-  A client MAY make the solutions of one upload before its first registration,
-  on more than one thread. The work for each solution does not change.
+  A client MAY make the solutions of one upload before its first registration
+  or while the upload runs, on more than one thread. The work for each solution
+  does not change.
 
 > *Cause.* Without a floor, an allocation at an effort of 0 costs nothing. The
 > relay holds one quota counter for each upload that carries no token (Part 12

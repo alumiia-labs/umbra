@@ -465,6 +465,85 @@ mod tests {
 
     use super::*;
 
+    /// The cost of the batch of one message at the client: the record and
+    /// the ratchet row of its contact, on a file.
+    #[test]
+    #[ignore = "a timing run"]
+    fn perf_the_batch_of_one_message() {
+        struct Counter(u8);
+
+        impl umbra_crypto::rand_core::TryRng for Counter {
+            type Error = core::convert::Infallible;
+
+            fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+                Ok(0)
+            }
+
+            fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+                Ok(0)
+            }
+
+            fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+                for byte in dst {
+                    self.0 = self.0.wrapping_add(1);
+                    *byte = self.0;
+                }
+                Ok(())
+            }
+        }
+
+        impl umbra_crypto::rand_core::TryCryptoRng for Counter {}
+
+        let directory = std::env::temp_dir().join(format!("umbra-ffi-p-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("perf.db");
+        let _ = std::fs::remove_file(&path);
+        let path_text = path.to_str().unwrap().to_owned();
+
+        let mut rng = Counter(0);
+        let mut store = Store::unlock(
+            SqliteBackend::open(&path_text).unwrap(),
+            Secret::new([1; 32]),
+        )
+        .unwrap();
+
+        let contact = store.row_id(TableId::CONTACT, b"alice");
+        let state = vec![0x11u8; 4_096];
+        let text = vec![0x22u8; 512];
+
+        for (name, replaces) in [("a new row", false), ("the ratchet row too", true)] {
+            let mut took = Vec::new();
+
+            for index in 0..400u32 {
+                let row = store.row_id(TableId::MESSAGE, &index.to_be_bytes());
+                let row = if replaces {
+                    store.row_id(TableId::MESSAGE, row.as_slice())
+                } else {
+                    row
+                };
+
+                let start = std::time::Instant::now();
+                let mut batch = store.begin();
+                batch
+                    .put(TableId::MESSAGE, row, Some(contact), &text, &mut rng)
+                    .unwrap();
+                if replaces {
+                    batch
+                        .put(TableId::CONTACT, contact, None, &state, &mut rng)
+                        .unwrap();
+                }
+                batch.commit().unwrap();
+                took.push(start.elapsed());
+            }
+
+            took.sort();
+            println!("client batch of {name}: {:?}", took[took.len() / 2]);
+        }
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
     #[test]
     fn a_file_counts_as_closed_after_its_last_connection_closed() {
         let directory =

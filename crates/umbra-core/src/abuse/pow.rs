@@ -450,6 +450,17 @@ fn is_live(issued_at: u64, now: u64) -> bool {
         && issued_at <= now.saturating_add(POW_CHALLENGE_PERIOD)
 }
 
+/// What the next registration of an upload finds, before any solve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Made {
+    /// A solution that admits the registration.
+    Solution(PowSolution),
+    /// A new solution is due at this seed and effort.
+    Due([u8; 32], u32),
+    /// No solution can come (`ABU-069`).
+    None,
+}
+
 /// The solutions of a client for the chunk commands of each relay
 /// (`ABU-106`, `ABU-107`). One solution at `POW_CHUNK_FLOOR` or above admits
 /// `POW_CHUNK_ALLOWANCE` registrations at its relay. Thus an upload solves
@@ -470,6 +481,11 @@ pub struct ChunkAdmissions {
     /// The solutions that the caller made ahead for an upload at a relay.
     /// The caller can solve them at one time on more than one thread.
     stock: BTreeMap<(u64, [u8; 32]), Vec<PowSolution>>,
+    /// The uploads whose solves the caller runs apart from the node.
+    apart: BTreeSet<u64>,
+    /// The solves on the thread of the node, for a measurement.
+    #[cfg(feature = "sockets-test")]
+    solved_at_send: u32,
 }
 
 impl ChunkAdmissions {
@@ -498,9 +514,33 @@ impl ChunkAdmissions {
         relay: &[u8; 32],
         rng: &mut R,
     ) -> Option<PowSolution> {
+        let (seed, effort) = match self.made(upload, relay) {
+            Made::Solution(solution) => return Some(solution),
+            Made::Due(seed, effort) => (seed, effort),
+            Made::None => return None,
+        };
+
+        #[cfg(feature = "sockets-test")]
+        {
+            self.solved_at_send = self.solved_at_send.saturating_add(1);
+        }
+
+        let solution = PowSolution::solve(relay, &seed, effort, rng).ok()?;
+        self.held.insert(
+            (upload, *relay),
+            (solution, POW_CHUNK_ALLOWANCE.saturating_sub(1)),
+        );
+        Some(solution)
+    }
+
+    /// What [`ChunkAdmissions::next`] finds for `upload` at `relay` with no
+    /// solve. A [`Made::Solution`] counts as one registration.
+    pub fn made(&mut self, upload: u64, relay: &[u8; 32]) -> Made {
         self.drop_ended();
 
-        let challenge = self.book.get(relay, self.now)?;
+        let Some(challenge) = self.book.get(relay, self.now) else {
+            return Made::None;
+        };
         let seed = challenge.seed;
         let effort = challenge.effort.clamp(POW_CHUNK_FLOOR, POW_EFFORT_MAX);
         let key = (upload, *relay);
@@ -508,23 +548,26 @@ impl ChunkAdmissions {
         if let Some((solution, left)) = self.held.get_mut(&key) {
             if *left > 0 {
                 *left -= 1;
-                return Some(*solution);
+                return Made::Solution(*solution);
             }
         }
 
         if let Some(solution) = self.take_stock(key, &seed, effort) {
-            return Some(solution);
+            return Made::Solution(solution);
         }
 
         // ABU-069: no new solve past one period from the fetch.
         if self.now.saturating_sub(self.fetched_at) >= POW_CHALLENGE_PERIOD {
-            return None;
+            return Made::None;
         }
 
-        let solution = PowSolution::solve(relay, &seed, effort, rng).ok()?;
-        self.held
-            .insert(key, (solution, POW_CHUNK_ALLOWANCE.saturating_sub(1)));
-        Some(solution)
+        Made::Due(seed, effort)
+    }
+
+    /// The solves on the thread of the node so far, for a measurement.
+    #[cfg(feature = "sockets-test")]
+    pub fn solved_at_send(&self) -> u32 {
+        self.solved_at_send
     }
 
     /// Drops each held solution and each stock whose challenge is not the
@@ -588,6 +631,49 @@ impl ChunkAdmissions {
             .entry((upload, relay))
             .or_default()
             .push(solution);
+    }
+
+    /// The solutions of the stock of `upload` at `relay` that still serve.
+    pub fn stocked(&self, upload: u64, relay: &[u8; 32]) -> usize {
+        let Some(challenge) = self.book.get(relay, self.now) else {
+            return 0;
+        };
+
+        self.stock.get(&(upload, *relay)).map_or(0, |solutions| {
+            solutions
+                .iter()
+                .filter(|solution| solution.seed == challenge.seed)
+                .count()
+        })
+    }
+
+    /// The time at which a solve must stop (`ABU-069`).
+    pub fn solve_until(&self) -> u64 {
+        self.fetched_at.saturating_add(POW_CHALLENGE_PERIOD)
+    }
+
+    /// Marks `upload` as an upload whose solves the caller runs. Its node
+    /// then does not solve on its own thread.
+    pub fn solve_apart(&mut self, upload: u64) {
+        self.apart.insert(upload);
+    }
+
+    /// Whether the caller runs the solves of `upload`.
+    pub fn is_apart(&self, upload: u64) -> bool {
+        self.apart.contains(&upload)
+    }
+
+    /// The caller stops the solves of `upload`, and the upload goes on with
+    /// a solve at each send.
+    pub fn end_apart(&mut self, upload: u64) {
+        self.apart.remove(&upload);
+    }
+
+    /// Drops each thing that `upload` holds, which has ended.
+    pub fn end_upload(&mut self, upload: u64) {
+        self.apart.remove(&upload);
+        self.held.retain(|(of, _), _| *of != upload);
+        self.stock.retain(|(of, _), _| *of != upload);
     }
 
     /// The newest challenge of `relay` that this device holds, live at the
@@ -883,6 +969,35 @@ mod tests {
         held.set_book(book_of(5, 4, 1_100, 1_100), 1_100);
         assert_eq!(held.next(1, &relay, &mut Rng(26)).unwrap().seed, [4; 32]);
         assert!(held.stock.is_empty());
+    }
+
+    #[test]
+    fn an_upload_with_solves_apart_never_solves_on_the_node() {
+        let relay = [5u8; 32];
+        let mut held = ChunkAdmissions::default();
+        held.set_book(book_of(5, 3, 1_000, 1_000), 1_000);
+        held.solve_apart(1);
+        assert!(held.is_apart(1));
+        assert_eq!(held.solve_until(), 1_000 + POW_CHALLENGE_PERIOD);
+        // With no stock, a solve is due and nothing solves.
+        assert_eq!(held.made(1, &relay), Made::Due([3; 32], POW_CHUNK_FLOOR));
+        assert_eq!(held.stocked(1, &relay), 0);
+        let solution = PowSolution::solve(&relay, &[3; 32], POW_CHUNK_FLOOR, &mut Rng(1)).unwrap();
+        held.stock(1, relay, solution);
+        assert_eq!(held.stocked(1, &relay), 1);
+        // ABU-107: one solution admits each registration of its allowance.
+        for _ in 0..POW_CHUNK_ALLOWANCE {
+            assert_eq!(held.made(1, &relay), Made::Solution(solution));
+        }
+        assert!(matches!(held.made(1, &relay), Made::Due(..)));
+        // ABU-069: past the period no solve is due.
+        held.set_now(1_000 + POW_CHALLENGE_PERIOD);
+        assert_eq!(held.made(1, &relay), Made::None);
+        // The end of an upload leaves nothing of it.
+        held.stock(1, relay, solution);
+        held.end_upload(1);
+        assert!(!held.is_apart(1));
+        assert!(held.held.is_empty() && held.stock.is_empty());
     }
 
     #[test]

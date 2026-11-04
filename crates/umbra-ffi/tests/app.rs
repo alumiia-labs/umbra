@@ -12,22 +12,26 @@
     missing_docs
 )]
 
+#[allow(dead_code)]
+mod network;
+
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
+use network::{
+    carried_of, relay_static, start_signed_network, start_signed_network_at,
+    start_signed_network_with, SignedNetwork, TestNdr, TransferSet, CA, LEAF, LEAF_KEY,
+    PACING_MEAN_MS,
+};
 use tokio::net::TcpListener;
 use umbra_core::{
-    attach::{place::AttachmentRelay, transfer::Shape},
+    attach::transfer::Shape,
     directory::{
-        authority::{
-            entry_of, keyset_bytes, keyset_bytes_with, sign_manifest, sign_manifest_under,
-            Admission, Listing, GENESIS_ROOT,
-        },
+        authority::{keyset_bytes, sign_manifest, sign_manifest_under},
         bloc::BlocList,
-        descriptor::{roles, RelayDescriptor, RelayEntry, HOST_LEN},
         manifest::{ListedRelay, RelayManifest, RelaySet},
         root::{Consensus, DirectoryKeySet},
     },
@@ -46,7 +50,6 @@ use umbra_crypto::{
     secret::Secret,
     sha2::Sha256,
     sign::SigningKey,
-    x25519::{PublicKey as XPublic, StaticSecret},
 };
 use umbra_ffi::bindings::{
     fetch_manifest, init, init_linked, init_restored, parse_network, recovery_digits_kind, Config,
@@ -54,41 +57,21 @@ use umbra_ffi::bindings::{
     RestoreStatus, SecureElementCallback, TextSink,
 };
 use umbra_ffi::groups::{run_groups, GroupCommand, GroupUpdate};
-use umbra_ffi::transfers::{run_transfers, TransferCommand, TransferUpdate};
+use umbra_ffi::transfers::{TransferCommand, TransferUpdate};
 use umbra_relay::{
     ndr_server::{run_ndr, Gateway, MemoryNdrStore},
     node::{Config as RelayConfig, RelayNode},
-    placement::placement,
-    server::{run_relay, tls_acceptor, Carried, OhttpForward, OsRng},
+    server::{run_relay, tls_acceptor, OsRng},
     sqlite_store::SqliteStore,
     store::{MemoryStore, RelayStore},
 };
-use umbra_transport::{
-    https::{self, Url},
-    native,
-    ndr::NdrRoute,
-    Dial,
-};
+use umbra_transport::{https, native, Dial};
 
-const PACING_MEAN_MS: u64 = 20;
 const HOST: &str = "invite.umbra.test";
 const STEP: Duration = Duration::from_secs(20);
 
 /// The turn of a test of several devices of one set.
 static DEVICE_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-const CA: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../tests/fixtures/tls/ca.pem"
-);
-const LEAF: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../tests/fixtures/tls/leaf.pem"
-);
-const LEAF_KEY: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../tests/fixtures/tls/leaf.key"
-);
 
 struct Keystore([u8; 32]);
 
@@ -118,15 +101,6 @@ fn units(text: &str) -> Vec<u16> {
 /// two relays of layer 2, and two queue relays. Thus the chains of the two
 /// apps can differ, and a record can need a circuit to a second queue relay.
 const LAYERS: [u8; 5] = [1, 2, 2, 3, 3];
-
-fn relay_static(number: u8) -> (RelayStatic, StaticSecret) {
-    let secret = StaticSecret::from([number; 32]);
-    let relay = RelayStatic {
-        s: *XPublic::from(&secret).as_bytes(),
-        relay_id: [0x10 + number; 32],
-    };
-    (relay, secret)
-}
 
 fn localhost(port: u16) -> Dial {
     Dial {
@@ -196,13 +170,6 @@ fn start_relays(
     start_relays_with(directory, ports, None)
 }
 
-/// The NDR of a test: its port, and its key id and gateway key.
-struct TestNdr {
-    port: u16,
-    key_id: u8,
-    gateway: umbra_crypto::kem::PublicKey,
-}
-
 /// Starts the relays as [`start_relays`] does. With an NDR the relay of
 /// layer 1 carries its OHTTP requests, and each queue relay pushes through
 /// that relay.
@@ -269,40 +236,6 @@ fn start_relays_with(
         ));
     }
     (relays, ports)
-}
-
-/// What one relay of a test carries: the OHTTP relay role at layer 1 and
-/// the route of the pushes at layer 3, when an NDR runs.
-fn carried_of(
-    layer: u8,
-    ports: &[u16],
-    ndr: Option<&TestNdr>,
-    tls: &Arc<native::ClientConfig>,
-) -> Carried {
-    let Some(ndr) = ndr else {
-        return Carried::default();
-    };
-    match layer {
-        1 => Carried {
-            ohttp: Some(OhttpForward {
-                gateway: Url::parse(&format!("https://localhost:{}/gateway", ndr.port)).unwrap(),
-                tls: tls.clone(),
-            }),
-            ..Carried::default()
-        },
-        3 => Carried {
-            ndr: Some((
-                NdrRoute {
-                    relay: Url::parse(&format!("https://localhost:{}/ohttp", ports[0])).unwrap(),
-                    key_id: ndr.key_id,
-                    gateway: ndr.gateway.clone(),
-                },
-                tls.clone(),
-            )),
-            ..Carried::default()
-        },
-        _ => Carried::default(),
-    }
 }
 
 fn network_of(ports: &[u16]) -> Network {
@@ -1159,34 +1092,6 @@ fn a_descriptor_names_the_facts_of_each_relay_and_the_first_version_reads() {
     assert!(parse_network(first.replace("umbra-network 1", "umbra-network 3"), None).is_err());
 }
 
-/// The identity seed of each relay of a signed test network. The first and
-/// the sixth relay are the two ingress relays. Under the genesis root the
-/// layer function puts the other ones in the layers 2, 3, 2, 3 and 3, thus
-/// three relays hold the three copies of a chunk.
-const IDENTITY_SEEDS: [u8; 7] = [0x65, 0x66, 0x61, 0x68, 0x63, 0x70, 0x62];
-const SIGNED_LAYERS: [u8; 7] = [1, 2, 3, 2, 3, 1, 3];
-
-/// A network of relays under a signed manifest, on sockets of this machine.
-struct SignedNetwork {
-    manifest: Vec<u8>,
-    keyset: Vec<u8>,
-    ports: Vec<u16>,
-    entries: Vec<Vec<u8>>,
-    authorities: Vec<SigningKey>,
-    epoch: u64,
-}
-
-fn start_signed_network(relays: &tokio::runtime::Runtime) -> SignedNetwork {
-    start_signed_network_at(relays, None)
-}
-
-/// The same network on given ports, for a test that ends each relay
-/// process and starts it again. The keys come from fixed seeds, thus a
-/// client of the first network knows each relay of the second.
-fn start_signed_network_at(relays: &tokio::runtime::Runtime, at: Option<&[u16]>) -> SignedNetwork {
-    start_signed_network_with(relays, at, None, None, false)
-}
-
 /// A directory of Part 9 with its issuer, on loopback, with an epoch of one
 /// second: its gateway port and the pins of `DIS-163`.
 fn start_test_directory(relays: &tokio::runtime::Runtime) -> (u16, Vec<u8>) {
@@ -1255,187 +1160,6 @@ fn start_test_directory(relays: &tokio::runtime::Runtime) -> (u16, Vec<u8>) {
     (port, pins)
 }
 
-/// The signed network with an NDR: the ingress relays carry its OHTTP
-/// requests, and each queue relay pushes through the first of them. A
-/// `provisional` network has one operator and one family for each relay,
-/// under a key set of one independent authority (Part 3 `NET-340`).
-fn start_signed_network_with(
-    relays: &tokio::runtime::Runtime,
-    at: Option<&[u16]>,
-    ndr: Option<&TestNdr>,
-    directory: Option<u16>,
-    provisional: bool,
-) -> SignedNetwork {
-    let owner = |number: u8| if provisional { [1; 32] } else { [number; 32] };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let epoch = now / 3_600;
-
-    // Each relay has a loopback address in a /16 of its own, because a
-    // manifest gives no prefix but the one of the address.
-    let mut listeners = Vec::new();
-    let mut entries = Vec::new();
-    let mut identities = Vec::new();
-    for (index, seed) in IDENTITY_SEEDS.iter().enumerate() {
-        let number = index as u8 + 1;
-        let address = [127, number, 0, 1];
-        let port = at.and_then(|ports| ports.get(index).copied()).unwrap_or(0);
-        let listener = relays
-            .block_on(TcpListener::bind((std::net::Ipv4Addr::from(address), port)))
-            .unwrap();
-        let (relay, static_secret) = relay_static(number);
-        let mut host = [0u8; HOST_LEN];
-        host[..9].copy_from_slice(b"localhost");
-        let is_ingress = SIGNED_LAYERS[index] == 1;
-        let descriptor = RelayDescriptor {
-            relay_id: [0; 32],
-            identity_pk: &[],
-            ntor_pk: relay.s,
-            addr_v4: address,
-            addr_v6: [0; 16],
-            port: listener.local_addr().unwrap().port(),
-            host,
-            asn: 64_500 + u32::from(number),
-            jurisdiction: [b'Z', b'A' + number],
-            family_id: owner(number),
-            capacity_class: 2,
-            roles: if is_ingress {
-                roles::INGRESS_OFFERED | roles::CHAIN
-            } else {
-                roles::QUEUE | roles::CHAIN | roles::ATTACHMENT
-            },
-            chunk_store_gib: 0,
-            // One epoch back, thus a manifest of that epoch can list it.
-            valid_after: epoch - 1,
-            sig: &[],
-        }
-        .sign(&SigningKey::from_seed(Secret::new([*seed; 32])), &mut OsRng)
-        .unwrap();
-
-        let listing = Listing {
-            descriptor: &descriptor,
-            operator_id: owner(number),
-            class: 2,
-            is_ingress,
-        };
-        let entry = entry_of(
-            &listing,
-            Admission::Placed {
-                root: GENESIS_ROOT,
-                epoch: 0,
-            },
-        )
-        .unwrap();
-
-        let relay_id = RelayEntry::parse(&entry).unwrap().descriptor.relay_id;
-        identities.push((relay_id, relay.s, static_secret, *seed));
-        entries.push(entry);
-        listeners.push(listener);
-    }
-
-    let authorities: Vec<SigningKey> = (0..7u8)
-        .map(|index| SigningKey::from_seed(Secret::new([0xD0 + index; 32])))
-        .collect();
-
-    let keyset = keyset_bytes_with(&authorities, 1, if provisional { 1 } else { 7 }).unwrap();
-    let manifest = sign_manifest_under(
-        &authorities,
-        &keyset,
-        &[0, 1, 2, 4, 6],
-        epoch,
-        entries.clone(),
-        &BlocList::v1(),
-        &mut OsRng,
-    )
-    .unwrap();
-
-    // Each relay reads its layer and its next hops from the manifest.
-    let client_tls = native::tls_config_with_root_file(CA).unwrap();
-    let mut layers = Vec::new();
-    let ports: Vec<u16> = listeners
-        .iter()
-        .map(|listener| listener.local_addr().unwrap().port())
-        .collect();
-    for (listener, (relay_id, static_key, static_secret, seed)) in
-        listeners.into_iter().zip(identities)
-    {
-        let placed = placement(&manifest, &keyset, &relay_id, &static_key, now).unwrap();
-        layers.push(placed.layer);
-        let config = RelayConfig {
-            relay: RelayStatic {
-                s: static_key,
-                relay_id,
-            },
-            static_secret,
-            layer: placed.layer,
-            chunk_capacity: 1 << 26,
-        };
-        let mut store: Box<dyn RelayStore> = Box::new(MemoryStore::default());
-        let mut node = RelayNode::restored(config, store.load().unwrap());
-
-        // WIR-526: a deposit reaches each other queue relay.
-        node.set_queue_relays(
-            placed
-                .queue_relays
-                .iter()
-                .map(|(id, (_, key))| (*id, *key))
-                .collect(),
-        );
-
-        // ABU-057, ABU-102: each relay signs its challenge, and the ingress
-        // relays carry it beside the manifest.
-        node.set_challenge_signer(
-            SigningKey::from_seed(Secret::new([seed; 32])),
-            placed.carriers.keys().copied().collect(),
-        );
-        node.set_relay_identities(placed.identities.clone());
-        let mut replicas = placed.replicas;
-        for (id, (dial, _)) in &placed.queue_relays {
-            replicas.entry(*id).or_insert_with(|| dial.clone());
-        }
-        for (id, dial) in &placed.carriers {
-            replicas.entry(*id).or_insert_with(|| dial.clone());
-        }
-        let mut carried = carried_of(placed.layer, &ports, ndr, &client_tls);
-        if let Some(route) = carried.ndr.as_mut() {
-            // The first ingress relay has an address of its own here.
-            route.0.relay.address = Some(std::net::IpAddr::from([127, 1, 0, 1]));
-        }
-
-        // The ingress relay is the carrier of the manifest, and of the
-        // requests to the directory (`DIS-162`).
-        carried.manifest = std::sync::Mutex::new((placed.layer == 1).then(|| manifest.clone()));
-        if placed.layer == 1 {
-            carried.directory = directory.map(|port| OhttpForward {
-                gateway: Url::parse(&format!("https://localhost:{port}/gateway")).unwrap(),
-                tls: client_tls.clone(),
-            });
-        }
-        relays.spawn(run_relay(
-            node,
-            listener,
-            tls_acceptor(LEAF, LEAF_KEY).unwrap(),
-            placed.next,
-            replicas,
-            client_tls.clone(),
-            PACING_MEAN_MS,
-            store,
-            carried,
-        ));
-    }
-    assert_eq!(layers, SIGNED_LAYERS);
-    SignedNetwork {
-        manifest,
-        keyset,
-        ports,
-        entries,
-        authorities,
-        epoch,
-    }
-}
-
 #[test]
 fn two_apps_take_their_network_from_a_signed_manifest() {
     let relays = tokio::runtime::Runtime::new().unwrap();
@@ -1446,6 +1170,7 @@ fn two_apps_take_their_network_from_a_signed_manifest() {
         entries,
         authorities,
         epoch,
+        ..
     } = start_signed_network(&relays);
 
     // A client reads the manifest over HTTPS from the ingress relay. A relay
@@ -1914,100 +1639,15 @@ fn transfer_end(
 fn a_file_goes_through_the_relays_of_a_signed_network() {
     let relays = tokio::runtime::Runtime::new().unwrap();
     let network = start_signed_network(&relays);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-
-    // The relay set, as a client reads it from the manifest.
-    let (keyset, _) = DirectoryKeySet::parse(&network.keyset).unwrap();
-    let mut consensus = Consensus::new(keyset, 0).unwrap();
-    let manifest = RelayManifest::parse(&network.manifest).unwrap();
-    let set = RelaySet::accept(&mut consensus, &manifest, &BlocList::v1(), now).unwrap();
-
-    let info_of = |relay: &ListedRelay| RelayInfo {
-        candidate: relay.candidate,
-        key: RelayStatic {
-            s: relay.ntor_pk,
-            relay_id: relay.candidate.relay_id,
-        },
-    };
-
-    let ingress = set
-        .relays
-        .iter()
-        .find(|relay| relay.candidate.ingress)
-        .unwrap();
-    let guard = Dial {
-        host: ingress.host.clone(),
-        addr_v4: Some(ingress.addr_v4),
-        addr_v6: None,
-        port: ingress.port,
-    };
-
-    let holders: Vec<AttachmentRelay> = set
-        .relays
-        .iter()
-        .filter(|relay| relay.has_attachment_role && relay.candidate.is_exit())
-        .map(|relay| AttachmentRelay {
-            relay_id: relay.candidate.relay_id,
-            operator_id: relay.candidate.operator_id,
-            family_id: relay.candidate.family_id,
-        })
-        .collect();
-    assert_eq!(holders.len(), 3);
 
     // Two devices, each with a transfer task on a connection of its own.
     let clients = tokio::runtime::Runtime::new().unwrap();
-    let tls = native::tls_config_with_root_file(CA).unwrap();
-
-    // ABU-106: a registration carries a solution, thus each task takes the
-    // signed challenges of the relays first, as a connect fetches them.
-    std::thread::sleep(Duration::from_secs(3));
-    let bundle = clients
-        .block_on(native::fetch_challenges(&guard, tls.clone()))
-        .unwrap();
-
-    let mut book = umbra_core::abuse::pow::ChallengeBook::default();
-    for challenge in umbra_core::abuse::pow::ChallengeBook::parse_bundle(&bundle).unwrap() {
-        let listed = set
-            .relays
-            .iter()
-            .find(|relay| relay.candidate.relay_id == challenge.verifier_id)
-            .unwrap();
-        let identity = umbra_crypto::sign::VerifyingKey::from_bytes(&listed.identity_pk).unwrap();
-        book.take(challenge, &identity, now).unwrap();
-    }
+    let set = TransferSet::read(&network, &clients);
+    assert_eq!(set.holders.len(), 3);
 
     let start = |seed: u8| {
-        let node = ClientNode::for_transfers(
-            info_of(ingress),
-            set.relays
-                .iter()
-                .filter(|relay| !relay.candidate.ingress)
-                .map(info_of)
-                .collect(),
-            umbra_crypto::hierarchy::RootIdentity::new(Secret::new([seed; 32])),
-        );
-        let (commands, task_commands) = tokio::sync::mpsc::unbounded_channel();
-        let (task_updates, updates) = tokio::sync::mpsc::unbounded_channel();
-        clients.spawn(run_transfers(
-            node,
-            guard.clone(),
-            tls.clone(),
-            holders.clone(),
-            std::sync::Arc::default(),
-            std::sync::Arc::default(),
-            task_commands,
-            task_updates,
-        ));
-        commands
-            .send(TransferCommand::Challenges {
-                book: book.clone(),
-                now,
-            })
-            .ok()
-            .unwrap();
+        let (task, commands, updates) = set.task(seed);
+        clients.spawn(task);
         (commands, updates)
     };
 

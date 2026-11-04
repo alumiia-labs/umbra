@@ -19,8 +19,12 @@ pub mod devlog;
 pub mod draft;
 #[cfg(feature = "runtime")]
 pub mod groups;
+#[cfg(feature = "sockets-test")]
+pub mod probe;
 #[cfg(feature = "runtime")]
 pub mod runtime;
+#[cfg(feature = "runtime")]
+mod solves;
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
 #[cfg(feature = "runtime")]

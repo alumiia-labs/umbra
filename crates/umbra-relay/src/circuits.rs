@@ -401,6 +401,26 @@ fn cell_bytes(circ_id: &[u8; 16], tag: &[u8; 16], body: &[u8]) -> Vec<u8> {
     [circ_id.as_slice(), tag, body].concat()
 }
 
+/// The bytes before the body of a cell: its `circ_id` and its tag.
+const CELL_HEAD: usize = 32;
+
+/// The body of `cell`, which a layer changes in place.
+fn body_of(cell: &mut [u8]) -> &mut [u8] {
+    cell.get_mut(CELL_HEAD..).unwrap_or_default()
+}
+
+/// Writes the head of `cell`. The body stays in place, thus a cell that
+/// moves between two links takes one copy at this relay.
+fn set_head(cell: &mut [u8], circ_id: &[u8; 16], tag: &[u8; 16]) {
+    if let Some((id_out, rest)) = cell.split_first_chunk_mut::<16>() {
+        *id_out = *circ_id;
+
+        if let Some((tag_out, _)) = rest.split_first_chunk_mut::<16>() {
+            *tag_out = *tag;
+        }
+    }
+}
+
 /// The circuits of one relay.
 pub struct CircuitTable {
     relay: RelayStatic,
@@ -711,18 +731,16 @@ impl CircuitTable {
             circ_id: *parsed.circ_id,
         };
 
-        let mut body = parsed.body.to_vec();
-
         if let Some(client_side) = self.back.get(&key).copied() {
-            return self.backward(client_side, parsed.tag, body);
+            return self.backward(client_side, parsed.tag, cell.to_vec());
         }
 
         if self.held.contains_key(&key) {
-            let actions = self.forward(key, bucket, parsed.tag, &mut body, now);
+            let actions = self.forward(key, bucket, parsed.tag, cell.to_vec(), now);
             return self.delay(key, actions, rng);
         }
 
-        self.build(key, parsed.tag, &body, origin, now, rng)
+        self.build(key, parsed.tag, parsed.body, origin, now, rng)
     }
 
     /// A cell on a circuit identifier that the relay does not hold is a
@@ -903,6 +921,8 @@ impl CircuitTable {
                     let wait = umbra_core::group::backoff::exponential(held.delay_mean_ms, draw);
                     let at_ms = now_ms.saturating_add(wait).max(held.released_at_ms);
                     held.released_at_ms = at_ms;
+                    #[cfg(feature = "sockets-test")]
+                    crate::hops::drawn(self.layer, wait, at_ms.saturating_sub(now_ms));
                     held.delayed_out = held.delayed_out.saturating_add(1);
                     Action::Delayed {
                         at_ms,
@@ -920,7 +940,7 @@ impl CircuitTable {
         key: CircuitKey,
         bucket: Bucket,
         tag: &[u8; 16],
-        body: &mut [u8],
+        mut cell: Vec<u8>,
         now: u64,
     ) -> Vec<Action> {
         let Some(held) = self.held.get_mut(&key) else {
@@ -959,15 +979,19 @@ impl CircuitTable {
 
         if let Some(next) = held.next {
             // NET-129: a relay in the middle makes no check.
-            return match held.hop.forward(tag, body) {
-                Ok(next_tag) => vec![Action::Send {
-                    link: next.link,
-                    cell: cell_bytes(&next.circ_id, &next_tag, body),
-                }],
+            return match held.hop.forward(tag, body_of(&mut cell)) {
+                Ok(next_tag) => {
+                    set_head(&mut cell, &next.circ_id, &next_tag);
+                    vec![Action::Send {
+                        link: next.link,
+                        cell,
+                    }]
+                }
                 Err(_) => self.close(key),
             };
         }
 
+        let body = body_of(&mut cell);
         let is_extending = held.extending;
         let recovered = if self.layer == 3 && measure == Measure::No {
             held.hop.forward(tag, body).map(|_| ())
@@ -1098,7 +1122,7 @@ impl CircuitTable {
         &mut self,
         client_side: CircuitKey,
         tag: &[u8; 16],
-        mut body: Vec<u8>,
+        mut cell: Vec<u8>,
     ) -> Vec<Action> {
         let Some(held) = self.held.get_mut(&client_side) else {
             return Vec::new();
@@ -1115,16 +1139,19 @@ impl CircuitTable {
                 return Vec::new();
             }
             held.extending = false;
-            held.hop.backward_build(&mut body)
+            held.hop.backward_build(body_of(&mut cell))
         } else {
-            held.hop.backward(tag, &mut body)
+            held.hop.backward(tag, body_of(&mut cell))
         };
 
         match layered {
-            Ok(out_tag) => vec![Action::Send {
-                link: client_side.link,
-                cell: cell_bytes(&client_side.circ_id, &out_tag, &body),
-            }],
+            Ok(out_tag) => {
+                set_head(&mut cell, &client_side.circ_id, &out_tag);
+                vec![Action::Send {
+                    link: client_side.link,
+                    cell,
+                }]
+            }
             Err(_) => self.close(client_side),
         }
     }
@@ -1144,13 +1171,15 @@ impl CircuitTable {
             return None;
         }
 
-        let mut body = vec![0u8; bucket.body_len()];
-        pad_body(bucket, command, content, &mut body).ok()?;
-        let tag = held.hop.backward(&[0u8; 16], &mut body).ok()?;
+        let mut cell = vec![0u8; bucket.cell_len()];
+        let body = body_of(&mut cell);
+        pad_body(bucket, command, content, body).ok()?;
+        let tag = held.hop.backward(&[0u8; 16], body).ok()?;
+        set_head(&mut cell, &circuit.circ_id, &tag);
 
         Some(Action::Send {
             link: circuit.link,
-            cell: cell_bytes(&circuit.circ_id, &tag, &body),
+            cell,
         })
     }
 

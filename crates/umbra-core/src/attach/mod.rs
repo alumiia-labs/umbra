@@ -46,7 +46,7 @@ pub const HOT_REPLICAS: usize = 6;
 /// `MAX_CONCURRENT_CHUNKS`, up.
 pub const MAX_CONCURRENT_UP: usize = 128;
 /// `MAX_CONCURRENT_CHUNKS`, down.
-pub const MAX_CONCURRENT_DOWN: usize = 32;
+pub const MAX_CONCURRENT_DOWN: usize = 128;
 /// `MAX_DESCRIPTOR_REFS`, one `B3` cell.
 pub const MAX_DESCRIPTOR_REFS: usize = 269;
 /// `MESSAGE_DESCRIPTOR_REFS`: the refs of a descriptor at level `0x00` in

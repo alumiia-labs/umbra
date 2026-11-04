@@ -36,6 +36,12 @@ pub struct Session {
     relay_session_sk: StaticSecret,
     seen: BTreeSet<u64>,
     queues: Vec<[u8; 32]>,
+    /// The key of the last command, with the public key that gave it. A
+    /// command stream of one queue then takes one key agreement, which was
+    /// nine parts in ten of the cost of a `SEND` at the node. The key comes
+    /// from `relay_session_sk` and that public key alone, and it ends with
+    /// the session.
+    last_key: Option<([u8; 32], CommandAuthKey)>,
 }
 
 impl Session {
@@ -53,6 +59,7 @@ impl Session {
                 relay_session_sk,
                 seen: BTreeSet::new(),
                 queues: Vec::new(),
+                last_key: None,
             }),
             _ => Err(Reject::Rejected),
         }
@@ -70,6 +77,7 @@ impl Session {
             relay_session_sk,
             seen: BTreeSet::new(),
             queues: Vec::new(),
+            last_key: None,
         }
     }
 
@@ -120,9 +128,14 @@ impl Session {
             return Err(Reject::Limit);
         }
 
-        let key = CommandAuthKey::derive(&self.relay_session_sk, auth_pk)
-            .map_err(|_| Reject::Rejected)?;
-        command.verify(&key, bind).map_err(|_| Reject::Rejected)?;
+        if self.last_key.as_ref().is_none_or(|(pk, _)| pk != auth_pk) {
+            let key = CommandAuthKey::derive(&self.relay_session_sk, auth_pk)
+                .map_err(|_| Reject::Rejected)?;
+            self.last_key = Some((*auth_pk, key));
+        }
+
+        let (_, key) = self.last_key.as_ref().ok_or(Reject::Rejected)?;
+        command.verify(key, bind).map_err(|_| Reject::Rejected)?;
 
         self.seen.insert(key_of_seen);
         Ok(())
@@ -226,5 +239,47 @@ mod tests {
         session.resume(&resume).unwrap();
         assert_eq!(session.resume(&resume), Err(Reject::Rejected));
         assert!(Session::open(resume, StaticSecret::from([1u8; 32])).is_err());
+    }
+
+    #[test]
+    fn the_key_of_the_last_command_serves_its_public_key_alone() {
+        let mut session = Session::for_circuit(&[1; 16], StaticSecret::from([1u8; 32]));
+        let relay_pk = session.relay_session_pk();
+
+        let first = StaticSecret::from([4u8; 32]);
+        let first_pk = *XPublic::from(&first).as_bytes();
+        let first_key = CommandAuthKey::derive(&first, &relay_pk).unwrap();
+        let second = StaticSecret::from([8u8; 32]);
+        let second_pk = *XPublic::from(&second).as_bytes();
+        let second_key = CommandAuthKey::derive(&second, &relay_pk).unwrap();
+
+        let mut cmd = Command {
+            cmd: Cmd::Sub,
+            corr_id: [5; 16],
+            queue_id: [6; 32],
+            auth: [0; 32],
+            payload: &[],
+        };
+
+        cmd.sign(&first_key, b"").unwrap();
+        session.accept(&cmd, &first_pk).unwrap();
+
+        // The key that the session holds opens no command of another key,
+        // under either public key.
+        cmd.corr_id = [7; 16];
+        cmd.sign(&second_key, b"").unwrap();
+        assert_eq!(session.accept(&cmd, &first_pk), Err(Reject::Rejected));
+        session.accept(&cmd, &second_pk).unwrap();
+
+        cmd.corr_id = [9; 16];
+        cmd.sign(&first_key, b"").unwrap();
+        assert_eq!(session.accept(&cmd, &second_pk), Err(Reject::Rejected));
+        session.accept(&cmd, &first_pk).unwrap();
+
+        // A key that a bound value changes is refused as before.
+        cmd.corr_id = [10; 16];
+        cmd.sign(&first_key, b"bound").unwrap();
+        assert_eq!(session.accept(&cmd, &first_pk), Err(Reject::Rejected));
+        session.accept_bound(&cmd, &first_pk, b"bound").unwrap();
     }
 }

@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 12: Attachments and Large Objects
 
 **Status:** Draft
-**Version:** 0.46.3
-**Date:** 2026-10-29
+**Version:** 0.47.0
+**Date:** 2026-11-01
 
 ---
 
@@ -977,7 +977,7 @@ three properties hold:
 | `CHUNK_LIFE_MAX` | 28 days. §12.3.3 rule 8 bounds a renewed chunk |
 | `CHUNK_PENDING_TTL` | 30 minutes, the life of a registration that waits for its bytes (`ATT-181`) |
 | `REPLICAS` | 3, on different operators |
-| `MAX_CONCURRENT_CHUNKS` | 128 up, 32 down, and §12.7.2 derives both from the bandwidth-delay product |
+| `MAX_CONCURRENT_CHUNKS` | 128 up, 128 down, and §12.7.2 gives the model of both |
 | `RELAYREF_WIDTH` | 12 B (§12.3.2) |
 | `MAX_DESCRIPTOR_REFS` | 269, which is one `B3` cell |
 | `MANIFEST_REFS_PER_CHUNK` | 271, which is `SEGMENT_SIZE` divided by 120 |
@@ -1112,31 +1112,82 @@ Three rules bound the failure that stays.
 | Download at one replica | 8 063 × 32 860 = about 252.7 MiB |
 | Upload time, Fast mode, 5 Mbit/s uplink | about **7.5 minutes**, and the uplink binds it |
 | Upload time, Balanced mode | about **7.5 minutes**, and the uplink binds it |
-| Upload time, Private mode | about **7.5 minutes**, and the uplink binds it |
-| Download time at 20 Mbit/s, Fast, Balanced, Private | about 2, 5.5, and 19 minutes |
+| Upload time, Private mode | about **13 minutes**, and the turn of the window binds it. 64 MiB took 191 to 202 s on loopback in two runs, which is 2.7 Mbit/s and below that uplink |
+| Download time at 20 Mbit/s, Fast, Balanced, Private | about 2, 2, and 7.5 minutes, from the steps of the measurement below and 0.42 s of propagation |
 
 **The round-trip model.** A chain of Part 3 §3.12 costs about 210 ms of
 propagation in each direction. The privacy mode adds a delay under Part 3
-§3.9:
+§3.9 to the forward cells alone (Part 3 rule `NET-338`):
 
-| Mode | Added delay in each direction | Round trip |
+| Mode | Added delay of a forward cell | Round trip of one command alone |
 | --- | --- | --- |
 | Fast | none | about 0.42 s |
-| Balanced | Erlang(3), mean 0.45 s | about 1.32 s |
-| Private | 2.1 s | about 4.62 s |
+| Balanced | Erlang(3), mean 0.45 s | about 0.87 s |
+| Private | Erlang(3), mean 2.1 s | about 2.52 s |
 
-The window of `MAX_CONCURRENT_CHUNKS` holds 128 chunks up, which is
-4 206 080 bytes in flight, and 32 chunks down, which is 1 051 520 bytes.
+The window of `MAX_CONCURRENT_CHUNKS` holds 128 chunks in each direction, which
+is 4 206 080 bytes in flight.
 
 **The turn of the window.** The answer to a `CPUT` and to a `CGET` leaves its
 relay when the relay serves the command (Part 3 rule `NET-360`), with no wait
-for the pacing clock of Part 3 §3.5.2. One turn of the window is one round
-trip of the table above. A window divided by its turn gives the throughput,
-and the smaller of that figure and the link rate gives the time.
+for the pacing clock of Part 3 §3.5.2. One turn of the window is the time of
+one command, from its entry into the link to its answer. The table above is
+the lower bound of that time. A relay releases no forward cell before the cell
+ahead of it (Part 3 rule `NET-339`), thus a cell of a busy circuit waits for
+the largest draw of the cells near it. The delay then grows with the cell rate
+of the circuit. This model gives the delay of three hops for cells at a fixed
+spacing:
 
-A file of 8 MiB is 257 chunks, thus its upload takes about 14 s in each mode
-at a 5 Mbit/s uplink, and that uplink binds it. The start of the circuits, the
-proofs, and the manifest chunk add some round trips. Measurements on the
+| Cells each second on one circuit | Balanced | Private |
+| --- | --- | --- |
+| 1 | 0.45 s | 2.63 s |
+| 4 | 0.54 s | 4.37 s |
+| 16 | 0.88 s | 6.89 s |
+
+The commands in flight divided by the turn give the throughput, and the smaller
+of that figure and the link rate gives the time.
+
+These figures were measured on loopback, with seven relays and one client on
+one machine, with the `PACING_MEAN` of a deployment and no propagation. They
+show the limit of the code and of the delays, and they are no figures for a
+real network. Each value is a median of three runs in Mbit/s of file bytes.
+The values of 32 and of 64 from the start at 64 MiB in Private mode are one run
+each, and the run of 32 stopped at the limit of the bench with 2 041 of 2 057
+chunks.
+
+| Window of `CGET` | 8 MiB Balanced | 8 MiB Private | 64 MiB Balanced | 64 MiB Private |
+| --- | --- | --- | --- | --- |
+| 32 from the start | 7.7 | 1.7 | 9.1 | 2.0 |
+| 64 from the start | 10.6 | 2.5 | 14.0 | 3.2 |
+| 128 from the start | 15.6 | 3.4 | 23.4 | no run |
+| 256 from the start | 25.3 | 4.6 | no run | no run |
+| `ATT-210`, to at most 128 | 11.8 | 2.8 | 22.0 | 5.0 |
+
+The row of `ATT-210` and each upload value of this section come from one run of
+the joined build of version 0.47.0. The other rows come from earlier builds.
+
+A file of 64 MiB under `ATT-210` held about 110 commands in flight, and one
+command took about 1.3 s in Balanced mode and 5.6 s in Private mode. The window was
+full for 86 percent of that time. Each party used less than a tenth of a
+thread, and no answer waited for a tick. Thus the window and the delay of
+`NET-339` bind these rates.
+
+A trace of each hop on the build with Part 3 rule `NET-376` split the step of
+that file in Private mode. The file took 104 s to 112 s, and one `CGET` took
+5.7 s to 5.9 s from the link to its answer. Each cell held one `CGET`, and each
+of the three circuits carried about 6.4 cells each second. Each hop drew
+about 0.7 s, and it held a cell for 1.7 s to 2.1 s, because it releases no
+cell before the cell ahead of it (`NET-339`). The wait for the clock of the
+relays added about 0.08 s, and the way back took some milliseconds. No `CGET`
+waited for a clock of the client. Thus the in-order hold of `NET-339` is the
+cause of the limit in Private mode. The model of this section gives 5.2 s for
+such cells at random times. The start of `ATT-210` costs a file of 8 MiB about
+a quarter of its rate against a window of 128 from the start.
+
+A file of 8 MiB is 257 chunks, thus its upload takes about 14 s in Fast mode
+and in Balanced mode at a 5 Mbit/s uplink, and that uplink binds it. In Private
+mode the turn of the window binds it, and loopback gave 51 to 60 s. The start
+of the circuits, the proofs, and the manifest chunk add some round trips. Measurements on the
 launch network for such a file on a 22 Mbit/s uplink gave these times:
 
 | Client | Time |
@@ -1158,7 +1209,25 @@ window, and its `CREP` and its `CVFY` run after it, thus neither adds a turn.
   - The window MUST NOT go below 8.
 - **[ATT-199]** A client MUST NOT hold more than 256 chunks that register or
   that wait for their `CPUT` with their tokens.
-- **[ATT-165]** A client MUST NOT hold more than 32 `CGET` in flight.
+- **[ATT-165]** A client MUST NOT hold more than 128 `CGET` of its downloads in
+  flight.
+- **[ATT-210]** A client MUST start a download with a window of 32 `CGET`, and
+  it MUST move that window at each chunk answer, and at each `CGET` with no
+  answer inside the bound of `ATT-190`, as `ATT-198` moves the window of an
+  upload. A chunk answer is a `CDAT`, and a `NACK` moves no window. The client
+  MUST also hold a limit of the window:
+  - The window MUST NOT open above the limit, and the limit starts at 32.
+  - A chunk answer inside 8 s MUST raise the limit to two times a count, when
+    that value is above the limit, and never above 128. The count is the
+    smaller of two values: the `CGET` in flight at the send of that `CGET`, and
+    the chunk answers of the last 8 s.
+  - A chunk answer after 15 s, or a `CGET` with no answer inside the bound of
+    `ATT-190`, MUST lower the limit to the window that it leaves.
+  - The `CGET` that follows a `CGET` with no answer MUST wait for a place in
+    the window.
+  - A chunk answer that comes while its chunk waits for that place MUST serve
+    that chunk. That chunk then takes no further `CGET`, and the wait counts as
+    no ask of `ATT-190`. That chunk answer is still one after 15 s.
 - **[ATT-166]** A client MUST send the `CREP` of a chunk while the `CPUT` of
   the next chunk is in flight. **[ATT-178]** A client MUST NOT wait for the
   `CRPUT` of a replica before the next `CPUT`.
@@ -1186,9 +1255,87 @@ window, and its `CREP` and its `CVFY` run after it, thus neither adds a turn.
 > at the bound of `ATT-190` empties 256 chunks ahead in about 16 minutes,
 > thus `CHUNK_PENDING_TTL` holds each registration of a slow upload.
 >
-> The download window of 32 fills a 20 Mbit/s downlink at the model turn. A
-> bulk circuit in a faster mode than its conversation shows the mode of that
-> conversation to the ingress relay, which Part 3 §3.9.1 forbids.
+> `ATT-165` binds a client, thus each download of one client shares its 128
+> places. Each one takes an equal share, thus a small file does not wait for
+> the end of a large file. A window for each file gave 12 files about 42 MB on
+> the link of one client in a model, above the bound of that link. At 20 Mbit/s
+> they ended no sooner than 128 places did. At 40 Mbit/s they ended sooner, at
+> 52 s against 65 s, with 50 MB on that link.
+>
+> The fetch of one chunk of a group key (the `ChunkFetch` of the reference
+> client) and the read of a handle (its `HandleRead`) each hold one `CGET`
+> outside these places. Many such fetches at one time pass 128 by their count.
+>
+> A window of 128 on a downlink of 1 Mbit/s holds its last `CGET` for 34 s,
+> which is above the bound of `ATT-190`. A relay cannot take a `CGET` back, thus
+> a late answer still takes its part of the link. The third `CGET` of a chunk
+> with no answer ends the file. Thus `ATT-210` starts small and follows the time
+> of the answers.
+>
+> The first answers of a window come ahead of a queue that did not form yet,
+> and their time shows nothing of the link. A model of a link shows the cost.
+> Under the rule of `ATT-198` alone the window opened past what the link
+> carries, and the file ended at 0.3 Mbit/s. A window that stayed at 32 brought
+> that file. A `CGET` behind *n* others with its answer inside 8 s shows that
+> the link carries *n* chunks in about that time only when each of the *n*
+> reached the link. A relay that answers late holds commands that did not, and
+> a circuit that still builds does the same. Thus the count of `ATT-210` is
+> also the chunk answers that came. With one relay 14 s late on 1 Mbit/s, the
+> commands in flight alone took the window to 128, and 2 000 chunks took 62
+> silences of `ATT-190` in the model, or 366 with no use of a late answer. With
+> the smaller count the window stayed
+> at 70 and no silence came. The answers that came alone are no proof either:
+> they keep the burst of a link that fell, and one such fall ended a file in
+> the model.
+>
+> Two times that count keeps the next answer inside the bound of `ATT-190`, and
+> the window still reaches 128 in about three turns. In the same model the file
+> came at each rate from 0.15 Mbit/s up, and no step passed that bound from
+> 0.3 Mbit/s up.
+>
+> A link that falls under a full window holds that window for as long as its
+> backlog takes. Each `CGET` that follows then waits behind that backlog. With
+> no wait for a place, the model ended the file at a fall from 20 Mbit/s to
+> 0.75 Mbit/s or less. With that wait, the file came at each fall down to
+> 0.25 Mbit/s. The bytes of a late answer are bytes that the link already
+> carried, thus a client that drops them pays for them again and spends a
+> replica of `ATT-019`. A flap from 20 Mbit/s to 0.3 Mbit/s for 30 s gave 621
+> silences on 2 000 chunks with that drop in the model, and 8 with the answer
+> in use. A slow answer still closes the window, because the link is still
+> slow.
+>
+> The rule of `ATT-198` takes 4 for each slow answer, thus one slow turn takes
+> the window down to 8, and the link can stand idle. With a delay of 5 to 9 s
+> before the link, the model lost up to 18 percent at 0.75 and 1 Mbit/s against
+> a fixed window of 32. At 5 Mbit/s the same case took a third of the time of
+> that fixed window. This rule accepts that cost, and it keeps one shape for
+> both directions.
+>
+> A dead relay costs a slow link in the same manner. Each silence closes the
+> window toward 8, and the dead relay then holds those places. With one relay
+> dead, 600 chunks took 440 s at 0.5 Mbit/s in the model, against 332 s for a
+> fixed window of 32. At 1 Mbit/s the two took 241 s and 237 s, and at 5 Mbit/s
+> this rule took 93 s against 227 s.
+>
+> A window of 256 gave more on loopback. It holds 8.4 MB, and its answers would
+> take a bound of 16 MiB under Part 3 rule `NET-365`. On 0.5 Mbit/s it holds a
+> `CGET` for 135 s. A later revision that has a measurement of a real network
+> can derive a larger value.
+>
+> A bulk circuit in a faster mode than its conversation shows the mode of that
+> conversation to the ingress relay, which Part 3 §3.9.1 forbids. The window
+> reads no mode. Each mode reached 128 on loopback, and a file took the same
+> count of `CGET` in each mode. An observer of the link reads the time of each
+> `CGET` and of each answer already, and the window is a function of those
+> times. One relay reads the times of its own circuit alone (§12.9), and the
+> rate that it reads also follows the answers of the other relays of the file.
+>
+> A window of 32 held the rate of a download near 9 Mbit/s in Balanced mode on
+> loopback, thus each client above that rate looked alike to a relay in the
+> middle. That rate is now about 2.5 times higher, thus a relay reads the rate
+> of a downlink up to that value. This specification accepts that result: the
+> rate is a function of the times of §12.9, and an upload shows its uplink in
+> the same manner.
 
 **A 250 MiB attachment costs about 267.7 MiB of the uplink of the device.**
 §12.4.1 makes the relay carry the copies, thus the device pays about 1.07 times

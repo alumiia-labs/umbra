@@ -403,26 +403,31 @@ impl RelayStore for SqliteStore {
         let transaction = fault(self.connection.transaction())?;
         let mut deleted = false;
 
+        // A commit serves a group of inputs (`NET-298`), and each `SEND` of
+        // it writes these two rows. One prepared statement serves the group.
+        let mut put_head = fault(transaction.prepare(
+            "INSERT INTO queues (recipient_id, head) VALUES (?1, ?2)
+             ON CONFLICT (recipient_id) DO UPDATE SET head = excluded.head",
+        ))?;
+        let mut put_record = fault(transaction.prepare(
+            "INSERT INTO records (recipient_id, seq, accepted_at, bytes)
+             VALUES (?1, ?2, ?3, ?4)",
+        ))?;
+
         for change in changes {
             match change {
-                StoreChange::Queue { recipient_id, head } => fault(transaction.execute(
-                    "INSERT INTO queues (recipient_id, head) VALUES (?1, ?2)
-                     ON CONFLICT (recipient_id) DO UPDATE SET head = excluded.head",
-                    params![recipient_id.as_slice(), head],
-                ))?,
+                StoreChange::Queue { recipient_id, head } => {
+                    fault(put_head.execute(params![recipient_id.as_slice(), head]))?
+                }
                 StoreChange::Record {
                     recipient_id,
                     record,
-                } => fault(transaction.execute(
-                    "INSERT INTO records (recipient_id, seq, accepted_at, bytes)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    params![
-                        recipient_id.as_slice(),
-                        i64::from(record.seq),
-                        signed(record.accepted_at)?,
-                        record.bytes
-                    ],
-                ))?,
+                } => fault(put_record.execute(params![
+                    recipient_id.as_slice(),
+                    i64::from(record.seq),
+                    signed(record.accepted_at)?,
+                    record.bytes
+                ]))?,
                 StoreChange::Acked { recipient_id, seq } => {
                     deleted = true;
                     fault(transaction.execute(
@@ -559,6 +564,8 @@ impl RelayStore for SqliteStore {
             };
         }
 
+        drop(put_head);
+        drop(put_record);
         fault(transaction.commit())?;
 
         if deleted {

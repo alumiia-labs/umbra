@@ -14,11 +14,15 @@
 //! binds the node to the native transport stack.
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "sockets-test")]
+pub mod busy;
 pub mod circuits;
 #[cfg(feature = "native")]
 pub mod directory_server;
 #[cfg(feature = "native")]
 pub mod fcm;
+#[cfg(feature = "sockets-test")]
+pub mod hops;
 #[cfg(feature = "native")]
 pub mod issuer_keys;
 pub mod loops;

@@ -8,7 +8,12 @@
 //! refs as a file of its own under `K_manifest`, and the download reads the
 //! manifest before the data.
 
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, VecDeque},
+    sync::Arc,
+    vec::Vec,
+};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use umbra_crypto::{rand_core::CryptoRng, secret::Secret, x25519::StaticSecret};
 use umbra_queue::Reject;
@@ -44,16 +49,116 @@ pub const UNPLACED_UP_MAX: usize = 4 * MAX_CONCURRENT_UP;
 /// wait for their `CPUT` (`ATT-199`). A registration takes a round trip of
 /// its own, thus it starts long before its place in the window opens.
 pub const REGISTER_AHEAD_MAX: usize = 2 * MAX_CONCURRENT_UP;
-/// The `CPUT` window at the start of an upload (`ATT-198`). The clock of a
-/// step starts when the command enters the link, thus a slow uplink with a
-/// wide window runs each step into `STEP_TIMEOUT_TICKS`.
-pub const UP_WINDOW_START: usize = 32;
+/// The window of a transfer at its start (`ATT-198`, `ATT-210`). The clock
+/// of a step starts when the command enters the link, thus a slow link with
+/// a wide window runs each step into `STEP_TIMEOUT_TICKS`.
+pub const WINDOW_START: usize = 32;
 /// The window never closes below this count.
-pub const UP_WINDOW_MIN: usize = 8;
-/// A `CPUT` with its answer inside this many ticks opens the window.
-pub const UP_WINDOW_FAST_TICKS: u32 = 8;
-/// A `CPUT` with its answer after this many ticks closes the window.
-pub const UP_WINDOW_SLOW_TICKS: u32 = 15;
+pub const WINDOW_MIN: usize = 8;
+/// A command with its answer inside this many ticks opens the window.
+pub const WINDOW_FAST_TICKS: u32 = 8;
+/// A command with its answer after this many ticks closes the window.
+pub const WINDOW_SLOW_TICKS: u32 = 15;
+
+/// The `CGET` of all downloads of one client (`ATT-165`). The downloads of
+/// one transfer run share one budget. A [`ChunkFetch`] and a read of a handle
+/// each hold one `CGET` outside it.
+#[derive(Debug, Default)]
+pub struct DownloadBudget {
+    held: AtomicUsize,
+    open: AtomicUsize,
+}
+
+impl DownloadBudget {
+    /// The places of one download. An equal share keeps a large file from
+    /// each place that the next file needs.
+    fn share(&self) -> usize {
+        let open = self.open.load(Ordering::Relaxed).max(1);
+
+        (MAX_CONCURRENT_DOWN / open).max(1)
+    }
+
+    fn has_room(&self) -> bool {
+        self.held.load(Ordering::Relaxed) < MAX_CONCURRENT_DOWN
+    }
+
+    fn take(&self) {
+        self.held.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn give(&self, count: usize) {
+        self.held.fetch_sub(count, Ordering::Relaxed);
+    }
+
+    fn join(&self) {
+        self.open.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn leave(&self) {
+        self.open.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// The chunk commands that a transfer holds in flight at the most. The time
+/// of each answer moves it (`ATT-198`, `ATT-210`).
+#[derive(Clone, Copy)]
+struct Window {
+    size: usize,
+    /// The size that the window can reach now.
+    ceiling: usize,
+    /// The size that the rule of the direction permits.
+    most: usize,
+}
+
+impl Window {
+    /// The window of an upload: it opens up to `most` with no proof.
+    const fn free(most: usize) -> Self {
+        Window {
+            size: WINDOW_START,
+            ceiling: most,
+            most,
+        }
+    }
+
+    /// The window of a download: it opens by proof alone (`ATT-210`).
+    const fn proven(most: usize) -> Self {
+        Window {
+            size: WINDOW_START,
+            ceiling: WINDOW_START,
+            most,
+        }
+    }
+
+    /// A command took its answer after `age` ticks (`ATT-210`). A fast
+    /// answer shows that the link carried `carried` chunks in
+    /// `WINDOW_FAST_TICKS`.
+    fn on_proof(&mut self, age: u32, carried: usize) {
+        if age <= WINDOW_FAST_TICKS {
+            let proven = carried.saturating_mul(2).min(self.most);
+            self.ceiling = self.ceiling.max(proven);
+        }
+
+        self.on_answer(age);
+
+        if age >= WINDOW_SLOW_TICKS {
+            self.ceiling = self.size;
+        }
+    }
+
+    /// An answer came `age` ticks after its command.
+    fn on_answer(&mut self, age: u32) {
+        if age <= WINDOW_FAST_TICKS {
+            self.size = self.size.saturating_add(2).min(self.ceiling);
+        } else if age >= WINDOW_SLOW_TICKS {
+            self.size = self.size.saturating_sub(4).max(WINDOW_MIN);
+        }
+    }
+
+    /// A command took no answer inside `STEP_TIMEOUT_TICKS`.
+    fn on_silence(&mut self) {
+        self.size = (self.size / 2).max(WINDOW_MIN);
+    }
+}
 
 fn random_below<R: CryptoRng + ?Sized>(rng: &mut R, bound: u32) -> u32 {
     let bound = bound.max(1);
@@ -198,7 +303,7 @@ pub struct Upload {
     /// and the tick.
     retries: Vec<(usize, usize, u32)>,
     /// The `CPUT` that this upload holds in flight at the most (`ATT-198`).
-    window: usize,
+    window: Window,
     ticks: u32,
     /// The name of this upload at the node. It is a random value that leaves
     /// the device in no form. The solution of a registration serves one
@@ -210,6 +315,12 @@ pub struct Upload {
     /// The chunks of the data phase that the manifest phase took before the
     /// caller had them.
     noted_late: Vec<ChunkCredential>,
+    /// The first asks for the proofs of new copies, as the chunk and the
+    /// replica: those of this turn of [`Upload::ask_proofs`], and those of
+    /// the turn before. A copy travels on a connection of its own, and a
+    /// `CVFY` that overtakes it costs a wait of `ATT-190`.
+    proofs_new: Vec<(usize, usize)>,
+    proofs_due: Vec<(usize, usize)>,
 }
 
 /// The credentials of the placed data chunks of a file of level `0x01`,
@@ -288,11 +399,13 @@ impl Upload {
             pool: relays.to_vec(),
             waiting: BTreeMap::new(),
             retries: Vec::new(),
-            window: UP_WINDOW_START,
+            window: Window::free(MAX_CONCURRENT_UP),
             ticks: 0,
             admissions: u64::from_be_bytes(random_bytes(rng)),
             has_unnoted: false,
             noted_late: Vec::new(),
+            proofs_new: Vec::new(),
+            proofs_due: Vec::new(),
         })
     }
 
@@ -389,7 +502,14 @@ impl Upload {
 
     /// The `CPUT` that this upload holds in flight at the most (`ATT-198`).
     pub fn window(&self) -> usize {
-        self.window
+        self.window.size
+    }
+
+    /// Whether the manifest of this upload goes up, for a test over real
+    /// sockets.
+    #[cfg(feature = "sockets-test")]
+    pub fn is_in_manifest_phase(&self) -> bool {
+        self.data.is_some()
     }
 
     /// The chunks placed, and the chunk count of both phases.
@@ -634,6 +754,13 @@ impl Upload {
 
         let chunk_id = *chunk.upload.chunk_id();
         let cred = chunk.cred;
+
+        // A registration of the old start that waits for its solution never
+        // leaves, at each relay of the draw.
+        for relay in &chunk.relays {
+            node.drop_unsolved(&chunk_id, relay);
+        }
+
         for relay in chunk.erase_targets(refused) {
             erase(node, relay, chunk_id, cred, rng);
         }
@@ -643,6 +770,8 @@ impl Upload {
         // proof of it is asked again.
         self.waiting.retain(|_, (of, _, _)| *of != index);
         self.retries.retain(|(of, _, _)| *of != index);
+        self.proofs_new.retain(|(of, _)| *of != index);
+        self.proofs_due.retain(|(of, _)| *of != index);
         let mut next = ChunkState::draw(&self.pool, failed, repairs, self.class.replicas, rng)?;
         next.is_started = true;
         let replicas = next.relays.len();
@@ -727,6 +856,15 @@ impl Upload {
         rng: &mut R,
     ) -> Result<(), Error> {
         self.ticks = self.ticks.saturating_add(1);
+
+        // A registration that waits for its solution did not leave, thus a
+        // slow solve counts against no step.
+        for handle in node.unsolved_handles(self.admissions) {
+            if let Some((_, _, sent)) = self.waiting.get_mut(&handle) {
+                *sent = self.ticks;
+            }
+        }
+
         let late: Vec<(u64, usize, Step)> = self
             .waiting
             .iter()
@@ -742,7 +880,7 @@ impl Upload {
 
             match step {
                 Step::Put => {
-                    self.window = (self.window / 2).max(UP_WINDOW_MIN);
+                    self.window.on_silence();
                     self.repair(node, index, step, rng)?;
                 }
                 // ATT-203: a proof that did not come counts as one ask.
@@ -764,7 +902,30 @@ impl Upload {
             self.send(node, index, Step::Verify(at), rng)?;
         }
 
+        self.ask_proofs(node, rng)?;
         self.fill(node, rng)
+    }
+
+    /// Whether a first ask for a proof waits for [`Upload::ask_proofs`].
+    pub fn has_proofs(&self) -> bool {
+        !self.proofs_new.is_empty() || !self.proofs_due.is_empty()
+    }
+
+    /// One turn of a clock of the caller that is shorter than its tick: each
+    /// first ask for a proof that waited one whole turn leaves. A tick is
+    /// also a turn, thus no caller needs this clock.
+    pub fn ask_proofs<R: CryptoRng + ?Sized>(
+        &mut self,
+        node: &mut ClientNode,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let due = core::mem::replace(&mut self.proofs_due, core::mem::take(&mut self.proofs_new));
+
+        for (index, at) in due {
+            self.send(node, index, Step::Verify(at), rng)?;
+        }
+
+        Ok(())
     }
 
     /// Sends each `CPUT` that has room in the window of `ATT-198`, and
@@ -776,7 +937,7 @@ impl Upload {
         node: &mut ClientNode,
         rng: &mut R,
     ) -> Result<(), Error> {
-        while self.in_flight() < self.window {
+        while self.in_flight() < self.window.size {
             let Some(index) = self
                 .chunks
                 .iter()
@@ -823,12 +984,7 @@ impl Upload {
 
         // ATT-198: the time of a `CPUT` to its answer moves the window.
         if matches!((step, &outcome), (Step::Put, ChunkOutcome::Stored)) {
-            let age = self.ticks.saturating_sub(sent);
-            if age <= UP_WINDOW_FAST_TICKS {
-                self.window = self.window.saturating_add(2).min(MAX_CONCURRENT_UP);
-            } else if age >= UP_WINDOW_SLOW_TICKS {
-                self.window = self.window.saturating_sub(4).max(UP_WINDOW_MIN);
-            }
+            self.window.on_answer(self.ticks.saturating_sub(sent));
         }
 
         let chunk = self.chunks.get_mut(index).ok_or(Error::Malformed)?;
@@ -863,10 +1019,8 @@ impl Upload {
                 if chunk.unverified.is_empty() {
                     chunk.is_done = true;
                 }
-                let due: Vec<usize> = chunk.unverified.iter().map(|(at, _)| *at).collect();
-                for at in due {
-                    self.send(node, index, Step::Verify(at), rng)?;
-                }
+                self.proofs_new
+                    .extend(chunk.unverified.iter().map(|(at, _)| (index, *at)));
             }
 
             (Step::Verify(at), ChunkOutcome::Verified) => {
@@ -979,6 +1133,9 @@ fn erase<R: CryptoRng + ?Sized>(
     cred: [u8; 32],
     rng: &mut R,
 ) {
+    // A registration that still waits for its solution never leaves.
+    node.drop_unsolved(&chunk_id, &relay);
+
     let job = ChunkJob::Erase {
         cred: StaticSecret::from(cred),
     };
@@ -1119,7 +1276,6 @@ struct Wanted {
     /// The replicas that this fetch did not ask yet, the next one last.
     order: Vec<[u8; 32]>,
     bytes: Option<Vec<u8>>,
-    is_asked: bool,
     /// The answers to this chunk, and the ones that said the relay holds
     /// no such chunk.
     answers: u32,
@@ -1152,9 +1308,24 @@ pub struct Download {
     chunk_key: Secret<32>,
     chunk_ids: Vec<[u8; 32]>,
     wanted: Vec<Wanted>,
-    /// Each `CGET` that waits for its answer: the chunk, the tick of its
-    /// send, and the relay.
-    waiting: BTreeMap<u64, (usize, u32, [u8; 32])>,
+    /// The first chunk of `wanted` that took no `CGET`. A chunk leaves this
+    /// count at its first `CGET` and never comes back.
+    unasked: usize,
+    /// The chunks that wait for a place in the window, thus a link that fell
+    /// does not take a second copy of its backlog. Each one has the handle
+    /// of its late `CGET`, when that `CGET` can still serve it.
+    silent: VecDeque<(usize, Option<u64>)>,
+    /// Each `CGET` that waits for its answer.
+    waiting: BTreeMap<u64, Fetching>,
+    /// Each `CGET` past `STEP_TIMEOUT_TICKS` whose chunk waits in `silent`.
+    /// A relay cannot take a `CGET` back, thus its answer is on the link.
+    late: BTreeMap<u64, Fetching>,
+    /// The tick of each chunk answer of the last `WINDOW_FAST_TICKS`.
+    carried: VecDeque<u32>,
+    /// The places of all downloads of this client (`ATT-165`).
+    budget: Arc<DownloadBudget>,
+    /// The `CGET` that this download holds in flight at the most (`ATT-165`).
+    window: Window,
     /// The ticks of the caller since the start.
     ticks: u32,
     /// The data phase of a file of level `0x01`, while its manifest comes.
@@ -1166,6 +1337,17 @@ pub struct Download {
     /// Each chunk and relay that answered `BUSY` or `LIMIT`, for the
     /// hold-offs of the caller.
     refused: Vec<([u8; 32], [u8; 32])>,
+}
+
+/// One `CGET` that waits for its answer.
+struct Fetching {
+    /// The chunk.
+    index: usize,
+    /// The tick of its send.
+    sent: u32,
+    /// The commands in flight at its send.
+    ahead: usize,
+    relay: [u8; 32],
 }
 
 /// What the data phase of a file of level `0x01` needs.
@@ -1214,7 +1396,6 @@ fn plan<R: CryptoRng + ?Sized>(
             Wanted {
                 order,
                 bytes: None,
-                is_asked: false,
                 answers: 0,
                 refusals: 0,
                 left_out: u32::try_from(left_out).unwrap_or(u32::MAX),
@@ -1288,13 +1469,32 @@ impl Download {
             chunk_key,
             chunk_ids: chunks.iter().map(|chunk| chunk.chunk_id).collect(),
             wanted: plan(&chunks, relays, &HoldOffs::default(), 0, rng),
+            unasked: 0,
+            silent: VecDeque::new(),
             waiting: BTreeMap::new(),
+            late: BTreeMap::new(),
+            carried: VecDeque::new(),
+            budget: Arc::new(DownloadBudget {
+                held: AtomicUsize::new(0),
+                open: AtomicUsize::new(1),
+            }),
+            window: Window::proven(MAX_CONCURRENT_DOWN),
             ticks: 0,
             then,
             hold_offs: HoldOffs::default(),
             now: 0,
             refused: Vec::new(),
         })
+    }
+
+    /// The download shares `budget` with each other download of its client
+    /// (`ATT-165`). The caller sets it before the first tick.
+    #[must_use]
+    pub fn with_budget(mut self, budget: &Arc<DownloadBudget>) -> Self {
+        self.budget.leave();
+        budget.join();
+        self.budget = Arc::clone(budget);
+        self
     }
 
     /// The download leaves out each relay inside its hold-off for a chunk
@@ -1336,6 +1536,7 @@ impl Download {
 
         self.chunk_ids = chunks.iter().map(|chunk| chunk.chunk_id).collect();
         self.wanted = plan(&chunks, &then.relays, &self.hold_offs, self.now, rng);
+        self.unasked = 0;
         self.chunk_key = then.file_key;
         self.assembler = Some(then.assembler);
         Ok(())
@@ -1350,7 +1551,6 @@ impl Download {
         let wanted = self.wanted.get_mut(index).ok_or(Error::Malformed)?;
         // No replica is left: the file is out of reach.
         let relay = wanted.order.pop().ok_or(Error::NoPath)?;
-        wanted.is_asked = true;
 
         let chunk_id = *self.chunk_ids.get(index).ok_or(Error::Malformed)?;
         let read = read_secret(
@@ -1358,13 +1558,25 @@ impl Download {
             u32::try_from(index).map_err(|_| Error::Malformed)?,
         );
         let handle = node.chunk(relay, chunk_id, ChunkJob::Fetch { read }, rng)?;
-        self.waiting.insert(handle, (index, self.ticks, relay));
+        let fetching = Fetching {
+            index,
+            sent: self.ticks,
+            ahead: self.waiting.len(),
+            relay,
+        };
+        self.waiting.insert(handle, fetching);
+        self.budget.take();
         Ok(())
+    }
+
+    /// The `CGET` that this download holds in flight at the most (`ATT-165`).
+    pub fn window(&self) -> usize {
+        self.window.size
     }
 
     /// Whether the answer with this handle belongs to this download.
     pub fn owns(&self, handle: u64) -> bool {
-        self.waiting.contains_key(&handle)
+        self.waiting.contains_key(&handle) || self.late.contains_key(&handle)
     }
 
     /// Whether each replica of one chunk answered that it holds no such
@@ -1378,9 +1590,9 @@ impl Download {
         self.wanted.iter().any(Wanted::is_gone)
     }
 
-    /// Moves the clock of the download one tick: a `CGET` past
-    /// `STEP_TIMEOUT_TICKS` goes to the next replica (`ATT-019`), and each
-    /// chunk that has room is asked for. The caller calls it at the start
+    /// Moves the clock of the download one tick: a chunk past
+    /// `STEP_TIMEOUT_TICKS` waits for a place, and it goes to the next
+    /// replica (`ATT-019`, `ATT-210`). Each chunk that has room is asked for. The caller calls it at the start
     /// and at each tick of its clock, and an answer moves no clock. A lost
     /// answer thus holds no download until its circuit ends.
     pub fn tick<R: CryptoRng + ?Sized>(
@@ -1389,38 +1601,83 @@ impl Download {
         rng: &mut R,
     ) -> Result<(), Error> {
         self.ticks = self.ticks.saturating_add(1);
-        let late: Vec<(u64, usize)> = self
+        let late: Vec<u64> = self
             .waiting
             .iter()
-            .filter(|(_, (_, sent, _))| self.ticks.saturating_sub(*sent) >= STEP_TIMEOUT_TICKS)
-            .map(|(handle, (index, _, _))| (*handle, *index))
+            .filter(|(_, fetching)| self.ticks.saturating_sub(fetching.sent) >= STEP_TIMEOUT_TICKS)
+            .map(|(handle, _)| *handle)
             .collect();
 
-        for (handle, index) in late {
-            self.waiting.remove(&handle);
-            // No answer is no statement that the relay lacks the chunk.
-            let wanted = self.wanted.get_mut(index).ok_or(Error::Malformed)?;
-            wanted.answers = wanted.answers.saturating_add(1);
-            self.ask(node, index, rng)?;
+        for handle in late {
+            let Some(fetching) = self.waiting.remove(&handle) else {
+                continue;
+            };
+
+            self.budget.give(1);
+            self.window.on_silence();
+            self.window.ceiling = self.window.size;
+            if let Some(wanted) = self.wanted.get_mut(fetching.index) {
+                wanted.answers = wanted.answers.saturating_add(1);
+            }
+            self.silent.push_back((fetching.index, Some(handle)));
+            self.late.insert(handle, fetching);
         }
 
         self.fill(node, rng)
     }
 
-    /// Asks for each chunk that has room under `MAX_CONCURRENT_DOWN`.
+    /// Asks for each chunk that has room in the window of `ATT-210`.
     fn fill<R: CryptoRng + ?Sized>(
         &mut self,
         node: &mut ClientNode,
         rng: &mut R,
     ) -> Result<(), Error> {
-        while self.waiting.len() < MAX_CONCURRENT_DOWN {
-            let Some(index) = self.wanted.iter().position(|wanted| !wanted.is_asked) else {
-                break;
+        while self.has_room() {
+            let index = match self.silent.pop_front() {
+                Some((index, None)) => index,
+                Some((index, Some(handle))) => {
+                    // The late answer served this chunk already.
+                    if self.late.remove(&handle).is_none() {
+                        continue;
+                    }
+
+                    index
+                }
+                None if self.unasked < self.wanted.len() => {
+                    let index = self.unasked;
+                    self.unasked = index.saturating_add(1);
+                    index
+                }
+                None => break,
             };
             self.ask(node, index, rng)?;
         }
 
         Ok(())
+    }
+
+    /// Whether this download can hold one more `CGET` (`ATT-165`, `ATT-210`).
+    fn has_room(&self) -> bool {
+        let places = self.window.size.min(self.budget.share());
+
+        self.waiting.len() < places && self.budget.has_room()
+    }
+
+    /// The chunks that the link carried in the last `WINDOW_FAST_TICKS`, with
+    /// the answer of this tick. No window asks for more than `MAX_CONCURRENT_DOWN`,
+    /// thus the count ends there.
+    fn count_carried(&mut self) -> usize {
+        let from = self.ticks.saturating_sub(WINDOW_FAST_TICKS);
+        while self.carried.front().is_some_and(|tick| *tick < from) {
+            self.carried.pop_front();
+        }
+
+        if self.carried.len() >= MAX_CONCURRENT_DOWN {
+            self.carried.pop_front();
+        }
+        self.carried.push_back(self.ticks);
+
+        self.carried.len()
     }
 
     /// Takes the answer to one `CGET`. The plaintext comes when the last
@@ -1457,9 +1714,24 @@ impl Download {
         outcome: ChunkOutcome,
         rng: &mut R,
     ) -> Result<bool, Error> {
-        let Some((index, _, relay)) = self.waiting.remove(&handle) else {
+        let on_time = self.waiting.remove(&handle);
+        let is_late = on_time.is_none();
+        let Some(fetching) = on_time.or_else(|| self.late.remove(&handle)) else {
             return Ok(false);
         };
+        if !is_late {
+            self.budget.give(1);
+        }
+        let Fetching { index, relay, .. } = fetching;
+
+        // ATT-210: the time of a `CGET` to its answer moves the window. A
+        // relay that answers late holds commands that never reached the
+        // link, thus the count of commands ahead proves no rate alone.
+        if matches!(outcome, ChunkOutcome::Fetched(_)) {
+            let age = self.ticks.saturating_sub(fetching.sent);
+            let carried = self.count_carried();
+            self.window.on_proof(age, fetching.ahead.min(carried));
+        }
 
         // ATT-150: a chunk that does not open under its tag is one bad
         // replica, and the next replica serves it (ATT-019). The chunk
@@ -1475,27 +1747,41 @@ impl Download {
         };
 
         let wanted = self.wanted.get_mut(index).ok_or(Error::Malformed)?;
-        wanted.answers = wanted.answers.saturating_add(1);
-        match outcome {
-            ChunkOutcome::Fetched(_) if opened.is_some() => wanted.bytes = opened,
+        if !is_late {
+            wanted.answers = wanted.answers.saturating_add(1);
+        }
+        let is_served = match outcome {
+            ChunkOutcome::Fetched(_) if opened.is_some() => {
+                wanted.bytes = opened;
+                true
+            }
             ChunkOutcome::Fetched(_) => {
                 wanted.refusals = wanted.refusals.saturating_add(1);
-                self.ask(node, index, rng)?;
+                false
             }
             // ATT-019: the next replica. WIR-317 gives one reason to an
             // unknown chunk, and the read secret of a descriptor is right.
             ChunkOutcome::Refused(Reject::Rejected) => {
                 wanted.refusals = wanted.refusals.saturating_add(1);
-                self.ask(node, index, rng)?;
+                false
             }
             // ATT-173, ATT-174: the next replica, and this relay takes no
             // same `CGET` inside the hold.
             ChunkOutcome::Refused(Reject::Busy | Reject::Limit) => {
                 let chunk_id = *self.chunk_ids.get(index).ok_or(Error::Malformed)?;
                 self.refused.push((chunk_id, relay));
+                false
+            }
+            _ => false,
+        };
+
+        // A late `CGET` held no place, thus its next ask waits for one.
+        if !is_served {
+            if is_late {
+                self.silent.push_back((index, None));
+            } else {
                 self.ask(node, index, rng)?;
             }
-            _ => self.ask(node, index, rng)?,
         }
 
         // The chunks open in their order.
@@ -1511,6 +1797,13 @@ impl Download {
         let is_complete = assembler.is_complete();
         self.fill(node, rng)?;
         Ok(is_complete)
+    }
+}
+
+impl Drop for Download {
+    fn drop(&mut self) {
+        self.budget.give(self.waiting.len());
+        self.budget.leave();
     }
 }
 
@@ -1884,6 +2177,541 @@ mod tests {
     }
 
     #[test]
+    fn a_window_of_a_download_opens_by_proof_alone() {
+        let mut window = Window::proven(MAX_CONCURRENT_DOWN);
+
+        // ATT-210: the first commands left ahead of a queue that did not
+        // form yet, thus their answers prove nothing.
+        window.on_proof(1, 0);
+        window.on_proof(1, 3);
+        assert_eq!(window.size, WINDOW_START);
+
+        // A fast answer behind 20 commands proves 40.
+        window.on_proof(8, 20);
+        assert_eq!((window.size, window.ceiling), (34, 40));
+        for _ in 0..8 {
+            window.on_proof(8, 20);
+        }
+        assert_eq!(window.size, 40);
+
+        // ATT-198: an answer between the two times moves nothing.
+        window.on_proof(WINDOW_FAST_TICKS + 1, 100);
+        assert_eq!((window.size, window.ceiling), (40, 40));
+
+        // A window that closed takes a new proof.
+        window.on_proof(WINDOW_SLOW_TICKS, 100);
+        assert_eq!((window.size, window.ceiling), (36, 36));
+        window.on_proof(1, 10);
+        assert_eq!(window.size, 36);
+        window.on_proof(1, 19);
+        assert_eq!((window.size, window.ceiling), (38, 38));
+
+        // ATT-165: no proof passes the ceiling, and no answer the floor.
+        window.on_proof(1, 4 * MAX_CONCURRENT_DOWN);
+        assert_eq!(window.ceiling, MAX_CONCURRENT_DOWN);
+        for _ in 0..64 {
+            window.on_proof(WINDOW_SLOW_TICKS, 0);
+        }
+        assert_eq!(window.size, WINDOW_MIN);
+    }
+
+    /// One file of `chunks` chunks at relays 1, 2, and 3, with the bytes of
+    /// each chunk.
+    fn fetchable(chunks: usize) -> (FileDescriptor, Vec<Vec<u8>>, Vec<u8>) {
+        let key = Secret::new([9; 32]);
+        let nonce = [8; 24];
+        let plain: Vec<u8> = (0..crate::attach::SEGMENT_SIZE * chunks - 77)
+            .map(|at| (at % 253) as u8)
+            .collect();
+        let sealed = seal_file(&key, &nonce, &plain).unwrap();
+
+        let refs = (0..chunks)
+            .map(|at| {
+                let mut chunk_id = [0u8; 32];
+                chunk_id[..8].copy_from_slice(&(at as u64).to_be_bytes());
+                ChunkRef {
+                    relay_id: [1; 32],
+                    chunk_id,
+                    cred_pk: [3; 32],
+                    replicas: [relay_hint(&[2; 32]), relay_hint(&[3; 32])],
+                }
+            })
+            .collect();
+        let descriptor = FileDescriptor {
+            level: Level::Data,
+            file_key: key,
+            file_nonce: nonce,
+            commit: sealed.commit,
+            digest: sealed.digest,
+            media_seconds: 0,
+            padded_size: sealed.padded_size,
+            mime_class: 5,
+            pixel_w: 0,
+            pixel_h: 0,
+            refs,
+        };
+
+        (descriptor, sealed.chunks, plain)
+    }
+
+    /// What some downloads did on a link of a modeled rate.
+    #[derive(Debug, Default)]
+    struct LinkRun {
+        /// The largest window, and the smallest one after it.
+        peak: usize,
+        low_after_peak: usize,
+        /// The `CGET` that passed `STEP_TIMEOUT_TICKS` and took a next ask.
+        silences: usize,
+        /// The longest wait of a `CGET` for its answer.
+        slowest: u32,
+        /// The most `CGET` of all downloads at one time.
+        most_in_flight: usize,
+        /// The tick of the first answer of the last file to take one.
+        last_start: u32,
+        ticks: u32,
+    }
+
+    /// One download of `over_links`.
+    struct OnLink {
+        download: Download,
+        sealed: Vec<Vec<u8>>,
+        plain: Vec<u8>,
+        next_handle: u64,
+        has_answer: bool,
+    }
+
+    /// One `CGET` on its way: its answer enters the link at `ready`.
+    struct Command {
+        ready: u32,
+        file: usize,
+        handle: u64,
+        index: usize,
+    }
+
+    /// Runs one download over a link. See [`over_links`].
+    fn over_link(chunks: usize, rate: impl Fn(u32) -> u32) -> LinkRun {
+        over_links(1, chunks, rate, |_| 0)
+    }
+
+    /// Runs `files` downloads at one time over one link, with a round trip
+    /// of one tick. Relay `id` adds `lag(id)` ticks before its answer. The
+    /// link carries `rate(tick)` hundredths of a chunk in each tick, in the
+    /// order of the answers. A relay cannot take a `CGET` back, thus an
+    /// answer that the client gave up on still takes its part of the link.
+    fn over_links(
+        files: usize,
+        chunks: usize,
+        rate: impl Fn(u32) -> u32,
+        lag: impl Fn(u8) -> u32,
+    ) -> LinkRun {
+        let pool = [relay(1), relay(2), relay(3)];
+        let mut node = silent_node();
+        let mut rng = Rng(11);
+        let budget = Arc::new(DownloadBudget::default());
+        let mut open: Vec<Option<OnLink>> = (0..files)
+            .map(|_| {
+                let (descriptor, sealed, plain) = fetchable(chunks);
+                let download = Download::new(&descriptor, &pool, &mut rng).unwrap();
+                Some(OnLink {
+                    download: download.with_budget(&budget),
+                    sealed,
+                    plain,
+                    next_handle: 0,
+                    has_answer: false,
+                })
+            })
+            .collect();
+
+        let mut parked: Vec<Command> = Vec::new();
+        let mut queue: VecDeque<Command> = VecDeque::new();
+        let mut credit = 0;
+        let mut run = LinkRun {
+            low_after_peak: usize::MAX,
+            ..LinkRun::default()
+        };
+
+        for tick in 1..=6_000 {
+            run.ticks = tick;
+            for held in open.iter_mut().flatten() {
+                held.download.tick(&mut node, &mut rng).unwrap();
+            }
+            credit = (credit + rate(tick)).min(100 + rate(tick));
+
+            loop {
+                let in_flight = open
+                    .iter()
+                    .flatten()
+                    .map(|held| held.download.waiting.len());
+                run.most_in_flight = run.most_in_flight.max(in_flight.sum());
+
+                // Each new command takes its way to its relay.
+                for (file, held) in open.iter_mut().enumerate() {
+                    let Some(held) = held else { continue };
+                    for (handle, fetching) in held.download.waiting.range(held.next_handle..) {
+                        parked.push(Command {
+                            ready: tick + 1 + lag(fetching.relay[0]),
+                            file,
+                            handle: *handle,
+                            index: fetching.index,
+                        });
+                        held.next_handle = handle + 1;
+                    }
+                }
+
+                let (due, later) = core::mem::take(&mut parked)
+                    .into_iter()
+                    .partition(|command| command.ready <= tick);
+                let due: Vec<Command> = due;
+                parked = later;
+                queue.extend(due);
+
+                if credit < 100 || queue.is_empty() {
+                    break;
+                }
+                credit -= 100;
+
+                let command = queue.pop_front().unwrap();
+                let Some(held) = open[command.file].as_mut() else {
+                    continue;
+                };
+
+                if let Some(fetching) = held.download.waiting.get(&command.handle) {
+                    run.slowest = run.slowest.max(tick - fetching.sent);
+                }
+                if !held.has_answer {
+                    held.has_answer = true;
+                    run.last_start = run.last_start.max(tick);
+                }
+
+                let bytes = held.sealed[command.index].clone();
+                let outcome = ChunkOutcome::Fetched(bytes);
+                let step = held
+                    .download
+                    .on_outcome(&mut node, command.handle, outcome, &mut rng);
+                if let Progress::Done(fetched) = step.unwrap() {
+                    assert!(fetched == held.plain, "the file came back changed");
+                    run.note_end(&held.download);
+                    open[command.file] = None;
+                    if open.iter().all(Option::is_none) {
+                        return run;
+                    }
+                    continue;
+                }
+
+                let window = held.download.window();
+                if window > run.peak {
+                    run.peak = window;
+                    run.low_after_peak = window;
+                }
+                run.low_after_peak = run.low_after_peak.min(window);
+            }
+        }
+
+        panic!("the downloads did not end: {run:?}");
+    }
+
+    impl LinkRun {
+        /// Each answer past the first of a chunk stands for one silence.
+        fn note_end(&mut self, download: &Download) {
+            let silences = download.wanted.iter().map(|wanted| wanted.answers - 1);
+            self.silences += silences.sum::<u32>() as usize;
+        }
+    }
+
+    /// The chunks of one cell in a tick of 1 s on a link of `kbit` kbit/s,
+    /// in hundredths.
+    fn hundredths(kbit: u32) -> u32 {
+        kbit * 1_000 * 100 / (8 * 32_860)
+    }
+
+    #[test]
+    fn a_slow_link_holds_the_window_and_no_step_times_out() {
+        // A window of `MAX_CONCURRENT_DOWN` holds its last chunk about 34 s
+        // on 1 Mbit/s, past `STEP_TIMEOUT_TICKS`.
+        for kbit in [500, 750, 1_000, 2_000] {
+            let run = over_link(160, |_| hundredths(kbit));
+
+            assert_eq!(run.silences, 0, "{kbit} kbit/s: {run:?}");
+            assert!(run.slowest < WINDOW_SLOW_TICKS + 4, "{kbit}: {run:?}");
+            assert!(run.peak <= 2 * 8 * hundredths(kbit) as usize / 100 + 2 * 8);
+        }
+    }
+
+    #[test]
+    fn a_link_that_falls_closes_the_window_and_the_file_still_comes() {
+        // The link carries 5 Mbit/s until the window stands at its ceiling
+        // of proof. Then it falls, with a full window in flight.
+        for kbit in [500, 1_000] {
+            let run = over_link(360, |tick| hundredths(if tick < 12 { 5_000 } else { kbit }));
+
+            assert_eq!(run.peak, MAX_CONCURRENT_DOWN, "{kbit} kbit/s: {run:?}");
+            assert!(run.low_after_peak <= WINDOW_START, "{kbit}: {run:?}");
+        }
+    }
+
+    #[test]
+    fn a_relay_that_answers_late_proves_no_rate_of_the_link() {
+        // Relay 1 holds its commands for 14 ticks on a link of 1 Mbit/s, thus
+        // an answer of another relay comes with many commands ahead of it
+        // that are not on the link.
+        let run = over_links(1, 300, |_| hundredths(1_000), |id| u32::from(id == 1) * 14);
+
+        // ATT-210: the link carries about 30 chunks in `WINDOW_FAST_TICKS`.
+        assert!(run.peak <= 2 * 30 + 2 * 8, "{run:?}");
+        assert_eq!(run.silences, 0, "{run:?}");
+    }
+
+    /// A download of 40 chunks that took no answer past the step timeout.
+    fn gone_silent() -> (Download, ClientNode, Rng, Vec<Vec<u8>>, Vec<u64>) {
+        let pool = [relay(1), relay(2), relay(3)];
+        let (descriptor, sealed, _) = fetchable(40);
+        let mut node = silent_node();
+        let mut rng = Rng(12);
+        let mut download = Download::new(&descriptor, &pool, &mut rng).unwrap();
+        download.tick(&mut node, &mut rng).unwrap();
+        let first: Vec<u64> = download.waiting.keys().copied().collect();
+
+        for _ in 0..STEP_TIMEOUT_TICKS {
+            download.tick(&mut node, &mut rng).unwrap();
+        }
+
+        (download, node, rng, sealed, first)
+    }
+
+    #[test]
+    fn a_silence_halves_the_window_and_takes_its_ceiling_down() {
+        let (download, ..) = gone_silent();
+
+        // ATT-198: each of the 32 `CGET` halves the window, to its floor.
+        assert_eq!(download.window.size, WINDOW_MIN);
+        // ATT-210: the limit falls with it, below its start.
+        assert_eq!(download.window.ceiling, WINDOW_MIN);
+        assert_eq!(download.waiting.len(), WINDOW_MIN);
+        // A silence gives its place back, thus no later download stalls.
+        assert_eq!(download.budget.held.load(Ordering::Relaxed), WINDOW_MIN);
+    }
+
+    #[test]
+    fn a_silence_counts_as_one_answer_at_its_tick() {
+        let (download, ..) = gone_silent();
+
+        // No answer is no statement that the relay lacks the chunk. The count
+        // of `is_gone` thus holds it while the chunk waits for a place.
+        let waits = download.silent.iter().filter(|(_, late)| late.is_some());
+        for (index, _) in waits {
+            assert_eq!(download.wanted[*index].answers, 1);
+            assert_eq!(download.wanted[*index].refusals, 0);
+        }
+    }
+
+    #[test]
+    fn a_silent_chunk_is_no_refusal() {
+        let pool = [relay(1), relay(2), relay(3)];
+        let (descriptor, sealed, _) = fetchable(40);
+        let mut node = silent_node();
+        let mut rng = Rng(12);
+        let mut download = Download::new(&descriptor, &pool, &mut rng).unwrap();
+        download.tick(&mut node, &mut rng).unwrap();
+
+        // The first two replicas of chunks 30 and 31 refuse.
+        for target in [30usize, 31] {
+            for _ in 0..2 {
+                let asked = &download.waiting;
+                let (handle, _) = asked.iter().find(|(_, c)| c.index == target).unwrap();
+                let handle = *handle;
+                let outcome = ChunkOutcome::Refused(Reject::Rejected);
+                download
+                    .on_outcome(&mut node, handle, outcome, &mut rng)
+                    .unwrap();
+            }
+        }
+        assert!(download.wanted[31].order.is_empty());
+
+        // The third replica of each one gives no answer, nor does any other.
+        for _ in 0..STEP_TIMEOUT_TICKS {
+            download.tick(&mut node, &mut rng).unwrap();
+        }
+
+        // The other chunks come, and chunk 30 then has no replica left.
+        // ATT-052: chunk 31 can sit at its third relay, thus the file is not
+        // gone. Before this count, it stayed `Gone` for good.
+        let error = loop {
+            let (handle, fetching) = download.waiting.iter().next().unwrap();
+            let handle = *handle;
+            let outcome = ChunkOutcome::Fetched(sealed[fetching.index].clone());
+            if let Err(error) = download.on_outcome(&mut node, handle, outcome, &mut rng) {
+                break error;
+            }
+        };
+
+        assert!(matches!(error, Error::NoPath));
+        assert!(!download.is_gone());
+    }
+
+    #[test]
+    fn a_silent_chunk_goes_before_a_chunk_with_no_ask() {
+        let (download, ..) = gone_silent();
+
+        // The file has 40 chunks, and the first 32 went silent. The places
+        // of the window go to those.
+        assert_eq!(download.unasked, WINDOW_START);
+        assert!(download.waiting.values().all(|c| c.index < WINDOW_START));
+        assert_eq!(download.silent.len(), WINDOW_START - WINDOW_MIN);
+    }
+
+    #[test]
+    fn a_ceiling_below_the_start_opens_by_a_new_proof_alone() {
+        let mut window = Window::proven(MAX_CONCURRENT_DOWN);
+        window.size = 12;
+        window.ceiling = 12;
+
+        // ATT-210: a slow answer takes the limit below 32, and a fast answer
+        // with no proof does not bring 32 back.
+        window.on_proof(WINDOW_SLOW_TICKS, 0);
+        assert_eq!((window.size, window.ceiling), (8, 8));
+        window.on_proof(1, 2);
+        assert_eq!((window.size, window.ceiling), (8, 8));
+        window.on_proof(1, 5);
+        assert_eq!((window.size, window.ceiling), (10, 10));
+    }
+
+    #[test]
+    fn a_late_answer_serves_its_chunk_and_closes_the_window() {
+        let (mut download, mut node, mut rng, sealed, first) = gone_silent();
+        let (handle, index) = first
+            .iter()
+            .filter_map(|handle| download.late.get(handle).map(|c| (*handle, c.index)))
+            .next()
+            .unwrap();
+        download.window.size = 20;
+        download.window.ceiling = 20;
+
+        // ATT-210: the answer comes while the chunk waits for a place.
+        assert!(download.owns(handle));
+        let outcome = ChunkOutcome::Fetched(sealed[index].clone());
+        download
+            .on_outcome(&mut node, handle, outcome, &mut rng)
+            .unwrap();
+
+        assert!(!download.owns(handle));
+        assert_eq!(download.wanted[index].answers, 1, "no silence counts");
+        assert_eq!(download.window.size, 16, "a slow answer closes it");
+        assert_eq!(download.window.ceiling, 16);
+
+        // The next places pass this chunk: it asks no second replica.
+        let replicas = download.wanted[index].order.len();
+        download.window.size = MAX_CONCURRENT_DOWN;
+        download.fill(&mut node, &mut rng).unwrap();
+        assert!(download.silent.is_empty());
+        assert!(download.waiting.values().all(|c| c.index != index));
+        assert_eq!(download.wanted[index].order.len(), replicas);
+    }
+
+    #[test]
+    fn a_late_refusal_waits_for_a_place_of_its_own() {
+        let (mut download, mut node, mut rng, _, first) = gone_silent();
+        let handle = *first
+            .iter()
+            .find(|handle| download.late.contains_key(handle))
+            .unwrap();
+        let held = download.waiting.len();
+        let outcome = ChunkOutcome::Refused(Reject::Rejected);
+
+        download
+            .on_outcome(&mut node, handle, outcome, &mut rng)
+            .unwrap();
+
+        assert_eq!(download.waiting.len(), held, "no place above the window");
+    }
+
+    #[test]
+    fn the_downloads_of_a_client_share_one_budget() {
+        // ATT-165: three files at 20 Mbit/s. Each one could prove 128.
+        let run = over_links(3, 200, |_| hundredths(20_000), |_| 0);
+        assert!(run.most_in_flight <= MAX_CONCURRENT_DOWN, "{run:?}");
+        assert!(run.most_in_flight > MAX_CONCURRENT_DOWN / 2, "{run:?}");
+        // An equal share: no file waits for the end of the file before it.
+        assert!(run.last_start <= 2, "{run:?}");
+        assert_eq!(run.silences, 0, "{run:?}");
+    }
+
+    #[test]
+    fn a_second_file_takes_an_equal_share_of_the_places() {
+        let budget = Arc::new(DownloadBudget::default());
+        let pool = [relay(1), relay(2), relay(3)];
+        let (descriptor, ..) = fetchable(100);
+        let mut node = silent_node();
+        let mut rng = Rng(14);
+
+        let mut first = Download::new(&descriptor, &pool, &mut rng)
+            .unwrap()
+            .with_budget(&budget);
+        let mut second = Download::new(&descriptor, &pool, &mut rng)
+            .unwrap()
+            .with_budget(&budget);
+        first.window.size = MAX_CONCURRENT_DOWN;
+        first.window.ceiling = MAX_CONCURRENT_DOWN;
+
+        // ATT-165: a window that could take each place leaves half of them.
+        first.tick(&mut node, &mut rng).unwrap();
+        assert_eq!(first.waiting.len(), MAX_CONCURRENT_DOWN / 2);
+        second.tick(&mut node, &mut rng).unwrap();
+        assert_eq!(second.waiting.len(), WINDOW_START);
+    }
+
+    #[test]
+    fn a_file_that_joins_late_takes_no_place_above_the_budget() {
+        let budget = Arc::new(DownloadBudget::default());
+        let pool = [relay(1), relay(2), relay(3)];
+        let (descriptor, ..) = fetchable(MAX_CONCURRENT_DOWN + 4);
+        let mut node = silent_node();
+        let mut rng = Rng(15);
+
+        let mut first = Download::new(&descriptor, &pool, &mut rng)
+            .unwrap()
+            .with_budget(&budget);
+        first.window.size = MAX_CONCURRENT_DOWN;
+        first.window.ceiling = MAX_CONCURRENT_DOWN;
+        first.tick(&mut node, &mut rng).unwrap();
+        assert_eq!(first.waiting.len(), MAX_CONCURRENT_DOWN);
+
+        // ATT-165: the first file holds each place, and its share falls only
+        // as its commands end.
+        let mut second = Download::new(&descriptor, &pool, &mut rng)
+            .unwrap()
+            .with_budget(&budget);
+        second.tick(&mut node, &mut rng).unwrap();
+        assert!(second.waiting.is_empty());
+        assert_eq!(budget.held.load(Ordering::Relaxed), MAX_CONCURRENT_DOWN);
+    }
+
+    #[test]
+    fn a_download_that_ends_gives_its_places_back() {
+        let budget = Arc::new(DownloadBudget::default());
+        let pool = [relay(1), relay(2), relay(3)];
+        let (descriptor, ..) = fetchable(4);
+        let mut node = silent_node();
+        let mut rng = Rng(13);
+
+        let mut first = Download::new(&descriptor, &pool, &mut rng)
+            .unwrap()
+            .with_budget(&budget);
+        first.tick(&mut node, &mut rng).unwrap();
+        assert_eq!(budget.held.load(Ordering::Relaxed), 4);
+        assert_eq!(budget.share(), MAX_CONCURRENT_DOWN);
+
+        let second = Download::new(&descriptor, &pool, &mut rng)
+            .unwrap()
+            .with_budget(&budget);
+        assert_eq!(budget.share(), MAX_CONCURRENT_DOWN / 2);
+
+        drop(first);
+        drop(second);
+        assert_eq!(budget.held.load(Ordering::Relaxed), 0);
+        assert_eq!(budget.open.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
     fn a_late_cput_asks_the_proof_again_only_at_a_relay_of_the_draw() {
         let pool = [relay(1), relay(2), relay(3), relay(4)];
         let mut node = silent_node();
@@ -1930,5 +2758,164 @@ mod tests {
                 assert!(noted[0].relays.contains(&fresh));
             }
         }
+    }
+
+    #[test]
+    fn the_first_ask_for_a_proof_waits_one_whole_turn() {
+        let pool = [relay(1), relay(2), relay(3)];
+        let mut node = silent_node();
+        let mut rng = Rng(13);
+        let mut upload = Upload::new(&[5u8; 100], Shape::default(), &pool, &mut rng).unwrap();
+        upload.proofs_new.push((0, 1));
+        assert!(upload.has_proofs());
+
+        // The turn that finds a new copy sends nothing.
+        upload.ask_proofs(&mut node, &mut rng).unwrap();
+        assert!(upload.waiting.is_empty());
+
+        // The next turn sends the ask.
+        upload.ask_proofs(&mut node, &mut rng).unwrap();
+        let steps: Vec<Step> = upload.waiting.values().map(|(_, step, _)| *step).collect();
+        assert!(steps == [Step::Verify(1)]);
+        assert!(!upload.has_proofs());
+    }
+
+    /// A book with a live challenge of each relay of `pool`.
+    fn book_of(pool: &[AttachmentRelay], now: u64) -> crate::abuse::pow::ChallengeBook {
+        use crate::abuse::pow::{ChallengeBook, PowChallenge};
+        use umbra_crypto::sign::SigningKey;
+
+        let key = SigningKey::from_seed(Secret::new([1; 32]));
+        let mut book = ChallengeBook::default();
+        for relay in pool {
+            let mut challenge = PowChallenge {
+                verifier_id: relay.relay_id,
+                seed: [3; 32],
+                effort: 0,
+                issued_at: now,
+                signature: Vec::new(),
+            };
+            challenge.sign(&key, &mut Rng(2)).unwrap();
+            book.take(challenge, &key.verifying_key(), now).unwrap();
+        }
+
+        book
+    }
+
+    #[test]
+    fn the_clock_of_a_registration_starts_at_its_release() {
+        use crate::abuse::{pow::PowSolution, POW_CHUNK_FLOOR};
+
+        let pool = [relay(1), relay(2), relay(3)];
+        let mut node = silent_node();
+        let mut rng = Rng(11);
+        node.set_challenges(book_of(&pool, 1_000), 1_000);
+        let mut upload = Upload::new(&[5u8; 100], Shape::default(), &pool, &mut rng).unwrap();
+        let name = upload.admission_name();
+        node.chunk_admissions().solve_apart(name);
+
+        // ABU-107: each registration waits, and nothing solves on the node.
+        upload.tick(&mut node, &mut rng).unwrap();
+        assert_eq!(node.unsolved_of(name).len(), 3);
+
+        // A slow solve costs no repair.
+        for _ in 0..2 * STEP_TIMEOUT_TICKS {
+            upload.tick(&mut node, &mut rng).unwrap();
+        }
+        assert_eq!(upload.chunks[0].repairs, 0);
+
+        // A solution frees the registration of its relay alone, and the
+        // clock of that step starts.
+        let first = upload.chunks[0].relays[0];
+        let solution = PowSolution::solve(&first, &[3; 32], POW_CHUNK_FLOOR, &mut rng).unwrap();
+        node.chunk_admissions().stock(name, first, solution);
+        node.release_unsolved(name, &mut rng).unwrap();
+        assert_eq!(node.unsolved_of(name).len(), 2);
+        for _ in 1..STEP_TIMEOUT_TICKS {
+            upload.tick(&mut node, &mut rng).unwrap();
+        }
+        assert_eq!(upload.chunks[0].repairs, 0);
+        upload.tick(&mut node, &mut rng).unwrap();
+        assert_eq!(upload.chunks[0].repairs, 1);
+
+        // The bound of ATT-190 ends an upload whose released step gets no
+        // answer.
+        let mut ended = Ok(());
+        for _ in 0..(u32::from(CHUNK_REPAIRS_MAX) + 1) * STEP_TIMEOUT_TICKS {
+            ended = upload.tick(&mut node, &mut rng);
+            if ended.is_err() {
+                break;
+            }
+        }
+        assert!(ended.is_err());
+    }
+
+    #[test]
+    fn a_new_start_drops_each_registration_that_waits() {
+        let pool = [relay(1), relay(2), relay(3)];
+        let mut node = silent_node();
+        let mut rng = Rng(14);
+        node.set_challenges(book_of(&pool, 1_000), 1_000);
+        let mut upload = Upload::new(&[5u8; 100], Shape::default(), &pool, &mut rng).unwrap();
+        let name = upload.admission_name();
+        node.chunk_admissions().solve_apart(name);
+        upload.tick(&mut node, &mut rng).unwrap();
+
+        // The relay of the failed step takes no `CDEL`, and its registration
+        // still waits.
+        upload
+            .restart(&mut node, 0, None, Some(0), &mut rng)
+            .unwrap();
+
+        // Only the registrations of the new start wait.
+        let waits = node.unsolved_of(name);
+        assert_eq!(waits.len(), 3);
+        assert!(waits.values().all(|count| *count == 1));
+    }
+
+    #[test]
+    fn the_end_of_an_upload_holds_back_its_commands_and_no_erase() {
+        use crate::abuse::{pow::PowSolution, POW_CHUNK_FLOOR};
+
+        let pool = [relay(1), relay(2), relay(3)];
+        let mut node = silent_node();
+        let mut rng = Rng(15);
+        node.set_challenges(book_of(&pool, 1_000), 1_000);
+        let mut upload = Upload::new(&[5u8; 100], Shape::default(), &pool, &mut rng).unwrap();
+        let name = upload.admission_name();
+        node.chunk_admissions().solve_apart(name);
+        upload.tick(&mut node, &mut rng).unwrap();
+
+        // A registration waits for its circuit, and so does a `CDEL`.
+        let first = upload.chunks[0].relays[0];
+        let solution = PowSolution::solve(&first, &[3; 32], POW_CHUNK_FLOOR, &mut rng).unwrap();
+        node.chunk_admissions().stock(name, first, solution);
+        node.release_unsolved(name, &mut rng).unwrap();
+        erase(&mut node, first, [9; 32], [8; 32], &mut rng);
+        assert_eq!(node.held_chunk_uploads().len(), 2);
+
+        node.end_upload(name);
+
+        let held = node.held_chunk_uploads();
+        assert_eq!(held.len(), 1);
+        assert!(!held.contains(&name));
+    }
+
+    #[test]
+    fn a_stop_of_the_solves_frees_each_registration() {
+        let pool = [relay(1), relay(2), relay(3)];
+        let mut node = silent_node();
+        let mut rng = Rng(12);
+        node.set_challenges(book_of(&pool, 1_000), 1_000);
+        let mut upload = Upload::new(&[5u8; 100], Shape::default(), &pool, &mut rng).unwrap();
+        let name = upload.admission_name();
+        node.chunk_admissions().solve_apart(name);
+        upload.tick(&mut node, &mut rng).unwrap();
+
+        // The upload goes on with a solve at each send.
+        node.chunk_admissions().end_apart(name);
+        node.release_unsolved(name, &mut rng).unwrap();
+
+        assert!(node.unsolved_of(name).is_empty());
     }
 }

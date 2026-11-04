@@ -15,7 +15,7 @@
 
 use alloc::{
     boxed::Box,
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{btree_map::Entry, BTreeMap, BTreeSet, VecDeque},
     vec::Vec,
 };
 
@@ -66,6 +66,7 @@ use super::{
     faults::{LinkFaults, REPORT_WAIT},
 };
 use crate::{
+    abuse::pow::Made,
     attach::{
         command::{ChunkCmd, CrepPayload, RegisterPayload, ReplicaTarget, PROOF_LEN, TOKEN_LEN},
         seal::{self, relay_hint},
@@ -421,6 +422,39 @@ pub enum ChunkJob {
         /// `cred_sk` of the chunk.
         cred: StaticSecret,
     },
+}
+
+/// One chunk command that left a transfer, for the timing of a test over
+/// real sockets. The node reads no clock, thus the caller stamps it.
+#[cfg(feature = "sockets-test")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChunkMark {
+    /// The handle of the answer.
+    pub handle: u64,
+    /// The command.
+    pub kind: ChunkKind,
+    /// The relay.
+    pub relay: [u8; 32],
+    /// The chunk.
+    pub chunk_id: [u8; 32],
+}
+
+/// The command of a [`ChunkMark`].
+#[cfg(feature = "sockets-test")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ChunkKind {
+    /// `CNEW` or `BNEW`.
+    Register,
+    /// `CPUT`.
+    Put,
+    /// `CREP`.
+    Replicate,
+    /// `CVFY`.
+    Verify,
+    /// `CGET`.
+    Fetch,
+    /// `CRNW` or `CDEL`.
+    Other,
 }
 
 /// The credential of a `GNEW` (Part 13 §13.2).
@@ -929,6 +963,11 @@ struct ChunkWait {
     expect: ChunkExpect,
 }
 
+/// The command keys that a transfer node keeps. One chunk of an upload sends
+/// up to three commands to one relay. The bound is above the chunks that an
+/// upload holds open at all of their relays.
+const CHUNK_KEYS_MAX: usize = 4_096;
+
 /// A chunk command that waits for a circuit to its relay.
 struct HeldChunk {
     relay: [u8; 32],
@@ -940,6 +979,9 @@ struct HeldChunk {
     /// The upload that the command belongs to, for the solution of a
     /// registration (Part 13 `ABU-108`).
     upload: u64,
+    /// The solution of a registration of an upload whose caller solves. The
+    /// command takes it before it waits for a circuit.
+    solution: Option<crate::abuse::pow::PowSolution>,
 }
 
 /// A group-queue command that waits for a circuit to its relay.
@@ -2010,6 +2052,15 @@ pub struct ClientNode {
     held_fetches: Vec<LinkFetch>,
     /// The chunk commands that wait for a circuit to their relay.
     held_chunks: Vec<HeldChunk>,
+    /// The registrations that wait for a solution of their caller.
+    unsolved_chunks: Vec<HeldChunk>,
+    /// The command key of each chunk of an upload in each relay session.
+    /// The Diffie-Hellman of a key takes more time than a hash of a chunk.
+    chunk_keys: BTreeMap<([u8; 32], [u8; 32]), CommandAuthKey>,
+    #[cfg(feature = "sockets-test")]
+    chunk_marks: Vec<ChunkMark>,
+    #[cfg(feature = "sockets-test")]
+    chunk_releases: Vec<u64>,
     /// The solutions of the registrations of this node (`ABU-106`).
     chunk_admissions: crate::abuse::pow::ChunkAdmissions,
     /// The group-queue commands that wait for a circuit to their relay.
@@ -2234,6 +2285,12 @@ impl ClientNode {
             held_records: Vec::new(),
             held_fetches: Vec::new(),
             held_chunks: Vec::new(),
+            unsolved_chunks: Vec::new(),
+            chunk_keys: BTreeMap::new(),
+            #[cfg(feature = "sockets-test")]
+            chunk_marks: Vec::new(),
+            #[cfg(feature = "sockets-test")]
+            chunk_releases: Vec::new(),
             chunk_admissions: crate::abuse::pow::ChunkAdmissions::default(),
             held_groups: Vec::new(),
             held_watches: Vec::new(),
@@ -7285,7 +7342,26 @@ impl ClientNode {
 
         let handle = self.handle();
         let class = self.chunk_class;
-        let held = HeldChunk {
+
+        #[cfg(feature = "sockets-test")]
+        {
+            let kind = match &job {
+                ChunkJob::Register { .. } => ChunkKind::Register,
+                ChunkJob::Put { .. } => ChunkKind::Put,
+                ChunkJob::Replicate { .. } => ChunkKind::Replicate,
+                ChunkJob::Verify { .. } => ChunkKind::Verify,
+                ChunkJob::Fetch { .. } => ChunkKind::Fetch,
+                ChunkJob::Renew { .. } | ChunkJob::Erase { .. } => ChunkKind::Other,
+            };
+            self.chunk_marks.push(ChunkMark {
+                handle,
+                kind,
+                relay,
+                chunk_id,
+            });
+        }
+
+        let mut held = HeldChunk {
             relay,
             chunk_id,
             handle,
@@ -7293,15 +7369,128 @@ impl ClientNode {
             class,
             // A command of no upload takes a name of its own.
             upload: upload.unwrap_or(handle),
+            solution: None,
         };
-        if self.ready_slot_in(&relay, None, class).is_some() {
-            self.start_chunk(held, rng)?;
-        } else {
-            self.held_chunks.push(held);
-            self.circuit_in(relay, class, rng)?;
+
+        let is_register = matches!(held.job, ChunkJob::Register { .. });
+        if is_register && self.chunk_admissions.is_apart(held.upload) {
+            match self.chunk_admissions.made(held.upload, &relay) {
+                Made::Solution(solution) => held.solution = Some(solution),
+                Made::None => {}
+                // The circuit starts while the caller solves.
+                Made::Due(..) => {
+                    self.unsolved_chunks.push(held);
+                    if self.ready_slot_in(&relay, None, class).is_none() {
+                        self.circuit_in(relay, class, rng)?;
+                    }
+                    return Ok(handle);
+                }
+            }
         }
 
+        self.place_chunk(held, rng)?;
         Ok(handle)
+    }
+
+    /// Starts a chunk command on a ready circuit to its relay. With no such
+    /// circuit the command waits, and the circuit starts.
+    fn place_chunk<R: CryptoRng + ?Sized>(
+        &mut self,
+        held: HeldChunk,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let (relay, class) = (held.relay, held.class);
+        if self.ready_slot_in(&relay, None, class).is_some() {
+            return self.start_chunk(held, rng);
+        }
+
+        self.held_chunks.push(held);
+        self.circuit_in(relay, class, rng)
+    }
+
+    /// Sends each registration of `upload` that no longer waits: a solution
+    /// came, or no solution can come. The caller calls this after each
+    /// solution that it stocks, and at each tick.
+    pub fn release_unsolved<R: CryptoRng + ?Sized>(
+        &mut self,
+        upload: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let (mine, others): (Vec<HeldChunk>, Vec<HeldChunk>) =
+            core::mem::take(&mut self.unsolved_chunks)
+                .into_iter()
+                .partition(|held| held.upload == upload);
+        self.unsolved_chunks = others;
+
+        let is_apart = self.chunk_admissions.is_apart(upload);
+        for mut held in mine {
+            match self.chunk_admissions.made(upload, &held.relay) {
+                Made::Solution(solution) => held.solution = Some(solution),
+                Made::Due(..) if is_apart => {
+                    self.unsolved_chunks.push(held);
+                    continue;
+                }
+                Made::Due(..) | Made::None => {}
+            }
+            self.place_chunk(held, rng)?;
+        }
+
+        Ok(())
+    }
+
+    /// The registrations of `upload` that wait for a solution at each relay.
+    pub fn unsolved_of(&self, upload: u64) -> BTreeMap<[u8; 32], usize> {
+        let mut counts: BTreeMap<[u8; 32], usize> = BTreeMap::new();
+        for held in self.unsolved_chunks.iter().filter(|h| h.upload == upload) {
+            let count = counts.entry(held.relay).or_default();
+            *count = count.saturating_add(1);
+        }
+
+        counts
+    }
+
+    /// The handles of the registrations of `upload` that wait for a solution.
+    pub fn unsolved_handles(&self, upload: u64) -> Vec<u64> {
+        self.unsolved_chunks
+            .iter()
+            .filter(|held| held.upload == upload)
+            .map(|held| held.handle)
+            .collect()
+    }
+
+    /// The upload of each chunk command that waits for a circuit.
+    #[cfg(test)]
+    pub(crate) fn held_chunk_uploads(&self) -> Vec<u64> {
+        self.held_chunks.iter().map(|held| held.upload).collect()
+    }
+
+    /// Drops a registration of `chunk_id` at `relay` that waits for a
+    /// solution: its chunk took a new start, or that relay lost its place.
+    pub fn drop_unsolved(&mut self, chunk_id: &[u8; 32], relay: &[u8; 32]) {
+        self.unsolved_chunks
+            .retain(|held| held.chunk_id != *chunk_id || held.relay != *relay);
+    }
+
+    /// `upload` ended, thus no command of it leaves. A `CDEL` has a name of
+    /// its own, thus it still leaves.
+    pub fn end_upload(&mut self, upload: u64) {
+        self.unsolved_chunks.retain(|held| held.upload != upload);
+        self.held_chunks.retain(|held| held.upload != upload);
+        self.chunk_admissions.end_upload(upload);
+        self.chunk_keys.clear();
+    }
+
+    /// Each chunk command since the last call, for a test over real sockets.
+    #[cfg(feature = "sockets-test")]
+    pub fn take_chunk_marks(&mut self) -> Vec<ChunkMark> {
+        core::mem::take(&mut self.chunk_marks)
+    }
+
+    /// The handle of each held command that its circuit released since the
+    /// last call, for a test over real sockets.
+    #[cfg(feature = "sockets-test")]
+    pub fn take_chunk_releases(&mut self) -> Vec<u64> {
+        core::mem::take(&mut self.chunk_releases)
     }
 
     /// Takes the challenges of a fetch, for the registrations of this node
@@ -7336,6 +7525,16 @@ impl ClientNode {
         let session_pk = self.session_pk()?;
         let corr_id: [u8; 16] = random(rng);
         let mut bind = [0u8; TOKEN_LEN];
+        // An upload draws a new `chunk_id` for each `cred_sk`, thus the name
+        // of a chunk in a session names one key.
+        let keeps_key = self.chunk_admissions.is_apart(held.upload)
+            && matches!(
+                held.job,
+                ChunkJob::Register { .. }
+                    | ChunkJob::Put { .. }
+                    | ChunkJob::Replicate { .. }
+                    | ChunkJob::Verify { .. }
+            );
         let (cmd, signer, payload, expect) = match held.job {
             ChunkJob::Register {
                 cred,
@@ -7346,10 +7545,10 @@ impl ClientNode {
                 // and one solution serves the registrations of its upload
                 // (`ABU-107`).
                 let mut body = [0u8; crate::abuse::pow::SOLUTION_LEN];
-                let solved = self
-                    .chunk_admissions
-                    .next(held.upload, &held.relay, rng)
-                    .and_then(|solution| solution.encode(&mut body).ok());
+                let solution = held
+                    .solution
+                    .or_else(|| self.chunk_admissions.next(held.upload, &held.relay, rng));
+                let solved = solution.and_then(|solution| solution.encode(&mut body).ok());
                 let admission = match solved {
                     Some(used) => Admission {
                         kind: umbra_wire::admission::AdmissionKind::Pow,
@@ -7416,9 +7615,22 @@ impl ClientNode {
             auth: [0; 32],
             payload: &payload,
         };
-        let key = CommandAuthKey::derive(&signer, &session_pk).map_err(|_| Error::Unverified)?;
+        let derive = || CommandAuthKey::derive(&signer, &session_pk).map_err(|_| Error::Unverified);
+        let derived;
+        let key = if keeps_key {
+            if self.chunk_keys.len() >= CHUNK_KEYS_MAX {
+                self.chunk_keys.clear();
+            }
+            match self.chunk_keys.entry((held.chunk_id, session_pk)) {
+                Entry::Occupied(kept) => &*kept.into_mut(),
+                Entry::Vacant(slot) => &*slot.insert(derive()?),
+            }
+        } else {
+            derived = derive()?;
+            &derived
+        };
         // ATT-042: the authorized bytes of a `CPUT` hold the token.
-        command.sign(&key, if is_put { bind.as_slice() } else { &[] })?;
+        command.sign(key, if is_put { bind.as_slice() } else { &[] })?;
         let mut encoded = alloc::vec![0u8; command.len()];
         command.encode(&mut encoded)?;
 
@@ -8671,6 +8883,9 @@ impl ClientNode {
             .partition(|held| held.relay == exit && held.class == ready_class);
         self.held_chunks = held;
         for held in due {
+            #[cfg(feature = "sockets-test")]
+            self.chunk_releases.push(held.handle);
+
             self.start_chunk(held, rng)?;
         }
 
