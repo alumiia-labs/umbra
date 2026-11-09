@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 2: Threat Model and Security Goals
 
 **Status:** Draft
-**Version:** 0.49.0
+**Version:** 0.49.1
 **Date:** 2026-11-09
 
 ---

@@ -97,20 +97,12 @@ COOLING_DAYS = 14
 # the advisory, the upstream security fix, or the yank. An entry that names
 # no version of Cargo.lock fails the check; remove it.
 COOLING_EXEMPT: dict[Crate, str] = {
-    ("crypto-bigint", "0.7.9"): "2026-10-25: RUSTSEC-2026-0387, branches on secrets; "
-                                "0.7.6 to 0.7.8 are yanked, thus 0.7.9 is the first fix",
-    ("ctutils", "0.4.5"): "2026-10-25: crypto-bigint 0.7.9 needs it; 0.4.4 is the first "
-                          "fix of RUSTSEC-2026-0385",
     ("ml-kem", "0.3.3"): "2026-10-23: RustCrypto/KEMs #386, the CBD sampling of 0.3.2 "
                          "has a table lookup that depends on a secret",
     ("rustls", "0.23.46"): "2026-10-23: RUSTSEC-2026-0346 to RUSTSEC-2026-0349; 0.23.46 "
                            "is the first fixed version",
     ("rustls-webpki", "0.103.16"): "2026-10-23: RUSTSEC-2026-0382, a path through a "
                                    "distrusted emSign intermediate; the first fixed version",
-    ("tokio", "1.53.3"): "2026-10-23: RUSTSEC-2026-0386, the AsyncFd constructors break "
-                         "I/O safety; the first fixed version of the 1.53 line",
-    ("webpki-roots", "1.0.10"): "2026-10-23: RUSTSEC-2026-0381, the root of the distrusted "
-                                "emSign intermediates; the first fixed version",
 }
 INDEX = "https://index.crates.io"
 
