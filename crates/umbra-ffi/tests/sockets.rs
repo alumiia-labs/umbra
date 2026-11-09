@@ -98,9 +98,9 @@ fn text(tag: u8, words: &str) -> Zeroizing<Vec<u8>> {
 struct Kept(mpsc::UnboundedSender<(ContactId, Vec<u8>)>);
 
 impl Persist for Kept {
-    fn commit(&mut self, _: Vec<StateChange>, received: &[(ContactId, Vec<u8>)]) -> bool {
-        for record in received {
-            let _ = self.0.send(record.clone());
+    fn commit(&mut self, _: Vec<StateChange>, received: &[(ContactId, &[u8])]) -> bool {
+        for (contact, app) in received {
+            let _ = self.0.send((*contact, app.to_vec()));
         }
         true
     }
@@ -291,15 +291,15 @@ struct Lasting {
 }
 
 impl Persist for Lasting {
-    fn commit(&mut self, changes: Vec<StateChange>, received: &[(ContactId, Vec<u8>)]) -> bool {
+    fn commit(&mut self, changes: Vec<StateChange>, received: &[(ContactId, &[u8])]) -> bool {
         let mut contacts = self.contacts.lock().unwrap();
         for change in changes {
             if let StateChange::Contact { contact, state } = change {
                 contacts.insert(contact, state.to_vec());
             }
         }
-        for record in received {
-            let _ = self.records.send(record.clone());
+        for (contact, app) in received {
+            let _ = self.records.send((*contact, app.to_vec()));
         }
         true
     }
@@ -547,7 +547,7 @@ struct Linking {
 }
 
 impl Persist for Linking {
-    fn commit(&mut self, changes: Vec<StateChange>, _: &[(ContactId, Vec<u8>)]) -> bool {
+    fn commit(&mut self, changes: Vec<StateChange>, _: &[(ContactId, &[u8])]) -> bool {
         let mut invitations = self.invitations.lock().unwrap();
         for change in changes {
             match change {
