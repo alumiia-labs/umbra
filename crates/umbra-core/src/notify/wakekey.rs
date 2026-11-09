@@ -31,7 +31,10 @@
 
 use alloc::vec::Vec;
 
-use umbra_crypto::{secret::Secret, zeroize::Zeroize};
+use umbra_crypto::{
+    secret::Secret,
+    zeroize::{Zeroize, Zeroizing},
+};
 use umbra_wire::codec::{Reader, Writer};
 
 use super::blob::{epoch_of_blob, Plain, Receiver, FLAG_URGENT};
@@ -119,7 +122,9 @@ impl WakeTable {
             + self.muted.len() * 24
             + 2
             + self.priority.len() * 16;
-        let mut out = alloc::vec![0u8; size];
+        // The roots wipe themselves on an error. The plain `Vec` of the
+        // result stays for the callers.
+        let mut out = Zeroizing::new(alloc::vec![0u8; size]);
         let mut w = Writer::new(&mut out);
         w.u8(0x03)?;
 
@@ -145,7 +150,7 @@ impl WakeTable {
             w.put(alias)?;
         }
 
-        Ok(out)
+        Ok(core::mem::take(&mut *out))
     }
 
     /// Reads a table.
@@ -160,7 +165,9 @@ impl WakeTable {
         if roots_len > WAKE_ENTRIES_MAX {
             return Err(Error::Malformed);
         }
-        let mut roots = Vec::with_capacity(roots_len);
+        // The roots wipe themselves on an error, and the table holds them
+        // after.
+        let mut roots = Zeroizing::new(Vec::with_capacity(roots_len));
         for _ in 0..roots_len {
             roots.push(r.array()?);
         }
@@ -200,7 +207,7 @@ impl WakeTable {
         r.finish()?;
 
         Ok(WakeTable {
-            roots,
+            roots: core::mem::take(&mut *roots),
             aliases,
             muted,
             priority,

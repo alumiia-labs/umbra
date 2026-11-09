@@ -163,7 +163,10 @@ pub fn safety_number(own_pk: &[u8], peer_pk: &[u8]) -> String {
 /// The big-endian integer of `bytes` in decimal, with leading zeros to
 /// `width` digits, and truncated to the last `width` digits if longer.
 pub fn decimal(bytes: &[u8], width: usize) -> String {
-    let mut digits: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    // A byte gives fewer than three digits. The full room at the start
+    // thus frees no copy of the digits of a secret at a growth.
+    let mut digits: alloc::vec::Vec<u8> =
+        alloc::vec::Vec::with_capacity(width.max(bytes.len().saturating_mul(3)));
     let mut number: alloc::vec::Vec<u8> = bytes.to_vec();
     while number.iter().any(|b| *b != 0) {
         let mut rem: u32 = 0;

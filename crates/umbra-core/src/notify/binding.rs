@@ -11,6 +11,7 @@ use umbra_crypto::{
     labels,
     rand_core::CryptoRng,
     secret::Secret,
+    zeroize::Zeroizing,
 };
 use umbra_wire::codec::{Reader, Writer};
 
@@ -69,12 +70,13 @@ impl Binding {
         recipient_id: &[u8; 32],
         rng: &mut R,
     ) -> Result<Vec<u8>, Error> {
-        let plain = self.encode()?;
+        // The plain bytes hold `k_ntf_root` and `k_tok`.
+        let plain = Zeroizing::new(self.encode()?);
         Ok(hpke::seal(
             relay_ntf_pk,
             labels::NTF,
             recipient_id,
-            &plain,
+            plain.as_slice(),
             rng,
         )?)
     }
@@ -85,7 +87,7 @@ impl Binding {
         recipient_id: &[u8; 32],
         sealed: &[u8],
     ) -> Result<Self, Error> {
-        let plain = hpke::open(relay_ntf, labels::NTF, recipient_id, sealed)?;
+        let plain = Zeroizing::new(hpke::open(relay_ntf, labels::NTF, recipient_id, sealed)?);
         Self::parse(&plain)
     }
 }

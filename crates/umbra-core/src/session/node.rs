@@ -1411,12 +1411,14 @@ pub fn stored_contact_keys(
 pub fn stored_with_peer_key(state: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, Error> {
     let mut reader = Reader::new(state);
     contact_version(&mut reader)?;
-    let mut out = state.to_vec();
+    // The copy holds the channel of the contact. It wipes itself on an
+    // error, and the plain `Vec` of the result stays for the FFI crate.
+    let mut out = Zeroizing::new(state.to_vec());
     // The version and the salt come first, and the key of the peer after.
     out.get_mut(17..49)
         .ok_or(Error::Malformed)?
         .copy_from_slice(key);
-    Ok(out)
+    Ok(core::mem::take(&mut *out))
 }
 
 /// The dead-channel secret of a stored contact (Part 3 §3.2.6), with the
@@ -2402,12 +2404,19 @@ impl ClientNode {
                 continue;
             };
 
-            let mut writer = Writer::new();
+            let channel = contact.channel.export()?;
+            let kept_len = contact.kept.as_ref().map_or(0, |kept| kept.bundle.len());
+            let capacity = channel
+                .len()
+                .saturating_add(kept_len)
+                .saturating_add(contact.flight.len())
+                .saturating_add(super::channel::STATE_HEADROOM);
+            let mut writer = Writer::with_capacity(capacity);
             writer.u8(CONTACT_GUARD_VERSION);
             writer.bytes(&contact.salt);
             writer.bytes(&contact.peer_static);
             writer.bytes(&contact.inbound_relay);
-            writer.var(&contact.channel.export()?)?;
+            writer.var(&channel)?;
             writer.bytes(&id);
             writer.u64(contact.since);
             writer.bytes(&contact.previous_relay);
@@ -2586,6 +2595,7 @@ impl ClientNode {
         recipient_id: &[u8; 32],
         rng: &mut R,
     ) -> Result<(), Error> {
+        // The `DEL` that used `rng` goes later now. Other crates still pass it.
         let _ = rng;
         let Some(held) = self.notify.remove(recipient_id) else {
             return Ok(());
@@ -2833,15 +2843,16 @@ impl ClientNode {
     /// Each inbound queue of a contact: the current one, and the one that a
     /// rotation replaced.
     fn queues_of(&self, contact: &[u8; 32]) -> Vec<[u8; 32]> {
-        self.contacts
-            .get(contact)
-            .map(|held| {
-                core::iter::once(held.channel.inbound())
-                    .chain(held.channel.previous())
-                    .map(|inbound| *inbound.recipient_id())
-                    .collect()
-            })
-            .unwrap_or_default()
+        self.queue_ids(contact).collect()
+    }
+
+    /// [`Self::queues_of`] with no allocation, for a check at each tick.
+    fn queue_ids<'a>(&'a self, contact: &[u8; 32]) -> impl Iterator<Item = [u8; 32]> + 'a {
+        self.contacts.get(contact).into_iter().flat_map(|held| {
+            core::iter::once(held.channel.inbound())
+                .chain(held.channel.previous())
+                .map(|inbound| *inbound.recipient_id())
+        })
     }
 
     /// Starts and ends the queue rotations that are due at `now` (Part 3
@@ -3187,6 +3198,7 @@ impl ClientNode {
         queue: &[u8; 32],
         rng: &mut R,
     ) -> Result<(), Error> {
+        // The `DEL` that used `rng` goes later now. Other crates still pass it.
         let _ = rng;
         let Some(half) = self.halves.remove(queue) else {
             return Ok(());
@@ -4482,6 +4494,7 @@ impl ClientNode {
         recipient_id: &[u8; 32],
         rng: &mut R,
     ) -> Result<(), Error> {
+        // The `DEL` that used `rng` goes later now. Other crates still pass it.
         let _ = rng;
         let Some(held) = self.rendezvous.remove(recipient_id) else {
             return Ok(());
@@ -6009,7 +6022,7 @@ impl ClientNode {
     /// this node drops.
     fn on_spare_cell<R: CryptoRng + ?Sized>(
         &mut self,
-        cell: &[u8],
+        cell: &mut [u8],
         now: u64,
         rng: &mut R,
     ) -> Result<Vec<ClientEvent>, Error> {
@@ -6068,7 +6081,7 @@ impl ClientNode {
         let Some(held) = self.retiring.get_mut(at) else {
             return Ok(Vec::new());
         };
-        let Ok(events) = held.session.receive_cell(cell) else {
+        let Ok(events) = held.session.receive_cell_in_place(cell) else {
             // NET-115: a failed check ends the circuit.
             self.retiring.remove(at);
             return Ok(Vec::new());
@@ -6790,9 +6803,8 @@ impl ClientNode {
     /// Whether a slot serves a queue of the contact `contact`. After a
     /// rotation or a renewal the contact id names no queue of a slot.
     fn serves(&self, contact: &[u8; 32]) -> bool {
-        self.queues_of(contact)
-            .iter()
-            .any(|queue| self.slot_of(queue).is_some())
+        self.queue_ids(contact)
+            .any(|queue| self.slot_of(&queue).is_some())
     }
 
     /// The circuit that serves an inbound queue.
@@ -8137,23 +8149,25 @@ impl ClientNode {
             return Ok(CoverSlot::Nothing);
         }
 
-        let ready: Vec<usize> = self
-            .slots
-            .iter()
-            .enumerate()
-            .filter(|(_, slot)| matches!(slot.circuit, Circuit::Ready(_)))
-            .map(|(index, _)| index)
-            .collect();
+        let is_ready = |slot: &&Slot| matches!(slot.circuit, Circuit::Ready(_));
+        let ready_count = self.slots.iter().filter(is_ready).count();
 
         // REL-163, NET-060: each slot takes one of the ready circuits at
         // random. Thus the loops measure each chain of this client and not
         // the first one alone.
-        let pick = if ready.len() > 1 {
-            usize::from(u16::from_be_bytes(random(rng))) % ready.len()
+        let pick = if ready_count > 1 {
+            usize::from(u16::from_be_bytes(random(rng))) % ready_count
         } else {
             0
         };
-        let Some(ready) = ready.get(pick).copied() else {
+        let Some(ready) = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| is_ready(slot))
+            .map(|(index, _)| index)
+            .nth(pick)
+        else {
             return Ok(CoverSlot::Nothing);
         };
 
@@ -8191,11 +8205,7 @@ impl ClientNode {
         self.clock = now;
         let contacts: Vec<[u8; 32]> = self.contacts.keys().copied().collect();
         for contact in contacts {
-            let is_served = self
-                .queues_of(&contact)
-                .iter()
-                .any(|queue| self.slot_of(queue).is_some());
-            if is_served && self.acknowledge(&ContactId(contact), now, rng)? {
+            if self.serves(&contact) && self.acknowledge(&ContactId(contact), now, rng)? {
                 return Ok(true);
             }
         }
@@ -8782,13 +8792,16 @@ impl ClientNode {
             return Ok(Vec::new());
         };
 
-        let cell = cell.to_vec();
+        // The cell borrows the link, thus a copy frees it. The onion layers
+        // come off in that copy.
+        let mut cell = cell.to_vec();
+
         // The `circ_id` of the cell names its circuit. A cell of no circuit
         // of this node drops.
         let circ_id = cell.get(..16);
         let of_cell = |slot: &Slot| slot.circ_id().as_ref().map(<[u8; 16]>::as_slice) == circ_id;
         let Some(index) = self.slots.iter().position(of_cell) else {
-            return self.on_spare_cell(&cell, now, rng);
+            return self.on_spare_cell(&mut cell, now, rng);
         };
 
         self.current = index;
@@ -8807,7 +8820,7 @@ impl ClientNode {
                 built
             }
             Circuit::Ready(mut session) => {
-                let received = session.receive_cell(&cell);
+                let received = session.receive_cell_in_place(&mut cell);
                 self.slot_mut()?.circuit = Circuit::Ready(session);
                 match received {
                     Ok(events) => self.on_events(events, now, rng),

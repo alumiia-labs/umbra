@@ -698,13 +698,19 @@ impl OpenedWindow {
 /// opened.
 const STORED_VERSION: u8 = 0x03;
 
+/// The room that a writer of stored state takes beside its large parts,
+/// such as a ratchet. A writer that sizes its state copies no large part
+/// at a growth. A state above it still grows the writer.
+pub(super) const STATE_HEADROOM: usize = 1_024;
+
 impl PairwiseChannel {
     /// Writes the channel for the at-rest store: the two queue ends and the
     /// ratchet. A client stores it before a record of
     /// [`PairwiseChannel::send`] leaves the device, and in the batch that
     /// commits a record of [`PairwiseChannel::receive`].
     pub fn export(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
-        let mut writer = Writer::new();
+        let ratchet = self.ratchet.export()?;
+        let mut writer = Writer::with_capacity(ratchet.len().saturating_add(STATE_HEADROOM));
         writer.u8(STORED_VERSION);
         self.outbound.export(&mut writer);
         self.inbound.export(&mut writer)?;
@@ -716,7 +722,7 @@ impl PairwiseChannel {
             None => writer.u8(0),
         }
 
-        writer.var(&self.ratchet.export()?)?;
+        writer.var(&ratchet)?;
         self.opened.export(&mut writer);
         Ok(writer.finish())
     }

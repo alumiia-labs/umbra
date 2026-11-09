@@ -58,16 +58,18 @@ impl RecoveryCode {
     /// The code from its 32 bytes, user half first: the payload of the
     /// digits of type `0x0001`.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
-        let user: [u8; 16] = bytes
-            .get(..16)
-            .and_then(|half| half.try_into().ok())
-            .ok_or(Error::Malformed)?;
-        let social: [u8; 16] = bytes
-            .get(16..)
-            .and_then(|half| half.try_into().ok())
-            .ok_or(Error::Malformed)?;
+        if bytes.len() != 32 {
+            return Err(Error::Malformed);
+        }
 
-        Ok(RecoveryCode::new(Secret::new(user), Secret::new(social)))
+        // Each half takes form in its wiped home, and no stack copy stays.
+        let (user_half, social_half) = bytes.split_at(16);
+        let mut user = Secret::<16>::zeroed();
+        user.expose_mut().copy_from_slice(user_half);
+        let mut social = Secret::<16>::zeroed();
+        social.expose_mut().copy_from_slice(social_half);
+
+        Ok(RecoveryCode::new(user, social))
     }
 
     /// `BackupRootKey` under the fixed salt and cost of `IDN-177`, which a
@@ -78,11 +80,12 @@ impl RecoveryCode {
 
     /// The 32 bytes of the code, user half first.
     pub fn bytes(&self) -> Secret<32> {
-        let mut out = [0u8; 32];
-        let (u, s) = out.split_at_mut(16);
+        // The code takes form in its wiped home, and no stack copy stays.
+        let mut out = Secret::<32>::zeroed();
+        let (u, s) = out.expose_mut().split_at_mut(16);
         u.copy_from_slice(self.user.expose());
         s.copy_from_slice(self.social.expose());
-        Secret::new(out)
+        out
     }
 
     /// `BackupRootKey = Argon2id(RecoveryCode, salt, m, t)` from the two
@@ -349,8 +352,10 @@ pub fn to_digits(kind: DigitsType, payload: &[u8]) -> Result<Zeroizing<String>, 
 /// (`IDN-151`), and refuses a type other than `expected` (`IDN-154`).
 /// The error carries nothing; the caller names the types to the user.
 pub fn from_digits(text: &str, expected: DigitsType) -> Result<Zeroizing<Vec<u8>>, Error> {
-    let digits: Zeroizing<Vec<u8>> =
-        Zeroizing::new(text.bytes().filter(|b| b.is_ascii_digit()).collect());
+    // The full room at the start, thus no growth frees a copy of the
+    // digits that no one wipes.
+    let mut digits: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(text.len()));
+    digits.extend(text.bytes().filter(|b| b.is_ascii_digit()));
 
     // The digit count names the length. The root seed and the recovery
     // code share a width, and `type` tells them apart (IDN-153).
@@ -472,9 +477,10 @@ pub fn join_social(shares: &[[u8; 17]]) -> Result<Secret<16>, Error> {
         return Err(Error::Malformed);
     }
 
-    // Lagrange interpolation at x = 0, one byte position at a time.
-    let mut out = [0u8; 16];
-    for (byte, slot) in out.iter_mut().enumerate() {
+    // Lagrange interpolation at x = 0, one byte position at a time. The
+    // secret takes form in its wiped home, and no stack copy stays.
+    let mut out = Secret::<16>::zeroed();
+    for (byte, slot) in out.expose_mut().iter_mut().enumerate() {
         let mut acc = 0u8;
         for (i, share) in shares.iter().enumerate() {
             let xi = share[0];
@@ -494,7 +500,7 @@ pub fn join_social(shares: &[[u8; 17]]) -> Result<Secret<16>, Error> {
         *slot = acc;
     }
 
-    Ok(Secret::new(out))
+    Ok(out)
 }
 
 #[cfg(test)]

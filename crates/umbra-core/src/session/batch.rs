@@ -92,13 +92,19 @@ impl Batcher {
     pub fn next_cell(&mut self) -> Option<(Bucket, Vec<u8>)> {
         let first = self.ready.pop_front()?;
         let bucket = smallest_bucket(first.len())?;
+        let area = bucket.command_area();
         let mut content = first;
         while let Some(next) = self.ready.front() {
-            if content.len().saturating_add(next.len()) > bucket.command_area() {
+            if content.len().saturating_add(next.len()) > area {
                 break;
             }
+            let Some(next) = self.ready.pop_front() else {
+                break;
+            };
 
-            content.extend(self.ready.pop_front().unwrap_or_default());
+            // One growth to the command area, and none for a lone command.
+            content.reserve(area.saturating_sub(content.len()));
+            content.extend_from_slice(&next);
         }
 
         Some((bucket, content))

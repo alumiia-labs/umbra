@@ -257,6 +257,42 @@ impl SealedRecord {
         self.open_under(store_key, table, row_id, ad.get(..len).unwrap_or(&[]))
     }
 
+    /// [`SealedRecord::open`] in the buffer of the record. Thus the largest
+    /// row of a store, a whole file, has no second copy at the read.
+    pub fn into_open(
+        self,
+        store_key: &Secret<32>,
+        table: TableId,
+        row_id: &RowId,
+        owner: Option<&RowId>,
+    ) -> Result<Vec<u8>, Error> {
+        let (ad, len) = owned_data(table, row_id, owner);
+        let ad = ad.get(..len).unwrap_or(&[]);
+        let mut bytes = self.0;
+
+        let (salt, nonce, body_len) = Self::frame(&bytes)?;
+        if salt == [0u8; SALT_LEN] {
+            return Err(Error::Stale);
+        }
+
+        let head = SALT_LEN + aead::NONCE_LEN;
+        let end = head.saturating_add(body_len);
+        let key = record_key(store_key, &salt, table, row_id);
+        let (body, tag) = bytes
+            .get_mut(head..)
+            .ok_or(Error::Malformed)?
+            .split_at_mut(body_len);
+        aead::open(&key, &nonce, ad, body, tag).map_err(|_| Error::Unverified)?;
+
+        // The move leaves a part of the plaintext behind the new end.
+        bytes.copy_within(head..end, 0);
+        if let Some(rest) = bytes.get_mut(body_len..) {
+            umbra_crypto::zeroize::Zeroize::zeroize(rest);
+        }
+        bytes.truncate(body_len);
+        Ok(bytes)
+    }
+
     /// Opens a record of version `0x01`, whose associated data names the
     /// table and the row alone. Only the store of an earlier build holds
     /// one. The pass that moves it to [`RECORD_VERSION`] calls this, and a
@@ -277,17 +313,7 @@ impl SealedRecord {
         row_id: &RowId,
         ad: &[u8],
     ) -> Result<Vec<u8>, Error> {
-        let (salt, rest) = self.0.split_at_checked(SALT_LEN).ok_or(Error::Malformed)?;
-        let (nonce, rest) = rest
-            .split_at_checked(aead::NONCE_LEN)
-            .ok_or(Error::Malformed)?;
-        let body_len = rest
-            .len()
-            .checked_sub(aead::TAG_LEN)
-            .ok_or(Error::Malformed)?;
-        let (body, tag) = rest.split_at(body_len);
-        let salt: [u8; SALT_LEN] = salt.try_into().map_err(|_| Error::Malformed)?;
-        let nonce: [u8; aead::NONCE_LEN] = nonce.try_into().map_err(|_| Error::Malformed)?;
+        let (salt, nonce, body_len) = Self::frame(&self.0)?;
 
         // IMP-041: a zero salt marks a discarded key, and no party derives
         // that key again.
@@ -295,10 +321,28 @@ impl SealedRecord {
             return Err(Error::Stale);
         }
 
+        let head = SALT_LEN + aead::NONCE_LEN;
+        let rest = self.0.get(head..).ok_or(Error::Malformed)?;
+        let (body, tag) = rest.split_at(body_len);
         let mut plain = body.to_vec();
         let key = record_key(store_key, &salt, table, row_id);
         aead::open(&key, &nonce, ad, &mut plain, tag).map_err(|_| Error::Unverified)?;
         Ok(plain)
+    }
+
+    /// The salt, the nonce, and the length of the ciphertext of a record.
+    fn frame(bytes: &[u8]) -> Result<([u8; SALT_LEN], [u8; aead::NONCE_LEN], usize), Error> {
+        let (salt, rest) = bytes.split_at_checked(SALT_LEN).ok_or(Error::Malformed)?;
+        let (nonce, rest) = rest
+            .split_at_checked(aead::NONCE_LEN)
+            .ok_or(Error::Malformed)?;
+        let body_len = rest
+            .len()
+            .checked_sub(aead::TAG_LEN)
+            .ok_or(Error::Malformed)?;
+        let salt: [u8; SALT_LEN] = salt.try_into().map_err(|_| Error::Malformed)?;
+        let nonce: [u8; aead::NONCE_LEN] = nonce.try_into().map_err(|_| Error::Malformed)?;
+        Ok((salt, nonce, body_len))
     }
 
     /// What the table MAC reads of the record: its tag, and for a record
@@ -428,6 +472,46 @@ mod tests {
         );
         assert!(earlier.open(&store_key, table, &row, None).is_err());
         assert!(earlier.open(&store_key, table, &row, Some(&owner)).is_err());
+    }
+
+    #[test]
+    fn an_open_in_the_record_buffer_matches_an_open_of_a_copy() {
+        let store_key = Secret::new([1; 32]);
+        let row = [5; ROW_ID_LEN];
+        let owner = [6; ROW_ID_LEN];
+        let table = TableId::MESSAGE;
+        let mut rng = Rng(1);
+
+        let plains: [&[u8]; 3] = [b"", b"hello", &[7; 300]];
+        for plain in plains {
+            let sealed =
+                SealedRecord::seal(&store_key, table, &row, Some(&owner), plain, &mut rng).unwrap();
+            assert_eq!(
+                sealed
+                    .clone()
+                    .into_open(&store_key, table, &row, Some(&owner)),
+                sealed.open(&store_key, table, &row, Some(&owner))
+            );
+            assert_eq!(
+                sealed
+                    .clone()
+                    .into_open(&store_key, table, &row, Some(&owner))
+                    .unwrap(),
+                plain
+            );
+            assert_eq!(
+                sealed.into_open(&store_key, table, &row, None),
+                Err(Error::Unverified)
+            );
+        }
+
+        let mut discarded =
+            SealedRecord::seal(&store_key, table, &row, None, b"gone", &mut rng).unwrap();
+        discarded.discard_key();
+        assert_eq!(
+            discarded.into_open(&store_key, table, &row, None),
+            Err(Error::Stale)
+        );
     }
 
     #[test]

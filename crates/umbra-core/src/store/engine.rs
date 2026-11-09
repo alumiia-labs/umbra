@@ -545,12 +545,16 @@ impl<B: Backend> Store<B> {
         table: TableId,
         row_id: &RowId,
         owner: Option<&RowId>,
-        sealed: &SealedRecord,
+        sealed: SealedRecord,
     ) -> Result<Vec<u8>, Error> {
+        // The second try needs the record as it was, thus the earlier form
+        // opens a copy.
+        if self.form == Form::Current {
+            return sealed.into_open(&self.store_key, table, row_id, owner);
+        }
+
         match sealed.open(&self.store_key, table, row_id, owner) {
-            Err(Error::Unverified) if self.form == Form::Earlier => {
-                sealed.open_earlier(&self.store_key, table, row_id)
-            }
+            Err(Error::Unverified) => sealed.open_earlier(&self.store_key, table, row_id),
             other => other,
         }
     }
@@ -577,6 +581,46 @@ impl<B: Backend> Store<B> {
         self.row_key.row_id(table, natural_key)
     }
 
+    /// Whether the table holds the row with a key that is not discarded.
+    /// The call opens no record, thus it does not verify one: a record
+    /// that a party with the file changed counts, and [`Store::get`] fails
+    /// on it. The scan of [`Store::audit`] finds such a record.
+    pub fn contains(&self, table: TableId, row_id: &RowId) -> Result<bool, Error> {
+        let Some(row) = self.backend.read(table, row_id)? else {
+            return Ok(false);
+        };
+
+        Ok(!SealedRecord::from_bytes(row.sealed)?.is_discarded())
+    }
+
+    /// The count of the rows that [`Store::list`] gives for the same
+    /// arguments, with no record opened. The call does not verify a
+    /// record, as [`Store::contains`] says.
+    pub fn count(&self, table: TableId, owner: Option<&RowId>) -> Result<usize, Error> {
+        let mut count = 0usize;
+        for row in self.backend.rows(table, owner)? {
+            if !SealedRecord::from_bytes(row.sealed)?.is_discarded() {
+                count = count.saturating_add(1);
+            }
+        }
+
+        Ok(count)
+    }
+
+    /// The identifiers of the rows that [`Store::list`] gives for the same
+    /// arguments, in the same order, with no record opened. The call does
+    /// not verify a record, as [`Store::contains`] says.
+    pub fn row_ids(&self, table: TableId, owner: Option<&RowId>) -> Result<Vec<RowId>, Error> {
+        let mut out = Vec::new();
+        for row in self.backend.rows(table, owner)? {
+            if !SealedRecord::from_bytes(row.sealed)?.is_discarded() {
+                out.push(row.row_id);
+            }
+        }
+
+        Ok(out)
+    }
+
     /// Reads and opens one row.
     pub fn get(&self, table: TableId, row_id: &RowId) -> Result<Option<Vec<u8>>, Error> {
         let Some(row) = self.backend.read(table, row_id)? else {
@@ -588,7 +632,7 @@ impl<B: Backend> Store<B> {
             table,
             row_id,
             row.owner.as_ref(),
-            &sealed,
+            sealed,
         )?))
     }
 
@@ -612,7 +656,7 @@ impl<B: Backend> Store<B> {
             let bound = owner.or(row.owner.as_ref());
             out.push((
                 row.row_id,
-                self.open_row(table, &row.row_id, bound, &sealed)?,
+                self.open_row(table, &row.row_id, bound, sealed)?,
             ));
         }
 
@@ -630,7 +674,7 @@ impl<B: Backend> Store<B> {
                 continue;
             }
 
-            let plain = self.open_row(table, &row.row_id, row.owner.as_ref(), &sealed)?;
+            let plain = self.open_row(table, &row.row_id, row.owner.as_ref(), sealed)?;
             out.push((row.row_id, row.owner, plain));
         }
 
@@ -659,9 +703,11 @@ impl<B: Backend> Store<B> {
             )?);
         }
 
-        let held = self.tables.get(&table).cloned().unwrap_or_default();
         let (scanned_accum, scanned_rows, _) = scanned.fields();
-        let (held_accum, held_rows, _) = held.fields();
+        let (held_accum, held_rows, _) = self
+            .tables
+            .get(&table)
+            .map_or_else(|| TableState::new().fields(), TableState::fields);
         if scanned_accum == held_accum && scanned_rows == held_rows {
             Ok(())
         } else {
@@ -723,7 +769,7 @@ impl<B: Backend> Transaction<'_, B> {
             Pending::Put(StoredRow {
                 row_id,
                 owner,
-                sealed: sealed.as_bytes().to_vec(),
+                sealed: sealed.into_bytes(),
             }),
         );
 
@@ -759,7 +805,7 @@ impl<B: Backend> Transaction<'_, B> {
         self.pending.insert(
             (table, row_id),
             Pending::Put(StoredRow {
-                sealed: sealed.as_bytes().to_vec(),
+                sealed: sealed.into_bytes(),
                 ..row
             }),
         );
@@ -1892,5 +1938,63 @@ mod tests {
         let backend = store.lock();
         assert_eq!(backend.deletion_batches, 1);
         Store::unlock(backend, Secret::new(KEY)).unwrap();
+    }
+
+    #[test]
+    fn the_presence_the_count_and_the_identifiers_match_the_list() {
+        let (mut store, conversation, first, second) = filled();
+        assert!(store.contains(TableId::MESSAGE, &first).unwrap());
+        assert!(store.contains(TableId::CONTACT, &conversation).unwrap());
+        assert!(!store.contains(TableId::CONTACT, &first).unwrap());
+        assert!(!store.contains(TableId::MESSAGE, &[9; 16]).unwrap());
+
+        let listed: Vec<RowId> = store
+            .list(TableId::MESSAGE, Some(&conversation))
+            .unwrap()
+            .into_iter()
+            .map(|(row_id, _)| row_id)
+            .collect();
+        assert_eq!(
+            store
+                .row_ids(TableId::MESSAGE, Some(&conversation))
+                .unwrap(),
+            listed
+        );
+        assert_eq!(store.row_ids(TableId::MESSAGE, None).unwrap(), listed);
+        assert_eq!(
+            store.count(TableId::MESSAGE, Some(&conversation)).unwrap(),
+            2
+        );
+        assert_eq!(store.count(TableId::MESSAGE, Some(&first)).unwrap(), 0);
+        assert_eq!(store.count(TableId::CONTACT, None).unwrap(), 1);
+        assert_eq!(store.count(TableId::QUEUE, None).unwrap(), 0);
+
+        // A discarded key leaves the row out, as the list does.
+        let mut batch = store.begin();
+        batch.discard_key(TableId::MESSAGE, second).unwrap();
+        batch.commit().unwrap();
+        assert!(!store.contains(TableId::MESSAGE, &second).unwrap());
+        assert_eq!(store.count(TableId::MESSAGE, None).unwrap(), 1);
+        assert_eq!(store.row_ids(TableId::MESSAGE, None).unwrap(), [first]);
+        assert_eq!(store.list(TableId::MESSAGE, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_read_in_the_record_buffer_gives_the_plaintext_and_refuses_a_changed_record() {
+        let (store, conversation, first, _) = filled();
+        assert!(store.list_owned(TableId::MESSAGE).unwrap().contains(&(
+            first,
+            Some(conversation),
+            b"one".to_vec()
+        )));
+
+        let mut backend = store.lock();
+        let row = backend.rows.get_mut(&(TableId::MESSAGE, first)).unwrap();
+        let last = row.sealed.len() - 1;
+        row.sealed[last] ^= 1;
+
+        let store = Store::unlock(backend, Secret::new(KEY)).unwrap();
+        assert_eq!(store.get(TableId::MESSAGE, &first), Err(Error::Unverified));
+        assert!(store.contains(TableId::MESSAGE, &first).unwrap());
     }
 }

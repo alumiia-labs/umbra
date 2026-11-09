@@ -8,7 +8,7 @@
 
 use alloc::{string::String, vec::Vec};
 
-use umbra_crypto::{aead, hash::sha3_256, labels, secret::Secret};
+use umbra_crypto::{aead, hash::sha3_256, labels, secret::Secret, zeroize::Zeroizing};
 use umbra_wire::{
     address::{self, QueueAddress},
     codec::{Reader, Writer},
@@ -25,8 +25,9 @@ pub const FRAGMENT_LEN: usize = 68;
 /// The blob version.
 pub const BLOB_VERSION: u8 = 0x01;
 
-/// The fragment of an invitation link.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The fragment of an invitation link. No `Copy`, thus each copy of the key
+/// is a visible `clone`.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Fragment {
     /// 256 bits of key material from the issuer's CSPRNG.
     pub key: [u8; 32],
@@ -34,6 +35,17 @@ pub struct Fragment {
     pub link_id: [u8; 24],
     /// The `RelayRef` of the relay that holds the blob.
     pub relay_ref: [u8; 12],
+}
+
+/// The key opens the bundle of the invitation, thus a log shows no byte of it.
+impl core::fmt::Debug for Fragment {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Fragment")
+            .field("key", &"<redacted>")
+            .field("link_id", &self.link_id)
+            .field("relay_ref", &self.relay_ref)
+            .finish()
+    }
 }
 
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -124,16 +136,18 @@ impl Fragment {
         let prefix = alloc::format!("https://{host}{PATH}#");
         let text = link.strip_prefix(&prefix).ok_or(Error::Malformed)?;
 
-        let mut bytes = [0u8; FRAGMENT_LEN];
-        base64url_decode(text, &mut bytes)?;
+        let mut bytes = Zeroizing::new([0u8; FRAGMENT_LEN]);
+        base64url_decode(text, &mut *bytes)?;
         Self::from_bytes(&bytes)
     }
 
     /// The blob key: `HKDF("umbra/v1/invite-blob" || SHA3-256(fragment))`,
     /// as `HKDF(salt = "", ikm = SHA3-256(fragment), info = label)`.
     pub fn blob_key(&self) -> Secret<32> {
-        let digest = sha3_256(&[&self.to_bytes()]);
-        let kdf = umbra_crypto::hkdf::Hkdf::<umbra_crypto::sha3::Sha3_256>::new(None, &digest);
+        let bytes = Zeroizing::new(self.to_bytes());
+        let digest = Zeroizing::new(sha3_256(&[bytes.as_slice()]));
+        let kdf =
+            umbra_crypto::hkdf::Hkdf::<umbra_crypto::sha3::Sha3_256>::new(None, digest.as_slice());
         let mut key = Secret::<32>::zeroed();
         let _ = kdf.expand(labels::INVITE_BLOB, key.expose_mut());
         key
@@ -256,7 +270,7 @@ impl<'a> Bundle<'a> {
 }
 
 /// An invitation the client issued, with its lifetime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Issued {
     /// The fragment.
     pub fragment: Fragment,

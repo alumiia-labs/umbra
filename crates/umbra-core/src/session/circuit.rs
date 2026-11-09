@@ -216,13 +216,13 @@ impl CircuitSession {
     /// Puts a `COVER` of the shape of a `B0` `SEND` with the ready commands
     /// (`WIR-015`). A relay gives no answer, thus nothing waits for one.
     pub fn queue_cover(&mut self, corr_id: [u8; 16]) -> Result<(), Error> {
-        let payload = alloc::vec![0u8; Bucket::B0.l5_payload()];
+        const PAYLOAD: [u8; Bucket::B0.l5_payload()] = [0; Bucket::B0.l5_payload()];
         let cover = Command {
             cmd: Cmd::Cover,
             corr_id,
             queue_id: [0; 32],
             auth: [0; 32],
-            payload: &payload,
+            payload: &PAYLOAD,
         };
 
         let mut encoded = alloc::vec![0u8; cover.len()];
@@ -292,16 +292,23 @@ impl CircuitSession {
     /// A cell that fails the check of the onion layer gives an error, and
     /// the caller tears the circuit down (`NET-130`).
     pub fn receive_cell(&mut self, cell: &[u8]) -> Result<Vec<Event>, Error> {
+        self.receive_cell_in_place(&mut cell.to_vec())
+    }
+
+    /// [`Self::receive_cell`] in the buffer of the caller. The layers come
+    /// off in that buffer, thus the caller does not read the cell after it.
+    pub(crate) fn receive_cell_in_place(&mut self, cell: &mut [u8]) -> Result<Vec<Event>, Error> {
         let (parsed, bucket) = Cell::parse(cell)?;
         if *parsed.circ_id != self.circuit.circ_id() {
             return Err(Error::Unverified);
         }
 
-        let mut body = parsed.body.to_vec();
+        let tag = *parsed.tag;
+        let body = cell.get_mut(32..).ok_or(Error::Malformed)?;
         self.circuit
-            .open(parsed.tag, &mut body)
+            .open(&tag, body)
             .map_err(|_| Error::Unverified)?;
-        let (command, content) = unpad_body(&body)?;
+        let (command, content) = unpad_body(body)?;
 
         // NET-060: a loop of this client came back (REL-163).
         if command == CellCommand::Loop {
@@ -322,13 +329,12 @@ impl CircuitSession {
     }
 
     fn event_of(&mut self, command: &Command<'_>, bucket: Bucket) -> Result<Option<Event>, Error> {
-        let payload = command.payload.to_vec();
         Ok(match command.cmd {
             Cmd::Cover => None,
             Cmd::Msg => Some(Event::Message {
                 queue_id: command.queue_id,
                 bucket,
-                payload,
+                payload: command.payload.to_vec(),
             }),
             Cmd::Nack => {
                 let nack = NackPayload::parse(command.payload)?;
@@ -354,18 +360,21 @@ impl CircuitSession {
                         reason: reject_of(nack.reason),
                     })
             }
-            cmd => Some(match self.pending.remove(&command.corr_id) {
-                Some(handle) => Event::Answered {
-                    handle,
-                    cmd,
-                    payload,
-                },
-                None => Event::Relay {
-                    cmd,
-                    queue_id: command.queue_id,
-                    payload,
-                },
-            }),
+            cmd => {
+                let payload = command.payload.to_vec();
+                Some(match self.pending.remove(&command.corr_id) {
+                    Some(handle) => Event::Answered {
+                        handle,
+                        cmd,
+                        payload,
+                    },
+                    None => Event::Relay {
+                        cmd,
+                        queue_id: command.queue_id,
+                        payload,
+                    },
+                })
+            }
         })
     }
 }

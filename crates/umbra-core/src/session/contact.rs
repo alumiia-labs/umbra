@@ -177,7 +177,12 @@ impl Inviter {
         };
 
         let state = responder.export()?;
-        let mut out = Zeroizing::new(alloc::vec![0u8; QUEUE_ADDRESS_LEN]);
+        // The full room at the start, thus no growth frees a copy of the
+        // queue keys that no one wipes.
+        let mut out = Zeroizing::new(Vec::with_capacity(
+            QUEUE_ADDRESS_LEN.saturating_add(state.len()),
+        ));
+        out.resize(QUEUE_ADDRESS_LEN, 0);
         reply_to.encode(&mut out)?;
         out.extend_from_slice(&state);
         Ok(Some(out))

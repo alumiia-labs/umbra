@@ -1,6 +1,6 @@
 {
   "name": "umbrachat-app-site",
-  "version": "0.50.5",
+  "version": "0.50.6",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@12.14.0",
