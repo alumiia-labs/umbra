@@ -15,6 +15,8 @@
 //! clock, and it binds its queues for the watch as Direct mode does
 //! (`NTF-150` to `NTF-153`).
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use umbra_core::notify::ndr::next_removal;
 use umbra_core::{
     notify::{binding::Binding, HANDLE_LEN, MAX_QUEUES_PER_HANDLE, ROTATE_INTERVAL, WATCH_HANDLE},
@@ -153,7 +155,7 @@ impl Timer {
 
         let mut at = 0;
         let handle = take(bytes, &mut at)?;
-        let removal = Secret::new(take(bytes, &mut at)?);
+        let removal = take_secret(bytes, &mut at)?;
         let [state] = take(bytes, &mut at)?;
         let registered_at = u64::from_be_bytes(take(bytes, &mut at)?);
 
@@ -186,6 +188,40 @@ fn take<const N: usize>(bytes: &[u8], at: &mut usize) -> Result<[u8; N], Error> 
     Ok(out)
 }
 
+/// A secret of 32 bytes at `at`. The bytes go straight into the secret,
+/// because a plain array on the stack gets no wipe.
+fn take_secret(bytes: &[u8], at: &mut usize) -> Result<Secret<32>, Error> {
+    let end = at.checked_add(32).ok_or(Error::Malformed)?;
+    let secret = super::secret_of(bytes.get(*at..end).ok_or(Error::Malformed)?)?;
+    *at = end;
+
+    Ok(secret)
+}
+
+/// The notifier secret of Part 8 §8.2.4 under the root of its group.
+fn notifier_secret_of(root: &Secret<32>, recipient_id: &[u8; 32]) -> Result<Secret<32>, Error> {
+    let kdf = Hkdf::<Sha3_256>::new(Some(recipient_id), root.expose());
+    let mut secret = Secret::<32>::zeroed();
+    kdf.expand(labels::NTF_NOTIFIER, secret.expose_mut())
+        .map_err(|_| Error::Malformed)?;
+
+    Ok(secret)
+}
+
+/// A copy of a secret that passes through no plain array.
+fn copy_secret(held: &Secret<32>) -> Secret<32> {
+    let mut copy = Secret::zeroed();
+    copy.expose_mut().copy_from_slice(held.expose());
+    copy
+}
+
+/// A random secret, drawn straight into the secret.
+fn random_secret<R: CryptoRng + ?Sized>(rng: &mut R) -> Secret<32> {
+    let mut secret = Secret::zeroed();
+    rng.fill_bytes(secret.expose_mut());
+    secret
+}
+
 impl Relay {
     fn encode(&self) -> Zeroizing<Vec<u8>> {
         Zeroizing::new(
@@ -216,7 +252,7 @@ impl Relay {
 
         Ok(Relay {
             relay_id: take(bytes, &mut at)?,
-            root: Secret::new(take(bytes, &mut at)?),
+            root: take_secret(bytes, &mut at)?,
             relay_idx: u16::from_be_bytes(take(bytes, &mut at)?),
         })
     }
@@ -224,7 +260,10 @@ impl Relay {
 
 impl Group {
     fn encode(&self) -> Zeroizing<Vec<u8>> {
-        let root = Zeroizing::new(self.root.as_ref().map_or([0u8; 32], |held| *held.expose()));
+        let root = self
+            .root
+            .as_ref()
+            .map_or([0u8; 32].as_slice(), |held| held.expose().as_slice());
         Zeroizing::new(
             [
                 self.handle.as_slice(),
@@ -232,7 +271,7 @@ impl Group {
                 self.k_tok.expose(),
                 self.removal.expose(),
                 &[self.state, self.count, self.class],
-                root.as_slice(),
+                root,
                 &self.rotated_at.to_be_bytes(),
             ]
             .concat(),
@@ -247,12 +286,12 @@ impl Group {
         let mut at = 0;
         let handle = take(bytes, &mut at)?;
         let relay_id = take(bytes, &mut at)?;
-        let k_tok = Secret::new(take(bytes, &mut at)?);
-        let removal = Secret::new(take(bytes, &mut at)?);
+        let k_tok = take_secret(bytes, &mut at)?;
+        let removal = take_secret(bytes, &mut at)?;
         let [state, count, class] = take(bytes, &mut at)?;
         let (root, rotated_at) = if bytes.len() == GROUP_LEN {
             (
-                Some(Secret::new(take(bytes, &mut at)?)),
+                Some(take_secret(bytes, &mut at)?),
                 u64::from_be_bytes(take(bytes, &mut at)?),
             )
         } else {
@@ -508,7 +547,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             (None, false) => {
                 let timer = Timer {
                     handle: random(rng),
-                    removal: Secret::new(random(rng)),
+                    removal: random_secret(rng),
                     state: UNREGISTERED,
                     registered_at: 0,
                 };
@@ -537,7 +576,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
             NdrRequest::Unregister {
                 handle: timer.handle,
-                removal: Secret::new(*timer.removal.expose()),
+                removal: copy_secret(&timer.removal),
             }
             .encode(&mut out)
             .map_err(|_| Error::Malformed)?;
@@ -563,13 +602,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let removal = if advances {
             next_removal(&timer.removal)
         } else {
-            Secret::new(*timer.removal.expose())
+            copy_secret(&timer.removal)
         };
         NdrRequest::Timer {
             handle: timer.handle,
             token: &plain,
             removal_hash: sha3_256(&[removal.expose()]),
-            prior: Secret::new(*timer.removal.expose()),
+            prior: copy_secret(&timer.removal),
         }
         .encode(&mut out)
         .map_err(|_| Error::Malformed)?;
@@ -669,14 +708,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// The hash of the contact set, for `NTF-008`.
     fn contact_set(&self) -> Result<[u8; 32], Error> {
         let store = &self.open_ref()?.store;
-        let mut rows: Vec<_> = store
-            .list(TableId::CONTACT, None)?
-            .into_iter()
-            .map(|(row, plain)| {
-                drop(Zeroizing::new(plain));
-                row
-            })
-            .collect();
+        let mut rows = store.row_ids(TableId::CONTACT, None)?;
         rows.sort_unstable();
         let parts: Vec<&[u8]> = rows.iter().map(|row| row.as_slice()).collect();
 
@@ -743,12 +775,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut fresh = Group {
             handle: random(rng),
             relay_id: old.relay_id,
-            k_tok: Secret::new(random(rng)),
-            removal: Secret::new(random(rng)),
+            k_tok: random_secret(rng),
+            removal: random_secret(rng),
             state: UNREGISTERED,
             count: 0,
             class: old.class,
-            root: Some(Secret::new(random(rng))),
+            root: Some(random_secret(rng)),
             rotated_at: now,
         };
         let mut deleted = Vec::new();
@@ -827,7 +859,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     .iter()
                     .find(|relay| relay.relay_id == group.relay_id)
                     .filter(|relay| relay.root.expose() != &[0; 32])
-                    .map(|relay| Secret::new(*relay.root.expose()));
+                    .map(|relay| copy_secret(&relay.root));
             }
         }
 
@@ -934,12 +966,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     groups.push(Group {
                         handle: random(rng),
                         relay_id: *relay_id,
-                        k_tok: Secret::new(random(rng)),
-                        removal: Secret::new(random(rng)),
+                        k_tok: random_secret(rng),
+                        removal: random_secret(rng),
                         state: UNREGISTERED,
                         count: 0,
                         class,
-                        root: Some(Secret::new(random(rng))),
+                        root: Some(random_secret(rng)),
                         rotated_at: now,
                     });
                     groups.len().saturating_sub(1)
@@ -990,9 +1022,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// blob with it (`NTF-136`). An alias whose queue raises no alert names
     /// [`WAKE_SILENT`] in the place of its conversation, and an alias of a
     /// muted conversation holds the end of its mute (`DEV-331`). An alias of
-    /// a priority conversation is in the priority part (`DEV-358`). The
-    /// platform writes the table again after each block, and a change of a
-    /// notification setting or a mute gives [`Event::WakeTable`].
+    /// a priority conversation that shows each record is in the priority
+    /// part (`DEV-358`). The platform writes the table again after each
+    /// block, and a change of a notification setting or a mute gives
+    /// [`Event::WakeTable`].
     pub fn wake_table(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
         let mut roots: Vec<[u8; 32]> = Vec::new();
 
@@ -1026,29 +1059,34 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // conversation of a view.
         // DEV-331: a mute with no end is silent, and a locked client reads
         // the end of each other mute from the table.
-        let mut silent = self.device_peers()?;
-        let mut mutes: Vec<(ConversationId, u64)> = Vec::new();
-        let mut priorities: Vec<ConversationId> = Vec::new();
-        for (_, conversation) in &conversations {
-            let conversation = ConversationId(*conversation);
+        let mut silent: BTreeSet<ConversationId> = self.device_peers()?.into_iter().collect();
+        let mut mutes: BTreeMap<ConversationId, u64> = BTreeMap::new();
+        let mut priorities: BTreeSet<ConversationId> = BTreeSet::new();
+        let distinct: BTreeSet<ConversationId> = conversations
+            .iter()
+            .map(|(_, conversation)| ConversationId(*conversation))
+            .collect();
+        for conversation in distinct {
             if silent.contains(&conversation) {
                 continue;
             }
 
-            let muted_until_ms = self.muted_until(conversation)?;
+            let (setting, muted_until_ms, flags) = self.alert_state(conversation)?;
             if self.is_blocked(conversation)?
-                || self.alert_setting(conversation)? == super::ALERT_NONE
+                || setting == super::ALERT_NONE
                 || muted_until_ms == super::MUTE_FOREVER
             {
-                silent.push(conversation);
+                silent.insert(conversation);
                 continue;
             }
 
             if muted_until_ms > 0 {
-                mutes.push((conversation, muted_until_ms.div_ceil(1_000)));
+                mutes.insert(conversation, muted_until_ms.div_ceil(1_000));
             }
-            if self.is_priority(conversation)? && !priorities.contains(&conversation) {
-                priorities.push(conversation);
+            // A locked client cannot read a mention. Thus a priority mark
+            // with the mentions setting lets no record through.
+            if setting == super::ALERT_ALL && flags & super::alerts::PRIORITY_BIT != 0 {
+                priorities.insert(conversation);
             }
         }
 
@@ -1076,10 +1114,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
 
             aliases.push((queue.alias, conversation));
-            if let Some((_, until)) = mutes
-                .iter()
-                .find(|(muted, _)| *muted == ConversationId(conversation))
-            {
+            if let Some(until) = mutes.get(&ConversationId(conversation)) {
                 muted.push((queue.alias, *until));
             }
             if priorities.contains(&ConversationId(conversation)) {
@@ -1256,12 +1291,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Ok(None);
         };
 
-        let kdf = Hkdf::<Sha3_256>::new(Some(recipient_id), binding.root.expose());
-        let mut secret = Secret::<32>::zeroed();
-        kdf.expand(labels::NTF_NOTIFIER, secret.expose_mut())
-            .map_err(|_| Error::Malformed)?;
-
-        Ok(Some(secret))
+        notifier_secret_of(&binding.root, recipient_id).map(Some)
     }
 
     /// The relay drew the `notifier_id` of a queue at its `NKEY`.
@@ -1293,7 +1323,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Ok(Vec::new());
         }
 
+        // The groups and the relays load once. Each secret comes from the
+        // root of its group, as `notifier_secret` derives it.
         let groups = self.notify_groups()?;
+        let relays = self.notify_relays()?;
         let mut out = Vec::new();
         for (_, bytes) in self.open_ref()?.store.list(NOTIFY_QUEUE, None)? {
             let Ok(queue) = Queue::parse(&bytes) else {
@@ -1305,13 +1338,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             let Some(group) = groups.iter().find(|group| group.handle == queue.handle) else {
                 continue;
             };
+            let Some(root) = &group.root else {
+                continue;
+            };
+            if !relays.iter().any(|relay| relay.relay_id == group.relay_id) {
+                continue;
+            }
 
             // DIS-014: the relay can resolve a rendezvous queue to its
             // published entry, thus its watch shares no circuit.
-            if let Some(secret) = self.notifier_secret(&queue.recipient_id)? {
-                let apart = group.class == RENDEZVOUS;
-                out.push((group.relay_id, notifier_id, secret, apart));
-            }
+            let secret = notifier_secret_of(root, &queue.recipient_id)?;
+            let apart = group.class == RENDEZVOUS;
+            out.push((group.relay_id, notifier_id, secret, apart));
         }
 
         Ok(out)
@@ -1394,7 +1432,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     let mut out = Box::new([0u8; NDR_REQUEST_LEN]);
                     NdrRequest::Unregister {
                         handle: group.handle,
-                        removal: Secret::new(*group.removal.expose()),
+                        removal: copy_secret(&group.removal),
                     }
                     .encode(&mut out)
                     .map_err(|_| Error::Malformed)?;
@@ -1426,11 +1464,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     // the NDR reads it for a handle that it holds, thus a
                     // first registration whose answer was lost goes again.
                     let advances = state == STALE;
-                    let prior = Secret::new(*group.removal.expose());
+                    let prior = copy_secret(&group.removal);
                     let removal = if advances {
                         next_removal(&group.removal)
                     } else {
-                        Secret::new(*group.removal.expose())
+                        copy_secret(&group.removal)
                     };
                     let mut out = Box::new([0u8; NDR_REQUEST_LEN]);
                     NdrRequest::Register {
@@ -1456,7 +1494,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     let mut out = Box::new([0u8; NDR_REQUEST_LEN]);
                     NdrRequest::Unregister {
                         handle: group.handle,
-                        removal: Secret::new(*group.removal.expose()),
+                        removal: copy_secret(&group.removal),
                     }
                     .encode(&mut out)
                     .map_err(|_| Error::Malformed)?;
@@ -1776,6 +1814,18 @@ mod tests {
         assert_eq!(aliases(&client), [(alias, WAKE_SILENT)]);
         assert!(priority(&client).is_empty());
         client.set_muted_until(conversation, 0, &mut rng).unwrap();
+        assert_eq!(priority(&client), [alias]);
+
+        // A locked client cannot read a mention, thus a priority mark with
+        // the mentions setting puts no alias in the priority part.
+        client
+            .set_alert_setting(conversation, super::super::ALERT_MENTIONS, &mut rng)
+            .unwrap();
+        assert_eq!(aliases(&client), [(alias, conversation.0)]);
+        assert!(priority(&client).is_empty());
+        client
+            .set_alert_setting(conversation, super::super::ALERT_ALL, &mut rng)
+            .unwrap();
         assert_eq!(priority(&client), [alias]);
         client.set_priority(conversation, false, &mut rng).unwrap();
         client.set_blocked(conversation, true, &mut rng).unwrap();

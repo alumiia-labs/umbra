@@ -50,6 +50,12 @@ pub struct ModNote {
     pub shown: u16,
 }
 
+/// The row of [`MODERATED`]: the conversation, the action, and the role of
+/// the actor.
+fn moderation_value(conversation: ConversationId, action: u8, actor_role: Role) -> Vec<u8> {
+    [conversation.0.as_slice(), &[action, actor_role as u8]].concat()
+}
+
 impl<B: Backend, E: SecureElement> Client<B, E> {
     /// The moderation state of a message and the role of the actor, or none.
     pub fn moderation_of(&self, message: &MsgRef) -> Result<Option<(u8, u8)>, Error> {
@@ -104,8 +110,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     note.shown = note.shown.saturating_add(1);
                 }
                 MOD_REMOVE => {
-                    self.put_moderation(conversation, message, MOD_REMOVE, actor_role, rng)?;
-                    self.leave_placeholder(conversation, message, rng)?;
+                    // A later epoch skips a removed message. Thus the mark
+                    // commits with the placeholder, and a fault leaves
+                    // neither.
+                    let mark = moderation_value(conversation, MOD_REMOVE, actor_role);
+                    self.placeholder_with(conversation, message, Some(&mark), rng)?;
                     note.removed = note.removed.saturating_add(1);
                 }
                 _ => continue,
@@ -144,10 +153,20 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         actor_role: Role,
         rng: &mut R,
     ) -> Result<(), Error> {
-        let value = [conversation.0.as_slice(), &[action, actor_role as u8]].concat();
+        let value = moderation_value(conversation, action, actor_role);
+        self.put_mark(conversation, message, &value, rng)
+    }
+
+    fn put_mark<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        message: MsgRef,
+        mark: &[u8],
+        rng: &mut R,
+    ) -> Result<(), Error> {
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
-        batch.put(MODERATED, message.0, Some(conversation.0), &value, rng)?;
+        batch.put(MODERATED, message.0, Some(conversation.0), mark, rng)?;
         Ok(batch.commit()?)
     }
 
@@ -160,14 +179,34 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         message: MsgRef,
         rng: &mut R,
     ) -> Result<(), Error> {
-        let Some(plain) = self.open_ref()?.store.get(TableId::MESSAGE, &message.0)? else {
+        self.placeholder_with(conversation, message, None, rng)
+    }
+
+    /// [`Client::leave_placeholder`], with the moderation state `mark` in
+    /// the same commit when the caller gives one.
+    fn placeholder_with<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        message: MsgRef,
+        mark: Option<&[u8]>,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let plain = self
+            .open_ref()?
+            .store
+            .get(TableId::MESSAGE, &message.0)?
+            .map(Zeroizing::new);
+        let is_here = match &plain {
+            Some(plain) => conversation_of(plain)? == conversation,
+            None => false,
+        };
+        let Some(plain) = plain.filter(|_| is_here) else {
+            if let Some(mark) = mark {
+                self.put_mark(conversation, message, mark, rng)?;
+            }
+
             return Ok(());
         };
-
-        let plain = Zeroizing::new(plain);
-        if conversation_of(&plain)? != conversation {
-            return Ok(());
-        }
 
         let placeholder = placeholder_of(&plain)?;
         self.outgoing.retain(|waiting| waiting.message != message);
@@ -188,6 +227,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             &placeholder,
             rng,
         )?;
+        if let Some(mark) = mark {
+            batch.put(MODERATED, message.0, Some(conversation.0), mark, rng)?;
+        }
         for row in erase {
             batch.delete(super::files::ERASE_DUE, row);
         }

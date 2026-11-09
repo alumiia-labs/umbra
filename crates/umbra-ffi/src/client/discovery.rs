@@ -21,7 +21,7 @@ use umbra_core::{
         wrap::SecureElement,
     },
 };
-use umbra_crypto::{kem::KeyPair, rand_core::CryptoRng};
+use umbra_crypto::{kem::KeyPair, rand_core::CryptoRng, secret::Secret};
 use umbra_wire::admission::AdmissionKind;
 use zeroize::Zeroizing;
 
@@ -77,7 +77,7 @@ pub(super) const EARLIER_ROOTS_KEY: &[u8] = b"discovery-roots";
 const ENTRY_NAME_LEN: usize = 1 + 4 + 4;
 
 type EntryName = [u8; ENTRY_NAME_LEN];
-type EarlierRoot = (Zeroizing<[u8; 32]>, Vec<EntryName>);
+type EarlierRoot = (Secret<32>, Vec<EntryName>);
 
 fn entry_name(kind: EntryKind, index: u32, rotation: u32) -> EntryName {
     let mut name = [0u8; ENTRY_NAME_LEN];
@@ -94,7 +94,7 @@ fn parse_earlier_roots(bytes: &[u8]) -> Result<Vec<EarlierRoot>, Error> {
     let mut r = Cursor(bytes);
     let mut roots = Vec::new();
     while !r.0.is_empty() {
-        let seed = Zeroizing::new(r.array::<32>()?);
+        let seed = super::secret_of(r.take(32)?)?;
         let count = usize::from(u16::from_be_bytes(r.array()?));
         let mut names = Vec::with_capacity(count);
         for _ in 0..count {
@@ -110,7 +110,7 @@ fn parse_earlier_roots(bytes: &[u8]) -> Result<Vec<EarlierRoot>, Error> {
 fn encode_earlier_roots(roots: &[EarlierRoot]) -> Result<Zeroizing<Vec<u8>>, Error> {
     let mut out = Zeroizing::new(Vec::new());
     for (seed, names) in roots {
-        out.extend_from_slice(seed.as_slice());
+        out.extend_from_slice(seed.expose());
         let count = u16::try_from(names.len()).map_err(|_| Error::TooLong)?;
         out.extend_from_slice(&count.to_be_bytes());
         for name in names {
@@ -598,7 +598,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .filter(|name| !served.contains(name))
             .collect();
         if !names.is_empty() {
-            roots.push((self.root_seed()?, names));
+            roots.push((super::secret_of(self.root_seed()?.as_slice())?, names));
         }
         if roots.is_empty() {
             return Ok(None);
@@ -651,18 +651,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 own[..5] == name[..5] && (own == *name || confirmed != Some(&entry.id))
             })
         };
-        let kept: Vec<EarlierRoot> = roots
-            .iter()
-            .map(|(seed, names)| {
-                let names: Vec<EntryName> = names
-                    .iter()
-                    .filter(|name| is_needed(name))
-                    .copied()
-                    .collect();
-                (seed.clone(), names)
-            })
-            .filter(|(_, names)| !names.is_empty())
-            .collect();
+        let mut kept: Vec<EarlierRoot> = Vec::new();
+        for (seed, names) in &roots {
+            let names: Vec<EntryName> = names
+                .iter()
+                .filter(|name| is_needed(name))
+                .copied()
+                .collect();
+            if !names.is_empty() {
+                kept.push((super::secret_of(seed.expose())?, names));
+            }
+        }
         let is_same = kept.len() == roots.len()
             && kept.iter().zip(&roots).all(|(a, b)| a.1.len() == b.1.len());
 
@@ -700,9 +699,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .into_iter()
             .find(|(_, names)| names.contains(&name));
         let root = match earlier {
-            Some((seed, _)) => {
-                umbra_crypto::hierarchy::RootIdentity::new(umbra_crypto::secret::Secret::new(*seed))
-            }
+            Some((seed, _)) => umbra_crypto::hierarchy::RootIdentity::new(seed),
             None => self.root_identity()?,
         };
 

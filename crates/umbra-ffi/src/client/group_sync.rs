@@ -49,7 +49,7 @@ const REKEY_HOLD_MAX: u64 = 7 * 86_400;
 /// The synced records of a group that this device does not hold yet, by
 /// their order of arrival: the subject of the group, then the record
 /// (`DEV-299`).
-const GROUP_RECORDS_HELD: TableId = TableId(0x2B);
+pub(super) const GROUP_RECORDS_HELD: TableId = TableId(0x2B);
 /// The groups whose state waits to go to the other devices of the set, by
 /// their conversation. A row stays until the descriptor went out, thus an
 /// app that ends before the upload sends it at its next run.
@@ -103,10 +103,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     self.groups.state_out.insert(conversation);
                     return Some((conversation, object));
                 }
-                // A group that left this device since sends nothing.
-                Err(_) => {
+                // A group that left this device since sends nothing. Any
+                // other fault keeps the mark for the next pump.
+                Err(Error::NotFound) => {
                     let _ = self.end_group_state_due(conversation);
                 }
+                Err(_) => {}
             }
         }
 
@@ -374,7 +376,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 TableId::LOCAL_IDENTITY,
                 store.row_id(TableId::LOCAL_IDENTITY, key),
             )?;
-            Some(Secret::new(plain.as_slice().try_into().ok()?))
+            super::secret_of(plain).ok()
         };
         let (Some(row), Some(seed)) = (find(GROUP, conversation.0), seed_of(group_id)) else {
             return Ok(false);
@@ -444,6 +446,36 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(batch.commit()?)
     }
 
+    /// Applies the held records of each group that this device holds by
+    /// now, at the start of a run. A fault of the store kept them in an
+    /// earlier run.
+    pub(super) fn replay_held_groups<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let store = &self.open_ref()?.store;
+        let mut subjects = std::collections::BTreeSet::new();
+        for row in store.row_ids(GROUP_RECORDS_HELD, None)? {
+            // A row that does not open stops no other group.
+            let Ok(Some(plain)) = store.get(GROUP_RECORDS_HELD, &row) else {
+                continue;
+            };
+
+            let plain = Zeroizing::new(plain);
+            if let Some(subject) = plain.get(..32).and_then(|bytes| bytes.try_into().ok()) {
+                subjects.insert(subject);
+            }
+        }
+
+        for subject in subjects {
+            if let Some(conversation) = self.conversation_of_group_subject(&subject)? {
+                self.replay_group_records(&subject, conversation, rng)?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Applies each held record of a group whose state arrived, in order.
     fn replay_group_records<R: CryptoRng + ?Sized>(
         &mut self,
@@ -482,10 +514,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             });
         for (_, row, at, app) in held {
             // A record that does not apply ends no replay, and a timed one
-            // whose period ended goes (DEV-210).
+            // whose period ended goes (DEV-210). A fault of the store keeps
+            // the record and each later one, in order, for the replay at
+            // the start of the next run.
             let expires_in = u32::try_from(at.saturating_sub(now_ms / 1_000)).unwrap_or(u32::MAX);
             if at == 0 || expires_in > 0 {
-                let _ = self.apply_synced_group(conversation, &app, expires_in, now_ms, rng);
+                if let Err(Error::Storage | Error::Closed | Error::Locked | Error::Busy) =
+                    self.apply_synced_group(conversation, &app, expires_in, now_ms, rng)
+                {
+                    break;
+                }
             }
 
             let open = self.open_mut()?;
@@ -546,13 +584,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Ok(true);
         };
 
-        let seed: [u8; 32] = value
+        let seed = value
             .get(..32)
-            .and_then(|bytes| bytes.try_into().ok())
-            .ok_or(Error::Malformed)?;
+            .map(super::secret_of)
+            .ok_or(Error::Malformed)?
+            .map_err(|_| Error::Malformed)?;
         let object = value.get(32..).ok_or(Error::Malformed)?;
         let mut group = self.group_of(conversation)?;
-        let seed = Secret::new(seed);
         match group.adopt_rekey(object, &seed, now_ms / 1_000) {
             Ok(_) => {}
             // A re-key that this row holds already changes nothing.
@@ -675,7 +713,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         rng: &mut R,
     ) -> Result<(), Error> {
         let open = self.open_mut()?;
-        if open.store.list(EPOCH_HELD, Some(&conversation.0))?.len() >= EPOCH_HELD_MAX {
+        if open.store.count(EPOCH_HELD, Some(&conversation.0))? >= EPOCH_HELD_MAX {
             return Ok(());
         }
 

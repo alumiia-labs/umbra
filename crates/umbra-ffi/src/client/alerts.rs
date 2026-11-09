@@ -35,7 +35,7 @@ pub const PREVIEW_SHOW: u8 = 1;
 pub const PREVIEW_HIDE: u8 = 2;
 /// The bit of the flags byte of `DEV-345` that marks a priority
 /// conversation (`DEV-358`).
-const PRIORITY_BIT: u8 = 0x10;
+pub(super) const PRIORITY_BIT: u8 = 0x10;
 /// The bits of the flags byte that hold the sender and the text.
 const PREVIEW_BITS: u8 = 0x0F;
 
@@ -115,7 +115,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(self.alert_state(conversation)?.2 & PRIORITY_BIT != 0)
     }
 
-    fn alert_state(&self, conversation: ConversationId) -> Result<(u8, u64, u8), Error> {
+    /// The setting, the end of the mute, and the flags byte of a
+    /// conversation, from one read of its row.
+    pub(super) fn alert_state(&self, conversation: ConversationId) -> Result<(u8, u64, u8), Error> {
         let store = &self.open_ref()?.store;
         let row = store.row_id(SETTINGS, &alert_key(conversation));
         Ok(store

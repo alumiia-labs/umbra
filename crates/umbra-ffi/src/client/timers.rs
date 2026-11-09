@@ -234,6 +234,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             self.drop_sync_sent_of(&messages)?;
         }
 
+        // A held record waits for its entry or its group with its deadline.
+        self.drop_lapsed_held(now)?;
+
         Ok(due.len())
     }
 

@@ -191,12 +191,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // A control record is a row of the conversation too, thus the list
         // takes each row and not the messages of a view alone.
         let messages: Vec<MsgRef> = store
-            .list(TableId::MESSAGE, Some(&conversation.0))?
+            .row_ids(TableId::MESSAGE, Some(&conversation.0))?
             .into_iter()
-            .map(|(row, plain)| {
-                drop(Zeroizing::new(plain));
-                MsgRef(row)
-            })
+            .map(MsgRef)
             .collect();
         let mut rows = self.message_rows(&messages)?;
         rows.extend(self.contact_rows(conversation, &subject)?);
@@ -254,8 +251,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let id = conversation.0;
         let mut rows = Vec::new();
         for table in OWNED {
-            for (row, plain) in store.list(table, Some(&id))? {
-                drop(Zeroizing::new(plain));
+            for row in store.row_ids(table, Some(&id))? {
                 rows.push((table, row));
             }
         }

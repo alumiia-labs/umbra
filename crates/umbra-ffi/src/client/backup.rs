@@ -34,7 +34,6 @@ use umbra_crypto::{
     rand_core::CryptoRng,
     secret::Secret,
     stored::{Reader, Writer},
-    x25519::{PublicKey as XPublic, StaticSecret},
     zeroize::Zeroizing,
 };
 
@@ -119,10 +118,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             RowWrite::Delete(BACKUP_STATE, store.row_id(BACKUP_STATE, STATE_KEY)),
             RowWrite::Delete(BACKUP_STATE, store.row_id(BACKUP_STATE, ROOT_KEY_KEY)),
         ];
-        for (row, _) in store.list(BACKUP_INDEX, None)? {
+        for row in store.row_ids(BACKUP_INDEX, None)? {
             writes.push(RowWrite::Delete(BACKUP_INDEX, row));
         }
-        for (row, _) in store.list(super::social::SHARES_GIVEN, None)? {
+        for row in store.row_ids(super::social::SHARES_GIVEN, None)? {
             writes.push(RowWrite::Delete(super::social::SHARES_GIVEN, row));
         }
 
@@ -288,7 +287,7 @@ impl BackupState {
             let mut credentials = Vec::new();
             for _ in 0..reader.u32()? {
                 let chunk_id = reader.array()?;
-                let cred = Secret::new(reader.array()?);
+                let cred = super::secret_of(reader.take(32)?)?;
                 let mut relays = Vec::new();
                 for _ in 0..reader.u8()? {
                     relays.push(reader.array()?);
@@ -382,8 +381,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let row = store.row_id(BACKUP_STATE, ROOT_KEY_KEY);
         if let Some(bytes) = store.get(BACKUP_STATE, &row)? {
             let bytes = Zeroizing::new(bytes);
-            let key: [u8; 32] = bytes.as_slice().try_into().map_err(|_| Error::Integrity)?;
-            return Ok(BackupRootKey::from_secret(Secret::new(key)).epoch(week));
+            let key = super::secret_of(&bytes)?;
+            return Ok(BackupRootKey::from_secret(key).epoch(week));
         }
 
         let key = self.recovery_code(rng)?.backup_root_key()?;
@@ -700,12 +699,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             credentials: uploaded
                 .credentials
                 .iter()
-                .map(|credential| ChunkCredential {
-                    chunk_id: credential.chunk_id,
-                    cred: Secret::new(*credential.cred.expose()),
-                    relays: credential.relays.clone(),
+                .map(|credential| {
+                    Ok(ChunkCredential {
+                        chunk_id: credential.chunk_id,
+                        cred: super::secret_of(credential.cred.expose())?,
+                        relays: credential.relays.clone(),
+                    })
                 })
-                .collect(),
+                .collect::<Result<_, Error>>()?,
         };
         let mut erase = Vec::new();
         let now = pending.written_at;
@@ -749,7 +750,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         rng.fill_bytes(&mut nonce);
         let sealed = root.seal(&credentials, nonce)?;
         let chunk = pad_handle_object(&sealed)?;
-        let read_pk = *XPublic::from(&StaticSecret::from(*credentials.read.expose())).as_bytes();
+        let read_pk = umbra_crypto::seal::public_of(&credentials.read);
 
         let encoded = state.encode()?;
         let open = self.open_mut()?;
@@ -767,7 +768,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
         Ok(RootWrite {
             handle: credentials.handle,
-            cred: Secret::new(*credentials.write.expose()),
+            cred: super::secret_of(credentials.write.expose())?,
             read_pk,
             chunk,
             erase,
@@ -823,19 +824,19 @@ impl RestoredBackup {
             }
         }
 
-        let names_root = |seed: [u8; 32], row: &RowId| {
-            let store_key = RootIdentity::new(Secret::new(seed)).storage_key();
-            RowKey::derive(&store_key).row_id(TableId::LOCAL_IDENTITY, super::ROOT_KEY) == *row
+        // The seed is the row whose identifier its own store key names.
+        let seed_of = |plain: &[u8], row: &RowId| -> Option<Secret<32>> {
+            let store_key = RootIdentity::new(super::secret_of(plain).ok()?).storage_key();
+            let is_root =
+                RowKey::derive(&store_key).row_id(TableId::LOCAL_IDENTITY, super::ROOT_KEY) == *row;
+            is_root.then(|| super::secret_of(plain).ok()).flatten()
         };
         let seed = rows
             .values()
             .find_map(|row| match row {
                 BackupRow::Put {
                     table, row, plain, ..
-                } if *table == TableId::LOCAL_IDENTITY => {
-                    let seed: [u8; 32] = plain.as_slice().try_into().ok()?;
-                    names_root(seed, row).then_some(seed)
-                }
+                } if *table == TableId::LOCAL_IDENTITY => seed_of(plain, row),
                 _ => None,
             })
             .ok_or(Error::NotFound)?;
@@ -850,7 +851,7 @@ impl RestoredBackup {
             .collect();
 
         Ok(RestoredBackup {
-            seed: Secret::new(seed),
+            seed,
             rows: rows.into_values().collect(),
             contacts,
         })
@@ -858,7 +859,9 @@ impl RestoredBackup {
 
     /// The root seed, for the store of the restored device.
     pub fn seed(&self) -> Secret<32> {
-        Secret::new(*self.seed.expose())
+        let mut seed = Secret::zeroed();
+        seed.expose_mut().copy_from_slice(self.seed.expose());
+        seed
     }
 
     /// The count of the contacts that the backup holds.

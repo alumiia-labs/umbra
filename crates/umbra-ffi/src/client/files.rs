@@ -32,7 +32,8 @@ use umbra_wire::{
 use zeroize::Zeroizing;
 
 use super::{
-    conversation_of, info_of, outbox_row, row_fault, Client, Outgoing, MESSAGE_PREFIX, OUTBOX,
+    conversation_of, info_of, outbox_row, row_fault, secret_of, Client, Outgoing, MESSAGE_PREFIX,
+    OUTBOX,
 };
 use crate::{draft::DraftFile, ConversationId, Delivery, Error, Event, MsgRef};
 
@@ -207,6 +208,25 @@ pub(super) struct FileQueues {
 }
 
 impl FileQueues {
+    /// Puts one chunk into the work list. A chunk that waits there takes
+    /// the relays of the new job, thus it takes one `CDEL` to each relay.
+    fn queue_erasure(&mut self, job: ErasureJob) {
+        let waiting = self
+            .erasures
+            .iter_mut()
+            .find(|waiting| waiting.chunk_id == job.chunk_id);
+        match waiting {
+            Some(waiting) => {
+                for relay in job.relays {
+                    if !waiting.relays.contains(&relay) {
+                        waiting.relays.push(relay);
+                    }
+                }
+            }
+            None => self.erasures.push_back(job),
+        }
+    }
+
     /// Notes that the row `row` waits for the answer of the `CDEL` of
     /// `chunk_id`.
     fn waits_for(&mut self, chunk_id: &[u8; 32], row: RowId) {
@@ -470,7 +490,7 @@ fn read_credentials_row(row: &[u8]) -> Result<Vec<ErasureJob>, Error> {
     let mut jobs = Vec::new();
     for _ in 0..u16::from_be_bytes(count) {
         let chunk_id: [u8; 32] = take(32)?.try_into().map_err(|_| Error::Integrity)?;
-        let cred: [u8; 32] = take(32)?.try_into().map_err(|_| Error::Integrity)?;
+        let cred = secret_of(take(32)?)?;
         let relay_count = usize::from(*take(1)?.first().ok_or(Error::Integrity)?);
         let mut relays = Vec::with_capacity(relay_count);
         for _ in 0..relay_count {
@@ -479,7 +499,7 @@ fn read_credentials_row(row: &[u8]) -> Result<Vec<ErasureJob>, Error> {
 
         jobs.push(ErasureJob {
             chunk_id,
-            cred: Secret::new(cred),
+            cred,
             relays,
         });
     }
@@ -531,7 +551,7 @@ fn merge_left(
             }
             None => merged.push(ChunkCredential {
                 chunk_id: credential.chunk_id,
-                cred: Secret::new(*credential.cred.expose()),
+                cred: secret_of(credential.cred.expose())?,
                 relays: credential.relays.clone(),
             }),
         }
@@ -789,31 +809,61 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let now = self.clock;
 
         // The count of a credentials row is two bytes wide.
+        let mut kept = 0usize;
         for part in credentials.chunks(usize::from(u16::MAX)) {
-            let Some(first) = part.first() else {
-                continue;
-            };
-            let open = self.open_mut()?;
-            let row = open.store.row_id(ERASE_DUE, &left_key(&first.chunk_id));
+            if let Err(error) = self.keep_left_part(part, now, rng) {
+                // The store holds no copy of these credentials, and the
+                // caller holds them no more. The work list of this run
+                // keeps them, thus their erase still goes.
+                for credential in credentials.get(kept..).unwrap_or_default() {
+                    let mut cred = Secret::zeroed();
+                    cred.expose_mut().copy_from_slice(credential.cred.expose());
+                    self.files.queue_erasure(ErasureJob {
+                        chunk_id: credential.chunk_id,
+                        cred,
+                        relays: credential.relays.clone(),
+                    });
+                }
 
-            // A task that a stop of its run did not end yet can note a chunk
-            // again after the first write, thus a second write adds to it.
-            let (at, merged) = merge_left(open.store.get(ERASE_DUE, &row)?, part, now)?;
-            let row_bytes = credentials_row(&merged)?;
-            let mut value = Zeroizing::new(Vec::with_capacity(
-                ERASE_HEAD.saturating_add(row_bytes.len()),
-            ));
-            value.push(ERASE_VERSION);
-            value.extend_from_slice(&at.to_be_bytes());
-            value.extend_from_slice(&row_bytes);
-
-            let mut batch = open.store.begin();
-            batch.put(ERASE_DUE, row, None, &value, rng)?;
-            batch.commit()?;
-
-            let jobs = read_credentials_row(&row_bytes)?;
-            self.erase_from(row, jobs);
+                return Err(error);
+            }
+            kept = kept.saturating_add(part.len());
         }
+
+        Ok(())
+    }
+
+    /// Writes one row of [`Client::keep_abandoned`] and puts its chunks into
+    /// the work list.
+    fn keep_left_part<R: CryptoRng + ?Sized>(
+        &mut self,
+        part: &[ChunkCredential],
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let Some(first) = part.first() else {
+            return Ok(());
+        };
+        let open = self.open_mut()?;
+        let row = open.store.row_id(ERASE_DUE, &left_key(&first.chunk_id));
+
+        // A task that a stop of its run did not end yet can note a chunk
+        // again after the first write, thus a second write adds to it.
+        let (at, merged) = merge_left(open.store.get(ERASE_DUE, &row)?, part, now)?;
+        let row_bytes = credentials_row(&merged)?;
+        let mut value = Zeroizing::new(Vec::with_capacity(
+            ERASE_HEAD.saturating_add(row_bytes.len()),
+        ));
+        value.push(ERASE_VERSION);
+        value.extend_from_slice(&at.to_be_bytes());
+        value.extend_from_slice(&row_bytes);
+
+        let mut batch = open.store.begin();
+        batch.put(ERASE_DUE, row, None, &value, rng)?;
+        batch.commit()?;
+
+        let jobs = read_credentials_row(&row_bytes)?;
+        self.erase_from(row, jobs);
 
         Ok(())
     }
@@ -1095,8 +1145,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
         let limit = self.auto_download_limit()?;
         let store = &self.open_ref()?.store;
-        let held_download = |row: &RowId, state: &[u8]| -> Result<Option<FileDescriptor>, Error> {
-            let info = read_state_row(state)?;
+        let held_download = |row: &RowId| -> Result<Option<FileDescriptor>, Error> {
+            let Some(state) = store.get(FILE_STATE, row)? else {
+                return Ok(None);
+            };
+
+            let info = read_state_row(&state)?;
             if info.state != FileState::Held || info.size > limit {
                 return Ok(None);
             }
@@ -1113,8 +1167,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // and it locks the store again at a fault of the call.
         let mut waiting = Vec::new();
         let mut is_sound = true;
-        for (row, state) in store.list(FILE_STATE, None)? {
-            match row_fault(held_download(&row, &state))? {
+        for row in store.row_ids(FILE_STATE, None)? {
+            match row_fault(held_download(&row))? {
                 Some(Some(descriptor)) => waiting.push((MsgRef(row), descriptor)),
                 Some(None) => {}
                 None => is_sound = false,
@@ -1173,13 +1227,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     pub(super) fn requeue_transfer_rows(&mut self) -> Result<bool, Error> {
         self.files.uploads.clear();
         self.files.downloads.clear();
-        let rows: Vec<RowId> = self
-            .open_ref()?
-            .store
-            .list(FILE_STATE, None)?
-            .into_iter()
-            .map(|(row, _)| row)
-            .collect();
+        let rows = self.open_ref()?.store.row_ids(FILE_STATE, None)?;
         let mut is_sound = true;
         for row in rows {
             if row_fault(self.requeue_file(&MsgRef(row)))?.is_none() {
@@ -1277,7 +1325,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let now = self.clock;
         let credentials = credentials_row(&[ChunkCredential {
             chunk_id: *chunk_id,
-            cred: Secret::new(*cred.expose()),
+            cred: secret_of(cred.expose())?,
             relays: relays.to_vec(),
         }])?;
         let mut value = Zeroizing::new(Vec::with_capacity(
@@ -1360,23 +1408,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             files.waits_for(&job.chunk_id, row);
         }
 
-        // A chunk of two rows takes one `CDEL` to the relays of the two.
         files.erase_left.insert(row, jobs.len());
         for job in jobs {
-            let waiting = files
-                .erasures
-                .iter_mut()
-                .find(|waiting| waiting.chunk_id == job.chunk_id);
-            match waiting {
-                Some(waiting) => {
-                    for relay in job.relays {
-                        if !waiting.relays.contains(&relay) {
-                            waiting.relays.push(relay);
-                        }
-                    }
-                }
-                None => files.erasures.push_back(job),
-            }
+            files.queue_erasure(job);
         }
     }
 

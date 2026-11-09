@@ -70,6 +70,15 @@ pub(super) const SYNC_INBOX: TableId = TableId(0x52);
 const PAIRWISE_HELD_MAX: usize = 1_024;
 /// The time that a held record waits for its entry, in seconds.
 const PAIRWISE_HELD_AGE: u64 = 30 * 86_400;
+/// The prefix of the setting that marks a contact whose changed channel
+/// did not go to the other devices of the set yet. The conversation
+/// follows it.
+const CHANNEL_DUE: &[u8] = b"channel-due/";
+
+/// The key of the setting of [`CHANNEL_DUE`] for one conversation.
+pub(super) fn channel_due_key(conversation: ConversationId) -> Vec<u8> {
+    [CHANNEL_DUE, conversation.0.as_slice()].concat()
+}
 
 /// One record for a sync channel: the conversation of the channel, and the
 /// encoded `AppMessage` of kind `0x20`.
@@ -537,9 +546,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
 
             // DEV-319: a channel whose item no device took yet, as the one
-            // of a contact from before this rule.
-            if !engine.holds_mutable(ITEM_CHANNEL, &subject) {
+            // of a contact from before this rule, or one whose change did
+            // not go out in an earlier run.
+            let due_key = channel_due_key(conversation);
+            let is_due = self.setting(&due_key)?.is_some();
+            if is_due || !engine.holds_mutable(ITEM_CHANNEL, &subject) {
                 self.publish_channel_entry(conversation, rng)?;
+            }
+            if is_due {
+                self.remove_setting(&due_key)?;
             }
         }
 
@@ -568,7 +583,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             0
         };
         let open = self.open_mut()?;
-        if open.store.list(PAIRWISE_HELD, None)?.len() >= PAIRWISE_HELD_MAX {
+        if open.store.count(PAIRWISE_HELD, None)? >= PAIRWISE_HELD_MAX {
             return Ok(());
         }
 
@@ -599,6 +614,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         &mut self,
         rng: &mut R,
     ) -> Result<(), Error> {
+        self.drop_lapsed_held(super::unix_now_seconds())?;
+
         let now_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| {
@@ -641,7 +658,45 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
         }
 
-        Ok(())
+        // DEV-299: a group record that a fault of the store kept.
+        self.replay_held_groups(rng)
+    }
+
+    /// Erases each held record whose period ended at `now`, of a contact
+    /// and of a group (`DEV-210`, `DEV-211`). An entry or a group state can
+    /// come long after the deadline, and the plaintext must not wait for it.
+    pub(super) fn drop_lapsed_held(&mut self, now: u64) -> Result<(), Error> {
+        let store = &self.open_ref()?.store;
+        let mut lapsed = Vec::new();
+        for table in [PAIRWISE_HELD, super::group_sync::GROUP_RECORDS_HELD] {
+            for row in store.row_ids(table, None)? {
+                // A row that does not open stops no other row.
+                let Ok(Some(plain)) = store.get(table, &row) else {
+                    continue;
+                };
+
+                let plain = Zeroizing::new(plain);
+                let at = plain
+                    .get(40..48)
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .map_or(0, u64::from_be_bytes);
+                if at != 0 && (umbra_core::devset::edits::Deadline { at }).due(now) {
+                    lapsed.push((table, row));
+                }
+            }
+        }
+
+        if lapsed.is_empty() {
+            return Ok(());
+        }
+
+        let open = self.open_mut()?;
+        let mut batch = open.store.begin();
+        for (table, row) in lapsed {
+            batch.delete(table, row);
+        }
+
+        Ok(batch.commit()?)
     }
 
     /// Stores each held record of a conversation whose identity entry came,
@@ -860,10 +915,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         );
         let row = open.store.row_id(TableId::CONTACT, &entry.conversation);
 
-        // The subject must name the salt, and a sync channel is no contact.
-        if named != subject || peers.contains(&ConversationId(row)) {
+        // The subject must name the salt, and a sync channel is no contact,
+        // also one that a revocation ended.
+        if named != subject
+            || peers.contains(&ConversationId(row))
+            || self.is_ended_channel(ConversationId(row))?
+        {
             return Err(Error::Integrity);
         }
+
+        let open = self.open_mut()?;
 
         let end = umbra_core::session::node::ChannelEnd {
             peer_static: entry.peer_static,
@@ -1017,7 +1078,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     return Err(Error::Integrity);
                 }
 
+                // A sync channel is no contact, also one that a revocation
+                // ended, as `apply_channel_entry` says.
                 let row = open.store.row_id(TableId::CONTACT, &entry.conversation);
+                if self.is_device_peer(ConversationId(row))?
+                    || self.is_ended_channel(ConversationId(row))?
+                {
+                    return Err(Error::Integrity);
+                }
+
+                let open = self.open_mut()?;
                 if open.store.get(TableId::CONTACT, &row)?.is_none() {
                     let state = umbra_core::session::node::shadow_contact_state(&entry.salt);
                     let plain = Zeroizing::new([entry.conversation.as_slice(), &state].concat());
@@ -1420,8 +1490,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         _ => None,
                     };
 
-                    // An item that does not apply ends no batch.
-                    let _ = self.apply_mutable(item, &key, &value, rng);
+                    // An item that does not apply ends no batch. A fault of
+                    // the store ends it, thus the engine commits no item
+                    // that the store did not take.
+                    if let Err(error @ (Error::Storage | Error::Closed | Error::Locked)) =
+                        self.apply_mutable(item, &key, &value, rng)
+                    {
+                        return Err(error);
+                    }
                     if let Some(conversation) = removed {
                         if self.is_ended_channel(conversation).unwrap_or(false) {
                             out.retain(|synced: &Synced| synced.conversation != conversation);
@@ -1764,5 +1840,134 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
 
         Ok(batch.commit()?)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+mod tests {
+    use umbra_core::{
+        store::{
+            engine::MemoryBackend,
+            wrap::{Cost, SecureElement},
+        },
+        Error as CoreError,
+    };
+    use umbra_crypto::{
+        hmac::{digest::KeyInit, Hmac, Mac},
+        rand_core::{TryCryptoRng, TryRng},
+        sha2::Sha256,
+    };
+
+    use super::*;
+    use crate::client::group_sync::GROUP_RECORDS_HELD;
+
+    struct Rng(u64);
+
+    impl TryRng for Rng {
+        type Error = core::convert::Infallible;
+
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+            Ok(self.try_next_u64()? as u32)
+        }
+
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            Ok(self.0 >> 11 ^ self.0 << 7)
+        }
+
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+            for chunk in dst.chunks_mut(8) {
+                let bytes = self.try_next_u64()?.to_le_bytes();
+                chunk.copy_from_slice(&bytes[..chunk.len()]);
+            }
+
+            Ok(())
+        }
+    }
+
+    impl TryCryptoRng for Rng {}
+
+    struct Element([u8; 32]);
+
+    impl SecureElement for Element {
+        fn keyed(&self, input: &[u8]) -> Result<[u8; 32], CoreError> {
+            let mut mac =
+                Hmac::<Sha256>::new_from_slice(&self.0).map_err(|_| CoreError::Malformed)?;
+            mac.update(input);
+            Ok(mac.finalize().into_bytes().into())
+        }
+    }
+
+    type Device = Client<MemoryBackend, Element>;
+
+    const T0: u64 = 1_700_000_000;
+
+    fn new_client(rng: &mut Rng) -> Device {
+        let passphrase: Vec<u16> = "correct horse".encode_utf16().collect();
+        Client::create(
+            MemoryBackend::default(),
+            Element([1; 32]),
+            &passphrase,
+            Cost { m_kib: 64, t: 1 },
+            1_000,
+            rng,
+        )
+        .unwrap()
+    }
+
+    /// Puts a held row of the form of both tables: the subject, the order,
+    /// the deadline, then the record.
+    fn hold(client: &mut Device, table: TableId, key: u8, at: u64, rng: &mut Rng) -> RowId {
+        let value = [
+            [key; 32].as_slice(),
+            &1u64.to_be_bytes(),
+            &at.to_be_bytes(),
+            b"record",
+        ]
+        .concat();
+        let open = client.open_mut().unwrap();
+        let row = open.store.row_id(table, &[key]);
+        let mut batch = open.store.begin();
+        batch.put(table, row, None, &value, rng).unwrap();
+        batch.commit().unwrap();
+        row
+    }
+
+    fn held(client: &Device, table: TableId) -> Vec<RowId> {
+        client
+            .open_ref()
+            .unwrap()
+            .store
+            .row_ids(table, None)
+            .unwrap()
+    }
+
+    /// DEV-210, DEV-211: a timed record that waits for its identity entry
+    /// or for its group goes at its deadline. Before this, it kept its
+    /// plaintext until the entry or the group came, or for ever.
+    #[test]
+    fn a_held_timed_record_goes_at_its_deadline() {
+        let mut rng = Rng(3);
+        let mut client = new_client(&mut rng);
+        for table in [PAIRWISE_HELD, GROUP_RECORDS_HELD] {
+            let lapsed = hold(&mut client, table, 1, T0 + 10, &mut rng);
+            let live = hold(&mut client, table, 2, T0 + 100, &mut rng);
+            let untimed = hold(&mut client, table, 3, 0, &mut rng);
+
+            client.sweep_timed(T0 + 9).unwrap();
+            assert_eq!(held(&client, table).len(), 3);
+
+            client.sweep_timed(T0 + 10).unwrap();
+            let mut left = held(&client, table);
+            left.sort_unstable();
+            let mut expected = [live, untimed];
+            expected.sort_unstable();
+            assert_eq!(left, expected);
+            assert!(!left.contains(&lapsed));
+        }
     }
 }

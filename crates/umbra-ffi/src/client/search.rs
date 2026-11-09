@@ -150,6 +150,9 @@ impl Drop for Index {
 }
 
 /// A build that did not read each conversation yet.
+/// The entry of one message and its folded text.
+type Searched = (Entry, Zeroizing<Vec<u8>>);
+
 struct Build {
     index: Index,
     pending: Vec<ConversationId>,
@@ -706,7 +709,30 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Ok(true);
         };
 
+        // A fault keeps the build and the conversation for the next step,
+        // thus no later step says that a build with a gap is complete.
+        let step = match self.searched_entries(conversation) {
+            Ok(entries) => {
+                for (entry, folded) in entries {
+                    build.index.add(entry, &folded);
+                }
+                Ok(false)
+            }
+            Err(error) => {
+                build.pending.push(conversation);
+                Err(error)
+            }
+        };
+        self.search.building = Some(build);
+
+        step
+    }
+
+    /// The entry and the folded text of each message of one conversation
+    /// that a search reads.
+    fn searched_entries(&self, conversation: ConversationId) -> Result<Vec<Searched>, Error> {
         let open = self.open_ref()?;
+        let mut entries = Vec::new();
         for (row, plain) in open.store.list(TableId::MESSAGE, Some(&conversation.0))? {
             let plain = Zeroizing::new(plain);
 
@@ -721,14 +747,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 continue;
             };
 
-            build
-                .index
-                .add(entry_of(MsgRef(row), &plain)?, &fold(&text));
+            entries.push((entry_of(MsgRef(row), &plain)?, fold(&text)));
         }
 
-        self.search.building = Some(build);
-
-        Ok(false)
+        Ok(entries)
     }
 
     /// Whether a build made an index and no lock removed it.

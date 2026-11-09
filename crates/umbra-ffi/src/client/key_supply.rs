@@ -9,9 +9,8 @@
 //! This device keeps the `send_index` of the record and no copy of it
 //! (`WIR-050`, `WIR-571`): no later key opens it, and the send again brings
 //! the content back. A hole above the rate of `WIR-337` gets no request, and
-//! the conversation shows a gap in its place (`WIR-572`). One limit of this
-//! client: a reply that goes again names no target, since the store holds
-//! the target as a reference alone after the first send.
+//! the conversation shows a gap in its place (`WIR-572`). A reply that goes
+//! again names its raw target while the store holds that target.
 
 use umbra_core::store::{engine::Backend, record::TableId, wrap::SecureElement};
 use umbra_crypto::rand_core::CryptoRng;
@@ -220,15 +219,44 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// The key requests of this device to the peer of a conversation in the
     /// 24 hours before `now`, of each scope. A mark of a supply is one byte,
-    /// thus it does not count.
-    fn requests_to(&self, conversation: ConversationId, now: u64) -> Result<usize, Error> {
+    /// thus it does not count. A request or a gap mark older than 24 hours
+    /// names nothing more, and it leaves the store here, thus the rows of a
+    /// peer stay near the rate.
+    fn requests_to(&mut self, conversation: ConversationId, now: u64) -> Result<usize, Error> {
         let store = &self.open_ref()?.store;
-        Ok(store
-            .list(KEY_ASKED, Some(&conversation.0))?
-            .iter()
-            .filter_map(|(_, at)| <[u8; 8]>::try_from(at.as_slice()).ok())
-            .filter(|at| now.saturating_sub(u64::from_be_bytes(*at)) < DAY)
-            .count())
+        let mut count = 0usize;
+        let mut old = Vec::new();
+        for (row, value) in store.list(KEY_ASKED, Some(&conversation.0))? {
+            // The time of a gap mark is the first 8 of its 9 bytes.
+            let at = match value.len() {
+                8 | 9 => value
+                    .get(..8)
+                    .and_then(|at| <[u8; 8]>::try_from(at).ok())
+                    .map(u64::from_be_bytes),
+                _ => None,
+            };
+            let Some(at) = at else {
+                continue;
+            };
+
+            if now.saturating_sub(at) >= DAY {
+                old.push(row);
+            } else if value.len() == 8 {
+                count = count.saturating_add(1);
+            }
+        }
+
+        if !old.is_empty() {
+            let open = self.open_mut()?;
+            let mut batch = open.store.begin();
+            for row in old {
+                batch.delete(KEY_ASKED, row);
+            }
+
+            batch.commit()?;
+        }
+
+        Ok(count)
     }
 
     /// Counts one group key request of this device to the peer of a
@@ -358,8 +386,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         };
         let status = match again {
             // WIR-348: the same record, thus the same `msg_id`, under the
-            // current ratchet state.
+            // current ratchet state. WIR-071: the wire carries the raw
+            // target of a reply, and the row holds its reference.
             Some(app) if AppMessage::parse(&app, Channel::Pairwise).is_ok() => {
+                let app = self.with_raw_targets(conversation, &app)?;
                 self.outgoing.push_back(Outgoing {
                     message: EPHEMERAL,
                     conversation,

@@ -151,6 +151,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut writes = self.new_recovery_code_writes(rng)?;
         writes.extend(self.device_set_writes(&device, &roster)?);
         writes.extend(tombstones);
+        writes.extend(self.owed_rekey_writes(now)?);
         let open = self.open_mut()?;
         let identity_row = open
             .store
@@ -178,6 +179,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for write in &writes {
             match write {
                 RowWrite::Put(table, row, plain) => batch.put(*table, *row, None, plain, rng)?,
+                RowWrite::PutOwned(table, row, owner, plain) => {
+                    batch.put(*table, *row, Some(*owner), plain, rng)?
+                }
                 RowWrite::Delete(table, row) => batch.delete(*table, *row),
             }
         }
@@ -197,8 +201,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         batch.commit()?;
 
         // DEV-263: the group re-key of Part 11 §11.12 in each group. A group
-        // that a rate holds back takes its re-key at a later try. An error
-        // here would tell the platform that no reset took place.
+        // whose re-key fails keeps its clock from the commit above, and
+        // `expire_group_holds` tries it again. An error here would tell the
+        // platform that no reset took place.
         let _ = self.rekey_groups(now_ms, rng);
         self.events.push_back(Event::Conversations);
 
@@ -225,7 +230,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// The key-change notices that no relay took yet, for the view of the
     /// identity: the reset is complete for a contact when its notice left.
     pub fn notices_waiting(&self) -> Result<usize, Error> {
-        Ok(self.open_ref()?.store.list(RESET_NOTICES, None)?.len())
+        Ok(self.open_ref()?.store.count(RESET_NOTICES, None)?)
     }
 
     /// Hands each notice whose delay passed at `now` to the send path. The

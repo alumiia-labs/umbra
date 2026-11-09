@@ -22,12 +22,7 @@ use umbra_core::{
     },
     store::{engine::Backend, record::TableId, wrap::SecureElement},
 };
-use umbra_crypto::{
-    rand_core::CryptoRng,
-    secret::Secret,
-    x25519::{PublicKey as XPublic, StaticSecret},
-    zeroize::Zeroizing,
-};
+use umbra_crypto::{rand_core::CryptoRng, secret::Secret, zeroize::Zeroizing};
 use umbra_wire::address::LEN as ADDRESS_LEN;
 
 use super::{info_of, Client, ConversationId, Outgoing, MESSAGE_PREFIX, QUEUE_ID_LEN, SETTINGS};
@@ -182,7 +177,7 @@ impl DeadRow {
             ))
         };
         let written_week = week(take(4)?)?;
-        let cred: [u8; 32] = take(32)?.try_into().map_err(|_| Error::Integrity)?;
+        let cred = super::secret_of(take(32)?)?;
         let count = usize::from(*take(1)?.first().ok_or(Error::Integrity)?);
         let mut written_relays = Vec::new();
         for index in 0..BLOB_RELAYS {
@@ -220,7 +215,7 @@ impl DeadRow {
             dead_since,
             address,
             written_week,
-            written_cred: Secret::new(cred),
+            written_cred: cred,
             written_relays,
             fetch_week,
             fetch_at,
@@ -281,7 +276,7 @@ pub enum DeadWork {
 }
 
 fn read_pk(read: &Secret<32>) -> [u8; 32] {
-    *XPublic::from(&StaticSecret::from(*read.expose())).as_bytes()
+    umbra_crypto::seal::public_of(read)
 }
 
 impl<B: Backend, E: SecureElement> Client<B, E> {
@@ -478,8 +473,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     ) -> Result<Vec<(ConversationId, [u8; 32], Zeroizing<Vec<u8>>, bool, bool)>, Error> {
         let store = &self.open_ref()?.store;
         let mut out = Vec::new();
-        for (row, plain) in store.list(TableId::CONTACT, None)? {
-            drop(Zeroizing::new(plain));
+        for row in store.row_ids(TableId::CONTACT, None)? {
             let conversation = ConversationId(row);
             let Some(held) = self.dead_row(conversation)? else {
                 continue;
@@ -534,7 +528,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
         Ok(Some(DeadWork::Erase {
             handle: secret.handle(&own_pk, row.written_week),
-            cred: Secret::new(*row.written_cred.expose()),
+            cred: super::secret_of(row.written_cred.expose())?,
             relays: row.written_relays.clone(),
         }))
     }
@@ -649,8 +643,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     pub fn silent_conversations(&self, now_ms: u64) -> Result<Vec<ConversationId>, Error> {
         let store = &self.open_ref()?.store;
         let mut out = Vec::new();
-        for (row, plain) in store.list(TableId::CONTACT, None)? {
-            drop(Zeroizing::new(plain));
+        for row in store.row_ids(TableId::CONTACT, None)? {
             let conversation = ConversationId(row);
             let name = [UNANSWERED_SETTING, conversation.0.as_slice()].concat();
             let since = store
@@ -754,8 +747,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
         // A row names its conversation by the key alone, thus each contact
         // is asked.
-        for (row, plain) in store.list(TableId::CONTACT, None)? {
-            drop(Zeroizing::new(plain));
+        for row in store.row_ids(TableId::CONTACT, None)? {
             let conversation = ConversationId(row);
             if !conversations.contains(&conversation) && self.dead_row(conversation)?.is_some() {
                 conversations.push(conversation);

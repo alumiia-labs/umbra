@@ -13,7 +13,7 @@ use umbra_crypto::rand_core::CryptoRng;
 use umbra_wire::app::keys::KeyChangeNotice;
 use zeroize::Zeroizing;
 
-use super::{Client, QUEUE_ID_LEN};
+use super::{sync::channel_due_key, Client, QUEUE_ID_LEN, SETTINGS};
 use crate::{ConversationId, Error, Event};
 
 /// The notice that waits for the answer of the user in each conversation,
@@ -170,13 +170,24 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let state = plain.get(QUEUE_ID_LEN..).ok_or(Error::Integrity)?;
         let changed =
             Zeroizing::new([contact.as_slice(), &stored_with_peer_key(state, &key)?].concat());
+
+        // DEV-319: each other device of the set takes the new key. The mark
+        // commits with the key, thus a publish that fails goes again at the
+        // start of the next run.
+        let due_key = channel_due_key(conversation);
+        let due_row = open.store.row_id(SETTINGS, &due_key);
         let mut batch = open.store.begin();
         batch.put(TableId::CONTACT, conversation.0, None, &changed, rng)?;
         batch.delete(KEY_CHANGES, conversation.0);
+        batch.put(SETTINGS, due_row, None, &[1], rng)?;
         batch.commit()?;
 
-        // DEV-319: each other device of the set takes the new key.
-        let _ = self.publish_channel_entry(conversation, rng);
+        // The key is in the store at this point, thus a fault of the publish
+        // or of the mark does not fail the answer of the user. A mark that
+        // stays publishes the same entry once more.
+        if self.publish_channel_entry(conversation, rng).is_ok() {
+            let _ = self.remove_setting(&due_key);
+        }
         self.events.push_back(Event::Conversations);
 
         Ok((ContactId(contact), key))

@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 7: Device Sets, History Sync, and Revocation
 
 **Status:** Draft
-**Version:** 0.51.5
+**Version:** 0.52.0
 **Date:** 2026-11-09
 
 ---
@@ -2009,7 +2009,9 @@ setting that decides **what the device shows**, and it is per conversation.
 > learns which conversation is priority. For the same reason the mark cannot
 > make a device wake sooner. In Periodic mode and in Private mode, the alert
 > of a priority conversation waits for the next wake of the clock. A mark on a
-> group with the `mentions` setting lets only a mention of the user through.
+> group with the `mentions` setting lets only a mention of the user through. A
+> locked client cannot read a mention, thus it shows each record of such a
+> group on the channel of messages.
 
 ### 7.5.10 The forward policy
 

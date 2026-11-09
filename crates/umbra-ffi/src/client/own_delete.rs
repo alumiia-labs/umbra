@@ -476,7 +476,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for (conversation, natural, reference) in waiting {
             let count = match held.get(conversation) {
                 Some(count) => *count,
-                None => open.store.list(PENDING, Some(&conversation.0))?.len(),
+                None => open.store.count(PENDING, Some(&conversation.0))?,
             };
             if count >= REF_ORPHAN_MAX {
                 continue;
@@ -546,20 +546,33 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// The messages that the deletions of the other devices name after a
     /// restore, which wait for the user (`DEV-117`).
     pub fn held_deletions(&self) -> Result<usize, Error> {
-        Ok(self.open_ref()?.store.list(HELD_DELETIONS, None)?.len())
+        Ok(self.open_ref()?.store.count(HELD_DELETIONS, None)?)
     }
 
     /// The user confirmed the deletions that wait (`DEV-118`), and later
     /// deletions apply at once.
     pub fn apply_held_deletions(&mut self) -> Result<(), Error> {
-        let held = self.open_ref()?.store.list(HELD_DELETIONS, None)?;
-        for (row, conversation) in held {
+        let held = self.open_ref()?.store.row_ids(HELD_DELETIONS, None)?;
+        let mut kept = Vec::new();
+        for row in held {
             let message = MsgRef(row);
-            if self.delete_if_held(&message).is_err() {
-                continue;
+            let conversation = self.open_ref()?.store.get(HELD_DELETIONS, &row);
+            match self.delete_if_held(&message) {
+                Ok(()) => {}
+                // A fault of the store keeps the confirmed deletion for a
+                // next try. A row that does not open deletes nothing.
+                Err(Error::Storage | Error::Closed | Error::Locked | Error::Busy) => {
+                    kept.push(row);
+                    continue;
+                }
+                Err(_) => continue,
             }
 
-            if let Ok(conversation) = <[u8; 16]>::try_from(conversation.as_slice()) {
+            if let Some(conversation) = conversation
+                .ok()
+                .flatten()
+                .and_then(|value| <[u8; 16]>::try_from(value.as_slice()).ok())
+            {
                 self.events.push_back(Event::Deleted {
                     conversation: ConversationId(conversation),
                     message,
@@ -567,7 +580,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
         }
 
-        self.end_held_deletions()
+        self.end_held_deletions(&kept)
     }
 
     /// Marks the store as a restore does, for a test.
@@ -578,20 +591,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// The user keeps the messages that the restore brought back.
     pub fn keep_restored_messages(&mut self) -> Result<(), Error> {
-        self.end_held_deletions()
+        self.end_held_deletions(&[])
     }
 
-    fn end_held_deletions(&mut self) -> Result<(), Error> {
-        let rows: Vec<_> = self
-            .open_ref()?
-            .store
-            .list(HELD_DELETIONS, None)?
-            .into_iter()
-            .map(|(row, _)| row)
-            .collect();
+    /// Ends the hold of `DEV-118`. Each row in `kept` stays, and it waits
+    /// for the user again.
+    fn end_held_deletions(&mut self, kept: &[RowId]) -> Result<(), Error> {
+        let rows = self.open_ref()?.store.row_ids(HELD_DELETIONS, None)?;
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
-        for row in rows {
+        for row in rows.into_iter().filter(|row| !kept.contains(row)) {
             batch.delete(HELD_DELETIONS, row);
         }
 

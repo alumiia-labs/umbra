@@ -31,6 +31,8 @@ const TOKEN_STATE: TableId = TableId(0x31);
 const KEY_ROW: u8 = 1;
 const SPENT_ROW: u8 = 2;
 const WORK_ROW: u8 = 3;
+/// The row of the epoch of the last prune: the epoch.
+const PRUNED_ROW: u8 = 4;
 
 /// The rows of one table, each with its value.
 type Rows = Vec<(RowId, Zeroizing<Vec<u8>>)>;
@@ -192,7 +194,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut batch = open.store.begin();
         batch.put(TOKEN_STATE, row, None, &held.to_be_bytes(), rng)?;
         batch.commit()?;
-        self.prune_token_state(epoch)?;
+        self.prune_token_state(epoch, rng)?;
 
         Ok(true)
     }
@@ -217,14 +219,30 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut batch = open.store.begin();
         batch.put(TOKEN_STATE, row, None, &epoch.to_be_bytes(), rng)?;
         batch.commit()?;
-        self.prune_token_state(epoch)?;
+        self.prune_token_state(epoch, rng)?;
 
         Ok(true)
     }
 
     /// Drops the keys and the spent nonces older than the epoch before
-    /// `epoch`, which no token of now names (§13.6).
-    fn prune_token_state(&mut self, epoch: u32) -> Result<(), Error> {
+    /// `epoch`, which no token of now names (§13.6). The prune opens each
+    /// row of the table, thus it runs once for each epoch and not for each
+    /// hello.
+    fn prune_token_state<R: CryptoRng + ?Sized>(
+        &mut self,
+        epoch: u32,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let store = &self.open_ref()?.store;
+        let mark = store.row_id(TOKEN_STATE, &[PRUNED_ROW]);
+        let pruned = store
+            .get(TOKEN_STATE, &mark)?
+            .and_then(|value| <[u8; 4]>::try_from(value.as_slice()).ok())
+            .map(u32::from_be_bytes);
+        if pruned.is_some_and(|pruned| pruned >= epoch) {
+            return Ok(());
+        }
+
         let floor = epoch.saturating_sub(1);
         let mut gone = Vec::new();
         for (row, value) in self.token_rows(TOKEN_STATE)? {
@@ -243,11 +261,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             gone.push(store.row_id(TOKEN_STATE, &key_key(held)));
         }
 
+        // The mark holds four bytes as a spent row does, and the scan can
+        // delete it. The put comes after the deletes and wins.
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         for row in gone {
             batch.delete(TOKEN_STATE, row);
         }
+        batch.put(TOKEN_STATE, mark, None, &epoch.to_be_bytes(), rng)?;
 
         Ok(batch.commit()?)
     }

@@ -25,6 +25,7 @@ use super::{
         RowWrite, DEVICE_SELF, LINK_FLOOR_SETTING, PENDING_PEER_SETTING, SELF_KEY,
         SYNC_BUNDLE_SETTING,
     },
+    groups::GROUP_PRESENCE,
     sync::SYNC_SENT,
     Client, Event, QUEUE_ID_LEN, SETTINGS,
 };
@@ -51,6 +52,44 @@ pub struct TakeOverCount {
 }
 
 impl<B: Backend, E: SecureElement> Client<B, E> {
+    /// The re-key clock of each open group that holds the member, as
+    /// writes for the commit that calls for a re-key (Part 11 §11.12).
+    /// `expire_group_holds` tries a group with a clock again, and a re-key
+    /// that goes clears it. Thus a fault of the re-key does not leave the
+    /// keys of a group with the party that the commit cuts off.
+    pub(super) fn owed_rekey_writes(&self, now: u64) -> Result<Vec<RowWrite>, Error> {
+        let mut writes = Vec::new();
+        for conversation in self.group_conversations()? {
+            // A group that no longer holds the member takes no re-key, and
+            // its clock would not clear. A group that does not open is owed.
+            if self.group_closed(conversation).unwrap_or(false) {
+                continue;
+            }
+
+            let active = self.group_of(conversation).map_or(true, |group| {
+                group
+                    .roster()
+                    .member(group.own_index())
+                    .is_some_and(|member| member.active)
+            });
+            if !active {
+                continue;
+            }
+
+            // The key of the re-key clock that `rekey_waits` reads.
+            let key = [conversation.0.as_slice(), b"rekeys"].concat();
+            let store = &self.open_ref()?.store;
+            writes.push(RowWrite::PutOwned(
+                GROUP_PRESENCE,
+                store.row_id(GROUP_PRESENCE, &key),
+                conversation.0,
+                Zeroizing::new(now.max(1).to_be_bytes().to_vec()),
+            ));
+        }
+
+        Ok(writes)
+    }
+
     /// The device that owns the channels, as a device that owns none sees
     /// it, with the sync channel to it when that channel opened.
     fn owning_device(&self) -> Result<Option<(DeviceId, Option<ConversationId>)>, Error> {
@@ -334,10 +373,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         ] {
             writes.push(RowWrite::Delete(SETTINGS, store.row_id(SETTINGS, key)));
         }
-        for (row, plain) in store.list(SYNC_SENT, None)? {
-            drop(Zeroizing::new(plain));
+        for row in store.row_ids(SYNC_SENT, None)? {
             writes.push(RowWrite::Delete(SYNC_SENT, row));
         }
+        writes.extend(self.owed_rekey_writes(now)?);
 
         // DEV-313: the store holds the notice before it holds the epoch.
         self.owe_revocation(absent, channel, &bytes, false, rng)?;
@@ -355,8 +394,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         self.mark_resync(rng)?;
 
         // Part 7 §7.7 step 2e: the absent device holds the keys of each
-        // group. A group that waits takes its re-key at a later try, and
-        // it does not undo the take-over.
+        // group. A group whose re-key fails keeps its clock from the commit
+        // above, and `expire_group_holds` tries it again. A fault does not
+        // undo the take-over.
         let _ = self.rekey_groups(now.saturating_mul(1_000), rng);
         self.events.push_back(Event::Conversations);
 

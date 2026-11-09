@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 8: Notifications and Mobile Delivery
 
 **Status:** Draft
-**Version:** 0.51.5
+**Version:** 0.52.0
 **Date:** 2026-11-09
 
 ---
@@ -877,9 +877,11 @@ section delivers a record to it. The **wake key** lets it open the blob of
   conversation. The table MUST hold the end of each other mute for the
   `queue_alias` of its conversation, and a locked client MUST show no alert for
   such an alias before that end. The table MUST also name each `queue_alias`
-  of a priority conversation of Part 7 `DEV-358`, and no silent alias. A client
-  MUST write the table again after each change of a mute, of a notification
-  setting, and of a priority mark.
+  of a priority conversation of Part 7 `DEV-358` whose notification setting is
+  `all`, and no silent alias. A locked client cannot read a mention, thus a
+  priority conversation with the `mentions` setting is not in that part. A
+  client MUST write the table again after each change of a mute, of a
+  notification setting, and of a priority mark.
 - **[NTF-136]** A locked client MUST open each blob of a push or of a watch with
   that table under `NTF-075` to `NTF-079`. It MUST show that a message waits in
   the conversation of `queue_alias`, grouped under `NTF-089`, with no text of a

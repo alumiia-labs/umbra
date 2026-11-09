@@ -74,6 +74,8 @@ const ROSTER_KEY: &[u8] = b"roster";
 /// One write that commits with a roster epoch.
 pub(super) enum RowWrite {
     Put(TableId, RowId, Zeroizing<Vec<u8>>),
+    /// A put of a row whose owner column names its group or its contact.
+    PutOwned(TableId, RowId, RowId, Zeroizing<Vec<u8>>),
     Delete(TableId, RowId),
 }
 /// The epochs below the head that a device keeps for a peer that missed
@@ -217,6 +219,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for write in &writes {
             match write {
                 RowWrite::Put(table, row, plain) => batch.put(*table, *row, None, plain, rng)?,
+                RowWrite::PutOwned(table, row, owner, plain) => {
+                    batch.put(*table, *row, Some(*owner), plain, rng)?
+                }
                 RowWrite::Delete(table, row) => batch.delete(*table, *row),
             }
         }
@@ -569,8 +574,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut owed = self.setting(ROTATION_OWED)?.unwrap_or_default();
         let peers = self.device_peers()?;
         let store = &self.open_ref()?.store;
-        for (row, plain) in store.list(TableId::CONTACT, None)? {
-            drop(Zeroizing::new(plain));
+        for row in store.row_ids(TableId::CONTACT, None)? {
             let is_held = owed.as_chunks::<16>().0.contains(&row);
             if !is_held && !peers.contains(&ConversationId(row)) {
                 owed.extend_from_slice(&row);

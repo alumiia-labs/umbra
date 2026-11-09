@@ -8,7 +8,7 @@ use umbra_core::{
 };
 use umbra_crypto::rand_core::CryptoRng;
 use umbra_wire::app::{recovery::RecoveryShare, AppKind, AppMessage};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::{msg_ref, outbox_row, stored_message, Client, Outgoing, OUTBOX, OUTGOING};
 use crate::{ConversationId, Delivery, Error, Event, MsgRef, Sink};
@@ -85,24 +85,22 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let shares = split_social(code.social(), threshold, count, &coeffs)?;
         let mut set_id = [0u8; 16];
         rng.fill_bytes(&mut set_id);
-        let old: Vec<[u8; 16]> = self
-            .open_ref()?
-            .store
-            .list(SHARES_GIVEN, None)?
-            .into_iter()
-            .map(|(row, _)| row)
-            .collect();
+        let old = self.open_ref()?.store.row_ids(SHARES_GIVEN, None)?;
         let mut sends = Vec::with_capacity(shares.len());
         for (holder, share) in holders.iter().zip(shares.iter()) {
-            let body = Zeroizing::new(
-                RecoveryShare {
-                    set_id,
-                    threshold,
-                    count,
-                    share: *share,
-                }
-                .encode()?,
-            );
+            // `RecoveryShare` is `Copy` and gets no wipe of its own, thus
+            // each stack copy of the share is wiped here.
+            let mut message = RecoveryShare {
+                set_id,
+                threshold,
+                count,
+                share: *share,
+            };
+            let encoded = message.encode();
+            message.share.zeroize();
+            let mut encoded = encoded?;
+            let body = Zeroizing::new(encoded.to_vec());
+            encoded.zeroize();
             let mut msg_id = [0u8; 16];
             rng.fill_bytes(&mut msg_id);
             let record = AppMessage {
@@ -195,8 +193,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
-        if RecoveryShare::parse(body).is_err() {
-            return Ok(());
+        match RecoveryShare::parse(body) {
+            Ok(mut parsed) => parsed.share.zeroize(),
+            Err(_) => return Ok(()),
         }
 
         let value =
@@ -236,14 +235,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// The share that a contact gave to this user, or none.
     pub fn held_share(&self, conversation: ConversationId) -> Result<Option<HeldShare>, Error> {
-        Ok(self
-            .held_body(conversation)?
-            .map(|(at_ms, body)| HeldShare {
+        Ok(self.held_body(conversation)?.map(|(at_ms, mut body)| {
+            let held = HeldShare {
                 threshold: body.threshold,
                 count: body.count,
                 index: body.share[0],
                 at_ms,
-            }))
+            };
+            body.share.zeroize();
+            held
+        }))
     }
 
     /// Writes the share that a contact gave to this user into `sink`, as
@@ -254,8 +255,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         conversation: ConversationId,
         sink: &mut dyn Sink,
     ) -> Result<(), Error> {
-        let (_, body) = self.held_body(conversation)?.ok_or(Error::NotFound)?;
-        let digits = to_digits(DigitsType::Share, &body.share)?;
+        let (_, mut body) = self.held_body(conversation)?.ok_or(Error::NotFound)?;
+        let digits = to_digits(DigitsType::Share, &body.share);
+        body.share.zeroize();
+        let digits = digits?;
         let units: Zeroizing<Vec<u16>> = Zeroizing::new(digits.encode_utf16().collect());
         sink.put(&units);
         Ok(())
