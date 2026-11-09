@@ -232,9 +232,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .store
                 .list(INTROS, Some(&from.0))?
                 .into_iter()
-                .filter(|(_, value)| {
-                    read_row(&Zeroizing::new(value.clone())).is_ok_and(|row| row.kind != ASKED)
-                })
+                .map(|(_, value)| Zeroizing::new(value))
+                .filter(|value| read_row(value).is_ok_and(|row| row.kind != ASKED))
                 .count();
             if waiting >= INTROS_WAITING_MAX {
                 return Ok(());

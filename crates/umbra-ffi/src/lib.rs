@@ -477,6 +477,70 @@ impl core::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// A store in memory whose writes fail on request, for the tests of a
+/// fault of the platform store.
+#[cfg(test)]
+pub(crate) mod faulty {
+    use core::cell::Cell;
+
+    use umbra_core::{
+        store::{
+            engine::{Backend, Batch, MemoryBackend, StoredRow, StoredTable},
+            record::{RowId, TableId},
+        },
+        Error as CoreError,
+    };
+
+    std::thread_local! {
+        /// The count of the next batches of this test thread that fail.
+        static FAILS: Cell<u32> = const { Cell::new(0) };
+    }
+
+    /// The next `count` batches of each faulty store of this thread fail.
+    pub(crate) fn fail_next(count: u32) {
+        FAILS.with(|fails| fails.set(count));
+    }
+
+    #[derive(Default)]
+    pub(crate) struct Faulty(MemoryBackend);
+
+    impl Backend for Faulty {
+        fn read(&self, table: TableId, row_id: &RowId) -> Result<Option<StoredRow>, CoreError> {
+            self.0.read(table, row_id)
+        }
+
+        fn rows(&self, table: TableId, owner: Option<&RowId>) -> Result<Vec<StoredRow>, CoreError> {
+            self.0.rows(table, owner)
+        }
+
+        fn row_ids(
+            &self,
+            table: TableId,
+            after: Option<&RowId>,
+            limit: usize,
+        ) -> Result<Vec<RowId>, CoreError> {
+            self.0.row_ids(table, after, limit)
+        }
+
+        fn tables(&self) -> Result<Vec<(TableId, StoredTable)>, CoreError> {
+            self.0.tables()
+        }
+
+        fn apply(&mut self, batch: &Batch) -> Result<(), CoreError> {
+            let fails = FAILS.with(|fails| {
+                let left = fails.get();
+                fails.set(left.saturating_sub(1));
+                left > 0
+            });
+            if fails {
+                return Err(CoreError::Storage);
+            }
+
+            self.0.apply(batch)
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
@@ -7421,6 +7485,61 @@ mod tests {
             .unwrap();
         let conversation = client.conversation_for(&contact.0).unwrap();
         (client, contact, conversation)
+    }
+
+    #[test]
+    fn a_fault_of_the_store_at_the_end_of_a_download_leaves_a_failed_file() {
+        use client::FileState;
+        use faulty::{fail_next, Faulty};
+        use umbra_core::session::node::StateChange;
+        use umbra_wire::app::AppKind;
+
+        let mut rng = Rng(31);
+        let mut bob = Client::create(
+            Faulty::default(),
+            Element([1; 32]),
+            &units("correct horse"),
+            CHEAP,
+            1_000,
+            &mut rng,
+        )
+        .unwrap();
+        let contact = ContactId([9; 32]);
+        let change = StateChange::Contact {
+            contact,
+            state: zeroize::Zeroizing::new(vec![1, 2, 3]),
+        };
+        bob.commit_network(&[change], &[], 1_000_000, &mut rng)
+            .unwrap();
+
+        let uploaded = uploaded_file(0x42);
+        let mut body = vec![0u8; uploaded.descriptor.len()];
+        uploaded.descriptor.encode(&mut body).unwrap();
+        let app = record(AppKind::Attachment, [0x56; 16], &body);
+        bob.commit_network(&[], &[(contact, app)], 2_000_000, &mut rng)
+            .unwrap();
+        let message = bob.take_download().unwrap().message;
+        while bob.next_event().is_some() {}
+
+        // The batch of the file fails, and the mark of the failure takes
+        // the next batch.
+        fail_next(1);
+        assert_eq!(
+            bob.download_arrived(&message, &[0x5A; 100], &mut rng),
+            Err(Error::Storage)
+        );
+        assert_eq!(
+            bob.info(&message).unwrap().file.unwrap().state,
+            FileState::Failed
+        );
+        assert_eq!(bob.next_event(), Some(Event::File { message }));
+
+        // A message that the user deleted takes no file, with no fault.
+        bob.delete_for_me(&message).unwrap();
+        assert_eq!(
+            bob.download_arrived(&message, &[0x5A; 100], &mut rng),
+            Ok(())
+        );
     }
 
     /// A descriptor of one chunk, as an upload gives it.

@@ -3843,7 +3843,9 @@ impl Inner {
                     restore_step = Some(RestoreStep::Object { index, plain });
                 }
                 Some(TransferWork::File { message, .. }) => {
-                    let _ = client.download_done(&message, &plain, &mut OsRng);
+                    // A fault of the store marks the file failed, and the
+                    // view shows it.
+                    let _ = client.download_arrived(&message, &plain, &mut OsRng);
                 }
                 // DEV-299: the group of another device is here, and this
                 // device reads it from now on.
@@ -4791,7 +4793,7 @@ struct HandleStore {
 }
 
 impl Persist for HandleStore {
-    fn commit(&mut self, changes: Vec<StateChange>, received: &[(ContactId, Vec<u8>)]) -> bool {
+    fn commit(&mut self, changes: Vec<StateChange>, received: &[(ContactId, &[u8])]) -> bool {
         let Some(handle) = self.handle.upgrade() else {
             return false;
         };
@@ -4807,7 +4809,7 @@ impl Persist for HandleStore {
         // A locked client takes no batch, and the run ends (`IMP-127`).
         let committed = inner
             .client
-            .commit_network(&changes, received, unix_now_ms(), &mut OsRng)
+            .commit_received(&changes, received, unix_now_ms(), &mut OsRng)
             .is_ok();
 
         // DEV-317: an epoch of this batch took the channels from this

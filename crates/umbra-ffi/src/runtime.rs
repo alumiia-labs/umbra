@@ -319,7 +319,7 @@ pub trait Persist: Send {
     /// of the node gave, in one batch. The result is false when the store
     /// did not take the batch, and the run then ends with no capsule of
     /// that call on the link.
-    fn commit(&mut self, changes: Vec<StateChange>, received: &[(ContactId, Vec<u8>)]) -> bool;
+    fn commit(&mut self, changes: Vec<StateChange>, received: &[(ContactId, &[u8])]) -> bool;
 
     /// A batch of receipts that may leave at `now`, in seconds, and the
     /// contact that gets it (Part 3 §3.5.4). The store holds the batch
@@ -375,7 +375,7 @@ pub trait Persist: Send {
 pub struct NoStore;
 
 impl Persist for NoStore {
-    fn commit(&mut self, _: Vec<StateChange>, _: &[(ContactId, Vec<u8>)]) -> bool {
+    fn commit(&mut self, _: Vec<StateChange>, _: &[(ContactId, &[u8])]) -> bool {
         true
     }
 }
@@ -659,10 +659,10 @@ fn settle(
         }
     }
 
-    let mut received: Vec<(ContactId, Vec<u8>)> = events
+    let received: Vec<(ContactId, &[u8])> = events
         .iter()
         .filter_map(|event| match event {
-            ClientEvent::Message { contact, app } => Some((*contact, app.clone())),
+            ClientEvent::Message { contact, app } => Some((*contact, app.as_slice())),
             _ => None,
         })
         .collect();
@@ -675,14 +675,7 @@ fn settle(
         return Ok(settled);
     }
 
-    let committed = persist.commit(changes, &received);
-
-    // IMP-126: the store holds each record now, and this copy of the
-    // plaintext leaves the memory.
-    for (_, app) in &mut received {
-        app.zeroize();
-    }
-    if !committed {
+    if !persist.commit(changes, &received) {
         return Err(Ended::StoreFault);
     }
 
@@ -746,8 +739,9 @@ fn answer_wait(sends: u32) -> u64 {
 
 impl Resends {
     /// Holds the record of `tag` for its ARQ, with the sends that the
-    /// store counts. The result says whether a send may happen at `now`.
-    /// False is the end of its ARQ, and the run holds nothing for it.
+    /// store counts. The result is the held record when a send may happen
+    /// at `now`. None is the end of its ARQ, and the run holds nothing for
+    /// it.
     fn hold(
         &mut self,
         tag: u64,
@@ -755,11 +749,11 @@ impl Resends {
         app: Zeroizing<Vec<u8>>,
         prior: Prior,
         now: u64,
-    ) -> bool {
+    ) -> Option<&[u8]> {
         let first = (prior.sends > 0 && prior.first != 0).then_some(prior.first);
         let mut arq = umbra_queue::client::arq::Arq::resumed(prior.sends, first);
         if !arq.may_send(now) {
-            return false;
+            return None;
         }
 
         let held = HeldSend {
@@ -769,7 +763,7 @@ impl Resends {
             again_at: None,
         };
         self.held.insert(tag, held);
-        true
+        self.held.get(&tag).map(|held| held.app.as_slice())
     }
 
     /// A send of the record of `tag` left at `now`: the node sealed it
@@ -853,10 +847,10 @@ impl Resends {
 
     /// The record of `tag` takes this slot: its contact and its bytes.
     /// The send counts when it leaves ([`Resends::left`]).
-    fn take(&mut self, tag: u64) -> Option<(ContactId, Zeroizing<Vec<u8>>)> {
+    fn take(&mut self, tag: u64) -> Option<(ContactId, &[u8])> {
         self.due.retain(|held| *held != tag);
         let held = self.held.get(&tag)?;
-        Some((held.contact, held.app.clone()))
+        Some((held.contact, held.app.as_slice()))
     }
 }
 
@@ -1396,7 +1390,7 @@ pub async fn run_client(
                         is_first || matches!(node.on_ack_slot(now, &mut rng), Ok(false));
                     if is_free {
                         if let Some((contact, app)) = resends.take(tag) {
-                            match node.send(&contact, &app, now, &mut rng) {
+                            match node.send(&contact, app, now, &mut rng) {
                                 Ok(handle) => {
                                     tags.insert(handle, tag);
                                 }
@@ -1824,15 +1818,15 @@ pub async fn run_client(
                     tag,
                     prior,
                 } => {
-                    if !resends.hold(tag, contact, app.clone(), prior, now) {
+                    match resends.hold(tag, contact, app, prior, now) {
                         // NET-219 to NET-221: the ARQ of the record stopped
                         // in an earlier run, and the record fails.
-                        let _ = updates.send(Update::Failed(tag));
-                    } else if prior.in_slot {
+                        None => {
+                            let _ = updates.send(Update::Failed(tag));
+                        }
                         // NET-071: the retry after a `LIMIT` takes a slot.
-                        resends.wait(tag);
-                    } else {
-                        match node.send(&contact, &app, now, &mut rng) {
+                        Some(_) if prior.in_slot => resends.wait(tag),
+                        Some(app) => match node.send(&contact, app, now, &mut rng) {
                             Ok(handle) => {
                                 tags.insert(handle, tag);
                             }
@@ -1840,7 +1834,7 @@ pub async fn run_client(
                                 resends.ended(tag);
                                 let _ = updates.send(Update::Unsent(tag));
                             }
-                        }
+                        },
                     }
                 }
                 // A queue that no circuit serves any more takes its binding
@@ -1993,7 +1987,7 @@ mod tests {
         let new = Prior::default();
         let mut resends = Resends::default();
         let mut stopped = Vec::new();
-        assert!(resends.hold(7, contact, app(), new, 100));
+        assert!(resends.hold(7, contact, app(), new, 100).is_some());
         resends.left(7, 100);
         assert_eq!(resends.next(100, &mut stopped), None);
 
@@ -2020,7 +2014,7 @@ mod tests {
 
         // NET-220: a record that waits for a slot past `SEND_GIVE_UP` of
         // its first send stops, and the caller fails it.
-        assert!(resends.hold(8, contact, app(), new, 1_000));
+        assert!(resends.hold(8, contact, app(), new, 1_000).is_some());
         resends.left(8, 1_000);
         assert!(resends.refused(8, Reject::Busy, 1_001));
         assert_eq!(resends.next(1_000 + SEND_GIVE_UP, &mut stopped), None);
@@ -2028,7 +2022,7 @@ mod tests {
 
         // A relay that took the record ends its ARQ, and a refusal of a
         // record that this run does not hold continues none.
-        assert!(resends.hold(9, contact, app(), new, 2_000));
+        assert!(resends.hold(9, contact, app(), new, 2_000).is_some());
         resends.left(9, 2_000);
         resends.ended(9);
         assert!(!resends.refused(9, Reject::Busy, 2_001));
@@ -2051,7 +2045,7 @@ mod tests {
             first: 1_000,
             in_slot: false,
         };
-        assert!(resends.hold(5, contact, app(), prior, 2_000));
+        assert!(resends.hold(5, contact, app(), prior, 2_000).is_some());
         resends.left(5, 2_000);
         assert!(resends.refused(5, Reject::Busy, 2_001));
         assert!(resends.take(5).is_some());
@@ -2065,7 +2059,7 @@ mod tests {
             first: 1_000,
             in_slot: false,
         };
-        assert!(!resends.hold(6, contact, app(), spent, 2_000));
+        assert!(resends.hold(6, contact, app(), spent, 2_000).is_none());
 
         // NET-220: `SEND_GIVE_UP` runs from the first send of the record,
         // which an earlier run made.
@@ -2074,8 +2068,12 @@ mod tests {
             first: 1_000,
             in_slot: false,
         };
-        assert!(resends.hold(7, contact, app(), old, 1_000 + SEND_GIVE_UP - 1));
-        assert!(!resends.hold(8, contact, app(), old, 1_000 + SEND_GIVE_UP));
+        assert!(resends
+            .hold(7, contact, app(), old, 1_000 + SEND_GIVE_UP - 1)
+            .is_some());
+        assert!(resends
+            .hold(8, contact, app(), old, 1_000 + SEND_GIVE_UP)
+            .is_none());
     }
 
     #[test]
@@ -2084,7 +2082,9 @@ mod tests {
         let app = || Zeroizing::new(vec![1, 2, 3]);
         let mut resends = Resends::default();
         let mut stopped = Vec::new();
-        assert!(resends.hold(1, contact, app(), Prior::default(), 100));
+        assert!(resends
+            .hold(1, contact, app(), Prior::default(), 100)
+            .is_some());
 
         // A record that the node holds for a circuit left no send, and it
         // waits for no answer.
@@ -2115,8 +2115,12 @@ mod tests {
         );
 
         // The oldest send goes first.
-        assert!(resends.hold(2, contact, app(), Prior::default(), 300));
-        assert!(resends.hold(3, contact, app(), Prior::default(), 300));
+        assert!(resends
+            .hold(2, contact, app(), Prior::default(), 300)
+            .is_some());
+        assert!(resends
+            .hold(3, contact, app(), Prior::default(), 300)
+            .is_some());
         resends.left(3, 300);
         resends.left(2, 301);
         resends.ended(1);
@@ -2151,7 +2155,9 @@ mod tests {
             first: 1_000,
             in_slot: true,
         };
-        assert!(resends.hold(4, contact, Zeroizing::new(vec![9]), held, 2_000));
+        assert!(resends
+            .hold(4, contact, Zeroizing::new(vec![9]), held, 2_000)
+            .is_some());
         resends.wait(4);
 
         // NET-065: one send left before, thus this one is the first
@@ -2170,7 +2176,7 @@ mod tests {
     }
 
     impl Persist for Ordered {
-        fn commit(&mut self, _: Vec<StateChange>, _: &[(ContactId, Vec<u8>)]) -> bool {
+        fn commit(&mut self, _: Vec<StateChange>, _: &[(ContactId, &[u8])]) -> bool {
             self.calls.push("batch");
             true
         }

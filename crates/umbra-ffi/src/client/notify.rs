@@ -467,6 +467,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(open
             .store
             .get(SETTINGS, &row)?
+            .map(Zeroizing::new)
             .and_then(|bytes| Timer::parse(&bytes).ok()))
     }
 
@@ -671,7 +672,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let mut rows: Vec<_> = store
             .list(TableId::CONTACT, None)?
             .into_iter()
-            .map(|(row, _)| row)
+            .map(|(row, plain)| {
+                drop(Zeroizing::new(plain));
+                row
+            })
             .collect();
         rows.sort_unstable();
         let parts: Vec<&[u8]> = rows.iter().map(|row| row.as_slice()).collect();

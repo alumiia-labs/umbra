@@ -47,13 +47,14 @@ pub struct ResetSummary {
 
 impl<B: Backend, E: SecureElement> Client<B, E> {
     /// The identity root: the row of a reset, or the storage seed.
-    pub(super) fn identity_seed(&self) -> Result<Option<[u8; 32]>, Error> {
+    pub(super) fn identity_seed(&self) -> Result<Option<Secret<32>>, Error> {
         let store = &self.open_ref()?.store;
         let row = store.row_id(TableId::LOCAL_IDENTITY, IDENTITY_ROOT_KEY);
-        match store.get(TableId::LOCAL_IDENTITY, &row)? {
-            Some(seed) => Ok(Some(
-                seed.as_slice().try_into().map_err(|_| Error::Integrity)?,
-            )),
+        match store
+            .get(TableId::LOCAL_IDENTITY, &row)?
+            .map(Zeroizing::new)
+        {
+            Some(seed) => Ok(Some(super::secret_of(&seed)?)),
             None => Ok(None),
         }
     }
@@ -76,7 +77,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
         let mut seed = Zeroizing::new([0u8; 32]);
         rng.fill_bytes(seed.as_mut());
-        let root = RootIdentity::new(Secret::new(*seed));
+        let root = RootIdentity::new(super::secret_of(seed.as_slice())?);
         let now = now_ms / 1_000;
 
         // DEV-172, DEV-173: a new roster key and a new roster epoch 0. Each
@@ -90,12 +91,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let device_peers = self.device_peers()?;
         let mut notices = Vec::new();
         for (row, plain) in self.open_ref()?.store.list(TableId::CONTACT, None)? {
+            let plain = Zeroizing::new(plain);
             let conversation = ConversationId(row);
             if device_peers.contains(&conversation) || self.is_ended_channel(conversation)? {
                 continue;
             }
 
-            let plain = Zeroizing::new(plain);
             let Some(state) = plain.get(QUEUE_ID_LEN..) else {
                 continue;
             };

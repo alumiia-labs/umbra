@@ -922,6 +922,22 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(())
     }
 
+    /// The file of a received message arrived from the transfer path. A
+    /// message that the user deleted since takes no file. Another fault of
+    /// the store marks the file failed: no event and no retry would follow
+    /// a file that stays in its download, and a tap fetches a failed one.
+    pub fn download_arrived<R: CryptoRng + ?Sized>(
+        &mut self,
+        message: &MsgRef,
+        file: &[u8],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        match self.download_done(message, file, rng) {
+            Ok(()) | Err(Error::NotFound) => Ok(()),
+            Err(error) => self.download_failed(message, rng).and(Err(error)),
+        }
+    }
+
     /// The download of the file of a message ended with no result. A new
     /// attempt can follow, until `CHUNK_LIFE_MAX` after the arrival of the
     /// message. No relay holds a chunk past that time (`ATT-160`), thus the

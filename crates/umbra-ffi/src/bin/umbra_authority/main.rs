@@ -281,7 +281,7 @@ struct QueueStore {
 }
 
 impl Persist for QueueStore {
-    fn commit(&mut self, changes: Vec<StateChange>, _received: &[(ContactId, Vec<u8>)]) -> bool {
+    fn commit(&mut self, changes: Vec<StateChange>, _received: &[(ContactId, &[u8])]) -> bool {
         for change in changes {
             if let StateChange::RendezvousQueue { state, .. } = change {
                 if write_private(&self.state, &state).is_err() {

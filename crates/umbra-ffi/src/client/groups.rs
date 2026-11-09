@@ -39,7 +39,7 @@ use umbra_wire::{
 };
 use zeroize::Zeroizing;
 
-use super::{stored_message, Client, MESSAGE_PREFIX, OUTBOX};
+use super::{secret_of, stored_message, Client, MESSAGE_PREFIX, OUTBOX};
 use crate::{ConversationId, Delivery, Error, Event, MsgRef};
 
 /// The state byte of a group row: open.
@@ -356,7 +356,7 @@ impl GkeyRow {
             let write_pk: [u8; 32] = r.take(32).ok()?.try_into().ok()?;
             *taken = is_taken.then_some(write_pk);
             for _ in 0..r.u8().ok()? {
-                replaced.push(Secret::new(r.take(32).ok()?.try_into().ok()?));
+                replaced.push(secret_of(r.take(32).ok()?).ok()?);
             }
         }
 
@@ -750,6 +750,10 @@ pub(super) struct GroupQueues {
     /// group that it reads, and silence then counts in a session alone
     /// (`GRP-396`).
     pub driven: bool,
+    /// The conversation of each group queue that the last scan of the
+    /// groups found. It is a hint: each answer from it passes a check
+    /// against the group in the store.
+    pub queue_hints: BTreeMap<[u8; 32], ConversationId>,
 }
 
 /// The `GKEY` commands that one replica of a group got in this session.
@@ -951,6 +955,17 @@ pub(super) fn lost_seed_key(group_id: &[u8; 32]) -> Vec<u8> {
     [group_id.as_slice(), b"lost"].concat()
 }
 
+/// Whether a replica of `group` holds the group queue `group_queue_id`.
+fn holds_queue(group: &Group, group_queue_id: &[u8; 32]) -> bool {
+    group.replicas().is_some_and(|replicas| {
+        (0..GROUP_REPLICAS).any(|index| {
+            replicas
+                .reference(index)
+                .is_some_and(|held| held.group_queue_id == *group_queue_id)
+        })
+    })
+}
+
 impl<B: Backend, E: SecureElement> Client<B, E> {
     /// The conversation of a group: the surrogate of its identifier under
     /// the store key, as a contact has one.
@@ -1079,21 +1094,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .get(TableId::LOCAL_IDENTITY, &seed_row)?
                 .ok_or(Error::Integrity)?,
         );
-        let seed: [u8; 32] = seed.as_slice().try_into().map_err(|_| Error::Integrity)?;
+        let seed = secret_of(&seed)?;
 
         // GRP-372: the seed before a re-key, while the group reads with it.
         let previous_row = store.row_id(TableId::LOCAL_IDENTITY, &previous_seed_key(&group_id));
         let previous = store
             .get(TableId::LOCAL_IDENTITY, &previous_row)?
             .map(Zeroizing::new)
-            .map(|bytes| -> Result<Secret<32>, Error> {
-                Ok(Secret::new(
-                    bytes.as_slice().try_into().map_err(|_| Error::Integrity)?,
-                ))
-            })
+            .map(|bytes| secret_of(&bytes))
             .transpose()?;
-        Group::restore_with_previous(stored, &Secret::new(seed), previous.as_ref())
-            .map_err(|_| Error::Integrity)
+        Group::restore_with_previous(stored, &seed, previous.as_ref()).map_err(|_| Error::Integrity)
     }
 
     /// Moves the member to new keys in each group of the user, after a
@@ -1723,10 +1733,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // before (GRP-372).
         let seed_row = store.row_id(TableId::LOCAL_IDENTITY, group_id);
         let lost_row = store.row_id(TableId::LOCAL_IDENTITY, &lost_seed_key(group_id));
-        let went_back = previous.as_ref().is_some_and(|seed| {
-            <[u8; 32]>::try_from(seed.as_slice())
-                .is_ok_and(|seed| group.reads_with(&Secret::new(seed)))
-        });
+        let went_back = previous
+            .as_ref()
+            .is_some_and(|seed| secret_of(seed).is_ok_and(|seed| group.reads_with(&seed)));
         let fresh = if went_back && group.lost_rekey() {
             Some(Zeroizing::new(
                 store
@@ -1810,11 +1819,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         group_queue_id: &[u8; 32],
         rng: &mut R,
     ) -> Result<(), Error> {
-        let Some(conversation) = self.conversation_of_queue(group_queue_id)? else {
+        let Some((conversation, group)) = self.group_of_queue(group_queue_id)? else {
             return Ok(());
         };
 
-        let group = self.group_of(conversation)?;
         let relay = group.replicas().and_then(|replicas| {
             (0..GROUP_REPLICAS)
                 .filter_map(|index| replicas.reference(index))
@@ -2134,7 +2142,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .map(Zeroizing::new)
         };
         let seed = match waiting {
-            Some(bytes) => Secret::new(bytes.as_slice().try_into().map_err(|_| Error::Integrity)?),
+            Some(bytes) => secret_of(&bytes)?,
             None => {
                 let mut seed = Secret::<32>::zeroed();
                 rng.fill_bytes(seed.expose_mut());
@@ -2652,7 +2660,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .get(TableId::LOCAL_IDENTITY, &lost_row)?
             .map(Zeroizing::new);
         let seed = match held {
-            Some(bytes) => Secret::new(bytes.as_slice().try_into().map_err(|_| Error::Integrity)?),
+            Some(bytes) => secret_of(&bytes)?,
             None => {
                 let mut seed = Secret::<32>::zeroed();
                 rng.fill_bytes(seed.expose_mut());
@@ -3182,8 +3190,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     .get(TableId::LOCAL_IDENTITY, &seed_row)?
                     .ok_or(Error::Integrity)?,
             });
-            let seed: [u8; 32] = seed.as_slice().try_into().map_err(|_| Error::Integrity)?;
-            Secret::new(seed)
+            secret_of(&seed)?
         };
         let control = GroupControl::parse(&admit)?;
         let invitation = GroupInvitation::parse(control.payload)?;
@@ -6625,11 +6632,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<Option<MsgRef>, Error> {
-        let Some(conversation) = self.conversation_of_queue(group_queue_id)? else {
+        let Some((conversation, mut group)) = self.group_of_queue(group_queue_id)? else {
             return Ok(None);
         };
-
-        let mut group = self.group_of(conversation)?;
 
         // GRP-253, GRP-254: a record that waited past GROUP_ROSTER_WAIT
         // for its roster leaves, and the conversation shows a gap.
@@ -7671,15 +7676,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         [conversation.0.as_slice(), b"gkey"].concat()
     }
 
-    /// What the store holds of the `GKEY` commands of a group.
+    /// What the store holds of the `GKEY` commands of a group. A row that
+    /// does not parse is a fault: an empty row in its place would let the
+    /// next write lose the replaced owner credentials (`GRP-401`).
     fn gkey_row(&self, conversation: ConversationId) -> Result<GkeyRow, Error> {
         let store = &self.open_ref()?.store;
         let row = store.row_id(GROUP_OWNERS, &Self::gkey_key(conversation));
-        Ok(store
-            .get(GROUP_OWNERS, &row)?
-            .map(Zeroizing::new)
-            .and_then(|plain| GkeyRow::parse(&plain))
-            .unwrap_or_default())
+        match store.get(GROUP_OWNERS, &row)?.map(Zeroizing::new) {
+            Some(plain) => GkeyRow::parse(&plain).ok_or(Error::Integrity),
+            None => Ok(GkeyRow::default()),
+        }
     }
 
     fn put_gkey_row<R: CryptoRng + ?Sized>(
@@ -7737,22 +7743,45 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// The conversation of a group queue, or none when this device holds
     /// no group with that queue.
     pub fn conversation_of_queue(
-        &self,
+        &mut self,
         group_queue_id: &[u8; 32],
     ) -> Result<Option<ConversationId>, Error> {
+        Ok(self
+            .group_of_queue(group_queue_id)?
+            .map(|(conversation, _)| conversation))
+    }
+
+    /// The conversation and the group of a group queue, or none when this
+    /// device holds no group with that queue. Each record of a group queue
+    /// asks for it, thus a hint of an earlier scan saves the restore of
+    /// each group. The group of a hint must hold the queue now, thus a
+    /// change of the replicas gives no stale answer. A miss scans again.
+    pub(super) fn group_of_queue(
+        &mut self,
+        group_queue_id: &[u8; 32],
+    ) -> Result<Option<(ConversationId, Group)>, Error> {
+        if let Some(conversation) = self.groups.queue_hints.get(group_queue_id).copied() {
+            if let Ok(group) = self.group_of(conversation) {
+                if holds_queue(&group, group_queue_id) {
+                    return Ok(Some((conversation, group)));
+                }
+            }
+        }
+
+        self.groups.queue_hints.clear();
         for conversation in self.group_conversations()? {
             let group = self.group_of(conversation)?;
-            let Some(replicas) = group.replicas() else {
-                continue;
-            };
+            for held in group.replicas().into_iter().flat_map(|replicas| {
+                (0..GROUP_REPLICAS).filter_map(move |index| replicas.reference(index))
+            }) {
+                self.groups
+                    .queue_hints
+                    .entry(held.group_queue_id)
+                    .or_insert(conversation);
+            }
 
-            let holds = (0..GROUP_REPLICAS).any(|index| {
-                replicas
-                    .reference(index)
-                    .is_some_and(|held| held.group_queue_id == *group_queue_id)
-            });
-            if holds {
-                return Ok(Some(conversation));
+            if holds_queue(&group, group_queue_id) {
+                return Ok(Some((conversation, group)));
             }
         }
 
@@ -8522,6 +8551,47 @@ mod tests {
 
     const AT_ADMIN: ContactId = ContactId([0x51; 32]);
     const AT_JOINER: ContactId = ContactId([0x52; 32]);
+
+    #[test]
+    fn a_hint_of_a_group_queue_gives_no_stale_answer() {
+        let mut rng = Rng(332);
+        let mut client = new_client(&mut rng);
+        let group = new_group(&mut client, &mut rng);
+        for queue in QUEUES {
+            assert_eq!(client.conversation_of_queue(&queue).unwrap(), Some(group));
+        }
+
+        // A hint that names a conversation whose group does not hold the
+        // queue passes no check, and the scan answers.
+        client
+            .groups
+            .queue_hints
+            .insert(QUEUES[0], ConversationId([0xEE; 16]));
+        assert_eq!(
+            client.conversation_of_queue(&QUEUES[0]).unwrap(),
+            Some(group)
+        );
+        client.groups.queue_hints.insert([0xAB; 32], group);
+        assert_eq!(client.conversation_of_queue(&[0xAB; 32]).unwrap(), None);
+    }
+
+    #[test]
+    fn a_gkey_row_that_does_not_parse_is_a_fault_and_no_empty_row() {
+        let mut rng = Rng(331);
+        let mut client = new_client(&mut rng);
+        let group = new_group(&mut client, &mut rng);
+        assert!(client.gkey_row(group).is_ok());
+
+        let open = client.open_mut().unwrap();
+        let row = open.store.row_id(GROUP_OWNERS, &Device::gkey_key(group));
+        let mut batch = open.store.begin();
+        batch
+            .put(GROUP_OWNERS, row, None, &[0x7F, 1, 2], &mut rng)
+            .unwrap();
+        batch.commit().unwrap();
+
+        assert!(matches!(client.gkey_row(group), Err(Error::Integrity)));
+    }
 
     #[test]
     fn a_member_that_left_takes_a_new_invitation_into_the_conversation_it_held() {

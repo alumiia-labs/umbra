@@ -65,7 +65,7 @@ const ENGINE_KEY: &[u8] = b"engine";
 pub(super) const PAIRWISE_HELD: TableId = TableId(0x51);
 /// Each record that the engine took and the store did not take yet, in the
 /// commit of the engine (`DEV-013`).
-const SYNC_INBOX: TableId = TableId(0x52);
+pub(super) const SYNC_INBOX: TableId = TableId(0x52);
 /// The records that a device holds while their entries wait.
 const PAIRWISE_HELD_MAX: usize = 1_024;
 /// The time that a held record waits for its entry, in seconds.
@@ -99,7 +99,7 @@ pub(super) struct Synced {
 /// The stored form of a synced record in the inbox: the conversation, the
 /// source device, its counter, whether the user wrote it, whether it is of
 /// a group, its remaining period, then the record.
-fn encode_synced(synced: &Synced) -> Vec<u8> {
+pub(super) fn encode_synced(synced: &Synced) -> Vec<u8> {
     [
         synced.conversation.0.as_slice(),
         &synced.origin.0,
