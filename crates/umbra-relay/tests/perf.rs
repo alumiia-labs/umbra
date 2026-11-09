@@ -1243,7 +1243,7 @@ fn send_changes(queue: u32, seq: u32, len: usize, out: &mut Vec<StoreChange>) {
     });
     out.push(StoreChange::Queue {
         recipient_id,
-        head: vec![0x55; 256],
+        head: umbra_crypto::zeroize::Zeroizing::new(vec![0x55; 256]),
     });
 }
 

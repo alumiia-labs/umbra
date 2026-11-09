@@ -79,7 +79,7 @@ async fn a_set_of_silent_sockets_holds_no_handshake_back() {
 
     let manifest = vec![0x4D; 96];
     let carried = Arc::new(Carried {
-        manifest: std::sync::Mutex::new(Some(manifest.clone())),
+        manifest: std::sync::Mutex::new(Some(manifest.clone().into())),
         limits: ConnectionLimits {
             handshakes_max: 1,
             handshake_timeout: Duration::from_secs(60),
@@ -137,7 +137,7 @@ async fn a_socket_that_sent_no_whole_hello_takes_no_handshake() {
 
     let manifest = vec![0x4D; 96];
     let carried = Arc::new(Carried {
-        manifest: std::sync::Mutex::new(Some(manifest.clone())),
+        manifest: std::sync::Mutex::new(Some(manifest.clone().into())),
         limits: ConnectionLimits {
             handshakes_max: 1,
             handshake_timeout: Duration::from_secs(60),

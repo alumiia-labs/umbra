@@ -22,6 +22,7 @@
 use std::collections::BTreeMap;
 
 use umbra_core::attach::store::HeldChunk;
+use umbra_crypto::zeroize::Zeroizing;
 use umbra_queue::relay::Stored;
 use umbra_wire::command::LINK_ID_LEN;
 
@@ -34,7 +35,8 @@ pub enum StoreChange {
         /// `RecipientId`.
         recipient_id: [u8; 32],
         /// The head of `umbra_queue::relay::queue::Queue::export_head`.
-        head: Vec<u8>,
+        /// It holds the binding, thus a drop wipes it.
+        head: Zeroizing<Vec<u8>>,
     },
     /// The relay accepted a `SEND`.
     Record {
@@ -81,7 +83,7 @@ pub enum StoreChange {
         /// `GroupQueueId`.
         group_queue_id: [u8; 32],
         /// The head of `umbra_queue::relay::group::GroupQueue::export_head`.
-        head: Vec<u8>,
+        head: Zeroizing<Vec<u8>>,
     },
     /// The relay accepted a `GPOST`.
     GroupRecord {
@@ -150,8 +152,8 @@ pub struct StoredInvitation {
 /// A queue, as the store holds it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StoredQueue {
-    /// The head.
-    pub head: Vec<u8>,
+    /// The head. A pairwise head holds the binding, thus a drop wipes it.
+    pub head: Zeroizing<Vec<u8>>,
     /// The records that no `ACK` covers.
     pub records: Vec<Stored>,
 }

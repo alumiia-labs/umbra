@@ -898,7 +898,7 @@ async fn run() -> ExitCode {
         PACING_MEAN_MS,
         store,
         Carried {
-            manifest: std::sync::Mutex::new(settings.manifest),
+            manifest: std::sync::Mutex::new(settings.manifest.map(Into::into)),
             manifest_source: settings.manifest_source,
             // NTF-127: the OHTTP relay role posts to the gateway of the NDR.
             ohttp: settings.ohttp_gateway.map(|gateway| OhttpForward {

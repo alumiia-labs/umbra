@@ -8,6 +8,7 @@
 
 use rusqlite::{params, types::Value, Connection, OptionalExtension};
 use umbra_core::attach::store::{Class, Credentials, HeldChunk};
+use umbra_crypto::zeroize::Zeroizing;
 use umbra_queue::relay::Stored;
 
 use crate::receipts::{KeptReceipt, ReceiptShelf};
@@ -195,7 +196,7 @@ impl RelayStore for SqliteStore {
             match (id_of::<32>(key.clone()), blob_of(head)) {
                 (Some(recipient_id), Some(head)) => {
                     let queue = StoredQueue {
-                        head,
+                        head: Zeroizing::new(head),
                         records: Vec::new(),
                     };
                     loaded.queues.insert(recipient_id, queue);
@@ -246,7 +247,7 @@ impl RelayStore for SqliteStore {
             match (id_of::<32>(key.clone()), blob_of(head)) {
                 (Some(group_queue_id), Some(head)) => {
                     let queue = StoredQueue {
-                        head,
+                        head: Zeroizing::new(head),
                         records: Vec::new(),
                     };
                     loaded.group_queues.insert(group_queue_id, queue);
@@ -417,7 +418,7 @@ impl RelayStore for SqliteStore {
         for change in changes {
             match change {
                 StoreChange::Queue { recipient_id, head } => {
-                    fault(put_head.execute(params![recipient_id.as_slice(), head]))?
+                    fault(put_head.execute(params![recipient_id.as_slice(), head.as_slice()]))?
                 }
                 StoreChange::Record {
                     recipient_id,
@@ -479,7 +480,7 @@ impl RelayStore for SqliteStore {
                 } => fault(transaction.execute(
                     "INSERT INTO group_queues (group_queue_id, head) VALUES (?1, ?2)
                      ON CONFLICT (group_queue_id) DO UPDATE SET head = excluded.head",
-                    params![group_queue_id.as_slice(), head],
+                    params![group_queue_id.as_slice(), head.as_slice()],
                 ))?,
                 StoreChange::GroupRecord {
                     group_queue_id,
@@ -976,15 +977,15 @@ mod tests {
         vec![
             StoreChange::Queue {
                 recipient_id: [1; 32],
-                head: vec![1, 1],
+                head: Zeroizing::new(vec![1, 1]),
             },
             StoreChange::Queue {
                 recipient_id: [2; 32],
-                head: vec![2],
+                head: Zeroizing::new(vec![2]),
             },
             StoreChange::Queue {
                 recipient_id: [3; 32],
-                head: vec![3],
+                head: Zeroizing::new(vec![3]),
             },
             StoreChange::Record {
                 recipient_id: [1; 32],
@@ -1012,7 +1013,7 @@ mod tests {
             },
             StoreChange::Queue {
                 recipient_id: [1; 32],
-                head: vec![1, 2],
+                head: Zeroizing::new(vec![1, 2]),
             },
             StoreChange::Acked {
                 recipient_id: [1; 32],
@@ -1037,11 +1038,11 @@ mod tests {
             StoreChange::InvitationDeleted { link_id: [8; 24] },
             StoreChange::GroupQueue {
                 group_queue_id: [4; 32],
-                head: vec![4],
+                head: Zeroizing::new(vec![4]),
             },
             StoreChange::GroupQueue {
                 group_queue_id: [5; 32],
-                head: vec![5],
+                head: Zeroizing::new(vec![5]),
             },
             StoreChange::GroupRecord {
                 group_queue_id: [4; 32],
@@ -1124,7 +1125,7 @@ mod tests {
         let loaded = again.load().unwrap();
         assert_eq!(loaded, model.load().unwrap());
 
-        assert_eq!(loaded.queues[&[1; 32]].head, [1, 2]);
+        assert_eq!(*loaded.queues[&[1; 32]].head, [1, 2]);
         assert_eq!(loaded.queues[&[1; 32]].records.len(), 1);
         assert_eq!(loaded.queues[&[2; 32]].records.len(), 1);
         assert_eq!(loaded.invitations.len(), 1);
@@ -1132,7 +1133,7 @@ mod tests {
         // A group queue and its records come back, and a `GDEL` leaves
         // neither (`NET-245`).
         assert_eq!(loaded.group_queues.len(), 1);
-        assert_eq!(loaded.group_queues[&[4; 32]].head, [4]);
+        assert_eq!(*loaded.group_queues[&[4; 32]].head, [4]);
         assert_eq!(loaded.group_queues[&[4; 32]].records.len(), 1);
         assert_eq!(loaded.group_queues[&[4; 32]].records[0].seq, 2);
 
@@ -1320,7 +1321,7 @@ mod tests {
         store
             .commit(&[StoreChange::GroupQueue {
                 group_queue_id: [4; 32],
-                head: vec![4],
+                head: Zeroizing::new(vec![4]),
             }])
             .unwrap();
         assert_eq!(store.load().unwrap().group_queues.len(), 1);
@@ -1353,7 +1354,7 @@ mod tests {
             .commit(&[
                 StoreChange::Queue {
                     recipient_id: [1; 32],
-                    head: vec![1],
+                    head: Zeroizing::new(vec![1]),
                 },
                 StoreChange::Record {
                     recipient_id: [1; 32],
@@ -1392,7 +1393,7 @@ mod tests {
         let twice = [
             StoreChange::Queue {
                 recipient_id: [1; 32],
-                head: vec![1],
+                head: Zeroizing::new(vec![1]),
             },
             StoreChange::Record {
                 recipient_id: [1; 32],

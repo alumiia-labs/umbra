@@ -21,7 +21,7 @@ use umbra_crypto::{
     secret::Secret,
     stored::{Reader, Writer},
     x25519::StaticSecret,
-    zeroize::Zeroize,
+    zeroize::{Zeroize, Zeroizing},
 };
 use umbra_queue::{
     params::{
@@ -455,7 +455,7 @@ impl QueueService {
         let mut request = Box::new([0u8; NDR_REQUEST_LEN]);
         let encoded = NdrRequest::Push {
             handle: binding.handle,
-            k_tok: Secret::new(*binding.k_tok.expose()),
+            k_tok: binding.k_tok,
             // NTF-086: each push takes one expiry. The kind of a push
             // shows in no field outside the blob.
             ttl: u32::try_from(PUSH_TTL_MESSAGE).unwrap_or(u32::MAX),
@@ -763,7 +763,10 @@ impl QueueService {
     /// no `MSG`. It leaves its backlog in `drains`, and the node asks for
     /// its records in steps ([`QueueService::drain_step`]): a drain above
     /// `DRAIN_THRESHOLD`, and a paced backlog at or below it.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the node lends its endpoint and its gate as separate borrows for one command"
+    )]
     pub fn handle<R: CryptoRng + ?Sized>(
         &mut self,
         circuit: CircuitKey,
@@ -942,18 +945,22 @@ impl QueueService {
         // writes no head. The store rounds the time of the last activity
         // to the hour, and most subscriptions do not move it. A `DEL` left
         // no queue, and then no head.
-        if self.head_of(&recipient_id) != before {
-            self.head_changed(recipient_id);
+        let after = self.head_of(&recipient_id);
+        if after != before {
+            if let Some(head) = after {
+                self.changes.push(StoreChange::Queue { recipient_id, head });
+            }
         }
         Ok(replies)
     }
 
-    /// The stored form of the head of a queue.
-    fn head_of(&self, recipient_id: &[u8; 32]) -> Option<Vec<u8>> {
+    /// The stored form of the head of a queue. It holds the binding, thus
+    /// it stays in a buffer that a drop wipes.
+    fn head_of(&self, recipient_id: &[u8; 32]) -> Option<Zeroizing<Vec<u8>>> {
         let queue = self.queues.get(recipient_id)?;
         let mut writer = Writer::new();
         queue.export_head(&mut writer);
-        Some(writer.finish().to_vec())
+        Some(writer.finish())
     }
 
     /// A command that `QR_auth` authorized.
@@ -1316,7 +1323,7 @@ mod tests {
         loaded.queues.insert(
             [1; 32],
             StoredQueue {
-                head: Vec::new(),
+                head: Default::default(),
                 records: Vec::new(),
             },
         );

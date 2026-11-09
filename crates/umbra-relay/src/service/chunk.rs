@@ -8,7 +8,7 @@
 //! answer that names it (`ATT-191`). A registration that waits for its
 //! bytes stays in RAM, and a restart ends it.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use umbra_core::{
     abuse::admission::{Accepts, RelayGate},
@@ -37,8 +37,9 @@ pub struct Push {
     pub chunk_id: [u8; 32],
     /// The relay that takes the copy, and the token that it issued.
     pub target: ReplicaTarget,
-    /// The bytes that the `CPUT` gave, without a change (`ATT-104`).
-    pub chunk: Vec<u8>,
+    /// The bytes that the `CPUT` gave, without a change (`ATT-104`). The
+    /// copies of one `CREP` share one buffer.
+    pub chunk: Arc<[u8]>,
 }
 
 /// The chunk service of one relay.
@@ -130,7 +131,10 @@ impl ChunkService {
     }
 
     /// Serves one command of a client at the end of a circuit.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the node lends its endpoint and its gate as separate borrows for one command"
+    )]
     pub fn handle<R: CryptoRng + ?Sized>(
         &mut self,
         circuit: CircuitKey,
@@ -257,11 +261,7 @@ impl ChunkService {
 
                 // A copy for a replica is no fetch, thus it takes nothing from
                 // the egress budget of §12.11.
-                let chunk = self
-                    .store
-                    .bytes(&chunk_id)
-                    .ok_or(Reject::Rejected)?
-                    .to_vec();
+                let chunk: Arc<[u8]> = self.store.bytes(&chunk_id).ok_or(Reject::Rejected)?.into();
 
                 let sent = self.copies.entry(chunk_id).or_insert(0);
                 for target in targets.targets {
@@ -272,7 +272,7 @@ impl ChunkService {
                     self.pushes.push(Push {
                         chunk_id,
                         target,
-                        chunk: chunk.clone(),
+                        chunk: Arc::clone(&chunk),
                     });
                 }
 
@@ -698,7 +698,7 @@ mod tests {
 
         assert!(pushes
             .iter()
-            .all(|push| push.chunk == chunk && push.chunk_id == chunk_id));
+            .all(|push| *push.chunk == chunk[..] && push.chunk_id == chunk_id));
         assert_eq!(pushes[1].target.storage_token, [0xC2; 32]);
 
         assert!(bench.service.take_pushes().is_empty());

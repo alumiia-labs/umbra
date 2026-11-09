@@ -4,6 +4,7 @@
 //! clock, the random source, and the sockets, and no protocol rule.
 
 use std::{
+    cell::Cell,
     cmp::Reverse,
     collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque},
     future::Future,
@@ -110,12 +111,13 @@ pub struct LinkWriter {
     limit: usize,
 }
 
-/// The count of the backlog of each link, which the node reads.
-#[derive(Clone, Default)]
+/// The count of the backlog of each link. The node owns it, and the node
+/// task alone changes and reads it, thus it takes no lock.
+#[derive(Default)]
 struct Gauges {
-    links: Arc<Mutex<BTreeMap<LinkId, Gauge>>>,
+    links: BTreeMap<LinkId, Gauge>,
     /// The last sum of the client links, with its time (`NET-377`).
-    total: Arc<Mutex<Option<(std::time::Instant, usize)>>>,
+    total: Cell<Option<(std::time::Instant, usize)>>,
 }
 
 /// The bytes that wait on one link, and its bound.
@@ -126,45 +128,51 @@ type Gauge = (Arc<AtomicUsize>, usize);
 /// 625 KB in this time, thus the sum stays near the bytes that wait.
 const TOTAL_AGE: Duration = Duration::from_millis(5);
 
-impl Gauges {
-    fn insert(&self, link: LinkId, writer: &LinkWriter) {
-        if let Ok(mut held) = self.links.lock() {
-            held.insert(link, (writer.queued.clone(), writer.limit));
-        }
-    }
-
-    fn remove(&self, link: LinkId) {
-        if let Ok(mut held) = self.links.lock() {
-            held.remove(&link);
-        }
-    }
-}
-
 impl Backlog for Gauges {
     fn of(&self, link: LinkId) -> Option<(usize, usize)> {
-        let held = self.links.lock().ok()?;
-        let (queued, limit) = held.get(&link)?;
+        let (queued, limit) = self.links.get(&link)?;
         Some((queued.load(Ordering::Relaxed), *limit))
     }
 
     fn total(&self, counted: &mut dyn FnMut(LinkId) -> bool) -> Option<usize> {
         let now = std::time::Instant::now();
-        let mut last = self.total.lock().ok()?;
 
-        if let Some((at, bytes)) = *last {
+        if let Some((at, bytes)) = self.total.get() {
             if now.duration_since(at) < TOTAL_AGE {
                 return Some(bytes);
             }
         }
 
-        let held = self.links.lock().ok()?;
-        let bytes = held
+        let bytes = self
+            .links
             .iter()
             .filter(|(link, _)| counted(**link))
             .map(|(_, (queued, _))| queued.load(Ordering::Relaxed))
             .fold(0usize, usize::saturating_add);
-        *last = Some((now, bytes));
+        self.total.set(Some((now, bytes)));
         Some(bytes)
+    }
+
+    fn insert_link(&mut self, link: LinkId, queued: Arc<AtomicUsize>, limit: usize) {
+        self.links.insert(link, (queued, limit));
+    }
+
+    fn remove_link(&mut self, link: LinkId) {
+        self.links.remove(&link);
+    }
+}
+
+/// Gives the count of the backlog of `link` to the node (`NET-349`).
+fn count_link(node: &mut RelayNode, link: LinkId, writer: &LinkWriter) {
+    if let Some(backlog) = node.backlog_mut() {
+        backlog.insert_link(link, writer.queued.clone(), writer.limit);
+    }
+}
+
+/// Ends the count of the backlog of `link` in the node.
+fn uncount_link(node: &mut RelayNode, link: LinkId) {
+    if let Some(backlog) = node.backlog_mut() {
+        backlog.remove_link(link);
     }
 }
 
@@ -407,12 +415,11 @@ fn unix_now() -> u64 {
 /// and each other circuit of the relay waited.
 const INPUTS_PER_COMMIT: usize = 64;
 
-/// The links of the node task: the writer of each one, the count of its
-/// backlog, and the connections that a resume moved.
+/// The links of the node task: the writer of each one, and the connections
+/// that a resume moved. The node holds the count of each backlog.
 #[derive(Default)]
 struct Links {
     writers: BTreeMap<LinkId, LinkWriter>,
-    gauges: Gauges,
     adopted: Adopted,
 }
 
@@ -431,7 +438,7 @@ fn take_input(
             source,
         } => {
             links.adopted.open.insert(link);
-            links.gauges.insert(link, &writer);
+            count_link(node, link, &writer);
             links.writers.insert(link, writer);
             node.opened(link, unix_now());
             if let Some(source) = source {
@@ -469,22 +476,15 @@ fn take_input(
             relay_id,
             writer,
         } => {
-            links.gauges.insert(link, &writer);
+            count_link(node, link, &writer);
             links.writers.insert(link, writer);
 
             let mut session_id = [0u8; 8];
-            let mut secret = [0u8; 32];
+            let mut secret = Secret::<32>::zeroed();
             let _ = rng.try_fill_bytes(&mut session_id);
-            let _ = rng.try_fill_bytes(&mut secret);
+            let _ = rng.try_fill_bytes(secret.expose_mut());
 
-            node.dialed(
-                link,
-                relay_id,
-                session_id,
-                Secret::new(secret),
-                unix_now(),
-                rng,
-            )
+            node.dialed(link, relay_id, session_id, secret, unix_now(), rng)
         }
         Input::Capsule { link, bytes } => match links.adopted.name_of(link) {
             Some(link) => node.on_capsule(link, &bytes, unix_now(), rng),
@@ -493,7 +493,7 @@ fn take_input(
         Input::Closed { link } => match links.adopted.closed(link) {
             Some(link) => {
                 links.writers.remove(&link);
-                links.gauges.remove(link);
+                uncount_link(node, link);
                 node.link_closed(link, unix_now())
             }
             None => Vec::new(),
@@ -550,6 +550,7 @@ fn moves_session(outputs: &[Output]) -> bool {
 /// in their order.
 fn send_outputs(
     outputs: Vec<Output>,
+    node: &mut RelayNode,
     links: &mut Links,
     requests: &mpsc::UnboundedSender<Request>,
 ) {
@@ -567,15 +568,15 @@ fn send_outputs(
             }
             Output::Close { link } => {
                 links.writers.remove(&link);
-                links.gauges.remove(link);
+                uncount_link(node, link);
             }
             // WIR-241, WIR-242: the writer of the new connection takes the
             // place of the old one, which closes when it drops.
             Output::Adopt { link, as_link } => {
                 links.adopted.adopt(link, as_link);
-                links.gauges.remove(link);
+                uncount_link(node, link);
                 if let Some(writer) = links.writers.remove(&link) {
-                    links.gauges.insert(as_link, &writer);
+                    count_link(node, as_link, &writer);
                     links.writers.insert(as_link, writer);
                 }
             }
@@ -607,7 +608,7 @@ pub async fn run_node(
     let mut links = Links::default();
 
     // NET-349: the node reads the backlog of a link before it frames a cell.
-    node.set_backlog(Box::new(links.gauges.clone()));
+    node.set_backlog(Box::new(Gauges::default()));
 
     // NET-320, NET-332: a step of the wall clock ends no circuit early and
     // holds no build back.
@@ -764,7 +765,7 @@ pub async fn run_node(
             let _ = requests.send(Request::Challenges(bundle));
         }
 
-        send_outputs(outputs, &mut links, &requests);
+        send_outputs(outputs, &mut node, &mut links, &requests);
         node.flushed();
 
         if stops {
@@ -1356,13 +1357,14 @@ impl Drop for Held {
 #[derive(Default)]
 pub struct Carried {
     /// The manifest, for a client that asks for it. A newer one that the
-    /// file gives takes its place (see [`ManifestSource`]).
-    pub manifest: std::sync::Mutex<Option<Vec<u8>>>,
+    /// file gives takes its place (see [`ManifestSource`]). A request takes
+    /// a share of it, thus the lock holds no copy.
+    pub manifest: std::sync::Mutex<Option<Arc<[u8]>>>,
     /// The file of the manifest and what a new one must verify against.
     pub manifest_source: Option<ManifestSource>,
     /// The key chain of the signer, which this relay carries beside the
     /// manifest (Part 10 `REL-199`), or none before the first rotation.
-    pub keychain: std::sync::Mutex<Option<Vec<u8>>>,
+    pub keychain: std::sync::Mutex<Option<Arc<[u8]>>>,
     /// The gateway, for a relay with the OHTTP relay role.
     pub ohttp: Option<OhttpForward>,
     /// The gateway of the directory and the issuer, for a relay with that
@@ -1374,7 +1376,7 @@ pub struct Carried {
     pub ndr: Option<(NdrRoute, Arc<rustls::ClientConfig>)>,
     /// The newest challenge of each relay, which a carrier of the manifest
     /// serves beside it (`ABU-104`). The node moves it.
-    pub challenges: std::sync::Mutex<Vec<u8>>,
+    pub challenges: std::sync::Mutex<Arc<[u8]>>,
     /// The limits of the connections (`NET-333` to `NET-335`).
     pub limits: ConnectionLimits,
     /// The address of each relay of the set, which holds more connections
@@ -1473,7 +1475,7 @@ async fn fetch_keychain_into(
     if held.as_deref() != Some(chain.as_slice()) {
         let _ = write_atomically(&keychain_path(source), &chain);
         if let Ok(mut slot) = carried.keychain.lock() {
-            *slot = Some(chain.clone());
+            *slot = Some(Arc::from(chain.as_slice()));
         }
     }
 
@@ -1631,7 +1633,7 @@ async fn reload_manifest(
     if let Ok(chain) = std::fs::read(keychain_path(source)) {
         if umbra_core::directory::keychain::links(&chain).is_ok() {
             if let Ok(mut slot) = carried.keychain.lock() {
-                *slot = Some(chain);
+                *slot = Some(chain.into());
             }
         }
     }
@@ -1683,7 +1685,7 @@ async fn reload_manifest(
         adopt(&carried, &placed, &routes, &node).await;
 
         if let Ok(mut held) = carried.manifest.lock() {
-            *held = Some(fresh);
+            *held = Some(fresh.into());
         }
     }
 }
@@ -1846,6 +1848,15 @@ pub async fn serve_connection<S>(
     serve_connection_until(socket, link, node, carried, deadline, None, state).await;
 }
 
+/// Whether `inbound` starts with the request line of a `POST` to `path`.
+/// The check runs at each read of a request, thus it makes no string.
+fn is_post(inbound: &[u8], path: &str) -> bool {
+    inbound
+        .strip_prefix(b"POST ")
+        .and_then(|rest| rest.strip_prefix(path.as_bytes()))
+        .is_some_and(|rest| rest.starts_with(b" "))
+}
+
 /// [`serve_connection`] under a deadline that the accept set: the TLS
 /// handshake and the request share `RELAY_HANDSHAKE_TIMEOUT` (`NET-335`).
 /// `source` is the address of the peer as the caps count it. `state` is what
@@ -1869,7 +1880,7 @@ pub async fn serve_connection_until<S>(
     let post_end = deadline + POST_GRACE;
 
     let request = loop {
-        if inbound.starts_with(format!("POST {OHTTP_PATH} ").as_bytes()) {
+        if is_post(&inbound, OHTTP_PATH) {
             let limits = (OHTTP_REQUEST_MAX, OHTTP_RESPONSE_MAX);
             let _ = tokio::time::timeout_at(
                 post_end,
@@ -1879,7 +1890,7 @@ pub async fn serve_connection_until<S>(
             return;
         }
 
-        if inbound.starts_with(format!("POST {DIRECTORY_PATH} ").as_bytes()) {
+        if is_post(&inbound, DIRECTORY_PATH) {
             let limits = (DIRECTORY_REQUEST_MAX, DIRECTORY_RESPONSE_MAX);
             let _ = tokio::time::timeout_at(
                 post_end,
@@ -1894,7 +1905,7 @@ pub async fn serve_connection_until<S>(
             return;
         }
 
-        if inbound.starts_with(format!("POST {RECEIPT_PATH} ").as_bytes()) {
+        if is_post(&inbound, RECEIPT_PATH) {
             let _ = tokio::time::timeout_at(
                 post_end,
                 answer_receipt_query(&mut stream, &mut inbound, &node, &carried),
@@ -1903,7 +1914,7 @@ pub async fn serve_connection_until<S>(
             return;
         }
 
-        if inbound.starts_with(format!("POST {STAT_PATH} ").as_bytes()) {
+        if is_post(&inbound, STAT_PATH) {
             let _ = tokio::time::timeout_at(
                 post_end,
                 answer_stat_query(&mut stream, &mut inbound, &node, &carried),
@@ -1916,7 +1927,7 @@ pub async fn serve_connection_until<S>(
             let bundle = carried
                 .challenges
                 .lock()
-                .map(|held| held.clone())
+                .map(|held| Arc::clone(&held))
                 .unwrap_or_default();
             let head = native::manifest_response_head(bundle.len());
 
@@ -2410,7 +2421,10 @@ pub async fn dial_next(
 /// `carried` gives what the relay serves over HTTPS beside the upgrade.
 /// `replicas` names each other relay with the attachment role, for the
 /// copies of Part 12 §12.4.1.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the process gives each part of the relay once, at its start"
+)]
 pub async fn run_relay(
     mut node: RelayNode,
     listener: TcpListener,
@@ -2553,7 +2567,7 @@ pub async fn run_relay(
                 }
                 Request::Challenges(bundle) => {
                     if let Ok(mut held) = carried_challenges.challenges.lock() {
-                        *held = bundle;
+                        *held = bundle.into();
                     }
                 }
                 Request::NdrPush(push) => {
@@ -2677,11 +2691,11 @@ mod tests {
 
     #[test]
     fn the_gauges_give_the_sum_of_the_counted_links() {
-        let gauges = Gauges::default();
+        let mut gauges = Gauges::default();
         let (one, _one_out, one_queued) = LinkWriter::new(LINK_BACKLOG);
         let (two, _two_out, two_queued) = LinkWriter::new(RELAY_LINK_BACKLOG);
-        gauges.insert(1, &one);
-        gauges.insert(2, &two);
+        gauges.insert_link(1, one.queued.clone(), one.limit);
+        gauges.insert_link(2, two.queued.clone(), two.limit);
         one_queued.store(3 << 20, Ordering::Relaxed);
         two_queued.store(5 << 20, Ordering::Relaxed);
 
@@ -2693,7 +2707,7 @@ mod tests {
         assert_eq!(gauges.total(&mut |_| true), Some(3 << 20));
         std::thread::sleep(TOTAL_AGE);
         assert_eq!(gauges.total(&mut |_| true), Some(8 << 20));
-        gauges.remove(2);
+        gauges.remove_link(2);
         std::thread::sleep(TOTAL_AGE);
         assert_eq!(gauges.total(&mut |_| true), Some(3 << 20));
     }
@@ -3324,7 +3338,7 @@ mod tests {
         loaded.queues.insert(
             [0x52; 32],
             crate::store::StoredQueue {
-                head: head.finish().to_vec(),
+                head: head.finish(),
                 records: Vec::new(),
             },
         );

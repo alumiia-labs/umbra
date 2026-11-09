@@ -10,6 +10,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     ops::Bound,
+    sync::{atomic::AtomicUsize, Arc},
 };
 
 use umbra_core::{
@@ -687,6 +688,19 @@ pub trait Backlog: Send {
         let _ = counted;
         None
     }
+
+    /// Starts the count of a new `link`: `queued` holds the bytes that
+    /// wait on it, and `limit` is its bound. The node owns the counts,
+    /// thus the read of each cell takes no lock. A runtime that counts
+    /// its links in another way ignores this call.
+    fn insert_link(&mut self, link: LinkId, queued: Arc<AtomicUsize>, limit: usize) {
+        let _ = (link, queued, limit);
+    }
+
+    /// Ends the count of `link`.
+    fn remove_link(&mut self, link: LinkId) {
+        let _ = link;
+    }
 }
 
 /// The time that an accepted link has for the capsule that makes it a link
@@ -866,7 +880,6 @@ pub struct RelayNode {
     /// a relay writes into one of its own queues and for the auth of each
     /// deposit it takes (`WIR-526`).
     relay: RelayStatic,
-    static_secret: StaticSecret,
     /// The static key of each queue relay of the relay set, for a deposit.
     queue_relays: BTreeMap<[u8; 32], [u8; 32]>,
     /// The identity key that signs the challenges of this relay.
@@ -955,7 +968,6 @@ impl RelayNode {
             relay_id,
         };
 
-        let static_secret = config.static_secret.clone();
         let layer = config.layer;
 
         let mut queues = QueueService::default();
@@ -981,7 +993,6 @@ impl RelayNode {
             groups: GroupService::default(),
             chunks: ChunkService::new(config.chunk_capacity),
             relay,
-            static_secret,
             queue_relays: BTreeMap::new(),
             pow_key: None,
             carriers: Vec::new(),
@@ -1339,6 +1350,11 @@ impl RelayNode {
         self.backlog = Some(backlog);
     }
 
+    /// The count of the backlog of each link, for a change of its links.
+    pub fn backlog_mut(&mut self) -> Option<&mut (dyn Backlog + 'static)> {
+        self.backlog.as_deref_mut()
+    }
+
     /// The runtime took the outputs of each call so far, and its count of
     /// each backlog holds them.
     pub fn flushed(&mut self) {
@@ -1488,7 +1504,7 @@ impl RelayNode {
         }
 
         let mut outputs = Vec::new();
-        for carrier in self.carriers.clone() {
+        for &carrier in &self.carriers {
             if carrier == self.relay.relay_id {
                 let identity = key.verifying_key();
                 if let Ok(moved) = self.challenges.take(challenge.clone(), &identity, now) {
@@ -1630,7 +1646,9 @@ impl RelayNode {
             return Vec::new();
         };
 
-        if let Some(reply) = self.queues.deposit(&command, &self.static_secret, now, rng) {
+        // The circuit table holds the one copy of the static key.
+        let static_secret = self.circuits.static_secret();
+        if let Some(reply) = self.queues.deposit(&command, static_secret, now, rng) {
             self.post_answer(reply.circuit, reply.outbound, false);
         }
 
@@ -1655,7 +1673,7 @@ impl RelayNode {
             node.gate.spent.restore(*epoch, *nonce);
         }
 
-        node.groups = GroupService::restore(&loaded);
+        node.groups = GroupService::restore(&mut loaded);
 
         let mut queues = QueueService::restore(loaded);
         queues.keep_notify_of(&mut node.queues);
@@ -2065,7 +2083,6 @@ impl RelayNode {
                     .and_then(|peer| self.identities.get(&peer))
                     .filter(|_| self.verifies_left(link, now))
                 {
-                    let identity = identity.clone();
                     let own = self.relay.relay_id;
 
                     // A receipt that the book drops counts as one signature
@@ -2073,7 +2090,7 @@ impl RelayNode {
                     // fail thus costs this relay a bounded number of them.
                     if !self
                         .receipts
-                        .receipt_taken(link, value, &own, &identity, now)
+                        .receipt_taken(link, value, &own, identity, now)
                     {
                         self.may_verify(link, now);
                     }
@@ -2751,7 +2768,7 @@ impl RelayNode {
             return true;
         }
 
-        let Some(secret) = self.circuits.session_secret(&circuit).cloned() else {
+        let Some(secret) = self.circuits.take_session_secret(&circuit) else {
             return false;
         };
 
@@ -3077,7 +3094,10 @@ impl RelayNode {
             let mut corr_id = [0u8; 16];
             rng.fill_bytes(&mut corr_id);
 
-            let payload = vec![0u8; Bucket::B0.l5_payload()];
+            // A cover goes at each tick of each idle circuit, thus its
+            // buffers stay on the stack. The command fills the command
+            // area of `B0`.
+            let payload = [0u8; Bucket::B0.l5_payload()];
             let cover = Command {
                 cmd: Cmd::Cover,
                 corr_id,
@@ -3086,7 +3106,7 @@ impl RelayNode {
                 payload: &payload,
             };
 
-            let mut encoded = vec![0u8; cover.len()];
+            let mut encoded = [0u8; Bucket::B0.command_area()];
             cover.encode(&mut encoded).ok().and_then(|_| {
                 self.circuits
                     .originate(circuit, Bucket::B0, CellCommand::Data, &encoded)
@@ -3496,7 +3516,7 @@ mod tests {
                 relay_id: [0xB1; 32],
                 storage_token: [0xB2; 32],
             },
-            chunk: vec![0x3C; CHUNK_SIZE],
+            chunk: vec![0x3C; CHUNK_SIZE].into(),
         };
 
         let Some(Output::Push { relay_id, capsule }) = push_output(&push) else {
@@ -3514,7 +3534,7 @@ mod tests {
 
         let copy = CrputPayload::parse(command.payload).unwrap();
         assert_eq!(copy.storage_token, [0xB2; 32]);
-        assert_eq!(copy.chunk, push.chunk);
+        assert_eq!(copy.chunk, &push.chunk[..]);
 
         // A relay that holds no registration for the chunk drops the copy.
         // It gives no answer, and it keeps the link (`ATT-107`).
@@ -3660,7 +3680,7 @@ mod tests {
         loaded.queues.insert(
             [0x52; 32],
             crate::store::StoredQueue {
-                head: head.finish().to_vec(),
+                head: head.finish(),
                 records: Vec::new(),
             },
         );

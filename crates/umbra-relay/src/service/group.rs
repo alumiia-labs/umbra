@@ -21,6 +21,7 @@ use umbra_core::{
 use umbra_crypto::{
     rand_core::CryptoRng,
     stored::{Reader, Writer},
+    zeroize::Zeroizing,
 };
 use umbra_queue::{
     params::{store_time, DRAIN_THRESHOLD},
@@ -161,10 +162,10 @@ fn accept_either(
 }
 
 /// The stored form of the head of a group queue.
-fn head_of(queue: &GroupQueue) -> Vec<u8> {
+fn head_of(queue: &GroupQueue) -> Zeroizing<Vec<u8>> {
     let mut writer = Writer::new();
     queue.export_head(&mut writer);
-    writer.finish().to_vec()
+    writer.finish()
 }
 
 fn sender_id_of(queue: &[u8; QUEUE_ADDRESS_LEN]) -> [u8; 32] {
@@ -175,25 +176,26 @@ impl GroupService {
     /// The group queues of an earlier run. A queue whose stored form has
     /// a fault is dropped, and the others stay. Each live session and
     /// each subscription of that run is gone, and the members open them
-    /// again.
-    pub fn restore(loaded: &Loaded) -> Self {
+    /// again. The group queues move out of `loaded`, thus no record is
+    /// copied.
+    pub fn restore(loaded: &mut Loaded) -> Self {
         let mut service = GroupService::default();
-        for (group_queue_id, stored) in &loaded.group_queues {
+        for (group_queue_id, stored) in core::mem::take(&mut loaded.group_queues) {
             let mut reader = Reader::new(&stored.head);
-            let restored = GroupQueue::restore(&mut reader, stored.records.clone())
+            let restored = GroupQueue::restore(&mut reader, stored.records)
                 .ok()
-                .filter(|queue| queue.id() == *group_queue_id);
+                .filter(|queue| queue.id() == group_queue_id);
 
             let Some(queue) = restored else {
                 // NET-302, NET-303: a queue that serves no one leaves the
                 // file too.
-                service.changes.push(StoreChange::GroupQueueDeleted {
-                    group_queue_id: *group_queue_id,
-                });
+                service
+                    .changes
+                    .push(StoreChange::GroupQueueDeleted { group_queue_id });
                 continue;
             };
 
-            service.served.insert(*group_queue_id, Served::new(queue));
+            service.served.insert(group_queue_id, Served::new(queue));
         }
 
         service
@@ -237,7 +239,10 @@ impl GroupService {
     /// A `GSUB` gives no `GMSG`. It leaves its backlog in `drains`, and the
     /// node asks for its records in steps ([`GroupService::drain_step`]): a
     /// drain above `DRAIN_THRESHOLD`, and a paced backlog at or below it.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the node lends its endpoint and its gate as separate borrows for one command"
+    )]
     pub fn handle<R: CryptoRng + ?Sized>(
         &mut self,
         circuit: CircuitKey,
@@ -538,7 +543,10 @@ impl GroupService {
     /// A `GNEW`: the admission of Part 13, a `GroupQueueId` from the relay
     /// CSPRNG, and one `GIDS` in the same session (`WIR-373`, `WIR-376`,
     /// `WIR-377`).
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the node lends its endpoint and its gate as separate borrows for one command"
+    )]
     fn create<R: CryptoRng + ?Sized>(
         &mut self,
         circuit: CircuitKey,
@@ -1347,7 +1355,8 @@ mod tests {
         // A second run of the relay reads it, and the reader of the epoch
         // takes the record that waited.
         let mut second = Relay::new();
-        second.service = GroupService::restore(&store);
+        // The store keeps what it holds, for the check of the `GDEL` below.
+        second.service = GroupService::restore(&mut store.clone());
         assert_eq!(second.service.len(), 1);
 
         let from_seq = [0u8; 4];
@@ -1380,7 +1389,7 @@ mod tests {
             store.apply(&change);
         }
         assert!(store.group_queues.is_empty());
-        assert!(GroupService::restore(&store).is_empty());
+        assert!(GroupService::restore(&mut store).is_empty());
     }
 
     #[test]

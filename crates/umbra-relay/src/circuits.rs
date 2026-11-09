@@ -360,7 +360,8 @@ struct Held {
     extending: bool,
     /// The time of that `EXTEND`.
     extended_at: u64,
-    /// `RelaySession_sk` at a relay of layer 3 (`NET-285`).
+    /// `RelaySession_sk` at a relay of layer 3 (`NET-285`), until the
+    /// first cell moves it to the endpoint.
     session_secret: Option<StaticSecret>,
     created_at: u64,
     /// The cells toward the queue relay and toward the client, against
@@ -407,6 +408,20 @@ const CELL_HEAD: usize = 32;
 /// The body of `cell`, which a layer changes in place.
 fn body_of(cell: &mut [u8]) -> &mut [u8] {
     cell.get_mut(CELL_HEAD..).unwrap_or_default()
+}
+
+/// The content of a cell whose body `unpad_body` read, in the buffer of
+/// the cell. The content starts after the command byte of the body. The
+/// buffer of the cell thus serves again, and a cell that ends here takes
+/// one copy at this relay.
+fn into_content(mut cell: Vec<u8>, len: usize) -> Vec<u8> {
+    let start = CELL_HEAD + 1;
+    cell.truncate(start.saturating_add(len));
+    cell.drain(..start.min(cell.len()));
+    // The bound of the delayed cells counts the length (`NET-362`), thus
+    // the buffer keeps no byte above it.
+    cell.shrink_to_fit();
+    cell
 }
 
 /// Writes the head of `cell`. The body stays in place, thus a cell that
@@ -708,9 +723,15 @@ impl CircuitTable {
         self.held.is_empty()
     }
 
-    /// `RelaySession_sk` of a circuit that ends at this relay.
-    pub fn session_secret(&self, circuit: &CircuitKey) -> Option<&StaticSecret> {
-        self.held.get(circuit)?.session_secret.as_ref()
+    /// The static secret key of this relay.
+    pub fn static_secret(&self) -> &StaticSecret {
+        &self.static_secret
+    }
+
+    /// Takes `RelaySession_sk` of a circuit that ends at this relay. The
+    /// session of the endpoint keeps the one copy.
+    pub fn take_session_secret(&mut self, circuit: &CircuitKey) -> Option<StaticSecret> {
+        self.held.get_mut(circuit)?.session_secret.take()
     }
 
     /// Whether a circuit identifier is free on a link (`NET-155`).
@@ -1012,6 +1033,7 @@ impl CircuitTable {
         let Ok((command, content)) = unpad_body(body) else {
             return self.close(key);
         };
+        let content_len = content.len();
 
         match (measure, command) {
             // NET-169, NET-322: the client ended its circuit here. The
@@ -1030,7 +1052,7 @@ impl CircuitTable {
             (Measure::Open { .. }, CellCommand::MeasEcho) if bucket == Bucket::B0 => {
                 return vec![Action::Echo {
                     circuit: key,
-                    content: content.to_vec(),
+                    content: into_content(cell, content_len),
                 }];
             }
             (Measure::Open { .. }, _) => return Vec::new(),
@@ -1039,7 +1061,7 @@ impl CircuitTable {
             (Measure::Candidate, CellCommand::MeasOpen) if bucket == Bucket::B3 => {
                 return vec![Action::MeasOpen {
                     circuit: key,
-                    content: content.to_vec(),
+                    content: into_content(cell, content_len),
                 }];
             }
             (Measure::Candidate, _) => return self.close(key),
@@ -1050,7 +1072,7 @@ impl CircuitTable {
             {
                 return vec![Action::MeasOpen {
                     circuit: key,
-                    content: content.to_vec(),
+                    content: into_content(cell, content_len),
                 }];
             }
             (Measure::No, _) => {}
@@ -1060,7 +1082,7 @@ impl CircuitTable {
             (CellCommand::Data, 3) => vec![Action::Serve {
                 circuit: key,
                 bucket,
-                content: content.to_vec(),
+                content: into_content(cell, content_len),
             }],
             (CellCommand::Loop, 3) => vec![Action::Loop { circuit: key }],
             // NET-166: a relay of layer 3 extends no circuit.
