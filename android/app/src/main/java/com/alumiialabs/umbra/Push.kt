@@ -148,7 +148,8 @@ class PushService : FirebaseMessagingService() {
 
         // The blob opens in each state, thus an open client counts it too
         // (NTF-078, NTF-079).
-        val conversation = waiting(app, message.data["b"])
+        val woken = waiting(app, message.data["b"])
+        val conversation = woken.conversation
         // A blob that the table names silent opened, and it shows no
         // alert. An open client writes the table at each change of a block
         // and of an alert setting, thus the table decides for it too.
@@ -157,23 +158,23 @@ class PushService : FirebaseMessagingService() {
         if (Core.isOpen()) {
             // A view on the screen shows the message itself. The alert of
             // the record takes the place of this one, or ends it.
-            if (!isSilent && !Core.isOnScreen()) Notifier.pushed(app, conversation)
+            if (!isSilent && !Core.isOnScreen()) Notifier.pushed(app, conversation, woken.priority)
             Core.wake(app)
             return
         }
 
         if (isSilent) return
-        Notifier.waiting(app, conversation)
+        Notifier.waiting(app, conversation, woken.priority)
     }
 
-    /** The conversation of a blob that the wake table opens, or none. */
-    private fun waiting(app: android.content.Context, encoded: String?): Conversation? {
-        if (Modes.mode(app) != NotifyMode.Instant) return null
+    /** What a blob that the wake table opens names. */
+    private fun waiting(app: android.content.Context, encoded: String?): WakeStore.Woken {
+        if (Modes.mode(app) != NotifyMode.Instant) return WakeStore.Woken.NONE
 
         val blob = encoded?.let {
             runCatching { Base64.decode(it, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP) }
                 .getOrNull()
-        } ?: return null
+        } ?: return WakeStore.Woken.NONE
         return WakeStore.openBlob(app, blob)
     }
 }

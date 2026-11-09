@@ -8652,6 +8652,85 @@ mod tests {
         client.audit().unwrap();
     }
 
+    /// DEV-358: the priority mark is bit 4 of the flags byte. The sender,
+    /// the text, the setting, and the mute keep it, and it keeps them.
+    #[test]
+    fn the_priority_mark_shares_the_flags_byte_of_the_preview() {
+        use super::{ALERT_ALL, ALERT_MENTIONS, PREVIEW_HIDE, PREVIEW_SHOW};
+        use umbra_core::devset::engine::SyncEngine;
+
+        let (mut client, mut rng, _, conversation) = client_with_contact(411);
+        let (tablet, _) = link_device(&mut client, &mut rng);
+        let own = client.device_identity().unwrap().unwrap().device_id;
+        let channel = ContactId([0x7C; 32]);
+        let subject = client.subject_of(conversation).unwrap().unwrap();
+        assert!(!client.is_priority(conversation).unwrap());
+
+        client.set_priority(conversation, true, &mut rng).unwrap();
+        let sends: Vec<_> = core::iter::from_fn(|| client.take_sync_send()).collect();
+        assert_eq!(sends.len(), 1);
+        let value = [[ALERT_ALL].as_slice(), &[0; 8], &[0x10]].concat();
+        assert!(carries(&sends[0].app, &value));
+        assert_eq!(client.preview_setting(conversation).unwrap(), 0);
+
+        // The preview, the setting, and the mute keep the mark.
+        let preview = PREVIEW_SHOW | PREVIEW_HIDE << 2;
+        client
+            .set_preview_setting(conversation, preview, &mut rng)
+            .unwrap();
+        client
+            .set_alert_setting(conversation, ALERT_MENTIONS, &mut rng)
+            .unwrap();
+        client
+            .set_muted_until(conversation, 60_000, &mut rng)
+            .unwrap();
+        assert!(client.is_priority(conversation).unwrap());
+        assert_eq!(client.preview_setting(conversation).unwrap(), preview);
+
+        // The end of the mark keeps the preview.
+        client.set_priority(conversation, false, &mut rng).unwrap();
+        assert!(!client.is_priority(conversation).unwrap());
+        assert_eq!(client.preview_setting(conversation).unwrap(), preview);
+
+        let mut engine = SyncEngine::new(tablet, &[own]).unwrap();
+        let mut take = |client: &mut TestClient, value: &[u8], msg_id: u8| {
+            let item = engine
+                .relay_mutable(
+                    super::alerts::ITEM_ALERT,
+                    &subject,
+                    value,
+                    1_000 + u64::from(msg_id),
+                    tablet,
+                    [msg_id; 16],
+                    10,
+                )
+                .unwrap();
+            let carried = record(AppKind::DeviceSet, [msg_id; 16], &item.body);
+            client
+                .commit_network(&[], &[(channel, carried)], T0, &mut rng)
+                .unwrap();
+        };
+
+        // Another device marks the conversation, with the text hidden.
+        let marked = [[ALERT_ALL].as_slice(), &[0; 8], &[0x10 | PREVIEW_HIDE << 2]].concat();
+        take(&mut client, &marked, 1);
+        assert!(client.is_priority(conversation).unwrap());
+        assert_eq!(
+            client.preview_setting(conversation).unwrap(),
+            PREVIEW_HIDE << 2
+        );
+
+        // A bit above bit 4 changes nothing.
+        let wrong = [[ALERT_ALL].as_slice(), &[0; 8], &[0x20]].concat();
+        take(&mut client, &wrong, 2);
+        assert!(client.is_priority(conversation).unwrap());
+
+        // A value with no flags byte ends the mark.
+        take(&mut client, &[ALERT_ALL], 3);
+        assert!(!client.is_priority(conversation).unwrap());
+        client.audit().unwrap();
+    }
+
     #[test]
     fn a_pinned_conversation_leads_the_list_and_a_deletion_empties_one_conversation() {
         let (mut client, mut rng, _, conversation) = client_with_contact(409);

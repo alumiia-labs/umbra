@@ -8,13 +8,15 @@
 //!
 //! ```text
 //! WakeTable {
-//!     version     u8                 // 0x02
+//!     version     u8                 // 0x03
 //!     root_count  u16
 //!     roots       [root_count][32]u8 // each k_ntf_root that a binding uses
 //!     alias_count u16
 //!     aliases     [alias_count] { queue_alias [16]u8, conversation [16]u8 }
 //!     muted_count u16
 //!     muted       [muted_count] { queue_alias [16]u8, until u64 }
+//!     priority_count u16
+//!     priority    [priority_count][16]u8 // each queue_alias of a priority conversation
 //! }
 //! ```
 //!
@@ -22,8 +24,10 @@
 //! rendezvous queue: its alert names none. A conversation of [`WAKE_SILENT`]
 //! names a queue that raises no alert. A muted alias raises no alert before
 //! its `until`, in seconds of the Unix time, since a locked client cannot
-//! write the table again at the end of a mute. A table of version `0x01`
-//! has no `muted` part.
+//! write the table again at the end of a mute. An alias in `priority` is
+//! the queue of a conversation that the user marked priority (Part 7
+//! `DEV-358`). A table of version `0x01` has no `muted` part, and a table
+//! below version `0x03` has no `priority` part.
 
 use alloc::vec::Vec;
 
@@ -51,6 +55,8 @@ pub struct WakeTable {
     /// Each queue alias whose conversation is muted, with the end of the
     /// mute in seconds of the Unix time.
     pub muted: Vec<([u8; 16], u64)>,
+    /// Each queue alias whose conversation is priority.
+    pub priority: Vec<[u8; 16]>,
 }
 
 impl Drop for WakeTable {
@@ -65,6 +71,7 @@ impl core::fmt::Debug for WakeTable {
             .field("roots", &self.roots.len())
             .field("aliases", &self.aliases.len())
             .field("muted", &self.muted.len())
+            .field("priority", &self.priority.len())
             .finish()
     }
 }
@@ -81,6 +88,9 @@ pub enum Woken {
         waiting: u8,
         /// Bit 0 of the flags.
         urgent: bool,
+        /// Whether the conversation is priority. A silent conversation is
+        /// not.
+        priority: bool,
     },
     /// The blob names an epoch outside the window, and no open ran
     /// (`NTF-076`). It counts as no failure.
@@ -95,15 +105,23 @@ impl WakeTable {
         if self.roots.len() > WAKE_ENTRIES_MAX
             || self.aliases.len() > WAKE_ENTRIES_MAX
             || self.muted.len() > WAKE_ENTRIES_MAX
+            || self.priority.len() > WAKE_ENTRIES_MAX
         {
             return Err(Error::Malformed);
         }
 
-        let size =
-            1 + 2 + self.roots.len() * 32 + 2 + self.aliases.len() * 32 + 2 + self.muted.len() * 24;
+        let size = 1
+            + 2
+            + self.roots.len() * 32
+            + 2
+            + self.aliases.len() * 32
+            + 2
+            + self.muted.len() * 24
+            + 2
+            + self.priority.len() * 16;
         let mut out = alloc::vec![0u8; size];
         let mut w = Writer::new(&mut out);
-        w.u8(0x02)?;
+        w.u8(0x03)?;
 
         w.u16(u16::try_from(self.roots.len()).map_err(|_| Error::Malformed)?)?;
         for root in &self.roots {
@@ -122,6 +140,11 @@ impl WakeTable {
             w.put(&until.to_be_bytes())?;
         }
 
+        w.u16(u16::try_from(self.priority.len()).map_err(|_| Error::Malformed)?)?;
+        for alias in &self.priority {
+            w.put(alias)?;
+        }
+
         Ok(out)
     }
 
@@ -129,7 +152,7 @@ impl WakeTable {
     pub fn parse(bytes: &[u8]) -> Result<Self, Error> {
         let mut r = Reader::new(bytes);
         let version = r.u8()?;
-        if version != 0x01 && version != 0x02 {
+        if !(0x01..=0x03).contains(&version) {
             return Err(Error::Malformed);
         }
 
@@ -152,7 +175,7 @@ impl WakeTable {
         }
 
         let mut muted = Vec::new();
-        if version == 0x02 {
+        if version >= 0x02 {
             let muted_len = usize::from(r.u16()?);
             if muted_len > WAKE_ENTRIES_MAX {
                 return Err(Error::Malformed);
@@ -162,12 +185,25 @@ impl WakeTable {
                 muted.push((r.array()?, u64::from_be_bytes(r.array()?)));
             }
         }
+
+        let mut priority = Vec::new();
+        if version >= 0x03 {
+            let priority_len = usize::from(r.u16()?);
+            if priority_len > WAKE_ENTRIES_MAX {
+                return Err(Error::Malformed);
+            }
+            priority.reserve(priority_len);
+            for _ in 0..priority_len {
+                priority.push(r.array()?);
+            }
+        }
         r.finish()?;
 
         Ok(WakeTable {
             roots,
             aliases,
             muted,
+            priority,
         })
     }
 
@@ -207,10 +243,14 @@ impl WakeTable {
                 }
             });
 
+        let priority = conversation.is_some_and(|id| id != WAKE_SILENT)
+            && self.priority.contains(&plain.queue_alias);
+
         Ok(Woken::Opened {
             conversation,
             waiting: plain.waiting_count,
             urgent: plain.flags & FLAG_URGENT != 0,
+            priority,
         })
     }
 }
@@ -237,6 +277,7 @@ mod tests {
             roots: alloc::vec![[9; 32], [3; 32]],
             aliases: alloc::vec![([7; 16], [5; 16]), ([8; 16], [0; 16])],
             muted: alloc::vec![([8; 16], u64::MAX)],
+            priority: alloc::vec![],
         };
         let table = WakeTable::parse(&table.encode().unwrap()).unwrap();
 
@@ -246,6 +287,7 @@ mod tests {
                 conversation: Some([5; 16]),
                 waiting: 2,
                 urgent: true,
+                priority: false,
             }
         );
 
@@ -261,6 +303,7 @@ mod tests {
             roots: alloc::vec![[9; 32]],
             aliases: alloc::vec![],
             muted: alloc::vec![],
+            priority: alloc::vec![],
         };
         assert_eq!(other.open(&blob, now).unwrap(), Woken::Failed);
 
@@ -269,17 +312,20 @@ mod tests {
             roots: alloc::vec![[3; 32]],
             aliases: alloc::vec![([7; 16], [0; 16])],
             muted: alloc::vec![],
+            priority: alloc::vec![[7; 16]],
         };
         assert!(matches!(
             unnamed.open(&blob, now).unwrap(),
             Woken::Opened {
                 conversation: None,
+                priority: false,
                 ..
             }
         ));
 
         assert!(WakeTable::parse(&[0x01, 0, 0, 0, 0, 0]).is_err());
-        assert!(WakeTable::parse(&[0x03, 0, 0, 0, 0]).is_err());
+        assert!(WakeTable::parse(&[0x03, 0, 0, 0, 0, 0, 0]).is_err());
+        assert!(WakeTable::parse(&[0x04, 0, 0, 0, 0, 0, 0, 0, 0]).is_err());
 
         // A table of the first version holds no mute.
         assert_eq!(
@@ -303,16 +349,41 @@ mod tests {
             roots: alloc::vec![[3; 32]],
             aliases: alloc::vec![([7; 16], [5; 16])],
             muted: alloc::vec![([7; 16], now + 60)],
+            priority: alloc::vec![[7; 16]],
         };
         let table = WakeTable::parse(&table.encode().unwrap()).unwrap();
-        let conversation = |at| match table.open(&blob, at).unwrap() {
-            Woken::Opened { conversation, .. } => conversation,
-            _ => None,
+        let opened = |at| match table.open(&blob, at).unwrap() {
+            Woken::Opened {
+                conversation,
+                priority,
+                ..
+            } => (conversation, priority),
+            _ => (None, false),
         };
 
         // DEV-331: the mute holds while the client is locked, and it ends
-        // at its time with no write of the table.
-        assert_eq!(conversation(now), Some(WAKE_SILENT));
-        assert_eq!(conversation(now + 60), Some([5; 16]));
+        // at its time with no write of the table. DEV-358: a mute stops the
+        // alert of a priority conversation too.
+        assert_eq!(opened(now), (Some(WAKE_SILENT), false));
+        assert_eq!(opened(now + 60), (Some([5; 16]), true));
+    }
+
+    #[test]
+    fn a_table_of_version_2_holds_no_priority() {
+        let table = WakeTable {
+            roots: alloc::vec![[3; 32]],
+            aliases: alloc::vec![([7; 16], [5; 16])],
+            muted: alloc::vec![],
+            priority: alloc::vec![[7; 16]],
+        };
+        let mut encoded = table.encode().unwrap();
+        assert_eq!(WakeTable::parse(&encoded).unwrap(), table);
+
+        // The table of an earlier build: version 0x02, and no priority part.
+        *encoded.first_mut().unwrap() = 0x02;
+        encoded.truncate(encoded.len() - 2 - 16);
+        let earlier = WakeTable::parse(&encoded).unwrap();
+        assert!(earlier.priority.is_empty());
+        assert_eq!(earlier.aliases, table.aliases);
     }
 }

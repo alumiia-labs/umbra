@@ -642,6 +642,8 @@ pub struct WakeOutcome {
     pub waiting: u8,
     /// Whether the sender marked the record urgent.
     pub urgent: bool,
+    /// Whether the conversation is priority (Part 7 `DEV-358`).
+    pub priority: bool,
 }
 
 /// Opens a push blob of a locked client with its wake table at `now`
@@ -656,6 +658,7 @@ pub fn open_wake_blob(table: Vec<u8>, blob: Vec<u8>, now: u64) -> WakeOutcome {
         conversation: None,
         waiting: 0,
         urgent: false,
+        priority: false,
     };
     let Ok(parsed) = WakeTable::parse(&table) else {
         return none(3);
@@ -666,11 +669,13 @@ pub fn open_wake_blob(table: Vec<u8>, blob: Vec<u8>, now: u64) -> WakeOutcome {
             conversation,
             waiting,
             urgent,
+            priority,
         }) => WakeOutcome {
             status: 0,
             conversation: conversation.map(|id| id.to_vec()),
             waiting,
             urgent,
+            priority,
         },
         Ok(Woken::OutsideWindow) => none(1),
         Ok(Woken::Failed) => none(2),
@@ -7587,6 +7592,25 @@ impl Handle {
         let mut inner = locked(&self.inner);
         let Inner { client, bridge, .. } = &mut *inner;
         client.set_preview_setting(conversation, value, &mut OsRng)?;
+        if let Some(running) = bridge {
+            running.flush(client, &mut OsRng)?;
+        }
+        Ok(())
+    }
+
+    /// Whether the user marked a conversation priority (Part 7 `DEV-358`).
+    pub fn is_priority(&self, conversation: Vec<u8>) -> Result<bool, FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        Ok(locked(&self.inner).client.is_priority(conversation)?)
+    }
+
+    /// Marks a conversation priority or ends the mark, for each device of
+    /// the set.
+    pub fn set_priority(&self, conversation: Vec<u8>, on: bool) -> Result<(), FfiError> {
+        let conversation = conversation_of(&conversation)?;
+        let mut inner = locked(&self.inner);
+        let Inner { client, bridge, .. } = &mut *inner;
+        client.set_priority(conversation, on, &mut OsRng)?;
         if let Some(running) = bridge {
             running.flush(client, &mut OsRng)?;
         }

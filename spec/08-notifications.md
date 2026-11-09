@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 8: Notifications and Mobile Delivery
 
 **Status:** Draft
-**Version:** 0.48.0
-**Date:** 2026-11-04
+**Version:** 0.49.0
+**Date:** 2026-11-09
 
 ---
 
@@ -876,12 +876,15 @@ section delivers a record to it. The **wake key** lets it open the blob of
   `DEV-331` mutes with no end, names 16 bytes `0xFF` in the place of its
   conversation. The table MUST hold the end of each other mute for the
   `queue_alias` of its conversation, and a locked client MUST show no alert for
-  such an alias before that end. A client MUST write the table again after each
-  change of a mute and of a notification setting.
+  such an alias before that end. The table MUST also name each `queue_alias`
+  of a priority conversation of Part 7 `DEV-358`, and no silent alias. A client
+  MUST write the table again after each change of a mute, of a notification
+  setting, and of a priority mark.
 - **[NTF-136]** A locked client MUST open each blob of a push or of a watch with
   that table under `NTF-075` to `NTF-079`. It MUST show that a message waits in
   the conversation of `queue_alias`, grouped under `NTF-089`, with no text of a
-  message and no name of a contact. It MUST NOT fetch or acknowledge the record,
+  message and no name of a contact. The alert of a priority alias takes the
+  channel of `NTF-155`. It MUST NOT fetch or acknowledge the record,
   which stays at the relay until the unlock.
 - **[NTF-137]** A client MUST delete the wake table and its keystore key at a
   local wipe of Part 7 `DEV-008`, and when the mode changes to Private mode
@@ -951,6 +954,27 @@ settings. v1 does not ask for that permission.
 > can see, and a collapse key for each conversation is a conversation count that
 > the provider can see. The group on the device does the grouping after the
 > open, thus the provider sees nothing.
+
+**Priority alerts.**
+
+- **[NTF-155]** An Android client MUST post the alert of a priority
+  conversation of Part 7 `DEV-358` on a second notification channel. It MUST
+  post each other message alert, and each alert that names no conversation, on
+  the channel of messages. The name and the description of a channel MUST NOT
+  name a contact or a conversation. A client MUST NOT change the interruption
+  filter of the device, and it MUST NOT give a message alert the category of a
+  call or of an alarm. The interface MAY open the settings of the system for
+  the priority channel, where the user can let it through Do Not Disturb.
+
+> *Cause.* Android lets a channel through Do Not Disturb only when the user
+> allows it in the settings of the system. The other path of the platform is a
+> priority conversation, and it needs a shortcut for each conversation. A
+> shortcut gives its name and its icon to the system, the launcher, and the
+> share sheet, and they keep them while the client is locked. That is a name of
+> a contact outside `K_store`, which `NTF-083` and `NTF-119` keep off the alerts.
+> A second channel gives the system one fixed name and no contact. The category
+> of a call or of an alarm passes each quiet mode with no choice of the user,
+> and the platform does not permit it for a message.
 
 > Note: Doze ignores a partial wake lock and suspends the network access. Doze
 > also limits `setExactAndAllowWhileIdle` to one call in 9 minutes. App Standby

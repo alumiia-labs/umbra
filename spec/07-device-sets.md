@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 7: Device Sets, History Sync, and Revocation
 
 **Status:** Draft
-**Version:** 0.48.0
-**Date:** 2026-11-04
+**Version:** 0.49.0
+**Date:** 2026-11-09
 
 ---
 
@@ -1980,11 +1980,19 @@ setting that decides **what the device shows**, and it is per conversation.
   `NTF-149`, and each other value takes the place of that setting for the
   conversation.
 - **[DEV-345]** The item of `DEV-332` MUST carry the two as one byte after
-  the end of the mute: bits 0 and 1 hold the sender, and bits 2 and 3 hold
-  the text, each as `default` 0, `show` 1, or `hide` 2. The other bits are
-  zero. A client MUST write the value with no such byte when the two are
-  `default`. A receiver MUST take a value with no such byte as `default`
-  for the two, and it MUST reject a field of 3 and a bit above bit 3.
+  the end of the mute, the **flags byte**: bits 0 and 1 hold the sender, and
+  bits 2 and 3 hold the text, each as `default` 0, `show` 1, or `hide` 2.
+  Bit 4 holds the priority mark of `DEV-358`. The other bits are zero. A
+  client MUST write the value with no such byte when the two are `default`
+  and the mark is off. A receiver MUST take a value with no such byte as
+  `default` for the two and with no mark. It MUST reject a field of 3 and a
+  bit above bit 4.
+- **[DEV-358]** A user MAY mark a conversation **priority**. A client MUST
+  show the alert of a priority conversation on the path of the platform that
+  the user can let through a quiet mode of the device. Part 8 `NTF-155` gives
+  that path on Android. The mark MUST NOT change the setting, the mute, or a
+  wake. A record that the setting or `DEV-331` stops gives no alert, and
+  `DEV-223` holds.
 
 > *Cause.* Part 8 §8.3 sets one mode for the device. With that mode alone, a
 > user that joins one busy group has to choose between a silent device and a
@@ -1994,6 +2002,14 @@ setting that decides **what the device shows**, and it is per conversation.
 > A `mentions` setting needs the mention list of Part 6 §6.6.5, and that list is
 > inside the AEAD of the conversation. Thus the relay and the Notification
 > Delivery Relay of Part 8 learn nothing from this setting.
+>
+> *Cause of `DEV-358`.* A user who silences the device at night still wants
+> the alerts of some contacts. The mark is part of the item of `DEV-332`, thus
+> the device set converges it as each other item of §7.5.3, and no relay
+> learns which conversation is priority. For the same reason the mark cannot
+> make a device wake sooner. In Periodic mode and in Private mode, the alert
+> of a priority conversation waits for the next wake of the clock. A mark on a
+> group with the `mentions` setting lets only a mention of the user through.
 
 ### 7.5.10 The forward policy
 

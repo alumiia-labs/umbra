@@ -321,6 +321,11 @@
     <string name="alerts_default">Default</string>
     <string name="alerts_show">Show</string>
     <string name="alerts_hide">Hide</string>
+    <string name="alerts_priority">Priority</string>
+    <string name="alerts_priority_about">Lets alerts through Do Not Disturb</string>
+    <string name="alerts_priority_interrupts">Alerts come through Do Not Disturb</string>
+    <string name="alerts_priority_blocked">Do Not Disturb still blocks alerts</string>
+    <string name="alerts_priority_allow">Allow through Do Not Disturb</string>
 
     <!-- Conversation view: the top bar and the list. -->
     <string name="chat_thread">Thread</string>
@@ -1121,6 +1126,8 @@
     <!-- Notifications: the channels -->
     <string name="notify_channel_connection_about">Shows that UMBRA holds a connection to take messages.</string>
     <string name="notify_channel_messages">Messages</string>
+    <string name="notify_channel_priority">Priority messages</string>
+    <string name="notify_channel_priority_about">Messages of the conversations that you mark priority.</string>
 
     <!-- Notifications: the alerts -->
     <string name="notify_unlocked">Unlocked</string>

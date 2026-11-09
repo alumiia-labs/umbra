@@ -176,11 +176,12 @@ object WakeStore {
     /**
      * Opens the blob of a push or of a watch with the table (`NTF-136`),
      * and counts the result toward `NTF_FAIL_MAX`. The result is the
-     * conversation that the blob names, or none.
+     * conversation that the blob names, or none, and whether it is
+     * priority (Part 7 `DEV-358`).
      */
-    fun openBlob(context: Context, blob: ByteArray): Conversation? {
-        if (!holdsTable(context)) return null
-        val table = read(context) ?: return null
+    fun openBlob(context: Context, blob: ByteArray): Woken {
+        if (!holdsTable(context)) return Woken.NONE
+        val table = read(context) ?: return Woken.NONE
 
         val outcome = try {
             openWakeBlob(table, blob, (System.currentTimeMillis() / 1_000).toULong())
@@ -195,7 +196,14 @@ object WakeStore {
             2 -> failed(context)
         }
 
-        return outcome.conversation?.let(::Conversation)
+        return Woken(outcome.conversation?.let(::Conversation), outcome.priority)
+    }
+
+    /** What a blob says: the conversation, or none, and whether it is priority. */
+    data class Woken(val conversation: Conversation?, val priority: Boolean) {
+        companion object {
+            val NONE = Woken(null, false)
+        }
     }
 
     /**

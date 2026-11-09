@@ -3,7 +3,7 @@
 //! §8.3 (`DEV-223`), and the device set converges it as mutable state
 //! (`DEV-219`, `DEV-220`). A mute until a time stops each notification of
 //! the conversation, and it shares the item of the setting (`DEV-331`,
-//! `DEV-332`).
+//! `DEV-332`). The priority mark of `DEV-358` shares that item too.
 
 use umbra_core::store::{engine::Backend, wrap::SecureElement};
 use umbra_crypto::rand_core::CryptoRng;
@@ -33,6 +33,11 @@ pub const PREVIEW_DEFAULT: u8 = 0;
 pub const PREVIEW_SHOW: u8 = 1;
 /// The alert hides the sender or the text.
 pub const PREVIEW_HIDE: u8 = 2;
+/// The bit of the flags byte of `DEV-345` that marks a priority
+/// conversation (`DEV-358`).
+const PRIORITY_BIT: u8 = 0x10;
+/// The bits of the flags byte that hold the sender and the text.
+const PREVIEW_BITS: u8 = 0x0F;
 
 pub(super) const ALERT_SETTING: &[u8] = b"alert/";
 
@@ -40,40 +45,43 @@ fn alert_key(conversation: ConversationId) -> Vec<u8> {
     [ALERT_SETTING, conversation.0.as_slice()].concat()
 }
 
-/// The setting, the end of the mute, and the preview byte in a value of
+/// The setting, the end of the mute, and the flags byte in a value of
 /// `DEV-332` and `DEV-345`. A value of one byte has no mute, and a value
-/// with no preview byte shows the default of the device.
+/// with no flags byte shows the default of the device and is no priority.
 fn parse_alert(value: &[u8]) -> Option<(u8, u64, u8)> {
     let (&setting, rest) = value.split_first()?;
     if setting > ALERT_NONE {
         return None;
     }
 
-    let (end, preview) = match rest.len() {
-        0 => (0, PREVIEW_DEFAULT),
-        8 => (u64::from_be_bytes(rest.try_into().ok()?), PREVIEW_DEFAULT),
+    let (end, flags) = match rest.len() {
+        0 => (0, 0),
+        8 => (u64::from_be_bytes(rest.try_into().ok()?), 0),
         9 => (
             u64::from_be_bytes(rest.get(..8)?.try_into().ok()?),
             *rest.get(8)?,
         ),
         _ => return None,
     };
-    is_preview(preview).then_some((setting, end, preview))
+    is_flags(flags).then_some((setting, end, flags))
 }
 
-/// Whether a preview byte holds two fields of 0 to 2 and no other bit.
-fn is_preview(byte: u8) -> bool {
-    byte & 0xF0 == 0 && byte & 0x03 <= PREVIEW_HIDE && (byte >> 2) & 0x03 <= PREVIEW_HIDE
+/// Whether a flags byte holds two fields of 0 to 2, the priority bit, and
+/// no other bit.
+fn is_flags(byte: u8) -> bool {
+    byte & !(PREVIEW_BITS | PRIORITY_BIT) == 0
+        && byte & 0x03 <= PREVIEW_HIDE
+        && (byte >> 2) & 0x03 <= PREVIEW_HIDE
 }
 
-/// The value of `DEV-332`. A value with no mute and no preview is one byte,
+/// The value of `DEV-332`. A value with no mute and no flags is one byte,
 /// which a build before the mute also reads.
-fn alert_value(setting: u8, muted_until_ms: u64, preview: u8) -> Vec<u8> {
-    if preview != PREVIEW_DEFAULT {
+fn alert_value(setting: u8, muted_until_ms: u64, flags: u8) -> Vec<u8> {
+    if flags != 0 {
         [
             [setting].as_slice(),
             &muted_until_ms.to_be_bytes(),
-            &[preview],
+            &[flags],
         ]
         .concat()
     } else if muted_until_ms == 0 {
@@ -99,7 +107,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// The sender in bits 0 and 1, and the text in bits 2 and 3, of the
     /// alert of a conversation (`DEV-344`).
     pub fn preview_setting(&self, conversation: ConversationId) -> Result<u8, Error> {
-        Ok(self.alert_state(conversation)?.2)
+        Ok(self.alert_state(conversation)?.2 & PREVIEW_BITS)
+    }
+
+    /// Whether the user marked a conversation priority (`DEV-358`).
+    pub fn is_priority(&self, conversation: ConversationId) -> Result<bool, Error> {
+        Ok(self.alert_state(conversation)?.2 & PRIORITY_BIT != 0)
     }
 
     fn alert_state(&self, conversation: ConversationId) -> Result<(u8, u64, u8), Error> {
@@ -125,18 +138,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(batch.commit()?)
     }
 
-    /// Writes the setting, the mute, and the preview, and each other device
+    /// Writes the setting, the mute, and the flags, and each other device
     /// of the set takes them in one item (`DEV-332`, `DEV-345`).
     fn publish_alert<R: CryptoRng + ?Sized>(
         &mut self,
         conversation: ConversationId,
-        (setting, muted_until_ms, preview): (u8, u64, u8),
+        (setting, muted_until_ms, flags): (u8, u64, u8),
         rng: &mut R,
     ) -> Result<(), Error> {
-        let value = alert_value(setting, muted_until_ms, preview);
+        let value = alert_value(setting, muted_until_ms, flags);
         self.put_alert(conversation, &value, rng)?;
 
-        // NTF-135: the wake table names a silent and a muted queue.
+        // NTF-135: the wake table names a silent, a muted, and a priority
+        // queue.
         self.wake_changed();
         if let Some(subject) = self.subject_of(conversation)? {
             self.publish_mutable(ITEM_ALERT, &subject, &value, rng)?;
@@ -157,8 +171,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Err(Error::Malformed);
         }
 
-        let (_, muted_until_ms, preview) = self.alert_state(conversation)?;
-        self.publish_alert(conversation, (value, muted_until_ms, preview), rng)
+        let (_, muted_until_ms, flags) = self.alert_state(conversation)?;
+        self.publish_alert(conversation, (value, muted_until_ms, flags), rng)
     }
 
     /// Mutes a conversation until `until_ms` in milliseconds of the Unix
@@ -170,8 +184,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         until_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
-        let (setting, _, preview) = self.alert_state(conversation)?;
-        self.publish_alert(conversation, (setting, until_ms, preview), rng)
+        let (setting, _, flags) = self.alert_state(conversation)?;
+        self.publish_alert(conversation, (setting, until_ms, flags), rng)
     }
 
     /// Sets whether an alert of a conversation shows the sender and the
@@ -182,12 +196,31 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         preview: u8,
         rng: &mut R,
     ) -> Result<(), Error> {
-        if !is_preview(preview) {
+        if preview & !PREVIEW_BITS != 0 || !is_flags(preview) {
             return Err(Error::Malformed);
         }
 
-        let (setting, muted_until_ms, _) = self.alert_state(conversation)?;
-        self.publish_alert(conversation, (setting, muted_until_ms, preview), rng)
+        let (setting, muted_until_ms, flags) = self.alert_state(conversation)?;
+        let flags = flags & PRIORITY_BIT | preview;
+        self.publish_alert(conversation, (setting, muted_until_ms, flags), rng)
+    }
+
+    /// Marks a conversation priority or ends the mark, and each other
+    /// device of the set takes it (`DEV-358`). The mark changes no wake
+    /// (`DEV-223`).
+    pub fn set_priority<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        on: bool,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let (setting, muted_until_ms, flags) = self.alert_state(conversation)?;
+        let flags = if on {
+            flags | PRIORITY_BIT
+        } else {
+            flags & !PRIORITY_BIT
+        };
+        self.publish_alert(conversation, (setting, muted_until_ms, flags), rng)
     }
 
     /// Takes the setting of another device of the set.
@@ -197,9 +230,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         value: &[u8],
         rng: &mut R,
     ) -> Result<(), Error> {
-        let (setting, muted_until_ms, preview) = parse_alert(value).ok_or(Error::Malformed)?;
+        let (setting, muted_until_ms, flags) = parse_alert(value).ok_or(Error::Malformed)?;
         if let Some(conversation) = self.conversation_of_subject(subject)? {
-            let value = alert_value(setting, muted_until_ms, preview);
+            let value = alert_value(setting, muted_until_ms, flags);
             self.put_alert(conversation, &value, rng)?;
             self.events.push_back(Event::Conversations);
             self.wake_changed();

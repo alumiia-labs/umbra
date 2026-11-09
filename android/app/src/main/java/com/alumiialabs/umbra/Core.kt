@@ -1557,6 +1557,7 @@ object Core {
                                 // NTF-149, DEV-344: the conversation takes the
                                 // place of the setting of the device.
                                 val held = client.previewSetting(event.conversation).toInt()
+                                val priority = client.isPriority(event.conversation)
                                 val showsSender = clockHolds && previewShows(held and 3, Modes.showsSender(app))
                                 val showsText = clockHolds && previewShows(held shr 2 and 3, Modes.showsText(app))
                                 // IMP-017: the text stays a CharArray, and
@@ -1572,7 +1573,13 @@ object Core {
                                     // A lock that came since takes the text
                                     // of no alert to the shade.
                                     if (phase == Phase.Open) {
-                                        Notifier.message(app, Conversation(event.conversation), title.takeIf { showsSender }, text)
+                                        Notifier.message(
+                                            app,
+                                            Conversation(event.conversation),
+                                            title.takeIf { showsSender },
+                                            text,
+                                            priority = priority,
+                                        )
                                     } else {
                                         text?.fill('\u0000')
                                     }
@@ -2723,6 +2730,18 @@ object Core {
     fun setAlert(context: Context, conversation: Conversation, value: UByte) = call { client ->
         client.setAlertSetting(conversation.id, value)
         // The wake table names a conversation with its alerts off silent.
+        refreshWake(context)
+    }
+
+    fun isPriority(conversation: Conversation, onLoaded: (Boolean) -> Unit) = call { client ->
+        val value = client.isPriority(conversation.id)
+        main.post { onLoaded(value) }
+    }
+
+    /** Marks a conversation priority (Part 7 `DEV-358`) or ends the mark. */
+    fun setPriority(context: Context, conversation: Conversation, on: Boolean) = call { client ->
+        client.setPriority(conversation.id, on)
+        // A locked client reads the mark from the wake table.
         refreshWake(context)
     }
 

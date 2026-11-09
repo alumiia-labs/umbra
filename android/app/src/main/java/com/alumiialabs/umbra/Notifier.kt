@@ -12,12 +12,15 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
+import android.provider.Settings
 
 /**
  * The notifications of the app. A message alert holds no text of the message
  * and no name, because the content preview is off in the shipped default
  * (`NTF-083`). The tray groups the alerts by conversation on the device
  * (`NTF-089`), thus no party outside the device sees a conversation count.
+ * The alert of a priority conversation goes on its own channel, which the
+ * user can let through Do Not Disturb (`NTF-155`).
  */
 object Notifier {
     const val CARRIER_ID = 1
@@ -30,6 +33,7 @@ object Notifier {
     private const val CARRIER_CHANNEL = "connection"
     private const val OLD_CARRIER_CHANNEL = "carrier"
     private const val MESSAGE_CHANNEL = "messages"
+    private const val PRIORITY_CHANNEL = "priority"
     private const val MESSAGE_TAG = "message"
 
     /**
@@ -64,11 +68,35 @@ object Notifier {
             NotificationManager.IMPORTANCE_HIGH,
         )
 
-        manager(context).createNotificationChannels(listOf(carrier, messages))
+        // NTF-155: the name and the description name no contact.
+        val priority = NotificationChannel(
+            PRIORITY_CHANNEL,
+            context.getString(R.string.notify_channel_priority),
+            NotificationManager.IMPORTANCE_HIGH,
+        ).apply {
+            description = context.getString(R.string.notify_channel_priority_about)
+        }
+
+        manager(context).createNotificationChannels(listOf(carrier, messages, priority))
         // A service whose notice still stands on the old channel keeps it,
         // and a later start deletes it.
         runCatching { manager(context).deleteNotificationChannel(OLD_CARRIER_CHANNEL) }
     }
+
+    private fun channelOf(priority: Boolean) = if (priority) PRIORITY_CHANNEL else MESSAGE_CHANNEL
+
+    /**
+     * Whether the user lets the priority channel through Do Not Disturb.
+     * Only the user can allow it, in the settings of the system (`NTF-155`).
+     */
+    fun priorityInterrupts(context: Context): Boolean =
+        manager(context).getNotificationChannel(PRIORITY_CHANNEL)?.canBypassDnd() == true
+
+    /** The settings of the system for the priority channel. */
+    fun priorityChannelSettings(context: Context): Intent =
+        Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+            .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+            .putExtra(Settings.EXTRA_CHANNEL_ID, PRIORITY_CHANNEL)
 
     private fun openApp(context: Context): PendingIntent = PendingIntent.getActivity(
         context,
@@ -152,10 +180,15 @@ object Notifier {
     /**
      * A locked client learned that a message waits: from a push, or from
      * its watch (`NTF-136`). It reads no setting of a conversation, thus
-     * each later wake of one conversation makes no second sound.
+     * each later wake of one conversation makes no second sound. The wake
+     * table says whether the conversation is priority.
      */
-    fun waiting(context: Context, conversation: Conversation?) {
-        if (conversation != null) message(context, conversation, quiet = true) else pushed(context)
+    fun waiting(context: Context, conversation: Conversation?, priority: Boolean) {
+        if (conversation != null) {
+            message(context, conversation, quiet = true, priority = priority)
+        } else {
+            pushed(context)
+        }
     }
 
     /** The form of an alert on a secure lock screen: that one exists. */
@@ -167,7 +200,8 @@ object Notifier {
 
     /**
      * One alert for each conversation. A later record updates that alert,
-     * and a `quiet` update makes no second sound (`NTF-018`).
+     * and a `quiet` update makes no second sound (`NTF-018`). The alert of a
+     * `priority` conversation goes on the priority channel (`NTF-155`).
      */
     fun message(
         context: Context,
@@ -175,6 +209,7 @@ object Notifier {
         title: String? = null,
         text: CharArray? = null,
         quiet: Boolean = false,
+        priority: Boolean = false,
     ) {
         if (!mayPost(context)) {
             text?.fill('\u0000')
@@ -184,7 +219,7 @@ object Notifier {
         // NTF-119: the system setting that shows all content ignores the
         // public version, thus a locked device gets the bare alert.
         val shows = (title != null || (text != null && text.isNotEmpty())) && !isDeviceLocked(context)
-        val alert = Notification.Builder(context, MESSAGE_CHANNEL)
+        val alert = Notification.Builder(context, channelOf(priority))
             .setSmallIcon(R.drawable.ic_stat_umbra)
             .setContentTitle(title?.takeIf { shows } ?: context.getString(R.string.common_new_message))
             .apply { if (shows && text != null && text.isNotEmpty()) setContentText(java.nio.CharBuffer.wrap(text)) }
@@ -243,12 +278,16 @@ object Notifier {
         if (shown.isEmpty()) return
 
         val manager = manager(context)
-        val active = manager.activeNotifications.filter { it.tag == MESSAGE_TAG }.map { it.id }.toSet()
+        // The bare form keeps the channel of the alert, thus a priority
+        // alert stays priority.
+        val active = manager.activeNotifications
+            .filter { it.tag == MESSAGE_TAG }
+            .associate { it.id to it.notification.channelId }
 
         for ((id, group) in shown) {
-            if (id !in active) continue
+            val channel = active[id] ?: continue
 
-            val bare = Notification.Builder(context, MESSAGE_CHANNEL)
+            val bare = Notification.Builder(context, channel)
                 .setSmallIcon(R.drawable.ic_stat_umbra)
                 .setContentTitle(context.getString(R.string.common_new_message))
                 .setGroup(group)
@@ -267,13 +306,13 @@ object Notifier {
      * and a later push takes its place with no second sound, thus a digest
      * push and a re-push make no alert of each record (`NTF-018`). An open
      * client gives the conversation of the push when the wake table named
-     * one.
+     * one, and whether that conversation is priority.
      */
-    fun pushed(context: Context, conversation: Conversation? = null) {
+    fun pushed(context: Context, conversation: Conversation? = null, priority: Boolean = false) {
         if (!mayPost(context)) return
 
         synchronized(pushOwed) { pushOwed.add(conversation?.key) }
-        val alert = Notification.Builder(context, MESSAGE_CHANNEL)
+        val alert = Notification.Builder(context, channelOf(priority && conversation != null))
             .setSmallIcon(R.drawable.ic_stat_umbra)
             .setContentTitle(context.getString(R.string.common_new_message))
             .setOnlyAlertOnce(true)

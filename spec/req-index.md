@@ -74,8 +74,8 @@ column when a crate implements the requirement and a test covers it.
 | `IDN` | 137 | 46 | 1 | 0 | 5 | **189** |
 | `CRY` | 121 | 27 | 0 | 0 | 1 | **149** |
 | `WIR` | 418 | 88 | 0 | 0 | 8 | **514** |
-| `DEV` | 224 | 95 | 0 | 0 | 14 | **333** |
-| `NTF` | 91 | 30 | 0 | 0 | 3 | **124** |
+| `DEV` | 224 | 95 | 0 | 0 | 15 | **334** |
+| `NTF` | 92 | 30 | 0 | 0 | 3 | **125** |
 | `DIS` | 138 | 37 | 1 | 0 | 3 | **179** |
 | `REL` | 173 | 34 | 1 | 0 | 4 | **212** |
 | `GRP` | 244 | 69 | 0 | 0 | 5 | **318** |
@@ -83,7 +83,7 @@ column when a crate implements the requirement and a test covers it.
 | `ABU` | 71 | 29 | 1 | 0 | 0 | **101** |
 | `IMP` | 120 | 41 | 1 | 0 | 2 | **164** |
 | `SEC` | 4 | 3 | 0 | 0 | 1 | **8** |
-| **All** | 2181 | 648 | 8 | 0 | 62 | **2899** |
+| **All** | 2182 | 648 | 8 | 0 | 63 | **2901** |
 
 ## SCP — Scope and Conventions
 
@@ -1717,10 +1717,11 @@ Source: `spec/07-device-sets.md`
 | `DEV-342` | §7.5.11 | MUST | The interface | The interface MUST ask for a confirmation, and it MUST state this line: "They are not told." |  |  |
 | `DEV-343` | §7.5.11 | MUST | When the device holds a share of the contact, the interface | When the device holds a share of the contact, the interface MUST also state this line: "The recovery piece that they gave you is deleted too." The other paths of §7.5.7 apply. |  |  |
 | `DEV-344` | §7.5.9 | MAY | A user | A user MAY set for each conversation whether an alert shows the sender, and whether it shows the text. |  |  |
-| `DEV-345` | §7.5.9 | MUST | The item of `DEV-332` | The item of `DEV-332` MUST carry the two as one byte after the end of the mute: bits 0 and 1 hold the sender, and bits 2 and 3 hold the text, each as `default` 0, `show` 1, or `hide` 2. |  |  |
+| `DEV-345` | §7.5.9 | MUST | The item of `DEV-332` | The item of `DEV-332` MUST carry the two as one byte after the end of the mute, the **flags byte**: bits 0 and 1 hold the sender, and bits 2 and 3 hold the text, each as `default` 0, `show` 1, or `hide` 2. |  |  |
 | `DEV-346` | §7.7.1 | MUST | A full identity reset | A full identity reset MUST make a new Recovery Code under Part 4 §4.7.1, and it MUST erase its state of the backup, in the commit of the new root. |  |  |
 | `DEV-347` | §7.7 | MUST | The device that owns the channels | The device that owns the channels MUST write the current rendezvous queue of each published entry to its store as a debt, before it writes an epoch with a new `revoked` entry. |  |  |
 | `DEV-357` | §7.7.1 | MUST | A full identity reset | A full identity reset MUST write the mark of a tombstone of Part 9 `DIS-205` for each entry that the device publishes, in the commit of the new root. |  |  |
+| `DEV-358` | §7.5.9 | MAY | A user | A user MAY mark a conversation **priority**. |  |  |
 
 ## NTF — Notifications
 
@@ -1852,6 +1853,7 @@ Source: `spec/08-notifications.md`
 | `NTF-152` | §8.2.8 | MUST | A device | A device MUST send its `NTIMER` again under the chain of `NTF-124` at each new push token, and at least once in each `ROTATE_INTERVAL`. |  |  |
 | `NTF-153` | §8.3 | MUST | A client in Periodic mode | A client in Periodic mode MUST bind each inbound queue for the watch as `NTF-142` binds it in Direct mode, and it MUST hold the wake table of `NTF-135` and the watch table of `NTF-145`. |  |  |
 | `NTF-154` | §8.2.8 | MUST | The NDR | The NDR MUST drop a timer after `TICK_INVALID_MAX` ticks in a row that FCM refuses with the status 400, the error code `INVALID_ARGUMENT`, and an error body that names the registration token. |  |  |
+| `NTF-155` | §8.4.1 | MUST | An Android client | An Android client MUST post the alert of a priority conversation of Part 7 `DEV-358` on a second notification channel. |  |  |
 
 ## DIS — Discovery, Handles, and Key Transparency
 

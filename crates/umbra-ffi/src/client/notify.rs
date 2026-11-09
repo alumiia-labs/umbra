@@ -985,7 +985,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// platform seals it under its keystore, thus a locked client opens a
     /// blob with it (`NTF-136`). An alias whose queue raises no alert names
     /// [`WAKE_SILENT`] in the place of its conversation, and an alias of a
-    /// muted conversation holds the end of its mute (`DEV-331`). The
+    /// muted conversation holds the end of its mute (`DEV-331`). An alias of
+    /// a priority conversation is in the priority part (`DEV-358`). The
     /// platform writes the table again after each block, and a change of a
     /// notification setting or a mute gives [`Event::WakeTable`].
     pub fn wake_table(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
@@ -1023,6 +1024,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // the end of each other mute from the table.
         let mut silent = self.device_peers()?;
         let mut mutes: Vec<(ConversationId, u64)> = Vec::new();
+        let mut priorities: Vec<ConversationId> = Vec::new();
         for (_, conversation) in &conversations {
             let conversation = ConversationId(*conversation);
             if silent.contains(&conversation) {
@@ -1035,8 +1037,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 || muted_until_ms == super::MUTE_FOREVER
             {
                 silent.push(conversation);
-            } else if muted_until_ms > 0 {
+                continue;
+            }
+
+            if muted_until_ms > 0 {
                 mutes.push((conversation, muted_until_ms.div_ceil(1_000)));
+            }
+            if self.is_priority(conversation)? && !priorities.contains(&conversation) {
+                priorities.push(conversation);
             }
         }
 
@@ -1046,6 +1054,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let store = &self.open_ref()?.store;
         let mut aliases = Vec::new();
         let mut muted = Vec::new();
+        let mut priority = Vec::new();
         for queue in store
             .list(NOTIFY_QUEUE, None)?
             .iter()
@@ -1069,11 +1078,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             {
                 muted.push((queue.alias, *until));
             }
+            if priorities.contains(&ConversationId(conversation)) {
+                priority.push(queue.alias);
+            }
         }
         let table = umbra_core::notify::wakekey::WakeTable {
             roots,
             aliases,
             muted,
+            priority,
         };
 
         // The drop of the table wipes its roots.
@@ -1741,11 +1754,26 @@ mod tests {
             .unwrap();
         assert_eq!(aliases(&client), [(alias, conversation.0)]);
 
+        // DEV-358: the alias of a priority conversation is in the priority
+        // part, and a silent alias is not.
+        let priority = |client: &Device| {
+            WakeTable::parse(&client.wake_table().unwrap())
+                .unwrap()
+                .priority
+                .clone()
+        };
+        assert!(priority(&client).is_empty());
+        client.set_priority(conversation, true, &mut rng).unwrap();
+        assert_eq!(priority(&client), [alias]);
+
         client
             .set_muted_until(conversation, super::super::MUTE_FOREVER, &mut rng)
             .unwrap();
         assert_eq!(aliases(&client), [(alias, WAKE_SILENT)]);
+        assert!(priority(&client).is_empty());
         client.set_muted_until(conversation, 0, &mut rng).unwrap();
+        assert_eq!(priority(&client), [alias]);
+        client.set_priority(conversation, false, &mut rng).unwrap();
         client.set_blocked(conversation, true, &mut rng).unwrap();
         assert_eq!(aliases(&client), [(alias, WAKE_SILENT)]);
         client.set_blocked(conversation, false, &mut rng).unwrap();

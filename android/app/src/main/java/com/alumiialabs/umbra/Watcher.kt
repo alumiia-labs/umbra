@@ -102,10 +102,10 @@ object Watcher : WatchListener {
             // An open client takes the record over its own run.
             if (Core.isOpen()) return
 
-            val conversation = WakeStore.openBlob(app, blob)
-            if (WakeStore.isSilent(conversation)) return
+            val woken = WakeStore.openBlob(app, blob)
+            if (WakeStore.isSilent(woken.conversation)) return
 
-            Notifier.waiting(app, conversation)
+            Notifier.waiting(app, woken.conversation, woken.priority)
         } catch (fault: Exception) {
             if (BuildConfig.DEBUG) android.util.Log.w("umbra-watch", "a wake failed", fault)
         }
