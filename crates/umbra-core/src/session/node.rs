@@ -861,7 +861,7 @@ enum Purpose {
         bundle: Vec<u8>,
         /// The lock key of the first fetch, which writes to the queue of
         /// the inviter in the place of the `QS_auth` of the bundle.
-        lock: Option<[u8; 32]>,
+        lock: Option<Secret<32>>,
         /// Whether the bundle opens the sync channel of a device.
         device: bool,
     },
@@ -920,7 +920,7 @@ struct NotifyQueue {
 /// The fetch of a blob between its `IGET` and its `IBLOB`.
 struct BlobWait {
     fragment: Fragment,
-    lock: [u8; 32],
+    lock: Secret<32>,
     handle: u64,
 }
 
@@ -934,8 +934,8 @@ struct LinkSetup {
 /// The keys of a queue between its `NEW` and its `IDS`.
 struct QueueKeys {
     qr_auth: StaticSecret,
-    qs_auth: [u8; 32],
-    queue_secret: [u8; 32],
+    qs_auth: Secret<32>,
+    queue_secret: Secret<32>,
     salt: [u8; 16],
     purpose: Purpose,
     handle: u64,
@@ -2193,6 +2193,21 @@ fn random<const N: usize, R: CryptoRng + ?Sized>(rng: &mut R) -> [u8; N] {
     bytes
 }
 
+/// A random secret. The bytes go into the secret, thus no plain copy
+/// stays on the stack.
+fn random_secret<const N: usize, R: CryptoRng + ?Sized>(rng: &mut R) -> Secret<N> {
+    let mut secret = Secret::zeroed();
+    rng.fill_bytes(secret.expose_mut());
+    secret
+}
+
+/// A second secret with the bytes of `secret`, with no plain copy between.
+fn copy_secret<const N: usize>(secret: &Secret<N>) -> Secret<N> {
+    let mut copy = Secret::zeroed();
+    copy.expose_mut().copy_from_slice(secret.expose());
+    copy
+}
+
 /// `ClientNode::new` takes an array of three, thus this path never runs. It
 /// gives a node with no relay, which builds no chain, in the place of a
 /// panic.
@@ -2366,8 +2381,19 @@ impl ClientNode {
 
     /// The changes of the state since the last call, for the store.
     pub fn take_changes(&mut self) -> Result<Vec<StateChange>, Error> {
+        // A failed export keeps each queued change for the next call.
+        let moved = self.moved_changes()?;
+
         let mut changes = core::mem::take(&mut self.changes);
-        for id in core::mem::take(&mut self.moved) {
+        self.moved.clear();
+        changes.extend(moved);
+        Ok(changes)
+    }
+
+    /// The stored forms of the queues and contacts whose state moved.
+    fn moved_changes(&self) -> Result<Vec<StateChange>, Error> {
+        let mut changes = Vec::with_capacity(self.moved.len());
+        for &id in &self.moved {
             if let Some(held) = self.notify.get(&id) {
                 changes.push(StateChange::NotifyQueue {
                     queue: id,
@@ -6596,11 +6622,10 @@ impl ClientNode {
         rng: &mut R,
     ) -> Result<(), Error> {
         let qr_auth = StaticSecret::from(random::<32, _>(rng));
-        let qs_auth: [u8; 32] = random(rng);
         let keys = QueueKeys {
             qr_auth,
-            qs_auth,
-            queue_secret: random(rng),
+            qs_auth: random_secret(rng),
+            queue_secret: random_secret(rng),
             salt: random(rng),
             purpose,
             handle: user_handle,
@@ -6621,7 +6646,7 @@ impl ClientNode {
         keys.session_pk = self.session_pk()?;
         let encoded = new_queue_command(
             &keys.qr_auth,
-            &StaticSecret::from(keys.qs_auth),
+            &StaticSecret::from(*keys.qs_auth.expose()),
             admission,
             &keys.session_pk,
             random(rng),
@@ -7672,10 +7697,10 @@ impl ClientNode {
         };
 
         self.current = slot;
-        let lock: [u8; 32] = random(rng);
+        let lock: Secret<32> = random_secret(rng);
         let command = get_blob_command(
             &fetch.fragment.link_id,
-            &StaticSecret::from(lock),
+            &StaticSecret::from(*lock.expose()),
             &self.session_pk()?,
             random(rng),
         )?;
@@ -7707,11 +7732,14 @@ impl ClientNode {
         let Some(fragment) = &link.fragment else {
             // The relay drew the identifier, thus the seal can bind it
             // (`IDN-160`).
-            let fragment = Fragment {
-                key: random(rng),
+            // The key goes into the fragment, thus no plain copy stays on
+            // the stack.
+            let mut fragment = Fragment {
+                key: [0; 32],
                 link_id,
                 relay_ref: relay_hint(&queue_relay),
             };
+            rng.fill_bytes(&mut fragment.key);
             let blob = Bundle::parse(&half.bundle)?.seal(&fragment, random(rng))?;
             let command = half
                 .inbound
@@ -7727,13 +7755,14 @@ impl ClientNode {
 
         // The relay holds the blob. The store keeps the fragment in the
         // place of the bundle, because the user gives out the fragment.
-        let shared = fragment.to_bytes().to_vec();
+        let shared = fragment.to_bytes_secret().to_vec();
         let handle = link.handle;
         half.bundle = shared.clone();
         half.link = None;
         if let Some(half) = self.halves.remove(&queue) {
-            self.invitation_changed(queue, &half)?;
+            let changed = self.invitation_changed(queue, &half);
             self.halves.insert(queue, half);
+            changed?;
         }
 
         Ok(alloc::vec![ClientEvent::InvitationLink {
@@ -7872,7 +7901,7 @@ impl ClientNode {
             .as_ref()
             .and_then(|held| held.asked_start_at(now));
         let mut ceremony = Ceremony::new(random(rng));
-        let commit = ceremony.commit_to_send();
+        let commit = ceremony.commit_to_send()?;
         // IDN-170: a start of the peer that waited for the user gets its
         // answer and the reveal now, one time.
         if let Some(start) = asked {
@@ -7923,7 +7952,7 @@ impl ClientNode {
                 .ceremony
                 .as_ref()
                 .filter(|ceremony| ceremony.awaits_commit())
-                .map(Ceremony::own_commit);
+                .and_then(Ceremony::own_commit);
             let mut own_commit = None;
             if answers == [0; 32] {
                 // IDN-170: a start gets an answer and a reveal only while
@@ -7947,7 +7976,7 @@ impl ClientNode {
                 }
 
                 let mut ceremony = Ceremony::new(random(rng));
-                own_commit = Some(ceremony.commit_to_send());
+                own_commit = Some(ceremony.commit_to_send()?);
                 held.ceremony = Some(ceremony);
             } else if waiting != Some(answers) {
                 // An answer to a start that this client replaced.
@@ -9211,17 +9240,24 @@ impl ClientNode {
             // A reply to one event can go to a second circuit. The next
             // event belongs to the circuit of the cell again.
             self.current = arrival;
+            // A fault of one record loses no event of an earlier record of
+            // the cell, and the records after it still open. The relay at
+            // the end of the circuit controls each answer.
             match event {
                 CircuitEvent::Answered {
                     handle,
                     cmd,
                     payload,
-                } => out.extend(self.on_answered(handle, cmd, payload, now, rng)?),
+                } => match self.on_answered(handle, cmd, payload, now, rng) {
+                    Ok(events) => out.extend(events),
+                    Err(error) => fault = fault.and(Err(error)),
+                },
                 CircuitEvent::Rejected { handle, reason } => {
-                    out.extend(self.on_rejected(handle, reason, now)?);
+                    match self.on_rejected(handle, reason, now) {
+                        Ok(events) => out.extend(events),
+                        Err(error) => fault = fault.and(Err(error)),
+                    }
                 }
-                // A fault of one record loses no event of an earlier record
-                // of the cell, and the records after it still open.
                 CircuitEvent::Message {
                     queue_id,
                     bucket,
@@ -9653,14 +9689,14 @@ impl ClientNode {
         let own_address = || QueueAddress {
             relay_id: queue_relay,
             sender_id: ids.sender_id,
-            qs_auth_sk: Secret::new(keys.qs_auth),
-            qe: Secret::new(keys.queue_secret),
+            qs_auth_sk: copy_secret(&keys.qs_auth),
+            qe: copy_secret(&keys.queue_secret),
         };
         let inbound = Inbound::new(
             ids.recipient_id,
             ids.sender_id,
             keys.qr_auth,
-            &Secret::new(keys.queue_secret),
+            &keys.queue_secret,
             0,
         );
         let subscribe = inbound.subscribe(&session_pk, random(rng))?;
@@ -9910,7 +9946,7 @@ impl ClientNode {
 
                 resend = flight1;
                 let outbound = match lock {
-                    Some(lock) => Outbound::locked(&to, StaticSecret::from(lock)),
+                    Some(lock) => Outbound::locked(&to, StaticSecret::from(*lock.expose())),
                     None => Outbound::new(&to),
                 };
                 (
@@ -10209,20 +10245,18 @@ impl ClientNode {
         Ok(out)
     }
 
-    /// Takes one `MSG` of the queue of a handshake that runs: the flight
-    /// that the half waits for, or a record that moves the cursor alone.
-    fn on_handshake_message<R: CryptoRng + ?Sized>(
+    /// Opens one `MSG` of the queue of a handshake and acknowledges it.
+    /// Gives the inner record of the flight that the half waits for, or
+    /// `None` when the record only moved the cursor.
+    fn awaited_flight<R: CryptoRng + ?Sized>(
         &mut self,
         queue_id: [u8; 32],
-        bucket: Bucket,
+        half: &mut Half,
         payload: &[u8],
+        bucket: Bucket,
         now: u64,
         rng: &mut R,
-    ) -> Result<Vec<ClientEvent>, Error> {
-        let Some(mut half) = self.halves.remove(&queue_id) else {
-            return Ok(Vec::new());
-        };
-
+    ) -> Result<Option<Vec<u8>>, Error> {
         let opened = half.inbound.open(payload, bucket, now)?;
         let Opened::Record {
             kind: L6Kind::Handshake,
@@ -10231,9 +10265,8 @@ impl ClientNode {
         } = opened
         else {
             // The cursor of the queue moved.
-            self.invitation_changed(queue_id, &half)?;
-            self.halves.insert(queue_id, half);
-            return Ok(Vec::new());
+            self.invitation_changed(queue_id, half)?;
+            return Ok(None);
         };
 
         // WIR-503: a flight with a number that the queue does not wait for
@@ -10253,10 +10286,44 @@ impl ClientNode {
         }
 
         if inner.first() != Some(&awaited) {
-            self.invitation_changed(queue_id, &half)?;
-            self.halves.insert(queue_id, half);
-            return Ok(Vec::new());
+            self.invitation_changed(queue_id, half)?;
+            return Ok(None);
         }
+
+        Ok(Some(inner))
+    }
+
+    /// Takes one `MSG` of the queue of a handshake that runs: the flight
+    /// that the half waits for, or a record that moves the cursor alone.
+    fn on_handshake_message<R: CryptoRng + ?Sized>(
+        &mut self,
+        queue_id: [u8; 32],
+        bucket: Bucket,
+        payload: &[u8],
+        now: u64,
+        rng: &mut R,
+    ) -> Result<Vec<ClientEvent>, Error> {
+        let Some(mut half) = self.halves.remove(&queue_id) else {
+            return Ok(Vec::new());
+        };
+
+        // A fault before the flight keeps the half, thus a later flight
+        // still completes the handshake.
+        let inner = match self.awaited_flight(queue_id, &mut half, payload, bucket, now, rng) {
+            Ok(Some(inner)) => inner,
+            Ok(None) => {
+                self.halves.insert(queue_id, half);
+                return Ok(Vec::new());
+            }
+            Err(error) => {
+                self.halves.insert(queue_id, half);
+                return Err(error);
+            }
+        };
+        let awaited = match &half.setup {
+            Setup::Inviting(inviter) => inviter.awaits(),
+            Setup::Accepting(_) => FLIGHT_2,
+        };
 
         // The flight 3 of an invitee, which the contact keeps until a relay
         // acknowledged it.
@@ -10271,8 +10338,9 @@ impl ClientNode {
                         // nothing.
                         if inviter.awaits() == FLIGHT_1 {
                             half.setup = Setup::Inviting(inviter);
-                            self.invitation_changed(queue_id, &half)?;
+                            let changed = self.invitation_changed(queue_id, &half);
                             self.halves.insert(queue_id, half);
+                            changed?;
                         } else {
                             self.changes
                                 .push(StateChange::InvitationEnded { queue: queue_id });
@@ -10293,8 +10361,9 @@ impl ClientNode {
                     half.resend = flight2;
                     half.acked = false;
                     half.since = now;
-                    self.invitation_changed(queue_id, &half)?;
+                    let changed = self.invitation_changed(queue_id, &half);
                     self.halves.insert(queue_id, half);
+                    changed?;
                     self.send_flight(queue_id, rng)?;
                     return Ok(Vec::new());
                 }
@@ -10313,8 +10382,9 @@ impl ClientNode {
                         };
 
                         half.setup = Setup::Inviting(Box::new(Inviter::restore_waiting(&waiting)?));
-                        self.invitation_changed(queue_id, &half)?;
+                        let changed = self.invitation_changed(queue_id, &half);
                         self.halves.insert(queue_id, half);
+                        changed?;
                         return Ok(Vec::new());
                     };
 
@@ -12961,6 +13031,56 @@ mod tests {
         assert!(net.take(ALICE).is_empty());
         assert!(net.node(ALICE).inbound_queue(&alice).unwrap().2);
         assert!(net.node(ALICE).ending_queues().is_empty());
+    }
+
+    #[test]
+    fn an_answer_that_fails_loses_no_message_of_its_cell() {
+        let mut net = Net::new();
+        let [alice, bob] = contacts(&mut net);
+        // The record of Bob waits at the relay of the queue of Alice.
+        let (queue, _, _) = net.node(ALICE).inbound_queue(&alice).unwrap();
+        let slot = net.node(ALICE).slot_of(&queue).unwrap();
+        let circuit = net.node(ALICE).slots[slot].circ_id().unwrap();
+        net.slow_back.insert(circuit);
+        let now = net.now;
+        net.node(BOB)
+            .send(&bob, &text(1), now, &mut Rng(4))
+            .unwrap();
+        net.run();
+        let held = net.held_answers.pop().unwrap();
+        assert_eq!(held.cmd, Cmd::Msg);
+
+        // The relay puts an `IDS` that does not parse behind the `MSG`.
+        let keys = QueueKeys {
+            qr_auth: StaticSecret::from([1; 32]),
+            qs_auth: Secret::zeroed(),
+            queue_secret: Secret::zeroed(),
+            salt: [0; 16],
+            purpose: Purpose::Notify,
+            handle: 0,
+            slot,
+            session_pk: [0; 32],
+            paid: false,
+        };
+        let node = net.node(ALICE);
+        node.current = slot;
+        node.waiting
+            .insert(u64::MAX, Waiting::Queue(Box::new(keys)));
+        let events = alloc::vec![
+            CircuitEvent::Message {
+                queue_id: held.queue_id,
+                bucket: held.bucket,
+                payload: held.payload,
+            },
+            CircuitEvent::Answered {
+                handle: u64::MAX,
+                cmd: Cmd::Ids,
+                payload: alloc::vec![0; 3],
+            },
+        ];
+
+        let out = node.on_events(events, now, &mut Rng(5)).unwrap();
+        assert_eq!(messages(&out), 1);
     }
 
     #[test]

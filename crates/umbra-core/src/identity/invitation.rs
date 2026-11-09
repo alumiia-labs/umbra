@@ -8,7 +8,13 @@
 
 use alloc::{string::String, vec::Vec};
 
-use umbra_crypto::{aead, hash::sha3_256, labels, secret::Secret, zeroize::Zeroizing};
+use umbra_crypto::{
+    aead,
+    hash::sha3_256,
+    labels,
+    secret::Secret,
+    zeroize::{Zeroize, Zeroizing},
+};
 use umbra_wire::{
     address::{self, QueueAddress},
     codec::{Reader, Writer},
@@ -26,8 +32,8 @@ pub const FRAGMENT_LEN: usize = 68;
 pub const BLOB_VERSION: u8 = 0x01;
 
 /// The fragment of an invitation link. No `Copy`, thus each copy of the key
-/// is a visible `clone`.
-#[derive(Clone, PartialEq, Eq)]
+/// is a visible `clone`. The key wipes on drop.
+#[derive(Clone)]
 pub struct Fragment {
     /// 256 bits of key material from the issuer's CSPRNG.
     pub key: [u8; 32],
@@ -36,6 +42,21 @@ pub struct Fragment {
     /// The `RelayRef` of the relay that holds the blob.
     pub relay_ref: [u8; 12],
 }
+
+impl Drop for Fragment {
+    fn drop(&mut self) {
+        self.key.zeroize();
+    }
+}
+
+/// A compare of the key takes the same time for each value of it.
+impl PartialEq for Fragment {
+    fn eq(&self, other: &Self) -> bool {
+        umbra_crypto::ct_eq(&*self.to_bytes_secret(), &*other.to_bytes_secret())
+    }
+}
+
+impl Eq for Fragment {}
 
 /// The key opens the bundle of the invitation, thus a log shows no byte of it.
 impl core::fmt::Debug for Fragment {
@@ -110,14 +131,26 @@ impl Fragment {
         })
     }
 
-    /// The bytes of the fragment.
+    /// The bytes of the fragment. [`Fragment::to_bytes_secret`] leaves no
+    /// plain copy of the key.
     pub fn to_bytes(&self) -> [u8; FRAGMENT_LEN] {
         let mut out = [0u8; FRAGMENT_LEN];
-        let mut w = Writer::new(&mut out);
+        self.write(&mut out);
+        out
+    }
+
+    /// The bytes of [`Fragment::to_bytes`], which wipe on drop.
+    pub fn to_bytes_secret(&self) -> Zeroizing<[u8; FRAGMENT_LEN]> {
+        let mut out = Zeroizing::new([0u8; FRAGMENT_LEN]);
+        self.write(&mut out);
+        out
+    }
+
+    fn write(&self, out: &mut [u8; FRAGMENT_LEN]) {
+        let mut w = Writer::new(out);
         let _ = w.put(&self.key);
         let _ = w.put(&self.link_id);
         let _ = w.put(&self.relay_ref);
-        out
     }
 
     /// The full link for `host`.
@@ -126,7 +159,7 @@ impl Fragment {
         s.push_str(host);
         s.push_str(PATH);
         s.push('#');
-        s.push_str(&base64url(&self.to_bytes()));
+        s.push_str(&base64url(&*self.to_bytes_secret()));
         s
     }
 
@@ -144,7 +177,7 @@ impl Fragment {
     /// The blob key: `HKDF("umbra/v1/invite-blob" || SHA3-256(fragment))`,
     /// as `HKDF(salt = "", ikm = SHA3-256(fragment), info = label)`.
     pub fn blob_key(&self) -> Secret<32> {
-        let bytes = Zeroizing::new(self.to_bytes());
+        let bytes = self.to_bytes_secret();
         let digest = Zeroizing::new(sha3_256(&[bytes.as_slice()]));
         let kdf =
             umbra_crypto::hkdf::Hkdf::<umbra_crypto::sha3::Sha3_256>::new(None, digest.as_slice());
@@ -320,6 +353,15 @@ mod tests {
         assert!(link.starts_with("https://invite.example/i#"));
         assert_eq!(Fragment::parse(&link, "invite.example").unwrap(), f);
         assert!(Fragment::parse(&link, "other.example").is_err());
+        assert_eq!(*f.to_bytes_secret(), f.to_bytes());
+        assert_ne!(
+            Fragment {
+                key: [9; 32],
+                ..fragment()
+            },
+            f
+        );
+        assert!(!alloc::format!("{f:?}").contains("1, 1, 1"));
 
         let mut short = link.clone();
         short.pop();

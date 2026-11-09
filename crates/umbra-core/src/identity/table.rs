@@ -3,8 +3,9 @@
 //! and verified at the unlock.
 
 use umbra_crypto::{
+    hash::hmac_sha3_256,
     hkdf::Hkdf,
-    hmac::{digest::KeyInit, Hmac, Mac},
+    hmac::{Hmac, Mac},
     labels,
     secret::Secret,
     sha3::Sha3_256,
@@ -25,8 +26,7 @@ impl TableKey {
     }
 
     fn mac(&self) -> Hmac<Sha3_256> {
-        Hmac::<Sha3_256>::new_from_slice(self.0.expose())
-            .unwrap_or_else(|_| Hmac::<Sha3_256>::new(&Default::default()))
+        hmac_sha3_256(self.0.expose())
     }
 
     /// `row_tag_i` over the record tag of a live row (`IDN-066`).
@@ -177,6 +177,20 @@ impl TableState {
 )]
 mod tests {
     use super::*;
+    use umbra_crypto::hmac::digest::KeyInit;
+
+    #[test]
+    fn the_tags_are_the_macs_of_the_slice_key() {
+        let key = TableKey::derive(&Secret::new([1; 32]));
+        let mut old = Hmac::<Sha3_256>::new_from_slice(key.0.expose()).unwrap();
+        old.update(&[0x01]);
+        old.update(b"messages");
+        old.update(b"row-1");
+        old.update(&[1; 16]);
+        let expected: [u8; 32] = old.finalize().into_bytes().into();
+
+        assert_eq!(key.row_tag(b"messages", b"row-1", &[1; 16]), expected);
+    }
 
     #[test]
     fn a_rollback_of_one_row_changes_the_mac() {

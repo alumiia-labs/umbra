@@ -708,7 +708,7 @@ impl<B: Backend> Store<B> {
             .tables
             .get(&table)
             .map_or_else(|| TableState::new().fields(), TableState::fields);
-        if scanned_accum == held_accum && scanned_rows == held_rows {
+        if umbra_crypto::ct_eq(&scanned_accum, &held_accum) && scanned_rows == held_rows {
             Ok(())
         } else {
             Err(Error::Unverified)

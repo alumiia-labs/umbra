@@ -142,7 +142,8 @@ impl Inviter {
         let held = self.prekey.as_ref().ok_or(Error::Stale)?;
         find_prekey(&pid, core::iter::once(held.id())).ok_or(Error::Unverified)?;
 
-        let mut app_1 = [0u8; QUEUE_ADDRESS_LEN];
+        // `app_1` holds `qs_auth_sk` and `qe` of the reply queue.
+        let mut app_1 = Zeroizing::new([0u8; QUEUE_ADDRESS_LEN]);
         // WIR-503: a flight that fails keeps the prekey for the true one.
         let (mut responder, read) = Responder::read_flight1(
             identity,
@@ -150,14 +151,14 @@ impl Inviter {
             VERSION_RANGE,
             AddressType::Pairwise,
             flight,
-            &mut app_1,
+            &mut app_1[..],
             &mut NoTrace,
         )?;
         if read.app_len != QUEUE_ADDRESS_LEN {
             return Err(Error::Malformed);
         }
 
-        let reply_to = QueueAddress::parse(&app_1)?;
+        let reply_to = QueueAddress::parse(&app_1[..])?;
         let mut flight2 = alloc::vec![0u8; FLIGHT2_FIXED + NONCE_LEN + PAYLOAD_OVERHEAD];
         let used = responder.flight2(&[], rng, &mut flight2, &mut NoTrace)?;
         flight2.truncate(used);
@@ -252,15 +253,15 @@ impl Invitee {
             range_r: VersionRange { min, max },
         };
 
-        let mut app_1 = [0u8; QUEUE_ADDRESS_LEN];
-        own_queue.encode(&mut app_1)?;
+        let mut app_1 = Zeroizing::new([0u8; QUEUE_ADDRESS_LEN]);
+        own_queue.encode(&mut app_1[..])?;
         let mut flight1 =
             alloc::vec![0u8; FLIGHT1_FIXED + NONCE_LEN + QUEUE_ADDRESS_LEN + PAYLOAD_OVERHEAD];
         let (initiator, used) = Initiator::flight1(
             &invitation,
             VERSION_RANGE,
             AddressType::Pairwise,
-            &app_1,
+            &app_1[..],
             rng,
             &mut flight1,
             &mut NoTrace,

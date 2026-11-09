@@ -2,7 +2,7 @@
 //! six-digit code that two persons compare. The exchange gives two clients
 //! one number; the comparison between the persons is the verification.
 
-use umbra_crypto::{hash::sha3_256, labels};
+use umbra_crypto::{hash::sha3_256, labels, secret::Secret};
 
 use super::address::canonical_pair;
 use crate::Error;
@@ -44,7 +44,9 @@ pub const HELD_START_LIFE: u64 = 600;
 
 /// The state of one ceremony at one client.
 pub struct Ceremony {
-    own_nonce: [u8; 32],
+    /// The nonce of this client. A held start of the peer has none, thus
+    /// it can send no commit and no reveal.
+    own_nonce: Option<Secret<32>>,
     sent_commit: bool,
     peer_commit: Option<[u8; 32]>,
     peer_nonce: Option<[u8; 32]>,
@@ -60,7 +62,7 @@ impl Ceremony {
     /// Starts a ceremony with a fresh nonce from the CSPRNG (`IDN-145`).
     pub fn new(own_nonce: [u8; 32]) -> Self {
         Ceremony {
-            own_nonce,
+            own_nonce: Some(Secret::new(own_nonce)),
             sent_commit: false,
             peer_commit: None,
             peer_nonce: None,
@@ -76,8 +78,13 @@ impl Ceremony {
     /// start from a ceremony of [`Ceremony::new`].
     pub fn asked(start: [u8; 32]) -> Self {
         Ceremony {
+            own_nonce: None,
+            sent_commit: false,
+            peer_commit: None,
+            peer_nonce: None,
+            confirmed: false,
             asked: Some(start),
-            ..Ceremony::new([0; 32])
+            asked_at: None,
         }
     }
 
@@ -115,14 +122,15 @@ impl Ceremony {
     }
 
     /// The `VerifyCommit` to send first (`IDN-142`).
-    pub fn commit_to_send(&mut self) -> [u8; 32] {
+    pub fn commit_to_send(&mut self) -> Result<[u8; 32], Error> {
+        let own_commit = self.own_commit().ok_or(Error::Unverified)?;
         self.sent_commit = true;
-        commit(&self.own_nonce)
+        Ok(own_commit)
     }
 
     /// The commit of this client, which the answer of the peer names.
-    pub fn own_commit(&self) -> [u8; 32] {
-        commit(&self.own_nonce)
+    pub fn own_commit(&self) -> Option<[u8; 32]> {
+        self.own_nonce.as_ref().map(|nonce| commit(nonce.expose()))
     }
 
     /// Whether this client sent its commit and holds no commit of the peer.
@@ -138,11 +146,12 @@ impl Ceremony {
     /// The `VerifyReveal` to send, once the peer's commit is held
     /// (`IDN-143`).
     pub fn reveal_to_send(&self) -> Result<[u8; 32], Error> {
+        let own_nonce = self.own_nonce.as_ref().ok_or(Error::Unverified)?;
         if !self.sent_commit || self.peer_commit.is_none() {
             return Err(Error::Unverified);
         }
 
-        Ok(self.own_nonce)
+        Ok(*own_nonce.expose())
     }
 
     /// The peer's `VerifyReveal` arrived; it must match the commit held
@@ -160,7 +169,8 @@ impl Ceremony {
     /// The code to show, once both nonces are held.
     pub fn code(&self, own_pk: &[u8], peer_pk: &[u8]) -> Option<u32> {
         let peer = self.peer_nonce?;
-        Some(code(own_pk, peer_pk, &self.own_nonce, &peer))
+        let own_nonce = self.own_nonce.as_ref()?;
+        Some(code(own_pk, peer_pk, own_nonce.expose(), &peer))
     }
 
     /// The user confirmed that the two codes match (`IDN-147`).
@@ -198,8 +208,8 @@ mod tests {
         let mut b = Ceremony::new([4; 32]);
         assert!(a.reveal_to_send().is_err());
 
-        let ca = a.commit_to_send();
-        let cb = b.commit_to_send();
+        let ca = a.commit_to_send().unwrap();
+        let cb = b.commit_to_send().unwrap();
         a.peer_committed(cb);
         b.peer_committed(ca);
         let ra = a.reveal_to_send().unwrap();
@@ -242,6 +252,13 @@ mod tests {
         assert_eq!(asked.asked_start_at(u64::MAX), Some([7; 32]));
         assert!(!asked.awaits_commit());
         assert!(!asked.spent());
+        // The held start has no nonce of this client, thus it sends no
+        // commit of a zero nonce.
+        assert_eq!(asked.own_commit(), None);
+        assert!(asked.commit_to_send().is_err());
+        assert!(!asked.awaits_commit());
+        asked.peer_committed(commit(&[4; 32]));
+        assert!(asked.reveal_to_send().is_err());
         assert!(asked.reveal_to_send().is_err());
         assert!(asked.peer_revealed([9; 32]).is_err());
         assert_eq!(asked.code(&[1; 32], &[2; 32]), None);
@@ -251,7 +268,7 @@ mod tests {
         // from the commit of the peer on.
         let mut own = Ceremony::new([3; 32]);
         assert_eq!(own.asked_start(), None);
-        own.commit_to_send();
+        own.commit_to_send().unwrap();
         assert!(own.awaits_commit());
         assert!(!own.spent());
         own.peer_committed(commit(&[4; 32]));

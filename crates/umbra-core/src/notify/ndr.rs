@@ -21,7 +21,7 @@ use umbra_wire::ndr::{parse_token, NdrRequest, NdrResponse, TokenCarrier, BLOB_L
 use super::{PERIODIC_INTERVAL, PUSH_TTL_MESSAGE};
 
 /// One registration, as the store of the NDR holds it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Held {
     /// The nonce of the seal of the token, or zero bytes for a timer.
     pub nonce: [u8; 24],
@@ -37,6 +37,20 @@ pub struct Held {
     pub pushed: bool,
     /// Whether it is a timer registration of Periodic mode (`NTF-150`).
     pub timer: bool,
+}
+
+/// A timer holds the plain FCM token, thus a log shows its length alone.
+impl core::fmt::Debug for Held {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Held")
+            .field("nonce", &self.nonce)
+            .field("ct_token_len", &self.ct_token.len())
+            .field("removal_hash", &self.removal_hash)
+            .field("registered_at", &self.registered_at)
+            .field("pushed", &self.pushed)
+            .field("timer", &self.timer)
+            .finish()
+    }
 }
 
 /// The second of each `PERIODIC_INTERVAL` at which the NDR pushes to a
@@ -738,6 +752,27 @@ mod tests {
         assert_eq!(ndr.handle(&removal, NOW).0, NdrResponse::Taken);
         assert_eq!(ndr.timers(), 0);
         assert!(ndr.ticks(base, base + PERIODIC_INTERVAL).is_empty());
+    }
+
+    #[test]
+    fn a_log_of_a_timer_shows_no_byte_of_its_token() {
+        let held = Held {
+            nonce: [0; 24],
+            ct_token: b"fcm-device-1".to_vec(),
+            removal_hash: [3; 32],
+            registered_at: NOW,
+            pushed: false,
+            timer: true,
+        };
+        let change = NdrChange::Registered {
+            handle: [7; 16],
+            held: held.clone(),
+        };
+
+        for shown in [alloc::format!("{held:?}"), alloc::format!("{change:?}")] {
+            assert!(!shown.contains("102, 99, 109"));
+            assert!(shown.contains("ct_token_len: 12"));
+        }
     }
 
     #[test]

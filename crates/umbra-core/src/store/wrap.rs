@@ -4,7 +4,14 @@
 //! passphrase needs the secure element, thus a brute force runs on the
 //! seized device.
 
-use umbra_crypto::{aead, hkdf::Hkdf, kdf, labels, secret::Secret, sha3::Sha3_256};
+use umbra_crypto::{
+    aead,
+    hkdf::Hkdf,
+    kdf, labels,
+    secret::Secret,
+    sha3::Sha3_256,
+    zeroize::{Zeroize, Zeroizing},
+};
 use umbra_wire::codec::{Reader, Writer};
 
 use crate::Error;
@@ -102,7 +109,14 @@ fn wrap_key(
     let (label_part, a_part) = input.expose_mut().split_at_mut(labels::AT_REST_WRAP.len());
     label_part.copy_from_slice(labels::AT_REST_WRAP);
     a_part.copy_from_slice(a.expose());
-    let s = Secret::new(element.keyed(input.expose())?);
+    // The trait gives `S` as a plain array, thus it is wiped where it lands.
+    let mut keyed = element.keyed(input.expose());
+    let mut s = Secret::<32>::zeroed();
+    if let Ok(bytes) = keyed.as_mut() {
+        s.expose_mut().copy_from_slice(bytes);
+        bytes.zeroize();
+    }
+    keyed?;
 
     let kdf = Hkdf::<Sha3_256>::new(Some(a.expose()), s.expose());
     let mut key = Secret::<32>::zeroed();
@@ -124,14 +138,17 @@ impl WrapHeader {
         element: &impl SecureElement,
     ) -> Result<Self, Error> {
         let key = wrap_key(passphrase, cost, &salt, element)?;
-        let mut wrapped = *store_key.expose();
-        let tag = aead::seal(&key, &nonce, labels::AT_REST_WRAP, &mut wrapped)?;
+        // The buffer holds `K_store` until the seal, and a failed seal
+        // leaves it plain.
+        let mut wrapped = Zeroizing::new([0u8; 32]);
+        wrapped.copy_from_slice(store_key.expose());
+        let tag = aead::seal(&key, &nonce, labels::AT_REST_WRAP, &mut wrapped[..])?;
 
         Ok(WrapHeader {
             cost,
             salt,
             nonce,
-            wrapped,
+            wrapped: *wrapped,
             tag,
         })
     }

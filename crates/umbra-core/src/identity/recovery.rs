@@ -6,11 +6,10 @@ use alloc::{string::String, vec::Vec};
 
 use umbra_crypto::{
     aead,
-    hash::sha3_256,
-    hmac::{digest::KeyInit, Hmac, Mac},
+    hash::{hmac_sha3_256, sha3_256},
+    hmac::Mac,
     kdf, labels,
     secret::Secret,
-    sha3::Sha3_256,
     zeroize::Zeroizing,
 };
 use umbra_wire::codec::{Reader, Writer};
@@ -113,8 +112,7 @@ impl BackupRootKey {
     }
 
     fn prf(&self, label: &[u8], epoch: u32) -> Secret<32> {
-        let mut mac = Hmac::<Sha3_256>::new_from_slice(self.0.expose())
-            .unwrap_or_else(|_| Hmac::<Sha3_256>::new(&Default::default()));
+        let mut mac = hmac_sha3_256(self.0.expose());
         mac.update(label);
         mac.update(&epoch.to_be_bytes());
         Secret::new(mac.finalize().into_bytes().into())
@@ -445,7 +443,12 @@ pub fn split_social(
     // Each share is a secret of the user, thus the list leaves no copy.
     let mut shares = Zeroizing::new(Vec::with_capacity(usize::from(n)));
     for x in 1..=n {
-        let mut share = [0u8; 17];
+        // The share takes its bytes in the list, thus no copy stays on
+        // the stack.
+        shares.push([0u8; 17]);
+        let Some(share) = shares.last_mut() else {
+            return Err(Error::Malformed);
+        };
         share[0] = x;
         for byte in 0..16 {
             let mut y = secret.expose().get(byte).copied().unwrap_or(0);
@@ -459,7 +462,6 @@ pub fn split_social(
                 *slot = y;
             }
         }
-        shares.push(share);
     }
 
     Ok(shares)
@@ -512,6 +514,21 @@ pub fn join_social(shares: &[[u8; 17]]) -> Result<Secret<16>, Error> {
 )]
 mod tests {
     use super::*;
+    use umbra_crypto::{
+        hmac::{digest::KeyInit, Hmac},
+        sha3::Sha3_256,
+    };
+
+    #[test]
+    fn the_epoch_values_are_the_macs_of_the_slice_key() {
+        let root = BackupRootKey::from_secret(Secret::new([5; 32]));
+        let mut old = Hmac::<Sha3_256>::new_from_slice(&[5; 32]).unwrap();
+        old.update(labels::BACKUP_HANDLE);
+        old.update(&7u32.to_be_bytes());
+        let expected: [u8; 32] = old.finalize().into_bytes().into();
+
+        assert_eq!(root.epoch(7).handle, expected);
+    }
 
     #[test]
     fn the_field_product_with_no_branch_is_the_product_of_the_field() {

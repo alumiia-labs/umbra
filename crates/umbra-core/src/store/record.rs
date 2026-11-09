@@ -6,12 +6,7 @@
 use alloc::vec::Vec;
 
 use umbra_crypto::{
-    aead,
-    hkdf::Hkdf,
-    hmac::{digest::KeyInit, Hmac, Mac},
-    labels,
-    rand_core::CryptoRng,
-    secret::Secret,
+    aead, hash::hmac_sha3_256, hkdf::Hkdf, hmac::Mac, labels, rand_core::CryptoRng, secret::Secret,
     sha3::Sha3_256,
 };
 
@@ -75,9 +70,7 @@ impl RowKey {
 
     /// `HMAC-SHA3-256(K_row, table_id || natural_key)[0..16]`.
     pub fn row_id(&self, table: TableId, natural_key: &[u8]) -> RowId {
-        // A 32-byte key is inside the HMAC key bound, thus this cannot fail.
-        let mut mac = Hmac::<Sha3_256>::new_from_slice(self.0.expose())
-            .unwrap_or_else(|_| Hmac::<Sha3_256>::new(&Default::default()));
+        let mut mac = hmac_sha3_256(self.0.expose());
         mac.update(&[table.0]);
         mac.update(natural_key);
 
@@ -390,6 +383,21 @@ impl SealedRecord {
 mod tests {
     use super::*;
     use crate::abuse::test_rng::Rng;
+    use umbra_crypto::hmac::{digest::KeyInit, Hmac};
+
+    #[test]
+    fn the_row_id_is_the_mac_of_the_slice_key() {
+        let rows = RowKey::derive(&Secret::new([1; 32]));
+        let mut old = Hmac::<Sha3_256>::new_from_slice(rows.0.expose()).unwrap();
+        old.update(&[TableId::MESSAGE.0]);
+        old.update(b"conversation 7");
+        let full: [u8; 32] = old.finalize().into_bytes().into();
+
+        assert_eq!(
+            rows.row_id(TableId::MESSAGE, b"conversation 7"),
+            full[..ROW_ID_LEN]
+        );
+    }
 
     #[test]
     fn a_record_opens_in_its_own_row_and_nowhere_else() {

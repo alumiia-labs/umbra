@@ -37,15 +37,28 @@ pub struct Binding {
 
 impl Binding {
     /// The 98 plain bytes, as the store of a queue relay holds them.
+    /// [`Binding::encode_secret`] leaves no plain copy of the keys.
     pub fn encode(&self) -> Result<[u8; PLAIN_LEN], Error> {
         let mut out = [0u8; PLAIN_LEN];
-        let mut w = Writer::new(&mut out);
+        self.write(&mut out)?;
+        Ok(out)
+    }
+
+    /// The 98 plain bytes of [`Binding::encode`], written into a secret.
+    pub fn encode_secret(&self) -> Result<Secret<PLAIN_LEN>, Error> {
+        let mut out = Secret::zeroed();
+        self.write(out.expose_mut())?;
+        Ok(out)
+    }
+
+    fn write(&self, out: &mut [u8; PLAIN_LEN]) -> Result<(), Error> {
+        let mut w = Writer::new(out);
         w.put(self.root.expose())?;
         w.put(&self.handle)?;
         w.put(self.k_tok.expose())?;
         w.put(&self.queue_alias)?;
         w.u16(self.relay_idx)?;
-        Ok(out)
+        Ok(())
     }
 
     /// Reads the plain bytes that [`Binding::encode`] wrote.
@@ -71,12 +84,12 @@ impl Binding {
         rng: &mut R,
     ) -> Result<Vec<u8>, Error> {
         // The plain bytes hold `k_ntf_root` and `k_tok`.
-        let plain = Zeroizing::new(self.encode()?);
+        let plain = self.encode_secret()?;
         Ok(hpke::seal(
             relay_ntf_pk,
             labels::NTF,
             recipient_id,
-            plain.as_slice(),
+            plain.expose(),
             rng,
         )?)
     }
@@ -115,6 +128,10 @@ mod tests {
         assert_eq!(back.handle, [2; 16]);
         assert_eq!(back.relay_idx, 5);
         assert!(Binding::open(&relay, &[8; 32], &sealed).is_err());
+        assert_eq!(
+            back.encode_secret().unwrap().expose(),
+            &binding.encode().unwrap()
+        );
         let other = KeyPair::generate(&mut rng);
         assert!(Binding::open(&other, &[9; 32], &sealed).is_err());
     }
