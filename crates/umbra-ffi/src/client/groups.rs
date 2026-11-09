@@ -857,6 +857,8 @@ pub(super) struct Before {
     /// The rotator of the current secret: a lower index of the same epoch
     /// takes its place (`GRP-273`).
     rotator: Option<u16>,
+    /// The public key of the first owner credential. A copy of the secret
+    /// on the stack would get no wipe.
     owners: Option<[u8; 32]>,
 }
 
@@ -865,9 +867,14 @@ impl Before {
         Before {
             epoch: group.epoch(),
             rotator: group.epoch_rotator(),
-            owners: group.owner(0).map(|held| *held.expose()),
+            owners: owners_pk(group),
         }
     }
+}
+
+/// The public key of the owner credential of the first replica.
+fn owners_pk(group: &Group) -> Option<[u8; 32]> {
+    group.owner(0).map(umbra_crypto::seal::public_of)
 }
 
 /// A rotation whose slots go on the chunk path, and whose record follows
@@ -1035,12 +1042,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 relay: *relay,
                 read_pk,
                 write_pk,
-                own: Secret::new(
-                    *group
+                own: secret_of(
+                    group
                         .owner(usize::from(replica))
                         .ok_or(Error::Malformed)?
                         .expose(),
-                ),
+                )?,
             });
         }
 
@@ -1539,11 +1546,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // replica in that state refuses as one with no queue does. The
         // mark of that `GKEY` goes, thus it goes again after the next
         // backlog, and a replica that still holds the queue takes it.
+        // A row that does not parse stops no close. It stays as it is,
+        // because a default over it would drop the replaced credentials
+        // (GRP-401).
         if state == CLOSED && group.owner(0).is_some() {
-            let mut held = self.gkey_row(conversation)?;
-            if held.taken.iter().any(Option::is_some) {
-                held.taken = [None; GROUP_REPLICAS];
-                self.put_gkey_row(conversation, &held, rng)?;
+            match self.gkey_row(conversation) {
+                Ok(mut held) => {
+                    if held.taken.iter().any(Option::is_some) {
+                        held.taken = [None; GROUP_REPLICAS];
+                        self.put_gkey_row(conversation, &held, rng)?;
+                    }
+                }
+                Err(Error::Integrity) => self.note_integrity_fault(),
+                Err(error) => return Err(error),
             }
         }
 
@@ -1631,13 +1646,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // longer holds, and refusals at each replica close the group again.
         // Such a record never goes, thus it leaves the store.
         let group = self.group_of(conversation)?;
-        let held: Zeroizing<Vec<[u8; 32]>> = Zeroizing::new(
-            [group.credentials(), group.previous_credentials()]
-                .into_iter()
-                .flatten()
-                .map(|credentials| *credentials.write_secret().expose())
-                .collect(),
-        );
+        let held: Vec<Secret<32>> = [group.credentials(), group.previous_credentials()]
+            .into_iter()
+            .flatten()
+            .map(|credentials| credentials.write_secret())
+            .collect();
 
         let now = super::unix_now_seconds();
         let mut kept = Vec::new();
@@ -1651,7 +1664,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if post.message.is_some() || queued.contains(&row) {
                 continue;
             }
-            if !held.contains(post.write.expose()) {
+            if !held
+                .iter()
+                .any(|secret| secret.expose() == post.write.expose())
+            {
                 if !held.is_empty() {
                     stale.push(row);
                 }
@@ -1712,7 +1728,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         conversation: ConversationId,
         group: &Group,
     ) -> Result<Vec<RowWrite>, Error> {
-        let state = self.group_state(conversation).unwrap_or(OPEN);
+        // A fault or a missing row ends the write. The default would open a
+        // closed group again.
+        let state = self.group_state(conversation)?;
         let row = Self::group_row(group, state)?;
         let store = &self.open_ref()?.store;
         let group_id = group.group_id();
@@ -1921,6 +1939,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         group_queue_id: [u8; 32],
         rng: &mut R,
     ) -> Result<bool, Error> {
+        // A relay that names the queue of another group of this device
+        // would take the records of that group to this one.
+        if self.queue_held_elsewhere(conversation, &[group_queue_id])? {
+            return Err(Error::Malformed);
+        }
+
         // The made queue holds its relay and its identifier until the
         // second one arrives, and then the group row holds both.
         let open = self.open_mut()?;
@@ -2668,7 +2692,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
         };
         let fresh = umbra_core::group::join::JoinKeys {
-            seed: Secret::new(*seed.expose()),
+            seed: secret_of(seed.expose())?,
             keys: MemberKeys::from_seed(&seed),
         };
         let object = group
@@ -2999,8 +3023,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             // relay, and a replica that came since takes 0.
             let seqs = self.seqs_of_admit(&held)?;
 
-            // A fault of one admit ends its row, and no other row.
-            let _ = self.send_admit(
+            // A fault that a later pump can pass keeps the row, else the
+            // joiner never gets its admit. Another fault ends its row, and
+            // no other row.
+            match self.send_admit(
                 held.from,
                 &held.group_id,
                 held.index,
@@ -3008,8 +3034,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 seqs,
                 now_ms,
                 rng,
-            );
-            done.push(add_row);
+            ) {
+                Err(Error::Storage | Error::Busy | Error::Locked) => {}
+                _ => done.push(add_row),
+            }
         }
 
         if done.is_empty() {
@@ -3566,6 +3594,20 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // does the second admit of `GRP-421`.
         let conversation = self.conversation_of_group(&group_id)?;
         if !replaces && self.holds_membership(conversation)? {
+            return Err(Error::Malformed);
+        }
+
+        // An inviter that names the queue of another group of this device
+        // would take the records of that group to this one.
+        let queues: Vec<[u8; 32]> = group
+            .replicas()
+            .into_iter()
+            .flat_map(|replicas| {
+                (0..GROUP_REPLICAS).filter_map(move |index| replicas.reference(index))
+            })
+            .map(|held| held.group_queue_id)
+            .collect();
+        if self.queue_held_elsewhere(conversation, &queues)? {
             return Err(Error::Malformed);
         }
 
@@ -4224,7 +4266,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // thus a run that ends first sends it again.
         let mut held = self.gkey_row(conversation)?;
         for (replaced, before) in held.replaced.iter_mut().zip(&old) {
-            replaced.push(Secret::new(*before.expose()));
+            replaced.push(secret_of(before.expose())?);
             let excess = replaced.len().saturating_sub(OWNER_HELD_MAX);
             replaced.drain(..excess);
         }
@@ -4795,11 +4837,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 message: None,
                 conversation: upload.conversation,
                 replicas,
-                write: Secret::new(*upload.write.expose()),
+                write: secret_of(upload.write.expose())?,
                 fallback: upload
                     .fallback
                     .as_ref()
-                    .map(|held| Secret::new(*held.expose())),
+                    .map(|held| secret_of(held.expose()))
+                    .transpose()?,
                 record,
                 is_rotation: true,
                 unsent: None,
@@ -4873,7 +4916,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(Some(GroupRekey {
             relay: *relay,
             group_queue_id: reference.group_queue_id,
-            own: Secret::new(*own.expose()),
+            own: secret_of(own.expose())?,
             next_own_pk: None,
             read_pk: credentials.read_public(),
             write_pk: credentials.write_public(),
@@ -4890,18 +4933,26 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         conversation: ConversationId,
         relay: &[u8; 32],
     ) -> Result<bool, Error> {
-        let Some(job) = self.group_rekey_for(conversation, relay)? else {
+        // The same checks as `group_rekey_for`, with no copy of the owner
+        // credential.
+        let group = self.group_of(conversation)?;
+        let Some(replicas) = Self::group_replicas_of(&group)? else {
+            return Ok(false);
+        };
+        let Some(which) = replicas.iter().position(|held| held.relay == *relay) else {
+            return Ok(false);
+        };
+        let (Some(_), Some(credentials)) = (group.owner(which), group.credentials()) else {
             return Ok(false);
         };
 
-        let group = self.group_of(conversation)?;
-        let which = Self::group_replicas_of(&group)?
-            .and_then(|replicas| replicas.iter().position(|held| held.relay == *relay));
-        let taken = which
-            .and_then(|which| self.gkey_row(conversation).ok()?.taken.get(which).copied())
+        let taken = self
+            .gkey_row(conversation)?
+            .taken
+            .get(which)
+            .copied()
             .flatten();
-
-        Ok(taken != Some(job.write_pk))
+        Ok(taken != Some(credentials.write_public()))
     }
 
     /// The upload of the snapshot of a join failed. The view reads the
@@ -6240,8 +6291,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
 
             // A group that holds no read key can send no `GNUNREG`; its
-            // registrations leave with the relay life of `NTF-102`.
-            let group = self.group_of(conversation).ok();
+            // registrations leave with the relay life of `NTF-102`. A group
+            // that is gone, or whose row does not restore, holds none. A
+            // fault of the storage ends the call, thus the `GNUNREG` goes
+            // at a later call.
+            let group = match self.group_of(conversation) {
+                Ok(group) => Some(group),
+                Err(error @ (Error::Storage | Error::Locked | Error::Closed)) => return Err(error),
+                Err(_) => None,
+            };
             let read = group
                 .as_ref()
                 .and_then(|group| group.credentials().map(|held| held.read_secret()));
@@ -6261,7 +6319,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                             on: false,
                             relay: reference.relay_id,
                             group_queue_id: reference.group_queue_id,
-                            read: Secret::new(*read.expose()),
+                            read: secret_of(read.expose())?,
                             queue: address.clone(),
                         });
                     }
@@ -6428,7 +6486,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     on: true,
                     relay: reference.relay_id,
                     group_queue_id: reference.group_queue_id,
-                    read: Secret::new(*read.expose()),
+                    read: secret_of(read.expose())?,
                     queue: address.clone(),
                 });
             }
@@ -6568,10 +6626,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             // take it under the credentials of that `GKEY` alone. The
             // replica then holds no pair of the epoch before (`GRP-398`),
             // and its pair is the one that the `GKEY` carried.
-            let write_pk = *umbra_crypto::x25519::PublicKey::from(
-                &umbra_crypto::x25519::StaticSecret::from(*post.write.expose()),
-            )
-            .as_bytes();
+            let write_pk = umbra_crypto::seal::public_of(&post.write);
             if let Some(sent) = self.groups.gkey_sent.get_mut(&(post.conversation, which)) {
                 if post.fallback.is_none() && sent.write_pk == write_pk {
                     sent.after.insert(*row);
@@ -6975,11 +7030,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         }
                     }
 
-                    let stored = self.store_group_message(conversation, &app, now_ms, rng)?;
+                    let is_recovered = self.clock(&recovered_key(conversation, epoch))?.is_some();
+                    let stored = self.store_group_message(
+                        conversation,
+                        &app,
+                        sender,
+                        is_recovered,
+                        now_ms,
+                        rng,
+                    )?;
                     if let Some(message) = stored {
-                        let is_recovered =
-                            self.clock(&recovered_key(conversation, epoch))?.is_some();
-                        self.put_group_sender(conversation, message, sender, is_recovered, rng)?;
                         self.after_group_store(conversation, &group, message, &app, now, rng)?;
                         match timer {
                             Some(seconds) => {
@@ -7000,6 +7060,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                             now_ms,
                             rng,
                         )?;
+
+                        // The sender row loses its wait mark last, thus a
+                        // run that ends before this point runs each step
+                        // again at the next copy of the record.
+                        self.put_group_sender(conversation, message, sender, is_recovered, rng)?;
                     }
 
                     first = first.or(stored);
@@ -7029,7 +7094,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // device holds now, and that admin moves each replica to them.
         // What this device knew of its own `GKEY` commands names
         // credentials that it holds no more.
-        let owners_moved = group.owner(0).map(|held| *held.expose()) != before.owners;
+        let owners_moved = owners_pk(&group) != before.owners;
         if owners_moved && before.owners.is_some() {
             self.put_gkey_row(conversation, &GkeyRow::default(), rng)?;
             self.groups
@@ -7079,7 +7144,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
         // GRP-402: owner credentials from another admin answer the call for
         // them, thus this admin stands down.
-        if group.owner(0).map(|held| *held.expose()) != before.owners {
+        if owners_moved {
             self.groups.owner_backoff.remove(&conversation);
             self.note_owners(conversation, &group, rng)?;
         }
@@ -7094,12 +7159,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(first)
     }
 
-    /// Stores one message of a group that arrived, and raises its event.
-    /// The second copy of one record drops at its `msg_id` (`WIR-065`).
+    /// Stores one message of a group that arrived, with its sender row, and
+    /// raises its event. The second copy of one record drops at its
+    /// `msg_id` (`WIR-065`). The sender row holds a wait mark until the
+    /// steps after the store end. A copy that finds the mark gives the
+    /// message again, thus those steps run again.
     fn store_group_message<R: CryptoRng + ?Sized>(
         &mut self,
         conversation: ConversationId,
         app: &[u8],
+        sender: u16,
+        is_recovered: bool,
         now_ms: u64,
         rng: &mut R,
     ) -> Result<Option<MsgRef>, Error> {
@@ -7118,7 +7188,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .get(umbra_core::store::record::TableId::MESSAGE, &row)?
             .is_some()
         {
-            return Ok(None);
+            let message = MsgRef(row);
+            if !self.group_steps_wait(&message, sender)? {
+                return Ok(None);
+            }
+
+            // The run that stored the message ended before its event left.
+            self.events.push_back(Event::Message {
+                conversation,
+                message,
+            });
+            return Ok(Some(message));
         }
 
         // GRP-142: the answer resolves inside this group, as a reference.
@@ -7140,6 +7220,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             row,
             Some(conversation.0),
             &plain,
+            rng,
+        )?;
+        let waits =
+            super::group_changes::group_sender_value(conversation, sender, is_recovered, true);
+        batch.put(
+            super::group_changes::GROUP_SENDER,
+            row,
+            Some(conversation.0),
+            &waits,
             rng,
         )?;
 
@@ -7602,18 +7691,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 continue;
             }
 
-            let job = |own: &Secret<32>, next_own_pk| GroupRekey {
-                relay: replica.relay,
-                group_queue_id: replica.group_queue_id,
-                own: Secret::new(*own.expose()),
-                next_own_pk,
-                read_pk,
-                write_pk,
+            let job = |own: &Secret<32>, next_own_pk| -> Result<GroupRekey, Error> {
+                Ok(GroupRekey {
+                    relay: replica.relay,
+                    group_queue_id: replica.group_queue_id,
+                    own: secret_of(own.expose())?,
+                    next_own_pk,
+                    read_pk,
+                    write_pk,
+                })
             };
-            let next = *umbra_crypto::x25519::PublicKey::from(
-                &umbra_crypto::x25519::StaticSecret::from(*own.expose()),
-            )
-            .as_bytes();
+            let next = umbra_crypto::seal::public_of(own);
 
             // A rotation that never reached the group row replaced nothing.
             let replaced: Vec<&Secret<32>> = replaced
@@ -7625,11 +7713,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
 
             for before in replaced {
-                self.groups.rekeys.push_back(job(before, Some(next)));
+                self.groups.rekeys.push_back(job(before, Some(next))?);
             }
 
             if !drew {
-                self.groups.rekeys.push_back(job(own, None));
+                self.groups.rekeys.push_back(job(own, None)?);
             }
 
             let sent = GkeySent {
@@ -7770,7 +7858,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
         self.groups.queue_hints.clear();
         for conversation in self.group_conversations()? {
-            let group = self.group_of(conversation)?;
+            let Some(group) = self.scanned_group(conversation)? else {
+                continue;
+            };
             for held in group.replicas().into_iter().flat_map(|replicas| {
                 (0..GROUP_REPLICAS).filter_map(move |index| replicas.reference(index))
             }) {
@@ -7786,6 +7876,58 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
 
         Ok(None)
+    }
+
+    /// The group of a scan over each group, or none for a group whose row
+    /// does not restore. That group stops no scan, and a fault of the file
+    /// tells the user (`IDN-039`). A fault of the storage ends the scan.
+    fn scanned_group(&mut self, conversation: ConversationId) -> Result<Option<Group>, Error> {
+        match self.group_of(conversation) {
+            Ok(group) => Ok(Some(group)),
+            Err(error @ (Error::Storage | Error::Locked | Error::Closed)) => Err(error),
+            Err(error) => {
+                if error == Error::Integrity {
+                    self.note_integrity_fault();
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    /// Whether a group other than `conversation` holds one of the group
+    /// queues `ids`. A queue names one group, thus an admit or a relay
+    /// that names the queue of another group takes none of its records.
+    fn queue_held_elsewhere(
+        &mut self,
+        conversation: ConversationId,
+        ids: &[[u8; 32]],
+    ) -> Result<bool, Error> {
+        for other in self.group_conversations()? {
+            if other == conversation {
+                continue;
+            }
+
+            let Some(group) = self.scanned_group(other)? else {
+                continue;
+            };
+            if ids.iter().any(|id| holds_queue(&group, id)) {
+                return Ok(true);
+            }
+        }
+
+        // A queue that waits for the second one of its group is no group
+        // row yet.
+        let store = &self.open_ref()?.store;
+        let own = store.row_ids(GROUP_QUEUE, Some(&conversation.0))?;
+        for (row, plain) in store.list(GROUP_QUEUE, None)? {
+            let plain = Zeroizing::new(plain);
+            let held = plain.get(QUEUE_ROW_LEN..).unwrap_or(&[]);
+            if !own.contains(&row) && ids.iter().any(|id| held == id.as_slice()) {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
     }
 
     /// Puts each `GNEW` and each record that waits into the work list.
@@ -8110,7 +8252,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 relay,
                 read_pk: credentials.read_public(),
                 write_pk: credentials.write_public(),
-                own: Secret::new(*own.expose()),
+                own: secret_of(own.expose())?,
             });
         }
 
@@ -8208,8 +8350,11 @@ fn read_unsent(
     let conversation = ConversationId(body.get(8..24)?.try_into().ok()?);
     let is_rotation = *body.get(24)? == 1;
     let has_fallback = *body.get(25)? == 1;
-    let write = Secret::new(take(26)?);
-    let fallback = has_fallback.then(|| take(58)).flatten().map(Secret::new);
+    let write = secret_of(body.get(26..58)?).ok()?;
+    let fallback = has_fallback
+        .then(|| body.get(58..90))
+        .flatten()
+        .and_then(|bytes| secret_of(bytes).ok());
     let replica = |at: usize| -> Option<GroupReplica> {
         Some(GroupReplica {
             relay: take(at)?,
@@ -8467,6 +8612,26 @@ mod tests {
         rng: &mut Rng,
         fetched: fn(&[u8]) -> Vec<u8>,
     ) -> ConversationId {
+        let (at_joiner, group_id, snapshot) = admit(admin, joiner, group, peers, now, rng);
+        let member = joiner
+            .accept_group_admit(at_joiner, &group_id, &fetched(&snapshot), now + 1, rng)
+            .unwrap();
+        while admin.next_event().is_some() {}
+        while joiner.next_event().is_some() {}
+        member
+    }
+
+    /// The steps of [`invite`] up to the admit at the joiner. The result is
+    /// the conversation of the admin at the joiner, the group identifier,
+    /// and the snapshot that the admin wrote.
+    fn admit(
+        admin: &mut Device,
+        joiner: &mut Device,
+        group: ConversationId,
+        peers: (ContactId, ContactId),
+        now: u64,
+        rng: &mut Rng,
+    ) -> (ConversationId, [u8; 32], Vec<u8>) {
         let at_admin = admin.conversation_for(&peers.0 .0).unwrap();
         let at_joiner = joiner.conversation_for(&peers.1 .0).unwrap();
         let group_id = admin.group_info(group).unwrap().group_id;
@@ -8503,13 +8668,7 @@ mod tests {
             .unwrap();
         let admit = admin.take_outgoing().unwrap();
         deliver(joiner, &peers.1, &admit.app, now * 1_000 + 600, rng);
-        let snapshot = fetched(&admission.snapshot);
-        let member = joiner
-            .accept_group_admit(at_joiner, &group_id, &snapshot, now + 1, rng)
-            .unwrap();
-        while admin.next_event().is_some() {}
-        while joiner.next_event().is_some() {}
-        member
+        (at_joiner, group_id, admission.snapshot)
     }
 
     /// One pump of the run of the group queues at `now`, as the bindings
@@ -8591,6 +8750,184 @@ mod tests {
         batch.commit().unwrap();
 
         assert!(matches!(client.gkey_row(group), Err(Error::Integrity)));
+    }
+
+    #[test]
+    fn a_fault_after_the_commit_of_a_batch_fails_no_commit() {
+        let mut rng = Rng(341);
+        let mut admin = new_client(&mut rng);
+        let mut joiner = new_client(&mut rng);
+        let group = new_group(&mut admin, &mut rng);
+        let at_admin = admin.conversation_for(&AT_ADMIN.0).unwrap();
+        admin
+            .offer_group(group, at_admin, T0 * 1_000, &mut rng)
+            .unwrap();
+        let offer = admin.take_outgoing().unwrap();
+
+        // IMP-132: the batch of the record is in the store, and the write of
+        // the offer after it fails. The commit gives Ok, thus the ACK goes,
+        // and the fault waits for the caller.
+        let committed = stop_after(1, || {
+            joiner.commit_network(&[], &[(AT_JOINER, offer.app.clone())], T0 * 1_000, &mut rng)
+        });
+        assert_eq!(committed, Ok(()));
+        assert_eq!(joiner.take_commit_fault(), Some(Error::Storage));
+        assert_eq!(joiner.take_commit_fault(), None);
+    }
+
+    #[test]
+    fn a_group_message_whose_steps_did_not_end_takes_them_at_its_next_copy() {
+        let mut rng = Rng(342);
+        let mut client = new_client(&mut rng);
+        let mut other = new_client(&mut rng);
+        let group = new_group(&mut client, &mut rng);
+        let member = invite(
+            &mut client,
+            &mut other,
+            group,
+            (AT_ADMIN, AT_JOINER),
+            T0 + 1,
+            &mut rng,
+        );
+        say(&mut other, member, "meet at 8", T0 + 10, &mut rng);
+        let post = other.take_group_post().unwrap();
+        let held = client
+            .on_group_record(&QUEUES[0], 30, &post.record, (T0 + 11) * 1_000, &mut rng)
+            .unwrap()
+            .unwrap();
+        let sender = client.group_sender(&held).unwrap().unwrap();
+        assert!(!client.group_steps_wait(&held, sender).unwrap());
+
+        // A run that ended after the batch of the message left the sender
+        // row with its wait mark.
+        let waits = super::super::group_changes::group_sender_value(group, sender, false, true);
+        let open = client.open_mut().unwrap();
+        let mut batch = open.store.begin();
+        batch
+            .put(
+                super::super::group_changes::GROUP_SENDER,
+                held.0,
+                Some(group.0),
+                &waits,
+                &mut rng,
+            )
+            .unwrap();
+        batch.commit().unwrap();
+        while client.next_event().is_some() {}
+        assert!(client.group_steps_wait(&held, sender).unwrap());
+        assert!(!client
+            .group_steps_wait(&held, sender.wrapping_add(1))
+            .unwrap());
+
+        // The copy of the other replica runs the steps again, and the mark
+        // goes last. The view learns of the message, which it did not.
+        let again = client
+            .on_group_record(&QUEUES[1], 30, &post.record, (T0 + 12) * 1_000, &mut rng)
+            .unwrap();
+        assert_eq!(again, Some(held));
+        assert!(!client.group_steps_wait(&held, sender).unwrap());
+        assert_eq!(client.group_sender(&held).unwrap(), Some(sender));
+        assert!(
+            std::iter::from_fn(|| client.next_event()).any(|event| matches!(
+                event,
+                Event::Message { message, .. } if message == held
+            ))
+        );
+
+        // A copy after the steps ended drops at its `msg_id`.
+        assert!(client
+            .on_group_record(&QUEUES[1], 30, &post.record, (T0 + 13) * 1_000, &mut rng)
+            .unwrap()
+            .is_none());
+        assert_eq!(client.messages(group).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_group_takes_no_queue_that_another_group_holds() {
+        let mut rng = Rng(343);
+        let mut client = new_client(&mut rng);
+        let group = new_group(&mut client, &mut rng);
+
+        // A relay that names the queue of the first group for a second one
+        // gives no queue to the second group.
+        let second = client.create_group("Ridge", RELAYS, T0, &mut rng).unwrap();
+        let second_id = client.group_info(second).unwrap().group_id;
+        assert_eq!(
+            client.group_queue_made(&second_id, 0, RELAYS[0], QUEUES[0], &mut rng),
+            Err(Error::Malformed)
+        );
+        assert_eq!(
+            client.group_queue_made(&second_id, 0, RELAYS[0], [0xE5; 32], &mut rng),
+            Ok(false)
+        );
+        assert_eq!(
+            client.group_queue_made(&second_id, 1, RELAYS[1], [0xF6; 32], &mut rng),
+            Ok(true)
+        );
+        assert_eq!(
+            client.conversation_of_queue(&QUEUES[0]).unwrap(),
+            Some(group)
+        );
+        assert_eq!(
+            client.conversation_of_queue(&[0xF6; 32]).unwrap(),
+            Some(second)
+        );
+
+        // An admit that names the queues of a group of the joiner adopts
+        // no group.
+        let mut joiner = new_client(&mut rng);
+        let own = new_group(&mut joiner, &mut rng);
+        let (at_joiner, group_id, snapshot) = admit(
+            &mut client,
+            &mut joiner,
+            group,
+            (AT_ADMIN, AT_JOINER),
+            T0 + 1,
+            &mut rng,
+        );
+        assert_eq!(
+            joiner
+                .accept_group_admit(at_joiner, &group_id, &snapshot, T0 + 2, &mut rng)
+                .map(|_| ()),
+            Err(Error::Malformed)
+        );
+        assert_eq!(joiner.conversation_of_queue(&QUEUES[0]).unwrap(), Some(own));
+    }
+
+    #[test]
+    fn a_group_row_that_does_not_restore_stops_no_scan_of_the_queues() {
+        let mut rng = Rng(344);
+        let mut client = new_client(&mut rng);
+        let broken = new_group(&mut client, &mut rng);
+        let second = client.create_group("Ridge", RELAYS, T0, &mut rng).unwrap();
+        let second_id = client.group_info(second).unwrap().group_id;
+        for (replica, queue) in [[0xE5; 32], [0xF6; 32]].into_iter().enumerate() {
+            client
+                .group_queue_made(&second_id, replica as u8, RELAYS[replica], queue, &mut rng)
+                .unwrap();
+        }
+        while client.next_event().is_some() {}
+
+        let open = client.open_mut().unwrap();
+        let mut batch = open.store.begin();
+        batch
+            .put(GROUP, broken.0, None, &[0x7F; 40], &mut rng)
+            .unwrap();
+        batch.commit().unwrap();
+        client.groups.queue_hints.clear();
+
+        // The scan passes the group that does not restore, and the user
+        // learns of the fault one time.
+        assert_eq!(
+            client.conversation_of_queue(&[0xF6; 32]).unwrap(),
+            Some(second)
+        );
+        client.groups.queue_hints.clear();
+        assert_eq!(client.conversation_of_queue(&[0xAB; 32]).unwrap(), None);
+        let faults = std::iter::from_fn(|| client.next_event())
+            .filter(|event| *event == Event::IntegrityFault)
+            .count();
+        assert_eq!(faults, 1);
     }
 
     #[test]

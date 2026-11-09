@@ -495,6 +495,9 @@ pub struct Client<B: Backend, E: SecureElement> {
     /// The conversations that a removal erased, until the bridge of the
     /// run drops them (`DEV-340`).
     erased: Vec<ConversationId>,
+    /// The first fault of a step after a commit, which the commit did not
+    /// give (`IMP-132`). [`Client::take_commit_fault`] reads it.
+    commit_fault: Option<Error>,
 }
 
 /// One record for the commit path: of a contact, or of the sync channel.
@@ -507,6 +510,14 @@ struct Record {
     synced: bool,
     /// The `expires_in` of a sync copy, or zero (`DEV-244`).
     expires_in: u32,
+}
+
+/// Whether the sync inbox keeps its records after `error` (`DEV-013`). A
+/// fault of the storage, or a lock, ends with a later run. Another fault
+/// would come again at each start, and each start would apply the group
+/// edits and votes of the inbox again.
+fn keeps_sync_inbox(error: Error) -> bool {
+    matches!(error, Error::Storage | Error::Locked)
 }
 
 /// A secret of 32 bytes from a stored row. The bytes go straight into the
@@ -873,6 +884,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             rotation_guarded: BTreeSet::new(),
             roster_chain_sent: BTreeMap::new(),
             erased: Vec::new(),
+            commit_fault: None,
             files: FileQueues::default(),
             groups: groups::GroupQueues::default(),
             auto_lock: AutoLock::new(now),
@@ -908,6 +920,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             rotation_guarded: BTreeSet::new(),
             roster_chain_sent: BTreeMap::new(),
             erased: Vec::new(),
+            commit_fault: None,
             files: FileQueues::default(),
             groups: groups::GroupQueues::default(),
             auto_lock: AutoLock::new(now),
@@ -1234,7 +1247,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     }
 
     /// [`Client::commit_network`] over records that the caller borrows,
-    /// thus the runtime makes no copy of the plaintext for the call.
+    /// thus the runtime keeps no second list of the plaintext. The commit
+    /// copies each record that it takes one time, into a [`Record`].
+    ///
+    /// The call gives Ok when the batch is in the store, also when a step
+    /// after the commit failed (`IMP-132`). [`Client::take_commit_fault`]
+    /// gives such a fault.
     pub fn commit_received<R: CryptoRng + ?Sized>(
         &mut self,
         changes: &[StateChange],
@@ -1244,19 +1262,21 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     ) -> Result<(), Error> {
         let mut records = Vec::with_capacity(received.len());
         for (contact, app) in received {
+            let conversation = self.conversation_for(&contact.0)?;
+
             // A channel that a revocation ended takes nothing (Part 7 §7.7).
-            if self.is_ended_channel(self.conversation_for(&contact.0)?)? {
+            if self.is_ended_channel(conversation)? {
                 continue;
             }
 
             // DEV-257: a channel that waits for the notice of its revocation
             // sends that notice, and it takes no record.
-            if self.is_leaving_channel(self.conversation_for(&contact.0)?)? {
+            if self.is_leaving_channel(conversation)? {
                 continue;
             }
 
             records.push(Record {
-                conversation: self.conversation_for(&contact.0)?,
+                conversation,
                 app: app.to_vec(),
                 from_user: false,
                 synced: false,
@@ -1321,6 +1341,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             self.events.push_back(Event::RenewalAsk { conversation });
         }
 
+        // IMP-132: the batch is in the store, thus a fault below fails no
+        // commit. A failed commit sends no ACK, and the relay would give
+        // each record of the batch again.
+        let mut fault = None;
+
         // DEV-290: an invitation that left the node waits for no retirement.
         let ended: Vec<[u8; 32]> = changes
             .iter()
@@ -1330,7 +1355,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             })
             .collect();
         if !ended.is_empty() {
-            self.forget_device_invitations(&ended, rng)?;
+            fault = self.forget_device_invitations(&ended, rng).err();
         }
 
         // Part 3 §3.2.6: each record here opened under the ratchet of its
@@ -1340,11 +1365,44 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for record in &records {
             if !heard.contains(&record.conversation) {
                 heard.push(record.conversation);
-                self.peer_heard(record.conversation)?;
+                if let Err(error) = self.peer_heard(record.conversation) {
+                    fault.get_or_insert(error);
+                }
             }
         }
 
+        self.defer_fault(fault);
         Ok(())
+    }
+
+    /// Keeps the first fault of a step after a commit. The batch is in the
+    /// store, thus the commit gives no error for it (`IMP-132`). A fault of
+    /// the file also tells the user (`IDN-039`), one time while the event
+    /// waits.
+    fn defer_fault(&mut self, fault: Option<Error>) {
+        let Some(fault) = fault else {
+            return;
+        };
+
+        if fault == Error::Integrity {
+            self.note_integrity_fault();
+        }
+        self.commit_fault.get_or_insert(fault);
+    }
+
+    /// Tells the user of a fault of the file (`IDN-039`). An event that
+    /// waits already tells it, thus a fault that comes again makes no flood.
+    pub(super) fn note_integrity_fault(&mut self) {
+        if !self.events.contains(&Event::IntegrityFault) {
+            self.events.push_back(Event::IntegrityFault);
+        }
+    }
+
+    /// The first fault of a step after a commit since the last call, or
+    /// none. The commit of that step gave Ok, because its batch is in the
+    /// store (`IMP-132`).
+    pub fn take_commit_fault(&mut self) -> Option<Error> {
+        self.commit_fault.take()
     }
 
     /// Publishes each record copy that waits for the other devices of the
@@ -1415,6 +1473,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// [`Client::commit_records`], with the place of each record that a
     /// sync channel gave, in the order of `records`. A record with no place
     /// came on its own ratchet, or from a table that keeps none.
+    ///
+    /// An error says that the batch is not in the store. A fault of a step
+    /// after the commit goes to [`Client::take_commit_fault`].
     fn commit_records_at<R: CryptoRng + ?Sized>(
         &mut self,
         changes: &[&StateChange],
@@ -1423,6 +1484,23 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        let fault = self.commit_batch(changes, records, places, now_ms, rng)?;
+        self.defer_fault(fault);
+
+        Ok(())
+    }
+
+    /// The work of [`Client::commit_records_at`]. The outer error says that
+    /// the batch is not in the store. The inner value is the first fault of
+    /// a step after the commit.
+    fn commit_batch<R: CryptoRng + ?Sized>(
+        &mut self,
+        changes: &[&StateChange],
+        records: &[Record],
+        places: &[Option<SyncPlace>],
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<Option<Error>, Error> {
         let owns = self.owns_channels()?;
         let device_peers = self.device_peers()?;
         let mut sends_delivery = Vec::new();
@@ -1554,6 +1632,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // The messages that a deletion of this batch overwrote, whose copies
         // for the other devices of the set go after the commit (`DEV-099`).
         let mut erased: Vec<MsgRef> = Vec::new();
+
+        // The newest message that a read receipt of this batch named, for
+        // each conversation (`WIR-514`).
+        let mut read_up_to: BTreeMap<ConversationId, u64> = BTreeMap::new();
         for (index, record) in records.iter().enumerate() {
             let app = &record.app;
             let conversation = record.conversation;
@@ -1734,40 +1816,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     }
                 }
 
-                if reported == Delivery::Read {
+                if reported == Delivery::Read && !named.is_empty() {
                     // WIR-514: the peer saw each message up to the newest
-                    // one that the receipt names. A message that no relay
-                    // took is not one of them.
+                    // one that the receipt names. The scan for them runs
+                    // after the loop, one time for each conversation. A
+                    // contact sends many receipts, and each one would read
+                    // each message of the conversation again.
                     let mut up_to = 0;
                     for (_, plain) in &named {
                         up_to = up_to.max(info_of(plain)?.stored_at_ms);
                     }
-                    for (row, plain) in open.store.list(TableId::MESSAGE, Some(&conversation.0))? {
-                        let plain = Zeroizing::new(plain);
-
-                        // IMP-121: the plaintext names its owner. A receipt
-                        // of this contact moves no record of another
-                        // conversation. Such a row is a fault of the file
-                        // that the user learns of one time (`IDN-039`). It
-                        // ends no batch. A batch that failed for it would
-                        // acknowledge no record, and each receipt of this
-                        // contact would come again at each run.
-                        if conversation_of(&plain).ok() != Some(conversation) {
-                            if !owner_fault {
-                                owner_fault = true;
-                                events.push(Event::IntegrityFault);
-                            }
-                            continue;
-                        }
-
-                        let info = info_of(&plain)?;
-                        let is_sent =
-                            matches!(info.delivery, Delivery::Accepted | Delivery::Delivered);
-                        let is_named = named.iter().any(|(held, _)| *held == row);
-                        if info.outgoing && is_sent && info.stored_at_ms <= up_to && !is_named {
-                            named.push((row, plain));
-                        }
-                    }
+                    let newest = read_up_to.entry(conversation).or_insert(0);
+                    *newest = (*newest).max(up_to);
                 }
 
                 for (row, mut plain) in named {
@@ -2497,6 +2557,62 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
         }
 
+        // A clear of a conversation keeps the messages that this batch
+        // stored after it. A receipt below stores no message, thus its
+        // writes are not in that range.
+        let read_from = planned.len();
+        for (conversation, up_to) in read_up_to {
+            for (row, plain) in open.store.list(TableId::MESSAGE, Some(&conversation.0))? {
+                let plain = Zeroizing::new(plain);
+
+                // IMP-121: the plaintext names its owner. A receipt of this
+                // contact moves no record of another conversation. Such a
+                // row is a fault of the file that the user learns of one
+                // time (`IDN-039`). It ends no batch. A batch that failed
+                // for it would acknowledge no record, and each receipt of
+                // this contact would come again at each run.
+                if conversation_of(&plain).ok() != Some(conversation) {
+                    if !owner_fault {
+                        owner_fault = true;
+                        events.push(Event::IntegrityFault);
+                    }
+                    continue;
+                }
+
+                // A message that no relay took is not one that the peer saw.
+                let info = info_of(&plain)?;
+                let is_sent = matches!(info.delivery, Delivery::Accepted | Delivery::Delivered);
+                if !info.outgoing || !is_sent || info.stored_at_ms > up_to {
+                    continue;
+                }
+
+                // The receipt changes the state of the newest value of the
+                // row in this batch, thus it puts back no earlier text.
+                let mut plain = match planned_row(&planned, TableId::MESSAGE, row) {
+                    Some(Some(value)) => value,
+                    Some(None) => continue,
+                    None => plain,
+                };
+                if !info_of(&plain)?.delivery.is_below(Delivery::Read) {
+                    continue;
+                }
+
+                *plain.get_mut(1).ok_or(Error::Integrity)? = Delivery::Read as u8;
+                planned.push(Planned::Put(
+                    TableId::MESSAGE,
+                    row,
+                    Some(conversation.0),
+                    plain,
+                ));
+                planned.push(Planned::Delete(OUTBOX, row));
+                delivered.push((row, Delivery::Read));
+                events.push(Event::Delivery {
+                    message: MsgRef(row),
+                    delivery: Delivery::Read,
+                });
+            }
+        }
+
         // DEV-268, DEV-293: each record of a contact goes to each device of
         // the set, and its copy waits in the same commit as the record. Each
         // copy holds its place: the time of this commit, above each copy
@@ -2551,7 +2667,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // IMP-132: the batch is in the store, and the relay gives no record
         // of it again. Thus each step below runs to its end. A record that
         // one step does not take is one drop, and a fault of the store in
-        // one step stops no other step. The first such fault is the result.
+        // one step stops no other step. The first such fault is the inner
+        // value, and it fails no commit.
         let mut fault: Option<Error> = None;
         let mut settle = |result: Result<(), Error>| match result {
             Ok(()) | Err(Error::Malformed | Error::TooLong | Error::NotFound | Error::Busy) => {}
@@ -2583,7 +2700,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         for (conversation, app, bound, before) in clears {
             // A message that this batch stored after the request stays.
             let later: Vec<RowId> = planned
-                .get(before..)
+                .get(before..read_from)
                 .unwrap_or(&[])
                 .iter()
                 .filter_map(|write| match write {
@@ -2639,13 +2756,20 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     // DEV-013: the store holds each record, thus the inbox
                     // lets go. A record that did not store stays in it.
                     Ok(()) => settle(self.drop_sync_inbox(&inbox)),
+                    // A fault that the next run does not repair would keep
+                    // each record in the inbox for good, and the inbox would
+                    // grow at each batch.
+                    Err(error) if !keeps_sync_inbox(error) => {
+                        settle(Err(error));
+                        settle(self.drop_sync_inbox(&inbox));
+                    }
                     Err(error) => settle(Err(error)),
                 },
                 Err(error) => settle(Err(error)),
             }
         }
 
-        fault.map_or(Ok(()), Err)
+        Ok(fault)
     }
 
     /// Stores the records that a sync channel gave, in the conversations
@@ -2661,13 +2785,23 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // that came in the same batch.
         let (synced, own) = own_delete::split_own_deletions(synced);
 
-        // DEV-015: each synced message keeps its source and counter.
-        let origins: Vec<(ConversationId, Vec<u8>, umbra_core::devset::DeviceId, u64)> = synced
+        // DEV-015: each synced message keeps its source and counter. A
+        // record whose app does not parse keeps none.
+        type Origin = (
+            ConversationId,
+            Option<[u8; 16]>,
+            umbra_core::devset::DeviceId,
+            u64,
+        );
+        let origins: Vec<Origin> = synced
             .iter()
             .map(|record| {
+                let msg_id = AppMessage::parse(&record.app, Channel::Pairwise)
+                    .ok()
+                    .map(|parsed| parsed.msg_id);
                 (
                     record.conversation,
-                    record.app.clone(),
+                    msg_id,
                     record.origin.0,
                     record.origin.1,
                 )
@@ -2675,15 +2809,24 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .collect();
         let (groups, synced): (Vec<_>, Vec<_>) =
             synced.into_iter().partition(|synced| synced.is_group);
+
+        // A record that does not apply ends no batch. A fault of the store
+        // is the result after each other step, thus the inbox keeps the
+        // record for the next run.
+        let mut fault = None;
         for record in groups {
-            // A record that does not apply ends no batch.
-            let _ = self.apply_synced_group(
+            match self.apply_synced_group(
                 record.conversation,
                 &record.app,
                 record.expires_in,
                 now_ms,
                 rng,
-            );
+            ) {
+                Ok(()) | Err(Error::Malformed | Error::TooLong | Error::NotFound) => {}
+                Err(error) => {
+                    fault.get_or_insert(error);
+                }
+            }
         }
 
         let places: Vec<Option<SyncPlace>> =
@@ -2699,22 +2842,25 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             })
             .collect();
         if !records.is_empty() {
-            self.commit_records_at(&[], &records, &places, now_ms, rng)?;
+            if let Some(error) = self.commit_batch(&[], &records, &places, now_ms, rng)? {
+                fault.get_or_insert(error);
+            }
         }
 
-        for (conversation, app, source, counter) in origins {
-            let Ok(parsed) = AppMessage::parse(&app, Channel::Pairwise) else {
+        for (conversation, msg_id, source, counter) in origins {
+            let Some(msg_id) = msg_id else {
                 continue;
             };
 
             let open = self.open_ref()?;
-            let reference = msg_ref(&open.device_set_key, &parsed.msg_id);
+            let reference = msg_ref(&open.device_set_key, &msg_id);
             let natural = [conversation.0.as_slice(), &reference].concat();
             let row = open.store.row_id(TableId::MESSAGE, &natural);
             self.keep_sync_origin(row, &source, counter, rng)?;
         }
 
-        self.take_own_deletions(own, now_ms, rng)
+        self.take_own_deletions(own, now_ms, rng)?;
+        fault.map_or(Ok(()), Err)
     }
 
     /// Stores each record that an earlier run took from a sync channel and
@@ -2733,10 +2879,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
 
         match self.store_synced(synced, now_ms, rng) {
-            Ok(()) | Err(Error::Malformed | Error::TooLong | Error::NotFound) => {
-                self.drop_sync_inbox(&rows)
-            }
-            Err(error) => Err(error),
+            Err(error) if keeps_sync_inbox(error) => Err(error),
+            _ => self.drop_sync_inbox(&rows),
         }
     }
 
@@ -5795,6 +5939,106 @@ mod tests {
         assert!(client.sync_inbox().unwrap().1.is_empty());
         let messages = client.messages(conversation).unwrap();
         assert_eq!(messages.len(), 1);
+    }
+
+    /// Puts one record into the sync inbox, as an earlier run that did
+    /// not store it left it.
+    fn put_in_inbox(client: &mut TestClient, synced: &super::sync::Synced, rng: &mut Rng) {
+        use super::sync::{encode_synced, SYNC_INBOX};
+
+        let value = Zeroizing::new(encode_synced(synced));
+        let digest = umbra_crypto::hash::sha3_256(&[&value]);
+        let open = client.open_mut().unwrap();
+        let row = open.store.row_id(SYNC_INBOX, &digest);
+        let mut batch = open.store.begin();
+        batch.put(SYNC_INBOX, row, None, &value, rng).unwrap();
+        batch.commit().unwrap();
+    }
+
+    #[test]
+    fn a_fault_that_a_later_run_does_not_repair_drops_the_sync_inbox() {
+        use super::sync::Synced;
+
+        let (mut client, mut rng, _, conversation) = client_with_contact(342);
+        let synced = Synced {
+            conversation,
+            origin: ([7; 16], 1),
+            app: record(AppKind::Text, [0x31; 16], b"lost"),
+            from_user: false,
+            is_group: false,
+            expires_in: 0,
+        };
+        put_in_inbox(&mut client, &synced, &mut rng);
+
+        // The timer row of the conversation does not parse, thus each run
+        // would meet the same fault. The inbox lets the record go.
+        let open = client.open_mut().unwrap();
+        let row = open.store.row_id(super::timers::TIMERS, &conversation.0);
+        let mut batch = open.store.begin();
+        batch
+            .put(
+                super::timers::TIMERS,
+                row,
+                Some(conversation.0),
+                &[1],
+                &mut rng,
+            )
+            .unwrap();
+        batch.commit().unwrap();
+
+        client.replay_sync_inbox(T0, &mut rng).unwrap();
+        assert!(client.sync_inbox().unwrap().1.is_empty());
+        assert!(client.messages(conversation).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_synced_group_record_that_meets_a_fault_is_no_silent_drop() {
+        use super::sync::Synced;
+
+        let (mut client, mut rng, _, conversation) = client_with_contact(343);
+
+        // A group row that does not restore gives a fault of the file, and
+        // no drop of a record that does not apply.
+        let group = ConversationId([0x44; 16]);
+        let open = client.open_mut().unwrap();
+        let mut batch = open.store.begin();
+        batch
+            .put(super::groups::GROUP, group.0, None, &[1, 2, 3], &mut rng)
+            .unwrap();
+        batch.commit().unwrap();
+        let timer = Synced {
+            conversation: group,
+            origin: ([7; 16], 1),
+            app: record(AppKind::ConversationTimer, [0x32; 16], &[0, 0, 0, 60]),
+            from_user: true,
+            is_group: true,
+            expires_in: 0,
+        };
+        let text = Synced {
+            conversation,
+            origin: ([7; 16], 2),
+            app: record(AppKind::Text, [0x33; 16], b"kept"),
+            from_user: false,
+            is_group: false,
+            expires_in: 0,
+        };
+
+        // The record of a missing group is one drop. The fault is the
+        // result, and the other record of the batch still stores.
+        let missing = Synced {
+            conversation: ConversationId([0x45; 16]),
+            origin: ([7; 16], 3),
+            app: timer.app.clone(),
+            from_user: true,
+            is_group: true,
+            expires_in: 0,
+        };
+        assert_eq!(client.store_synced(vec![missing], T0, &mut rng), Ok(()));
+        assert_eq!(
+            client.store_synced(vec![timer, text], T0, &mut rng),
+            Err(Error::Integrity)
+        );
+        assert_eq!(client.messages(conversation).unwrap().len(), 1);
     }
 
     #[test]

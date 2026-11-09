@@ -52,8 +52,32 @@ fn pending_group_key(natural: &[u8], sender: u16) -> Vec<u8> {
     [natural, b"member", &sender.to_be_bytes()].concat()
 }
 
+/// The length of a sender row whose message waits for the steps after its
+/// store: the mention, the poll, the deadline, and a held edit.
+const SENDER_WAITS_LEN: usize = 20;
+
+/// The value of a sender row: the conversation, the index, and the marks.
+/// WIR-462: a record that opened under the secret of a key supply keeps
+/// that mark after the sender. A row that `waits` holds the mark of the
+/// recovery as a byte, and a last byte of 1.
+pub(super) fn group_sender_value(
+    conversation: ConversationId,
+    sender: u16,
+    is_recovered: bool,
+    waits: bool,
+) -> Vec<u8> {
+    let marks: &[u8] = match (waits, is_recovered) {
+        (true, recovered) => &[u8::from(recovered), 1],
+        (false, true) => &[1],
+        (false, false) => &[],
+    };
+
+    [conversation.0.as_slice(), &sender.to_be_bytes(), marks].concat()
+}
+
 impl<B: Backend, E: SecureElement> Client<B, E> {
-    /// Keeps the sender of a message of a group that arrived.
+    /// Keeps the sender of a message of a group that arrived. The row has
+    /// no wait mark, thus the steps after the store of the message ended.
     pub(super) fn put_group_sender<R: CryptoRng + ?Sized>(
         &mut self,
         conversation: ConversationId,
@@ -62,19 +86,24 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         is_recovered: bool,
         rng: &mut R,
     ) -> Result<(), Error> {
-        // WIR-462: a record that opened under the secret of a key supply
-        // keeps that mark after the sender.
-        let value = [
-            conversation.0.as_slice(),
-            &sender.to_be_bytes(),
-            if is_recovered { &[1u8][..] } else { &[] },
-        ]
-        .concat();
+        let value = group_sender_value(conversation, sender, is_recovered, false);
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         batch.put(GROUP_SENDER, message.0, Some(conversation.0), &value, rng)?;
 
         Ok(batch.commit()?)
+    }
+
+    /// Whether the message of `sender` waits for the steps after its store,
+    /// because a run ended between them. The row of another sender gives
+    /// false, thus a record that reuses the `msg_id` changes nothing.
+    pub(super) fn group_steps_wait(&self, message: &MsgRef, sender: u16) -> Result<bool, Error> {
+        let Some(value) = self.open_ref()?.store.get(GROUP_SENDER, &message.0)? else {
+            return Ok(false);
+        };
+
+        let value = Zeroizing::new(value);
+        Ok(value.len() == SENDER_WAITS_LEN && value.get(16..18) == Some(&sender.to_be_bytes()[..]))
     }
 
     /// The member index that sent a message of a group, or none for a
@@ -185,8 +214,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let is_deleted = held
             .as_ref()
             .is_some_and(|entry| entry.len() == PENDING_ROW_LEN);
-        let is_full = held.is_none()
-            && open.store.list(PENDING, Some(&conversation.0))?.len() >= REF_ORPHAN_MAX;
+        // The count opens no row, thus a full table costs no decryption of
+        // each entry at each change.
+        let is_full =
+            held.is_none() && open.store.count(PENDING, Some(&conversation.0))? >= REF_ORPHAN_MAX;
         if is_deleted || is_full {
             return Ok(());
         }
