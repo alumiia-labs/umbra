@@ -1,6 +1,11 @@
 package com.alumiialabs.umbra
 
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -8,8 +13,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 
 /** The notification settings of Part 7 §7.5.9, as the core numbers them. */
@@ -50,6 +57,7 @@ fun AlertRows(chat: Chat) {
     // come back, thus each return to the view reads it again.
     var interrupts by remember { mutableStateOf(Notifier.priorityInterrupts(context)) }
     LifecycleResumeEffect(Unit) {
+        Notifier.refreshPriorityChannel(context)
         interrupts = Notifier.priorityInterrupts(context)
         onPauseOrDispose {}
     }
@@ -74,13 +82,13 @@ fun AlertRows(chat: Chat) {
         priority = on
         Core.setPriority(context, chat.conversation, on)
         // NTF-155: only the user can let the channel through Do Not
-        // Disturb, thus the switch opens its settings.
-        if (on && !interrupts) openPriorityChannel(context)
+        // Disturb, thus the switch tells how before the settings open.
+        if (on && !interrupts) editing = AlertSheet.Interrupt
     }
     HorizontalDivider(color = Palette.Divider)
     if (marked && !interrupts) {
         EntryRow(
-            RowEntry("triangle-exclamation", stringResource(R.string.alerts_priority_allow)) { openPriorityChannel(context) },
+            RowEntry("triangle-exclamation", stringResource(R.string.alerts_priority_allow)) { editing = AlertSheet.Interrupt },
         )
         HorizontalDivider(color = Palette.Divider)
     }
@@ -123,16 +131,61 @@ fun AlertRows(chat: Chat) {
                 onDismiss = close,
             )
         }
+        AlertSheet.Interrupt -> InterruptSheet(onDismiss = close)
         null -> Unit
     }
 }
 
+/**
+ * The steps that let the priority channel through Do Not Disturb, before
+ * the settings of the system open (`NTF-155`). With no access, the user
+ * gives the access. With the access and no bypass, the user changed the
+ * channel, and only its own switch can let it through.
+ */
+@Composable
+private fun InterruptSheet(onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val hasAccess = Notifier.hasDndAccess(context)
+    val steps = if (hasAccess) {
+        listOf(R.string.alerts_dnd_channel_1, R.string.alerts_dnd_channel_2, R.string.alerts_dnd_channel_3)
+    } else {
+        listOf(R.string.alerts_dnd_access_1, R.string.alerts_dnd_access_2, R.string.alerts_dnd_access_3)
+    }
+
+    ActionSheet(
+        stringResource(R.string.alerts_dnd_title),
+        listOf(RowEntry("gear", stringResource(R.string.alerts_dnd_open)) { openPriorityChannel(context) }),
+        note = stringResource(if (hasAccess) R.string.alerts_dnd_channel_note else R.string.alerts_dnd_access_note),
+        top = {
+            Column(Modifier.padding(horizontal = PressInset)) {
+                steps.forEachIndexed { index, step ->
+                    Row(Modifier.padding(vertical = 4.dp)) {
+                        Text("${index + 1}.", Modifier.width(24.dp), color = Palette.TextSecondary)
+                        Text(stringResource(step), style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+            }
+        },
+        onDismiss = onDismiss,
+    )
+}
+
+/**
+ * NTF-155: with no access of Do Not Disturb, the list of that access opens.
+ * Some systems, as One UI, let the user allow no single channel. With the
+ * access, the settings of the channel open.
+ */
 private fun openPriorityChannel(context: android.content.Context) {
-    runCatching { context.startActivity(Notifier.priorityChannelSettings(context)) }
+    val settings = if (Notifier.hasDndAccess(context)) {
+        Notifier.priorityChannelSettings(context)
+    } else {
+        Notifier.dndAccessSettings()
+    }
+    runCatching { context.startActivity(settings) }
 }
 
 /** The sheets of the notification rows. */
-private enum class AlertSheet { Alerts, Sender, Text }
+private enum class AlertSheet { Alerts, Sender, Text, Interrupt }
 
 /** The sender and the text of an alert take these values (`DEV-345`). */
 const val PREVIEW_DEFAULT = 0

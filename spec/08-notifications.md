@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 8: Notifications and Mobile Delivery
 
 **Status:** Draft
-**Version:** 0.49.2
+**Version:** 0.50.3
 **Date:** 2026-11-09
 
 ---
@@ -965,16 +965,24 @@ settings. v1 does not ask for that permission.
   filter of the device, and it MUST NOT give a message alert the category of a
   call or of an alarm. The interface MAY open the settings of the system for
   the priority channel, where the user can let it through Do Not Disturb.
+  The interface MAY ask the user for the access of the app to the policy of
+  Do Not Disturb. With that access, the client MUST set the bypass of Do Not
+  Disturb on the priority channel alone, and it MUST NOT use the access for
+  another change of the policy.
 
 > *Cause.* Android lets a channel through Do Not Disturb only when the user
-> allows it in the settings of the system. The other path of the platform is a
-> priority conversation, and it needs a shortcut for each conversation. A
-> shortcut gives its name and its icon to the system, the launcher, and the
-> share sheet, and they keep them while the client is locked. That is a name of
-> a contact outside `K_store`, which `NTF-083` and `NTF-119` keep off the alerts.
-> A second channel gives the system one fixed name and no contact. The category
-> of a call or of an alarm passes each quiet mode with no choice of the user,
-> and the platform does not permit it for a message.
+> allows it in the settings of the system. Some systems, as One UI, let the user
+> allow a whole app and no single channel. A whole app would let each
+> conversation through. With the access of the policy, the platform takes the
+> bypass of the channel from the app. The access also lets an app change the
+> policy itself, thus the rule limits its use to the one channel. The other path
+> of the platform is a priority conversation, and it needs a shortcut for each
+> conversation. A shortcut gives its name and its icon to the system, the
+> launcher, and the share sheet, and they keep them while the client is locked.
+> That is a name of a contact outside `K_store`, which `NTF-083` and `NTF-119`
+> keep off the alerts. A second channel gives the system one fixed name and no
+> contact. The category of a call or of an alarm passes each quiet mode with no
+> choice of the user, and the platform does not permit it for a message.
 
 > Note: Doze ignores a partial wake lock and suspends the network access. Doze
 > also limits `setExactAndAllowWhileIdle` to one call in 9 minutes. App Standby

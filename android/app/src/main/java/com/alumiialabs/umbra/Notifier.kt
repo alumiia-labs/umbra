@@ -33,7 +33,11 @@ object Notifier {
     private const val CARRIER_CHANNEL = "connection"
     private const val OLD_CARRIER_CHANNEL = "carrier"
     private const val MESSAGE_CHANNEL = "messages"
-    private const val PRIORITY_CHANNEL = "priority"
+    // The platform takes the bypass of Do Not Disturb from the app only on a
+    // channel that the user never changed. An exception of a whole app in
+    // One UI changes each channel, thus the old one leaves.
+    private const val PRIORITY_CHANNEL = "priority-messages"
+    private const val OLD_PRIORITY_CHANNEL = "priority"
     private const val MESSAGE_TAG = "message"
 
     /**
@@ -68,29 +72,44 @@ object Notifier {
             NotificationManager.IMPORTANCE_HIGH,
         )
 
-        // NTF-155: the name and the description name no contact.
-        val priority = NotificationChannel(
-            PRIORITY_CHANNEL,
-            context.getString(R.string.notify_channel_priority),
-            NotificationManager.IMPORTANCE_HIGH,
-        ).apply {
-            description = context.getString(R.string.notify_channel_priority_about)
-        }
-
-        manager(context).createNotificationChannels(listOf(carrier, messages, priority))
+        manager(context).createNotificationChannels(listOf(carrier, messages, priorityChannel(context)))
         // A service whose notice still stands on the old channel keeps it,
         // and a later start deletes it.
         runCatching { manager(context).deleteNotificationChannel(OLD_CARRIER_CHANNEL) }
+        runCatching { manager(context).deleteNotificationChannel(OLD_PRIORITY_CHANNEL) }
+    }
+
+    // NTF-155: the name and the description name no contact. The platform
+    // takes the bypass from an app with the access of Do Not Disturb alone.
+    private fun priorityChannel(context: Context) = NotificationChannel(
+        PRIORITY_CHANNEL,
+        context.getString(R.string.notify_channel_priority),
+        NotificationManager.IMPORTANCE_HIGH,
+    ).apply {
+        description = context.getString(R.string.notify_channel_priority_about)
+        setBypassDnd(true)
     }
 
     private fun channelOf(priority: Boolean) = if (priority) PRIORITY_CHANNEL else MESSAGE_CHANNEL
 
-    /**
-     * Whether the user lets the priority channel through Do Not Disturb.
-     * Only the user can allow it, in the settings of the system (`NTF-155`).
-     */
+    /** Whether the user lets the priority channel through Do Not Disturb. */
     fun priorityInterrupts(context: Context): Boolean =
         manager(context).getNotificationChannel(PRIORITY_CHANNEL)?.canBypassDnd() == true
+
+    /** Whether the user gave the app the access of Do Not Disturb. */
+    fun hasDndAccess(context: Context): Boolean = manager(context).isNotificationPolicyAccessGranted
+
+    /**
+     * Writes the priority channel again after the user gave the access, thus
+     * the platform takes its bypass (`NTF-155`). The app uses the access for
+     * no other change.
+     */
+    fun refreshPriorityChannel(context: Context) {
+        if (hasDndAccess(context)) manager(context).createNotificationChannel(priorityChannel(context))
+    }
+
+    /** The list of the system where the user gives the access of Do Not Disturb. */
+    fun dndAccessSettings(): Intent = Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)
 
     /** The settings of the system for the priority channel. */
     fun priorityChannelSettings(context: Context): Intent =

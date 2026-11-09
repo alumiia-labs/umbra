@@ -20,7 +20,7 @@ if (file("google-services.json").exists()) {
 // The semantic version of the app, the same as the Rust workspace and the
 // specification. The version code grows with each one: major, minor, then
 // patch, three digits each.
-val appVersion = "0.49.2"
+val appVersion = "0.50.3"
 val (versionMajor, versionMinor, versionPatch) = appVersion.split(".").map(String::toInt)
 
 // The network file of the release, which scripts/release-network.sh writes
@@ -87,6 +87,12 @@ android {
             "umbra.devnetHost takes an IPv4 address"
         }
         buildConfigField("String", "DEVNET_HOST", "\"$devnetHost\"")
+
+        // -Pumbra.bench=true shows the audio bench of Stage 0 of the call
+        // proposal in the settings. Each other build holds no path to it,
+        // thus R8 removes it.
+        val audioBench = project.findProperty("umbra.bench") == "true"
+        buildConfigField("boolean", "AUDIO_BENCH", audioBench.toString())
     }
 
     signingConfigs {

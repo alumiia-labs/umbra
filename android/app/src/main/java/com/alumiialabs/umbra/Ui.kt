@@ -76,6 +76,7 @@ sealed interface Screen {
     data object Handle : Screen
     data object Profile : Screen
     data object Requests : Screen
+    data object AudioBench : Screen
 
     /** A conversation, at its end or at the message `target`. */
     data class Chat(val conversation: Conversation, val target: List<Byte>? = null) : Screen
@@ -210,6 +211,7 @@ private fun OpenApp() {
             Screen.Handle -> HandleScreen(pop)
             Screen.Profile -> ProfileScreen(pop, push)
             Screen.Requests -> RequestsScreen(pop)
+            Screen.AudioBench -> if (BuildConfig.AUDIO_BENCH) AudioBenchScreen(pop)
             is Screen.Search -> SearchScreen(top.scope, pop, push)
             else -> {
                 val chat = Core.chats.firstOrNull { it.conversation == top.contact }
@@ -894,6 +896,10 @@ private fun SettingsTab(push: (Screen) -> Unit) {
                 },
                 leads = false,
             )
+            if (BuildConfig.AUDIO_BENCH) {
+                SectionLabel(stringResource(R.string.bench_section))
+                EntryRow(RowEntry("microphone", stringResource(R.string.bench_title)) { push(Screen.AudioBench) })
+            }
             Spacer(Modifier.height(20.dp))
         }
 

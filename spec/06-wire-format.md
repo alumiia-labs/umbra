@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 6: Wire Format and Encoding
 
 **Status:** Draft
-**Version:** 0.49.2
+**Version:** 0.50.3
 **Date:** 2026-11-09
 
 ---

@@ -1,7 +1,7 @@
 # Voice calls over UMBRA relays
 
 **Status:** Proposal, revised after two independent reviews. This document is not normative. It adds no rule ID and it changes no part of `spec/`.
-**Date:** 2026-10-31
+**Date:** 2026-10-31, revised 2026-11-09 with the owner decisions D8 to D10 and the Stage 0 floor (§3.1)
 
 This document proposes a voice call for a later version. Part 2 §2.5 lists real-time media as an omission of v1. This document supplies the three items that §2.5 asks for: a latency target, a metadata cost, and a residual.
 
@@ -11,8 +11,8 @@ This document proposes a voice call for a later version. Part 2 §2.5 lists real
 
 **A reader must not assume these items.**
 
-- No measurement exists. No UMBRA call exists, and each figure here is cited, derived, or proposed.
-- The budget does not close on paper. The known sum is 473 ms to 580 ms against a limit of 400 ms (§3).
+- One measurement exists: the propagation floor of the launch relays (§3.1). No UMBRA call exists, and each other figure here is cited, derived, or proposed.
+- The budget does not close on paper. The known sum is 473 ms to 580 ms against a limit of 400 ms (§3). On the launch relays the measured floor closes it, but those relays do not meet §3.4.6 (§3.1).
 - A call does not hide its time. A contact who also watches a link can match the time of a call to that link (§8.1 row 11).
 - Profile A is a control and profile C is a candidate. Neither has a measured precedent in this form (§7).
 
@@ -31,7 +31,7 @@ This document proposes a voice call for a later version. Part 2 §2.5 lists real
 | # | Open item | Why it stays open |
 | --- | --- | --- |
 | O1 | Contact plus observer: the call time, a hostile splice relay, a forged frame, and a hostile pin that writes to a hostile contact | Each one survives the splice clock (§8.1 row 11) |
-| O2 | The latency budget | It needs Stage 0 |
+| O2 | The latency budget | The floor of the launch relays is measured (§3.1). Test bed T and the terms of the phone are open |
 | O3 | `THR-002` fails for a call when A1 holds both links | It is the core of the mode. The owner must accept it or end this work |
 | O4 | A shared pin gives one relay the two addresses | No detection exists that does not show the pin to the contact |
 | O5 | Pin oracle and guard discovery at each relay that a contact names | A party that cannot join shows that to the peer, and a hostile relay meets a hostile hop 2 (§8.1 row 21) |
@@ -51,7 +51,7 @@ A call uses constant-rate media circuits. Hop 1 and hop 2 add no delay. A memory
 
 1. Two active media circuits from a monitored set, each a lossless 3-hop circuit with the existing chained cipher.
 2. A constant cell clock at 40 ms, one `B0` cell for each tick on each path, with no silence suppression, no Poisson pacing, and no per-hop delay. **The owner reversed the "no relay clock" part at the splice relay after the first review.**
-3. Opus at 32 kbit/s with 40 ms frames, two copies on two paths, and the first copy plays. Spare cell space can carry the previous frame.
+3. Opus at 32 kbit/s with 40 ms frames, two copies on two paths, and the first copy plays. Spare cell space can carry the previous frame. **The owner raised the bitrate to 64 kbit/s on 2026-11-09 (D8).**
 4. A memory-only splice relay joins the two parties. The callee must be online.
 5. An end-to-end frame layer with its own counter and MAC above the circuit. Only a failed circuit ends, and the monitored set replaces it.
 6. No fall back to peer-to-peer media or to one TURN relay.
@@ -61,7 +61,7 @@ A call uses constant-rate media circuits. Hop 1 and hop 2 add no delay. A memory
 
 | Class | Meaning |
 | --- | --- |
-| Measured | A measurement on UMBRA hardware or on the UMBRA network. This document holds no such figure. |
+| Measured | A measurement on UMBRA hardware or on the UMBRA network. This document holds the Stage 0 floor of §3.1 and the cell rate of §9.1. |
 | Cited | A figure from a source of §13. |
 | Derived | A figure that this document calculates from the spec or from a cited figure. |
 | Proposed | A value that this document selects. No source supports the value. The plan of §11 tests it. |
@@ -78,6 +78,9 @@ A call uses constant-rate media circuits. Hop 1 and hop 2 add no delay. A memory
 | D5 | Item 4: one path that two parties share | The first review showed that a contact can write a pattern through a relay that it names. The second review showed that two parties cannot compute a shared draw. | Each path carries one direction, and its receiver picks the relay (§4.2). |
 | D6 | "No one relay learns both parties" | Each client pins two ingress relays, and both pins carry a call. Two clients share a pin with a probability of 100 % at 2 ingress relays, 38 % at 10, and 8 % at 50 (derived, equal weights). | The launch network cannot hold this property (O4). |
 | D7 | Launch network as a call network | The inventory holds one layer 2 relay and two ingress relays, thus no two paths are disjoint. All relays share one ASN, thus no chain meets invariants 1 and 3 of §3.4.6. | The launch network is a test floor only. §11 defines a test bed. |
+| D8 | Item 3: Opus at 32 kbit/s | The owner asked for at least 64 kbit/s on 2026-11-09. A 64 kbit/s frame of 40 ms is 320 B, and 327 B with its item header. `MediaPlain` holds 462 B (§6) | Profile A stays in `B0`. Profile C, with the previous frame in the same cell, needs `B1` (§6, §9) |
+| D9 | §3 options: a splice at layer 2 | The owner prefers a splice at layer 2 on 2026-11-09. On the launch relays it saves one relay leg in each half (§3.1) | It still needs the change of `NET-167` and of §3.4.2 (§10). §4 to §9 still describe a splice at layer 3 until a later revision |
+| D10 | Figure classes | The first measured figures: the propagation of the launch relays (§3.1) | O2 stays open for T and for the terms of the phone |
 
 Item 2 changes at the splice relay alone. Hop 1 and hop 2 keep no delay. Item 6 and item 7 stand. Item 5 stands with one addition: the frame nonce comes from an implicit cell index (§6).
 
@@ -141,8 +144,43 @@ If Stage 0 shows that the conformant chains do not close the budget, three optio
 | Option | Effect | Cost |
 | --- | --- | --- |
 | A latency bound on the draw, from directory data | Shorter links | A smaller set of chains, with no local measurement (`REL-014`). §3.12 names LAMP-style selection, and no rule holds it (§10) |
-| Splice at layer 2 | 4 links, 270 ms in the model | Breaks `NET-167` and the fixed hop count of §3.4.2. The splice relay then sits next to each ingress relay |
+| Splice at layer 2. **Preferred by the owner (D9)** | 4 links, 270 ms in the model | Breaks `NET-167` and the fixed hop count of §3.4.2. The splice relay then sits next to each ingress relay |
 | A higher target | No change to the network | The call exceeds the G.114 planning limit. Kill criterion 1 covers this case |
+
+### 3.1 Stage 0 floor on the launch relays (measured)
+
+**Method.** `umbra-latency` (`crates/umbra-relay/src/bin/latency.rs`) builds circuits as a client does, one hop at a time, and it times each `EXTEND` until its `EXTENDED`. A build cell to hop `n` passes hops 1 to `n − 1`, thus the difference of two steps is the round trip of one leg between two relays. A one-hop build took the same time as a TCP connect, within a few milliseconds, thus a relay adds no delay to a build cell. The probe needs no measurer certificate.
+
+**Setting.** 2026-11-09, one Windows host of the owner (its place and its access link are not recorded), 10 rounds of each build, the manifest of that day. The launch network is three servers of one operator and one ASN (AS16276):
+
+| Server | Layers |
+| --- | --- |
+| `east-1` | Ingress and layer 3 |
+| `west-1` | Ingress and layer 3 |
+| `east-2` | Layer 2 and layer 3 |
+
+**Round trips, p50 of 10.**
+
+| Leg | Round trip | Class |
+| --- | --- | --- |
+| Host to `east-1` or `east-2` | 31 ms to 35 ms | Measured |
+| Host to `west-1` | 68 ms | Measured |
+| `east-1` to `east-2` | 15 ms | Measured |
+| `west-1` to `east-2` | 60 ms, p90 80 ms | Measured |
+
+**One way of a call, both parties at the host.** One way is the round trip of one half, because each party builds its own half.
+
+| Ingress | Splice at layer 2, 4 links | Splice at layer 3, 6 links |
+| --- | --- | --- |
+| `east-1` | 50 ms | 49 ms to 110 ms |
+| `west-1` | 124 ms | 130 ms to 191 ms |
+
+**What the floor shows.**
+
+- On the launch relays even 6 links stay far below `L_net`. The worst path is 191 ms one way, before the access link of a phone, the frame time, and the jitter buffer.
+- The model of §3 is not wrong. It describes a network that meets §3.4.6, with three operators, three blocs, and three autonomous systems. The launch network meets none of these, thus its chains are short.
+- A splice at layer 2 saves one leg between relays in each half: 15 ms to 65 ms one way here. On a network that meets §3.4.6 one leg can take 80 ms to 150 ms, thus the saving grows there.
+- This is a floor and not a result of Stage 0. Both parties sit at one host, the sample is small, and no phone took part. Test bed T, the terms of `X`, and a mobile access link stay open.
 
 ## 4. The media circuit
 
@@ -361,7 +399,7 @@ CallOffer {                     // bucket B1, 1 466 B at P = 6
     offer_time  u64
     K_offer     [32]u8          // CSPRNG
     kem_ek      [1216]u8        // UMBRA-KEM public key, fresh for this call
-    codec       u8              // 0x01 Opus, 32 kbit/s, 40 ms
+    codec       u8              // 0x01 Opus, 64 kbit/s, 40 ms (D8)
     profile     u8              // sets P
     relays      [P][32]u8       // relay_id of each receive path of the caller
 }
@@ -483,9 +521,11 @@ One cell can hold two voice items and a control item. `cell_index` is the index 
 
 The relay gets a selective drop, and it reaches the receiving client alone. The per-cell channel to a far relay stays closed.
 
+**The bucket rule (proposed, D8).** A cell holds one voice item of up to 453 B in `B0`: 462 B less the 2 B of `ack` and the 7 B of the item header. That is about 90 kbit/s at 40 ms. Thus profile A at 64 kbit/s stays in `B0`. Profile C puts the previous frame in the same cell, which is 656 B at 64 kbit/s, and it needs `B1`. One call uses one bucket for each direction, and the bucket does not change during the call. A bucket shows on the link, thus a `B1` call looks unlike a `B0` call (§8.1 row 8).
+
 **The rules (proposed).**
 
-1. A frame is 160 B at 32 kbit/s and 40 ms (derived). Donar reports 172 B, and the 12 B difference is likely the RTP header (not verified).
+1. A frame is 320 B at 64 kbit/s and 40 ms (derived, D8). Opus runs in constrained VBR with a cap on the frame size, thus a peak frame never leaves its cell. Donar reports 172 B at 32 kbit/s, and the 12 B difference from 160 B is likely the RTP header (not verified).
 2. A sender seals each frame once for each path that carries it.
 3. A sender makes a cell at the tick, and not before. If a socket is full, it skips that tick and it seals nothing. An index thus never repeats, and no sealed cell waits for a stale time.
 4. A sender keeps at most one cell unsent in the socket.
@@ -649,10 +689,21 @@ The current relay serves cells on one task, thus one core for each relay is the 
 | The same with TCP/IP headers, 612 B a cell | | 245 kbit/s, 220 MB | Derived |
 | Against U4, 100 MB each month | 100 / 100.8 | One 30-minute call equals the monthly idle budget | Derived |
 | One hour each day for 30 days | | About 6 GB | Derived |
-| Overhead against the voice | 224 / 32 | 7 times | Derived |
+| Overhead against the voice | 224 / 64 | 3.5 times | Derived, D8 |
 | Radio draw | 9.1 mWh / 18 s | 1.82 W | Derived, unmeasured |
 | Radio cost in 1 h | 1.82 Wh / 15.4 Wh | 11.8 % of the U5 battery | Derived, lower bound |
 | CPU cost | 100 cells/s, 3 hop layers each, 100 AEAD operations, Opus, audio | Not verified | Stage 3 |
+
+**The cost of each bucket (derived).** One party sends 50 cells/s each way, and each cell carries 48 B of link framing (§9.1).
+
+| Bucket | Use | Wire rate each way | Bytes in 1 h each way |
+| --- | --- | --- | --- |
+| `B0` | Profile A at 64 kbit/s | 224 kbit/s | 100.8 MB |
+| `B1` | Profile C at 64 kbit/s, or voice above 90 kbit/s | 838 kbit/s | 377 MB |
+| `B2` | Video, not in the first version | 3.3 Mbit/s | 1.48 GB |
+| `B3` | Video, not in the first version | 13.1 Mbit/s | 5.9 GB |
+
+A `B1` call also loads each relay 3.74 times as much as a `B0` call (2 096 / 560), thus each ceiling of §9.1 falls by that factor.
 
 The radio row uses the tail model of Part 3 §3.12. Active transfer costs more than the tail, thus the row is a lower bound. Stage 3 needs a power monitor, as `NET-101` states for the other radio figures.
 
@@ -750,6 +801,14 @@ The numbers below are proposed, except where a source is named. **The call rate 
 ## 12. Open questions
 
 ### 12.1 Decisions
+
+The owner decided these items on 2026-11-09:
+
+- The voice bitrate is at least 64 kbit/s (D8). A call may use `B1` if a profile needs it, and the opt-in screen states the data cost and the load.
+- A splice at layer 2 is the preferred direction (D9). It still needs the review and the spec changes of §10.
+- No video in the first version. Video comes after voice passes Stage 3.
+
+These items stay open:
 
 1. Do calls ship on a provisional network (§8.2)?
 2. Is the exception to `THR-002` for A1 acceptable at all? Row 6 of §8.1 is the core of the mode.

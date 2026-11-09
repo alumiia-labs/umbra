@@ -109,6 +109,20 @@ To add a new icon:
 An icon that the Free set does not hold takes the Free file of a near icon
 under its name, as `shield-check` takes `shield-halved`.
 
+## Talk to the release app from a terminal
+
+`umbra-cli` is a text client of the release network, for tests by hand,
+as of the alerts of a priority conversation. It reads the assets of
+`app/src/release/assets`, and it keeps its store in `target/umbra-cli`.
+Its keystore is a key in a file, thus use it for tests alone.
+
+```sh
+cargo run -p umbra-ffi --features bindings --bin umbra-cli
+```
+
+Type `/invite`, and open the link on the phone. Each other line goes to
+the contact as a message. `/help` lists the commands.
+
 ## Run against a local network
 
 ```sh

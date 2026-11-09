@@ -326,6 +326,21 @@
     <string name="alerts_priority_interrupts">Alerts come through Do Not Disturb</string>
     <string name="alerts_priority_blocked">Do Not Disturb still blocks alerts</string>
     <string name="alerts_priority_allow">Allow through Do Not Disturb</string>
+    <string name="bench_section">Test</string>
+    <string name="bench_title">Audio bench</string>
+    <string name="bench_about">Measures the audio delay of this phone for the call design: Opus at 64 kbit/s, the frame cipher, and the time from the speaker to the microphone. Turn the volume up, put the phone on a table, and keep the speaker and the microphone free. The phone plays 10 short beeps. The test uses no network and stores nothing.</string>
+    <string name="bench_start">Start</string>
+    <string name="bench_copy">Copy the results</string>
+    <string name="alerts_dnd_title">Let priority alerts through Do Not Disturb</string>
+    <string name="alerts_dnd_open">Open settings</string>
+    <string name="alerts_dnd_access_1">Tap Open settings. The list of Do Not Disturb access opens.</string>
+    <string name="alerts_dnd_access_2">Find UMBRA in the list, and turn it on.</string>
+    <string name="alerts_dnd_access_3">Come back to UMBRA. The app then lets the Priority messages category through.</string>
+    <string name="alerts_dnd_access_note">UMBRA uses this access for the Priority messages category alone, and it never turns Do Not Disturb on or off. Do not add UMBRA to the app exceptions of Do Not Disturb. Then each conversation comes through, and not only the priority ones.</string>
+    <string name="alerts_dnd_channel_1">Tap Open settings. The settings of the Priority messages category open.</string>
+    <string name="alerts_dnd_channel_2">Turn on Override Do Not Disturb.</string>
+    <string name="alerts_dnd_channel_3">Come back to UMBRA.</string>
+    <string name="alerts_dnd_channel_note">The settings of this category were changed, thus UMBRA cannot let it through by itself. If the page shows no such switch, this phone lets no single category through Do Not Disturb.</string>
 
     <!-- Conversation view: the top bar and the list. -->
     <string name="chat_thread">Thread</string>
