@@ -84,15 +84,15 @@ impl<R: TryCryptoRng> TryRng for HardenedRng<'_, R> {
     type Error = <R as TryRng>::Error;
 
     fn try_next_u32(&mut self) -> Result<u32, <R as TryRng>::Error> {
-        let mut b = [0u8; 4];
-        self.try_fill_bytes(&mut b)?;
-        Ok(u32::from_le_bytes(b))
+        let mut b = Secret::<4>::zeroed();
+        self.try_fill_bytes(b.expose_mut())?;
+        Ok(u32::from_le_bytes(*b.expose()))
     }
 
     fn try_next_u64(&mut self) -> Result<u64, <R as TryRng>::Error> {
-        let mut b = [0u8; 8];
-        self.try_fill_bytes(&mut b)?;
-        Ok(u64::from_le_bytes(b))
+        let mut b = Secret::<8>::zeroed();
+        self.try_fill_bytes(b.expose_mut())?;
+        Ok(u64::from_le_bytes(*b.expose()))
     }
 
     fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), <R as TryRng>::Error> {

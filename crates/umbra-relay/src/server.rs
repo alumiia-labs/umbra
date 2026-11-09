@@ -521,6 +521,9 @@ fn take_input(
                 QueryAnswer::Elsewhere => {
                     let _ = reply.send(QueryAnswer::Elsewhere);
                 }
+                QueryAnswer::Fault => {
+                    let _ = reply.send(QueryAnswer::Fault);
+                }
             }
             Vec::new()
         }
@@ -529,6 +532,7 @@ fn take_input(
                 QueryAnswer::Given(answer) => QueryAnswer::Given(answer.encode().to_vec()),
                 QueryAnswer::Above => QueryAnswer::Above,
                 QueryAnswer::Elsewhere => QueryAnswer::Elsewhere,
+                QueryAnswer::Fault => QueryAnswer::Fault,
             };
             let _ = reply.send(answer);
             Vec::new()
@@ -1733,7 +1737,8 @@ async fn answer_receipt_query<S>(
 
 /// The answer of the node to a query: the body, 429 above the bound of
 /// `REL-187`, 403 with no body for a query that names another relay
-/// (`REL-180`, `REL-192`), or 503 when the node gave none.
+/// (`REL-180`, `REL-192`), or 503 at a fault of the store or when the node
+/// gave none.
 async fn respond_answer<S>(stream: &mut S, answer: Option<QueryAnswer<Vec<u8>>>)
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -1744,7 +1749,7 @@ where
         }
         Some(QueryAnswer::Above) => https::respond(stream, 429, "text/plain", &[]).await,
         Some(QueryAnswer::Elsewhere) => https::respond(stream, 403, "text/plain", &[]).await,
-        None => https::respond(stream, 503, "text/plain", &[]).await,
+        Some(QueryAnswer::Fault) | None => https::respond(stream, 503, "text/plain", &[]).await,
     };
 }
 

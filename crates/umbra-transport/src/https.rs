@@ -278,19 +278,30 @@ pub fn parse_request(inbound: &[u8], limit: usize) -> Result<Option<Request>, Er
 
     // The first pass checks the head with no allocation. A caller parses
     // again after each partial read, thus the owned headers wait for the body.
-    let mut length = 0usize;
+    let mut length = None;
     for line in lines.clone() {
         let Some((name, value)) = line.split_once(':') else {
             return Err(Error::Refused);
         };
+        // RFC 9112 §5.1: a server refuses whitespace before the colon. A
+        // proxy can read such a name as another header, which smuggles a
+        // body past the framing checks below.
+        if !is_token(name) {
+            return Err(Error::Refused);
+        }
         if name.eq_ignore_ascii_case("Transfer-Encoding") {
             return Err(Error::Refused);
         }
         if name.eq_ignore_ascii_case("Content-Length") {
-            length = value.trim().parse().map_err(|_| Error::Refused)?;
+            // RFC 9112 §6.3: two lengths make the framing unclear.
+            if length.is_some() {
+                return Err(Error::Refused);
+            }
+            length = Some(content_length(value)?);
         }
     }
 
+    let length = length.unwrap_or(0);
     if length > limit {
         return Err(Error::Refused);
     }
@@ -302,7 +313,7 @@ pub fn parse_request(inbound: &[u8], limit: usize) -> Result<Option<Request>, Er
 
     let headers = lines
         .filter_map(|line| line.split_once(':'))
-        .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_owned()))
+        .map(|(name, value)| (name.to_ascii_lowercase(), value.trim().to_owned()))
         .collect();
     Ok(Some(Request {
         method: method.to_owned(),
@@ -310,6 +321,25 @@ pub fn parse_request(inbound: &[u8], limit: usize) -> Result<Option<Request>, Er
         headers,
         body: body.to_vec(),
     }))
+}
+
+/// Whether `name` is a field name: one `token` of RFC 9110 §5.6.2, thus
+/// with no whitespace.
+fn is_token(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+}
+
+/// The value of a `Content-Length` field: decimal digits alone (RFC 9112
+/// §6.2), thus no sign.
+fn content_length(value: &str) -> Result<usize, Error> {
+    let digits = value.trim();
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(Error::Refused);
+    }
+    digits.parse().map_err(|_| Error::Refused)
 }
 
 /// Reads one request from a stream, up to `limit` bytes of body.
@@ -414,6 +444,37 @@ mod tests {
         let chunked = b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
         assert!(parse_request(chunked, 64).is_err());
         assert!(parse_request(&[b'a'; HEAD_MAX + 1], 64).is_err());
+    }
+
+    #[test]
+    fn a_header_name_with_whitespace_is_refused() {
+        for bad in [
+            &b"POST / HTTP/1.1\r\nTransfer-Encoding : chunked\r\n\r\n"[..],
+            b"POST / HTTP/1.1\r\nContent-Length : 5\r\n\r\nhello",
+            b"POST / HTTP/1.1\r\nContent-Length\t: 5\r\n\r\nhello",
+            b"POST / HTTP/1.1\r\nHost: x\r\n Content-Length: 5\r\n\r\nhello",
+            b"POST / HTTP/1.1\r\n: x\r\n\r\n",
+        ] {
+            assert_eq!(
+                parse_request(bad, 64),
+                Err(Error::Refused),
+                "{}",
+                String::from_utf8_lossy(bad)
+            );
+        }
+    }
+
+    #[test]
+    fn a_second_content_length_is_refused() {
+        let two = b"POST / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 0\r\n\r\nhello";
+        assert_eq!(parse_request(two, 64), Err(Error::Refused));
+        let same = b"POST / HTTP/1.1\r\nContent-Length: 5\r\ncontent-length: 5\r\n\r\nhello";
+        assert_eq!(parse_request(same, 64), Err(Error::Refused));
+
+        let signed = b"POST / HTTP/1.1\r\nContent-Length: +5\r\n\r\nhello";
+        assert_eq!(parse_request(signed, 64), Err(Error::Refused));
+        let one = b"POST / HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello";
+        assert_eq!(parse_request(one, 64).unwrap().unwrap().body, b"hello");
     }
 
     #[test]

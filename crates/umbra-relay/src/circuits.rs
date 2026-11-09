@@ -723,8 +723,8 @@ impl CircuitTable {
         self.held.is_empty()
     }
 
-    /// The static secret key of this relay.
-    pub fn static_secret(&self) -> &StaticSecret {
+    /// The static secret key of this relay. It stays inside this crate.
+    pub(crate) fn static_secret(&self) -> &StaticSecret {
         &self.static_secret
     }
 

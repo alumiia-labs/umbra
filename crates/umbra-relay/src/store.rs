@@ -19,15 +19,16 @@
 //! identifiers, public keys, and ciphertext. It holds no circuit, no
 //! session, and no subscription, because each one ends with its run.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt};
 
 use umbra_core::attach::store::HeldChunk;
 use umbra_crypto::zeroize::Zeroizing;
 use umbra_queue::relay::Stored;
 use umbra_wire::command::LINK_ID_LEN;
 
-/// One change of the stored state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One change of the stored state. Its `Debug` gives the length of a head
+/// alone, because a head holds the keys of its queue.
+#[derive(Clone, PartialEq, Eq)]
 pub enum StoreChange {
     /// A queue is new, or its head moved: its keys, its two sequence
     /// points, its notifier, or the time of its last activity.
@@ -138,6 +139,100 @@ pub enum StoreChange {
     },
 }
 
+impl fmt::Debug for StoreChange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StoreChange::Queue { recipient_id, head } => f
+                .debug_struct("Queue")
+                .field("recipient_id", recipient_id)
+                .field("head_len", &head.len())
+                .finish(),
+            StoreChange::Record {
+                recipient_id,
+                record,
+            } => f
+                .debug_struct("Record")
+                .field("recipient_id", recipient_id)
+                .field("record", record)
+                .finish(),
+            StoreChange::Acked { recipient_id, seq } => f
+                .debug_struct("Acked")
+                .field("recipient_id", recipient_id)
+                .field("seq", seq)
+                .finish(),
+            StoreChange::Expired { accepted_before } => f
+                .debug_struct("Expired")
+                .field("accepted_before", accepted_before)
+                .finish(),
+            StoreChange::QueueDeleted { recipient_id } => f
+                .debug_struct("QueueDeleted")
+                .field("recipient_id", recipient_id)
+                .finish(),
+            StoreChange::Invitation { link_id, held } => f
+                .debug_struct("Invitation")
+                .field("link_id", link_id)
+                .field("held", held)
+                .finish(),
+            StoreChange::InvitationDeleted { link_id } => f
+                .debug_struct("InvitationDeleted")
+                .field("link_id", link_id)
+                .finish(),
+            StoreChange::GroupQueue {
+                group_queue_id,
+                head,
+            } => f
+                .debug_struct("GroupQueue")
+                .field("group_queue_id", group_queue_id)
+                .field("head_len", &head.len())
+                .finish(),
+            StoreChange::GroupRecord {
+                group_queue_id,
+                record,
+            } => f
+                .debug_struct("GroupRecord")
+                .field("group_queue_id", group_queue_id)
+                .field("record", record)
+                .finish(),
+            StoreChange::GroupTrimmed {
+                group_queue_id,
+                through_seq,
+            } => f
+                .debug_struct("GroupTrimmed")
+                .field("group_queue_id", group_queue_id)
+                .field("through_seq", through_seq)
+                .finish(),
+            StoreChange::GroupQueueDeleted { group_queue_id } => f
+                .debug_struct("GroupQueueDeleted")
+                .field("group_queue_id", group_queue_id)
+                .finish(),
+            StoreChange::Chunk { chunk_id, held } => f
+                .debug_struct("Chunk")
+                .field("chunk_id", chunk_id)
+                .field("held", held)
+                .finish(),
+            StoreChange::ChunkRenewed {
+                chunk_id,
+                renewed_at,
+                erase_at,
+            } => f
+                .debug_struct("ChunkRenewed")
+                .field("chunk_id", chunk_id)
+                .field("renewed_at", renewed_at)
+                .field("erase_at", erase_at)
+                .finish(),
+            StoreChange::ChunkDeleted { chunk_id } => f
+                .debug_struct("ChunkDeleted")
+                .field("chunk_id", chunk_id)
+                .finish(),
+            StoreChange::Spent { epoch, nonce } => f
+                .debug_struct("Spent")
+                .field("epoch", epoch)
+                .field("nonce", nonce)
+                .finish(),
+        }
+    }
+}
+
 /// One invitation of Part 4 §4.3.1, as the store holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredInvitation {
@@ -149,13 +244,23 @@ pub struct StoredInvitation {
     pub at: u64,
 }
 
-/// A queue, as the store holds it.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// A queue, as the store holds it. Its `Debug` gives the length of the
+/// head alone.
+#[derive(Clone, PartialEq, Eq, Default)]
 pub struct StoredQueue {
     /// The head. A pairwise head holds the binding, thus a drop wipes it.
     pub head: Zeroizing<Vec<u8>>,
     /// The records that no `ACK` covers.
     pub records: Vec<Stored>,
+}
+
+impl fmt::Debug for StoredQueue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StoredQueue")
+            .field("head_len", &self.head.len())
+            .field("records", &self.records)
+            .finish()
+    }
 }
 
 /// The whole stored state, which a relay reads at its start.

@@ -122,7 +122,7 @@ pub fn solve<R: TryCryptoRng + ?Sized>(
     Err(Error::Rng)
 }
 
-/// Verifies a solution: the Equi-X check and the pass test (`ABU-073`).
+/// Verifies a solution: the pass test and the Equi-X check (`ABU-073`).
 pub fn verify(
     verifier_id: &[u8; 32],
     seed: &[u8; 32],
@@ -131,15 +131,16 @@ pub fn verify(
     solution: &[u8; SOLUTION_LEN],
 ) -> Result<(), Error> {
     let challenge = challenge_string(verifier_id, seed, nonce, effort);
+    // The pass test is one hash, and the Equi-X check builds a program. An
+    // anonymous client thus spends the CPU of the verifier only on a
+    // solution that passes.
+    if !passes(&challenge, solution, effort) {
+        return Err(Error::Auth);
+    }
+
     builder()
         .verify_bytes(&challenge, solution)
-        .map_err(|_| Error::Auth)?;
-
-    if passes(&challenge, solution, effort) {
-        Ok(())
-    } else {
-        Err(Error::Auth)
-    }
+        .map_err(|_| Error::Auth)
 }
 
 #[cfg(test)]
@@ -165,6 +166,39 @@ mod tests {
         // the puzzle, thus a solution at 2 does not verify at 3.
         assert!(passes(&[0; 96], &[0; 16], 0));
         assert!(verify(&verifier, &seed, &nonce, 3, &solution).is_err());
+    }
+
+    /// The pass test runs first, and the result stays as before: a valid
+    /// Equi-X solution under the effort fails, and a solution that passes
+    /// but is no Equi-X solution fails.
+    #[test]
+    fn each_of_the_two_tests_refuses_a_solution() {
+        let verifier = [5u8; 32];
+        let seed = [6u8; 32];
+        let effort = u32::MAX;
+
+        let mut memory = SolverMemory::new();
+        let found = (0u8..=255).find_map(|n| {
+            let nonce = [n; NONCE_LEN];
+            let challenge = challenge_string(&verifier, &seed, &nonce, effort);
+            let instance = builder().build(&challenge).unwrap();
+            let solutions = instance.solve_with_memory(&mut memory);
+            let solution = solutions.iter().map(Solution::to_bytes).next()?;
+            Some((nonce, challenge, solution))
+        });
+        let (nonce, challenge, solution) = found.unwrap();
+        assert!(builder().verify_bytes(&challenge, &solution).is_ok());
+        assert!(!passes(&challenge, &solution, effort));
+        assert_eq!(
+            verify(&verifier, &seed, &nonce, effort, &solution),
+            Err(Error::Auth)
+        );
+
+        // Effort 0 passes each solution, thus the Equi-X check refuses it.
+        let bad = [0xa5u8; SOLUTION_LEN];
+        let challenge = challenge_string(&verifier, &seed, &nonce, 0);
+        assert!(passes(&challenge, &bad, 0));
+        assert_eq!(verify(&verifier, &seed, &nonce, 0, &bad), Err(Error::Auth));
     }
 
     fn h16(s: &str) -> [u8; 16] {

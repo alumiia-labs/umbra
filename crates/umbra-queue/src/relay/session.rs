@@ -31,7 +31,9 @@ fn seen_key(corr_id: &[u8; 16]) -> u64 {
 /// One session.
 pub struct Session {
     id: [u8; 8],
-    secret: Secret<32>,
+    /// The secret that authenticates a resume. A circuit does not resume,
+    /// thus its session holds none.
+    secret: Option<Secret<32>>,
     resume_count: u32,
     relay_session_sk: StaticSecret,
     seen: BTreeSet<u64>,
@@ -54,7 +56,7 @@ impl Session {
                 session_secret,
             } => Ok(Session {
                 id: session_id,
-                secret: session_secret,
+                secret: Some(session_secret),
                 resume_count: 0,
                 relay_session_sk,
                 seen: BTreeSet::new(),
@@ -72,8 +74,8 @@ impl Session {
     pub fn for_circuit(circ_id: &[u8; 16], relay_session_sk: StaticSecret) -> Self {
         Session {
             id: umbra_crypto::bytes::part::<0, 8, 16>(circ_id),
-            secret: Secret::new([0; 32]),
-            resume_count: u32::MAX,
+            secret: None,
+            resume_count: 0,
             relay_session_sk,
             seen: BTreeSet::new(),
             queues: Vec::new(),
@@ -93,8 +95,9 @@ impl Session {
 
     /// Binds a resume to this session (`WIR-237` to `WIR-241`).
     pub fn resume(&mut self, control: &SessionControl) -> Result<(), Reject> {
+        let secret = self.secret.as_ref().ok_or(Reject::Rejected)?;
         let (count, _, _) = control
-            .verify_resume(&self.secret, &self.id, self.resume_count)
+            .verify_resume(secret, &self.id, self.resume_count)
             .map_err(|_| Reject::Rejected)?;
 
         self.resume_count = count;
@@ -239,6 +242,19 @@ mod tests {
         session.resume(&resume).unwrap();
         assert_eq!(session.resume(&resume), Err(Reject::Rejected));
         assert!(Session::open(resume, StaticSecret::from([1u8; 32])).is_err());
+    }
+
+    #[test]
+    fn the_session_of_a_circuit_refuses_each_resume() {
+        let circ_id = [2u8; 16];
+        let mut session = Session::for_circuit(&circ_id, StaticSecret::from([1u8; 32]));
+        let id = session.id();
+
+        // A zero secret was the stand-in of the resume secret before.
+        for secret in [[0u8; 32], [3u8; 32]] {
+            let resume = SessionControl::resume(&Secret::new(secret), id, 1, 0, 0);
+            assert_eq!(session.resume(&resume), Err(Reject::Rejected));
+        }
     }
 
     #[test]

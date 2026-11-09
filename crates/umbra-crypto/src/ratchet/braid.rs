@@ -108,6 +108,24 @@ fn is_target_of(role: Role, own_epoch: u32, peer_epoch: u32) -> bool {
     target_of(role.mirror(), peer_epoch) == Some(own_epoch)
 }
 
+/// The ML-KEM-768 key of the seeds `d || z`. The call wipes its copy of
+/// the seeds, because the `Seed` type does not wipe itself.
+fn decapsulation_key(seed: &Secret<64>) -> DecapsulationKey<MlKem768> {
+    let mut dz = Seed::from(*seed.expose());
+    let dk = DecapsulationKey::<MlKem768>::from_seed(dz);
+    dz.zeroize();
+    dk
+}
+
+/// The seeds `d || z` of `dk`. The call wipes its copy of the seeds, because
+/// the `Seed` type does not wipe itself.
+fn seed_of(dk: &DecapsulationKey<MlKem768>) -> Result<Secret<64>, Error> {
+    let mut dz = dk.to_seed().ok_or(Error::Key)?;
+    let seed = Secret::new(dz.into());
+    dz.zeroize();
+    Ok(seed)
+}
+
 impl Role {
     fn mirror(self) -> Self {
         match self {
@@ -126,9 +144,7 @@ impl Braid {
     ) -> Result<(), Error> {
         let mut seed = Secret::<64>::zeroed();
         rng.fill_bytes(seed.expose_mut());
-        let mut dz = Seed::from(*seed.expose());
-        let dk = DecapsulationKey::<MlKem768>::from_seed(dz);
-        dz.zeroize();
+        let dk = decapsulation_key(&seed);
         let ek: [u8; 1184] = dk.encapsulation_key().to_bytes().into();
 
         let mut ct = [0u8; 1088];
@@ -417,10 +433,10 @@ impl Braid {
         writer.u32(self.epoch);
         // A key of this code comes from a seed, thus the seed restores it.
         let seed = match &self.own_dk {
-            Some(dk) => Some(dk.to_seed().ok_or(Error::Key)?),
+            Some(dk) => Some(seed_of(dk)?),
             None => None,
         };
-        writer.option(seed.as_ref(), |w, seed| w.bytes(seed));
+        writer.option(seed.as_ref(), |w, seed| w.bytes(seed.expose()));
         writer.option(self.material.as_ref(), |w, material| w.bytes(&material.0));
         writer.u32(u32::try_from(self.next_chunk).map_err(|_| Error::Length)?);
         writer.u32(self.records_in_epoch);
@@ -453,8 +469,8 @@ impl Braid {
         let width = Width::from_byte(reader.u8()?)?;
         let epoch = reader.u32()?;
         let own_dk = reader
-            .option(|r| r.array::<64>())?
-            .map(|seed| DecapsulationKey::<MlKem768>::from_seed(Seed::from(seed)));
+            .option(|r| Ok(Secret::<64>::new(r.array()?)))?
+            .map(|seed| decapsulation_key(&seed));
         let material = reader.option(|r| Ok(Material(r.array()?)))?;
         let next_chunk = usize::try_from(reader.u32()?).map_err(|_| Error::Length)?;
         let records_in_epoch = reader.u32()?;

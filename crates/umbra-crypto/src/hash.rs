@@ -3,11 +3,17 @@
 //! HMAC-SHA3-256 instance under a 32-byte key.
 
 use hmac::{
-    digest::{Key, KeyInit},
+    digest::{common::KeySizeUser, typenum::Unsigned, Key, KeyInit},
     Hmac,
 };
 use sha3::{Digest, Sha3_256};
 use zeroize::Zeroize;
+
+/// The key block of HMAC-SHA3-256, which is the block of SHA3-256.
+const KEY_BLOCK_LEN: usize = <<Hmac<Sha3_256> as KeySizeUser>::KeySize as Unsigned>::USIZE;
+
+// A block shorter than the key would cut the key, and no call could tell.
+const _: () = assert!(KEY_BLOCK_LEN >= 32);
 
 /// `SHA3-256(parts[0] || parts[1] || ...)`.
 pub fn sha3_256(parts: &[&[u8]]) -> [u8; 32] {
@@ -25,8 +31,9 @@ pub fn sha3_256(parts: &[&[u8]]) -> [u8; 32] {
 /// call would need a fallback key, and a wrong fallback would run silently.
 pub fn hmac_sha3_256(key: &[u8; 32]) -> Hmac<Sha3_256> {
     let mut block = Key::<Hmac<Sha3_256>>::default();
-    if let Some(head) = block.get_mut(..key.len()) {
-        head.copy_from_slice(key);
+    // The assert on `KEY_BLOCK_LEN` makes the block hold each key byte.
+    for (slot, byte) in block.iter_mut().zip(key) {
+        *slot = *byte;
     }
 
     let mac = <Hmac<Sha3_256> as KeyInit>::new(&block);

@@ -259,15 +259,20 @@ impl ChunkService {
                 let targets = CrepPayload::parse(command.payload).map_err(|_| Reject::Rejected)?;
                 let proof = self.held_proof(command)?;
 
+                // A chunk at `COPIES_MAX` sends no further copy, thus the
+                // check comes before the copy of its bytes.
+                let sent = self.copies.get(&chunk_id).copied().unwrap_or(0);
+                let room = usize::from(COPIES_MAX.saturating_sub(sent));
+                if room == 0 || targets.targets.is_empty() {
+                    return Ok(reply(ChunkCmd::Cprf, &proof));
+                }
+
                 // A copy for a replica is no fetch, thus it takes nothing from
                 // the egress budget of §12.11.
                 let chunk: Arc<[u8]> = self.store.bytes(&chunk_id).ok_or(Reject::Rejected)?.into();
 
                 let sent = self.copies.entry(chunk_id).or_insert(0);
-                for target in targets.targets {
-                    if *sent >= COPIES_MAX {
-                        break;
-                    }
+                for target in targets.targets.into_iter().take(room) {
                     *sent = sent.saturating_add(1);
                     self.pushes.push(Push {
                         chunk_id,

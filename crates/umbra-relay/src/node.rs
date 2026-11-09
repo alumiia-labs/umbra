@@ -43,7 +43,7 @@ use umbra_queue::{relay::session::Session, Reject};
 use umbra_transport::link::{ClientLink, RelayLink, ResumeFault};
 use umbra_wire::{
     address::QueueAddress,
-    bucket::Bucket,
+    bucket::{Bucket, COMMAND_HEADER},
     capsule::{self, CapsuleType, Link as CapsuleLink},
     cell::CellCommand,
     command::{Cmd, Command},
@@ -84,6 +84,9 @@ pub enum QueryAnswer<T> {
     /// The query names another relay. It gets no body, and it counts
     /// toward no bound (`REL-180`, `REL-192`).
     Elsewhere,
+    /// The store failed. The relay gives no answer, because "no receipt"
+    /// would say that the cell did not pass (`REL-179`).
+    Fault,
 }
 
 impl<T> QueryAnswer<T> {
@@ -91,7 +94,7 @@ impl<T> QueryAnswer<T> {
     pub fn given(self) -> Option<T> {
         match self {
             QueryAnswer::Given(answer) => Some(answer),
-            QueryAnswer::Above | QueryAnswer::Elsewhere => None,
+            QueryAnswer::Above | QueryAnswer::Elsewhere | QueryAnswer::Fault => None,
         }
     }
 }
@@ -196,12 +199,16 @@ const CRPUT: u8 = 0x77;
 /// The capsule of one copy. The header carries no authenticator, because
 /// the token of the payload authorizes a copy (`ATT-107`, `ATT-108`).
 fn push_output(push: &Push) -> Option<Output> {
-    let mut payload = vec![0u8; CRPUT_LEN];
+    // The payload goes in place behind the two headers, thus the chunk has
+    // one copy in the capsule and no other.
+    let value_len = COMMAND_HEADER + CRPUT_LEN;
+    let mut capsule = vec![0u8; capsule::HEADER_LEN + value_len];
+    let (heads, payload) = capsule.split_at_mut_checked(capsule::HEADER_LEN + COMMAND_HEADER)?;
     CrputPayload {
         storage_token: push.target.storage_token,
         chunk: &push.chunk,
     }
-    .encode(&mut payload)
+    .encode(payload)
     .ok()?;
 
     let command = Command {
@@ -211,15 +218,12 @@ fn push_output(push: &Push) -> Option<Output> {
         corr_id: [0; 16],
         queue_id: push.chunk_id,
         auth: [0; 32],
-        payload: &payload,
+        payload,
     };
 
-    let mut encoded = vec![0u8; command.len()];
-    command.encode(&mut encoded).ok()?;
-
-    let mut capsule = vec![0u8; capsule::HEADER_LEN + encoded.len()];
-    let used = capsule::encode(CapsuleType::Replica, &encoded, &mut capsule).ok()?;
-    capsule.truncate(used);
+    let (capsule_head, command_head) = heads.split_at_mut_checked(capsule::HEADER_LEN)?;
+    command.encode_header(command_head).ok()?;
+    capsule::encode_header(CapsuleType::Replica, value_len, capsule_head).ok()?;
 
     Some(Output::Push {
         relay_id: push.target.relay_id,
@@ -1815,7 +1819,10 @@ impl RelayNode {
             .admit_query(query.authority_index, query.epoch, false, now);
 
         match asked {
-            Asked::Fresh => QueryAnswer::Given(self.receipts.answer(query)),
+            Asked::Fresh => match self.receipts.answer(query) {
+                Ok(answer) => QueryAnswer::Given(answer),
+                Err(_) => QueryAnswer::Fault,
+            },
             // REL-179: no receipt of an epoch outside the retention, and
             // such a query costs no search and counts toward no bound.
             Asked::Outside => QueryAnswer::Given(receipt::ReceiptAnswer::none()),
@@ -3535,6 +3542,28 @@ mod tests {
         let copy = CrputPayload::parse(command.payload).unwrap();
         assert_eq!(copy.storage_token, [0xB2; 32]);
         assert_eq!(copy.chunk, &push.chunk[..]);
+
+        // The encoding in place gives the bytes of the three encodings, one
+        // after the other.
+        let mut payload = vec![0u8; CRPUT_LEN];
+        CrputPayload {
+            storage_token: [0xB2; 32],
+            chunk: &push.chunk,
+        }
+        .encode(&mut payload)
+        .unwrap();
+        let command = Command {
+            cmd: Cmd::Attachment(CRPUT),
+            corr_id: [0; 16],
+            queue_id: [0xC7; 32],
+            auth: [0; 32],
+            payload: &payload,
+        };
+        let mut encoded = vec![0u8; command.len()];
+        command.encode(&mut encoded).unwrap();
+        let mut whole = vec![0u8; capsule::HEADER_LEN + encoded.len()];
+        let used = capsule::encode(CapsuleType::Replica, &encoded, &mut whole).unwrap();
+        assert_eq!(capsule, whole[..used]);
 
         // A relay that holds no registration for the chunk drops the copy.
         // It gives no answer, and it keeps the link (`ATT-107`).

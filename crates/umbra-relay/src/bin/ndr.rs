@@ -60,6 +60,52 @@ fn gateway_pair(seed: &[u8; 32]) -> KeyPair {
     seeded_pair(umbra_crypto::labels::NDR, seed)
 }
 
+/// The settings of a run, with the gateway key in place of its seed.
+struct Settings {
+    key_id: u8,
+    pair: KeyPair,
+    listen: Option<String>,
+    cert: Option<String>,
+    key: Option<String>,
+    store: Option<String>,
+    trust: Option<String>,
+    fcm_credentials: Option<String>,
+    fcm_api: Option<String>,
+}
+
+/// Reads the settings file. The text holds the seed of the gateway key in
+/// hex, thus it lives in this call alone, and `Zeroizing` wipes it.
+fn read_settings(path: &str) -> Result<Settings, &'static str> {
+    let text = std::fs::read_to_string(path)
+        .map(Zeroizing::new)
+        .map_err(|_| "the settings file does not read")?;
+
+    let values: BTreeMap<&str, &str> = text
+        .lines()
+        .filter_map(|line| line.trim().split_once('='))
+        .collect();
+
+    let (Some(seed), Some(key_id)) = (
+        values.get("kem_seed").and_then(|seed| hex32(seed)),
+        values.get("key_id").and_then(|id| id.parse::<u8>().ok()),
+    ) else {
+        return Err("the settings file needs kem_seed and key_id");
+    };
+
+    let owned = |name: &str| values.get(name).map(|value| (*value).to_owned());
+    Ok(Settings {
+        key_id,
+        pair: gateway_pair(&seed),
+        listen: owned("listen"),
+        cert: owned("cert"),
+        key: owned("key"),
+        store: owned("store"),
+        trust: owned("trust"),
+        fcm_credentials: owned("fcm_credentials"),
+        fcm_api: owned("fcm_api"),
+    })
+}
+
 fn main() -> ExitCode {
     let Ok(runtime) = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -82,26 +128,16 @@ async fn run() -> ExitCode {
         }
     };
 
-    // The text holds the seed of the gateway key, thus `Zeroizing` wipes it.
-    let Ok(text) = std::fs::read_to_string(path).map(Zeroizing::new) else {
-        eprintln!("the settings file does not read");
-        return ExitCode::from(2);
+    let settings = match read_settings(path) {
+        Ok(settings) => settings,
+        Err(cause) => {
+            eprintln!("{cause}");
+            return ExitCode::from(2);
+        }
     };
 
-    let values: BTreeMap<&str, &str> = text
-        .lines()
-        .filter_map(|line| line.trim().split_once('='))
-        .collect();
-
-    let (Some(seed), Some(key_id)) = (
-        values.get("kem_seed").and_then(|seed| hex32(seed)),
-        values.get("key_id").and_then(|id| id.parse::<u8>().ok()),
-    ) else {
-        eprintln!("the settings file needs kem_seed and key_id");
-        return ExitCode::from(2);
-    };
-
-    let pair = gateway_pair(&seed);
+    let key_id = settings.key_id;
+    let pair = settings.pair;
     if prints_config {
         let config = ohttp::encode_key_config(key_id, pair.public());
         println!(
@@ -115,10 +151,10 @@ async fn run() -> ExitCode {
     }
 
     let (Some(listen), Some(cert), Some(key), Some(store)) = (
-        values.get("listen"),
-        values.get("cert"),
-        values.get("key"),
-        values.get("store"),
+        settings.listen.as_deref(),
+        settings.cert.as_deref(),
+        settings.key.as_deref(),
+        settings.store.as_deref(),
     ) else {
         eprintln!("the settings file needs listen, cert, key, and store");
         return ExitCode::from(2);
@@ -129,7 +165,7 @@ async fn run() -> ExitCode {
         return ExitCode::from(2);
     };
 
-    let provider_tls = match values.get("trust") {
+    let provider_tls = match settings.trust.as_deref() {
         Some(path) => native::tls_config_with_root_file(path),
         None => native::tls_config(),
     };
@@ -154,14 +190,14 @@ async fn run() -> ExitCode {
     // No line of this program names a handle, a token, or an address.
     println!("ndr listen={listen} key_id={key_id}");
 
-    let fcm = match values.get("fcm_credentials") {
+    let fcm = match settings.fcm_credentials.as_deref() {
         Some(path) => {
             // The file holds the key of the account.
             let account = std::fs::read_to_string(path)
                 .ok()
                 .map(Zeroizing::new)
                 .and_then(|json| ServiceAccount::parse(&json));
-            let api = values.get("fcm_api").copied().unwrap_or(FCM_API);
+            let api = settings.fcm_api.as_deref().unwrap_or(FCM_API);
             match account.and_then(|account| Fcm::new(account, api, provider_tls.clone())) {
                 Some(fcm) => Some(fcm),
                 None => {

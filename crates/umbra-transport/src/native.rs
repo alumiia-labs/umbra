@@ -905,7 +905,7 @@ impl QuicLink {
     /// caller parses the capsule again.
     pub async fn recv(&mut self) -> Result<Vec<u8>, NativeError> {
         loop {
-            if let Some(capsule) = take_capsule(&mut self.inbound) {
+            if let Some(capsule) = take_capsule(&mut self.inbound)? {
                 return Ok(capsule);
             }
 
@@ -927,10 +927,18 @@ impl QuicLink {
 }
 
 /// Takes the first capsule from the front of a QUIC stream, header
-/// included, or `None` while the stream holds no whole capsule.
-fn take_capsule(inbound: &mut Vec<u8>) -> Option<Vec<u8>> {
-    let (_, _, used) = umbra_wire::capsule::parse(inbound).ok()?;
-    Some(inbound.drain(..used).collect())
+/// included, or `None` while the stream holds no whole capsule. A bad
+/// header is a fault at once: no later byte makes it whole.
+fn take_capsule(inbound: &mut Vec<u8>) -> Result<Option<Vec<u8>>, Error> {
+    let Some((_, used)) = umbra_wire::capsule::header(inbound).map_err(|_| Error::Malformed)?
+    else {
+        return Ok(None);
+    };
+    if inbound.len() < used {
+        return Ok(None);
+    }
+
+    Ok(Some(inbound.drain(..used).collect()))
 }
 
 /// One connected transport.
@@ -1423,17 +1431,42 @@ mod tests {
         inbound.extend_from_slice(capsule.get(..n - 1).unwrap());
 
         // The caller parses what it takes, thus the header stays.
-        let taken = take_capsule(&mut inbound).unwrap();
+        let taken = take_capsule(&mut inbound).unwrap().unwrap();
         assert_eq!(taken, capsule);
         assert!(umbra_wire::capsule::parse(&taken).is_ok());
 
         // A capsule that is not whole waits for the rest of the stream.
-        assert_eq!(take_capsule(&mut inbound), None);
+        assert_eq!(take_capsule(&mut inbound), Ok(None));
         assert_eq!(inbound.len(), n - 1);
 
         inbound.extend_from_slice(capsule.get(n - 1..).unwrap());
-        assert_eq!(take_capsule(&mut inbound).unwrap(), capsule);
+        assert_eq!(take_capsule(&mut inbound).unwrap().unwrap(), capsule);
         assert!(inbound.is_empty());
+    }
+
+    #[test]
+    fn a_quic_stream_with_a_bad_header_fails_at_once() {
+        // A header that is not whole yet waits.
+        let mut short = vec![0x4b, 0x53, 0x80];
+        assert_eq!(take_capsule(&mut short), Ok(None));
+
+        for bad in [
+            // The type in a form other than the 2-byte form.
+            [0x0b, 0x53, 0x80, 0x00, 0x00, 0x09],
+            // A type outside the closed list.
+            [0x4b, 0x00, 0x80, 0x00, 0x00, 0x09],
+            // The length in a form other than the 4-byte form.
+            [0x4b, 0x53, 0x00, 0x00, 0x00, 0x09],
+            // A length that no session control record has.
+            [0x4b, 0x53, 0x80, 0x00, 0x00, 0x02],
+        ] {
+            let mut inbound = bad.to_vec();
+            assert_eq!(
+                take_capsule(&mut inbound),
+                Err(Error::Malformed),
+                "{bad:x?}"
+            );
+        }
     }
 
     #[test]

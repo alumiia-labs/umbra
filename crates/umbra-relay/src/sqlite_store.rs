@@ -842,8 +842,8 @@ impl ReceiptShelf for SqliteShelf {
         Ok(())
     }
 
-    fn find(&self, epoch: u64, leaf: &[u8; 32]) -> Vec<KeptReceipt> {
-        self.read(epoch, leaf).unwrap_or_default()
+    fn find(&self, epoch: u64, leaf: &[u8; 32]) -> Result<Vec<KeptReceipt>, StoreFault> {
+        self.read(epoch, leaf)
     }
 
     fn erase_before(&mut self, floor: u64) {
@@ -903,8 +903,8 @@ mod tests {
             bytes
         };
 
-        assert!(shelf.find(7, &leaf(0)).is_empty());
-        assert_eq!(shelf.find(7, &leaf(255)).len(), 1);
+        assert!(shelf.find(7, &leaf(0)).unwrap().is_empty());
+        assert_eq!(shelf.find(7, &leaf(255)).unwrap().len(), 1);
     }
 
     #[test]
@@ -928,18 +928,18 @@ mod tests {
 
         // A restart keeps each receipt.
         let mut shelf = SqliteShelf::open(&path).unwrap();
-        let found = shelf.find(7, &[13; 32]);
+        let found = shelf.find(7, &[13; 32]).unwrap();
         assert_eq!(found.len(), 2);
         assert!(found[0].issued);
         assert_eq!(found[0].signed, vec![12; 40]);
         assert!(!found[1].issued);
         assert_eq!(found[1].leaves.len(), 4);
-        assert!(shelf.find(9, &[13; 32]).is_empty());
+        assert!(shelf.find(9, &[13; 32]).unwrap().is_empty());
 
         shelf.erase_before(250);
         assert_eq!(shelf.held(), (1, 0));
-        assert!(shelf.find(7, &[13; 32]).is_empty());
-        assert_eq!(shelf.find(8, &[11; 32]).len(), 1);
+        assert!(shelf.find(7, &[13; 32]).unwrap().is_empty());
+        assert_eq!(shelf.find(8, &[11; 32]).unwrap().len(), 1);
 
         let rows: i64 = shelf
             .connection

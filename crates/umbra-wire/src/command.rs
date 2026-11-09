@@ -210,6 +210,16 @@ impl<'a> Command<'a> {
 
     /// Writes the command and returns its length.
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, Error> {
+        let head = self.encode_header(out)?;
+        let mut w = Writer::new(out.get_mut(head..).ok_or(Error::Capacity)?);
+        w.put(self.payload)?;
+        Ok(head.saturating_add(w.position()))
+    }
+
+    /// Writes the `COMMAND_HEADER` bytes, with the length of the payload,
+    /// and no payload. A caller that wrote the payload in place after the
+    /// header thus makes no copy of it.
+    pub fn encode_header(&self, out: &mut [u8]) -> Result<usize, Error> {
         let payload_len = u16::try_from(self.payload.len()).map_err(|_| Error::Capacity)?;
         let mut w = Writer::new(out);
         w.u8(VERSION)?;
@@ -218,7 +228,6 @@ impl<'a> Command<'a> {
         w.put(&self.queue_id)?;
         w.put(&self.auth)?;
         w.u16(payload_len)?;
-        w.put(self.payload)?;
         Ok(w.position())
     }
 

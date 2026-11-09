@@ -109,20 +109,43 @@ pub fn parse_on(bytes: &[u8], link: Link) -> Result<(CapsuleType, &[u8], usize),
 
 /// Writes one capsule and returns its length.
 pub fn encode(kind: CapsuleType, value: &[u8], out: &mut [u8]) -> Result<usize, Error> {
-    check_value_len(kind, value.len())?;
-    let len = u32::try_from(value.len()).map_err(|_| Error::Capacity)?;
+    let head = encode_header(kind, value.len(), out)?;
+    let mut w = Writer::new(out.get_mut(head..).ok_or(Error::Capacity)?);
+    w.put(value)?;
+    Ok(head.saturating_add(w.position()))
+}
+
+/// Writes the `HEADER_LEN` bytes of a capsule whose value has `value_len`
+/// bytes, and no value. A caller that wrote the value in place after the
+/// header thus makes no copy of it.
+pub fn encode_header(kind: CapsuleType, value_len: usize, out: &mut [u8]) -> Result<usize, Error> {
+    check_value_len(kind, value_len)?;
+    let len = u32::try_from(value_len).map_err(|_| Error::Capacity)?;
 
     let mut w = Writer::new(out);
     // The 2-byte form carries prefix 01, and the 4-byte form prefix 10.
     w.u16(0x4000 | kind as u16)?;
     w.u32(0x8000_0000 | len)?;
-    w.put(value)?;
     Ok(w.position())
 }
 
 /// Reads one capsule from the front of `bytes`. Returns its type, its
 /// value, and the count of bytes it took, thus a stream parses in a loop.
 pub fn parse(bytes: &[u8]) -> Result<(CapsuleType, &[u8], usize), Error> {
+    let (kind, used) = header(bytes)?.ok_or(Error::Malformed)?;
+    let value = bytes.get(HEADER_LEN..used).ok_or(Error::Malformed)?;
+    Ok((kind, value, used))
+}
+
+/// Reads the header at the front of `bytes`: the capsule type, and the
+/// count of bytes of the whole capsule. `Ok(None)` while the header is not
+/// complete. A stream reader thus tells a capsule that is not whole yet
+/// from a capsule that is malformed.
+pub fn header(bytes: &[u8]) -> Result<Option<(CapsuleType, usize)>, Error> {
+    if bytes.len() < HEADER_LEN {
+        return Ok(None);
+    }
+
     let mut r = Reader::new(bytes);
     let kind_raw = r.u16()?;
     if kind_raw >> 14 != 0b01 {
@@ -137,8 +160,8 @@ pub fn parse(bytes: &[u8]) -> Result<(CapsuleType, &[u8], usize), Error> {
 
     let len = usize::try_from(len_raw & 0x3FFF_FFFF).map_err(|_| Error::Malformed)?;
     check_value_len(kind, len)?;
-    let value = r.take(len)?;
-    Ok((kind, value, r.position()))
+    let used = HEADER_LEN.checked_add(len).ok_or(Error::Malformed)?;
+    Ok(Some((kind, used)))
 }
 
 fn check_value_len(kind: CapsuleType, len: usize) -> Result<(), Error> {

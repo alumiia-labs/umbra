@@ -16,7 +16,7 @@ use umbra_core::directory::{
 use umbra_crypto::{rand_core::CryptoRng, sign::SigningKey};
 use umbra_queue::params::store_time;
 
-use crate::circuits::LinkId;
+use crate::{circuits::LinkId, store::StoreFault};
 
 /// The receipts that a relay with no receipt file keeps at one time, of
 /// each kind. A window holds at most `RECEIPT_WINDOW` leaves of 32 bytes,
@@ -54,10 +54,11 @@ pub struct KeptReceipt {
 /// Where the book keeps its receipts for `RECEIPT_RETENTION` (`REL-073`).
 pub trait ReceiptShelf: Send {
     /// Keeps one receipt. A fault keeps nothing.
-    fn keep(&mut self, kept: KeptReceipt) -> Result<(), crate::store::StoreFault>;
+    fn keep(&mut self, kept: KeptReceipt) -> Result<(), StoreFault>;
     /// The receipts of `epoch` whose leaves may hold `leaf`, those issued
-    /// first.
-    fn find(&self, epoch: u64, leaf: &[u8; 32]) -> Vec<KeptReceipt>;
+    /// first. A fault is no empty list: an authority must not read it as
+    /// "no receipt" (`REL-179`).
+    fn find(&self, epoch: u64, leaf: &[u8; 32]) -> Result<Vec<KeptReceipt>, StoreFault>;
     /// Erases each receipt kept before `floor` (`REL-074`).
     fn erase_before(&mut self, floor: u64);
     /// The receipts that it holds: those issued, and those taken.
@@ -73,7 +74,7 @@ pub struct MemoryShelf {
 }
 
 impl ReceiptShelf for MemoryShelf {
-    fn keep(&mut self, kept: KeptReceipt) -> Result<(), crate::store::StoreFault> {
+    fn keep(&mut self, kept: KeptReceipt) -> Result<(), StoreFault> {
         let list = if kept.issued {
             &mut self.issued
         } else {
@@ -88,13 +89,14 @@ impl ReceiptShelf for MemoryShelf {
         Ok(())
     }
 
-    fn find(&self, epoch: u64, leaf: &[u8; 32]) -> Vec<KeptReceipt> {
-        self.issued
+    fn find(&self, epoch: u64, leaf: &[u8; 32]) -> Result<Vec<KeptReceipt>, StoreFault> {
+        Ok(self
+            .issued
             .iter()
             .chain(self.taken.iter())
             .filter(|kept| kept.epoch == epoch && kept.leaves.contains(leaf))
             .cloned()
-            .collect()
+            .collect())
     }
 
     fn erase_before(&mut self, floor: u64) {
@@ -458,11 +460,12 @@ impl ReceiptBook {
     }
 
     /// The answer to a query that verified (`REL-179`): the receipt of its
-    /// epoch that covers its cell, issued or taken, with the proof.
-    pub fn answer(&self, query: &ReceiptQuery) -> ReceiptAnswer {
+    /// epoch that covers its cell, issued or taken, with the proof. A fault
+    /// of the shelf gives no answer.
+    pub fn answer(&self, query: &ReceiptQuery) -> Result<ReceiptAnswer, StoreFault> {
         let leaf = query.leaf();
 
-        for held in self.shelf.0.find(query.epoch, &leaf) {
+        for held in self.shelf.0.find(query.epoch, &leaf)? {
             if held.epoch != query.epoch {
                 continue;
             }
@@ -475,7 +478,7 @@ impl ReceiptBook {
                 continue;
             };
 
-            return ReceiptAnswer {
+            return Ok(ReceiptAnswer {
                 found: if held.issued {
                     Found::Issued
                 } else {
@@ -484,10 +487,10 @@ impl ReceiptBook {
                 receipt: held.signed,
                 leaf_index: u32::try_from(index).unwrap_or(u32::MAX),
                 proof,
-            };
+            });
         }
 
-        ReceiptAnswer::none()
+        Ok(ReceiptAnswer::none())
     }
 }
 
@@ -622,25 +625,58 @@ mod tests {
             epoch: 490_000,
             tag: cell(1_026)[16..32].try_into().unwrap(),
         };
-        let issued = taker.answer(&query);
+        let issued = taker.answer(&query).unwrap();
         assert_eq!(issued.found, Found::Issued);
         assert_eq!(issued.covers(&query, &b_pk).unwrap().window, 1);
 
-        let taken = sender.answer(&query);
+        let taken = sender.answer(&query).unwrap();
         assert_eq!(taken.found, Found::Taken);
         taken.covers(&query, &b_pk).unwrap();
 
         let unknown = ReceiptQuery { epoch: 1, ..query };
-        assert_eq!(taker.answer(&unknown).found, Found::None);
+        assert_eq!(taker.answer(&unknown).unwrap().found, Found::None);
 
         // REL-074, NET-301: a receipt goes after its retention, at most one
         // grain late, since the book holds its time to the end of its grain.
         taker.tick(&b, &b_key, later + RECEIPT_RETENTION, &mut rng);
-        assert_eq!(taker.answer(&query).found, Found::Issued);
+        assert_eq!(taker.answer(&query).unwrap().found, Found::Issued);
 
         let grain = umbra_queue::params::STORE_TIME_GRAIN;
         taker.tick(&b, &b_key, later + RECEIPT_RETENTION + grain, &mut rng);
-        assert_eq!(taker.answer(&query).found, Found::None);
+        assert_eq!(taker.answer(&query).unwrap().found, Found::None);
+    }
+
+    /// A shelf whose each read fails.
+    struct BrokenShelf;
+
+    impl ReceiptShelf for BrokenShelf {
+        fn keep(&mut self, _: KeptReceipt) -> Result<(), StoreFault> {
+            Err(StoreFault)
+        }
+
+        fn find(&self, _: u64, _: &[u8; 32]) -> Result<Vec<KeptReceipt>, StoreFault> {
+            Err(StoreFault)
+        }
+
+        fn erase_before(&mut self, _: u64) {}
+
+        fn held(&self) -> (usize, usize) {
+            (0, 0)
+        }
+    }
+
+    #[test]
+    fn a_fault_of_the_shelf_gives_no_answer_of_no_receipt() {
+        let mut book = ReceiptBook::default();
+        book.set_shelf(Box::new(BrokenShelf));
+        let query = ReceiptQuery {
+            authority_index: 0,
+            relay_id: [0xB2; 32],
+            epoch: 490_000,
+            tag: [3; 16],
+        };
+
+        assert_eq!(book.answer(&query), Err(StoreFault));
     }
 
     #[test]

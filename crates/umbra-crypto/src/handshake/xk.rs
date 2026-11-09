@@ -74,8 +74,11 @@ impl OneTimePrekey {
     /// The seeds `d || z`, for the at-rest store of an invitation that no
     /// party consumed yet.
     pub fn seed(&self) -> Result<Secret<64>, Error> {
-        let seed = self.dk.to_seed().ok_or(Error::Key)?;
-        Ok(Secret::new(seed.into()))
+        // The `Seed` type does not wipe itself.
+        let mut dz = self.dk.to_seed().ok_or(Error::Key)?;
+        let seed = Secret::new(dz.into());
+        dz.zeroize();
+        Ok(seed)
     }
 
     /// The encapsulation key `s1`, as the invitation carries it.
@@ -416,7 +419,8 @@ impl Initiator {
 
         // 5. payload2
         let (ct, tag) = payload.split_at(payload_len - PAYLOAD_OVERHEAD);
-        let mut buf = [0u8; NONCE_LEN + MAX_APP_LEN];
+        // The plaintext holds the app payload, such as the keys of a queue.
+        let mut buf = Zeroizing::new([0u8; NONCE_LEN + MAX_APP_LEN]);
         let buf = buf.get_mut(..ct.len()).ok_or(Error::Length)?;
         buf.copy_from_slice(ct);
         st.open(buf, tag)?;
@@ -578,7 +582,8 @@ impl Responder {
         st.trace(trace, "1.5 tag1");
 
         let (ct, tag) = payload.split_at(payload_len - PAYLOAD_OVERHEAD);
-        let mut buf = [0u8; NONCE_LEN + MAX_APP_LEN];
+        // The plaintext holds the app payload, such as the keys of a queue.
+        let mut buf = Zeroizing::new([0u8; NONCE_LEN + MAX_APP_LEN]);
         let buf = buf.get_mut(..ct.len()).ok_or(Error::Length)?;
         buf.copy_from_slice(ct);
         st.open(buf, tag)?;

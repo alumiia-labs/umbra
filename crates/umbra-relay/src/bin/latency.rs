@@ -13,16 +13,22 @@
 //! The probe builds circuits as a client does, one hop at a time, and it
 //! times each `EXTEND` until its `EXTENDED`. A build cell to hop `n` passes
 //! hops 1 to `n − 1`, thus the difference of two steps is the round trip of
-//! one leg between two relays. The probe needs no measurer certificate, and
-//! it sends no cell after the build.
+//! one leg between two relays. The probe needs no measurer certificate.
+//! After each build it sends a `DESTROY` and closes its session, as a client
+//! does at its end (`NET-169`, `WIR-246`). Otherwise the ingress relay parks
+//! the session (`WIR-542`), and each hop keeps its part for hours.
 //!
-//! The output gives, for each relay, the round trip of a TCP connect and of
-//! a one-hop build. Then it gives the leg from each ingress relay to each
-//! layer 2 relay, and from each layer 2 relay to each layer 3 relay. The
-//! last table sums one way of a call for two designs: a splice at layer 2
-//! (four links) and a splice at layer 3 (six links). Both parties of that
-//! sum sit at the place of this machine, thus the sum is a floor for two
-//! parties far apart.
+//! The output gives, for each relay, the round trip of a TCP connect. For
+//! each ingress relay it also gives the round trip of a one-hop build. A
+//! relay of layer 2 or 3 takes a build on a link with no relay hello as a
+//! measurement attempt of this address (`NET-353`, `REL-069`), thus the
+//! probe builds no one-hop circuit there.
+//!
+//! Then the output gives the leg from each ingress relay to each layer 2
+//! relay, and from each layer 2 relay to each layer 3 relay. The last table
+//! sums one way of a call for two designs: a splice at layer 2 (four links)
+//! and a splice at layer 3 (six links). Both parties of that sum sit at the
+//! place of this machine, thus the sum is a floor for two parties far apart.
 
 use std::{
     collections::BTreeMap,
@@ -42,13 +48,14 @@ use umbra_crypto::{handshake::nk::RelayStatic, rand_core::TryRng, secret::Secret
 use umbra_onion::{
     build::{build_cell_body, read_cell_body, DelayClass, Pending, BUILD_BUCKET, HELLO_LEN},
     circuit::CircuitBuild,
-    CIRCUIT_BUILD_TIMEOUT,
+    CIRCUIT_BUILD_TIMEOUT, HOPS,
 };
 use umbra_relay::{measurer::Target, server::OsRng};
 use umbra_transport::{link::ClientLink, native};
 use umbra_wire::{
+    bucket::Bucket,
     capsule::{self, CapsuleType},
-    cell::{Cell, CellCommand},
+    cell::{pad_body, Cell, CellCommand},
 };
 
 /// The rounds of each measurement, when the arguments name no count.
@@ -138,8 +145,9 @@ async fn tcp_round_trip(target: &Target) -> Option<Duration> {
     Some(elapsed)
 }
 
-/// Builds a circuit through `chain`, one hop at a time. The result is the
-/// time of each step, from the send of its `EXTEND` to its `EXTENDED`.
+/// Builds a circuit through `chain`, one hop at a time, and then ends it.
+/// The result is the time of each step, from the send of its `EXTEND` to
+/// its `EXTENDED`.
 async fn build(
     chain: &[&Target],
     tls: Arc<rustls::ClientConfig>,
@@ -173,6 +181,27 @@ async fn build(
         .map_err(|_| "the link failed")?;
 
     let mut circuit = CircuitBuild::new(circ_id);
+    let steps = extend_each(chain, &mut tcp, &mut link, &mut circuit, &mut buffer).await;
+
+    // A relay that stops reading holds the probe for one build time at most.
+    let end = tear_down(&mut tcp, link, circuit, &mut buffer);
+    let _ = tokio::time::timeout(wait, end).await;
+    steps
+}
+
+/// Extends `circuit` through each relay of `chain`. The result is the time
+/// of each step, from the send of its `EXTEND` to its `EXTENDED`.
+async fn extend_each(
+    chain: &[&Target],
+    tcp: &mut native::TcpLink,
+    link: &mut ClientLink,
+    circuit: &mut CircuitBuild,
+    buffer: &mut [u8],
+) -> Result<Vec<Duration>, Failure> {
+    let mut rng = OsRng;
+    let circ_id = circuit.circ_id();
+    let wait = Duration::from_secs(CIRCUIT_BUILD_TIMEOUT);
+
     let mut steps = Vec::with_capacity(chain.len());
     for (index, target) in chain.iter().enumerate() {
         let relay = RelayStatic {
@@ -186,7 +215,7 @@ async fn build(
         build_cell_body(CellCommand::Extend, &hello, &mut body).map_err(|_| "a local fault")?;
         let tag = circuit.seal(&mut body).map_err(|_| "a local fault")?;
         let cell = [circ_id.as_slice(), &tag, &body].concat();
-        let used = link.send(&cell, &mut buffer).map_err(|_| "a local fault")?;
+        let used = link.send(&cell, buffer).map_err(|_| "a local fault")?;
 
         let start = Instant::now();
         tcp.send(buffer.get(..used).unwrap_or(&[]))
@@ -236,6 +265,58 @@ async fn build(
     Ok(steps)
 }
 
+/// Ends the circuit and the session as a client does at its end. The last
+/// hop that answered ends its part at the `DESTROY` (`NET-169`). The close
+/// then makes the ingress relay end each circuit of the session at once,
+/// also one that failed part way, and keep nothing for a resume (`WIR-246`).
+async fn tear_down(
+    tcp: &mut native::TcpLink,
+    mut link: ClientLink,
+    circuit: CircuitBuild,
+    buffer: &mut [u8],
+) {
+    let destroy = destroy_cell(circuit).and_then(|cell| link.send(&cell, buffer).ok());
+    if let Some(used) = destroy {
+        if tcp.send(buffer.get(..used).unwrap_or(&[])).await.is_err() {
+            return;
+        }
+    }
+
+    if let Ok(used) = link.close(buffer) {
+        let _ = tcp.send(buffer.get(..used).unwrap_or(&[])).await;
+    }
+}
+
+/// The `DESTROY` cell of `circuit`, sealed for the hops that answered, or
+/// none when no hop answered. A full circuit sends it in the shape of a
+/// `B0` cell, as the client session does. A build cell carries `EXTEND` or
+/// `EXTENDED` alone (`NET-157`), thus a part-built circuit sends it in the
+/// plain body of the build bucket.
+fn destroy_cell(mut circuit: CircuitBuild) -> Option<Vec<u8>> {
+    let circ_id = circuit.circ_id();
+    let built = circuit.built();
+    if built == 0 {
+        return None;
+    }
+
+    let bucket = if built == HOPS {
+        Bucket::B0
+    } else {
+        BUILD_BUCKET
+    };
+    let mut body = vec![0u8; bucket.body_len()];
+    pad_body(bucket, CellCommand::Destroy, &[], &mut body).ok()?;
+    // Hop 3 of a full circuit runs its key update at each cell (`NET-204`),
+    // and only the finished circuit makes that update.
+    let tag = if built == HOPS {
+        circuit.finish().ok()?.seal(&mut body).ok()?
+    } else {
+        circuit.seal(&mut body).ok()?
+    };
+
+    Some([circ_id.as_slice(), &tag, &body].concat())
+}
+
 /// The median, the 90th percentile, and the minimum of the samples, in
 /// milliseconds.
 fn summary(samples: &[f64]) -> Option<(f64, f64, f64)> {
@@ -278,24 +359,27 @@ async fn run(arguments: Arguments) -> Result<(), Failure> {
         println!("  {:<40} {a}.{b}.{c}.{d}  AS{}", name(target), target.asn);
     }
 
-    println!("\nThis machine to each relay:");
-    let mut first_leg: BTreeMap<[u8; 32], f64> = BTreeMap::new();
+    println!("\nThis machine to each relay (a one-hop build at layer 1 alone):");
     for target in &targets {
+        // NET-353: at layer 2 or 3 a build from this link is a measurement
+        // attempt, and it spends an attempt of this address (REL-069).
+        let is_ingress = target.layer == 1;
         let mut tcp = Vec::new();
         let mut hop = Vec::new();
         for _ in 0..rounds {
             if let Some(rtt) = tcp_round_trip(target).await {
                 tcp.push(ms(rtt));
             }
-            if let Ok(steps) = build(&[target], tls.clone()).await {
-                hop.extend(steps.first().map(|step| ms(*step)));
+            if is_ingress {
+                if let Ok(steps) = build(&[target], tls.clone()).await {
+                    hop.extend(steps.first().map(|step| ms(*step)));
+                }
             }
             tokio::time::sleep(PAUSE).await;
         }
         show(&format!("{} TCP connect", target.dial.host), &tcp, rounds);
-        show(&format!("{} one-hop build", target.dial.host), &hop, rounds);
-        if let Some((median, _, _)) = summary(&hop) {
-            first_leg.insert(target.relay_id, median);
+        if is_ingress {
+            show(&format!("{} one-hop build", target.dial.host), &hop, rounds);
         }
     }
 
@@ -379,9 +463,6 @@ async fn run(arguments: Arguments) -> Result<(), Failure> {
     }
     for (chain, median) in &half_l3 {
         println!("  splice at layer 3, {chain:<52} {median:>7.1} ms");
-    }
-    if first_leg.is_empty() {
-        println!("  no relay took a one-hop build");
     }
 
     Ok(())
