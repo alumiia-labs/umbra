@@ -151,7 +151,7 @@ object Notifier {
         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
     )
 
-    /** Whether the user swiped the notice away while the setting lets it go. */
+    /** Whether the user swiped the notice away since the service started. */
     @Volatile
     private var isCarrierHidden = false
 
@@ -162,16 +162,15 @@ object Notifier {
         manager(context).notify(CARRIER_ID, carrier(context))
     }
 
-    /** The user swiped the notice away. It comes back while the setting keeps it. */
-    fun carrierDismissed(context: Context) {
-        if (Modes.keepsNotice(context)) {
-            refreshCarrier(context)
-        } else {
-            isCarrierHidden = true
-        }
+    /**
+     * The user swiped the notice away. A change of the link state does not
+     * post it again, and the next start of the service does.
+     */
+    fun carrierDismissed() {
+        isCarrierHidden = true
     }
 
-    /** Ends a hide: the service started again, or the setting keeps the notice now. */
+    /** Ends a hide: the service started again, and the platform posted the notice. */
     fun showCarrier(context: Context) {
         isCarrierHidden = false
         if (Core.carrierHolds) refreshCarrier(context)
@@ -387,6 +386,6 @@ object Notifier {
  */
 class CarrierDismissed : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (Core.carrierHolds) Notifier.carrierDismissed(context)
+        if (Core.carrierHolds) Notifier.carrierDismissed()
     }
 }
