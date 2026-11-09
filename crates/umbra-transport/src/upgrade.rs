@@ -183,7 +183,11 @@ pub fn parse_request(bytes: &[u8]) -> Result<Option<(Request, usize)>, crate::Er
     let text = core::str::from_utf8(head).map_err(|_| crate::Error::Malformed)?;
     let mut lines = text.split("\r\n");
     let start = lines.next().ok_or(crate::Error::Malformed)?;
-    if start != format!("GET {PATH} HTTP/1.1") {
+    // The parts compare one at a time, thus a request check allocates no string.
+    let target = start
+        .strip_prefix("GET ")
+        .and_then(|rest| rest.strip_prefix(PATH));
+    if target != Some(" HTTP/1.1") {
         return Err(crate::Error::Malformed);
     }
 
@@ -276,6 +280,10 @@ mod tests {
         assert_eq!(parse_request(&req.as_bytes()[..20]).unwrap(), None);
         let other = req.replace("/umbra", "/other");
         assert!(parse_request(other.as_bytes()).is_err());
+        let longer = req.replace(" HTTP/1.1\r\n", "x HTTP/1.1\r\n");
+        assert!(parse_request(longer.as_bytes()).is_err());
+        let older = req.replace("HTTP/1.1\r\n", "HTTP/1.0\r\n");
+        assert!(parse_request(older.as_bytes()).is_err());
 
         let compressed = resp.replace(
             "\r\n\r\n",

@@ -205,15 +205,31 @@ impl Context {
 
     /// `Seal`: the ciphertext with its tag, at the next sequence number.
     pub fn seal(&mut self, aad: &[u8], plain: &[u8]) -> Result<Vec<u8>, Error> {
+        let mut out = Vec::new();
+        self.seal_into(aad, plain, &mut out)?;
+        Ok(out)
+    }
+
+    /// `Seal` onto the end of `out`, for a caller that writes a head before
+    /// the ciphertext. The body seals in place, thus one buffer serves.
+    pub(crate) fn seal_into(
+        &mut self,
+        aad: &[u8],
+        plain: &[u8],
+        out: &mut Vec<u8>,
+    ) -> Result<(), Error> {
         let nonce = self.nonce();
-        let mut out = plain.to_vec();
+        let start = out.len();
+        out.reserve_exact(plain.len().saturating_add(TAG_LEN));
+        out.extend_from_slice(plain);
+        let body = out.get_mut(start..).ok_or(Error::Length)?;
         let tag = ChaCha20Poly1305::new(self.key.expose().into())
-            .encrypt_inout_detached(&Nonce::from(nonce), aad, out.as_mut_slice().into())
+            .encrypt_inout_detached(&Nonce::from(nonce), aad, body.into())
             .map_err(|_| Error::Length)?;
 
         out.extend_from_slice(&tag);
         self.seq = self.seq.checked_add(1).ok_or(Error::Length)?;
-        Ok(out)
+        Ok(())
     }
 
     /// `Open`: the plaintext, at the next sequence number.
@@ -287,7 +303,7 @@ pub fn seal<R: CryptoRng + ?Sized>(
     rng: &mut R,
 ) -> Result<Vec<u8>, Error> {
     let (mut out, mut context) = setup_sender::<UmbraKem, Sha3_256, R>(pk, info, rng)?;
-    out.extend_from_slice(&context.seal(aad, plain)?);
+    context.seal_into(aad, plain, &mut out)?;
     Ok(out)
 }
 

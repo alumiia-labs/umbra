@@ -7,8 +7,8 @@
 //! at a constant width.
 
 use aes::{
-    cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit, KeyIvInit, StreamCipher},
-    Aes256,
+    cipher::{BlockCipherDecrypt, BlockCipherEncrypt, InnerIvInit, KeyInit, StreamCipher},
+    Aes256, Aes256Enc,
 };
 use hkdf::Hkdf;
 use polyval::{universal_hash::UniversalHash, Polyval};
@@ -21,7 +21,7 @@ use crate::Error;
 /// The width of the left block, the tag, and the tweak.
 pub const BLOCK: usize = 16;
 
-type Ctr = ctr::Ctr128BE<Aes256>;
+type Ctr = ctr::Ctr128BE<Aes256Enc>;
 
 /// The key set of one hop in one direction.
 pub struct HopKeys {
@@ -30,6 +30,11 @@ pub struct HopKeys {
     hash: Secret<16>,
     tweak: [u8; BLOCK],
     chain: [u8; BLOCK],
+    // The key schedules of `prp` and `stream`, made once for each key set
+    // and not for each cell. The `zeroize` feature of `aes` wipes each one
+    // when it drops, thus an update also erases them (`NET-208`).
+    prp_cipher: Aes256,
+    stream_cipher: Aes256Enc,
 }
 
 impl Drop for HopKeys {
@@ -95,12 +100,18 @@ fn xor_into(dst: &mut [u8; BLOCK], src: &[u8; BLOCK]) {
 impl HopKeys {
     fn from_blocks(material: [&[u8; BLOCK]; HOP_BLOCKS], tweak: [u8; BLOCK]) -> Self {
         let [prp_head, prp_tail, stream_head, stream_tail, hash, chain] = material;
+        let prp = pair(prp_head, prp_tail);
+        let stream = pair(stream_head, stream_tail);
+        let prp_cipher = Aes256::new(prp.expose().into());
+        let stream_cipher = Aes256Enc::new(stream.expose().into());
         HopKeys {
-            prp: pair(prp_head, prp_tail),
-            stream: pair(stream_head, stream_tail),
+            prp,
+            stream,
             hash: Secret::new(*hash),
             tweak,
             chain: *chain,
+            prp_cipher,
+            stream_cipher,
         }
     }
 
@@ -133,7 +144,9 @@ impl HopKeys {
     }
 
     fn stream(&self, counter: &[u8; BLOCK], data: &mut [u8]) {
-        Ctr::new(self.stream.expose().into(), counter.into()).apply_keystream(data);
+        // The copy of the key schedule wipes itself when the counter mode drops.
+        let core = ctr::CtrCore::inner_iv_init(self.stream_cipher.clone(), counter.into());
+        Ctr::from_core(core).apply_keystream(data);
     }
 
     fn check_body(body: &[u8]) -> Result<(), Error> {
@@ -153,7 +166,7 @@ impl HopKeys {
         xor_into(&mut s, &self.tweak);
 
         let mut s_block = s.into();
-        Aes256::new(self.prp.expose().into()).encrypt_block(&mut s_block);
+        self.prp_cipher.encrypt_block(&mut s_block);
         let s: [u8; BLOCK] = s_block.into();
         self.stream(&s, body);
 
@@ -174,7 +187,7 @@ impl HopKeys {
         self.stream(&s, body);
 
         let mut x_block = s.into();
-        Aes256::new(self.prp.expose().into()).decrypt_block(&mut x_block);
+        self.prp_cipher.decrypt_block(&mut x_block);
         let mut x_l: [u8; BLOCK] = x_block.into();
         xor_into(&mut x_l, &self.chain);
         xor_into(&mut x_l, &self.tweak);
@@ -318,5 +331,71 @@ mod tests {
 
         assert!(a.forward.encipher(&[0; 16], &mut [0u8; 15]).is_err());
         assert!(a.forward.encipher(&[0; 16], &mut []).is_err());
+    }
+
+    /// The layer as it was before the cached key schedules: a key expansion
+    /// for each step. The cache must give the same bytes.
+    fn reference_encipher(
+        prp: &[u8; 32],
+        stream: &[u8; 32],
+        hash: &[u8; 16],
+        tweak: &[u8; 16],
+        chain: &[u8; 16],
+        x_l: &[u8; 16],
+        body: &mut [u8],
+    ) -> [u8; 16] {
+        use aes::cipher::KeyIvInit;
+
+        let mut s = *x_l;
+        xor_into(&mut s, chain);
+        xor_into(&mut s, tweak);
+        let mut s_block = s.into();
+        Aes256::new(prp.into()).encrypt_block(&mut s_block);
+        let s: [u8; 16] = s_block.into();
+        ctr::Ctr128BE::<Aes256>::new(stream.into(), (&s).into()).apply_keystream(body);
+
+        let mut hasher = Polyval::new(hash.into());
+        hasher.update_padded(body);
+        let mut y_l = s;
+        xor_into(&mut y_l, &hasher.finalize().into());
+        y_l
+    }
+
+    #[test]
+    fn the_cached_key_schedules_give_the_bytes_of_a_fresh_expansion() {
+        let mut sender = keys().forward;
+        let mut receiver = keys().forward;
+        for round in 0u8..6 {
+            let x_l = [round; 16];
+            let mut plain = [0u8; 480];
+            for (i, b) in plain.iter_mut().enumerate() {
+                *b = (i as u8) ^ round;
+            }
+
+            let mut expected = plain;
+            let expected_y = reference_encipher(
+                sender.prp.expose(),
+                sender.stream.expose(),
+                sender.hash.expose(),
+                &sender.tweak,
+                &sender.chain,
+                &x_l,
+                &mut expected,
+            );
+
+            let mut body = plain;
+            let y_l = sender.encipher(&x_l, &mut body).unwrap();
+            assert_eq!(y_l, expected_y);
+            assert_eq!(body, expected);
+
+            assert_eq!(receiver.decipher(&y_l, &mut body).unwrap(), x_l);
+            assert_eq!(body, plain);
+
+            // An update rebuilds the schedules from the new keys.
+            if round % 2 == 1 {
+                sender.update(&y_l);
+                receiver.update(&y_l);
+            }
+        }
     }
 }

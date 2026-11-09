@@ -126,11 +126,14 @@ pub fn encapsulate_request<R: CryptoRng + ?Sized>(
     let (enc, mut context) =
         hpke::setup_sender::<UmbraKem, Sha3_256, R>(public, &request_info(&head), rng)?;
 
-    let sealed = context.seal(&[], request)?;
+    let capacity = head.len() + enc.len() + request.len().saturating_add(hpke::TAG_LEN);
+    let mut out = Vec::with_capacity(capacity);
+    out.extend_from_slice(&head);
+    out.extend_from_slice(&enc);
+    context.seal_into(&[], request, &mut out)?;
+
     let mut secret = Secret::<32>::zeroed();
     context.export(RESPONSE_LABEL, secret.expose_mut())?;
-
-    let out = [head.as_slice(), &enc, &sealed].concat();
     Ok((out, ResponseKey { secret, enc }))
 }
 
@@ -174,9 +177,15 @@ pub fn encapsulate_response<R: CryptoRng + ?Sized>(
     rng.fill_bytes(&mut nonce);
 
     let (aead_key, aead_nonce) = key.keys(&nonce)?;
-    let mut body = response.to_vec();
-    let tag = aead::seal_ietf(&aead_key, &aead_nonce, &[], &mut body)?;
-    Ok([nonce.as_slice(), &body, &tag].concat())
+
+    // The body seals in place inside the output, thus one buffer serves.
+    let mut out = Vec::with_capacity(RESPONSE_NONCE_LEN + response.len() + aead::TAG_LEN);
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(response);
+    let body = out.get_mut(RESPONSE_NONCE_LEN..).ok_or(Error::Length)?;
+    let tag = aead::seal_ietf(&aead_key, &aead_nonce, &[], body)?;
+    out.extend_from_slice(&tag);
+    Ok(out)
 }
 
 /// Opens the response at the client.

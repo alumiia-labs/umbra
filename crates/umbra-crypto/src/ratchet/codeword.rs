@@ -296,6 +296,22 @@ impl Collector {
         Ok(self.count >= code.k)
     }
 
+    /// A second copy of the store, for a receive that rolls back.
+    pub(crate) fn copy(&self) -> Self {
+        let Self {
+            width,
+            held,
+            count,
+            chunks,
+        } = self;
+        Self {
+            width: *width,
+            held: *held,
+            count: *count,
+            chunks: *chunks,
+        }
+    }
+
     /// Writes the held chunks for the at-rest store.
     pub(crate) fn export(&self, writer: &mut crate::stored::Writer) -> Result<(), Error> {
         let w = self.width.bytes();

@@ -23,7 +23,7 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Nonce, Tag,
 };
 use hkdf::Hkdf;
-use hmac::{Hmac, Mac};
+use hmac::{digest::FixedOutput, Mac};
 use rand_core::CryptoRng;
 use sha3::{Digest, Sha3_256};
 use x25519_dalek::{PublicKey as XPublic, StaticSecret};
@@ -245,14 +245,14 @@ fn kdf_rk(root_key: &Secret<32>, dh_output: &Secret<32>) -> (Secret<32>, Secret<
 }
 
 fn hmac_chain(chain_key: &Secret<32>, constant: u8) -> Secret<32> {
-    // HMAC accepts any key length, thus the Result never carries Err.
-    let mut mac = match Hmac::<Sha3_256>::new_from_slice(chain_key.expose()) {
-        Ok(mac) => mac,
-        Err(_) => Hmac::<Sha3_256>::new(&Default::default()),
-    };
+    let mut mac = crate::hash::hmac_sha3_256(chain_key.expose());
     mac.update(labels::RATCHET_CHAIN);
     mac.update(&[constant]);
-    Secret::new(mac.finalize().into_bytes().into())
+
+    // The MAC writes into the secret, thus no unwiped output array holds a key.
+    let mut out = Secret::<32>::zeroed();
+    mac.finalize_into(out.expose_mut().into());
+    out
 }
 
 /// `MK = HMAC(CK, label || 0x01)`, `CK' = HMAC(CK, label || 0x02)`.
@@ -301,7 +301,54 @@ fn read_secret(reader: &mut Reader<'_>) -> Result<Secret<32>, Error> {
     Ok(Secret::new(reader.array()?))
 }
 
+fn copy_secret(secret: &Secret<32>) -> Secret<32> {
+    Secret::new(*secret.expose())
+}
+
 impl Session {
+    /// A second copy of the session, for a receive that rolls back. It holds
+    /// what a round trip through [`Session::export`] and [`Session::restore`]
+    /// holds. The pattern names each field, thus a new field does not
+    /// compile until the copy takes it.
+    pub(crate) fn copy(&self) -> Self {
+        let Self {
+            rk,
+            dh_s,
+            dh_r,
+            ck_s,
+            ck_r,
+            hk_s,
+            nhk_s,
+            hk_r,
+            nhk_r,
+            n_s,
+            n_r,
+            pn,
+            send_index,
+            session_tag,
+            skipped,
+            mixed,
+        } = self;
+        Self {
+            rk: copy_secret(rk),
+            dh_s: dh_s.clone(),
+            dh_r: *dh_r,
+            ck_s: ck_s.as_ref().map(copy_secret),
+            ck_r: ck_r.as_ref().map(copy_secret),
+            hk_s: hk_s.as_ref().map(copy_secret),
+            nhk_s: copy_secret(nhk_s),
+            hk_r: hk_r.as_ref().map(copy_secret),
+            nhk_r: copy_secret(nhk_r),
+            n_s: *n_s,
+            n_r: *n_r,
+            pn: *pn,
+            send_index: *send_index,
+            session_tag: *session_tag,
+            skipped: skipped.iter().map(Skipped::copy).collect(),
+            mixed: *mixed,
+        }
+    }
+
     /// Writes the state of the session for the at-rest store. The bytes hold
     /// each key of the session, thus they go into a sealed record only.
     pub(crate) fn export(&self, writer: &mut Writer) -> Result<(), Error> {
@@ -901,9 +948,7 @@ impl Session {
 }
 
 fn take_secret(s: &mut Secret<32>) -> Secret<32> {
-    let out = Secret::new(*s.expose());
-    *s = Secret::zeroed();
-    out
+    core::mem::replace(s, Secret::zeroed())
 }
 
 fn open_header(

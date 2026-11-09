@@ -107,7 +107,10 @@ async fn post_now(
         body.len()
     );
     for (name, value) in headers {
-        head.push_str(&format!("{name}: {value}\r\n"));
+        head.push_str(name);
+        head.push_str(": ");
+        head.push_str(value);
+        head.push_str("\r\n");
     }
     head.push_str("\r\n");
 
@@ -273,13 +276,13 @@ pub fn parse_request(inbound: &[u8], limit: usize) -> Result<Option<Request>, Er
         return Err(Error::Refused);
     };
 
+    // The first pass checks the head with no allocation. A caller parses
+    // again after each partial read, thus the owned headers wait for the body.
     let mut length = 0usize;
-    let mut headers = Vec::new();
-    for line in lines {
+    for line in lines.clone() {
         let Some((name, value)) = line.split_once(':') else {
             return Err(Error::Refused);
         };
-        headers.push((name.trim().to_ascii_lowercase(), value.trim().to_owned()));
         if name.eq_ignore_ascii_case("Transfer-Encoding") {
             return Err(Error::Refused);
         }
@@ -296,6 +299,11 @@ pub fn parse_request(inbound: &[u8], limit: usize) -> Result<Option<Request>, Er
     let Some(body) = inbound.get(body_start..body_start.saturating_add(length)) else {
         return Ok(None);
     };
+
+    let headers = lines
+        .filter_map(|line| line.split_once(':'))
+        .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_owned()))
+        .collect();
     Ok(Some(Request {
         method: method.to_owned(),
         path: path.to_owned(),
@@ -390,8 +398,18 @@ mod tests {
         assert_eq!(request.method, "POST");
         assert_eq!(request.path, "/ohttp");
         assert_eq!(request.body, b"hello");
-        assert_eq!(request.headers[0], ("host".into(), "x".into()));
+        assert_eq!(
+            request.headers,
+            [
+                ("host".into(), "x".into()),
+                ("content-length".into(), "5".into())
+            ]
+        );
         assert!(parse_request(full, 4).is_err());
+
+        // A fault in the head shows before the body is complete.
+        let bad = b"POST / HTTP/1.1\r\nHost x\r\nContent-Length: 5\r\n\r\nhe";
+        assert!(parse_request(bad, 64).is_err());
 
         let chunked = b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
         assert!(parse_request(chunked, 64).is_err());

@@ -11,6 +11,7 @@
 
 use ml_dsa::{EncodedSignature, EncodedVerifyingKey, KeyExport, MlDsa65, Seed};
 use rand_core::TryCryptoRng;
+use zeroize::Zeroize;
 
 use crate::{secret::Secret, Error};
 
@@ -25,7 +26,10 @@ pub struct SigningKey(ml_dsa::SigningKey<MlDsa65>);
 impl SigningKey {
     /// Derives the key from `seed`, as FIPS 204 `KeyGen_internal` does.
     pub fn from_seed(seed: Secret<32>) -> Self {
-        Self(ml_dsa::SigningKey::from_seed(&Seed::from(*seed.expose())))
+        let mut array = Seed::from(*seed.expose());
+        let key = ml_dsa::SigningKey::from_seed(&array);
+        array.zeroize();
+        Self(key)
     }
 
     /// Makes a key from `rng`.

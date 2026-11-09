@@ -6,7 +6,7 @@
 //! to itself and no other member can.
 
 use hkdf::Hkdf;
-use hmac::{digest::KeyInit, Hmac, Mac};
+use hmac::{Hmac, Mac};
 use sha3::{Digest, Sha3_256};
 use subtle::ConstantTimeEq;
 use x25519_dalek::{PublicKey as XPublic, StaticSecret};
@@ -92,9 +92,7 @@ impl PairKey {
     }
 
     fn mac(&self) -> Hmac<Sha3_256> {
-        // A 32-byte key is inside the HMAC key bound, thus this cannot fail.
-        Hmac::<Sha3_256>::new_from_slice(self.0.expose())
-            .unwrap_or_else(|_| Hmac::<Sha3_256>::new(&Default::default()))
+        crate::hash::hmac_sha3_256(self.0.expose())
     }
 
     fn truncate(mac: Hmac<Sha3_256>) -> [u8; TAG_LEN] {

@@ -276,7 +276,10 @@ impl<'a> ContentPlain<'a> {
 
 /// Seals a content record: builds the plaintext, encrypts it under the
 /// record key, and writes the full record at `bucket`.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each argument is one field of the record or of its AEAD input"
+)]
 pub fn seal_content(
     plain: &ContentPlain<'_>,
     record_key: &umbra_crypto::secret::Secret<32>,

@@ -218,20 +218,28 @@ pub fn manifest_response_head(len: usize) -> String {
     )
 }
 
+/// Whether `head` starts with `GET {path} HTTP/1.1\r\n`. The parts compare
+/// one at a time, thus a request check allocates no string.
+fn asks_path(head: &[u8], path: &str) -> bool {
+    head.strip_prefix(b"GET ")
+        .and_then(|rest| rest.strip_prefix(path.as_bytes()))
+        .is_some_and(|rest| rest.starts_with(b" HTTP/1.1\r\n"))
+}
+
 /// Whether a complete request head asks for the relay manifest.
 pub fn asks_manifest(head: &[u8]) -> bool {
-    head.starts_with(format!("GET {MANIFEST_PATH} HTTP/1.1\r\n").as_bytes())
+    asks_path(head, MANIFEST_PATH)
 }
 
 /// Whether the head of a request asks for the key chain (Part 10
 /// `REL-199`).
 pub fn asks_keychain(head: &[u8]) -> bool {
-    head.starts_with(format!("GET {KEYCHAIN_PATH} HTTP/1.1\r\n").as_bytes())
+    asks_path(head, KEYCHAIN_PATH)
 }
 
 /// Whether the head of a request asks for the challenges of the relays.
 pub fn asks_challenges(head: &[u8]) -> bool {
-    head.starts_with(format!("GET {CHALLENGES_PATH} HTTP/1.1\r\n").as_bytes())
+    asks_path(head, CHALLENGES_PATH)
 }
 
 /// Reads the challenges of the relays from the carrier of the manifest, on
@@ -319,7 +327,7 @@ async fn fetch_carried(
         }
     }
 
-    read_carried(&inbound)
+    read_carried(inbound)
 }
 
 /// The body of the answer of a carrier. The status is `200`, and a
@@ -327,7 +335,18 @@ async fn fetch_carried(
 /// The read takes a cut connection as the end of the stream. Thus a body
 /// that the close alone delimits can be a body cut short, and the call
 /// refuses it.
-fn read_carried(inbound: &[u8]) -> Result<Vec<u8>, NativeError> {
+fn read_carried(mut inbound: Vec<u8>) -> Result<Vec<u8>, NativeError> {
+    let body_start = carried_body_start(&inbound)?;
+
+    // A manifest is up to 32 MiB. The body moves to the front of its own
+    // buffer, thus no second buffer of that size exists.
+    inbound.drain(..body_start);
+    Ok(inbound)
+}
+
+/// Checks the head of the answer of a carrier, and returns where the body
+/// starts.
+fn carried_body_start(inbound: &[u8]) -> Result<usize, NativeError> {
     let head_end = inbound
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
@@ -340,7 +359,8 @@ fn read_carried(inbound: &[u8]) -> Result<Vec<u8>, NativeError> {
         return Err(Error::Refused.into());
     }
 
-    let body = inbound.get(head_end.saturating_add(4)..).unwrap_or(&[]);
+    let body_start = head_end.saturating_add(4);
+    let body = inbound.get(body_start..).unwrap_or(&[]);
     let mut is_whole = false;
 
     for line in lines {
@@ -364,7 +384,7 @@ fn read_carried(inbound: &[u8]) -> Result<Vec<u8>, NativeError> {
         return Err(Error::Refused.into());
     }
 
-    Ok(body.to_vec())
+    Ok(body_start)
 }
 
 /// The bytes that a [`Coalesced`] stream holds before it writes. A group of
@@ -483,9 +503,9 @@ impl<S: AsyncWrite + Unpin> Coalesced<S> {
 
         self.written = 0;
         self.held.clear();
-        if self.held.capacity() > HELD_KEPT {
-            self.held = Vec::new();
-        }
+        // The buffer keeps `HELD_KEPT` and not zero, thus the next write does
+        // not grow it again from nothing.
+        self.held.shrink_to(HELD_KEPT);
 
         Poll::Ready(Ok(()))
     }
@@ -1419,20 +1439,44 @@ mod tests {
     #[test]
     fn a_carried_body_that_the_close_alone_ends_is_refused() {
         let whole = format!("{}{}", manifest_response_head(2), "ok");
-        assert_eq!(read_carried(whole.as_bytes()).unwrap(), b"ok");
+        assert_eq!(read_carried(whole.into_bytes()).unwrap(), b"ok");
 
         // A cut connection gives the same bytes as a whole answer here.
         let open = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nok";
-        assert!(read_carried(open).is_err());
+        assert!(read_carried(open.to_vec()).is_err());
 
         let short = format!("{}{}", manifest_response_head(9), "ok");
-        assert!(read_carried(short.as_bytes()).is_err());
+        assert!(read_carried(short.into_bytes()).is_err());
 
         let chunked = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n";
-        assert!(read_carried(chunked).is_err());
+        assert!(read_carried(chunked.to_vec()).is_err());
 
         let absent = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
-        assert!(read_carried(absent).is_err());
+        assert!(read_carried(absent.to_vec()).is_err());
+
+        let empty = manifest_response_head(0).into_bytes();
+        assert_eq!(read_carried(empty).unwrap(), b"");
+    }
+
+    #[test]
+    fn a_request_check_takes_the_exact_path() {
+        let manifest = format!("GET {MANIFEST_PATH} HTTP/1.1\r\nHost: a\r\n\r\n");
+        assert!(asks_manifest(manifest.as_bytes()));
+        assert!(!asks_keychain(manifest.as_bytes()));
+        assert!(!asks_challenges(manifest.as_bytes()));
+
+        let keychain = format!("GET {KEYCHAIN_PATH} HTTP/1.1\r\n\r\n");
+        assert!(asks_keychain(keychain.as_bytes()));
+        let challenges = format!("GET {CHALLENGES_PATH} HTTP/1.1\r\n\r\n");
+        assert!(asks_challenges(challenges.as_bytes()));
+
+        // A longer path, another method, or a cut head does not match.
+        let longer = format!("GET {MANIFEST_PATH}x HTTP/1.1\r\n\r\n");
+        assert!(!asks_manifest(longer.as_bytes()));
+        let post = format!("POST {MANIFEST_PATH} HTTP/1.1\r\n\r\n");
+        assert!(!asks_manifest(post.as_bytes()));
+        let cut = format!("GET {MANIFEST_PATH} HTTP/1.1");
+        assert!(!asks_manifest(cut.as_bytes()));
     }
 
     #[test]

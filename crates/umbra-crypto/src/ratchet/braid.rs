@@ -370,6 +370,47 @@ pub fn bound_skipped(ratchets: &mut [&mut Ratchet], bound: usize) -> Vec<usize> 
 const STORED_VERSION: u8 = 0x01;
 
 impl Braid {
+    /// A second copy of the braid, for a receive that rolls back. It holds
+    /// what a round trip through [`Braid::export`] and [`Braid::restore`]
+    /// holds. The pattern names each field, thus a new field does not
+    /// compile until the copy takes it.
+    fn copy(&self) -> Self {
+        let Self {
+            role,
+            width,
+            epoch,
+            own_dk,
+            material,
+            next_chunk,
+            records_in_epoch,
+            epoch_started_at,
+            complete,
+            own_secret,
+            peer_epoch,
+            collector,
+            peer_ek,
+            peer_secret,
+        } = self;
+        Braid {
+            role: *role,
+            width: *width,
+            epoch: *epoch,
+            own_dk: own_dk.clone(),
+            material: material.clone(),
+            next_chunk: *next_chunk,
+            records_in_epoch: *records_in_epoch,
+            epoch_started_at: *epoch_started_at,
+            complete: *complete,
+            own_secret: own_secret.as_ref().map(|s| Secret::new(*s.expose())),
+            peer_epoch: *peer_epoch,
+            collector: collector.as_ref().map(Collector::copy),
+            peer_ek: *peer_ek,
+            peer_secret: peer_secret
+                .as_ref()
+                .map(|(target, s)| (*target, Secret::new(*s.expose()))),
+        }
+    }
+
     fn export(&self, writer: &mut Writer) -> Result<(), Error> {
         writer.flag(self.role == Role::Initiator);
         writer.u8(self.width.to_byte());
@@ -463,6 +504,16 @@ impl Ratchet {
         self.session.export(&mut writer)?;
         self.braid.export(&mut writer)?;
         Ok(writer.finish())
+    }
+
+    /// A second copy of both ratchets in memory, for a receive that rolls
+    /// back. It holds what a round trip through [`Ratchet::export`] and
+    /// [`Ratchet::restore`] holds, with no encoding and no key generation.
+    fn copy(&self) -> Self {
+        Self {
+            session: self.session.copy(),
+            braid: self.braid.copy(),
+        }
     }
 
     /// Reads the state that [`Ratchet::export`] wrote.
@@ -612,7 +663,7 @@ impl Ratchet {
         rng: &mut R,
         out: &mut [u8],
     ) -> Result<Opened, Error> {
-        let before = self.export()?;
+        let before = self.copy();
         let mut unframed = false;
         let mut opened = self.receive_once(record, now, rng, out, false, &mut unframed);
 
@@ -620,20 +671,15 @@ impl Ratchet {
         // secret waited. The step runs again with the mix, and the body
         // opens under one of the two chains alone.
         if opened.is_err() && unframed {
-            if let Ok(back) = Self::restore(&before) {
-                *self = back;
-                if let Ok(mixed) = self.receive_once(record, now, rng, out, true, &mut unframed) {
-                    opened = Ok(mixed);
-                }
+            *self = before.copy();
+            if let Ok(mixed) = self.receive_once(record, now, rng, out, true, &mut unframed) {
+                opened = Ok(mixed);
             }
         }
 
-        // Bytes that `export` just wrote restore, and the first fault is
-        // the one that the caller gets.
+        // The first fault is the one that the caller gets.
         if opened.is_err() {
-            if let Ok(back) = Self::restore(&before) {
-                *self = back;
-            }
+            *self = before;
         }
 
         opened
@@ -766,6 +812,39 @@ mod tests {
         let again = Ratchet::restore(&bytes).unwrap();
         assert_eq!(*again.export().unwrap(), *bytes);
         again
+    }
+
+    /// The rollback of a receive takes the copy, thus the copy must hold
+    /// each byte that the stored form holds.
+    fn copies_as_it_stores(ratchet: &Ratchet) {
+        assert_eq!(
+            *ratchet.copy().export().unwrap(),
+            *ratchet.export().unwrap()
+        );
+    }
+
+    #[test]
+    fn the_copy_of_a_ratchet_holds_the_stored_form() {
+        let (mut a, mut b, mut rng) = pair(b"copy", Width::W64);
+        copies_as_it_stores(&a);
+        copies_as_it_stores(&b);
+
+        // Skipped keys, a partial codeword, waiting secrets, and mixes.
+        let mut now = 0u64;
+        let late = send(&mut a, &mut rng, b"late", now);
+        for _ in 0..9 {
+            converse(&mut a, &mut b, &mut rng, 1, 23, &mut now);
+            copies_as_it_stores(&a);
+            copies_as_it_stores(&b);
+        }
+        assert!(b.skipped_len() > 0);
+        assert!(a.mixed() >= 1);
+
+        // The copy continues the session as the original does.
+        let mut copy = b.copy();
+        assert_eq!(recv(&mut copy, &mut rng, &late, now).unwrap(), b"late");
+        assert_eq!(recv(&mut b, &mut rng, &late, now).unwrap(), b"late");
+        assert_eq!(*copy.export().unwrap(), *b.export().unwrap());
     }
 
     #[test]

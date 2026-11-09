@@ -34,11 +34,12 @@ pub const PAUSE_WAIT: u64 = 2;
 
 /// One `UMBRA_SESSION` capsule of `control`.
 fn control_capsule(control: &SessionControl, out: &mut [u8]) -> Result<usize, Error> {
-    let mut record = [0u8; 41];
-    let n = control.encode(&mut record)?;
+    // A `SessionOpen` record holds the session secret, thus the record wipes on drop.
+    let mut record = Secret::<41>::zeroed();
+    let n = control.encode(record.expose_mut())?;
     Ok(capsule::encode(
         CapsuleType::Session,
-        record.get(..n).ok_or(Error::Capacity)?,
+        record.expose().get(..n).ok_or(Error::Capacity)?,
         out,
     )?)
 }
@@ -65,11 +66,20 @@ impl ClientLink {
     /// (`WIR-136`, `WIR-231`), and returns the capsule that goes first on
     /// the connection (`WIR-229`).
     pub fn open(id: [u8; 8], secret: Secret<32>, out: &mut [u8]) -> Result<(Self, usize), Error> {
+        // The secret moves into the control and back out, thus no second copy exists.
         let control = SessionControl::Open {
             session_id: id,
-            session_secret: Secret::new(*secret.expose()),
+            session_secret: secret,
         };
         let used = control_capsule(&control, out)?;
+        let SessionControl::Open {
+            session_secret: secret,
+            ..
+        } = control
+        else {
+            return Err(Error::State);
+        };
+
         Ok((
             ClientLink {
                 id,

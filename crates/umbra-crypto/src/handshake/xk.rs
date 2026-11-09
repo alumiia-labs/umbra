@@ -230,7 +230,6 @@ impl Initiator {
     /// `out` needs `FLIGHT1_FIXED + NONCE_LEN + app_1.len() + PAYLOAD_OVERHEAD`
     /// bytes. The coins come from `rng`, which is the hardened generator of
     /// §5.9 on a protocol path.
-    #[allow(clippy::too_many_arguments)]
     pub fn flight1<R: CryptoRng + ?Sized, T: Trace>(
         invitation: &Invitation<'_>,
         range_i: VersionRange,

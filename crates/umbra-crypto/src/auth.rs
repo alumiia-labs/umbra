@@ -5,7 +5,7 @@
 //! holds no proof that a given device wrote a given command (`NET-015`).
 
 use hkdf::Hkdf;
-use hmac::{digest::KeyInit, Hmac, Mac};
+use hmac::{Hmac, Mac};
 use sha3::Sha3_256;
 use subtle::ConstantTimeEq;
 use x25519_dalek::{PublicKey as XPublic, StaticSecret};
@@ -108,9 +108,7 @@ pub fn verify_session_resume(
 }
 
 fn keyed(key: &[u8; 32]) -> Hmac<Sha3_256> {
-    // A 32-byte key is inside the HMAC key bound, thus this cannot fail.
-    Hmac::<Sha3_256>::new_from_slice(key)
-        .unwrap_or_else(|_| Hmac::<Sha3_256>::new(&Default::default()))
+    crate::hash::hmac_sha3_256(key)
 }
 
 #[cfg(test)]

@@ -163,7 +163,7 @@ mod keygen {
 
     use crypto_bigint::U1024;
     use crypto_primes::{random_prime, Flavor};
-    use hmac::{Hmac, KeyInit, Mac};
+    use hmac::{digest::FixedOutput, Hmac, KeyInit, Mac};
     use rand_core::{TryCryptoRng, TryRng};
     use sha3::Sha3_256;
 
@@ -183,15 +183,15 @@ mod keygen {
         type Error = Infallible;
 
         fn try_next_u32(&mut self) -> Result<u32, Infallible> {
-            let mut b = [0u8; 4];
-            self.try_fill_bytes(&mut b)?;
-            Ok(u32::from_le_bytes(b))
+            let mut b = Secret::<4>::zeroed();
+            self.try_fill_bytes(b.expose_mut())?;
+            Ok(u32::from_le_bytes(*b.expose()))
         }
 
         fn try_next_u64(&mut self) -> Result<u64, Infallible> {
-            let mut b = [0u8; 8];
-            self.try_fill_bytes(&mut b)?;
-            Ok(u64::from_le_bytes(b))
+            let mut b = Secret::<8>::zeroed();
+            self.try_fill_bytes(b.expose_mut())?;
+            Ok(u64::from_le_bytes(*b.expose()))
         }
 
         fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Infallible> {
@@ -200,9 +200,12 @@ mod keygen {
                 mac.update(&self.counter.to_be_bytes());
                 self.counter = self.counter.wrapping_add(1);
 
-                let block = mac.finalize().into_bytes();
-                let n = chunk.len().min(block.len());
-                if let (Some(to), Some(from)) = (chunk.get_mut(..n), block.get(..n)) {
+                // The block is input of the secret primes, thus it lives in
+                // a secret that wipes on drop.
+                let mut block = Secret::<32>::zeroed();
+                mac.finalize_into(block.expose_mut().into());
+                let n = chunk.len().min(block.expose().len());
+                if let (Some(to), Some(from)) = (chunk.get_mut(..n), block.expose().get(..n)) {
                     to.copy_from_slice(from);
                 }
             }

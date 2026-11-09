@@ -64,12 +64,12 @@ pub fn seal<R: CryptoRng + ?Sized>(
     let shared = ephemeral.diffie_hellman(&PublicKey::from(*recipient));
     let key = key_of(shared.as_bytes(), &ephemeral_pk, recipient, label)?;
 
-    let mut body = plain.to_vec();
-    let tag = aead::seal_ietf(&key, &[0u8; aead::NONCE_LEN_IETF], &[], &mut body)?;
-
+    // The body seals in place inside the output, thus one buffer serves.
     let mut out = Vec::with_capacity(plain.len().saturating_add(OVERHEAD));
     out.extend_from_slice(&ephemeral_pk);
-    out.extend_from_slice(&body);
+    out.extend_from_slice(plain);
+    let body = out.get_mut(ephemeral_pk.len()..).ok_or(Error::Length)?;
+    let tag = aead::seal_ietf(&key, &[0u8; aead::NONCE_LEN_IETF], &[], body)?;
     out.extend_from_slice(&tag);
     Ok(out)
 }

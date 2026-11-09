@@ -3,7 +3,7 @@
 //! verification. The interpreter runs everywhere, and the JIT of the
 //! `hashx` crate stays off.
 
-use equix::{EquiXBuilder, RuntimeOption, Solution};
+use equix::{EquiXBuilder, RuntimeOption, Solution, SolverMemory};
 use rand_core::TryCryptoRng;
 
 use crate::{hash::sha3_256, labels, Error};
@@ -46,20 +46,60 @@ fn builder() -> EquiXBuilder {
     b
 }
 
+/// A solver that keeps its Equi-X memory across attempts.
+///
+/// The memory is `SolverMemory::SIZE` bytes on the heap, some megabytes. A
+/// caller that makes many attempts keeps one solver, thus an attempt
+/// allocates no new memory.
+pub struct Solver {
+    builder: EquiXBuilder,
+    memory: SolverMemory,
+}
+
+impl Solver {
+    /// A solver with new memory.
+    pub fn new() -> Self {
+        Self {
+            builder: builder(),
+            memory: SolverMemory::new(),
+        }
+    }
+
+    /// One attempt at `nonce`: the first Equi-X solution of the challenge
+    /// that passes, if any.
+    pub fn attempt(
+        &mut self,
+        verifier_id: &[u8; 32],
+        seed: &[u8; 32],
+        nonce: &[u8; NONCE_LEN],
+        effort: u32,
+    ) -> Option<[u8; SOLUTION_LEN]> {
+        let challenge = challenge_string(verifier_id, seed, nonce, effort);
+        let instance = self.builder.build(&challenge).ok()?;
+        let solutions = instance.solve_with_memory(&mut self.memory);
+        solutions
+            .iter()
+            .map(Solution::to_bytes)
+            .find(|s| passes(&challenge, s, effort))
+    }
+}
+
+impl Default for Solver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// One attempt at `nonce`: the first Equi-X solution of the challenge
-/// that passes, if any.
+/// that passes, if any. Each call allocates new solver memory; a caller
+/// that makes many attempts uses a [`Solver`].
 pub fn attempt(
     verifier_id: &[u8; 32],
     seed: &[u8; 32],
     nonce: &[u8; NONCE_LEN],
     effort: u32,
 ) -> Option<[u8; SOLUTION_LEN]> {
-    let challenge = challenge_string(verifier_id, seed, nonce, effort);
-    let solutions = builder().solve(&challenge).ok()?;
-    solutions
-        .iter()
-        .map(Solution::to_bytes)
-        .find(|s| passes(&challenge, s, effort))
+    Solver::new().attempt(verifier_id, seed, nonce, effort)
 }
 
 /// Solves a challenge: draws a nonce from `rng` for each attempt, at most
@@ -71,10 +111,11 @@ pub fn solve<R: TryCryptoRng + ?Sized>(
     max_attempts: u32,
     rng: &mut R,
 ) -> Result<([u8; NONCE_LEN], [u8; SOLUTION_LEN]), Error> {
+    let mut solver = Solver::new();
     for _ in 0..max_attempts {
         let mut nonce = [0u8; NONCE_LEN];
         rng.try_fill_bytes(&mut nonce).map_err(|_| Error::Rng)?;
-        if let Some(solution) = attempt(verifier_id, seed, &nonce, effort) {
+        if let Some(solution) = solver.attempt(verifier_id, seed, &nonce, effort) {
             return Ok((nonce, solution));
         }
     }
@@ -180,5 +221,21 @@ mod tests {
         assert_eq!(nonce, h16("0d5b3e3fe15d1772b5a97b1a32f0d244"));
         assert_eq!(solution, h16("921b1b8a361cb2f7be9bcde5e8b1e3fa"));
         verify(&[9; 32], &[8; 32], &nonce, 5, &solution).unwrap();
+    }
+
+    /// The memory of one attempt must not change the result of the next.
+    #[test]
+    fn a_reused_solver_gives_the_result_of_a_new_one() {
+        let mut solver = Solver::new();
+        for i in 0u8..24 {
+            let verifier = [i; 32];
+            let seed = [i ^ 0x33; 32];
+            let nonce = [i.wrapping_mul(5); NONCE_LEN];
+            let effort = u32::from(i % 4);
+            assert_eq!(
+                solver.attempt(&verifier, &seed, &nonce, effort),
+                attempt(&verifier, &seed, &nonce, effort)
+            );
+        }
     }
 }

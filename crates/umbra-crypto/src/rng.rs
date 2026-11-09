@@ -9,13 +9,13 @@
 
 use core::convert::Infallible;
 
-use hmac::{Hmac, KeyInit, Mac};
+use hmac::{Hmac, Mac};
 use rand_core::{TryCryptoRng, TryRng};
 use sha3::Sha3_256;
 
 use zeroize::Zeroize;
 
-use crate::secret::Secret;
+use crate::{hash::hmac_sha3_256, secret::Secret};
 
 /// A generator that hardens an inner CSPRNG under `K_rng_harden`.
 ///
@@ -46,11 +46,7 @@ impl<'a, R: TryCryptoRng> HardenedRng<'a, R> {
         context: &'static [u8],
         call: [u8; CALL_LEN],
     ) -> Self {
-        // HMAC accepts a key of any length, thus the Result never carries Err.
-        let mac = match Hmac::<Sha3_256>::new_from_slice(key.expose()) {
-            Ok(mac) => mac,
-            Err(_) => Hmac::<Sha3_256>::new(&Default::default()),
-        };
+        let mac = hmac_sha3_256(key.expose());
         Self {
             inner,
             mac,
