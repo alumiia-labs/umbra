@@ -6,6 +6,7 @@
 //! runs. A proof of work of an issuance takes some seconds.
 
 use std::{
+    borrow::Borrow,
     collections::BTreeMap,
     sync::Arc,
     time::{Duration, Instant},
@@ -409,34 +410,39 @@ impl DirectoryLink {
     }
 
     /// Registers a label under `token` (`DIS-101`), with the lease of a
-    /// timed link (`DIS-172`). The registration challenge proves `key`
-    /// (`DIS-197`), and it names the version of the entry that `entry_of`
-    /// writes. `keep` runs before the registration leaves, and a fault of
-    /// it sends nothing (`DIS-205`). The result is that version, or the
-    /// fault with what it left at the directory.
+    /// timed link (`DIS-172`). The registration challenge proves the key
+    /// that `key_of` loads (`DIS-197`), and it names the version of the
+    /// entry that `entry_of` writes. `keep` runs before the registration
+    /// leaves, and a fault of it sends nothing (`DIS-205`). The result is
+    /// that version, or the fault with what it left at the directory.
     #[allow(clippy::too_many_arguments)]
     fn register(
         &self,
         token: &[u8],
         input: &[u8],
         name: &[u8],
-        key: &KeyPair,
-        entry_of: impl FnOnce(u32) -> Result<Vec<u8>, FfiError>,
+        key_of: impl Fn() -> Result<KeyPair, FfiError>,
+        entry_of: impl FnOnce(&KeyPair, u32) -> Result<Vec<u8>, FfiError>,
         lease: Option<u32>,
         keep: impl FnOnce(u32) -> Result<(), FfiError>,
     ) -> Result<u32, (WriteFault, FfiError)> {
         // A fault before the registration request leaves registers nothing.
         let (body, version_new) = (|| {
-            let challenge = self.register_challenge(input, key, token)?;
+            let public = key_of()?.public().to_bytes();
+            let challenge = self.register_challenge(input, &public, token)?;
             let (challenge, purpose) =
                 dirclient::parse_register_challenge(&challenge).map_err(|_| FfiError::Malformed)?;
             let Purpose::Write { version_new } = purpose else {
                 return Err(FfiError::Malformed);
             };
 
-            let entry = entry_of(version_new)?;
-            let ans = answer(purpose, key, name, &challenge, Some(&entry))
+            // IMP-127: the key loads after the challenge and drops before
+            // the next request, thus a lock in a wait finds no key in RAM.
+            let key = key_of()?;
+            let entry = entry_of(&key, version_new)?;
+            let ans = answer(purpose, &key, name, &challenge, Some(&entry))
                 .map_err(|_| FfiError::Unverified)?;
+            drop(key);
             let body = dirclient::register_body(token, input, &entry, &ans, lease)
                 .map_err(|_| FfiError::Malformed)?;
 
@@ -465,15 +471,14 @@ impl DirectoryLink {
     fn register_challenge(
         &self,
         input: &[u8],
-        key: &KeyPair,
+        key: &[u8; ENTRY_PK_LEN],
         token: &[u8],
     ) -> Result<Vec<u8>, FfiError> {
-        let key = key.public().to_bytes();
-        let paid = dirclient::register_challenge_body(input, &key, Some(token))
+        let paid = dirclient::register_challenge_body(input, key, Some(token))
             .map_err(|_| FfiError::Malformed)?;
         match self.send(Kind::Challenge, &paid) {
             Err(FfiError::Malformed) => {
-                let body = dirclient::register_challenge_body(input, &key, None)
+                let body = dirclient::register_challenge_body(input, key, None)
                     .map_err(|_| FfiError::Malformed)?;
                 self.send(Kind::Challenge, &body)
             }
@@ -484,11 +489,11 @@ impl DirectoryLink {
     /// Writes the next version of a label under the key of the version
     /// that `version` names (`DIS-093`), with what a fault left at the
     /// directory. A tombstone entry retires the label (`DIS-171`).
-    fn write_staged(
+    fn write_staged<K: Borrow<KeyPair>>(
         &self,
         input: &[u8],
         name: &[u8],
-        key: &KeyPair,
+        key_of: impl FnOnce() -> Result<K, FfiError>,
         version: u32,
         entry: &[u8],
     ) -> Result<(), (WriteFault, FfiError)> {
@@ -498,8 +503,13 @@ impl DirectoryLink {
             let challenge = self.send(Kind::Challenge, &body)?;
             let (challenge, purpose) =
                 dirclient::parse_challenge(&challenge, version).map_err(|_| FfiError::Malformed)?;
-            let ans = answer(purpose, key, name, &challenge, Some(entry))
+
+            // IMP-127: the key loads after the challenge and drops before
+            // the write, thus a lock in a wait finds no key in RAM.
+            let key = key_of()?;
+            let ans = answer(purpose, key.borrow(), name, &challenge, Some(entry))
                 .map_err(|_| FfiError::Unverified)?;
+            drop(key);
             dirclient::write_body(input, &ans, entry).map_err(|_| FfiError::Malformed)
         })()
         .map_err(|error| (WriteFault::Refused, error))?;
@@ -550,19 +560,27 @@ impl DirectoryLink {
         &self,
         input: &[u8],
         name: &[u8],
-        key: &KeyPair,
+        key_of: impl FnOnce() -> Result<KeyPair, FfiError>,
         blob: &[u8],
     ) -> Result<(), FfiError> {
         let body = dirclient::blob_challenge_body(input).map_err(|_| FfiError::Malformed)?;
         let challenge = self.send(Kind::Challenge, &body)?;
-        let ans = answer(Purpose::Blob, key, name, &challenge, Some(blob))
+
+        // IMP-127: the key loads after the challenge and drops at once.
+        let ans = answer(Purpose::Blob, &key_of()?, name, &challenge, Some(blob))
             .map_err(|_| FfiError::Unverified)?;
         let body = dirclient::blob_body(input, &ans, blob).map_err(|_| FfiError::Malformed)?;
         self.send(Kind::Blob, &body).map(|_| ())
     }
 
-    /// Renews the lease of a label under its key (`DIS-040`).
-    pub fn renew(&self, input: &[u8], name: &[u8], key: &KeyPair) -> Result<(), FfiError> {
+    /// Renews the lease of a label under the key that `key_of` loads
+    /// (`DIS-040`).
+    pub fn renew(
+        &self,
+        input: &[u8],
+        name: &[u8],
+        key_of: impl FnOnce() -> Result<KeyPair, FfiError>,
+    ) -> Result<(), FfiError> {
         let body = dirclient::challenge_body(true, input).map_err(|_| FfiError::Malformed)?;
         let challenge = self.send(Kind::Challenge, &body)?;
         let (challenge, purpose) =
@@ -571,7 +589,9 @@ impl DirectoryLink {
             return Err(FfiError::Malformed);
         }
 
-        let ans = answer(purpose, key, name, &challenge, None).map_err(|_| FfiError::Unverified)?;
+        // IMP-127: the key loads after the challenge and drops at once.
+        let ans = answer(purpose, &key_of()?, name, &challenge, None)
+            .map_err(|_| FfiError::Unverified)?;
         let body = dirclient::renew_body(input, &ans).map_err(|_| FfiError::Malformed)?;
         self.send(Kind::Renew, &body).map(|_| ())
     }
@@ -831,6 +851,22 @@ impl Handle {
         })
     }
 
+    /// A loader of the key of an entry. A call loads the key just before its
+    /// signature. A lock during a network step thus finds no key in RAM, and
+    /// the next load gives `Locked` (`IMP-127`).
+    fn entry_key_of(
+        &self,
+        kind: EntryKind,
+        index: u32,
+        rotation: u32,
+    ) -> impl Fn() -> Result<KeyPair, FfiError> + '_ {
+        move || {
+            Ok(locked(&self.inner)
+                .client
+                .entry_key(kind, index, rotation)?)
+        }
+    }
+
     /// Makes a rendezvous queue and waits for its address.
     fn new_rendezvous(&self) -> Result<([u8; 32], Vec<u8>), FfiError> {
         let tag = {
@@ -929,13 +965,10 @@ impl Handle {
 
         let registered = (|| {
             // The proof of work of the token takes seconds. The entry key
-            // leaves the store after it, thus a lock in that time finds no
-            // key in memory, and the challenge lives through no proof.
+            // leaves the store only for each signature after it, thus a lock
+            // in that time finds no key in memory, and the challenge lives
+            // through no proof.
             let token = link.token().map_err(|error| (WriteFault::Refused, error))?;
-            let key = locked(&self.inner)
-                .client
-                .entry_key(kind, index, 0)
-                .map_err(|error| (WriteFault::Refused, FfiError::from(error)))?;
             let address = QueueAddress::parse(&rendezvous)
                 .map_err(|_| (WriteFault::Refused, FfiError::Malformed))?;
             let keep = |version: u32| -> Result<(), FfiError> {
@@ -948,8 +981,8 @@ impl Handle {
                 &token,
                 &label,
                 &name,
-                &key,
-                |version| entry_of(&key, address, version),
+                self.entry_key_of(kind, index, 0),
+                |key, version| entry_of(key, address, version),
                 lease,
                 keep,
             )
@@ -1047,7 +1080,7 @@ impl Handle {
     /// the welcome text, sealed under the key of the fragment of its link
     /// (`DIS-141`, `DIS-176`). A device with no handle writes nothing.
     fn publish_profile_blob(&self, link: &DirectoryLink) -> Result<(), FfiError> {
-        let (entry, key, blob) = {
+        let (entry, blob) = {
             let mut inner = locked(&self.inner);
             if !inner.client.profile_blob_due()? {
                 return Ok(());
@@ -1086,14 +1119,11 @@ impl Handle {
             let blob = handle
                 .seal_blob(&fragment, nonce, &plain)
                 .map_err(|_| FfiError::Malformed)?;
-
-            let key = inner
-                .client
-                .entry_key(EntryKind::Handle, entry.index, entry.rotation)?;
-            (entry, key, blob)
+            (entry, blob)
         };
 
-        link.put_blob(&entry.label, &entry.name, &key, &blob)?;
+        let key_of = self.entry_key_of(EntryKind::Handle, entry.index, entry.rotation);
+        link.put_blob(&entry.label, &entry.name, key_of, &blob)?;
         Ok(locked(&self.inner)
             .client
             .set_profile_blob_due(false, &mut OsRng)?)
@@ -1104,9 +1134,12 @@ impl Handle {
     /// a tombstone whose answer did not come shows at the upkeep as a
     /// version of this device, and not as a takeover (`DIS-205`).
     fn retire(&self, link: &DirectoryLink, entry: &Published) -> Result<(), FfiError> {
-        let key = locked(&self.inner)
-            .client
-            .entry_key(entry.kind, entry.index, entry.rotation)?;
+        // A locked client sends no challenge (`IMP-127`).
+        if !locked(&self.inner).client.is_unlocked() {
+            return Err(FfiError::Locked);
+        }
+
+        let key_of = self.entry_key_of(entry.kind, entry.index, entry.rotation);
         let version = entry.version.checked_add(1).ok_or(FfiError::TooLong)?;
 
         let tombstone = match entry.kind {
@@ -1146,7 +1179,7 @@ impl Handle {
                 .put_published(&marked, &mut OsRng)?;
         }
 
-        match link.write_staged(&entry.label, &entry.name, &key, entry.version, &tombstone) {
+        match link.write_staged(&entry.label, &entry.name, key_of, entry.version, &tombstone) {
             // A label that the directory tombstoned already, or holds no
             // more, is retired.
             Ok(()) | Err((_, FfiError::NotFound | FfiError::Stale)) => self.retired(entry),
@@ -1257,9 +1290,7 @@ impl Handle {
         now: u64,
     ) -> Result<(), FfiError> {
         let version = entry.version.checked_add(1).ok_or(FfiError::TooLong)?;
-        let key = locked(&self.inner)
-            .client
-            .entry_key(entry.kind, entry.index, entry.rotation)?;
+        let key_of = self.entry_key_of(entry.kind, entry.index, entry.rotation);
 
         let (queue, rendezvous) = self.new_rendezvous()?;
         let rotated = Published {
@@ -1272,7 +1303,7 @@ impl Handle {
             ..entry.clone()
         };
 
-        self.write_version(link, entry, &rotated, &key, &key, entry.version)
+        self.write_version(link, entry, &rotated, &key_of, &key_of, entry.version)
     }
 
     /// Moves an entry from `before` to `after`, its next version on a new
@@ -1289,17 +1320,20 @@ impl Handle {
     /// (`DEV-306`). The key of `before` signs this write, and it signs the
     /// write again after a fault. Thus its root stays until the log shows
     /// `after` (`Client::confirm_published`). A refusal thus puts back the
-    /// exact state before the call.
+    /// exact state before the call. `signer_of` and `key_of` load each key
+    /// just before its use.
     fn write_version(
         &self,
         link: &DirectoryLink,
         before: &Published,
         after: &Published,
-        signer: &KeyPair,
-        key: &KeyPair,
+        signer_of: impl FnOnce() -> Result<KeyPair, FfiError>,
+        key_of: impl FnOnce() -> Result<KeyPair, FfiError>,
         over: u32,
     ) -> Result<(), FfiError> {
-        let kept = entry_bytes(after, key).and_then(|bytes| {
+        let kept = key_of().and_then(|key| {
+            let bytes = entry_bytes(after, &key)?;
+            drop(key);
             locked(&self.inner)
                 .client
                 .put_published(after, &mut OsRng)?;
@@ -1313,7 +1347,7 @@ impl Handle {
             }
         };
 
-        match link.write_staged(&before.label, &before.name, signer, over, &bytes) {
+        match link.write_staged(&before.label, &before.name, signer_of, over, &bytes) {
             Ok(()) => Ok(()),
             // The log holds the version before for certain, thus the store
             // goes back to it. A store that does not go back, at a lock,
@@ -1368,7 +1402,13 @@ impl Handle {
         };
 
         let bytes = entry_bytes(entry, &key)?;
-        match link.write_staged(&entry.label, &entry.name, signer, shown.version, &bytes) {
+        match link.write_staged(
+            &entry.label,
+            &entry.name,
+            || Ok(signer),
+            shown.version,
+            &bytes,
+        ) {
             // The next look waits for the epoch of this write.
             Ok(()) | Err((WriteFault::Unknown, _)) => {
                 entry.queue_since = now;
@@ -1431,11 +1471,11 @@ impl Handle {
                     .client
                     .entry_key(EntryKind::Handle, entry.index, rotation)?;
             if key.public().to_bytes() == shown.hk_pub {
-                matched = Some((rotation, key));
+                matched = Some(rotation);
                 break;
             }
         }
-        let Some((rotation, key)) = matched else {
+        let Some(rotation) = matched else {
             done(self);
             return Ok(false);
         };
@@ -1453,7 +1493,8 @@ impl Handle {
             ..entry.clone()
         };
 
-        self.write_version(link, entry, &found, &key, &key, version)?;
+        let key_of = self.entry_key_of(EntryKind::Handle, entry.index, rotation);
+        self.write_version(link, entry, &found, &key_of, &key_of, version)?;
         entry.rotation = found.rotation;
         entry.version = found.version;
         entry.queue = found.queue;
@@ -1689,11 +1730,13 @@ impl Handle {
                 continue;
             }
 
-            let key =
-                locked(&self.inner)
-                    .client
-                    .entry_key(entry.kind, entry.index, entry.rotation)?;
-            if link.renew(&entry.label, &entry.name, &key).is_ok() {
+            // A locked client sends no challenge, and the upkeep ends.
+            if !locked(&self.inner).client.is_unlocked() {
+                return Err(FfiError::Locked);
+            }
+
+            let key_of = self.entry_key_of(entry.kind, entry.index, entry.rotation);
+            if link.renew(&entry.label, &entry.name, key_of).is_ok() {
                 let renewed = Published {
                     renewed_at: now,
                     ..entry
@@ -1829,10 +1872,12 @@ impl Handle {
     pub fn create_public_link(&self, valid_seconds: u64) -> Result<PublicLink, FfiError> {
         let link = self.directory_link()?;
         let index = locked(&self.inner).client.take_address_index(&mut OsRng)?;
-        let key = locked(&self.inner)
+        // The key drops here, and the publish loads it for each signature.
+        let address_pk = locked(&self.inner)
             .client
-            .entry_key(EntryKind::Address, index, 0)?;
-        let address_pk = key.public().to_bytes();
+            .entry_key(EntryKind::Address, index, 0)?
+            .public()
+            .to_bytes();
         let address = address::address_of(&address_pk);
 
         let expires_at = match valid_seconds {
@@ -1967,17 +2012,8 @@ impl Handle {
             .ok_or(FfiError::NotFound)?;
 
         let rotation = entry.rotation.checked_add(1).ok_or(FfiError::TooLong)?;
-        let (old, new) = {
-            let inner = locked(&self.inner);
-            (
-                inner
-                    .client
-                    .entry_key(EntryKind::Handle, entry.index, entry.rotation)?,
-                inner
-                    .client
-                    .entry_key(EntryKind::Handle, entry.index, rotation)?,
-            )
-        };
+        let old_of = self.entry_key_of(EntryKind::Handle, entry.index, entry.rotation);
+        let new_of = self.entry_key_of(EntryKind::Handle, entry.index, rotation);
 
         let version = entry.version.checked_add(1).ok_or(FfiError::TooLong)?;
         let (queue, rendezvous) = self.new_rendezvous()?;
@@ -1992,7 +2028,7 @@ impl Handle {
             pending: None,
             ..entry.clone()
         };
-        self.write_version(&link, &entry, &rotated, &old, &new, entry.version)?;
+        self.write_version(&link, &entry, &rotated, old_of, new_of, entry.version)?;
 
         // A queue still in its grace ends now: one queue waits at a time.
         if let Some((previous, _)) = entry.previous {
@@ -2141,9 +2177,16 @@ impl Handle {
             return Err(FfiError::Offline);
         }
 
-        let token = inner.client.take_token(epoch_number(unix_now()))?;
+        let epoch = epoch_number(unix_now());
+        let token = inner.client.take_token(epoch)?;
         let bridge = inner.bridge.as_ref().ok_or(FfiError::Offline)?;
-        bridge.hello(entry_pk.to_vec(), encoded, profile, token)?;
+        if let Err(error) = bridge.hello(entry_pk.to_vec(), encoded, profile, token.clone()) {
+            // The run took no hello, thus its token goes back to the store.
+            if let Some(token) = token {
+                let _ = inner.client.put_tokens(epoch, &[token], &mut OsRng);
+            }
+            return Err(error.into());
+        }
 
         if let Some((input, resolved)) = to_hold {
             inner

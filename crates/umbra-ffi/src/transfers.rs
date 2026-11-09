@@ -305,7 +305,7 @@ fn fail_upload(
     updates: &mpsc::UnboundedSender<TransferUpdate>,
     tag: u64,
 ) {
-    crate::devlog::line(format!("transfers: tag {tag} failed apart from a step"));
+    crate::devlog::format_line!("transfers: tag {tag} failed apart from a step");
     end_transfer(node, active, tag);
     classes.remove(&tag);
     let _ = updates.send(TransferUpdate::Failed { tag });
@@ -591,7 +591,7 @@ pub async fn run_transfers(
                 }
 
                 for tag in failed {
-                    crate::devlog::line(format!("transfers: tag {tag} failed at a tick"));
+                    crate::devlog::format_line!("transfers: tag {tag} failed at a tick");
                     end_transfer(&mut node, &mut active, tag);
                     classes.remove(&tag);
                     let _ = updates.send(TransferUpdate::Failed { tag });
@@ -754,7 +754,7 @@ pub async fn run_transfers(
                     }
 
                     let update = step.unwrap_or_else(|error| {
-                        crate::devlog::line(format!("transfers: tag {tag} failed: {error:?}"));
+                        crate::devlog::format_line!("transfers: tag {tag} failed: {error:?}");
                         TransferUpdate::Failed { tag }
                     });
 
@@ -1015,11 +1015,11 @@ pub async fn run_transfers(
     if let Some(capsule) = node.close() {
         let _ = tokio::time::timeout(Duration::from_secs(1), link.send(&capsule)).await;
     }
-    crate::devlog::line(format!(
+    crate::devlog::format_line!(
         "transfers: the run ended with {} open and {} waiting",
         active.len(),
         early.len()
-    ));
+    );
 
     // The circuits of the task end with it.
     if !shown_chains.is_empty() {

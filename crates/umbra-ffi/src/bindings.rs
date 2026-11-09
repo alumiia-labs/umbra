@@ -209,14 +209,13 @@ impl MediaSource {
             .map_or(0, |bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX))
     }
 
-    /// At most `len` bytes from `offset`. A read after the end gives none,
-    /// and a read after a lock closes the source and fails.
+    /// At most `len` bytes from `offset`. A read after the end gives none.
+    /// A lock closes the source, and a read after it fails.
     pub fn read_at(&self, offset: u64, len: u32) -> Result<Vec<u8>, FfiError> {
-        let is_open = self
-            .handle
-            .upgrade()
-            .is_some_and(|handle| locked(&handle.inner).client.is_unlocked());
-        if !is_open {
+        // Each lock releases each source under the lock of the handle state
+        // (`Inner::stop_network_if_locked`), thus a read takes no such lock.
+        // A source whose handle is gone closes here.
+        if self.handle.strong_count() == 0 {
             self.release();
             return Err(FfiError::Locked);
         }
@@ -1873,6 +1872,13 @@ struct Inner {
     /// wipes the plaintext in them (`IMP-127`).
     media: Vec<Weak<MediaSource>>,
     drafts: Vec<Weak<DraftHandle>>,
+    /// The rows of a restore and the snapshot of a link that the platform
+    /// may hold. They hold the root seed, and a lock wipes them (`IMP-127`).
+    restored: Weak<Restored>,
+    linked: Weak<Linked>,
+    /// A commit can have made work for the pumps, and the next update of
+    /// the network pumps, also one that makes no work by itself.
+    pumps_due: bool,
     /// The number of the run of the network, which each connect moves.
     run: u64,
     /// The newest challenge of each relay, from the carrier of the manifest
@@ -2146,10 +2152,12 @@ enum GroupWork {
 impl Inner {
     /// The privacy mode of the conversation of a message.
     fn mode_of_message(&self, message: &crate::MsgRef) -> umbra_core::session::node::DelayClass {
+        // A fault of the store gives the strictest mode, thus a Private
+        // conversation never falls to a weaker one.
         self.client
             .conversation_of_message(message)
             .and_then(|conversation| self.client.privacy_mode(conversation))
-            .unwrap_or_default()
+            .unwrap_or(umbra_core::session::node::DelayClass::Private)
     }
 
     /// Gives each file job of the store to the transfer task (Part 12
@@ -2432,11 +2440,8 @@ impl Inner {
                     tag,
                     relay: replica.relay,
                     group_queue_id: replica.group_queue_id,
-                    write: umbra_crypto::secret::Secret::new(*job.write.expose()),
-                    fallback: job
-                        .fallback
-                        .as_ref()
-                        .map(|held| umbra_crypto::secret::Secret::new(*held.expose())),
+                    write: crate::runtime::copy_secret(&job.write),
+                    fallback: job.fallback.as_ref().map(crate::runtime::copy_secret),
                     record: job.record.clone(),
                 });
             }
@@ -2812,12 +2817,12 @@ impl Inner {
         }
 
         match &update {
-            GroupUpdate::Posted { tag, .. } => crate::devlog::line(format!("group {tag}: posted")),
+            GroupUpdate::Posted { tag, .. } => crate::devlog::format_line!("group {tag}: posted"),
             GroupUpdate::Failed { tag, reason } => {
-                crate::devlog::line(format!("group {tag}: failed {reason:?}"));
+                crate::devlog::format_line!("group {tag}: failed {reason:?}");
             }
             GroupUpdate::Created { tag, .. } => {
-                crate::devlog::line(format!("group {tag}: created"))
+                crate::devlog::format_line!("group {tag}: created");
             }
             _ => {}
         }
@@ -3292,7 +3297,6 @@ impl Inner {
 
     fn send_dead_work(&mut self, step: crate::client::DeadWork) {
         use crate::client::DeadWork;
-        use umbra_crypto::secret::Secret;
 
         match step {
             DeadWork::Rotate { contact } => {
@@ -3319,7 +3323,7 @@ impl Inner {
                 let tag = self.next_tag(TransferWork::DeadWrite {
                     conversation,
                     week,
-                    cred: Secret::new(*cred.expose()),
+                    cred: crate::runtime::copy_secret(&cred),
                 });
                 self.send_transfer(TransferCommand::WriteHandle {
                     tag,
@@ -3569,21 +3573,27 @@ impl Inner {
             _ => {}
         }
 
-        crate::devlog::line(match &update {
+        // A release build formats no line. The faults, an erasure, and the
+        // chains end here.
+        let step = match &update {
             TransferUpdate::Progress { tag, done, total } => {
-                format!("transfer {tag}: {done} of {total}")
+                crate::devlog::format_line!("transfer {tag}: {done} of {total}");
+                None
             }
-            TransferUpdate::Uploaded { tag, .. } => format!("transfer {tag}: uploaded"),
-            TransferUpdate::Downloaded { tag, .. } => format!("transfer {tag}: downloaded"),
-            TransferUpdate::HandleWritten { tag, .. } => format!("transfer {tag}: handle written"),
-            TransferUpdate::HandleRead { tag, .. } => format!("transfer {tag}: handle read"),
-            TransferUpdate::Failed { tag } => format!("transfer {tag}: failed"),
-            TransferUpdate::Interrupted { tag } => format!("transfer {tag}: interrupted"),
-            TransferUpdate::Gone { tag } => format!("transfer {tag}: gone"),
+            TransferUpdate::Uploaded { tag, .. } => Some((*tag, "uploaded")),
+            TransferUpdate::Downloaded { tag, .. } => Some((*tag, "downloaded")),
+            TransferUpdate::HandleWritten { tag, .. } => Some((*tag, "handle written")),
+            TransferUpdate::HandleRead { tag, .. } => Some((*tag, "handle read")),
+            TransferUpdate::Failed { tag } => Some((*tag, "failed")),
+            TransferUpdate::Interrupted { tag } => Some((*tag, "interrupted")),
+            TransferUpdate::Gone { tag } => Some((*tag, "gone")),
             TransferUpdate::Faults(_)
             | TransferUpdate::Erased { .. }
             | TransferUpdate::Chains(_) => return,
-        });
+        };
+        if let Some((tag, step)) = step {
+            crate::devlog::format_line!("transfer {tag}: {step}");
+        }
 
         // NET-320: a file whose run ended goes again in the next run, from
         // its stored state; each other work takes the end as a failure, and
@@ -3689,50 +3699,51 @@ impl Inner {
                 chunks,
                 answered,
             } => {
-                let work = transfer_tags.remove(&tag);
-                if let Some(TransferWork::RestoreRoot { week }) = &work {
-                    restore_step = Some(RestoreStep::Root {
-                        week: *week,
-                        chunks: chunks.clone(),
-                        answered,
-                    });
-                }
-
-                if let Some(TransferWork::DeadRead {
-                    conversation,
-                    week,
-                    blob_key,
-                }) = work
-                {
-                    // A relay that serves bytes that do not open stops no
-                    // read: the first chunk that opens names the address.
-                    let address = chunks.iter().find_map(|chunk| {
-                        umbra_core::session::dead::open_blob(&blob_key, chunk).ok()
-                    });
-                    let contact = client.contact_id_of(conversation);
-                    if let (Some(address), Ok(contact), Some(running)) =
-                        (address, contact, bridge.as_mut())
-                    {
-                        let contact = umbra_core::session::node::ContactId(contact);
-
-                        // The channel keeps its address, its row, and its
-                        // blob, and no record goes again. A party with the
-                        // pairwise identity and no ratchet can write a
-                        // blob. The node sends the record of `NET-191` to
-                        // the candidate, one time. No record of the peer
-                        // makes the candidate the address of the channel.
-                        // The peer that reads the candidate queue answers
-                        // with its own record of kind `0x33`, and that
-                        // record moves the channel (`Update::PeerMoved`).
-                        // The blob of the later week names the candidate,
-                        // and the candidate of a channel that lives again
-                        // ends here.
-                        if let Ok(Some((dead, sent))) =
-                            client.hold_candidate_of(conversation, &address, week, &mut OsRng)
+                // Each kind of work is one alone, thus the chunks move.
+                match transfer_tags.remove(&tag) {
+                    Some(TransferWork::RestoreRoot { week }) => {
+                        restore_step = Some(RestoreStep::Root {
+                            week,
+                            chunks,
+                            answered,
+                        });
+                    }
+                    Some(TransferWork::DeadRead {
+                        conversation,
+                        week,
+                        blob_key,
+                    }) => {
+                        // A relay that serves bytes that do not open stops no
+                        // read: the first chunk that opens names the address.
+                        let address = chunks.iter().find_map(|chunk| {
+                            umbra_core::session::dead::open_blob(&blob_key, chunk).ok()
+                        });
+                        let contact = client.contact_id_of(conversation);
+                        if let (Some(address), Ok(contact), Some(running)) =
+                            (address, contact, bridge.as_mut())
                         {
-                            let _ = running.peer_moved(contact, address, dead, sent);
+                            let contact = umbra_core::session::node::ContactId(contact);
+
+                            // The channel keeps its address, its row, and its
+                            // blob, and no record goes again. A party with the
+                            // pairwise identity and no ratchet can write a
+                            // blob. The node sends the record of `NET-191` to
+                            // the candidate, one time. No record of the peer
+                            // makes the candidate the address of the channel.
+                            // The peer that reads the candidate queue answers
+                            // with its own record of kind `0x33`, and that
+                            // record moves the channel (`Update::PeerMoved`).
+                            // The blob of the later week names the candidate,
+                            // and the candidate of a channel that lives again
+                            // ends here.
+                            if let Ok(Some((dead, sent))) =
+                                client.hold_candidate_of(conversation, &address, week, &mut OsRng)
+                            {
+                                let _ = running.peer_moved(contact, address, dead, sent);
+                            }
                         }
                     }
+                    _ => {}
                 }
             }
             TransferUpdate::Uploaded { tag, uploaded } => match transfer_tags.remove(&tag) {
@@ -4109,130 +4120,135 @@ impl Inner {
     }
 
     fn next_event(&mut self) -> Option<FfiEvent> {
-        if self.client.is_unlocked() {
-            if let Some(message) = self.progress_events.pop_front() {
-                let conversation = self
-                    .client
-                    .conversation_of_message(&message)
-                    .map_or(Vec::new(), |conversation| conversation.0.to_vec());
-                return Some(FfiEvent::File {
-                    conversation,
-                    message: Arc::new(MsgHandle(message)),
-                });
-            }
-        }
-
-        if let Some(event) = self.client.next_event() {
-            return Some(match event {
-                Event::Message {
-                    conversation,
-                    message,
-                } => FfiEvent::Message {
-                    conversation: conversation.0.to_vec(),
-                    message: Arc::new(MsgHandle(message)),
-                },
-                Event::Delivery { message, delivery } => FfiEvent::Delivery {
-                    message: Arc::new(MsgHandle(message)),
-                    state: delivery as u8,
-                },
-                Event::Reacted { conversation, .. } => FfiEvent::Reacted {
-                    conversation: conversation.0.to_vec(),
-                },
-                Event::Typing {
-                    conversation,
-                    is_typing,
-                } => FfiEvent::Typing {
-                    conversation: conversation.0.to_vec(),
-                    is_typing,
-                },
-                Event::Voted { conversation, .. } => FfiEvent::Voted {
-                    conversation: conversation.0.to_vec(),
-                },
-                Event::Edited { conversation, .. } => FfiEvent::Edited {
-                    conversation: conversation.0.to_vec(),
-                },
-                Event::ChangeFailed {
-                    conversation,
-                    is_delete,
-                } => FfiEvent::ChangeFailed {
-                    conversation: conversation.0.to_vec(),
-                    is_delete,
-                },
-                Event::Deleted { conversation, .. } => FfiEvent::Deleted {
-                    conversation: conversation.0.to_vec(),
-                },
-                Event::RenewalAsk { conversation } => FfiEvent::RenewalAsk {
-                    conversation: conversation.0.to_vec(),
-                },
-                Event::Conversations => FfiEvent::Conversations,
-                Event::WakeTable => FfiEvent::WakeTable,
-                Event::File { message } => FfiEvent::File {
-                    // A message that a deletion took since has no
-                    // conversation, and the view of none changes.
-                    conversation: self
+        // A loop and not a recursion: a group admin can queue many events
+        // that give nothing, and a recursion for each one fills the stack.
+        loop {
+            if self.client.is_unlocked() {
+                if let Some(message) = self.progress_events.pop_front() {
+                    let conversation = self
                         .client
                         .conversation_of_message(&message)
-                        .map_or(Vec::new(), |conversation| conversation.0.to_vec()),
-                    message: Arc::new(MsgHandle(message)),
-                },
-                Event::GroupOffer { .. } => FfiEvent::GroupOffer,
-                Event::Introduction { .. } => FfiEvent::Introduction,
-                Event::GroupJoiner { .. } => FfiEvent::GroupJoiner,
-                // The snapshot of an admit is already on its way: the
-                // commit of the record asked for it.
-                Event::GroupAdmit { .. } => return self.next_event(),
-                Event::Locked => FfiEvent::Locked,
-                Event::IntegrityFault => FfiEvent::IntegrityFault,
-            });
-        }
-
-        if core::mem::take(&mut self.circuits_changed) {
-            return Some(FfiEvent::Circuits);
-        }
-
-        Some(match self.net_events.pop_front()? {
-            NetEvent::Online => FfiEvent::Online,
-            NetEvent::Offline(ended) => FfiEvent::Offline { cause: ended as u8 },
-            // An invitation holds the keys of one queue, and a code is a
-            // value of one ceremony: a locked client gives neither. The
-            // store holds the invitation, and the next run gives it again.
-            NetEvent::Invitation(_) | NetEvent::VerificationCode(..)
-                if !self.client.is_unlocked() =>
-            {
-                return self.next_event();
-            }
-            NetEvent::Invitation(shared) => {
-                // The app makes each invitation with a link. A stored
-                // bundle of another path has no link, and it gives no event.
-                let bytes: Result<&[u8; FRAGMENT_LEN], _> = shared.as_slice().try_into();
-                let Some(fragment) = bytes.ok().and_then(|b| Fragment::from_bytes(b).ok()) else {
-                    return self.next_event();
-                };
-
-                FfiEvent::Invitation {
-                    link: fragment.link(&self.invitation_host),
+                        .map_or(Vec::new(), |conversation| conversation.0.to_vec());
+                    return Some(FfiEvent::File {
+                        conversation,
+                        message: Arc::new(MsgHandle(message)),
+                    });
                 }
             }
-            NetEvent::InvitationGone => FfiEvent::InvitationGone,
-            NetEvent::VerificationCode(conversation, code) => FfiEvent::VerificationCode {
-                conversation: conversation.0.to_vec(),
-                code: umbra_core::identity::verify::digits(code),
-            },
-            NetEvent::Verified(conversation) => FfiEvent::Verified {
-                conversation: conversation.0.to_vec(),
-            },
-            NetEvent::VerificationRefused(conversation) => FfiEvent::VerificationRefused {
-                conversation: conversation.0.to_vec(),
-            },
-            NetEvent::Contact(conversation) => FfiEvent::Contact {
-                conversation: conversation.0.to_vec(),
-            },
-            // The link takes the bundle before the queue of events.
-            NetEvent::DeviceInvitation(_) => return self.next_event(),
-            NetEvent::DeviceLinked(_) => FfiEvent::DeviceLinked,
-            NetEvent::Refused => FfiEvent::Refused,
-            NetEvent::ContactRequest => FfiEvent::ContactRequest,
-        })
+
+            if let Some(event) = self.client.next_event() {
+                return Some(match event {
+                    Event::Message {
+                        conversation,
+                        message,
+                    } => FfiEvent::Message {
+                        conversation: conversation.0.to_vec(),
+                        message: Arc::new(MsgHandle(message)),
+                    },
+                    Event::Delivery { message, delivery } => FfiEvent::Delivery {
+                        message: Arc::new(MsgHandle(message)),
+                        state: delivery as u8,
+                    },
+                    Event::Reacted { conversation, .. } => FfiEvent::Reacted {
+                        conversation: conversation.0.to_vec(),
+                    },
+                    Event::Typing {
+                        conversation,
+                        is_typing,
+                    } => FfiEvent::Typing {
+                        conversation: conversation.0.to_vec(),
+                        is_typing,
+                    },
+                    Event::Voted { conversation, .. } => FfiEvent::Voted {
+                        conversation: conversation.0.to_vec(),
+                    },
+                    Event::Edited { conversation, .. } => FfiEvent::Edited {
+                        conversation: conversation.0.to_vec(),
+                    },
+                    Event::ChangeFailed {
+                        conversation,
+                        is_delete,
+                    } => FfiEvent::ChangeFailed {
+                        conversation: conversation.0.to_vec(),
+                        is_delete,
+                    },
+                    Event::Deleted { conversation, .. } => FfiEvent::Deleted {
+                        conversation: conversation.0.to_vec(),
+                    },
+                    Event::RenewalAsk { conversation } => FfiEvent::RenewalAsk {
+                        conversation: conversation.0.to_vec(),
+                    },
+                    Event::Conversations => FfiEvent::Conversations,
+                    Event::WakeTable => FfiEvent::WakeTable,
+                    Event::File { message } => FfiEvent::File {
+                        // A message that a deletion took since has no
+                        // conversation, and the view of none changes.
+                        conversation: self
+                            .client
+                            .conversation_of_message(&message)
+                            .map_or(Vec::new(), |conversation| conversation.0.to_vec()),
+                        message: Arc::new(MsgHandle(message)),
+                    },
+                    Event::GroupOffer { .. } => FfiEvent::GroupOffer,
+                    Event::Introduction { .. } => FfiEvent::Introduction,
+                    Event::GroupJoiner { .. } => FfiEvent::GroupJoiner,
+                    // The snapshot of an admit is already on its way: the
+                    // commit of the record asked for it.
+                    Event::GroupAdmit { .. } => continue,
+                    Event::Locked => FfiEvent::Locked,
+                    Event::IntegrityFault => FfiEvent::IntegrityFault,
+                });
+            }
+
+            if core::mem::take(&mut self.circuits_changed) {
+                return Some(FfiEvent::Circuits);
+            }
+
+            return Some(match self.net_events.pop_front()? {
+                NetEvent::Online => FfiEvent::Online,
+                NetEvent::Offline(ended) => FfiEvent::Offline { cause: ended as u8 },
+                // An invitation holds the keys of one queue, and a code is a
+                // value of one ceremony: a locked client gives neither. The
+                // store holds the invitation, and the next run gives it again.
+                NetEvent::Invitation(_) | NetEvent::VerificationCode(..)
+                    if !self.client.is_unlocked() =>
+                {
+                    continue;
+                }
+                NetEvent::Invitation(shared) => {
+                    // The app makes each invitation with a link. A stored
+                    // bundle of another path has no link, and it gives no event.
+                    let bytes: Result<&[u8; FRAGMENT_LEN], _> = shared.as_slice().try_into();
+                    let Some(fragment) = bytes.ok().and_then(|b| Fragment::from_bytes(b).ok())
+                    else {
+                        continue;
+                    };
+
+                    FfiEvent::Invitation {
+                        link: fragment.link(&self.invitation_host),
+                    }
+                }
+                NetEvent::InvitationGone => FfiEvent::InvitationGone,
+                NetEvent::VerificationCode(conversation, code) => FfiEvent::VerificationCode {
+                    conversation: conversation.0.to_vec(),
+                    code: umbra_core::identity::verify::digits(code),
+                },
+                NetEvent::Verified(conversation) => FfiEvent::Verified {
+                    conversation: conversation.0.to_vec(),
+                },
+                NetEvent::VerificationRefused(conversation) => FfiEvent::VerificationRefused {
+                    conversation: conversation.0.to_vec(),
+                },
+                NetEvent::Contact(conversation) => FfiEvent::Contact {
+                    conversation: conversation.0.to_vec(),
+                },
+                // The link takes the bundle before the queue of events.
+                NetEvent::DeviceInvitation(_) => continue,
+                NetEvent::DeviceLinked(_) => FfiEvent::DeviceLinked,
+                NetEvent::Refused => FfiEvent::Refused,
+                NetEvent::ContactRequest => FfiEvent::ContactRequest,
+            });
+        }
     }
 
     /// The keys of the runtime leave RAM with `K_store`, thus a locked
@@ -4317,6 +4333,12 @@ impl Inner {
         }
         for draft in self.drafts.drain(..).filter_map(|draft| draft.upgrade()) {
             locked(&draft.0).take();
+        }
+        if let Some(restored) = core::mem::take(&mut self.restored).upgrade() {
+            locked(&restored.0).take();
+        }
+        if let Some(linked) = core::mem::take(&mut self.linked).upgrade() {
+            locked(&linked.0).take();
         }
         runs
     }
@@ -4539,10 +4561,18 @@ pub fn init_restored(
     passphrase: Vec<u16>,
     restored: Arc<Restored>,
 ) -> Result<Arc<Handle>, FfiError> {
-    let restored = locked(&restored.0).take().ok_or(FfiError::NotFound)?;
-    init_store_from(config, element, passphrase, &restored, |client| {
-        Ok(client.apply_restore(&restored, &mut OsRng)?)
-    })
+    // The holder stays free during the long steps, thus a lock of the old
+    // handle never waits for them (`IMP-127`).
+    let backup = locked(&restored.0).take().ok_or(FfiError::NotFound)?;
+    let made = init_store_from(config, element, passphrase, &backup, |client| {
+        Ok(client.apply_restore(&backup, &mut OsRng)?)
+    });
+
+    // A call that fails keeps the root seed and the rows for the next try.
+    if made.is_err() {
+        *locked(&restored.0) = Some(backup);
+    }
+    made
 }
 
 /// How long the removal of the files of a store waits for the connections
@@ -4583,6 +4613,30 @@ fn init_store_from(
     let passphrase = Zeroizing::new(passphrase);
     remove_store_files(&config.database_path)?;
 
+    let made = make_store_from(&config, element, &passphrase, restored, fill);
+    let client = match made {
+        Ok(client) => client,
+        Err(error) => {
+            // A header with no rows would open as an empty device, and the
+            // backup would not come back. The next try starts with no files.
+            let _ = remove_store_files(&config.database_path);
+            return Err(error);
+        }
+    };
+
+    harden(&client);
+    Ok(handle_of(config.database_path, client))
+}
+
+/// The steps of [`init_store_from`] after the removal of the old files. On
+/// an error, each connection to the new files closed at the return.
+fn make_store_from(
+    config: &Config,
+    element: Arc<dyn SecureElementCallback>,
+    passphrase: &[u16],
+    restored: &crate::client::RestoredBackup,
+    fill: impl FnOnce(&mut Client<SqliteBackend, ForeignElement>) -> Result<(), FfiError>,
+) -> Result<Client<SqliteBackend, ForeignElement>, FfiError> {
     let backend = SqliteBackend::open(&config.database_path).map_err(|_| FfiError::Storage)?;
     let headers = SqliteBackend::open(&config.database_path).map_err(|_| FfiError::Storage)?;
 
@@ -4590,7 +4644,7 @@ fn init_store_from(
     let mut client = Client::create_with_seed(
         backend,
         ForeignElement(element),
-        &passphrase,
+        passphrase,
         cost,
         unix_now(),
         restored.seed(),
@@ -4602,8 +4656,7 @@ fn init_store_from(
         .map_err(|_| FfiError::Storage)?;
 
     fill(&mut client)?;
-    harden(&client);
-    Ok(handle_of(config.database_path, client))
+    Ok(client)
 }
 
 /// Makes the store of a device from a root seed (Part 4 `IDN-003`): the
@@ -4625,10 +4678,14 @@ pub fn init_from_root_seed(
         _ => FfiError::Malformed,
     })?;
 
-    // The seed sits in a value that overwrites itself at its drop.
-    let seed = umbra_crypto::secret::Secret::new(
-        <[u8; 32]>::try_from(seed.as_slice()).map_err(|_| FfiError::Malformed)?,
-    );
+    // The seed goes straight into a value that overwrites itself at its
+    // drop, and no copy of it stays on the stack.
+    if seed.len() != 32 {
+        return Err(FfiError::Malformed);
+    }
+    let mut held = umbra_crypto::secret::Secret::<32>::zeroed();
+    held.expose_mut().copy_from_slice(&seed);
+    let seed = held;
 
     // A first launch that ended before its header left rows under a key
     // that no header wraps. They open no more, and a store over them fails
@@ -4743,6 +4800,9 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             restore_lost: false,
             media: Vec::new(),
             drafts: Vec::new(),
+            restored: Weak::new(),
+            linked: Weak::new(),
+            pumps_due: false,
             run: 0,
             challenges: umbra_core::abuse::pow::ChallengeBook::default(),
             challenges_at: 0,
@@ -4812,6 +4872,13 @@ impl Persist for HandleStore {
             .commit_received(&changes, received, unix_now_ms(), &mut OsRng)
             .is_ok();
 
+        // IMP-132: a step after the commit that failed fails no commit. An
+        // Integrity fault raised its event already, thus each other fault
+        // goes to the log of a debug build alone.
+        if let Some(fault) = inner.client.take_commit_fault() {
+            crate::devlog::format_line!("a step after a commit failed: {fault:?}");
+        }
+
         // DEV-317: an epoch of this batch took the channels from this
         // device. The run ends before one more record leaves on them.
         if inner.end_run_of_lost_ownership() {
@@ -4832,6 +4899,7 @@ impl Persist for HandleStore {
         // Neither waits for a view to read an event.
         inner.fetch_admitted_snapshots();
         inner.pump_groups();
+        inner.pumps_due = true;
         drop(inner);
         handle.changed.notify_all();
         committed
@@ -4941,6 +5009,22 @@ impl Persist for HandleStore {
     }
 }
 
+/// Whether an update can make no work for the pumps of the store. Each
+/// send of a record gives such updates, and the bridge writes only the
+/// state of that record for them. The acceptance of a record can end a
+/// channel (`DEV-313`), thus it is not one of them.
+fn makes_no_pump_work(update: &Update) -> bool {
+    matches!(
+        update,
+        Update::SendIndex { .. }
+            | Update::Room { .. }
+            | Update::Held(_)
+            | Update::Faults(_)
+            | Update::Probe { .. }
+            | Update::ProbeFailed
+    )
+}
+
 impl Handle {
     /// A task of the runtime gives one update of the network to the client.
     /// `task` names the start of the task.
@@ -5025,6 +5109,7 @@ impl Handle {
         let ended = matches!(update, Update::Offline(_));
         let is_tick = matches!(update, Update::Tick);
         let chains_moved = matches!(update, Update::Circuits(_));
+        let makes_no_work = makes_no_pump_work(&update);
         match &update {
             Update::Circuits(chains) => {
                 circuits.clone_from(chains);
@@ -5288,12 +5373,17 @@ impl Handle {
             inner.share_chains();
         }
 
-        // A record with a descriptor asks for its file.
+        // A record with a descriptor asks for its file. Each send gives some
+        // updates that make no work, and each pump reads many rows, thus
+        // such an update pumps only after a commit that made work.
         inner.take_link_events();
-        inner.pump_transfers();
-        inner.pump_group_state();
-        inner.pump_groups();
-        inner.pump_ndr();
+        let pumps_due = core::mem::take(&mut inner.pumps_due);
+        if pumps_due || !makes_no_work {
+            inner.pump_transfers();
+            inner.pump_group_state();
+            inner.pump_groups();
+            inner.pump_ndr();
+        }
         if is_tick {
             inner.pump_dead_channels();
             inner.pump_backup();
@@ -6096,11 +6186,13 @@ impl Handle {
             }
 
             // NET-028: the records of a conversation in another mode go on
-            // circuits of that mode.
+            // circuits of that mode. A fault of the store gives the strictest
+            // mode, and not the default.
             for (conversation, contact) in running.contacts() {
-                if let Ok(class) = client.privacy_mode(conversation) {
-                    node.set_contact_class(&contact, class);
-                }
+                let class = client
+                    .privacy_mode(conversation)
+                    .unwrap_or(umbra_core::session::node::DelayClass::Private);
+                node.set_contact_class(&contact, class);
             }
 
             *bridge = Some(running);
@@ -7035,19 +7127,28 @@ impl Handle {
         let text = Zeroizing::new(String::from_utf16_lossy(&Zeroizing::new(user)));
         let user = from_digits(&text, DigitsType::User).map_err(|_| FfiError::Malformed)?;
 
-        let mut held = Vec::with_capacity(shares.len());
+        // Each share and the user half go straight into values that
+        // overwrite themselves at their drop.
+        let mut held = Zeroizing::new(Vec::with_capacity(shares.len()));
         for share in shares {
             let text = Zeroizing::new(String::from_utf16_lossy(&Zeroizing::new(share)));
             let bytes = from_digits(&text, DigitsType::Share).map_err(|_| FfiError::Malformed)?;
-            held.push(<[u8; 17]>::try_from(bytes.as_slice()).map_err(|_| FfiError::Malformed)?);
+            if bytes.len() != 17 {
+                return Err(FfiError::Malformed);
+            }
+            held.push([0u8; 17]);
+            if let Some(slot) = held.last_mut() {
+                slot.copy_from_slice(&bytes);
+            }
         }
 
         let social = join_social(&held).map_err(|error| FfiError::from(Error::from(error)))?;
-        let user: [u8; 16] = user
-            .as_slice()
-            .try_into()
-            .map_err(|_| FfiError::Malformed)?;
-        let key = RecoveryCode::new(umbra_crypto::secret::Secret::new(user), social)
+        if user.len() != 16 {
+            return Err(FfiError::Malformed);
+        }
+        let mut user_half = umbra_crypto::secret::Secret::<16>::zeroed();
+        user_half.expose_mut().copy_from_slice(&user);
+        let key = RecoveryCode::new(user_half, social)
             .backup_root_key()
             .map_err(|error| FfiError::from(Error::from(error)))?;
         self.start_restore(key)
@@ -7073,7 +7174,9 @@ impl Handle {
             .and_then(|job| job.restored.take())
             .ok_or(FfiError::NotFound)?;
         inner.restore = None;
-        Ok(Arc::new(Restored(Mutex::new(Some(restored)))))
+        let restored = Arc::new(Restored(Mutex::new(Some(restored))));
+        inner.restored = Arc::downgrade(&restored);
+        Ok(restored)
     }
 
     /// Renders the root seed into a sink of the platform, as the 87 digits
@@ -8495,6 +8598,98 @@ guard relay1.example.org"
         };
         let handle = init(config, Arc::new(Keystore), passphrase()).unwrap();
         (handle, directory)
+    }
+
+    #[test]
+    fn a_restore_that_fails_keeps_its_rows_for_the_next_try() {
+        let (handle, directory) = open("restore-retry");
+        let upload = locked(&handle.inner)
+            .client
+            .backup_due(unix_now(), true)
+            .unwrap()
+            .unwrap();
+        let backup = crate::client::RestoredBackup::assemble(&[upload.plain]).unwrap();
+        let restored = Arc::new(Restored(Mutex::new(Some(backup))));
+        drop(handle);
+        let config = |file: &str| Config {
+            database_path: directory.join(file).to_str().unwrap().to_owned(),
+            argon2_floor_ms: 60_000,
+        };
+
+        // A folder that is not there fails the open of the store.
+        let failed = init_restored(
+            config("absent/client.db"),
+            Arc::new(Keystore),
+            passphrase(),
+            Arc::clone(&restored),
+        );
+        assert_eq!(failed.err(), Some(FfiError::Storage));
+        assert!(locked(&restored.0).is_some());
+
+        // The next try makes the store, and the rows leave the holder.
+        let made = init_restored(
+            config("restored.db"),
+            Arc::new(Keystore),
+            passphrase(),
+            Arc::clone(&restored),
+        )
+        .unwrap();
+        assert!(locked(&restored.0).is_none());
+        drop(made);
+
+        let again = init_restored(
+            config("again.db"),
+            Arc::new(Keystore),
+            passphrase(),
+            restored,
+        );
+        assert_eq!(again.err(), Some(FfiError::NotFound));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_lock_wipes_the_rows_of_a_restore_that_the_platform_holds() {
+        let (handle, directory) = open("restore-lock");
+        let upload = locked(&handle.inner)
+            .client
+            .backup_due(unix_now(), true)
+            .unwrap()
+            .unwrap();
+        let backup = crate::client::RestoredBackup::assemble(&[upload.plain]).unwrap();
+        let restored = Arc::new(Restored(Mutex::new(Some(backup))));
+        locked(&handle.inner).restored = Arc::downgrade(&restored);
+
+        // IMP-127: the root seed leaves RAM with the keys of the store.
+        handle.lock();
+        assert!(locked(&restored.0).is_none());
+
+        drop(handle);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_restore_that_fails_after_its_header_leaves_no_store() {
+        let (handle, directory) = open("restore-header");
+        let upload = locked(&handle.inner)
+            .client
+            .backup_due(unix_now(), true)
+            .unwrap()
+            .unwrap();
+        let backup = crate::client::RestoredBackup::assemble(&[upload.plain]).unwrap();
+        drop(handle);
+        let database_path = directory.join("restored.db").to_str().unwrap().to_owned();
+        let config = Config {
+            database_path: database_path.clone(),
+            argon2_floor_ms: 60_000,
+        };
+
+        // The fill runs after the write of the header.
+        let failed = init_store_from(config, Arc::new(Keystore), passphrase(), &backup, |_| {
+            Err(FfiError::Storage)
+        });
+        assert_eq!(failed.err(), Some(FfiError::Storage));
+        assert!(!std::path::Path::new(&database_path).exists());
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     fn erasure(chunk: u8) -> TransferCommand {

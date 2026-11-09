@@ -191,7 +191,7 @@ struct Join {
 /// The snapshot and the identity of a new device, for [`init_linked`].
 /// The platform holds this object and never reads it.
 #[derive(uniffi::Object)]
-pub struct Linked(Mutex<Option<(RestoredBackup, DeviceIdentity)>>);
+pub struct Linked(pub(super) Mutex<Option<(RestoredBackup, DeviceIdentity)>>);
 
 /// What a pump of the link does next.
 enum Next {
@@ -274,7 +274,7 @@ impl Inner {
             return;
         };
 
-        let erase = Some((slot.handle, Secret::new(*slot.cred.expose())));
+        let erase = Some((slot.handle, crate::runtime::copy_secret(&slot.cred)));
         let Some(tag) = self.link_tag_erasing(step, erase) else {
             return;
         };
@@ -1254,7 +1254,9 @@ impl Handle {
         let taken = join.restored.take().zip(join.identity.take());
         inner.link = None;
         let taken = taken.ok_or(FfiError::NotFound)?;
-        Ok(Arc::new(Linked(Mutex::new(Some(taken)))))
+        let linked = Arc::new(Linked(Mutex::new(Some(taken))));
+        inner.linked = Arc::downgrade(&linked);
+        Ok(linked)
     }
 
     /// Removes a device from the set (Part 7 §7.7). The call makes the
@@ -1489,11 +1491,19 @@ pub fn init_linked(
     passphrase: Vec<u16>,
     linked: Arc<Linked>,
 ) -> Result<Arc<Handle>, FfiError> {
+    // The holder stays free during the long steps, thus a lock of the old
+    // handle never waits for them (`IMP-127`).
     let (restored, identity) = locked(&linked.0).take().ok_or(FfiError::NotFound)?;
-    init_store_from(config, element, passphrase, &restored, |client| {
+    let made = init_store_from(config, element, passphrase, &restored, |client| {
         client.apply_restore(&restored, &mut OsRng)?;
         Ok(client.apply_link(&identity, &mut OsRng)?)
-    })
+    });
+
+    // A call that fails keeps the snapshot and the identity for the next try.
+    if made.is_err() {
+        *locked(&linked.0) = Some((restored, identity));
+    }
+    made
 }
 
 #[cfg(test)]

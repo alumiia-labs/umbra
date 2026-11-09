@@ -28,7 +28,7 @@ use umbra_transport::{
     Dial,
 };
 
-use crate::runtime::OsRng;
+use crate::runtime::{copy_secret, OsRng};
 
 /// The tick that keeps the run from a stall with no traffic.
 const TICK: Duration = Duration::from_secs(1);
@@ -192,7 +192,7 @@ impl GroupCommand {
             } => GroupCommand::Notify {
                 relay: *relay,
                 group_queue_id: *group_queue_id,
-                read: Secret::new(*read.expose()),
+                read: copy_secret(read),
                 queue: queue.clone(),
                 on: *on,
             },
@@ -208,7 +208,7 @@ impl GroupCommand {
                 relay: *relay,
                 read_pk: *read_pk,
                 write_pk: *write_pk,
-                own: Secret::new(*own.expose()),
+                own: copy_secret(own),
                 payment: payment.clone(),
             },
             GroupCommand::Challenges { book, now } => GroupCommand::Challenges {
@@ -226,8 +226,8 @@ impl GroupCommand {
                 tag: *tag,
                 relay: *relay,
                 group_queue_id: *group_queue_id,
-                write: Secret::new(*write.expose()),
-                fallback: fallback.as_ref().map(|held| Secret::new(*held.expose())),
+                write: copy_secret(write),
+                fallback: fallback.as_ref().map(copy_secret),
                 record: record.clone(),
             },
             GroupCommand::Subscribe {
@@ -239,8 +239,8 @@ impl GroupCommand {
             } => GroupCommand::Subscribe {
                 relay: *relay,
                 group_queue_id: *group_queue_id,
-                read: Secret::new(*read.expose()),
-                fallback: fallback.as_ref().map(|held| Secret::new(*held.expose())),
+                read: copy_secret(read),
+                fallback: fallback.as_ref().map(copy_secret),
                 from_seq: *from_seq,
             },
             GroupCommand::Repair {
@@ -252,8 +252,8 @@ impl GroupCommand {
             } => GroupCommand::Repair {
                 relay: *relay,
                 group_queue_id: *group_queue_id,
-                read: Secret::new(*read.expose()),
-                fallback: fallback.as_ref().map(|held| Secret::new(*held.expose())),
+                read: copy_secret(read),
+                fallback: fallback.as_ref().map(copy_secret),
                 from_seq: *from_seq,
             },
             GroupCommand::Rotate {
@@ -266,7 +266,7 @@ impl GroupCommand {
             } => GroupCommand::Rotate {
                 relay: *relay,
                 group_queue_id: *group_queue_id,
-                own: Secret::new(*own.expose()),
+                own: copy_secret(own),
                 next_own_pk: *next_own_pk,
                 read_pk: *read_pk,
                 write_pk: *write_pk,
@@ -278,7 +278,7 @@ impl GroupCommand {
             } => GroupCommand::Delete {
                 relay: *relay,
                 group_queue_id: *group_queue_id,
-                own: Secret::new(*own.expose()),
+                own: copy_secret(own),
             },
             GroupCommand::Chains(chains) => GroupCommand::Chains(chains.clone()),
         }
@@ -293,7 +293,8 @@ impl GroupCommand {
     /// The same command under the credential of the previous epoch, when
     /// it carries one (`GRP-398`).
     fn under_fallback(&self) -> Option<GroupCommand> {
-        match self.copy() {
+        // A command with no fallback copies nothing.
+        match self {
             GroupCommand::Post {
                 tag,
                 relay,
@@ -302,12 +303,12 @@ impl GroupCommand {
                 record,
                 ..
             } => Some(GroupCommand::Post {
-                tag,
-                relay,
-                group_queue_id,
-                write,
+                tag: *tag,
+                relay: *relay,
+                group_queue_id: *group_queue_id,
+                write: copy_secret(write),
                 fallback: None,
-                record,
+                record: record.clone(),
             }),
             GroupCommand::Subscribe {
                 relay,
@@ -316,11 +317,11 @@ impl GroupCommand {
                 from_seq,
                 ..
             } => Some(GroupCommand::Subscribe {
-                relay,
-                group_queue_id,
-                read,
+                relay: *relay,
+                group_queue_id: *group_queue_id,
+                read: copy_secret(read),
                 fallback: None,
-                from_seq,
+                from_seq: *from_seq,
             }),
             GroupCommand::Repair {
                 relay,
@@ -329,19 +330,20 @@ impl GroupCommand {
                 from_seq,
                 ..
             } => Some(GroupCommand::Repair {
-                relay,
-                group_queue_id,
-                read,
+                relay: *relay,
+                group_queue_id: *group_queue_id,
+                read: copy_secret(read),
                 fallback: None,
-                from_seq,
+                from_seq: *from_seq,
             }),
             _ => None,
         }
     }
 
     /// The tag, the relay, the group queue, and the job of the node for a
-    /// command that goes on a circuit. The challenges go on none.
-    fn job(&self) -> Option<CommandJob> {
+    /// command that goes on a circuit. The challenges go on none. A post
+    /// gives its record to the job, and keeps an empty one.
+    fn take_job(&mut self) -> Option<CommandJob> {
         match self {
             GroupCommand::Create {
                 tag,
@@ -376,7 +378,7 @@ impl GroupCommand {
                 *group_queue_id,
                 GroupJob::Post {
                     write: StaticSecret::from(*write.expose()),
-                    record: record.clone(),
+                    record: core::mem::take(record),
                 },
             )),
             GroupCommand::Subscribe {
@@ -833,9 +835,12 @@ async fn session(
             continue;
         }
 
-        for command in carried.early.drain(..) {
+        for mut command in carried.early.drain(..) {
+            // The retry needs the record, which the job takes.
+            let retry = command.under_fallback();
+
             // The receive arms take the challenges.
-            let Some((tag, relay, group_queue_id, job)) = command.job() else {
+            let Some((tag, relay, group_queue_id, job)) = command.take_job() else {
                 continue;
             };
 
@@ -844,7 +849,7 @@ async fn session(
                     if let Some(tag) = tag {
                         pending.insert(handle, Pending { tag, relay });
                     }
-                    if let Some(retry) = command.under_fallback() {
+                    if let Some(retry) = retry {
                         second.insert(handle, retry);
                     }
                     if matches!(

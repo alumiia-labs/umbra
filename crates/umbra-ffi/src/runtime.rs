@@ -42,6 +42,14 @@ pub struct OsRng;
 /// come from the platform source alone until the next unlock.
 static HARDEN: std::sync::Mutex<Option<Secret<32>>> = std::sync::Mutex::new(None);
 
+/// A copy of `secret` that the bytes go straight into. A copy through an
+/// array value would leave the bytes in a stack slot that no wipe reaches.
+pub(crate) fn copy_secret<const N: usize>(secret: &Secret<N>) -> Secret<N> {
+    let mut copy = Secret::zeroed();
+    copy.expose_mut().copy_from_slice(secret.expose());
+    copy
+}
+
 /// The context of each value of this process under the hardening.
 const HARDEN_CONTEXT: &[u8] = umbra_crypto::labels::CLIENT_RNG;
 

@@ -476,7 +476,7 @@ async fn run_watch(
     listener: Arc<dyn WatchListener>,
     mut stopped: mpsc::UnboundedReceiver<()>,
 ) {
-    crate::devlog::line(format!("watch: start, {} queues", table.len()));
+    crate::devlog::format_line!("watch: start, {} queues", table.len());
     let (stop, lane_stop) = watch::channel(false);
     let mut lanes = tokio::task::JoinSet::new();
     for (lane, delayed) in table.lanes() {

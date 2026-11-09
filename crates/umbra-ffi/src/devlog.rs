@@ -31,6 +31,20 @@ pub fn line(text: impl Into<String>) {
 #[cfg(not(debug_assertions))]
 pub fn line(_text: impl Into<String>) {}
 
+/// Keeps one line from the arguments of `format!`, in a debug build. A
+/// release build formats nothing, and the arguments still count as used.
+/// Only the modules of the runtime use it.
+#[cfg_attr(not(feature = "runtime"), allow(unused_macros))]
+macro_rules! format_line {
+    ($($arg:tt)*) => {
+        if cfg!(debug_assertions) {
+            $crate::devlog::line(format!($($arg)*));
+        }
+    };
+}
+#[cfg_attr(not(feature = "runtime"), allow(unused_imports))]
+pub(crate) use format_line;
+
 /// Each line that waits, in its order. A release build gives none.
 pub fn take() -> Vec<String> {
     #[cfg(debug_assertions)]

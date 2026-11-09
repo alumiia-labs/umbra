@@ -43,8 +43,8 @@ use umbra_crypto::{
     sha2::Sha256,
 };
 use umbra_ffi::bindings::{
-    advance_key_set, fetch_key_chain, fetch_manifest, init, newest_key_set, Config, FfiError,
-    FfiEvent, Handle, Network, SecureElementCallback, TextSink,
+    advance_key_set, fetch_key_chain, fetch_manifest, init, newest_key_set, store_has_header,
+    Config, FfiError, FfiEvent, Handle, Network, SecureElementCallback, TextSink,
 };
 
 /// The port of each carrier of the manifest (Part 3 §3.10).
@@ -227,21 +227,24 @@ fn keystore_key(data: &Path) -> Result<[u8; 32], Failure> {
 
     let mut key = [0u8; 32];
     getrandom::fill(&mut key).map_err(|e| failed("the random source", e))?;
-    fs::write(&path, key).map_err(|e| failed("the file element.key", e))?;
-    restrict(&path)?;
+
+    // The file takes its mode at the open, thus no other user can open it
+    // before a later change of the mode.
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&path)
+        .map_err(|e| failed("the file element.key", e))?;
+    file.write_all(&key)
+        .map_err(|e| failed("the file element.key", e))?;
+    file.sync_all()
+        .map_err(|e| failed("the file element.key", e))?;
     Ok(key)
-}
-
-#[cfg(unix)]
-fn restrict(path: &Path) -> Result<(), Failure> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-        .map_err(|e| failed("the permissions of a key file", e))
-}
-
-#[cfg(not(unix))]
-fn restrict(_: &Path) -> Result<(), Failure> {
-    Ok(())
 }
 
 fn passphrase(input: &mut impl BufRead) -> Result<Vec<u16>, Failure> {
@@ -264,7 +267,6 @@ fn passphrase(input: &mut impl BufRead) -> Result<Vec<u16>, Failure> {
 /// later start unlocks it.
 fn open(data: &Path, input: &mut impl BufRead) -> Result<Arc<Handle>, Failure> {
     let database = data.join("client.db");
-    let is_new = !database.exists();
     let config = Config {
         database_path: database.to_string_lossy().into_owned(),
         argon2_floor_ms: ARGON2_FLOOR_MS,
@@ -272,14 +274,15 @@ fn open(data: &Path, input: &mut impl BufRead) -> Result<Arc<Handle>, Failure> {
     let element = Arc::new(FileKeystore(keystore_key(data)?)) as Arc<dyn SecureElementCallback>;
     let passphrase = passphrase(input)?;
 
-    if is_new {
-        return init(config, element, passphrase).map_err(|e| failed("the new store", e));
+    // A file with no header is a first start that ended early. `init` makes
+    // the store again under the passphrase, thus it always gets the real one.
+    let has_header = store_has_header(config.database_path.clone());
+    let handle = init(config, element, passphrase.clone()).map_err(|e| failed("the store", e))?;
+    if has_header {
+        handle
+            .unlock(passphrase)
+            .map_err(|e| failed("the unlock", e))?;
     }
-
-    let handle = init(config, element, Vec::new()).map_err(|e| failed("the store", e))?;
-    handle
-        .unlock(passphrase)
-        .map_err(|e| failed("the unlock", e))?;
     Ok(handle)
 }
 

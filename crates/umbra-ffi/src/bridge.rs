@@ -567,20 +567,22 @@ impl Bridge {
             Update::SendIndex { tag, index } => {
                 // A message that the user deleted since takes no index.
                 if let Some(message) = self.sent.get(&tag) {
-                    let indexed = match client.note_send_index(message, index, rng) {
-                        Err(Error::NotFound) => Ok(()),
-                        other => other,
-                    };
-
                     // NET-219, NET-220: each seal is one send of the
                     // record to its contact, and the store counts it. A
                     // record that goes to the owner of the channels on a
                     // sync channel has the ARQ of that channel (`DEV-073`).
-                    // A fault of the index stops no count.
+                    // Its index is one of the sync channel, and not one of
+                    // the channel of the contact that `WIR-254` reads.
                     if !self.sync_sent.contains_key(&tag) {
+                        let indexed = match client.note_send_index(message, index, rng) {
+                            Err(Error::NotFound) => Ok(()),
+                            other => other,
+                        };
+
+                        // A fault of the index stops no count.
                         client.note_send(message, now_ms / 1_000, rng)?;
+                        indexed?;
                     }
-                    indexed?;
                 }
                 None
             }
