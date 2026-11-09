@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 3: Network Architecture
 
 **Status:** Draft
-**Version:** 0.47.0
-**Date:** 2026-11-01
+**Version:** 0.48.0
+**Date:** 2026-11-04
 
 ---
 
@@ -2391,11 +2391,14 @@ drop that answer. The command of each dropped answer goes again.
 >
 > This bound holds answers and nothing else. A forward cell that waits for its
 > delay under `NET-338` and `NET-339` counts under `NET-362`.
-> `RELAY_DELAYED_MAX` cells of `B3` are 4 GiB, which is above each kit. A party
-> reaches that sum only if it sends it inside the delay of the cells. A full
-> circuit of Private mode holds its cells about 5.3 s, the largest of 1 024
-> draws. Thus a link of 1 Gbit/s fills about 660 MB of cells, and a relay with a
-> faster link than its class has less margin. A `CGET` is one `B0` cell, thus a
+> `RELAY_DELAYED_MAX` cells of `B3` are 4 GiB, which is above each kit, thus
+> `RELAY_DELAYED_BYTES_MAX` bounds their bytes. A full circuit of Private mode
+> holds its cells about 5.3 s, the largest of 1 024 draws. Thus a link of
+> 1 Gbit/s fills about 660 MB of cells with no bound in bytes. A cell of Private
+> mode waits 1.7 s to 2.1 s at one hop at a full window (Part 12 §12.7.2). A
+> relay of class C3 at its full rate in Private mode alone thus holds up to
+> about 250 MiB of cells, below the bound of 320 MiB. A `CGET` is one `B0`
+> cell, thus a
 > download window holds 70 KiB at one hop. An upload window of 128 `CPUT` holds
 > 4.0 MiB. The honest use of each bound stays far below the kit.
 
@@ -2413,6 +2416,61 @@ to a link to a relay of the next layer.
 > memory of the relay at almost no cost. A rate of 16 KiB/s is below each
 > mobile link that carries a session. A client whose link falls below it for
 > a minute opens a new connection and builds its circuits again.
+
+**[NET-377]** The backlogs of the client links of one relay MUST NOT hold more
+than `RELAY_BACKLOG_MAX` together. The client links of one address MUST NOT
+hold more than `SOURCE_BACKLOG_MAX` together. A client link is an accepted link
+with no hello of a relay, and the address is the one of `NET-331`.
+`RELAY_BACKLOG_MAX` is 384 MiB and `SOURCE_BACKLOG_MAX` is 64 MiB. A cell for
+a client link above either bound MUST NOT go, and its circuit ends as under
+`NET-349`. An echo of Part 10 above either bound drops. A relay MUST NOT close
+a link for these bounds.
+
+> *Cause of `NET-377`.* The bound of a backlog holds for one link: 32 MiB for
+> an accepted link. `RELAY_CONN_MAX` accepted links hold about 625 GiB, and the
+> `RELAY_CONN_PER_IP` links of one address hold 1 GiB. `NET-364` closes a link
+> that reads too slowly, but a peer that reads at `LINK_DRAIN_RATE` keeps its
+> backlog full. 45 such links reach the kit of 1 400 MiB, at 720 KiB/s of reads
+> in all. The kit then stopped the relay, and each circuit on it ended.
+>
+> With these bounds a party fills the sum only from six addresses or more, and
+> the relay keeps its circuits. While the sum stays full, each cell for a
+> client link ends its circuit. A party above the share of its address ends
+> only the circuits of that address. Clients behind one shared address share
+> it, as they share `RELAY_CONN_PER_IP`.
+>
+> The rule closes no link, and the fate of a cell depends only on the sum of
+> all client links and on the links of its own address. An earlier draft
+> closed the client link with the largest backlog. Its cells then told a party
+> whether another client held more than a given backlog. A party that could
+> grow the backlog of one client could also close that link at a time of its
+> choice, and an exit of that party could then see its circuits end. That is a
+> tool for the correlation of a circuit, and this rule gives none.
+>
+> A link of a relay carries the circuits of many clients, thus it takes no part
+> in these bounds. `NET-349` and `NET-364` bound it as before. Only a relay of
+> the relay set opens such a link, thus their sum follows the size of that set
+> and not the count of clients. That sum stays a residual of this rule.
+>
+> An honest client reads its link, thus its backlog stays near empty. A
+> download window holds 4.0 MiB at its exit (Part 12 rule `ATT-165`), thus the
+> sum holds 96 full windows and the share of one address holds 16. The runtime
+> can count the backlogs some milliseconds late, and a link of 1 Gbit/s writes
+> about 625 KB in 5 ms. The bounds of one relay together:
+>
+> | Bound | Bytes |
+> | --- | --- |
+> | `RELAY_ANSWER_BYTES_MAX`, `NET-375` | 64 MiB |
+> | `RELAY_DELAYED_BYTES_MAX`, `NET-362` | 320 MiB |
+> | `RELAY_BACKLOG_MAX`, `NET-377` | 384 MiB |
+> | All three | 768 MiB, which leaves 632 MiB of the kit of 1 400 MiB |
+>
+> An exit relay holds its chunk store of 1 GiB beside them, inside its kit of
+> 2 500 MiB. The circuits, their keys, the sessions, and the links of relays
+> take the rest. The sum of a relay that shares the bound with other clients
+> rises with their backlogs, thus a party near the bound sees when the other
+> clients of that relay hold more in all. Each shared bound of this section
+> and the memory of the relay itself give that same sum.
 
 **A group-queue session is a held session.** The `GSUB` of Part 6 §6.4.5 is
 the subscription of that session, and the relay pushes each new record on it.
@@ -3060,11 +3118,13 @@ that circuit from the `delay_class` of its own `HopHello` (§3.4.3).
   forward cell of that circuit. A build cell and a `DESTROY` go at once.
 - **[NET-362]** A relay MUST hold at most `CIRCUIT_DELAYED_MAX` forward cells
   of one circuit for their delay, and at most `RELAY_DELAYED_MAX` forward
-  cells in all. `CIRCUIT_DELAYED_MAX` is 1 024 cells and `RELAY_DELAYED_MAX`
-  is 131 072 cells. A cell above either bound MUST end its circuit under
-  `NET-322`, after the cells of that circuit that wait. A cell that dropped
-  with no end would break the chain of each layer after it. A relay MUST
-  drop each forward cell of a circuit whose end waits for its delayed cells.
+  cells and `RELAY_DELAYED_BYTES_MAX` bytes of cells in all.
+  `CIRCUIT_DELAYED_MAX` is 1 024 cells, `RELAY_DELAYED_MAX` is 131 072 cells,
+  and `RELAY_DELAYED_BYTES_MAX` is 320 MiB. A cell above a bound MUST end its
+  circuit under `NET-322`, after the cells of that circuit that wait. A cell
+  that dropped with no end would break the chain of each layer after it. A
+  relay MUST drop each forward cell of a circuit whose end waits for its
+  delayed cells.
   An upload window and a download window of Part 12 each hold 128 cells at
   most, thus a client of ordinary use stays far under each bound.
 - The delay of the third hop is the delay of `NET-039`. The backward

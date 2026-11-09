@@ -112,20 +112,29 @@ pub struct LinkWriter {
 
 /// The count of the backlog of each link, which the node reads.
 #[derive(Clone, Default)]
-struct Gauges(Arc<Mutex<BTreeMap<LinkId, Gauge>>>);
+struct Gauges {
+    links: Arc<Mutex<BTreeMap<LinkId, Gauge>>>,
+    /// The last sum of the client links, with its time (`NET-377`).
+    total: Arc<Mutex<Option<(std::time::Instant, usize)>>>,
+}
 
 /// The bytes that wait on one link, and its bound.
 type Gauge = (Arc<AtomicUsize>, usize);
 
+/// The age of a sum of the backlogs that the node can still use. A sum for
+/// each cell costs a scan of each link. A link of 1 Gbit/s writes about
+/// 625 KB in this time, thus the sum stays near the bytes that wait.
+const TOTAL_AGE: Duration = Duration::from_millis(5);
+
 impl Gauges {
     fn insert(&self, link: LinkId, writer: &LinkWriter) {
-        if let Ok(mut held) = self.0.lock() {
+        if let Ok(mut held) = self.links.lock() {
             held.insert(link, (writer.queued.clone(), writer.limit));
         }
     }
 
     fn remove(&self, link: LinkId) {
-        if let Ok(mut held) = self.0.lock() {
+        if let Ok(mut held) = self.links.lock() {
             held.remove(&link);
         }
     }
@@ -133,9 +142,29 @@ impl Gauges {
 
 impl Backlog for Gauges {
     fn of(&self, link: LinkId) -> Option<(usize, usize)> {
-        let held = self.0.lock().ok()?;
+        let held = self.links.lock().ok()?;
         let (queued, limit) = held.get(&link)?;
         Some((queued.load(Ordering::Relaxed), *limit))
+    }
+
+    fn total(&self, counted: &mut dyn FnMut(LinkId) -> bool) -> Option<usize> {
+        let now = std::time::Instant::now();
+        let mut last = self.total.lock().ok()?;
+
+        if let Some((at, bytes)) = *last {
+            if now.duration_since(at) < TOTAL_AGE {
+                return Some(bytes);
+            }
+        }
+
+        let held = self.links.lock().ok()?;
+        let bytes = held
+            .iter()
+            .filter(|(link, _)| counted(**link))
+            .map(|(_, (queued, _))| queued.load(Ordering::Relaxed))
+            .fold(0usize, usize::saturating_add);
+        *last = Some((now, bytes));
+        Some(bytes)
     }
 }
 
@@ -2644,6 +2673,29 @@ mod tests {
         assert!(empty.queue(vec![9]));
         assert_eq!(empty.take(), Some(vec![9]));
         assert_eq!(empty.take(), None);
+    }
+
+    #[test]
+    fn the_gauges_give_the_sum_of_the_counted_links() {
+        let gauges = Gauges::default();
+        let (one, _one_out, one_queued) = LinkWriter::new(LINK_BACKLOG);
+        let (two, _two_out, two_queued) = LinkWriter::new(RELAY_LINK_BACKLOG);
+        gauges.insert(1, &one);
+        gauges.insert(2, &two);
+        one_queued.store(3 << 20, Ordering::Relaxed);
+        two_queued.store(5 << 20, Ordering::Relaxed);
+
+        // NET-377: the sum of the links that the node counts, and no other.
+        assert_eq!(gauges.total(&mut |link| link == 1), Some(3 << 20));
+
+        // A sum younger than `TOTAL_AGE` serves again, and a later one counts
+        // the links again.
+        assert_eq!(gauges.total(&mut |_| true), Some(3 << 20));
+        std::thread::sleep(TOTAL_AGE);
+        assert_eq!(gauges.total(&mut |_| true), Some(8 << 20));
+        gauges.remove(2);
+        std::thread::sleep(TOTAL_AGE);
+        assert_eq!(gauges.total(&mut |_| true), Some(3 << 20));
     }
 
     #[test]

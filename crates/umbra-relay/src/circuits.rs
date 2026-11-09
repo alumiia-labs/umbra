@@ -514,6 +514,11 @@ impl CircuitTable {
         self.held_max = held_max;
     }
 
+    /// Whether `link` carries the hello of a relay of the layer before.
+    pub fn is_relay_link(&self, link: LinkId) -> bool {
+        self.relay_links.contains_key(&link)
+    }
+
     /// Names the holder of `link`: the address of a client, or the relay
     /// of a hello that verified. A link that holds a circuit keeps the
     /// holder of its first build. The builds of a link count against the

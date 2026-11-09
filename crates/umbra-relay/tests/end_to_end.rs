@@ -52,7 +52,10 @@ use umbra_onion::{
 use umbra_queue::params::{DRAIN_THRESHOLD, QUEUE_QUOTA};
 use umbra_relay::{
     circuits::{CircuitKey, LinkId, LINK_BUILD_BURST},
-    node::{Backlog, Config, Output, RelayNode, LINK_IDLE_TIMEOUT, LINK_OPEN_TIMEOUT},
+    node::{
+        Backlog, Config, Output, RelayNode, LINK_IDLE_TIMEOUT, LINK_OPEN_TIMEOUT,
+        RELAY_BACKLOG_MAX, SOURCE_BACKLOG_MAX,
+    },
     service::DRAINS_PER_MINUTE,
 };
 use umbra_transport::link::ClientLink;
@@ -1048,6 +1051,92 @@ fn a_full_backlog_ends_the_circuit_of_its_cell_and_keeps_the_link() {
     // A link with room takes its cell.
     let mut other = Direct::open(&mut node, 2, 100);
     assert!(other.first_hop(&mut node, &relay, 3, 100).is_some());
+}
+
+/// A runtime whose client links together hold `total`, with the bytes of
+/// each link that holds some.
+struct Crowded {
+    total: usize,
+    links: Vec<(LinkId, usize)>,
+}
+
+impl Backlog for Crowded {
+    fn of(&self, link: LinkId) -> Option<(usize, usize)> {
+        let held = self.links.iter().find(|(at, _)| *at == link);
+        Some((held.map_or(0, |(_, bytes)| *bytes), 32 << 20))
+    }
+
+    fn total(&self, _: &mut dyn FnMut(LinkId) -> bool) -> Option<usize> {
+        Some(self.total)
+    }
+}
+
+/// Whether `outputs` are one `Destroy` on `link` and nothing else: the cell
+/// found no room, and its circuit ended.
+fn only_ends_on(outputs: &[Output], link: LinkId) -> bool {
+    match outputs {
+        [Output::Send { link: at, capsule }] if *at == link => {
+            capsule::parse(capsule).unwrap().0 == capsule::CapsuleType::Session
+        }
+        _ => false,
+    }
+}
+
+#[test]
+fn a_cell_above_the_bound_of_all_client_links_ends_its_circuit_and_closes_no_link() {
+    // NET-377: before this, each link held its own bound, and 20 000 links
+    // of 32 MiB were far above each kit.
+    let (mut node, relay) = lone_relay(1);
+    let mut client = Direct::open(&mut node, 1, 100);
+    let _held = client.first_hop(&mut node, &relay, 1, 100).unwrap();
+    let mut other = Direct::open(&mut node, 2, 100);
+    let _other_held = other.first_hop(&mut node, &relay, 2, 100).unwrap();
+
+    node.set_backlog(Box::new(Crowded {
+        total: RELAY_BACKLOG_MAX,
+        links: vec![(2, 4 << 20)],
+    }));
+
+    // The cell does not go. No link closes, thus the fate of the cell tells
+    // nothing of the backlog of another client.
+    let mut build = CircuitBuild::new([3; 16]);
+    let (outputs, _) = client.extend(&mut node, &mut build, &relay, 100);
+    assert!(only_ends_on(&outputs, 1), "{outputs:?}");
+
+    // Below the bound the cell goes.
+    node.set_backlog(Box::new(Crowded {
+        total: RELAY_BACKLOG_MAX - (1 << 20),
+        links: vec![(2, 4 << 20)],
+    }));
+    assert!(client.first_hop(&mut node, &relay, 4, 100).is_some());
+}
+
+#[test]
+fn the_client_links_of_one_address_hold_a_bounded_backlog_together() {
+    let (mut node, relay) = lone_relay(1);
+    let mut client = Direct::open(&mut node, 1, 100);
+    let _held = client.first_hop(&mut node, &relay, 1, 100).unwrap();
+    let mut sibling = Direct::open(&mut node, 2, 100);
+    let _sibling_held = sibling.first_hop(&mut node, &relay, 2, 100).unwrap();
+    let mut stranger = Direct::open(&mut node, 3, 100);
+    let _stranger_held = stranger.first_hop(&mut node, &relay, 3, 100).unwrap();
+
+    node.set_source(1, [7; 16]);
+    node.set_source(2, [7; 16]);
+    node.set_source(3, [8; 16]);
+    node.set_backlog(Box::new(Crowded {
+        total: SOURCE_BACKLOG_MAX,
+        links: vec![(2, SOURCE_BACKLOG_MAX)],
+    }));
+
+    // NET-377: the other link of the address holds its share, thus the cell
+    // of this link ends its circuit.
+    let mut build = CircuitBuild::new([4; 16]);
+    let (outputs, _) = client.extend(&mut node, &mut build, &relay, 100);
+    assert!(only_ends_on(&outputs, 1), "{outputs:?}");
+
+    // A link of another address takes its cell.
+    assert!(stranger.first_hop(&mut node, &relay, 5, 100).is_some());
 }
 
 #[test]

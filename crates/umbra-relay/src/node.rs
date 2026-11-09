@@ -679,6 +679,14 @@ pub trait Backlog: Send {
     /// The bytes that wait on `link` and the bytes that it holds at most,
     /// or none for a link that the runtime does not know.
     fn of(&self, link: LinkId) -> Option<(usize, usize)>;
+
+    /// The bytes that wait on the links that `counted` takes, together
+    /// (`NET-377`), or none for a runtime that does not count them. The sum
+    /// can be some milliseconds old.
+    fn total(&self, counted: &mut dyn FnMut(LinkId) -> bool) -> Option<usize> {
+        let _ = counted;
+        None
+    }
 }
 
 /// The time that an accepted link has for the capsule that makes it a link
@@ -700,6 +708,32 @@ pub const EXTEND_WAITING_MAX: usize = 8_192;
 /// `RELAY_DELAYED_MAX`: the forward cells that wait for their per-hop
 /// delay at one relay (`NET-362`). A cell above it ends its circuit.
 pub const RELAY_DELAYED_MAX: usize = 1 << 17;
+/// `RELAY_DELAYED_BYTES_MAX`: the bytes of the forward cells that wait for
+/// their per-hop delay at one relay (`NET-362`). `RELAY_DELAYED_MAX` cells
+/// of `B3` hold 4 GiB, which is above each kit.
+pub const RELAY_DELAYED_BYTES_MAX: usize = 320 << 20;
+/// `RELAY_BACKLOG_MAX`: the bytes that wait on all client links of one
+/// relay together (`NET-377`). The bound of one client link times
+/// `RELAY_CONN_MAX` is about 625 GiB.
+pub const RELAY_BACKLOG_MAX: usize = 384 << 20;
+/// `SOURCE_BACKLOG_MAX`: the bytes that wait on the client links of one
+/// address together (`NET-377`).
+pub const SOURCE_BACKLOG_MAX: usize = 64 << 20;
+
+/// Whether a forward cell of `len` bytes finds room among the `count`
+/// cells and the `bytes` that wait for their delay (`NET-362`).
+fn delay_room(count: usize, bytes: usize, len: usize) -> bool {
+    count < RELAY_DELAYED_MAX && bytes.saturating_add(len) <= RELAY_DELAYED_BYTES_MAX
+}
+
+/// The bytes of a cell that a delayed action holds.
+fn held_bytes(action: &Action) -> usize {
+    match action {
+        Action::Send { cell, .. } => cell.len(),
+        Action::Serve { content, .. } => content.len(),
+        _ => 0,
+    }
+}
 
 /// The last dial of a relay of the next layer that opened no link.
 #[derive(Clone, Copy)]
@@ -818,6 +852,8 @@ pub struct RelayNode {
     /// their circuit, by release time and arrival (Part 3 §3.9).
     delayed: BTreeMap<(u64, u64), (CircuitKey, Action)>,
     delayed_seq: u64,
+    /// The bytes of the cells in `delayed` (`NET-362`).
+    delayed_bytes: usize,
     circuits: CircuitTable,
     endpoints: BTreeMap<CircuitKey, Endpoint>,
     /// The bytes of the answers that wait at each endpoint (`NET-375`).
@@ -877,6 +913,8 @@ pub struct RelayNode {
     /// The bytes of the cells that the node framed for each link since the
     /// runtime took its outputs.
     framed: BTreeMap<LinkId, usize>,
+    /// The sum of `framed`.
+    framed_total: usize,
     /// The cells that wait on each link, by circuit (`NET-349`).
     waits: BTreeMap<LinkId, Waits>,
     /// The circuits that hold a drain.
@@ -896,6 +934,8 @@ pub struct RelayNode {
     measure_attempts: BTreeMap<Holder, Attempts>,
     /// The address of each link, as the runtime cut it.
     sources: BTreeMap<LinkId, [u8; 16]>,
+    /// The links of each address of `sources` (`NET-377`).
+    links_of: BTreeMap<[u8; 16], BTreeSet<LinkId>>,
     /// The loop chains of this relay (`NET-069`).
     loops: Loops,
     /// Whether the circuits take their time from the clock of the per-hop
@@ -932,6 +972,7 @@ impl RelayNode {
             extending: BTreeMap::new(),
             delayed: BTreeMap::new(),
             delayed_seq: 0,
+            delayed_bytes: 0,
             circuits: CircuitTable::new(config.relay, config.static_secret, config.layer),
             endpoints: BTreeMap::new(),
             answer_bytes: AnswerBytes::default(),
@@ -958,7 +999,9 @@ impl RelayNode {
             quiet: BTreeMap::new(),
             backlog: None,
             framed: BTreeMap::new(),
+            framed_total: 0,
             waits: BTreeMap::new(),
+            links_of: BTreeMap::new(),
             draining: BTreeSet::new(),
             drain_turn: None,
             builds_seen: None,
@@ -1201,7 +1244,14 @@ impl RelayNode {
     /// thus an echo that drops moves no chaining value.
     fn echo(&mut self, circuit: CircuitKey, content: &[u8]) -> Option<Output> {
         let len = Bucket::B0.cell_len().saturating_add(FRAME_ROOM);
+        let held = self
+            .backlog
+            .as_deref()
+            .and_then(|backlog| backlog.of(circuit.link))
+            .map_or(0, |(bytes, _)| bytes);
+        let waiting = held.saturating_add(self.framed.get(&circuit.link).copied().unwrap_or(0));
 
+        // NET-377: an echo that finds no room drops, as at `ECHO_PART`.
         if self.parked.contains_key(&circuit.link)
             || !fits(
                 self.backlog.as_deref(),
@@ -1210,6 +1260,7 @@ impl RelayNode {
                 len,
                 ECHO_PART,
             )
+            || !self.client_room(circuit.link, waiting, len)
         {
             return None;
         }
@@ -1218,9 +1269,21 @@ impl RelayNode {
             return None;
         };
 
+        self.count_framed(link, len);
+        self.frame(link, &cell)
+    }
+
+    /// Counts `len` bytes that the node framed for `link`.
+    fn count_framed(&mut self, link: LinkId, len: usize) {
         let framed = self.framed.entry(link).or_insert(0);
         *framed = framed.saturating_add(len);
-        self.frame(link, &cell)
+        self.framed_total = self.framed_total.saturating_add(len);
+    }
+
+    /// Forgets the framed bytes of `link`, which closed.
+    fn forget_framed(&mut self, link: LinkId) {
+        let bytes = self.framed.remove(&link).unwrap_or(0);
+        self.framed_total = self.framed_total.saturating_sub(bytes);
     }
 
     /// The layer of this relay.
@@ -1280,6 +1343,7 @@ impl RelayNode {
     /// each backlog holds them.
     pub fn flushed(&mut self) {
         self.framed.clear();
+        self.framed_total = 0;
     }
 
     /// The runtime accepted the connection of `link` at `now`.
@@ -1293,7 +1357,9 @@ impl RelayNode {
     /// another layer takes its circuits from relays, and it names them by
     /// their hello.
     pub fn set_source(&mut self, link: LinkId, source: [u8; 16]) {
+        self.forget_source(link);
         self.sources.insert(link, source);
+        self.links_of.entry(source).or_default().insert(link);
         // NET-332: the builds of one address count together in each layer.
         self.circuits.set_source(link, source);
         if self.layer == 1 {
@@ -2159,7 +2225,7 @@ impl RelayNode {
     fn park(&mut self, link: LinkId, now: u64) -> Vec<Output> {
         self.parked.entry(link).or_default();
         self.quiet.remove(&link);
-        self.framed.remove(&link);
+        self.forget_framed(link);
         self.waits.remove(&link);
 
         self.circuits.set_clock_ms(clock_ms());
@@ -2231,15 +2297,19 @@ impl RelayNode {
                     at_ms,
                     circuit,
                     action,
-                } => {
-                    self.delayed_seq = self.delayed_seq.wrapping_add(1);
-                    self.delayed
-                        .insert((at_ms, self.delayed_seq), (circuit, *action));
-                }
+                } => self.hold_delayed(at_ms, circuit, *action),
                 _ => {}
             }
         }
         outputs
+    }
+
+    /// Holds one action for the per-hop delay of its circuit (Part 3 §3.9).
+    fn hold_delayed(&mut self, at_ms: u64, circuit: CircuitKey, action: Action) {
+        self.delayed_seq = self.delayed_seq.wrapping_add(1);
+        self.delayed_bytes = self.delayed_bytes.saturating_add(held_bytes(&action));
+        self.delayed
+            .insert((at_ms, self.delayed_seq), (circuit, action));
     }
 
     /// The client of a circuit that ends here paused its session
@@ -2292,6 +2362,9 @@ impl RelayNode {
     /// circuits of a party that fills a link with many of them, each below
     /// the floor, from the others. A link at its bound thus still ends the
     /// circuit of each cell.
+    ///
+    /// A cell for a client link also needs the room of `NET-377`, which
+    /// [`RelayNode::client_room`] gives.
     fn place_cell(&mut self, link: LinkId, cell: &[u8]) -> (bool, [Option<[u8; 16]>; 2]) {
         let len = cell.len().saturating_add(FRAME_ROOM);
         let Some((held, limit)) = self.backlog.as_deref().and_then(|backlog| backlog.of(link))
@@ -2299,18 +2372,23 @@ impl RelayNode {
             return (true, [None, None]);
         };
 
-        let framed = self.framed.entry(link).or_insert(0);
-        let waiting = held.saturating_add(*framed);
+        let framed = self.framed.get(&link).copied().unwrap_or(0);
+        let waiting = held.saturating_add(framed);
         let after = waiting.saturating_add(len);
+        let has_total_room = self.client_room(link, waiting, len);
 
         let Some(circ_id) = cell.first_chunk::<16>().copied() else {
-            return (after <= limit, [None, None]);
+            let takes = after <= limit && has_total_room;
+            if takes {
+                self.count_framed(link, len);
+            }
+            return (takes, [None, None]);
         };
 
         let waits = self.waits.entry(link).or_default();
         waits.trim(waiting);
 
-        let mut takes = after <= limit;
+        let mut takes = after <= limit && has_total_room;
         let mut other = None;
 
         if after > limit.saturating_sub(limit / SHED_MARK_PART) {
@@ -2339,11 +2417,80 @@ impl RelayNode {
 
         if takes {
             waits.add(circ_id, len);
-            *framed = framed.saturating_add(len);
+            self.count_framed(link, len);
             (true, [other, None])
         } else {
             waits.forget(&circ_id);
             (false, [other, Some(circ_id)])
+        }
+    }
+
+    /// Whether `link` is a client link: an accepted link with no hello of a
+    /// relay of the layer before.
+    fn is_client_link(&self, link: LinkId) -> bool {
+        matches!(self.links.get(&link), Some(Framing::Accepted(_)))
+            && !self.circuits.is_relay_link(link)
+    }
+
+    /// Whether `len` more bytes for `link`, which holds `waiting` bytes, stay
+    /// under `RELAY_BACKLOG_MAX` and under `SOURCE_BACKLOG_MAX` of its
+    /// address (`NET-377`). A link of a relay takes no part.
+    ///
+    /// A cell above a bound does not go, and its circuit ends. No link
+    /// closes for it. The fate of a cell thus depends on the sum of all
+    /// client links and on the links of its own address. It never depends
+    /// on which other client holds the most, thus a party learns no backlog
+    /// of another client from it and ends no chosen link.
+    fn client_room(&self, link: LinkId, waiting: usize, len: usize) -> bool {
+        if !self.is_client_link(link) {
+            return true;
+        }
+        let Some(backlog) = self.backlog.as_deref() else {
+            return true;
+        };
+
+        // The framed bytes of each link count, which is more than those of
+        // the client links.
+        let mut is_client = |other: LinkId| self.is_client_link(other);
+        if let Some(total) = backlog.total(&mut is_client) {
+            let after = total.saturating_add(self.framed_total).saturating_add(len);
+            if after > RELAY_BACKLOG_MAX {
+                return false;
+            }
+        }
+
+        let Some(siblings) = self
+            .sources
+            .get(&link)
+            .and_then(|source| self.links_of.get(source))
+        else {
+            return true;
+        };
+
+        let held = siblings
+            .iter()
+            .map(|sibling| {
+                if *sibling == link {
+                    return waiting;
+                }
+                let counted = backlog.of(*sibling).map_or(0, |(bytes, _)| bytes);
+                counted.saturating_add(self.framed.get(sibling).copied().unwrap_or(0))
+            })
+            .fold(0usize, usize::saturating_add);
+
+        held.saturating_add(len) <= SOURCE_BACKLOG_MAX
+    }
+
+    /// Forgets the address of `link`.
+    fn forget_source(&mut self, link: LinkId) {
+        let Some(source) = self.sources.remove(&link) else {
+            return;
+        };
+        if let Some(links) = self.links_of.get_mut(&source) {
+            links.remove(&link);
+            if links.is_empty() {
+                self.links_of.remove(&source);
+            }
         }
     }
 
@@ -2496,13 +2643,14 @@ impl RelayNode {
                         Action::Send { .. } | Action::Serve { .. } | Action::Loop { .. }
                     );
 
-                    if is_cell && self.delayed.len() >= RELAY_DELAYED_MAX {
+                    let room =
+                        delay_room(self.delayed.len(), self.delayed_bytes, held_bytes(&action));
+
+                    if is_cell && !room {
                         self.circuits.released(&circuit);
                         work.extend(self.circuits.shed(circuit.link, circuit.circ_id));
                     } else {
-                        self.delayed_seq = self.delayed_seq.wrapping_add(1);
-                        self.delayed
-                            .insert((at_ms, self.delayed_seq), (circuit, *action));
+                        self.hold_delayed(at_ms, circuit, *action);
                     }
                 }
             }
@@ -2584,6 +2732,7 @@ impl RelayNode {
             #[cfg(feature = "sockets-test")]
             crate::hops::released(self.layer, now_ms.saturating_sub(entry.key().0));
             let (circuit, action) = entry.remove();
+            self.delayed_bytes = self.delayed_bytes.saturating_sub(held_bytes(&action));
             self.circuits.released(&circuit);
             due.push(action);
         }
@@ -3131,9 +3280,9 @@ impl RelayNode {
         self.deposits.remove(&link);
         self.fresh.remove(&link);
         self.quiet.remove(&link);
-        self.framed.remove(&link);
+        self.forget_framed(link);
         self.waits.remove(&link);
-        self.sources.remove(&link);
+        self.forget_source(link);
         self.receipts.link_closed(link);
         self.next_hops.retain(|_, held| *held != link);
         self.loops.link_closed(link);
@@ -3161,11 +3310,7 @@ impl RelayNode {
                     at_ms,
                     circuit,
                     action,
-                } => {
-                    self.delayed_seq = self.delayed_seq.wrapping_add(1);
-                    self.delayed
-                        .insert((at_ms, self.delayed_seq), (circuit, *action));
-                }
+                } => self.hold_delayed(at_ms, circuit, *action),
                 _ => {}
             }
         }
@@ -3324,6 +3469,23 @@ mod tests {
         // NET-349: a drain still reads one quarter of the bound of its link.
         let above = OneLink(ANSWER_MARK);
         assert!(fits(Some(&above), &none, 1, DRAIN_STEP, DRAIN_CALM_PART));
+    }
+
+    #[test]
+    fn the_delayed_cells_hold_a_bounded_count_and_bounded_bytes() {
+        const CELL: usize = 32_800;
+
+        // NET-362: the count holds as before.
+        assert!(delay_room(RELAY_DELAYED_MAX - 1, 0, CELL));
+        assert!(!delay_room(RELAY_DELAYED_MAX, 0, 1));
+
+        // The bytes bound the cells of `B3` far below the count. Before
+        // this, the count alone held 4 GiB of them.
+        let fit = RELAY_DELAYED_BYTES_MAX / CELL;
+        assert!(fit < RELAY_DELAYED_MAX / 8);
+        assert!(delay_room(fit - 1, (fit - 1) * CELL, CELL));
+        assert!(!delay_room(fit, fit * CELL, CELL));
+        assert!(delay_room(fit, fit * CELL, 0));
     }
 
     #[test]

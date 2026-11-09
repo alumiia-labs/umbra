@@ -70,7 +70,7 @@ column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 264 | 92 | 1 | 0 | 9 | **366** |
+| `NET` | 264 | 93 | 1 | 0 | 9 | **367** |
 | `IDN` | 137 | 46 | 1 | 0 | 5 | **189** |
 | `CRY` | 121 | 27 | 0 | 0 | 1 | **149** |
 | `WIR` | 418 | 88 | 0 | 0 | 8 | **514** |
@@ -83,7 +83,7 @@ column when a crate implements the requirement and a test covers it.
 | `ABU` | 71 | 29 | 1 | 0 | 0 | **101** |
 | `IMP` | 120 | 41 | 1 | 0 | 2 | **164** |
 | `SEC` | 4 | 3 | 0 | 0 | 1 | **8** |
-| **All** | 2181 | 647 | 8 | 0 | 62 | **2898** |
+| **All** | 2181 | 648 | 8 | 0 | 62 | **2899** |
 
 ## SCP — Scope and Conventions
 
@@ -500,13 +500,14 @@ Source: `spec/03-network-architecture.md`
 | `NET-359` | §3.2.6 | MUST | The question of `NET-355` | The question of `NET-355` MUST state that an acceptance gives the conversation to the device that sent the request. |  |  |
 | `NET-360` | §3.5.2 | MUST | (unstated) | On a circuit that carries the attachment commands of Part 12, a relay MUST send the answers to the commands of one cell when it serves that cell, with no wait for a tick, up to 256 KiB of cells. |  |  |
 | `NET-361` | §3.4.3 | MUST | A relay | A relay MUST keep the ephemeral key `e` of the `HopHello` of each build that it runs a key agreement for, at least the last `HELLO_REPLAY_MIN` of them. |  |  |
-| `NET-362` | §3.9 | MUST | A relay | A relay MUST hold at most `CIRCUIT_DELAYED_MAX` forward cells of one circuit for their delay, and at most `RELAY_DELAYED_MAX` forward cells in all. |  |  |
+| `NET-362` | §3.9 | MUST | A relay | A relay MUST hold at most `CIRCUIT_DELAYED_MAX` forward cells of one circuit for their delay, and at most `RELAY_DELAYED_MAX` forward cells and `RELAY_DELAYED_BYTES_MAX` bytes of cells in all. |  |  |
 | `NET-363` | §3.6.3 | MUST | A relay of layer 1 or 2 that holds a relay set | A relay of layer 1 or 2 that holds a relay set MUST hold one loop chain through each relay of the next layer that it holds a link to. |  |  |
 | `NET-364` | §3.5.2 | MUST | A relay | A relay MUST close a link whose backlog stays above `LINK_DRAIN_MARK` for a whole `LINK_DRAIN_WINDOW` while the relay writes less than `LINK_DRAIN_RATE` to it in that window. |  |  |
 | `NET-365` | §3.5.2 | MUST | A relay | A relay MUST hold the backlog of a `SUB` or a `GSUB` at or below `DRAIN_THRESHOLD` as a place in its queue, as it holds a drain. |  |  |
 | `NET-370` | §3.4.3 | MUST | A client | A client MUST measure the age of a circuit on a monotonic source under Part 1 rule `SCP-018`. |  |  |
 | `NET-375` | §3.5.2 | MUST NOT | (unstated) | The answers that wait for the clocks of all circuits of one relay MUST NOT hold more than `RELAY_ANSWER_BYTES_MAX` together. |  |  |
 | `NET-376` | §3.5.2 | MUST NOT | A relay | A relay MUST NOT pack answers of two ranges into one cell (Part 6 rule `WIR-108`). |  |  |
+| `NET-377` | §3.5.2 | MUST NOT | The backlogs of the client links of one relay | The backlogs of the client links of one relay MUST NOT hold more than `RELAY_BACKLOG_MAX` together. |  |  |
 
 ## IDN — Identity
 
