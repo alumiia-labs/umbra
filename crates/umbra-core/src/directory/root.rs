@@ -151,6 +151,15 @@ impl<'a> DirectoryKeySet<'a> {
         Ok(VerifyingKey::from_bytes(bytes)?)
     }
 
+    /// The decoded key of each authority, in the order of the set. A key
+    /// that does not decode is `None` and verifies no signature.
+    fn decode_keys(&self) -> Vec<Option<VerifyingKey>> {
+        self.keys
+            .iter()
+            .map(|bytes| VerifyingKey::from_bytes(bytes).ok())
+            .collect()
+    }
+
     /// Counts the valid signatures over `preimage` and fails below five
     /// (`REL-031`, `REL-032`).
     pub(crate) fn verify_multi(
@@ -158,11 +167,30 @@ impl<'a> DirectoryKeySet<'a> {
         preimage: &[u8],
         sigs: &[AuthoritySig<'_>],
     ) -> Result<(), Error> {
+        self.verify_multi_by(preimage, sigs, |index| self.key(index))
+    }
+
+    /// Counts the valid signatures over `preimage` under the keys that
+    /// `key` gives. A holder of decoded keys passes them, thus no key
+    /// decodes again for each root.
+    fn verify_multi_by<K: core::borrow::Borrow<VerifyingKey>>(
+        &self,
+        preimage: &[u8],
+        sigs: &[AuthoritySig<'_>],
+        key: impl Fn(u8) -> Result<K, Error>,
+    ) -> Result<(), Error> {
         // Each index and each signature decodes before the first
         // verification. Thus a malformed signature after the threshold still
-        // fails the set, and the loop below can stop at the threshold.
+        // fails the set, and the loop below can stop at the threshold. The
+        // parser orders the indices, but `sigs` is public, thus the order is
+        // checked here again.
         let mut decoded = Vec::with_capacity(sigs.len());
+        let mut last: Option<u8> = None;
         for s in sigs {
+            if last.is_some_and(|l| l >= s.authority_index) {
+                return Err(Error::Malformed);
+            }
+            last = Some(s.authority_index);
             let key = self
                 .keys
                 .get(usize::from(s.authority_index))
@@ -178,7 +206,7 @@ impl<'a> DirectoryKeySet<'a> {
             if valid >= SIGNATURES_NEEDED {
                 break;
             }
-            if self.key(*index)?.verify(preimage, sig).is_ok() {
+            if key(*index)?.borrow().verify(preimage, sig).is_ok() {
                 valid = valid.saturating_add(1);
             }
         }
@@ -193,6 +221,15 @@ impl<'a> DirectoryKeySet<'a> {
     /// Accepts a `SignedKeySet` as the successor of this set (`REL-036`,
     /// `REL-037`), and returns the new set.
     pub fn rotate(&self, signed: &'a [u8]) -> Result<DirectoryKeySet<'a>, Error> {
+        self.rotate_by(signed, |index| self.key(index))
+    }
+
+    /// Accepts a successor under the keys of this set that `key` gives.
+    fn rotate_by<K: core::borrow::Borrow<VerifyingKey>>(
+        &self,
+        signed: &'a [u8],
+        key: impl Fn(u8) -> Result<K, Error>,
+    ) -> Result<DirectoryKeySet<'a>, Error> {
         let (next, used) = DirectoryKeySet::parse(signed)?;
         if next.keyset_epoch <= self.keyset_epoch {
             return Err(Error::Stale);
@@ -213,7 +250,7 @@ impl<'a> DirectoryKeySet<'a> {
         preimage.push(0x01);
         preimage.extend_from_slice(&next.keyset_epoch.to_be_bytes());
         preimage.extend_from_slice(&next.hash()?);
-        self.verify_multi(&preimage, &sigs)?;
+        self.verify_multi_by(&preimage, &sigs, key)?;
         Ok(next)
     }
 }
@@ -340,6 +377,9 @@ pub enum ClockState {
 /// the accepted root, and the clock correction.
 pub struct Consensus<'a> {
     keyset: DirectoryKeySet<'a>,
+    /// The keys of `keyset`, decoded once. An ML-DSA key costs a matrix
+    /// expansion to decode.
+    verifying: Vec<Option<VerifyingKey>>,
     keyset_hash: [u8; 32],
     highest_epoch: u64,
     accepted: Option<DirectoryRoot<'a>>,
@@ -350,8 +390,10 @@ impl<'a> Consensus<'a> {
     /// Starts from the shipped key set and the shipped epoch of `REL-045`.
     pub fn new(keyset: DirectoryKeySet<'a>, shipped_epoch: u64) -> Result<Self, Error> {
         let keyset_hash = keyset.hash()?;
+        let verifying = keyset.decode_keys();
         Ok(Consensus {
             keyset,
+            verifying,
             keyset_hash,
             highest_epoch: shipped_epoch,
             accepted: None,
@@ -406,10 +448,22 @@ impl<'a> Consensus<'a> {
 
     /// Rotates the key set from a `SignedKeySet`.
     pub fn rotate_keys(&mut self, signed: &'a [u8]) -> Result<(), Error> {
-        let next = self.keyset.rotate(signed)?;
+        let next = self
+            .keyset
+            .rotate_by(signed, |index| self.verifying_key(index))?;
         self.keyset_hash = next.hash()?;
+        self.verifying = next.decode_keys();
         self.keyset = next;
         Ok(())
+    }
+
+    /// The decoded key of the authority at `index`.
+    fn verifying_key(&self, index: u8) -> Result<&VerifyingKey, Error> {
+        self.verifying
+            .get(usize::from(index))
+            .ok_or(Error::Malformed)?
+            .as_ref()
+            .ok_or(Error::Unverified)
     }
 
     /// Accepts a root under the rules of §10.5.2 at the device clock
@@ -433,7 +487,10 @@ impl<'a> Consensus<'a> {
             return Err(Error::Stale);
         }
 
-        self.keyset.verify_multi(&root.preimage(), &root.sigs)?;
+        self.keyset
+            .verify_multi_by(&root.preimage(), &root.sigs, |index| {
+                self.verifying_key(index)
+            })?;
 
         // REL-035: not older than the validity plus the skew.
         let is_stale = self.client_clock(device_clock).is_some_and(|clock| {
@@ -729,6 +786,28 @@ pub(crate) mod tests {
         let end = broken.len() - 1;
         broken[end] = 0xFF;
         assert_eq!(accept(&broken), Err(Error::Unverified));
+    }
+
+    #[test]
+    fn a_repeated_or_descending_index_built_in_memory_is_malformed() {
+        let keys = authorities(10);
+        let (pks, _) = keyset_of(&keys, 1);
+        let hash = keyset(&pks, 1).hash().unwrap();
+        let bytes = signed_root(&keys, &[0, 1, 2, 3, 4, 5], 101, hash, [9; 32]);
+        let consensus = Consensus::new(keyset(&pks, 1), 100).unwrap();
+        let clock = 101 * 3_600 + 5;
+
+        // The fields are public, thus a caller can build what no parser gives.
+        let mut repeated = DirectoryRoot::parse(&bytes).unwrap();
+        repeated.sigs[1] = repeated.sigs[0].clone();
+        assert_eq!(consensus.verify(&repeated, clock), Err(Error::Malformed));
+
+        let mut descending = DirectoryRoot::parse(&bytes).unwrap();
+        descending.sigs.reverse();
+        assert_eq!(consensus.verify(&descending, clock), Err(Error::Malformed));
+
+        let ordered = DirectoryRoot::parse(&bytes).unwrap();
+        assert_eq!(consensus.verify(&ordered, clock), Ok(()));
     }
 
     #[test]

@@ -130,19 +130,35 @@ impl<'a> LogKeySet<'a> {
         Ok(sha3_256(&[bytes.get(..n).ok_or(Error::Malformed)?]))
     }
 
-    fn key(&self, index: u8) -> Result<VerifyingKey, Error> {
-        let bytes = self.keys.get(usize::from(index)).ok_or(Error::Malformed)?;
-        Ok(VerifyingKey::from_bytes(bytes)?)
+    /// The decoded key of each signer, in the order of the set. A key that
+    /// does not decode is `None` and verifies no signature.
+    fn decode_keys(&self) -> Vec<Option<VerifyingKey>> {
+        self.keys
+            .iter()
+            .map(|bytes| VerifyingKey::from_bytes(bytes).ok())
+            .collect()
     }
 
-    /// Counts the valid signatures over `preimage` and fails below two
-    /// (`DIS-058`, `DIS-059`).
-    fn verify_multi(&self, preimage: &[u8], sigs: &[SignerSig<'_>]) -> Result<(), Error> {
+    /// Counts the valid signatures over `preimage` under the decoded keys
+    /// `keys` of this set, and fails below two (`DIS-058`, `DIS-059`).
+    fn verify_multi(
+        &self,
+        keys: &[Option<VerifyingKey>],
+        preimage: &[u8],
+        sigs: &[SignerSig<'_>],
+    ) -> Result<(), Error> {
         // Each index and each signature decodes before the first
         // verification. Thus a malformed signature after the threshold still
-        // fails the set, and the loop below can stop at the threshold.
+        // fails the set, and the loop below can stop at the threshold. The
+        // parser orders the indices, but `sigs` is public, thus the order is
+        // checked here again.
         let mut decoded = Vec::with_capacity(sigs.len());
+        let mut last: Option<u8> = None;
         for s in sigs {
+            if last.is_some_and(|l| l >= s.signer_index) {
+                return Err(Error::Malformed);
+            }
+            last = Some(s.signer_index);
             let key = self
                 .keys
                 .get(usize::from(s.signer_index))
@@ -158,7 +174,12 @@ impl<'a> LogKeySet<'a> {
             if valid >= SIGNATURES_NEEDED {
                 break;
             }
-            if self.key(*index)?.verify(preimage, sig).is_ok() {
+            let key = keys
+                .get(usize::from(*index))
+                .ok_or(Error::Malformed)?
+                .as_ref()
+                .ok_or(Error::Unverified)?;
+            if key.verify(preimage, sig).is_ok() {
                 valid = valid.saturating_add(1);
             }
         }
@@ -184,6 +205,15 @@ impl<'a> LogKeySet<'a> {
     /// Accepts a `SignedLogKeySet` as the successor of this set
     /// (`DIS-064`, `DIS-065`).
     pub fn rotate(&self, signed: &'a [u8]) -> Result<LogKeySet<'a>, Error> {
+        self.rotate_by(&self.decode_keys(), signed)
+    }
+
+    /// Accepts a successor under the decoded keys `keys` of this set.
+    fn rotate_by(
+        &self,
+        keys: &[Option<VerifyingKey>],
+        signed: &'a [u8],
+    ) -> Result<LogKeySet<'a>, Error> {
         let (next, used) = LogKeySet::parse(signed)?;
         if next.keyset_epoch <= self.keyset_epoch {
             return Err(Error::Stale);
@@ -193,7 +223,7 @@ impl<'a> LogKeySet<'a> {
         let sigs = parse_sigs(&mut r)?;
         r.finish()?;
 
-        self.verify_multi(&next.rotation_preimage()?, &sigs)?;
+        self.verify_multi(keys, &next.rotation_preimage()?, &sigs)?;
         Ok(next)
     }
 }
@@ -278,6 +308,9 @@ pub struct AcceptedHead {
 /// What a client holds about the log.
 pub struct HeadState<'a> {
     keyset: LogKeySet<'a>,
+    /// The keys of `keyset`, decoded once. An ML-DSA key costs a matrix
+    /// expansion to decode.
+    verifying: Vec<Option<VerifyingKey>>,
     keyset_hash: [u8; 32],
     highest_tree_size: u64,
     retained: Vec<AcceptedHead>,
@@ -287,8 +320,10 @@ impl<'a> HeadState<'a> {
     /// Starts from the shipped key set (`DIS-066`).
     pub fn new(keyset: LogKeySet<'a>) -> Result<Self, Error> {
         let keyset_hash = keyset.hash()?;
+        let verifying = keyset.decode_keys();
         Ok(HeadState {
             keyset,
+            verifying,
             keyset_hash,
             highest_tree_size: 0,
             retained: Vec::new(),
@@ -302,8 +337,9 @@ impl<'a> HeadState<'a> {
 
     /// Rotates to a signed successor set.
     pub fn rotate_keys(&mut self, signed: &'a [u8]) -> Result<(), Error> {
-        let next = self.keyset.rotate(signed)?;
+        let next = self.keyset.rotate_by(&self.verifying, signed)?;
         self.keyset_hash = next.hash()?;
+        self.verifying = next.decode_keys();
         self.keyset = next;
         Ok(())
     }
@@ -317,7 +353,8 @@ impl<'a> HeadState<'a> {
             return Err(Error::Unverified);
         }
 
-        self.keyset.verify_multi(&head.preimage(), &head.sigs)?;
+        self.keyset
+            .verify_multi(&self.verifying, &head.preimage(), &head.sigs)?;
 
         let is_old = head
             .timestamp

@@ -290,6 +290,11 @@ impl Verifier {
             .any(|live| live.seed == *seed)
     }
 
+    /// The seeds of the newest and of the previous challenge (`ABU-058`).
+    pub fn live_seeds(&self) -> [Option<[u8; 32]>; 2] {
+        [self.newest, self.previous].map(|live| live.map(|live| live.seed))
+    }
+
     /// Whether a new challenge is due at `now` (`ABU-057`).
     pub fn due(&self, now: u64) -> bool {
         self.newest

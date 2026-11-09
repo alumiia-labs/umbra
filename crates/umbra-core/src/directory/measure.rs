@@ -152,8 +152,11 @@ impl<'a> MeasurerCert<'a> {
         let mut last: Option<u8> = None;
         for _ in 0..count {
             let authority_index = r.u8()?;
-            // One canonical form, and no authority counts two times.
-            if last.is_some_and(|l| l >= authority_index) {
+            // One canonical form, no authority counts two times, and each
+            // index is inside the key set.
+            if last.is_some_and(|l| l >= authority_index)
+                || usize::from(authority_index) >= AUTHORITY_COUNT
+            {
                 return Err(Error::Malformed);
             }
             last = Some(authority_index);
@@ -501,6 +504,10 @@ mod tests {
         bytes[count_at + 1 + 1 + SIGNATURE_LEN] = 4;
         let (parsed, _) = MeasurerCert::parse(&bytes).unwrap();
         assert_eq!(parsed.verify(&keyset, &[], 500), Err(Error::Unverified));
+        // An index outside the key set does not parse.
+        let mut bytes = cert(&keys, &[0, 3], 500, 1);
+        bytes[count_at + 1 + 1 + SIGNATURE_LEN] = 7;
+        assert_eq!(MeasurerCert::parse(&bytes), Err(Error::Malformed));
     }
 
     #[test]

@@ -190,7 +190,8 @@ impl IdentityEntry {
 /// The value of the item of the channel of a contact (`DEV-319`): what a
 /// device that takes the set over needs for the renewal of Part 3 §3.2.6.
 /// It holds no ratchet and no queue of the device that owns the channel.
-#[derive(Clone, PartialEq, Eq)]
+/// It holds secrets, thus it has no equality that could leak a timing.
+#[derive(Clone)]
 pub struct ChannelEntry {
     /// The pairwise salt.
     pub salt: [u8; 16],
@@ -776,7 +777,9 @@ mod tests {
         };
         let bytes = channel.encode();
         assert_eq!(bytes.len(), 245);
-        assert!(ChannelEntry::parse(&bytes).unwrap() == channel);
+        // The encoding holds each field, thus two equal encodings are two
+        // equal entries.
+        assert!(*ChannelEntry::parse(&bytes).unwrap().encode() == *bytes);
         assert!(ChannelEntry::parse(&bytes[..209]).is_err());
         let mut none = bytes.to_vec();
         none[209..213].copy_from_slice(&[0; 4]);

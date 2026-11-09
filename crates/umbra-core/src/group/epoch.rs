@@ -797,7 +797,10 @@ pub fn rotate<R: CryptoRng + TryCryptoRng + ?Sized>(
         tag: [0u8; TAG_LEN],
         own_sks: own.iter().map(|s| Secret::new(*s.expose())).collect(),
     });
-    let mut plain = Zeroizing::new(Vec::new());
+    // One allocation of the largest size: a growth would free a block that
+    // holds the epoch secret with no wipe.
+    let plain_max = full.as_ref().map_or(0, SlotPayload::len).max(bare.len());
+    let mut plain = Zeroizing::new(Vec::with_capacity(plain_max));
 
     for member in included {
         if last.is_some_and(|l| l >= member.index) {

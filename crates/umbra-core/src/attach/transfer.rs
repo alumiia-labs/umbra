@@ -15,7 +15,9 @@ use alloc::{
 };
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use umbra_crypto::{rand_core::CryptoRng, secret::Secret, x25519::StaticSecret};
+use umbra_crypto::{
+    rand_core::CryptoRng, secret::Secret, x25519::StaticSecret, zeroize::Zeroizing,
+};
 use umbra_queue::Reject;
 use umbra_wire::descriptor::{ChunkRef, FileDescriptor, Level};
 
@@ -180,6 +182,20 @@ fn random_bytes<R: CryptoRng + ?Sized, const N: usize>(rng: &mut R) -> [u8; N] {
     let mut bytes = [0u8; N];
     rng.fill_bytes(&mut bytes);
     bytes
+}
+
+/// A fresh key, drawn into its `Secret`, thus no plain copy stays.
+fn random_secret<R: CryptoRng + ?Sized>(rng: &mut R) -> Secret<32> {
+    let mut secret = Secret::zeroed();
+    rng.fill_bytes(secret.expose_mut());
+    secret
+}
+
+/// A second `Secret` with the bytes of `secret`, written in place.
+fn copy_secret(secret: &Secret<32>) -> Secret<32> {
+    let mut copy = Secret::zeroed();
+    copy.expose_mut().copy_from_slice(secret.expose());
+    copy
 }
 
 /// What the uploader keeps of one chunk until the chunk is erased
@@ -366,7 +382,7 @@ impl Upload {
         class: Class,
         rng: &mut R,
     ) -> Result<Self, Error> {
-        let file_key = Secret::new(random_bytes(rng));
+        let file_key = random_secret(rng);
         let file_nonce = random_bytes(rng);
         let sealed = seal_file(&file_key, &file_nonce, plain)?;
 
@@ -390,7 +406,7 @@ impl Upload {
             class,
             data_chunks: sealed.chunks.len(),
             sealed,
-            chunk_key: Secret::new(*file_key.expose()),
+            chunk_key: copy_secret(&file_key),
             data: None,
             file_key,
             file_nonce,
@@ -439,7 +455,7 @@ impl Upload {
                 chunk.is_noted = true;
                 started.push(ChunkCredential {
                     chunk_id: *chunk.upload.chunk_id(),
-                    cred: Secret::new(*chunk.cred.expose()),
+                    cred: copy_secret(&chunk.cred),
                     relays: chunk.relays.clone(),
                 });
             }
@@ -541,7 +557,7 @@ impl Upload {
             refs.extend(chunk.upload.chunk_refs()?);
             credentials.push(ChunkCredential {
                 chunk_id: *chunk.upload.chunk_id(),
-                cred: Secret::new(*chunk.cred.expose()),
+                cred: copy_secret(&chunk.cred),
                 relays: chunk.relays.clone(),
             });
         }
@@ -1105,7 +1121,7 @@ impl Upload {
         Ok(Uploaded {
             descriptor: FileDescriptor {
                 level,
-                file_key: Secret::new(*self.file_key.expose()),
+                file_key: copy_secret(&self.file_key),
                 file_nonce: self.file_nonce,
                 commit,
                 digest,
@@ -1168,7 +1184,7 @@ impl ChunkState {
         rng: &mut R,
     ) -> Result<Self, Error> {
         let picked = pick_relays(pool, &failed, replicas, rng)?;
-        let cred = Secret::new(random_bytes(rng));
+        let cred = random_secret(rng);
 
         Ok(ChunkState {
             upload: ChunkUpload::new(random_bytes(rng), StaticSecret::from(*cred.expose())),
@@ -1273,7 +1289,8 @@ fn pick_relays<R: CryptoRng + ?Sized>(
 struct Wanted {
     /// The replicas that this fetch did not ask yet, the next one last.
     order: Vec<[u8; 32]>,
-    bytes: Option<Vec<u8>>,
+    /// The opened segment of a later chunk, which waits for its turn.
+    bytes: Option<Zeroizing<Vec<u8>>>,
     /// The answers to this chunk, and the ones that said the relay holds
     /// no such chunk.
     answers: u32,
@@ -1431,7 +1448,7 @@ impl Download {
         rng: &mut R,
     ) -> Result<Self, Error> {
         let data = Assembler::for_data(descriptor)?;
-        let file_key = Secret::new(*descriptor.file_key.expose());
+        let file_key = copy_secret(&descriptor.file_key);
         let (assembler, chunk_key, expected, then) = match descriptor.level {
             Level::Data => (data, file_key, descriptor.refs.len(), None),
             Level::Manifest => {
@@ -1694,7 +1711,8 @@ impl Download {
             if self.then.is_none() {
                 return Ok(Progress::Done(plain));
             }
-            self.start_data(&plain, rng)?;
+            let manifest = Zeroizing::new(plain);
+            self.start_data(&manifest, rng)?;
             self.fill(node, rng)?;
         }
 
@@ -1733,26 +1751,30 @@ impl Download {
 
         // ATT-150: a chunk that does not open under its tag is one bad
         // replica, and the next replica serves it (ATT-019). The chunk
-        // opens once, and its segment waits for its turn.
+        // opens once. The next chunk opens onto the file, and a later one
+        // waits for its turn. A second answer for a chunk that is in opens
+        // nothing.
+        let position = u32::try_from(index).map_err(|_| Error::Malformed)?;
+        let assembler = self.assembler.as_mut().ok_or(Error::Stale)?;
+        let wanted = self.wanted.get_mut(index).ok_or(Error::Malformed)?;
+        let is_taken = position < assembler.next_index() || wanted.bytes.is_some();
         let opened = match &outcome {
-            ChunkOutcome::Fetched(bytes) => {
-                let position = u32::try_from(index).map_err(|_| Error::Malformed)?;
-                self.assembler
-                    .as_ref()
-                    .and_then(|assembler| assembler.open_at(position, bytes))
+            ChunkOutcome::Fetched(_) if is_taken => true,
+            ChunkOutcome::Fetched(bytes) if position == assembler.next_index() => {
+                assembler.accept(bytes).is_ok()
             }
-            _ => None,
+            ChunkOutcome::Fetched(bytes) => {
+                wanted.bytes = assembler.open_at(position, bytes).map(Zeroizing::new);
+                wanted.bytes.is_some()
+            }
+            _ => false,
         };
 
-        let wanted = self.wanted.get_mut(index).ok_or(Error::Malformed)?;
         if !is_late {
             wanted.answers = wanted.answers.saturating_add(1);
         }
         let is_served = match outcome {
-            ChunkOutcome::Fetched(_) if opened.is_some() => {
-                wanted.bytes = opened;
-                true
-            }
+            ChunkOutcome::Fetched(_) if opened => true,
             ChunkOutcome::Fetched(_) => {
                 wanted.refusals = wanted.refusals.saturating_add(1);
                 false
@@ -1868,7 +1890,7 @@ impl ChunkFetch {
         order.reverse();
 
         Ok(ChunkFetch {
-            file_key: Secret::new(*descriptor.file_key.expose()),
+            file_key: copy_secret(&descriptor.file_key),
             file_nonce: descriptor.file_nonce,
             index,
             is_last: position.saturating_add(1) == descriptor.refs.len(),
@@ -2620,6 +2642,54 @@ mod tests {
             .unwrap();
 
         assert_eq!(download.waiting.len(), held, "no place above the window");
+    }
+
+    #[test]
+    fn a_second_answer_for_a_chunk_that_is_in_keeps_no_segment() {
+        let pool = [relay(1), relay(2), relay(3)];
+        let (descriptor, sealed, _) = fetchable(40);
+        let mut node = silent_node();
+        let mut rng = Rng(12);
+        let mut download = Download::new(&descriptor, &pool, &mut rng).unwrap();
+        download.tick(&mut node, &mut rng).unwrap();
+        let ask_of = |download: &Download, index: usize| {
+            let (handle, fetching) = download
+                .waiting
+                .iter()
+                .find(|(_, fetching)| fetching.index == index)
+                .unwrap();
+            (*handle, fetching.sent, fetching.ahead, fetching.relay)
+        };
+        let answer = |download: &mut Download, node: &mut ClientNode, rng: &mut Rng, index| {
+            let (handle, sent, ahead, relay) = ask_of(download, index);
+            let copy = Fetching {
+                index,
+                sent,
+                ahead,
+                relay,
+            };
+            let outcome = ChunkOutcome::Fetched(sealed[index].clone());
+            download.on_outcome(node, handle, outcome, rng).unwrap();
+            copy
+        };
+
+        // Chunk 1 waits for chunk 0, and chunk 0 then opens onto the file.
+        answer(&mut download, &mut node, &mut rng, 1);
+        assert!(download.wanted[1].bytes.is_some());
+        let copy = answer(&mut download, &mut node, &mut rng, 0);
+        assert_eq!(download.assembler.as_ref().unwrap().next_index(), 2);
+        assert!(download.wanted[0].bytes.is_none());
+
+        // A second answer for chunk 0 opens nothing and holds no segment.
+        let again = u64::MAX;
+        download.waiting.insert(again, copy);
+        download.budget.take();
+        let outcome = ChunkOutcome::Fetched(sealed[0].clone());
+        download
+            .on_outcome(&mut node, again, outcome, &mut rng)
+            .unwrap();
+        assert!(download.wanted[0].bytes.is_none());
+        assert_eq!(download.assembler.as_ref().unwrap().next_index(), 2);
     }
 
     #[test]

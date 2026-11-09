@@ -11,12 +11,7 @@ use alloc::{
     vec::Vec,
 };
 
-use umbra_crypto::{
-    hmac::{digest::KeyInit, Hmac, Mac},
-    labels,
-    sha3::Sha3_256,
-    vrf,
-};
+use umbra_crypto::{hash::hmac_sha3_256, hmac::Mac, labels, vrf};
 use umbra_wire::codec::{Reader, Writer};
 
 use super::{
@@ -41,9 +36,7 @@ pub const ENTRY_MAX: usize = 8_192;
 /// The entry holds the handle string, thus the leaf commits to it
 /// (`DIS-009`).
 pub fn commitment(opening: &[u8; 32], entry: &[u8]) -> [u8; 32] {
-    // A 32-byte key is inside the HMAC key bound, thus this cannot fail.
-    let mut mac = Hmac::<Sha3_256>::new_from_slice(opening)
-        .unwrap_or_else(|_| Hmac::<Sha3_256>::new(&Default::default()));
+    let mut mac = hmac_sha3_256(opening);
     mac.update(labels::LOG_COMMIT);
     mac.update(entry);
     mac.finalize().into_bytes().into()

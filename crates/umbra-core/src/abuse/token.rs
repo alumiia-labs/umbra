@@ -77,7 +77,7 @@ impl TokenChallenge {
 }
 
 /// A token.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Token {
     /// The type.
     pub token_type: u16,
@@ -90,6 +90,18 @@ pub struct Token {
     /// The authenticator: 256 bytes for the cross-relay type, 64 for the
     /// first-party type.
     pub authenticator: Vec<u8>,
+}
+
+/// A log line must not hold a token that it could spend: the nonce and the
+/// authenticator stay out.
+impl core::fmt::Debug for Token {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Token")
+            .field("token_type", &self.token_type)
+            .field("challenge_digest", &self.challenge_digest)
+            .field("token_key_id", &self.token_key_id)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Token {

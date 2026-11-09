@@ -9,9 +9,12 @@ use alloc::{
     vec::Vec,
 };
 
-use umbra_crypto::group::{
-    pair::{app_hash, RecordTag},
-    MemberKeys,
+use umbra_crypto::{
+    group::{
+        pair::{app_hash, RecordTag},
+        MemberKeys,
+    },
+    zeroize::Zeroizing,
 };
 use umbra_wire::{
     app::{AppKind, AppMessage, Channel},
@@ -372,8 +375,9 @@ impl Receiver {
         };
 
         // Each try copies the ciphertext into the buffer again, thus one
-        // buffer serves all the keys.
-        let mut plain_bytes = alloc::vec![0u8; bucket.group_record()];
+        // buffer serves all the keys. The plaintext is message content, thus
+        // a drop wipes it.
+        let mut plain_bytes = Zeroizing::new(alloc::vec![0u8; bucket.group_record()]);
         let mut opened: Option<(usize, bool, bool)> = None;
         for key in &keys {
             if let Ok(n) = open_content(&record, &key.key, ctx.roster.group_id(), &mut plain_bytes)

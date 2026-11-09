@@ -695,11 +695,13 @@ impl Directory {
             .collect();
 
         for search_key in lapsed {
-            let Some(mut record) = self.labels.get(&search_key).cloned() else {
+            // Only the label changes, thus the blob is no copy.
+            let Some(record) = self.labels.get(&search_key) else {
                 continue;
             };
+            let mut label = record.label.clone();
 
-            let Some(version) = record.label.tombstone_if_lapsed(now) else {
+            let Some(version) = label.tombstone_if_lapsed(now) else {
                 continue;
             };
 
@@ -715,7 +717,8 @@ impl Directory {
                 continue;
             }
 
-            self.keep_label(&search_key, record);
+            // The record is there: the read above found it.
+            let _ = self.replace_label(&search_key, label);
         }
 
         // ABU-098: each key of this epoch and of the next one goes into the

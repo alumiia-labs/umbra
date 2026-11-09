@@ -504,6 +504,13 @@ impl SyncEngine {
             DeviceSetBody::MutableState(_) => {
                 let item = MutableItem::parse(body)?;
                 let counter = item.context.counter_of(source).ok_or(Error::Malformed)?;
+                // DEV-270, DEV-308: a device writes under its own id, and only
+                // the owner relays the write of another. Else a peer could
+                // write under a lower id and win each tie.
+                if item.writer != *source && self.owner != Some(*source) {
+                    return Err(Error::Unverified);
+                }
+
                 let lamport = self.take_lamport(source, item.context.lamport)?;
                 if !self.take_counter(source, counter, now)? {
                     return Ok(Taken::Duplicate);
@@ -693,20 +700,32 @@ impl SyncEngine {
             return;
         }
 
-        let is_delivery = |key: &(u8, Vec<u8>)| key.0 == super::sync::ITEM_DELIVERY;
-        let mut lamports: Vec<u64> = self
+        // Exactly the excess leaves, the lowest Lamport counter first and the
+        // key on a tie. A cut at a Lamport value alone keeps each item at
+        // that value, and many equal values would keep the engine above the
+        // bound and trim at each insert.
+        let mut oldest: Vec<(u64, &(u8, Vec<u8>))> = self
             .mutable
             .iter()
-            .filter(|(key, _)| is_delivery(key))
-            .map(|(_, (lamport, _))| *lamport)
+            .filter(|(key, _)| key.0 == super::sync::ITEM_DELIVERY)
+            .map(|(key, (lamport, _))| (*lamport, key))
             .collect();
-        lamports.sort_unstable();
-        let excess = lamports.len().saturating_sub(MUTABLE_HELD);
-        let floor = lamports.get(excess).copied().unwrap_or(0);
+        let held = oldest.len();
+        let excess = held.saturating_sub(MUTABLE_HELD);
+        if excess == 0 {
+            return;
+        }
+        oldest.select_nth_unstable(excess);
+        let gone: Vec<(u8, Vec<u8>)> = oldest
+            .iter()
+            .take(excess)
+            .map(|(_, key)| (*key).clone())
+            .collect();
 
-        self.mutable
-            .retain(|key, (lamport, _)| !is_delivery(key) || *lamport >= floor);
-        self.deliveries = self.mutable.keys().filter(|key| is_delivery(key)).count();
+        for key in &gone {
+            self.mutable.remove(key);
+        }
+        self.deliveries = held.saturating_sub(gone.len());
     }
 
     /// Holds the winner of one item, and trims the delivery items
@@ -942,6 +961,26 @@ mod tests {
     }
 
     #[test]
+    fn a_trim_of_items_of_one_lamport_value_takes_the_bound() {
+        // Each delivery item holds one Lamport value. The trim still takes
+        // the count to the bound, thus the next trim waits for the slack.
+        let (mut phone, _) = pair();
+        let delivery = crate::devset::sync::ITEM_DELIVERY;
+        let count = MUTABLE_HELD + MUTABLE_SLACK + 1;
+        for at in 0..count {
+            let key = u32::try_from(at).unwrap().to_be_bytes().to_vec();
+            phone.put_mutable((delivery, key), (5, PHONE));
+        }
+
+        assert_eq!(phone.deliveries, MUTABLE_HELD);
+        assert_eq!(phone.mutable.len(), MUTABLE_HELD);
+        // The tie breaks by the key, thus the lowest keys left.
+        assert!(!phone.holds_mutable(delivery, &0u32.to_be_bytes()));
+        let newest = u32::try_from(count - 1).unwrap().to_be_bytes();
+        assert!(phone.holds_mutable(delivery, &newest));
+    }
+
+    #[test]
     fn the_stored_form_holds_the_counters_the_log_and_the_items() {
         let (mut phone, mut laptop) = pair();
         let first = phone
@@ -1099,6 +1138,8 @@ mod tests {
         // write at the same counter, and the relay wins there as it won at
         // the tablet, and not by the device of the tablet.
         let (mut phone2, mut laptop2) = pair();
+        phone2.set_owner(Some(TABLET));
+        laptop2.set_owner(Some(TABLET));
         let mut tablet = SyncEngine::new(TABLET, &[PHONE, LAPTOP]).unwrap();
 
         let a = phone2
@@ -1147,6 +1188,33 @@ mod tests {
         assert!(matches!(
             phone.receive(&LAPTOP, &later.body, 21).unwrap(),
             Taken::Mutable { .. }
+        ));
+    }
+
+    #[test]
+    fn a_peer_that_does_not_own_the_channels_writes_under_its_own_id_alone() {
+        let (mut phone, _) = pair();
+        let mut laptop = SyncEngine::new(LAPTOP, &[PHONE, TABLET]).unwrap();
+        let mut tablet = SyncEngine::new(TABLET, &[PHONE, LAPTOP]).unwrap();
+
+        // The laptop puts the id of the phone, the lower one, on its write.
+        let forged = laptop
+            .relay_mutable(1, b"conversation", b"read to 9", 1, PHONE, [7; 16], 10)
+            .unwrap();
+        assert_eq!(
+            tablet.receive(&LAPTOP, &forged.body, 11),
+            Err(Error::Unverified)
+        );
+        assert!(!tablet.holds_mutable(1, b"conversation"));
+
+        // The owner of the channels relays the write of another device.
+        phone.set_owner(Some(TABLET));
+        let relay = tablet
+            .relay_mutable(1, b"conversation", b"read to 9", 1, LAPTOP, [8; 16], 12)
+            .unwrap();
+        assert!(matches!(
+            phone.receive(&TABLET, &relay.body, 13).unwrap(),
+            Taken::Mutable { writer: LAPTOP, .. }
         ));
     }
 

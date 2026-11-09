@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 
 use umbra_crypto::{
     aead, ct_eq, hash::sha3_256, hkdf::Hkdf, labels, secret::Secret, sha3::Sha3_256,
-    x25519::StaticSecret,
+    x25519::StaticSecret, zeroize::Zeroizing,
 };
 use umbra_wire::descriptor::{FileDescriptor, Level};
 
@@ -223,18 +223,22 @@ pub struct Assembler {
     digest: Option<[u8; 32]>,
     chunk_count: u32,
     next: u32,
-    plain: Vec<u8>,
+    /// The opened segments. The buffer holds the whole file from the
+    /// start, thus no growth frees a block of plaintext with no wipe.
+    plain: Zeroizing<Vec<u8>>,
 }
 
 impl Assembler {
     fn new(key: Secret<32>, nonce: [u8; 24], digest: Option<[u8; 32]>, chunk_count: u32) -> Self {
+        let most = segment::segment_count(usize::try_from(MAX_FILE_SIZE).unwrap_or(usize::MAX));
+        let segments = usize::try_from(chunk_count).map_or(most, |count| count.min(most));
         Assembler {
             key,
             nonce,
             digest,
             chunk_count,
             next: 0,
-            plain: Vec::new(),
+            plain: Zeroizing::new(Vec::with_capacity(segments.saturating_mul(SEGMENT_SIZE))),
         }
     }
 
@@ -345,7 +349,8 @@ impl Assembler {
         self.plain.get(start..).ok_or(Error::Malformed)
     }
 
-    /// Removes the padding and checks the digest (`ATT-031`, `ATT-032`).
+    /// Removes the padding and checks the digest (`ATT-031`, `ATT-032`). A
+    /// file that fails is wiped at the drop of the assembler.
     pub fn finish(mut self) -> Result<Vec<u8>, Error> {
         if !self.is_complete() {
             return Err(Error::Stale);
@@ -353,12 +358,12 @@ impl Assembler {
 
         segment::unpad_file(&mut self.plain)?;
         if let Some(digest) = self.digest {
-            if !ct_eq(&sha3_256(&[&self.plain]), &digest) {
+            if !ct_eq(&sha3_256(&[self.plain.as_slice()]), &digest) {
                 return Err(Error::Unverified);
             }
         }
 
-        Ok(self.plain)
+        Ok(core::mem::take(&mut *self.plain))
     }
 }
 

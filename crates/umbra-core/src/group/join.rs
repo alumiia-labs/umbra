@@ -66,11 +66,18 @@ impl JoinKeys {
 }
 
 pub(crate) fn wrap(control_type: ControlType, payload: &[u8]) -> Result<Vec<u8>, Error> {
+    let mut out = wrap_secret(control_type, payload)?;
+    Ok(core::mem::take(&mut *out))
+}
+
+/// The control object of a payload that holds secrets. The buffer does
+/// not grow, thus no freed block holds a copy, and a drop wipes it.
+fn wrap_secret(control_type: ControlType, payload: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
     let control = GroupControl {
         control_type,
         payload,
     };
-    let mut out = alloc::vec![0u8; payload.len().saturating_add(8)];
+    let mut out = Zeroizing::new(alloc::vec![0u8; payload.len().saturating_add(8)]);
     let n = control.encode(&mut out)?;
     out.truncate(n);
     Ok(out)
@@ -119,7 +126,8 @@ pub const fn admit_slot(t_join: u32, start_slot: u32) -> u32 {
 
 /// The admit an inviting admin sends after the add took `GSEQ` at each
 /// replica (`GRP-312`). `chain` is the epoch chain of the admin, from
-/// which the slot key of `slot` comes.
+/// which the slot key of `slot` comes. The bytes hold the slot key and the
+/// queue credentials, thus a drop wipes them.
 #[allow(clippy::too_many_arguments)]
 pub fn admit(
     group_id: [u8; 32],
@@ -132,7 +140,7 @@ pub fn admit(
     roster_epoch: u32,
     replicas: [ReplicaRef; 2],
     descriptor: &[u8],
-) -> Result<Vec<u8>, Error> {
+) -> Result<Zeroizing<Vec<u8>>, Error> {
     let slot_key = chain.slot_key(slot)?;
     let mut invitation = GroupInvitation {
         group_id,
@@ -167,7 +175,7 @@ pub fn admit(
     }
 
     let n = encoded?;
-    wrap(
+    wrap_secret(
         ControlType::Invitation,
         payload.get(..n).ok_or(Error::Malformed)?,
     )

@@ -74,6 +74,9 @@ pub struct RelayGate {
     /// The registrations that each accepted chunk solution may still admit,
     /// by its seed and its nonce, with its Equi-X bytes (`ABU-107`).
     chunk_uses: BTreeMap<SolutionKey, ([u8; 16], u16)>,
+    /// The live seeds at the last prune of `chunk_uses`. A prune scans the
+    /// whole map, thus it runs only when a challenge changes.
+    pruned_for: [Option<[u8; 32]>; 2],
     /// The token nonces spent since the last call, each with its epoch,
     /// for the store (`ABU-114`).
     fresh: Vec<(u32, [u8; 32])>,
@@ -91,6 +94,7 @@ impl RelayGate {
             spent: SpendSet::default(),
             admissions: 0,
             chunk_uses: BTreeMap::new(),
+            pruned_for: [None; 2],
             fresh: Vec::new(),
         }
     }
@@ -224,9 +228,13 @@ impl RelayGate {
         let holder = holder(b"pow", &[&solution.seed, &solution.nonce]);
 
         // A solution to a challenge that went out of use admits nothing more.
-        let pow = &self.pow;
-        self.chunk_uses
-            .retain(|(seed, _), _| pow.is_live_seed(seed));
+        let live = self.pow.live_seeds();
+        if live != self.pruned_for {
+            let pow = &self.pow;
+            self.chunk_uses
+                .retain(|(seed, _), _| pow.is_live_seed(seed));
+            self.pruned_for = live;
+        }
 
         if let Some((bytes, left)) = self.chunk_uses.get_mut(&key) {
             if *bytes != solution.solution || *left == 0 {

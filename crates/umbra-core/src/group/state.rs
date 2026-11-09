@@ -1960,7 +1960,13 @@ impl Group {
     /// Keeps an opened slot of an epoch above the current one that does not
     /// install yet, or a delivery of owner credentials of the current epoch
     /// (`GRP-429`). Its rotator is an active member, thus a member that
-    /// left fills no place, and the oldest one leaves at the bound.
+    /// left fills no place.
+    ///
+    /// Each rotator holds at most one slot and one delivery, thus a member
+    /// cannot fill the list with crafted slots. Of two slots of one rotator
+    /// the lower epoch stays, because it installs first. Of two deliveries
+    /// the higher roster epoch stays, because it replaces the older set. At
+    /// the bound the highest epoch leaves, as in `keep_waiting`.
     fn keep_pending(&mut self, opened: Opened) {
         let rotator = opened.payload.rotator;
         let delivery = is_delivery(&opened.payload);
@@ -1994,8 +2000,38 @@ impl Group {
             return;
         }
 
+        let same_rotator = self
+            .pending
+            .iter_mut()
+            .find(|held| held.payload.rotator == rotator && is_delivery(&held.payload) == delivery);
+        if let Some(held) = same_rotator {
+            let is_better = if delivery {
+                opened.roster_epoch > held.roster_epoch
+            } else {
+                opened.epoch < held.epoch
+            };
+            if is_better {
+                *held = opened;
+            }
+            return;
+        }
+
         if self.pending.len() >= PENDING_MAX {
-            self.pending.remove(0);
+            // The highest epoch leaves, and of one epoch the slot that came
+            // last. A slot that came first keeps its place.
+            let Some((last, highest)) = self
+                .pending
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, held)| (held.epoch, held.arrived_at))
+                .map(|(place, held)| (place, held.epoch))
+            else {
+                return;
+            };
+            if opened.epoch >= highest {
+                return;
+            }
+            self.pending.remove(last);
         }
 
         self.pending.push(opened);
@@ -2655,7 +2691,12 @@ impl Group {
 
     /// The admit for the member at `index`, with the slot key of its join
     /// and the two replicas (`GRP-312`), at the roster epoch that stands.
-    pub fn admit_for(&self, index: u16, descriptor: &[u8], now: u64) -> Result<Vec<u8>, Error> {
+    pub fn admit_for(
+        &self,
+        index: u16,
+        descriptor: &[u8],
+        now: u64,
+    ) -> Result<Zeroizing<Vec<u8>>, Error> {
         self.admit_at(index, self.roster.epoch_index(), descriptor, [0; 2], now)
     }
 
@@ -2671,7 +2712,7 @@ impl Group {
         descriptor: &[u8],
         seqs: [u32; 2],
         now: u64,
-    ) -> Result<Vec<u8>, Error> {
+    ) -> Result<Zeroizing<Vec<u8>>, Error> {
         let current = self.epochs.current().ok_or(Error::NoPath)?;
         let replicas = self.replicas.as_ref().ok_or(Error::NoPath)?;
         let mut refs = [
@@ -5549,5 +5590,55 @@ mod tests {
             .waiting
             .iter()
             .any(|held| held.epoch == e + 1 && held.body == chunked(1, 9)));
+    }
+
+    /// An opened slot of `rotator` and `epoch` whose secret is `mark`.
+    fn opened(rotator: u16, epoch: u32, mark: u8, now: u64) -> Opened {
+        Opened {
+            epoch,
+            start_slot: slot_of(now),
+            roster_epoch: 99,
+            payload: SlotPayload {
+                rotator,
+                epoch_secret: Secret::new([mark; 32]),
+                tag: [0; TAG_LEN],
+                own_sks: Vec::new(),
+            },
+            is_current: true,
+            serves_all: true,
+            arrived_at: now,
+        }
+    }
+
+    #[test]
+    fn a_member_holds_one_pending_slot_and_pushes_out_no_slot_of_another() {
+        let now = 1_700_000_000;
+        let (mut creator, _, _) = pair(now);
+        let e = creator.epoch();
+
+        // A real slot of the next epoch waits for its roster object.
+        creator.keep_pending(opened(0, e + 1, 1, now));
+
+        // Member 1 crafts more slots than the bound. Each one takes the one
+        // place of member 1, and a lower epoch replaces a higher one.
+        for step in 0..u8::try_from(PENDING_MAX).unwrap() {
+            creator.keep_pending(opened(1, e + 9 - u32::from(step), 10 + step, now));
+        }
+        let held: Vec<(u16, u32)> = creator
+            .pending
+            .iter()
+            .map(|held| (held.payload.rotator, held.epoch))
+            .collect();
+        assert_eq!(held.len(), 2);
+        assert!(held.contains(&(0, e + 1)));
+        assert!(held.contains(&(1, e + 2)));
+
+        // A higher epoch of member 1 does not take the place of its lower one.
+        creator.keep_pending(opened(1, e + 5, 40, now + 1));
+        assert!(creator
+            .pending
+            .iter()
+            .any(|held| held.payload.rotator == 1 && held.epoch == e + 2));
+        assert_eq!(creator.pending.len(), 2);
     }
 }

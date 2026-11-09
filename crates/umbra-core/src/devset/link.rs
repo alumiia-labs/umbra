@@ -17,6 +17,7 @@ use umbra_crypto::{
     labels,
     rand_core::{CryptoRng, TryCryptoRng},
     secret::Secret,
+    sha3::{Digest, Sha3_256},
     sign::{SigningKey, VERIFYING_KEY_LEN},
     x25519::{PublicKey as XPublic, StaticSecret},
 };
@@ -102,17 +103,25 @@ pub struct Slot {
 
 impl Slot {
     fn derive(label: &[u8], secret: &[&[u8]]) -> Self {
-        let part = |name: &[u8]| {
-            let mut parts: Vec<&[u8]> = alloc::vec![label];
-            parts.extend_from_slice(secret);
-            parts.push(name);
-            sha3_256(&parts)
+        // Each key is written in its `Secret`, thus no plain copy stays.
+        let part_into = |name: &[u8], out: &mut [u8; 32]| {
+            let mut hasher = Sha3_256::new();
+            hasher.update(label);
+            for piece in secret {
+                hasher.update(piece);
+            }
+            hasher.update(name);
+            hasher.finalize_into(out.into());
         };
-        Slot {
-            handle: part(b"handle"),
-            cred: Secret::new(part(b"cred")),
-            read: Secret::new(part(b"read")),
-        }
+        let mut slot = Slot {
+            handle: [0; 32],
+            cred: Secret::zeroed(),
+            read: Secret::zeroed(),
+        };
+        part_into(b"handle", &mut slot.handle);
+        part_into(b"cred", slot.cred.expose_mut());
+        part_into(b"read", slot.read.expose_mut());
+        slot
     }
 
     /// The public half of `read_sk`, which the write carries.
@@ -190,7 +199,7 @@ const HELLO_BODY_LEN: usize = 16 + PUBLIC_KEY_LEN + VERIFYING_KEY_LEN + LABEL_LE
 pub const HELLO_LEN: usize = 1 + CIPHERTEXT_LEN + aead::NONCE_LEN + aead::TAG_LEN + HELLO_BODY_LEN;
 
 fn hello_key(ss: &Secret<32>, nonce: &[u8; 16]) -> Secret<32> {
-    Secret::new(sha3_256(&[labels::LINK_HELLO, ss.expose(), nonce, b"seal"]))
+    secret_hash(&[labels::LINK_HELLO, ss.expose(), nonce, b"seal"])
 }
 
 impl LinkHello {
@@ -327,12 +336,12 @@ impl LinkSecret {
     }
 
     fn seal_key(&self) -> Secret<32> {
-        Secret::new(sha3_256(&[
+        secret_hash(&[
             labels::LINK_PROVISION,
             self.ss.expose(),
             &self.transcript,
             b"seal",
-        ]))
+        ])
     }
 
     /// Seals a provision for its handle-addressed chunk: the nonce, the
@@ -438,37 +447,31 @@ pub struct DeviceIdentity {
 }
 
 impl DeviceIdentity {
-    /// A new identity with fresh values.
+    /// A new identity with fresh values. The seeds are long-term keys,
+    /// thus each one is drawn into its `Secret` and has no plain copy.
     pub fn generate<R: CryptoRng + ?Sized>(label: &str, rng: &mut R) -> Self {
-        let mut device_id = [0u8; 16];
-        rng.fill_bytes(&mut device_id);
-        let mut kem_x = [0u8; 32];
-        rng.fill_bytes(&mut kem_x);
-        let mut kem_dz = [0u8; 64];
-        rng.fill_bytes(&mut kem_dz);
-        let mut roster_seed = [0u8; 32];
-        rng.fill_bytes(&mut roster_seed);
-
-        DeviceIdentity {
-            device_id,
+        let mut identity = DeviceIdentity {
+            device_id: [0; 16],
             label: label_bytes(label),
-            kem_x: Secret::new(kem_x),
-            kem_dz: Secret::new(kem_dz),
-            roster_seed: Secret::new(roster_seed),
-        }
+            kem_x: Secret::zeroed(),
+            kem_dz: Secret::zeroed(),
+            roster_seed: Secret::zeroed(),
+        };
+        rng.fill_bytes(&mut identity.device_id);
+        rng.fill_bytes(identity.kem_x.expose_mut());
+        rng.fill_bytes(identity.kem_dz.expose_mut());
+        rng.fill_bytes(identity.roster_seed.expose_mut());
+        identity
     }
 
     /// The `DeviceKey`.
     pub fn device_key(&self) -> KeyPair {
-        KeyPair::from_seeds(
-            Secret::new(*self.kem_x.expose()),
-            Secret::new(*self.kem_dz.expose()),
-        )
+        KeyPair::from_seeds(copy_secret(&self.kem_x), copy_secret(&self.kem_dz))
     }
 
     /// The `DeviceRosterKey`.
     pub fn roster_key(&self) -> SigningKey {
-        SigningKey::from_seed(Secret::new(*self.roster_seed.expose()))
+        SigningKey::from_seed(copy_secret(&self.roster_seed))
     }
 
     /// The stored form: 16 + 32 + 32 + 64 + 32 bytes.
@@ -482,19 +485,44 @@ impl DeviceIdentity {
         out
     }
 
-    /// Reads the stored form.
+    /// Reads the stored form. Each seed goes from the bytes into its
+    /// `Secret` with no plain copy.
     pub fn parse(bytes: &[u8]) -> Result<Self, Error> {
         let mut r = Reader::new(bytes);
-        let identity = DeviceIdentity {
+        let mut identity = DeviceIdentity {
             device_id: r.array()?,
             label: r.array()?,
-            kem_x: Secret::new(r.array()?),
-            kem_dz: Secret::new(r.array()?),
-            roster_seed: Secret::new(r.array()?),
+            kem_x: Secret::zeroed(),
+            kem_dz: Secret::zeroed(),
+            roster_seed: Secret::zeroed(),
         };
+        identity.kem_x.expose_mut().copy_from_slice(r.take(32)?);
+        identity.kem_dz.expose_mut().copy_from_slice(r.take(64)?);
+        identity
+            .roster_seed
+            .expose_mut()
+            .copy_from_slice(r.take(32)?);
         r.finish()?;
         Ok(identity)
     }
+}
+
+/// A second `Secret` with the bytes of `secret`, written in place.
+fn copy_secret<const N: usize>(secret: &Secret<N>) -> Secret<N> {
+    let mut copy = Secret::zeroed();
+    copy.expose_mut().copy_from_slice(secret.expose());
+    copy
+}
+
+/// SHA3-256 over `parts`, written in a `Secret`.
+fn secret_hash(parts: &[&[u8]]) -> Secret<32> {
+    let mut out = Secret::zeroed();
+    let mut hasher = Sha3_256::new();
+    for part in parts {
+        hasher.update(part);
+    }
+    hasher.finalize_into(out.expose_mut().into());
+    out
 }
 
 /// The owned parts of a [`DeviceEntry`], which borrows its keys.

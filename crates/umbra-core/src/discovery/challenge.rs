@@ -7,9 +7,9 @@ use alloc::vec::Vec;
 
 use umbra_crypto::{
     ct_eq,
-    hash::sha3_256,
+    hash::{hmac_sha3_256, sha3_256},
     hkdf::Hkdf,
-    hmac::{digest::KeyInit, Hmac, Mac},
+    hmac::Mac,
     kem::{self, Ciphertext, KeyPair, PublicKey, SharedSecret, CIPHERTEXT_LEN},
     labels,
     rand_core::CryptoRng,
@@ -81,9 +81,7 @@ fn answer_of(
     nonce: &[u8; NONCE_LEN],
     entry_new: Option<&[u8]>,
 ) -> [u8; ANSWER_LEN] {
-    // A 32-byte key is inside the HMAC key bound, thus this cannot fail.
-    let mut mac = Hmac::<Sha3_256>::new_from_slice(k.expose())
-        .unwrap_or_else(|_| Hmac::<Sha3_256>::new(&Default::default()));
+    let mut mac = hmac_sha3_256(k.expose());
     mac.update(nonce);
     if let Some(entry) = entry_new {
         mac.update(&sha3_256(&[entry]));
