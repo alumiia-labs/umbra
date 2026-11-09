@@ -1192,9 +1192,9 @@ impl Group {
                 .is_some_and(|member| member.role >= Role::Admin)
         });
 
-        let mut members: Vec<(u16, Role, Vec<u8>, PairKey)> = Vec::new();
+        let mut members: Vec<(u16, Role, &[u8], PairKey)> = Vec::new();
         for member in self.roster.active() {
-            let kem_pk = member.kem_pk.clone().ok_or(Error::NoPath)?;
+            let kem_pk = member.kem_pk.as_deref().ok_or(Error::NoPath)?;
             // GRP-237, GRP-308: a member whose key gives no pair key, or
             // whose KEM key does not decode, takes no slot. The roster
             // takes no such key (`GRP-320`); one that an earlier roster
@@ -1202,7 +1202,7 @@ impl Group {
             let Ok(pair) = self.keys.pair_key(&member.pair_pk, self.roster.group_id()) else {
                 continue;
             };
-            if umbra_crypto::kem::PublicKey::from_bytes(&kem_pk).is_err() {
+            if umbra_crypto::kem::PublicKey::from_bytes(kem_pk).is_err() {
                 continue;
             }
             members.push((member.index, member.role, kem_pk, pair));
@@ -1862,7 +1862,7 @@ impl Group {
     }
 
     /// Installs what an opened slot gives, or keeps it for a later try.
-    fn install_opened(&mut self, opened: Opened, now: u64) -> Result<(), Error> {
+    fn install_opened(&mut self, mut opened: Opened, now: u64) -> Result<(), Error> {
         // GRP-400: a slot with no epoch secret hands the owner credentials
         // and installs no epoch. Only a slot of the current epoch holds it.
         if is_delivery(&opened.payload) {
@@ -1920,7 +1920,11 @@ impl Group {
         };
 
         let before = self.epochs.epoch();
-        let secret = EpochSecret::from_secret(Secret::new(*opened.payload.epoch_secret.expose()));
+        // The payload needs the secret no more, thus it moves with no copy.
+        let secret = EpochSecret::from_secret(core::mem::replace(
+            &mut opened.payload.epoch_secret,
+            Secret::zeroed(),
+        ));
         // GRP-386: the two queue credentials come from `K_e`.
         let mut state = EpochState::new(
             secret,
@@ -2180,14 +2184,14 @@ impl Group {
             .member(index)
             .filter(|member| member.active && member.role >= Role::Admin)
             .ok_or(Error::NoPath)?;
-        let kem_pk = member.kem_pk.clone().ok_or(Error::NoPath)?;
+        let kem_pk = member.kem_pk.as_deref().ok_or(Error::NoPath)?;
         let pair = self
             .keys
             .pair_key(&member.pair_pk, self.roster.group_id())?;
         let included = Included {
             index,
             role: member.role,
-            kem_pk: &kem_pk,
+            kem_pk,
             pair_key: &pair,
         };
 
@@ -2320,21 +2324,26 @@ impl Group {
         }
 
         let member = self.roster.member(index).ok_or(Error::NoPath)?;
-        let kem_pk = member.kem_pk.clone().ok_or(Error::NoPath)?;
+        let kem_pk = member.kem_pk.as_deref().ok_or(Error::NoPath)?;
         let pair = self
             .keys
             .pair_key(&member.pair_pk, self.roster.group_id())?;
         let included = Included {
             index,
             role: member.role,
-            kem_pk: &kem_pk,
+            kem_pk,
             pair_key: &pair,
         };
 
         // The roster epoch of the rotation, thus the requester counts the
         // triggers after it as every other member does (`GRP-357`).
-        let secret = Secret::new(*current.secret().expose().expose());
-        self.one_slot_record(&included, current.roster_epoch(), &secret, None, rng)
+        self.one_slot_record(
+            &included,
+            current.roster_epoch(),
+            current.secret().expose(),
+            None,
+            rng,
+        )
     }
 
     /// The member indices that the slots of an epoch-key body serve, under
@@ -4801,7 +4810,7 @@ mod tests {
         // record of that epoch for index 1, with a secret of its own. The
         // index rule would give it the place of the true secret.
         let target = creator.roster().member(1).unwrap();
-        let kem_pk = target.kem_pk.clone().unwrap();
+        let kem_pk = target.kem_pk.as_deref().unwrap();
         let pair = creator
             .keys
             .pair_key(&target.pair_pk, creator.group_id())
@@ -4809,7 +4818,7 @@ mod tests {
         let included = Included {
             index: 1,
             role: Role::Member,
-            kem_pk: &kem_pk,
+            kem_pk,
             pair_key: &pair,
         };
         let roster_epoch = creator.roster().epoch_index();

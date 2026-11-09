@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 9: Discovery, Handles, and Key Transparency
 
 **Status:** Draft
-**Version:** 0.50.7
+**Version:** 0.51.0
 **Date:** 2026-11-09
 
 ---
@@ -581,9 +581,13 @@ bytes, thus each form fits one `B3` cell.
    A client MUST reject a `signer_index` at or above `signer_count`.
 7. **[DIS-057]** A client MUST reject a `sigs` list that is not in ascending
    order of `signer_index`.
-8. **[DIS-058]** A client MUST verify each signature against the key at its
-   `signer_index` in the `LogKeySet` that the client holds. **[DIS-059]** A
-   client MUST count 2 or more valid signatures before it accepts the head.
+8. **[DIS-058]** A client MUST decode each signature and check its
+   `signer_index` before it verifies one. It MUST then verify the signatures
+   in list order, each against the key at its `signer_index` in the
+   `LogKeySet` that the client holds, until 2 of them are valid. It MAY skip
+   the verification of the signature after that, as Part 10 `REL-031` allows.
+   **[DIS-059]** A client MUST count 2 or more valid signatures before it
+   accepts the head.
 9. **[DIS-060]** A client MUST reject a `SignedTreeHead` whose `keyset_hash`
    differs from the hash of the `LogKeySet` that the client holds.
 10. **[DIS-061]** A client MUST reject a `SignedTreeHead` whose `tree_size` is

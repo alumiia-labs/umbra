@@ -190,7 +190,10 @@ pub fn sign_manifest_under<R: TryCryptoRng + ?Sized>(
 
 /// As [`sign_manifest_under`], with the `measurer_id` of each revoked
 /// `MeasurerCert` in the root (`REL-105`).
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is one input of the signed root, and the signer passes each one"
+)]
 pub fn sign_manifest_revoking<R: TryCryptoRng + ?Sized>(
     keys: &[SigningKey],
     keyset: &[u8],
@@ -202,8 +205,10 @@ pub fn sign_manifest_revoking<R: TryCryptoRng + ?Sized>(
     rng: &mut R,
 ) -> Result<Vec<u8>, Error> {
     // REL-054 and REL-055: ascending `relay_id`, each one time.
-    let id_of = |entry: &Vec<u8>| entry.get(1..33).map(<[u8]>::to_vec);
-    entries.sort_by_key(id_of);
+    fn id_of(entry: &[u8]) -> Option<&[u8]> {
+        entry.get(1..33)
+    }
+    entries.sort_by(|a, b| id_of(a).cmp(&id_of(b)));
     if entries.windows(2).any(|pair| match pair {
         [a, b] => id_of(a) == id_of(b),
         _ => false,
@@ -243,13 +248,11 @@ pub fn sign_manifest_revoking<R: TryCryptoRng + ?Sized>(
     let root_len = root.encode(&mut root_bytes)?;
     root_bytes.truncate(root_len);
 
-    let mut proven = Vec::with_capacity(entries.len());
-    for (index, entry) in entries.iter().enumerate() {
-        proven.push(ProvenEntry {
-            entry,
-            proof: tree::prove(&leaves, index).ok_or(Error::Malformed)?,
-        });
-    }
+    let proven: Vec<ProvenEntry<'_>> = entries
+        .iter()
+        .zip(tree::prove_all(&leaves))
+        .map(|(entry, proof)| ProvenEntry { entry, proof })
+        .collect();
 
     RelayManifest {
         root: &root_bytes,

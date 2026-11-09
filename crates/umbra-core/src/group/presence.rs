@@ -159,6 +159,14 @@ fn step(window: Window, slot: u32, span: u32, unseen: Option<u32>) -> Window {
     }
 }
 
+/// The windows of each rate after one more object.
+struct Stepped {
+    member: Window,
+    group: Window,
+    grants: Window,
+    rekeys: Window,
+}
+
 /// The rates of the roster chain (`GRP-076`). Each rate counts on the slot
 /// of the record that carried the object, and not on the clock of the
 /// receiver. Each member reads that slot alike. Thus a member that reads a
@@ -204,14 +212,14 @@ impl RosterRates {
     }
 
     /// Whether an object of `kind` from `maker`, in a record of `slot`, is
-    /// inside every rate, and counts it if so. One slot takes
-    /// `ROSTER_SLOT_RATE` objects of one maker and `GROUP_SLOT_RATE`
-    /// objects of the group. `RATE_DAY_SLOTS` slots take `GRANT_RATE_DAY`
-    /// grants of the group and `REKEY_RATE_DAY` re-keys of one member. The
-    /// last one keeps one member from the use of each index of the group
-    /// (`GRP-306`). A window that this roster cannot know counts and
-    /// refuses nothing.
-    pub fn allow(&mut self, maker: u16, kind: RateKind, slot: u32) -> bool {
+    /// inside every rate. Unlike [`RosterRates::allow`], it counts nothing.
+    pub fn allows(&self, maker: u16, kind: RateKind, slot: u32) -> bool {
+        self.stepped(maker, kind, slot).is_some()
+    }
+
+    /// The windows after one more object of `kind` from `maker` in a
+    /// record of `slot`, or none when a rate refuses it.
+    fn stepped(&self, maker: u16, kind: RateKind, slot: u32) -> Option<Stepped> {
         let unseen = self.unseen;
         let over = |window: Window, limit: u32| window.held > limit && !window.unsure;
 
@@ -223,12 +231,12 @@ impl RosterRates {
         );
         let group = step(self.group, slot, 1, unseen);
         if over(member, ROSTER_SLOT_RATE) || over(group, GROUP_SLOT_RATE) {
-            return false;
+            return None;
         }
 
         let grants = step(self.grants, slot, RATE_DAY_SLOTS, unseen);
         if kind == RateKind::Grant && over(grants, GRANT_RATE_DAY) {
-            return false;
+            return None;
         }
 
         let rekeys = step(
@@ -238,8 +246,35 @@ impl RosterRates {
             unseen,
         );
         if matches!(kind, RateKind::Rekey { .. }) && over(rekeys, REKEY_RATE_DAY) {
-            return false;
+            return None;
         }
+
+        Some(Stepped {
+            member,
+            group,
+            grants,
+            rekeys,
+        })
+    }
+
+    /// Whether an object of `kind` from `maker`, in a record of `slot`, is
+    /// inside every rate, and counts it if so. One slot takes
+    /// `ROSTER_SLOT_RATE` objects of one maker and `GROUP_SLOT_RATE`
+    /// objects of the group. `RATE_DAY_SLOTS` slots take `GRANT_RATE_DAY`
+    /// grants of the group and `REKEY_RATE_DAY` re-keys of one member. The
+    /// last one keeps one member from the use of each index of the group
+    /// (`GRP-306`). A window that this roster cannot know counts and
+    /// refuses nothing.
+    pub fn allow(&mut self, maker: u16, kind: RateKind, slot: u32) -> bool {
+        let Some(Stepped {
+            member,
+            group,
+            grants,
+            rekeys,
+        }) = self.stepped(maker, kind, slot)
+        else {
+            return false;
+        };
 
         self.members
             .retain(|_, window| slot < window.start.saturating_add(WINDOW_KEPT));

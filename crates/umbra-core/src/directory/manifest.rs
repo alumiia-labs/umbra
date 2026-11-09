@@ -293,8 +293,9 @@ impl RelaySet {
         let mut leaves: Vec<[u8; 32]> = Vec::with_capacity(manifest.entries.len());
         let mut last_id: Option<[u8; 32]> = None;
         for proven in &manifest.entries {
-            tree::verify(proven.entry, &proven.proof, &merkle_root)?;
-            leaves.push(tree::leaf(proven.entry));
+            let leaf = tree::leaf(proven.entry);
+            tree::verify_leaf(leaf, &proven.proof, &merkle_root)?;
+            leaves.push(leaf);
 
             let entry = RelayEntry::parse(proven.entry)?;
             let descriptor = &entry.descriptor;

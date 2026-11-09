@@ -1144,7 +1144,7 @@ impl Roster {
     /// `maker` in a record of `slot`. A maker asks before it posts, thus it
     /// posts no object that each member then discards.
     pub fn rate_allows(&self, maker: u16, kind: RateKind, slot: u32) -> bool {
-        self.rates.clone().allow(maker, kind, slot)
+        self.rates.allows(maker, kind, slot)
     }
 
     /// Counts one object against the rates of `GRP-076`.

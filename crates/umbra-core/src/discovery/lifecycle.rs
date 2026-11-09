@@ -209,12 +209,10 @@ pub fn assess(held: &Version, between: &[Version]) -> Result<Takeover, Error> {
         return Err(Error::Stale);
     }
 
-    let expected: Vec<u32> = (held.version.saturating_add(1)..=resolved.version).collect();
-    if between
-        .iter()
-        .map(|v| v.version)
-        .ne(expected.iter().copied())
-    {
+    // The comparison stops at the first difference, thus a far version
+    // allocates nothing and costs no more than `between`.
+    let expected = held.version.saturating_add(1)..=resolved.version;
+    if between.iter().map(|v| v.version).ne(expected) {
         return Err(Error::Malformed);
     }
 

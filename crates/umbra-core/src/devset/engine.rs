@@ -359,7 +359,10 @@ impl SyncEngine {
     /// The item takes a counter of this device, and it keeps the time and
     /// the writer of its write, thus it supersedes no later write of any
     /// device, and a tie breaks as at the writer.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one field of the write of the peer, and the item keeps each one"
+    )]
     pub fn relay_mutable(
         &mut self,
         item: u8,

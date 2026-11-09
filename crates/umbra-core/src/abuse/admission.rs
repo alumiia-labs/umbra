@@ -145,13 +145,21 @@ impl RelayGate {
                     Err(Reject::Admission)
                 }
             }
-            AdmissionKind::Token => self.admit_token(admission.body, accepts, now),
+            AdmissionKind::Token => Token::parse(admission.body)
+                .map_err(|_| Reject::Admission)
+                .and_then(|token| self.admit_token(&token, accepts, now)),
             AdmissionKind::Pow => {
                 let solution = PowSolution::parse(admission.body).map_err(|_| Reject::Admission)?;
                 self.pow.accept(&solution).map_err(|_| Reject::Admission)?;
                 Ok(Admitted::Pow)
             }
-        }?;
+        };
+        self.counted(admitted)
+    }
+
+    /// Counts an admission that passed in the backlog.
+    fn counted(&mut self, admitted: Result<Admitted, Reject>) -> Result<Admitted, Reject> {
+        let admitted = admitted?;
 
         // ABU-060: the backlog counts what the relay accepted. A refusal
         // costs its sender nothing, thus it must not raise the effort.
@@ -162,18 +170,17 @@ impl RelayGate {
     /// Checks a token and spends its nonce. It does not count the backlog.
     fn admit_token(
         &mut self,
-        body: &[u8],
+        token: &Token,
         accepts: &Accepts<'_>,
         now: u64,
     ) -> Result<Admitted, Reject> {
-        let token = Token::parse(body).map_err(|_| Reject::Admission)?;
         if token.token_type != accepts.token_type() {
             return Err(Reject::Admission);
         }
 
-        let epoch = self.token_epoch(&token, now).ok_or(Reject::Admission)?;
+        let epoch = self.token_epoch(token, now).ok_or(Reject::Admission)?;
         accepts
-            .verify(&token, epoch)
+            .verify(token, epoch)
             .map_err(|_| Reject::Admission)?;
 
         self.spent
@@ -200,9 +207,10 @@ impl RelayGate {
         match admission.kind {
             AdmissionKind::None => Err(Reject::Admission),
             AdmissionKind::Token => {
-                self.admit(admission, accepts, now)?;
                 let token = Token::parse(admission.body).map_err(|_| Reject::Admission)?;
-                Ok(holder(b"token", &token.nonce))
+                let admitted = self.admit_token(&token, accepts, now);
+                self.counted(admitted)?;
+                Ok(holder(b"token", &[&token.nonce]))
             }
             AdmissionKind::Pow => self.admit_chunk_pow(admission.body),
         }
@@ -213,7 +221,7 @@ impl RelayGate {
     fn admit_chunk_pow(&mut self, body: &[u8]) -> Result<[u8; 32], Reject> {
         let solution = PowSolution::parse(body).map_err(|_| Reject::Admission)?;
         let key = (solution.seed, solution.nonce);
-        let holder = holder(b"pow", &[&solution.seed[..], &solution.nonce].concat());
+        let holder = holder(b"pow", &[&solution.seed, &solution.nonce]);
 
         // A solution to a challenge that went out of use admits nothing more.
         let pow = &self.pow;
@@ -241,9 +249,18 @@ impl RelayGate {
     }
 }
 
-/// The holder of an upload quota, from what admitted the upload.
-fn holder(kind: &[u8], value: &[u8]) -> [u8; 32] {
-    umbra_crypto::hash::sha3_256(&[umbra_crypto::labels::QUOTA_HOLDER, kind, value])
+/// The holder of an upload quota, from what admitted the upload. The parts
+/// of `value` hash in order, as one string.
+fn holder(kind: &[u8], value: &[&[u8]]) -> [u8; 32] {
+    use umbra_crypto::sha3::{Digest, Sha3_256};
+
+    let mut hasher = Sha3_256::new();
+    hasher.update(umbra_crypto::labels::QUOTA_HOLDER);
+    hasher.update(kind);
+    for part in value {
+        hasher.update(part);
+    }
+    hasher.finalize().into()
 }
 
 #[cfg(test)]

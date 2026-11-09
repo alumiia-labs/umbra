@@ -582,6 +582,15 @@ impl Directory {
         self.labels.insert(search_key.to_vec(), record);
     }
 
+    /// Puts `label` in the record of `search_key` and keeps the record. The
+    /// record moves out and back, thus its blob is no copy.
+    fn replace_label(&mut self, search_key: &[u8], label: Label) -> Result<(), Status> {
+        let mut record = self.labels.remove(search_key).ok_or(Status::NotFound)?;
+        record.label = label;
+        self.keep_label(search_key, record);
+        Ok(())
+    }
+
     /// Closes the epoch, and the two auditors check it. The log moves only
     /// when both auditors pass, and the two move with it. A failed check
     /// thus keeps each staged version for the next epoch.
@@ -984,20 +993,25 @@ impl Directory {
             return Err(Status::Malformed);
         }
 
-        let search_key = self.voprf.evaluate_direct(&input).to_vec();
-        let mut record = self
+        let search_key = self.voprf.evaluate_direct(&input);
+        let label = &self
             .labels
-            .get(&search_key)
-            .cloned()
-            .ok_or(Status::NotFound)?;
+            .get(search_key.as_slice())
+            .ok_or(Status::NotFound)?
+            .label;
 
-        if record.label.is_tombstoned() {
+        if label.is_tombstoned() {
             return Err(Status::Stale);
         }
 
-        let version = record.label.version;
+        let version = label.version;
         self.answer_pending(&search_key, BLOB, version, &answer, Some(&blob), now)?;
 
+        // The record moves out and back, thus the old blob is no copy.
+        let mut record = self
+            .labels
+            .remove(search_key.as_slice())
+            .ok_or(Status::NotFound)?;
         record.blob = (!blob.is_empty()).then_some(blob);
         self.keep_label(&search_key, record);
         Ok(Vec::new())
@@ -1106,7 +1120,7 @@ impl Directory {
         };
         r.finish().map_err(|_| Status::Malformed)?;
 
-        let search_key = self.voprf.evaluate_direct(&input).to_vec();
+        let search_key = self.voprf.evaluate_direct(&input);
         let version = self.register_version(&search_key, now)?;
 
         // DIS-010: one version of a label in each epoch.
@@ -1121,14 +1135,17 @@ impl Directory {
 
         // DIS-076: the label takes the change before the log does, thus a
         // change that the label refuses stages no entry.
-        let mut label = match self.labels.get(&search_key).cloned() {
+        let held = self
+            .labels
+            .get(search_key.as_slice())
+            .map(|record| record.label.clone());
+        let mut label = match held {
             None => Label::register(key, now),
-            Some(mut record) => {
-                record
-                    .label
+            Some(mut label) => {
+                label
                     .publish(version, key, now)
                     .map_err(|_| Status::Stale)?;
-                record.label
+                label
             }
         };
 
@@ -1227,7 +1244,7 @@ impl Directory {
             }
         };
 
-        let search_key = self.voprf.evaluate_direct(&input).to_vec();
+        let search_key = self.voprf.evaluate_direct(&input);
         let version = self.register_version(&search_key, now)?;
         let slot = (Self::register_slot(&search_key, &key), REGISTER);
 
@@ -1319,11 +1336,10 @@ impl Directory {
         let input = take_var16(&mut r).map_err(|_| Status::Malformed)?.to_vec();
         r.finish().map_err(|_| Status::Malformed)?;
 
-        let search_key = self.voprf.evaluate_direct(&input).to_vec();
-        let mut record = self
+        let search_key = self.voprf.evaluate_direct(&input);
+        let record = self
             .labels
-            .get(&search_key)
-            .cloned()
+            .get(search_key.as_slice())
             .ok_or(Status::NotFound)?;
 
         let allowed = match purpose {
@@ -1339,7 +1355,7 @@ impl Directory {
 
         // DIS-194: a live challenge of this purpose goes again, thus a
         // party that asks for the label of another ends no challenge of it.
-        let slot = (search_key.clone(), purpose);
+        let slot = (search_key.to_vec(), purpose);
         if let Some(pending) = self.challenges.get(&slot) {
             let current = pending.version == record.label.version
                 && match pending.issued.purpose() {
@@ -1351,30 +1367,30 @@ impl Directory {
             }
         }
 
-        let (purpose, lease_epoch) = match purpose {
+        // Only a renewal changes the label, and only its lease epoch. Thus
+        // only the label of a renewal is a copy, and the blob stays.
+        let mut renewed = None;
+        let purpose = match purpose {
             RENEW => {
-                let lease_epoch = record.label.issue_lease_epoch();
-                (Purpose::Renew { lease_epoch }, Some(lease_epoch))
+                let mut label = record.label.clone();
+                let lease_epoch = label.issue_lease_epoch();
+                renewed = Some((label, lease_epoch));
+                Purpose::Renew { lease_epoch }
             }
-            WRITE => (
-                Purpose::Write {
-                    version_new: record.label.version.saturating_add(1),
-                },
-                None,
-            ),
-            _ => (Purpose::Blob, None),
+            WRITE => Purpose::Write {
+                version_new: record.label.version.saturating_add(1),
+            },
+            _ => Purpose::Blob,
         };
 
         let issued = Issued::new(purpose, &record.label.hk_pub, record.challenge_name(), rng)
             .map_err(|_| Status::Busy)?;
         let mut out = issued.bytes().to_vec();
-        if let Some(lease_epoch) = lease_epoch {
-            out.extend_from_slice(&lease_epoch.to_be_bytes());
-        }
-
         let version = record.label.version;
-        if lease_epoch.is_some() {
-            self.keep_label(&search_key, record);
+
+        if let Some((label, lease_epoch)) = renewed {
+            out.extend_from_slice(&lease_epoch.to_be_bytes());
+            self.replace_label(&search_key, label)?;
         }
 
         self.challenges.insert(
@@ -1394,7 +1410,6 @@ impl Directory {
     /// and ends that challenge when the answer holds (`DIS-168`). A wrong
     /// answer ends nothing (`DIS-194`). `search_key` names the slot: the
     /// search key, or the slot of a registration challenge.
-    #[allow(clippy::too_many_arguments)]
     fn answer_pending(
         &mut self,
         search_key: &[u8],
@@ -1435,19 +1450,20 @@ impl Directory {
         let entry = take_var16(&mut r).map_err(|_| Status::Malformed)?.to_vec();
         r.finish().map_err(|_| Status::Malformed)?;
 
-        let search_key = self.voprf.evaluate_direct(&input).to_vec();
-        let mut record = self
+        let search_key = self.voprf.evaluate_direct(&input);
+        let mut label = self
             .labels
-            .get(&search_key)
-            .cloned()
-            .ok_or(Status::NotFound)?;
+            .get(search_key.as_slice())
+            .ok_or(Status::NotFound)?
+            .label
+            .clone();
 
         if self.operator.is_staged(&search_key) {
             return Err(Status::Busy);
         }
 
         // DIS-097, DIS-098: the answer binds the entry.
-        let version = record.label.version;
+        let version = label.version;
         let Purpose::Write { version_new } =
             self.answer_pending(&search_key, WRITE, version, &answer, Some(&entry), now)?
         else {
@@ -1461,13 +1477,9 @@ impl Directory {
         // the log never part.
         if key == [0; 1_216] {
             // DIS-171: the holder retires the entry.
-            record
-                .label
-                .retire(version_new, now)
-                .map_err(|_| Status::Stale)?;
+            label.retire(version_new, now).map_err(|_| Status::Stale)?;
         } else {
-            record
-                .label
+            label
                 .publish(version_new, key, now)
                 .map_err(|_| Status::Stale)?;
         }
@@ -1484,7 +1496,7 @@ impl Directory {
             return Err(Status::Stale);
         }
 
-        self.keep_label(&search_key, record);
+        self.replace_label(&search_key, label)?;
         Ok(Vec::new())
     }
 
@@ -1585,26 +1597,24 @@ impl Directory {
         let answer: [u8; 32] = r.array().map_err(|_| Status::Malformed)?;
         r.finish().map_err(|_| Status::Malformed)?;
 
-        let search_key = self.voprf.evaluate_direct(&input).to_vec();
-        let mut record = self
+        let search_key = self.voprf.evaluate_direct(&input);
+        let mut label = self
             .labels
-            .get(&search_key)
-            .cloned()
-            .ok_or(Status::NotFound)?;
+            .get(search_key.as_slice())
+            .ok_or(Status::NotFound)?
+            .label
+            .clone();
 
-        let version = record.label.version;
+        let version = label.version;
         let Purpose::Renew { lease_epoch } =
             self.answer_pending(&search_key, RENEW, version, &answer, None, now)?
         else {
             return Err(Status::Stale);
         };
 
-        record
-            .label
-            .renew(lease_epoch, now)
-            .map_err(|_| Status::Stale)?;
+        label.renew(lease_epoch, now).map_err(|_| Status::Stale)?;
 
-        self.keep_label(&search_key, record);
+        self.replace_label(&search_key, label)?;
         Ok(Vec::new())
     }
 

@@ -71,6 +71,7 @@ impl Purpose {
 fn derive_k(purpose: Purpose, ss: &SharedSecret, handle: &[u8]) -> Secret<32> {
     let kdf = Hkdf::<Sha3_256>::new(Some(purpose.label()), ss.expose());
     let mut k = Secret::<32>::zeroed();
+    // A 32-byte output is inside the HKDF output bound, thus this cannot fail.
     let _ = kdf.expand_multi_info(&[handle, &purpose.info_tail()], k.expose_mut());
     k
 }

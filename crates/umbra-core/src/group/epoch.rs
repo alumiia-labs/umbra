@@ -9,12 +9,13 @@ use umbra_crypto::{
     group::{
         chain::{ChainState, Credentials, EpochSecret},
         pair::{EpochTag, PairKey},
-        slot, MemberKeys,
+        slot, MemberKeys, TAG_LEN,
     },
     kem::PublicKey,
     rand_core::{CryptoRng, TryCryptoRng},
     secret::Secret,
     stored::{Reader, Writer},
+    zeroize::Zeroizing,
 };
 use umbra_wire::group::{
     control::Role,
@@ -782,6 +783,22 @@ pub fn rotate<R: CryptoRng + TryCryptoRng + ?Sized>(
     let mut sealed_slots: Vec<(u16, Vec<u8>)> = Vec::with_capacity(included.len());
     let mut last: Option<u16> = None;
 
+    // Two payloads serve all the members, thus each secret has at most two
+    // copies. Only the tag changes from member to member.
+    let mut bare = SlotPayload {
+        rotator,
+        epoch_secret: Secret::new(*secret.expose().expose()),
+        tag: [0u8; TAG_LEN],
+        own_sks: Vec::new(),
+    };
+    let mut full = own_sks.map(|own| SlotPayload {
+        rotator,
+        epoch_secret: Secret::new(*secret.expose().expose()),
+        tag: [0u8; TAG_LEN],
+        own_sks: own.iter().map(|s| Secret::new(*s.expose())).collect(),
+    });
+    let mut plain = Zeroizing::new(Vec::new());
+
     for member in included {
         if last.is_some_and(|l| l >= member.index) {
             return Err(Error::Malformed);
@@ -796,17 +813,14 @@ pub fn rotate<R: CryptoRng + TryCryptoRng + ?Sized>(
             epoch_secret: secret.expose(),
         });
 
-        let admin = member.role >= Role::Admin && own_sks.is_some();
-        let payload = SlotPayload {
-            rotator,
-            epoch_secret: Secret::new(*secret.expose().expose()),
-            tag,
-            own_sks: match own_sks.filter(|_| admin) {
-                Some(own) => own.iter().map(|s| Secret::new(*s.expose())).collect(),
-                None => Vec::new(),
-            },
+        let admin = member.role >= Role::Admin && full.is_some();
+        let payload = match full.as_mut().filter(|_| admin) {
+            Some(full) => full,
+            None => &mut bare,
         };
-        let mut plain = alloc::vec![0u8; payload.len()];
+        payload.tag = tag;
+        plain.clear();
+        plain.resize(payload.len(), 0);
         payload.encode(&mut plain)?;
 
         let pk = PublicKey::from_bytes(member.kem_pk)?;
@@ -921,7 +935,7 @@ pub fn one_slot<R: CryptoRng + ?Sized>(
             .map(|own| own.iter().map(|s| Secret::new(*s.expose())).collect())
             .unwrap_or_default(),
     };
-    let mut plain = alloc::vec![0u8; payload.len()];
+    let mut plain = Zeroizing::new(alloc::vec![0u8; payload.len()]);
     payload.encode(&mut plain)?;
 
     let pk = PublicKey::from_bytes(member.kem_pk)?;
@@ -975,7 +989,7 @@ pub fn open_own_slot(
         .find(|s| s.index == own_index)
         .ok_or(Error::NoPath)?;
 
-    let mut plain = alloc::vec![0u8; slot.sealed.len()];
+    let mut plain = Zeroizing::new(alloc::vec![0u8; slot.sealed.len()]);
     let n = slot::open(
         own_keys.kem(),
         group_id,

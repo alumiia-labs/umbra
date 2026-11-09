@@ -138,11 +138,27 @@ impl<'a> LogKeySet<'a> {
     /// Counts the valid signatures over `preimage` and fails below two
     /// (`DIS-058`, `DIS-059`).
     fn verify_multi(&self, preimage: &[u8], sigs: &[SignerSig<'_>]) -> Result<(), Error> {
-        let mut valid = 0usize;
+        // Each index and each signature decodes before the first
+        // verification. Thus a malformed signature after the threshold still
+        // fails the set, and the loop below can stop at the threshold.
+        let mut decoded = Vec::with_capacity(sigs.len());
         for s in sigs {
-            let key = self.key(s.signer_index)?;
-            let sig = Signature::from_bytes(s.sig)?;
-            if key.verify(preimage, &sig).is_ok() {
+            let key = self
+                .keys
+                .get(usize::from(s.signer_index))
+                .ok_or(Error::Malformed)?;
+            if key.len() != VERIFYING_KEY_LEN {
+                return Err(Error::Unverified);
+            }
+            decoded.push((s.signer_index, Signature::from_bytes(s.sig)?));
+        }
+
+        let mut valid = 0usize;
+        for (index, sig) in &decoded {
+            if valid >= SIGNATURES_NEEDED {
+                break;
+            }
+            if self.key(*index)?.verify(preimage, sig).is_ok() {
                 valid = valid.saturating_add(1);
             }
         }
@@ -765,6 +781,38 @@ mod tests {
         assert!(!gossip.allow(DigestSource::TreeHead, GOSSIP_INTERVAL - 1));
         assert!(gossip.allow(DigestSource::ConsensusRoot, 1));
         assert!(gossip.allow(DigestSource::TreeHead, GOSSIP_INTERVAL));
+    }
+
+    #[test]
+    fn the_check_stops_at_two_and_each_signature_must_decode() {
+        let keys = signers(1);
+        let ks_bytes = keyset_bytes(&keys, 1);
+        let (keyset, _) = LogKeySet::parse(&ks_bytes).unwrap();
+        let hash = keyset.hash().unwrap();
+        let clock = 1_000_000u64;
+        let accept = |bytes: &[u8]| {
+            HeadState::new(keyset.clone())
+                .unwrap()
+                .accept(&SignedTreeHead::parse(bytes).unwrap(), clock)
+        };
+
+        // A third that decodes but does not verify changes nothing.
+        let mut forged = signed_head(&keys, &[0, 1, 2], 10, clock, hash);
+        let third = HEAD_FIXED + 2 * SIGNER_SIG_LEN + 100;
+        forged[third] ^= 1;
+        accept(&forged).unwrap();
+
+        // The last byte counts the hints, and a count above `omega` does
+        // not decode.
+        let mut broken = signed_head(&keys, &[0, 1, 2], 10, clock, hash);
+        let end = broken.len() - 1;
+        broken[end] = 0xFF;
+        assert_eq!(accept(&broken), Err(Error::Unverified));
+
+        // An index outside the key set is malformed.
+        let mut outside = signed_head(&keys, &[0, 1, 2], 10, clock, hash);
+        outside[HEAD_FIXED + 2 * SIGNER_SIG_LEN] = 3;
+        assert_eq!(SignedTreeHead::parse(&outside), Err(Error::Malformed));
     }
 
     #[test]

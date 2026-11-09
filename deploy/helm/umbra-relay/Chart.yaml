@@ -4,8 +4,8 @@ apiVersion: v2
 name: umbra-relay
 description: One relay of your own for the public UMBRA network
 type: application
-version: 0.50.7
-appVersion: "0.50.7"
+version: 0.51.0
+appVersion: "0.51.0"
 home: https://umbrachat.app
 sources:
   - https://github.com/alumiia-labs/umbra

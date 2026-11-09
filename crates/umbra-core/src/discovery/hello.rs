@@ -93,6 +93,7 @@ impl<'a> HelloBody<'a> {
 fn hello_key(ss: &Secret<32>, entry_pk: &[u8]) -> Secret<32> {
     let kdf = Hkdf::<Sha3_256>::new(None, ss.expose());
     let mut key = Secret::<32>::zeroed();
+    // A 32-byte output is inside the HKDF output bound, thus this cannot fail.
     let _ = kdf.expand_multi_info(&[labels::HELLO, entry_pk], key.expose_mut());
     key
 }

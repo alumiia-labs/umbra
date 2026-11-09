@@ -11,6 +11,7 @@ use umbra_crypto::{
     hash::sha3_256,
     rand_core::TryCryptoRng,
     secret::Secret,
+    zeroize::{Zeroize, Zeroizing},
 };
 use umbra_wire::group::control::{
     Chain, ControlType, GroupControl, GroupInvitation, InvitationAdmit, InvitationStage,
@@ -133,7 +134,7 @@ pub fn admit(
     descriptor: &[u8],
 ) -> Result<Vec<u8>, Error> {
     let slot_key = chain.slot_key(slot)?;
-    let invitation = GroupInvitation {
+    let mut invitation = GroupInvitation {
         group_id,
         stage: InvitationStage::Admit(alloc::boxed::Box::new(InvitationAdmit {
             index,
@@ -152,8 +153,20 @@ pub fn admit(
     };
 
     // 36 bytes of header, the fixed body, and the descriptor.
-    let mut payload = alloc::vec![0u8; descriptor.len().saturating_add(ADMIT_FIXED + 64)];
-    let n = invitation.encode(&mut payload)?;
+    let mut payload = Zeroizing::new(alloc::vec![
+        0u8;
+        descriptor.len().saturating_add(ADMIT_FIXED + 64)
+    ]);
+    let encoded = invitation.encode(&mut payload);
+
+    // The wire type does not wipe itself, thus the secrets go here.
+    if let InvitationStage::Admit(body) = &mut invitation.stage {
+        body.slot_key.zeroize();
+        body.read_sk.zeroize();
+        body.write_sk.zeroize();
+    }
+
+    let n = encoded?;
     wrap(
         ControlType::Invitation,
         payload.get(..n).ok_or(Error::Malformed)?,

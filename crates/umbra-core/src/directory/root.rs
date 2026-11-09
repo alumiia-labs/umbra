@@ -36,8 +36,10 @@ pub(crate) fn read_sigs<'a>(r: &mut Reader<'a>) -> Result<Vec<AuthoritySig<'a>>,
     let mut last: Option<u8> = None;
     for _ in 0..count {
         let authority_index = r.u8()?;
-        // REL-028 and REL-030: ascending, no repeat.
-        if last.is_some_and(|l| l >= authority_index) {
+        // REL-028 and REL-030: ascending, no repeat, and inside the key set.
+        if last.is_some_and(|l| l >= authority_index)
+            || usize::from(authority_index) >= AUTHORITY_COUNT
+        {
             return Err(Error::Malformed);
         }
         last = Some(authority_index);
@@ -156,11 +158,27 @@ impl<'a> DirectoryKeySet<'a> {
         preimage: &[u8],
         sigs: &[AuthoritySig<'_>],
     ) -> Result<(), Error> {
-        let mut valid = 0usize;
+        // Each index and each signature decodes before the first
+        // verification. Thus a malformed signature after the threshold still
+        // fails the set, and the loop below can stop at the threshold.
+        let mut decoded = Vec::with_capacity(sigs.len());
         for s in sigs {
-            let key = self.key(s.authority_index)?;
-            let sig = Signature::from_bytes(s.sig)?;
-            if key.verify(preimage, &sig).is_ok() {
+            let key = self
+                .keys
+                .get(usize::from(s.authority_index))
+                .ok_or(Error::Malformed)?;
+            if key.len() != VERIFYING_KEY_LEN {
+                return Err(Error::Unverified);
+            }
+            decoded.push((s.authority_index, Signature::from_bytes(s.sig)?));
+        }
+
+        let mut valid = 0usize;
+        for (index, sig) in &decoded {
+            if valid >= SIGNATURES_NEEDED {
+                break;
+            }
+            if self.key(*index)?.verify(preimage, sig).is_ok() {
                 valid = valid.saturating_add(1);
             }
         }
@@ -671,6 +689,46 @@ pub(crate) mod tests {
         assert_eq!(consensus.keyset().keyset_epoch, 2);
         // The same rotation again is stale (REL-037).
         assert_eq!(consensus.rotate_keys(&signed[..total]), Err(Error::Stale));
+    }
+
+    #[test]
+    fn an_index_outside_the_key_set_is_malformed() {
+        let keys = authorities(10);
+        let (pks, _) = keyset_of(&keys, 1);
+        let hash = keyset(&pks, 1).hash().unwrap();
+        let mut bytes = signed_root(&keys, &[0, 1, 2, 3, 4, 5], 101, hash, [9; 32]);
+        let last_index = bytes.len() - 3_310;
+        assert_eq!(bytes[last_index], 5);
+        bytes[last_index] = 7;
+        assert_eq!(DirectoryRoot::parse(&bytes), Err(Error::Malformed));
+    }
+
+    #[test]
+    fn a_signature_after_the_threshold_must_still_decode() {
+        let keys = authorities(10);
+        let (pks, _) = keyset_of(&keys, 1);
+        let hash = keyset(&pks, 1).hash().unwrap();
+        let all = [0, 1, 2, 3, 4, 5, 6];
+        let accept = |bytes: &[u8]| {
+            Consensus::new(keyset(&pks, 1), 100)
+                .unwrap()
+                .accept(DirectoryRoot::parse(bytes).unwrap(), 101 * 3_600 + 5)
+        };
+
+        // The verification stops at five, thus a sixth and a seventh that
+        // decode but do not verify change nothing.
+        let mut forged = signed_root(&keys, &all, 101, hash, [9; 32]);
+        let sixth = forged.len() - 2 * 3_310 + 100;
+        forged[sixth] ^= 1;
+        forged[sixth + 3_310] ^= 1;
+        accept(&forged).unwrap();
+
+        // The last byte counts the hints, and a count above `omega` does
+        // not decode.
+        let mut broken = signed_root(&keys, &all, 101, hash, [9; 32]);
+        let end = broken.len() - 1;
+        broken[end] = 0xFF;
+        assert_eq!(accept(&broken), Err(Error::Unverified));
     }
 
     #[test]

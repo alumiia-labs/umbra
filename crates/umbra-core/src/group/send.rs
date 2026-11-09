@@ -131,7 +131,10 @@ impl Sender {
     /// Builds and seals a content record for `app` at `now`
     /// (`GRP-238`, `GRP-239`, `GRP-246`). `nonce` comes from the device
     /// CSPRNG.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the caller holds each part of the group state apart, and a record needs each part"
+    )]
     pub fn build(
         &mut self,
         own_index: u16,
@@ -168,7 +171,10 @@ impl Sender {
     /// stop the record to each other member:
     /// - a member whose pair key this roster lost since;
     /// - a member whose `pair_pk` gives no pair key (`GRP-237`).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the caller holds each part of the group state apart, and a record needs each part"
+    )]
     pub fn build_at(
         &mut self,
         own_index: u16,
@@ -189,15 +195,12 @@ impl Sender {
 
         let slot = send_slot(epochs, now);
         let record_key = &epochs.send_key(slot, now)?;
-        let active = roster
-            .active_at(roster_epoch)
-            .ok_or(Error::NoPath)?
-            .to_vec();
+        let active = roster.active_at(roster_epoch).ok_or(Error::NoPath)?;
         let counter = self.next_counter(epoch)?;
         let hash = app_hash(app);
 
         let mut tags = Vec::with_capacity(active.len().saturating_mul(TAG_LEN));
-        for index in &active {
+        for index in active {
             if *index == own_index {
                 tags.extend_from_slice(&[0u8; TAG_LEN]);
                 continue;
@@ -243,7 +246,10 @@ impl Sender {
     /// at `admin` or above and no other (`GRP-128`, `GRP-321`). It carries
     /// the counter of the last record of this device in the epoch and takes
     /// no step of it, because only an admin reads it (`GRP-395`).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the caller holds each part of the group state apart, and a record needs each part"
+    )]
     pub fn build_presence(
         &mut self,
         own_index: u16,
@@ -280,12 +286,11 @@ impl Sender {
         let app = app.as_slice();
         let hash = app_hash(app);
 
-        let targets: Vec<u16> = roster
+        let targets = roster
             .active()
             .filter(|m| m.role >= Role::Admin && m.index != own_index)
-            .map(|m| m.index)
-            .collect();
-        let mut entries = Vec::with_capacity(targets.len());
+            .map(|m| m.index);
+        let mut entries = Vec::new();
         for index in targets {
             // GRP-237: an admin whose key gives no pair key takes no entry.
             let Ok(key) = pairs.get(index, roster, own) else {

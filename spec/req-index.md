@@ -1918,7 +1918,7 @@ Source: `spec/09-discovery.md`
 | `DIS-055` | §9.5.2 | MUST | A client | A client MUST reject a repeated `signer_index`. |  |  |
 | `DIS-056` | §9.5.2 | MUST | A client | A client MUST reject a `signer_index` at or above `signer_count`. |  |  |
 | `DIS-057` | §9.5.2 | MUST | A client | A client MUST reject a `sigs` list that is not in ascending order of `signer_index`. |  |  |
-| `DIS-058` | §9.5.2 | MUST | A client | A client MUST verify each signature against the key at its `signer_index` in the `LogKeySet` that the client holds. |  |  |
+| `DIS-058` | §9.5.2 | MUST | A client | A client MUST decode each signature and check its `signer_index` before it verifies one. |  |  |
 | `DIS-059` | §9.5.2 | MUST | A client | A client MUST count 2 or more valid signatures before it accepts the head. |  |  |
 | `DIS-060` | §9.5.2 | MUST | A client | A client MUST reject a `SignedTreeHead` whose `keyset_hash` differs from the hash of the `LogKeySet` that the client holds. |  |  |
 | `DIS-061` | §9.5.2 | MUST | A client | A client MUST reject a `SignedTreeHead` whose `tree_size` is below the highest `tree_size` that the client accepted. |  |  |
@@ -2077,7 +2077,7 @@ Source: `spec/10-relay-directory.md`
 | `REL-028` | §10.5.2 | MUST | A client | A client MUST reject a repeated `authority_index`. |  |  |
 | `REL-029` | §10.5.2 | MUST | A client | A client MUST reject an `authority_index` at or above `authority_count`. |  |  |
 | `REL-030` | §10.5.2 | MUST | A client | A client MUST reject a `sigs` list that is not in ascending order of `authority_index`. |  |  |
-| `REL-031` | §10.5.2 | MUST | A client | A client MUST verify each signature against the key at its `authority_index` in the key set that the client holds. |  |  |
+| `REL-031` | §10.5.2 | MUST | A client | A client MUST decode each signature and check its `authority_index` before it verifies one. |  |  |
 | `REL-032` | §10.5.2 | MUST | A client | A client MUST count 5 or more **valid** signatures before it accepts the object. |  |  |
 | `REL-033` | §10.5.2 | MUST | A client | A client MUST reject a `DirectoryRoot` whose `keyset_hash` differs from the hash of the key set that the client holds. |  |  |
 | `REL-034` | §10.5.2 | MUST | A client | A client MUST reject a `DirectoryRoot` whose `epoch` is below the highest epoch that the client verified. |  |  |

@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 10: Relay Directory, Measurement, and Selection
 
 **Status:** Draft
-**Version:** 0.50.7
+**Version:** 0.51.0
 **Date:** 2026-11-09
 
 ---
@@ -1070,10 +1070,19 @@ fits one `B3` cell.
 3. **[REL-030]** A client MUST reject a `sigs` list that is not in ascending
    order of `authority_index`. Part 6 §6.1.1 rule 4 requires one canonical
    form.
-4. **[REL-031]** A client MUST verify each signature against the key at its
-   `authority_index` in the key set that the client holds. **[REL-032]** A
-   client MUST count 5 or more **valid** signatures before it accepts the
-   object. A count of the entries is not a count of the valid signatures.
+4. **[REL-031]** A client MUST decode each signature and check its
+   `authority_index` before it verifies one. It MUST then verify the
+   signatures in list order, each against the key at its `authority_index` in
+   the key set that the client holds, until 5 of them are valid. It MAY skip
+   the verification of each signature after that. **[REL-032]** A client MUST
+   count 5 or more **valid** signatures before it accepts the object. A count
+   of the entries is not a count of the valid signatures.
+
+   > *Cause of `REL-031`.* A sixth or seventh valid signature changes no
+   > result, and each one costs an ML-DSA verification. A manifest with many
+   > link removals of §10.4.2 holds about 1 000 of them. The decode and the
+   > index check of each signature still run, thus a malformed list fails as
+   > before.
 5. **[REL-033]** A client MUST reject a `DirectoryRoot` whose `keyset_hash`
    differs from the hash of the key set that the client holds. **[REL-119]** A
    directory authority MUST set `bloc_hash` to the SHA3-256 over the canonical

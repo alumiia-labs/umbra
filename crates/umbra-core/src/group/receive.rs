@@ -371,18 +371,21 @@ impl Receiver {
             Err(e) => return Err(e),
         };
 
-        let mut opened: Option<(Vec<u8>, bool, bool)> = None;
+        // Each try copies the ciphertext into the buffer again, thus one
+        // buffer serves all the keys.
+        let mut plain_bytes = alloc::vec![0u8; bucket.group_record()];
+        let mut opened: Option<(usize, bool, bool)> = None;
         for key in &keys {
-            let mut out = alloc::vec![0u8; bucket.group_record()];
-            if let Ok(n) = open_content(&record, &key.key, ctx.roster.group_id(), &mut out) {
-                out.truncate(n);
-                opened = Some((out, key.previous, key.alternate));
+            if let Ok(n) = open_content(&record, &key.key, ctx.roster.group_id(), &mut plain_bytes)
+            {
+                opened = Some((n, key.previous, key.alternate));
                 break;
             }
         }
 
         // One error covers the open, the tag, and the parse (GRP-251).
-        let (plain_bytes, previous_epoch, under_alternate) = opened.ok_or(Error::Unverified)?;
+        let (plain_len, previous_epoch, under_alternate) = opened.ok_or(Error::Unverified)?;
+        plain_bytes.truncate(plain_len);
         let roster_epoch = Self::roster_epoch_of(&plain_bytes)?;
 
         if roster_epoch > ctx.roster.epoch_index() {
@@ -523,15 +526,18 @@ impl Receiver {
             let floor = epoch.saturating_sub(1);
             self.holes.retain(|(_, held, _)| *held >= floor);
 
-            let mut of_sender: Vec<(u16, u32, u32)> = self
-                .holes
-                .range((sender, epoch, 0)..=(sender, epoch, u32::MAX))
-                .copied()
-                .collect();
-            if of_sender.len() > HOLES_MAX {
-                let excess = of_sender.len() - HOLES_MAX;
-                for old in of_sender.drain(..excess) {
-                    self.holes.remove(&old);
+            // Only the excess, which is most often none, goes into a list.
+            let of_sender = (sender, epoch, 0)..=(sender, epoch, u32::MAX);
+            let held = self.holes.range(of_sender.clone()).count();
+            if held > HOLES_MAX {
+                let excess: Vec<(u16, u32, u32)> = self
+                    .holes
+                    .range(of_sender)
+                    .take(held - HOLES_MAX)
+                    .copied()
+                    .collect();
+                for old in &excess {
+                    self.holes.remove(old);
                 }
             }
         } else if self.holes.remove(&(sender, epoch, plain.counter)) {

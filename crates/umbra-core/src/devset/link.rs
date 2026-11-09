@@ -249,7 +249,7 @@ impl LinkHello {
         let mut body = Zeroizing::new(r.take(HELLO_BODY_LEN)?.to_vec());
         r.finish()?;
 
-        let ss = Secret::new(*link_key.decapsulate(&ct)?.expose());
+        let ss = link_key.decapsulate(&ct)?;
         aead::open(
             &hello_key(&ss, nonce),
             &seal_nonce,
@@ -285,8 +285,7 @@ impl LinkSecret {
         offer: &LinkOffer,
         rng: &mut R,
     ) -> (Ciphertext, Secret<32>) {
-        let (ct, ss) = kem::encapsulate(&offer.link_pk, rng);
-        (ct, Secret::new(*ss.expose()))
+        kem::encapsulate(&offer.link_pk, rng)
     }
 
     /// The secret from the shared value of the KEM, the nonce of the

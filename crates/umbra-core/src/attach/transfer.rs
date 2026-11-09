@@ -21,7 +21,7 @@ use umbra_wire::descriptor::{ChunkRef, FileDescriptor, Level};
 
 use super::{
     manifest::{self, Replicas},
-    place::{fetch_order, resolve_hint, AttachmentRelay, HoldOffs},
+    place::{fetch_order, resolve_hint, AttachmentRelay, HintIndex, HoldOffs},
     seal::{manifest_key, open_chunk, read_secret, seal_file, Assembler, SealedFile},
     upload::ChunkUpload,
     MAX_CONCURRENT_DOWN, MAX_CONCURRENT_UP, MAX_DATA_CHUNKS, REPLICAS,
@@ -228,7 +228,7 @@ enum Step {
 
 struct ChunkState {
     upload: ChunkUpload,
-    cred: [u8; 32],
+    cred: Secret<32>,
     relays: Vec<[u8; 32]>,
     tokens: Vec<Option<[u8; 32]>>,
     /// The replicas that still owe a proof, with the attempts that remain.
@@ -439,7 +439,7 @@ impl Upload {
                 chunk.is_noted = true;
                 started.push(ChunkCredential {
                     chunk_id: *chunk.upload.chunk_id(),
-                    cred: Secret::new(chunk.cred),
+                    cred: Secret::new(*chunk.cred.expose()),
                     relays: chunk.relays.clone(),
                 });
             }
@@ -541,7 +541,7 @@ impl Upload {
             refs.extend(chunk.upload.chunk_refs()?);
             credentials.push(ChunkCredential {
                 chunk_id: *chunk.upload.chunk_id(),
-                cred: Secret::new(chunk.cred),
+                cred: Secret::new(*chunk.cred.expose()),
                 relays: chunk.relays.clone(),
             });
         }
@@ -607,7 +607,7 @@ impl Upload {
                 .cloned()
                 .ok_or(Error::Malformed)
         };
-        let cred = StaticSecret::from(chunk.cred);
+        let cred = StaticSecret::from(*chunk.cred.expose());
         let chunk_id = *chunk.upload.chunk_id();
         let relay_at = |at: usize| chunk.relays.get(at).copied().ok_or(Error::Malformed);
 
@@ -708,7 +708,7 @@ impl Upload {
                     Err(error) => return Err(error),
                 };
 
-                erase(node, bad, chunk_id, chunk.cred, rng);
+                erase(node, bad, chunk_id, &chunk.cred, rng);
                 *chunk.relays.get_mut(at).ok_or(Error::Malformed)? = fresh;
                 *chunk.tokens.get_mut(at).ok_or(Error::Malformed)? = None;
                 if !chunk.unverified.iter().any(|(of, _)| *of == at) {
@@ -753,7 +753,6 @@ impl Upload {
         failed.extend(bad);
 
         let chunk_id = *chunk.upload.chunk_id();
-        let cred = chunk.cred;
 
         // A registration of the old start that waits for its solution never
         // leaves, at each relay of the draw.
@@ -762,7 +761,7 @@ impl Upload {
         }
 
         for relay in chunk.erase_targets(refused) {
-            erase(node, relay, chunk_id, cred, rng);
+            erase(node, relay, chunk_id, &chunk.cred, rng);
         }
 
         let repairs = chunk.repairs;
@@ -993,8 +992,7 @@ impl Upload {
                 *chunk.tokens.get_mut(at).ok_or(Error::Malformed)? = Some(token);
                 if chunk.tokens.iter().all(Option::is_some) {
                     // The first relay of the draw takes the `CPUT`.
-                    let pairs: Vec<_> = chunk.relays.iter().zip(&chunk.tokens).collect();
-                    for (relay, token) in pairs {
+                    for (relay, token) in chunk.relays.iter().zip(&chunk.tokens) {
                         chunk
                             .upload
                             .register(*relay, token.ok_or(Error::Malformed)?)?;
@@ -1130,14 +1128,14 @@ fn erase<R: CryptoRng + ?Sized>(
     node: &mut ClientNode,
     relay: [u8; 32],
     chunk_id: [u8; 32],
-    cred: [u8; 32],
+    cred: &Secret<32>,
     rng: &mut R,
 ) {
     // A registration that still waits for its solution never leaves.
     node.drop_unsolved(&chunk_id, &relay);
 
     let job = ChunkJob::Erase {
-        cred: StaticSecret::from(cred),
+        cred: StaticSecret::from(*cred.expose()),
     };
     let _ = node.chunk(relay, chunk_id, job, rng);
 }
@@ -1170,10 +1168,10 @@ impl ChunkState {
         rng: &mut R,
     ) -> Result<Self, Error> {
         let picked = pick_relays(pool, &failed, replicas, rng)?;
-        let cred: [u8; 32] = random_bytes(rng);
+        let cred = Secret::new(random_bytes(rng));
 
         Ok(ChunkState {
-            upload: ChunkUpload::new(random_bytes(rng), StaticSecret::from(cred)),
+            upload: ChunkUpload::new(random_bytes(rng), StaticSecret::from(*cred.expose())),
             cred,
             tokens: alloc::vec![None; picked.len()],
             relays: picked,
@@ -1367,6 +1365,7 @@ fn plan<R: CryptoRng + ?Sized>(
     now: u64,
     rng: &mut R,
 ) -> Vec<Wanted> {
+    let hints = HintIndex::new(relays.iter().map(|relay| relay.relay_id));
     chunks
         .iter()
         .map(|chunk| {
@@ -1376,8 +1375,7 @@ fn plan<R: CryptoRng + ?Sized>(
             // out of reach, and no statement that the chunk is gone.
             let mut unresolved = 0usize;
             for hint in &chunk.hints {
-                let ids = relays.iter().map(|relay| relay.relay_id);
-                match resolve_hint(hint, ids) {
+                match hints.resolve(hint) {
                     Ok(relay) if !replicas.contains(&relay) => replicas.push(relay),
                     Ok(_) => {}
                     Err(_) => unresolved = unresolved.saturating_add(1),
@@ -2139,7 +2137,7 @@ mod tests {
         assert_eq!(started.len(), 2);
         for (credential, chunk) in started.iter().zip(&upload.chunks) {
             assert_eq!(credential.chunk_id, *chunk.upload.chunk_id());
-            assert_eq!(*credential.cred.expose(), chunk.cred);
+            assert_eq!(credential.cred.expose(), chunk.cred.expose());
             assert_eq!(credential.relays, chunk.relays);
         }
         assert!(upload.take_started().is_empty());
@@ -2891,7 +2889,7 @@ mod tests {
         let solution = PowSolution::solve(&first, &[3; 32], POW_CHUNK_FLOOR, &mut rng).unwrap();
         node.chunk_admissions().stock(name, first, solution);
         node.release_unsolved(name, &mut rng).unwrap();
-        erase(&mut node, first, [9; 32], [8; 32], &mut rng);
+        erase(&mut node, first, [9; 32], &Secret::new([8; 32]), &mut rng);
         assert_eq!(node.held_chunk_uploads().len(), 2);
 
         node.end_upload(name);

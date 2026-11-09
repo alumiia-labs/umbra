@@ -3,7 +3,7 @@
 //! high-water mark, the pending reference table, the deletion rate, and
 //! the timer deadline.
 
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::collections::BTreeMap;
 
 use super::{DELETE_RATE_INTERVAL, EDIT_MAX, EDIT_WINDOW, REF_ORPHAN_MAX, REF_ORPHAN_TTL};
 use crate::Error;
@@ -106,19 +106,26 @@ impl PendingTable {
     /// Holds a reference. Above `REF_ORPHAN_MAX` for the conversation the
     /// oldest entry of that conversation leaves (`DEV-095`).
     pub fn hold(&mut self, key: PendingKey, pending: Pending) {
-        let in_conversation: Vec<PendingKey> = self
-            .entries
-            .keys()
-            .filter(|k| k.conversation == key.conversation)
-            .copied()
-            .collect();
+        // The conversation comes first in the order of the keys, thus the
+        // entries of one conversation are one range.
+        let first = PendingKey {
+            conversation: key.conversation,
+            origin: 0,
+            target: [0; 16],
+        };
+        let last = PendingKey {
+            conversation: key.conversation,
+            origin: u32::MAX,
+            target: [u8::MAX; 16],
+        };
+        let in_conversation = self.entries.range(first..=last);
 
-        if in_conversation.len() >= REF_ORPHAN_MAX {
-            if let Some(oldest) = in_conversation
-                .iter()
-                .min_by_key(|k| self.entries.get(k).map_or(u64::MAX, |p| p.arrived_at))
-            {
-                self.entries.remove(oldest);
+        if in_conversation.clone().count() >= REF_ORPHAN_MAX {
+            let oldest = in_conversation
+                .min_by_key(|(_, held)| held.arrived_at)
+                .map(|(oldest, _)| *oldest);
+            if let Some(oldest) = oldest {
+                self.entries.remove(&oldest);
             }
         }
 
@@ -282,5 +289,37 @@ mod tests {
         assert!(d.due(3_700));
         assert_eq!(d.expires_in(1_000), 2_700);
         assert_eq!(Deadline::from_sync(500, d.expires_in(1_000)).at, 3_200);
+    }
+
+    #[test]
+    fn the_bound_counts_the_entries_of_one_conversation_alone() {
+        let mut table = PendingTable::default();
+        let pending = |arrived_at| Pending {
+            deletion: false,
+            position: 1,
+            arrived_at,
+        };
+        let key = |conversation: u8, origin: u32| PendingKey {
+            conversation: [conversation; 32],
+            origin,
+            target: [u8::MAX; 16],
+        };
+
+        // The conversations on each side of the one that fills hold the
+        // oldest entries, and none of them leaves.
+        table.hold(key(1, u32::MAX), pending(0));
+        table.hold(key(3, 0), pending(0));
+        for i in 0..REF_ORPHAN_MAX as u32 {
+            table.hold(key(2, i), pending(10_000 - u64::from(i)));
+        }
+        assert_eq!(table.len(), REF_ORPHAN_MAX + 2);
+
+        table.hold(key(2, u32::MAX), pending(20_000));
+        assert_eq!(table.len(), REF_ORPHAN_MAX + 2);
+        let last = REF_ORPHAN_MAX as u32 - 1;
+        assert!(table.take(&key(2, last)).is_none());
+        assert!(table.take(&key(1, u32::MAX)).is_some());
+        assert!(table.take(&key(3, 0)).is_some());
+        assert!(table.take(&key(2, u32::MAX)).is_some());
     }
 }

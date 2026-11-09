@@ -85,21 +85,42 @@ pub fn open_chunk(
     last: bool,
     chunk: &[u8],
 ) -> Result<Vec<u8>, Error> {
+    let mut plain = Vec::with_capacity(SEGMENT_SIZE);
+    open_chunk_onto(file_key, file_nonce, index, last, chunk, &mut plain)?;
+    Ok(plain)
+}
+
+/// As [`open_chunk`], with the segment put at the end of `out`. A receiver
+/// that assembles a file thus copies no segment a second time. A chunk that
+/// fails leaves `out` as it was.
+fn open_chunk_onto(
+    file_key: &Secret<32>,
+    file_nonce: &[u8; 24],
+    index: u32,
+    last: bool,
+    chunk: &[u8],
+    out: &mut Vec<u8>,
+) -> Result<(), Error> {
     if chunk.len() != CHUNK_SIZE {
         return Err(Error::Malformed);
     }
 
     let body = chunk.get(..SEGMENT_SIZE).ok_or(Error::Malformed)?;
     let tag = chunk.get(SEGMENT_SIZE..).ok_or(Error::Malformed)?;
-    let mut plain = body.to_vec();
-    aead::open(
+    let start = out.len();
+    out.extend_from_slice(body);
+    let opened = aead::open(
         file_key,
         &chunk_nonce(file_nonce, index),
         &associated_data(index, last),
-        &mut plain,
+        out.get_mut(start..).ok_or(Error::Malformed)?,
         tag,
-    )?;
-    Ok(plain)
+    );
+
+    if opened.is_err() {
+        out.truncate(start);
+    }
+    opened.map_err(Error::from)
 }
 
 /// `read_sk` of file chunk `index` (`ATT-037`): HKDF-SHA3-256 with
@@ -108,6 +129,7 @@ pub fn open_chunk(
 pub fn read_secret(file_key: &Secret<32>, index: u32) -> StaticSecret {
     let kdf = Hkdf::<Sha3_256>::new(None, file_key.expose());
     let mut secret = Secret::<32>::zeroed();
+    // A 32-byte output is inside the HKDF output bound, thus this cannot fail.
     let _ = kdf.expand_multi_info(
         &[labels::CHUNK_READ, &index.to_be_bytes()],
         secret.expose_mut(),
@@ -120,6 +142,7 @@ pub fn read_secret(file_key: &Secret<32>, index: u32) -> StaticSecret {
 pub fn manifest_key(file_key: &Secret<32>, file_nonce: &[u8; 24]) -> Secret<32> {
     let kdf = Hkdf::<Sha3_256>::new(None, file_key.expose());
     let mut key = Secret::<32>::zeroed();
+    // A 32-byte output is inside the HKDF output bound, thus this cannot fail.
     let _ = kdf.expand_multi_info(&[labels::FILE_MANIFEST, file_nonce], key.expose_mut());
     key
 }
@@ -158,12 +181,16 @@ pub fn seal_file(
         return Err(Error::Malformed);
     }
 
-    let padded = segment::pad_file(plain);
-    let count = padded.len() / SEGMENT_SIZE;
-    let chunks = padded
-        .as_chunks::<SEGMENT_SIZE>()
-        .0
+    // The padding of `ATT-059` always adds a segment that holds the tail
+    // and the marker. Thus only that segment is a copy, and each whole
+    // segment seals from `plain` itself.
+    let (whole, tail) = plain.as_chunks::<SEGMENT_SIZE>();
+    let last_segment = segment::pad(tail, SEGMENT_SIZE);
+    let count = whole.len().saturating_add(1);
+    let chunks = whole
         .iter()
+        .map(<[u8; SEGMENT_SIZE]>::as_slice)
+        .chain(core::iter::once(last_segment.as_slice()))
         .enumerate()
         .map(|(i, segment)| {
             let index = u32::try_from(i).map_err(|_| Error::Malformed)?;
@@ -305,9 +332,15 @@ impl Assembler {
         }
 
         let last = self.next.saturating_add(1) == self.chunk_count;
-        let segment = open_chunk(&self.key, &self.nonce, self.next, last, chunk)?;
         let start = self.plain.len();
-        self.plain.extend_from_slice(&segment);
+        open_chunk_onto(
+            &self.key,
+            &self.nonce,
+            self.next,
+            last,
+            chunk,
+            &mut self.plain,
+        )?;
         self.next = self.next.saturating_add(1);
         self.plain.get(start..).ok_or(Error::Malformed)
     }
@@ -356,6 +389,48 @@ mod tests {
                 sealed.chunks.len()
             ],
         }
+    }
+
+    #[test]
+    fn the_chunks_are_the_seal_of_the_padded_file() {
+        let key = Secret::new([9; 32]);
+        let nonce = [8; 24];
+        for len in [
+            0,
+            1,
+            SEGMENT_SIZE - 1,
+            SEGMENT_SIZE,
+            SEGMENT_SIZE + 1,
+            2 * SEGMENT_SIZE,
+        ] {
+            let plain: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+            let padded = segment::pad_file(&plain);
+            let count = padded.len() / SEGMENT_SIZE;
+            let sealed = seal_file(&key, &nonce, &plain).unwrap();
+            assert_eq!(sealed.chunks.len(), count, "length {len}");
+            for (i, segment) in padded.chunks(SEGMENT_SIZE).enumerate() {
+                let expected =
+                    seal_segment(&key, &nonce, i as u32, i + 1 == count, segment).unwrap();
+                assert_eq!(sealed.chunks[i], expected, "length {len}, chunk {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_chunk_leaves_the_assembly_as_it_was() {
+        let key = Secret::new([9; 32]);
+        let nonce = [8; 24];
+        let plain: Vec<u8> = (0..SEGMENT_SIZE + 5).map(|i| (i % 251) as u8).collect();
+        let sealed = seal_file(&key, &nonce, &plain).unwrap();
+        let d = descriptor([9; 32], nonce, &sealed);
+
+        let mut a = Assembler::for_data(&d).unwrap();
+        a.accept(&sealed.chunks[0]).unwrap();
+        let mut bad = sealed.chunks[1].clone();
+        bad[0] ^= 1;
+        assert_eq!(a.accept(&bad), Err(Error::Unverified));
+        a.accept(&sealed.chunks[1]).unwrap();
+        assert_eq!(a.finish().unwrap(), plain);
     }
 
     #[test]

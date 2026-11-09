@@ -94,6 +94,41 @@ pub fn resolve_hint(
     found.ok_or(Error::NoPath)
 }
 
+/// The hint of each relay of a set, for many hints against one set. It
+/// gives what [`resolve_hint`] gives, and it hashes each relay one time.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HintIndex {
+    /// The relay of each hint, or none when two relays share the hint.
+    relays: BTreeMap<[u8; 12], Option<[u8; 32]>>,
+}
+
+impl HintIndex {
+    /// The index over `relay_ids`.
+    pub fn new(relay_ids: impl Iterator<Item = [u8; 32]>) -> Self {
+        let mut relays = BTreeMap::new();
+        for relay_id in relay_ids {
+            relays
+                .entry(seal::relay_hint(&relay_id))
+                .and_modify(|found| *found = None)
+                .or_insert(Some(relay_id));
+        }
+        HintIndex { relays }
+    }
+
+    /// The one relay that `hint` names (`ATT-008` to `ATT-013`).
+    pub fn resolve(&self, hint: &[u8; 12]) -> Result<[u8; 32], Error> {
+        if *hint == [0; 12] {
+            return Err(Error::NoPath);
+        }
+
+        self.relays
+            .get(hint)
+            .copied()
+            .flatten()
+            .ok_or(Error::NoPath)
+    }
+}
+
 /// The relays that answered `BUSY` or `LIMIT` for a chunk, which the same
 /// `CGET` does not reach again inside `FETCH_RETRY_HOLD` (`ATT-174`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -212,6 +247,24 @@ mod tests {
             resolve_hint(&[0; 12], ids.iter().copied()),
             Err(Error::NoPath)
         );
+    }
+
+    #[test]
+    fn a_hint_index_resolves_as_each_hint_alone() {
+        let ids = [[1u8; 32], [2; 32], [3; 32], [2; 32], [4; 32]];
+        let hints = [
+            seal::relay_hint(&[1; 32]),
+            seal::relay_hint(&[2; 32]),
+            seal::relay_hint(&[4; 32]),
+            seal::relay_hint(&[5; 32]),
+            [0; 12],
+        ];
+        for set in [&ids[..], &ids[..1], &ids[..3], &[]] {
+            let index = HintIndex::new(set.iter().copied());
+            for hint in &hints {
+                assert_eq!(index.resolve(hint), resolve_hint(hint, set.iter().copied()));
+            }
+        }
     }
 
     #[test]

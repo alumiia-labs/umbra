@@ -676,7 +676,10 @@ impl LogOperator {
 
     /// The update of the open epoch: the staged leaves enter the prefix
     /// tree, which `indexes` names for an undo, and nothing else changes.
-    #[allow(clippy::type_complexity)]
+    #[expect(
+        clippy::type_complexity,
+        reason = "the tuple holds the parts of one update, and its one caller takes them apart at once"
+    )]
     fn open_epoch(
         &mut self,
         nonce: [u8; 32],
