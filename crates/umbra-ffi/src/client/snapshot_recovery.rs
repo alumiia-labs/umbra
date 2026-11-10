@@ -238,10 +238,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return;
         }
 
-        let is_admin = group
-            .roster()
-            .member(group.own_index())
-            .is_some_and(|member| member.role >= Role::Admin);
+        // A removed admin holds no role, and it builds no snapshot.
+        let is_admin = group.own_role().is_some_and(|role| role >= Role::Admin);
         if !is_admin || request.epoch >= group.roster().epoch_index() {
             return;
         }

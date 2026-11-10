@@ -2481,7 +2481,7 @@ mod tests {
                     assert!(registration.on);
                     assert_eq!(registration.queue, queue);
                     client
-                        .notify_registered(conversation, registration.which, now, rng)
+                        .notify_registered(conversation, registration.which, queue, now, rng)
                         .unwrap();
                 }
                 assert!(client.notify_registrations_due(now).unwrap().is_empty());
@@ -8399,6 +8399,108 @@ mod tests {
         assert_eq!(alice.info(&answer).unwrap().revisions, 0);
         alice.audit().unwrap();
         bob.audit().unwrap();
+    }
+
+    #[test]
+    fn an_edit_that_the_client_refuses_keeps_its_draft() {
+        use crate::client::EDIT_WINDOW_MS;
+
+        let mut rng = Rng(71);
+        let (mut alice, _, conversation) = client_with_contact(72);
+        let mut draft = alice.new_draft(conversation);
+        draft.set_text(&units("first")).unwrap();
+        let sent = alice.send_draft(draft, 2_000_000, &mut rng).unwrap();
+
+        // After the window the text stays in the holder.
+        let mut draft = alice.new_draft(conversation);
+        draft.set_text(&units("second")).unwrap();
+        let mut held = Some(draft);
+        assert_eq!(
+            alice.edit_kept(&sent, &mut held, 2_000_000 + EDIT_WINDOW_MS, &mut rng),
+            Err(Error::TooLong)
+        );
+        assert!(held.as_ref().is_some_and(|draft| !draft.is_empty()));
+
+        // Inside the window the store takes the edit, and the holder is
+        // empty.
+        alice
+            .edit_kept(&sent, &mut held, 2_001_000, &mut rng)
+            .unwrap();
+        assert!(held.is_none());
+        assert_eq!(
+            alice.edit_kept(&sent, &mut held, 2_002_000, &mut rng),
+            Err(Error::NotFound)
+        );
+    }
+
+    #[test]
+    fn a_receipt_for_a_peer_with_no_channel_waits_and_blocks_no_other() {
+        use umbra_core::session::node::{ContactId, StateChange};
+        use umbra_queue::params::RECEIPT_MIN_DELAY;
+        use umbra_wire::app::AppKind;
+
+        let mut rng = Rng(73);
+        let mut client = new_client(&mut rng);
+        let both = ReceiptSettings {
+            delivery: true,
+            read: true,
+        };
+        let mut conversations = Vec::new();
+        for id in [9u8, 10] {
+            let contact = ContactId([id; 32]);
+            let change = StateChange::Contact {
+                contact,
+                state: zeroize::Zeroizing::new(vec![1, 2, 3]),
+            };
+            client
+                .commit_network(&[change], &[], 1_000_000, &mut rng)
+                .unwrap();
+            let conversation = client.conversation_for(&contact.0).unwrap();
+            client
+                .set_receipt_settings(conversation, both, &mut rng)
+                .unwrap();
+            let text = (contact, record(AppKind::Text, [id; 16], b"hi"));
+            client
+                .commit_network(&[], &[text], 3_000_000, &mut rng)
+                .unwrap();
+            conversations.push(conversation);
+        }
+
+        // The run holds a channel to the second peer alone.
+        let floor = 3_000 + RECEIPT_MIN_DELAY;
+        let reached = conversations[1];
+        let due = client
+            .due_receipt_among(floor, |conversation| *conversation == reached, &mut rng)
+            .unwrap()
+            .unwrap();
+        assert_eq!(due.conversation, reached);
+        client.receipt_sent(&due).unwrap();
+        assert_eq!(
+            client
+                .due_receipt_among(floor, |conversation| *conversation == reached, &mut rng)
+                .unwrap(),
+            None
+        );
+
+        // The receipt of the first peer waited, and a later run sends it.
+        let late = client.due_receipt(floor, &mut rng).unwrap().unwrap();
+        assert_eq!(late.conversation, conversations[0]);
+    }
+
+    #[test]
+    fn a_relay_set_gives_its_correction_its_pins_and_its_epoch_in_one_commit() {
+        let mut rng = Rng(75);
+        let mut client = new_client(&mut rng);
+        client
+            .accept_relay_set(Some(-30), None, 7, &mut rng)
+            .unwrap();
+        assert_eq!(client.directory_correction().unwrap(), Some(-30));
+        assert_eq!(client.directory_epoch().unwrap(), 7);
+
+        // An older epoch moves nothing back.
+        client.accept_relay_set(None, None, 5, &mut rng).unwrap();
+        assert_eq!(client.directory_correction().unwrap(), Some(-30));
+        assert_eq!(client.directory_epoch().unwrap(), 7);
     }
 
     #[test]

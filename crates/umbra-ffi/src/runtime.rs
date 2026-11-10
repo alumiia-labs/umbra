@@ -1358,6 +1358,10 @@ pub async fn run_client(
                     // them that sends finds no way while the session
                     // pauses, and the next run does it.
                     Err(_) if pausing.is_some() => Vec::new(),
+                    // NET-378: an answer or a record that the node cannot
+                    // use gives no error here. What stays is a capsule of
+                    // the ingress relay that does not parse, or a fault of
+                    // this device.
                     Err(_) => break 'run Ended::NodeFault,
                 },
                 Err(_) => match pausing {

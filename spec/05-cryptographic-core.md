@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 5: Cryptographic Core
 
 **Status:** Draft
-**Version:** 0.54.0
+**Version:** 0.55.0
 **Date:** 2026-11-10
 
 ---
@@ -749,8 +749,9 @@ The value `RK` is the initial root key of §5.5.1. The two header keys protect
 the `hdr_ct` field of Part 6 §6.5, one for each direction. **[CRY-059]** An
 implementation MUST erase `ck`, `h`, `k`, and each ephemeral private key after
 the split, with the one exception of the next rule. Part 14 §14.4 gives the
-erasure rule. Part 7 §7.4 step 3 takes its 6-digit confirmation code from `h`,
-and it takes that code before the erasure.
+erasure rule. Part 7 §7.4 takes its 6-digit confirmation code from the link
+secret, the
+link transcript, and the value of the `LinkReply`, and not from `h`.
 
 **The first ratchet key.** The ephemeral `er` of flight 2 is the first DH
 ratchet key of the responder in §5.5.1. The initiator holds its public half

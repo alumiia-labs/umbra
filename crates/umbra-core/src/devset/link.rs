@@ -1,7 +1,8 @@
 //! The link of a new device to a device set (Part 7 §7.4): the ticket that
 //! the QR code carries, the offer and the hello that the two devices put on
-//! handle-addressed chunks (Part 12 §12.4.2), the code that the user
-//! compares, and the sealed provision that makes the new device a member.
+//! handle-addressed chunks (Part 12 §12.4.2), the reply that fixes the code,
+//! the code that the user compares, and the sealed provision that makes the
+//! new device a member.
 //!
 //! The new device holds no root identity until the provision arrives, thus
 //! the link uses no queue and no pairwise channel. Each object sits under a
@@ -136,7 +137,8 @@ pub fn offer_slot(nonce: &[u8; 16]) -> Slot {
 }
 
 /// The slot of the hello of the new device (`DEV-281`). Each holder of the
-/// ticket can write it, and the code of `DEV-283` shows which one did.
+/// ticket can write it. The reply of `DEV-361` goes to the one writer whose
+/// hello the existing device took, and the code of `DEV-283` shows it.
 pub fn hello_slot(nonce: &[u8; 16]) -> Slot {
     Slot::derive(labels::LINK_HELLO, &[nonce])
 }
@@ -281,14 +283,21 @@ impl LinkHello {
     }
 }
 
-/// The secret of one link, and what the two devices derive from it
-/// (`DEV-282` to `DEV-284`).
-pub struct LinkSecret {
+/// The length of the value of a reply.
+pub const REPLY_VALUE_LEN: usize = 32;
+/// The length of an encoded reply.
+pub const REPLY_LEN: usize = 1 + aead::NONCE_LEN + aead::TAG_LEN + REPLY_VALUE_LEN;
+
+/// What the two devices hold after the hello and before the reply
+/// (`DEV-361`): the shared value of the KEM and the transcript. The writer
+/// of the hello selected each input of the two, thus no code comes from
+/// them alone.
+pub struct LinkPending {
     ss: Secret<32>,
     transcript: [u8; 32],
 }
 
-impl LinkSecret {
+impl LinkPending {
     /// The side of the new device: one encapsulation to the offer.
     pub fn encapsulate<R: CryptoRng + ?Sized>(
         offer: &LinkOffer,
@@ -297,17 +306,17 @@ impl LinkSecret {
         kem::encapsulate(&offer.link_pk, rng)
     }
 
-    /// The secret from the shared value of the KEM, the nonce of the
+    /// The state from the shared value of the KEM, the nonce of the
     /// ticket, and the two objects.
     pub fn new(ss: Secret<32>, nonce: &[u8; 16], offer: &[u8], hello: &[u8]) -> Self {
-        LinkSecret {
+        LinkPending {
             transcript: sha3_256(&[labels::LINK_TRANSCRIPT, nonce, offer, hello]),
             ss,
         }
     }
 
     /// The side of the existing device: the hello opens under the key of
-    /// the offer, and the secret follows.
+    /// the offer, and the state follows.
     pub fn decapsulate(
         link_key: &KeyPair,
         nonce: &[u8; 16],
@@ -318,11 +327,104 @@ impl LinkSecret {
         Ok((hello, Self::new(ss, nonce, offer, hello_bytes)))
     }
 
+    /// The slot of the reply. Only the two devices that hold `ss` know it.
+    pub fn reply_slot(&self) -> Slot {
+        Slot::derive(labels::LINK_CODE, &[self.ss.expose(), &self.transcript])
+    }
+
+    fn reply_key(&self) -> Secret<32> {
+        secret_hash(&[
+            labels::LINK_CODE,
+            self.ss.expose(),
+            &self.transcript,
+            b"seal",
+        ])
+    }
+
+    /// The side of the existing device, after it took this one hello
+    /// (`DEV-361`): a fresh value, sealed for the reply slot, and the
+    /// secret of the link. The value is new for each call, thus the writer
+    /// of the hello cannot know the code before its hello is fixed.
+    pub fn answer<R: CryptoRng + ?Sized>(
+        self,
+        rng: &mut R,
+    ) -> Result<(Vec<u8>, LinkSecret), Error> {
+        let mut value = [0u8; REPLY_VALUE_LEN];
+        rng.fill_bytes(&mut value);
+
+        let mut seal_nonce = [0u8; aead::NONCE_LEN];
+        rng.fill_bytes(&mut seal_nonce);
+        let mut body = value;
+        let tag = aead::seal(&self.reply_key(), &seal_nonce, labels::LINK_CODE, &mut body)?;
+
+        let mut out = Vec::with_capacity(REPLY_LEN);
+        out.push(0x01);
+        out.extend_from_slice(&seal_nonce);
+        out.extend_from_slice(&tag);
+        out.extend_from_slice(&body);
+        Ok((out, self.with_reply(value)))
+    }
+
+    /// The side of the new device: the reply opens under the key of its
+    /// own hello, and the secret of the link follows. A reply that opens
+    /// shows that the existing device took the hello of this device.
+    pub fn open_reply(&self, sealed: &[u8]) -> Result<LinkSecret, Error> {
+        let mut r = Reader::new(sealed);
+        if r.u8()? != 0x01 {
+            return Err(Error::Malformed);
+        }
+
+        let seal_nonce: [u8; aead::NONCE_LEN] = r.array()?;
+        let tag = r.take(aead::TAG_LEN)?;
+        let mut value: [u8; REPLY_VALUE_LEN] = r.array()?;
+        r.finish()?;
+
+        aead::open(
+            &self.reply_key(),
+            &seal_nonce,
+            labels::LINK_CODE,
+            &mut value,
+            tag,
+        )
+        .map_err(|_| Error::Unverified)?;
+
+        let pending = LinkPending {
+            ss: copy_secret(&self.ss),
+            transcript: self.transcript,
+        };
+        Ok(pending.with_reply(value))
+    }
+
+    fn with_reply(self, reply: [u8; REPLY_VALUE_LEN]) -> LinkSecret {
+        LinkSecret {
+            ss: self.ss,
+            transcript: self.transcript,
+            reply,
+        }
+    }
+}
+
+/// The secret of one link after the reply, and what the two devices derive
+/// from it (`DEV-282` to `DEV-284`).
+pub struct LinkSecret {
+    ss: Secret<32>,
+    transcript: [u8; 32],
+    /// The value of the reply. The existing device drew it after the hello.
+    reply: [u8; REPLY_VALUE_LEN],
+}
+
+impl LinkSecret {
     /// The six-digit code that the user compares on the two screens
-    /// (`DEV-283`): the first four bytes of a hash of the secret and the
-    /// transcript, as a number modulo 1 000 000.
+    /// (`DEV-283`): the first four bytes of a hash of the secret, the
+    /// transcript, and the value of the reply, as a number modulo
+    /// 1 000 000.
     pub fn code(&self) -> u32 {
-        let digest = sha3_256(&[labels::LINK_CODE, self.ss.expose(), &self.transcript]);
+        let digest = sha3_256(&[
+            labels::LINK_CODE,
+            self.ss.expose(),
+            &self.transcript,
+            &self.reply,
+        ]);
         let head = [digest[0], digest[1], digest[2], digest[3]];
         u32::from_be_bytes(head) % 1_000_000
     }
@@ -331,7 +433,7 @@ impl LinkSecret {
     pub fn provision_slot(&self) -> Slot {
         Slot::derive(
             labels::LINK_PROVISION,
-            &[self.ss.expose(), &self.transcript],
+            &[self.ss.expose(), &self.transcript, &self.reply],
         )
     }
 
@@ -340,6 +442,7 @@ impl LinkSecret {
             labels::LINK_PROVISION,
             self.ss.expose(),
             &self.transcript,
+            &self.reply,
             b"seal",
         ])
     }
@@ -351,7 +454,7 @@ impl LinkSecret {
         provision: &Provision,
         rng: &mut R,
     ) -> Result<Vec<u8>, Error> {
-        let mut body = Zeroizing::new(provision.encode()?);
+        let mut body = provision.encode()?;
         let mut nonce = [0u8; aead::NONCE_LEN];
         rng.fill_bytes(&mut nonce);
         let tag = aead::seal(&self.seal_key(), &nonce, labels::LINK_PROVISION, &mut body)?;
@@ -397,17 +500,28 @@ impl LinkSecret {
 /// roster that adds the new device and the bundle that opens the sync
 /// channel of the two (`DEV-286`), thus the provision stays one chunk at
 /// `MAX_DEVICES`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Provision {
     /// The `device_id` of the existing device.
     pub from_device: DeviceId,
-    /// The encoded `FileDescriptor` of the snapshot.
-    pub snapshot: Vec<u8>,
+    /// The encoded `FileDescriptor` of the snapshot. It holds the file key,
+    /// thus it wipes at the drop.
+    pub snapshot: Zeroizing<Vec<u8>>,
+}
+
+impl core::fmt::Debug for Provision {
+    /// The descriptor holds a key, thus the text shows its length alone.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Provision")
+            .field("from_device", &self.from_device)
+            .field("snapshot_len", &self.snapshot.len())
+            .finish()
+    }
 }
 
 impl Provision {
-    fn encode(&self) -> Result<Vec<u8>, Error> {
-        let mut out = alloc::vec![0u8; 1 + 16 + 4 + self.snapshot.len()];
+    fn encode(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
+        let mut out = Zeroizing::new(alloc::vec![0u8; 1 + 16 + 4 + self.snapshot.len()]);
         let mut w = Writer::new(&mut out);
         w.u8(0x01)?;
         w.put(&self.from_device)?;
@@ -424,7 +538,7 @@ impl Provision {
 
         let from_device = r.array()?;
         let len = usize::try_from(r.u32()?).map_err(|_| Error::Malformed)?;
-        let snapshot = r.take(len)?.to_vec();
+        let snapshot = Zeroizing::new(r.take(len)?.to_vec());
         r.finish()?;
         Ok(Provision {
             from_device,
@@ -711,7 +825,7 @@ mod tests {
         assert!(LinkOffer::parse(&other.encode(), &scanned).is_err());
 
         let identity = DeviceIdentity::generate("Tablet", &mut rng);
-        let (ct, ss) = LinkSecret::encapsulate(&offer, &mut rng);
+        let (ct, ss) = LinkPending::encapsulate(&offer, &mut rng);
         let hello = LinkHello {
             device_id: identity.device_id,
             device_pk: identity.device_key().public().clone(),
@@ -724,15 +838,22 @@ mod tests {
         // The label is not in the clear.
         assert!(!hello_bytes.windows(6).any(|w| w == b"Tablet"));
 
-        let joined = LinkSecret::new(ss, &scanned.nonce, &offer_bytes, &hello_bytes);
+        let joining = LinkPending::new(ss, &scanned.nonce, &offer_bytes, &hello_bytes);
 
-        // The existing device reads the hello: the same code. A hello under
-        // another nonce does not open.
-        assert!(LinkSecret::decapsulate(&link_key, &[8; 16], &offer_bytes, &hello_bytes).is_err());
-        let (read, offered) =
-            LinkSecret::decapsulate(&link_key, &ticket.nonce, &offer_bytes, &hello_bytes).unwrap();
+        // The existing device reads the hello. A hello under another nonce
+        // does not open.
+        assert!(LinkPending::decapsulate(&link_key, &[8; 16], &offer_bytes, &hello_bytes).is_err());
+        let (read, offering) =
+            LinkPending::decapsulate(&link_key, &ticket.nonce, &offer_bytes, &hello_bytes).unwrap();
         assert_eq!(label_text(&read.label), "Tablet");
         assert_eq!(read.device_id, identity.device_id);
+        assert_eq!(offering.reply_slot().handle, joining.reply_slot().handle);
+
+        // DEV-361: the reply of the existing device gives the two the same
+        // code.
+        let (reply, offered) = offering.answer(&mut rng).unwrap();
+        assert_eq!(reply.len(), REPLY_LEN);
+        let joined = joining.open_reply(&reply).unwrap();
         assert_eq!(offered.code(), joined.code());
         assert!(offered.code() < 1_000_000);
         assert_eq!(
@@ -743,18 +864,106 @@ mod tests {
         // The provision opens at the new device alone.
         let provision = Provision {
             from_device: [1; 16],
-            snapshot: alloc::vec![3; 200],
+            snapshot: Zeroizing::new(alloc::vec![3; 200]),
         };
         let sealed = offered.seal(&provision, &mut rng).unwrap();
         assert_eq!(joined.open(&sealed).unwrap(), provision);
 
-        let stranger = LinkSecret::new(
+        let stranger = LinkPending::new(
             Secret::new([9; 32]),
             &ticket.nonce,
             &offer_bytes,
             &hello_bytes,
         );
+        assert!(stranger.open_reply(&reply).is_err());
+        let (_, stranger) = stranger.answer(&mut rng).unwrap();
         assert!(stranger.open(&sealed).is_err());
+
+        // The text of a provision shows no byte of the descriptor.
+        assert!(!alloc::format!("{provision:?}").contains("3, 3"));
+    }
+
+    /// One hello with a seal nonce that the writer selects, as a party
+    /// that looks for a code does.
+    fn hello_with_nonce(
+        offer: &LinkOffer,
+        nonce: &[u8; 16],
+        seal_nonce: u64,
+        rng: &mut Rng,
+    ) -> (Vec<u8>, Secret<32>) {
+        let identity = DeviceIdentity::generate("Other", rng);
+        let (ct, ss) = LinkPending::encapsulate(offer, rng);
+        let hello = LinkHello {
+            device_id: identity.device_id,
+            device_pk: identity.device_key().public().clone(),
+            roster_pk: identity.roster_key().verifying_key().to_bytes().to_vec(),
+            label: identity.label,
+            ct,
+        };
+        let bytes = hello.seal(&ss, nonce, &mut Rng(seal_nonce)).unwrap();
+        (bytes, ss)
+    }
+
+    #[test]
+    fn the_writer_of_a_hello_selects_no_code() {
+        let mut rng = Rng(21);
+        let link_key = KeyPair::generate(&mut rng);
+        let offer = LinkOffer {
+            link_pk: link_key.public().clone(),
+        };
+        let offer_bytes = offer.encode();
+        let nonce = [4; 16];
+        let (hello_bytes, _) = hello_with_nonce(&offer, &nonce, 1, &mut rng);
+
+        // DEV-361: one hello gives a new code at each reply. Thus the bytes
+        // of the hello, which its writer selects, fix no code, and a search
+        // through hellos finds none before the reply.
+        let mut codes = alloc::collections::BTreeSet::new();
+        for _ in 0..8 {
+            let (_, pending) =
+                LinkPending::decapsulate(&link_key, &nonce, &offer_bytes, &hello_bytes).unwrap();
+            let (_, secret) = pending.answer(&mut rng).unwrap();
+            codes.insert(secret.code());
+        }
+        assert!(codes.len() > 1);
+    }
+
+    #[test]
+    fn a_reply_opens_for_the_hello_that_the_existing_device_took_alone() {
+        let mut rng = Rng(22);
+        let link_key = KeyPair::generate(&mut rng);
+        let offer = LinkOffer {
+            link_pk: link_key.public().clone(),
+        };
+        let offer_bytes = offer.encode();
+        let nonce = [6; 16];
+
+        // Two parties hold the ticket, and each one writes a hello.
+        let (honest_hello, honest_ss) = hello_with_nonce(&offer, &nonce, 1, &mut rng);
+        let (other_hello, other_ss) = hello_with_nonce(&offer, &nonce, 2, &mut rng);
+        let honest = LinkPending::new(honest_ss, &nonce, &offer_bytes, &honest_hello);
+        let other = LinkPending::new(other_ss, &nonce, &offer_bytes, &other_hello);
+
+        // The existing device took the hello of the other party.
+        let (_, taken) =
+            LinkPending::decapsulate(&link_key, &nonce, &offer_bytes, &other_hello).unwrap();
+        assert_ne!(taken.reply_slot().handle, honest.reply_slot().handle);
+        let (reply, shown) = taken.answer(&mut rng).unwrap();
+
+        // The honest device opens no reply, thus it shows no code. The
+        // other party reads the code, and it cannot move it to the honest
+        // device.
+        assert_eq!(honest.open_reply(&reply).err(), Some(Error::Unverified));
+        assert_eq!(other.open_reply(&reply).unwrap().code(), shown.code());
+
+        // A reply with a changed byte or another length opens nothing.
+        let mut changed = reply.clone();
+        changed[REPLY_LEN - 1] ^= 1;
+        assert_eq!(other.open_reply(&changed).err(), Some(Error::Unverified));
+        assert!(other.open_reply(&reply[..REPLY_LEN - 1]).is_err());
+        let mut versioned = reply;
+        versioned[0] = 0x02;
+        assert_eq!(other.open_reply(&versioned).err(), Some(Error::Malformed));
     }
 
     #[test]

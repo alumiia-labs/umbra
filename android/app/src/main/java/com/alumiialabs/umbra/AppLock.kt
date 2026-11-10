@@ -57,7 +57,12 @@ fun AutoLockSheet(onDismiss: () -> Unit) {
         stringResource(R.string.lock_auto_lock),
         AutoLockChoices.map { (seconds, words) ->
             val (title, detail) = words
-            SheetChoice(stringResource(title), Core.autoLockSeconds == seconds, detail?.let { stringResource(it) }) {
+            SheetChoice(
+                stringResource(title),
+                Core.autoLockSeconds == seconds,
+                detail?.let { stringResource(it) },
+                tag = TestTags.choice(TestTags.AUTO_LOCK_CHOICE, seconds),
+            ) {
                 Core.setAutoLock(seconds)
             }
         },
@@ -109,7 +114,11 @@ fun AutoDownloadSheet(onDismiss: () -> Unit) {
     ChoiceSheet(
         stringResource(R.string.common_automatic_download),
         AutoDownloadChoices.map { bytes ->
-            SheetChoice(downloadLimitLabel(bytes), Core.autoDownloadLimit == bytes) {
+            SheetChoice(
+                downloadLimitLabel(bytes),
+                Core.autoDownloadLimit == bytes,
+                tag = TestTags.choice(TestTags.DOWNLOAD_CHOICE, bytes),
+            ) {
                 Core.setAutoDownload(bytes, Core.autoDownloadWifiOnly)
             }
         },

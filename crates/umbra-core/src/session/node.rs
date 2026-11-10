@@ -932,6 +932,24 @@ enum Purpose {
     },
 }
 
+impl Purpose {
+    /// What ends this purpose when its queue fails: the contact of a
+    /// rotation or of a renewal. Each other purpose ends with a rejection
+    /// at its caller, as an invitation does.
+    fn ending(&self) -> Purpose {
+        match self {
+            Purpose::Rotate { contact, now } => Purpose::Rotate {
+                contact: *contact,
+                now: *now,
+            },
+            Purpose::Renew { contact } | Purpose::RenewAccept { contact, .. } => {
+                Purpose::Renew { contact: *contact }
+            }
+            _ => Purpose::Invite,
+        }
+    }
+}
+
 /// A notify queue of Part 8 §8.5.2: a queue of this device that no contact
 /// writes to, where a group-queue relay deposits its digests.
 struct NotifyQueue {
@@ -1033,6 +1051,10 @@ struct GroupWait {
 /// The longest wait before a build again to a relay whose builds ran out of
 /// time, in seconds (`NET-347`).
 const REBUILD_WAIT_MAX: u64 = 300;
+
+/// The cells with a failed answer that one circuit gives before it ends
+/// (`NET-379`). An honest relay gives none.
+const ANSWER_FAULTS_MAX: u8 = 8;
 
 /// The `SUB` and `GSUB` commands whose refusal the node still maps, as the
 /// session watches them. A command that took no refusal waits for none,
@@ -2101,6 +2123,8 @@ pub struct ClientNode {
     /// The builds again to each relay after a lost build: the count, and
     /// the time before which no build to it starts (`NET-347`).
     rebuilds: BTreeMap<[u8; 32], (u32, u64)>,
+    /// The cells of each ready circuit whose answer failed, by `circ_id`.
+    answer_faults: BTreeMap<[u8; 16], u8>,
     /// The handles in `waiting` of the commands whose only answer is a
     /// `NACK`, oldest first.
     watched_waits: VecDeque<u64>,
@@ -2345,6 +2369,7 @@ impl ClientNode {
             next_handle: 1,
             waiting: BTreeMap::new(),
             rebuilds: BTreeMap::new(),
+            answer_faults: BTreeMap::new(),
             watched_waits: VecDeque::new(),
             halves: BTreeMap::new(),
             contacts: BTreeMap::new(),
@@ -3934,15 +3959,23 @@ impl ClientNode {
         // renewal owes its `DEL`, each after a delay of its own. The store
         // holds each one until its `DEL` left, thus one goes in each run
         // (`WIR-045`) and the device loses none.
+        //
+        // The channel changed already, and the events below must reach the
+        // client. A queue end whose stored form did not encode keeps no
+        // `DEL`, and its relay ends the queue at its age. A send that fails
+        // goes again in a slot of the cover clock.
         for (inbound, relay) in ended {
             let queue = *inbound.recipient_id();
-            self.owe_del(inbound, relay, false, now, del_delay(rng))?;
+            let _ = self.owe_del(inbound, relay, false, now, del_delay(rng));
             events.push(ClientEvent::QueueEnded { queue });
         }
 
-        self.send_closing(contact, now, rng)?;
-        self.send_waiting(contact, now, rng)?;
-        self.send_guard(contact, now, rng)?;
+        let is_sent = self.send_closing(contact, now, rng).is_ok()
+            && self.send_waiting(contact, now, rng).is_ok()
+            && self.send_guard(contact, now, rng).is_ok();
+        if !is_sent {
+            self.resends.insert(contact);
+        }
 
         if asked {
             events.push(ClientEvent::RenewalAskEnded {
@@ -5601,6 +5634,7 @@ impl ClientNode {
         self.watched_waits.clear();
         self.held_records.clear();
         self.rebuilds.clear();
+        self.answer_faults.clear();
         self.drop_spares();
         for slot in &mut self.slots {
             slot.circuit = Circuit::None;
@@ -6197,8 +6231,10 @@ impl ClientNode {
         }
 
         // Each answer and each record belongs to the slot of the queues.
+        // The old circuit ends soon, thus a failed answer counts for none.
         self.current = slot;
-        self.on_events(events, now, rng)
+        let (events, _) = self.take_events(events, now, rng)?;
+        Ok(events)
     }
 
     /// Builds again a circuit to the relay of a waiting record whose build
@@ -6788,16 +6824,7 @@ impl ClientNode {
         // A `NEW` that does not reach the session leaves no keys. Its
         // purpose then ends as one with no admission does, thus no rotation
         // and no renewal waits for an answer that no relay gives.
-        let purpose = match &keys.purpose {
-            Purpose::Rotate { contact, now } => Purpose::Rotate {
-                contact: *contact,
-                now: *now,
-            },
-            Purpose::Renew { contact } => Purpose::Renew { contact: *contact },
-            Purpose::RenewAccept { contact, .. } => Purpose::Renew { contact: *contact },
-            // Each other purpose ends with a rejection, as an invitation.
-            _ => Purpose::Invite,
-        };
+        let purpose = keys.purpose.ending();
         let queue_handle = keys.handle;
         keys.paid = true;
         self.current = keys.slot;
@@ -6824,6 +6851,12 @@ impl ClientNode {
     /// next bundle of the peer. Each other purpose has a caller that holds
     /// `handle`, and it takes the rejection.
     fn admission_failed(&mut self, handle: u64, purpose: &Purpose) -> Vec<ClientEvent> {
+        self.queue_ended(handle, purpose, Reject::Admission)
+    }
+
+    /// Ends the purpose of a queue that this node does not hold, with
+    /// `reason` for a caller that waits.
+    fn queue_ended(&mut self, handle: u64, purpose: &Purpose, reason: Reject) -> Vec<ClientEvent> {
         match purpose {
             Purpose::Rotate { contact, .. } => {
                 self.rotating.remove(contact);
@@ -6833,10 +6866,7 @@ impl ClientNode {
                 self.renewal_ended(contact);
                 Vec::new()
             }
-            _ => alloc::vec![ClientEvent::Rejected {
-                handle,
-                reason: Reject::Admission,
-            }],
+            _ => alloc::vec![ClientEvent::Rejected { handle, reason }],
         }
     }
 
@@ -9517,15 +9547,78 @@ impl ClientNode {
         })
     }
 
-    /// Takes the events of one cell of the current circuit.
+    /// Takes the events of one cell of the ready circuit of the current
+    /// slot. A relay that gives `ANSWER_FAULTS_MAX` cells with a failed
+    /// answer loses the circuit, as after a failed check (`NET-379`).
     fn on_events<R: CryptoRng + ?Sized>(
         &mut self,
         events: Vec<CircuitEvent>,
         now: u64,
         rng: &mut R,
     ) -> Result<Vec<ClientEvent>, Error> {
+        let arrival = self.current;
+        let (mut out, answer_failed) = self.take_events(events, now, rng)?;
+
+        if answer_failed && self.answer_fault_ends(arrival, now, rng) {
+            out.push(ClientEvent::CircuitLost);
+        }
+        Ok(out)
+    }
+
+    /// Counts one cell with a failed answer for the circuit of slot
+    /// `index`. The result is whether the circuit ended.
+    fn answer_fault_ends<R: CryptoRng + ?Sized>(
+        &mut self,
+        index: usize,
+        now: u64,
+        rng: &mut R,
+    ) -> bool {
+        let Some(slot) = self.slots.get(index) else {
+            return false;
+        };
+        let Some(circ_id) = slot.circ_id().filter(|_| slot.is_ready()) else {
+            return false;
+        };
+
+        // A count of a circuit that ended leaves here.
+        let slots = &self.slots;
+        self.answer_faults
+            .retain(|held, _| slots.iter().any(|slot| slot.circ_id() == Some(*held)));
+        let count = self.answer_faults.entry(circ_id).or_insert(0);
+        *count = count.saturating_add(1);
+        if *count < ANSWER_FAULTS_MAX {
+            return false;
+        }
+
+        self.answer_faults.remove(&circ_id);
+        let Some(slot) = self.slots.get_mut(index) else {
+            return false;
+        };
+        slot.circuit = Circuit::None;
+        if let Some(chain) = slot.chain {
+            self.faults.forced_replacement(&chain, now);
+        }
+        self.rebuild_last(index, now, rng);
+        true
+    }
+
+    /// Takes the events of one cell for the current slot. The second
+    /// result is whether an answer of the relay failed.
+    ///
+    /// The relay at the end of the circuit controls each answer, and a
+    /// peer or that relay controls each record. A fault of one of them
+    /// drops that event and ends no run (`NET-378`): a run that ended here
+    /// would let one relay end each run of the client. A fault of the store
+    /// is a fault of this device, and it ends the call.
+    fn take_events<R: CryptoRng + ?Sized>(
+        &mut self,
+        events: Vec<CircuitEvent>,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(Vec<ClientEvent>, bool), Error> {
         let mut out = Vec::new();
-        let mut fault = Ok(());
+        let mut local = Ok(());
+        let mut answer_failed = false;
         let arrival = self.current;
         for event in events {
             // A reply to one event can go to a second circuit. The next
@@ -9541,12 +9634,14 @@ impl ClientNode {
                     payload,
                 } => match self.on_answered(handle, cmd, payload, now, rng) {
                     Ok(events) => out.extend(events),
-                    Err(error) => fault = fault.and(Err(error)),
+                    Err(Error::Storage) => local = Err(Error::Storage),
+                    Err(_) => answer_failed = true,
                 },
                 CircuitEvent::Rejected { handle, reason } => {
                     match self.on_rejected(handle, reason, now) {
                         Ok(events) => out.extend(events),
-                        Err(error) => fault = fault.and(Err(error)),
+                        Err(Error::Storage) => local = Err(Error::Storage),
+                        Err(_) => answer_failed = true,
                     }
                 }
                 CircuitEvent::Message {
@@ -9555,7 +9650,10 @@ impl ClientNode {
                     payload,
                 } => match self.on_message(queue_id, bucket, &payload, now, rng) {
                     Ok(events) => out.extend(events),
-                    Err(error) => fault = fault.and(Err(error)),
+                    Err(Error::Storage) => local = Err(Error::Storage),
+                    // A record that does not open drops, as a record of no
+                    // queue of this node does.
+                    Err(_) => {}
                 },
                 // A `GMSG` carries a `corr_id` of the relay, thus it names
                 // no command of this session.
@@ -9594,10 +9692,8 @@ impl ClientNode {
         }
 
         self.pump()?;
-        match fault {
-            Err(error) if out.is_empty() => Err(error),
-            _ => Ok(out),
-        }
+        local?;
+        Ok((out, answer_failed))
     }
 
     /// The relay answered the command of `handle` with `cmd`.
@@ -9616,7 +9712,7 @@ impl ClientNode {
             // node holds already makes no queue, as an answer of another
             // kind does (`WIR-497`).
             (Some(Waiting::Queue(keys)), Cmd::Ids) => match self.checked_ids(&keys, &payload) {
-                Some(ids) => out.extend(self.on_ids(*keys, &ids, rng)?),
+                Some(ids) => out.extend(self.take_ids(*keys, &ids, rng)?),
                 None => out.extend(self.queue_not_made(*keys)),
             },
             // WIR-496: the QUOTA is the relay acknowledgment.
@@ -9697,11 +9793,29 @@ impl ClientNode {
                     relay_ntf_pk: payload,
                 });
             }
+            // The caller of a link waits for one event. An answer that
+            // gives no link ends that call, as a refusal of the relay does.
             (Some(Waiting::Link(queue)), Cmd::Ilink) => {
-                out.extend(self.on_link(queue, &payload, rng)?);
+                let half = self.halves.get(&queue);
+                let caller = half.and_then(|half| half.link.as_ref().map(|link| link.handle));
+                match (self.on_link(queue, &payload, rng), caller) {
+                    (Ok(events), _) => out.extend(events),
+                    (Err(fault), Some(handle)) if fault != Error::Storage => {
+                        out.push(ClientEvent::Rejected {
+                            handle,
+                            reason: Reject::Rejected,
+                        });
+                    }
+                    (Err(fault), _) => return Err(fault),
+                }
             }
             (Some(Waiting::Blob(wait)), Cmd::Iblob) => {
-                out.extend(self.on_blob(*wait, &payload, rng)?);
+                let handle = wait.handle;
+                match self.on_blob(*wait, &payload, rng) {
+                    Ok(events) => out.extend(events),
+                    Err(Error::Storage) => return Err(Error::Storage),
+                    Err(_) => out.push(ClientEvent::InvitationGone { handle }),
+                }
             }
             (Some(Waiting::Chunk(wait)), Cmd::Attachment(byte)) => {
                 out.push(ClientEvent::Chunk {
@@ -10000,6 +10114,36 @@ impl ClientNode {
                 reason: Reject::Rejected,
             }],
         }
+    }
+
+    /// Takes the `IDS` of a `NEW`. A step of this device that fails after
+    /// the relay made the queue ends the purpose of the queue, and it ends
+    /// no run (`NET-378`). Thus no rotation and no renewal waits for the
+    /// whole run, and a caller that waits takes a rejection.
+    fn take_ids<R: CryptoRng + ?Sized>(
+        &mut self,
+        keys: QueueKeys,
+        ids: &IdsPayload,
+        rng: &mut R,
+    ) -> Result<Vec<ClientEvent>, Error> {
+        let handle = keys.handle;
+        let purpose = keys.purpose.ending();
+        let fault = match self.on_ids(keys, ids, rng) {
+            Ok(events) => return Ok(events),
+            Err(fault) => fault,
+        };
+
+        // A queue end that the node holds has its own path from here: its
+        // flight goes again at a later slot.
+        let queue = &ids.recipient_id;
+        let is_held = self.halves.contains_key(queue)
+            || self.notify.contains_key(queue)
+            || self.rendezvous.contains_key(queue)
+            || self.contact_of(queue).is_some();
+        if fault == Error::Storage || is_held {
+            return Err(fault);
+        }
+        Ok(self.queue_ended(handle, &purpose, Reject::Rejected))
     }
 
     /// The relay made a queue. The client subscribes to it, and then it
@@ -10321,8 +10465,11 @@ impl ClientNode {
         // Flight 1 of an invitee goes to the queue of the inviter. NET-326:
         // the bundle of a renewal goes to the queue of the peer, under the
         // queue end-to-end layer alone. The store holds each of them with
-        // the half, and it goes again until a relay acknowledged it.
-        self.send_flight(ids.recipient_id, rng)?;
+        // the half, and it goes again until a relay acknowledged it. The
+        // half is made, thus a send that fails here loses no event of it.
+        if self.send_flight(ids.recipient_id, rng).is_err() {
+            self.resends.insert(ids.recipient_id);
+        }
         Ok(out)
     }
 
@@ -10862,8 +11009,14 @@ impl ClientNode {
         // NET-356: each party sets its first guard when the handshake ends.
         self.new_guard(&queue_id, 0, rng);
         self.moved.insert(queue_id);
-        self.send_closing(queue_id, now, rng)?;
-        self.send_guard(queue_id, now, rng)?;
+
+        // The contact is made, and its event must reach the client. A send
+        // that fails here goes again in a slot of the cover clock.
+        let is_sent = self.send_closing(queue_id, now, rng).is_ok()
+            && self.send_guard(queue_id, now, rng).is_ok();
+        if !is_sent {
+            self.resends.insert(queue_id);
+        }
         Ok(alloc::vec![ClientEvent::ContactReady {
             contact: ContactId(queue_id),
             peer_static,
@@ -13597,6 +13750,63 @@ mod tests {
 
         let out = node.on_events(events, now, &mut Rng(5)).unwrap();
         assert_eq!(messages(&out), 1);
+    }
+
+    /// One cell of the relay of a queue with an `ILINK` that does not
+    /// parse, for a command that waits.
+    fn failed_answer(node: &mut ClientNode, slot: usize, now: u64) -> Vec<ClientEvent> {
+        node.current = slot;
+        node.waiting.insert(u64::MAX, Waiting::Link([7; 32]));
+        let events = alloc::vec![CircuitEvent::Answered {
+            handle: u64::MAX,
+            cmd: Cmd::Ilink,
+            payload: alloc::vec![0; 3],
+        }];
+        node.on_events(events, now, &mut Rng(5)).unwrap()
+    }
+
+    #[test]
+    fn an_answer_that_fails_ends_no_run_and_the_bound_ends_its_circuit() {
+        let mut net = Net::new();
+        let [alice, _] = contacts(&mut net);
+        let (queue, _, _) = net.node(ALICE).inbound_queue(&alice).unwrap();
+        let slot = net.node(ALICE).slot_of(&queue).unwrap();
+        let now = net.now;
+        let node = net.node(ALICE);
+
+        // NET-378: the answer drops, and the circuit serves on.
+        for _ in 1..ANSWER_FAULTS_MAX {
+            assert!(failed_answer(node, slot, now).is_empty());
+            assert!(node.slots[slot].is_ready());
+        }
+
+        // NET-379: the relay that gives no correct answer loses the circuit.
+        assert_eq!(failed_answer(node, slot, now), [ClientEvent::CircuitLost]);
+        assert!(!node.slots[slot].is_ready());
+        assert!(node.answer_faults.is_empty());
+    }
+
+    #[test]
+    fn a_record_that_does_not_open_alone_in_its_cell_ends_no_run() {
+        let mut net = Net::new();
+        let [alice, _] = contacts(&mut net);
+        let (queue, _, _) = net.node(ALICE).inbound_queue(&alice).unwrap();
+        let slot = net.node(ALICE).slot_of(&queue).unwrap();
+        let now = net.now;
+        let node = net.node(ALICE);
+        node.current = slot;
+
+        // The relay or a peer controls the bytes. No count runs for them,
+        // because a peer must not end the circuit of a relay.
+        for _ in 0..ANSWER_FAULTS_MAX.saturating_mul(2) {
+            let events = alloc::vec![CircuitEvent::Message {
+                queue_id: queue,
+                bucket: Bucket::B0,
+                payload: alloc::vec![0x5A; Bucket::B0.l6_record()],
+            }];
+            assert!(node.on_events(events, now, &mut Rng(5)).unwrap().is_empty());
+        }
+        assert!(node.slots[slot].is_ready());
     }
 
     #[test]

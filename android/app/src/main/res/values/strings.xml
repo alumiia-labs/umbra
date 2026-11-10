@@ -746,6 +746,7 @@
     <string name="devices_copy_the_code">Copy the code</string>
     <string name="devices_link_expires">Works once. Expires in 2 minutes.</string>
     <string name="devices_codes_match_question">Do the codes match?</string>
+    <string name="devices_confirm_same_code">Confirm only when the new device shows this code. If it shows no code, stop.</string>
     <string name="devices_copying">Copying to the new device</string>
     <string name="devices_linked">Linked</string>
     <string name="devices_code_ran_out">The code ran out.</string>
@@ -1036,6 +1037,7 @@
     <string name="core_connecting">Connecting…</string>
     <string name="core_no_network">No network.</string>
     <string name="core_copying">Copying from the other device…</string>
+    <string name="core_link_waits">Waiting for the other device…</string>
     <string name="core_code_ran_out">The code ran out.</string>
     <string name="core_not_link_code">This is not the code of a link.</string>
     <!-- %1$s holds the technical name of the fault. -->
@@ -1145,4 +1147,10 @@
     <string name="mod_you_removed_silence">You are no longer in the group after 30 days of silence</string>
     <string name="mod_you_two_changes">Your devices made two different changes to the group</string>
     <string name="mod_warning">Warning</string>
+
+    <!-- P3-2 -->
+    <string name="main_split_view">The relay directory gave two different signed lists for the same time. UMBRA does not use the second list. Tell the UMBRA project.</string>
+    <string name="main_migration_unsound">A check of the stored data failed during an update. Some data can be damaged or changed by another party.</string>
+    <string name="chat_stop_audio">Stop</string>
+    <string name="chat_audio_prepares">Preparing the audio</string>
 </resources>

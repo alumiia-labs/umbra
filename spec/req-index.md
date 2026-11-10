@@ -70,20 +70,20 @@ column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 262 | 93 | 1 | 0 | 11 | **367** |
+| `NET` | 263 | 94 | 1 | 0 | 11 | **369** |
 | `IDN` | 138 | 46 | 1 | 0 | 5 | **190** |
 | `CRY` | 121 | 27 | 0 | 0 | 2 | **150** |
 | `WIR` | 418 | 88 | 0 | 0 | 8 | **514** |
-| `DEV` | 226 | 95 | 0 | 0 | 15 | **336** |
+| `DEV` | 228 | 95 | 0 | 0 | 15 | **338** |
 | `NTF` | 92 | 30 | 0 | 0 | 3 | **125** |
 | `DIS` | 138 | 38 | 1 | 0 | 3 | **180** |
 | `REL` | 175 | 34 | 1 | 0 | 4 | **214** |
-| `GRP` | 244 | 69 | 0 | 0 | 5 | **318** |
+| `GRP` | 245 | 69 | 0 | 0 | 5 | **319** |
 | `ATT` | 153 | 47 | 2 | 0 | 3 | **205** |
 | `ABU` | 71 | 29 | 1 | 0 | 0 | **101** |
 | `IMP` | 120 | 41 | 1 | 0 | 2 | **164** |
 | `SEC` | 4 | 3 | 0 | 0 | 1 | **8** |
-| **All** | 2185 | 649 | 8 | 0 | 66 | **2908** |
+| **All** | 2189 | 650 | 8 | 0 | 66 | **2913** |
 
 ## SCP — Scope and Conventions
 
@@ -508,6 +508,8 @@ Source: `spec/03-network-architecture.md`
 | `NET-375` | §3.5.2 | MUST NOT | (unstated) | The answers that wait for the clocks of all circuits of one relay MUST NOT hold more than `RELAY_ANSWER_BYTES_MAX` together. |  |  |
 | `NET-376` | §3.5.2 | MUST NOT | A relay | A relay MUST NOT pack answers of two ranges into one cell (Part 6 rule `WIR-108`). |  |  |
 | `NET-377` | §3.5.2 | MUST NOT | The backlogs of the client links of one relay | The backlogs of the client links of one relay MUST NOT hold more than `RELAY_BACKLOG_MAX` together. |  |  |
+| `NET-378` | §3.4.4 | MUST NOT | (unstated) | A client MUST discard an answer or a record of a circuit that passes the comparison of NET-114 and that the client cannot use, and it MUST NOT end its session with the ingress relay for that cause. |  |  |
+| `NET-379` | §3.4.4 | MUST | A client | A client MUST tear down a circuit that gave 8 cells with an answer that the client cannot use, and it MUST build that circuit again under NET-347. |  |  |
 
 ## IDN — Identity
 
@@ -1656,7 +1658,7 @@ Source: `spec/07-device-sets.md`
 | `DEV-277` | §7.5.3 | MUST | A device | A device MUST retain a `MutableItem` for the resend of §7.5.5 under a reference to its row and its key, and not under its bytes. |  |  |
 | `DEV-280` | §7.4 | MUST | The existing device | The existing device MUST write the offer under the offer slot before it shows the ticket, and the ticket MUST carry the hash of that offer. |  |  |
 | `DEV-281` | §7.4 | MUST | The new device | The new device MUST reject an offer whose hash differs from the ticket, and it MUST write its hello under the hello slot. |  |  |
-| `DEV-282` | §7.4 | MUST | Each device | Each device MUST derive the hello key, the transcript, the code, the provision slot, and the seal key as above. |  |  |
+| `DEV-282` | §7.4 | MUST | Each device | Each device MUST derive the hello key, the transcript, the reply slot, the reply key, the code, the provision slot, and the seal key as above. |  |  |
 | `DEV-283` | §7.4 | MUST NOT | (unstated) | The two devices MUST show the code of step 3, and the existing device MUST NOT write the provision before the user confirms on it that the two codes match. |  |  |
 | `DEV-284` | §7.4 | MUST | The new device | The new device MUST make its store from the root seed of the snapshot and take each row of it, as a restore does, and it MUST keep its own `DeviceKey`, `DeviceRosterKey`, and `device_id`. |  |  |
 | `DEV-285` | §7.4 | MUST | A device that holds no roster | A device that holds no roster MUST sign epoch 0 with itself alone before it offers its first link. |  |  |
@@ -1726,6 +1728,8 @@ Source: `spec/07-device-sets.md`
 | `DEV-358` | §7.5.9 | MAY | A user | A user MAY mark a conversation **priority**. |  |  |
 | `DEV-359` | §7.5.9 | MUST | (unstated) | A locked client cannot read the mention list of a record. |  |  |
 | `DEV-360` | §7.5.6 | MUST | A client | A client MUST discard a new pending entry of a group from a member index that made `REF_ORPHAN_MEMBER_MAX` entries in the current period of `REF_ORPHAN_TTL`. |  |  |
+| `DEV-361` | §7.4 | MUST | The existing device | The existing device MUST take one hello and no more. |  |  |
+| `DEV-362` | §7.4 | MUST | (unstated) | When one read of the hello slot gives two different chunks that open as a hello, the existing device MUST end the link with no code and no reply. |  |  |
 
 ## NTF — Notifications
 
@@ -2526,7 +2530,7 @@ Source: `spec/11-private-groups.md`
 | `GRP-372` | §11.12 | MUST | The member | The member MUST zeroize the old seed and the old three keys when an epoch-key record with a slot for its new index arrives. |  |  |
 | `GRP-373` | §11.12 | MUST | The interface | The interface MUST show each group whose re-key waits for a rotation or for an admit. |  |  |
 | `GRP-374` | §11.12 | MUST | (unstated) | If the record of the user lost under `GRP-369` and the user holds no pairwise channel with an admin of that group, the interface MUST state that the group needs a new invitation. |  |  |
-| `GRP-375` | §11.4.3 | MUST | (unstated) | Any active member that reads a `KeyRequest` of scope `0x02` from an index that the current roster holds MUST answer, after the backoff of §11.4.1 and only if no one-slot epoch-key record for that index arrived first, with a one-slot epoch-key record of the current epoch for that member, inline with `slot_count` 1 and `own_count` 0, and then with a `KeySupply` of status `0x01` on the path that carried the request. |  |  |
+| `GRP-375` | §11.4.3 | MUST | (unstated) | Any active member that reads a `KeyRequest` of scope `0x02` from an index that the current roster holds MUST answer, after the backoff of §11.4.1 and only if no `KeySupply` of status `0x01` of an active member for that index and that epoch arrived first, with a one-slot epoch-key record of the current epoch for that member, inline with `slot_count` 1 and `own_count` 0, and then with a `KeySupply` of status `0x01` on the path that carried the request. |  |  |
 | `GRP-376` | §11.4.3 | MUST | (unstated) | A member that receives a `KeyRequest` of scope `0x02` on a pairwise channel MUST answer it at once when `GRP-404` permits, because no other member read it, and MUST post it otherwise as a group record that keeps the `index` of `WIR-523`, thus another member answers under the backoff. |  |  |
 | `GRP-377` | §11.4.3 | MUST NOT | A member | A member MUST NOT answer a `KeyRequest` from an index that the current roster does not hold. |  |  |
 | `GRP-378` | §11.4.3 | MUST | A member | A member MUST discard an epoch request above that rate. |  |  |
@@ -2591,6 +2595,7 @@ Source: `spec/11-private-groups.md`
 | `GRP-441` | §11.9.3 | MUST | A verifier | A verifier MUST apply a granting epoch that gives a member the role that it holds as each other grant. |  |  |
 | `GRP-442` | §11.9 | MUST NOT | A client | A client MUST NOT build a content record that `GRP-425` makes each receiver reject. |  |  |
 | `GRP-443` | §11.9.3 | MUST | Before an admin posts an add under `GRP-310`, it | Before an admin posts an add under `GRP-310`, it MUST post the epoch of `GRP-441` for each role holder that its path does not back, when `GRP-441` permits that epoch and the roster takes it. |  |  |
+| `GRP-444` | §11.2.1 | MUST | A device that holds a group row for a `group_id` | A device that holds a group row for a `group_id` MUST discard an offer for that `group_id` whose `creator_roster_pk` is not the roster key of the creator of the group that it holds. |  |  |
 
 ## ATT — Attachments and Large Objects
 

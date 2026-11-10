@@ -128,14 +128,22 @@ fun NewPollScreen(chat: Chat, onBack: () -> Unit) {
 
             SectionLabel(stringResource(R.string.poll_ends))
             for ((seconds, title) in PollPeriods) {
-                ChoiceRow(stringResource(title), isChosen = !isCustom && period == seconds) {
+                ChoiceRow(
+                    stringResource(title),
+                    isChosen = !isCustom && period == seconds,
+                    tag = TestTags.choice(TestTags.POLL_PERIOD_CHOICE, seconds),
+                ) {
                     isCustom = false
                     period = seconds
                     if (seconds == 0u) hidden = false
                 }
             }
 
-            ChoiceRow(stringResource(R.string.poll_custom), isChosen = isCustom) { isCustom = true }
+            ChoiceRow(
+                stringResource(R.string.poll_custom),
+                isChosen = isCustom,
+                tag = TestTags.choice(TestTags.POLL_PERIOD_CHOICE, "custom"),
+            ) { isCustom = true }
 
             if (isCustom) {
                 Row(Modifier.padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {

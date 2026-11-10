@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 1: Scope, Conventions, and Terminology
 
 **Status:** Draft
-**Version:** 0.54.0
+**Version:** 0.55.0
 **Date:** 2026-11-10
 
 ---
@@ -507,7 +507,7 @@ a side channel that the user selects, such as a QR code scan.
 | `NotifyRegistration` for a group | Part 6 §6.4.5 | `GNREG` and `GNUNREG`, Part 6 §6.4.5 | Client |
 | `NotifyDigest` | Part 8 §8.5.1 | `SEND`, as the L6 record of kind `0x04` | Group-queue relay |
 | `LinkTicket` | Part 7 §7.4 | The QR code of the existing device | Client |
-| `LinkOffer`, `LinkHello` | Part 7 §7.4 | A handle-addressed chunk of Part 12 §12.4.2 | Client |
+| `LinkOffer`, `LinkHello`, `LinkReply` | Part 7 §7.4 | A handle-addressed chunk of Part 12 §12.4.2 | Client |
 | `Provision` | Part 7 §7.4 | A handle-addressed chunk of Part 12 §12.4.2, sealed | Client |
 | `JoinRecord` | Part 6 §6.6.3 | `GroupControl`, type `0x02`, on the pairwise channel of the invitee to the inviter | Client |
 | `GroupInvitation` | Part 6 §6.6.3 | `GroupControl`, type `0x07`, on the pairwise channel of the inviter to the invitee | Client |

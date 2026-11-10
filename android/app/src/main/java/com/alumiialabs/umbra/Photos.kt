@@ -634,7 +634,7 @@ fun PhotoScreen(line: Line, chat: Chat, onBack: () -> Unit) {
                     .padding(start = 4.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                IconAction("arrow-left", stringResource(R.string.common_back), tint = Color.White, onClick = onBack)
+                IconAction("arrow-left", stringResource(R.string.common_back), tint = Color.White, onClick = onBack, tag = TestTags.BACK)
                 Spacer(Modifier.width(6.dp))
                 Column {
                     Text(

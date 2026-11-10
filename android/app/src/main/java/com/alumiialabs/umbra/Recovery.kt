@@ -210,7 +210,7 @@ fun SocialRecoveryScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             Spacer(Modifier.height(8.dp))
             for (chat in contacts) {
                 val key = chat.conversation.id.toList()
-                ToggleRow(chat.title, key in chosen) { on ->
+                ToggleRow(chat.title, key in chosen, tag = TestTags.SOCIAL_CONTACT) { on ->
                     if (on) chosen.add(key) else chosen.remove(key)
                 }
                 HorizontalDivider(color = Palette.Divider)
@@ -219,20 +219,24 @@ fun SocialRecoveryScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             if (count >= 2) {
                 SectionLabel(stringResource(R.string.recovery_pieces_needed))
                 for (k in 2..count) {
-                    ChoiceRow(stringResource(R.string.recovery_k_of_n, k, count), isChosen = needed == k) {
+                    ChoiceRow(
+                        stringResource(R.string.recovery_k_of_n, k, count),
+                        isChosen = needed == k,
+                        tag = TestTags.choice(TestTags.RECOVERY_NEEDED_CHOICE, k),
+                    ) {
                         threshold = k
                     }
                 }
             }
 
             Spacer(Modifier.height(16.dp))
-            PrimaryButton(stringResource(R.string.recovery_send_pieces), enabled = count >= 2) {
+            PrimaryButton(stringResource(R.string.recovery_send_pieces), enabled = count >= 2, tag = TestTags.SOCIAL_SEND) {
                 val holders = contacts.filter { it.conversation.id.toList() in chosen }.map { it.conversation }
                 Core.splitSocial(holders, needed) { isSent = !isSent }
                 chosen.clear()
             }
             Spacer(Modifier.height(8.dp))
-            SecondaryButton(stringResource(R.string.recovery_show_user_half)) { push(Screen.UserHalf) }
+            SecondaryButton(stringResource(R.string.recovery_show_user_half), tag = TestTags.SOCIAL_USER_HALF) { push(Screen.UserHalf) }
             Spacer(Modifier.height(20.dp))
         }
     }
@@ -323,7 +327,7 @@ fun RestoreForm(onCancel: () -> Unit) {
                 )
             }
             if (shareCount < shares.size) {
-                InlineButton(stringResource(R.string.recovery_add_share)) { shareCount++ }
+                InlineButton(stringResource(R.string.recovery_add_share), tag = TestTags.SOCIAL_ADD_SHARE) { shareCount++ }
             }
         }
 

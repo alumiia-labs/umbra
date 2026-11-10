@@ -45,6 +45,16 @@ object BuildNetwork {
     var isProvisional = false
         private set
 
+    /**
+     * Whether a manifest gave a second signed view of an epoch (`REL-034`).
+     * It is a proof against the signers, thus it stays until the app ends.
+     */
+    val isSplitView: Boolean
+        get() = splitView.value
+
+    /** A state of the view, thus the note shows at the moment of the proof. */
+    private val splitView = androidx.compose.runtime.mutableStateOf(false)
+
     /** Whether the last network that `network` gave came from the kept manifest. */
     @Volatile
     var isFromKept = false
@@ -132,6 +142,9 @@ object BuildNetwork {
 
             val verified = try {
                 client.networkOfManifest(manifest, next, pins.shippedEpoch, pins.invitationHost, null)
+            } catch (split: FfiException.SplitView) {
+                splitView.value = true
+                continue
             } catch (refused: FfiException) {
                 continue
             }
@@ -225,6 +238,11 @@ object BuildNetwork {
             } catch (locked: FfiException.Locked) {
                 // A locked client reads no manifest, thus the call asks no carrier.
                 return null
+            } catch (split: FfiException.SplitView) {
+                // REL-034: this manifest gives no network, and the user
+                // learns that the signers gave two views.
+                splitView.value = true
+                continue
             } catch (refused: FfiException) {
                 continue
             }

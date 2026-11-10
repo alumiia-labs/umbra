@@ -164,9 +164,9 @@ fun SearchScreen(scope: Conversation?, onBack: () -> Unit, push: (Screen) -> Uni
             Modifier.fillMaxWidth().padding(start = 4.dp, end = 16.dp, top = 8.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconAction("arrow-left", stringResource(R.string.common_back), onClick = leave)
+            IconAction("arrow-left", stringResource(R.string.common_back), onClick = leave, tag = TestTags.BACK)
             Spacer(Modifier.width(4.dp))
-            PlatformInput(field, stringResource(R.string.common_search), isPassphrase = false, modifier = Modifier.weight(1f))
+            PlatformInput(field, stringResource(R.string.common_search), isPassphrase = false, modifier = Modifier.weight(1f).tagged(TestTags.SEARCH_INPUT))
         }
 
         Row(
@@ -185,11 +185,11 @@ fun SearchScreen(scope: Conversation?, onBack: () -> Unit, push: (Screen) -> Uni
         val results = found
         when {
             results == null -> Unit
-            results.isEmpty() -> EmptyState(stringResource(R.string.search_no_results))
+            results.isEmpty() -> EmptyState(stringResource(R.string.search_no_results), tag = TestTags.SEARCH_EMPTY)
             else -> LazyColumn(state = listState) {
                 items(results, key = { it.key }) { result ->
                     PressOver(
-                        Modifier.fillMaxWidth().pressShadeInList(),
+                        Modifier.fillMaxWidth().pressShadeInList().tagged(TestTags.SEARCH_RESULT),
                         onClick = { push(Screen.Chat(result.conversation, result.key)) },
                     ) { ResultRow(result, showsChat = scope == null, members[result.conversation]) }
                 }
@@ -211,6 +211,7 @@ private fun LimitChip(title: String, choices: List<Choice>, current: Int, onPick
             .minimumInteractiveComponentSize()
             .clip(CircleShape)
             .background(if (isSet) Palette.Container else Palette.Incoming)
+            .tagged(TestTags.SEARCH_LIMIT)
             .press(role = Role.Button, label = title) { isOpen = true }
             .padding(horizontal = 14.dp, vertical = 8.dp),
     ) {
@@ -229,7 +230,11 @@ private fun LimitChip(title: String, choices: List<Choice>, current: Int, onPick
         ChoiceSheet(
             title,
             choices.mapIndexed { index, choice ->
-                SheetChoice(labels[index], isChosen = choice === chosen) { onPick(choice.value) }
+                SheetChoice(
+                    labels[index],
+                    isChosen = choice === chosen,
+                    tag = TestTags.choice(TestTags.SEARCH_FILTER_CHOICE, index),
+                ) { onPick(choice.value) }
             },
             onDismiss = { isOpen = false },
         )

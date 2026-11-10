@@ -510,6 +510,15 @@ pub enum GroupUpdate {
         /// The tag of the command.
         tag: u64,
     },
+    /// A `GNREG` settled: its session lived for `SETTLED` after the send.
+    /// It has no answer, thus this is the one sign that it arrived
+    /// (`NTF-093`).
+    NotifySettled {
+        /// The relay.
+        relay: [u8; 32],
+        /// The group queue at that relay.
+        group_queue_id: [u8; 32],
+    },
     /// No circuit reached the relay of a `GSUB`. The caller subscribes at
     /// the other replica (`GRP-391`).
     SubscriptionLost {
@@ -706,7 +715,28 @@ async fn session(
                 None => break 'run End::Closed,
             },
             _ = tick.tick() => {
-                carried.quiet.retain(|(sent, _)| sent.elapsed() < SETTLED);
+                // A `GNREG` that settled tells the caller, which marks the
+                // registration only then. One that a stop or a lost session
+                // overtook thus stays due.
+                carried.quiet.retain(|(sent, command)| {
+                    if sent.elapsed() < SETTLED {
+                        return true;
+                    }
+
+                    if let GroupCommand::Notify {
+                        relay,
+                        group_queue_id,
+                        on: true,
+                        ..
+                    } = command
+                    {
+                        let _ = updates.send(GroupUpdate::NotifySettled {
+                            relay: *relay,
+                            group_queue_id: *group_queue_id,
+                        });
+                    }
+                    false
+                });
 
                 // A `GSUB` whose wait after a `LIMIT` ran out goes again.
                 let now = tokio::time::Instant::now();

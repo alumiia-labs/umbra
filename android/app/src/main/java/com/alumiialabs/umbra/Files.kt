@@ -1095,7 +1095,7 @@ fun VideoScreen(line: Line, onBack: () -> Unit) {
                 .padding(start = 4.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconAction("arrow-left", stringResource(R.string.common_back), tint = Color.White, onClick = onBack)
+            IconAction("arrow-left", stringResource(R.string.common_back), tint = Color.White, onClick = onBack, tag = TestTags.BACK)
         }
 
         if (isReady) {
@@ -1175,7 +1175,7 @@ fun rememberSave(): (Line) -> Unit {
         ActionSheet(
             stringResource(R.string.files_save_title),
             listOf(
-                RowEntry("download", stringResource(R.string.common_save)) {
+                RowEntry("download", stringResource(R.string.common_save), tag = TestTags.MEDIA_SAVE) {
                     context.getSharedPreferences(FILE_PREFS, Context.MODE_PRIVATE)
                         .edit().putBoolean(SAVE_WARNED, true).apply()
                     start(line)
@@ -1219,7 +1219,7 @@ fun MediaScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp),
         ) {
             if (lines != null && all.isEmpty()) {
-                item { EmptyState(stringResource(R.string.files_nothing_shared)) }
+                item { EmptyState(stringResource(R.string.files_nothing_shared), tag = TestTags.MEDIA_EMPTY) }
             }
 
             items(media.chunked(3).size) { row ->

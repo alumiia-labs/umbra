@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 3: Network Architecture
 
 **Status:** Draft
-**Version:** 0.54.0
+**Version:** 0.55.0
 **Date:** 2026-11-10
 
 ---
@@ -1890,6 +1890,18 @@ against the 16 zero bytes in constant time. **[NET-115]** That party MUST drop
 the cell and tear the circuit down when the two values differ. **[NET-129]** A
 relay in the middle position MUST NOT check `X_L`. **[NET-130]** A party MUST
 NOT act on a recovered payload before the comparison of NET-114 succeeds.
+
+**[NET-378]** A client MUST discard an answer or a record of a circuit that
+passes the comparison of NET-114 and that the client cannot use, and it MUST
+NOT end its session with the ingress relay for that cause. **[NET-379]** A
+client MUST tear down a circuit that gave 8 cells with an answer that the
+client cannot use, and it MUST build that circuit again under NET-347.
+
+> *Cause.* The queue relay controls each answer, and a peer or that relay
+> controls each record. A client that ends its session for one such object
+> gives one relay the means to end each session of the client. The bound of
+> `NET-379` ends a circuit to a relay that gives no correct answer. An honest
+> relay gives no such answer, thus the bound has no effect on it.
 
 The backward direction is the mirror. The queue relay sets `X_L` to 16 zero
 bytes, each hop applies NET-108 with its backward key set, and the client

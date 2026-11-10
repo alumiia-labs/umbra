@@ -217,6 +217,94 @@ struct Pending {
     paid: bool,
 }
 
+/// The slot of a pending challenge: the search key or the slot of a
+/// registration, and the purpose byte.
+type ChallengeSlot = (Vec<u8>, u8);
+
+/// The pending challenges. The registration challenges of each class stand
+/// in the order of their issue also, thus the count of the live ones and
+/// the oldest one cost no pass over the map (`DIS-203`).
+#[derive(Default)]
+struct Challenges {
+    held: BTreeMap<ChallengeSlot, (Pending, u64)>,
+    /// The registration challenges with no token, and the paid ones: the
+    /// time of the issue and a serial, to the slot.
+    registers: [BTreeMap<(u64, u64), ChallengeSlot>; 2],
+    serial: u64,
+}
+
+impl Challenges {
+    fn get(&self, slot: &ChallengeSlot) -> Option<&Pending> {
+        self.held.get(slot).map(|(pending, _)| pending)
+    }
+
+    fn insert(&mut self, slot: ChallengeSlot, pending: Pending) {
+        self.remove(&slot);
+
+        let serial = self.serial;
+        self.serial = self.serial.wrapping_add(1);
+        if slot.1 == REGISTER {
+            if let Some(order) = self.registers.get_mut(usize::from(pending.paid)) {
+                order.insert((pending.at, serial), slot.clone());
+            }
+        }
+        self.held.insert(slot, (pending, serial));
+    }
+
+    fn remove(&mut self, slot: &ChallengeSlot) {
+        let Some((pending, serial)) = self.held.remove(slot) else {
+            return;
+        };
+
+        if let Some(order) = self.registers.get_mut(usize::from(pending.paid)) {
+            order.remove(&(pending.at, serial));
+        }
+    }
+
+    /// Drops each challenge that is not live at `now`.
+    fn retain_live(&mut self, now: u64) {
+        let lapsed: Vec<ChallengeSlot> = self
+            .held
+            .iter()
+            .filter(|(_, (pending, _))| now.saturating_sub(pending.at) >= CHALLENGE_TTL)
+            .map(|(slot, _)| slot.clone())
+            .collect();
+        for slot in lapsed {
+            self.remove(&slot);
+        }
+    }
+
+    /// The count of the registration challenges of one class that are live
+    /// at `now`. Each lapsed one of that class leaves: no request takes a
+    /// lapsed challenge.
+    fn live_registers(&mut self, paid: bool, now: u64) -> usize {
+        loop {
+            let oldest = self
+                .registers
+                .get(usize::from(paid))
+                .and_then(|order| order.first_key_value())
+                .filter(|((at, _), _)| now.saturating_sub(*at) >= CHALLENGE_TTL)
+                .map(|(_, slot)| slot.clone());
+            match oldest {
+                Some(slot) => self.remove(&slot),
+                None => break,
+            }
+        }
+
+        self.registers
+            .get(usize::from(paid))
+            .map_or(0, BTreeMap::len)
+    }
+
+    /// The oldest registration challenge of one class.
+    fn oldest_register(&self, paid: bool) -> Option<ChallengeSlot> {
+        self.registers
+            .get(usize::from(paid))
+            .and_then(|order| order.first_key_value())
+            .map(|(_, slot)| slot.clone())
+    }
+}
+
 /// The purpose byte of a `Challenge` request, which keys its pending
 /// challenge beside the search key.
 const RENEW: u8 = 0x01;
@@ -328,7 +416,7 @@ pub struct Directory {
     last_close: Option<u64>,
     epoch_seconds: u64,
     labels: BTreeMap<Vec<u8>, LabelRecord>,
-    challenges: BTreeMap<(Vec<u8>, u8), Pending>,
+    challenges: Challenges,
     /// The registration challenges that wait at once: with no token, and
     /// paid (`DIS-203`).
     register_max: (usize, usize),
@@ -418,7 +506,7 @@ impl Directory {
             last_close: None,
             epoch_seconds,
             labels: BTreeMap::new(),
-            challenges: BTreeMap::new(),
+            challenges: Challenges::default(),
             register_max: (REGISTER_PENDING_MAX, REGISTER_PAID_MAX),
             spent: SpendSet::default(),
             lookup_seeds: LookupSeeds::new(LOOKUP_SEEDS_MAX),
@@ -801,8 +889,7 @@ impl Directory {
             root: self.operator.newest_root(),
         });
 
-        self.challenges
-            .retain(|_, pending| now.saturating_sub(pending.at) < CHALLENGE_TTL);
+        self.challenges.retain_live(now);
         self.sign_head(now, rng)
     }
 
@@ -1313,12 +1400,7 @@ impl Directory {
         // DIS-203: a challenge with no token takes no place of a paid one.
         let (unpaid_max, paid_max) = self.register_max;
         let bound = if paid.is_some() { paid_max } else { unpaid_max };
-        let is_peer = |((_, purpose), pending): &(&(Vec<u8>, u8), &Pending)| {
-            *purpose == REGISTER
-                && pending.paid == paid.is_some()
-                && now.saturating_sub(pending.at) < CHALLENGE_TTL
-        };
-        let is_full = self.challenges.iter().filter(is_peer).count() >= bound;
+        let is_full = self.challenges.live_registers(paid.is_some(), now) >= bound;
         if is_full && paid.is_none() {
             return Err(Status::Busy);
         }
@@ -1347,13 +1429,7 @@ impl Directory {
         // in tokens in each `CHALLENGE_TTL`. A drop makes it pay the bound in
         // the seconds between a challenge and its registration.
         if is_full {
-            let oldest = self
-                .challenges
-                .iter()
-                .filter(is_peer)
-                .min_by_key(|(_, pending)| pending.at)
-                .map(|(slot, _)| slot.clone());
-            if let Some(oldest) = oldest {
+            if let Some(oldest) = self.challenges.oldest_register(paid.is_some()) {
                 self.challenges.remove(&oldest);
             }
         }
@@ -2808,6 +2884,73 @@ mod tests {
         assert_eq!(
             read(&mut dir, &keyset, input, now, &mut rng).unwrap(),
             entry2
+        );
+    }
+
+    #[test]
+    fn a_head_whose_signature_failed_goes_again_with_no_second_close() {
+        let closes = |events: &[DirEvent]| {
+            events
+                .iter()
+                .filter(|event| matches!(event, DirEvent::Closed { .. }))
+                .count()
+        };
+        let mut rng = Rng(51);
+        let (mut dir, _) = directory();
+        dir.tick(T0, &mut rng).unwrap();
+        dir.take_events();
+
+        // A head has room for three signatures. A fourth signer makes the
+        // step after the close fail.
+        dir.signers
+            .push(SigningKey::from_seed(Secret::new([50; 32])));
+        let now = T0 + DIRECTORY_EPOCH;
+        assert!(dir.tick(now, &mut rng).is_err());
+        assert_eq!(closes(&dir.take_events()), 1);
+        assert!(dir.head.is_none());
+
+        // The next tick signs the head of that close, and it closes no
+        // second epoch for it.
+        dir.signers.pop();
+        dir.tick(now + 1, &mut rng).unwrap();
+        assert_eq!(closes(&dir.take_events()), 0);
+        let head = SignedTreeHead::parse(dir.head.as_deref().unwrap()).unwrap();
+        assert_eq!(head.timestamp, now);
+    }
+
+    #[test]
+    fn an_evaluation_that_fails_spends_no_token() {
+        let mut rng = Rng(52);
+        let (mut dir, _) = directory();
+        dir.tick(T0, &mut rng).unwrap();
+        let pk = *dir.voprf_public();
+        let epoch = epoch_number(T0);
+        let token = tokens(&mut dir, epoch, 1, T0, &mut rng).remove(0);
+        dir.take_events();
+
+        // The last 32 bytes are the blinded element. These bytes decode to
+        // no element.
+        let (_, mut body) =
+            dirclient::evaluate_request(b"@hugo#1", &pk, epoch, Some(&token), &mut rng).unwrap();
+        let at = body.len() - 32;
+        body[at..].fill(0xFF);
+        assert_eq!(
+            call(&mut dir, Kind::Evaluate, &body, T0, &mut rng),
+            Err(DirError::Status(Status::Malformed))
+        );
+        let spent = |event: &DirEvent| matches!(event, DirEvent::Spent { .. });
+        assert!(!dir.take_events().iter().any(spent));
+
+        // The token still pays for one evaluation, and for no second one.
+        let (_, body) =
+            dirclient::evaluate_request(b"@hugo#1", &pk, epoch, Some(&token), &mut rng).unwrap();
+        call(&mut dir, Kind::Evaluate, &body, T0, &mut rng).unwrap();
+        assert!(dir.take_events().iter().any(spent));
+        let (_, body) =
+            dirclient::evaluate_request(b"@hugo#1", &pk, epoch, Some(&token), &mut rng).unwrap();
+        assert_eq!(
+            call(&mut dir, Kind::Evaluate, &body, T0, &mut rng),
+            Err(DirError::Status(Status::Refused))
         );
     }
 

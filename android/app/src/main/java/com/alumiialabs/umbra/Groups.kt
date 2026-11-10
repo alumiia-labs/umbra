@@ -254,7 +254,12 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, onLeft: () -> Unit, push:
                 choices.map { (role, detail) ->
                     // GRP-441: the role that the member holds goes again when
                     // the path of this device does not back it.
-                    SheetChoice(roleLabel(role), role == member.role, stringResource(detail)) {
+                    SheetChoice(
+                        roleLabel(role),
+                        role == member.role,
+                        stringResource(detail),
+                        tag = TestTags.choice(TestTags.GROUP_ROLE_CHOICE, role.name.lowercase()),
+                    ) {
                         Core.setGroupRole(chat.conversation, member.index, role) { reload++ }
                     }
                 },

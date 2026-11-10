@@ -170,7 +170,7 @@ fun DevicesScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                 // and this list has none.
                 Column(Modifier.padding(horizontal = PressInset)) {
                     EntryRow(
-                        RowEntry("triangle-exclamation", stringResource(R.string.devices_owning_device_lost_question)) {
+                        RowEntry("triangle-exclamation", stringResource(R.string.devices_owning_device_lost_question), tag = TestTags.TAKE_OVER_OPEN) {
                             push(Screen.TakeOver)
                         },
                     )
@@ -251,7 +251,7 @@ fun TakeOverScreen(onBack: () -> Unit) {
                 Note(stringResource(R.string.devices_takeover_not_lost), isError = true)
                 Spacer(Modifier.height(12.dp))
             }
-            DangerButton(stringResource(R.string.devices_take_over), enabled = !isRunning) {
+            DangerButton(stringResource(R.string.devices_take_over), enabled = !isRunning, tag = TestTags.TAKE_OVER_CONFIRM) {
                 isRunning = true
                 isRefused = false
                 Core.takeOver(context) { code ->
@@ -311,6 +311,8 @@ fun LinkDeviceScreen(onBack: () -> Unit) {
                     Headline(stringResource(R.string.devices_codes_match_question))
                     Spacer(Modifier.height(20.dp))
                     CodeDigits(status.code, tag = TestTags.LINK_CODE)
+                    Spacer(Modifier.height(12.dp))
+                    Note(stringResource(R.string.devices_confirm_same_code))
                     Spacer(Modifier.height(24.dp))
                     PrimaryButton(stringResource(R.string.common_codes_match), tag = TestTags.LINK_CODES_MATCH) { Core.confirmLink() }
                     Spacer(Modifier.height(8.dp))

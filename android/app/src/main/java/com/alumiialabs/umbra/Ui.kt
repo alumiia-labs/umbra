@@ -494,8 +494,16 @@ private fun ConnectionNote() {
     val fault = Core.fault
     val context = LocalContext.current
     // A degraded state stops nothing, thus it is no error (`IMP-078`).
-    val lines = buildList {
+    // REL-034: two signed views of the directory are a proof against its
+    // signers. IDN-039: a table of the store did not match its MAC at a
+    // move. Each one is an error, and no degraded state.
+    val errors = buildList {
         fault?.let { add(it) }
+        if (BuildNetwork.isSplitView) add(UiText.get(R.string.main_split_view))
+        if (Core.migrationWasUnsound) add(UiText.get(R.string.main_migration_unsound))
+    }
+    val lines = buildList {
+        addAll(errors)
         Core.degraded?.let { add(it) }
         if (BuildNetwork.isProvisional) add(UiText.get(R.string.umbra_ui_rel_126))
         // DEV-181: another device of the set removed this one.
@@ -530,7 +538,7 @@ private fun ConnectionNote() {
 
     for (line in lines) {
         Box(Modifier.padding(start = PressInset, end = PressInset, top = 12.dp)) {
-            Note(line, isError = line == fault)
+            Note(line, isError = line in errors)
         }
     }
 }
@@ -1041,7 +1049,11 @@ private fun SettingsTab(push: (Screen) -> Unit) {
         SettingSheet.Appearance -> ChoiceSheet(
             stringResource(R.string.main_appearance),
             Appearance.entries.map { look ->
-                SheetChoice(look.label, look == Appearances.choice) { Appearances.choose(context, look) }
+                SheetChoice(
+                    look.label,
+                    look == Appearances.choice,
+                    tag = TestTags.choice(TestTags.APPEARANCE_CHOICE, look.name.lowercase()),
+                ) { Appearances.choose(context, look) }
             },
             onDismiss = close,
         )
@@ -1049,7 +1061,11 @@ private fun SettingsTab(push: (Screen) -> Unit) {
         SettingSheet.History -> ChoiceSheet(
             stringResource(R.string.main_keep_history),
             HISTORY_AGES.map { seconds ->
-                SheetChoice(historyLabel(seconds), historyLabel(seconds) == historyLabel(Core.historyAge)) {
+                SheetChoice(
+                    historyLabel(seconds),
+                    historyLabel(seconds) == historyLabel(Core.historyAge),
+                    tag = TestTags.choice(TestTags.HISTORY_CHOICE, seconds),
+                ) {
                     Core.keepHistoryFor(seconds)
                 }
             },
@@ -1100,11 +1116,12 @@ private const val MSG_TTL_MS = 45L * 86_400_000L
  * sender wrote. A record that waited at the relay for the unlock thus shows
  * when it was sent. The value is advisory (`WIR-076`), thus it never shows
  * a time after the store of the message or before a record could wait, and
- * the view orders by the store time alone (`IMP-128`).
+ * the view orders by the order stamp alone (`IMP-128`). The bound is the
+ * clock of this device at the store, because the stamp is no time.
  */
 val uniffi.umbra_ffi.MsgInfo.shownAtMs: Long
     get() {
-        val stored = storedAtMs.toLong()
+        val stored = clockAtMs.toLong()
         val sent = sentAtMs.toLong()
         return if (sent in (stored - MSG_TTL_MS)..stored) sent else stored
     }

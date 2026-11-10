@@ -346,7 +346,12 @@ fun NotificationsScreen(onBack: () -> Unit) {
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = PressInset)) {
             Spacer(Modifier.height(8.dp))
             for (choice in Modes.offered(context)) {
-                ChoiceRow(choice.label, isChosen = delivery == choice, detail = choice.trade) {
+                ChoiceRow(
+                    choice.label,
+                    isChosen = delivery == choice,
+                    detail = choice.trade,
+                    tag = TestTags.choice(TestTags.DELIVERY_CHOICE, choice.name.lowercase()),
+                ) {
                     delivery = choice
                     Modes.setDelivery(context, choice)
                 }
@@ -366,6 +371,7 @@ fun NotificationsScreen(onBack: () -> Unit) {
                             R.string.umbra_ui_ntf_009_private
                         },
                     ),
+                    tag = TestTags.NOTIFY_DELAYED,
                 ) {
                     isDelayed = it
                     Modes.setDelayed(context, it)
@@ -380,18 +386,19 @@ fun NotificationsScreen(onBack: () -> Unit) {
                     stringResource(R.string.battery_background),
                     Battery.state == BatteryState.Unrestricted,
                     detail = stringResource(R.string.battery_keeps),
+                    tag = TestTags.NOTIFY_BACKGROUND,
                 ) { Battery.open(context) }
                 HorizontalDivider(color = Palette.Divider)
             }
 
             // NTF-082: the controls of the high-risk configuration sit on
             // this one screen.
-            ToggleRow(stringResource(R.string.modes_show_sender), showsSender) {
+            ToggleRow(stringResource(R.string.modes_show_sender), showsSender, tag = TestTags.NOTIFY_SHOW_SENDER) {
                 showsSender = it
                 Modes.setShowsSender(context, it)
             }
             HorizontalDivider(color = Palette.Divider)
-            ToggleRow(stringResource(R.string.modes_show_text), showsText) {
+            ToggleRow(stringResource(R.string.modes_show_text), showsText, tag = TestTags.NOTIFY_SHOW_TEXT) {
                 showsText = it
                 Modes.setShowsText(context, it)
             }

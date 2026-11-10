@@ -256,22 +256,11 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
         }
     }
 
-    // The text of a send that has no result yet. A send that fails puts it
-    // back into an empty composer, thus the user loses no text.
+    // The text of each send and each edit that has no result yet. One that
+    // fails puts its text back into an empty composer, thus the user loses
+    // no text.
     val unsent = remember(conversation) { UnsentText() }
     DisposableEffect(conversation) { onDispose { unsent.wipe() } }
-    LaunchedEffect(conversation) {
-        snapshotFlow { Core.revision to Core.fault }.collect { (revision, fault) ->
-            val failed = unsent.takeIfFailed(revision, fault) ?: return@collect
-
-            // A text that the user typed after the send stays.
-            if (composer.isEmpty && edited == null) {
-                putText(failed.text)
-                answered = failed.answered
-            }
-            failed.text.fill('\u0000')
-        }
-    }
 
     // The message that the user wants to delete.
     var deleting by remember(conversation) { mutableStateOf<Line?>(null) }
@@ -782,8 +771,8 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                 if (threadOf != null && line.key != threadOf && line.threadKey != threadOf) return@itemsIndexed
 
                 val before = lines.getOrNull(index - 1)
-                if (before == null || !isSameDay(before.info.storedAtMs, line.info.storedAtMs)) {
-                    DayLabel(line.info.storedAtMs.toLong())
+                if (before == null || !isSameDay(before.info.clockAtMs, line.info.clockAtMs)) {
+                    DayLabel(line.info.clockAtMs.toLong())
                 }
                 if (!line.info.outgoing && line.info.storedAtMs == newFrom) NewLabel()
 
@@ -1011,6 +1000,20 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
         // NET-355: the question blocks nothing, and the composer stays.
         if (asksRenewal) RenewalPanel(chat)
 
+        // The encode of a long audio file takes time, and the user can end
+        // it.
+        if (Core.audioEncoding == conversation) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = PressInset, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(Modifier.weight(1f)) { WorkingRow(stringResource(R.string.chat_audio_prepares)) }
+                InlineButton(stringResource(R.string.chat_stop_audio), tag = TestTags.CHAT_AUDIO_STOP) {
+                    Core.stopAudio()
+                }
+            }
+        }
+
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
             // The send button stays beside the line of the text.
@@ -1124,14 +1127,46 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                         }
 
                         composer.take()?.let { text ->
+                            // The core wipes `text`, thus the view keeps a
+                            // copy until the core tells the result. A text
+                            // that the user typed after the send stays.
+                            val copy = unsent.hold(text)
                             val target = edited
+                            val answers = answered
                             if (target != null) {
-                                Core.edit(conversation, target.handle, text)
+                                Core.edit(
+                                    conversation,
+                                    target.handle,
+                                    text,
+                                    onFailed = {
+                                        unsent.end(copy) { kept ->
+                                            // The edit starts again, and a
+                                            // text that the user typed
+                                            // after it waits as a draft.
+                                            if (edited == null) {
+                                                heldDraft = composer.copy().takeIf { it.isNotEmpty() }
+                                                edited = target
+                                                putText(kept)
+                                            }
+                                        }
+                                    },
+                                    onSent = { unsent.end(copy) },
+                                )
                             } else {
-                                // The core wipes `text`, thus the view keeps
-                                // a copy until the send has a result.
-                                unsent.hold(text, answered)
-                                Core.send(conversation, text, answered?.handle)
+                                Core.send(
+                                    conversation,
+                                    text,
+                                    answers?.handle,
+                                    onFailed = {
+                                        unsent.end(copy) { kept ->
+                                            if (composer.isEmpty && edited == null) {
+                                                putText(kept)
+                                                answered = answers
+                                            }
+                                        }
+                                    },
+                                    onSent = { unsent.end(copy) },
+                                )
                                 jumpsAtNextLoad = true
                             }
 
@@ -1162,49 +1197,33 @@ private fun TaggedNote(note: ChatNote) {
 }
 
 /**
- * The text of a send until the core gives its result. The core reports a
- * result in two ways: a new revision when the store took the message, and a
- * new fault when the call failed. The first of the two decides.
+ * The texts of the sends and the edits that have no result yet. The core
+ * wipes the text that it takes, thus the view keeps a copy until the core
+ * tells the result. Each copy is zeros after its result, and after the
+ * view left.
  */
 private class UnsentText {
-    /** A text that did not go, with the message that it answered. */
-    class Failed(val text: CharArray, val answered: Line?)
+    private val held = mutableListOf<CharArray>()
+    private var isShown = true
 
-    private var text: CharArray? = null
-    private var answered: Line? = null
-    private var revisionAtSend = 0
-    private var faultAtSend: String? = null
-
-    fun hold(sent: CharArray, answers: Line?) {
-        wipe()
-        text = sent.copyOf()
-        answered = answers
-        revisionAtSend = Core.revision
-        faultAtSend = Core.fault
+    /** A copy of `sent`, which stays until [end]. */
+    fun hold(sent: CharArray): CharArray {
+        val copy = sent.copyOf()
+        held.add(copy)
+        return copy
     }
 
-    /** The text when the send failed. A send that went wipes the copy. */
-    fun takeIfFailed(revision: Int, fault: String?): Failed? {
-        val held = text ?: return null
-
-        if (revision != revisionAtSend) {
-            wipe()
-            return null
-        }
-
-        // Each fault is a new object, thus the same words twice are two faults.
-        if (fault == null || fault === faultAtSend) return null
-
-        val failed = Failed(held, answered)
-        text = null
-        answered = null
-        return failed
+    /** Ends a copy. A view that is still there gets the text first. */
+    fun end(copy: CharArray, onKept: ((CharArray) -> Unit)? = null) {
+        if (isShown) onKept?.invoke(copy)
+        copy.fill('\u0000')
+        held.removeAll { it === copy }
     }
 
     fun wipe() {
-        text?.fill('\u0000')
-        text = null
-        answered = null
+        isShown = false
+        held.forEach { it.fill('\u0000') }
+        held.clear()
     }
 }
 
@@ -1526,11 +1545,11 @@ private fun BubbleContent(
         val file = line.info.file
         if (!isGone && file != null) {
             when (file.mimeClass) {
-                CLASS_IMAGE -> PhotoTile(line, file, Modifier.align(Alignment.Start))
-                CLASS_VIDEO -> VideoTile(line, file, Modifier.align(Alignment.Start))
-                CLASS_VOICE, CLASS_AUDIO -> VoiceTile(line, file, Modifier.align(Alignment.Start))
+                CLASS_IMAGE -> PhotoTile(line, file, Modifier.align(Alignment.Start).tagged(TestTags.MESSAGE_PHOTO))
+                CLASS_VIDEO -> VideoTile(line, file, Modifier.align(Alignment.Start).tagged(TestTags.MESSAGE_VIDEO))
+                CLASS_VOICE, CLASS_AUDIO -> VoiceTile(line, file, Modifier.align(Alignment.Start).tagged(TestTags.MESSAGE_VOICE))
                 // ATT-193: a class that this device does not know is a file.
-                else -> FileTile(line, file, Modifier.align(Alignment.Start))
+                else -> FileTile(line, file, Modifier.align(Alignment.Start).tagged(TestTags.MESSAGE_FILE))
             }
             Spacer(Modifier.height(4.dp))
             // WIR-535: the caption sits under the file.

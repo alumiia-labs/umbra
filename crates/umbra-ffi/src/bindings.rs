@@ -110,6 +110,10 @@ pub enum FfiError {
     /// A different party now holds the handle (Part 9 §9.9.2). A hello goes
     /// only after the user confirms it (`DIS-085`).
     Takeover,
+    /// Two signed views of one epoch of the directory verify and differ
+    /// (`REL-034`). It is a proof that the signers gave two views, and no
+    /// fault of a carrier.
+    SplitView,
 }
 
 impl core::fmt::Display for FfiError {
@@ -595,6 +599,9 @@ enum ManifestFault {
     /// The root verifies, and the entries are a part of the signed set
     /// (`REL-147`). The key set is the right one, thus no key chain helps.
     Partial,
+    /// The root verifies, and it differs from the root of the same epoch
+    /// that this device verified before (`REL-034`).
+    SplitView,
 }
 
 impl From<ManifestFault> for FfiError {
@@ -608,6 +615,7 @@ impl From<ManifestFault> for FfiError {
             // of bytes that are no manifest, at which the platform goes to
             // the next carrier with no other request.
             ManifestFault::Malformed | ManifestFault::Partial => FfiError::Malformed,
+            ManifestFault::SplitView => FfiError::SplitView,
         }
     }
 }
@@ -808,7 +816,7 @@ fn dial_order(pins: &[[u8; 32]], entries: &[RelayEntry<'_>], uses_second: bool) 
                 .iter()
                 .find(|entry| entry.descriptor.relay_id == *pin)
         })
-        .filter(|entry| entry.layer() == 1 && entry.descriptor.addr_v4 != [0; 4])
+        .filter(|entry| entry.placed_layer() == Some(1) && entry.descriptor.addr_v4 != [0; 4])
         .take(INGRESS_PINS)
         .map(|entry| entry.descriptor.host_str().to_owned())
         .collect();
@@ -1102,9 +1110,13 @@ pub struct MsgInfo {
     pub delivery: u8,
     /// The send time that the sender wrote, in milliseconds.
     pub sent_at_ms: u64,
-    /// The time of this device at the store of the message, in
-    /// milliseconds. The list of [`Handle::messages`] is in this order.
+    /// The order stamp of this device at the store of the message. The
+    /// list of [`Handle::messages`] is in this order. It is no time: it
+    /// never goes back, also when the clock of the device does.
     pub stored_at_ms: u64,
+    /// The clock of this device at the store of the message, in
+    /// milliseconds. A view shows this time.
+    pub clock_at_ms: u64,
     /// Whether a deletion took the content. The row is a placeholder, and
     /// it has no text.
     pub deleted: bool,
@@ -1771,6 +1783,15 @@ enum ChainsOf {
     Transfers,
 }
 
+/// A `GNREG` that a task took and that did not settle yet.
+struct UnsettledNotify {
+    conversation: crate::ConversationId,
+    /// Which replica, 0 or 1.
+    which: usize,
+    /// The encoded `QueueAddress` of the notify queue that it names.
+    queue: Vec<u8>,
+}
+
 struct Inner {
     /// The invitation host of the run, for the text of a link.
     invitation_host: String,
@@ -1890,6 +1911,10 @@ struct Inner {
     /// The group of each notify queue that the run makes, by tag.
     notify_pending: BTreeMap<u64, crate::ConversationId>,
     next_notify_tag: u64,
+    /// Each `GNREG` that a task took and that did not settle yet, by its
+    /// relay and its group queue. The store marks the registration when
+    /// the task tells that it settled.
+    notify_unsettled: BTreeMap<([u8; 32], [u8; 32]), UnsettledNotify>,
     /// Whether a handle group rotated in this run (`NTF-081`).
     rotated_in_run: bool,
     /// The inbound queues of the run with their relays, as its last report
@@ -2451,9 +2476,9 @@ impl Inner {
         // NTF-132, NTF-133: the notify queue of a group left, and one that
         // a new queue replaced, leave each replica and end.
         //
-        // A `GNREG` has no answer. The store thus marks an ending, and a
-        // registration below, only when a task took each command of it. One
-        // that no task took stays due.
+        // A `GNUNREG` has no answer. The store thus marks an ending only
+        // when a task took each command of it. One that no task took stays
+        // due.
         let endings = match &self.bridge {
             Some(_) => self.client.notify_endings_due().unwrap_or_default(),
             None => Vec::new(),
@@ -2509,6 +2534,19 @@ impl Inner {
         // and again before the relay forgets it.
         if let Ok(due) = self.client.notify_registrations_due(now_ms / 1_000) {
             for registration in due {
+                // A `GNREG` has no answer. The task tells when it settled,
+                // and the store marks the registration then. One that a
+                // stop overtook stays due for the next run.
+                let replica = (registration.relay, registration.group_queue_id);
+                if self.notify_unsettled.contains_key(&replica) {
+                    continue;
+                }
+
+                let unsettled = UnsettledNotify {
+                    conversation: registration.conversation,
+                    which: registration.which,
+                    queue: registration.queue.clone(),
+                };
                 let is_sent = self.send_group(GroupCommand::Notify {
                     relay: registration.relay,
                     group_queue_id: registration.group_queue_id,
@@ -2516,16 +2554,9 @@ impl Inner {
                     queue: registration.queue,
                     on: registration.on,
                 });
-                if !is_sent {
-                    continue;
+                if is_sent {
+                    self.notify_unsettled.insert(replica, unsettled);
                 }
-
-                let _ = self.client.notify_registered(
-                    registration.conversation,
-                    registration.which,
-                    now_ms / 1_000,
-                    &mut OsRng,
-                );
             }
         }
 
@@ -2848,6 +2879,10 @@ impl Inner {
         self.group_task = self.group_task.wrapping_add(1);
         let task = self.group_task;
 
+        // A `GNREG` that the task before this one took settles no more,
+        // thus each one is due again.
+        self.notify_unsettled.clear();
+
         let me = self.me.clone();
         spawner.spawn(async move {
             while let Some(update) = updates.recv().await {
@@ -2930,6 +2965,11 @@ impl Inner {
             }
             let Ok(descriptor) = umbra_wire::descriptor::FileDescriptor::parse(&admit.descriptor)
             else {
+                // No fetch can name this snapshot, thus the admit ends as
+                // a failed admission and no commit reads it again.
+                let _ = self
+                    .client
+                    .fail_group_admit(admit.from, &admit.group_id, &mut OsRng);
                 continue;
             };
 
@@ -3197,6 +3237,20 @@ impl Inner {
                 self.group_refusals.clear();
                 self.pump_groups();
             }
+            GroupUpdate::NotifySettled {
+                relay,
+                group_queue_id,
+            } => {
+                if let Some(settled) = self.notify_unsettled.remove(&(relay, group_queue_id)) {
+                    let _ = self.client.notify_registered(
+                        settled.conversation,
+                        settled.which,
+                        &settled.queue,
+                        crate::runtime::unix_now(),
+                        &mut OsRng,
+                    );
+                }
+            }
             GroupUpdate::Faults(_) => {}
             GroupUpdate::Chains(chains) => {
                 self.group_chains = chains;
@@ -3208,6 +3262,7 @@ impl Inner {
                 self.group_sent.clear();
                 self.group_reading.clear();
                 self.group_refusals.clear();
+                self.notify_unsettled.clear();
                 self.share_chains();
             }
         }
@@ -3346,7 +3401,7 @@ impl Inner {
                     // The event stays for the view, and each pump sees it
                     // again, thus the link takes it once.
                     if self.links_opened.insert(conversation) {
-                        self.link_opened();
+                        self.link_opened(conversation);
                     }
                     kept.push_back(NetEvent::DeviceLinked(conversation));
                 }
@@ -3546,6 +3601,10 @@ impl Inner {
         // would close a group at one refusal of the next run.
         self.group_refusals.clear();
         self.group_lost.clear();
+
+        // A `GNREG` that the stop overtook did not settle, and it is due
+        // again in the next run.
+        self.notify_unsettled.clear();
     }
 
     /// Ends the wait of each accept that settled. An accept of this run
@@ -4574,12 +4633,7 @@ impl Inner {
         // invitation holds a sync bundle, and a code is a value of one
         // ceremony. The platform can stop its event loop at a lock, thus
         // none of them waits in the queue. The store holds each invitation,
-        // and the next run gives it again.
-        for event in &mut self.net_events {
-            if let NetEvent::Invitation(bytes) | NetEvent::DeviceInvitation(bytes) = event {
-                bytes.zeroize();
-            }
-        }
+        // and the next run gives it again. The bytes wipe at the drop.
         self.net_events.retain(|event| {
             !matches!(
                 event,
@@ -5219,6 +5273,7 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             ndr_retry: BTreeMap::new(),
             notify_pending: BTreeMap::new(),
             next_notify_tag: 0,
+            notify_unsettled: BTreeMap::new(),
             rotated_in_run: false,
             run_queues: Vec::new(),
             silent: Vec::new(),
@@ -5393,8 +5448,13 @@ impl Persist for HandleStore {
         }
 
         // A locked client gives none, and its receipts wait in the store.
-        let due = inner.client.due_receipt(now, &mut OsRng).ok()??;
-        let contact = inner.bridge.as_ref()?.contact_for(&due.conversation)?;
+        // A receipt for a peer with no contact in this run waits too, and
+        // it blocks no receipt of another peer.
+        let Inner { client, bridge, .. } = &mut *inner;
+        let running = bridge.as_ref()?;
+        let in_run = |conversation: &ConversationId| running.contact_for(conversation).is_some();
+        let due = client.due_receipt_among(now, in_run, &mut OsRng).ok()??;
+        let contact = running.contact_for(&due.conversation)?;
         let app = due.app.clone();
         self.given = Some(Given::Receipt(due));
         Some((contact, app))
@@ -5983,7 +6043,10 @@ fn send_nkey(
         return false;
     };
 
-    let notifier = umbra_crypto::x25519::StaticSecret::from(*secret.expose());
+    // The array is a copy of the secret on the stack, and it wipes here.
+    let mut bytes = *secret.expose();
+    let notifier = umbra_crypto::x25519::StaticSecret::from(bytes);
+    bytes.zeroize();
     let public = *umbra_crypto::x25519::PublicKey::from(&notifier).as_bytes();
     running.notify_queue(recipient_id, public).is_ok()
 }
@@ -6209,8 +6272,19 @@ impl Handle {
             .map_err(|cause| match cause {
                 umbra_core::Error::Stale => ManifestFault::Stale,
                 umbra_core::Error::Malformed => ManifestFault::Malformed,
+                umbra_core::Error::SplitView => ManifestFault::SplitView,
                 _ => ManifestFault::Unverified,
             })?;
+
+        // REL-034: this device keeps the digest of the first root of an
+        // epoch that it verified. A root of that epoch that verifies and
+        // has another digest is a second view of the signers. Each call
+        // makes a new consensus state, thus the stored digest is the one
+        // memory of the first root.
+        let first = inner.client.verified_root_digest(set.epoch)?;
+        if first.is_some_and(|digest| digest != set.digest) {
+            return Err(ManifestFault::SplitView.into());
+        }
 
         // REL-147: a carrier that serves a part of the signed set as the
         // set would end each pin that it left out (`REL-153`). It would
@@ -6257,15 +6331,14 @@ impl Handle {
         // REL-147: the store takes the correction, the pins, and the epoch
         // after the last test. Thus a manifest that this call refuses
         // leaves each of them as it was.
-        if let Some(correction) = consensus.correction() {
-            inner
-                .client
-                .set_directory_correction(correction, &mut OsRng)?;
-        }
-        if is_repinned {
-            inner.client.set_ingress_pins(&pins, &mut OsRng)?;
-        }
-        inner.client.set_directory_epoch(set.epoch, &mut OsRng)?;
+        // One commit takes the three, thus a fault of the store leaves no
+        // part of this set beside the parts of an older one.
+        inner.client.accept_relay_set(
+            consensus.correction(),
+            is_repinned.then_some(&pins),
+            set.epoch,
+            &mut OsRng,
+        )?;
 
         // REL-008: the digest of this root is the one that the gossip sends
         // and compares.
@@ -6730,7 +6803,11 @@ impl Handle {
             // the link faults and the reports that wait.
             inner_faults.absorb(core::mem::take(pending_faults));
             node.set_faults(core::mem::take(inner_faults));
-            net_events.extend(invitations.drain(..).map(NetEvent::Invitation));
+            net_events.extend(
+                invitations
+                    .drain(..)
+                    .map(|bundle| NetEvent::Invitation(Zeroizing::new(bundle))),
+            );
 
             *bridge = Some(running);
             inner.invitation_host.clone_from(&network.invitation_host);
@@ -8046,6 +8123,7 @@ impl Handle {
             delivery: info.delivery as u8,
             sent_at_ms: info.sent_at_ms,
             stored_at_ms: info.stored_at_ms,
+            clock_at_ms: info.clock_at_ms,
             deleted: info.deleted,
             edited: info.revisions > 0,
             editable: info.outgoing
@@ -8490,27 +8568,15 @@ impl Handle {
         // The order is `inner`, then the draft, as in `send_draft`.
         let mut inner = locked(&self.inner);
         let mut held = locked(&draft.0);
-        {
-            let waiting = held.as_ref().ok_or(FfiError::NotFound)?;
-            if !inner.client.is_unlocked() {
-                return Err(FfiError::Locked);
-            }
-            if waiting.is_empty() {
-                return Err(FfiError::Malformed);
-            }
+        if !inner.client.is_unlocked() {
+            return Err(FfiError::Locked);
         }
 
-        // The client takes the draft by value. Thus the window of the
-        // edit is checked here first, and an edit after it keeps the text.
-        let info = inner.client.info(&message.0)?;
-        if unix_now_ms().saturating_sub(info.clock_at_ms) >= crate::client::EDIT_WINDOW_MS {
-            return Err(FfiError::TooLong);
-        }
-
-        let draft = held.take().ok_or(FfiError::NotFound)?;
-        drop(held);
+        // An edit that the client refuses leaves the draft in its handle,
+        // thus the user loses no text to the edit window or to `EDIT_MAX`.
         let Inner { client, bridge, .. } = &mut *inner;
-        client.edit(&message.0, draft, unix_now_ms(), &mut OsRng)?;
+        client.edit_kept(&message.0, &mut held, unix_now_ms(), &mut OsRng)?;
+        drop(held);
 
         // With no network the edit waits in the store. The store holds
         // the edit, thus a fault of the flush is no fault of this call.
@@ -9734,7 +9800,7 @@ guard relay1.example.org"
         let mut inner = locked(&handle.inner);
         inner
             .net_events
-            .push_back(NetEvent::Invitation(vec![0; FRAGMENT_LEN]));
+            .push_back(NetEvent::Invitation(Zeroizing::new(vec![0; FRAGMENT_LEN])));
         inner
             .net_events
             .push_back(NetEvent::VerificationCode(ConversationId([1; 16]), 7));
@@ -9885,10 +9951,12 @@ guard relay1.example.org"
         let (handle, directory) = open("lock-events");
         {
             let mut inner = locked(&handle.inner);
-            inner.net_events.push_back(NetEvent::Invitation(vec![7; 8]));
             inner
                 .net_events
-                .push_back(NetEvent::DeviceInvitation(vec![7; 8]));
+                .push_back(NetEvent::Invitation(Zeroizing::new(vec![7; 8])));
+            inner
+                .net_events
+                .push_back(NetEvent::DeviceInvitation(Zeroizing::new(vec![7; 8])));
             inner
                 .net_events
                 .push_back(NetEvent::VerificationCode(ConversationId([1; 16]), 7));

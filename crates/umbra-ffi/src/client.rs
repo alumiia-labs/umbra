@@ -3361,6 +3361,45 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(())
     }
 
+    /// Keeps what one verified relay set gives, in one commit: the clock
+    /// correction, the new pins, and the epoch (`REL-147`). A fault of the
+    /// store thus leaves no part of a set beside the parts of an older one.
+    pub fn accept_relay_set<R: CryptoRng + ?Sized>(
+        &mut self,
+        correction: Option<i64>,
+        pins: Option<&IngressPins>,
+        epoch: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let held = self.directory_correction()?;
+        let correction = correction.filter(|new| held != Some(*new));
+        let is_newer = epoch > self.directory_epoch()?;
+
+        let open = self.open_mut()?;
+        let correction_row = open.store.row_id(SETTINGS, DIRECTORY_CORRECTION_SETTING);
+        let pins_row = open.store.row_id(SETTINGS, INGRESS_PINS_SETTING);
+        let epoch_row = open.store.row_id(SETTINGS, DIRECTORY_EPOCH_SETTING);
+        let mut batch = open.store.begin();
+        if let Some(correction) = correction {
+            batch.put(
+                SETTINGS,
+                correction_row,
+                None,
+                &correction.to_be_bytes(),
+                rng,
+            )?;
+        }
+        if let Some(pins) = pins {
+            batch.put(SETTINGS, pins_row, None, &pins.encode(), rng)?;
+        }
+        if is_newer {
+            batch.put(SETTINGS, epoch_row, None, &epoch.to_be_bytes(), rng)?;
+        }
+        batch.commit()?;
+
+        Ok(())
+    }
+
     /// Sets the idle time of the auto-lock. `IMP-119` bounds it at 30
     /// minutes, and a value above that bound is an error and no change.
     pub fn set_auto_lock<R: CryptoRng + ?Sized>(
@@ -4211,6 +4250,37 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        self.edit_kept(message, &mut Some(draft), now_ms, rng)
+    }
+
+    /// Edits with the draft of `held`, as [`Client::edit`] does. An edit
+    /// that this call refuses leaves the draft in `held`, thus the user
+    /// loses no text to a lock, the edit window, or `EDIT_MAX`. After the
+    /// store took the edit, `held` is empty and the draft is zero bytes
+    /// (`IMP-039`). An empty `held` gives `NotFound`.
+    pub fn edit_kept<R: CryptoRng + ?Sized>(
+        &mut self,
+        message: &MsgRef,
+        held: &mut Option<Draft>,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let draft = held.as_ref().ok_or(Error::NotFound)?;
+        self.edit_checked(message, draft, now_ms, rng)?;
+        *held = None;
+
+        Ok(())
+    }
+
+    /// The edit of [`Client::edit_kept`], with each of its checks. It reads
+    /// the draft and changes nothing in it.
+    fn edit_checked<R: CryptoRng + ?Sized>(
+        &mut self,
+        message: &MsgRef,
+        draft: &Draft,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
         if draft.is_empty() || draft.conversation() != self.conversation_of_message(message)? {
             return Err(Error::Malformed);
         }
@@ -4615,6 +4685,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now: u64,
         rng: &mut R,
     ) -> Result<Option<DueReceipt>, Error> {
+        self.due_receipt_among(now, |_| true, rng)
+    }
+
+    /// [`Client::due_receipt`] for the peers that `has_channel` accepts.
+    /// A receipt for another peer stays in the store and blocks no batch:
+    /// the run holds no channel to that peer now, and a later run can.
+    pub fn due_receipt_among<R: CryptoRng + ?Sized>(
+        &mut self,
+        now: u64,
+        has_channel: impl Fn(&ConversationId) -> bool,
+        rng: &mut R,
+    ) -> Result<Option<DueReceipt>, Error> {
         let listed = self.open_ref()?.store.list(RECEIPT, None)?;
 
         // A receipt that this device cannot send leaves here. The caller
@@ -4670,6 +4752,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 let conversation = ConversationId(conversation);
                 if unsendable.contains(&conversation) {
                     stale.push(*row);
+                    continue;
+                }
+                if !has_channel(&conversation) {
                     continue;
                 }
 

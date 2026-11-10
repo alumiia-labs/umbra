@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 11: Private Groups (2–500)
 
 **Status:** Draft
-**Version:** 0.54.0
+**Version:** 0.55.0
 **Date:** 2026-11-10
 
 ---
@@ -155,6 +155,16 @@ it. The group of that admit MUST take the place of the group that the member
 held, in the same conversation. The messages of that conversation stay. Each
 key, each credential, and each record that the earlier membership held and did
 not send leaves with that membership.
+
+**[GRP-444]** A device that holds a group row for a `group_id` MUST discard an
+offer for that `group_id` whose `creator_roster_pk` is not the roster key of
+the creator of the group that it holds. It MUST refuse an admit under such an
+offer as a failed admission (`GRP-327`).
+
+> *Cause.* `group_id` is no secret to a former member. A contact that knows it
+> can offer a group of its own under that identifier and under the same name.
+> The admit of that offer would put the roster of the contact in the place of
+> the held group, in the same conversation and below its history.
 
 `group_id` travels inside the invitation and inside the AEAD of each record,
 and no relay reads it. `GroupQueueId` is the relay-side name, and it carries no
@@ -1234,12 +1244,21 @@ the epoch the member lacks, and `index` is 0.
   rules `WIR-456` and `WIR-457` state the same carrier.
 - **[GRP-375]** Any active member that reads a `KeyRequest` of scope `0x02`
   from an index that the current roster holds MUST answer, after the backoff
-  of §11.4.1 and only if no one-slot epoch-key record for that index arrived
-  first, with a one-slot epoch-key record of the current epoch for that
-  member, inline with `slot_count` 1 and `own_count` 0, and then with a
-  `KeySupply` of status `0x01` on the path that carried the request. For scope
-  `0x02` the `body` of a `KeySupply` is empty, and status `0x01` means "a
-  one-slot epoch-key record was posted".
+  of §11.4.1 and only if no `KeySupply` of status `0x01` of an active member
+  for that index and that epoch arrived first, with a one-slot epoch-key
+  record of the current epoch for that member, inline with `slot_count` 1 and
+  `own_count` 0, and then with a `KeySupply` of status `0x01` on the path that
+  carried the request. For scope `0x02` the `body` of a `KeySupply` is empty,
+  and status `0x01` means "a one-slot epoch-key record was posted". The
+  `index` of that `KeySupply` MUST be 1 plus the member index of the member
+  that the record supplies. A member MUST NOT take an epoch-key record alone
+  as that signal.
+
+  > *Cause.* No reader but the member of the slot can check who made an
+  > epoch-key record. A relay, or a removed member inside its grace time, can
+  > thus post a record with a false slot for that index. If such a record ended
+  > the answers, each honest member would stand down and the member would get
+  > no key. The tag of the `KeySupply` record names an active member.
 - **[GRP-376]** A member that receives a `KeyRequest` of scope `0x02` on a
   pairwise channel MUST answer it at once when `GRP-404` permits, because no
   other member read it, and MUST post it otherwise as a group record that
@@ -1949,7 +1968,9 @@ keeps no member in a group against its will.
 - **Two different members that make two successors is normal use.**
   **[GRP-118]** A client MUST NOT show a fork for that case. **[GRP-119]** A
   member whose epoch the order above did not select MUST publish that epoch
-  again against the selected epoch. **[GRP-416]** It MUST publish the change
+  again against the selected epoch. The member MUST keep that epoch in its
+  store until the new one is in the store, thus a run that ends between the
+  two loses no change. **[GRP-416]** It MUST publish the change
   of that epoch as it applies to the new head, and it MUST NOT publish a
   change that the roster holds already.
 - **[GRP-417]** A client MUST keep the roster before the head of its chain,

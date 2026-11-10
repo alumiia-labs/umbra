@@ -551,6 +551,14 @@ object Core {
     var removedFromSet by mutableStateOf(false)
         private set
 
+    /**
+     * Whether a move of the store in this run found a table that did not
+     * match its MAC (`IDN-039`). The rows of that table can be damaged or
+     * changed.
+     */
+    var migrationWasUnsound by mutableStateOf(false)
+        private set
+
     /** Whether this device can take the set over now (Part 7 `DEV-231`, `DEV-315`). */
     var canTakeOver by mutableStateOf(false)
         private set
@@ -597,6 +605,7 @@ object Core {
         val owns = client.ownsChannels()
         val takes = !owns && client.canTakeOver()
         val removed = client.removedFromSet()
+        val unsound = client.migrationWasUnsound()
         val forks = client.rosterForks()
         val holes = client.historyHoles()
         val held = client.heldDeletions().toInt()
@@ -604,6 +613,7 @@ object Core {
         main.post {
             heldDeletions = held
             removedFromSet = removed
+            migrationWasUnsound = unsound
             canTakeOver = takes
             historyHoles.clear()
             historyHoles.addAll(holes)
@@ -1035,6 +1045,12 @@ object Core {
                     first.tick()
                     when (val status = first.linkStatus()) {
                         is LinkStatus.Ready -> isReady = true
+                        // DEV-362: the code shows only after the other
+                        // device took the hello of this one.
+                        is LinkStatus.Preparing -> main.post {
+                            joinCode = null
+                            joinNote = UiText.get(R.string.core_link_waits)
+                        }
                         is LinkStatus.Code -> main.post {
                             joinNote = null
                             joinCode = status.code
@@ -2709,11 +2725,27 @@ object Core {
      * Sends the text of a composer, as an answer to `replyTo` when the user
      * chose one. This call overwrites `text`.
      */
-    fun send(conversation: Conversation, text: CharArray, replyTo: MsgHandle? = null) {
+    /**
+     * Sends a text. `onSent` and `onFailed` run on the main thread, one of
+     * them for each call. The core wipes `text`, thus a view that puts the
+     * text back after a failure keeps a copy of its own.
+     */
+    fun send(
+        conversation: Conversation,
+        text: CharArray,
+        replyTo: MsgHandle? = null,
+        onFailed: () -> Unit = {},
+        onSent: () -> Unit = {},
+    ) {
         // The names of the contacts, read on the main thread.
         val titles = chats.associate { it.conversation.id.toList() to it.title }
 
-        call { client ->
+        val failed = {
+            // A call that no thread took did not wipe the text.
+            text.fill('\u0000')
+            onFailed()
+        }
+        call(failed) { client ->
             // GRP-334: an @name of a member of a group names that member.
             val mentions = try {
                 if (client.isGroup(conversation.id)) {
@@ -2742,7 +2774,10 @@ object Core {
                 client.sendDraft(draft).destroy()
             }
 
-            main.post { revision++ }
+            main.post {
+                revision++
+                onSent()
+            }
             refreshChats()
         }
     }
@@ -2908,6 +2943,18 @@ object Core {
         }
     }
 
+    /** The conversation whose audio file is in its encode, for the stop control of its view. */
+    var audioEncoding by mutableStateOf<Conversation?>(null)
+        private set
+
+    @Volatile
+    private var isAudioStopped = false
+
+    /** Ends the encode of the audio file that runs. Its draft sends nothing. */
+    fun stopAudio() {
+        isAudioStopped = true
+    }
+
     /** Sends a picked audio file, encoded again with no field of the original. */
     fun sendAudio(context: Context, conversation: Conversation, source: android.net.Uri, caption: CharArray? = null) {
         val app = context.applicationContext
@@ -2925,9 +2972,17 @@ object Core {
                 val made = client.newDraft(conversation.id)
                 draft = made
 
-                // A lock ends the encode: the draft of a locked client sends nothing.
-                val bytes = Files.attachAudio(app, source, picked, made) { phase != Phase.Open }
+                // A lock ends the encode: the draft of a locked client sends
+                // nothing. The user ends it too.
+                isAudioStopped = false
+                main.post { audioEncoding = conversation }
+                val bytes = Files.attachAudio(app, source, picked, made) {
+                    phase != Phase.Open || isAudioStopped
+                }
                 if (bytes < 0) {
+                    // A stop by the user is no fault.
+                    if (isAudioStopped) return@on
+
                     val text = when (bytes) {
                         MEDIA_TOO_LARGE -> R.string.core_audio_too_large
                         MEDIA_FORM -> R.string.core_audio_form
@@ -2941,6 +2996,8 @@ object Core {
                 offer(client, PendingSend(conversation, made, bytes, isOriginal = false))
                 isOffered = true
             } finally {
+                main.post { audioEncoding = null }
+
                 // A fault of the provider or of the core leaves no draft and
                 // no caption in the memory.
                 if (!isOffered) {
@@ -3415,15 +3472,34 @@ object Core {
     }
 
     /** Changes the text of a message of this device. This call overwrites `text`. */
-    fun edit(conversation: Conversation, message: MsgHandle, text: CharArray) = call { client ->
-        val units = text.map { it.code.toUShort() }
-        text.fill('\u0000')
-        client.newDraft(conversation.id).use { draft ->
-            draft.setText(units)
-            client.editMessage(message, draft)
+    /**
+     * Changes the text of a message. `onSent` and `onFailed` run on the
+     * main thread, one of them for each call. The core wipes `text`.
+     */
+    fun edit(
+        conversation: Conversation,
+        message: MsgHandle,
+        text: CharArray,
+        onFailed: () -> Unit = {},
+        onSent: () -> Unit = {},
+    ) {
+        val failed = {
+            text.fill('\u0000')
+            onFailed()
         }
-        main.post { revision++ }
-        refreshChats()
+        call(failed) { client ->
+            val units = text.map { it.code.toUShort() }
+            text.fill('\u0000')
+            client.newDraft(conversation.id).use { draft ->
+                draft.setText(units)
+                client.editMessage(message, draft)
+            }
+            main.post {
+                revision++
+                onSent()
+            }
+            refreshChats()
+        }
     }
 
     /** Removes a message, or a placeholder, from this device alone. */

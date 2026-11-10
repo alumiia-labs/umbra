@@ -2764,6 +2764,7 @@ fn update_name(update: &GroupUpdate) -> &'static str {
         GroupUpdate::Failed { .. } => "failed",
         GroupUpdate::Unreachable { .. } => "unreachable",
         GroupUpdate::Unsent { .. } => "unsent",
+        GroupUpdate::NotifySettled { .. } => "notify settled",
         GroupUpdate::SubscriptionLost { .. } => "subscription lost",
         GroupUpdate::Reset => "reset",
         GroupUpdate::Ended => "ended",
@@ -3168,25 +3169,70 @@ fn a_new_device_links_from_the_code_of_the_existing_one() {
             .err(),
         Some(FfiError::Malformed)
     );
+
+    // DEV-007: a device that holds a set joins no other set, and its own
+    // link stays.
+    assert_eq!(
+        alice.join_link(ticket.clone(), "Phone".into()).err(),
+        Some(FfiError::Refused)
+    );
+    assert!(matches!(alice.link_status(), LinkStatus::Ticket { .. }));
     tablet.join_link(ticket, "Tablet".into()).unwrap();
 
-    // DEV-283: the two screens show one code.
+    // DEV-283, DEV-361: the two screens show one code. The tablet shows
+    // it after the reply of the phone to its hello.
     let code_of = |handle: &Handle| match handle.link_status() {
         LinkStatus::Code { code } => Some(code),
         _ => None,
     };
-    tick_until(
-        &[&alice, &tablet],
-        || code_of(&alice).is_some() && code_of(&tablet).is_some(),
-        "no code",
-    );
-    assert_eq!(code_of(&alice), code_of(&tablet));
-    assert_eq!(code_of(&alice).unwrap().len(), 6);
+    let both_show_one_code = || {
+        tick_until(
+            &[&alice, &tablet],
+            || {
+                assert_link_runs(&alice);
+                assert_link_runs(&tablet);
+                code_of(&alice).is_some() && code_of(&tablet).is_some()
+            },
+            "no code",
+        );
+        assert_eq!(code_of(&alice), code_of(&tablet));
+        assert_eq!(code_of(&alice).unwrap().len(), 6);
+    };
+    both_show_one_code();
 
-    // No provision before the confirmation.
-    std::thread::sleep(Duration::from_secs(3));
-    assert!(code_of(&tablet).is_some());
+    // Each device reads its slots through several polls, and the tablet
+    // gets nothing before the confirmation.
+    let stays_at_its_code = |handle: &Arc<Handle>, others: &[&Arc<Handle>]| {
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(7) {
+            (*handle).clone().tick();
+            for other in others {
+                (*other).clone().tick();
+            }
+            assert!(code_of(handle).is_some(), "{:?}", handle.link_status());
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    };
+    stays_at_its_code(&tablet, &[&alice]);
+    assert!(code_of(&alice).is_some());
 
+    // A link that the user cancels after the confirmation gives no device.
+    // A second link waits while the snapshot of the first one goes.
+    alice.confirm_link().unwrap();
+    assert_eq!(alice.start_link("Phone".into()).err(), Some(FfiError::Busy));
+    alice.cancel_link();
+    assert_eq!(alice.link_status(), LinkStatus::Idle);
+    assert_eq!(alice.confirm_link().err(), Some(FfiError::NotFound));
+    stays_at_its_code(&tablet, &[&alice]);
+    assert_eq!(alice.devices().unwrap().len(), 1);
+    tablet.cancel_link();
+    assert_eq!(tablet.link_status(), LinkStatus::Idle);
+
+    // The next link of the two devices runs to its end. DEV-290: the
+    // pending device and the sync invitation of the first one are gone.
+    let ticket = link_ticket(&alice);
+    tablet.join_link(ticket, "Tablet".into()).unwrap();
+    both_show_one_code();
     alice.confirm_link().unwrap();
     tick_until(
         &[&alice, &tablet],
@@ -3198,6 +3244,7 @@ fn a_new_device_links_from_the_code_of_the_existing_one() {
         "no snapshot",
     );
     let linked = tablet.take_linked().unwrap();
+    assert_eq!(tablet.take_linked().err(), Some(FfiError::NotFound));
     tablet.disconnect();
     drop(tablet);
     let config = Config {
@@ -3467,19 +3514,7 @@ fn link_new_device(
     key: u8,
     network_for: &dyn Fn(&Handle) -> Network,
 ) -> Arc<Handle> {
-    owner.start_link("Phone".into()).unwrap();
-    let mut ticket = String::new();
-    tick_until(
-        &[owner],
-        || match owner.link_status() {
-            LinkStatus::Ticket { text } => {
-                ticket = text;
-                true
-            }
-            _ => false,
-        },
-        "no ticket",
-    );
+    let ticket = link_ticket(owner);
 
     let fresh = launch(directory, name, key);
     fresh.clone().connect(network_for(&fresh)).unwrap();
@@ -3489,16 +3524,30 @@ fn link_new_device(
     });
 
     fresh.join_link(ticket, "Tablet".into()).unwrap();
+
+    // DEV-283: the user confirms when the two devices show one code.
+    let code_of = |handle: &Handle| match handle.link_status() {
+        LinkStatus::Code { code } => Some(code),
+        _ => None,
+    };
     tick_until(
         &[owner, &fresh],
-        || matches!(owner.link_status(), LinkStatus::Code { .. }),
+        || {
+            assert_link_runs(owner);
+            assert_link_runs(&fresh);
+            code_of(owner).is_some() && code_of(owner) == code_of(&fresh)
+        },
         "no code",
     );
 
     owner.confirm_link().unwrap();
     tick_until(
         &[owner, &fresh],
-        || fresh.link_status() == LinkStatus::Ready,
+        || {
+            assert_link_runs(owner);
+            assert_link_runs(&fresh);
+            fresh.link_status() == LinkStatus::Ready
+        },
         "no snapshot",
     );
 
@@ -3522,10 +3571,44 @@ fn link_new_device(
     // link ends a moment later, and a second link waits for it.
     tick_until(
         &[owner, &device],
-        || owner.link_status() == LinkStatus::Linked,
+        || {
+            assert_link_runs(owner);
+            owner.link_status() == LinkStatus::Linked
+        },
         "the owner did not end the link",
     );
     device
+}
+
+/// Starts a link at `owner` and gives the text of its ticket.
+#[track_caller]
+fn link_ticket(owner: &Arc<Handle>) -> String {
+    owner.start_link("Phone".into()).unwrap();
+    let mut ticket = String::new();
+    tick_until(
+        &[owner],
+        || match owner.link_status() {
+            LinkStatus::Ticket { text } => {
+                ticket = text;
+                true
+            }
+            LinkStatus::Preparing => false,
+            other => panic!("{other:?}"),
+        },
+        "no ticket",
+    );
+    ticket
+}
+
+/// A link that failed or ran out ends the test here, and not at the end of
+/// a long wait.
+#[track_caller]
+fn assert_link_runs(handle: &Handle) {
+    let status = handle.link_status();
+    assert!(
+        !matches!(status, LinkStatus::Failed | LinkStatus::Expired),
+        "the link ended: {status:?}"
+    );
 }
 
 /// A message of `handle` whose text is `text`, in `conversation`.

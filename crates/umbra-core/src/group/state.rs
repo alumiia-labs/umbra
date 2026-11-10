@@ -5892,6 +5892,66 @@ mod tests {
         }
     }
 
+    /// An opened slot of the next epoch of `group` from `rotator`, with
+    /// owner credentials of the bytes `mark`.
+    fn opened_with_owners(group: &Group, rotator: u16, mark: u8, now: u64) -> Opened {
+        let mut slot = opened(rotator, group.epoch() + 1, mark, now);
+        slot.roster_epoch = group.roster().epoch_index();
+        slot.payload.own_sks = (0..GROUP_REPLICAS)
+            .map(|_| Secret::new([mark; 32]))
+            .collect();
+        slot
+    }
+
+    #[test]
+    fn a_slot_that_installs_gives_owner_credentials_from_an_admin_alone() {
+        let now = 1_700_000_000;
+        let (mut creator, _, _) = trio_with_a_trigger(now);
+        let held = *creator.owner(0).unwrap().expose();
+
+        // GRP-379: member 1 is no admin when the slot installs. The epoch
+        // installs, and the credentials that the relay holds stay.
+        let slot = opened_with_owners(&creator, 1, 0x71, now);
+        let epoch = slot.epoch;
+        creator.install_opened(slot, now).unwrap();
+        assert_eq!(creator.epoch(), epoch);
+        assert_eq!(*creator.owner(0).unwrap().expose(), held);
+
+        // The same slot from an admin hands its credentials.
+        let (mut creator, mut member, mut third) = trio_with_a_trigger(now);
+        let grant = creator.grant(1, Role::Admin, &mut Rng(71)).unwrap();
+        let control = GroupControl::parse(&grant).unwrap();
+        for group in [&mut creator, &mut member, &mut third] {
+            group.apply_control(&control, 0, now).unwrap();
+        }
+        let slot = opened_with_owners(&creator, 1, 0x72, now);
+        creator.install_opened(slot, now).unwrap();
+        assert_eq!(*creator.owner(0).unwrap().expose(), [0x72; 32]);
+    }
+
+    #[test]
+    fn a_chunked_record_of_the_current_epoch_gets_no_fetch_without_a_trigger() {
+        let now = 1_700_000_000;
+        let t = slot_of(now);
+
+        // The first epoch of a group has no base and no epoch before it.
+        let (creator, _, _) = pair(now);
+        let body = chunked(creator.roster().epoch_index(), 1);
+        assert!(creator
+            .wanted_chunk(creator.epoch(), t, &body, now)
+            .is_err());
+
+        // An epoch that answered a trigger has a base. A second rotator can
+        // answer the same trigger, thus its record gets the fetch.
+        let (mut creator, mut member, _) = trio_with_a_trigger(now);
+        let rotation = creator.rotate(now, &mut Rng(73)).unwrap();
+        install(&mut member, &rotation, now).unwrap();
+        assert_eq!(member.epoch(), creator.epoch());
+        let body = chunked(member.roster().epoch_index(), 2);
+        let wanted = member.wanted_chunk(member.epoch(), t, &body, now);
+        assert!(matches!(wanted, Ok(Some(_))));
+    }
+
     #[test]
     fn a_member_holds_one_pending_slot_and_pushes_out_no_slot_of_another() {
         let now = 1_700_000_000;

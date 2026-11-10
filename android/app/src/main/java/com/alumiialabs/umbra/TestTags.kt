@@ -188,6 +188,83 @@ object TestTags {
     const val PASSPHRASE_NEW = "passphrase_new"
     const val PASSPHRASE_CONFIRM = "passphrase_confirm"
     const val PASSPHRASE_SAVE = "passphrase_save"
+
+    // The tiles of a message with a file, and the view of the shared files.
+    const val MESSAGE_PHOTO = "message_photo"
+    const val MESSAGE_VIDEO = "message_video"
+    const val MESSAGE_VOICE = "message_voice"
+    const val MESSAGE_FILE = "message_file"
+    const val MEDIA_SAVE = "media_save"
+    const val MEDIA_EMPTY = "media_empty"
+    const val CHAT_AUDIO_STOP = "chat_audio_stop"
+
+    // The search.
+    const val SEARCH_INPUT = "search_input"
+    const val SEARCH_LIMIT = "search_limit"
+    const val SEARCH_RESULT = "search_result"
+    const val SEARCH_EMPTY = "search_empty"
+
+    // The notifications.
+    const val NOTIFY_DELAYED = "notify_delayed"
+    const val NOTIFY_BACKGROUND = "notify_background"
+    const val NOTIFY_SHOW_SENDER = "notify_show_sender"
+    const val NOTIFY_SHOW_TEXT = "notify_show_text"
+
+    // The profile, the handle, and the reusable links.
+    const val PROFILE_NAME = "profile_name"
+    const val PROFILE_WELCOME = "profile_welcome"
+    const val PROFILE_SAVE = "profile_save"
+    const val PROFILE_HANDLE = "profile_handle"
+    const val PROFILE_PUBLIC_LINKS = "profile_public_links"
+    const val HANDLE_NAME = "handle_name"
+    const val HANDLE_CLAIM = "handle_claim"
+    const val HANDLE_COPY = "handle_copy"
+    const val HANDLE_SHARE = "handle_share"
+    const val HANDLE_COPY_LINK = "handle_copy_link"
+    const val HANDLE_MOVE_QUEUE = "handle_move_queue"
+    const val HANDLE_RESET_REQUESTS = "handle_reset_requests"
+    const val HANDLE_RELEASE = "handle_release"
+    const val HANDLE_RELEASE_CONFIRM = "handle_release_confirm"
+    const val PUBLIC_LINK_CREATE = "public_link_create"
+    const val PUBLIC_LINK_ROW = "public_link_row"
+    const val PUBLIC_LINK_TEXT = "public_link_text"
+    const val PUBLIC_LINK_SHARE = "public_link_share"
+    const val PUBLIC_LINK_COPY = "public_link_copy"
+    const val PUBLIC_LINK_RETIRE = "public_link_retire"
+    const val PUBLIC_LINK_RETIRE_CONFIRM = "public_link_retire_confirm"
+    const val REQUEST_ACCEPT = "request_accept"
+    const val REQUEST_DECLINE = "request_decline"
+
+    // The social recovery and the take-over.
+    const val SOCIAL_CONTACT = "social_contact"
+    const val SOCIAL_SEND = "social_send"
+    const val SOCIAL_USER_HALF = "social_user_half"
+    const val SOCIAL_ADD_SHARE = "social_add_share"
+    const val TAKE_OVER_OPEN = "take_over_open"
+    const val TAKE_OVER_CONFIRM = "take_over_confirm"
+
+    // The groups of choices. `choice` adds the value of one choice.
+    const val ALERT_CHOICE = "alert_choice"
+    const val PREVIEW_CHOICE = "preview_choice"
+    const val AUTO_LOCK_CHOICE = "auto_lock_choice"
+    const val DOWNLOAD_CHOICE = "download_choice"
+    const val LINK_PERIOD_CHOICE = "link_period_choice"
+    const val GROUP_ROLE_CHOICE = "group_role_choice"
+    const val DELIVERY_CHOICE = "delivery_choice"
+    const val POLL_PERIOD_CHOICE = "poll_period_choice"
+    const val RECOVERY_NEEDED_CHOICE = "recovery_needed_choice"
+    const val SEARCH_FILTER_CHOICE = "search_filter_choice"
+    const val TIMER_CHOICE = "timer_choice"
+    const val APPEARANCE_CHOICE = "appearance_choice"
+    const val HISTORY_CHOICE = "history_choice"
+    const val SPEED_CHOICE = "speed_choice"
+
+    /**
+     * The name of one choice of a group: the name of the group, then the
+     * value that the choice sets. The value is one of a fixed list of the
+     * app, and never data of the user.
+     */
+    fun choice(group: String, value: Any): String = "${group}_$value"
 }
 
 /** Puts a test name on a control, or nothing when the caller gives none. */

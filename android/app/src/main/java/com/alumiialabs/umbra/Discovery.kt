@@ -58,7 +58,7 @@ private val LinkPeriods = listOf(
 @Composable
 fun HandleRow(push: (Screen) -> Unit) {
     EntryRow(
-        RowEntry("globe", stringResource(R.string.common_your_handle), Core.myHandle ?: stringResource(R.string.common_none)) {
+        RowEntry("globe", stringResource(R.string.common_your_handle), Core.myHandle ?: stringResource(R.string.common_none), tag = TestTags.PROFILE_HANDLE) {
             push(Screen.Handle)
         },
     )
@@ -84,6 +84,7 @@ private fun LimitOffer(label: String) {
     SecondaryButton(
         stringResource(R.string.discovery_move_to_new_queue),
         enabled = Core.online && !Core.directoryBusy,
+        tag = TestTags.HANDLE_MOVE_QUEUE,
     ) {
         Core.rotateEntry(label)
     }
@@ -142,7 +143,11 @@ fun PublicLinksScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = PressInset)) {
             Spacer(Modifier.height(8.dp))
             for ((seconds, title) in LinkPeriods) {
-                ChoiceRow(stringResource(title), isChosen = period == seconds) { period = seconds }
+                ChoiceRow(
+                    stringResource(title),
+                    isChosen = period == seconds,
+                    tag = TestTags.choice(TestTags.LINK_PERIOD_CHOICE, seconds),
+                ) { period = seconds }
                 HorizontalDivider(color = Palette.Divider)
             }
 
@@ -150,6 +155,7 @@ fun PublicLinksScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             PrimaryButton(
                 stringResource(R.string.discovery_create_link),
                 enabled = Core.online && !Core.directoryBusy,
+                tag = TestTags.PUBLIC_LINK_CREATE,
             ) {
                 Core.createPublicLink(period)
             }
@@ -165,7 +171,7 @@ fun PublicLinksScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                 SectionLabel(stringResource(R.string.discovery_your_links))
                 Core.publicLinks.forEachIndexed { index, link ->
                     if (index > 0) HorizontalDivider(color = Palette.Divider)
-                    EntryRow(RowEntry("link", shortLink(link.link), remaining(link.expiresAt)) { push(Screen.PublicLinkView(link.id.toList())) })
+                    EntryRow(RowEntry("link", shortLink(link.link), remaining(link.expiresAt), tag = TestTags.PUBLIC_LINK_ROW) { push(Screen.PublicLinkView(link.id.toList())) })
                 }
             }
             Spacer(Modifier.height(20.dp))
@@ -193,19 +199,20 @@ fun PublicLinkScreen(id: List<Byte>, onBack: () -> Unit) {
                 QrCode(link.link, description = stringResource(R.string.discovery_reusable_link_qr))
             }
             Spacer(Modifier.height(16.dp))
-            MonoBox(link.link)
+            MonoBox(link.link, tag = TestTags.PUBLIC_LINK_TEXT)
             TakeoverWarning(link.link)
             LimitOffer(link.link)
 
             Spacer(Modifier.height(12.dp))
             val shareLink = stringResource(R.string.common_share_link)
             val umbraLink = stringResource(R.string.common_umbra_link)
-            PrimaryButton(shareLink) { shareText(context, link.link, shareLink) }
+            PrimaryButton(shareLink, tag = TestTags.PUBLIC_LINK_SHARE) { shareText(context, link.link, shareLink) }
             Spacer(Modifier.height(8.dp))
-            SecondaryButton(stringResource(R.string.common_copy_link)) { copySensitive(context, link.link, umbraLink) }
+            SecondaryButton(stringResource(R.string.common_copy_link), tag = TestTags.PUBLIC_LINK_COPY) { copySensitive(context, link.link, umbraLink) }
             Spacer(Modifier.height(8.dp))
             QuietButton(
                 stringResource(if (isRetiring) R.string.discovery_retiring else R.string.discovery_retire_link),
+                tag = TestTags.PUBLIC_LINK_RETIRE,
             ) {
                 if (!isRetiring) asksRetire = true
             }
@@ -218,7 +225,7 @@ fun PublicLinkScreen(id: List<Byte>, onBack: () -> Unit) {
             ActionSheet(
                 stringResource(R.string.discovery_retire_link_question),
                 listOf(
-                    RowEntry("xmark", stringResource(R.string.discovery_retire_link)) {
+                    RowEntry("xmark", stringResource(R.string.discovery_retire_link), tag = TestTags.PUBLIC_LINK_RETIRE_CONFIRM) {
                         isRetiring = true
                         Core.retirePublicLink(link)
                     },
@@ -261,12 +268,13 @@ fun HandleScreen(onBack: () -> Unit) {
                         keyboardType = KeyboardType.Ascii,
                         autoCorrectEnabled = false,
                     ),
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().tagged(TestTags.HANDLE_NAME),
                 )
                 Spacer(Modifier.height(12.dp))
                 PrimaryButton(
                     stringResource(R.string.discovery_claim_handle),
                     enabled = Core.online && !Core.directoryBusy && name.isNotBlank(),
+                    tag = TestTags.HANDLE_CLAIM,
                 ) {
                     focus.clearFocus()
                     Core.claimHandle(name)
@@ -297,23 +305,23 @@ fun HandleScreen(onBack: () -> Unit) {
                     Spacer(Modifier.height(12.dp))
                     val shareLink = stringResource(R.string.common_share_link)
                     val umbraLink = stringResource(R.string.common_umbra_link)
-                    PrimaryButton(shareLink) { shareText(context, link, shareLink) }
+                    PrimaryButton(shareLink, tag = TestTags.HANDLE_SHARE) { shareText(context, link, shareLink) }
                     Spacer(Modifier.height(8.dp))
-                    SecondaryButton(stringResource(R.string.common_copy_link)) {
+                    SecondaryButton(stringResource(R.string.common_copy_link), tag = TestTags.HANDLE_COPY_LINK) {
                         copySensitive(context, link, umbraLink)
                     }
                     Spacer(Modifier.height(8.dp))
                 }
 
                 val umbraHandle = stringResource(R.string.discovery_umbra_handle)
-                SecondaryButton(stringResource(R.string.discovery_copy_handle)) {
+                SecondaryButton(stringResource(R.string.discovery_copy_handle), tag = TestTags.HANDLE_COPY) {
                     copySensitive(context, handle, umbraHandle)
                 }
 
                 Spacer(Modifier.height(24.dp))
                 // Part 9 §9.9: a new key and a new rendezvous queue at one tap.
-                QuietButton(stringResource(R.string.discovery_reset_contact_requests)) { Core.rotateHandleKey() }
-                QuietButton(stringResource(R.string.discovery_release_handle)) { asksRelease = true }
+                QuietButton(stringResource(R.string.discovery_reset_contact_requests), tag = TestTags.HANDLE_RESET_REQUESTS) { Core.rotateHandleKey() }
+                QuietButton(stringResource(R.string.discovery_release_handle), tag = TestTags.HANDLE_RELEASE) { asksRelease = true }
                 DirectoryState(stringResource(R.string.discovery_writing_release))
             }
         }
@@ -325,7 +333,7 @@ fun HandleScreen(onBack: () -> Unit) {
     if (asksRelease && handle != null) {
         ActionSheet(
             stringResource(R.string.discovery_release_handle_question, handle),
-            listOf(RowEntry("xmark", stringResource(R.string.discovery_release_handle)) { Core.releaseHandle() }),
+            listOf(RowEntry("xmark", stringResource(R.string.discovery_release_handle), tag = TestTags.HANDLE_RELEASE_CONFIRM) { Core.releaseHandle() }),
             note = stringResource(R.string.discovery_release_handle_note),
             onDismiss = { asksRelease = false },
         )
@@ -348,7 +356,7 @@ fun ProfileScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             HorizontalDivider(color = Palette.Divider)
             HandleRow(push)
             HorizontalDivider(color = Palette.Divider)
-            EntryRow(RowEntry("link", stringResource(R.string.discovery_reusable_links)) { push(Screen.PublicLinks) })
+            EntryRow(RowEntry("link", stringResource(R.string.discovery_reusable_links), tag = TestTags.PROFILE_PUBLIC_LINKS) { push(Screen.PublicLinks) })
         }
     }
 }
@@ -385,7 +393,7 @@ private fun ProfileFields() {
         label = { Text(stringResource(R.string.common_name)) },
         singleLine = true,
         keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().tagged(TestTags.PROFILE_NAME),
     )
     Spacer(Modifier.height(8.dp))
     OutlinedTextField(
@@ -393,13 +401,14 @@ private fun ProfileFields() {
         onValueChange = { welcome = it.take(280) },
         label = { Text(stringResource(R.string.discovery_welcome_text)) },
         maxLines = 4,
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().tagged(TestTags.PROFILE_WELCOME),
     )
 
     Spacer(Modifier.height(12.dp))
     PrimaryButton(
         stringResource(R.string.common_save),
         enabled = Core.online && !Core.directoryBusy && (name to welcome) != saved,
+        tag = TestTags.PROFILE_SAVE,
     ) {
         focus.clearFocus()
         Core.setProfile(name, welcome)
@@ -462,8 +471,8 @@ private fun RequestRow(context: Context, request: ContactRequestInfo) {
         }
         Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            InlineButton(stringResource(R.string.common_accept), enabled = Core.online) { Core.acceptRequest(request) }
-            InlineButton(stringResource(R.string.common_decline)) { Core.declineRequest(request) }
+            InlineButton(stringResource(R.string.common_accept), enabled = Core.online, tag = TestTags.REQUEST_ACCEPT) { Core.acceptRequest(request) }
+            InlineButton(stringResource(R.string.common_decline), tag = TestTags.REQUEST_DECLINE) { Core.declineRequest(request) }
         }
     }
 }

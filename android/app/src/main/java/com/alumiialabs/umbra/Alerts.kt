@@ -111,7 +111,7 @@ fun AlertRows(chat: Chat) {
             ChoiceSheet(
                 stringResource(R.string.alerts_notify_for),
                 choices.map { value ->
-                    SheetChoice(alertLabel(value), held == value) {
+                    SheetChoice(alertLabel(value), held == value, tag = TestTags.choice(TestTags.ALERT_CHOICE, value)) {
                         alert = value
                         Core.setAlert(context, chat.conversation, value)
                     }
@@ -124,7 +124,11 @@ fun AlertRows(chat: Chat) {
             ChoiceSheet(
                 stringResource(if (open == AlertSheet.Sender) R.string.alerts_sender else R.string.alerts_text),
                 listOf(PREVIEW_DEFAULT, PREVIEW_SHOW, PREVIEW_HIDE).map { field ->
-                    SheetChoice(previewLabel(field), shown shr shift and 3 == field) {
+                    SheetChoice(
+                        previewLabel(field),
+                        shown shr shift and 3 == field,
+                        tag = TestTags.choice(TestTags.PREVIEW_CHOICE, field),
+                    ) {
                         val next = shown and (3 shl shift).inv() or (field shl shift)
                         preview = next
                         Core.setPreviewSetting(chat.conversation, next)

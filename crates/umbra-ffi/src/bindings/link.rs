@@ -1,10 +1,11 @@
 //! The link of a device (Part 7 §7.4) over the transfer task.
 //!
-//! The existing device offers: it writes the offer, reads the hello, shows
-//! the code, and after the confirmation of the user it uploads the snapshot
-//! and writes the provision. The new device joins on a handle whose store
-//! holds no data of the user, as a restore does, and [`init_linked`] makes
-//! its store from the snapshot.
+//! The existing device offers: it writes the offer, reads the hello, writes
+//! the reply, shows the code, and after the confirmation of the user it
+//! uploads the snapshot and writes the provision. The new device joins on a
+//! handle whose store holds no data of the user, as a restore does. It shows
+//! the code after it read the reply, and [`init_linked`] makes its store
+//! from the snapshot.
 
 use std::sync::{Arc, Mutex};
 
@@ -15,8 +16,8 @@ use umbra_core::{
     },
     devset::{
         link::{
-            commit, hello_slot, offer_slot, DeviceIdentity, LinkHello, LinkOffer, LinkSecret,
-            LinkTicket, Provision, Slot,
+            commit, hello_slot, offer_slot, DeviceIdentity, LinkHello, LinkOffer, LinkPending,
+            LinkSecret, LinkTicket, Provision, Slot,
         },
         DeviceId, LINK_PROVISION_TTL, LINK_QR_TTL,
     },
@@ -43,16 +44,19 @@ const POLL: u64 = 2;
 pub enum LinkStatus {
     /// No link runs.
     Idle,
-    /// The offer goes up, or the new device reads it.
+    /// The offer goes up, or the new device reads it. The new device stays
+    /// here after its hello too, until the reply of the existing device is
+    /// there (`DEV-361`).
     Preparing,
     /// The existing device shows the ticket as a QR code (`DEV-005`).
     Ticket {
         /// The text of the QR code.
         text: String,
     },
-    /// The two devices show the code of `DEV-283`. The existing device
-    /// waits for [`Handle::confirm_link`], and the new device for the
-    /// provision.
+    /// The device shows the code of `DEV-283`. The existing device shows
+    /// it when it took a hello, and the new device when it read the reply
+    /// to its own hello. The existing device waits for
+    /// [`Handle::confirm_link`], and the new device for the provision.
     Code {
         /// Six digits.
         code: String,
@@ -131,10 +135,12 @@ pub struct FfiTakeOverCount {
 pub(super) enum LinkStep {
     WriteOffer,
     ReadHello,
+    WriteReply,
     Snapshot,
     WriteProvision,
     ReadOffer,
     WriteHello,
+    ReadReply,
     ReadProvision,
     ReadSnapshot,
 }
@@ -163,6 +169,9 @@ struct Offer {
     offered_at: u64,
     offer_relays: Vec<[u8; 32]>,
     hello: Option<(LinkHello, LinkSecret)>,
+    /// The slot of the reply to that hello, for its erasure.
+    reply_slot: Option<Slot>,
+    reply_relays: Vec<[u8; 32]>,
     roster: Option<Vec<u8>>,
     /// The causal counter of this device at the confirmation: each record
     /// after it waits for the new device (`DEV-297`, `DEV-311`).
@@ -183,6 +192,8 @@ struct Join {
     started_at: u64,
     hello_at: u64,
     has_offer: bool,
+    /// What the hello fixed. The reply turns it into `secret`.
+    pending: Option<LinkPending>,
     secret: Option<LinkSecret>,
     hello_relays: Vec<[u8; 32]>,
     restored: Option<RestoredBackup>,
@@ -191,7 +202,42 @@ struct Join {
 /// The snapshot and the identity of a new device, for [`init_linked`].
 /// The platform holds this object and never reads it.
 #[derive(uniffi::Object)]
-pub struct Linked(pub(super) Mutex<Option<(RestoredBackup, DeviceIdentity)>>);
+pub struct Linked(pub(super) Mutex<LinkedHold>);
+
+/// What a [`Linked`] holds, and whether a lock emptied it.
+pub(super) struct LinkedHold {
+    value: Option<(RestoredBackup, DeviceIdentity)>,
+    is_wiped: bool,
+}
+
+impl LinkedHold {
+    fn new(value: (RestoredBackup, DeviceIdentity)) -> Self {
+        LinkedHold {
+            value: Some(value),
+            is_wiped: false,
+        }
+    }
+
+    /// Empties the holder for good, as a lock does (`IMP-127`). A call of
+    /// [`init_linked`] that fails after this puts nothing back.
+    pub(super) fn take(&mut self) -> Option<(RestoredBackup, DeviceIdentity)> {
+        self.is_wiped = true;
+        self.value.take()
+    }
+
+    /// Takes the value for the long steps of [`init_linked`].
+    fn lend(&mut self) -> Option<(RestoredBackup, DeviceIdentity)> {
+        self.value.take()
+    }
+
+    /// Puts the value back for the next try. After a lock no handle refers
+    /// to the holder, thus the value drops here and wipes.
+    fn give_back(&mut self, value: (RestoredBackup, DeviceIdentity)) {
+        if !self.is_wiped {
+            self.value = Some(value);
+        }
+    }
+}
 
 /// What a pump of the link does next.
 enum Next {
@@ -333,6 +379,9 @@ impl Inner {
                     offer_slot(&offer.nonce),
                     core::mem::take(&mut offer.offer_relays),
                 ));
+                if let Some(slot) = offer.reply_slot.take() {
+                    slots.push((slot, core::mem::take(&mut offer.reply_relays)));
+                }
                 if let Some((_, secret)) = &offer.hello {
                     slots.push((
                         secret.provision_slot(),
@@ -419,13 +468,14 @@ impl Inner {
 
     /// Sends the erasure of each link object that the store keeps
     /// (`DEV-003`): a link that ended at a lock, or with its process, left
-    /// them. A link that runs keeps its objects.
+    /// them. A link that runs keeps its objects, and a link that ended sent
+    /// the erasures of its own.
     fn pump_link_erasures(&mut self) {
-        if !self.link_erasures_due
-            || self.link.is_some()
-            || self.bridge.is_none()
-            || !self.client.is_unlocked()
-        {
+        let runs = self
+            .link
+            .as_ref()
+            .is_some_and(|link| !is_over(&link.status));
+        if !self.link_erasures_due || runs || self.bridge.is_none() || !self.client.is_unlocked() {
             return;
         }
         let Ok(jobs) = self.client.kept_erasures() else {
@@ -620,6 +670,18 @@ impl Inner {
                         link.next_poll = now.saturating_add(POLL);
                         Next::Read(LinkStep::ReadOffer, offer_slot(&join.ticket.nonce))
                     }
+                    // DEV-361: the hello is up, and the reply fixes the code.
+                    (LinkJob::Join(join), LinkStatus::Preparing)
+                        if may_read && join.hello_at != 0 =>
+                    {
+                        match &join.pending {
+                            Some(pending) => {
+                                link.next_poll = now.saturating_add(POLL);
+                                Next::Read(LinkStep::ReadReply, pending.reply_slot())
+                            }
+                            None => Next::Nothing,
+                        }
+                    }
                     (LinkJob::Join(join), LinkStatus::Code { .. }) if may_read => {
                         match &join.secret {
                             Some(secret) => {
@@ -747,8 +809,14 @@ impl Inner {
                     };
                 }
             }
+            (LinkStep::ReadHello, TransferUpdate::HandleRead { chunks, .. }) => {
+                if let Some(link) = self.link.as_mut() {
+                    link.reading = false;
+                }
+                self.on_hellos(&chunks);
+            }
             (
-                step @ (LinkStep::ReadHello | LinkStep::ReadOffer | LinkStep::ReadProvision),
+                step @ (LinkStep::ReadOffer | LinkStep::ReadReply | LinkStep::ReadProvision),
                 TransferUpdate::HandleRead { chunks, .. },
             ) => {
                 if let Some(link) = self.link.as_mut() {
@@ -761,13 +829,22 @@ impl Inner {
                 // own end time. The next poll reads the slot again.
                 for chunk in &chunks {
                     let opened = match step {
-                        LinkStep::ReadHello => self.on_hello(chunk),
                         LinkStep::ReadOffer => self.on_offer(chunk),
+                        LinkStep::ReadReply => self.on_reply(chunk),
                         _ => self.on_provision(chunk),
                     };
                     if opened {
                         break;
                     }
+                }
+            }
+            (LinkStep::WriteReply, TransferUpdate::HandleWritten { relays, .. }) => {
+                if let Some(LinkState {
+                    job: LinkJob::Offer(offer),
+                    ..
+                }) = self.link.as_mut()
+                {
+                    offer.reply_relays = relays;
                 }
             }
             (LinkStep::Snapshot, TransferUpdate::Uploaded { uploaded, .. }) => {
@@ -798,19 +875,16 @@ impl Inner {
                 }
             }
             (LinkStep::WriteHello, TransferUpdate::HandleWritten { relays, .. }) => {
+                // DEV-361: no code yet. The next poll reads the reply.
                 if let Some(LinkState {
                     job: LinkJob::Join(join),
-                    status,
+                    next_poll,
                     ..
                 }) = self.link.as_mut()
                 {
                     join.hello_relays = relays;
-                    join.hello_at = now;
-                    if let Some(secret) = &join.secret {
-                        *status = LinkStatus::Code {
-                            code: six_digits(secret.code()),
-                        };
-                    }
+                    join.hello_at = now.max(1);
+                    *next_poll = 0;
                 }
             }
             (LinkStep::ReadSnapshot, TransferUpdate::Downloaded { plain, .. }) => {
@@ -818,7 +892,10 @@ impl Inner {
             }
             // A read that failed goes again at the next poll.
             (
-                LinkStep::ReadHello | LinkStep::ReadOffer | LinkStep::ReadProvision,
+                LinkStep::ReadHello
+                | LinkStep::ReadOffer
+                | LinkStep::ReadReply
+                | LinkStep::ReadProvision,
                 TransferUpdate::Failed { .. },
             ) => {
                 if let Some(link) = self.link.as_mut() {
@@ -830,38 +907,79 @@ impl Inner {
         None
     }
 
-    /// The hello is there: it opens under the key of the offer, and the
-    /// offer goes, since the ticket works once (`DEV-006`).
-    /// The result is whether the chunk opened. A chunk that does not open
-    /// is an empty slot, and the next poll reads the slot again.
-    fn on_hello(&mut self, chunk: &[u8]) -> bool {
+    /// The hello slot gave its chunks. One hello opens under the key of the
+    /// offer: the reply goes up, the code shows, and the offer goes, since
+    /// the ticket works once (`DEV-006`). Two different hellos show that a
+    /// second party holds the ticket, and the link ends (`DEV-362`). A
+    /// chunk that does not open is an empty slot, and the next poll reads
+    /// the slot again.
+    fn on_hellos(&mut self, chunks: &[Vec<u8>]) {
+        let Some(LinkState {
+            job: LinkJob::Offer(offer),
+            status: LinkStatus::Ticket { .. },
+            ..
+        }) = self.link.as_ref()
+        else {
+            return;
+        };
+        if offer.hello.is_some() {
+            return;
+        }
+
+        // The replicas of one write give the same bytes, and those count
+        // one time.
+        let mut seen: Vec<&[u8]> = Vec::new();
+        let mut opened = Vec::new();
+        for chunk in chunks {
+            let Ok(bytes) = unpad_handle_object(chunk) else {
+                continue;
+            };
+            if seen.contains(&bytes) {
+                continue;
+            }
+            seen.push(bytes);
+
+            if let Ok(found) =
+                LinkPending::decapsulate(&offer.link_key, &offer.nonce, &offer.offer, bytes)
+            {
+                opened.push(found);
+            }
+        }
+
+        if opened.len() > 1 {
+            self.end_link(LinkStatus::Failed);
+            return;
+        }
+        let Some((hello, pending)) = opened.pop() else {
+            return;
+        };
+
+        // DEV-361: the value of the reply is drawn here, after the hello is
+        // fixed.
+        let slot = pending.reply_slot();
+        let kept_slot = pending.reply_slot();
+        let Ok((reply, secret)) = pending.answer(&mut OsRng) else {
+            self.end_link(LinkStatus::Failed);
+            return;
+        };
+
         let Some(LinkState {
             job: LinkJob::Offer(offer),
             status,
             ..
         }) = self.link.as_mut()
         else {
-            return true;
+            return;
         };
-        if offer.hello.is_some() {
-            return true;
-        }
-
-        let opened = unpad_handle_object(chunk).ok().and_then(|bytes| {
-            LinkSecret::decapsulate(&offer.link_key, &offer.nonce, &offer.offer, bytes).ok()
-        });
-        let Some((hello, secret)) = opened else {
-            return false;
-        };
-
         *status = LinkStatus::Code {
             code: six_digits(secret.code()),
         };
         offer.hello = Some((hello, secret));
+        offer.reply_slot = Some(kept_slot);
         let relays = core::mem::take(&mut offer.offer_relays);
-        let slot = offer_slot(&offer.nonce);
-        self.erase_slot(slot, relays);
-        true
+        let offer_slot = offer_slot(&offer.nonce);
+        self.erase_slot(offer_slot, relays);
+        self.write_slot(LinkStep::WriteReply, slot, &reply);
     }
 
     /// The user confirmed that the two codes match (`DEV-283`): the roster
@@ -953,7 +1071,8 @@ impl Inner {
             .ok()
             .flatten()
             .map(|identity| identity.device_id);
-        let mut descriptor = vec![0u8; snapshot.descriptor.len()];
+        // The descriptor holds the file key of the snapshot.
+        let mut descriptor = Zeroizing::new(vec![0u8; snapshot.descriptor.len()]);
         let sealed = match (from_device, snapshot.descriptor.encode(&mut descriptor)) {
             (Some(from_device), Ok(_)) => secret.seal(
                 &Provision {
@@ -984,9 +1103,11 @@ impl Inner {
         }
     }
 
-    /// The sync channel of a device opened: the roster of the link holds
-    /// from here, and the provision and the snapshot go (`DEV-003`).
-    pub(super) fn link_opened(&mut self) {
+    /// The sync channel of a device opened in `conversation`: the roster of
+    /// the link holds from here, and the provision and the snapshot go
+    /// (`DEV-003`). A roster that does not commit names no new device, thus
+    /// its channel ends (`DEV-290`).
+    pub(super) fn link_opened(&mut self, conversation: crate::ConversationId) {
         let Some(LinkState {
             job: LinkJob::Offer(offer),
             status: LinkStatus::Sending | LinkStatus::Waiting,
@@ -1021,6 +1142,14 @@ impl Inner {
             }
         }
 
+        if !committed {
+            let Inner { client, bridge, .. } = &mut *self;
+            let _ = client.refuse_device_channel(conversation, &mut OsRng);
+            if let Some(running) = bridge.as_mut() {
+                running.forget(&conversation);
+            }
+        }
+
         self.end_link(if committed {
             LinkStatus::Linked
         } else {
@@ -1051,7 +1180,7 @@ impl Inner {
         };
 
         let nonce = join.ticket.nonce;
-        let (ct, ss) = LinkSecret::encapsulate(&offer, &mut OsRng);
+        let (ct, ss) = LinkPending::encapsulate(&offer, &mut OsRng);
         let hello = LinkHello {
             device_id: identity.device_id,
             device_pk: identity.device_key().public().clone(),
@@ -1064,9 +1193,38 @@ impl Inner {
             return true;
         };
 
-        join.secret = Some(LinkSecret::new(ss, &nonce, offer_bytes, &hello_bytes));
+        join.pending = Some(LinkPending::new(ss, &nonce, offer_bytes, &hello_bytes));
         join.has_offer = true;
         self.write_slot(LinkStep::WriteHello, hello_slot(&nonce), &hello_bytes);
+        true
+    }
+
+    /// The reply is there (`DEV-361`): it opens under the key of the hello
+    /// of this device, thus the existing device took that hello, and the
+    /// code shows. The result is whether the chunk opened.
+    fn on_reply(&mut self, chunk: &[u8]) -> bool {
+        let Some(LinkState {
+            job: LinkJob::Join(join),
+            status: status @ LinkStatus::Preparing,
+            ..
+        }) = self.link.as_mut()
+        else {
+            return true;
+        };
+
+        let secret = join.pending.as_ref().and_then(|pending| {
+            let sealed = unpad_handle_object(chunk).ok()?;
+            pending.open_reply(sealed).ok()
+        });
+        let Some(secret) = secret else {
+            return false;
+        };
+
+        *status = LinkStatus::Code {
+            code: six_digits(secret.code()),
+        };
+        join.secret = Some(secret);
+        join.pending = None;
         true
     }
 
@@ -1180,6 +1338,8 @@ impl Handle {
             offered_at: unix_now(),
             offer_relays: Vec::new(),
             hello: None,
+            reply_slot: None,
+            reply_relays: Vec::new(),
             roster: None,
             sync_floor: 0,
             snapshot: None,
@@ -1194,12 +1354,17 @@ impl Handle {
 
     /// Starts a link as the new device, from the text of the scanned QR
     /// code. The handle holds no data of the user: the snapshot makes the
-    /// store at [`init_linked`].
+    /// store at [`init_linked`]. A handle that holds a device set or a
+    /// conversation gives `Refused`, since [`init_linked`] removes its store
+    /// (`DEV-007`, `DEV-008`).
     pub fn join_link(&self, ticket: String, label: String) -> Result<(), FfiError> {
         let ticket = LinkTicket::from_text(&ticket).map_err(|_| FfiError::Malformed)?;
         let mut inner = locked(&self.inner);
         if inner.bridge.is_none() {
             return Err(FfiError::Offline);
+        }
+        if inner.client.device_identity()?.is_some() || !inner.client.conversations()?.is_empty() {
+            return Err(FfiError::Refused);
         }
 
         let identity = DeviceIdentity::generate(&label, &mut OsRng);
@@ -1209,6 +1374,7 @@ impl Handle {
             started_at: unix_now(),
             hello_at: 0,
             has_offer: false,
+            pending: None,
             secret: None,
             hello_relays: Vec::new(),
             restored: None,
@@ -1252,7 +1418,7 @@ impl Handle {
         let taken = join.restored.take().zip(join.identity.take());
         inner.link = None;
         let taken = taken.ok_or(FfiError::NotFound)?;
-        let linked = Arc::new(Linked(Mutex::new(Some(taken))));
+        let linked = Arc::new(Linked(Mutex::new(LinkedHold::new(taken))));
         inner.linked = Arc::downgrade(&linked);
         Ok(linked)
     }
@@ -1263,7 +1429,9 @@ impl Handle {
     /// device knew each queue (step 2c). Each other device gets the epoch.
     /// The store holds the rotations and the notice until each one is done,
     /// thus the call needs no run. The removed device keeps what it synced
-    /// (`DEV-137`).
+    /// (`DEV-137`). A link whose snapshot goes holds a roster on the head
+    /// that this call would move, thus the call gives `Busy` until that
+    /// link ends.
     pub fn remove_device(&self, device_id: Vec<u8>) -> Result<(), FfiError> {
         let device: umbra_core::devset::DeviceId = device_id
             .as_slice()
@@ -1272,6 +1440,18 @@ impl Handle {
         let mut inner = locked(&self.inner);
         if !inner.client.owns_channels()? {
             return Err(FfiError::NotFound);
+        }
+
+        let is_linking = matches!(
+            inner.link.as_ref(),
+            Some(LinkState {
+                job: LinkJob::Offer(_),
+                status: LinkStatus::Sending | LinkStatus::Waiting,
+                ..
+            })
+        );
+        if is_linking {
+            return Err(FfiError::Busy);
         }
 
         inner.client.revoke_device(device, &mut OsRng)?;
@@ -1501,15 +1681,17 @@ pub fn init_linked(
 ) -> Result<Arc<Handle>, FfiError> {
     // The holder stays free during the long steps, thus a lock of the old
     // handle never waits for them (`IMP-127`).
-    let (restored, identity) = locked(&linked.0).take().ok_or(FfiError::NotFound)?;
+    let (restored, identity) = locked(&linked.0).lend().ok_or(FfiError::NotFound)?;
     let made = init_store_from(config, element, passphrase, &restored, |client| {
         client.apply_restore(&restored, &mut OsRng)?;
         Ok(client.apply_link(&identity, &mut OsRng)?)
     });
 
-    // A call that fails keeps the snapshot and the identity for the next try.
+    // A call that fails keeps the snapshot and the identity for the next
+    // try. A lock in the long steps found the holder empty, and no later
+    // lock reaches it, thus the two drop here after such a lock.
     if made.is_err() {
-        *locked(&linked.0) = Some((restored, identity));
+        locked(&linked.0).give_back((restored, identity));
     }
     made
 }
@@ -1530,6 +1712,8 @@ mod tests {
             offered_at: unix_now(),
             offer_relays: vec![[9; 32]],
             hello: None,
+            reply_slot: None,
+            reply_relays: Vec::new(),
             roster: None,
             sync_floor: 0,
             snapshot: None,
@@ -1637,7 +1821,7 @@ mod tests {
 
         // DEV-290: the channel of a device of an earlier link opens while
         // the snapshot of this link goes up. The link stays where it is.
-        inner.link_opened();
+        inner.link_opened(crate::ConversationId([3; 16]));
         assert_eq!(status(&inner), Some(LinkStatus::Sending));
 
         // After the provision left, the opening is the one of this link:
@@ -1649,10 +1833,525 @@ mod tests {
         {
             offer.provision_sent = true;
         }
-        inner.link_opened();
+        inner.link_opened(crate::ConversationId([3; 16]));
         assert_eq!(status(&inner), Some(LinkStatus::Failed));
         drop(inner);
         drop(handle);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// A transfer task that the test holds. Each command of the link comes
+    /// here, and no command fails for a task that does not run.
+    fn task(inner: &mut Inner) -> tokio::sync::mpsc::UnboundedReceiver<TransferCommand> {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        inner.transfers = Some(sender);
+        receiver
+    }
+
+    fn sent(
+        task: &mut tokio::sync::mpsc::UnboundedReceiver<TransferCommand>,
+    ) -> Vec<TransferCommand> {
+        let mut commands = Vec::new();
+        while let Ok(command) = task.try_recv() {
+            commands.push(command);
+        }
+        commands
+    }
+
+    fn erases(commands: &[TransferCommand], handle: [u8; 32]) -> bool {
+        commands.iter().any(
+            |command| matches!(command, TransferCommand::Erase { chunk_id, .. } if *chunk_id == handle),
+        )
+    }
+
+    fn status(inner: &Inner) -> LinkStatus {
+        inner
+            .link
+            .as_ref()
+            .map_or(LinkStatus::Idle, |link| link.status.clone())
+    }
+
+    fn set_status(inner: &mut Inner, status: LinkStatus) {
+        if let Some(link) = inner.link.as_mut() {
+            link.status = status;
+        }
+    }
+
+    const NONCE: [u8; 16] = [5; 16];
+
+    /// The side of the existing device with a true offer, which shows its
+    /// ticket. The result is the encoded offer.
+    fn shown_offer(inner: &mut Inner) -> Vec<u8> {
+        let link_key = KeyPair::generate(&mut OsRng);
+        let offer_bytes = LinkOffer {
+            link_pk: link_key.public().clone(),
+        }
+        .encode();
+        let LinkJob::Offer(mut job) = offer() else {
+            unreachable!()
+        };
+        job.nonce = NONCE;
+        job.link_key = link_key;
+        job.offer = offer_bytes.clone();
+        inner.start(LinkJob::Offer(job));
+        set_status(
+            inner,
+            LinkStatus::Ticket {
+                text: String::new(),
+            },
+        );
+        offer_bytes
+    }
+
+    /// The hello of a new device for `offer_bytes`: its identity, its
+    /// padded chunk, and its side of the link.
+    fn hello_for(offer_bytes: &[u8]) -> (DeviceIdentity, Vec<u8>, LinkPending) {
+        let ticket = LinkTicket {
+            nonce: NONCE,
+            commit: commit(offer_bytes),
+        };
+        let offer = LinkOffer::parse(offer_bytes, &ticket).unwrap();
+        let identity = DeviceIdentity::generate("Tablet", &mut OsRng);
+        let (ct, ss) = LinkPending::encapsulate(&offer, &mut OsRng);
+        let hello = LinkHello {
+            device_id: identity.device_id,
+            device_pk: identity.device_key().public().clone(),
+            roster_pk: identity.roster_key().verifying_key().to_bytes().to_vec(),
+            label: identity.label,
+            ct,
+        };
+        let bytes = hello.seal(&ss, &NONCE, &mut OsRng).unwrap();
+        let pending = LinkPending::new(ss, &NONCE, offer_bytes, &bytes);
+        (identity, pad_handle_object(&bytes).unwrap(), pending)
+    }
+
+    /// A hello as the existing device reads it.
+    fn read_hello() -> LinkHello {
+        let link_key = KeyPair::generate(&mut OsRng);
+        let offer_bytes = LinkOffer {
+            link_pk: link_key.public().clone(),
+        }
+        .encode();
+        let (_, chunk, _) = hello_for(&offer_bytes);
+        let bytes = unpad_handle_object(&chunk).unwrap();
+        let (hello, _) = LinkPending::decapsulate(&link_key, &NONCE, &offer_bytes, bytes).unwrap();
+        hello
+    }
+
+    /// The side of the new device, which waits for its offer.
+    fn join() -> LinkJob {
+        LinkJob::Join(Box::new(Join {
+            ticket: LinkTicket {
+                nonce: NONCE,
+                commit: [0; 32],
+            },
+            identity: Some(DeviceIdentity::generate("Tablet", &mut OsRng)),
+            started_at: unix_now(),
+            hello_at: 0,
+            has_offer: false,
+            pending: None,
+            secret: None,
+            hello_relays: Vec::new(),
+            restored: None,
+        }))
+    }
+
+    #[test]
+    fn one_hello_gets_its_reply_and_two_hellos_end_the_link() {
+        let (handle, directory) = open("link-hellos");
+        let mut inner = locked(&handle.inner);
+        inner.pump_link(unix_now());
+        let mut task = task(&mut inner);
+
+        // Two replicas give the hello of one write, and a third one gives
+        // other bytes. That is one hello.
+        let offer_bytes = shown_offer(&mut inner);
+        let (_, chunk, pending) = hello_for(&offer_bytes);
+        let junk = pad_handle_object(&[7u8; 64]).unwrap();
+        inner.on_hellos(&[junk, chunk.clone(), chunk]);
+        let shown = status(&inner);
+        assert!(matches!(shown, LinkStatus::Code { .. }), "{shown:?}");
+        let LinkStatus::Code { code } = shown else {
+            return;
+        };
+
+        // DEV-361: the reply goes under the slot of that hello, and the new
+        // device reads the code of the existing device from it. DEV-003:
+        // the offer goes.
+        let commands = sent(&mut task);
+        let reply = commands
+            .iter()
+            .find_map(|command| match command {
+                TransferCommand::WriteHandle { handle, chunk, .. }
+                    if *handle == pending.reply_slot().handle =>
+                {
+                    Some(chunk.clone())
+                }
+                _ => None,
+            })
+            .unwrap();
+        let secret = pending
+            .open_reply(unpad_handle_object(&reply).unwrap())
+            .unwrap();
+        assert_eq!(six_digits(secret.code()), code);
+        assert!(erases(&commands, offer_slot(&NONCE).handle));
+
+        // DEV-006: the ticket works once. A later hello changes nothing.
+        let (_, late, _) = hello_for(&offer_bytes);
+        inner.on_hellos(&[late]);
+        assert_eq!(status(&inner), LinkStatus::Code { code });
+        assert!(sent(&mut task).is_empty());
+
+        // DEV-362: two hellos in one read show a second holder of the
+        // ticket. No code shows, and no reply goes.
+        let offer_bytes = shown_offer(&mut inner);
+        sent(&mut task);
+        let (_, first, _) = hello_for(&offer_bytes);
+        let (_, second, _) = hello_for(&offer_bytes);
+        inner.on_hellos(&[first, second]);
+        assert_eq!(status(&inner), LinkStatus::Failed);
+        assert!(!sent(&mut task)
+            .iter()
+            .any(|command| matches!(command, TransferCommand::WriteHandle { .. })));
+        drop(inner);
+        drop(handle);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_new_device_shows_its_code_at_the_reply_to_its_own_hello() {
+        let (handle, directory) = open("link-reply");
+        let mut inner = locked(&handle.inner);
+        inner.pump_link(unix_now());
+        let mut task = task(&mut inner);
+
+        // The new device wrote its hello, and it waits for the reply.
+        let link_key = KeyPair::generate(&mut OsRng);
+        let offer_bytes = LinkOffer {
+            link_pk: link_key.public().clone(),
+        }
+        .encode();
+        let (_, chunk, pending) = hello_for(&offer_bytes);
+        let reply_handle = pending.reply_slot().handle;
+        inner.start(join());
+        if let Some(LinkState {
+            job: LinkJob::Join(join),
+            ..
+        }) = inner.link.as_mut()
+        {
+            join.has_offer = true;
+            join.hello_at = unix_now();
+            join.pending = Some(pending);
+        }
+
+        // It reads the reply slot, and it shows no code before the reply.
+        inner.pump_link(unix_now());
+        assert!(sent(&mut task).iter().any(|command| matches!(
+            command,
+            TransferCommand::ReadHandle { handle, .. } if *handle == reply_handle
+        )));
+        assert_eq!(status(&inner), LinkStatus::Preparing);
+
+        // The reply to the hello of another party opens nothing.
+        let (_, other_chunk, _) = hello_for(&offer_bytes);
+        let other = unpad_handle_object(&other_chunk).unwrap();
+        let (_, taken) = LinkPending::decapsulate(&link_key, &NONCE, &offer_bytes, other).unwrap();
+        let (other_reply, _) = taken.answer(&mut OsRng).unwrap();
+        assert!(!inner.on_reply(&pad_handle_object(&other_reply).unwrap()));
+        assert_eq!(status(&inner), LinkStatus::Preparing);
+
+        // Its own reply gives the code of the existing device.
+        let own = unpad_handle_object(&chunk).unwrap();
+        let (_, taken) = LinkPending::decapsulate(&link_key, &NONCE, &offer_bytes, own).unwrap();
+        let (reply, secret) = taken.answer(&mut OsRng).unwrap();
+        assert!(inner.on_reply(&pad_handle_object(&reply).unwrap()));
+        assert_eq!(
+            status(&inner),
+            LinkStatus::Code {
+                code: six_digits(secret.code())
+            }
+        );
+        drop(inner);
+        drop(handle);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn each_step_of_a_link_ends_at_its_time_and_erases_its_objects() {
+        let (handle, directory) = open("link-expiry");
+        let mut inner = locked(&handle.inner);
+        let now = unix_now();
+        inner.pump_link(now);
+        let mut task = task(&mut inner);
+        let after = |time: u64| now.saturating_add(time).saturating_add(2);
+
+        // DEV-005: the ticket ends at `LINK_QR_TTL`, and the offer goes.
+        shown_offer(&mut inner);
+        inner.pump_link(now);
+        assert!(matches!(status(&inner), LinkStatus::Ticket { .. }));
+        inner.pump_link(after(LINK_QR_TTL));
+        assert_eq!(status(&inner), LinkStatus::Expired);
+        assert!(erases(&sent(&mut task), offer_slot(&NONCE).handle));
+
+        // A code that the user never confirms ends at two times
+        // `LINK_PROVISION_TTL`, and the reply goes.
+        let offer_bytes = shown_offer(&mut inner);
+        let (_, chunk, pending) = hello_for(&offer_bytes);
+        inner.on_hellos(&[chunk]);
+        if let Some(LinkState {
+            job: LinkJob::Offer(offer),
+            ..
+        }) = inner.link.as_mut()
+        {
+            offer.reply_relays = vec![[8; 32]];
+        }
+        sent(&mut task);
+        inner.pump_link(after(LINK_QR_TTL));
+        assert!(matches!(status(&inner), LinkStatus::Code { .. }));
+        inner.pump_link(after(2 * LINK_PROVISION_TTL));
+        assert_eq!(status(&inner), LinkStatus::Expired);
+        assert!(erases(&sent(&mut task), pending.reply_slot().handle));
+
+        // DEV-003: a provision that no device took ends at
+        // `LINK_PROVISION_TTL`. DEV-290: the pending device leaves.
+        shown_offer(&mut inner);
+        set_status(&mut inner, LinkStatus::Waiting);
+        if let Some(LinkState {
+            job: LinkJob::Offer(offer),
+            ..
+        }) = inner.link.as_mut()
+        {
+            offer.provisioned_at = now;
+        }
+        inner
+            .client
+            .set_pending_peer([4; 16], &[0; 32], &mut OsRng)
+            .unwrap();
+        inner.peer_drop_due = false;
+        inner.pump_link(now);
+        assert_eq!(status(&inner), LinkStatus::Waiting);
+        assert!(inner.client.holds_pending_peer().unwrap());
+        inner.pump_link(after(LINK_PROVISION_TTL));
+        assert_eq!(status(&inner), LinkStatus::Expired);
+        assert!(!inner.client.holds_pending_peer().unwrap());
+
+        // The new device: no offer and no reply inside `LINK_QR_TTL`.
+        inner.start(join());
+        inner.pump_link(now);
+        assert_eq!(status(&inner), LinkStatus::Preparing);
+        inner.pump_link(after(LINK_QR_TTL));
+        assert_eq!(status(&inner), LinkStatus::Expired);
+
+        // The new device: no provision inside `LINK_PROVISION_TTL` after
+        // its hello, and the hello goes.
+        let link_key = KeyPair::generate(&mut OsRng);
+        let offer_bytes = LinkOffer {
+            link_pk: link_key.public().clone(),
+        }
+        .encode();
+        let (_, _, pending) = hello_for(&offer_bytes);
+        let (_, secret) = pending.answer(&mut OsRng).unwrap();
+        inner.start(join());
+        if let Some(LinkState {
+            job: LinkJob::Join(join),
+            status,
+            ..
+        }) = inner.link.as_mut()
+        {
+            join.has_offer = true;
+            join.hello_at = now;
+            join.hello_relays = vec![[8; 32]];
+            join.secret = Some(secret);
+            *status = LinkStatus::Code {
+                code: "000000".into(),
+            };
+        }
+        sent(&mut task);
+        inner.pump_link(now);
+        assert!(matches!(status(&inner), LinkStatus::Code { .. }));
+        inner.pump_link(after(LINK_PROVISION_TTL));
+        assert_eq!(status(&inner), LinkStatus::Expired);
+        assert!(erases(&sent(&mut task), hello_slot(&NONCE).handle));
+        drop(inner);
+        drop(handle);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_roster_that_does_not_commit_ends_the_channel_of_its_link() {
+        let (handle, directory) = open("link-commit");
+        let mut inner = locked(&handle.inner);
+        inner.pump_link(unix_now());
+        inner.client.ensure_device_set("Phone", &mut OsRng).unwrap();
+
+        // The user confirmed a link, and the sync channel of its device
+        // opened. Another epoch took the head in between.
+        let first = inner
+            .client
+            .sign_linked_device(&read_hello(), &mut OsRng)
+            .unwrap();
+        let other = inner
+            .client
+            .sign_linked_device(&read_hello(), &mut OsRng)
+            .unwrap();
+        inner.start(offer());
+        set_status(&mut inner, LinkStatus::Waiting);
+        if let Some(LinkState {
+            job: LinkJob::Offer(offer),
+            ..
+        }) = inner.link.as_mut()
+        {
+            offer.roster = Some(first);
+            offer.provision_sent = true;
+        }
+        let conversation = crate::ConversationId([3; 16]);
+        inner
+            .client
+            .set_pending_peer([4; 16], &[0; 32], &mut OsRng)
+            .unwrap();
+        inner
+            .client
+            .mark_device_peer(conversation, &mut OsRng)
+            .unwrap();
+        assert!(inner.client.is_device_peer(conversation).unwrap());
+        inner.client.commit_roster(&other, &mut OsRng).unwrap();
+
+        // The link fails, and the channel of a device that no roster names
+        // ends with it (`DEV-290`).
+        inner.link_opened(conversation);
+        assert_eq!(status(&inner), LinkStatus::Failed);
+        assert!(!inner.client.is_device_peer(conversation).unwrap());
+
+        // A removal moves the head, thus it waits while the snapshot of a
+        // link goes.
+        for waits in [LinkStatus::Sending, LinkStatus::Waiting] {
+            inner.start(offer());
+            set_status(&mut inner, waits);
+            drop(inner);
+            assert_eq!(
+                handle.remove_device(vec![4; 16]).err(),
+                Some(FfiError::Busy)
+            );
+            inner = locked(&handle.inner);
+        }
+
+        // With no such link the call reaches the roster, which names no
+        // such device.
+        inner.cancel_link();
+        drop(inner);
+        assert_eq!(
+            handle.remove_device(vec![4; 16]).err(),
+            Some(FfiError::NotFound)
+        );
+        drop(handle);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_confirmation_needs_a_code_and_a_run() {
+        let (handle, directory) = open("link-confirm");
+        let mut inner = locked(&handle.inner);
+        inner.pump_link(unix_now());
+        let mut task = task(&mut inner);
+
+        // No link, and a link with no hello: no code to confirm.
+        assert_eq!(inner.confirm_link().err(), Some(FfiError::NotFound));
+        let offer_bytes = shown_offer(&mut inner);
+        assert_eq!(inner.confirm_link().err(), Some(FfiError::NotFound));
+
+        // A code with no run: the call changes nothing, and the user can
+        // confirm again when the network is up.
+        let (_, chunk, _) = hello_for(&offer_bytes);
+        inner.on_hellos(&[chunk]);
+        let shown = status(&inner);
+        assert!(matches!(shown, LinkStatus::Code { .. }));
+        assert_eq!(inner.confirm_link().err(), Some(FfiError::Offline));
+        assert_eq!(status(&inner), shown);
+        assert!(!inner.client.holds_pending_peer().unwrap());
+        sent(&mut task);
+        drop(inner);
+
+        drop(handle);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    struct Keystore;
+
+    impl SecureElementCallback for Keystore {
+        fn keyed(&self, _input: Vec<u8>) -> Result<Vec<u8>, FfiError> {
+            Ok(vec![7; 32])
+        }
+    }
+
+    #[test]
+    fn a_link_store_that_fails_keeps_its_snapshot_for_the_next_try() {
+        let (handle, directory) = open("link-init");
+        let mut inner = locked(&handle.inner);
+        inner.client.ensure_device_set("Phone", &mut OsRng).unwrap();
+
+        // The snapshot of a link whose roster names the new device.
+        let link_key = KeyPair::generate(&mut OsRng);
+        let offer_bytes = LinkOffer {
+            link_pk: link_key.public().clone(),
+        }
+        .encode();
+        let (identity, chunk, _) = hello_for(&offer_bytes);
+        let bytes = unpad_handle_object(&chunk).unwrap();
+        let (hello, _) = LinkPending::decapsulate(&link_key, &NONCE, &offer_bytes, bytes).unwrap();
+        let roster = inner.client.sign_linked_device(&hello, &mut OsRng).unwrap();
+        let plain = inner
+            .client
+            .link_snapshot(unix_now(), &roster, &[7; 64], 0)
+            .unwrap();
+        drop(inner);
+        drop(handle);
+
+        let held = || {
+            let restored = RestoredBackup::assemble(core::slice::from_ref(&plain)).unwrap();
+            let identity = DeviceIdentity::parse(&identity.encode()).unwrap();
+            Arc::new(Linked(Mutex::new(LinkedHold::new((restored, identity)))))
+        };
+        let config = |file: &str| Config {
+            database_path: directory.join(file).to_str().unwrap().to_owned(),
+            argon2_floor_ms: 60_000,
+        };
+
+        // A folder that is not there fails the open of the store, and the
+        // holder keeps the snapshot.
+        let linked = held();
+        let failed = init_linked(
+            config("absent/tablet.db"),
+            Arc::new(Keystore),
+            passphrase(),
+            Arc::clone(&linked),
+        );
+        assert_eq!(failed.err(), Some(FfiError::Storage));
+        assert!(locked(&linked.0).value.is_some());
+
+        // The next try makes the store of a device of the set, and the
+        // holder is empty for each later call.
+        let made = init_linked(
+            config("tablet.db"),
+            Arc::new(Keystore),
+            passphrase(),
+            Arc::clone(&linked),
+        )
+        .unwrap();
+        assert_eq!(made.devices().unwrap().len(), 2);
+        assert!(!made.owns_channels().unwrap());
+        assert!(locked(&linked.0).value.is_none());
+        drop(made);
+        let again = init_linked(config("again.db"), Arc::new(Keystore), passphrase(), linked);
+        assert_eq!(again.err(), Some(FfiError::NotFound));
+
+        // IMP-127: a lock in the long steps finds the holder empty. A call
+        // that fails after it puts nothing back, since no later lock
+        // reaches the holder.
+        let linked = held();
+        let lent = locked(&linked.0).lend().unwrap();
+        assert!(locked(&linked.0).take().is_none());
+        locked(&linked.0).give_back(lent);
+        assert!(locked(&linked.0).value.is_none());
         let _ = std::fs::remove_dir_all(&directory);
     }
 }

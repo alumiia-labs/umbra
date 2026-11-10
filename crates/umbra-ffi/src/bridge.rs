@@ -30,8 +30,8 @@ pub enum NetEvent {
     /// The run of the network ended. Each contact stays in the store.
     Offline(Ended),
     /// The fragment of an invitation link, which the user gives out of
-    /// band.
-    Invitation(Vec<u8>),
+    /// band. It holds queue keys, thus its bytes wipe at the drop.
+    Invitation(Zeroizing<Vec<u8>>),
     /// The relay holds no blob for a link that the user accepted.
     InvitationGone,
     /// The code of a verification ceremony, which the two users compare.
@@ -44,8 +44,8 @@ pub enum NetEvent {
     /// A contact is ready, and its conversation takes drafts.
     Contact(ConversationId),
     /// The bundle of the sync channel of a device (Part 7 `DEV-286`), for
-    /// the provision of a link.
-    DeviceInvitation(Vec<u8>),
+    /// the provision of a link. Its bytes wipe at the drop.
+    DeviceInvitation(Zeroizing<Vec<u8>>),
     /// The sync channel of another device of this set opened. No view
     /// shows it as a contact.
     DeviceLinked(ConversationId),
@@ -516,8 +516,10 @@ impl Bridge {
             | Update::Faults(_) => None,
             Update::Online => Some(NetEvent::Online),
             Update::Offline(ended) => Some(NetEvent::Offline(ended)),
-            Update::Invitation(bundle) => Some(NetEvent::Invitation(bundle)),
-            Update::DeviceInvitation(bundle) => Some(NetEvent::DeviceInvitation(bundle)),
+            Update::Invitation(bundle) => Some(NetEvent::Invitation(Zeroizing::new(bundle))),
+            Update::DeviceInvitation(bundle) => {
+                Some(NetEvent::DeviceInvitation(Zeroizing::new(bundle)))
+            }
             Update::Refused => Some(NetEvent::Refused),
             Update::InvitationGone => Some(NetEvent::InvitationGone),
             Update::Contact {

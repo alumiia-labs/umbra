@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 6: Wire Format and Encoding
 
 **Status:** Draft
-**Version:** 0.54.0
+**Version:** 0.55.0
 **Date:** 2026-11-10
 
 ---
@@ -2760,7 +2760,7 @@ KeySupply {                       // kind 0x35
     scope     u8        // as in the request
     id        [32]u8    // as in the request
     epoch     u32       // as in the request
-    index     u32       // as in the request
+    index     u32       // as in the request, or the value of GRP-375
     status    u8        // 0x01 posted, 0x02 not held, 0x03 resent
     body_len  u16
     body      [body_len]u8    // empty in each scope

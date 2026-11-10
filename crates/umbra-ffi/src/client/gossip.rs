@@ -136,6 +136,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         self.drop_gossip(old)
     }
 
+    /// The digest of the root of `epoch` that this device verified, or
+    /// none (`REL-034`).
+    pub fn verified_root_digest(&self, epoch: u64) -> Result<Option<[u8; 32]>, Error> {
+        Ok(self
+            .consensus_digest(Some(epoch))?
+            .map(|(_, digest)| digest))
+    }
+
     fn consensus_digest(&self, epoch: Option<u64>) -> Result<Option<(u64, [u8; 32])>, Error> {
         let mut found: Option<(u64, [u8; 32])> = None;
         for (_, value) in self.gossip_rows()? {

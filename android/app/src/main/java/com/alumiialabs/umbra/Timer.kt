@@ -138,7 +138,11 @@ fun DisappearingRow(chat: Chat, mayChange: Boolean) {
         title,
         TimerChoices.map { (seconds, label) ->
             // The same value again sends no change to the other party.
-            SheetChoice(stringResource(label), seconds == now.seconds) {
+            SheetChoice(
+                stringResource(label),
+                seconds == now.seconds,
+                tag = TestTags.choice(TestTags.TIMER_CHOICE, seconds),
+            ) {
                 if (seconds != now.seconds) Core.setTimer(chat.conversation, seconds)
             }
         },

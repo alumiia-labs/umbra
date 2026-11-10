@@ -195,7 +195,7 @@ fun ContactDetailsScreen(chat: Chat, onBack: () -> Unit, onMessage: () -> Unit, 
         ContactSheet.Speed -> ChoiceSheet(
             stringResource(R.string.verify_delivery_speed),
             listOf(0, 1, 2).map { choice ->
-                SheetChoice(modeLabel(choice), mode == choice) {
+                SheetChoice(modeLabel(choice), mode == choice, tag = TestTags.choice(TestTags.SPEED_CHOICE, choice)) {
                     mode = choice
                     Core.keepPrivacyMode(chat.conversation, choice)
                 }

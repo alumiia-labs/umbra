@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 7: Device Sets, History Sync, and Revocation
 
 **Status:** Draft
-**Version:** 0.54.0
+**Version:** 0.55.0
 **Date:** 2026-11-10
 
 ---
@@ -437,7 +437,7 @@ The link is a one-shot flow, and it is in person or on an authenticated side
 channel. The target is 60 seconds or less and one QR scan (usability goal U7).
 
 The new device holds no `RootIdentity` until the link ends, thus it has no
-queue and no pairwise channel. The two devices meet on three handle-addressed
+queue and no pairwise channel. The two devices meet on four handle-addressed
 chunks of Part 12 §12.4.2. Each one sits under a handle that both devices
 derive, and the placement list of the relay set names its relays.
 
@@ -457,10 +457,15 @@ derive, and the placement list of the relay set names its relays.
         │                   DeviceRosterKey_pk, and label
         │◀── reads the hello ───────────────────│
         │                                       │
-        │  3. both devices show a 6-digit code  │
-        │     from the shared secret and the    │
-        │     transcript — the user confirms    │
-        │     that the two codes match ─────────│
+        │  3. takes one hello, draws a fresh    │
+        │     value, and writes it as the       │
+        │     reply under a key of the secret ─▶│
+        │                                       │
+        │     both devices show a 6-digit code  │
+        │     from the shared secret, the       │
+        │     transcript, and that value — the  │
+        │     user confirms that the two codes  │
+        │     match ────────────────────────────│
         │                                       │
         │  4. signs roster epoch n+1, makes a   │
         │     sync invitation, uploads a        │
@@ -498,15 +503,25 @@ LinkHello {                      // 4 377 B, under the hello slot
                                  //   label     [32]u8     UTF-8, padded with zeros
 }
 
+LinkReply {                      // 73 B, under the reply slot
+    version     u8               // 0x01
+    nonce       [24]u8
+    tag         [16]u8
+    r           [32]u8           // sealed under the reply key, XChaCha20-Poly1305,
+                                 // fresh from the CSPRNG of the existing device
+}
+
 slot(label, secret)  = handle, cred_sk, read_sk
                      = SHA3-256(label || secret || "handle"), and "cred", and "read"
 offer slot           = slot("umbra/v1/link-offer", nonce)
 hello slot           = slot("umbra/v1/link-hello", nonce)
 hello key            = SHA3-256("umbra/v1/link-hello" || ss || nonce || "seal")
 transcript           = SHA3-256("umbra/v1/link-transcript" || nonce || LinkOffer || LinkHello)
-code                 = BE32(SHA3-256("umbra/v1/link-code" || ss || transcript)[0..4]) mod 1 000 000
-provision slot       = slot("umbra/v1/link-provision", ss || transcript)
-seal key             = SHA3-256("umbra/v1/link-provision" || ss || transcript || "seal")
+reply slot           = slot("umbra/v1/link-code", ss || transcript)
+reply key            = SHA3-256("umbra/v1/link-code" || ss || transcript || "seal")
+code                 = BE32(SHA3-256("umbra/v1/link-code" || ss || transcript || r)[0..4]) mod 1 000 000
+provision slot       = slot("umbra/v1/link-provision", ss || transcript || r)
+seal key             = SHA3-256("umbra/v1/link-provision" || ss || transcript || r || "seal")
 
 Provision {                      // sealed under the seal key, XChaCha20-Poly1305
     version     u8               // 0x01
@@ -523,19 +538,65 @@ Provision {                      // sealed under the seal key, XChaCha20-Poly130
   slot before it shows the ticket, and the ticket MUST carry the hash of that
   offer. **[DEV-281]** The new device MUST reject an offer whose hash differs
   from the ticket, and it MUST write its hello under the hello slot.
-- **[DEV-282]** Each device MUST derive the hello key, the transcript, the code,
-  the provision slot, and the seal key as above. **[DEV-288]** The new device
+- **[DEV-282]** Each device MUST derive the hello key, the transcript, the
+  reply slot, the reply key, the code, the provision slot, and the seal key as
+  above. The inputs after the label of the code are 96 bytes, and the inputs of
+  the reply slot and of the reply key are 68 to 70 bytes, thus no two of them
+  are one input. **[DEV-288]** The new device
   MUST seal the four fields of the body of its hello under the hello key, and
   the existing device MUST reject a hello whose body does not open. A relay that
   holds the hello thus reads no key and no label. **[DEV-283]** The two devices
   MUST show the code of step 3, and the existing device MUST NOT write the
-  provision before the user confirms on it that the two codes match.
+  provision before the user confirms on it that the two codes match. The view
+  of the existing device MUST tell the user to confirm only when the new
+  device shows the same code.
+- **[DEV-361]** The existing device MUST take one hello and no more. It MUST
+  draw `r` from its CSPRNG after it took that hello, and it MUST write the
+  reply under the reply slot of that hello. The new device MUST NOT show a
+  code before it opened a reply under the reply key of its own hello, and it
+  MUST reject a reply that does not open.
+- **[DEV-362]** When one read of the hello slot gives two different chunks
+  that open as a hello, the existing device MUST end the link with no code and
+  no reply. A second party holds the ticket in that case. The copies of one
+  write that two relays give count as one hello.
+
+  > *Cause of the reply.* The writer of a hello selects each byte of it: the
+  > encapsulation, and the nonce of its seal. Thus it selects `ss` and the
+  > transcript. A code of those two alone has no commitment. A party that
+  > holds the ticket and sees the code on the new device makes hellos until
+  > one gives that code, which is about 10⁶ seals, and it writes that hello
+  > where the existing device reads it first. The user then sees one code on
+  > two screens, and the provision goes to that party.
+  >
+  > With the reply, each party that can select an input is bound before the
+  > last unknown input shows:
+  >
+  > - *The writer of the hello.* The existing device takes one hello, and it
+  >   draws `r` after that. The writer does not know `r` when its hello is
+  >   fixed, thus its code is one of 10⁶ with equal chance, and one link gives
+  >   it one try. A search through hellos finds nothing.
+  > - *The new device of the user.* It shows a code only after a reply opened
+  >   under the reply key of its own hello. That key needs `ss`, and only the
+  >   holder of the secret half of `link_pk` gets `ss` from the hello. The
+  >   ticket binds `link_pk` through the scan (`DEV-281`). The existing device
+  >   writes one reply, for the one hello that it took. Thus a new device that
+  >   shows a code shows the code of the existing device. When the existing
+  >   device took the hello of another party, the new device of the user shows
+  >   no code, and the user has no two codes to compare.
+  > - *The existing device.* It selects `r` after it saw the hello, and it
+  >   could search for a code. It is the device that holds the set, and a
+  >   party in its place needs the secret half of `link_pk`. A relay cannot
+  >   write or change a reply, because the reply opens under a key of `ss`.
+  >
+  > The residual is a user who confirms on the existing device while the new
+  > device shows no code. `DEV-283` puts that condition in the view.
 - **[DEV-002]** The existing device MUST write the provision under the
   provision slot and under no other handle. **[DEV-003]** The existing device
   MUST erase the offer when it reads the hello, or at `LINK_QR_TTL` after the
-  offer, whichever comes first. It MUST erase the provision and the chunks of
-  the snapshot when the sync channel opens, or at `LINK_PROVISION_TTL` after
-  the provision, whichever comes first. The new device MUST erase its hello
+  offer, whichever comes first. It MUST erase the reply, the provision, and the chunks
+  of the snapshot when the sync channel opens or when the link ends. A link
+  ends at the latest at `LINK_PROVISION_TTL` after the provision, and with no
+  provision at two times `LINK_PROVISION_TTL` after the offer. The new device MUST erase its hello
   when it reads the provision.
 - **[DEV-004]** The snapshot MUST be a full backup object of Part 4 §4.7.2
   under a fresh file key. Thus it carries the **local identity table** of
@@ -599,6 +660,12 @@ Provision {                      // sealed under the seal key, XChaCha20-Poly130
   no relay made yet ends when the relay made it, and no party gets its bundle.
   The existing device also removes the pending device from its store.
 
+  A sync channel that opens for a link whose roster does not follow the
+  current epoch MUST end as the channel of a revoked device does. Another
+  epoch took the head in that case, and the roster of the link names a device
+  that no epoch in force holds. A client MUST NOT sign an epoch that removes
+  a device while the snapshot of a link goes.
+
   The existing device MUST refuse a contact whose handshake names it a device
   while the existing device holds no pending device. The channel of that
   contact ends as the channel of a revoked device ends. No view shows it, no
@@ -653,9 +720,19 @@ Provision {                      // sealed under the seal key, XChaCha20-Poly130
 > handshake over an ephemeral queue. The new device holds no root identity
 > before the provision, and each queue of the reference client hangs off one.
 > A handle-addressed chunk needs no identity, the restore of Part 4 §4.7.2
-> already reads one, and the code of `DEV-283` gives the same protection as
-> the handshake transcript: a party that read the QR code and wrote the
-> hello first shows a code that differs from the screen of the new device.
+> already reads one, and the code of `DEV-283` with the reply of `DEV-361`
+> gives the same protection as the handshake transcript: when a party that
+> read the QR code wrote the hello that the existing device took, the new
+> device of the user shows no code.
+
+> *Limit of the hello slot.* Each holder of the ticket derives the write key
+> of the hello slot, thus it can replace or erase the hello of the new device,
+> and it can register other bytes under the handle before the new device
+> writes. The link then gives no code on the new device, or it ends under
+> `DEV-362`, and it ends at its time. That party stops a link, and it gets no
+> provision. A writer of Part 12 §12.4.2 that finds its first relays taken
+> goes to later relays of the placement list, and a reader asks `PLACE_PROBE`
+> relays. Part 12 states the two bounds.
 
 > *Cause.* A browser has no camera that a user trusts for a scan, and a phone
 > has one. A QR code that the new device shows moves the scan to the phone.
