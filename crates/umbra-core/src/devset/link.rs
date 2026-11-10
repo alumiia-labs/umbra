@@ -643,6 +643,11 @@ fn from_base64url(text: &str) -> Option<Vec<u8>> {
             out.push(u8::try_from((acc >> bits) & 0xFF).ok()?);
         }
     }
+
+    // One text for one value: the bits after the last byte are zero.
+    if acc & ((1 << bits) - 1) != 0 {
+        return None;
+    }
     Some(out)
 }
 

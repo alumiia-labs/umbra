@@ -257,6 +257,8 @@ object Core {
     /** The lock waits for no call of the worker (`IMP-127`). */
     private val lockWorker = Executors.newSingleThreadExecutor { Thread(null, it, "umbra-lock", 16L shl 20) }
 
+    // The lock thread, the network thread, and a service read it.
+    @Volatile
     private var handle: Handle? = null
 
     /** The handle of an unlock that failed. The next unlock takes it, thus one store opens one time. */
@@ -299,6 +301,7 @@ object Core {
     private var isVisible = false
 
     /** The mode of this device (Part 8 §8.3), as `Modes` gave it last. */
+    @Volatile
     private var mode = NotifyMode.Instant
 
     /** The ingress relays of the last connection that named one (`NTF-053`). */
@@ -319,6 +322,13 @@ object Core {
         private set
     private var lastTouchMs = 0L
     private var retryDelayMs = FIRST_RETRY_MS
+
+    /**
+     * Whether a lock for the idle time runs and its `Locked` event did not
+     * arrive yet. The activity keeps its cover for that time.
+     */
+    var locksForIdle by mutableStateOf(false)
+        private set
 
     private const val TOUCH_GAP_MS = 10_000L
 
@@ -431,6 +441,10 @@ object Core {
             restoreNote = null
             phase = Phase.Open
             mode = Modes.mode(app)
+            lastTouchMs = SystemClock.elapsedRealtime()
+            locksForIdle = false
+            // The user looks at the open app, thus each alert is old.
+            if (isVisible) Notifier.clear(app)
 
             // NTF-142: the open client takes each record over its own run.
             Watcher.stop()
@@ -1110,14 +1124,14 @@ object Core {
     fun userHalf(onLoaded: (CharArray) -> Unit) = call { client ->
         val sink = CharSink()
         client.userHalf(sink)
-        main.post { onLoaded(sink.chars) }
+        main.post { giveIfOpen(sink.chars, onLoaded) }
     }
 
     /** The share that a contact gave to this user, as its 51 digits. */
     fun heldShareDigits(conversation: Conversation, onLoaded: (CharArray) -> Unit) = call { client ->
         val sink = CharSink()
         client.heldShareDigits(conversation.id, sink)
-        main.post { onLoaded(sink.chars) }
+        main.post { giveIfOpen(sink.chars, onLoaded) }
     }
 
     /** The share that a contact gave to this user, or none. */
@@ -1141,13 +1155,13 @@ object Core {
     fun rootSeed(onLoaded: (CharArray) -> Unit) = call { client ->
         val sink = CharSink()
         client.rootSeed(sink)
-        main.post { onLoaded(sink.chars) }
+        main.post { giveIfOpen(sink.chars, onLoaded) }
     }
 
     fun recoveryCode(onLoaded: (CharArray) -> Unit) = call { client ->
         val sink = CharSink()
         client.recoveryCode(sink)
-        main.post { onLoaded(sink.chars) }
+        main.post { giveIfOpen(sink.chars, onLoaded) }
     }
 
     /**
@@ -1426,6 +1440,7 @@ object Core {
     private fun fail(message: String) = main.post {
         fault = message
         phase = Phase.Locked
+        locksForIdle = false
     }
 
     /** One thread drains the event stream, and it gives the clock to Rust. */
@@ -1664,6 +1679,10 @@ object Core {
                 invitation = null
                 // A scanned invitation is a capability.
                 scannedInvitation = null
+                // A link that waited through a lock with no view leaves. A
+                // link of this moment stays: the user tapped it, and the
+                // unlock view is in front.
+                if (!isVisible) linkedInvitation = null
                 joinCode = null
                 // The run ended with the lock, thus its two lines are old.
                 // `fault` stays: the lock view shows it, as for a store
@@ -1705,6 +1724,7 @@ object Core {
                 linkStatus = LinkStatus.Idle
                 main.removeCallbacks(dropRun)
                 phase = Phase.Locked
+                locksForIdle = false
 
                 // A locked client holds no key that reads a queue, thus the
                 // carrier ends, and the user learns it. A service that did
@@ -1715,8 +1735,9 @@ object Core {
                 if (carrierHolds) {
                     if (watches) Watcher.start(app) else DeliveryService.stop(app)
                 }
-                // A lock takes the text of each alert off the shade.
-                Notifier.clear(app)
+                // A lock takes the text of each alert off the shade. The
+                // alert itself stays: the user did not see it yet.
+                Notifier.lockContent(app)
                 // NTF-120: a tick of Periodic mode shows which conversation
                 // waits, thus that mode takes no notice.
                 val ticks = Modes.mode(app) == NotifyMode.Periodic
@@ -1831,6 +1852,22 @@ object Core {
         }
     }
 
+    /**
+     * Locks the client when the idle time of the auto-lock passed. The tick
+     * of the core counts no time of a frozen process, and the clock since
+     * boot does. `lastTouchMs` can be `TOUCH_GAP_MS` older than the last
+     * touch, thus the check adds that gap.
+     */
+    fun lockIfIdle(context: Context) {
+        if (phase != Phase.Open || autoLockSeconds <= 0L) return
+
+        val idleMs = SystemClock.elapsedRealtime() - lastTouchMs
+        if (idleMs < autoLockSeconds * 1_000L + TOUCH_GAP_MS) return
+
+        locksForIdle = true
+        lock(context)
+    }
+
     /** The user acted, thus the idle time of the auto-lock starts again. */
     fun touched() {
         val now = SystemClock.elapsedRealtime()
@@ -1846,7 +1883,10 @@ object Core {
         isVisible = nowVisible
         // The client makes cover cells while a view is on the screen only.
         call { it.setForeground(nowVisible) }
-        if (nowVisible) Notifier.clear(context)
+        // The unlock view shows no message, thus the alerts stay until the
+        // client opens.
+        if (nowVisible && phase == Phase.Open && !locksForIdle) Notifier.clear(context)
+        if (nowVisible && phase != Phase.Open) Notifier.clearLocked(context)
         if (nowVisible) {
             resultLock?.let { main.removeCallbacks(it) }
             resultLock = null
@@ -2039,10 +2079,17 @@ object Core {
         main.post { onLoaded(pending) }
     }
 
-    /** Accepts the new key of one contact (`IDN-062`). */
-    fun acceptKeyChange(conversation: Conversation) = call { client ->
-        client.acceptKeyChange(conversation.id)
-        main.post { revision++ }
+    /**
+     * Accepts the new key of one contact (`IDN-062`). `shown` is the safety
+     * number that the notice showed. A later notice with another key gives
+     * `Stale`: the view reads the notice again, and nothing applies.
+     */
+    fun acceptKeyChange(conversation: Conversation, shown: String) = call { client ->
+        try {
+            client.acceptKeyChange(conversation.id, shown)
+        } finally {
+            main.post { revision++ }
+        }
         refreshChats()
     }
 
@@ -2380,7 +2427,7 @@ object Core {
      * Makes a private group of Part 11. The two relays of its queues come
      * from the relay set, and the group sends nothing until both answered.
      */
-    fun createGroup(name: String, onMade: (Conversation) -> Unit) = call { client ->
+    fun createGroup(name: String, onFailed: () -> Unit = {}, onMade: (Conversation) -> Unit) = call(onFailed) { client ->
         val conversation = Conversation(client.createGroup(name))
         val list = summaries(client)
         main.post {
@@ -2633,13 +2680,16 @@ object Core {
     }
 
     /** Part 7 `DEV-334`: the deletion of the own devices, and a request to the contact. */
-    fun deleteConversationForEveryone(conversation: Conversation, onBusy: () -> Unit) {
+    fun deleteConversationForEveryone(conversation: Conversation, onAsked: () -> Unit = {}, onBusy: () -> Unit) {
         val client = handle ?: return
 
         worker.execute {
             try {
                 client.deleteConversationForEveryone(conversation.id)
-                main.post { revision++ }
+                main.post {
+                    revision++
+                    onAsked()
+                }
                 refreshChats()
             } catch (busy: FfiException.Busy) {
                 main.post(onBusy)
@@ -2824,7 +2874,10 @@ object Core {
     fun sendVideo(context: Context, conversation: Conversation, source: android.net.Uri, caption: CharArray? = null) {
         val app = context.applicationContext
         on(mediaWorker) { client ->
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return@on
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                caption?.fill('\u0000')
+                return@on
+            }
 
             // ATT `MAX_FILE_SIZE`: the size that the provider names refuses
             // a video before the remux copies one sample.
@@ -3256,12 +3309,15 @@ object Core {
      * in 10 seconds for one conversation, and `onBusy` tells a user who is
      * faster than that.
      */
-    fun deleteForEveryone(message: MsgHandle, onBusy: () -> Unit) {
+    fun deleteForEveryone(message: MsgHandle, onAsked: () -> Unit = {}, onBusy: () -> Unit) {
         val client = handle ?: return
         worker.execute {
             try {
                 client.deleteForEveryone(message)
-                main.post { revision++ }
+                main.post {
+                    revision++
+                    onAsked()
+                }
                 refreshChats()
             } catch (busy: FfiException.Busy) {
                 main.post(onBusy)
@@ -3309,7 +3365,19 @@ object Core {
             Line(message, sink.chars, info, quote, client.reactions(message), poll)
         }
 
-        main.post { onLoaded(lines) }
+        main.post {
+            // A lock overtook the read: no view takes the text, thus it
+            // leaves the memory here.
+            if (phase != Phase.Open) {
+                lines.forEach { line ->
+                    line.text.fill('\u0000')
+                    line.quote?.text?.fill('\u0000')
+                }
+                return@post
+            }
+
+            onLoaded(lines)
+        }
     }
 
     /** One result of a search: the message, its text, and the match in it. */
@@ -3417,7 +3485,16 @@ object Core {
                 }
             }
 
-            main.post { if (turn == searchTurns) onFound(found) }
+            main.post {
+                // A lock or a later search overtook this one, thus no view
+                // takes the text.
+                if (turn != searchTurns || phase != Phase.Open) {
+                    found.forEach { it.text.fill('\u0000') }
+                    return@post
+                }
+
+                onFound(found)
+            }
         }
     }
 
@@ -3544,26 +3621,57 @@ object Core {
         return image
     }
 
-    private fun call(action: (Handle) -> Unit) = on(worker, action)
+    private fun call(action: (Handle) -> Unit) = on(worker, action = action)
 
-    /** Runs a call of the client on one thread of the core, and shows its fault. */
-    private fun on(thread: java.util.concurrent.Executor, action: (Handle) -> Unit) {
-        val client = handle ?: return
+    /** A call whose view shows a state of its own, which `onFailed` ends on the main thread. */
+    private fun call(onFailed: () -> Unit, action: (Handle) -> Unit) = on(worker, onFailed, action)
+
+    /**
+     * Gives secret digits to a view of an open client. A lock that overtook
+     * the read leaves no view to wipe them, thus they leave the memory here.
+     */
+    private fun giveIfOpen(chars: CharArray, onLoaded: (CharArray) -> Unit) {
+        if (phase != Phase.Open) {
+            chars.fill('\u0000')
+            return
+        }
+
+        onLoaded(chars)
+    }
+
+    /**
+     * Runs a call of the client on one thread of the core, and shows its
+     * fault. `onFailed` runs on the main thread after each call that did
+     * not finish, also one that a lock overtook.
+     */
+    private fun on(thread: java.util.concurrent.Executor, onFailed: (() -> Unit)? = null, action: (Handle) -> Unit) {
+        val client = handle
+        if (client == null) {
+            onFailed?.let { main.post(it) }
+            return
+        }
 
         thread.execute {
             try {
                 action(client)
             } catch (locked: FfiException.Locked) {
                 // A read that the lock overtook is no fault of the user.
+                onFailed?.let { main.post(it) }
             } catch (failure: FfiException) {
                 // A debug build names the call that failed.
                 if (BuildConfig.DEBUG) android.util.Log.w("umbra-core", "a call failed", failure)
-                main.post { fault = UiText.get(R.string.core_did_not_work, failure.javaClass.simpleName) }
+                main.post {
+                    fault = UiText.get(R.string.core_did_not_work, failure.javaClass.simpleName)
+                    onFailed?.invoke()
+                }
             } catch (failure: Exception) {
                 // A fault of the platform, as a content provider that
                 // refuses a file, ends the call and not the app.
                 if (BuildConfig.DEBUG) android.util.Log.w("umbra-core", "a call failed", failure)
-                main.post { fault = UiText.get(R.string.core_did_not_work, failure.javaClass.simpleName) }
+                main.post {
+                    fault = UiText.get(R.string.core_did_not_work, failure.javaClass.simpleName)
+                    onFailed?.invoke()
+                }
             }
         }
     }

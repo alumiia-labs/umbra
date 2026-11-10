@@ -27,7 +27,11 @@ use umbra_crypto::{hash::sha3_256, ohttp};
 use umbra_transport::https;
 use umbra_wire::directory::{self, Kind, Status};
 
-use crate::{ndr_server::Gateway, server::OsRng, store::StoreFault};
+use crate::{
+    ndr_server::{source_of, Gateway, Sources, CONNECTIONS_PER_SOURCE, HANDSHAKES_PER_SOURCE},
+    server::OsRng,
+    store::StoreFault,
+};
 
 /// The path of the gateway.
 pub const GATEWAY_PATH: &str = "/gateway";
@@ -503,13 +507,15 @@ pub async fn run_directory(
 
     let gateway = Arc::new(gateway);
     let held = Arc::new(tokio::sync::Semaphore::new(CONNECTION_MAX));
+    let connections = Sources::default();
+    let handshakes = Sources::default();
 
     loop {
         // An accept that fails ends no directory: the process is out of
         // descriptors, or a peer reset its connection in the queue, and
         // both pass. It writes no line, because the cause can come from a
         // peer at will.
-        let Ok((tcp, _)) = listener.accept().await else {
+        let Ok((tcp, address)) = listener.accept().await else {
             tokio::time::sleep(ACCEPT_RETRY).await;
             continue;
         };
@@ -518,16 +524,32 @@ pub async fn run_directory(
             continue;
         };
 
+        // One network holds a part of the places and no more. The server
+        // holds the network for the time of the connection and writes it
+        // nowhere.
+        let source = source_of(address.ip());
+        let Some(seat) = connections.take(source, CONNECTIONS_PER_SOURCE) else {
+            continue;
+        };
+        let shaking = handshakes.clone();
+
         let tls = tls.clone();
         let gateway = gateway.clone();
         let shared = shared.clone();
 
         tokio::spawn(async move {
             let _permit = permit;
+            let _seat = seat;
             let _ = tokio::time::timeout(CONNECTION_TIME, async move {
                 // A peer that sends no handshake holds its place for
-                // `HANDSHAKE_TIME` and not for the whole of the connection.
+                // `HANDSHAKE_TIME` and not for the whole of the connection,
+                // and one network holds a bounded count of such peers.
+                let Some(shake) = shaking.take(source, HANDSHAKES_PER_SOURCE) else {
+                    return;
+                };
                 let accepted = tokio::time::timeout(HANDSHAKE_TIME, tls.accept(tcp)).await;
+                drop(shake);
+
                 if let Ok(Ok(stream)) = accepted {
                     serve(stream, gateway, shared).await;
                 }

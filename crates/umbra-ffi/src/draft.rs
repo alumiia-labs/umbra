@@ -179,6 +179,23 @@ impl Draft {
         self.file.take()
     }
 
+    /// Takes the file out of the draft, with its name and its preview
+    /// (`IMP-039`).
+    pub fn detach(&mut self) {
+        self.wipe_file();
+        self.file = None;
+    }
+
+    /// Whether the draft holds a file that a send refuses before it reads
+    /// the store: a file with an answer, or with a text above the caption.
+    pub fn file_refusal(&self) -> Option<Error> {
+        self.file.as_ref()?;
+        if self.reply_to.is_some() {
+            return Some(Error::Malformed);
+        }
+        (self.text.len() > umbra_wire::descriptor::CAPTION_MAX).then_some(Error::TooLong)
+    }
+
     /// Whether the draft holds a file.
     pub fn has_file(&self) -> bool {
         self.file.is_some()
@@ -301,6 +318,26 @@ mod tests {
             .attach(bytes(), shape(class::AUDIO, VOICE_MAX_SECONDS + 1))
             .unwrap();
         draft.attach(bytes(), shape(class::DOC, 0)).unwrap();
+    }
+
+    #[test]
+    fn a_draft_names_the_file_that_a_send_refuses_and_gives_its_file_up() {
+        let mut draft = Draft::new(ConversationId([4; 16]));
+        assert_eq!(draft.file_refusal(), None);
+        draft
+            .attach(Zeroizing::new(vec![7; 10]), Shape::default())
+            .unwrap();
+        assert_eq!(draft.file_refusal(), None);
+
+        // WIR-535: the text of a file is a caption with a bound.
+        let long = vec![u16::from(b'a'); umbra_wire::descriptor::CAPTION_MAX + 1];
+        draft.set_text(&long).unwrap();
+        assert_eq!(draft.file_refusal(), Some(Error::TooLong));
+
+        // A file that the draft gives up leaves a text draft.
+        draft.detach();
+        assert!(!draft.has_file());
+        assert_eq!(draft.file_refusal(), None);
     }
 
     #[test]

@@ -212,6 +212,9 @@ pub struct Receiver {
     /// record filled yet: a record that fills one is a reorder, and it
     /// shows (`GRP-259`, `GRP-205`).
     holes: BTreeSet<(u16, u32, u32)>,
+    /// The epoch and the slot of the newest presence record of each sender.
+    /// It stays in RAM: a restart opens the slot window one time more.
+    presence: BTreeMap<u16, (u32, u32)>,
     /// The held records that left at the bound since the last count, which
     /// the client shows as a gap (`GRP-254`).
     evicted: usize,
@@ -227,6 +230,11 @@ const HOLES_MAX: usize = 256;
 
 /// `HOLES_MAX` as a counter distance.
 const HOLES_MAX_COUNTER: u32 = 256;
+
+/// The time for which one gap sends the reader to the other replica. A
+/// record that neither replica holds would else ask until the epoch floor
+/// moves.
+const GAP_ASK_SPAN: u64 = 10 * GROUP_GAP_TIMEOUT;
 
 impl Receiver {
     /// The index whose tags this receiver checks.
@@ -247,6 +255,7 @@ impl Receiver {
             held: Vec::new(),
             gaps: BTreeMap::new(),
             holes: BTreeSet::new(),
+            presence: BTreeMap::new(),
             evicted: 0,
         }
     }
@@ -335,6 +344,7 @@ impl Receiver {
             held,
             gaps,
             holes,
+            presence: BTreeMap::new(),
             evicted: 0,
         })
     }
@@ -490,6 +500,19 @@ impl Receiver {
             if !is_presence(plain.app) {
                 return Err(Error::Unverified);
             }
+
+            // A presence record uses no counter, thus its slot stops a
+            // replay: an older record must not show a silent member as
+            // alive. Two records of one slot both count.
+            let at = (record.epoch, record.slot);
+            if self
+                .presence
+                .get(&sender)
+                .is_some_and(|newest| at < *newest)
+            {
+                return Ok(Outcome::Duplicate);
+            }
+            self.presence.insert(sender, at);
             return Ok(Outcome::Presence { sender });
         }
 
@@ -511,6 +534,7 @@ impl Receiver {
 
         let epoch = record.epoch;
         let mut repeated = false;
+        let mut is_new_gap = false;
         let last = self.counters.entry((sender, epoch)).or_insert(0);
         if plain.counter > *last {
             // GRP-259: each counter between the last and this one is a
@@ -521,14 +545,17 @@ impl Receiver {
                 .saturating_add(1)
                 .max(plain.counter.saturating_sub(HOLES_MAX_COUNTER));
             *last = plain.counter;
+            is_new_gap = from < plain.counter;
             for missing in from..plain.counter {
                 self.holes.insert((sender, epoch, missing));
             }
 
             // The holes of an epoch before the previous one name records
-            // that no key opens any more (GRP-250).
+            // that no key opens any more (GRP-250). The counters of such an
+            // epoch order no record any more.
             let floor = epoch.saturating_sub(1);
             self.holes.retain(|(_, held, _)| *held >= floor);
+            self.counters.retain(|(_, held), _| *held >= floor);
 
             // Only the excess, which is most often none, goes into a list.
             let of_sender = (sender, epoch, 0)..=(sender, epoch, u32::MAX);
@@ -566,7 +593,11 @@ impl Receiver {
             .next()
             .is_some();
         if has_hole {
-            self.gaps.entry(sender).or_insert(now);
+            // A new gap after the ask span of an older one asks again.
+            let since = self.gaps.entry(sender).or_insert(now);
+            if is_new_gap && now.saturating_sub(*since) >= GAP_ASK_SPAN {
+                *since = now;
+            }
         } else {
             self.gaps.remove(&sender);
         }
@@ -722,10 +753,9 @@ impl Receiver {
     /// reader to the other replica (`GRP-205`, `GRP-255`).
     pub fn needs_other_replica(&self, now: u64) -> bool {
         !self.held.is_empty()
-            || self
-                .gaps
-                .values()
-                .any(|since| now.saturating_sub(*since) >= GROUP_GAP_TIMEOUT)
+            || self.gaps.values().any(|since| {
+                (GROUP_GAP_TIMEOUT..GAP_ASK_SPAN).contains(&now.saturating_sub(*since))
+            })
     }
 
     /// The last counter seen from `sender` in `epoch`.
@@ -738,6 +768,7 @@ impl Receiver {
         self.counters.retain(|(s, _), _| *s != sender);
         self.gaps.remove(&sender);
         self.holes.retain(|(s, _, _)| *s != sender);
+        self.presence.remove(&sender);
     }
 }
 

@@ -26,6 +26,9 @@ object Watcher : WatchListener {
     /** The watch that runs. The worker alone touches it. */
     private var watch: Watch? = null
 
+    /** Whether the service holds the watch, and not a tick alone. The worker alone touches it. */
+    private var isHeld = false
+
     /**
      * Starts the watch from the sealed table of the last open client. With
      * no table that opens, the service ends, and the user learns that no
@@ -35,6 +38,8 @@ object Watcher : WatchListener {
         val app = context.applicationContext
         this.app = app
         worker.execute {
+            // A watch that a tick started serves the service from here.
+            isHeld = true
             if (watch != null) return@execute
 
             val table = WakeStore.readWatch(app)
@@ -81,18 +86,24 @@ object Watcher : WatchListener {
         if (!started) return
 
         Thread.sleep(ms)
-        stop()
+        // The service can take the watch in those seconds, and its watch
+        // does not end with the tick.
+        worker.execute { if (!isHeld) end() }
     }
 
     /** Ends the watch: at the unlock, and when the service ends. */
     fun stop() {
-        worker.execute {
-            watch?.let {
-                it.stop()
-                it.destroy()
-            }
-            watch = null
+        worker.execute { end() }
+    }
+
+    /** Ends the watch on the worker. */
+    private fun end() {
+        watch?.let {
+            it.stop()
+            it.destroy()
         }
+        watch = null
+        isHeld = false
     }
 
     // An exception that crosses into Rust ends the process.
@@ -120,11 +131,7 @@ object Watcher : WatchListener {
         try {
             val app = app ?: return
             worker.execute {
-                watch?.let {
-                    it.stop()
-                    it.destroy()
-                }
-                watch = null
+                end()
 
                 // NTF-120: the watch of Direct mode ended for good. The
                 // next tick of Periodic mode tries again.

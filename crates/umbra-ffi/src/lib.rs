@@ -108,15 +108,14 @@ impl Delivery {
 
     /// The state of a stored byte.
     pub fn from_byte(byte: u8) -> Option<Self> {
-        [
-            Delivery::Queued,
-            Delivery::Accepted,
-            Delivery::Delivered,
-            Delivery::Read,
-            Delivery::Failed,
-        ]
-        .into_iter()
-        .find(|state| *state as u8 == byte)
+        match byte {
+            0 => Some(Delivery::Queued),
+            1 => Some(Delivery::Accepted),
+            2 => Some(Delivery::Delivered),
+            3 => Some(Delivery::Read),
+            4 => Some(Delivery::Failed),
+            _ => None,
+        }
     }
 }
 
@@ -162,15 +161,14 @@ pub enum FailureCause {
 impl FailureCause {
     /// The cause of a stored byte.
     pub fn from_byte(byte: u8) -> Option<Self> {
-        [
-            FailureCause::Refused,
-            FailureCause::NoPath,
-            FailureCause::Upload,
-            FailureCause::NoReplica,
-            FailureCause::Full,
-        ]
-        .into_iter()
-        .find(|cause| *cause as u8 == byte)
+        match byte {
+            1 => Some(FailureCause::Refused),
+            2 => Some(FailureCause::NoPath),
+            3 => Some(FailureCause::Upload),
+            4 => Some(FailureCause::NoReplica),
+            5 => Some(FailureCause::Full),
+            _ => None,
+        }
     }
 }
 
@@ -655,6 +653,18 @@ mod tests {
             rng,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn a_stored_byte_names_its_state_and_its_cause_and_no_other_value() {
+        for byte in 0..=u8::MAX {
+            let state = Delivery::from_byte(byte);
+            assert_eq!(state.map(|state| state as u8), (byte <= 4).then_some(byte));
+
+            let cause = FailureCause::from_byte(byte);
+            let is_cause = (1..=5).contains(&byte);
+            assert_eq!(cause.map(|cause| cause as u8), is_cause.then_some(byte));
+        }
     }
 
     #[test]
@@ -4622,7 +4632,10 @@ mod tests {
             Err(Error::Busy)
         );
 
-        let (named, key) = client.accept_key_change(conversation, &mut rng).unwrap();
+        let shown = client.key_change(conversation).unwrap().unwrap();
+        let (named, key) = client
+            .accept_key_change(conversation, &shown.new_safety_number, &mut rng)
+            .unwrap();
         assert_eq!((named, key), (contact, [0xAB; 32]));
         assert_eq!(
             client.safety_number(conversation).unwrap(),
@@ -4688,7 +4701,10 @@ mod tests {
             .unwrap());
         assert!(!client.is_verified(conversation).unwrap());
 
-        client.accept_key_change(conversation, &mut rng).unwrap();
+        let shown = client.key_change(conversation).unwrap().unwrap();
+        client
+            .accept_key_change(conversation, &shown.new_safety_number, &mut rng)
+            .unwrap();
         assert!(client.is_verified(conversation).unwrap());
     }
 
@@ -4768,7 +4784,9 @@ mod tests {
         deliver(&mut bob, &at_bob, &notice.app, (now + 20) * 1_000, &mut rng);
         let pending = bob.key_change(with_alice).unwrap().unwrap();
         assert_ne!(pending.new_safety_number, before);
-        let (_, key) = bob.accept_key_change(with_alice, &mut rng).unwrap();
+        let (_, key) = bob
+            .accept_key_change(with_alice, &pending.new_safety_number, &mut rng)
+            .unwrap();
         assert_eq!(key, new);
         assert_eq!(
             bob.safety_number(with_alice).unwrap(),

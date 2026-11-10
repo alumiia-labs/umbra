@@ -103,7 +103,8 @@ pub struct ResponseKey {
 impl ResponseKey {
     fn keys(&self, nonce: &[u8]) -> Result<(Secret<32>, [u8; 12]), Error> {
         let salt = [self.enc.as_slice(), nonce].concat();
-        let (_, kdf) = Hkdf::<Sha3_256>::extract(Some(&salt), self.secret.expose());
+        // `new` gives no copy of the pseudorandom key to this frame.
+        let kdf = Hkdf::<Sha3_256>::new(Some(&salt), self.secret.expose());
         let mut key = Secret::<32>::zeroed();
         kdf.expand(b"key", key.expose_mut())
             .map_err(|_| Error::Length)?;

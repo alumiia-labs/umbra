@@ -302,12 +302,14 @@ fn fail_upload(
     node: &mut ClientNode,
     active: &mut BTreeMap<u64, Active>,
     classes: &mut BTreeMap<u64, umbra_core::session::node::DelayClass>,
+    progress: &mut BTreeMap<u64, (u32, u32)>,
     updates: &mpsc::UnboundedSender<TransferUpdate>,
     tag: u64,
 ) {
     crate::devlog::format_line!("transfers: tag {tag} failed apart from a step");
     end_transfer(node, active, tag);
     classes.remove(&tag);
+    progress.remove(&tag);
     let _ = updates.send(TransferUpdate::Failed { tag });
 }
 
@@ -426,6 +428,13 @@ pub async fn run_transfers(
         }
     };
 
+    // ATT-161: the relays of this run, by their identifier. A relay that
+    // left the directory takes no `CDEL`.
+    let known: std::collections::BTreeSet<[u8; 32]> =
+        relays.iter().map(|relay| relay.relay_id).collect();
+
+    // The key and the mask of the upgrade are no secret under TLS, thus a
+    // draw that fails leaves zero and ends no dial.
     let mut key = [0u8; 16];
     let mut mask = [0u8; 4];
     let _ = rng.try_fill_bytes(&mut key);
@@ -493,7 +502,7 @@ pub async fn run_transfers(
         crate::probe::sent(&mut node);
 
         for capsule in node.take_capsules() {
-            if link.send(&capsule).await.is_err() {
+            if !crate::runtime::sent_in_time(&mut link, &capsule).await {
                 break 'run;
             }
         }
@@ -524,7 +533,7 @@ pub async fn run_transfers(
                     on_solved(solved, &mut solves, &mut node, &mut active, &mut rng)
                 });
                 if let Some(tag) = failed {
-                    fail_upload(&mut node, &mut active, &mut classes, &updates, tag);
+                    fail_upload(&mut node, &mut active, &mut classes, &mut progress, &updates, tag);
                 }
                 Vec::new()
             }
@@ -539,7 +548,7 @@ pub async fn run_transfers(
                     }
                 }
                 for tag in failed {
-                    fail_upload(&mut node, &mut active, &mut classes, &updates, tag);
+                    fail_upload(&mut node, &mut active, &mut classes, &mut progress, &updates, tag);
                 }
                 Vec::new()
             }
@@ -559,6 +568,7 @@ pub async fn run_transfers(
                 }
 
                 let mut failed = Vec::new();
+                let mut gone = Vec::new();
                 let mut read = Vec::new();
                 for (tag, transfer) in &mut active {
                     node.set_chunk_class(classes.get(tag).copied().unwrap_or_default());
@@ -585,7 +595,15 @@ pub async fn run_transfers(
                             Err(error) => Err(error),
                         },
                     };
-                    if ticked.is_err() {
+                    if ticked.is_ok() {
+                        continue;
+                    }
+
+                    // A download that no relay holds is gone, at a tick as
+                    // at an answer. The view shows the two ends apart.
+                    if matches!(transfer, Active::Down(download) if download.is_gone()) {
+                        gone.push(*tag);
+                    } else {
                         failed.push(*tag);
                     }
                 }
@@ -594,12 +612,21 @@ pub async fn run_transfers(
                     crate::devlog::format_line!("transfers: tag {tag} failed at a tick");
                     end_transfer(&mut node, &mut active, tag);
                     classes.remove(&tag);
+                    progress.remove(&tag);
                     let _ = updates.send(TransferUpdate::Failed { tag });
+                }
+
+                for tag in gone {
+                    end_transfer(&mut node, &mut active, tag);
+                    classes.remove(&tag);
+                    progress.remove(&tag);
+                    let _ = updates.send(TransferUpdate::Gone { tag });
                 }
 
                 for (tag, found) in read {
                     active.remove(&tag);
                     classes.remove(&tag);
+                    progress.remove(&tag);
                     let _ = updates.send(TransferUpdate::HandleRead {
                         tag,
                         chunks: found.chunks,
@@ -618,7 +645,7 @@ pub async fn run_transfers(
 
         // The node commits nothing: a transfer node holds no contact. The
         // changes leave it, thus they do not pile up.
-        let _ = node.take_changes();
+        drop(node.take_changes());
         for event in events {
             match event {
                 ClientEvent::CircuitReady => {
@@ -866,6 +893,15 @@ pub async fn run_transfers(
                     let mut left = 0usize;
                     let mut each = true;
                     for relay in relays {
+                        // A relay that left the directory holds the chunk
+                        // for no client, and no later run reaches it. It
+                        // counts as done, or the store would send this
+                        // erase in each run with no end. A run with no
+                        // relay set decides nothing.
+                        if !known.is_empty() && !known.contains(&relay) {
+                            continue;
+                        }
+
                         let job = ChunkJob::Erase {
                             cred: StaticSecret::from(*cred.expose()),
                         };
@@ -882,6 +918,9 @@ pub async fn run_transfers(
                         // A second erase of one chunk adds to the first.
                         let waits = erase_left.entry(chunk_id).or_insert((0, true));
                         *waits = (waits.0.saturating_add(left), waits.1 && each);
+                    } else if each {
+                        // Each relay of the chunk left the directory.
+                        let _ = updates.send(TransferUpdate::Erased { chunk_id });
                     }
 
                     idle_since = tokio::time::Instant::now();

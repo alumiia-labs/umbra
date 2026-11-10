@@ -20,6 +20,16 @@ impl<const N: usize> Secret<N> {
         Self([0u8; N])
     }
 
+    /// A second copy of the secret, for a state copy that a failed step
+    /// drops. The bytes go from one secret into the other, with no plain
+    /// array between them.
+    #[must_use]
+    pub fn duplicate(&self) -> Self {
+        let mut copy = Self::zeroed();
+        copy.0.copy_from_slice(&self.0);
+        copy
+    }
+
     /// The bytes.
     pub fn expose(&self) -> &[u8; N] {
         &self.0
@@ -40,5 +50,17 @@ impl<const N: usize> From<[u8; N]> for Secret<N> {
 impl<const N: usize> subtle::ConstantTimeEq for Secret<N> {
     fn ct_eq(&self, other: &Self) -> subtle::Choice {
         self.0.ct_eq(&other.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_duplicate_holds_the_bytes_of_its_source() {
+        let source = Secret::new([7u8; 48]);
+        let copy = source.duplicate();
+        assert_eq!(copy.expose(), source.expose());
     }
 }

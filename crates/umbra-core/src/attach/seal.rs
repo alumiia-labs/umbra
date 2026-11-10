@@ -230,16 +230,35 @@ pub struct Assembler {
 
 impl Assembler {
     fn new(key: Secret<32>, nonce: [u8; 24], digest: Option<[u8; 32]>, chunk_count: u32) -> Self {
-        let most = segment::segment_count(usize::try_from(MAX_FILE_SIZE).unwrap_or(usize::MAX));
-        let segments = usize::try_from(chunk_count).map_or(most, |count| count.min(most));
+        // The peer states the size. The buffer thus grows with the chunks
+        // that open, and a descriptor alone reserves no memory.
         Assembler {
             key,
             nonce,
             digest,
             chunk_count,
             next: 0,
-            plain: Zeroizing::new(Vec::with_capacity(segments.saturating_mul(SEGMENT_SIZE))),
+            plain: Zeroizing::new(Vec::new()),
         }
+    }
+
+    /// Makes room for one more segment. A growth moves the plaintext to a
+    /// new buffer and wipes the old one, which a plain `Vec` growth does
+    /// not do.
+    fn make_room(&mut self) {
+        let needed = self.plain.len().saturating_add(SEGMENT_SIZE);
+        if needed <= self.plain.capacity() {
+            return;
+        }
+
+        let most = segment::segment_count(usize::try_from(MAX_FILE_SIZE).unwrap_or(usize::MAX));
+        let segments = usize::try_from(self.chunk_count).map_or(most, |count| count.min(most));
+        let whole = segments.saturating_mul(SEGMENT_SIZE);
+        let doubled = self.plain.capacity().saturating_mul(2);
+
+        let mut grown = Zeroizing::new(Vec::with_capacity(doubled.min(whole).max(needed)));
+        grown.extend_from_slice(&self.plain);
+        self.plain = grown;
     }
 
     /// The data chunks of a descriptor, under `file_key`. The commitment
@@ -323,6 +342,7 @@ impl Assembler {
             return Err(Error::Stale);
         }
 
+        self.make_room();
         self.plain.extend_from_slice(segment);
         self.next = self.next.saturating_add(1);
         Ok(())
@@ -336,6 +356,7 @@ impl Assembler {
         }
 
         let last = self.next.saturating_add(1) == self.chunk_count;
+        self.make_room();
         let start = self.plain.len();
         open_chunk_onto(
             &self.key,

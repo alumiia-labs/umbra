@@ -50,6 +50,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.runtime.saveable.rememberSaveable
 
 /** The views above the tabs. The list is a stack, and Back takes the top. */
 sealed interface Screen {
@@ -141,7 +142,8 @@ fun UmbraApp() {
 
 @Composable
 private fun OpenApp() {
-    var tab by remember { mutableStateOf(Tab.Chats) }
+    // The tab stays across a change of the configuration, as a new font size.
+    var tab by rememberSaveable { mutableStateOf(Tab.Chats) }
     var stack by remember { mutableStateOf(listOf<Screen>()) }
     val push: (Screen) -> Unit = { stack = stack + it }
     val pop: () -> Unit = { stack = stack.dropLast(1) }
@@ -163,19 +165,22 @@ private fun OpenApp() {
     // A contact that is new takes its name before each other view.
     val unnamed = Core.toName
     if (unnamed != null) {
-        NameContactScreen(
-            unnamed,
-            onDone = {
-                Core.toName = null
-                stack = listOf(Screen.Chat(unnamed))
-            },
-        )
+        val onNamed = {
+            Core.toName = null
+            stack = listOf(Screen.Chat(unnamed))
+        }
+
+        // Back does what the arrow of the bar does. Without this, it would
+        // pop a view that this one hides, or leave the app.
+        BackHandler(onBack = onNamed)
+        NameContactScreen(unnamed, onDone = onNamed)
         return
     }
 
     val top = stack.lastOrNull()
     Column(Modifier.fillMaxSize()) {
         if (top !is Screen.VerifyCode) VerifyPrompt(push)
+        FaultNotice(top)
         when (top) {
             null -> TabsScreen(tab, onTab = { tab = it }, push)
             Screen.AddContact -> AddContactScreen(pop, push)
@@ -199,7 +204,7 @@ private fun OpenApp() {
             Screen.RecoveryCode -> RecoveryCodeScreen(pop, push)
             // IDN-003: the seed that rebuilds the identity and no contact.
             Screen.RootSeed -> SecretDigitsScreen(
-                stringResource(R.string.main_root_seed_title),
+                stringResource(R.string.common_root_seed),
                 stringResource(R.string.main_root_seed_body),
                 pop,
             ) { loaded -> Core.rootSeed(loaded) }
@@ -229,6 +234,33 @@ private fun OpenApp() {
             }
         }
     }
+}
+
+/** Whether a view shows the fault of the core in a place of its own. */
+private fun showsOwnFault(top: Screen?) = when (top) {
+    null, Screen.NewGroup, Screen.YourInvitation, Screen.UseInvitation, Screen.LinkDevice -> true
+    // A photo and a video fill the screen with a dark ground.
+    is Screen.Chat, is Screen.Photo, is Screen.Video -> true
+    else -> false
+}
+
+/**
+ * The fault of the core on a view that has no place for it. Without this
+ * line, a failure there showed nothing, and it showed later in the chat
+ * list. A fault that is older than the view is not its fault, thus the
+ * view does not show it. A tap takes the line away.
+ */
+@Composable
+private fun FaultNotice(top: Screen?) {
+    val older = remember(top) { Core.fault }
+    val fault = Core.fault ?: return
+    if (fault == older || showsOwnFault(top)) return
+
+    Box(
+        Modifier
+            .padding(start = PressInset, end = PressInset, top = 12.dp)
+            .press(role = Role.Button, label = stringResource(R.string.common_dismiss)) { Core.fault = null },
+    ) { Note(fault, isError = true) }
 }
 
 /** A view of one contact. */
@@ -300,7 +332,7 @@ private fun UnlockScreen() {
     // The field is gone while the store opens, and its keyboard goes too.
     HideKeyboardOn(isOpening)
 
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = PressInset)) {
         // The block starts at one height in each state, thus nothing jumps
         // when the field gives way to the progress bar.
         Spacer(Modifier.height(132.dp))
@@ -308,7 +340,7 @@ private fun UnlockScreen() {
         Spacer(Modifier.height(28.dp))
         when {
             isOpening -> Headline(stringResource(R.string.main_opening))
-            isFirst && isRestoring -> Headline(stringResource(R.string.main_restore))
+            isFirst && isRestoring -> Headline(stringResource(R.string.common_restore))
             isFirst && isJoining -> Headline(stringResource(R.string.main_link_this_device))
             // The one fact that a user cannot know: no party resets it.
             isFirst -> Headline(
@@ -331,11 +363,7 @@ private fun UnlockScreen() {
             Spacer(Modifier.height(10.dp))
             // The time of the key derivation is a few seconds by design, and
             // the client knows no part of it, thus the bar shows no amount.
-            LinearProgressIndicator(
-                modifier = Modifier.fillMaxWidth().height(5.dp).clip(CircleShape),
-                color = Palette.Action,
-                trackColor = Palette.Container,
-            )
+            WaitBar()
         } else {
             FramedPlatformField(field, stringResource(R.string.main_passphrase), isPassphrase = true)
             if (isFirst) {
@@ -396,13 +424,11 @@ private fun TabsScreen(tab: Tab, onTab: (Tab) -> Unit, push: (Screen) -> Unit) {
                 Box(
                     Modifier
                         .align(Alignment.BottomEnd)
-                        .padding(20.dp)
+                        .padding(PressInset)
                         .size(56.dp)
                         .clip(RoundedCornerShape(16.dp))
                         .background(Palette.Container)
-                        .clickable(role = Role.Button, onClickLabel = addContact) {
-                            push(Screen.AddContact)
-                        },
+                        .press(role = Role.Button) { push(Screen.AddContact) },
                     contentAlignment = Alignment.Center,
                 ) { FaIcon("user-plus", label = addContact, tint = Palette.Action) }
             }
@@ -416,7 +442,7 @@ private fun TabsScreen(tab: Tab, onTab: (Tab) -> Unit, push: (Screen) -> Unit) {
                     Modifier
                         .weight(1f)
                         .fillMaxHeight()
-                        .press(role = Role.Tab) { onTab(entry) }
+                        .pressChoice(isSelected, role = Role.Tab) { onTab(entry) }
                         .padding(vertical = 12.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
@@ -443,7 +469,7 @@ private fun TabTitle(title: String) {
     Text(
         title,
         style = MaterialTheme.typography.headlineMedium,
-        modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 20.dp, bottom = 12.dp),
+        modifier = Modifier.padding(start = PressInset, end = PressInset, top = 20.dp, bottom = 12.dp),
     )
 }
 
@@ -485,14 +511,14 @@ private fun ConnectionNote() {
 
     if (Core.connection?.admissionSurge == true) {
         LinearProgressIndicator(
-            modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 12.dp).height(3.dp),
+            modifier = Modifier.fillMaxWidth().padding(start = PressInset, end = PressInset, top = 12.dp).height(3.dp),
             color = Palette.Action,
             trackColor = Palette.Pressed,
         )
     }
 
     for (line in lines) {
-        Box(Modifier.padding(start = 20.dp, end = 20.dp, top = 12.dp)) {
+        Box(Modifier.padding(start = PressInset, end = PressInset, top = 12.dp)) {
             Note(line, isError = line == fault)
         }
     }
@@ -525,7 +551,7 @@ private fun ChatsTab(push: (Screen) -> Unit) {
             }
         }
         notice?.let {
-            Box(Modifier.padding(start = 20.dp, end = 20.dp, bottom = 8.dp)) { Note(it) }
+            Box(Modifier.padding(start = PressInset, end = PressInset, bottom = 8.dp)) { Note(it) }
         }
 
         var acting by remember { mutableStateOf<Chat?>(null) }
@@ -542,7 +568,7 @@ private fun ChatsTab(push: (Screen) -> Unit) {
         muting?.let { chat -> MuteOptions(chat) { muting = null } }
         deleting?.let { chat ->
             ActionSheet(
-                stringResource(R.string.main_delete_conversation_q),
+                stringResource(R.string.main_delete_chat_question),
                 listOf(
                     RowEntry("trash-can", stringResource(R.string.common_delete_on_my_devices)) { deletingHere = chat },
                     RowEntry("trash-can", stringResource(R.string.chat_delete_for_everyone)) { deletingAll = chat },
@@ -553,12 +579,12 @@ private fun ChatsTab(push: (Screen) -> Unit) {
 
         deletingHere?.let { chat ->
             ActionSheet(
-                stringResource(R.string.main_delete_on_my_devices_q),
+                stringResource(R.string.common_delete_on_my_devices_question),
                 listOf(
                     RowEntry("trash-can", stringResource(R.string.common_delete_on_my_devices)) {
                         Core.deleteConversation(chat.conversation)
                         // DEV-129: the view says which deletion ran.
-                        notice = UiText.get(R.string.main_deleted_on_your_devices)
+                        notice = UiText.get(R.string.common_deleted_on_your_devices)
                     },
                 ),
                 // DEV-333: the line of a deletion for the own devices.
@@ -576,11 +602,12 @@ private fun ChatsTab(push: (Screen) -> Unit) {
                 stringResource(R.string.chat_delete_for_everyone_question),
                 listOf(
                     RowEntry("trash-can", stringResource(R.string.chat_delete_for_everyone)) {
-                        Core.deleteConversationForEveryone(chat.conversation) {
+                        // DEV-129: the view says which deletion ran, after
+                        // the core took the request.
+                        val asked = UiText.get(R.string.main_asked_contact_to_delete_chat, chat.title)
+                        Core.deleteConversationForEveryone(chat.conversation, onAsked = { notice = asked }) {
                             notice = UiText.get(R.string.chat_wait_between_deletions)
                         }
-                        // DEV-129: the view says which deletion ran.
-                        notice = UiText.get(R.string.main_asked_contact_to_delete_chat, chat.title)
                     },
                 ),
                 // DEV-334: each limit of the request.
@@ -593,7 +620,7 @@ private fun ChatsTab(push: (Screen) -> Unit) {
         // creation is the act that put it here.
         val withMessages = Core.chats.filter { it.preview != null || it.isGroup }
         if (withMessages.isEmpty()) {
-            EmptyState(stringResource(R.string.main_no_conversations))
+            EmptyState(stringResource(R.string.main_no_chats))
             return
         }
 
@@ -636,11 +663,11 @@ private fun ChatOptions(
             add(RowEntry("check", stringResource(R.string.main_mark_as_read)) { Core.markRead(chat.conversation) })
         }
         if (chat.isGroup) {
-            add(RowEntry("circle-info", stringResource(R.string.main_group_details)) { push(Screen.GroupDetails(chat.conversation)) })
+            add(RowEntry("circle-info", stringResource(R.string.common_group_details)) { push(Screen.GroupDetails(chat.conversation)) })
         } else {
-            add(RowEntry("circle-info", stringResource(R.string.main_contact_details)) { push(Screen.ContactDetails(chat.conversation)) })
+            add(RowEntry("circle-info", stringResource(R.string.common_contact_details)) { push(Screen.ContactDetails(chat.conversation)) })
         }
-        add(RowEntry("trash-can", stringResource(R.string.main_delete_conversation)) { onDelete(chat) })
+        add(RowEntry("trash-can", stringResource(R.string.main_delete_chat)) { onDelete(chat) })
     }
 
     ActionSheet(chat.title, entries, onDismiss = onDismiss)
@@ -686,7 +713,7 @@ private fun ChatRow(chat: Chat, onOpen: () -> Unit, onOptions: () -> Unit) {
     PressOver(
         Modifier.fillMaxWidth().pressShadeInList(),
         onClick = onOpen,
-        longLabel = stringResource(R.string.main_conversation_options),
+        longLabel = stringResource(R.string.main_chat_options),
         onLongClick = onOptions,
     ) { ChatRowContent(chat) }
 }
@@ -710,7 +737,7 @@ private fun ChatRowContent(chat: Chat) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     // Part 6 §6.6.5: the newest message answers a message.
                     if (chat.isPreviewReply) {
-                        FaIcon("reply", label = stringResource(R.string.main_reply), size = 11.dp, tint = Palette.TextSecondary)
+                        FaIcon("reply", label = stringResource(R.string.common_reply), size = 11.dp, tint = Palette.TextSecondary)
                         Spacer(Modifier.width(5.dp))
                     }
                     PlatformText(
@@ -766,7 +793,7 @@ private fun ContactsTab(push: (Screen) -> Unit) {
         // A group is no contact, and its details are group details.
         val byName = Core.chats.filter { !it.isGroup }.sortedBy { it.title.lowercase() }
         if (byName.isEmpty()) {
-            EmptyState(stringResource(R.string.main_no_contacts))
+            EmptyState(stringResource(R.string.common_no_contacts))
             return
         }
 
@@ -799,7 +826,7 @@ fun EmptyState(title: String) {
         title,
         style = MaterialTheme.typography.bodyLarge,
         color = Palette.TextSecondary,
-        modifier = Modifier.padding(horizontal = 20.dp, vertical = 24.dp),
+        modifier = Modifier.padding(horizontal = PressInset, vertical = 24.dp),
     )
 }
 
@@ -815,7 +842,7 @@ private fun SettingsTab(push: (Screen) -> Unit) {
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
         TabTitle(stringResource(R.string.main_tab_settings))
-        Column(Modifier.padding(horizontal = 20.dp)) {
+        Column(Modifier.padding(horizontal = PressInset)) {
             SectionLabel(stringResource(R.string.settings_general))
             EntryRow(
                 RowEntry("circle-half-stroke", stringResource(R.string.main_appearance), Appearances.choice.label) {
@@ -842,7 +869,7 @@ private fun SettingsTab(push: (Screen) -> Unit) {
             )
             HorizontalDivider(color = Palette.Divider)
             EntryRow(
-                RowEntry("download", stringResource(R.string.main_automatic_download), downloadLimitLabel(Core.autoDownloadLimit)) {
+                RowEntry("download", stringResource(R.string.common_automatic_download), downloadLimitLabel(Core.autoDownloadLimit)) {
                     sheet = SettingSheet.Download
                 },
                 leads = false,
@@ -879,7 +906,7 @@ private fun SettingsTab(push: (Screen) -> Unit) {
                 EntryRow(RowEntry("shield-halved", stringResource(R.string.common_recovery_code), backup) { push(Screen.RecoveryCode) })
                 HorizontalDivider(color = Palette.Divider)
             }
-            EntryRow(RowEntry("laptop", stringResource(R.string.main_linked_devices), devicesLabel(Core.devices.size)) { push(Screen.Devices) })
+            EntryRow(RowEntry("laptop", stringResource(R.string.common_linked_devices), devicesLabel(Core.devices.size)) { push(Screen.Devices) })
             HorizontalDivider(color = Palette.Divider)
             if (Core.ownsChannels) {
                 EntryRow(
@@ -929,7 +956,7 @@ private fun SettingsTab(push: (Screen) -> Unit) {
         SettingSheet.Download -> AutoDownloadSheet(close)
         SettingSheet.AutoLock -> AutoLockSheet(close)
         SettingSheet.Erase -> ActionSheet(
-            stringResource(R.string.main_erase_q),
+            stringResource(R.string.main_erase_question),
             listOf(RowEntry("trash-can", stringResource(R.string.main_erase_this_device)) { Core.eraseDevice(context) }),
             note = stringResource(R.string.main_erase_note),
             onDismiss = close,
@@ -946,8 +973,8 @@ private val HISTORY_AGES = listOf(86_400L, 30L * 86_400, 365L * 86_400, -1L)
 
 private fun historyLabel(seconds: Long): String = when {
     seconds < 0 -> UiText.get(R.string.main_history_forever)
-    seconds <= 86_400 -> UiText.get(R.string.main_history_1_day)
-    seconds <= 30L * 86_400 -> UiText.get(R.string.main_history_30_days)
+    seconds <= 86_400 -> UiText.get(R.string.common_period_1_day)
+    seconds <= 30L * 86_400 -> UiText.get(R.string.common_period_30_days)
     seconds <= 365L * 86_400 -> UiText.get(R.string.main_history_1_year)
     else -> UiText.get(R.string.main_history_forever)
 }

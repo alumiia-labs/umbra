@@ -12,6 +12,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.PowerManager
 import android.provider.Settings
 
 /**
@@ -251,9 +252,15 @@ object Notifier {
 
         val id = conversation.hashCode()
         // NTF-018: the alert of the conversation takes the place of the alert
-        // of its push, thus one message shows one alert.
-        synchronized(pushOwed) { pushOwed.clear() }
-        manager(context).cancel(MESSAGE_TAG, PUSH_ID)
+        // of its push, thus one message shows one alert. A push that named
+        // no conversation counts as this one. The alert of the push stays
+        // while it stands for another conversation.
+        val isSettled = synchronized(pushOwed) {
+            pushOwed.remove(conversation.key)
+            pushOwed.remove(null)
+            pushOwed.isEmpty()
+        }
+        if (isSettled) manager(context).cancel(MESSAGE_TAG, PUSH_ID)
         synchronized(withContent) {
             if (shows) withContent[id] = conversation.label else withContent.remove(id)
         }
@@ -264,6 +271,12 @@ object Notifier {
     }
 
     private fun isDeviceLocked(context: Context): Boolean {
+        // The keyguard waits for the lock delay of the system after the
+        // screen goes off, and `hideContent` ran already then. A screen
+        // that is off thus counts as a locked device.
+        val power = context.getSystemService(PowerManager::class.java) ?: return true
+        if (!power.isInteractive) return true
+
         val keyguard = context.getSystemService(KeyguardManager::class.java) ?: return true
         return keyguard.isKeyguardLocked || keyguard.isDeviceLocked
     }
@@ -290,6 +303,13 @@ object Notifier {
             app.registerReceiver(receiver, filter)
         }
     }
+
+    /**
+     * The client locked. Each alert stays, and an alert with a sender or a
+     * text takes its bare form: an alert that the user did not see is not
+     * old, and a locked client shows no content.
+     */
+    fun lockContent(context: Context) = hideContent(context.applicationContext)
 
     private fun hideContent(context: Context) {
         val shown = synchronized(withContent) { HashMap(withContent).also { withContent.clear() } }
@@ -387,7 +407,15 @@ object Notifier {
         manager(context).notify(LOCKED_ID, notice)
     }
 
-    /** The user looks at the app, thus each alert is old. */
+    /**
+     * The user looks at the unlock view. The notice of the lock is old, and
+     * each message alert stays until the client opens.
+     */
+    fun clearLocked(context: Context) {
+        manager(context).cancel(LOCKED_ID)
+    }
+
+    /** The user looks at the open app, thus each alert is old. */
     fun clear(context: Context) {
         synchronized(pushOwed) { pushOwed.clear() }
         synchronized(withContent) { withContent.clear() }

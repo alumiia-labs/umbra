@@ -54,11 +54,10 @@ impl MemberKeys {
         let kdf = Hkdf::<Sha3_256>::new(None, seed.expose());
 
         let mut pair = Secret::<32>::zeroed();
-        // The output lengths are below the HKDF bound, thus expand cannot fail.
-        let _ = kdf.expand(labels::GROUP_PAIR, pair.expose_mut());
+        crate::kdf::expand_into(&kdf, &[labels::GROUP_PAIR], &mut pair);
 
         let mut hybrid = Secret::<96>::zeroed();
-        let _ = kdf.expand(labels::GROUP_KEM, hybrid.expose_mut());
+        crate::kdf::expand_into(&kdf, &[labels::GROUP_KEM], &mut hybrid);
         // Each seed goes straight into a buffer that wipes itself.
         let (x_part, dz_part) = hybrid.expose().split_at(32);
         let mut x = Secret::<32>::zeroed();
@@ -66,8 +65,11 @@ impl MemberKeys {
         x.expose_mut().copy_from_slice(x_part);
         dz.expose_mut().copy_from_slice(dz_part);
 
+        // Part 5 §5.8 gives the seed itself to ML-DSA and to the HKDF above.
+        // The two functions differ (SHAKE and HMAC-SHA3), thus the keys are
+        // apart. A labeled expand for the roster key needs a format change.
         Self {
-            roster: SigningKey::from_seed(Secret::new(*seed.expose())),
+            roster: SigningKey::from_seed(seed.duplicate()),
             pair: StaticSecret::from(*pair.expose()),
             kem: KeyPair::from_seeds(x, dz),
         }

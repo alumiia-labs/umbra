@@ -96,6 +96,17 @@ impl LinkFaults {
         }
     }
 
+    /// The run of these counts ended. No circuit of the next run returns a
+    /// loop that still travels, thus such a loop counts neither as sent nor
+    /// as lost, and an honest chain takes no report for the end of a run.
+    pub fn run_ended(&mut self) {
+        for count in self.counts.values_mut() {
+            let open = u16::try_from(count.waiting.len()).unwrap_or(u16::MAX);
+            count.loops_sent = count.loops_sent.saturating_sub(open);
+            count.waiting.clear();
+        }
+    }
+
     /// A build of `chain` started.
     pub fn build_started(&mut self, chain: &Chain, now: u64) {
         let count = self.count(chain, now);
@@ -318,6 +329,17 @@ mod tests {
         }
         faults.tick(T0 + EPOCH_SECONDS + 200);
         assert!(faults.due().is_none(), "each loop came back");
+    }
+
+    #[test]
+    fn a_loop_that_travels_at_the_end_of_a_run_counts_as_no_loss() {
+        let mut faults = LinkFaults::default();
+        for i in 0..10 {
+            faults.loop_sent(&A, T0 + i);
+        }
+        faults.run_ended();
+        faults.tick(T0 + EPOCH_SECONDS + LOOP_RETURN_WAIT);
+        assert!(faults.due().is_none(), "the run ended, and no chain failed");
     }
 
     #[test]

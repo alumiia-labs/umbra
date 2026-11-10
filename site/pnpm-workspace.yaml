@@ -1,6 +1,10 @@
 allowBuilds:
   esbuild: true
   workerd: true
+# The cooling-off window of Part 14 §14.2.7, in minutes: pnpm resolves no
+# version that is younger than 14 days. Dependabot has the same window, and
+# this line holds it for a change by hand also.
+minimumReleaseAge: 20160
 # miniflare pins undici 7.29.1, which GHSA-xjj6-f33q-929c and two moderate
 # advisories name. Remove this line when miniflare takes 7.30.1 or later.
 overrides:

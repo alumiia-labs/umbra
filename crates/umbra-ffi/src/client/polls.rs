@@ -297,10 +297,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         record.encode(&mut app)?;
         let now = now_ms / 1_000;
         let message = if is_group {
-            let message = self.post_to_group(conversation, msg_id, &app, now_ms, rng)?;
-            self.open_poll(conversation, message, open_seconds, now, rng)?;
-            message
+            // The close time is in the commit of the message. A poll with
+            // no such row would never close, and a hidden count would never
+            // show.
+            let closes = (POLLS, poll_row(conversation, open_seconds, now));
+            self.post_to_group_with(conversation, msg_id, &app, Some(closes), now_ms, rng)?
         } else {
+            // DEV-215: the deadline is in the commit of the message too.
+            let seconds = self.timer_seconds(conversation)?;
             let open = self.open_mut()?;
             let reference = msg_ref(&open.device_set_key, &msg_id);
             let natural = [conversation.0.as_slice(), &reference].concat();
@@ -317,9 +321,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             batch.put(TableId::MESSAGE, row, Some(conversation.0), &plain, rng)?;
             batch.put(OUTBOX, row, None, &outbox_row(), rng)?;
             batch.put(POLLS, row, Some(conversation.0), &value, rng)?;
+            if seconds > 0 && super::timers::is_timed_kind(AppKind::Poll) {
+                let deadline = umbra_core::devset::edits::Deadline::received(now, seconds);
+                batch.put(
+                    super::timers::DEADLINES,
+                    row,
+                    Some(conversation.0),
+                    &super::timers::deadline_row(conversation, deadline.at),
+                    rng,
+                )?;
+            }
+
             batch.commit()?;
             let message = MsgRef(row);
-            self.stamp_deadline(conversation, message, AppKind::Poll, now, rng)?;
             self.outgoing.push_back(Outgoing {
                 message,
                 conversation,
@@ -369,10 +383,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         };
         let mut request = vec![0u8; record.len()];
         record.encode(&mut request)?;
-        self.take_vote(conversation, &body, VOTER_SELF, now_ms, now, rng)?;
         if self.is_group(conversation)? {
+            // GRP-210: a closed group takes no record, thus the count shows
+            // no vote that no member got.
+            if self.group_closed(conversation)? {
+                return Err(Error::Closed);
+            }
+
+            // The record goes first. A post that fails leaves no vote here.
             self.post_to_group(conversation, msg_id, &request, now_ms, rng)?;
+            self.take_vote(conversation, &body, VOTER_SELF, now_ms, now, rng)?;
         } else {
+            self.take_vote(conversation, &body, VOTER_SELF, now_ms, now, rng)?;
+
             // The request row holds the record for its send, and no view
             // shows it.
             let open = self.open_mut()?;

@@ -273,7 +273,9 @@ impl<'a> AttachmentBody<'a> {
         r.finish()?;
 
         // WIR-532: a trailer that carries nothing is a second encoding of a
-        // body that ends after the descriptor.
+        // body that ends after the descriptor. The check reads the bytes on
+        // the wire. A name of bidirectional marks alone passes it and then
+        // reads as no name: the rule keeps such a stored record in reach.
         if name.is_empty() && preview.is_empty() && caption.is_none() {
             return Err(Error::Malformed);
         }

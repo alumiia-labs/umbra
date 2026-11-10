@@ -157,7 +157,8 @@ impl Cmd {
             Cmd::Nack => Some(crate::nack::LEN),
             Cmd::Attachment(b) => attachment_payload_len(b),
             Cmd::Group(g) => g.fixed_payload_len(bucket),
-            _ => None,
+            // No wildcard: a new command must state its length here.
+            Cmd::New => None,
         }
     }
 }
@@ -371,7 +372,7 @@ fn filled_blob<'a>(r: &mut Reader<'a>) -> Result<&'a [u8], Error> {
 /// The smallest bucket whose record length holds an invitation blob with
 /// the fields of an `IPUT` before it.
 pub fn blob_bucket(blob_len: usize) -> Option<Bucket> {
-    [Bucket::B0, Bucket::B1, Bucket::B2, Bucket::B3]
+    Bucket::ALL
         .into_iter()
         .find(|bucket| LINK_ID_LEN + 2 + blob_len <= bucket.l6_record())
 }

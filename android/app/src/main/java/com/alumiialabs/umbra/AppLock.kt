@@ -31,7 +31,7 @@ import androidx.compose.ui.unit.dp
 /** The idle times before the lock. `IMP-119` caps the idle time at 30 minutes. */
 private val AutoLockChoices = listOf<Pair<Long, Pair<Int, Int?>>>(
     0L to (R.string.lock_immediately to R.string.lock_when_you_leave),
-    5 * 60L to (R.string.lock_5_minutes to null),
+    5 * 60L to (R.string.common_period_5_minutes to null),
     15 * 60L to (R.string.lock_15_minutes to null),
     30 * 60L to (R.string.lock_30_minutes to null),
 )
@@ -107,7 +107,7 @@ fun downloadLimitLabel(bytes: ULong): String = when (bytes) {
 @Composable
 fun AutoDownloadSheet(onDismiss: () -> Unit) {
     ChoiceSheet(
-        stringResource(R.string.lock_automatic_download),
+        stringResource(R.string.common_automatic_download),
         AutoDownloadChoices.map { bytes ->
             SheetChoice(downloadLimitLabel(bytes), Core.autoDownloadLimit == bytes) {
                 Core.setAutoDownload(bytes, Core.autoDownloadWifiOnly)
@@ -124,7 +124,7 @@ fun RadioMark(isChosen: Boolean) {
     Box(
         Modifier
             .size(20.dp)
-            .border(2.dp, if (isChosen) Palette.Action else Palette.Outline, CircleShape),
+            .border(2.dp, if (isChosen) Palette.Action else Palette.Control, CircleShape),
         contentAlignment = Alignment.Center,
     ) {
         if (isChosen) Box(Modifier.size(10.dp).background(Palette.Action, CircleShape))
@@ -142,7 +142,7 @@ fun ChangePassphraseScreen(onBack: () -> Unit) {
 
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.common_change_passphrase), onBack = onBack)
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(PressInset)) {
             FramedPlatformField(current, stringResource(R.string.lock_current_passphrase), isPassphrase = true)
             Spacer(Modifier.height(14.dp))
             FramedPlatformField(new, stringResource(R.string.common_new_passphrase), isPassphrase = true)

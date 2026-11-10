@@ -189,6 +189,9 @@ impl<'a> MeasurerCert<'a> {
         if self.not_after < epoch {
             return Err(Error::Stale);
         }
+        if lives_too_long(self.not_after, epoch) {
+            return Err(Error::Unverified);
+        }
         if revoked.len() > MEASURER_REVOKE_MAX || revoked.contains(&self.measurer_id) {
             return Err(Error::Unverified);
         }
@@ -253,6 +256,9 @@ pub fn verify_open(
     let (keyset, _) = DirectoryKeySet::parse(&trust.keyset)?;
     if cert.not_after < epoch {
         return Err(Error::Stale);
+    }
+    if lives_too_long(cert.not_after, epoch) {
+        return Err(Error::Unverified);
     }
     if trust.revoked.contains(&cert.measurer_id) {
         return Err(Error::Unverified);
@@ -340,6 +346,17 @@ impl ClassResult {
         let _ = write!(out, " {} {word} {}", self.class, self.epoch);
         out
     }
+}
+
+/// The epochs by which the clock of a verifier can be behind the authority
+/// that set `not_after`: the validity of a consensus.
+const CERT_EPOCH_SKEW: u64 = 3;
+
+/// Whether `not_after` is past the longest life of a certificate at
+/// `epoch`. No honest authority signs such a certificate, and one from
+/// compromised authorities would else live until its revocation.
+const fn lives_too_long(not_after: u64, epoch: u64) -> bool {
+    not_after > epoch.saturating_add(MEASURER_CERT_TTL + CERT_EPOCH_SKEW)
 }
 
 /// The class that the results verify for the relay `relay_id` whose
@@ -477,6 +494,14 @@ mod tests {
         assert_eq!(parsed.not_after, 668);
         assert_eq!(parsed.verify(&keyset, &[], 500), Ok(()));
         assert_eq!(parsed.verify(&keyset, &[], 668), Ok(()));
+
+        // A certificate that ends later than one full life after the epoch
+        // of the verifier is no honest certificate.
+        assert_eq!(parsed.verify(&keyset, &[], 500 - CERT_EPOCH_SKEW), Ok(()));
+        assert_eq!(
+            parsed.verify(&keyset, &[], 499 - CERT_EPOCH_SKEW),
+            Err(Error::Unverified)
+        );
         assert_eq!(cert(&keys, &[0, 1, 2, 3, 4, 5, 6], 500, 1).len(), 25_148);
     }
 

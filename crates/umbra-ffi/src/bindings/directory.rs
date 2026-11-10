@@ -869,7 +869,7 @@ impl Handle {
 
     /// Makes a rendezvous queue and waits for its address.
     fn new_rendezvous(&self) -> Result<([u8; 32], Vec<u8>), FfiError> {
-        let tag = {
+        let (tag, run) = {
             let mut inner = locked(&self.inner);
             let tag = inner.next_rendezvous_tag;
             inner.next_rendezvous_tag = tag.wrapping_add(1);
@@ -878,19 +878,12 @@ impl Handle {
                 .as_ref()
                 .ok_or(FfiError::Offline)?
                 .make_rendezvous_queue(tag)?;
-            tag
+            (tag, inner.run)
         };
 
         let start = Instant::now();
         loop {
             let mut inner = locked(&self.inner);
-
-            // A lock ends the wait at once. The caller can hold keys of the
-            // store, and the runtime stops at a lock.
-            if !inner.client.is_unlocked() {
-                return Err(FfiError::Locked);
-            }
-
             if let Some(made) = inner.rendezvous_ready.remove(&tag) {
                 return Ok(made);
             }
@@ -898,11 +891,29 @@ impl Handle {
                 return Err(FfiError::Busy);
             }
 
-            drop(inner);
-            if start.elapsed() > QUEUE_WAIT {
+            // The run of the command ended, and no answer of it comes. The
+            // start of the next run ends a queue that no entry names.
+            if inner.run != run || inner.bridge.is_none() {
                 return Err(FfiError::Offline);
             }
 
+            // A lock ends the wait at once. The caller can hold keys of the
+            // store, and the runtime stops at a lock. A queue that comes
+            // after this call ended has no entry, thus it ends when it
+            // comes.
+            let ended = if !inner.client.is_unlocked() {
+                Some(FfiError::Locked)
+            } else if start.elapsed() > QUEUE_WAIT {
+                Some(FfiError::Offline)
+            } else {
+                None
+            };
+            if let Some(ended) = ended {
+                inner.rendezvous_abandoned.insert(tag);
+                return Err(ended);
+            }
+
+            drop(inner);
             std::thread::sleep(Duration::from_millis(100));
         }
     }
@@ -1710,7 +1721,9 @@ impl Handle {
                     let _ = inner.client.unbind_queue(&previous, &mut OsRng);
                     inner.client.put_published(&entry, &mut OsRng)?;
                 }
-                let _ = self.rotate_queue(&link, &entry, now);
+                if let Err(fault) = self.rotate_queue(&link, &entry, now) {
+                    crate::devlog::format_line!("a rendezvous queue did not rotate: {fault:?}");
+                }
                 continue;
             }
 
@@ -1720,7 +1733,9 @@ impl Handle {
                 && !is_staged
                 && now.saturating_sub(entry.queue_since) >= RENDEZVOUS_ROTATE
             {
-                let _ = self.rotate_queue(&link, &entry, now);
+                if let Err(fault) = self.rotate_queue(&link, &entry, now) {
+                    crate::devlog::format_line!("a rendezvous queue did not rotate: {fault:?}");
+                }
                 continue;
             }
 
@@ -1760,7 +1775,8 @@ impl Handle {
             return Ok(());
         }
 
-        self.fetch_tokens(&link, epoch_number(now), count as usize)
+        let count = usize::try_from(count).map_err(|_| FfiError::TooLong)?;
+        self.fetch_tokens(&link, epoch_number(now), count)
     }
 
     /// The tokens of this epoch that this device holds, for a test.

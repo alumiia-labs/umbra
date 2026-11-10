@@ -12,6 +12,44 @@ cd "$(dirname "$0")/.."
 
 step() { printf '\n== %s\n' "$1"; }
 
+step "version places"
+# AGENTS.md: one version in each place of the table.
+python scripts/versioncheck.py
+
+step "dependency policy"
+# This step runs before each build. A crate inside the cooling-off window
+# then runs no build script here (Part 14 §14.2.7).
+# The advisories check reads the RustSec database, thus this step needs the
+# network. It fails on a known fault and on a yanked version (Part 14
+# §14.2.7).
+#
+# `deps.py --check` below can fail with no change in the tree. A `skip`
+# entry of deny.toml is then older than 90 days. Check the entry again.
+# Then give it a new date or remove it.
+cargo deny --locked check advisories bans licenses sources
+
+# The platform graph of register R3: its advisories, its licenses under the
+# exceptions of deny.toml, and its sources. Its crates stay off the bans
+# allow list (Part 14 §14.2.3).
+cargo deny --locked --features umbra-ffi/bindings,umbra-relay/native check advisories licenses sources
+
+# The cooling-off window: each registry version of Cargo.lock is 14 days
+# old or more, or the script names its advisory or its yank.
+python scripts/deps.py --cooling
+
+# The audit checks each package of the site lock against the advisories of
+# the npm registry. No alert of GitHub reads the packages under wrangler
+# (Part 14 §14.2.7). Corepack reads the pnpm version of site/package.json
+# and checks its hash when the field holds one. npx checks no hash, thus it
+# is the path only for a machine with no Corepack.
+pnpm_spec=$(sed -n 's/^ *"packageManager": "\(pnpm@[0-9.]*\(+[^"]*\)\{0,1\}\)",*$/\1/p' site/package.json)
+[ -n "$pnpm_spec" ] || { echo 'site/package.json: no pnpm version in packageManager' >&2; exit 1; }
+if command -v corepack >/dev/null 2>&1; then
+    (cd site && COREPACK_ENABLE_STRICT=1 corepack pnpm audit --audit-level high)
+else
+    (cd site && npx --yes "${pnpm_spec%%+*}" audit --audit-level high)
+fi
+
 step "format"
 cargo fmt --all --check
 
@@ -61,33 +99,6 @@ cargo build --locked --workspace --target wasm32-unknown-unknown
 step "build, aarch64-linux-android"
 cargo build --locked --workspace --target aarch64-linux-android
 
-step "dependency policy"
-# The advisories check reads the RustSec database, thus this step needs the
-# network. It fails on a known fault and on a yanked version (Part 14
-# §14.2.7).
-#
-# `deps.py --check` below can fail with no change in the tree. A `skip`
-# entry of deny.toml is then older than 90 days. Check the entry again.
-# Then give it a new date or remove it.
-cargo deny --locked check advisories bans licenses sources
-
-# The platform graph of register R3: its advisories, its licenses under the
-# exceptions of deny.toml, and its sources. Its crates stay off the bans
-# allow list (Part 14 §14.2.3).
-cargo deny --locked --features umbra-ffi/bindings,umbra-relay/native check advisories licenses sources
-
-# The cooling-off window: each registry version of Cargo.lock is 14 days
-# old or more, or the script names its advisory or its yank.
-python scripts/deps.py --cooling
-
-# The audit checks each package of the site lock against the advisories of
-# the npm registry. No alert of GitHub reads the packages under wrangler
-# (Part 14 §14.2.7). npx takes the pnpm version of site/package.json, thus
-# the step needs Node alone. Corepack can add a hash to the version.
-pnpm_version=$(sed -n 's/^ *"packageManager": "pnpm@\([0-9.]*\)\(+[^"]*\)\{0,1\}",*$/\1/p' site/package.json)
-[ -n "$pnpm_version" ] || { echo 'site/package.json: no pnpm version in packageManager' >&2; exit 1; }
-(cd site && npx --yes "pnpm@$pnpm_version" audit --audit-level high)
-
 step "generated files are current"
 python scripts/deps.py --check
 python scripts/vectors.py --check
@@ -101,6 +112,7 @@ python scripts/relay-admit.py --self-test
 
 step "specification consistency"
 python scripts/speccheck.py --quiet
+python scripts/reqindex.py --check
 
 step "web site of the domain"
 # Part 4 §4.3.1: no page of the invitation host holds a script or reads a

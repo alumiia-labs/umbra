@@ -135,6 +135,14 @@ The pull policy of the chart is `IfNotPresent`, thus the node uses the
 imported image. Another cluster reads the image from a registry: push it
 there, and set `image.repository`.
 
+A tag can move to another image, and `IfNotPresent` keeps the image that
+the node has for a tag. For one fixed image, use its digest. The release
+run prints the name with the digest in its summary.
+
+- Helm: set `image.digest` to `sha256:<64 hex>`.
+- Compose: set `UMBRA_IMAGE` in `.env` to
+  `ghcr.io/alumiia-labs/umbra-relay:<version>@sha256:<64 hex>`.
+
 ## A port below 1024
 
 Docker gives the relay user no capability, thus port 443 needs a setting of

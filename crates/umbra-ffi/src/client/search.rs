@@ -149,6 +149,48 @@ impl Drop for Index {
     }
 }
 
+impl Index {
+    /// Erases the text of each message of `gone` from the index. The store
+    /// holds these messages no more, and the index must hold no copy of
+    /// their text until its next build.
+    fn forget(&mut self, gone: &BTreeSet<[u8; 16]>) {
+        let mut ids: BTreeSet<u32> = BTreeSet::new();
+        for (id, doc) in self.docs.iter_mut().enumerate() {
+            if !gone.contains(&doc.entry.message.0) {
+                continue;
+            }
+
+            if let Some(text) = self.text.get_mut(doc.start..doc.end) {
+                text.zeroize();
+            }
+
+            // The message keeps its place, thus each other identifier holds.
+            doc.end = doc.start;
+            ids.extend(u32::try_from(id).ok());
+        }
+        if ids.is_empty() {
+            return;
+        }
+
+        for (gram, mut list) in core::mem::take(&mut self.grams) {
+            list.retain(|id| !ids.contains(id));
+            if !list.is_empty() {
+                self.grams.insert(gram, list);
+            }
+        }
+
+        // A word that no message holds now leaves with its bytes.
+        for (mut word, mut list) in core::mem::take(&mut self.words) {
+            list.retain(|id| !ids.contains(id));
+            if list.is_empty() {
+                word.zeroize();
+            } else {
+                self.words.insert(word, list);
+            }
+        }
+    }
+}
+
 /// A build that did not read each conversation yet.
 /// The entry of one message and its folded text.
 type Searched = (Entry, Zeroizing<Vec<u8>>);
@@ -163,6 +205,24 @@ struct Build {
 pub(super) struct Search {
     ready: Option<Index>,
     building: Option<Build>,
+}
+
+impl Search {
+    /// Erases the text of each message of `gone` from the index in use and
+    /// from a build that runs (`IMP-176`).
+    pub(super) fn forget(&mut self, gone: &[MsgRef]) {
+        if gone.is_empty() || (self.ready.is_none() && self.building.is_none()) {
+            return;
+        }
+
+        let gone: BTreeSet<[u8; 16]> = gone.iter().map(|message| message.0).collect();
+        if let Some(index) = self.ready.as_mut() {
+            index.forget(&gone);
+        }
+        if let Some(build) = self.building.as_mut() {
+            build.index.forget(&gone);
+        }
+    }
 }
 
 /// Folds `text` for a comparison: no case, no accent, and one space for
@@ -885,6 +945,26 @@ mod tests {
     fn a_fold_removes_case_accents_and_runs_of_space() {
         assert_eq!(fold("  Café   CRÈME\n").as_slice(), b"cafe creme");
         assert_eq!(fold("Ünïcödé").as_slice(), b"unicode");
+    }
+
+    #[test]
+    fn a_message_that_left_the_store_leaves_no_text_in_the_index() {
+        let mut index = index_of(&["happy birthday to you", "a birthday cake", "no"]);
+        assert_eq!(found(&index, "birthday"), [1, 0]);
+
+        index.forget(&BTreeSet::from([[0u8; 16]]));
+
+        assert_eq!(found(&index, "birthday"), [1]);
+        assert!(found(&index, "happy").is_empty());
+        assert!(!index.words.contains_key(b"happy".as_slice()));
+        assert!(!index
+            .text
+            .windows(5)
+            .any(|window| window == b"happy".as_slice()));
+
+        // Each other message keeps its place.
+        assert_eq!(found(&index, "cake"), [1]);
+        assert_eq!(found(&index, "no"), [2]);
     }
 
     #[test]

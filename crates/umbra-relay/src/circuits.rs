@@ -375,6 +375,10 @@ struct Held {
     ending: bool,
     /// The delayed actions of the circuit that the node holds.
     delayed_out: u32,
+    /// A pause of the circuit waits behind its delayed cells. A second
+    /// `CircuitPause` then adds no action, thus a flood of them holds no
+    /// memory past the bounds of the delayed cells.
+    pause_waits: bool,
     /// The holder of the link of the circuit at its build.
     holder: Holder,
     /// The place of the circuit among those of its holder, by the time of
@@ -872,6 +876,7 @@ impl CircuitTable {
                 released_at_ms: 0,
                 ending: false,
                 delayed_out: 0,
+                pause_waits: false,
                 holder,
                 seat: self.seat_seq,
                 measure: if is_candidate {
@@ -1367,8 +1372,13 @@ impl CircuitTable {
             return Vec::new();
         }
 
+        if held.pause_waits {
+            return Vec::new();
+        }
+
         if held.delayed_out > 0 {
             held.delayed_out = held.delayed_out.saturating_add(1);
+            held.pause_waits = true;
             return vec![Action::Delayed {
                 at_ms: held.released_at_ms,
                 circuit: key,
@@ -1383,9 +1393,10 @@ impl CircuitTable {
     /// services of a circuit that ends here. The node runs it for an
     /// [`Action::Pause`].
     pub fn pause_now(&mut self, key: CircuitKey) -> Vec<Action> {
-        let Some(held) = self.held.get(&key) else {
+        let Some(held) = self.held.get_mut(&key) else {
             return Vec::new();
         };
+        held.pause_waits = false;
 
         match held.next {
             Some(next) => vec![Action::PauseNext {
@@ -1988,5 +1999,43 @@ mod tests {
             .on_cell(1, &cell, Origin::Relay, 101, &mut rng)
             .is_empty());
         assert!(table.holds(1, [5; 16]));
+    }
+
+    #[test]
+    fn a_circuit_holds_one_pause_behind_its_delayed_cells() {
+        let mut rng = Rng(12);
+        let (relay, mut table) = relay(0xC3, 3);
+        let mut hop = one_hop(
+            &mut table,
+            &relay,
+            1,
+            [5; 16],
+            DelayClass::Private,
+            &mut rng,
+        );
+
+        let cell = sealed(&mut hop, [5; 16], Bucket::B0, CellCommand::Loop, true);
+        let actions = table.on_cell(1, &cell, Origin::Relay, 101, &mut rng);
+        assert!(matches!(actions[..], [Action::Delayed { .. }]));
+
+        // The first pause waits behind the cell, and each later one drops.
+        let first = table.on_pause(1, [5; 16]);
+        assert!(matches!(first[..], [Action::Delayed { .. }]));
+        for _ in 0..8 {
+            assert!(table.on_pause(1, [5; 16]).is_empty());
+        }
+
+        // The pause ran, thus the circuit takes the next one.
+        let key = CircuitKey {
+            link: 1,
+            circ_id: [5; 16],
+        };
+        table.released(&key);
+        table.released(&key);
+        assert!(matches!(table.pause_now(key)[..], [Action::Paused { .. }]));
+        assert!(matches!(
+            table.on_pause(1, [5; 16])[..],
+            [Action::Paused { .. }]
+        ));
     }
 }

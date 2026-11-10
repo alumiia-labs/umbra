@@ -112,6 +112,9 @@ pub struct Store<B: Backend> {
     /// The fault that ended [`Store::migrate`] in this run. A write then
     /// fails with it and runs no second pass: the next unlock does.
     migration_fault: Option<Error>,
+    /// Whether a pass of [`Store::migrate`] found a table that did not
+    /// match its accumulator (`IDN-039`).
+    migration_unsound: bool,
 }
 
 /// The record version that a store holds. The form of each MAC says it,
@@ -285,6 +288,7 @@ impl<B: Backend> Store<B> {
             indexed,
             form,
             migration_fault: None,
+            migration_unsound: false,
         })
     }
 
@@ -331,11 +335,20 @@ impl<B: Backend> Store<B> {
         }
 
         let moved = self.migrate_tables(rng);
-        if let Err(fault) = moved {
-            self.migration_fault = Some(fault);
+        match moved {
+            Ok(is_sound) => self.migration_unsound |= !is_sound,
+            Err(fault) => self.migration_fault = Some(fault),
         }
 
         moved
+    }
+
+    /// Whether a pass of [`Store::migrate`] in this run found a table that
+    /// did not match its accumulator. The pass of the first
+    /// [`Transaction::put`] has no caller that takes its result, thus the
+    /// sign of `IDN-039` stays here for the client.
+    pub fn migration_was_unsound(&self) -> bool {
+        self.migration_unsound
     }
 
     /// The pass of [`Store::migrate`].
@@ -1686,6 +1699,7 @@ mod tests {
         // IDN-039: the pass finds a table that does not match the MAC that
         // came back, and it says so before a view reads the row.
         assert!(!store.migrate(&mut Rng(16)).unwrap());
+        assert!(store.migration_was_unsound());
         assert!(!store.migration_due());
         assert_eq!(store.audit(TableId::MESSAGE), Err(Error::Unverified));
 

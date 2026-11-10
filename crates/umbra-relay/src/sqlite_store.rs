@@ -74,9 +74,19 @@ const fn class_code(class: Class) -> i64 {
     }
 }
 
+/// The time that a statement waits for a lock of another connection.
+const BUSY_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The least time between two truncating checkpoints of the queue file.
+const CHECKPOINT_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// The store of one relay in one SQLite file.
 pub struct SqliteStore {
     connection: Connection,
+    /// A commit deleted a row since the last truncating checkpoint.
+    checkpoint_due: bool,
+    /// The time of the last truncating checkpoint.
+    checkpointed_at: Option<std::time::Instant>,
 }
 
 fn fault<T>(result: rusqlite::Result<T>) -> Result<T, StoreFault> {
@@ -139,6 +149,9 @@ impl SqliteStore {
     /// file of another schema version is a fault, and no data of it changes.
     pub fn open(path: &str) -> Result<Self, StoreFault> {
         let connection = fault(Connection::open(path))?;
+        // A failed commit stops the relay, thus a lock that a second
+        // process holds for a moment is no fault.
+        fault(connection.busy_timeout(BUSY_WAIT))?;
         fault(connection.pragma_update(None, "secure_delete", "ON"))?;
         fault(connection.pragma_update(None, "journal_mode", "WAL"))?;
         // A `QUOTA` leaves after its commit, thus the commit reaches the
@@ -164,7 +177,11 @@ impl SqliteStore {
         fault(connection.execute_batch(SCHEMA))?;
         fault(connection.pragma_update(None, "user_version", SCHEMA_VERSION))?;
 
-        Ok(SqliteStore { connection })
+        Ok(SqliteStore {
+            connection,
+            checkpoint_due: false,
+            checkpointed_at: None,
+        })
     }
 }
 
@@ -569,13 +586,22 @@ impl RelayStore for SqliteStore {
         drop(put_record);
         fault(transaction.commit())?;
 
-        if deleted {
-            // The log holds the old pages of a deleted row until a
-            // checkpoint truncates it.
+        // The log holds the old pages of a deleted row until a checkpoint
+        // truncates it. The commit above is on the disk already. One
+        // checkpoint in `CHECKPOINT_EVERY` then serves each `ACK` of that
+        // time, and the node task does not wait for one at each of them.
+        self.checkpoint_due |= deleted;
+        let is_spaced = self
+            .checkpointed_at
+            .is_none_or(|at| at.elapsed() >= CHECKPOINT_EVERY);
+
+        if self.checkpoint_due && is_spaced {
             fault(
                 self.connection
                     .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(())),
             )?;
+            self.checkpoint_due = false;
+            self.checkpointed_at = Some(std::time::Instant::now());
         }
 
         Ok(())
@@ -629,6 +655,12 @@ const SIZE_CHECK_EVERY: u32 = 64;
 /// under its bound over some checks. No cell waits for one long erase.
 const TRIM_BATCH: i64 = 8;
 const TRIM_STEPS: u32 = 16;
+/// The receipts past their retention that leave in one transaction, and the
+/// transactions of one erase. The times of a file have a grain of one hour,
+/// thus one hour of receipts passes its retention at one time. The book
+/// erases once each minute, and the steps of one hour take that hour.
+const ERASE_BATCH: i64 = 64;
+const ERASE_STEPS: u32 = 16;
 
 /// The index column of a leaf: its first 8 bytes.
 fn leaf_key(leaf: &[u8; 32]) -> i64 {
@@ -639,6 +671,7 @@ impl SqliteShelf {
     /// Opens the receipt file at `path`, and makes it when it does not exist.
     pub fn open(path: &str) -> Result<Self, StoreFault> {
         let connection = fault(Connection::open(path))?;
+        fault(connection.busy_timeout(BUSY_WAIT))?;
         // REL-074: an erased receipt leaves no bytes in the file.
         fault(connection.pragma_update(None, "secure_delete", "ON"))?;
         fault(connection.pragma_update(None, "journal_mode", "WAL"))?;
@@ -748,32 +781,43 @@ impl SqliteShelf {
 
     fn erase(&mut self, floor: u64) -> Result<(), StoreFault> {
         let floor = signed(floor)?;
-        let old: Option<i64> = fault(
-            self.connection
-                .query_row(
-                    "SELECT 1 FROM receipts WHERE at < ?1 LIMIT 1",
-                    [floor],
-                    |row| row.get(0),
-                )
-                .optional(),
-        )?;
+        let mut erased = false;
 
-        if old.is_none() {
-            return Ok(());
+        for _ in 0..ERASE_STEPS {
+            // The oldest receipts below the floor.
+            let ids: Vec<i64> = {
+                let mut query = fault(
+                    self.connection
+                        .prepare("SELECT id FROM receipts WHERE at < ?1 ORDER BY at, id LIMIT ?2"),
+                )?;
+                let rows = fault(query.query_map(params![floor, ERASE_BATCH], |row| row.get(0)))?;
+                fault(rows.collect())?
+            };
+
+            if ids.is_empty() {
+                break;
+            }
+
+            let transaction = fault(self.connection.transaction())?;
+            {
+                let mut leaves =
+                    fault(transaction.prepare("DELETE FROM receipt_leaves WHERE receipt = ?1"))?;
+                let mut receipt = fault(transaction.prepare("DELETE FROM receipts WHERE id = ?1"))?;
+                for id in &ids {
+                    fault(leaves.execute([id]))?;
+                    fault(receipt.execute([id]))?;
+                }
+            }
+            fault(transaction.commit())?;
+            erased = true;
         }
 
-        let transaction = fault(self.connection.transaction())?;
-        fault(transaction.execute(
-            "DELETE FROM receipt_leaves WHERE receipt IN (SELECT id FROM receipts WHERE at < ?1)",
-            [floor],
-        ))?;
-        fault(transaction.execute("DELETE FROM receipts WHERE at < ?1", [floor]))?;
-        fault(transaction.commit())?;
-
-        fault(
-            self.connection
-                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(())),
-        )?;
+        if erased {
+            fault(
+                self.connection
+                    .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(())),
+            )?;
+        }
         Ok(())
     }
 

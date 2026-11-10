@@ -13,8 +13,6 @@
 //! session before it closes the connection makes that certain. A link thus
 //! keeps no cell.
 
-use alloc::collections::BTreeSet;
-
 use umbra_crypto::secret::Secret;
 use umbra_wire::{
     capsule::{self, CapsuleType, HEADER_LEN},
@@ -28,6 +26,76 @@ pub const RESUME_WINDOW: u64 = 4 * 3_600;
 /// The span of frame sequences below the highest one in which a relay
 /// remembers each sequence that it accepted (`WIR-141`).
 pub const ACCEPTED_SPAN: usize = 1_000;
+/// The bits of the ring that holds the accepted sequences. It is above
+/// `ACCEPTED_SPAN`, thus each sequence of the span has a bit of its own.
+const RING_BITS: u32 = 1_024;
+const RING_WORDS: usize = 16;
+
+/// The frame sequences that a relay accepted inside the span below the
+/// highest one, as one bit for each. A cell costs one bit test and one bit
+/// write. Before this, a set of 1 001 entries took an insert and a removal
+/// of a tree node for each cell.
+#[derive(Default)]
+struct Accepted {
+    ring: [u64; RING_WORDS],
+    top: Option<u32>,
+}
+
+impl Accepted {
+    fn place(seq: u32) -> (usize, u64) {
+        let bit = seq % RING_BITS;
+        (usize::try_from(bit / 64).unwrap_or(0), 1u64 << (bit % 64))
+    }
+
+    fn holds(&self, seq: u32) -> bool {
+        let (word, mask) = Self::place(seq);
+        self.ring.get(word).is_some_and(|bits| bits & mask != 0)
+    }
+
+    fn set(&mut self, seq: u32, on: bool) {
+        let (word, mask) = Self::place(seq);
+        if let Some(bits) = self.ring.get_mut(word) {
+            if on {
+                *bits |= mask;
+            } else {
+                *bits &= !mask;
+            }
+        }
+    }
+
+    /// Takes `seq`. The result is whether it is new: not below the span,
+    /// and not accepted before.
+    fn insert(&mut self, seq: u32) -> bool {
+        let span = u32::try_from(ACCEPTED_SPAN).unwrap_or(u32::MAX);
+        let Some(top) = self.top else {
+            self.set(seq, true);
+            self.top = Some(seq);
+            return true;
+        };
+
+        if seq <= top {
+            if seq < top.saturating_sub(span) || self.holds(seq) {
+                return false;
+            }
+            self.set(seq, true);
+            return true;
+        }
+
+        // The bits between the old top and the new one held sequences that
+        // are below the span now.
+        if seq.saturating_sub(top) >= RING_BITS {
+            self.ring = [0; RING_WORDS];
+        } else {
+            for passed in top.saturating_add(1)..seq {
+                self.set(passed, false);
+            }
+        }
+
+        self.set(seq, true);
+        self.top = Some(seq);
+        true
+    }
+}
 /// `SESSION_PAUSE_WAIT`: the time that a client waits for the
 /// `SessionPaused` of its relay, in seconds (`WIR-540`).
 pub const PAUSE_WAIT: u64 = 2;
@@ -138,7 +206,10 @@ impl ClientLink {
 
     /// Takes a frame of the relay. Returns the cell, or `None` for a frame
     /// whose sequence the client accepted before (`WIR-141`). The relay
-    /// sends in order over TLS, thus one count serves.
+    /// sends in order over TLS, thus one count serves. A sequence above the
+    /// count is no fault here: a relay that drops one cell breaks the
+    /// circuit of that cell alone, and the other circuits of the session
+    /// continue. The counts of the next resume show the loss (`WIR-544`).
     pub fn receive<'a>(&mut self, capsule_value: &'a [u8]) -> Result<Option<&'a [u8]>, Error> {
         let (frame, _) = SessionFrame::parse(capsule_value)?;
         if frame.session_id != self.id {
@@ -277,8 +348,7 @@ pub struct RelayLink {
     /// The frame sequences that the relay accepted inside the span below
     /// the highest one. A sequence below that span is a duplicate, and the
     /// set stays bounded whatever a peer sends.
-    accepted: BTreeSet<u32>,
-    top: Option<u32>,
+    accepted: Accepted,
     bound: bool,
     closed_at: Option<u64>,
     next_seq: u32,
@@ -302,8 +372,7 @@ impl RelayLink {
                 id: session_id,
                 secret: session_secret,
                 resume_count: 0,
-                accepted: BTreeSet::new(),
-                top: None,
+                accepted: Accepted::default(),
                 bound: true,
                 closed_at: None,
                 next_seq: 0,
@@ -334,19 +403,8 @@ impl RelayLink {
             return Err(Error::Refused);
         }
 
-        let span = u32::try_from(ACCEPTED_SPAN).unwrap_or(u32::MAX);
-        let floor = self.top.map_or(0, |top| top.saturating_sub(span));
-        let is_below = self.top.is_some() && frame.seq < floor;
-        if is_below || !self.accepted.insert(frame.seq) {
+        if !self.accepted.insert(frame.seq) {
             return Ok(None);
-        }
-
-        if self.top.is_none_or(|top| frame.seq > top) {
-            self.top = Some(frame.seq);
-            let floor = frame.seq.saturating_sub(span);
-            while self.accepted.first().is_some_and(|seq| *seq < floor) {
-                self.accepted.pop_first();
-            }
         }
         Ok(Some(frame.cell))
     }
@@ -422,7 +480,7 @@ impl RelayLink {
             .map_err(|_| ResumeFault::Refused)?;
         self.resume_count = count;
 
-        let taken = self.top.map_or(0, |top| top.saturating_add(1));
+        let taken = self.accepted.top.map_or(0, |top| top.saturating_add(1));
         if sent != taken || received != self.next_seq {
             return Err(ResumeFault::Lost);
         }
@@ -653,5 +711,41 @@ mod tests {
         let early = SessionControl::Paused { session_id: [1; 8] };
         assert!(client.on_paused(&early).is_err());
         assert!(!client.is_paused());
+    }
+
+    #[test]
+    fn the_ring_of_accepted_sequences_agrees_with_a_set() {
+        use alloc::collections::BTreeSet;
+
+        let span = u32::try_from(ACCEPTED_SPAN).unwrap();
+        let mut ring = Accepted::default();
+        let mut set = BTreeSet::new();
+        let mut top: Option<u32> = None;
+
+        // A sequence that no generator of the build gives: steps ahead,
+        // steps back inside and below the span, repeats, and long jumps.
+        let mut state = 0x9E37_79B9u32;
+        let mut seq = 5u32;
+        for round in 0..20_000u32 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            seq = match state >> 28 {
+                0..=7 => top.map_or(seq, |top| top + 1),
+                8..=10 => top.map_or(seq, |top| top.saturating_sub((state >> 8) % 1_200)),
+                11..=12 => top.map_or(seq, |top| top + 1 + (state >> 8) % 40),
+                13 => seq,
+                14 => top.map_or(seq, |top| top + 900 + (state >> 8) % 300),
+                _ => top.map_or(seq, |top| top + 1 + (state >> 8) % 5_000),
+            };
+
+            let floor = top.map_or(0, |top| top.saturating_sub(span));
+            let expected = !(top.is_some() && seq < floor) && set.insert(seq);
+            if top.is_none_or(|top| seq > top) {
+                top = Some(seq);
+                set.retain(|held| *held >= seq.saturating_sub(span));
+            }
+
+            assert_eq!(ring.insert(seq), expected, "round {round}, seq {seq}");
+            assert_eq!(ring.top, top);
+        }
     }
 }

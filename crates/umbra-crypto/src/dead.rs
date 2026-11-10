@@ -42,7 +42,7 @@ impl DeadChannel {
         // A 32-byte key is the hash length, and a 32-byte output is inside
         // the bound of HKDF, thus neither call fails.
         if let Ok(kdf) = Hkdf::<Sha3_256>::from_prk(&*self.prk) {
-            let _ = kdf.expand_multi_info(&info, out.expose_mut());
+            crate::kdf::expand_into(&kdf, &info, &mut out);
         }
         out
     }

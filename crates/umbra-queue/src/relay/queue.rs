@@ -140,6 +140,11 @@ impl Queue {
         self.records.is_empty()
     }
 
+    /// The bytes of the held records.
+    pub fn bytes(&self) -> usize {
+        self.records.iter().map(|record| record.bytes.len()).sum()
+    }
+
     /// The capacity left under `QUEUE_QUOTA`, which a `QUOTA` reports
     /// (`NET-017`).
     pub fn remaining(&self) -> usize {

@@ -122,6 +122,13 @@ impl<'a> FamilyCert<'a> {
             return Err(Error::Unverified);
         }
 
+        // One relay counts one time in its family.
+        let mut members = self.members.clone();
+        members.sort_unstable();
+        if members.windows(2).any(|w| matches!(w, [a, b] if a == b)) {
+            return Err(Error::Unverified);
+        }
+
         let preimage = self.preimage();
         for ((member, key), sig) in self.members.iter().zip(identity_keys).zip(&self.sigs) {
             if sha3_256(&[key]) != *member {

@@ -30,7 +30,10 @@ class DeliveryService : Service() {
             )
         } catch (refused: IllegalStateException) {
             // The platform permits no foreground service at this moment.
-            // The next view on the screen starts the carrier again.
+            // The next view on the screen starts the carrier again. No
+            // watch runs until then, and a locked client tells the user
+            // (`NTF-120`).
+            if (!Core.isOpen() && Modes.mode(this) == NotifyMode.Direct) Notifier.locked(this)
             stopSelf()
             return START_NOT_STICKY
         }

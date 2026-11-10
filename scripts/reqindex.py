@@ -15,7 +15,11 @@ The index has one row per marker. This tool:
 Rows stay grouped by part in prefix order, and inside a part they are sorted
 by number. Run scripts/speccheck.py afterwards.
 
-Usage: python scripts/reqindex.py [--dry-run]
+A row whose key word is not in the text of its rule takes the key word of
+that text. With --check the tool writes nothing, and it fails when the
+index is stale.
+
+Usage: python scripts/reqindex.py [--dry-run | --check]
 """
 from __future__ import annotations
 
@@ -166,11 +170,13 @@ def load_rows():
 
 
 def main(argv):
-    dry = "--dry-run" in argv
+    check = "--check" in argv
+    dry = "--dry-run" in argv or check
     markers = collect_markers()
     lines, rows = load_rows()
 
     kept, added, removed, refreshed = 0, [], [], []
+    stale_words = []
     new_rows = {}
     for rid, (prefix, num, sec, sentence, segment) in markers.items():
         if rid in rows:
@@ -179,6 +185,13 @@ def main(argv):
             if len(cells) >= 5 and normalized(cells[2]) not in segment:
                 cells[2] = f" {sentence} "
                 refreshed.append(rid)
+            # A row keeps its key word, thus a rule that changes from MUST
+            # to SHOULD shows only in this comparison.
+            # A rule with no key word keeps the default of its row.
+            word = next((kw for kw in KEYWORDS if f" {kw} " in f" {segment} "), None)
+            if word and cells[0].strip() not in segment:
+                cells[0] = f" {word} "
+                stale_words.append(rid)
             new_rows[rid] = f"| `{rid}` | §{sec} |" + "|".join(cells)
             kept += 1
         else:
@@ -231,6 +244,15 @@ def main(argv):
         print("added:", ", ".join(added))
     if removed:
         print("removed:", ", ".join(removed))
+    if stale_words:
+        print("new key word:", ", ".join(stale_words))
+
+    if check:
+        current = (SPEC / "req-index.md").read_text(encoding="utf-8")
+        is_stale = "\n".join(out) + "\n" != current
+        if is_stale:
+            print("spec/req-index.md is stale. Run python scripts/reqindex.py.", file=sys.stderr)
+        return 1 if is_stale else 0
 
     if not dry:
         (SPEC / "req-index.md").write_text("\n".join(out) + "\n", encoding="utf-8", newline="\n")

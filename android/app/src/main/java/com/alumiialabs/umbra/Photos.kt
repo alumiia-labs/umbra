@@ -43,6 +43,16 @@ import kotlin.concurrent.thread
 import uniffi.umbra_ffi.DraftHandle
 import uniffi.umbra_ffi.FileSink
 import uniffi.umbra_ffi.MsgFile
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import android.text.format.DateUtils
 
 /** The media class of an image in a descriptor (Part 12 §12.3). */
 const val CLASS_IMAGE: UByte = 1u
@@ -399,8 +409,8 @@ fun PhotoTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
                 Spacer(Modifier.height(6.dp))
                 Text(
                     lostLabel(line) ?: when (state) {
-                        FILE_WANTED -> stringResource(R.string.photo_receiving)
-                        FILE_FAILED -> stringResource(R.string.photo_not_received)
+                        FILE_WANTED -> stringResource(R.string.common_receiving)
+                        FILE_FAILED -> stringResource(R.string.common_not_received)
                         else -> stringResource(R.string.common_photo)
                     },
                     style = MaterialTheme.typography.labelSmall,
@@ -423,28 +433,26 @@ object Viewer {
  */
 @Composable
 fun PhotoScreen(line: Line, chat: Chat, onBack: () -> Unit) {
-    androidx.compose.runtime.DisposableEffect(Unit) {
+    DisposableEffect(Unit) {
         Viewer.isOpen = true
         onDispose { Viewer.isOpen = false }
     }
 
-    var scale by androidx.compose.runtime.remember { androidx.compose.runtime.mutableFloatStateOf(1f) }
-    var offset by androidx.compose.runtime.remember {
-        androidx.compose.runtime.mutableStateOf(androidx.compose.ui.geometry.Offset.Zero)
-    }
-    var showsBar by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(true) }
+    var scale by remember { mutableFloatStateOf(1f) }
+    var offset by remember { mutableStateOf(Offset.Zero) }
+    var showsBar by remember { mutableStateOf(true) }
     val image = Core.image(line)
 
     Box(
         Modifier
             .fillMaxSize()
-            .background(androidx.compose.ui.graphics.Color.Black)
+            .background(Color.Black)
             .pointerInput(Unit) {
                 detectTapGestures(
                     onTap = { showsBar = !showsBar },
                     onDoubleTap = {
                         scale = if (scale > 1f) 1f else 2.5f
-                        offset = androidx.compose.ui.geometry.Offset.Zero
+                        offset = Offset.Zero
                     },
                 )
             }
@@ -452,7 +460,7 @@ fun PhotoScreen(line: Line, chat: Chat, onBack: () -> Unit) {
                 detectTransformGestures { _, pan, zoom, _ ->
                     scale = (scale * zoom).coerceIn(1f, 5f)
                     // An image at its fit has no place to move to.
-                    offset = if (scale == 1f) androidx.compose.ui.geometry.Offset.Zero else offset + pan
+                    offset = if (scale == 1f) Offset.Zero else offset + pan
                 }
             },
         contentAlignment = Alignment.Center,
@@ -469,6 +477,9 @@ fun PhotoScreen(line: Line, chat: Chat, onBack: () -> Unit) {
                     translationY = offset.y
                 },
             )
+        } else {
+            // The decode runs on another thread, and a dark screen alone says nothing.
+            CircularProgressIndicator(color = Color.White)
         }
 
         if (showsBar) {
@@ -476,46 +487,27 @@ fun PhotoScreen(line: Line, chat: Chat, onBack: () -> Unit) {
                 Modifier
                     .align(Alignment.TopStart)
                     .fillMaxWidth()
-                    .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.45f))
+                    .background(Color.Black.copy(alpha = 0.45f))
                     .padding(start = 4.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                androidx.compose.runtime.CompositionLocalProvider(
-                    androidx.compose.material3.LocalContentColor provides androidx.compose.ui.graphics.Color.White,
-                ) {
-                    // The shared icon button has the ink of a light view.
-                    Box(
-                        Modifier
-                            .size(48.dp)
-                            .clip(androidx.compose.foundation.shape.CircleShape)
-                            .press(role = androidx.compose.ui.semantics.Role.Button, label = stringResource(R.string.common_back), onClick = onBack),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        FaIcon(
-                            "arrow-left",
-                            label = stringResource(R.string.common_back),
-                            size = 20.dp,
-                            tint = androidx.compose.ui.graphics.Color.White,
-                        )
-                    }
-                    Spacer(Modifier.width(6.dp))
-                    Column {
-                        Text(
-                            if (line.info.outgoing) stringResource(R.string.common_you) else chat.title,
-                            style = MaterialTheme.typography.titleMedium,
-                            color = androidx.compose.ui.graphics.Color.White,
-                        )
-                        Text(
-                            android.text.format.DateUtils.formatDateTime(
-                                androidx.compose.ui.platform.LocalContext.current,
-                                line.info.shownAtMs,
-                                android.text.format.DateUtils.FORMAT_SHOW_DATE or
-                                    android.text.format.DateUtils.FORMAT_SHOW_TIME,
-                            ),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.8f),
-                        )
-                    }
+                IconAction("arrow-left", stringResource(R.string.common_back), tint = Color.White, onClick = onBack)
+                Spacer(Modifier.width(6.dp))
+                Column {
+                    Text(
+                        if (line.info.outgoing) stringResource(R.string.common_you) else chat.title,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = Color.White,
+                    )
+                    Text(
+                        DateUtils.formatDateTime(
+                            LocalContext.current,
+                            line.info.shownAtMs,
+                            DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_SHOW_TIME,
+                        ),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Color.White.copy(alpha = 0.8f),
+                    )
                 }
             }
         }

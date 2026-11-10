@@ -153,6 +153,14 @@ relay_conf() {
         die "UMBRA_ADDRESS is an IPv4 address"
     [[ "$UMBRA_COUNTRY" =~ ^[A-Z]{2}$ ]] || die "UMBRA_COUNTRY is two capital letters, as DE"
     [[ "$UMBRA_ASN" =~ ^[0-9]+$ ]] || die "UMBRA_ASN is a number, without AS"
+    # These values go into the lines of relay.conf and of the join request.
+    # A space, a comma, or a line end in one of them would make a second
+    # value there. scripts/relay-admit.py has the same patterns.
+    [[ "$UMBRA_OPERATOR" =~ ^[A-Za-z0-9._-]+$ ]] ||
+        die "UMBRA_OPERATOR takes letters, digits, and . _ -"
+    [[ "$UMBRA_PUBLIC_HOST" =~ ^[A-Za-z0-9.-]+$ ]] || die "UMBRA_HOST is a DNS name"
+    [[ "$UMBRA_PUBLIC_PORT" =~ ^[0-9]{1,5}$ ]] && [ "$UMBRA_PUBLIC_PORT" -ge 1 ] &&
+        [ "$UMBRA_PUBLIC_PORT" -le 65535 ] || die "UMBRA_PORT is a port number"
 
     case $role in
         entry)

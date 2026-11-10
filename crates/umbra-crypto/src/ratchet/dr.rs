@@ -228,7 +228,7 @@ impl<R: CryptoRng + ?Sized> StepHooks for NoBraid<'_, R> {
 fn kdf_rk(root_key: &Secret<32>, dh_output: &Secret<32>) -> (Secret<32>, Secret<32>, Secret<32>) {
     let kdf = Hkdf::<Sha3_256>::new(Some(root_key.expose()), dh_output.expose());
     let mut output = Secret::<96>::zeroed();
-    let _ = kdf.expand(labels::RATCHET_ROOT, output.expose_mut());
+    crate::kdf::expand_into(&kdf, &[labels::RATCHET_ROOT], &mut output);
 
     // Each part goes straight into a buffer that wipes itself, thus no
     // plain copy of a key stays behind.
@@ -301,10 +301,6 @@ fn read_secret(reader: &mut Reader<'_>) -> Result<Secret<32>, Error> {
     Ok(Secret::new(reader.array()?))
 }
 
-fn copy_secret(secret: &Secret<32>) -> Secret<32> {
-    Secret::new(*secret.expose())
-}
-
 impl Session {
     /// A second copy of the session, for a receive that rolls back. It holds
     /// what a round trip through [`Session::export`] and [`Session::restore`]
@@ -330,15 +326,15 @@ impl Session {
             mixed,
         } = self;
         Self {
-            rk: copy_secret(rk),
+            rk: rk.duplicate(),
             dh_s: dh_s.clone(),
             dh_r: *dh_r,
-            ck_s: ck_s.as_ref().map(copy_secret),
-            ck_r: ck_r.as_ref().map(copy_secret),
-            hk_s: hk_s.as_ref().map(copy_secret),
-            nhk_s: copy_secret(nhk_s),
-            hk_r: hk_r.as_ref().map(copy_secret),
-            nhk_r: copy_secret(nhk_r),
+            ck_s: ck_s.as_ref().map(Secret::duplicate),
+            ck_r: ck_r.as_ref().map(Secret::duplicate),
+            hk_s: hk_s.as_ref().map(Secret::duplicate),
+            nhk_s: nhk_s.duplicate(),
+            hk_r: hk_r.as_ref().map(Secret::duplicate),
+            nhk_r: nhk_r.duplicate(),
             n_s: *n_s,
             n_r: *n_r,
             pn: *pn,
@@ -456,7 +452,9 @@ impl Session {
         let mut tag_hash = Sha3_256::new();
         tag_hash.update(labels::SESSION_TAG);
         tag_hash.update(rk.expose());
-        let tag_digest: [u8; 32] = tag_hash.finalize().into();
+        // Two bytes of the digest are public. The other bytes come from
+        // the root key, thus the digest wipes itself.
+        let tag_digest = zeroize::Zeroizing::new(<[u8; 32]>::from(tag_hash.finalize()));
         let mut session_tag = [0u8; 2];
         session_tag.copy_from_slice(tag_digest.get(..2).ok_or(Error::Length)?);
 
@@ -551,9 +549,14 @@ impl Session {
         let record_len = Self::overhead(frame.len()) + plaintext.len();
         let record = out.get_mut(..record_len).ok_or(Error::Length)?;
 
+        // Each check runs before the chain moves, thus a call that fails
+        // costs no chain key and writes no record.
+        let next_n = self.n_s.checked_add(1).ok_or(Error::Ratchet)?;
+        let frame_len = u8::try_from(frame.len()).map_err(|_| Error::Length)?;
+        let header_key = self.hk_s.as_ref().ok_or(Error::Ratchet)?;
+
         // The message key comes from the sending chain, which advances once.
         let chain_key = self.ck_s.take().ok_or(Error::Ratchet)?;
-        let header_key = self.hk_s.as_ref().ok_or(Error::Ratchet)?;
         let (next_chain_key, message_key) = kdf_ck(&chain_key);
         self.ck_s = Some(next_chain_key);
 
@@ -595,7 +598,7 @@ impl Session {
 
         // pq_frame_len || pq_frame
         let (frame_len_out, frame_out) = after_header.split_at_mut(1);
-        frame_len_out.copy_from_slice(&[frame.len() as u8]);
+        frame_len_out.copy_from_slice(&[frame_len]);
         frame_out.copy_from_slice(frame);
 
         // body_nonce || body_ct
@@ -608,7 +611,7 @@ impl Session {
         let tag = seal(&message_key, &body_nonce_value, prefix, body_plain)?;
         body_tag.copy_from_slice(&tag);
 
-        self.n_s = self.n_s.checked_add(1).ok_or(Error::Ratchet)?;
+        self.n_s = next_n;
         self.send_index = self.send_index.wrapping_add(1);
         Ok(record_len)
     }
@@ -625,6 +628,21 @@ impl Session {
         out: &mut [u8],
     ) -> Result<Received<'a>, Error> {
         self.receive_with(record, now, out, &mut NoBraid { rng })
+    }
+
+    /// Tests that a header key of this session opens the header of
+    /// `record`. The call changes no state, thus a caller can refuse a
+    /// record of another party before it does costly work.
+    pub(crate) fn check_header(&self, record: &[u8]) -> Result<(), Error> {
+        let (head, rest) = record.split_at_checked(5).ok_or(Error::Length)?;
+        let (hdr_nonce, rest) = rest.split_at_checked(12).ok_or(Error::Length)?;
+        let hdr_nonce: [u8; 12] = hdr_nonce.try_into().map_err(|_| Error::Length)?;
+        let (hdr_ct, _) = rest.split_at_checked(HDR_CT_LEN).ok_or(Error::Length)?;
+
+        if self.try_skipped(&hdr_nonce, head, hdr_ct).is_some() {
+            return Ok(());
+        }
+        self.decrypt_header(&hdr_nonce, head, hdr_ct).map(|_| ())
     }
 
     /// Decrypts `record` into `out` with the braid hooks of a ratchet step.
@@ -840,7 +858,7 @@ impl Session {
         };
 
         let hk = match self.hk_r.as_ref() {
-            Some(h) => Secret::new(*h.expose()),
+            Some(h) => h.duplicate(),
             None => {
                 self.ck_r = Some(ck);
                 return Ok(());
@@ -923,7 +941,7 @@ impl Session {
     fn mix_root(&mut self, epoch: u32, secret: &Secret<32>) {
         let kdf = Hkdf::<Sha3_256>::new(Some(self.rk.expose()), secret.expose());
         let mut next = Secret::<32>::zeroed();
-        let _ = kdf.expand_multi_info(&[labels::PQ_EPOCH, &epoch.to_be_bytes()], next.expose_mut());
+        crate::kdf::expand_into(&kdf, &[labels::PQ_EPOCH, &epoch.to_be_bytes()], &mut next);
         self.rk = next;
         self.mixed = self.mixed.saturating_add(1);
     }

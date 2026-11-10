@@ -29,11 +29,11 @@ import uniffi.umbra_ffi.ConversationTimer
 private val TimerChoices = listOf(
     0u to R.string.common_off,
     30u to R.string.timer_30_seconds,
-    300u to R.string.timer_5_minutes,
-    3_600u to R.string.timer_1_hour,
+    300u to R.string.common_period_5_minutes,
+    3_600u to R.string.common_period_1_hour,
     28_800u to R.string.timer_8_hours,
-    86_400u to R.string.timer_1_day,
-    604_800u to R.string.timer_1_week,
+    86_400u to R.string.common_period_1_day,
+    604_800u to R.string.common_period_1_week,
     2_419_200u to R.string.timer_4_weeks,
     7_776_000u to R.string.timer_90_days,
 )
@@ -127,7 +127,7 @@ fun DisappearingRow(chat: Chat, mayChange: Boolean) {
             else -> stringResource(R.string.timer_set_by, chat.title, at)
         }
     }
-    val note = listOfNotNull(setBy?.let { "$it." }, UiText.get(R.string.umbra_ui_dev_218)).joinToString(" ")
+    val note = listOfNotNull(setBy, UiText.get(R.string.umbra_ui_dev_218)).joinToString(" ")
 
     if (!mayChange) {
         ActionSheet(title, emptyList(), note = note, onDismiss = { isChoosing = false })

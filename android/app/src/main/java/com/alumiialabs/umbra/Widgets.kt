@@ -100,6 +100,10 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.layout.sizeIn
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 
 /**
  * The holder of a text field of the platform. A composable field holds its
@@ -336,7 +340,7 @@ fun FramedPlatformField(state: PlatformFieldState, label: String, isPassphrase: 
     Row(
         Modifier
             .fillMaxWidth()
-            .border(1.dp, Palette.Outline, RoundedCornerShape(10.dp)),
+            .border(1.dp, Palette.Control, RoundedCornerShape(10.dp)),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(
@@ -437,19 +441,42 @@ fun Modifier.press(role: Role? = null, label: String? = null, onClick: () -> Uni
     )
 }
 
-/** The same press for a switch. */
+/** The same press for a switch, or for a box of a list with [role] `Checkbox`. */
 @Composable
-fun Modifier.pressToggle(isOn: Boolean, onChange: (Boolean) -> Unit): Modifier {
+fun Modifier.pressToggle(isOn: Boolean, role: Role = Role.Switch, onChange: (Boolean) -> Unit): Modifier {
     val source = remember { MutableInteractionSource() }
 
     return pressShade(source).toggleable(
         value = isOn,
         interactionSource = source,
         indication = null,
-        role = Role.Switch,
+        role = role,
         onValueChange = onChange,
     )
 }
+
+/**
+ * The same press for one choice of a set, or for a tab. A plain press says
+ * no state, thus a screen reader would not say which choice is on.
+ */
+@Composable
+fun Modifier.pressChoice(isChosen: Boolean, role: Role = Role.RadioButton, onChoose: () -> Unit): Modifier {
+    val source = remember { MutableInteractionSource() }
+
+    return pressShade(source).selectable(
+        selected = isChosen,
+        interactionSource = source,
+        indication = null,
+        role = role,
+        onClick = onChoose,
+    )
+}
+
+/** The least size of a thing that takes a touch. */
+val TouchTarget = 48.dp
+
+/** Makes a small thing that takes a touch as large as [TouchTarget]. It goes before the press. */
+fun Modifier.touchTarget(): Modifier = sizeIn(minWidth = TouchTarget, minHeight = TouchTarget)
 
 @Composable
 private fun Modifier.pressShade(source: MutableInteractionSource): Modifier {
@@ -599,7 +626,7 @@ fun PromptCard(onClick: (() -> Unit)? = null, content: @Composable ColumnScope.(
 
     Column(
         Modifier
-            .padding(start = 20.dp, end = 20.dp, top = 12.dp)
+            .padding(start = PressInset, end = PressInset, top = 12.dp)
             .fillMaxWidth()
             .clip(shape)
             .background(Palette.Incoming)
@@ -754,11 +781,11 @@ fun BrandBar(onConnection: () -> Unit, onProfile: () -> Unit) {
         // The profile of the user opens from its picture. A device that does
         // not own the channels publishes no profile (DEV-287).
         if (Core.ownsChannels) {
-            val me = stringResource(R.string.widget_me)
+            val me = stringResource(R.string.common_me)
             Box(
                 Modifier
                     .size(48.dp)
-                    .press(role = Role.Button, label = stringResource(R.string.widget_profile), onClick = onProfile),
+                    .press(role = Role.Button, label = stringResource(R.string.common_profile), onClick = onProfile),
                 contentAlignment = Alignment.Center,
             ) { ProfilePicture(Core.myPicture, Core.myName.ifEmpty { me }, 32) }
             Spacer(Modifier.width(4.dp))
@@ -794,7 +821,7 @@ fun BackBar(
         Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp, top = 8.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        IconAction("arrow-left", stringResource(R.string.common_back), onBack)
+        IconAction("arrow-left", stringResource(R.string.common_back), onClick = onBack)
         // The shade of a title that leads somewhere fills the bar between
         // the back button and the actions, square as each other press shade.
         // It starts a little inside the empty side of the back button, thus
@@ -886,29 +913,39 @@ fun ChoiceSheet(title: String, choices: List<SheetChoice>, note: String? = null,
     Sheet(title, note, onDismiss) {
         choices.forEachIndexed { index, choice ->
             if (index > 0) HorizontalDivider(color = Palette.Divider)
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .pressShadeInColumn()
-                    .press(role = Role.RadioButton) {
-                        onDismiss()
-                        choice.onChoose()
-                    }
-                    .padding(horizontal = PressInset, vertical = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                RadioMark(isChosen = choice.isChosen)
-                Spacer(Modifier.width(14.dp))
-                Column {
-                    Text(choice.title)
-                    choice.detail?.let {
-                        Text(
-                            it,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Palette.TextSecondary,
-                        )
-                    }
-                }
+            ChoiceRow(choice.title, choice.isChosen, choice.detail) {
+                onDismiss()
+                choice.onChoose()
+            }
+        }
+    }
+}
+
+/**
+ * One choice of a set in a column with side padding of `PressInset`: the
+ * mark, a title, and a smaller line. Each list of choices uses this row, thus
+ * each has one height and says its state to a screen reader.
+ */
+@Composable
+fun ChoiceRow(title: String, isChosen: Boolean, detail: String? = null, onChoose: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .pressShadeInColumn()
+            .pressChoice(isChosen, onChoose = onChoose)
+            .padding(horizontal = PressInset, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RadioMark(isChosen = isChosen)
+        Spacer(Modifier.width(14.dp))
+        Column {
+            Text(title)
+            detail?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Palette.TextSecondary,
+                )
             }
         }
     }
@@ -945,7 +982,7 @@ private fun Sheet(title: String, note: String?, onDismiss: () -> Unit, rows: @Co
     ) {
         // A long list of a sheet, such as the contacts of an introduction,
         // scrolls inside the sheet.
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(start = 20.dp, end = 20.dp, bottom = 24.dp)) {
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(start = PressInset, end = PressInset, bottom = 24.dp)) {
             Text(title, style = MaterialTheme.typography.headlineSmall)
             Spacer(Modifier.height(12.dp))
             rows()
@@ -1082,7 +1119,7 @@ fun ToggleRow(
         Modifier
             .fillMaxWidth()
             .pressShadeInColumn()
-            .pressToggle(isOn, onChange)
+            .pressToggle(isOn, onChange = onChange)
             .padding(horizontal = PressInset, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1125,7 +1162,7 @@ fun SwitchMark(isOn: Boolean, enabled: Boolean = true) {
     // The size of a switch of the platform, with the thin line of the
     // outlines of the app in the place of a solid track.
     val offset by animateDpAsState(if (isOn) 20.dp else 0.dp, label = "switch")
-    val tint = if (isOn) Palette.Action else Palette.Outline
+    val tint = if (isOn) Palette.Action else Palette.Control
 
     Box(
         Modifier
@@ -1141,14 +1178,66 @@ fun SwitchMark(isOn: Boolean, enabled: Boolean = true) {
 
 /** An icon that acts. The touch target is 48 dp, and the label is for a screen reader. */
 @Composable
-fun IconAction(icon: String, label: String, onClick: () -> Unit) {
-    // The shade fills the square that the button holds, as a tab does.
+fun IconAction(icon: String, label: String, tint: Color = Palette.Text, onClick: () -> Unit) {
+    // The shade fills the square that the button holds, as a tab does. The
+    // icon gives the label, thus the press gives none and a screen reader
+    // says it one time.
     Box(
         Modifier
-            .size(48.dp)
-            .press(role = Role.Button, label = label, onClick = onClick),
+            .size(TouchTarget)
+            .press(role = Role.Button, onClick = onClick),
         contentAlignment = Alignment.Center,
-    ) { FaIcon(icon, label = label, size = 20.dp, tint = Palette.Text) }
+    ) { FaIcon(icon, label = label, size = 20.dp, tint = tint) }
+}
+
+/** The line of a thing that runs: a turning mark, and what runs. */
+@Composable
+fun WorkingRow(text: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 3.dp)
+        Spacer(Modifier.width(12.dp))
+        Text(text)
+    }
+}
+
+/** The bar of a wait whose end the app does not know. */
+@Composable
+fun WaitBar() {
+    LinearProgressIndicator(
+        modifier = Modifier.fillMaxWidth().height(5.dp).clip(CircleShape),
+        color = Palette.Action,
+        trackColor = Palette.Container,
+    )
+}
+
+/** The six digits of a code that the user compares, as two groups of three. */
+@Composable
+fun CodeDigits(code: String) {
+    Text(
+        "${code.take(3)} ${code.drop(3)}",
+        fontSize = 40.sp,
+        letterSpacing = 4.sp,
+        color = Palette.Action,
+        textAlign = TextAlign.Center,
+        modifier = Modifier.fillMaxWidth(),
+    )
+}
+
+/** The framed ground of digits that the user reads or writes down. */
+@Composable
+fun DigitFrame(rowGap: Dp = 0.dp, content: @Composable ColumnScope.() -> Unit) {
+    val shape = RoundedCornerShape(24.dp)
+
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .background(Palette.Raised, shape)
+            .border(1.dp, Palette.Divider, shape)
+            .padding(vertical = 20.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(rowGap),
+        content = content,
+    )
 }
 
 @Composable

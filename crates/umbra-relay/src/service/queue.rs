@@ -66,6 +66,16 @@ pub struct QueueService {
     by_notifier: BTreeMap<[u8; 32], [u8; 32]>,
     /// The circuit that holds the watch of a queue (`NTF-142`).
     watchers: BTreeMap<[u8; 32], CircuitKey>,
+    /// Each queue that a circuit subscribed to or watched, thus the end of
+    /// a circuit reads its own queues alone. An entry can name a queue that
+    /// the circuit holds no more.
+    touched: BTreeMap<CircuitKey, BTreeSet<[u8; 32]>>,
+    /// The last time that the wake states lost their idle entries.
+    wakes_swept: u64,
+    /// The bytes of the records that the queues hold. Each new record adds
+    /// to it, and the sweep counts it again, thus a record that left
+    /// counts until the next sweep.
+    held_bytes: usize,
     /// The queues under each handle of an NDR, which no binding of a watch
     /// names (`NTF-125`, `NTF-143`).
     by_handle: BTreeMap<[u8; HANDLE_LEN], BTreeSet<[u8; 32]>>,
@@ -81,15 +91,31 @@ pub struct QueueService {
     /// The notification state of a queue relay (Part 8 §8.2.3).
     notify: Option<Notify>,
     /// The `corr_id` of each recent deposit, which a second copy repeats
-    /// (`WIR-527`), in the order of its arrival.
-    deposited: VecDeque<[u8; 16]>,
+    /// (`WIR-527`), in the order of its arrival and with its time.
+    deposited: VecDeque<(u64, [u8; 16])>,
     /// The same values in a set, thus a capsule costs no scan of the list
     /// before its auth verifies.
     deposited_set: BTreeSet<[u8; 16]>,
 }
 
-/// The deposits whose `corr_id` a queue relay holds (`WIR-527`).
+/// The deposits whose `corr_id` a queue relay holds (`WIR-527`) with no
+/// regard to their age.
 const DEPOSIT_SEEN: usize = 4_096;
+
+/// The time that a `corr_id` stays above `DEPOSIT_SEEN`, in seconds. A burst
+/// of new deposits thus pushes out no recent value.
+const DEPOSIT_SEEN_AGE: u64 = 3_600;
+
+/// The largest count of held `corr_id` values, which bounds the memory.
+const DEPOSIT_SEEN_MAX: usize = 65_536;
+
+/// The bytes of pairwise records that one relay holds in memory. A record
+/// above the bound gets `BUSY`. With no bound, the admissions of a party set
+/// the memory of the relay.
+pub const QUEUE_RECORDS_MAX: usize = 256 << 20;
+
+/// The interval at which the wake states lose their idle entries, in seconds.
+const WAKE_SWEEP_INTERVAL: u64 = 60;
 
 /// The wake state of one queue, in memory alone.
 #[derive(Default)]
@@ -267,11 +293,16 @@ impl QueueService {
     /// re-push (`NTF-049`, `NTF-066`). The `NWAKE` at the end of the window
     /// of a watch waits in [`QueueService::take_wakes`] (`NTF-146`).
     pub fn push_tick<R: CryptoRng + ?Sized>(&mut self, now: u64, rng: &mut R) {
+        // The watches are few beside the wake states, thus they lead.
         let due: Vec<[u8; 32]> = self
-            .wakes
-            .iter()
-            .filter(|(id, state)| state.pending.is_some() && self.watchers.contains_key(*id))
-            .map(|(id, _)| *id)
+            .watchers
+            .keys()
+            .filter(|id| {
+                self.wakes
+                    .get(*id)
+                    .is_some_and(|state| state.pending.is_some())
+            })
+            .copied()
             .collect();
 
         for recipient_id in due {
@@ -280,8 +311,11 @@ impl QueueService {
         }
 
         // A queue with no wake to come and an ended window holds no state.
-        self.wakes
-            .retain(|_, state| state.pending.is_some() || state.inside(now));
+        if now.saturating_sub(self.wakes_swept) >= WAKE_SWEEP_INTERVAL {
+            self.wakes_swept = now;
+            self.wakes
+                .retain(|_, state| state.pending.is_some() || state.inside(now));
+        }
 
         match self.notify.as_mut() {
             Some(notify) => {
@@ -484,9 +518,14 @@ impl QueueService {
         now: u64,
         rng: &mut R,
     ) -> Result<(u32, Option<Reply>), Reject> {
+        if self.held_bytes.saturating_add(record.len()) > QUEUE_RECORDS_MAX {
+            return Err(Reject::Busy);
+        }
+
         let queue = self.queues.get_mut(&recipient_id).ok_or(Reject::Rejected)?;
         let seq = queue.send(record, now)?;
         let remaining = u32::try_from(queue.remaining()).unwrap_or(u32::MAX);
+        self.held_bytes = self.held_bytes.saturating_add(record.len());
 
         self.changes.push(StoreChange::Record {
             recipient_id,
@@ -631,13 +670,20 @@ impl QueueService {
         let key = CommandAuthKey::derive(relay_static, &qs_auth_pk).ok()?;
         command.verify(&key, b"").ok()?;
 
-        if self.deposited.len() >= DEPOSIT_SEEN {
-            if let Some(oldest) = self.deposited.pop_front() {
-                self.deposited_set.remove(&oldest);
+        // A value leaves above `DEPOSIT_SEEN` only when it is old, thus a
+        // burst of deposits opens no replay of a recent one.
+        while let Some((at, oldest)) = self.deposited.front().copied() {
+            let is_old = now.saturating_sub(at) >= DEPOSIT_SEEN_AGE;
+            let count = self.deposited.len();
+            if count < DEPOSIT_SEEN || (count < DEPOSIT_SEEN_MAX && !is_old) {
+                break;
             }
+
+            self.deposited.pop_front();
+            self.deposited_set.remove(&oldest);
         }
 
-        self.deposited.push_back(command.corr_id);
+        self.deposited.push_back((now, command.corr_id));
         self.deposited_set.insert(command.corr_id);
 
         // NTF-086: a deposit is a digest, and the blob of its push says so.
@@ -685,6 +731,7 @@ impl QueueService {
                     .insert(recipient_id);
             }
 
+            service.held_bytes = service.held_bytes.saturating_add(queue.bytes());
             service.queues.insert(recipient_id, queue);
         }
 
@@ -899,6 +946,10 @@ impl QueueService {
                 self.free_places(session);
                 session.bind_queue(command.queue_id)?;
                 self.watchers.insert(recipient_id, circuit);
+                self.touched
+                    .entry(circuit)
+                    .or_default()
+                    .insert(recipient_id);
 
                 // NTF-146: an arrival that waited while no watch lived gets
                 // its wake now.
@@ -1010,6 +1061,10 @@ impl QueueService {
                 session.bind_queue(recipient_id)?;
                 queue.subscribe(true, now);
                 self.subscribers.insert(recipient_id, circuit);
+                self.touched
+                    .entry(circuit)
+                    .or_default()
+                    .insert(recipient_id);
 
                 // The subscription takes each record, thus no wake waits.
                 if let Some(state) = self.wakes.get_mut(&recipient_id) {
@@ -1219,22 +1274,24 @@ impl QueueService {
     /// thus it would give the next push. The record stays in the queue,
     /// and the next subscription takes it again.
     pub fn circuit_closed(&mut self, circuit: &CircuitKey, now: u64) {
-        let ended: Vec<[u8; 32]> = self
-            .subscribers
-            .iter()
-            .filter(|(_, held)| *held == circuit)
-            .map(|(recipient_id, _)| *recipient_id)
-            .collect();
+        // A circuit that touched no queue costs one lookup.
+        let Some(touched) = self.touched.remove(circuit) else {
+            return;
+        };
 
-        for recipient_id in ended {
-            self.subscribers.remove(&recipient_id);
-            if let Some(queue) = self.queues.get_mut(&recipient_id) {
-                queue.subscribe(false, now);
+        for recipient_id in touched {
+            if self.subscribers.get(&recipient_id) == Some(circuit) {
+                self.subscribers.remove(&recipient_id);
+                if let Some(queue) = self.queues.get_mut(&recipient_id) {
+                    queue.subscribe(false, now);
+                }
+            }
+
+            // A watch lives with its circuit (`NTF-142`).
+            if self.watchers.get(&recipient_id) == Some(circuit) {
+                self.watchers.remove(&recipient_id);
             }
         }
-
-        // A watch lives with its circuit (`NTF-142`).
-        self.watchers.retain(|_, held| held != circuit);
     }
 
     /// The client of a circuit paused its session (`WIR-546`): each
@@ -1295,6 +1352,8 @@ impl QueueService {
                 .push(StoreChange::QueueDeleted { recipient_id });
             self.subscribers.remove(&recipient_id);
         }
+
+        self.held_bytes = self.queues.values().map(Queue::bytes).sum();
     }
 }
 

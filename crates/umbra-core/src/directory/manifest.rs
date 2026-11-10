@@ -374,13 +374,23 @@ fn newest_queues(queues: &[&[u8]], keyset: &DirectoryKeySet<'_>, epoch: u64) -> 
 ///
 /// REL-184: a removal that fails or ended goes, and the manifest stays. A
 /// link that the list holds already costs no second verification.
+///
+/// No root covers the list, thus a carrier can fill it with removals that
+/// fail. After `REMOVALS_FAILED_MAX` signature failures the remaining
+/// removals go with no verification. A carrier can drop each removal already, thus the
+/// bound gives it nothing more.
 fn verified_removals(
     removals: &[&[u8]],
     keyset: &DirectoryKeySet<'_>,
     epoch: u64,
 ) -> Vec<LinkRemoval> {
     let mut removed_links: Vec<LinkRemoval> = Vec::new();
+    let mut failed = 0usize;
     for bytes in removals {
+        if failed >= REMOVALS_FAILED_MAX {
+            break;
+        }
+
         let is_held = LinkRemoval::link_of(bytes).is_some_and(|(relay_a, relay_b)| {
             removed_links
                 .iter()
@@ -390,12 +400,20 @@ fn verified_removals(
             continue;
         }
 
-        if let Ok(removal) = LinkRemoval::verify(bytes, keyset, epoch) {
-            removed_links.push(removal);
+        match LinkRemoval::verify(bytes, keyset, epoch) {
+            Ok(removal) => removed_links.push(removal),
+            // A removal that ended costs no signature check, and an honest
+            // list can hold many of them.
+            Err(Error::Unverified) => failed = failed.saturating_add(1),
+            Err(_) => {}
         }
     }
     removed_links
 }
+
+/// The removals of one manifest that can fail before the client stops the
+/// verification of the list. Each one costs up to seven ML-DSA checks.
+const REMOVALS_FAILED_MAX: usize = 8;
 
 #[cfg(test)]
 #[allow(

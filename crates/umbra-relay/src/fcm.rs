@@ -33,6 +33,8 @@ const WAIT: Duration = Duration::from_secs(10);
 /// second fetch goes, in seconds. The NDR refuses a push inside it at once.
 /// A token endpoint that is down thus holds no connection for `WAIT`.
 const TOKEN_RETRY: u64 = 5;
+/// The status of FCM for an access token that it does not take.
+const UNAUTHORIZED: u16 = 401;
 /// The error code of FCM for a registration token that is gone.
 const UNREGISTERED: &str = "UNREGISTERED";
 /// The error code of FCM for a request with a field that is not valid.
@@ -259,7 +261,7 @@ impl ServiceAccount {
 /// last fetch that failed.
 #[derive(Default)]
 struct Access {
-    token: Option<(String, u64)>,
+    token: Option<(Zeroizing<String>, u64)>,
     failed_at: Option<u64>,
 }
 
@@ -296,7 +298,7 @@ impl Fcm {
     /// The access token, fetched again near its end. One fetch runs at a
     /// time. A fetch that fails refuses each push that waited for it, and
     /// no second fetch goes inside `TOKEN_RETRY`.
-    async fn access_token(&self) -> Option<String> {
+    async fn access_token(&self) -> Option<Zeroizing<String>> {
         let mut held = self.access.lock().await;
         let now = unix_now();
 
@@ -325,8 +327,23 @@ impl Fcm {
         fetched.map(|(token, _)| token)
     }
 
+    /// Drops the access token `used` when it is the one that serves now.
+    /// FCM refused it before its end, as after a key change of the account.
+    /// The next send then fetches a new one. Before this, each push failed
+    /// until the end of the token, which is up to one hour.
+    async fn drop_token(&self, used: &str) {
+        let mut held = self.access.lock().await;
+        if held
+            .token
+            .as_ref()
+            .is_some_and(|(token, _)| token.as_str() == used)
+        {
+            held.token = None;
+        }
+    }
+
     /// One fetch of the access token at the token endpoint, with its end.
-    async fn fetch_token(&self, now: u64) -> Option<(String, u64)> {
+    async fn fetch_token(&self, now: u64) -> Option<(Zeroizing<String>, u64)> {
         let assertion = self.account.assertion(now)?;
         let body = format!(
             "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion={assertion}"
@@ -349,7 +366,7 @@ impl Fcm {
         }
 
         let answer = core::str::from_utf8(&answer).ok()?;
-        let token = json_string(answer, "access_token")?;
+        let token = Zeroizing::new(json_string(answer, "access_token")?);
         let life = json_number(answer, "expires_in").unwrap_or(3_600);
         Some((token, now.saturating_add(life)))
     }
@@ -365,12 +382,18 @@ impl Fcm {
         };
 
         let message = message_of(token, blob, ttl);
-        let authorization = format!("Bearer {access}");
+
+        // The header holds the access token, thus it takes its full length
+        // at the start and the send wipes it at its end.
+        let mut authorization =
+            Zeroizing::new(String::with_capacity(access.len().saturating_add(7)));
+        authorization.push_str("Bearer ");
+        authorization.push_str(&access);
 
         let answer = https::post(
             &self.send,
             "application/json",
-            &[("Authorization", &authorization)],
+            &[("Authorization", authorization.as_str())],
             message.as_bytes(),
             self.tls.clone(),
             16_384,
@@ -379,6 +402,10 @@ impl Fcm {
         .await;
 
         match answer {
+            Ok((UNAUTHORIZED, _)) => {
+                self.drop_token(&access).await;
+                Sent::Refused
+            }
             Ok((status, body)) => sent_of(status, &body),
             Err(_) => Sent::Refused,
         }

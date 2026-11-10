@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 6: Wire Format and Encoding
 
 **Status:** Draft
-**Version:** 0.52.1
+**Version:** 0.53.0
 **Date:** 2026-11-09
 
 ---
@@ -1829,7 +1829,8 @@ NOT reject a body for such a character. A stored record and a record of an
 earlier sender can hold one, and their file must stay in reach. The parser
 MUST take each such character out of the `name` before a view, a save, or a
 store uses it. The parser MUST read a `name` that is then empty, `.`, or `..`
-as no name.
+as no name. A trailer that carries only such a `name` is the one trailer that
+the parser accepts with no name, no preview, and no caption.
 
 **[WIR-533]** A `preview` MUST be a JPEG of at most `PREVIEW_MAX` bytes that
 starts with `FF D8 FF` and ends with `FF D9`. A parser MUST reject a body with

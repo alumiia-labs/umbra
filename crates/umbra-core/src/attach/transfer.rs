@@ -1204,43 +1204,42 @@ impl ChunkState {
     }
 }
 
-/// Whether [`fresh_relay`] has a relay to give.
-fn has_fresh_relay(pool: &[AttachmentRelay], others: &[[u8; 32]], failed: &[[u8; 32]]) -> bool {
+/// The relays that can take the place of a replica that failed: no relay
+/// of `failed`, no relay of `others`, and no operator of `others`
+/// (`ATT-017`).
+fn free_relays<'a>(
+    pool: &'a [AttachmentRelay],
+    others: &[[u8; 32]],
+    failed: &[[u8; 32]],
+) -> Vec<&'a AttachmentRelay> {
     let operators: Vec<[u8; 32]> = pool
         .iter()
         .filter(|relay| others.contains(&relay.relay_id))
         .map(|relay| relay.operator_id)
         .collect();
 
-    pool.iter().any(|relay| {
-        !others.contains(&relay.relay_id)
-            && !failed.contains(&relay.relay_id)
-            && !operators.contains(&relay.operator_id)
-    })
+    pool.iter()
+        .filter(|relay| {
+            !others.contains(&relay.relay_id)
+                && !failed.contains(&relay.relay_id)
+                && !operators.contains(&relay.operator_id)
+        })
+        .collect()
 }
 
-/// One relay for the place of a replica that failed: no relay of `failed`,
-/// no relay of `others`, and no operator of `others` (`ATT-017`).
+/// Whether [`fresh_relay`] has a relay to give.
+fn has_fresh_relay(pool: &[AttachmentRelay], others: &[[u8; 32]], failed: &[[u8; 32]]) -> bool {
+    !free_relays(pool, others, failed).is_empty()
+}
+
+/// One relay of [`free_relays`], at random.
 fn fresh_relay<R: CryptoRng + ?Sized>(
     pool: &[AttachmentRelay],
     others: &[[u8; 32]],
     failed: &[[u8; 32]],
     rng: &mut R,
 ) -> Result<[u8; 32], Error> {
-    let operators: Vec<[u8; 32]> = pool
-        .iter()
-        .filter(|relay| others.contains(&relay.relay_id))
-        .map(|relay| relay.operator_id)
-        .collect();
-
-    let free: Vec<&AttachmentRelay> = pool
-        .iter()
-        .filter(|relay| {
-            !others.contains(&relay.relay_id)
-                && !failed.contains(&relay.relay_id)
-                && !operators.contains(&relay.operator_id)
-        })
-        .collect();
+    let free = free_relays(pool, others, failed);
 
     let bound = u32::try_from(free.len()).map_err(|_| Error::Malformed)?;
     let at = usize::try_from(random_below(rng, bound)).map_err(|_| Error::Malformed)?;
@@ -1775,10 +1774,10 @@ impl Download {
         }
         let is_served = match outcome {
             ChunkOutcome::Fetched(_) if opened => true,
-            ChunkOutcome::Fetched(_) => {
-                wanted.refusals = wanted.refusals.saturating_add(1);
-                false
-            }
+            // Bytes that do not open are a fault of that relay. They are no
+            // statement that the relay holds no such chunk, thus they do
+            // not count for `is_gone`.
+            ChunkOutcome::Fetched(_) => false,
             // ATT-019: the next replica. WIR-317 gives one reason to an
             // unknown chunk, and the read secret of a descriptor is right.
             ChunkOutcome::Refused(Reject::Rejected) => {

@@ -18,6 +18,10 @@ pub struct Held {
     pub at: u64,
 }
 
+/// The receipts that the hold of one peer keeps. A peer sets the count of
+/// its messages, and a session that opens late takes no batch meanwhile.
+pub const RECEIPT_HELD_MAX: usize = 4_096;
+
 /// The hold of one peer.
 #[derive(Default)]
 pub struct ReceiptHold {
@@ -25,11 +29,31 @@ pub struct ReceiptHold {
 }
 
 impl ReceiptHold {
-    /// Queues a receipt for `target` reporting an event at `at`.
+    /// Queues a receipt for `target` reporting an event at `at`. A hold at
+    /// `RECEIPT_HELD_MAX` first loses each receipt that is stale at `at`,
+    /// and then its oldest one.
     pub fn push(&mut self, target: [u8; 16], at: u64) {
-        if !self.held.iter().any(|h| h.target == target) {
-            self.held.push(Held { target, at });
+        if self.held.iter().any(|h| h.target == target) {
+            return;
         }
+
+        if self.held.len() >= RECEIPT_HELD_MAX {
+            self.discard_stale(at);
+        }
+
+        if self.held.len() >= RECEIPT_HELD_MAX {
+            let oldest = self
+                .held
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, h)| h.at)
+                .map(|(index, _)| index);
+            if let Some(index) = oldest {
+                self.held.swap_remove(index);
+            }
+        }
+
+        self.held.push(Held { target, at });
     }
 
     /// Discards each receipt held past `RECEIPT_MAX_HOLD` (`NET-052`).
@@ -106,6 +130,24 @@ mod tests {
 
         assert_eq!(hold.discard_stale(1_000 + RECEIPT_MAX_HOLD), 3);
         assert!(hold.is_empty());
+    }
+
+    #[test]
+    fn a_full_hold_loses_its_oldest_receipt() {
+        let mut hold = ReceiptHold::default();
+        let target = |i: usize| {
+            let mut target = [0u8; 16];
+            target[..8].copy_from_slice(&(i as u64).to_be_bytes());
+            target
+        };
+
+        for i in 0..RECEIPT_HELD_MAX {
+            hold.push(target(i), 1_000 + i as u64);
+        }
+
+        hold.push(target(RECEIPT_HELD_MAX), 1_500);
+        assert_eq!(hold.len(), RECEIPT_HELD_MAX);
+        assert!(!hold.held.iter().any(|h| h.target == target(0)));
     }
 
     #[test]

@@ -142,20 +142,29 @@ impl Braid {
         now: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        // The checks of the peer key run first, thus an advance that
+        // fails costs no key generation.
+        let target = match target_of(self.role, epoch) {
+            Some(target) => {
+                let (target_epoch, peer_ek) = self.peer_ek.as_ref().ok_or(Error::Ratchet)?;
+                if *target_epoch != target {
+                    return Err(Error::Ratchet);
+                }
+
+                let peer_ek = EncapsulationKey::<MlKem768>::new(&Array::from(*peer_ek))
+                    .map_err(|_| Error::Key)?;
+                Some((target, peer_ek))
+            }
+            None => None,
+        };
+
         let mut seed = Secret::<64>::zeroed();
         rng.fill_bytes(seed.expose_mut());
         let dk = decapsulation_key(&seed);
         let ek: [u8; 1184] = dk.encapsulation_key().to_bytes().into();
 
         let mut ct = [0u8; 1088];
-        if let Some(target) = target_of(self.role, epoch) {
-            let (target_epoch, peer_ek) = self.peer_ek.as_ref().ok_or(Error::Ratchet)?;
-            if *target_epoch != target {
-                return Err(Error::Ratchet);
-            }
-
-            let peer_ek = EncapsulationKey::<MlKem768>::new(&Array::from(*peer_ek))
-                .map_err(|_| Error::Key)?;
+        if let Some((target, peer_ek)) = target {
             let (ciphertext, mut shared) = peer_ek.encapsulate_with_rng(rng);
             ct.copy_from_slice(&ciphertext);
             let mut secret = Secret::<32>::zeroed();
@@ -203,7 +212,9 @@ impl Braid {
         let index = self.next_chunk;
         let kind = width.kind_at(index)? as u8;
         let epoch = self.epoch.to_be_bytes();
-        let index_bytes = (index as u16).to_be_bytes();
+        let index_bytes = u16::try_from(index)
+            .map_err(|_| Error::Length)?
+            .to_be_bytes();
         head.copy_from_slice(&[
             epoch[0],
             epoch[1],
@@ -234,7 +245,8 @@ impl Braid {
                 .and_then(|b| b.try_into().ok())
                 .ok_or(Error::Length)?,
         ));
-        let width = Width::from_frame_len(frame.len() as u8)?;
+        let frame_len = u8::try_from(frame.len()).map_err(|_| Error::Length)?;
+        let width = Width::from_frame_len(frame_len)?;
         if width.kind_at(index)? != kind {
             return Err(Error::Ratchet);
         }
@@ -262,6 +274,10 @@ impl Braid {
         if done && !already_done {
             let material = collector.rebuild()?;
             let ek = material.encapsulation_key()?;
+
+            // A key that fails the check of FIPS 203 would fail each later
+            // advance, thus the braid does not keep it.
+            EncapsulationKey::<MlKem768>::new(&Array::from(ek)).map_err(|_| Error::Key)?;
             self.peer_ek = Some((epoch, ek));
 
             let ct = material.ciphertext();
@@ -417,13 +433,13 @@ impl Braid {
             records_in_epoch: *records_in_epoch,
             epoch_started_at: *epoch_started_at,
             complete: *complete,
-            own_secret: own_secret.as_ref().map(|s| Secret::new(*s.expose())),
+            own_secret: own_secret.as_ref().map(|s| s.duplicate()),
             peer_epoch: *peer_epoch,
             collector: collector.as_ref().map(Collector::copy),
             peer_ek: *peer_ek,
             peer_secret: peer_secret
                 .as_ref()
-                .map(|(target, s)| (*target, Secret::new(*s.expose()))),
+                .map(|(target, s)| (*target, s.duplicate())),
         }
     }
 
@@ -679,6 +695,11 @@ impl Ratchet {
         rng: &mut R,
         out: &mut [u8],
     ) -> Result<Opened, Error> {
+        // The copy of the state is large, and a step on it is costly. A
+        // record whose header no key opens gets neither.
+        Session::peek_ctx(record)?;
+        self.session.check_header(record)?;
+
         let before = self.copy();
         let mut unframed = false;
         let mut opened = self.receive_once(record, now, rng, out, false, &mut unframed);
@@ -894,6 +915,26 @@ mod tests {
         // The key served one record, in the stored form too.
         let mut b = stored_and_read_again(&b);
         assert!(recv(&mut b, &mut rng, &late, 3).is_err());
+    }
+
+    #[test]
+    fn a_header_that_no_key_opens_changes_nothing() {
+        let (mut a, mut b, mut rng) = pair(b"foreign header", Width::W64);
+        let first = send(&mut a, &mut rng, b"first", 0);
+        assert_eq!(recv(&mut b, &mut rng, &first, 0).unwrap(), b"first");
+
+        // Byte 20 is inside the header ciphertext.
+        let mut changed = send(&mut a, &mut rng, b"second", 1);
+        changed[20] ^= 1;
+        let before = b.export().unwrap();
+        assert!(recv(&mut b, &mut rng, &changed, 1).is_err());
+        assert_eq!(*b.export().unwrap(), *before);
+
+        // A record that is too short for a header is a length fault.
+        assert!(matches!(
+            recv(&mut b, &mut rng, &changed[..10], 1),
+            Err(Error::Length)
+        ));
     }
 
     #[test]

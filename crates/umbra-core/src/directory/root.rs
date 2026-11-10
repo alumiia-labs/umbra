@@ -206,7 +206,12 @@ impl<'a> DirectoryKeySet<'a> {
             if valid >= SIGNATURES_NEEDED {
                 break;
             }
-            if key(*index)?.borrow().verify(preimage, sig).is_ok() {
+            // REL-031: a key that does not decode gives no valid signature,
+            // and the other signatures still count.
+            let Ok(key) = key(*index) else {
+                continue;
+            };
+            if key.borrow().verify(preimage, sig).is_ok() {
                 valid = valid.saturating_add(1);
             }
         }

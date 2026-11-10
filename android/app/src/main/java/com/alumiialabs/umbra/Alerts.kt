@@ -28,7 +28,7 @@ const val ALERT_NONE: UByte = 2u
 fun alertLabel(value: UByte): String = when (value) {
     ALERT_MENTIONS -> UiText.get(R.string.alerts_mentions_only)
     ALERT_NONE -> UiText.get(R.string.common_off)
-    else -> UiText.get(R.string.alerts_all_messages)
+    else -> UiText.get(R.string.common_all_messages)
 }
 
 /**
@@ -87,8 +87,10 @@ fun AlertRows(chat: Chat) {
     }
     HorizontalDivider(color = Palette.Divider)
     if (marked && !interrupts) {
+        // The row opens a sheet, thus it has no chevron.
         EntryRow(
             RowEntry("triangle-exclamation", stringResource(R.string.alerts_priority_allow)) { editing = AlertSheet.Interrupt },
+            leads = false,
         )
         HorizontalDivider(color = Palette.Divider)
     }
@@ -194,7 +196,7 @@ const val PREVIEW_HIDE = 2
 
 @Composable
 private fun previewLabel(field: Int): String = when (field) {
-    PREVIEW_SHOW -> stringResource(R.string.alerts_show)
+    PREVIEW_SHOW -> stringResource(R.string.common_show)
     PREVIEW_HIDE -> stringResource(R.string.alerts_hide)
     else -> stringResource(R.string.alerts_default)
 }

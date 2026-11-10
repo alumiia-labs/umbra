@@ -174,11 +174,11 @@ impl<'a> LogKeySet<'a> {
             if valid >= SIGNATURES_NEEDED {
                 break;
             }
-            let key = keys
-                .get(usize::from(*index))
-                .ok_or(Error::Malformed)?
-                .as_ref()
-                .ok_or(Error::Unverified)?;
+            // DIS-058: a key that does not decode gives no valid signature,
+            // and the other signatures still count.
+            let Some(key) = keys.get(usize::from(*index)).ok_or(Error::Malformed)? else {
+                continue;
+            };
             if key.verify(preimage, sig).is_ok() {
                 valid = valid.saturating_add(1);
             }
@@ -217,6 +217,12 @@ impl<'a> LogKeySet<'a> {
         let (next, used) = LogKeySet::parse(signed)?;
         if next.keyset_epoch <= self.keyset_epoch {
             return Err(Error::Stale);
+        }
+        // DIS-065: `keyset_epoch` counts the rotations, thus the successor
+        // is one above. A set that names a far epoch would stand above each
+        // honest set after it.
+        if next.keyset_epoch != self.keyset_epoch.saturating_add(1) {
+            return Err(Error::Unverified);
         }
 
         let mut r = Reader::new(signed.get(used..).ok_or(Error::Malformed)?);
@@ -453,10 +459,14 @@ impl<'a> HeadState<'a> {
         self.admit(head, device_clock, true)
     }
 
-    /// Drops each head past `TREE_HEAD_RETAIN` (`DIS-063`).
+    /// Drops each head past `TREE_HEAD_RETAIN` (`DIS-063`). The newest head
+    /// stays: with no retained head, `accept` would take a fork with no
+    /// consistency proof.
     pub fn retain(&mut self, now: u64) {
-        self.retained
-            .retain(|h| now.saturating_sub(h.accepted_at) < TREE_HEAD_RETAIN);
+        let newest = self.newest().map(|h| h.tree_size);
+        self.retained.retain(|h| {
+            Some(h.tree_size) == newest || now.saturating_sub(h.accepted_at) < TREE_HEAD_RETAIN
+        });
     }
 
     /// The newest head accepted, if any is retained.
@@ -810,8 +820,10 @@ mod tests {
         let later = clock + TREE_HEAD_RETAIN;
         assert!(state.degraded(later));
         assert_eq!(state.compare(&digest, later), Verdict::Degraded);
+        // The newest head stays past the retention, thus a later head still
+        // needs its consistency proof.
         state.retain(later);
-        assert!(state.newest().is_none());
+        assert!(state.newest().is_some());
 
         let mut gossip = Gossip::default();
         assert!(gossip.allow(DigestSource::TreeHead, 0));
@@ -885,6 +897,10 @@ mod tests {
 
         let self_signed = make(2, &[0, 1], &next_keys);
         assert_eq!(state.rotate_keys(&self_signed), Err(Error::Unverified));
+
+        // DIS-065: a set that names a far epoch is no successor.
+        let far = make(3, &[1, 2], &keys);
+        assert_eq!(state.rotate_keys(&far), Err(Error::Unverified));
 
         let good = make(2, &[1, 2], &keys);
         state.rotate_keys(&good).unwrap();

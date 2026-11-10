@@ -247,20 +247,24 @@ fn keystore_key(data: &Path) -> Result<[u8; 32], Failure> {
     Ok(key)
 }
 
-fn passphrase(input: &mut impl BufRead) -> Result<Vec<u16>, Failure> {
+/// The passphrase of the store. Each copy that this tool holds overwrites
+/// itself at its drop. The copy in the environment of the process stays.
+fn passphrase(input: &mut impl BufRead) -> Result<zeroize::Zeroizing<Vec<u16>>, Failure> {
     if let Ok(text) = std::env::var("UMBRA_CLI_PASSPHRASE") {
-        return Ok(text.encode_utf16().collect());
+        let text = zeroize::Zeroizing::new(text);
+        return Ok(zeroize::Zeroizing::new(text.encode_utf16().collect()));
     }
 
     print!("passphrase: ");
     io::stdout()
         .flush()
         .map_err(|e| failed("the standard output", e))?;
-    let mut line = String::new();
+    let mut line = zeroize::Zeroizing::new(String::new());
     input
         .read_line(&mut line)
         .map_err(|e| failed("the standard input", e))?;
-    Ok(line.trim_end_matches(['\r', '\n']).encode_utf16().collect())
+    let typed = line.trim_end_matches(['\r', '\n']);
+    Ok(zeroize::Zeroizing::new(typed.encode_utf16().collect()))
 }
 
 /// Opens the store. The first start makes it under the passphrase, and a
@@ -277,10 +281,10 @@ fn open(data: &Path, input: &mut impl BufRead) -> Result<Arc<Handle>, Failure> {
     // A file with no header is a first start that ended early. `init` makes
     // the store again under the passphrase, thus it always gets the real one.
     let has_header = store_has_header(config.database_path.clone());
-    let handle = init(config, element, passphrase.clone()).map_err(|e| failed("the store", e))?;
+    let handle = init(config, element, passphrase.to_vec()).map_err(|e| failed("the store", e))?;
     if has_header {
         handle
-            .unlock(passphrase)
+            .unlock(passphrase.to_vec())
             .map_err(|e| failed("the unlock", e))?;
     }
     Ok(handle)

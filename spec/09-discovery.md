@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 9: Discovery, Handles, and Key Transparency
 
 **Status:** Draft
-**Version:** 0.52.1
+**Version:** 0.53.0
 **Date:** 2026-11-09
 
 ---
@@ -586,6 +586,8 @@ bytes, thus each form fits one `B3` cell.
    in list order, each against the key at its `signer_index` in the
    `LogKeySet` that the client holds, until 2 of them are valid. It MAY skip
    the verification of the signature after that, as Part 10 `REL-031` allows.
+   A signature under a key of the set that does not decode is not valid, and
+   the client MUST still count the other signatures.
    **[DIS-059]** A client MUST count 2 or more valid signatures before it
    accepts the head.
 9. **[DIS-060]** A client MUST reject a `SignedTreeHead` whose `keyset_hash`
@@ -654,7 +656,13 @@ auditor holds the intent of the holder.
     `keyset_epoch || SHA3-256(the new canonical key set)`. Part 5 §5.11 holds
     that label.
 15. **[DIS-065]** A client MUST reject a `LogKeySet` whose `keyset_epoch` is at
-    or below the `keyset_epoch` that the client holds.
+    or below the `keyset_epoch` that the client holds. A client MUST also
+    reject a `LogKeySet` whose `keyset_epoch` is more than one above that
+    value. `keyset_epoch` counts the rotations, thus the step of one is its
+    only bound, as Part 10 `REL-037` gives it for a `DirectoryKeySet`. A set
+    that names a far value would stand above each honest set after it.
+    `DIS-198` sends the sets in a chain, thus a client that is some
+    rotations behind takes them one at a time.
 16. **[DIS-066]** A client build MUST ship the genesis `LogKeySet`.
 17. **[DIS-198]** A directory MUST answer a `KeySet` request of §9.10 with
     each `SignedLogKeySet` whose `keyset_epoch` is above the epoch of the

@@ -37,11 +37,15 @@ impl Matrix {
         }
     }
 
+    // An index outside the matrix is a defect of this file. A debug build
+    // stops on it, and a release build keeps the total behavior.
     fn at(&self, r: usize, c: usize) -> u16 {
+        debug_assert!(r < self.k && c < self.k);
         self.cells.get(r * self.k + c).copied().unwrap_or(0)
     }
 
     fn set(&mut self, r: usize, c: usize, v: u16) {
+        debug_assert!(r < self.k && c < self.k);
         if let Some(cell) = self.cells.get_mut(r * self.k + c) {
             *cell = v;
         }
@@ -218,6 +222,7 @@ impl Code {
 
 fn symbol(chunks: &[u8], chunk: usize, w: usize, sym: usize) -> u16 {
     let at = chunk * w + 2 * sym;
+    debug_assert!(at + 1 < chunks.len());
     match (chunks.get(at), chunks.get(at + 1)) {
         (Some(&hi), Some(&lo)) => u16::from_be_bytes([hi, lo]),
         _ => 0,
@@ -226,6 +231,7 @@ fn symbol(chunks: &[u8], chunk: usize, w: usize, sym: usize) -> u16 {
 
 fn put_symbol(chunks: &mut [u8], chunk: usize, w: usize, sym: usize, v: u16) {
     let at = chunk * w + 2 * sym;
+    debug_assert!(at + 1 < chunks.len());
     if let Some(cell) = chunks.get_mut(at..at + 2) {
         cell.copy_from_slice(&v.to_be_bytes());
     }

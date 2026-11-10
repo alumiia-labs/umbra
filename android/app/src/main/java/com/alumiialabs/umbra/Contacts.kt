@@ -60,7 +60,7 @@ import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
 fun AddContactScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.contacts_add_contact), onBack = onBack)
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(PressInset)) {
             HeroIcon("link")
             Spacer(Modifier.height(24.dp))
             Headline(stringResource(R.string.contacts_say_hello))
@@ -79,7 +79,7 @@ fun AddContactScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             EntryRow(RowEntry("qrcode", stringResource(R.string.contacts_use_invitation_instead)) { push(Screen.UseInvitation) })
             HorizontalDivider(color = Palette.Divider)
             // The group of Part 11 starts beside the contacts.
-            EntryRow(RowEntry("user-group", stringResource(R.string.contacts_new_private_group)) { push(Screen.NewGroup) })
+            EntryRow(RowEntry("user-group", stringResource(R.string.common_new_private_group)) { push(Screen.NewGroup) })
             // Part 9: a link for many people, and a name to look up.
             if (Core.ownsChannels) {
                 HorizontalDivider(color = Palette.Divider)
@@ -96,7 +96,7 @@ fun YourInvitationScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.contacts_add_contact), onBack = onBack)
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(PressInset)) {
             Headline(
                 stringResource(R.string.contacts_your_invitation),
                 stringResource(R.string.contacts_invitation_expires),
@@ -105,11 +105,7 @@ fun YourInvitationScreen(onBack: () -> Unit) {
 
             val link = Core.invitation
             if (link == null) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 3.dp)
-                    Spacer(Modifier.width(12.dp))
-                    Text(stringResource(R.string.contacts_asking_relay))
-                }
+                WorkingRow(stringResource(R.string.contacts_asking_relay))
                 Core.fault?.let {
                     Spacer(Modifier.height(16.dp))
                     Note(it, isError = true)
@@ -119,21 +115,12 @@ fun YourInvitationScreen(onBack: () -> Unit) {
 
             Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { QrCode(link) }
             Spacer(Modifier.height(16.dp))
-            Text(
-                link,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                fontFamily = Fonts.Mono,
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Palette.Raised, RoundedCornerShape(16.dp))
-                    .border(1.dp, Palette.Divider, RoundedCornerShape(16.dp))
-                    .padding(16.dp),
-            )
+            MonoBox(link)
 
             Spacer(Modifier.height(12.dp))
-            PrimaryButton(stringResource(R.string.contacts_share_invitation)) { share(context, link) }
+            PrimaryButton(stringResource(R.string.contacts_share_invitation)) {
+                shareText(context, link, UiText.get(R.string.contacts_share_invitation))
+            }
             Spacer(Modifier.height(8.dp))
             SecondaryButton(stringResource(R.string.common_copy_link)) { copySensitive(context, link) }
             Spacer(Modifier.height(12.dp))
@@ -227,7 +214,7 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
 
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.contacts_use_invitation), onBack = onBack)
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(PressInset)) {
             HeroIcon("qrcode")
             Spacer(Modifier.height(24.dp))
             Headline(stringResource(R.string.contacts_someone_invited_you))
@@ -302,11 +289,7 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                 if (Core.requestSent) {
                     Note(stringResource(R.string.contacts_request_sent))
                 } else if (Core.directoryBusy) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 3.dp)
-                        Spacer(Modifier.width(12.dp))
-                        Text(stringResource(R.string.contacts_looking_up))
-                    }
+                    WorkingRow(stringResource(R.string.contacts_looking_up))
                 } else if (Core.takeoverOf == pasted.trim()) {
                     // DIS-084, DIS-085: the hello goes only after a confirmation.
                     Note(UiText.get(R.string.umbra_ui_dis_084, pasted.trim()), isError = true)
@@ -334,11 +317,7 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                     Note(it, isError = true)
                 }
             } else if (isWaiting) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 3.dp)
-                    Spacer(Modifier.width(12.dp))
-                    Text(stringResource(R.string.contacts_opening_invitation))
-                }
+                WorkingRow(stringResource(R.string.contacts_opening_invitation))
             } else {
                 SecondaryButton(
                     stringResource(R.string.contacts_continue),
@@ -403,17 +382,9 @@ fun NameContactScreen(conversation: Conversation, onDone: () -> Unit) {
 
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.contacts_new_contact), onBack = onDone)
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(PressInset)) {
             Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                Box(
-                    Modifier.size(84.dp).background(Palette.Avatars[1], CircleShape),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        firstLetter(name.trim()),
-                        style = MaterialTheme.typography.headlineMedium,
-                    )
-                }
+                LetterAvatar(name.trim(), seed = 1, size = 84)
             }
             Spacer(Modifier.height(20.dp))
             Headline(stringResource(R.string.contacts_name_this_contact))
@@ -432,9 +403,7 @@ fun NameContactScreen(conversation: Conversation, onDone: () -> Unit) {
                 if (name.isNotBlank()) Core.setName(conversation, name)
                 onDone()
             }
-            TextButton(onClick = onDone, modifier = Modifier.fillMaxWidth()) {
-                Text(stringResource(R.string.contacts_not_now))
-            }
+            QuietButton(stringResource(R.string.contacts_not_now), onClick = onDone)
         }
     }
 }
@@ -445,7 +414,7 @@ fun RenameContactScreen(chat: Chat, onDone: () -> Unit) {
     var name by remember { mutableStateOf(chat.name) }
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.contacts_edit_contact), onBack = onDone)
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(PressInset)) {
             Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { Avatar(chat, size = 84) }
             Spacer(Modifier.height(20.dp))
             OutlinedTextField(
@@ -463,15 +432,6 @@ fun RenameContactScreen(chat: Chat, onDone: () -> Unit) {
             }
         }
     }
-}
-
-/** The share sheet of the platform. The user picks the app that carries the link. */
-private fun share(context: Context, link: String) {
-    val send = Intent(Intent.ACTION_SEND).apply {
-        type = "text/plain"
-        putExtra(Intent.EXTRA_TEXT, link)
-    }
-    context.startActivity(Intent.createChooser(send, UiText.get(R.string.contacts_share_invitation)))
 }
 
 /** IMP-056: the clipboard preview of the platform hides a sensitive clip. */

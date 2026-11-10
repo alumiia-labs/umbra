@@ -51,7 +51,7 @@ enum class NotifyMode(private val labelId: Int) {
     Direct(R.string.modes_direct),
     Private(R.string.modes_direct_delayed),
     Periodic(R.string.modes_google_delayed),
-    Off(R.string.modes_none),
+    Off(R.string.common_none),
     ;
 
     /** The name of the mode, as the settings list shows it. */
@@ -68,7 +68,7 @@ enum class Delivery(private val labelId: Int, private val words: Int) {
     // NTF-009: the trade of each delivery, in one honest line.
     Direct(R.string.modes_direct, R.string.umbra_ui_ntf_009_direct),
     Google(R.string.modes_google, R.string.umbra_ui_ntf_009),
-    None(R.string.modes_none, R.string.umbra_ui_ntf_009_off),
+    None(R.string.common_none, R.string.umbra_ui_ntf_009_off),
     ;
 
     val label: String
@@ -343,30 +343,12 @@ fun NotificationsScreen(onBack: () -> Unit) {
 
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.common_notifications), onBack = onBack)
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = PressInset)) {
             Spacer(Modifier.height(8.dp))
             for (choice in Modes.offered(context)) {
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .pressShadeInColumn()
-                        .press(role = Role.RadioButton) {
-                            delivery = choice
-                            Modes.setDelivery(context, choice)
-                        }
-                        .padding(horizontal = PressInset, vertical = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    RadioMark(isChosen = delivery == choice)
-                    Spacer(Modifier.width(14.dp))
-                    Column {
-                        Text(choice.label)
-                        Text(
-                            choice.trade,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Palette.TextSecondary,
-                        )
-                    }
+                ChoiceRow(choice.label, isChosen = delivery == choice, detail = choice.trade) {
+                    delivery = choice
+                    Modes.setDelivery(context, choice)
                 }
 
                 HorizontalDivider(color = Palette.Divider)
@@ -413,7 +395,6 @@ fun NotificationsScreen(onBack: () -> Unit) {
                 showsText = it
                 Modes.setShowsText(context, it)
             }
-            HorizontalDivider(color = Palette.Divider)
         }
     }
 }

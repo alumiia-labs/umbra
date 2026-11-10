@@ -109,8 +109,9 @@ const PUSHES_PER_WINDOW: usize = 2 * MAX_QUEUES_PER_HANDLE;
 /// with requests that parsed as nothing, and each kept `NPUSH` passed
 /// again. The places now turn over at the rate of the requests that prove
 /// a right. A party that holds no `k_tok` adds a place for each new handle
-/// that `NEW_HANDLES_PER_MINUTE` admits. That is more than three hours for
-/// all of them.
+/// that `NEW_HANDLES_PER_MINUTE` admits, and for each move of a handle that
+/// it holds, which `MOVES_PER_HANDLE` and `MOVES_PER_RELAY` bound. That is
+/// more than three hours for all of them from one network.
 ///
 /// The places are in memory alone, thus a restart of the NDR empties them,
 /// and so does a flush at the rate above. A kept `NPUSH` that passes again
@@ -118,6 +119,27 @@ const PUSHES_PER_WINDOW: usize = 2 * MAX_QUEUES_PER_HANDLE;
 /// holds with no memory of a request. The rotation of the handle ends its
 /// `k_tok`, and the kept `NPUSH` then passes no more.
 const REPLAYS_HELD: usize = 1 << 18;
+/// The moves of one held handle that the NDR takes in one minute. A device
+/// moves its handle at a token change and at a renewal, which are hours
+/// apart. Before this bound, a party with one handle sent moves at the rate
+/// of its connection, and each one cost a commit to the disk.
+const MOVES_PER_HANDLE: u32 = 4;
+/// The moves that the NDR takes in one minute from one OHTTP relay, by the
+/// network of its connection. At this rate the moves of one network need
+/// more than three hours to turn over `REPLAYS_HELD`.
+const MOVES_PER_RELAY: u32 = 1_200;
+/// The connections that one network holds at once, a part of
+/// `CONNECTION_MAX`. An OHTTP relay opens one connection for each request,
+/// thus the part is large. One network of slow peers then leaves three
+/// parts of the places to the other networks.
+pub(crate) const CONNECTIONS_PER_SOURCE: usize = CONNECTION_MAX / 4;
+/// The TLS handshakes that one network runs at once. A peer that sends no
+/// handshake holds one of these for `HANDSHAKE_TIME`.
+pub(crate) const HANDSHAKES_PER_SOURCE: usize = 128;
+/// How often the store moves its log into the file. Before this, each
+/// commit did it, which was one more sync of the disk for each request.
+/// A dropped registration thus leaves the log at most this late.
+const CHECKPOINT_EVERY: Duration = Duration::from_secs(60);
 /// The time that the NDR holds the count at an `NREG` of a handle, in
 /// seconds. It is above `CONNECTION_TIME`, thus it covers each push that
 /// was at the provider when the `NREG` came.
@@ -157,6 +179,11 @@ struct Guard {
     /// `MOVED_HELD`.
     moved: BTreeMap<[u8; HANDLE_LEN], (u64, u64)>,
     moved_pruned_at: u64,
+    /// The minute of the clock for the moves, and the moves inside it of
+    /// each held handle and of each network.
+    move_minute: u64,
+    moves_by_handle: BTreeMap<[u8; HANDLE_LEN], u32>,
+    moves_by_relay: BTreeMap<[u8; 16], u32>,
 }
 
 impl Guard {
@@ -191,14 +218,46 @@ impl Guard {
             self.new_by_relay.clear();
         }
 
-        let of_relay = self.new_by_relay.entry(relay).or_insert(0);
-        if self.new_handles >= all || *of_relay >= one {
+        // A refused network takes no entry, thus a flood of them grows no
+        // map.
+        let of_relay = self.new_by_relay.get(&relay).copied().unwrap_or(0);
+        if self.new_handles >= all || of_relay >= one {
             return false;
         }
 
-        *of_relay = of_relay.saturating_add(1);
+        self.new_by_relay.insert(relay, of_relay.saturating_add(1));
         self.new_handles = self.new_handles.saturating_add(1);
         true
+    }
+
+    fn turn_move_minute(&mut self, now: u64) {
+        let minute = now / 60;
+        if minute != self.move_minute {
+            self.move_minute = minute;
+            self.moves_by_handle.clear();
+            self.moves_by_relay.clear();
+        }
+    }
+
+    /// Whether the NDR takes one more move of the held `handle` from the
+    /// network `relay` in the minute of `now`. It counts nothing: a move
+    /// that proves no right uses up no move of the handle.
+    fn admits_move(&mut self, handle: &[u8; HANDLE_LEN], relay: &[u8; 16], now: u64) -> bool {
+        self.turn_move_minute(now);
+
+        let of_handle = self.moves_by_handle.get(handle).copied().unwrap_or(0);
+        let of_relay = self.moves_by_relay.get(relay).copied().unwrap_or(0);
+        of_handle < MOVES_PER_HANDLE && of_relay < MOVES_PER_RELAY
+    }
+
+    /// Counts one move of `handle` that the NDR took.
+    fn count_move(&mut self, handle: [u8; HANDLE_LEN], relay: [u8; 16], now: u64) {
+        self.turn_move_minute(now);
+
+        let of_handle = self.moves_by_handle.entry(handle).or_insert(0);
+        *of_handle = of_handle.saturating_add(1);
+        let of_relay = self.moves_by_relay.entry(relay).or_insert(0);
+        *of_relay = of_relay.saturating_add(1);
     }
 
     /// The oldest registration that took no push, other than `handle`.
@@ -295,6 +354,18 @@ impl Guard {
         true
     }
 
+    /// Gives back one push of `handle` that the provider did not take. A
+    /// provider that fails thus uses up no push of a handle, and the relay
+    /// tries again inside the same window.
+    fn push_failed(&mut self, handle: &[u8; HANDLE_LEN], now: u64) {
+        if now / WAKE_COALESCE_WINDOW != self.window {
+            return;
+        }
+        if let Some(count) = self.pushed.get_mut(handle) {
+            *count = count.saturating_sub(1);
+        }
+    }
+
     /// Counts each `NREG` among `changes`, and takes its count and time.
     fn note(&mut self, changes: &[NdrChange], now: u64) {
         if self.moved_pruned_at != now {
@@ -328,6 +399,11 @@ pub trait NdrStore: Send {
     fn load(&mut self) -> Result<Vec<([u8; HANDLE_LEN], Held)>, StoreFault>;
     /// Commits the changes of one request, all or none.
     fn commit(&mut self, changes: &[NdrChange]) -> Result<(), StoreFault>;
+    /// Moves the log of the store into its file, at each
+    /// `CHECKPOINT_EVERY`. A store with no log does nothing.
+    fn checkpoint(&mut self) -> Result<(), StoreFault> {
+        Ok(())
+    }
 }
 
 /// A store in RAM, for a test.
@@ -504,7 +580,10 @@ impl NdrStore for SqliteNdrStore {
             };
         }
 
-        fault(transaction.commit())?;
+        fault(transaction.commit())
+    }
+
+    fn checkpoint(&mut self) -> Result<(), StoreFault> {
         fault(
             self.connection
                 .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(())),
@@ -655,6 +734,13 @@ impl State {
             return Some((NdrResponse::Refused, None));
         }
 
+        // A held handle moves at a bounded rate. The check comes before the
+        // step, thus a move above the rate costs no commit.
+        let moves = registers && self.guard.kind_of(&handle).is_some();
+        if moves && !self.guard.admits_move(&handle, &relay, now) {
+            return Some((NdrResponse::Refused, None));
+        }
+
         let before = self.ndr.len();
         let (answer, delivery) = self.ndr.handle(plain, now);
 
@@ -685,6 +771,10 @@ impl State {
 
         let changes = self.ndr.take_changes();
         self.commit(&changes, now)?;
+
+        if moves && answer == NdrResponse::Taken && !changes.is_empty() {
+            self.guard.count_move(handle, relay, now);
+        }
 
         // The count takes a push whose token opened and no other one. A
         // party that holds no `k_tok` thus uses up no push of a handle.
@@ -724,6 +814,21 @@ impl State {
         }
         let pushed = self.ndr.take_changes();
         self.commit(&pushed, unix_now())
+    }
+
+    /// The provider took no push of `handle`, thus the push counts no more
+    /// in its window.
+    fn push_failed(&mut self, handle: [u8; HANDLE_LEN]) {
+        self.guard.push_failed(&handle, unix_now());
+    }
+
+    /// Moves the log of the store into its file. A checkpoint that fails
+    /// breaks nothing: the commits are in the log, and the next one tries
+    /// again.
+    fn checkpoint(&mut self) {
+        if !self.broken {
+            let _ = self.store.checkpoint();
+        }
     }
 
     /// The provider named the token of a tick of `handle` not valid, and
@@ -785,6 +890,76 @@ fn clock_span(last: u64, now: u64) -> (u64, u64) {
     (last.max(now.saturating_sub(TICK_LATE_MAX)), now)
 }
 
+/// Runs `run` on the state, on a thread that may block. A commit syncs the
+/// disk, and the lock waits for it. Before this, both ran on a worker of
+/// the runtime, and a flood of commits held each worker.
+async fn on_state<T: Send + 'static>(
+    state: &Arc<Mutex<State>>,
+    run: impl FnOnce(&mut State) -> T + Send + 'static,
+) -> Option<T> {
+    let state = state.clone();
+    let ran = tokio::task::spawn_blocking(move || {
+        let mut state = state.lock().ok()?;
+        Some(run(&mut state))
+    });
+    ran.await.ok().flatten()
+}
+
+/// The network of a peer, for the counts of one OHTTP relay: the /24 of an
+/// IPv4 address and the /64 of an IPv6 address. Before this, the counts
+/// took the whole address, and one IPv6 network held as many addresses as
+/// it needed to use up each bound.
+pub(crate) fn source_of(ip: std::net::IpAddr) -> [u8; 16] {
+    match ip.to_canonical() {
+        std::net::IpAddr::V4(v4) => {
+            let mut key = v4.to_ipv6_mapped().octets();
+            key[15] = 0;
+            key
+        }
+        std::net::IpAddr::V6(v6) => {
+            let mut key = v6.octets();
+            key[8..].fill(0);
+            key
+        }
+    }
+}
+
+/// The places that each network holds now, of one kind.
+#[derive(Clone, Default)]
+pub(crate) struct Sources(Arc<Mutex<BTreeMap<[u8; 16], usize>>>);
+
+/// One place of a network, which it gives back when it drops.
+pub(crate) struct Seat(Sources, [u8; 16]);
+
+impl Sources {
+    /// Takes one place of `source`, or none when it holds `max` of them.
+    pub(crate) fn take(&self, source: [u8; 16], max: usize) -> Option<Seat> {
+        let mut held = self.0.lock().ok()?;
+        let count = held.entry(source).or_insert(0);
+        if *count >= max {
+            return None;
+        }
+
+        *count = count.saturating_add(1);
+        Some(Seat(self.clone(), source))
+    }
+}
+
+impl Drop for Seat {
+    fn drop(&mut self) {
+        let Ok(mut held) = self.0 .0.lock() else {
+            return;
+        };
+
+        if let Some(count) = held.get_mut(&self.1) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                held.remove(&self.1);
+            }
+        }
+    }
+}
+
 /// Runs the clock of Periodic mode: each tick that came due goes to the
 /// provider, at most `TICKS_AT_ONCE` of them at once (`NTF-150`). A tick
 /// whose time passed while the server was down goes nowhere, thus a restart
@@ -796,10 +971,9 @@ async fn run_clock(state: Arc<Mutex<State>>, fcm: Option<Arc<Fcm>>) {
     loop {
         tokio::time::sleep(CLOCK_STEP).await;
         let (from, to) = clock_span(last, unix_now());
-        let (due, mark) = match state.lock() {
-            Ok(state) => state.ticks(from, to),
-            Err(_) => (Vec::new(), 0),
-        };
+        let (due, mark) = on_state(&state, move |state| state.ticks(from, to))
+            .await
+            .unwrap_or_default();
         last = to;
 
         for delivery in due {
@@ -813,18 +987,17 @@ async fn run_clock(state: Arc<Mutex<State>>, fcm: Option<Arc<Fcm>>) {
                 let _permit = permit;
                 let sent =
                     tokio::time::timeout(CONNECTION_TIME, deliver(&delivery, fcm.as_deref())).await;
-                let Ok(mut state) = state.lock() else {
-                    return;
-                };
-                match sent {
-                    Ok(Sent::Taken) => drop(state.took_push(delivery.handle)),
+                let handle = delivery.handle;
+                let _ = on_state(&state, move |state| match sent {
+                    Ok(Sent::Taken) => drop(state.took_push(handle)),
                     // NTF-125: the provider named the token gone, thus the
                     // timer ends, unless a move gave it another token.
-                    Ok(Sent::Gone) => drop(state.provider_gone(delivery.handle, mark)),
-                    Ok(Sent::Invalid) => drop(state.tick_invalid(delivery.handle, mark)),
+                    Ok(Sent::Gone) => drop(state.provider_gone(handle, mark)),
+                    Ok(Sent::Invalid) => drop(state.tick_invalid(handle, mark)),
                     // A tick that did not go waits for the next interval.
                     Ok(Sent::Refused) | Err(_) => {}
-                }
+                })
+                .await;
             });
         }
     }
@@ -858,14 +1031,15 @@ async fn serve(
     let plain = Zeroizing::new(plain);
     let digest = sha3_256(&[&request.body[..]]);
 
-    let stepped = match state.lock() {
-        Ok(mut state) => state
+    // The step takes `plain` with it, and wipes it at its end.
+    let stepped = on_state(&state, move |state| {
+        state
             .request(digest, &plain, relay, unix_now())
-            .map(|served| (served, state.guard.moves)),
-        Err(_) => None,
-    };
+            .map(|served| (served, state.guard.moves))
+    })
+    .await
+    .flatten();
 
-    drop(plain);
     let Some(((mut answer, delivery), mark)) = stepped else {
         let _ = https::respond(&mut stream, 502, "text/plain", &[]).await;
         return;
@@ -877,10 +1051,13 @@ async fn serve(
             // moved to another token since the push started keeps its
             // registration, and the relay may try again.
             Sent::Gone => {
-                let left = match state.lock() {
-                    Ok(mut state) => state.provider_gone(delivery.handle, mark),
-                    Err(_) => None,
-                };
+                let handle = delivery.handle;
+                let left = on_state(&state, move |state| {
+                    state.push_failed(handle);
+                    state.provider_gone(handle, mark)
+                })
+                .await
+                .flatten();
                 answer = if left == Some(true) {
                     NdrResponse::Gone
                 } else {
@@ -888,12 +1065,16 @@ async fn serve(
                 };
             }
             Sent::Taken => {
-                if let Ok(mut state) = state.lock() {
-                    let _ = state.took_push(delivery.handle);
-                }
+                let handle = delivery.handle;
+                let _ = on_state(&state, move |state| state.took_push(handle)).await;
             }
-            // A push that did not go, and the relay may try again.
-            Sent::Refused | Sent::Invalid => answer = NdrResponse::Refused,
+            // A push that did not go, and the relay may try again. It
+            // counts no more in the window of its handle.
+            Sent::Refused | Sent::Invalid => {
+                let handle = delivery.handle;
+                let _ = on_state(&state, move |state| state.push_failed(handle)).await;
+                answer = NdrResponse::Refused;
+            }
         }
     }
 
@@ -923,10 +1104,19 @@ pub async fn run_ndr(
     let sweeping = state.clone();
     tokio::spawn(async move {
         loop {
-            if let Ok(mut state) = sweeping.lock() {
+            let _ = on_state(&sweeping, |state| {
                 let _ = state.step(|ndr| ndr.expire(unix_now()));
-            }
+            })
+            .await;
             tokio::time::sleep(SWEEP_EVERY).await;
+        }
+    });
+
+    let checkpointing = state.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(CHECKPOINT_EVERY).await;
+            let _ = on_state(&checkpointing, State::checkpoint).await;
         }
     });
 
@@ -934,6 +1124,8 @@ pub async fn run_ndr(
 
     let gateway = Arc::new(gateway);
     let held = Arc::new(tokio::sync::Semaphore::new(CONNECTION_MAX));
+    let connections = Sources::default();
+    let handshakes = Sources::default();
 
     loop {
         // An accept that fails ends no NDR: a restart would empty the
@@ -950,12 +1142,16 @@ pub async fn run_ndr(
             continue;
         };
 
-        // The address of the OHTTP relay, for the count of its new handles.
-        // The NDR holds it for one minute and writes it nowhere.
-        let relay = match address.ip().to_canonical() {
-            std::net::IpAddr::V4(v4) => v4.to_ipv6_mapped().octets(),
-            std::net::IpAddr::V6(v6) => v6.octets(),
+        // The network of the OHTTP relay, for the counts of its handles and
+        // its connections. The NDR holds it for one minute, or for the time
+        // of the connection, and writes it nowhere.
+        let relay = source_of(address.ip());
+
+        // One network holds a part of the places and no more.
+        let Some(seat) = connections.take(relay, CONNECTIONS_PER_SOURCE) else {
+            continue;
         };
+        let shaking = handshakes.clone();
 
         let tls = tls.clone();
         let gateway = gateway.clone();
@@ -964,8 +1160,16 @@ pub async fn run_ndr(
 
         tokio::spawn(async move {
             let _permit = permit;
+            let _seat = seat;
             let _ = tokio::time::timeout(CONNECTION_TIME, async move {
+                // A network of peers that send no handshake holds a bounded
+                // count of them, and the place ends with the handshake.
+                let Some(shake) = shaking.take(relay, HANDSHAKES_PER_SOURCE) else {
+                    return;
+                };
                 let accepted = tokio::time::timeout(HANDSHAKE_TIME, tls.accept(tcp)).await;
+                drop(shake);
+
                 if let Ok(Ok(stream)) = accepted {
                     serve(stream, relay, gateway, state, fcm).await;
                 }
@@ -1593,5 +1797,95 @@ mod tests {
             .unwrap();
         let (from, to) = clock_span(NOW, NOW + 10 * 1_800);
         assert!(state.ticks(from, to).0.len() <= 1);
+    }
+
+    #[test]
+    fn a_held_handle_moves_at_a_bounded_rate_and_a_move_above_it_costs_no_commit() {
+        let mut state = state();
+        let (handle, register, _, _) = device(1);
+        let minute = NOW - NOW % 60;
+        let mut digest = 0u8;
+        let mut moved = |state: &mut State, now: u64| {
+            digest += 1;
+            state.request_from([digest; 32], &register, now).unwrap().0
+        };
+
+        // The first `NREG` is a new handle and no move.
+        assert_eq!(moved(&mut state, minute), NdrResponse::Taken);
+        for _ in 0..MOVES_PER_HANDLE {
+            assert_eq!(moved(&mut state, minute + 1), NdrResponse::Taken);
+        }
+
+        let seen = state.guard.seen.len();
+        let moves = state.guard.moves;
+        assert_eq!(moved(&mut state, minute + 2), NdrResponse::Refused);
+
+        // The refused move took no place among the repeats and no count.
+        assert_eq!(state.guard.seen.len(), seen);
+        assert_eq!(state.guard.moves, moves);
+        assert!(state.guard.kind_of(&handle).is_some());
+
+        // The next minute gives the count back.
+        assert_eq!(moved(&mut state, minute + 60), NdrResponse::Taken);
+    }
+
+    #[test]
+    fn a_push_that_the_provider_did_not_take_counts_no_more() {
+        let mut state = state();
+        let (handle, register, push, _) = device(1);
+        // The count gives a push back in the window of the clock alone.
+        let start = unix_now();
+        state.request_from([0xA0; 32], &register, start).unwrap();
+
+        let mut digest = [0u8; 32];
+        for sent in 0..PUSHES_PER_WINDOW {
+            digest[0] = u8::try_from(sent).unwrap();
+            assert!(state
+                .request_from(digest, &push, start)
+                .unwrap()
+                .1
+                .is_some());
+        }
+        assert!(state
+            .request_from([0xB0; 32], &push, start)
+            .unwrap()
+            .1
+            .is_none());
+
+        state.push_failed(handle);
+        assert!(state
+            .request_from([0xB1; 32], &push, start)
+            .unwrap()
+            .1
+            .is_some());
+    }
+
+    #[test]
+    fn the_counts_of_a_peer_take_its_network_and_not_its_address() {
+        use std::net::IpAddr;
+
+        // One /64 is one source, with each address that it holds.
+        let a: IpAddr = "2001:db8:1:2::1".parse().unwrap();
+        let b: IpAddr = "2001:db8:1:2:ffff:ffff:ffff:ffff".parse().unwrap();
+        let c: IpAddr = "2001:db8:1:3::1".parse().unwrap();
+        assert_eq!(source_of(a), source_of(b));
+        assert_ne!(source_of(a), source_of(c));
+
+        // One /24 is one source, also as a mapped address.
+        let d: IpAddr = "192.0.2.1".parse().unwrap();
+        let e: IpAddr = "::ffff:192.0.2.200".parse().unwrap();
+        let f: IpAddr = "192.0.3.1".parse().unwrap();
+        assert_eq!(source_of(d), source_of(e));
+        assert_ne!(source_of(d), source_of(f));
+
+        // A source holds its count of places, and a place that drops
+        // comes back.
+        let sources = Sources::default();
+        let first = sources.take(source_of(a), 1).unwrap();
+        assert!(sources.take(source_of(b), 1).is_none());
+        assert!(sources.take(source_of(c), 1).is_some());
+        drop(first);
+        assert!(sources.take(source_of(b), 1).is_some());
+        assert!(sources.0.lock().unwrap().is_empty());
     }
 }

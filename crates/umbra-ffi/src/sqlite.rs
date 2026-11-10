@@ -268,6 +268,15 @@ impl SqliteBackend {
              ON CONFLICT (id) DO UPDATE SET header = excluded.header",
             params![bytes.as_slice()],
         ))?;
+
+        // The file must not hold the header of the passphrase before in a
+        // page that the log covers. A checkpoint that another connection
+        // keeps from its end stays for the next commit of that connection.
+        let _ = self
+            .connection
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                row.get::<_, i64>(0)
+            });
         Ok(())
     }
 

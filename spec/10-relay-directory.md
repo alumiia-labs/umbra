@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 10: Relay Directory, Measurement, and Selection
 
 **Status:** Draft
-**Version:** 0.52.1
+**Version:** 0.53.0
 **Date:** 2026-11-09
 
 ---
@@ -843,6 +843,9 @@ the label.
   pass over a removal of a link that it holds already before it verifies a
   signature of it. No root covers the removals, and each one costs five to
   seven verifications, thus the bound is the work that a carrier can cause.
+  A client MAY drop the remaining removals of a manifest after 8 removals
+  of it failed their signatures. An honest directory signs each removal that
+  it lists, and a carrier can leave each removal out already.
 - **[REL-185]** A client MUST reject a chain in which two adjacent relays form
   a removed link, in either order. Each relay of the link stays in each other
   chain.
@@ -1074,7 +1077,9 @@ fits one `B3` cell.
    `authority_index` before it verifies one. It MUST then verify the
    signatures in list order, each against the key at its `authority_index` in
    the key set that the client holds, until 5 of them are valid. It MAY skip
-   the verification of each signature after that. **[REL-032]** A client MUST
+   the verification of each signature after that. A signature under a key of
+   the set that does not decode is not valid, and the client MUST still count
+   the other signatures. **[REL-032]** A client MUST
    count 5 or more **valid** signatures before it accepts the object. A count
    of the entries is not a count of the valid signatures.
 
@@ -1089,7 +1094,11 @@ fits one `B3` cell.
    `BlocList` of §10.6.3. **[REL-120]** A client MUST reject a `DirectoryRoot`
    whose `revoked_count` is above `MEASURER_REVOKE_MAX`.
 6. **[REL-034]** A client MUST reject a `DirectoryRoot` whose `epoch` is below
-   the highest epoch that the client verified.
+   the highest epoch that the client verified. A client that accepted a root
+   of that highest epoch MUST also reject each other root of that epoch: it
+   keeps the first one. A second root of one epoch that differs is a split
+   view, and the digest of `REL-160` shows it to the gossip of `REL-008`.
+   The root test itself raises no alarm for it.
 
    **The epoch names a start time.** §10.11 gives the epoch a length of 1 hour,
    and it gives the consensus a validity of 3 hours. Consensus epoch `E` starts

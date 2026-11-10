@@ -788,7 +788,7 @@ impl PairwiseChannel {
 
         Outbound::restore(&mut reader)?;
         let mut queues = alloc::vec![*Inbound::restore(&mut reader)?.recipient_id()];
-        if version != 0x01 && reader.u8()? == 1 {
+        if version != 0x01 && reader.flag()? {
             queues.push(*Inbound::restore(&mut reader)?.recipient_id());
         }
         Ok(queues)

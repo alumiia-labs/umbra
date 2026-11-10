@@ -38,7 +38,7 @@ use super::{
     head::{LogKeySet, SignedTreeHead, SignerSig},
     lifecycle::{Label, Needs},
     profile::PROFILE_BLOB_MAX,
-    translog::{Auditor, LogOperator},
+    translog::{Auditor, LogOperator, ENTRY_MAX},
     HANDLE_LEASE, LEASE_MIN,
 };
 use crate::{
@@ -1176,13 +1176,20 @@ impl Directory {
 
         // DIS-197: the registrant holds the private half of the key of the
         // entry, and the answer binds the entry.
-        self.answer_pending(&slot, REGISTER, version, &answer, Some(&entry), now)?;
+        self.verify_pending(&slot, REGISTER, version, &answer, Some(&entry), now)?;
+
+        // The log refuses an entry above its bound. The test runs here,
+        // thus the stage below refuses nothing after the token spends.
+        if entry.len() > ENTRY_MAX {
+            return Err(Status::Stale);
+        }
 
         // The token spends after each check that can refuse, thus a refused
-        // registration keeps it.
+        // registration keeps it and its challenge.
         if let Some((token_epoch, nonce)) = spend {
             self.commit_spend(token_epoch, nonce, now)?;
         }
+        self.end_pending(&slot, REGISTER);
 
         if self
             .stage(&search_key, entry, rng)
@@ -1441,6 +1448,39 @@ impl Directory {
         Ok(purpose)
     }
 
+    /// Verifies an answer as [`Self::answer_pending`] does, and ends no
+    /// challenge that holds. A caller with more steps that can refuse ends
+    /// the challenge with [`Self::end_pending`] after the last of them,
+    /// thus a refused request keeps its challenge.
+    fn verify_pending(
+        &mut self,
+        search_key: &[u8],
+        purpose: u8,
+        version: u32,
+        answer: &[u8; 32],
+        bound: Option<&[u8]>,
+        now: u64,
+    ) -> Result<Purpose, Status> {
+        let slot = (search_key.to_vec(), purpose);
+        let pending = self.challenges.get(&slot).ok_or(Status::Stale)?;
+
+        if now.saturating_sub(pending.at) >= CHALLENGE_TTL || pending.version != version {
+            self.challenges.remove(&slot);
+            return Err(Status::Stale);
+        }
+
+        pending
+            .issued
+            .verify(answer, bound)
+            .map_err(|_| Status::Refused)?;
+        Ok(pending.issued.purpose())
+    }
+
+    /// Ends the challenge of `purpose` for a slot (`DIS-168`).
+    fn end_pending(&mut self, search_key: &[u8], purpose: u8) {
+        self.challenges.remove(&(search_key.to_vec(), purpose));
+    }
+
     fn write<R: CryptoRng + TryCryptoRng + ?Sized>(
         &mut self,
         body: &[u8],
@@ -1468,7 +1508,7 @@ impl Directory {
         // DIS-097, DIS-098: the answer binds the entry.
         let version = label.version;
         let Purpose::Write { version_new } =
-            self.answer_pending(&search_key, WRITE, version, &answer, Some(&entry), now)?
+            self.verify_pending(&search_key, WRITE, version, &answer, Some(&entry), now)?
         else {
             return Err(Status::Stale);
         };
@@ -1499,6 +1539,9 @@ impl Directory {
             return Err(Status::Stale);
         }
 
+        // The challenge ends after the stage, thus a write that a check
+        // above refused keeps it.
+        self.end_pending(&search_key, WRITE);
         self.replace_label(&search_key, label)?;
         Ok(Vec::new())
     }

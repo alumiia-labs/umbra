@@ -444,7 +444,9 @@ async fn run_socket(
         last.push(close);
     }
 
-    let _ = batches.send(last).await;
+    // A relay that reads no more leaves the writer full. The send then
+    // waits for a bounded time, and the run ends.
+    let _ = tokio::time::timeout(Duration::from_secs(2), batches.send(last)).await;
 
     drop(batches);
     let _ = tokio::time::timeout(Duration::from_secs(2), write).await;

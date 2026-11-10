@@ -4,8 +4,15 @@
 //! direction, and each cell passes through one rugged-PRP layer for each
 //! hop (§3.4.4). The layer is AES-256 with POLYVAL in the UIV+ shape, thus
 //! a change of one bit anywhere in a cell randomizes the innermost left
-//! block, and the endpoint rejects the cell. Replay protection is a free
-//! result of the chaining value (§3.4.5).
+//! block, and the endpoint rejects the cell.
+//!
+//! The chaining value rejects a replayed cell (§3.4.5), and the party then
+//! tears the circuit down (`NET-115`). The chaining value alone is no
+//! replay protection after a rejected cell: a layer with no key update
+//! takes the tag of each cell as its next chaining value, thus the cell
+//! that followed the replayed one opens again. The key update of hop 3
+//! stops this on a data circuit. A build layer and a measurement layer have
+//! no key update, thus their owners must not continue after a rejection.
 #![forbid(unsafe_code)]
 #![no_std]
 

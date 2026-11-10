@@ -321,15 +321,15 @@ impl CircuitSession {
 
         let mut events = Vec::new();
         for command in unpack(content, bucket)? {
-            if let Some(event) = self.event_of(&command, bucket)? {
-                events.push(event);
-            }
+            events.extend(self.event_of(&command, bucket));
         }
         Ok(events)
     }
 
-    fn event_of(&mut self, command: &Command<'_>, bucket: Bucket) -> Result<Option<Event>, Error> {
-        Ok(match command.cmd {
+    /// The event of one command of a cell. A command that names nothing
+    /// gives none, and it stops no other command of the cell.
+    fn event_of(&mut self, command: &Command<'_>, bucket: Bucket) -> Option<Event> {
+        match command.cmd {
             Cmd::Cover => None,
             Cmd::Msg => Some(Event::Message {
                 queue_id: command.queue_id,
@@ -337,12 +337,14 @@ impl CircuitSession {
                 payload: command.payload.to_vec(),
             }),
             Cmd::Nack => {
-                let nack = NackPayload::parse(command.payload)?;
+                // The relay controls the payload. A `NACK` that does not
+                // parse drops, and the events before it in the cell stay.
+                let nack = NackPayload::parse(command.payload).ok()?;
                 // WIR-494: the `corr_id` of the header and the one of the
                 // payload agree. A `NACK` whose two values differ names no
                 // command, and it drops.
                 if nack.corr_id != command.corr_id {
-                    return Ok(None);
+                    return None;
                 }
 
                 // WIR-323: a NACK that names no command of this session.
@@ -375,6 +377,6 @@ impl CircuitSession {
                     },
                 })
             }
-        })
+        }
     }
 }

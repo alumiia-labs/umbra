@@ -209,6 +209,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
         }
 
+        let mut erased = 0usize;
         for (conversation, message) in &due {
             // A row that a deletion took first leaves its deadline alone.
             // A fault of one message keeps its deadline for the next sweep,
@@ -216,6 +217,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if self.delete_if_held(message).is_err() {
                 continue;
             }
+
+            erased = erased.saturating_add(1);
 
             let open = self.open_mut()?;
             let mut batch = open.store.begin();
@@ -237,7 +240,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // A held record waits for its entry or its group with its deadline.
         self.drop_lapsed_held(now)?;
 
-        Ok(due.len())
+        // A message that a fault kept counts at the sweep that erases it.
+        Ok(erased)
     }
 
     /// Sets the timer of a conversation and sends the timer record to the

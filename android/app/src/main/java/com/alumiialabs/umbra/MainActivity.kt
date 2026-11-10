@@ -31,7 +31,6 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         Appearances.start(this)
         UiText.start(this)
-        Notifier.makeChannels(this)
         // NTF-052: a network change draws a new phase of the Private clock.
         Modes.watchNetwork(this)
 
@@ -55,6 +54,7 @@ class MainActivity : ComponentActivity() {
             snapshotFlow { Core.restoreNote != null || Core.joinNote != null || Core.joinCode != null }
                 .collect(::holdScreen)
         }
+        lifecycleScope.launch { snapshotFlow { Core.locksForIdle }.collect { showCover() } }
 
         val root = FrameLayout(this)
         // No autofill service reads a view of the app. A service that sees
@@ -191,6 +191,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        // The platform can freeze the process, and the tick of the
+        // auto-lock then does not run. The idle time is thus checked here,
+        // before the cover goes.
+        Core.lockIfIdle(this)
         Core.visible(this, true)
     }
 
@@ -199,14 +203,33 @@ class MainActivity : ComponentActivity() {
         super.onStop()
     }
 
+    /** Whether the activity is between `onResume` and `onPause`. */
+    private var isInFront = false
+
+    /** The cover hides the content of each view that is not in front, and of a client that locks. */
+    private fun showCover() {
+        cover.visibility = if (isInFront && !Core.locksForIdle) View.GONE else View.VISIBLE
+    }
+
     override fun onPause() {
-        cover.visibility = View.VISIBLE
+        isInFront = false
+        showCover()
+        // IMP-055: before API 33 the platform can take the task snapshot
+        // before the cover draws, thus the window is secure while it is
+        // not in front.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
         super.onPause()
     }
 
     override fun onResume() {
         super.onResume()
-        cover.visibility = View.GONE
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
+        isInFront = true
+        showCover()
         Core.resumed()
         Battery.read(this)
     }

@@ -58,16 +58,9 @@ impl Circuit {
     /// and the layers of hops 3, 2, and 1 follow in that order (`NET-124`
     /// to `NET-126`). Returns the `tag` field; `body` holds `Y_R`.
     pub fn seal(&mut self, body: &mut [u8]) -> Result<[u8; BLOCK], Error> {
-        let mut left = [0u8; BLOCK];
-        for (index, hop) in self.hops.iter_mut().enumerate().rev() {
-            left = hop.forward.encipher(&left, body)?;
-            if index == HOPS - 1 {
-                hop.forward.update(&left);
-            }
-        }
-
-        self.sent = self.sent.saturating_add(1);
-        Ok(left)
+        // The tag that hop 1 reads is the `tag` field of the cell.
+        let [tag, ..] = self.seal_with_tags(body)?;
+        Ok(tag)
     }
 
     /// As [`Circuit::seal`], and gives the `tag` that each hop reads, hop 1

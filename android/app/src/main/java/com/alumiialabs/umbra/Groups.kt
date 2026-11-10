@@ -44,9 +44,12 @@ fun NewGroupScreen(onBack: () -> Unit, onMade: (Conversation) -> Unit) {
     var name by remember { mutableStateOf("") }
     var isMaking by remember { mutableStateOf(false) }
 
+    // A creation that failed gives the button back, and the view says why.
+    LaunchedEffect(Core.fault) { if (Core.fault != null) isMaking = false }
+
     Column(Modifier.fillMaxSize()) {
-        BackBar(stringResource(R.string.group_new_private_group), onBack = onBack)
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
+        BackBar(stringResource(R.string.common_new_private_group), onBack = onBack)
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(PressInset)) {
             HeroIcon("user-group")
             Spacer(Modifier.height(24.dp))
             Headline(stringResource(R.string.group_bring_people_together))
@@ -65,12 +68,18 @@ fun NewGroupScreen(onBack: () -> Unit, onMade: (Conversation) -> Unit) {
                 stringResource(R.string.group_create),
                 enabled = Core.online && name.isNotBlank() && !isMaking,
             ) {
+                // A fault of an earlier act is no fault of this creation.
+                Core.fault = null
                 isMaking = true
-                Core.createGroup(name.trim()) { conversation -> onMade(conversation) }
+                Core.createGroup(name.trim(), onFailed = { isMaking = false }) { conversation -> onMade(conversation) }
             }
             if (!Core.online) {
                 Spacer(Modifier.height(10.dp))
                 Note(stringResource(R.string.group_connecting_note))
+            }
+            Core.fault?.let {
+                Spacer(Modifier.height(10.dp))
+                Note(it, isError = true)
             }
         }
     }
@@ -107,8 +116,8 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, onLeft: () -> Unit, push:
     var showsAll by remember { mutableStateOf(false) }
 
     Column(Modifier.fillMaxSize()) {
-        BackBar(stringResource(R.string.group_details), onBack = onBack)
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
+        BackBar(stringResource(R.string.common_group_details), onBack = onBack)
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = PressInset)) {
             Spacer(Modifier.height(12.dp))
             Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
                 Avatar(chat, size = EDITABLE_PICTURE_SIZE)
@@ -136,7 +145,7 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, onLeft: () -> Unit, push:
             noForward?.let {
                 if (chat.isMember && isAdmin) {
                     HorizontalDivider(color = Palette.Divider)
-                    ToggleRow(stringResource(R.string.group_no_forwarding), it, icon = "share-nodes") { on ->
+                    ToggleRow(stringResource(R.string.common_no_forwarding), it, icon = "share-nodes") { on ->
                         noForward = on
                         Core.setForwardProhibited(chat.conversation, on)
                     }
@@ -231,7 +240,7 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, onLeft: () -> Unit, push:
         }
         // GRP-264: the group starts a new epoch in the same action.
         is GroupSheet.Remove -> ActionSheet(
-            stringResource(R.string.group_remove_title, memberName(open.member)),
+            stringResource(R.string.common_remove_named, memberName(open.member)),
             listOf(
                 RowEntry("xmark", stringResource(R.string.group_remove_member)) {
                     Core.removeFromGroup(chat.conversation, open.member.index) { reload++ }
@@ -287,12 +296,12 @@ private sealed interface GroupSheet {
 @Composable
 private fun GroupStateNote(chat: Chat) {
     val line = when {
-        chat.isLapsed -> stringResource(R.string.group_lapsed_note)
-        chat.isClosed -> stringResource(R.string.group_closed_note)
+        chat.isLapsed -> stringResource(R.string.common_group_lapsed_note)
+        chat.isClosed -> stringResource(R.string.common_group_closed_note)
         // GRP-184: the group keeps two owners, thus a silent owner leaves
         // only after another member becomes one.
         chat.ownerNeeded -> stringResource(R.string.group_owner_silent_note)
-        chat.isReturning -> stringResource(R.string.group_returning_note)
+        chat.isReturning -> stringResource(R.string.common_group_returning_note)
         chat.needsInvitation -> UiText.get(R.string.umbra_ui_grp_374)
         !chat.isMember -> stringResource(R.string.group_not_member_note)
         // A technical fact that the user cannot see anywhere else.
@@ -418,7 +427,7 @@ fun InviteToGroupScreen(chat: Chat, onBack: () -> Unit) {
 
         val contacts = Core.chats.filter { !it.isGroup }
         if (contacts.isEmpty()) {
-            EmptyState(stringResource(R.string.group_no_contacts))
+            EmptyState(stringResource(R.string.common_no_contacts))
             return
         }
 
@@ -484,10 +493,10 @@ fun IntroductionPrompt() {
             if (intro.isOffer) {
                 InlineButton(stringResource(R.string.common_accept)) { Core.acceptIntroduction(intro) }
             } else {
-                InlineButton(stringResource(R.string.group_allow)) { Core.allowIntroduction(intro) }
+                InlineButton(stringResource(R.string.common_allow)) { Core.allowIntroduction(intro) }
             }
             Spacer(Modifier.width(12.dp))
-            InlineButton(stringResource(R.string.group_decline)) { Core.declineIntroduction(intro) }
+            InlineButton(stringResource(R.string.common_decline)) { Core.declineIntroduction(intro) }
         }
     }
 }

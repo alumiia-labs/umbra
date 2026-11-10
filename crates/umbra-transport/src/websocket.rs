@@ -94,8 +94,9 @@ struct Frame<'a> {
 }
 
 /// Finds the frame at the front of `bytes`, or `Ok(None)` when it is not
-/// complete yet.
-fn whole_frame(bytes: &[u8], from_client: bool) -> Result<Option<Frame<'_>>, Error> {
+/// complete yet. A frame whose header names a payload above `max` bytes is
+/// a fault at its header, thus no caller holds the bytes of such a frame.
+fn whole_frame(bytes: &[u8], from_client: bool, max: usize) -> Result<Option<Frame<'_>>, Error> {
     let Some(head) = bytes.get(..SHORT_HEADER_LEN) else {
         return Ok(None);
     };
@@ -135,6 +136,9 @@ fn whole_frame(bytes: &[u8], from_client: bool) -> Result<Option<Frame<'_>>, Err
     if len == 0 {
         return Err(Error::Malformed);
     }
+    if len > max {
+        return Err(Error::Capacity);
+    }
 
     let total = frame_len(len, masked);
     let Some(frame) = bytes.get(..total) else {
@@ -172,7 +176,7 @@ pub fn decode(
     from_client: bool,
     out: &mut [u8],
 ) -> Result<Option<(usize, usize)>, Error> {
-    let Some(frame) = whole_frame(bytes, from_client)? else {
+    let Some(frame) = whole_frame(bytes, from_client, out.len())? else {
         return Ok(None);
     };
 
@@ -194,13 +198,9 @@ pub fn decode_owned(
     from_client: bool,
     max: usize,
 ) -> Result<Option<(Vec<u8>, usize)>, Error> {
-    let Some(frame) = whole_frame(bytes, from_client)? else {
+    let Some(frame) = whole_frame(bytes, from_client, max)? else {
         return Ok(None);
     };
-
-    if frame.payload.len() > max {
-        return Err(Error::Capacity);
-    }
 
     let mut payload = frame.payload.to_vec();
     if let Some(key) = &frame.mask {

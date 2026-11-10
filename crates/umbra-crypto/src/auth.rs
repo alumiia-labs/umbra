@@ -36,7 +36,7 @@ impl CommandAuthKey {
 
         let kdf = Hkdf::<Sha3_256>::new(None, shared.as_bytes());
         let mut key = Secret::<32>::zeroed();
-        let _ = kdf.expand(labels::CMD_AUTH, key.expose_mut());
+        crate::kdf::expand_into(&kdf, &[labels::CMD_AUTH], &mut key);
         Ok(Self(key))
     }
 

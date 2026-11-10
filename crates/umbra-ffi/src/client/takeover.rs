@@ -33,7 +33,7 @@ use crate::{ConversationId, Error};
 
 /// The receive time of the last record of the owning device on the sync
 /// channel, in seconds (`DEV-230`). The setting stays on this device.
-const OWNER_HEARD_SETTING: &[u8] = b"owner-heard";
+pub(super) const OWNER_HEARD_SETTING: &[u8] = b"owner-heard";
 /// The least time between two writes of that setting, in seconds.
 const OWNER_HEARD_STEP: u64 = 60;
 

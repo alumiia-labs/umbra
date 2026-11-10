@@ -15,8 +15,11 @@
 
 name: umbra-relay
 
+# A tag can move to another image. For one fixed image, set UMBRA_IMAGE in
+# .env to the name with the digest of the release run:
+# ghcr.io/alumiia-labs/umbra-relay:<version>@sha256:<64 hex>.
 x-image: &image
-  image: ${UMBRA_IMAGE:-ghcr.io/alumiia-labs/umbra-relay:0.52.1}
+  image: ${UMBRA_IMAGE:-ghcr.io/alumiia-labs/umbra-relay:0.53.0}
   build:
     context: .
     target: relay
@@ -42,6 +45,18 @@ services:
     restart: unless-stopped
     network_mode: host
     entrypoint: ["sh", "/umbra/certbot.sh"]
+    # Certbot answers on port 80 and writes files for other users, thus it
+    # runs as root with these four capabilities alone.
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE, CHOWN, FOWNER, DAC_OVERRIDE]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp
+      - /var/lib/letsencrypt
+      - /var/log/letsencrypt
+    mem_limit: 256m
+    cpus: 0.5
     environment:
       UMBRA_FQDN: ${UMBRA_HOST:-}
     volumes:
@@ -90,6 +105,8 @@ services:
       UMBRA_CHUNK_CAPACITY: ${UMBRA_CHUNK_CAPACITY:-1073741824}
     mem_reservation: ${UMBRA_MEMORY_HIGH:-1200m}
     mem_limit: ${UMBRA_MEMORY_MAX:-1400m}
+    # 0 is no limit. A relay of class 2 or 3 needs each core that it has.
+    cpus: ${UMBRA_CPUS:-0}
     volumes:
       - ${UMBRA_ROOT:-./data}/relay:/var/lib/umbra
       - ${UMBRA_ROOT:-./data}/tls:/etc/umbra/tls:ro

@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 15: Security Considerations and Known Limitations
 
 **Status:** Draft
-**Version:** 0.52.1
+**Version:** 0.53.0
 **Date:** 2026-11-09
 
 ---
@@ -223,7 +223,7 @@ browser. UMBRA accepts this residual, and §15.3 holds the row.
 | Two sets from one, when two linked devices take the set over at the same time | The user. Each contact follows the renewal that ended last | Part 7 §7.7. Neither device has a channel to the other. Each one waits for `OWNER_ABSENCE` and for `DRAIN_QUIET` first (`DEV-231`, `DEV-315`). UMBRA accepts this residual |
 | A take-over with no absence, by a linked device in hostile hands. The device that owns the channels stops and shows the event | A6 that holds a linked device, before the user revokes it | Part 7 §7.7 rule `DEV-317`. No verifier measures an absence. That device holds the `RootIdentity` already (Part 7 §7.2), thus the epoch gives it no key. The fix is the restore of Part 4 §4.7 and the full identity reset of Part 7 §7.7.1. UMBRA accepts this residual |
 | A record written to a live subscription whose link was lost already gets no push | The user, as latency to the next subscription of that queue | Part 8 rule `NTF-128`. The record stays in the queue and the next subscription takes it. The relay cannot tell a lost link from an orderly end, and a reason field in `CircuitDestroy` is a planned change of a later version |
-| The conversation of each push that arrives, at a device seized in the AFU state, from the wake table of `NTF-135` | A6 | Part 8 §8.4.1. The table holds the blob roots and the queue aliases, and no queue key, ratchet, or message. A new root each 7 days under `NTF-007` bounds it. UMBRA accepts this residual |
+| The conversation of each push that arrives, at a device seized in the AFU state, from the wake table of `NTF-135` | A6 | Part 8 §8.4.1. The table holds the blob roots, the queue aliases, the end of each mute, and the mark of each priority conversation, and no queue key, ratchet, or message. Thus it also shows which conversations the user muted or marked. A new root each 7 days under `NTF-007` bounds it. UMBRA accepts this residual |
 | Which conversations the user marked priority, at a device seized in the AFU state, from the wake table of `NTF-135` | A6 | Part 7 `DEV-358`, Part 8 `NTF-155`. The table names the queue aliases of each priority conversation, and the settings of the system show whether the priority channel passes Do Not Disturb. No relay learns the mark. UMBRA accepts this residual |
 | The arrivals at each queue of a device in Direct mode or in Periodic mode, from the watch table of `NTF-145` at a device seized in the AFU state. The party can watch each queue until the next rotation of its root | A6 | Part 8 §8.4.3. The table holds the relays and the notifier secrets, which see an arrival and read, fetch, and acknowledge no record. A new root each 7 days under `NTF-007` ends each notifier key. Only an unlocked client of the set rotates a root, thus for a set of one seized device the watch lasts until a restore moves its queues. UMBRA accepts this residual |
 | The battery cost of Direct mode, the default, is not measured | The user, as battery use. No party learns more from it | Part 8 `NTF-141`. The held socket and the watch of Part 8 §8.4.3 cost battery that no measurement bounds yet. The project took Direct mode as the default with that cost open. §8.8 states the result after the measurement |

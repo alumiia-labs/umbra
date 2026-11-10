@@ -183,14 +183,28 @@ pub fn answer<R: CryptoRng + ?Sized>(
     rng: &mut R,
     out: &mut [u8],
 ) -> Result<Secret<32>, Error> {
+    let responder = read_hello(relay, static_secret, hello)?;
+    let out = out.get_mut(..REPLY_LEN).ok_or(Error::Length)?;
+    Ok(responder.flight2(rng, out, &mut NoTrace)?)
+}
+
+/// Reads a hello and refuses one that names another relay (`NET-153`).
+fn read_hello(
+    relay: &RelayStatic,
+    static_secret: &StaticSecret,
+    hello: &[u8],
+) -> Result<nk::Relay, Error> {
     let hello = HopHello::parse(hello)?;
     if hello.relay_id != relay.relay_id {
         return Err(Error::Build);
     }
 
-    let responder = nk::Relay::read_flight1(relay, static_secret, hello.flight1, &mut NoTrace)?;
-    let out = out.get_mut(..REPLY_LEN).ok_or(Error::Length)?;
-    Ok(responder.flight2(rng, out, &mut NoTrace)?)
+    Ok(nk::Relay::read_flight1(
+        relay,
+        static_secret,
+        hello.flight1,
+        &mut NoTrace,
+    )?)
 }
 
 /// The relay side of a build at the queue relay of a circuit: as
@@ -203,12 +217,7 @@ pub fn answer_at_queue_relay<R: CryptoRng + ?Sized>(
     rng: &mut R,
     out: &mut [u8],
 ) -> Result<(Secret<32>, StaticSecret), Error> {
-    let hello = HopHello::parse(hello)?;
-    if hello.relay_id != relay.relay_id {
-        return Err(Error::Build);
-    }
-
-    let responder = nk::Relay::read_flight1(relay, static_secret, hello.flight1, &mut NoTrace)?;
+    let responder = read_hello(relay, static_secret, hello)?;
     let out = out.get_mut(..REPLY_LEN).ok_or(Error::Length)?;
     Ok(responder.flight2_keeping_er(rng, out, &mut NoTrace)?)
 }

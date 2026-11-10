@@ -330,7 +330,7 @@ impl Group {
         w.u8(STORED_VERSION);
         w.u16(self.own_index);
         self.roster.export(&mut w)?;
-        self.epochs.export(&mut w);
+        self.epochs.export(&mut w)?;
         self.sender.export(&mut w)?;
         self.receiver.export(&mut w)?;
 

@@ -41,8 +41,11 @@ const GROUP_RELINK_FIRST: Duration = Duration::from_secs(1);
 /// `GROUP_RELINK_MAX`: the longest wait before a new link.
 const GROUP_RELINK_MAX: Duration = Duration::from_secs(60);
 
-/// How long a session must stay ready before a `GKEY` or a `GDEL` that it
-/// carried counts as delivered. Neither command has an answer.
+/// How long a session must live after it sent a `GKEY`, a `GDEL`, or a
+/// `GNREG` before that command counts as delivered. None of them has an
+/// answer. The time counts from the send of each command: a command that
+/// left one second before the link ended did not settle, however long the
+/// session was ready before.
 const SETTLED: Duration = Duration::from_secs(30);
 
 /// The first wait before a `GSUB` goes again after a `LIMIT`. Each `LIMIT`
@@ -542,8 +545,9 @@ enum End {
 struct Carried {
     /// The commands that did not leave yet.
     early: Vec<GroupCommand>,
-    /// Each `GKEY` and `GDEL` of this session, until it settles.
-    quiet: Vec<GroupCommand>,
+    /// Each command with no answer that this session sent, with the instant
+    /// of its send, until it settles.
+    quiet: Vec<(tokio::time::Instant, GroupCommand)>,
 }
 
 /// Runs the group queues until the caller drops the commands. A session
@@ -574,9 +578,10 @@ pub async fn run_groups(
             break;
         }
 
-        // A `GKEY` or a `GDEL` that may not have arrived goes in the next
-        // session. A `GSUB` of the caller comes again after `Reset`.
-        carried.early.append(&mut carried.quiet);
+        // A command with no answer that may not have arrived goes in the
+        // next session. A `GSUB` of the caller comes again after `Reset`.
+        let unsettled = carried.quiet.drain(..).map(|(_, command)| command);
+        carried.early.extend(unsettled);
         carried.early.retain(|command| {
             !matches!(
                 command,
@@ -649,6 +654,8 @@ async fn session(
     let mut second: std::collections::BTreeMap<u64, GroupCommand> =
         std::collections::BTreeMap::new();
 
+    // The key and the mask of the upgrade are no secret under TLS, thus a
+    // draw that fails leaves zero and ends no dial.
     let mut key = [0u8; 16];
     let mut mask = [0u8; 4];
     let _ = rng.try_fill_bytes(&mut key);
@@ -678,7 +685,7 @@ async fn session(
         }
 
         for capsule in node.take_capsules() {
-            if link.send(&capsule).await.is_err() {
+            if !crate::runtime::sent_in_time(&mut link, &capsule).await {
                 break 'run End::Lost;
             }
         }
@@ -707,9 +714,7 @@ async fn session(
                 None => break 'run End::Closed,
             },
             _ = tick.tick() => {
-                if ready_since.is_some_and(|since| since.elapsed() >= SETTLED) {
-                    carried.quiet.clear();
-                }
+                carried.quiet.retain(|(sent, _)| sent.elapsed() < SETTLED);
 
                 // A `GSUB` whose wait after a `LIMIT` ran out goes again.
                 let now = tokio::time::Instant::now();
@@ -729,15 +734,18 @@ async fn session(
             }
         };
 
-        // A group node holds no contact, thus it commits nothing.
-        let _ = node.take_changes();
+        // A group node holds no contact, thus no change of it goes to a
+        // store. The call empties the list, which would grow with the run.
+        drop(node.take_changes());
         for event in events {
             match event {
                 ClientEvent::CircuitReady => {
                     ready_since.get_or_insert_with(tokio::time::Instant::now);
                 }
                 // A new run takes new circuits, and `Reset` subscribes
-                // each group again.
+                // each group again. The loss of one circuit ends the
+                // session too: the relay dropped each `GSUB` on it, and no
+                // other path subscribes again.
                 ClientEvent::CircuitLost | ClientEvent::CircuitAged => break 'run End::Lost,
                 ClientEvent::Group { handle, outcome } => {
                     // GRP-398: the relay holds the credentials of a new
@@ -860,9 +868,11 @@ async fn session(
                     }
                     if matches!(
                         command,
-                        GroupCommand::Rotate { .. } | GroupCommand::Delete { .. }
+                        GroupCommand::Rotate { .. }
+                            | GroupCommand::Delete { .. }
+                            | GroupCommand::Notify { .. }
                     ) {
-                        carried.quiet.push(command);
+                        carried.quiet.push((tokio::time::Instant::now(), command));
                     }
                 }
                 Err(_) => {

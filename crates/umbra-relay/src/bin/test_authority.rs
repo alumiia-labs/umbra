@@ -244,7 +244,9 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
     // life expels each relay that it peels.
     let live: Vec<LinkRemoval> = removed
         .iter()
-        .filter(|removal| removal.epoch <= epoch && removal.epoch + LINK_REMOVAL_EPOCHS >= epoch)
+        .filter(|removal| {
+            removal.epoch <= epoch && removal.epoch.saturating_add(LINK_REMOVAL_EPOCHS) >= epoch
+        })
         .copied()
         .collect();
 
@@ -355,10 +357,9 @@ fn run(settings: &str, out: &Path) -> Result<(), &'static str> {
 
     let signers: Vec<(u8, &SigningKey)> = (0u8..).zip(keys.iter()).collect();
     let mut signed_removals = Vec::new();
-    for removal in removed
-        .iter()
-        .filter(|removal| removal.epoch <= epoch && removal.epoch + LINK_REMOVAL_EPOCHS >= epoch)
-    {
+    for removal in removed.iter().filter(|removal| {
+        removal.epoch <= epoch && removal.epoch.saturating_add(LINK_REMOVAL_EPOCHS) >= epoch
+    }) {
         signed_removals.push(
             removal
                 .sign(&signers, &mut OsRng)

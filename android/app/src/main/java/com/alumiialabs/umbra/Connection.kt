@@ -109,7 +109,7 @@ fun ConnectionScreen(onBack: () -> Unit) {
 
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.common_connection), onBack = onBack)
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = PressInset)) {
             Spacer(Modifier.height(12.dp))
             HeroIcon("wifi")
             Spacer(Modifier.height(20.dp))
@@ -119,7 +119,7 @@ fun ConnectionScreen(onBack: () -> Unit) {
                 when (state) {
                     LinkState.Connected -> stringResource(R.string.connection_connected)
                     LinkState.Connecting -> stringResource(R.string.connection_connecting)
-                    LinkState.Down -> stringResource(R.string.connection_no_connection)
+                    LinkState.Down -> stringResource(R.string.connection_offline)
                 },
                 when {
                     state == LinkState.Down -> Core.linkFault

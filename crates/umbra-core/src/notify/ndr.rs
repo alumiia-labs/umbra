@@ -15,6 +15,7 @@ use alloc::{
     vec::Vec,
 };
 
+use core::ops::Bound;
 use umbra_crypto::{aead, hash::sha3_256, secret::Secret, zeroize::Zeroizing};
 use umbra_wire::ndr::{parse_token, NdrRequest, NdrResponse, TokenCarrier, BLOB_LEN, HANDLE_LEN};
 
@@ -178,17 +179,19 @@ impl Ndr {
 
         // A span of one interval or more reaches each phase. A span that
         // passes the end of the interval reaches the phases on both sides.
-        let mut due: Vec<&(u64, [u8; HANDLE_LEN])> = if to - from >= PERIODIC_INTERVAL {
+        // The phase `start` belongs to the span before this one, thus the
+        // lower bound is exclusive and no handle fires two times.
+        let above = |low| (Bound::Excluded(low), Bound::Included(through));
+        let due: Vec<&(u64, [u8; HANDLE_LEN])> = if to - from >= PERIODIC_INTERVAL {
             self.timers.iter().collect()
         } else if start < end {
-            self.timers.range(after..=through).collect()
+            self.timers.range(above(after)).collect()
         } else {
             self.timers
-                .range(after..=highest)
+                .range((Bound::Excluded(after), Bound::Included(highest)))
                 .chain(self.timers.range(lowest..=through))
                 .collect()
         };
-        due.dedup();
 
         due.into_iter()
             .filter_map(|(_, handle)| {

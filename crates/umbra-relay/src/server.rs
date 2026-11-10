@@ -476,13 +476,22 @@ fn take_input(
             relay_id,
             writer,
         } => {
-            count_link(node, link, &writer);
-            links.writers.insert(link, writer);
-
+            // A link whose random source fails gets no session. A session
+            // under a secret of zero bytes would be open to each party.
             let mut session_id = [0u8; 8];
             let mut secret = Secret::<32>::zeroed();
-            let _ = rng.try_fill_bytes(&mut session_id);
-            let _ = rng.try_fill_bytes(secret.expose_mut());
+            let is_drawn = rng.try_fill_bytes(&mut session_id).is_ok()
+                && rng.try_fill_bytes(secret.expose_mut()).is_ok();
+
+            if !is_drawn {
+                eprintln!("relay: the random source gave no session secret, and the link closes");
+                drop(writer);
+                node.dial_failed(relay_id, unix_now());
+                return Some(Vec::new());
+            }
+
+            count_link(node, link, &writer);
+            links.writers.insert(link, writer);
 
             node.dialed(link, relay_id, session_id, secret, unix_now(), rng)
         }
@@ -1477,7 +1486,10 @@ async fn fetch_keychain_into(
     let held = carried.keychain.lock().ok()?.clone();
 
     if held.as_deref() != Some(chain.as_slice()) {
-        let _ = write_atomically(&keychain_path(source), &chain);
+        if !write_atomically(&keychain_path(source), &chain) {
+            eprintln!("relay: the key chain file does not write; a restart serves the old chain");
+        }
+
         if let Ok(mut slot) = carried.keychain.lock() {
             *slot = Some(Arc::from(chain.as_slice()));
         }

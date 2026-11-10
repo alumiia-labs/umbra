@@ -440,19 +440,43 @@ impl Bridge {
     }
 
     /// A sync record that no relay took starts the paced resend of its
-    /// peer now, and not at the next run (`DEV-312`, `DEV-073`).
+    /// peer now, and not at the next run (`DEV-312`, `DEV-073`). The result
+    /// is whether the resend started, and the record thus goes again.
     fn sync_lost<B: Backend, E: SecureElement, R: CryptoRng + ?Sized>(
         &mut self,
         client: &mut Client<B, E>,
         tag: u64,
         rng: &mut R,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
         match self.sync_sent.remove(&tag) {
             Some(channel) if self.sync_restarted.insert(channel) => {
-                client.sync_send_lost(channel, rng)
+                client.sync_send_lost(channel, rng)?;
+                Ok(true)
             }
-            _ => Ok(()),
+            _ => Ok(false),
         }
+    }
+
+    /// Fails the message of a record that no relay took. A record that the
+    /// resend of its sync channel carries again fails not: the owner of
+    /// the channels can still deliver it, and the view must show no
+    /// failure for a message that then arrives.
+    fn fail_sent<B: Backend, E: SecureElement, R: CryptoRng + ?Sized>(
+        &mut self,
+        client: &mut Client<B, E>,
+        tag: u64,
+        cause: crate::FailureCause,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let goes_again = self.sync_lost(client, tag, rng)?;
+        let Some(message) = self.sent.remove(&tag) else {
+            return Ok(());
+        };
+        if goes_again {
+            return Ok(());
+        }
+
+        client.fail(&message, cause, rng)
     }
 
     /// Applies one update of the runtime to the client.
@@ -478,6 +502,7 @@ impl Bridge {
             | Update::NotifyKey { .. }
             | Update::NotifierId { .. }
             | Update::NotifyQueue { .. }
+            | Update::NotifyRefused(_)
             | Update::RendezvousQueue { .. }
             | Update::RendezvousRefused(_)
             | Update::Hello { .. }
@@ -551,17 +576,11 @@ impl Bridge {
             }
             // IMP-074: a failed record names its cause.
             Update::Failed(tag) => {
-                self.sync_lost(client, tag, rng)?;
-                if let Some(message) = self.sent.remove(&tag) {
-                    client.fail(&message, crate::FailureCause::Refused, rng)?;
-                }
+                self.fail_sent(client, tag, crate::FailureCause::Refused, rng)?;
                 None
             }
             Update::Unsent(tag) => {
-                self.sync_lost(client, tag, rng)?;
-                if let Some(message) = self.sent.remove(&tag) {
-                    client.fail(&message, crate::FailureCause::NoPath, rng)?;
-                }
+                self.fail_sent(client, tag, crate::FailureCause::NoPath, rng)?;
                 None
             }
             Update::SendIndex { tag, index } => {

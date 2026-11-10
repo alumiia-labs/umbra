@@ -221,6 +221,11 @@ mod keygen {
         /// `HMAC-SHA3-256(seed, "umbra/v1/issuer-rsa" || context)` gives
         /// the two primes, thus a restart of the issuer finds the same key
         /// (Part 13 §13.6).
+        ///
+        /// The key depends on the order in which `crypto-primes` draws from
+        /// the stream. A new version of that crate can thus give another
+        /// key from one seed: the test `a_seed_gives_the_recorded_key`
+        /// shows such a change before an issuer takes the version.
         pub fn from_seed(seed: &Secret<32>, context: &[u8]) -> Result<Self, Error> {
             let mut outer = <Hmac<Sha3_256> as KeyInit>::new_from_slice(seed.expose())
                 .map_err(|_| Error::Key)?;
@@ -476,6 +481,22 @@ mod tests {
         verify(key.public(), b"token input", &sig).unwrap();
         assert!(verify(other.public(), b"token input", &sig).is_err());
     }
+
+    // A new version of `crypto-primes` that draws in another order fails
+    // here, before an issuer loses the key of its seed.
+    #[cfg(feature = "keygen")]
+    #[test]
+    fn a_seed_gives_the_recorded_key() {
+        use crate::secret::Secret;
+
+        let key = SecretKey2048::from_seed(&Secret::new([0x5A; 32]), &7u32.to_be_bytes()).unwrap();
+        let digest = crate::hash::sha3_256(&[key.public().modulus()]);
+        assert_eq!(digest[..], hex(RECORDED_MODULUS_DIGEST)[..]);
+    }
+
+    #[cfg(feature = "keygen")]
+    const RECORDED_MODULUS_DIGEST: &str =
+        "d68f40eee12e4f67967f523e9b86b3f310c391788bf3d39d6466516bda13e4e9";
 
     fn hex(s: &str) -> Vec<u8> {
         (0..s.len())

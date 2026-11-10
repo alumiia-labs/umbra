@@ -437,6 +437,20 @@ impl Initiator {
         Ok(app_len)
     }
 
+    /// Tests that [`Initiator::flight3`] can write its flight for an
+    /// `app_3` of `app_len` bytes into a buffer of `out_len` bytes. That
+    /// call takes the initiator, thus a caller that must keep the state on
+    /// a failure calls this first.
+    pub fn check_flight3(&self, app_len: usize, out_len: usize) -> Result<(), Error> {
+        if self.er.is_none() {
+            return Err(Error::Handshake);
+        }
+        if out_len < FLIGHT3_FIXED + app_len + PAYLOAD_OVERHEAD {
+            return Err(Error::Length);
+        }
+        Ok(())
+    }
+
     /// Writes flight 3 into `out` with the initiator's static identity
     /// `s_i`, and returns the session keys and the length. `out` needs
     /// `FLIGHT3_FIXED + app_3.len() + PAYLOAD_OVERHEAD` bytes. An initiator
@@ -568,6 +582,10 @@ impl Responder {
         st.trace(trace, "1.2 es");
 
         let e1: [u8; EK_LEN] = e1.try_into().map_err(|_| Error::Length)?;
+
+        // Flight 2 encapsulates to `e1`. A key that fails the check of
+        // FIPS 203 gives a handshake that cannot end, thus it fails here.
+        EncapsulationKey::<MlKem768>::new(&Array::from(e1)).map_err(|_| Error::Key)?;
         st.mix_hash(&e1);
         st.trace(trace, "1.3 e1");
 
@@ -620,7 +638,11 @@ impl Responder {
 
         let total = FLIGHT2_FIXED + NONCE_LEN + app_2.len() + PAYLOAD_OVERHEAD;
         let out = out.get_mut(..total).ok_or(Error::Length)?;
-        let st = &mut self.st;
+
+        // The flight goes on a copy, thus a step that fails leaves the
+        // state as flight 1 left it.
+        let mut st = self.st.copy();
+        let st = &mut st;
 
         // 1. er
         let er_sk = StaticSecret::random_from_rng(rng);
@@ -662,6 +684,7 @@ impl Responder {
         tag.copy_from_slice(&st.seal(pt)?);
         st.trace(trace, "2.5 payload2");
 
+        self.st = st.copy();
         self.er_sk = Some(er_sk);
         Ok(total)
     }

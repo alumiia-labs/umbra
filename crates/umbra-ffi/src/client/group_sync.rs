@@ -50,6 +50,12 @@ const REKEY_HOLD_MAX: u64 = 7 * 86_400;
 /// their order of arrival: the subject of the group, then the record
 /// (`DEV-299`).
 pub(super) const GROUP_RECORDS_HELD: TableId = TableId(0x2B);
+/// The most held records of groups. A group whose state never comes fills
+/// no store. The value is that of the pairwise path (`DEV-294`).
+const GROUP_HELD_MAX: usize = 1_024;
+/// The longest time that a record of a group waits for its state, in
+/// seconds.
+const GROUP_HELD_AGE: u64 = 30 * 86_400;
 /// The groups whose state waits to go to the other devices of the set, by
 /// their conversation. A row stays until the descriptor went out, thus an
 /// app that ends before the upload sends it at its next run.
@@ -420,9 +426,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX)
             });
         let open = self.open_mut()?;
-        let mut nonce = [0u8; 16];
-        rng.fill_bytes(&mut nonce);
-        let row = open.store.row_id(GROUP_RECORDS_HELD, &nonce);
+        if open.store.count(GROUP_RECORDS_HELD, None)? >= GROUP_HELD_MAX {
+            return Ok(());
+        }
+
+        // One record holds one row, thus a record that comes again takes
+        // no second place.
+        let digest = umbra_crypto::hash::sha3_256(&[subject.as_slice(), app]);
+        let row = open.store.row_id(GROUP_RECORDS_HELD, &digest);
 
         // DEV-244: a timed record waits with its deadline, thus the wait
         // does not lengthen its period.
@@ -453,18 +464,44 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         &mut self,
         rng: &mut R,
     ) -> Result<(), Error> {
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| {
+                u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX)
+            });
         let store = &self.open_ref()?.store;
         let mut subjects = std::collections::BTreeSet::new();
+        let mut old = Vec::new();
         for row in store.row_ids(GROUP_RECORDS_HELD, None)? {
             // A row that does not open stops no other group.
             let Ok(Some(plain)) = store.get(GROUP_RECORDS_HELD, &row) else {
                 continue;
             };
 
+            // A record past `GROUP_HELD_AGE` goes, as on the pairwise path.
             let plain = Zeroizing::new(plain);
+            let order = plain
+                .get(32..40)
+                .and_then(|bytes| bytes.try_into().ok())
+                .map_or(0, u64::from_be_bytes);
+            if now_ns.saturating_sub(order) / 1_000_000_000 > GROUP_HELD_AGE {
+                old.push(row);
+                continue;
+            }
+
             if let Some(subject) = plain.get(..32).and_then(|bytes| bytes.try_into().ok()) {
                 subjects.insert(subject);
             }
+        }
+
+        if !old.is_empty() {
+            let open = self.open_mut()?;
+            let mut batch = open.store.begin();
+            for row in old {
+                batch.delete(GROUP_RECORDS_HELD, row);
+            }
+
+            batch.commit()?;
         }
 
         for subject in subjects {
@@ -619,7 +656,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         subject: &[u8; 32],
     ) -> Result<Option<ConversationId>, Error> {
         for conversation in self.group_conversations()? {
-            let group = self.group_of(conversation)?;
+            let Some(group) = self.readable_group(conversation)? else {
+                continue;
+            };
             let set_key = &self.open_ref()?.device_set_key;
             if group_subject(set_key, group.group_id()) == *subject {
                 return Ok(Some(conversation));
@@ -805,19 +844,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
         }
 
+        // The group that holds the key goes to the store before the rows
+        // of the key go. A fault between the two keeps the rows, and the
+        // next call installs them again.
+        if installed {
+            self.take_outcomes(conversation, group, outcomes, before, true, now_ms, rng)?;
+        }
+
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         for row in done {
             batch.delete(EPOCH_HELD, row);
         }
 
-        batch.commit()?;
-        if !installed {
-            return Ok(());
-        }
-
-        self.take_outcomes(conversation, group, outcomes, before, true, now_ms, rng)?;
-
-        Ok(())
+        Ok(batch.commit()?)
     }
 }

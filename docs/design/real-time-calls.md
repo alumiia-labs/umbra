@@ -508,7 +508,7 @@ kind 0x04 control  item u16, PATH_NEW
 kind 0x05 end      item u16
 ```
 
-One cell can hold two voice items and a control item. `cell_index` is the index of the last sealed cell of that path, plus one. Index 0 is the first `MEDIA` cell of the path. A rejoin keeps the index. No cell carries the index, and `seq` sits inside the ciphertext. A relay `PADDING` cell is outside the frame layer and uses no index. Each relay after the splice sees it as an ordinary `B0` cell, because the hop layers hide its command byte.
+A `B0` cell holds one voice item, and a control item when the voice item leaves room for it. Two voice items in one cell need `B1` (the bucket rule of D8). `cell_index` is the index of the last sealed cell of that path, plus one. Index 0 is the first `MEDIA` cell of the path. A rejoin keeps the index. No cell carries the index, and `seq` sits inside the ciphertext. A relay `PADDING` cell is outside the frame layer and uses no index. Each relay after the splice sees it as an ordinary `B0` cell, because the hop layers hide its command byte.
 
 **The gap rule.** The receiver accepts a forward gap: on a failed check it tries the next index, up to `GAP_MAX` of 400 cells. It derives a later `CK` for a trial, and it erases an older `CK` only after a check passes. One cell that fails each index of the window ends the path. While a path is in setup the receiver tries `SK` too.
 

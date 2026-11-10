@@ -108,7 +108,20 @@ pub struct GroupService {
     turn: Option<[u8; 32]>,
     /// The records that the subscriptions took, which wait for the node.
     arrivals: Vec<Arrival>,
+    /// Each group queue that a circuit subscribed to or registered at, thus
+    /// the end of a circuit reads its own queues alone. An entry can name a
+    /// queue that the circuit holds no more.
+    touched: BTreeMap<CircuitKey, BTreeSet<[u8; 32]>>,
+    /// The bytes of the records that the group queues hold. Each fresh
+    /// record adds to it, and the sweep counts it again, thus a record that
+    /// left counts until the next sweep.
+    held_bytes: usize,
 }
+
+/// The bytes of group records that one relay holds in memory. A post above
+/// the bound gets `BUSY`. With no bound, each `GNEW` adds `GROUP_QUEUE_QUOTA`
+/// to the memory that a party can fill.
+pub const GROUP_RECORDS_MAX: usize = 256 << 20;
 
 /// The `GMSG` of one record, in the bucket that the record length gives.
 /// The bucket of a `GPOST` and of its `GMSG` is one (`WIR-372`).
@@ -195,6 +208,7 @@ impl GroupService {
                 continue;
             };
 
+            service.held_bytes = service.held_bytes.saturating_add(queue.bytes());
             service.served.insert(group_queue_id, Served::new(queue));
         }
 
@@ -294,10 +308,16 @@ impl GroupService {
                     return Err(Reject::Rejected);
                 }
 
+                if self.held_bytes.saturating_add(payload.len()) > GROUP_RECORDS_MAX {
+                    return Err(Reject::Busy);
+                }
+
                 // WIR-374: a post carries no admission.
                 let posted = served.queue.post(command.payload, now)?;
 
                 if posted.fresh {
+                    self.held_bytes = self.held_bytes.saturating_add(payload.len());
+
                     self.changes.push(StoreChange::GroupRecord {
                         group_queue_id,
                         record: Stored {
@@ -417,6 +437,10 @@ impl GroupService {
                 if !served.subscribers.contains(&circuit) {
                     served.subscribers.push(circuit);
                 }
+                self.touched
+                    .entry(circuit)
+                    .or_default()
+                    .insert(group_queue_id);
 
                 // WIR-387: each retained record above `from_seq`, in order.
                 // The node reads each one from the queue at its step
@@ -464,6 +488,10 @@ impl GroupService {
                     // A registration that the queue holds already is no new
                     // one, and it counts for no circuit.
                     let is_new = !served.notify.contains_key(&sender_id);
+                    self.touched
+                        .entry(circuit)
+                        .or_default()
+                        .insert(group_queue_id);
                     let made = served.registered_by.entry(circuit).or_insert(0);
 
                     if is_new && *made >= GNREG_PER_CIRCUIT {
@@ -758,9 +786,16 @@ impl GroupService {
 
     /// A circuit ended, thus its subscriptions end.
     pub fn circuit_closed(&mut self, circuit: &CircuitKey) {
-        for served in self.served.values_mut() {
-            served.subscribers.retain(|held| held != circuit);
-            served.registered_by.remove(circuit);
+        // A circuit that touched no group queue costs one lookup.
+        let Some(touched) = self.touched.remove(circuit) else {
+            return;
+        };
+
+        for group_queue_id in touched {
+            if let Some(served) = self.served.get_mut(&group_queue_id) {
+                served.subscribers.retain(|held| held != circuit);
+                served.registered_by.remove(circuit);
+            }
         }
     }
 
@@ -768,8 +803,14 @@ impl GroupService {
     /// subscription of the circuit ends. The circuit stays, and with it the
     /// count of its registrations.
     pub fn circuit_paused(&mut self, circuit: &CircuitKey) {
-        for served in self.served.values_mut() {
-            served.subscribers.retain(|held| held != circuit);
+        let Some(touched) = self.touched.get(circuit) else {
+            return;
+        };
+
+        for group_queue_id in touched {
+            if let Some(served) = self.served.get_mut(group_queue_id) {
+                served.subscribers.retain(|held| held != circuit);
+            }
         }
     }
 
@@ -817,6 +858,12 @@ impl GroupService {
             self.changes
                 .push(StoreChange::GroupQueueDeleted { group_queue_id });
         }
+
+        self.held_bytes = self
+            .served
+            .values()
+            .map(|served| served.queue.bytes())
+            .sum();
 
         self.digest_tick(now)
     }

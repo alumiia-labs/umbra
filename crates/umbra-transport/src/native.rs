@@ -7,6 +7,7 @@
 //! early data (`NET-073`), and GREASE ECH.
 
 use std::{
+    future::Future,
     io,
     net::SocketAddr,
     pin::Pin,
@@ -148,6 +149,15 @@ fn tls_config_under(roots: RootCertStore) -> Result<Arc<ClientConfig>, NativeErr
 /// family keeps the larger part for its connect, its handshake, and its
 /// upgrade.
 const FAMILY_WAIT: Duration = Duration::from_secs(4);
+/// How long a link has at one address for its connect, its TLS handshake,
+/// and its upgrade, before the dial turns to the next address. Before this,
+/// an address that took the connect and then stalled used the full time of
+/// the dial, and the second family got no turn.
+const ATTEMPT_WAIT: Duration = Duration::from_secs(6);
+/// The time that one capsule of [`Link::send`] has to leave. A peer that
+/// reads no more, or a path that died, then ends the link here and not at
+/// the retransmit limit of TCP, which is minutes.
+const WRITE_WAIT: Duration = Duration::from_secs(20);
 
 /// The addresses of a dial in the order of their use: IPv4 first, then
 /// IPv6, each one that the descriptor holds.
@@ -168,7 +178,15 @@ fn socket_addrs(dial: &Dial) -> impl Iterator<Item = SocketAddr> {
 /// of the caller alone. One address is in use at a time, thus the relay
 /// sees one address of the client.
 async fn connect_tcp(dial: &Dial) -> Result<TcpStream, NativeError> {
-    let mut addrs = socket_addrs(dial).peekable();
+    connect_first(socket_addrs(dial)).await
+}
+
+/// Connects to the first of `addrs` that answers, by the rule of
+/// [`connect_tcp`].
+pub(crate) async fn connect_first(
+    addrs: impl Iterator<Item = SocketAddr>,
+) -> Result<TcpStream, NativeError> {
+    let mut addrs = addrs.peekable();
     let mut failed: NativeError = Error::Refused.into();
     while let Some(addr) = addrs.next() {
         let connected = if addrs.peek().is_some() {
@@ -202,7 +220,16 @@ pub const CHALLENGES_PATH: &str = "/.well-known/umbra/challenges";
 /// The largest bundle of challenges that a client reads: one challenge of
 /// 3 387 bytes for each of 3 000 relays is below 10 MiB.
 pub const CHALLENGES_MAX: usize = 16 << 20;
-const MANIFEST_TIMEOUT: Duration = Duration::from_secs(20);
+/// The time that a fetch from a carrier has in all. A manifest of 18 MiB
+/// then needs 0.8 Mbit/s. Before this, the time was 20 s, which a slow
+/// mobile link never met.
+const MANIFEST_TIMEOUT: Duration = Duration::from_secs(180);
+/// The time that a carrier has for the head of its answer, and then for
+/// each read of the body. A carrier that stalls thus ends the fetch long
+/// before `MANIFEST_TIMEOUT`.
+const CARRIED_IDLE: Duration = Duration::from_secs(20);
+/// The longest head of the answer of a carrier.
+const CARRIED_HEAD_MAX: usize = 8_192;
 /// The path of the key chain of the directory, beside the manifest (Part 10
 /// `REL-199`).
 pub const KEYCHAIN_PATH: &str = "/.well-known/umbra/keychain";
@@ -295,6 +322,50 @@ async fn fetch_carried(
     path: &str,
     max: usize,
 ) -> Result<Vec<u8>, NativeError> {
+    // The connect, the handshake, and the head share one wait.
+    let opened = timeout(CARRIED_IDLE, open_carried(dial, config, path));
+    let (mut stream, inbound) = opened.await.map_err(|_| NativeError::Timeout)??;
+
+    let (body_start, length) = carried_head(&inbound)?.ok_or(Error::Refused)?;
+    if length > max {
+        return Err(Error::Refused.into());
+    }
+
+    // A manifest is up to 32 MiB. The body takes its full room at the
+    // start, from the length that the head gives. Before this, the buffer
+    // grew by doubling, and each growth was a copy of the whole body.
+    let mut body = Vec::with_capacity(length);
+    body.extend_from_slice(inbound.get(body_start..).unwrap_or(&[]));
+    if body.len() > length {
+        return Err(Error::Refused.into());
+    }
+    drop(inbound);
+
+    let mut chunk = vec![0u8; 16_384];
+    while body.len() < length {
+        let want = length.saturating_sub(body.len()).min(chunk.len());
+        let room = chunk.get_mut(..want).unwrap_or(&mut []);
+        let read = timeout(CARRIED_IDLE, stream.read(room));
+
+        // A carrier that closes before the length is a body cut short.
+        let n = read.await.map_err(|_| NativeError::Timeout)?.unwrap_or(0);
+        if n == 0 {
+            return Err(Error::Refused.into());
+        }
+
+        body.extend_from_slice(chunk.get(..n).unwrap_or(&[]));
+    }
+
+    Ok(body)
+}
+
+/// Opens the connection to a carrier, asks for `path`, and reads to the
+/// end of the head of the answer. Gives the stream and what came.
+async fn open_carried(
+    dial: &Dial,
+    config: Arc<ClientConfig>,
+    path: &str,
+) -> Result<(tokio_rustls::client::TlsStream<TcpStream>, Vec<u8>), NativeError> {
     let tcp = connect_tcp(dial).await?;
     let name = ServerName::try_from(dial.host.clone()).map_err(|_| Error::Refused)?;
     let mut stream = tokio_rustls::TlsConnector::from(config)
@@ -311,58 +382,57 @@ async fn fetch_carried(
     // A TLS stream can hold a written record until its flush.
     stream.flush().await?;
 
-    let mut inbound = Vec::with_capacity(65_536);
-    let mut chunk = vec![0u8; 16_384];
+    let mut inbound = Vec::with_capacity(CARRIED_HEAD_MAX);
+    let mut chunk = vec![0u8; 4_096];
     loop {
-        // A carrier that closes with no TLS close is at its end too, and the
-        // length of the head tests what came.
         let n = stream.read(&mut chunk).await.unwrap_or(0);
         if n == 0 {
-            break;
+            return Err(Error::Refused.into());
         }
 
         inbound.extend_from_slice(chunk.get(..n).unwrap_or(&[]));
-        if inbound.len() > max {
+        if carried_head(&inbound)?.is_some() {
+            return Ok((stream, inbound));
+        }
+        if inbound.len() > CARRIED_HEAD_MAX {
             return Err(Error::Refused.into());
         }
     }
-
-    read_carried(inbound)
 }
 
-/// The body of the answer of a carrier. The status is `200`, and a
+/// The body of the answer of a carrier that came whole in `inbound`. A
 /// `Content-Length` that equals what came proves that the body is whole.
-/// The read takes a cut connection as the end of the stream. Thus a body
-/// that the close alone delimits can be a body cut short, and the call
-/// refuses it.
+#[cfg(test)]
 fn read_carried(mut inbound: Vec<u8>) -> Result<Vec<u8>, NativeError> {
-    let body_start = carried_body_start(&inbound)?;
+    let (body_start, length) = carried_head(&inbound)?.ok_or(Error::Refused)?;
 
-    // A manifest is up to 32 MiB. The body moves to the front of its own
-    // buffer, thus no second buffer of that size exists.
     inbound.drain(..body_start);
+    if inbound.len() != length {
+        return Err(Error::Refused.into());
+    }
     Ok(inbound)
 }
 
-/// Checks the head of the answer of a carrier, and returns where the body
-/// starts.
-fn carried_body_start(inbound: &[u8]) -> Result<usize, NativeError> {
-    let head_end = inbound
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .ok_or(Error::Refused)?;
+/// Checks the head of the answer of a carrier, and gives where the body
+/// starts and its length, or `None` while the head is not whole. The
+/// status is `200`. The body has a plain length: a body that the close
+/// alone delimits can be a body cut short, and the call refuses it.
+fn carried_head(inbound: &[u8]) -> Result<Option<(usize, usize)>, NativeError> {
+    let Some(head_end) = inbound.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return Ok(None);
+    };
     let head =
         core::str::from_utf8(inbound.get(..head_end).unwrap_or(&[])).map_err(|_| Error::Refused)?;
     let mut lines = head.split("\r\n");
-    let status = lines.next().unwrap_or_default();
-    if !status.starts_with("HTTP/1.1 200") {
+    let status = lines
+        .next()
+        .and_then(|line| line.strip_prefix("HTTP/1.1 "))
+        .and_then(crate::https::status_code);
+    if status != Some(200) {
         return Err(Error::Refused.into());
     }
 
-    let body_start = head_end.saturating_add(4);
-    let body = inbound.get(body_start..).unwrap_or(&[]);
-    let mut is_whole = false;
-
+    let mut length = None;
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
             continue;
@@ -373,18 +443,15 @@ fn carried_body_start(inbound: &[u8]) -> Result<usize, NativeError> {
         }
 
         if name.eq_ignore_ascii_case("Content-Length") {
-            if value.trim().parse::<usize>().ok() != Some(body.len()) {
+            let stated = value.trim().parse::<usize>().map_err(|_| Error::Refused)?;
+            if length.replace(stated).is_some() {
                 return Err(Error::Refused.into());
             }
-            is_whole = true;
         }
     }
 
-    if !is_whole {
-        return Err(Error::Refused.into());
-    }
-
-    Ok(body_start)
+    let length = length.ok_or(Error::Refused)?;
+    Ok(Some((head_end.saturating_add(4), length)))
 }
 
 /// The bytes that a [`Coalesced`] stream holds before it writes. A group of
@@ -438,6 +505,12 @@ impl WriteState {
     /// The bytes that the socket took so far. The count wraps.
     pub fn sent(&self) -> usize {
         self.sent.load(Ordering::Relaxed)
+    }
+
+    /// The stream holds no later write. A group that failed leaves no hold
+    /// behind it.
+    fn release(&self) {
+        self.holding.store(false, Ordering::Relaxed);
     }
 }
 
@@ -652,7 +725,23 @@ impl<W: AsyncWrite + Unpin> FrameWriter<W> {
     /// waits for the socket with the session in the middle of a group. A
     /// frame that goes alone has nothing to share a write with, and the
     /// stream holds no copy of it.
+    ///
+    /// The group has no time bound here. A relay sets a bound for each
+    /// frame, because one bound for the group ends the link of a slow peer
+    /// (`NET-364`). A caller must not drop this call and then send again: a
+    /// part of a frame can be in the TLS session, and the peer reads no
+    /// frame after it. After an error or a dropped call the caller ends the
+    /// link.
     async fn write_group<C: AsRef<[u8]>>(&mut self, capsules: &[C]) -> Result<(), NativeError> {
+        let written = self.write_group_now(capsules).await;
+
+        if written.is_err() {
+            self.state.release();
+        }
+        written
+    }
+
+    async fn write_group_now<C: AsRef<[u8]>>(&mut self, capsules: &[C]) -> Result<(), NativeError> {
         let mut waiting = 0usize;
         if capsules.len() > 1 {
             self.state.hold();
@@ -691,13 +780,57 @@ pub struct TcpLink {
 impl TcpLink {
     /// Connects, handshakes, and upgrades. `key` and `mask_seed` come from
     /// the CSPRNG of the caller.
+    ///
+    /// The link goes to the first address of the dial that completes the
+    /// upgrade, with one address in use at a time. An address that is not
+    /// the last one has `ATTEMPT_WAIT` for all of it, and the last address
+    /// waits for the deadline of the caller alone.
     pub async fn connect(
         dial: &Dial,
         config: Arc<ClientConfig>,
         key: [u8; 16],
         mask_seed: [u8; 4],
     ) -> Result<Self, NativeError> {
-        let tcp = connect_tcp(dial).await?;
+        let mut addrs = socket_addrs(dial).peekable();
+        let mut failed: NativeError = Error::Refused.into();
+
+        while let Some(addr) = addrs.next() {
+            let is_last = addrs.peek().is_none();
+            let attempt = Self::connect_at(addr, is_last, dial, config.clone(), key, mask_seed);
+
+            let connected = if is_last {
+                attempt.await
+            } else {
+                match timeout(ATTEMPT_WAIT, attempt).await {
+                    Ok(connected) => connected,
+                    Err(_) => Err(NativeError::Timeout),
+                }
+            };
+
+            match connected {
+                Ok(link) => return Ok(link),
+                Err(error) => failed = error,
+            }
+        }
+        Err(failed)
+    }
+
+    /// One attempt of [`TcpLink::connect`], at one address.
+    async fn connect_at(
+        addr: SocketAddr,
+        is_last: bool,
+        dial: &Dial,
+        config: Arc<ClientConfig>,
+        key: [u8; 16],
+        mask_seed: [u8; 4],
+    ) -> Result<Self, NativeError> {
+        let tcp = if is_last {
+            TcpStream::connect(addr).await?
+        } else {
+            timeout(FAMILY_WAIT, TcpStream::connect(addr))
+                .await
+                .map_err(|_| NativeError::Timeout)??
+        };
         tcp.set_nodelay(true)?;
         let name = ServerName::try_from(dial.host.clone()).map_err(|_| Error::Refused)?;
         let connector = tokio_rustls::TlsConnector::from(config);
@@ -743,11 +876,18 @@ impl TcpLink {
         })
     }
 
-    /// Sends one capsule.
+    /// Sends one capsule, inside `WRITE_WAIT`. A caller must not drop this
+    /// call and then send again, and it ends the link after an error: a
+    /// part of a frame can be in the TLS session.
     pub async fn send(&mut self, capsule: &[u8]) -> Result<(), NativeError> {
-        self.writer
-            .write_group(core::slice::from_ref(&capsule))
-            .await
+        let group = core::slice::from_ref(&capsule);
+        match timeout(WRITE_WAIT, self.writer.write_group(group)).await {
+            Ok(written) => written,
+            Err(_) => {
+                self.writer.state.release();
+                Err(NativeError::Timeout)
+            }
+        }
     }
 
     /// Receives one capsule. A caller may drop this call while it waits:
@@ -842,8 +982,14 @@ impl TcpWriter {
     }
 }
 
+/// How often a QUIC link that idles sends a keep-alive.
+const QUIC_KEEP_ALIVE: Duration = Duration::from_secs(15);
+
 /// A QUIC connection with one bidirectional stream that carries capsules
 /// back to back.
+///
+/// No client of v1 dials QUIC: each caller passes `Plan::Only(Wire::Tcp)`.
+/// Thus no test of the workspace covers this link against a relay.
 pub struct QuicLink {
     _connection: quinn::Connection,
     send: quinn::SendStream,
@@ -862,7 +1008,13 @@ impl QuicLink {
         tls.alpn_protocols = vec![QUIC_ALPN.to_vec()];
         let quic_config = quinn::crypto::rustls::QuicClientConfig::try_from(tls)
             .map_err(|e| NativeError::Quic(e.to_string()))?;
-        let client_config = quinn::ClientConfig::new(Arc::new(quic_config));
+        let mut client_config = quinn::ClientConfig::new(Arc::new(quic_config));
+
+        // A link that idles sends a keep-alive, thus the idle timeout of
+        // QUIC ends no link that the session still holds.
+        let mut transport = quinn::TransportConfig::default();
+        transport.keep_alive_interval(Some(QUIC_KEEP_ALIVE));
+        client_config.transport_config(Arc::new(transport));
 
         let bind: SocketAddr = if addr.is_ipv6() {
             "[::]:0".parse().map_err(|_| Error::Refused)?
@@ -1033,6 +1185,34 @@ pub async fn connect(
     timeout(overall, raced)
         .await
         .map_err(|_| NativeError::Timeout)?
+}
+
+/// Connects over TCP alone inside `overall`, with the key of the upgrade
+/// and the seed of the masks from `rng`. A generator that fails ends the
+/// dial: a key of zeros would be the same for each link.
+///
+/// The draw is done when this call returns, thus the dial that it gives
+/// holds no borrow of `rng`.
+pub fn dial_tcp<'a, R: umbra_crypto::rand_core::TryRng + ?Sized>(
+    dial: &'a Dial,
+    config: Arc<ClientConfig>,
+    rng: &mut R,
+    overall: Duration,
+) -> impl Future<Output = Result<Link, NativeError>> + use<'a, R> {
+    let mut key = [0u8; 16];
+    let mut mask_seed = [0u8; 4];
+    let is_drawn = rng
+        .try_fill_bytes(&mut key)
+        .and_then(|()| rng.try_fill_bytes(&mut mask_seed))
+        .is_ok();
+
+    async move {
+        if !is_drawn {
+            return Err(io::Error::other("the generator gave no random bytes").into());
+        }
+
+        connect(dial, config, Plan::Only(Wire::Tcp), key, mask_seed, overall).await
+    }
 }
 
 #[cfg(test)]
@@ -1467,6 +1647,54 @@ mod tests {
                 "{bad:x?}"
             );
         }
+    }
+
+    #[test]
+    fn the_head_of_a_carrier_gives_the_length_before_the_body_comes() {
+        // The head alone gives the length, thus the body takes its room
+        // one time and a length above the bound costs no read.
+        let head = manifest_response_head(1 << 20);
+        assert_eq!(
+            carried_head(head.as_bytes()).unwrap(),
+            Some((head.len(), 1 << 20))
+        );
+        assert_eq!(
+            carried_head(&head.as_bytes()[..head.len() - 1]).unwrap(),
+            None
+        );
+
+        // A status of four digits, and two lengths, are no answer.
+        let long = b"HTTP/1.1 2000 OK\r\nContent-Length: 2\r\n\r\n";
+        assert!(carried_head(long).is_err());
+        let twice = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Length: 2\r\n\r\n";
+        assert!(carried_head(twice).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_generator_that_fails_ends_a_dial_before_its_connect() {
+        struct Broken;
+        impl umbra_crypto::rand_core::TryRng for Broken {
+            type Error = core::fmt::Error;
+            fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+                Err(core::fmt::Error)
+            }
+            fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+                Err(core::fmt::Error)
+            }
+            fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), Self::Error> {
+                Err(core::fmt::Error)
+            }
+        }
+
+        let dial = Dial {
+            host: "relay.example".into(),
+            addr_v4: None,
+            addr_v6: None,
+            port: 443,
+        };
+        let wait = Duration::from_secs(1);
+        let dialed = dial_tcp(&dial, tls_config().unwrap(), &mut Broken, wait);
+        assert!(matches!(dialed.await, Err(NativeError::Io(_))));
     }
 
     #[test]

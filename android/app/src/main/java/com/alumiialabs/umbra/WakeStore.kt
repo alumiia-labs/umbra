@@ -224,7 +224,10 @@ object WakeStore {
      * the clock state shows, and the next unlock makes each root again
      * (`NTF-084`).
      */
+    @Synchronized
     fun failed(context: Context) {
+        // The FCM thread and the watch thread call this, and each call reads
+        // the count before it writes.
         val preferences = preferences(context)
         val count = preferences.getInt(FAILURES, 0) + 1
 

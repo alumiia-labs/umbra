@@ -40,6 +40,8 @@ import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import uniffi.umbra_ffi.FfiPoll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.material3.minimumInteractiveComponentSize
 
 /** `POLL_OPTION_MAX` of Part 6 §6.6.6. */
 private const val OPTION_MAX = 12
@@ -50,9 +52,9 @@ const val POLL_GROUP_MAX = 100
 /** The periods of a poll, with their words. */
 private val PollPeriods = listOf(
     0u to R.string.common_no_end,
-    3_600u to R.string.poll_one_hour,
-    86_400u to R.string.poll_one_day,
-    604_800u to R.string.poll_one_week,
+    3_600u to R.string.common_period_1_hour,
+    86_400u to R.string.common_period_1_day,
+    604_800u to R.string.common_period_1_week,
 )
 
 /** `POLL_OPEN_MIN` and `POLL_OPEN_MAX` of Part 6 §6.6.6, in seconds. */
@@ -89,7 +91,7 @@ fun NewPollScreen(chat: Chat, onBack: () -> Unit) {
 
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.poll_new_poll), onBack = onBack)
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = PressInset)) {
             Spacer(Modifier.height(12.dp))
             OutlinedTextField(
                 value = question,
@@ -126,36 +128,14 @@ fun NewPollScreen(chat: Chat, onBack: () -> Unit) {
 
             SectionLabel(stringResource(R.string.poll_ends))
             for ((seconds, title) in PollPeriods) {
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .pressShadeInColumn()
-                        .press(role = Role.RadioButton) {
-                            isCustom = false
-                            period = seconds
-                            if (seconds == 0u) hidden = false
-                        }
-                        .padding(horizontal = PressInset, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    RadioMark(isChosen = !isCustom && period == seconds)
-                    Spacer(Modifier.width(14.dp))
-                    Text(stringResource(title))
+                ChoiceRow(stringResource(title), isChosen = !isCustom && period == seconds) {
+                    isCustom = false
+                    period = seconds
+                    if (seconds == 0u) hidden = false
                 }
             }
 
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .pressShadeInColumn()
-                    .press(role = Role.RadioButton) { isCustom = true }
-                    .padding(horizontal = PressInset, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                RadioMark(isChosen = isCustom)
-                Spacer(Modifier.width(14.dp))
-                Text(stringResource(R.string.poll_custom))
-            }
+            ChoiceRow(stringResource(R.string.poll_custom), isChosen = isCustom) { isCustom = true }
 
             if (isCustom) {
                 Row(Modifier.padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -171,15 +151,24 @@ fun NewPollScreen(chat: Chat, onBack: () -> Unit) {
                     Spacer(Modifier.width(8.dp))
                     PeriodUnits.forEachIndexed { index, (title, _) ->
                         val shape = RoundedCornerShape(12.dp)
+                        val isChosen = unit == index
                         Box(
                             Modifier
                                 .padding(end = 6.dp)
+                                .minimumInteractiveComponentSize()
                                 .clip(shape)
-                                .background(if (unit == index) Palette.Container else Palette.Surface)
-                                .border(1.dp, if (unit == index) Palette.Action else Palette.Outline, shape)
-                                .press(role = Role.RadioButton) { unit = index }
+                                .background(if (isChosen) Palette.Container else Palette.Surface)
+                                .border(1.dp, if (isChosen) Palette.Action else Palette.Control, shape)
+                                .pressChoice(isChosen) { unit = index }
                                 .padding(horizontal = 10.dp, vertical = 10.dp),
-                        ) { Text(stringResource(title), style = MaterialTheme.typography.labelLarge) }
+                        ) {
+                            // The weight shows the choice also, thus the color is not its one sign.
+                            Text(
+                                stringResource(title),
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = if (isChosen) FontWeight.Bold else FontWeight.Normal,
+                            )
+                        }
                     }
                 }
 
@@ -259,7 +248,7 @@ fun PollContent(line: Line, poll: FfiPoll, modifier: Modifier = Modifier, mayVot
                     .fillMaxWidth()
                     .then(
                         if (canVote) {
-                            Modifier.press(role = if (poll.multiple) Role.Checkbox else Role.RadioButton) {
+                            val choose = {
                                 val next = when {
                                     !poll.multiple -> listOf(choice)
                                     isMine -> chosen.filter { it != choice }
@@ -268,11 +257,19 @@ fun PollContent(line: Line, poll: FfiPoll, modifier: Modifier = Modifier, mayVot
                                 // A vote takes one option at least (WIR-186).
                                 if (next.isNotEmpty() && next != chosen) Core.vote(line.handle, next)
                             }
+
+                            // The state goes to a screen reader with the press.
+                            if (poll.multiple) {
+                                Modifier.touchTarget().pressToggle(isMine, role = Role.Checkbox) { choose() }
+                            } else {
+                                Modifier.touchTarget().pressChoice(isMine, onChoose = choose)
+                            }
                         } else {
                             Modifier
                         },
                     )
                     .padding(vertical = 6.dp),
+                verticalArrangement = Arrangement.Center,
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     ChoiceMark(isMine, poll.multiple)

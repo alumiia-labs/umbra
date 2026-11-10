@@ -8,6 +8,11 @@ use umbra_crypto::stored::{Reader, Writer};
 
 use crate::params::{ACK_HOLE_TIMEOUT, DRAIN_THRESHOLD, IN_FLIGHT_WINDOW, RECEIPT_MIN_DELAY};
 
+/// The distance above the cursor at which the cursor takes a record. A queue
+/// rotates near `ROTATE_AFTER_MESSAGES`, thus no relay gives a number this
+/// far above a cursor of its queue.
+pub const SEQ_REACH: u32 = 1 << 24;
+
 /// The cursor of one queue.
 pub struct AckCursor {
     acked: u32,
@@ -103,8 +108,17 @@ impl AckCursor {
     /// a record only while it holds a full window. The relay emits
     /// that record again at the next `SUB`, as each record that no `ACK`
     /// covers (`WIR-110`).
+    ///
+    /// A record more than `SEQ_REACH` above the cursor is none that a relay
+    /// gives in the life of a queue. The cursor refuses it. Else one such
+    /// record would move the cursor to the end of the numbers after
+    /// `ACK_HOLE_TIMEOUT`, and each later record would be a duplicate.
     pub fn receive(&mut self, seq: u32, now: u64) -> bool {
         if seq <= self.acked || self.received.contains_key(&seq) {
+            return false;
+        }
+
+        if seq.saturating_sub(self.acked) > SEQ_REACH {
             return false;
         }
 
@@ -330,6 +344,17 @@ mod tests {
         c.acknowledged(p);
         assert_eq!(c.acked(), far + 1);
         assert!(c.gap_shown());
+    }
+
+    #[test]
+    fn a_record_past_the_reach_of_the_cursor_moves_no_cursor() {
+        let mut c = AckCursor::new(10);
+        assert!(!c.receive(u32::MAX, 1_000));
+        assert!(!c.receive(10 + SEQ_REACH + 1, 1_000));
+        assert_eq!(c.ack_point(1_000 + 2 * ACK_HOLE_TIMEOUT), None);
+
+        // The last number inside the reach is a record above a hole.
+        assert!(c.receive(10 + SEQ_REACH, 1_000));
     }
 
     #[test]

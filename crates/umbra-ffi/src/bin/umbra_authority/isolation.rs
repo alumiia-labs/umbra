@@ -75,14 +75,11 @@ async fn probe(
         return Err("the chain does not start at an ingress relay");
     }
 
-    let mut seed = [0u8; 32];
-    umbra_crypto::rand_core::TryRng::try_fill_bytes(&mut OsRng, &mut seed)
+    let mut seed = Secret::<32>::zeroed();
+    umbra_crypto::rand_core::TryRng::try_fill_bytes(&mut OsRng, seed.expose_mut())
         .map_err(|_| "no random bytes")?;
-    let mut node = ClientNode::with_relays(
-        info(a),
-        vec![info(b), info(c)],
-        RootIdentity::new(Secret::new(seed)),
-    );
+    let mut node =
+        ClientNode::with_relays(info(a), vec![info(b), info(c)], RootIdentity::new(seed));
     node.set_bootstrap(super::is_provisional(settings)?);
 
     // REL-185: a chain with a removed link gives no probe circuit.

@@ -144,7 +144,8 @@ impl Inviter {
 
         // `app_1` holds `qs_auth_sk` and `qe` of the reply queue.
         let mut app_1 = Zeroizing::new([0u8; QUEUE_ADDRESS_LEN]);
-        // WIR-503: a flight that fails keeps the prekey for the true one.
+        // WIR-503: a flight that does not verify keeps the prekey for the
+        // true one.
         let (mut responder, read) = Responder::read_flight1(
             identity,
             held,
@@ -154,6 +155,10 @@ impl Inviter {
             &mut app_1[..],
             &mut NoTrace,
         )?;
+
+        // CRY-089: the prekey goes with the first flight 1 that verifies,
+        // also when that flight gives no flight 2.
+        self.prekey = None;
         if read.app_len != QUEUE_ADDRESS_LEN {
             return Err(Error::Malformed);
         }
@@ -163,8 +168,6 @@ impl Inviter {
         let used = responder.flight2(&[], rng, &mut flight2, &mut NoTrace)?;
         flight2.truncate(used);
 
-        // CRY-089: the prekey goes with the flight 1 that it served.
-        self.prekey = None;
         self.responder = Some(responder);
         Ok((numbered(FLIGHT_2, &flight2), self.reply_to.insert(reply_to)))
     }

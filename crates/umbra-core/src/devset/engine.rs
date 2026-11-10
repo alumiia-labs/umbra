@@ -254,6 +254,13 @@ impl SyncEngine {
     /// that value. Without that, the device would reject each record of the
     /// owner permanently.
     fn take_lamport(&self, source: &DeviceId, lamport: u64) -> Result<u64, Error> {
+        // No count of writes reaches the top half of the range. A value
+        // there from an owner with a fault would leave no next counter, and
+        // each later write of this device would fail.
+        if lamport > u64::MAX / 2 {
+            return Err(Error::Unverified);
+        }
+
         let is_far = lamport.saturating_sub(self.lamport) > SYNC_LAMPORT_LEAD;
         if is_far && self.owner != Some(*source) {
             return Err(Error::Unverified);

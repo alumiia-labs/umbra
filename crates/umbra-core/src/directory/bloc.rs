@@ -59,7 +59,13 @@ impl BlocList {
             .iter()
             .all(|b| !b.is_empty() && b.windows(2).all(|w| matches!(w, [a, c] if a < c)));
         let blocs_ascend = self.blocs.windows(2).all(|w| matches!(w, [a, c] if a < c));
-        codes_ascend && blocs_ascend
+
+        // One code in two blocs would give a relay two blocs.
+        let mut codes: Vec<&[u8; 2]> = self.blocs.iter().flatten().collect();
+        codes.sort_unstable();
+        let codes_differ = codes.windows(2).all(|w| matches!(w, [a, c] if a != c));
+
+        codes_ascend && blocs_ascend && codes_differ
     }
 
     /// Writes the canonical encoding.

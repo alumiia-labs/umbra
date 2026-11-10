@@ -78,8 +78,18 @@ SHEET_FAULTS = {
 THIS_HOST = re.compile(r"^/(?![/\\])")
 # The directives of the Content-Security-Policy of each page. A browser
 # then refuses a script, a frame, or a form that a page holds after all.
-CSP = ("default-src 'none'", "frame-ancestors 'none'", "base-uri 'none'",
-       "form-action 'none'")
+# The policy is this set and no other: an added directive, as `script-src *`,
+# would open what `default-src 'none'` closes.
+CSP = frozenset({
+    "default-src 'none'", "img-src 'self'", "font-src 'self'",
+    "style-src 'unsafe-inline'", "base-uri 'none'", "form-action 'none'",
+    "frame-ancestors 'none'",
+})
+# One year, in seconds: the lowest `max-age` of the transport security header.
+HSTS_MIN_AGE = 31_536_000
+# The file types of the site. A file of another type gets no scan here, thus
+# the site holds none.
+FILE_TYPES = frozenset({".html", ".svg", ".json", ".txt", ".woff2"})
 # Each other header of each page, and a part of its value. `no-transform`
 # keeps Cloudflare from writing into a page.
 HEADERS = {
@@ -93,15 +103,31 @@ HEADERS = {
 def header_problems(where: str, headers: dict[str, str]) -> list[str]:
     """The faults of the headers of one page; `headers` has lower-case names."""
     problems = []
-    policy = [part.strip() for part in headers.get("content-security-policy", "").split(";")]
-    for directive in CSP:
-        if directive not in policy:
-            problems.append(f"{where}: the Content-Security-Policy has no {directive}")
+    problems.extend(policy_problems(where, headers.get("content-security-policy", "")))
 
     for name, part in HEADERS.items():
         if part not in headers.get(name, "").lower():
             problems.append(f"{where}: no {name} with {part}")
+    problems.extend(age_problems(where, headers.get("strict-transport-security", "")))
     return problems
+
+
+def policy_problems(where: str, value: str) -> list[str]:
+    """The faults of one Content-Security-Policy value against `CSP`."""
+    policy = {" ".join(part.split()) for part in value.split(";") if part.strip()}
+    problems = [f"{where}: the Content-Security-Policy has no {directive}"
+                for directive in sorted(CSP - policy)]
+    problems += [f"{where}: the Content-Security-Policy has the added directive {directive}"
+                 for directive in sorted(policy - CSP)]
+    return problems
+
+
+def age_problems(where: str, value: str) -> list[str]:
+    """The fault of one Strict-Transport-Security value with a short age."""
+    found = re.search(r"max-age=(\d+)", value.lower())
+    if found is None or int(found.group(1)) < HSTS_MIN_AGE:
+        return [f"{where}: the strict-transport-security max-age is below {HSTS_MIN_AGE}"]
+    return []
 
 
 def read_headers(path: Path) -> dict[str, dict[str, str]]:
@@ -136,6 +162,12 @@ def check_headers(problems: list[str]) -> None:
         for name in ["content-security-policy", *HEADERS]:
             if "!" + name in headers and name not in headers:
                 problems.append(f"_headers {path}: drops {name}")
+
+        # A rule of one path can set a weaker value than the rule of each page.
+        if path != "/*" and "content-security-policy" in headers:
+            problems.extend(policy_problems(f"_headers {path}", headers["content-security-policy"]))
+        if path != "/*" and "strict-transport-security" in headers:
+            problems.extend(age_problems(f"_headers {path}", headers["strict-transport-security"]))
 
         cache = headers.get("cache-control")
         if cache is not None and "no-transform" not in cache.lower():
@@ -366,6 +398,10 @@ def main() -> None:
         read_document(path.relative_to(SITE).as_posix(), path.read_text(encoding="utf-8"), problems)
     for path in sorted(SITE.rglob("*.js")) + sorted(SITE.rglob("*.mjs")):
         problems.append(f"{path.relative_to(SITE).as_posix()}: IDN-120: a script file")
+    for path in sorted(SITE.rglob("*")):
+        is_known = path.suffix.lower() in FILE_TYPES or path.name == "_headers"
+        if path.is_file() and not is_known and path.suffix.lower() not in (".js", ".mjs"):
+            problems.append(f"{path.relative_to(SITE).as_posix()}: a file type that this check does not scan")
 
     check_headers(problems)
 

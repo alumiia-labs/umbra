@@ -45,7 +45,7 @@ fn slot_key(shared: &SharedSecret, ad: &[u8; 63]) -> Secret<32> {
     // K_slot and ad share one byte string, thus one buffer serves both.
     let kdf = Hkdf::<Sha3_256>::new(None, shared.expose());
     let mut key = Secret::<32>::zeroed();
-    let _ = kdf.expand(ad, key.expose_mut());
+    crate::kdf::expand_into(&kdf, &[ad], &mut key);
     key
 }
 

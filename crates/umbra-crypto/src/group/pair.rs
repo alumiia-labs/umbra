@@ -87,7 +87,7 @@ impl PairKey {
 
         let kdf = Hkdf::<Sha3_256>::new(None, shared.as_bytes());
         let mut key = Secret::<32>::zeroed();
-        let _ = kdf.expand_multi_info(&[labels::GROUP_TAG, group_id, low, high], key.expose_mut());
+        crate::kdf::expand_into(&kdf, &[labels::GROUP_TAG, group_id, low, high], &mut key);
         Ok(Self(key))
     }
 

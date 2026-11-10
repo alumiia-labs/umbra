@@ -102,16 +102,9 @@ fun RecoveryCodeScreen(onBack: () -> Unit, push: (Screen) -> Unit = {}) {
 
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.common_recovery_code), onBack = onBack)
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(PressInset)) {
             val shown = digits
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .background(Palette.Raised, RoundedCornerShape(24.dp))
-                    .border(1.dp, Palette.Divider, RoundedCornerShape(24.dp))
-                    .padding(vertical = 20.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
+            DigitFrame {
                 if (shown != null) DigitRows(shown)
             }
 
@@ -126,7 +119,7 @@ fun RecoveryCodeScreen(onBack: () -> Unit, push: (Screen) -> Unit = {}) {
                 RowEntry("user-group", stringResource(R.string.recovery_with_contacts)) { push(Screen.SocialRecovery) },
             )
             HorizontalDivider(color = Palette.Divider)
-            EntryRow(RowEntry("key", stringResource(R.string.recovery_root_seed)) { push(Screen.RootSeed) })
+            EntryRow(RowEntry("key", stringResource(R.string.common_root_seed)) { push(Screen.RootSeed) })
         }
     }
 }
@@ -151,15 +144,8 @@ fun SecretDigitsScreen(title: String, note: String, onBack: () -> Unit, load: ((
 
     Column(Modifier.fillMaxSize()) {
         BackBar(title, onBack = onBack)
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .background(Palette.Raised, RoundedCornerShape(24.dp))
-                    .border(1.dp, Palette.Divider, RoundedCornerShape(24.dp))
-                    .padding(vertical = 20.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(PressInset)) {
+            DigitFrame {
                 digits?.let { DigitRows(it) }
             }
             Spacer(Modifier.height(16.dp))
@@ -187,7 +173,7 @@ fun SocialRecoveryScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
 
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.recovery_with_contacts), onBack = onBack)
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = PressInset)) {
             Spacer(Modifier.height(8.dp))
             // IDN-087, IDN-088: which half each holder takes, and what the
             // pieces do alone.
@@ -227,17 +213,8 @@ fun SocialRecoveryScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             if (count >= 2) {
                 SectionLabel(stringResource(R.string.recovery_pieces_needed))
                 for (k in 2..count) {
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .pressShadeInColumn()
-                            .press(role = Role.RadioButton) { threshold = k }
-                            .padding(horizontal = PressInset, vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        RadioMark(isChosen = needed == k)
-                        Spacer(Modifier.width(14.dp))
-                        Text(stringResource(R.string.recovery_k_of_n, k, count))
+                    ChoiceRow(stringResource(R.string.recovery_k_of_n, k, count), isChosen = needed == k) {
+                        threshold = k
                     }
                 }
             }
@@ -347,7 +324,7 @@ fun RestoreForm(onCancel: () -> Unit) {
         Spacer(Modifier.height(14.dp))
         FramedPlatformField(confirm, stringResource(R.string.lock_confirm_new_passphrase), isPassphrase = true)
         Spacer(Modifier.height(14.dp))
-        PrimaryButton(stringResource(R.string.recovery_restore)) {
+        PrimaryButton(stringResource(R.string.common_restore)) {
             // A mismatch keeps the code and the shares in their fields.
             val phrase = passphrase.take()
             val second = confirm.take()
@@ -396,6 +373,8 @@ fun ResetIdentityScreen(onBack: () -> Unit) {
     var result by remember { mutableStateOf<String?>(null) }
     var digits by remember { mutableStateOf<CharArray?>(null) }
     var fault by remember { mutableStateOf<String?>(null) }
+    // A reset that runs takes no second start.
+    var isRunning by remember { mutableStateOf(false) }
 
     val shown = result
     digits?.let { held ->
@@ -408,18 +387,22 @@ fun ResetIdentityScreen(onBack: () -> Unit) {
 
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.common_reset_identity), onBack = onBack)
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(PressInset)) {
             Text(stringResource(R.string.recovery_reset_intro))
             Spacer(Modifier.height(12.dp))
             val changes = listOf(
                 stringResource(R.string.recovery_reset_new_key),
                 stringResource(R.string.recovery_reset_groups),
                 stringResource(R.string.recovery_reset_links_end),
-                stringResource(R.string.recovery_reset_code_changes),
+                stringResource(R.string.common_recovery_code_changes),
                 stringResource(R.string.recovery_reset_messages_stay),
             )
             for (line in changes) {
-                Text("· $line", color = Palette.TextSecondary, modifier = Modifier.padding(bottom = 6.dp))
+                Text(
+                    stringResource(R.string.common_list_item, line),
+                    color = Palette.TextSecondary,
+                    modifier = Modifier.padding(bottom = 6.dp),
+                )
             }
 
             Spacer(Modifier.height(16.dp))
@@ -436,7 +419,11 @@ fun ResetIdentityScreen(onBack: () -> Unit) {
                 // DEV-307: the other devices leave the set first.
                 Note(stringResource(R.string.recovery_remove_other_devices))
             } else {
-                DangerButton(stringResource(R.string.common_reset_identity)) { isAsking = true }
+                DangerButton(stringResource(R.string.common_reset_identity), enabled = !isRunning) { isAsking = true }
+                if (isRunning) {
+                    Spacer(Modifier.height(12.dp))
+                    WaitBar()
+                }
             }
         }
     }
@@ -446,7 +433,12 @@ fun ResetIdentityScreen(onBack: () -> Unit) {
             stringResource(R.string.recovery_reset_question),
             listOf(
                 RowEntry("rotate", stringResource(R.string.common_reset_identity)) {
+                    if (isRunning) return@RowEntry
+
+                    isRunning = true
+                    fault = null
                     Core.resetIdentity(context) { done, code ->
+                        isRunning = false
                         if (done == null) {
                             fault = UiText.get(R.string.recovery_remove_other_devices)
                         } else {

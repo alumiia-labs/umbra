@@ -47,10 +47,10 @@ import uniffi.umbra_ffi.PublicLink
 
 /** The periods of a timed link, in seconds, and their labels. 0 is a link with no end. */
 private val LinkPeriods = listOf(
-    3_600uL to R.string.discovery_period_1_hour,
-    86_400uL to R.string.discovery_period_1_day,
-    604_800uL to R.string.discovery_period_1_week,
-    2_592_000uL to R.string.discovery_period_30_days,
+    3_600uL to R.string.common_period_1_hour,
+    86_400uL to R.string.common_period_1_day,
+    604_800uL to R.string.common_period_1_week,
+    2_592_000uL to R.string.common_period_30_days,
     0uL to R.string.common_no_end,
 )
 
@@ -58,7 +58,7 @@ private val LinkPeriods = listOf(
 @Composable
 fun HandleRow(push: (Screen) -> Unit) {
     EntryRow(
-        RowEntry("globe", stringResource(R.string.common_your_handle), Core.myHandle ?: stringResource(R.string.discovery_none)) {
+        RowEntry("globe", stringResource(R.string.common_your_handle), Core.myHandle ?: stringResource(R.string.common_none)) {
             push(Screen.Handle)
         },
     )
@@ -94,11 +94,7 @@ private fun LimitOffer(label: String) {
 private fun DirectoryState(working: String) {
     if (Core.directoryBusy) {
         Spacer(Modifier.height(12.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 3.dp)
-            Spacer(Modifier.width(12.dp))
-            Text(working)
-        }
+        WorkingRow(working)
     }
 
     Core.directoryNote?.let {
@@ -143,21 +139,10 @@ fun PublicLinksScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
 
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.discovery_reusable_links), onBack = onBack)
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = PressInset)) {
             Spacer(Modifier.height(8.dp))
             for ((seconds, title) in LinkPeriods) {
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .pressShadeInColumn()
-                        .press(role = Role.RadioButton) { period = seconds }
-                        .padding(horizontal = PressInset, vertical = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    RadioMark(isChosen = period == seconds)
-                    Spacer(Modifier.width(14.dp))
-                    Text(stringResource(title))
-                }
+                ChoiceRow(stringResource(title), isChosen = period == seconds) { period = seconds }
                 HorizontalDivider(color = Palette.Divider)
             }
 
@@ -201,7 +186,7 @@ fun PublicLinkScreen(id: List<Byte>, onBack: () -> Unit) {
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.discovery_reusable_link), onBack = onBack)
         link ?: return@Column
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(PressInset)) {
             Headline(stringResource(R.string.discovery_your_link), remaining(link.expiresAt))
             Spacer(Modifier.height(16.dp))
             Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
@@ -259,7 +244,7 @@ fun HandleScreen(onBack: () -> Unit) {
 
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.common_your_handle), onBack = onBack)
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(PressInset)) {
             val handle = Core.myHandle
             if (handle == null) {
                 HeroIcon("globe")
@@ -356,8 +341,8 @@ fun ProfileScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
     LaunchedEffect(Unit) { Core.readDirectory() }
 
     Column(Modifier.fillMaxSize()) {
-        BackBar(stringResource(R.string.discovery_profile), onBack = onBack)
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
+        BackBar(stringResource(R.string.common_profile), onBack = onBack)
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(PressInset)) {
             ProfileFields()
             Spacer(Modifier.height(16.dp))
             HorizontalDivider(color = Palette.Divider)
@@ -390,7 +375,7 @@ private fun ProfileFields() {
         EditablePicture(
             hasPicture = picture.isNotEmpty(),
             onSet = { square -> Core.setProfilePicture(square) { picture = it } },
-        ) { ProfilePicture(picture, name.ifEmpty { stringResource(R.string.discovery_me) }, EDITABLE_PICTURE_SIZE) }
+        ) { ProfilePicture(picture, name.ifEmpty { stringResource(R.string.common_me) }, EDITABLE_PICTURE_SIZE) }
     }
 
     Spacer(Modifier.height(20.dp))
@@ -442,7 +427,7 @@ fun RequestsScreen(onBack: () -> Unit) {
                 RequestRow(context, request)
                 HorizontalDivider(color = Palette.Divider)
             }
-            Box(Modifier.padding(20.dp)) {
+            Box(Modifier.padding(PressInset)) {
                 // Part 9 §9.8: the name of a request is a claim of its sender.
                 Note(stringResource(R.string.discovery_request_name_note))
             }
@@ -452,10 +437,11 @@ fun RequestsScreen(onBack: () -> Unit) {
 
 @Composable
 private fun RequestRow(context: Context, request: ContactRequestInfo) {
-    Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp)) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = PressInset, vertical = 12.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             // DIS-180: the picture and the note that the sender chose.
-            ProfilePicture(request.picture, request.name.ifBlank { "?" }, 44)
+            // A profile with no name gets the mark of an avatar with no letter.
+            ProfilePicture(request.picture, request.name.trim(), 44)
             Spacer(Modifier.width(14.dp))
             Column {
                 Text(request.name.ifBlank { stringResource(R.string.discovery_no_name) })
@@ -477,7 +463,7 @@ private fun RequestRow(context: Context, request: ContactRequestInfo) {
         Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             InlineButton(stringResource(R.string.common_accept), enabled = Core.online) { Core.acceptRequest(request) }
-            InlineButton(stringResource(R.string.discovery_decline)) { Core.declineRequest(request) }
+            InlineButton(stringResource(R.string.common_decline)) { Core.declineRequest(request) }
         }
     }
 }

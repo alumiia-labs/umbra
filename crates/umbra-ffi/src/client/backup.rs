@@ -192,6 +192,22 @@ const BACKED_UP: [TableId; 39] = [
     super::pictures::PET_AVATARS,
 ];
 
+/// The rows that belong to this device alone, for `stays`.
+struct LocalRows {
+    /// The sync channels of this device (`DEV-286`).
+    device_peers: BTreeSet<RowId>,
+    /// The settings of `local_setting_rows`.
+    settings: BTreeSet<RowId>,
+}
+
+/// The tables that a link snapshot carries beside [`BACKED_UP`]: the
+/// roster of the set, its hash, and its parent (`DEV-286`).
+const RESTORED: [TableId; 3] = [
+    super::devices::DEVICE_ROSTER,
+    super::roster_fork::ROSTER_HASHES,
+    super::roster_fork::ROSTER_PARENT,
+];
+
 /// A backup object that is due: its bytes, which go up as a file of the
 /// backup class, and what its upload commits.
 pub struct BackupUpload {
@@ -233,7 +249,8 @@ pub struct RootWrite {
 
 struct StoredEntry {
     kind: u8,
-    descriptor: Vec<u8>,
+    /// The descriptor holds the file key of the object.
+    descriptor: Zeroizing<Vec<u8>>,
     credentials: Vec<ChunkCredential>,
 }
 
@@ -283,7 +300,7 @@ impl BackupState {
         let mut entries = Vec::new();
         for _ in 0..count {
             let kind = reader.u8()?;
-            let descriptor = reader.var()?.to_vec();
+            let descriptor = Zeroizing::new(reader.var()?.to_vec());
             let mut credentials = Vec::new();
             for _ in 0..reader.u32()? {
                 let chunk_id = reader.array()?;
@@ -400,6 +417,55 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(key.epoch(week))
     }
 
+    /// The rows of the settings that count something for this device
+    /// alone (`IDN-180`): the correction of its clock, the absence of the
+    /// owner as it saw it, and the counts of one contact, one record, or
+    /// one entry. A setting row has a keyed identifier, thus the names
+    /// come from the rows that they count for.
+    fn local_setting_rows(&self) -> Result<BTreeSet<RowId>, Error> {
+        let store = &self.open_ref()?.store;
+        let mut rows = BTreeSet::new();
+        for name in [
+            super::DIRECTORY_CORRECTION_SETTING,
+            super::takeover::OWNER_HEARD_SETTING,
+        ] {
+            rows.insert(store.row_id(super::SETTINGS, name));
+        }
+
+        let counted = [
+            (TableId::CONTACT, super::dead::UNANSWERED_SETTING),
+            (super::OUTBOX, super::quota::HELD_SETTING),
+            (
+                super::discovery::PUBLISHED,
+                super::discovery::HELLO_COUNT_SETTING,
+            ),
+        ];
+        for (table, prefix) in counted {
+            for id in self.local_setting_ids(table)? {
+                let name = [prefix, id.as_slice()].concat();
+                rows.insert(store.row_id(super::SETTINGS, &name));
+            }
+        }
+
+        Ok(rows)
+    }
+
+    /// The identifiers that name the counted settings of one table: the
+    /// row of a contact or of a record, and the identifier of an entry.
+    fn local_setting_ids(&self, table: TableId) -> Result<Vec<RowId>, Error> {
+        if table != super::discovery::PUBLISHED {
+            return Ok(self.open_ref()?.store.row_ids(table, None)?);
+        }
+
+        // An entry that does not parse fails no backup.
+        Ok(self
+            .published()
+            .unwrap_or_default()
+            .iter()
+            .map(|entry| entry.id)
+            .collect())
+    }
+
     /// Whether a row of a carried table stays on the device: a setting of
     /// this device alone (`IDN-180`), or a message older than
     /// `BACKUP_HISTORY_DAYS` (`IDN-082`).
@@ -410,9 +476,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         owner: Option<&RowId>,
         plain: &[u8],
         now: u64,
-        device_peers: &BTreeSet<RowId>,
+        local: &LocalRows,
     ) -> Result<bool, Error> {
         let store = &self.open_ref()?.store;
+        let device_peers = &local.device_peers;
 
         // DEV-286: a sync channel belongs to this device alone.
         if device_peers.contains(row) || owner.is_some_and(|owner| device_peers.contains(owner)) {
@@ -420,6 +487,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
 
         if table == super::SETTINGS {
+            if local.settings.contains(row) {
+                return Ok(true);
+            }
+
             if super::notify::DEVICE_SETTINGS
                 .iter()
                 .any(|key| store.row_id(super::SETTINGS, key) == *row)
@@ -513,6 +584,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .into_iter()
             .map(|conversation| conversation.0)
             .collect();
+        let settings = if tables.contains(&super::SETTINGS) {
+            self.local_setting_rows()?
+        } else {
+            BTreeSet::new()
+        };
+        let local = LocalRows {
+            device_peers,
+            settings,
+        };
         let mut current: Vec<BackupRow> = Vec::new();
         for &table in tables {
             let rows = self.open_ref()?.store.list_owned(table)?;
@@ -521,7 +601,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 if table == super::files::FILE_STATE {
                     super::files::carried_state(&mut plain);
                 }
-                if !self.stays(table, &row, owner.as_ref(), &plain, now, &device_peers)? {
+                if !self.stays(table, &row, owner.as_ref(), &plain, now, &local)? {
                     current.push(BackupRow::Put {
                         table,
                         row,
@@ -564,6 +644,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 row,
                 BackupRow::Put { table, row, .. }
                     if *table == TableId::LOCAL_IDENTITY && *row == code
+            )
+        });
+
+        // IDN-189: a share that waits for its relay is a request row of
+        // this device. The shares rebuild the social half of the recovery
+        // secret, thus no device that the user can remove later holds one.
+        rows.retain(|row| {
+            !matches!(
+                row,
+                BackupRow::Put { table, plain, .. }
+                    if *table == TableId::MESSAGE && super::social::is_share_row(plain)
             )
         });
         rows.extend(self.link_rows(roster, sync_bundle, sync_floor)?);
@@ -691,7 +782,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let held = self.backup_state()?;
         let is_first = held.is_none();
         let mut state = held.unwrap_or_default();
-        let mut descriptor = alloc_vec(uploaded.descriptor.len());
+        let mut descriptor = Zeroizing::new(alloc_vec(uploaded.descriptor.len()));
         uploaded.descriptor.encode(&mut descriptor)?;
         let entry = StoredEntry {
             kind: pending.kind,
@@ -885,9 +976,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .store
             .row_id(super::SETTINGS, super::own_delete::HOLDS_DELETIONS);
         // IDN-180: an object of an earlier build carries the push path of
-        // its device, and this device takes none of it.
+        // its device, and this device takes none of it. The same holds for
+        // each setting that decides what this device does on its network:
+        // an object must not choose the ingress relays or the downloads.
         let local: Vec<RowId> = super::notify::DEVICE_SETTINGS
             .iter()
+            .copied()
+            .chain([
+                super::INGRESS_PINS_SETTING,
+                super::AUTO_DOWNLOAD_SETTING,
+                super::UNMETERED_ONLY_SETTING,
+                super::DIRECTORY_CORRECTION_SETTING,
+                super::takeover::OWNER_HEARD_SETTING,
+            ])
             .map(|key| open.store.row_id(super::SETTINGS, key))
             .collect();
         let mut batch = open.store.begin();
@@ -899,6 +1000,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 plain,
             } = row
             {
+                // An object writes the tables that a backup or a link
+                // carries, and no other one. A row of another table would
+                // set state that no backup holds, as the ownership of the
+                // channels or a deadline.
+                if !RESTORED.contains(table) && !BACKED_UP.contains(table) {
+                    continue;
+                }
                 if *table == super::SETTINGS && local.contains(row) {
                     continue;
                 }

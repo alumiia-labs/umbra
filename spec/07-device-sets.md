@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 7: Device Sets, History Sync, and Revocation
 
 **Status:** Draft
-**Version:** 0.52.1
+**Version:** 0.53.0
 **Date:** 2026-11-09
 
 ---
@@ -1993,6 +1993,11 @@ setting that decides **what the device shows**, and it is per conversation.
   that path on Android. The mark MUST NOT change the setting, the mute, or a
   wake. A record that the setting or `DEV-331` stops gives no alert, and
   `DEV-223` holds.
+- **[DEV-359]** A locked client cannot read the mention list of a record.
+  It MUST show the alert of Part 8 `NTF-136` for each record of a
+  conversation with the `mentions` setting, as for the `all` setting. The
+  `none` setting, a block, and a mute of `DEV-331` stop that alert. An open
+  client applies the setting to the records after the unlock.
 
 > *Cause.* Part 8 §8.3 sets one mode for the device. With that mode alone, a
 > user that joins one busy group has to choose between a silent device and a

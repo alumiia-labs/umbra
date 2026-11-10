@@ -31,6 +31,7 @@ check set runs it.
 import base64
 import binascii
 import hashlib
+import json
 import re
 import sys
 import tempfile
@@ -94,23 +95,39 @@ def parse(text):
     return facts
 
 
+def shown(text):
+    """The text with each control character as an escape. A request is not
+    trusted, and an escape sequence can write over the terminal of the owner."""
+    return "".join(char if char.isprintable() else repr(char)[1:-1] for char in text)
+
+
 def check(facts):
     checks = {
         "name": r"[a-z0-9-]+",
         "role": r"entry|middle|exit",
         "class": r"[0-3]",
-        "public": r"[A-Za-z0-9.-]+,\d+\.\d+\.\d+\.\d+,\d+",
+        # `[0-9]` and not `\d`, which takes each number character of Unicode.
+        "public": r"[A-Za-z0-9.-]+,[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3},[0-9]{1,5}",
         # The signer reads a relay line split at commas, and the entry
-        # script splits the list at spaces.
-        "operator": r"[^,\s]+",
+        # script splits the list at spaces. The owner pastes the value into
+        # a YAML line, thus it holds no character that YAML reads as syntax.
+        "operator": r"[A-Za-z0-9._-]+",
         "country": r"[A-Z]{2}",
-        "asn": r"\d+",
+        "asn": r"[0-9]{1,10}",
         "family": r"[0-9a-f]{64}",
         "relay_id": r"[0-9a-f]{64}",
     }
     for name, pattern in checks.items():
         if not re.fullmatch(pattern, facts[name]):
             raise ValueError(f"{name}={facts[name]} is not valid")
+
+    _, address, port = facts["public"].split(",")
+    if any(int(part) > 255 for part in address.split(".")):
+        raise ValueError(f"public={facts['public']} holds no IPv4 address")
+    if not 1 <= int(port) <= 65_535:
+        raise ValueError(f"public={facts['public']} holds no port")
+    if int(facts["asn"]) >= 2**32:
+        raise ValueError(f"asn={facts['asn']} is above 32 bits")
 
     if facts["role"] == "entry" and (facts["class"] == "0" or not facts["public"].endswith(",443")):
         raise ValueError("an entry relay takes port 443 and class 1 or more")
@@ -370,6 +387,9 @@ def self_test():
         ("roles that do not fit the role", sample_request("c", "home-4", stated={"role": "entry"}), "the role entry"),
         ("an entry relay on another port", sample_request("c", "home-4", role="entry", public=other_port), "port 443"),
         ("no descriptor", sample_request("c", "home-4").split("descriptor=")[0] + END, "holds no descriptor"),
+        ("the own operator in quotes", sample_request("c", "home-4", stated={"operator": '"umbra-project"'}), "operator="),
+        ("a port above 16 bits", sample_request("c", "home-4", stated={"public": "relay.example.org,198.51.100.7,70000"}), "holds no port"),
+        ("an ASN above 32 bits", sample_request("c", "home-4", stated={"asn": "4294967296"}), "above 32 bits"),
     ]
     settings = read_settings(SAMPLE_GROUP_VARS, SAMPLE_INVENTORY)
 
@@ -400,8 +420,8 @@ def main():
     try:
         settings = read_settings(file_text(ANSIBLE / "group_vars/all.yml"), file_text(ANSIBLE / "inventory.yml"))
         facts, target, changed = review(Path(sys.argv[1]).read_text(encoding="utf-8"), out, settings)
-    except (ValueError, binascii.Error) as fault:
-        print(f"the request is refused: {fault}", file=sys.stderr)
+    except (ValueError, OverflowError, binascii.Error) as fault:
+        print(f"the request is refused: {shown(str(fault))}", file=sys.stderr)
         return 1
 
     if changed:
@@ -411,14 +431,18 @@ def main():
         print(f"{target} holds this descriptor already")
 
     address = facts["public"].split(",")[1]
-    print(f"relay_id {facts['relay_id']}, contact {facts['contact']}")
+    print(f"relay_id {facts['relay_id']}, contact {shown(facts['contact'])}")
     _, _, outside = settings
     same = [name for name, operator in outside if operator == facts["operator"] and name != facts["name"]]
     if same:
         print(f"the operator {facts['operator']} has these relays already: {' '.join(same)}")
 
     print("\nAnsible, umbra_outside_relays of group_vars/all.yml:")
-    line = f"  - {{ name: {facts['name']}, role: {facts['role']}, class: {facts['class']}, operator: {facts['operator']}"
+    # The quotes keep a name as `true` or `123` a string in YAML.
+    line = (
+        f"  - {{ name: {json.dumps(facts['name'])}, role: {facts['role']}, class: {facts['class']}, "
+        f"operator: {json.dumps(facts['operator'])}"
+    )
     if facts["role"] == "entry":
         line += f", address: {address}"
     print(line + " }")

@@ -825,7 +825,8 @@ const DESCRIPTOR_HEADER: &str = "umbra-network 2";
 const DESCRIPTOR_HEADER_V1: &str = "umbra-network 1";
 
 fn hex_bytes(text: &str) -> Option<Vec<u8>> {
-    if !text.len().is_multiple_of(2) || !text.is_ascii() {
+    // `from_str_radix` takes a sign, which is no hex digit.
+    if !text.len().is_multiple_of(2) || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
     (0..text.len())
@@ -1617,13 +1618,16 @@ impl DraftHandle {
         let mut draft = locked(&self.0);
         let draft = draft.as_mut().ok_or(FfiError::NotFound)?;
         draft.attach(plain, shape)?;
-        if let Some(name) = name {
-            draft.set_file_name(&name)?;
+
+        // A name or a preview that the draft refuses leaves no file with
+        // half of its fields.
+        let named = name.map_or(Ok(()), |name| draft.set_file_name(&name));
+        let shown =
+            named.and_then(|()| preview.map_or(Ok(()), |preview| draft.set_file_preview(&preview)));
+        if shown.is_err() {
+            draft.detach();
         }
-        if let Some(preview) = preview {
-            draft.set_file_preview(&preview)?;
-        }
-        Ok(())
+        Ok(shown?)
     }
 }
 
@@ -1636,7 +1640,10 @@ const DRAFT_READ_ROOM: usize = 64 * 1024;
 /// names can be absent or wrong, and the path can be a pipe with no end.
 /// Thus the bound holds at the read and not after it.
 fn read_draft_file(path: &str, max: usize) -> Result<Zeroizing<Vec<u8>>, FfiError> {
-    let file = std::fs::File::open(path).map_err(|_| FfiError::NotFound)?;
+    let file = std::fs::File::open(path).map_err(|fault| match fault.kind() {
+        std::io::ErrorKind::NotFound => FfiError::NotFound,
+        _ => FfiError::Storage,
+    })?;
     let named = file.metadata().map_or(0, |metadata| metadata.len());
     read_bounded(file, usize::try_from(named).unwrap_or(usize::MAX), max)
 }
@@ -1685,7 +1692,7 @@ fn read_bounded(
             match source.read(free) {
                 Ok(read) => break read,
                 Err(fault) if fault.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(_) => return Err(FfiError::NotFound),
+                Err(_) => return Err(FfiError::Storage),
             }
         };
         if read == 0 {
@@ -1837,6 +1844,9 @@ struct Inner {
     rendezvous_ready: BTreeMap<u64, ([u8; 32], Vec<u8>)>,
     /// The tags of the rendezvous queues that no relay made.
     rendezvous_refused: BTreeSet<u64>,
+    /// The tags whose call ended before the answer. A queue that comes for
+    /// one of them ends at once, since no entry names it.
+    rendezvous_abandoned: BTreeSet<u64>,
     next_rendezvous_tag: u64,
     /// The introductions that the user allowed, each of which takes the
     /// next fresh invitation of the run (`WIR-199`).
@@ -2340,23 +2350,36 @@ impl Inner {
 
         // NTF-132, NTF-133: the notify queue of a group left, and one that
         // a new queue replaced, leave each replica and end.
-        if let (Ok(endings), Some(running)) = (self.client.notify_endings_due(), &self.bridge) {
-            for ending in endings {
-                for registration in ending.unregistrations {
-                    commands.push(GroupCommand::Notify {
-                        relay: registration.relay,
-                        group_queue_id: registration.group_queue_id,
-                        read: registration.read,
-                        queue: registration.queue,
-                        on: false,
-                    });
-                }
-                for queue in &ending.queues {
-                    let _ = running.end_notify_queue(*queue);
-                    let _ = self.client.unbind_queue(queue, &mut OsRng);
-                }
-                let _ = self.client.notify_ended(ending.conversation, &mut OsRng);
+        //
+        // A `GNREG` has no answer. The store thus marks an ending, and a
+        // registration below, only when a task took each command of it. One
+        // that no task took stays due.
+        let endings = match &self.bridge {
+            Some(_) => self.client.notify_endings_due().unwrap_or_default(),
+            None => Vec::new(),
+        };
+        for ending in endings {
+            let mut is_sent = true;
+            for registration in ending.unregistrations {
+                is_sent &= self.send_group(GroupCommand::Notify {
+                    relay: registration.relay,
+                    group_queue_id: registration.group_queue_id,
+                    read: registration.read,
+                    queue: registration.queue,
+                    on: false,
+                });
             }
+            if !is_sent {
+                continue;
+            }
+
+            for queue in &ending.queues {
+                if let Some(running) = &self.bridge {
+                    let _ = running.end_notify_queue(*queue);
+                }
+                let _ = self.client.unbind_queue(queue, &mut OsRng);
+            }
+            let _ = self.client.notify_ended(ending.conversation, &mut OsRng);
         }
 
         // NTF-090, NTF-104: each group with no notify queue, or with one
@@ -2386,13 +2409,17 @@ impl Inner {
         // and again before the relay forgets it.
         if let Ok(due) = self.client.notify_registrations_due(now_ms / 1_000) {
             for registration in due {
-                commands.push(GroupCommand::Notify {
+                let is_sent = self.send_group(GroupCommand::Notify {
                     relay: registration.relay,
                     group_queue_id: registration.group_queue_id,
                     read: registration.read,
                     queue: registration.queue,
                     on: registration.on,
                 });
+                if !is_sent {
+                    continue;
+                }
+
                 let _ = self.client.notify_registered(
                     registration.conversation,
                     registration.which,
@@ -2622,22 +2649,23 @@ impl Inner {
     }
 
     /// Sends one command to the group task, and starts the task when the
-    /// link of an earlier run ended.
-    fn send_group(&mut self, command: GroupCommand) {
+    /// link of an earlier run ended. The result is whether a task took the
+    /// command.
+    fn send_group(&mut self, command: GroupCommand) -> bool {
         let command = match &self.groups {
             Some(sender) => match sender.send(command) {
-                Ok(()) => return,
+                Ok(()) => return true,
                 Err(refused) => refused.0,
             },
             None => command,
         };
         self.groups = self.start_groups();
-        if let Some(sender) = &self.groups {
-            let _ = sender.send(command);
-        }
 
         // With no task the work stays in the store, and the next run of
         // `resume_group_work` brings it back.
+        self.groups
+            .as_ref()
+            .is_some_and(|sender| sender.send(command).is_ok())
     }
 
     /// The chains of the circuits of each node of the client but `own`,
@@ -2730,7 +2758,7 @@ impl Inner {
     fn flush_outgoing(&mut self) {
         let Inner { client, bridge, .. } = self;
         if let Some(running) = bridge {
-            let _ = running.flush(client, &mut OsRng);
+            flush_logged(running, client);
         }
     }
 
@@ -2922,7 +2950,7 @@ impl Inner {
                         .client
                         .add_answered(&row, &relay, seq, unix_now_ms(), &mut OsRng);
                     if let Some(running) = self.bridge.as_mut() {
-                        let _ = running.flush(&mut self.client, &mut OsRng);
+                        flush_logged(running, &mut self.client);
                     }
                 }
                 if let Some(message) = message {
@@ -3154,7 +3182,7 @@ impl Inner {
         };
 
         if client.resend_one(now, &mut OsRng).unwrap_or(false) {
-            let _ = running.flush(client, &mut OsRng);
+            flush_logged(running, client);
         }
         self.pump_catch_up(now);
     }
@@ -3748,19 +3776,30 @@ impl Inner {
             }
             TransferUpdate::Uploaded { tag, uploaded } => match transfer_tags.remove(&tag) {
                 // IDN-098: the root of the week names the object.
-                Some(TransferWork::Backup(pending)) => {
-                    let epoch = client.directory_epoch().unwrap_or(0);
-                    if let Ok(root) = client.backup_uploaded(*pending, &uploaded, epoch, &mut OsRng)
-                    {
-                        backup_root = Some(root);
+                Some(TransferWork::Backup(pending)) => match client.directory_epoch() {
+                    Ok(epoch) if epoch != 0 => {
+                        if let Ok(root) =
+                            client.backup_uploaded(*pending, &uploaded, epoch, &mut OsRng)
+                        {
+                            backup_root = Some(root);
+                        }
                     }
-                }
+                    // A root of week 0 names no week. The object goes at
+                    // its relays, and the schedule makes it again.
+                    _ => {
+                        let _ = client.keep_abandoned(&uploaded.credentials, &mut OsRng);
+                    }
+                },
                 Some(TransferWork::File { message, .. }) => {
                     if client.upload_done(&message, &uploaded, &mut OsRng).is_ok() {
                         // The record with the descriptor goes to the send path.
                         if let Some(running) = bridge {
-                            let _ = running.flush(client, &mut OsRng);
+                            flush_logged(running, client);
                         }
+                    } else {
+                        // The chunks are abandoned, thus the file shows its
+                        // failure and not an upload with no job.
+                        let _ = client.upload_failed(&message, &mut OsRng);
                     }
                 }
                 Some(TransferWork::Snapshot {
@@ -3785,7 +3824,7 @@ impl Inner {
                             &mut OsRng,
                         );
                         if let Some(running) = bridge {
-                            let _ = running.flush(client, &mut OsRng);
+                            flush_logged(running, client);
                         }
                     }
                 }
@@ -3818,7 +3857,7 @@ impl Inner {
                             .is_ok()
                     {
                         if let Some(running) = bridge {
-                            let _ = running.flush(client, &mut OsRng);
+                            flush_logged(running, client);
                         }
                     }
                 }
@@ -3830,7 +3869,7 @@ impl Inner {
                             .is_ok()
                     {
                         if let Some(running) = bridge {
-                            let _ = running.flush(client, &mut OsRng);
+                            flush_logged(running, client);
                         }
                     }
                 }
@@ -3872,7 +3911,7 @@ impl Inner {
                         .catch_up_fetched(channel, &plain, unix_now_ms(), &mut OsRng)
                         .is_ok();
                     if let Some(running) = bridge {
-                        let _ = running.flush(client, &mut OsRng);
+                        flush_logged(running, client);
                     }
                 }
                 // GRP-329: the member takes the roster of the snapshot.
@@ -4471,6 +4510,33 @@ impl Handle {
     }
 }
 
+/// Gives each record that waits to the send path of a run. The records
+/// stay queued after a fault, and the next flush takes them. The fault is a
+/// fault of the store, thus the log of a debug build names it.
+fn flush_logged(running: &mut Bridge, client: &mut Client<SqliteBackend, ForeignElement>) {
+    if let Err(fault) = running.flush(client, &mut OsRng) {
+        crate::devlog::format_line!("a flush failed: {fault:?}");
+    }
+}
+
+/// The runtime of the run before a start. A start that fails drops this
+/// value early, and the runtime stops with it.
+struct EarlierRun<'a> {
+    held: &'a mut Option<tokio::runtime::Runtime>,
+    is_replaced: bool,
+}
+
+impl Drop for EarlierRun<'_> {
+    fn drop(&mut self) {
+        if self.is_replaced {
+            return;
+        }
+        if let Some(runtime) = self.held.take() {
+            runtime.shutdown_background();
+        }
+    }
+}
+
 impl Drop for Handle {
     fn drop(&mut self) {
         // The last reference can drop on a worker of the runtime, and a
@@ -4478,6 +4544,18 @@ impl Drop for Handle {
         // each thread.
         if let Some(runtime) = locked(&self.runtime).take() {
             runtime.shutdown_background();
+        }
+
+        // IMP-039: the platform can hold a draft after the handle. A draft
+        // holds plaintext, and it reads nothing after this, as after a
+        // lock. A restore and a link stay: `init_restored` and
+        // `init_linked` take them after the drop of this handle.
+        let inner = self
+            .inner
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for draft in inner.drafts.drain(..).filter_map(|draft| draft.upgrade()) {
+            locked(&draft.0).take();
         }
 
         // IMP-093: the hardening key is a key of the store, and a handle
@@ -4687,12 +4765,17 @@ pub fn init_from_root_seed(
     held.expose_mut().copy_from_slice(&seed);
     let seed = held;
 
+    // A store with a header is the store of an identity. This call makes
+    // a new one, and it must not write over the header of another.
+    let exists = std::path::Path::new(&config.database_path).exists();
+    if exists && SqliteBackend::holds_header(&config.database_path).unwrap_or(true) {
+        return Err(FfiError::Storage);
+    }
+
     // A first launch that ended before its header left rows under a key
     // that no header wraps. They open no more, and a store over them fails
     // its table MACs at each unlock, thus the files go first, as in `init`.
-    let is_leftover = std::path::Path::new(&config.database_path).exists()
-        && !SqliteBackend::holds_header(&config.database_path).unwrap_or(true);
-    if is_leftover {
+    if exists {
         remove_store_files(&config.database_path)?;
     }
 
@@ -4784,6 +4867,7 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             links_opened: BTreeSet::new(),
             rendezvous_ready: BTreeMap::new(),
             rendezvous_refused: BTreeSet::new(),
+            rendezvous_abandoned: BTreeSet::new(),
             next_rendezvous_tag: 0,
             pending_grants: VecDeque::new(),
             ndr_in_flight: NdrFlights::default(),
@@ -4891,7 +4975,7 @@ impl Persist for HandleStore {
         // that a peer handed to this device goes to its contact.
         let Inner { client, bridge, .. } = &mut *inner;
         if let Some(running) = bridge.as_mut() {
-            let _ = running.flush(client, &mut OsRng);
+            flush_logged(running, client);
         }
 
         // The join flow of Part 11 moves with a record of a contact: an
@@ -5059,8 +5143,20 @@ impl Handle {
 
         // NET-310: a task that a later start replaced holds no circuit of
         // the client, and its end ends no task that runs.
+        //
+        // Its `Reset` and its lost subscription name the session of the
+        // old task too. Each one would clear the subscriptions of the task
+        // that runs, and that task would subscribe a second time. The
+        // answer of a command and a record still count.
         let is_replaced = inner.group_task != task;
-        if is_replaced && matches!(update, GroupUpdate::Chains(_) | GroupUpdate::Ended) {
+        let is_of_session = matches!(
+            update,
+            GroupUpdate::Chains(_)
+                | GroupUpdate::Ended
+                | GroupUpdate::Reset
+                | GroupUpdate::SubscriptionLost { .. }
+        );
+        if is_replaced && is_of_session {
             return;
         }
 
@@ -5099,6 +5195,7 @@ impl Handle {
             dead_work,
             rendezvous_ready,
             rendezvous_refused,
+            rendezvous_abandoned,
             pending_grants,
             invitation_host,
             pending_faults,
@@ -5191,7 +5288,7 @@ impl Handle {
                     silent.retain(|held| *held != conversation);
                     if was_down && client.resend_unreceipted(conversation).is_ok() {
                         if let Some(running) = bridge.as_mut() {
-                            let _ = running.flush(client, &mut OsRng);
+                            flush_logged(running, client);
                         }
                     }
                 }
@@ -5201,10 +5298,18 @@ impl Handle {
                 recipient_id,
                 address,
             } => {
-                rendezvous_ready.insert(*tag, (*recipient_id, address.clone()));
+                if rendezvous_abandoned.remove(tag) {
+                    if let Some(running) = bridge.as_ref() {
+                        let _ = running.end_rendezvous_queue(*recipient_id);
+                    }
+                } else {
+                    rendezvous_ready.insert(*tag, (*recipient_id, address.clone()));
+                }
             }
             Update::RendezvousRefused(tag) => {
-                rendezvous_refused.insert(*tag);
+                if !rendezvous_abandoned.remove(tag) {
+                    rendezvous_refused.insert(*tag);
+                }
             }
             // ABU-012: the request shows after its checks.
             Update::Hello { queue, envelope } => {
@@ -5226,6 +5331,11 @@ impl Handle {
                         &mut OsRng,
                     );
                 }
+            }
+            // A refused queue frees its conversation, thus the next
+            // refresh asks again in this run.
+            Update::NotifyRefused(tag) => {
+                notify_pending.remove(tag);
             }
             // NTF-113: the binding goes sealed to that key.
             Update::NotifyKey {
@@ -5338,7 +5448,7 @@ impl Handle {
                                 unix_now_ms(),
                                 &mut OsRng,
                             );
-                            let _ = running.flush(client, &mut OsRng);
+                            flush_logged(running, client);
                         }
                     }
                     // The node refused a command, which can be the invite of
@@ -5398,7 +5508,7 @@ impl Handle {
             let Inner { client, bridge, .. } = &mut *inner;
             if client.queue_sync_acks(unix_now(), &mut OsRng).is_ok() {
                 if let Some(running) = bridge.as_mut() {
-                    let _ = running.flush(client, &mut OsRng);
+                    flush_logged(running, client);
                 }
             }
         }
@@ -5920,7 +6030,15 @@ impl Handle {
             .filter(|relay| relay.layer == 1)
             .take(INGRESS_PINS)
             .collect();
-        let uses_second = locked(&self.inner).uses_second_pin && pinned.len() > 1;
+        let uses_second = {
+            let inner = locked(&self.inner);
+
+            // A locked client starts no run, and it builds no runtime.
+            if !inner.client.is_unlocked() {
+                return Err(FfiError::Locked);
+            }
+            inner.uses_second_pin && pinned.len() > 1
+        };
         let guard = *pinned
             .get(usize::from(uses_second))
             .ok_or(FfiError::Malformed)?;
@@ -5964,7 +6082,15 @@ impl Handle {
         // the runtime orders each start, and no path takes it with the lock
         // of the state held.
         let mut held = locked(&self.runtime);
+
+        // The state below ends the run before. A start that fails must
+        // then also stop the runtime of that run, which no bridge feeds.
+        let mut earlier = EarlierRun {
+            held: &mut held,
+            is_replaced: false,
+        };
         let run;
+        let mut invitations = Vec::new();
         {
             let mut inner = locked(&self.inner);
             inner.run = inner.run.wrapping_add(1);
@@ -5987,6 +6113,12 @@ impl Handle {
             inner.transfers = None;
             inner.groups = None;
             inner.group_reading.clear();
+
+            // A rendezvous queue of the run before answers no call of this
+            // run. The restore below ends each one that no entry names.
+            inner.rendezvous_ready.clear();
+            inner.rendezvous_refused.clear();
+            inner.rendezvous_abandoned.clear();
 
             // The store gives each open file to this run below. Thus no
             // file of the run before waits for a second start of its own
@@ -6087,7 +6219,7 @@ impl Handle {
 
                 // A renewal of Part 3 §3.2.6 is no invitation of the user.
                 if !bundle.is_empty() {
-                    net_events.push_back(NetEvent::Invitation(bundle));
+                    invitations.push(bundle);
                 }
             }
 
@@ -6195,6 +6327,10 @@ impl Handle {
                 node.set_contact_class(&contact, class);
             }
 
+            // No step below fails, thus a start that failed gave no event
+            // that the next start gives again.
+            net_events.extend(invitations.drain(..).map(NetEvent::Invitation));
+
             *bridge = Some(running);
             inner.invitation_host.clone_from(&network.invitation_host);
             inner.guard = Some(guard_id);
@@ -6253,9 +6389,11 @@ impl Handle {
             }
         });
 
-        if let Some(earlier) = held.replace(runtime) {
+        earlier.is_replaced = true;
+        if let Some(earlier) = earlier.held.replace(runtime) {
             earlier.shutdown_background();
         }
+        drop(earlier);
         drop(held);
         self.fetch_challenges();
         Ok(())
@@ -6379,6 +6517,10 @@ impl Handle {
     /// each circuit inside `SESSION_RESUME_WINDOW`. The call returns when
     /// the session is parked, after `SESSION_PAUSE_WAIT` at the latest.
     pub fn disconnect(&self) {
+        // The lock order of `connect`: the runtime, then the state. A start
+        // on another thread thus runs before this call or after it, and
+        // this call stops no runtime of a later run.
+        let mut held = locked(&self.runtime);
         {
             let mut inner = locked(&self.inner);
             inner.run = inner.run.wrapping_add(1);
@@ -6389,8 +6531,10 @@ impl Handle {
             inner.spawner = None;
         }
 
-        let runtime = locked(&self.runtime).take();
+        let runtime = held.take();
         let done = locked(&self.run_done).take();
+        drop(held);
+
         if let Some(runtime) = runtime {
             stop_after_park(runtime, done);
         }
@@ -6543,7 +6687,7 @@ impl Handle {
 
             // The records that a push-wake session held go now.
             if is_foreground {
-                let _ = running.flush(client, &mut OsRng);
+                flush_logged(running, client);
             }
         }
     }
@@ -6923,10 +7067,30 @@ impl Handle {
         Ok(Arc::new(MsgHandle(again)))
     }
 
-    /// Sends a draft. The handle of the draft is empty after this call.
+    /// Sends a draft. The handle of the draft is empty after a send that
+    /// reached the store. A send that this call refuses before that keeps
+    /// the draft, thus the user loses no text and no file to a lock or to
+    /// a draft that is too long.
     pub fn send_draft(&self, draft: Arc<DraftHandle>) -> Result<Arc<MsgHandle>, FfiError> {
-        let draft = locked(&draft.0).take().ok_or(FfiError::NotFound)?;
+        // The order is `inner`, then the draft, as in a lock of the client.
+        // The other order lets a send and a lock wait for each other.
         let mut inner = locked(&self.inner);
+        let mut held = locked(&draft.0);
+        {
+            let waiting = held.as_ref().ok_or(FfiError::NotFound)?;
+            if !inner.client.is_unlocked() {
+                return Err(FfiError::Locked);
+            }
+            if waiting.is_empty() {
+                return Err(FfiError::Malformed);
+            }
+            if let Some(refused) = waiting.file_refusal() {
+                return Err(refused.into());
+            }
+        }
+
+        let draft = held.take().ok_or(FfiError::NotFound)?;
+        drop(held);
         let Inner { client, bridge, .. } = &mut *inner;
         let message = client.send_draft(draft, unix_now_ms(), &mut OsRng)?;
 
@@ -6963,13 +7127,32 @@ impl Handle {
 
     /// Accepts the new key of one contact (`IDN-062`, `IDN-092`). The node
     /// that runs takes it too, thus its next handshake binds it.
-    pub fn accept_key_change(&self, conversation: Vec<u8>) -> Result<(), FfiError> {
+    ///
+    /// `shown` is the safety number that the prompt showed, as
+    /// [`Handle::key_change`] gave it. A later notice can take the place of
+    /// the one that the user saw. The client then holds another key, and
+    /// the call gives `Stale` and applies nothing: the view shows the new
+    /// notice, and the user answers that one.
+    pub fn accept_key_change(&self, conversation: Vec<u8>, shown: String) -> Result<(), FfiError> {
         let conversation = conversation_of(&conversation)?;
         let mut inner = locked(&self.inner);
         let Inner { client, bridge, .. } = &mut *inner;
-        let (contact, key) = client.accept_key_change(conversation, &mut OsRng)?;
+
+        // The lock of the state covers the read and the acceptance, thus no
+        // notice comes between the two.
+        let pending = client.key_change(conversation)?.ok_or(FfiError::NotFound)?;
+        if pending.new_safety_number != shown {
+            return Err(FfiError::Stale);
+        }
+
+        let (contact, key) = client.accept_key_change(conversation, &shown, &mut OsRng)?;
+
+        // The store holds the key from here on. A run that ended takes no
+        // key, and the next run restores the contact with it.
         if let Some(running) = bridge {
-            running.peer_key(contact, key)?;
+            if running.peer_key(contact, key).is_err() {
+                crate::devlog::format_line!("a run took no accepted key");
+            }
         }
         drop(inner);
         self.changed.notify_all();
@@ -7389,7 +7572,7 @@ impl Handle {
     /// got for a document that the user created.
     pub fn save_file(&self, message: Arc<MsgHandle>, path: String) -> Result<(), FfiError> {
         let bytes = locked(&self.inner).client.file_bytes(&message.0)?;
-        std::fs::write(&path, &*bytes).map_err(|_| FfiError::NotFound)
+        std::fs::write(&path, &*bytes).map_err(|_| FfiError::Storage)
     }
 
     /// The direction, the delivery state, and the send time of a message.
@@ -8287,7 +8470,7 @@ impl Handle {
         if inner.client.send_due_notices(now, &mut OsRng).unwrap_or(0) > 0 {
             let Inner { client, bridge, .. } = &mut *inner;
             if let Some(running) = bridge {
-                let _ = running.flush(client, &mut OsRng);
+                flush_logged(running, client);
             }
         }
 
@@ -8351,6 +8534,71 @@ mod tests {
         // A device with no fetch yet, and a clock that moved back.
         assert!(challenges_due(fetched_at, 0));
         assert!(!challenges_due(fetched_at - 10, fetched_at));
+    }
+
+    #[test]
+    fn a_sign_is_no_hex_digit() {
+        assert_eq!(hex_bytes("0aFf"), Some(vec![0x0A, 0xFF]));
+        assert_eq!(hex_bytes("+f"), None);
+        assert_eq!(hex_bytes("-1"), None);
+        assert_eq!(hex_bytes("abc"), None);
+    }
+
+    #[test]
+    fn a_send_that_the_call_refuses_keeps_the_draft() {
+        let (handle, directory) = open("kept-draft");
+        let draft = handle.new_draft(vec![5; 16]).unwrap();
+
+        // An empty draft sends nothing, and the handle still holds it: a
+        // draft that the call took would give `NotFound` here.
+        for _ in 0..2 {
+            let refused = handle.send_draft(Arc::clone(&draft)).err();
+            assert!(matches!(refused, Some(FfiError::Malformed)));
+        }
+        assert!(locked(&draft.0).is_some());
+
+        drop(handle);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn an_acceptance_with_no_notice_applies_nothing() {
+        let (handle, directory) = open("no-notice");
+
+        // IDN-062: the acceptance names the notice that the user saw. With
+        // no notice the call has nothing to apply.
+        let refused = handle.accept_key_change(vec![5; 16], "12345".to_owned());
+        assert!(matches!(refused, Err(FfiError::NotFound)));
+
+        drop(handle);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_start_that_fails_stops_the_runtime_of_the_run_before() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let mut held = Some(runtime);
+
+        // A start that returns early drops the value, and the runtime of
+        // the run before goes with it.
+        drop(EarlierRun {
+            held: &mut held,
+            is_replaced: false,
+        });
+        assert!(held.is_none());
+
+        // A start that put its own runtime in place leaves it.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let mut held = Some(runtime);
+        drop(EarlierRun {
+            held: &mut held,
+            is_replaced: true,
+        });
+        assert!(held.is_some());
     }
 
     #[test]
@@ -8419,6 +8667,19 @@ mod tests {
             assert_eq!(inner.group_chains, [chain(10)]);
             assert_eq!(inner.transfer_chains, [chain(20)]);
         }
+
+        // A session of the first task that ends clears no subscription of
+        // the second task, which would subscribe a second time.
+        let reading = crate::ConversationId([7; 16]);
+        locked(&handle.inner).group_reading.insert(reading);
+        handle.on_group_update(1, GroupUpdate::Reset);
+        handle.on_group_update(
+            1,
+            GroupUpdate::SubscriptionLost {
+                group_queue_id: [9; 32],
+            },
+        );
+        assert!(locked(&handle.inner).group_reading.contains(&reading));
 
         // The tasks of the second start change the chains.
         handle.on_group_update(2, GroupUpdate::Chains(vec![chain(40)]));

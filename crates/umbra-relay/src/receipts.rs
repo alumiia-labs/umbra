@@ -129,6 +129,9 @@ pub struct ReceiptBook {
     next_window: BTreeMap<LinkId, (u64, u32)>,
     /// The leaves of the cells sent on each relay link, the oldest first.
     sent: BTreeMap<LinkId, VecDeque<[u8; 32]>>,
+    /// The last epoch for which each link gave a receipt of a window that
+    /// was not full. A peer closes one such window in an epoch (`REL-176`).
+    partial: BTreeMap<LinkId, u64>,
     /// The receipts that this relay issued and took.
     shelf: Shelf,
     /// The queries of each authority in the current epoch (`REL-186`).
@@ -157,6 +160,10 @@ pub enum Asked {
 /// this long after `RECEIPT_RETENTION`, and the shelf takes no write at
 /// each tick.
 const ERASE_EVERY: u64 = 60;
+
+/// The seconds that the clock of a peer can lead this one at the end of an
+/// epoch, for the epoch of a receipt.
+const EPOCH_SLACK: u64 = 300;
 
 /// The leaf of a cell: its tag follows its `circ_id` (Part 3 §3.4.4).
 fn leaf_of(cell: &[u8]) -> Option<[u8; 32]> {
@@ -188,6 +195,7 @@ impl ReceiptBook {
         self.taking.remove(&link);
         self.next_window.remove(&link);
         self.sent.remove(&link);
+        self.partial.remove(&link);
     }
 
     /// This relay took `cell` on `link` at `now`. The result is the signed
@@ -353,11 +361,32 @@ impl ReceiptBook {
             return false;
         }
 
+        // A receipt names the epoch of its cells: the epoch of `now`, the
+        // one before, or the next one for a peer whose clock leads. A
+        // receipt of another epoch answers no query of its cells.
+        let oldest = now.saturating_sub(EPOCH_SECONDS) / EPOCH_SECONDS;
+        let newest = now.saturating_add(EPOCH_SLACK) / EPOCH_SECONDS;
+        if !(oldest..=newest).contains(&receipt.epoch) {
+            return false;
+        }
+
+        // REL-176: a window closes below `RECEIPT_WINDOW` at the end of its
+        // epoch alone. A peer that signs one receipt for each cell would
+        // cost a signature check and a shelf write for each, and its
+        // receipts would push those of each other link off the shelf.
+        let is_partial = receipt.cell_count < RECEIPT_WINDOW;
+        if is_partial && self.partial.get(&link) == Some(&receipt.epoch) {
+            return false;
+        }
+
         let Some(sent) = self.sent.get_mut(&link) else {
             return false;
         };
 
-        let count = receipt.cell_count as usize;
+        let Ok(count) = usize::try_from(receipt.cell_count) else {
+            return false;
+        };
+
         if sent.len() < count {
             return false;
         }
@@ -371,6 +400,13 @@ impl ReceiptBook {
             return false;
         }
 
+        if is_partial {
+            self.partial.insert(link, receipt.epoch);
+        }
+
+        // The leaves leave also when the shelf faults. The root of the
+        // next receipt starts after them, thus a kept leaf would fail each
+        // later receipt of the link.
         sent.drain(..count);
         self.shelf
             .0
@@ -434,17 +470,24 @@ impl ReceiptBook {
         let epoch = now / EPOCH_SECONDS;
         let (held, count) = self.chains;
 
+        let floor = epoch.saturating_sub(RECEIPT_RETENTION / EPOCH_SECONDS);
+
         if held != epoch {
             if held != 0 {
                 self.shares
                     .insert(held, umbra_core::directory::stat::split(count, rng));
+
+                // An epoch that the clock passed with no call had no chain.
+                for skipped in held.saturating_add(1).max(floor)..epoch {
+                    self.shares
+                        .insert(skipped, umbra_core::directory::stat::split(0, rng));
+                }
             }
             self.chains = (epoch, 0);
         }
 
         self.chains.1 = self.chains.1.saturating_add(built);
 
-        let floor = epoch.saturating_sub(RECEIPT_RETENTION / EPOCH_SECONDS);
         self.shares.retain(|held, _| *held >= floor);
     }
 
@@ -644,6 +687,50 @@ mod tests {
         let grain = umbra_queue::params::STORE_TIME_GRAIN;
         taker.tick(&b, &b_key, later + RECEIPT_RETENTION + grain, &mut rng);
         assert_eq!(taker.answer(&query).unwrap().found, Found::None);
+    }
+
+    #[test]
+    fn a_link_gives_one_partial_receipt_in_an_epoch_and_none_of_another_epoch() {
+        let mut rng = Rng(3);
+        let (a, b) = ([0xA1; 32], [0xB2; 32]);
+        let b_key = SigningKey::from_seed(Secret::new([7; 32]));
+        let b_pk = b_key.verifying_key().to_bytes();
+
+        let link = 1;
+        let mut sender = ReceiptBook::default();
+        sender.set_peer(link, b);
+
+        let epoch = 490_000;
+        let now = epoch * EPOCH_SECONDS + 10;
+        for i in 0..3 {
+            sender.cell_sent(link, &cell(i));
+        }
+
+        let leaf = |i: u32| leaf_of(&cell(i)).unwrap();
+        let one_cell = |i: u32, epoch: u64, rng: &mut Rng| {
+            LinkReceipt {
+                from_relay: a,
+                to_relay: b,
+                epoch,
+                window: i,
+                cell_count: 1,
+                batch_root: tree::root(&[leaf(i)]).unwrap(),
+            }
+            .sign(&b_key, rng)
+            .unwrap()
+        };
+
+        // A receipt of an epoch far from the clock takes no leaf.
+        let far = one_cell(0, epoch - 5, &mut rng);
+        assert!(!sender.receipt_taken(link, &far, &a, &b_pk, now));
+
+        let first = one_cell(0, epoch, &mut rng);
+        assert!(sender.receipt_taken(link, &first, &a, &b_pk, now));
+
+        // A second window below its size in the same epoch is no receipt.
+        let second = one_cell(1, epoch, &mut rng);
+        assert!(!sender.receipt_taken(link, &second, &a, &b_pk, now));
+        assert_eq!(sender.held(), (0, 1));
     }
 
     /// A shelf whose each read fails.

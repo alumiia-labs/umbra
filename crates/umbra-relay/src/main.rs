@@ -537,7 +537,15 @@ fn read_settings(path: &str, takes_place: bool) -> Option<Settings> {
             per_ip_max: match (layer == 1 || is_placed, values.get("max_conns_per_ip")) {
                 (true, Some(count)) => count.parse().ok()?,
                 (true, None) => ConnectionLimits::CONN_PER_IP,
-                _ => 0,
+                (false, Some(_)) => {
+                    // The line would change nothing, and silence would let
+                    // an operator think that the cap holds.
+                    eprintln!(
+                        "max_conns_per_ip has no effect: a relay with a layer line of 2 or 3                          applies no cap for one address (NET-334)"
+                    );
+                    0
+                }
+                (false, None) => 0,
             },
             ..ConnectionLimits::default()
         },

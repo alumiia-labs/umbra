@@ -105,6 +105,12 @@ object Palette {
     val Container get() = pick(0xFFDCECDF, 0xFF25392D)
     val Incoming get() = pick(0xFFE9EEE3, 0xFF202924)
     val Outline get() = pick(0xFFB4BFB3, 0xFF4B5852)
+
+    /**
+     * The line of a control that is off, and the frame of a field. [Outline]
+     * is too faint on the light ground for a thing that the user must find.
+     */
+    val Control get() = pick(0xFF76847A, 0xFF7A8981)
     val Divider get() = pick(0xFFE1E6DB, 0xFF29322D)
 
     /** The shade of a row or a tab under a finger, above its content. */

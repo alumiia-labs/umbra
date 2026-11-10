@@ -46,6 +46,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.delay
 import java.nio.CharBuffer
+import androidx.compose.material3.minimumInteractiveComponentSize
 
 /** The characters of a result line before its match. */
 private const val SNIPPET_LEAD = 24
@@ -71,8 +72,8 @@ private val SIDES = listOf(
 )
 
 private val KINDS = listOf(
-    Choice(R.string.search_all_messages, "comment", 0),
-    Choice(R.string.search_files, "file", 1),
+    Choice(R.string.common_all_messages, "comment", 0),
+    Choice(R.string.common_files, "file", 1),
 )
 
 private val AGES = listOf(
@@ -163,7 +164,7 @@ fun SearchScreen(scope: Conversation?, onBack: () -> Unit, push: (Screen) -> Uni
             Modifier.fillMaxWidth().padding(start = 4.dp, end = 16.dp, top = 8.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconAction("arrow-left", stringResource(R.string.common_back), leave)
+            IconAction("arrow-left", stringResource(R.string.common_back), onClick = leave)
             Spacer(Modifier.width(4.dp))
             PlatformInput(field, stringResource(R.string.common_search), isPassphrase = false, modifier = Modifier.weight(1f))
         }
@@ -177,7 +178,7 @@ fun SearchScreen(scope: Conversation?, onBack: () -> Unit, push: (Screen) -> Uni
         ) {
             LimitChip(stringResource(R.string.search_sort), ORDERS, order) { order = it }
             LimitChip(stringResource(R.string.search_from), SIDES, side) { side = it }
-            LimitChip(stringResource(R.string.search_show), KINDS, kind) { kind = it }
+            LimitChip(stringResource(R.string.common_show), KINDS, kind) { kind = it }
             LimitChip(stringResource(R.string.search_date), AGES, age) { age = it }
         }
 
@@ -207,6 +208,7 @@ private fun LimitChip(title: String, choices: List<Choice>, current: Int, onPick
 
     Box(
         Modifier
+            .minimumInteractiveComponentSize()
             .clip(CircleShape)
             .background(if (isSet) Palette.Container else Palette.Incoming)
             .press(role = Role.Button, label = title) { isOpen = true }
@@ -221,14 +223,13 @@ private fun LimitChip(title: String, choices: List<Choice>, current: Int, onPick
     }
 
     if (isOpen) {
-        val selected = stringResource(R.string.search_selected)
         val labels = choices.map { stringResource(it.label) }
-        ActionSheet(
+        // One value of a short list is a choice, thus the sheet of each
+        // other setting shows it, with its mark.
+        ChoiceSheet(
             title,
             choices.mapIndexed { index, choice ->
-                RowEntry(choice.icon, labels[index], if (choice === chosen) selected else null) {
-                    onPick(choice.value)
-                }
+                SheetChoice(labels[index], isChosen = choice === chosen) { onPick(choice.value) }
             },
             onDismiss = { isOpen = false },
         )

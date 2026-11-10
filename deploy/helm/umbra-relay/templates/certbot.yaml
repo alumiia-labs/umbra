@@ -39,7 +39,7 @@ spec:
       enableServiceLinks: false
       {{- with .Values.node }}
       nodeSelector:
-        kubernetes.io/hostname: {{ . }}
+        kubernetes.io/hostname: {{ . | quote }}
       {{- end }}
       initContainers:
         {{- include "relay.init" . | nindent 8 }}
@@ -49,23 +49,36 @@ spec:
           command: ["sh", "/umbra/certbot.sh"]
           env:
             - { name: UMBRA_FQDN, value: {{ .Values.relay.host | quote }} }
-          # Certbot answers on port 80 and writes files for other users.
+          # Certbot answers on port 80 and writes files for other users,
+          # thus it runs as root with these four capabilities alone. It
+          # writes its state, its log, and its work files below the mounts.
           securityContext:
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              type: RuntimeDefault
             capabilities:
               drop: [ALL]
               add: [NET_BIND_SERVICE, CHOWN, FOWNER, DAC_OVERRIDE]
           resources:
             requests:
               memory: 32Mi
+              cpu: 10m
             limits:
               memory: 256Mi
+              cpu: 500m
           volumeMounts:
+            - { name: scratch, mountPath: /tmp }
+            - { name: scratch, mountPath: /var/lib/letsencrypt, subPath: work }
+            - { name: scratch, mountPath: /var/log/letsencrypt, subPath: log }
             - { name: root, mountPath: /etc/letsencrypt, subPath: letsencrypt }
             - { name: root, mountPath: /etc/umbra/tls, subPath: tls }
             - { name: script, mountPath: /umbra, readOnly: true }
       volumes:
         {{- include "relay.root" . | nindent 8 }}
+        - name: scratch
+          emptyDir:
+            sizeLimit: 64Mi
         - name: script
           configMap:
             name: {{ .Release.Name }}-certbot

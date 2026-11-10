@@ -63,11 +63,12 @@ impl KeySet {
     pub fn derive(ss_hop: &Secret<32>, hop_index: u32) -> Self {
         let kdf = Hkdf::<Sha3_256>::new(Some(ss_hop.expose()), &[]);
         let mut t = Zeroizing::new([[0u8; BLOCK]; 2 * HOP_BLOCKS + 1]);
-        // 208 bytes are inside the HKDF bound, thus expand cannot fail.
-        let _ = kdf.expand_multi_info(
+        // `EXPAND_FITS` proves the length, thus expand cannot fail.
+        let filled = kdf.expand_multi_info(
             &[labels::ONION_HOP, &hop_index.to_be_bytes()],
             t.as_flattened_mut(),
         );
+        debug_assert!(filled.is_ok());
 
         let [f0, f1, f2, f3, f4, f5, b0, b1, b2, b3, b4, b5, tweak] = &*t;
         KeySet {
@@ -81,14 +82,35 @@ impl KeySet {
 /// `K_str` of two blocks each, then `K_h`, then the chaining value.
 const HOP_BLOCKS: usize = 6;
 
+/// The largest output of one HKDF-SHA3-256 expand: 255 blocks of the hash.
+const HKDF_MAX: usize = 255 * 32;
+
+// A longer derivation would fail at expand and leave a key set of zero
+// bytes. This check stops such a change at compile time.
+const EXPAND_FITS: () = assert!((2 * HOP_BLOCKS + 1) * BLOCK <= HKDF_MAX);
+const _: () = EXPAND_FITS;
+
 /// A key of two blocks. The lengths are types, thus a length fault does not
 /// compile, and no key falls back to zero bytes.
 fn pair(head: &[u8; BLOCK], tail: &[u8; BLOCK]) -> Secret<{ 2 * BLOCK }> {
     let mut out = Secret::<{ 2 * BLOCK }>::zeroed();
-    let (first, second) = out.expose_mut().split_at_mut(BLOCK);
+    write_pair(&mut out, head, tail);
+    out
+}
+
+fn write_pair(key: &mut Secret<{ 2 * BLOCK }>, head: &[u8; BLOCK], tail: &[u8; BLOCK]) {
+    let (first, second) = key.expose_mut().split_at_mut(BLOCK);
     first.copy_from_slice(head);
     second.copy_from_slice(tail);
-    out
+}
+
+/// The last block of the POLYVAL input: the length of the body in bytes, as
+/// a big-endian integer in the last 8 bytes (`NET-108`).
+fn length_block(body_len: usize) -> [u8; BLOCK] {
+    let mut block = [0u8; BLOCK];
+    let (_, tail) = block.split_at_mut(BLOCK / 2);
+    tail.copy_from_slice(&u64::try_from(body_len).unwrap_or(u64::MAX).to_be_bytes());
+    block
 }
 
 fn xor_into(dst: &mut [u8; BLOCK], src: &[u8; BLOCK]) {
@@ -140,6 +162,10 @@ impl HopKeys {
     fn polyval(&self, data: &[u8]) -> [u8; BLOCK] {
         let mut hasher = Polyval::new(self.hash.expose().into());
         hasher.update_padded(data);
+        // POLYVAL ignores zero blocks at the start of its input. The length
+        // block binds the bucket, thus no hop makes a longer cell of a
+        // shorter one with the same tag.
+        hasher.update_padded(&length_block(data.len()));
         hasher.finalize().into()
     }
 
@@ -202,13 +228,21 @@ impl HopKeys {
     pub fn update(&mut self, y_l: &[u8; BLOCK]) {
         let kdf = Hkdf::<Sha3_256>::new(Some(self.stream.expose()), y_l);
         let mut u = Zeroizing::new([[0u8; BLOCK]; HOP_BLOCKS]);
-        // 96 bytes are inside the HKDF bound, thus expand cannot fail.
-        let _ = kdf.expand(labels::ONION_HOP_UPDATE, u.as_flattened_mut());
-        let [u0, u1, u2, u3, u4, u5] = &*u;
+        // `EXPAND_FITS` covers this shorter length also.
+        let filled = kdf.expand(labels::ONION_HOP_UPDATE, u.as_flattened_mut());
+        debug_assert!(filled.is_ok());
+        let [prp_head, prp_tail, stream_head, stream_tail, hash, chain] = &*u;
 
-        let fresh = HopKeys::from_blocks([u0, u1, u2, u3, u4, u5], self.tweak);
-        self.chain.zeroize();
-        *self = fresh;
+        // NET-208: each key goes into its own place. A new key set on the
+        // stack would leave a copy that no drop erases.
+        write_pair(&mut self.prp, prp_head, prp_tail);
+        write_pair(&mut self.stream, stream_head, stream_tail);
+        self.hash.expose_mut().copy_from_slice(hash);
+        self.chain = *chain;
+
+        // Each old key schedule wipes itself when the new one replaces it.
+        self.prp_cipher = Aes256::new(self.prp.expose().into());
+        self.stream_cipher = Aes256Enc::new(self.stream.expose().into());
     }
 }
 
@@ -247,6 +281,26 @@ mod tests {
         assert_eq!(x_l, [0; 16]);
         let x_l = receiver.forward.decipher(&y_l2, &mut replay).unwrap();
         assert_ne!(x_l, [0; 16]);
+    }
+
+    #[test]
+    fn a_longer_body_with_zero_blocks_in_front_does_not_keep_the_tag() {
+        let mut sender = keys();
+        let mut body = [0x42u8; 480];
+        let y_l = sender.forward.encipher(&[0; 16], &mut body).unwrap();
+
+        // A hostile hop puts zero blocks before the body of a small cell.
+        let mut longer = [0u8; 2_016];
+        longer[2_016 - 480..].copy_from_slice(&body);
+        let mut receiver = keys();
+        assert_ne!(
+            receiver.forward.decipher(&y_l, &mut longer).unwrap(),
+            [0; 16]
+        );
+
+        // The same cell at its own length still opens.
+        let mut receiver = keys();
+        assert_eq!(receiver.forward.decipher(&y_l, &mut body).unwrap(), [0; 16]);
     }
 
     #[test]
@@ -356,6 +410,9 @@ mod tests {
 
         let mut hasher = Polyval::new(hash.into());
         hasher.update_padded(body);
+        let mut len = [0u8; 16];
+        len[8..].copy_from_slice(&(body.len() as u64).to_be_bytes());
+        hasher.update_padded(&len);
         let mut y_l = s;
         xor_into(&mut y_l, &hasher.finalize().into());
         y_l

@@ -303,8 +303,10 @@ impl EpochState {
         Ok(self.chain.record_key(slot)?)
     }
 
-    /// Writes the epoch state to its stored form.
-    pub fn export(&self, w: &mut Writer) {
+    /// Writes the epoch state to its stored form. A chain that gives no
+    /// key of its own slot is a fault, and no state with a zero key goes
+    /// to the store.
+    pub fn export(&self, w: &mut Writer) -> Result<(), Error> {
         w.bytes(self.secret.expose().expose());
         w.u32(self.epoch);
         w.u32(self.start_slot);
@@ -314,14 +316,12 @@ impl EpochState {
         let slot = self.chain.slot();
         w.u32(slot);
         // The chain holds the key of that slot, thus this call clones it.
-        match self.chain.slot_key(slot) {
-            Ok(key) => w.bytes(key.expose()),
-            Err(_) => w.bytes(&[0; 32]),
-        }
+        w.bytes(self.chain.slot_key(slot)?.expose());
 
         w.bytes(self.credentials.read_secret().expose());
         w.bytes(self.credentials.write_secret().expose());
         w.u64(self.installed_at);
+        Ok(())
     }
 
     /// Reads an epoch state that [`EpochState::export`] wrote.
@@ -499,6 +499,21 @@ impl EpochStore {
             return Err(Error::Stale);
         }
 
+        // GRP-273 orders two rotators that did not read each other. A
+        // second record long after the first secret of the epoch is no such
+        // race. An active member of a lower index could else move the send
+        // key of this member at any time.
+        let first = self
+            .alternate
+            .as_ref()
+            .map_or(current.installed_at, |held| {
+                held.installed_at.min(current.installed_at)
+            });
+        if state.installed_at.saturating_sub(first) >= GROUP_EPOCH_GRACE {
+            self.current = Some(current);
+            return Err(Error::Stale);
+        }
+
         self.alternate = Some(state);
         self.current = Some(current);
         self.settle();
@@ -565,7 +580,9 @@ impl EpochStore {
     }
 
     /// Drops the previous epoch after `GROUP_EPOCH_GRACE` (`GRP-231`) and
-    /// each alternate with it.
+    /// its alternate with it. The alternate of the current epoch stays: its
+    /// grace starts at the next epoch (`GRP-273`), and a member that sends
+    /// under the other secret still needs it to read the group.
     pub fn expire(&mut self, now: u64) {
         if self
             .previous
@@ -574,7 +591,6 @@ impl EpochStore {
             .is_some_and(|(_, c)| now.saturating_sub(c.installed_at) >= GROUP_EPOCH_GRACE)
         {
             self.previous = None;
-            self.alternate = None;
             self.previous_alternate = None;
         }
     }
@@ -641,7 +657,7 @@ impl EpochStore {
     }
 
     /// Writes the four epoch states to their stored form.
-    pub fn export(&self, w: &mut Writer) {
+    pub fn export(&self, w: &mut Writer) -> Result<(), Error> {
         w.u8(EPOCHS_VERSION);
 
         for state in [
@@ -652,7 +668,7 @@ impl EpochStore {
         ] {
             w.flag(state.is_some());
             if let Some(state) = state {
-                state.export(w);
+                state.export(w)?;
                 w.flag(state.supplied);
                 w.flag(state.repeat);
                 w.option(state.base.as_ref(), |w, base| {
@@ -662,6 +678,7 @@ impl EpochStore {
                 });
             }
         }
+        Ok(())
     }
 
     /// Reads an epoch store that [`EpochStore::export`] wrote.
@@ -1273,6 +1290,31 @@ mod tests {
     }
 
     #[test]
+    fn a_rival_secret_after_the_grace_of_the_first_one_is_refused() {
+        let now = 1_000 * GROUP_SLOT;
+        let mut store = EpochStore::default();
+        store.install(state(1, 1, 0, now)).unwrap();
+        store.install(state(2, 2, 5, now)).unwrap();
+
+        // GRP-273: inside the grace, the secret of the lower rotator index
+        // takes the place of the current one.
+        let mut raced = EpochStore::default();
+        raced.install(state(2, 2, 5, now)).unwrap();
+        raced
+            .install(state(2, 3, 1, now + GROUP_EPOCH_GRACE - 1))
+            .unwrap();
+        assert_eq!(raced.current().unwrap().rotator, 1);
+
+        // After the grace, a lower index moves no send key.
+        assert_eq!(
+            store.install(state(2, 3, 1, now + GROUP_EPOCH_GRACE)),
+            Err(Error::Stale)
+        );
+        assert_eq!(store.current().unwrap().rotator, 5);
+        assert!(store.alternate.is_none());
+    }
+
+    #[test]
     fn a_supplied_secret_takes_no_part_in_the_index_rule() {
         let now = 1_000 * GROUP_SLOT;
         let mut store = EpochStore::default();
@@ -1316,7 +1358,7 @@ mod tests {
         marked.install(state(2, 2, 5, now).supplied()).unwrap();
 
         let mut w = Writer::new();
-        marked.export(&mut w);
+        marked.export(&mut w).unwrap();
         let bytes = w.finish();
         let mut reader = Reader::new(&bytes);
         let back = EpochStore::import(&mut reader).unwrap();
@@ -1328,7 +1370,7 @@ mod tests {
         let mut w = Writer::new();
         w.u8(STORED_VERSION);
         w.flag(true);
-        marked.current().unwrap().export(&mut w);
+        marked.current().unwrap().export(&mut w).unwrap();
         w.flag(false);
         w.flag(false);
         let bytes = w.finish();
@@ -1345,7 +1387,7 @@ mod tests {
         w.u8(EPOCHS_VERSION_SUPPLIED);
         for held in [marked.current(), marked.previous()] {
             w.flag(true);
-            held.unwrap().export(&mut w);
+            held.unwrap().export(&mut w).unwrap();
             w.flag(false);
         }
         w.flag(false);
@@ -1446,7 +1488,7 @@ mod tests {
 
         // The stored form keeps it, and the grace ends it.
         let mut w = Writer::new();
-        store.export(&mut w);
+        store.export(&mut w).unwrap();
         let bytes = w.finish();
         let mut reader = Reader::new(&bytes);
         let mut back = EpochStore::import(&mut reader).unwrap();
@@ -1460,7 +1502,7 @@ mod tests {
         w.u8(EPOCHS_VERSION_BASE);
         for held in [store.current(), store.previous()] {
             w.flag(true);
-            held.unwrap().export(&mut w);
+            held.unwrap().export(&mut w).unwrap();
             w.flag(false);
             w.flag(false);
             w.flag(false);

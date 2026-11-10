@@ -114,7 +114,9 @@ impl Label {
         hk_pub: [u8; 1_216],
         now: u64,
     ) -> Result<(), Error> {
-        if version_new != self.version.saturating_add(1) || hk_pub == [0; 1_216] {
+        // A label at the last version takes no next one: a saturated count
+        // would publish that version a second time.
+        if self.version.checked_add(1) != Some(version_new) || hk_pub == [0; 1_216] {
             return Err(Error::Stale);
         }
 
@@ -165,7 +167,7 @@ impl Label {
     /// write challenge verified (`DIS-171`). The reservation of `DIS-074`
     /// holds as for a lapsed lease.
     pub fn retire(&mut self, version_new: u32, now: u64) -> Result<(), Error> {
-        if self.is_tombstoned() || version_new != self.version.saturating_add(1) {
+        if self.is_tombstoned() || self.version.checked_add(1) != Some(version_new) {
             return Err(Error::Stale);
         }
 
@@ -183,7 +185,7 @@ impl Label {
             return None;
         }
 
-        self.version = self.version.saturating_add(1);
+        self.version = self.version.checked_add(1)?;
         self.lease_until = None;
         self.tombstoned_at = Some(now);
         Some(self.version)
@@ -223,7 +225,10 @@ pub fn assess(held: &Version, between: &[Version]) -> Result<Takeover, Error> {
     let chain: Vec<&Version> = core::iter::once(held).chain(between.iter()).collect();
     for (i, v) in chain.iter().enumerate() {
         if v.is_tombstone() {
-            let before = chain.get(i.wrapping_sub(1)).map(|b| b.hk_pub);
+            let before = i
+                .checked_sub(1)
+                .and_then(|at| chain.get(at))
+                .map(|b| b.hk_pub);
             let after = chain.get(i.saturating_add(1)).map(|a| a.hk_pub);
             if let (Some(b), Some(a)) = (before, after) {
                 if b != a {

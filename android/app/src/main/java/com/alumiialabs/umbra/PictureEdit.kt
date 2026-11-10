@@ -57,6 +57,7 @@ import androidx.compose.ui.window.SecureFlagPolicy
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import androidx.compose.material3.minimumInteractiveComponentSize
 
 /** The side of a picture that the user can change, in dp. */
 const val EDITABLE_PICTURE_SIZE = 104
@@ -92,7 +93,7 @@ fun EditablePicture(hasPicture: Boolean, onSet: (Bitmap?) -> Unit, picture: @Com
     ) {
         Box(Modifier.clip(CircleShape)) { picture() }
         Text(
-            stringResource(R.string.picture_edit),
+            stringResource(R.string.common_edit),
             style = MaterialTheme.typography.labelMedium,
             fontWeight = FontWeight.SemiBold,
             color = Palette.OnAction,
@@ -230,13 +231,7 @@ private fun CropDialog(image: Bitmap, onDone: (Bitmap) -> Unit, onCancel: () -> 
                     .padding(start = 4.dp, end = 12.dp, top = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Box(
-                    Modifier
-                        .size(48.dp)
-                        .clip(CircleShape)
-                        .press(role = Role.Button, label = stringResource(R.string.common_cancel), onClick = onCancel),
-                    contentAlignment = Alignment.Center,
-                ) { FaIcon("xmark", label = stringResource(R.string.common_cancel), size = 20.dp, tint = Color.White) }
+                IconAction("xmark", stringResource(R.string.common_cancel), tint = Color.White, onClick = onCancel)
                 Spacer(Modifier.weight(1f))
             }
 
@@ -249,15 +244,16 @@ private fun CropDialog(image: Bitmap, onDone: (Bitmap) -> Unit, onCancel: () -> 
                     .align(Alignment.BottomCenter)
                     .navigationBarsPadding()
                     .padding(bottom = 24.dp)
+                    .minimumInteractiveComponentSize()
                     .clip(CircleShape)
                     .background(Palette.Action)
-                    .press(role = Role.Button, label = stringResource(R.string.common_done)) {
+                    .press(role = Role.Button) {
                         val side = (frame / scale).toInt().coerceIn(1, minOf(image.width, image.height))
                         val left = (centerX - side / 2f).toInt().coerceIn(0, image.width - side)
                         val top = (centerY - side / 2f).toInt().coerceIn(0, image.height - side)
                         onDone(Bitmap.createBitmap(image, left, top, side, side))
                     }
-                    .padding(horizontal = 32.dp, vertical = 12.dp),
+                    .padding(horizontal = 32.dp, vertical = 14.dp),
             )
         }
     }

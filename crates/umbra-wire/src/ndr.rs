@@ -234,10 +234,22 @@ pub enum TokenCarrier {
     Fcm = 0x02,
 }
 
-/// Writes a plain push token: the carrier byte, then its target.
+/// Whether each byte of a push target is printable ASCII with no space.
+fn is_printable(target: &[u8]) -> bool {
+    target.iter().all(|b| (0x21..0x7F).contains(b))
+}
+
+/// Writes a plain push token: the carrier byte, then its target. The
+/// function refuses a target that [`parse_token`] refuses, thus no client
+/// registers such a token. It writes the reserved carrier, because a test
+/// of the refusal needs those bytes.
 pub fn encode_token(carrier: TokenCarrier, target: &[u8], out: &mut [u8]) -> Result<usize, Error> {
     if target.is_empty() || target.len() >= PUSH_TOKEN_MAX {
         return Err(Error::Capacity);
+    }
+
+    if !is_printable(target) {
+        return Err(Error::Malformed);
     }
 
     let mut w = Writer::new(out);
@@ -256,8 +268,7 @@ pub fn parse_token(bytes: &[u8]) -> Result<(TokenCarrier, &[u8]), Error> {
     };
 
     let target = r.rest();
-    let printable = target.iter().all(|b| (0x21..0x7F).contains(b));
-    if target.is_empty() || !printable {
+    if target.is_empty() || !is_printable(target) {
         return Err(Error::Malformed);
     }
     Ok((carrier, target))
@@ -419,6 +430,16 @@ mod tests {
         )
         .unwrap();
         assert!(parse_token(&out[..n]).is_err());
+
+        // The writer refuses the target that the reader refuses.
+        assert_eq!(
+            encode_token(TokenCarrier::Fcm, b"fcm token", &mut out),
+            Err(Error::Malformed)
+        );
+        assert_eq!(
+            encode_token(TokenCarrier::Fcm, b"fcm\ntoken", &mut out),
+            Err(Error::Malformed)
+        );
 
         assert!(parse_token(&[0x03, b'x']).is_err());
         assert!(parse_token(&[0x02, b' ']).is_err());

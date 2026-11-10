@@ -21,6 +21,15 @@ pub(super) const SHARES_HELD: TableId = TableId(0x3F);
 /// threshold, and the count.
 pub(super) const SHARES_GIVEN: TableId = TableId(0x40);
 
+/// Whether a stored message row is a share of this user that waits for its
+/// relay. A row that does not parse is none.
+pub(super) fn is_share_row(plain: &[u8]) -> bool {
+    plain
+        .get(super::MESSAGE_PREFIX..)
+        .and_then(|app| AppMessage::parse(app, umbra_wire::app::Channel::Pairwise).ok())
+        .is_some_and(|parsed| parsed.kind == AppKind::RecoveryShare)
+}
+
 /// A share that a contact gave to this user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HeldShare {

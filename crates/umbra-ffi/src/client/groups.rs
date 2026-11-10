@@ -1240,10 +1240,56 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Ok(batch.commit()?);
         }
 
+        // The post of the new object writes this row, thus the row goes
+        // first.
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         batch.delete(OWN_EPOCH, row);
         batch.commit()?;
+
+        match self.repost_object(conversation, &control, now_ms, rng) {
+            // GRP-076: the rate of the chain bars the object now, or the
+            // group closed in the meantime. The object waits for the sweep.
+            Err(Error::Busy | Error::Closed) if control.control_type != ControlType::Rekey => {
+                self.keep_displaced(conversation, row, &object, &displaced, rng)
+            }
+            other => other,
+        }
+    }
+
+    /// Puts a displaced roster object back with its mark, thus the sweep
+    /// posts it again (`GRP-119`). A newer object of this device in the row
+    /// stays, and the displaced one goes.
+    fn keep_displaced<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        row: RowId,
+        object: &[u8],
+        displaced: &[u8; 32],
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let open = self.open_mut()?;
+        if open.store.get(OWN_EPOCH, &row)?.is_some() {
+            return Ok(());
+        }
+
+        let mark = open.store.row_id(OWN_EPOCH, &displaced_key(conversation));
+        let mut batch = open.store.begin();
+        batch.put(OWN_EPOCH, row, Some(conversation.0), object, rng)?;
+        batch.put(OWN_EPOCH, mark, Some(conversation.0), displaced, rng)?;
+
+        Ok(batch.commit()?)
+    }
+
+    /// Builds the act of a displaced roster object again against the head
+    /// that stands, and posts it.
+    fn repost_object<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        control: &GroupControl<'_>,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
         let group = self.group_of(conversation)?;
         match control.control_type {
             ControlType::Rekey => {
@@ -1256,6 +1302,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
             ControlType::PlainEpoch => match PlainEpoch::parse(control.payload)?.op {
                 PlainOp::Remove { index } => {
+                    // A re-key in the epoch that won moved the member to a
+                    // new index, and the act follows the member.
+                    let index = group.roster().successor_of(index).unwrap_or(index);
                     let active = group.roster().member(index).is_some_and(|m| m.active);
                     drop(group);
                     if active {
@@ -1293,19 +1342,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             },
             ControlType::GrantingEpoch => {
                 let grant = GrantingEpoch::parse(control.payload)?;
+
+                // The grant follows a member that a re-key moved.
+                let grantee = group
+                    .roster()
+                    .successor_of(grant.grantee_index)
+                    .unwrap_or(grant.grantee_index);
                 let stands = group
                     .roster()
-                    .member(grant.grantee_index)
+                    .member(grantee)
                     .is_some_and(|member| member.active && member.role != grant.role);
                 drop(group);
                 if stands {
-                    self.set_group_role(
-                        conversation,
-                        grant.grantee_index,
-                        grant.role,
-                        now_ms,
-                        rng,
-                    )?;
+                    self.set_group_role(conversation, grantee, grant.role, now_ms, rng)?;
                 }
 
                 Ok(())
@@ -2817,30 +2866,45 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         };
         let parsed = JoinRecord::parse(&record)?;
 
-        // GRP-443: the joiner rejects a snapshot whose path does not back
-        // each role, thus the repair goes before the add.
+        // GRP-306: a run that ended after the add went out left the row at
+        // `Asked`. The roster holds the member, thus this call takes that
+        // index and builds no second add.
+        let held = group
+            .roster()
+            .active()
+            .find(|member| member.roster_pk_hash == parsed.keys.roster_pk_hash)
+            .map(|member| member.index);
         drop(group);
-        self.repair_paths(conversation, now_ms, rng)?;
-        let group = self.group_of(conversation)?;
 
-        // GRP-329: a roster from a snapshot builds no add before an object
-        // of another member gave it the index of the group.
-        let add = group.add_object(&parsed).map_err(|_| {
-            if group.roster().index_is_open() {
-                Error::Busy
-            } else {
-                Error::Malformed
+        let (index, add_row) = match held {
+            Some(index) => (index, None),
+            None => {
+                // GRP-443: the joiner rejects a snapshot whose path does
+                // not back each role, thus the repair goes before the add.
+                self.repair_paths(conversation, now_ms, rng)?;
+                let group = self.group_of(conversation)?;
+
+                // GRP-329: a roster from a snapshot builds no add before an
+                // object of another member gave it the index of the group.
+                let add = group.add_object(&parsed).map_err(|_| {
+                    if group.roster().index_is_open() {
+                        Error::Busy
+                    } else {
+                        Error::Malformed
+                    }
+                })?;
+
+                // GRP-310, GRP-389: the add goes to each replica first,
+                // thus its record names the roster epoch that every member
+                // holds. GRP-311: the kept record of the add takes the
+                // `GSEQ` of each replica, and the admit names them.
+                let posted = self.post_own_object(conversation, &add, now_ms, rng)?;
+                let Applied::Added(index) = posted.applied else {
+                    return Err(Error::Malformed);
+                };
+
+                (index, posted.kept)
             }
-        })?;
-
-        // GRP-310, GRP-389: the add goes to each replica first, thus its
-        // record names the roster epoch that every member holds. GRP-311:
-        // the kept record of the add takes the `GSEQ` of each replica, and
-        // the admit names them.
-        let posted = self.post_own_object(conversation, &add, now_ms, rng)?;
-        let add_row = posted.kept;
-        let Applied::Added(index) = posted.applied else {
-            return Err(Error::Malformed);
         };
 
         // GRP-324: the snapshot carries the authority path of each role.
@@ -2999,7 +3063,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 Some(JoinEntry::Added { index, .. }) if index == held.index
             );
             let open_group = match self.conversation_of_group(&held.group_id) {
-                Ok(conversation) => !self.group_closed(conversation)?,
+                Ok(conversation) => match self.group_closed(conversation) {
+                    Ok(closed) => !closed,
+                    Err(Error::NotFound) => false,
+                    Err(fault) => return Err(fault),
+                },
                 Err(_) => false,
             };
             if !current || !open_group {
@@ -3658,8 +3726,32 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         now_ms: u64,
         rng: &mut R,
     ) -> Result<MsgRef, Error> {
+        self.post_to_group_with(conversation, msg_id, app, None, now_ms, rng)
+    }
+
+    /// As [`Client::post_to_group`], with one row of `beside` under the row
+    /// of the message, in the commit of the message.
+    pub(super) fn post_to_group_with<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        msg_id: [u8; 16],
+        app: &[u8],
+        beside: Option<(TableId, Zeroizing<Vec<u8>>)>,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<MsgRef, Error> {
         let kind = AppMessage::parse(app, umbra_wire::app::Channel::Group)?.kind;
         self.refuse_observer(conversation, kind)?;
+
+        // DEV-215, DEV-245: the period of a record of this device runs from
+        // its send, and the sync copy carries it. The deadline is in the
+        // commit of the message, thus no stop leaves a message of a timed
+        // conversation that never expires.
+        let seconds = if super::timers::is_timed_kind(kind) {
+            self.timer_seconds(conversation)?
+        } else {
+            0
+        };
 
         let open = self.open_mut()?;
         let reference = super::msg_ref(&open.device_set_key, &msg_id);
@@ -3683,12 +3775,22 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             rng,
         )?;
         batch.put(OUTBOX, row, None, &super::outbox_row(), rng)?;
+        if seconds > 0 {
+            let deadline = umbra_core::devset::edits::Deadline::received(now_ms / 1_000, seconds);
+            batch.put(
+                super::timers::DEADLINES,
+                row,
+                Some(conversation.0),
+                &super::timers::deadline_row(conversation, deadline.at),
+                rng,
+            )?;
+        }
+        if let Some((table, value)) = beside {
+            batch.put(table, row, Some(conversation.0), &value, rng)?;
+        }
+
         batch.commit()?;
         let message = MsgRef(row);
-
-        // DEV-245: the period of a record of this device runs from its send,
-        // and the sync copy carries it.
-        self.stamp_deadline(conversation, message, kind, now_ms / 1_000, rng)?;
         self.queue_group_post(conversation, Some(message), app, now_ms, rng)?;
 
         Ok(message)
@@ -4592,11 +4694,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let now = now_ms / 1_000;
         let mut due = Vec::new();
         for conversation in self.group_conversations()? {
+            // The group loads first, thus a row that does not restore ends
+            // no scan at the state check.
+            let Some(group) = self.scanned_group(conversation)? else {
+                continue;
+            };
             if self.group_closed(conversation)? {
                 continue;
             }
 
-            let group = self.group_of(conversation)?;
             if group.owner(0).is_none() || group.own_role().is_none_or(|role| role < Role::Admin) {
                 continue;
             }
@@ -5269,7 +5375,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let now = now_ms / 1_000;
         let mut due = Vec::new();
         for conversation in self.group_conversations()? {
-            let group = self.group_of(conversation)?;
+            let Some(group) = self.scanned_group(conversation)? else {
+                continue;
+            };
             let Some(trigger) = group.owes_rotation(now) else {
                 self.groups.backoff.remove(&conversation);
                 continue;
@@ -5447,11 +5555,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             post.replicas.map(|replica| replica.relay),
         );
         self.groups.posts.push_back(post);
-        self.put_clock(conversation, sent_key(conversation), now, rng)?;
+
+        // IMP-132: the object is in the store, thus a fault of a step after
+        // it fails no act, and the caller does its next steps.
+        let stamped = self.put_clock(conversation, sent_key(conversation), now, rng);
+        self.defer_fault(stamped.err());
 
         // DEV-296: the other devices of the set take the object on the
         // sync channel.
-        self.publish_sync(conversation, &app, true, None, now, rng)?;
+        let published = self.publish_sync(conversation, &app, true, None, now, rng);
+        self.defer_fault(published.err());
 
         Ok(Some(SealedOwn {
             group,
@@ -5493,11 +5606,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let now = now_ms / 1_000;
         let mut due = Vec::new();
         for conversation in self.group_conversations()? {
+            // The group loads first, thus a row that does not restore ends
+            // no scan at the state check.
+            let Some(group) = self.scanned_group(conversation)? else {
+                continue;
+            };
             if self.group_closed(conversation)? {
                 continue;
             }
 
-            let group = self.group_of(conversation)?;
             let Some(epoch) = group.lacks_epoch() else {
                 continue;
             };
@@ -6463,7 +6580,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             else {
                 continue;
             };
-            let group = self.group_of(conversation)?;
+            let Some(group) = self.readable_group(conversation)? else {
+                continue;
+            };
             let Some(read) = group.credentials().map(|held| held.read_secret()) else {
                 continue;
             };
@@ -6811,7 +6930,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     }
                 }
                 Outcome::Presence { sender } => {
-                    self.note_seen(conversation, &group, sender, now, rng)?;
+                    // The time of a member is beside its record. A fault of it
+                    // ends no outcome, and the next record of the member
+                    // writes the time again.
+                    let seen = self.note_seen(conversation, &group, sender, now, rng);
+                    self.defer_fault(seen.err());
                 }
                 Outcome::Content {
                     sender,
@@ -6822,7 +6945,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     repeated,
                     ..
                 } => {
-                    self.note_seen(conversation, &group, sender, now, rng)?;
+                    let seen = self.note_seen(conversation, &group, sender, now, rng);
+                    self.defer_fault(seen.err());
 
                     // GRP-251: a record whose app does not parse is one
                     // silent drop; it ends no other outcome of the arrival.
@@ -6939,6 +7063,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     // comes first: the vote after the re-key is the later
                     // one.
                     if parsed.kind == AppKind::PollVote {
+                        // The two highest values name the user and the peer
+                        // of a pairwise poll. A member at such an index
+                        // would write the vote of the user.
+                        if sender >= super::polls::VOTER_PEER {
+                            continue;
+                        }
+
                         // The position holds 16 bits of the epoch. An epoch
                         // above them takes the highest value, thus the
                         // order never runs back.
@@ -7107,8 +7238,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             self.ask_to_return(conversation, now_ms, rng)?;
         }
 
+        // The group is in the store. An act that the roster refuses now
+        // is void, and no fault of a repost ends the steps after it.
         for head in displaced {
-            self.repost_displaced(conversation, head.hash, now_ms, rng)?;
+            let reposted = self.repost_displaced(conversation, head.hash, now_ms, rng);
+            self.defer_fault(
+                reposted
+                    .err()
+                    .filter(|fault| !matches!(fault, Error::Malformed | Error::NotFound)),
+            );
         }
 
         self.drop_passed_adds(conversation)?;
@@ -7489,11 +7627,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let now = now_ms / 1_000;
         let mut due = Vec::new();
         for conversation in self.group_conversations()? {
+            // The group loads first, thus a row that does not restore ends
+            // no scan at the state check.
+            let Some(group) = self.scanned_group(conversation)? else {
+                continue;
+            };
             if self.group_closed(conversation)? {
                 continue;
             }
 
-            let group = self.group_of(conversation)?;
             if group.own_role().is_none() || group.replicas().is_none() {
                 continue;
             }
@@ -7567,7 +7709,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let now = now_ms / 1_000;
         let mut due = Vec::new();
         for conversation in self.group_conversations()? {
-            let group = self.group_of(conversation)?;
+            let Some(group) = self.scanned_group(conversation)? else {
+                continue;
+            };
             if group.own_role().is_none_or(|role| role < Role::Admin) {
                 continue;
             }
@@ -7894,6 +8038,20 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
     }
 
+    /// The group of a scan that cannot change the client, or none for a
+    /// group whose row does not restore. The scans that can change the
+    /// client tell the user of such a row (`scanned_group`).
+    pub(super) fn readable_group(
+        &self,
+        conversation: ConversationId,
+    ) -> Result<Option<Group>, Error> {
+        match self.group_of(conversation) {
+            Ok(group) => Ok(Some(group)),
+            Err(error @ (Error::Storage | Error::Locked | Error::Closed)) => Err(error),
+            Err(_) => Ok(None),
+        }
+    }
+
     /// Whether a group other than `conversation` holds one of the group
     /// queues `ids`. A queue names one group, thus an admit or a relay
     /// that names the queue of another group takes none of its records.
@@ -8016,9 +8174,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                     continue;
                 };
 
-                let wait = RESEND_FIRST
-                    .checked_shl(replica.attempts.saturating_sub(1))
-                    .map_or(RESEND_MAX, |wait| wait.min(RESEND_MAX));
+                // A shift that pushes a set bit out gives a small value, and
+                // `checked_shl` does not catch it.
+                let doublings = replica.attempts.saturating_sub(1);
+                let wait = if doublings >= RESEND_FIRST.leading_zeros() {
+                    RESEND_MAX
+                } else {
+                    (RESEND_FIRST << doublings).min(RESEND_MAX)
+                };
                 if replica.state != REPLICA_PENDING || now.saturating_sub(*sent) < wait {
                     continue;
                 }
@@ -11112,5 +11275,73 @@ mod tests {
             .request_epoch_pairwise(group, epoch, ms(T0 + 20 + DAY), &mut rng)
             .unwrap();
         assert_eq!(asked, 1);
+    }
+
+    #[test]
+    fn a_timed_group_message_holds_its_deadline_in_the_commit_of_the_message() {
+        let mut rng = Rng(61);
+        let mut admin = new_client(&mut rng);
+        let group = new_group(&mut admin, &mut rng);
+        admin
+            .put_timer(group, 3_600, T0 * 1_000, true, &mut rng)
+            .unwrap();
+
+        let msg_id = [0x71; 16];
+        let record = AppMessage {
+            kind: AppKind::Text,
+            msg_id,
+            sent_at: T0 * 1_000,
+            body: b"timed",
+        };
+        let mut app = vec![0u8; record.len()];
+        record.encode(&mut app).unwrap();
+
+        // The store takes the batch of the message and then stops.
+        let before = admin
+            .open_ref()
+            .unwrap()
+            .store
+            .count(crate::client::timers::DEADLINES, Some(&group.0))
+            .unwrap();
+        let _ = stop_after(1, || {
+            admin.post_to_group(group, msg_id, &app, T0 * 1_000, &mut rng)
+        });
+
+        let after = admin
+            .open_ref()
+            .unwrap()
+            .store
+            .count(crate::client::timers::DEADLINES, Some(&group.0))
+            .unwrap();
+        assert_eq!(after, before + 1);
+    }
+
+    #[test]
+    fn a_group_poll_holds_its_close_time_in_the_commit_of_the_message() {
+        let mut rng = Rng(62);
+        let mut admin = new_client(&mut rng);
+        let group = new_group(&mut admin, &mut rng);
+
+        // The store takes the batch of the message and then stops.
+        let _ = stop_after(1, || {
+            admin.send_poll(
+                group,
+                "Where?",
+                &["Here", "There"],
+                false,
+                true,
+                3_600,
+                T0 * 1_000,
+                &mut rng,
+            )
+        });
+
+        let polls = admin
+            .open_ref()
+            .unwrap()
+            .store
+            .count(crate::client::polls::POLLS, Some(&group.0))
+            .unwrap();
+        assert_eq!(polls, 1);
     }
 }

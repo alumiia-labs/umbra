@@ -71,7 +71,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 fun ScanInvitationScreen(onBack: () -> Unit) {
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.scan_scan_code), onBack = onBack)
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(PressInset)) {
             Headline(stringResource(R.string.scan_their_invitation))
             Spacer(Modifier.height(20.dp))
             Scanner { text ->
@@ -94,18 +94,18 @@ fun ScanSafetyNumberScreen(chat: Chat, onBack: () -> Unit) {
     var isMatch by remember { mutableStateOf<Boolean?>(null) }
 
     Column(Modifier.fillMaxSize()) {
-        BackBar(stringResource(R.string.scan_verify, chat.title), onBack = onBack)
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
+        BackBar(stringResource(R.string.common_verify_named, chat.title), onBack = onBack)
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(PressInset)) {
             when (isMatch) {
                 null -> {
-                    Headline(stringResource(R.string.scan_code_of, chat.title))
+                    Headline(stringResource(R.string.common_scan_code_of, chat.title))
                     Spacer(Modifier.height(20.dp))
                     Scanner { text -> Core.verifyByNumber(chat.conversation, text) { isMatch = it } }
                 }
                 true -> {
                     HeroIcon("shield-check")
                     Spacer(Modifier.height(20.dp))
-                    Headline(stringResource(R.string.scan_you_verified, chat.title))
+                    Headline(stringResource(R.string.common_you_verified, chat.title))
                     Spacer(Modifier.height(20.dp))
                     PrimaryButton(stringResource(R.string.common_done), onClick = onBack)
                 }
@@ -114,8 +114,8 @@ fun ScanSafetyNumberScreen(chat: Chat, onBack: () -> Unit) {
                     Spacer(Modifier.height(20.dp))
                     // A user cannot know what a mismatch means.
                     Headline(
-                        stringResource(R.string.scan_codes_do_not_match),
-                        stringResource(R.string.scan_another_party, chat.title),
+                        stringResource(R.string.common_codes_do_not_match),
+                        stringResource(R.string.common_another_party_between, chat.title),
                     )
                     Spacer(Modifier.height(20.dp))
                     PrimaryButton(stringResource(R.string.scan_again)) { isMatch = null }

@@ -37,8 +37,9 @@ pub struct PendingKeyChange {
 
 impl<B: Backend, E: SecureElement> Client<B, E> {
     /// Keeps a notice that a contact sent on its receiving chain
-    /// (`IDN-059`). A notice that does not parse changes nothing, and a
-    /// later notice takes the place of one that waits.
+    /// (`IDN-059`). A notice that does not parse changes nothing. A later
+    /// notice takes the place of one that waits, and the acceptance then
+    /// names the number that the user saw (`accept_key_change`).
     pub(super) fn take_key_change<R: CryptoRng + ?Sized>(
         &mut self,
         conversation: ConversationId,
@@ -151,12 +152,26 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// The stored contact takes it, and the result names the contact and
     /// the key for a node that runs. The verification of the earlier key
     /// counts for nothing now (`IDN-175`).
+    ///
+    /// `shown_safety_number` is the number of the prompt that the user
+    /// answered. A later notice can take the place of the shown one before
+    /// the answer. The key of that notice is not the key that the user
+    /// accepted, thus the call gives `NotFound` and changes nothing.
     pub fn accept_key_change<R: CryptoRng + ?Sized>(
         &mut self,
         conversation: ConversationId,
+        shown_safety_number: &str,
         rng: &mut R,
     ) -> Result<(ContactId, [u8; 32]), Error> {
         let (key, _) = self.held_key_change(conversation)?.ok_or(Error::NotFound)?;
+
+        let waiting = self.key_change(conversation)?.ok_or(Error::NotFound)?;
+        if waiting.new_safety_number != shown_safety_number {
+            // The view reads the notice that waits now.
+            self.events.push_back(Event::Conversations);
+            return Err(Error::NotFound);
+        }
+
         let open = self.open_mut()?;
         let plain = Zeroizing::new(
             open.store

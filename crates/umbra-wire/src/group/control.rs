@@ -11,6 +11,7 @@ use umbra_crypto::{
     hash::sha3_256,
     labels,
     sign::{Signature, VerifyingKey, SIGNATURE_LEN, VERIFYING_KEY_LEN},
+    zeroize::Zeroize,
 };
 
 use crate::{
@@ -619,7 +620,10 @@ pub enum InvitationStage<'a> {
 }
 
 /// The body of an admit, `InvitationAdmit` of §6.6.3.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// The three keys are secrets. The value erases them when it drops, and its
+/// `Debug` form does not print them.
+#[derive(Clone, PartialEq, Eq)]
 pub struct InvitationAdmit<'a> {
     /// The member index the admin gave the joiner.
     pub index: u16,
@@ -644,8 +648,34 @@ pub struct InvitationAdmit<'a> {
     pub descriptor: &'a [u8],
 }
 
+impl Drop for InvitationAdmit<'_> {
+    fn drop(&mut self) {
+        self.slot_key.zeroize();
+        self.read_sk.zeroize();
+        self.write_sk.zeroize();
+    }
+}
+
+impl core::fmt::Debug for InvitationAdmit<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("InvitationAdmit")
+            .field("index", &self.index)
+            .field("epoch", &self.epoch)
+            .field("t_e", &self.t_e)
+            .field("t_join", &self.t_join)
+            .field("roster_epoch", &self.roster_epoch)
+            .field("replicas", &self.replicas)
+            .field("descriptor_len", &self.descriptor.len())
+            .finish_non_exhaustive()
+    }
+}
+
 /// The fixed part of an admit body, before the descriptor (`WIR-521`).
 pub const ADMIT_FIXED: usize = 253;
+
+/// The fixed part of an offer body: the length byte of the name, then the
+/// two roster keys.
+const OFFER_FIXED: usize = 1 + 2 * VERIFYING_KEY_LEN;
 
 /// A `GroupInvitation`, control type `0x07`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -678,7 +708,7 @@ impl<'a> GroupInvitation<'a> {
                 let name_len = u8::try_from(name.len()).map_err(|_| Error::Malformed)?;
 
                 w.u8(0x01)?;
-                w.u16(u16::try_from(3_905 + name.len()).map_err(|_| Error::Malformed)?)?;
+                w.u16(u16::try_from(OFFER_FIXED + name.len()).map_err(|_| Error::Malformed)?)?;
                 w.u8(name_len)?;
                 w.put(name.as_bytes())?;
                 w.put(admin_roster_pk)?;
@@ -741,7 +771,7 @@ impl<'a> GroupInvitation<'a> {
         let stage = match stage_byte {
             0x01 => {
                 let name_len = usize::from(b.u8()?);
-                if body_len != 3_905 + name_len {
+                if body_len != OFFER_FIXED + name_len {
                     return Err(Error::Malformed);
                 }
 
@@ -925,10 +955,11 @@ impl<'a> RosterSnapshot<'a> {
             return Err(Error::Malformed);
         }
 
+        // The two lists are in index order, thus one pass finds each entry.
+        // A search for each key would cost a product that the sender sets.
+        let mut entries = self.entries.iter();
         for key in &self.keys {
-            let entry = self
-                .entries
-                .iter()
+            let entry = entries
                 .find(|e| e.index == key.index)
                 .ok_or(Error::Malformed)?;
             if key.kem_pk.len() != KEM_PK_LEN || sha3_256(&[key.kem_pk]) != entry.kem_pk_hash {

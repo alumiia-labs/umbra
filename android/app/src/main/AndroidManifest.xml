@@ -23,6 +23,7 @@
          manifest cannot set the value again. IMP-050: a device-to-device
          transfer carries none either. -->
     <application
+        android:name=".UmbraApplication"
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@mipmap/ic_launcher"

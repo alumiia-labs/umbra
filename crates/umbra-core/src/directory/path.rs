@@ -326,7 +326,16 @@ pub fn check(
     // circuit, thus such a chain is the last resort of a bootstrap network.
     // Without the relaxation of NET-350, invariant 3 keeps two hops of one
     // address apart already, by their prefix.
-    let one_host = hop1.v4.is_some() && hop1.v4 == hop3.v4;
+    //
+    // A candidate holds no full IPv6 address. Two relays with no IPv4
+    // address and one IPv6 /48 thus count as one server: the test must not
+    // rank one server before two servers of one operator.
+    let one_v4 = hop1.v4.is_some() && hop1.v4 == hop3.v4;
+    let one_v6 = hop1.v4.is_none()
+        && hop3.v4.is_none()
+        && hop1.v6_prefix.is_some()
+        && hop1.v6_prefix == hop3.v6_prefix;
+    let one_host = one_v4 || one_v6;
     if one_host && relax.network && !relax.host {
         return Err(Error::NoPath);
     }

@@ -31,6 +31,18 @@ def main():
         if values.get(name, "").lower() != asset.read_bytes().hex():
             faults.append(f"{NETWORK_ENV.name}: {name} is not {asset.name}; run scripts/release-network.sh")
 
+    # The app and the relay image name one signer and one pair of routes. A
+    # relay with another value reads another manifest than the phones.
+    app = env_values(ASSETS / "umbra-network.properties")
+    signer = ",".join(values.get("UMBRA_SIGNER", "").split(",")[:2])
+    if signer not in app.get("carriers", "").split(";"):
+        faults.append(f"{NETWORK_ENV.name}: UMBRA_SIGNER is no carrier of umbra-network.properties")
+
+    routes = {"UMBRA_NDR_ROUTE": "ndr_relay", "UMBRA_DIRECTORY_ROUTE": "directory_relay"}
+    for name, key in routes.items():
+        if values.get(name, "") != app.get(key, "").split(",")[0]:
+            faults.append(f"{NETWORK_ENV.name}: {name} is not {key} of umbra-network.properties")
+
     for fault in faults:
         print(fault, file=sys.stderr)
     return 1 if faults else 0

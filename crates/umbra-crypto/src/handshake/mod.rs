@@ -133,9 +133,9 @@ impl State {
     /// a flight that does not verify leaves the state as it was.
     pub(crate) fn copy(&self) -> Self {
         State {
-            ck: Secret::new(*self.ck.expose()),
+            ck: self.ck.duplicate(),
             h: self.h,
-            k: self.k.as_ref().map(|k| Secret::new(*k.expose())),
+            k: self.k.as_ref().map(|k| k.duplicate()),
             n: self.n,
         }
     }
@@ -166,7 +166,7 @@ impl State {
         let hk = Hkdf::<Sha3_256>::new(Some(self.ck.expose()), ikm);
         let mut t = Secret::<64>::zeroed();
         // 64 bytes is inside the HKDF bound, thus expand cannot fail.
-        let _ = hk.expand(labels::HANDSHAKE_CK, t.expose_mut());
+        crate::kdf::expand_into(&hk, &[labels::HANDSHAKE_CK], &mut t);
 
         // Each half goes straight into a buffer that wipes itself.
         let mut ck = Secret::<32>::zeroed();
@@ -247,7 +247,7 @@ impl State {
     pub(crate) fn derive(&self, info: &[&[u8]]) -> Secret<32> {
         let hk = Hkdf::<Sha3_256>::new(Some(self.ck.expose()), &[]);
         let mut out = Secret::<32>::zeroed();
-        let _ = hk.expand_multi_info(info, out.expose_mut());
+        crate::kdf::expand_into(&hk, info, &mut out);
         out
     }
 

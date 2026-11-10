@@ -82,7 +82,7 @@ fun SetupScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
 
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.setup_title), onBack = onBack)
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(PressInset)) {
             Text(
                 stringResource(R.string.setup_step, total - steps.size + 1, total),
                 style = MaterialTheme.typography.labelMedium,
@@ -107,7 +107,7 @@ fun SetupScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                     Spacer(Modifier.height(24.dp))
                     Headline(stringResource(R.string.setup_battery_title), batteryLine())
                     Spacer(Modifier.height(20.dp))
-                    PrimaryButton(stringResource(R.string.battery_allow)) {
+                    PrimaryButton(stringResource(R.string.common_allow)) {
                         Battery.note(context)
                         Battery.open(context)
                     }

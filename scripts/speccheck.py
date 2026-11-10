@@ -60,20 +60,23 @@ def strip_code(line: str) -> str:
 
 
 def load_spec():
-    """Return (markers, dupes, sections, texts).
+    """Return (markers, dupes, sections, texts, missing).
 
     markers: id -> (file, line, section)
     dupes: (id, file, line, first marker) for each marker that occurs again
     sections: part -> {section number}
     texts: file -> list of lines
+    missing: each part file that does not exist
     """
     markers = {}
     dupes = []
     sections = defaultdict(set)
     texts = {}
+    missing = []
     for fname, part in FILE_PART.items():
         path = SPEC / fname
         if not path.exists():
+            missing.append(fname)
             continue
 
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -98,7 +101,7 @@ def load_spec():
                     dupes.append((rid, fname, no, markers[rid]))
                 else:
                     markers[rid] = (fname, no, current)
-    return markers, dupes, sections, texts
+    return markers, dupes, sections, texts, missing
 
 
 def load_index():
@@ -125,7 +128,10 @@ def main(argv):
     quiet = "--quiet" in argv
     problems = defaultdict(list)
 
-    markers, dupes, sections, texts = load_spec()
+    markers, dupes, sections, texts, missing = load_spec()
+
+    for fname in missing:
+        problems["part-missing"].append(f"spec/{fname}")
     rows, row_dupes, summary = load_index()
 
     for rid, f, no, first in dupes:

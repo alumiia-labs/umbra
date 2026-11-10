@@ -97,12 +97,37 @@ fn base64url(bytes: &[u8]) -> String {
     out
 }
 
+/// The six bits of one character of the alphabet. A fragment holds a key,
+/// thus the value comes from arithmetic on the character, and no search or
+/// table index depends on it.
+fn sextet(c: u8) -> Option<u32> {
+    let c = i16::from(c);
+    // All ones when `lo <= c <= hi`: the two differences are both negative.
+    let within = |lo: u8, hi: u8| ((i16::from(lo) - 1 - c) & (c - i16::from(hi) - 1)) >> 15;
+
+    let upper = within(b'A', b'Z');
+    let lower = within(b'a', b'z');
+    let digit = within(b'0', b'9');
+    let dash = within(b'-', b'-');
+    let under = within(b'_', b'_');
+    let value = (upper & (c - 65))
+        | (lower & (c - 97 + 26))
+        | (digit & (c - 48 + 52))
+        | (dash & 62)
+        | (under & 63);
+
+    if (upper | lower | digit | dash | under) == 0 {
+        return None;
+    }
+    u32::try_from(value).ok()
+}
+
 fn base64url_decode(text: &str, out: &mut [u8]) -> Result<(), Error> {
     let mut acc: u32 = 0;
     let mut bits = 0u32;
     let mut at = 0usize;
     for c in text.bytes() {
-        let v = B64.iter().position(|b| *b == c).ok_or(Error::Malformed)? as u32;
+        let v = sextet(c).ok_or(Error::Malformed)?;
         acc = (acc << 6) | v;
         bits += 6;
         if bits >= 8 {
@@ -255,7 +280,9 @@ impl<'a> Bundle<'a> {
     /// nonce, and the ciphertext with its tag, under the blob key of the
     /// fragment with the link id as associated data.
     pub fn seal(&self, fragment: &Fragment, nonce: [u8; 24]) -> Result<Vec<u8>, Error> {
-        let mut out = alloc::vec![0u8; 1 + 24 + self.len() + aead::TAG_LEN];
+        // The buffer holds the plain bundle until the seal, and a seal that
+        // fails leaves it plain. The wrapper wipes it on that path.
+        let mut out = Zeroizing::new(alloc::vec![0u8; 1 + 24 + self.len() + aead::TAG_LEN]);
         let mut w = Writer::new(&mut out);
         w.u8(BLOB_VERSION)?;
         w.put(&nonce)?;
@@ -272,7 +299,7 @@ impl<'a> Bundle<'a> {
             .copy_from_slice(&tag);
 
         out.truncate(body_at + n + aead::TAG_LEN);
-        Ok(out)
+        Ok(core::mem::take(&mut *out))
     }
 
     /// Opens a blob into `buf`, which then holds the plaintext, and parses
@@ -343,6 +370,14 @@ mod tests {
             key: [1; 32],
             link_id: [2; 24],
             relay_ref: [3; 12],
+        }
+    }
+
+    #[test]
+    fn each_character_decodes_to_its_place_in_the_alphabet() {
+        for c in 0..=u8::MAX {
+            let place = B64.iter().position(|b| *b == c);
+            assert_eq!(sextet(c), place.map(|at| at as u32), "character {c}");
         }
     }
 

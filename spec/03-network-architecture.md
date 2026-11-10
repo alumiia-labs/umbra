@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 3: Network Architecture
 
 **Status:** Draft
-**Version:** 0.52.1
+**Version:** 0.53.0
 **Date:** 2026-11-09
 
 ---
@@ -1834,8 +1834,12 @@ is the tweak of the layer and `C` is the chaining value of that direction:
 ```
 S    = AES-256-Enc( K_prp, X_L XOR C XOR T )
 Y_R  = X_R XOR AES-256-CTR( K_str, counter = S )
-Y_L  = S XOR POLYVAL( K_hash, Y_R )
+Y_L  = S XOR POLYVAL( K_hash, Y_R || LEN )
 ```
+
+`LEN` is one block of 16 bytes: 8 zero bytes, then the length of `Y_R` in
+bytes as one 64-bit big-endian integer. It is the last block of the POLYVAL
+input.
 
 `AES-256-CTR( K, counter = S )` takes the 16 bytes of `S` as its first
 counter block. For each next block of 16 bytes of key stream it adds 1 to
@@ -1846,7 +1850,7 @@ way.
 **[NET-113]** A receiver MUST decipher one layer with the inverse steps:
 
 ```
-S    = Y_L XOR POLYVAL( K_hash, Y_R )
+S    = Y_L XOR POLYVAL( K_hash, Y_R || LEN )
 X_R  = Y_R XOR AES-256-CTR( K_str, counter = S )
 X_L  = AES-256-Dec( K_prp, S ) XOR C XOR T
 ```
@@ -1947,6 +1951,9 @@ retransmission below the cell layer.
 > *Why this shape gives non-malleability.* A change of one bit of `Y_R` changes
 > `POLYVAL`, thus it changes `S`. A changed `S` randomizes the full right part
 > and the recovered `X_L`. A change of one bit of `Y_L` has the same result.
+> POLYVAL gives the same value for an input and for that input after zero
+> blocks. `LEN` changes with the length, thus a hop that puts zero blocks
+> before `Y_R` to make the cell of a larger bucket also changes `S`.
 > Thus no adversary edits a cell into a related cell, and the tagging attack
 > that confirms a chain does not operate. This is the protected-IV shape of the
 > rugged-PRP family, and it is the property that `NET-030` requires.

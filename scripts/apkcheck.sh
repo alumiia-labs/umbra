@@ -3,6 +3,8 @@
 # APK starts at a 16 KB boundary, thus a device with 16 KB pages maps it from
 # the APK. scripts/android.sh checks each library against IMP-021.
 #
+# It also refuses an APK for a device that the debug key signs.
+#
 # Usage: scripts/apkcheck.sh <apk>
 #
 # The release build runs it on each APK (task checkReleaseApk of
@@ -43,3 +45,30 @@ if ! report="$("$zipalign" -v -c -P 16 4 "$apk" 2>&1)"; then
     exit 1
 fi
 echo "IMP-022: $apk passes zipalign -c -P 16 4."
+
+# -Pumbra.releaseTest=true signs the release type with the debug key, for an
+# emulator. That build holds the x86_64 library alone. An APK with a library
+# of a device and the debug key is a release that must not go out.
+apksigner=""
+for candidate in "$(dirname "$zipalign")/apksigner" "$(dirname "$zipalign")/apksigner.bat"; do
+    if [ -f "$candidate" ]; then
+        apksigner="$candidate"
+        break
+    fi
+done
+if [ -z "$apksigner" ]; then
+    echo "No apksigner beside $zipalign." >&2
+    exit 1
+fi
+
+if ! certs="$("$apksigner" verify --print-certs "$apk" 2>&1)"; then
+    # An APK with no signature installs on no device, thus it is no risk here.
+    echo "Signer: apksigner did not verify $apk, thus there is no signer to check."
+    exit 0
+fi
+if printf '%s\n' "$certs" | grep -q 'CN=Android Debug' \
+    && printf '%s\n' "$report" | grep -Eq 'lib/(arm64-v8a|armeabi-v7a)/'; then
+    echo "Signer: $apk holds a device library and the debug key. Do not publish it." >&2
+    exit 1
+fi
+echo "Signer: $apk has no debug key on a device build."

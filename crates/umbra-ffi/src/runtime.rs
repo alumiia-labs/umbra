@@ -153,7 +153,7 @@ impl TryRng for OsRng {
 impl TryCryptoRng for OsRng {}
 
 /// What the application asks of the runtime.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Command {
     /// The challenges of the relays of the last fetch, for a `NEW` that
     /// pays with a proof of work (`ABU-014`).
@@ -307,6 +307,14 @@ pub enum Command {
     },
 }
 
+// A command holds plaintext, addresses, and bundles. Its debug form names
+// the variant by its number alone, thus no log line shows a value of it.
+impl core::fmt::Debug for Command {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "Command({:?})", core::mem::discriminant(self))
+    }
+}
+
 /// The sends of one record before a [`Command::Send`], as the store counts
 /// them (Part 3 `NET-219`, `NET-220`). The default is a record that never
 /// left.
@@ -389,7 +397,7 @@ impl Persist for NoStore {
 }
 
 /// What the runtime tells the application.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Update {
     /// The circuit is ready.
     Online,
@@ -411,6 +419,9 @@ pub enum Update {
         /// The encoded `QueueAddress` that a group relay writes to.
         address: Vec<u8>,
     },
+    /// No relay made the notify queue of this tag in this run. The store
+    /// asks for it again with a new tag.
+    NotifyRefused(u64),
     /// A rendezvous queue exists at its relay.
     RendezvousQueue {
         /// The tag of the command.
@@ -573,6 +584,14 @@ pub enum Update {
     Refused,
     /// The run ended.
     Offline(Ended),
+}
+
+// An update holds addresses, bundles, and keys of a contact, thus its debug
+// form shows no value, as the form of a command.
+impl core::fmt::Debug for Update {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "Update({:?})", core::mem::discriminant(self))
+    }
 }
 
 /// Why a run of the network ended. The interface shows it, and a later
@@ -1030,6 +1049,8 @@ impl CircuitClock {
 
 /// The time to the next slot of a Poisson clock.
 fn cover_delay(rng: &mut OsRng) -> Duration {
+    // A draw that fails leaves zero, which gives the longest delay of the
+    // clock. The draw is a time and no secret.
     let mut bytes = [0u8; 4];
     let _ = rng.try_fill_bytes(&mut bytes);
 
@@ -1098,8 +1119,66 @@ const RESUME_CONFIRM_WAIT: Duration = Duration::from_secs(10);
 /// The time that the `SessionClose` of a run that ends has to leave.
 const CLOSE_WAIT: Duration = Duration::from_secs(1);
 
+/// The tag of the caller for each handle of a send. One record can hold
+/// more than one handle, because each send again takes a new one.
+#[derive(Default)]
+struct Tags {
+    of_handle: BTreeMap<u64, u64>,
+    handles_of: BTreeMap<u64, Vec<u64>>,
+}
+
+impl Tags {
+    fn insert(&mut self, handle: u64, tag: u64) {
+        self.of_handle.insert(handle, tag);
+        self.handles_of.entry(tag).or_default().push(handle);
+    }
+
+    fn get(&self, handle: &u64) -> Option<&u64> {
+        self.of_handle.get(handle)
+    }
+
+    fn contains_key(&self, handle: &u64) -> bool {
+        self.of_handle.contains_key(handle)
+    }
+
+    fn remove(&mut self, handle: &u64) -> Option<u64> {
+        let tag = self.of_handle.remove(handle)?;
+        if let Some(handles) = self.handles_of.get_mut(&tag) {
+            handles.retain(|held| held != handle);
+            if handles.is_empty() {
+                self.handles_of.remove(&tag);
+            }
+        }
+        Some(tag)
+    }
+
+    /// Drops each handle of a record. An answer to an earlier send of it
+    /// then names no record of the run.
+    fn forget(&mut self, tag: u64) {
+        for handle in self.handles_of.remove(&tag).unwrap_or_default() {
+            self.of_handle.remove(&handle);
+        }
+    }
+}
+
+/// The time that one capsule has to leave. A guard that reads no more, or
+/// a path that died, fills the socket, and the send would wait for the TCP
+/// retransmit limit. The stop of the client and each timer of the run would
+/// wait with it.
+pub(crate) const SEND_WAIT: Duration = Duration::from_secs(20);
+
+/// Writes one capsule, and says whether it left inside [`SEND_WAIT`].
+pub(crate) async fn sent_in_time(link: &mut native::Link, capsule: &[u8]) -> bool {
+    matches!(
+        tokio::time::timeout(SEND_WAIT, link.send(capsule)).await,
+        Ok(Ok(()))
+    )
+}
+
 /// Opens a connection to the guard.
 async fn dial(guard: &Dial, tls: &Arc<ClientConfig>, rng: &mut OsRng) -> Option<native::Link> {
+    // The key and the mask of the WebSocket upgrade are no secret under
+    // TLS, thus a draw that fails leaves zero and ends no dial.
     let mut key = [0u8; 16];
     let mut mask = [0u8; 4];
     let _ = rng.try_fill_bytes(&mut key);
@@ -1183,7 +1262,7 @@ pub async fn run_client(
     let mut notify_tags: BTreeMap<u64, u64> = BTreeMap::new();
     let mut rendezvous_tags: BTreeMap<u64, u64> = BTreeMap::new();
     let mut report_handles: BTreeSet<u64> = BTreeSet::new();
-    let mut tags: BTreeMap<u64, u64> = BTreeMap::new();
+    let mut tags = Tags::default();
 
     // NET-218: the records of the user that wait for a relay
     // acknowledgment, for the ARQ of this run.
@@ -1251,9 +1330,11 @@ pub async fn run_client(
             break 'run cause;
         }
 
+        // A send that passes its deadline leaves a part of a frame on the
+        // connection, thus the link counts as closed.
         let mut is_closed = false;
         for capsule in node.take_capsules() {
-            if link.send(&capsule).await.is_err() {
+            if !sent_in_time(&mut link, &capsule).await {
                 is_closed = true;
                 break;
             }
@@ -1389,7 +1470,7 @@ pub async fn run_client(
                 let mut stopped = Vec::new();
                 let resend = resends.next(now, &mut stopped);
                 for tag in stopped {
-                    tags.retain(|_, held| *held != tag);
+                    tags.forget(tag);
                     let _ = updates.send(Update::Failed(tag));
                 }
 
@@ -1404,7 +1485,7 @@ pub async fn run_client(
                                 }
                                 Err(_) => {
                                     resends.ended(tag);
-                                    tags.retain(|_, held| *held != tag);
+                                    tags.forget(tag);
                                     let _ = updates.send(Update::Unsent(tag));
                                 }
                             }
@@ -1533,6 +1614,11 @@ pub async fn run_client(
             Err(ended) => break 'run ended,
         };
 
+        // The store took each event of this batch in `settle`. An event
+        // that ends the run thus ends it after the last one, or the answer
+        // of a record that the store holds as sent would be lost.
+        let mut ending: Option<Ended> = None;
+
         for event in events {
             let update = match event {
                 ClientEvent::CircuitReady => Update::Online,
@@ -1584,7 +1670,7 @@ pub async fn run_client(
                         resends.ended(tag);
                         // An answer to an earlier send of this record
                         // names no record of the run any more.
-                        tags.retain(|_, held| *held != tag);
+                        tags.forget(tag);
                         Update::Sent(tag)
                     }
                     None => continue,
@@ -1605,7 +1691,7 @@ pub async fn run_client(
                     // queue, and it gives it to a later send (`IMP-082`).
                     Some(tag) => {
                         resends.ended(tag);
-                        tags.retain(|_, held| *held != tag);
+                        tags.forget(tag);
                         Update::Held(tag)
                     }
                     None => continue,
@@ -1620,7 +1706,7 @@ pub async fn run_client(
                     // NET-219 to NET-221: the ARQ stopped, and the record
                     // fails.
                     Some(tag) => {
-                        tags.retain(|_, held| *held != tag);
+                        tags.forget(tag);
                         Update::Failed(tag)
                     }
                     None => continue,
@@ -1628,7 +1714,7 @@ pub async fn run_client(
                 ClientEvent::Rejected { handle, reason } => match tags.remove(&handle) {
                     Some(tag) => {
                         resends.ended(tag);
-                        tags.retain(|_, held| *held != tag);
+                        tags.forget(tag);
                         Update::Failed(tag)
                     }
                     // A relay refused the `NEW` of a rendezvous queue.
@@ -1638,7 +1724,12 @@ pub async fn run_client(
                         None if report_handles.remove(&handle) => {
                             Update::ReportQueueRefused(Some(reason))
                         }
-                        None => continue,
+                        // The store holds the group as one that waits for
+                        // its notify queue, and only this update ends that.
+                        None => match notify_tags.remove(&handle) {
+                            Some(tag) => Update::NotifyRefused(tag),
+                            None => continue,
+                        },
                     },
                 },
                 // The node of the queues sends no chunk command and no
@@ -1734,10 +1825,23 @@ pub async fn run_client(
                 ClientEvent::CircuitLost | ClientEvent::CircuitAged if pausing.is_some() => {
                     continue
                 }
-                ClientEvent::CircuitLost => break 'run Ended::CircuitLost,
-                ClientEvent::CircuitAged => break 'run Ended::Aged,
+                // A circuit that still holds its three hops serves on, and
+                // `rebuild_lost` builds the lost one again at a tick. Thus
+                // one relay that ends one circuit ends no run.
+                ClientEvent::CircuitLost if node.is_ready() => continue,
+                ClientEvent::CircuitLost => {
+                    ending.get_or_insert(Ended::CircuitLost);
+                    continue;
+                }
+                ClientEvent::CircuitAged => {
+                    ending.get_or_insert(Ended::Aged);
+                    continue;
+                }
             };
             let _ = updates.send(update);
+        }
+        if let Some(ended) = ending {
+            break 'run ended;
         }
 
         let chains = node.chains();
@@ -1847,11 +1951,14 @@ pub async fn run_client(
                 }
                 // A queue that no circuit serves any more takes its binding
                 // in a later run, thus a failure here ends nothing.
-                Command::MakeNotifyQueue(tag) => {
-                    if let Ok(handle) = node.make_notify_queue(&mut rng) {
+                Command::MakeNotifyQueue(tag) => match node.make_notify_queue(&mut rng) {
+                    Ok(handle) => {
                         notify_tags.insert(handle, tag);
                     }
-                }
+                    Err(_) => {
+                        let _ = updates.send(Update::NotifyRefused(tag));
+                    }
+                },
                 Command::EndNotifyQueue(recipient_id) => {
                     let _ = node.end_notify_queue(&recipient_id, &mut rng);
                 }
@@ -1983,6 +2090,38 @@ pub async fn run_client(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_debug_form_of_a_command_and_of_an_update_shows_no_value() {
+        let command = Command::Send {
+            contact: ContactId([3; 32]),
+            app: Zeroizing::new(b"plaintext".to_vec()),
+            tag: 77,
+            prior: Prior::default(),
+        };
+        let update = Update::Invitation(vec![0xAB; 4]);
+        let shown = format!("{command:?} {update:?}");
+        assert!(shown.starts_with("Command(Discriminant("));
+        assert!(!shown.contains("112") && !shown.contains("171") && !shown.contains("77"));
+    }
+
+    #[test]
+    fn the_tags_drop_each_handle_of_a_record_at_once() {
+        let mut tags = Tags::default();
+        tags.insert(1, 50);
+        tags.insert(2, 50);
+        tags.insert(3, 60);
+
+        // One answer takes its handle alone.
+        assert_eq!(tags.remove(&1), Some(50));
+        assert!(tags.contains_key(&2));
+
+        // The end of a record takes each handle of it, and no other.
+        tags.forget(50);
+        assert!(!tags.contains_key(&2));
+        assert_eq!(tags.get(&3), Some(&60));
+        assert_eq!(tags.remove(&2), None);
+    }
 
     #[test]
     fn a_record_that_a_relay_refuses_with_busy_goes_again_inside_its_bounds() {

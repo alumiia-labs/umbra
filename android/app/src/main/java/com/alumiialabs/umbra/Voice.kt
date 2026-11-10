@@ -44,6 +44,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import uniffi.umbra_ffi.MsgFile
+import androidx.compose.foundation.shape.RoundedCornerShape
 
 /** The voice class of a descriptor (Part 12 §12.3). */
 const val CLASS_VOICE: UByte = 4u
@@ -361,11 +362,11 @@ fun VoiceTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
                     append(Files.duration(seconds))
 
                     when {
-                        progress != null && !line.info.outgoing -> append(" · ").append(stringResource(R.string.voice_percent, progress))
-                        state == FILE_WANTED -> append(" · ").append(stringResource(R.string.voice_receiving))
+                        progress != null && !line.info.outgoing -> append(" · ").append(stringResource(R.string.common_percent, progress))
+                        state == FILE_WANTED -> append(" · ").append(stringResource(R.string.common_receiving))
                         state == FILE_HELD -> append(" · ").append(Files.size(context, file.size.toLong()))
                         lostLabel(line) != null -> append(" · ").append(lostLabel(line))
-                        state == FILE_FAILED && !line.info.outgoing -> append(" · ").append(stringResource(R.string.voice_not_received))
+                        state == FILE_FAILED && !line.info.outgoing -> append(" · ").append(stringResource(R.string.common_not_received))
                     }
                 },
                 style = MaterialTheme.typography.labelSmall,
@@ -417,7 +418,13 @@ fun RecordingBar(recording: VoiceRecording, onDiscard: () -> Unit, modifier: Mod
         ) { FaIcon("trash-can", label = stringResource(R.string.voice_discard_recording), size = 18.dp, tint = Palette.TextSecondary) }
 
         val isRecording = !recording.isEnded && !recording.isAtLimit
-        Box(Modifier.size(8.dp).background(if (isRecording) Palette.Error else Palette.TextSecondary, CircleShape))
+        // A dot records and a square stopped, thus the color is not the one sign.
+        Box(
+            Modifier.size(8.dp).background(
+                if (isRecording) Palette.Error else Palette.TextSecondary,
+                if (isRecording) CircleShape else RoundedCornerShape(1.dp),
+            ),
+        )
         Spacer(Modifier.width(10.dp))
         Text(
             if (recording.isAtLimit) {

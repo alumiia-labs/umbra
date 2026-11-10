@@ -666,6 +666,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 // A message that a deletion took during its upload is such
                 // a case.
                 let _ = self.keep_abandoned(&uploaded.credentials, rng);
+
+                // A message that stays has no upload job now. The view
+                // shows the failure, and the user sends the file again. The
+                // first error is the one that the caller gets.
+                if error != Error::NotFound {
+                    let _ = self.upload_failed(message, rng);
+                }
+
                 return Err(error);
             }
         };
@@ -1549,7 +1557,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             self.files.erase_left.insert(message.0, erasure.jobs.len());
         }
 
-        self.files.erasures.extend(erasure.jobs);
+        // One chunk takes one `CDEL` to each relay.
+        for job in erasure.jobs {
+            self.files.queue_erasure(job);
+        }
     }
 }
 

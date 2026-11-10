@@ -43,9 +43,46 @@ const HEAD_ROW_LEN: usize = 8 + 32 + 8 + 8;
 /// The next Public Address index. Profile 0 has no entry (Part 4 §4.2.5),
 /// thus the first link takes index 1.
 const NEXT_ADDRESS_SETTING: &[u8] = b"next-address-index";
+/// Reads one stored contact request.
+fn stored_request(plain: &[u8]) -> Result<(ContactRequest, StoredRequest), Error> {
+    let mut r = Cursor(plain);
+    if r.u8()? != REQUEST_VERSION {
+        return Err(Error::Integrity);
+    }
+
+    let id = r.array()?;
+    let via = r.array()?;
+    let received_at = u64::from_be_bytes(r.array()?);
+    let bundle = Zeroizing::new(r.var()?);
+    let name = String::from_utf8_lossy(&r.var()?).into_owned();
+
+    // A row of an earlier build ends after the name.
+    let (note, picture) = if r.0.is_empty() {
+        (String::new(), Vec::new())
+    } else {
+        (
+            String::from_utf8_lossy(&r.var()?).into_owned(),
+            r.var()?.to_vec(),
+        )
+    };
+    r.end()?;
+
+    Ok((
+        ContactRequest {
+            id,
+            via,
+            received_at,
+            name,
+            note,
+            picture,
+        },
+        StoredRequest { bundle },
+    ))
+}
+
 /// The hellos shown for one entry in one epoch of Part 13 §13.6, before
 /// the identifier of the entry.
-const HELLO_COUNT_SETTING: &[u8] = b"hello-count/";
+pub(super) const HELLO_COUNT_SETTING: &[u8] = b"hello-count/";
 /// The name that a hello of this device shows.
 const PROFILE_NAME_SETTING: &[u8] = b"profile-name";
 /// The welcome text of the profile blob (§9.3.1).
@@ -852,7 +889,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // DIS-135: the queue that a rotation replaced takes hellos in its
         // grace too.
         let Some(entry) = self.published()?.into_iter().find(|entry| {
-            entry.queue == *queue || entry.previous.is_some_and(|(held, _)| held == *queue)
+            entry.queue == *queue
+                || entry
+                    .previous
+                    .is_some_and(|(held, grace_end)| held == *queue && now < grace_end)
         }) else {
             return Ok(None);
         };
@@ -973,39 +1013,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let store = &self.open_ref()?.store;
         let mut out = Vec::new();
         for (_, plain) in store.list(REQUESTS, None)? {
-            let plain = Zeroizing::new(plain);
-            let mut r = Cursor(&plain);
-            if r.u8()? != REQUEST_VERSION {
-                return Err(Error::Integrity);
+            // A row that does not parse is one request less. A fault here
+            // would fail each hello and each view of the requests for it.
+            if let Ok(request) = stored_request(&Zeroizing::new(plain)) {
+                out.push(request);
             }
-
-            let id = r.array()?;
-            let via = r.array()?;
-            let received_at = u64::from_be_bytes(r.array()?);
-            let bundle = Zeroizing::new(r.var()?);
-            let name = String::from_utf8_lossy(&r.var()?).into_owned();
-
-            // A row of an earlier build ends after the name.
-            let (note, picture) = if r.0.is_empty() {
-                (String::new(), Vec::new())
-            } else {
-                (
-                    String::from_utf8_lossy(&r.var()?).into_owned(),
-                    r.var()?.to_vec(),
-                )
-            };
-            r.end()?;
-            out.push((
-                ContactRequest {
-                    id,
-                    via,
-                    received_at,
-                    name,
-                    note,
-                    picture,
-                },
-                StoredRequest { bundle },
-            ));
         }
 
         out.sort_by_key(|(request, _)| request.received_at);

@@ -86,6 +86,11 @@ fn element_from_bytes(bytes: &[u8; 32]) -> Result<RistrettoPoint, Error> {
     Ok(point)
 }
 
+/// The largest batch of one proof. The composite of an element takes its
+/// index as 2 bytes, thus a larger batch would give two elements one index.
+pub const BATCH_MAX: usize = 65_535;
+
+// Each caller gives a part of a fixed, short length.
 fn len_prefix(part: &[u8]) -> [u8; 2] {
     u16::try_from(part.len()).unwrap_or(u16::MAX).to_be_bytes()
 }
@@ -276,7 +281,7 @@ impl ServerKey {
         blinded: &[[u8; ELEMENT_LEN]],
         mut r: Scalar,
     ) -> Result<BatchEvaluation, Error> {
-        if blinded.is_empty() {
+        if blinded.is_empty() || blinded.len() > BATCH_MAX {
             r.zeroize();
             return Err(Error::Length);
         }
@@ -448,7 +453,7 @@ pub fn verify_proof_batch(
     elements: &[[u8; ELEMENT_LEN]],
     proof: &[u8; PROOF_LEN],
 ) -> Result<(), Error> {
-    if blinded.is_empty() || blinded.len() != elements.len() {
+    if blinded.is_empty() || blinded.len() > BATCH_MAX || blinded.len() != elements.len() {
         return Err(Error::Length);
     }
 
@@ -517,6 +522,22 @@ mod tests {
 
     fn scalar(s: &str) -> Scalar {
         Scalar::from_canonical_bytes(hex(s).try_into().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_batch_above_the_index_range_is_refused() {
+        let key = ServerKey::derive(&Secret::new([0xA3; 32]), b"test key").unwrap();
+        let blinded = alloc::vec![[0u8; ELEMENT_LEN]; BATCH_MAX + 1];
+
+        // The length check runs before a point decodes.
+        assert!(matches!(
+            key.evaluate_batch_with(&blinded, Scalar::ONE),
+            Err(Error::Length)
+        ));
+        assert!(matches!(
+            verify_proof_batch(key.public(), &blinded, &blinded, &[0u8; PROOF_LEN]),
+            Err(Error::Length)
+        ));
     }
 
     #[test]

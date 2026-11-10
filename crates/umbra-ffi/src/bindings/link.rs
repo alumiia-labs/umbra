@@ -755,15 +755,15 @@ impl Inner {
                     link.reading = false;
                 }
 
-                // Each chunk that a relay gave is tried in order, and the
-                // link fails only when none of them opens.
-                let count = chunks.len();
-                for (index, chunk) in chunks.iter().enumerate() {
-                    let last = index.saturating_add(1) == count;
+                // Each chunk that a relay gave is tried in order. One
+                // that does not open is an empty slot: a replica can give
+                // other bytes before the peer wrote, and the link has its
+                // own end time. The next poll reads the slot again.
+                for chunk in &chunks {
                     let opened = match step {
-                        LinkStep::ReadHello => self.on_hello(chunk, last),
-                        LinkStep::ReadOffer => self.on_offer(chunk, last),
-                        _ => self.on_provision(chunk, last),
+                        LinkStep::ReadHello => self.on_hello(chunk),
+                        LinkStep::ReadOffer => self.on_offer(chunk),
+                        _ => self.on_provision(chunk),
                     };
                     if opened {
                         break;
@@ -832,9 +832,9 @@ impl Inner {
 
     /// The hello is there: it opens under the key of the offer, and the
     /// offer goes, since the ticket works once (`DEV-006`).
-    /// The result is whether the chunk opened; a chunk that does not open
-    /// ends the link when it is the `last` one.
-    fn on_hello(&mut self, chunk: &[u8], last: bool) -> bool {
+    /// The result is whether the chunk opened. A chunk that does not open
+    /// is an empty slot, and the next poll reads the slot again.
+    fn on_hello(&mut self, chunk: &[u8]) -> bool {
         let Some(LinkState {
             job: LinkJob::Offer(offer),
             status,
@@ -851,9 +851,6 @@ impl Inner {
             LinkSecret::decapsulate(&offer.link_key, &offer.nonce, &offer.offer, bytes).ok()
         });
         let Some((hello, secret)) = opened else {
-            if last {
-                self.end_link(LinkStatus::Failed);
-            }
             return false;
         };
 
@@ -895,7 +892,14 @@ impl Inner {
 
         // The pending device is the one of this link from here on.
         *peer_drop_due = false;
-        running.invite_device()?;
+
+        // A run that ended takes no invitation. The roster and the pending
+        // device of this try then go, and the user confirms again.
+        if let Err(fault) = running.invite_device() {
+            offer.roster = None;
+            *peer_drop_due = true;
+            return Err(fault.into());
+        }
         *status = LinkStatus::Sending;
         Ok(())
     }
@@ -1013,7 +1017,7 @@ impl Inner {
         {
             let Inner { client, bridge, .. } = &mut *self;
             if let Some(running) = bridge.as_mut() {
-                let _ = running.flush(client, &mut OsRng);
+                super::flush_logged(running, client);
             }
         }
 
@@ -1026,9 +1030,9 @@ impl Inner {
 
     /// The offer is there: it checks against the ticket (`DEV-281`), and
     /// the hello goes up.
-    /// The result is whether the chunk opened; a chunk that does not open
-    /// ends the link when it is the `last` one.
-    fn on_offer(&mut self, chunk: &[u8], last: bool) -> bool {
+    /// The result is whether the chunk opened. A chunk that does not open
+    /// is an empty slot, and the next poll reads the slot again.
+    fn on_offer(&mut self, chunk: &[u8]) -> bool {
         let Some(LinkState {
             job: LinkJob::Join(join),
             ..
@@ -1043,9 +1047,6 @@ impl Inner {
             .ok()
             .and_then(|bytes| Some((bytes, LinkOffer::parse(bytes, &join.ticket).ok()?)))
         else {
-            if last {
-                self.end_link(LinkStatus::Failed);
-            }
             return false;
         };
 
@@ -1071,9 +1072,9 @@ impl Inner {
 
     /// The provision is there: the snapshot that it names comes down, and
     /// the hello goes.
-    /// The result is whether the chunk opened; a chunk that does not open
-    /// ends the link when it is the `last` one.
-    fn on_provision(&mut self, chunk: &[u8], last: bool) -> bool {
+    /// The result is whether the chunk opened. A chunk that does not open
+    /// is an empty slot, and the next poll reads the slot again.
+    fn on_provision(&mut self, chunk: &[u8]) -> bool {
         let Some(LinkState {
             job: LinkJob::Join(join),
             status,
@@ -1089,9 +1090,6 @@ impl Inner {
             FileDescriptor::parse(&provision.snapshot).ok()
         });
         let Some(descriptor) = descriptor else {
-            if last {
-                self.end_link(LinkStatus::Failed);
-            }
             return false;
         };
 
@@ -1325,7 +1323,7 @@ impl Handle {
     /// call on the device that owns the channels gives `NotFound`.
     pub fn take_over(&self, sink: Arc<dyn super::TextSink>) -> Result<(), FfiError> {
         let mut held = super::HeldText::default();
-        {
+        let rendered = {
             let mut inner = locked(&self.inner);
             let now = unix_now();
             if inner.client.owns_channels()? {
@@ -1342,16 +1340,20 @@ impl Handle {
             // a contact either.
             inner.end_run_for_ownership();
             inner.owns_channels = true;
-            inner.client.render_recovery_code(&mut held, &mut OsRng)?;
-        }
+
+            // The take-over is done here. A code that does not render must
+            // not keep the run of the old ownership up, thus its fault
+            // returns after the stop below.
+            inner.client.render_recovery_code(&mut held, &mut OsRng)
+        };
 
         if let Some(runtime) = locked(&self.runtime).take() {
             runtime.shutdown_background();
         }
         locked(&self.run_done).take();
-        let given = held.give(sink.as_ref());
         self.changed.notify_all();
-        given
+        rendered?;
+        held.give(sink.as_ref())
     }
 
     /// Whether another device of the set removed this one (`DEV-181`).

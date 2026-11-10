@@ -464,8 +464,14 @@ impl Watermarks {
     }
 
     pub(super) fn export(&self, w: &mut stored::Writer) {
-        w.u32(u32::try_from(self.marks.len()).unwrap_or(0));
-        for (source, counter) in &self.marks {
+        // The count and the entries agree at each length.
+        let count = u32::try_from(self.marks.len()).unwrap_or(u32::MAX);
+        w.u32(count);
+        for (source, counter) in self
+            .marks
+            .iter()
+            .take(usize::try_from(count).unwrap_or(usize::MAX))
+        {
             w.bytes(source);
             w.u64(*counter);
         }
@@ -558,8 +564,14 @@ impl RetainedLog {
 
     pub(super) fn export(&self, w: &mut stored::Writer) {
         w.u64(self.acked);
-        w.u32(u32::try_from(self.records.len()).unwrap_or(0));
-        for record in &self.records {
+        // The count and the entries agree at each length.
+        let count = u32::try_from(self.records.len()).unwrap_or(u32::MAX);
+        w.u32(count);
+        for record in self
+            .records
+            .iter()
+            .take(usize::try_from(count).unwrap_or(usize::MAX))
+        {
             w.bytes(&record.msg_ref);
             w.u64(record.counter);
             w.u64(record.sent_at);

@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 11: Private Groups (2–500)
 
 **Status:** Draft
-**Version:** 0.52.1
+**Version:** 0.53.0
 **Date:** 2026-11-09
 
 ---
@@ -891,7 +891,14 @@ epoch `e + 1` before either reads the other.
 install the secret of the record whose rotator has the lower member index, and
 it MUST keep the other secret as an alternate for `GROUP_EPOCH_GRACE`. That
 rule orders two records that each hold a slot for every member of their
-`roster_epoch`.
+`roster_epoch`. A member MUST reject a record of a second rotator for the
+current epoch when `GROUP_EPOCH_GRACE` passed since that member installed its
+first secret of that epoch.
+
+> *Cause.* The rule orders a race of two rotators. Without the bound, an
+> active member of a lower index can give one member a new secret for the
+> current epoch at any time, and that member then sends under a secret that
+> no other member holds.
 
 A one-slot record of §11.4.3 names the member that made it and not the rotator
 of its secret. Thus a member that holds a secret of the epoch MUST keep the

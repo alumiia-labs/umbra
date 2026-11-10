@@ -15,7 +15,9 @@ pub fn commit(nonce: &[u8; 32]) -> [u8; 32] {
 /// The six-digit code of a ceremony.
 pub fn code(own_pk: &[u8], peer_pk: &[u8], own_nonce: &[u8; 32], peer_nonce: &[u8; 32]) -> u32 {
     let (lo, hi) = canonical_pair(own_pk, peer_pk);
-    let (nonce_lo, nonce_hi) = if core::ptr::eq(lo, own_pk) {
+    // The order of the nonces follows the order of the keys by their value,
+    // and not by the place of a slice in memory.
+    let (nonce_lo, nonce_hi) = if lo == own_pk {
         (own_nonce, peer_nonce)
     } else {
         (peer_nonce, own_nonce)

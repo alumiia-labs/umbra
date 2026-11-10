@@ -100,6 +100,7 @@ import uniffi.umbra_ffi.MsgReaction
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.material3.minimumInteractiveComponentSize
 
 @Composable
 fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: List<Byte>? = null) {
@@ -403,16 +404,20 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
     }
 
     forwarding?.let { line ->
+        val targets = Core.chats.filter {
+            !it.conversation.id.contentEquals(conversation.id) && !it.isClosed && it.isMember &&
+                (!it.isGroup || it.conversation in forwardGroups)
+        }
+
         ActionSheet(
             stringResource(R.string.chat_forward_to),
-            Core.chats.filter {
-                !it.conversation.id.contentEquals(conversation.id) && !it.isClosed && it.isMember &&
-                    (!it.isGroup || it.conversation in forwardGroups)
-            }.map { target ->
+            targets.map { target ->
                 RowEntry(if (target.isGroup) "user-group" else "comment", target.title) {
                     Core.forward(line.handle, target.conversation) { notice = UiText.get(R.string.chat_forwarded_to, target.title) }
                 }
             },
+            // A sheet with a title and no row says why it is empty.
+            note = if (targets.isEmpty()) stringResource(R.string.chat_no_forward_target) else null,
             onDismiss = { forwarding = null },
         )
     }
@@ -432,7 +437,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
     chosen?.let { line ->
         val entries = if (line.info.deleted) {
             // DEV-105: the user can clear a placeholder.
-            listOf(RowEntry("trash-can", stringResource(R.string.chat_remove)) { Core.deleteForMe(line.handle) })
+            listOf(RowEntry("trash-can", stringResource(R.string.common_remove)) { Core.deleteForMe(line.handle) })
         } else if (line.info.moderation == MOD_HIDE && line.key !in revealed) {
             // A hidden message that the user did not open gives no content.
             buildList {
@@ -449,7 +454,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                     add(RowEntry("rotate", stringResource(R.string.chat_send_again)) { Core.sendAgain(line.handle) })
                 }
                 add(
-                    RowEntry("reply", stringResource(R.string.chat_reply)) {
+                    RowEntry("reply", stringResource(R.string.common_reply)) {
                         endEdit()
                         answered = line
                     },
@@ -458,7 +463,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                 // device, inside 24 hours, below the limit of revisions.
                 if (line.info.editable && !isObserver) {
                     add(
-                        RowEntry("pen", stringResource(R.string.chat_edit)) {
+                        RowEntry("pen", stringResource(R.string.common_edit)) {
                             answered = null
                             // A second edit keeps the draft of the first one.
                             if (edited == null) heldDraft = composer.copy().takeIf { it.isNotEmpty() }
@@ -576,12 +581,12 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
 
     deletingOwn?.let { line ->
         ActionSheet(
-            stringResource(R.string.chat_delete_on_my_devices_question),
+            stringResource(R.string.common_delete_on_my_devices_question),
             listOf(
                 RowEntry("trash-can", stringResource(R.string.common_delete_on_my_devices)) {
                     Core.deleteForMe(line.handle)
                     // DEV-129: the view says which deletion ran.
-                    notice = UiText.get(R.string.chat_deleted_on_your_devices)
+                    notice = UiText.get(R.string.common_deleted_on_your_devices)
                 },
             ),
             note = stringResource(R.string.chat_delete_on_my_devices_note),
@@ -595,14 +600,15 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
             listOf(
                 RowEntry("trash-can", stringResource(R.string.chat_delete_for_everyone)) {
                     if (answered?.key == line.key) answered = null
-                    Core.deleteForEveryone(line.handle) {
-                        notice = UiText.get(R.string.chat_wait_between_deletions)
-                    }
-                    // DEV-129: the view says which deletion ran.
-                    notice = if (chat.isGroup) {
+                    // DEV-129: the view says which deletion ran, after the
+                    // core took the request.
+                    val asked = if (chat.isGroup) {
                         UiText.get(R.string.chat_asked_each_member_to_delete)
                     } else {
                         UiText.get(R.string.chat_asked_contact_to_delete, chat.title)
+                    }
+                    Core.deleteForEveryone(line.handle, onAsked = { notice = asked }) {
+                        notice = UiText.get(R.string.chat_wait_between_deletions)
                     }
                 },
             ),
@@ -649,13 +655,13 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
 
         // GRP-199, GRP-200: the line ends at the first answer of a relay.
         if (chat.isUnreachable) {
-            Box(Modifier.padding(start = 20.dp, end = 20.dp, top = 8.dp)) {
+            Box(Modifier.padding(start = PressInset, end = PressInset, top = 8.dp)) {
                 Note(UiText.get(R.string.umbra_ui_grp_199))
             }
         }
 
         if (isQueueFull) {
-            Box(Modifier.padding(start = 20.dp, end = 20.dp, top = 8.dp)) {
+            Box(Modifier.padding(start = PressInset, end = PressInset, top = 8.dp)) {
                 Note(UiText.get(R.string.umbra_ui_imp_082))
             }
         }
@@ -692,7 +698,8 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                 }
             }
 
-            itemsIndexed(lines) { index, line ->
+            // The key keeps the state of a bubble, as its slide, with its message.
+            itemsIndexed(lines, key = { _, line -> line.key }) { index, line ->
                 // A thread shows its root and its replies alone.
                 if (threadOf != null && line.key != threadOf && line.threadKey != threadOf) return@itemsIndexed
 
@@ -772,6 +779,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                         color = Palette.Action,
                         modifier = Modifier
                             .padding(start = 12.dp, bottom = 4.dp)
+                            .minimumInteractiveComponentSize()
                             .press(role = Role.Button) { threadOf = line.key },
                     )
                 }
@@ -790,13 +798,13 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
         }
 
         notice?.let {
-            Box(Modifier.padding(horizontal = 12.dp)) { Note(it) }
+            Box(Modifier.padding(horizontal = PressInset)) { Note(it) }
         }
 
         // DEV-126: the limits of an edit show while the user edits. They go
         // at the confirmation and at the cancel, and they wait for no relay.
         if (edited != null) {
-            Box(Modifier.padding(horizontal = 12.dp)) {
+            Box(Modifier.padding(horizontal = PressInset)) {
                 Note(
                     UiText.get(
                         if (chat.isGroup) R.string.umbra_ui_dev_126_edit_group else R.string.umbra_ui_dev_126_edit,
@@ -892,11 +900,11 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
             // GRP-297: the keys of the group moved on while this device was
             // away, and no member could give them to it.
             chat.isLapsed ->
-                stringResource(R.string.chat_membership_lapsed)
-            chat.isClosed -> stringResource(R.string.chat_group_closed)
+                stringResource(R.string.common_group_lapsed_note)
+            chat.isClosed -> stringResource(R.string.common_group_closed_note)
             // GRP-373, GRP-374: a removed device took the index of this member.
             chat.isReturning ->
-                stringResource(R.string.chat_device_took_your_place)
+                stringResource(R.string.common_group_returning_note)
             chat.needsInvitation -> UiText.get(R.string.umbra_ui_grp_374)
             chat.isGroup && !chat.isMember ->
                 stringResource(R.string.chat_no_longer_member)
@@ -906,7 +914,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
         }
 
         if (stopped != null) {
-            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = PressInset, vertical = 12.dp)) {
                 Note(stopped)
             }
             return@Column
@@ -1012,13 +1020,13 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                     .size(48.dp)
                     .clip(CircleShape)
                     .background(Palette.Action)
-                    .clickable(role = Role.Button, onClickLabel = sendLabel) {
+                    .press(role = Role.Button, label = sendLabel) {
                         val active = recording
                         if (active != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                             recording = null
                             Core.sendVoice(conversation, active)
                             jumpsAtNextLoad = true
-                            return@clickable
+                            return@press
                         }
 
                         if (offersVoice) {
@@ -1028,7 +1036,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                             } else {
                                 askMicrophone.launch(Manifest.permission.RECORD_AUDIO)
                             }
-                            return@clickable
+                            return@press
                         }
 
                         composer.take()?.let { text ->
@@ -1201,6 +1209,14 @@ private fun Bubble(
                 // The text is a view of the platform, thus the press area lies above
                 // the content, as in a row of the chat list. A press on an answer
                 // leads to the message that it answers.
+                // The time line of a voice message takes its own touch, thus
+                // a tap there moves the message. A bubble with a view of the
+                // platform, as a caption or a quote, keeps the area above it.
+                val file = line.info.file
+                val isVoiceAlone = !line.info.deleted && line.text.isEmpty() && !line.isReply && file != null &&
+                    file.state.toInt() == FILE_READY &&
+                    (file.mimeClass == CLASS_VOICE || file.mimeClass == CLASS_AUDIO)
+
                 PressOver(
                     Modifier
                         .widthIn(max = 300.dp)
@@ -1213,7 +1229,7 @@ private fun Bubble(
                     longLabel = stringResource(R.string.chat_message_actions),
                     onLongClick = onLongPress,
                     // The options of a poll take their own press.
-                    isOver = line.poll == null,
+                    isOver = line.poll == null && !isVoiceAlone,
                 ) { BubbleContent(line, chat, isRevealed, isQuoteHidden, mayVote, author, quoteAuthor) }
                 if (line.reactions.isNotEmpty()) ReactionPills(line)
             }
@@ -1266,7 +1282,7 @@ private fun ReactionPills(line: Line) {
                     .press(role = Role.Button, label = if (isMine) stringResource(R.string.chat_remove_reaction, emoji) else stringResource(R.string.chat_react, emoji)) {
                         Core.react(line.handle, emoji)
                     }
-                    .padding(horizontal = 8.dp, vertical = 3.dp),
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(emoji, fontSize = 14.sp)
@@ -1518,7 +1534,7 @@ private fun ComposerHeader(icon: String, words: String, quoted: CharArray, onCan
                 modifier = Modifier.weight(1f),
             )
             Box(
-                Modifier.size(36.dp).clip(CircleShape).press(role = Role.Button, label = stringResource(R.string.common_cancel), onClick = onCancel),
+                Modifier.size(TouchTarget).clip(CircleShape).press(role = Role.Button, onClick = onCancel),
                 contentAlignment = Alignment.Center,
             ) { FaIcon("xmark", label = stringResource(R.string.common_cancel), size = 14.dp, tint = Palette.TextSecondary) }
         }

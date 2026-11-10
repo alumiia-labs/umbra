@@ -11,6 +11,9 @@ use alloc::{string::String, vec::Vec};
 pub const TCP_HEAD_START_MS: u64 = 250;
 /// The lifetime of a cached winner, in seconds.
 pub const WINNER_TTL: u64 = 24 * 3_600;
+/// The networks whose winner the cache holds at most. A device that moves
+/// between many networks thus keeps a bounded list of their names.
+pub const WINNERS_MAX: usize = 32;
 
 /// The two transports of L1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +38,10 @@ pub enum Plan {
 
 /// The winner cache, keyed by the network identifier the platform gives:
 /// an SSID or a PLMN.
+///
+/// No client of v1 uses the cache: each dial is `Plan::Only(Wire::Tcp)`.
+/// The names of the networks say where a device was. A caller thus keeps
+/// the cache in memory alone, and it holds `WINNERS_MAX` names at most.
 #[derive(Default)]
 pub struct WinnerCache {
     entries: Vec<(String, Wire, u64)>,
@@ -61,7 +68,15 @@ impl WinnerCache {
 
     /// Records the transport that completed first on `network` at `now`.
     pub fn record(&mut self, network: &str, wire: Wire, now: u64) {
-        self.entries.retain(|(n, _, _)| n != network);
+        // A winner past its lifetime serves no plan, thus it leaves here.
+        self.entries
+            .retain(|(n, _, at)| n != network && now.saturating_sub(*at) < WINNER_TTL);
+
+        // The entries are in the order of their record, the oldest first.
+        if self.entries.len() >= WINNERS_MAX {
+            self.entries.remove(0);
+        }
+
         self.entries.push((String::from(network), wire, now));
     }
 
@@ -105,5 +120,22 @@ mod tests {
 
         cache.forget("home");
         assert_eq!(cache.lookup("home", 600), None);
+    }
+
+    #[test]
+    fn the_cache_holds_a_bounded_count_of_networks() {
+        let mut cache = WinnerCache::default();
+        for index in 0..=WINNERS_MAX {
+            cache.record(&alloc::format!("net-{index}"), Wire::Tcp, 100);
+        }
+
+        // The oldest network left, and each later one stays.
+        assert_eq!(cache.entries.len(), WINNERS_MAX);
+        assert_eq!(cache.lookup("net-0", 200), None);
+        assert_eq!(cache.lookup("net-1", 200), Some(Wire::Tcp));
+
+        // A record drops each winner past its lifetime.
+        cache.record("late", Wire::Quic, 100 + WINNER_TTL);
+        assert_eq!(cache.entries.len(), 1);
     }
 }

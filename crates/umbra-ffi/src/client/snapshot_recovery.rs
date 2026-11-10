@@ -416,9 +416,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             self.note_grant(conversation, entry, rng)?;
         }
 
-        self.put_recovery(conversation, None, rng)?;
+        // The recovery ends after the store holds the roster. With the
+        // other order, a fault of the store would end the recovery with no
+        // roster, and no later request would ask for one.
         let outcomes: VecDeque<_> = group.retry_held(now_ms / 1_000).into_iter().collect();
         self.take_outcomes(conversation, group, outcomes, before, false, now_ms, rng)?;
+        self.put_recovery(conversation, None, rng)?;
         self.events.push_back(crate::Event::Conversations);
 
         Ok(())

@@ -13,7 +13,12 @@ use tokio::{
     time::timeout,
 };
 
-use crate::{native::NativeError, Error};
+use umbra_crypto::zeroize::Zeroizing;
+
+use crate::{
+    native::{self, NativeError},
+    Error,
+};
 
 /// The longest request head that a reader takes.
 const HEAD_MAX: usize = 8_192;
@@ -99,13 +104,22 @@ async fn post_now(
         .connect(name, tcp)
         .await?;
 
-    let mut head = format!(
+    // A header can hold an access token, thus the head takes its full
+    // length at the start and wipes at its end.
+    let extra: usize = headers
+        .iter()
+        .map(|(name, value)| name.len().saturating_add(value.len()).saturating_add(4))
+        .sum();
+    let first = format!(
         "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: {content_type}\r\n\
          Content-Length: {}\r\nConnection: close\r\n",
         url.path,
         url.host,
         body.len()
     );
+    let room = first.len().saturating_add(extra).saturating_add(2);
+    let mut head = Zeroizing::new(String::with_capacity(room));
+    head.push_str(&first);
     for (name, value) in headers {
         head.push_str(name);
         head.push_str(": ");
@@ -139,28 +153,25 @@ async fn post_now(
     read_response(&inbound)
 }
 
-/// Connects to each address of the host at once and keeps the first that
-/// answers. A host name with an IPv6 address that refuses costs no wait
-/// then: a refused connect on some systems takes seconds.
+/// Connects to the first address of the host that answers, the IPv4
+/// addresses first, with one address in use at a time. The peer thus sees
+/// one address of this party, as a relay does at a dial. Before this, a
+/// connect went to each address at once, and a host with two address
+/// families saw the IPv4 and the IPv6 address of a device together.
+///
+/// The system resolver sees the host name when the URL holds no address. A
+/// caller on a device gives the address.
 async fn connect_any(url: &Url) -> Result<TcpStream, NativeError> {
     if let Some(address) = url.address {
         return Ok(TcpStream::connect((address, url.port)).await?);
     }
 
-    let mut attempts = tokio::task::JoinSet::new();
-    for addr in tokio::net::lookup_host((url.host.as_str(), url.port)).await? {
-        attempts.spawn(TcpStream::connect(addr));
-    }
+    let mut addrs: Vec<_> = tokio::net::lookup_host((url.host.as_str(), url.port))
+        .await?
+        .collect();
+    addrs.sort_by_key(std::net::SocketAddr::is_ipv6);
 
-    let mut last = None;
-    while let Some(joined) = attempts.join_next().await {
-        match joined {
-            Ok(Ok(tcp)) => return Ok(tcp),
-            Ok(Err(error)) => last = Some(error),
-            Err(_) => {}
-        }
-    }
-    Err(last.map_or_else(|| Error::Refused.into(), NativeError::from))
+    native::connect_first(addrs.into_iter()).await
 }
 
 /// Reads the status and the body of an answer. The body must prove its
@@ -181,36 +192,58 @@ fn read_response(inbound: &[u8]) -> Result<(u16, Vec<u8>), NativeError> {
     let status = lines
         .next()
         .and_then(|line| line.strip_prefix("HTTP/1.1 "))
-        .and_then(|rest| rest.get(..3))
-        .and_then(|code| code.parse::<u16>().ok())
+        .and_then(status_code)
         .ok_or(Error::Refused)?;
 
     let body = inbound.get(head_end.saturating_add(4)..).unwrap_or(&[]);
 
+    // RFC 9112 §6.3: an answer with two framings is not clear, thus the
+    // head is read whole before the body.
+    let mut chunked = false;
+    let mut length = None;
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
             continue;
         };
 
         if name.eq_ignore_ascii_case("Transfer-Encoding") {
-            if !value.trim().eq_ignore_ascii_case("chunked") {
+            if chunked || !value.trim().eq_ignore_ascii_case("chunked") {
                 return Err(Error::Refused.into());
             }
-            return Ok((status, dechunk(body)?));
+            chunked = true;
         }
 
         if name.eq_ignore_ascii_case("Content-Length") {
-            if value.trim().parse::<usize>().ok() != Some(body.len()) {
+            if length.is_some() {
                 return Err(Error::Refused.into());
             }
-            return Ok((status, body.to_vec()));
+            length = Some(content_length(value)?);
         }
+    }
+
+    match (chunked, length) {
+        (true, None) => return Ok((status, dechunk(body)?)),
+        (false, Some(length)) if length == body.len() => return Ok((status, body.to_vec())),
+        (false, None) => {}
+        _ => return Err(Error::Refused.into()),
     }
 
     if matches!(status, 204 | 304) && body.is_empty() {
         return Ok((status, Vec::new()));
     }
     Err(Error::Refused.into())
+}
+
+/// The status code at the start of `rest`, which is the status line after
+/// its version: three digits, then a space or the end. Thus `2000` is no
+/// status.
+pub(crate) fn status_code(rest: &str) -> Option<u16> {
+    let code = rest.get(..3)?;
+    let ends = matches!(rest.as_bytes().get(3), None | Some(b' '));
+    if !ends || !code.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    code.parse().ok()
 }
 
 /// The body of a chunked answer: each chunk after its size in hex, up to
@@ -259,7 +292,7 @@ pub struct Request {
 /// A request with a body of another framing, or longer than `limit`, is
 /// refused.
 pub fn parse_request(inbound: &[u8], limit: usize) -> Result<Option<Request>, Error> {
-    let Some(head_end) = inbound.windows(4).position(|window| window == b"\r\n\r\n") else {
+    let Some(head_end) = head_end_after(inbound, 0) else {
         return if inbound.len() > HEAD_MAX {
             Err(Error::Refused)
         } else {
@@ -267,19 +300,64 @@ pub fn parse_request(inbound: &[u8], limit: usize) -> Result<Option<Request>, Er
         };
     };
 
-    let head =
-        core::str::from_utf8(inbound.get(..head_end).unwrap_or(&[])).map_err(|_| Error::Refused)?;
+    let (head, length) = checked_head(inbound, head_end, limit)?;
     let mut lines = head.split("\r\n");
     let mut first = lines.next().unwrap_or_default().split(' ');
-    let (Some(method), Some(path), Some("HTTP/1.1")) = (first.next(), first.next(), first.next())
-    else {
+    let (Some(method), Some(path)) = (first.next(), first.next()) else {
         return Err(Error::Refused);
     };
 
-    // The first pass checks the head with no allocation. A caller parses
-    // again after each partial read, thus the owned headers wait for the body.
+    let body_start = head_end.saturating_add(4);
+    let Some(body) = inbound.get(body_start..body_start.saturating_add(length)) else {
+        return Ok(None);
+    };
+
+    let headers = lines
+        .filter_map(|line| line.split_once(':'))
+        .map(|(name, value)| (name.to_ascii_lowercase(), value.trim().to_owned()))
+        .collect();
+    Ok(Some(Request {
+        method: method.to_owned(),
+        path: path.to_owned(),
+        headers,
+        body: body.to_vec(),
+    }))
+}
+
+/// Where the head of a request ends, from a search that starts at `from`.
+fn head_end_after(inbound: &[u8], from: usize) -> Option<usize> {
+    inbound
+        .get(from..)?
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|at| at.saturating_add(from))
+}
+
+/// Checks the head of a request that ends at `head_end`, with no
+/// allocation. Gives the head and the length of the body.
+fn checked_head(inbound: &[u8], head_end: usize, limit: usize) -> Result<(&str, usize), Error> {
+    let head =
+        core::str::from_utf8(inbound.get(..head_end).unwrap_or(&[])).map_err(|_| Error::Refused)?;
+    let mut lines = head.split("\r\n");
+
+    // RFC 9112 §3: the line is the method, the target, and the version,
+    // with one space between them and nothing after them.
+    let mut first = lines.next().unwrap_or_default().split(' ');
+    let line = (first.next(), first.next(), first.next(), first.next());
+    let (Some(method), Some(path), Some("HTTP/1.1"), None) = line else {
+        return Err(Error::Refused);
+    };
+    if method.is_empty() || !path.starts_with('/') {
+        return Err(Error::Refused);
+    }
+
     let mut length = None;
-    for line in lines.clone() {
+    for line in lines {
+        // RFC 9112 §2.2: a bare CR or LF in a line can read as the end of
+        // that line to another party.
+        if line.contains(['\r', '\n']) {
+            return Err(Error::Refused);
+        }
         let Some((name, value)) = line.split_once(':') else {
             return Err(Error::Refused);
         };
@@ -306,21 +384,7 @@ pub fn parse_request(inbound: &[u8], limit: usize) -> Result<Option<Request>, Er
         return Err(Error::Refused);
     }
 
-    let body_start = head_end.saturating_add(4);
-    let Some(body) = inbound.get(body_start..body_start.saturating_add(length)) else {
-        return Ok(None);
-    };
-
-    let headers = lines
-        .filter_map(|line| line.split_once(':'))
-        .map(|(name, value)| (name.to_ascii_lowercase(), value.trim().to_owned()))
-        .collect();
-    Ok(Some(Request {
-        method: method.to_owned(),
-        path: path.to_owned(),
-        headers,
-        body: body.to_vec(),
-    }))
+    Ok((head, length))
 }
 
 /// Whether `name` is a field name: one `token` of RFC 9110 §5.6.2, thus
@@ -349,9 +413,28 @@ pub async fn read_request<S: AsyncRead + Unpin>(
     limit: usize,
 ) -> Result<Request, Error> {
     let mut chunk = vec![0u8; 16_384];
+
+    // The search for the end of the head starts where the last one ended,
+    // and the head is checked one time. Before this, each read parsed the
+    // whole buffer again.
+    let mut searched = 0usize;
+    let mut whole_at = None;
+
     loop {
-        if let Some(request) = parse_request(inbound, limit)? {
-            return Ok(request);
+        if whole_at.is_none() {
+            match head_end_after(inbound, searched) {
+                Some(head_end) => {
+                    let (_, length) = checked_head(inbound, head_end, limit)?;
+                    whole_at = Some(head_end.saturating_add(4).saturating_add(length));
+                }
+                None if inbound.len() > HEAD_MAX => return Err(Error::Refused),
+                // The end can lie across two reads.
+                None => searched = inbound.len().saturating_sub(3),
+            }
+        }
+
+        if whole_at.is_some_and(|end| inbound.len() >= end) {
+            return parse_request(inbound, limit)?.ok_or(Error::Refused);
         }
 
         match stream.read(&mut chunk).await {
@@ -473,6 +556,17 @@ mod tests {
 
         let signed = b"POST / HTTP/1.1\r\nContent-Length: +5\r\n\r\nhello";
         assert_eq!(parse_request(signed, 64), Err(Error::Refused));
+
+        // A request line with one more part, with no path, or with a bare
+        // LF in a header is no request.
+        for bad in [
+            &b"POST / HTTP/1.1 x\r\nContent-Length: 0\r\n\r\n"[..],
+            b"POST  HTTP/1.1\r\nContent-Length: 0\r\n\r\n",
+            b"POST x HTTP/1.1\r\nContent-Length: 0\r\n\r\n",
+            b"POST / HTTP/1.1\r\nHost: a\nContent-Length: 9\r\n\r\n",
+        ] {
+            assert_eq!(parse_request(bad, 64), Err(Error::Refused));
+        }
         let one = b"POST / HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello";
         assert_eq!(parse_request(one, 64).unwrap().unwrap().body, b"hello");
     }
@@ -499,6 +593,17 @@ mod tests {
 
         let short = b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\nok";
         assert!(read_response(short).is_err());
+
+        // Two framings in one answer are not clear, in each order.
+        let both =
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n";
+        assert!(read_response(both).is_err());
+        let twice = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Length: 2\r\n\r\nok";
+        assert!(read_response(twice).is_err());
+
+        // A status has three digits.
+        let long = b"HTTP/1.1 2000 OK\r\nContent-Length: 2\r\n\r\nok";
+        assert!(read_response(long).is_err());
     }
 
     #[test]

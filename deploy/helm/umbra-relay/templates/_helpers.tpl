@@ -1,5 +1,10 @@
 {{- define "relay.image" -}}
+{{- /* A digest names one image for good. A tag can move to another. */ -}}
+{{- if .Values.image.digest -}}
+{{ .Values.image.repository }}@{{ .Values.image.digest }}
+{{- else -}}
 {{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}
+{{- end -}}
 {{- end -}}
 
 {{- define "relay.labels" -}}

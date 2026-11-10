@@ -123,10 +123,10 @@ fun DevicesScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             title = if (device.label.isEmpty()) {
                 stringResource(R.string.devices_remove_this_device)
             } else {
-                stringResource(R.string.devices_remove_named, device.label)
+                stringResource(R.string.common_remove_named, device.label)
             },
             entries = listOf(
-                RowEntry("trash-can", stringResource(R.string.devices_remove)) { Core.removeDevice(device.deviceId) },
+                RowEntry("trash-can", stringResource(R.string.common_remove)) { Core.removeDevice(device.deviceId) },
             ),
             note = UiText.get(R.string.umbra_ui_dev_137) +
                 " " + stringResource(R.string.devices_hostile_hands) + removed,
@@ -135,7 +135,7 @@ fun DevicesScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
     }
 
     Column(Modifier.fillMaxSize()) {
-        BackBar(stringResource(R.string.devices_linked_devices), onBack = onBack)
+        BackBar(stringResource(R.string.common_linked_devices), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState())) {
             for (device in Core.devices) {
                 // The device that owns the channels removes another one.
@@ -148,7 +148,7 @@ fun DevicesScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     FaIcon("mobile", size = 20.dp, tint = Palette.Text)
-                    Spacer(Modifier.width(18.dp))
+                    Spacer(Modifier.width(16.dp))
                     Column {
                         Text(device.label.ifEmpty { stringResource(R.string.devices_device) })
                         if (device.isSelf) {
@@ -163,14 +163,18 @@ fun DevicesScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             }
 
             if (Core.canTakeOver) {
-                EntryRow(
-                    RowEntry("triangle-exclamation", stringResource(R.string.devices_owning_device_lost_question)) {
-                        push(Screen.TakeOver)
-                    },
-                )
+                // The row puts its shade past a column with side padding,
+                // and this list has none.
+                Column(Modifier.padding(horizontal = PressInset)) {
+                    EntryRow(
+                        RowEntry("triangle-exclamation", stringResource(R.string.devices_owning_device_lost_question)) {
+                            push(Screen.TakeOver)
+                        },
+                    )
+                }
             }
 
-            Column(Modifier.padding(20.dp)) {
+            Column(Modifier.padding(PressInset)) {
                 if (Core.ownsChannels) {
                     PrimaryButton(stringResource(R.string.devices_link_a_device)) { push(Screen.LinkDevice) }
                 }
@@ -206,7 +210,7 @@ fun TakeOverScreen(onBack: () -> Unit) {
 
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.devices_owning_device_lost), onBack = onBack)
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(PressInset)) {
             Text(stringResource(R.string.devices_takeover_intro))
             Spacer(Modifier.height(12.dp))
 
@@ -229,10 +233,14 @@ fun TakeOverScreen(onBack: () -> Unit) {
                     add(UiText.plural(R.plurals.devices_takeover_unreachable, late.toInt(), late.toLong()))
                 }
                 add(UiText.get(R.string.devices_takeover_devices_leave))
-                add(UiText.get(R.string.devices_takeover_code_changes))
+                add(UiText.get(R.string.common_recovery_code_changes))
             }
             for (line in lines) {
-                Text("· $line", color = Palette.TextSecondary, modifier = Modifier.padding(bottom = 6.dp))
+                Text(
+                    stringResource(R.string.common_list_item, line),
+                    color = Palette.TextSecondary,
+                    modifier = Modifier.padding(bottom = 6.dp),
+                )
             }
 
             Spacer(Modifier.height(16.dp))
@@ -257,28 +265,6 @@ fun TakeOverScreen(onBack: () -> Unit) {
     }
 }
 
-/** The six digits of a link code, as two groups of three. */
-@Composable
-private fun LinkCode(code: String) {
-    Text(
-        "${code.take(3)} ${code.drop(3)}",
-        fontSize = 40.sp,
-        letterSpacing = 4.sp,
-        color = Palette.Action,
-        textAlign = TextAlign.Center,
-        modifier = Modifier.fillMaxWidth(),
-    )
-}
-
-@Composable
-private fun Progress() {
-    LinearProgressIndicator(
-        modifier = Modifier.fillMaxWidth().height(5.dp).clip(CircleShape),
-        color = Palette.Action,
-        trackColor = Palette.Container,
-    )
-}
-
 /**
  * The link as the existing device (Part 7 §7.4): the ticket as a QR code,
  * the code that the user compares (`DEV-283`), and the copy to the new
@@ -301,7 +287,7 @@ fun LinkDeviceScreen(onBack: () -> Unit) {
 
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.devices_link_a_device), onBack = onBack)
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(PressInset)) {
             when (val status = Core.linkStatus) {
                 is LinkStatus.Ticket -> {
                     Headline(stringResource(R.string.devices_scan_on_new_device))
@@ -310,18 +296,7 @@ fun LinkDeviceScreen(onBack: () -> Unit) {
                         QrCode(status.text, stringResource(R.string.devices_link_qr))
                     }
                     Spacer(Modifier.height(16.dp))
-                    Text(
-                        status.text,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        fontFamily = Fonts.Mono,
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(Palette.Raised, RoundedCornerShape(16.dp))
-                            .border(1.dp, Palette.Divider, RoundedCornerShape(16.dp))
-                            .padding(16.dp),
-                    )
+                    MonoBox(status.text)
                     Spacer(Modifier.height(12.dp))
                     SecondaryButton(stringResource(R.string.devices_copy_the_code)) {
                         copySensitive(context, status.text, UiText.get(R.string.common_umbra_link))
@@ -332,11 +307,11 @@ fun LinkDeviceScreen(onBack: () -> Unit) {
                 is LinkStatus.Code -> {
                     Headline(stringResource(R.string.devices_codes_match_question))
                     Spacer(Modifier.height(20.dp))
-                    LinkCode(status.code)
+                    CodeDigits(status.code)
                     Spacer(Modifier.height(24.dp))
-                    PrimaryButton(stringResource(R.string.devices_codes_match)) { Core.confirmLink() }
+                    PrimaryButton(stringResource(R.string.common_codes_match)) { Core.confirmLink() }
                     Spacer(Modifier.height(8.dp))
-                    SecondaryButton(stringResource(R.string.devices_codes_do_not_match)) {
+                    SecondaryButton(stringResource(R.string.common_codes_differ)) {
                         Core.cancelLink()
                         onBack()
                     }
@@ -344,7 +319,7 @@ fun LinkDeviceScreen(onBack: () -> Unit) {
                 is LinkStatus.Sending, is LinkStatus.Waiting -> {
                     Headline(stringResource(R.string.devices_copying))
                     Spacer(Modifier.height(20.dp))
-                    Progress()
+                    WaitBar()
                 }
                 is LinkStatus.Linked -> {
                     HeroIcon("check")
@@ -373,7 +348,7 @@ fun LinkDeviceScreen(onBack: () -> Unit) {
                     // The offer goes up to a relay before the code exists.
                     Headline(stringResource(R.string.devices_preparing_code))
                     Spacer(Modifier.height(20.dp))
-                    Progress()
+                    WaitBar()
                 }
             }
 
@@ -412,7 +387,7 @@ fun JoinForm(onCancel: () -> Unit) {
     Column(Modifier.fillMaxWidth()) {
         when {
             code != null -> {
-                LinkCode(code)
+                CodeDigits(code)
                 Spacer(Modifier.height(16.dp))
                 Text(
                     stringResource(R.string.devices_confirm_on_other),
@@ -424,7 +399,7 @@ fun JoinForm(onCancel: () -> Unit) {
             note != null -> {
                 Text(note, style = MaterialTheme.typography.bodySmall, color = Palette.TextSecondary)
                 Spacer(Modifier.height(10.dp))
-                Progress()
+                WaitBar()
             }
             held != null && (isPasting || !canScan) -> {
                 // A ticket is no message text, thus a composable field

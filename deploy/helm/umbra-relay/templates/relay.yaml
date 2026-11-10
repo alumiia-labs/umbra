@@ -40,7 +40,7 @@ spec:
       enableServiceLinks: false
       {{- with .Values.node }}
       nodeSelector:
-        kubernetes.io/hostname: {{ . }}
+        kubernetes.io/hostname: {{ . | quote }}
       {{- end }}
       securityContext:
         supplementalGroups: [10000]

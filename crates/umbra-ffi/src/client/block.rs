@@ -121,7 +121,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let open = self.open_mut()?;
         let mut waiting = Vec::new();
         for (row, plain) in open.store.list(super::RECEIPT, Some(&conversation.0))? {
-            if plain.get(16) == Some(&(umbra_wire::app::AppKind::ReadReceipt as u8)) {
+            if plain.get(super::RECEIPT_KIND)
+                == Some(&(umbra_wire::app::AppKind::ReadReceipt as u8))
+            {
                 waiting.push(row);
             }
         }

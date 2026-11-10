@@ -163,8 +163,10 @@ fn split_head(bytes: &[u8]) -> Option<(&[u8], usize)> {
 
 fn header<'a>(lines: &[&'a str], name: &str) -> Option<&'a str> {
     lines.iter().find_map(|line| {
+        // RFC 9112 §5.1: a name with whitespace before the colon is no
+        // header of that name, as the reader of `https` has it.
         let (k, v) = line.split_once(':')?;
-        k.trim().eq_ignore_ascii_case(name).then(|| v.trim())
+        k.eq_ignore_ascii_case(name).then(|| v.trim())
     })
 }
 

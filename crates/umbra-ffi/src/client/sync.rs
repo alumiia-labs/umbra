@@ -707,6 +707,13 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         conversation: ConversationId,
         rng: &mut R,
     ) -> Result<(), Error> {
+        // The held rows stay in the store, thus a batch that fails loses
+        // no record: the start of the next run stores them.
+        if let Some(waiting) = self.replays_wait.as_mut() {
+            waiting.push((*subject, conversation));
+            return Ok(());
+        }
+
         let mut held: Vec<(u64, RowId, super::Record)> = Vec::new();
         let now = super::unix_now_seconds();
         for (row, plain) in self.open_ref()?.store.list(PAIRWISE_HELD, None)? {
@@ -761,23 +768,19 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
 
         held.sort_by_key(|(order, _, _)| *order);
-        let rows: Vec<RowId> = held.iter().map(|(_, row, _)| *row).collect();
+        let rows: Vec<(TableId, RowId)> = held
+            .iter()
+            .map(|(_, row, _)| (PAIRWISE_HELD, *row))
+            .collect();
         let records: Vec<super::Record> = held
             .into_iter()
             .map(|(_, _, record)| record)
             .filter(|record| !record.app.is_empty())
             .collect();
-        if !records.is_empty() {
-            self.commit_records(&[], &records, now.saturating_mul(1_000), rng)?;
-        }
 
-        let open = self.open_mut()?;
-        let mut batch = open.store.begin();
-        for row in rows {
-            batch.delete(PAIRWISE_HELD, row);
-        }
-
-        Ok(batch.commit()?)
+        // The held rows leave in the commit of their records. A stop
+        // between two commits would apply each held edit a second time.
+        self.commit_held_records(&records, &rows, now.saturating_mul(1_000), rng)
     }
 
     /// Publishes one item of mutable state to each device of the set
@@ -1006,7 +1009,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
 
         let conversation = super::conversation_of(&plain)?;
-        *plain.get_mut(1).ok_or(Error::Integrity)? = reported as u8;
+        super::write_delivery(&mut plain, reported)?;
         let mut batch = open.store.begin();
         batch.put(TableId::MESSAGE, row, Some(conversation.0), &plain, rng)?;
         batch.commit()?;
@@ -1382,6 +1385,31 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// that go into their conversations, and the acknowledgments that end a
     /// resend. The engine state commits here.
     pub(super) fn take_sync_bodies<R: CryptoRng + ?Sized>(
+        &mut self,
+        bodies: Vec<(ConversationId, Vec<u8>)>,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<(Vec<Synced>, Vec<RowId>), Error> {
+        self.replays_wait = Some(Vec::new());
+        let taken = self.take_sync_bodies_held(bodies, now, rng);
+        let waiting = self.replays_wait.take().unwrap_or_default();
+        let taken = taken?;
+
+        // The engine is in the store now. A fault of a replay fails no
+        // batch that the store holds (`IMP-132`), and the held rows stay
+        // for the next run.
+        for (subject, conversation) in waiting {
+            if let Err(fault) = self.replay_pairwise_records(&subject, conversation, rng) {
+                self.defer_fault(Some(fault));
+            }
+        }
+
+        Ok(taken)
+    }
+
+    /// The work of [`Client::take_sync_bodies`]. Each replay of held
+    /// records waits in `replays_wait` during this call.
+    fn take_sync_bodies_held<R: CryptoRng + ?Sized>(
         &mut self,
         bodies: Vec<(ConversationId, Vec<u8>)>,
         now: u64,

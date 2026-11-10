@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 4: Identity
 
 **Status:** Draft
-**Version:** 0.52.1
+**Version:** 0.53.0
 **Date:** 2026-11-09
 
 ---
@@ -659,6 +659,17 @@ gives the handshake a static KEM.
    **[IDN-091]** The interface MUST NOT make the acceptance the default action.
    **[IDN-092]** The interface MUST NOT let a user accept the notice for more
    than one contact in one action.
+9. **[IDN-201]** An acceptance MUST name the `new_x25519_pk` that the notice
+   showed to the user. A client MUST apply the keys that it holds for the
+   contact only when they are the keys that the acceptance names. A later
+   notice of the same contact takes the place of the notice that waits. The
+   client MUST then show the notice again with the later key, and it MUST
+   refuse an acceptance that names the earlier key.
+
+> *Cause of `IDN-201`.* The attacker of the trade above can send a second
+> notice between the display and the answer of the user. Without the rule,
+> the user accepts one key and the client applies another, and a verification
+> under `IDN-090` of the first key protects nothing.
 
 > *Cause.* A pairwise identity holds no signing keypair, thus the outgoing
 > pairwise key cannot sign the replacement key. The ratchet already authenticates

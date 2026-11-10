@@ -2,7 +2,10 @@
 //! rate, and the two graces of a credential rotation. The notifier set of
 //! Part 8 §8.5.2 sits with the digest gate at the service.
 
-use alloc::{collections::VecDeque, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, VecDeque},
+    vec::Vec,
+};
 
 use umbra_crypto::stored::{Reader, Writer};
 
@@ -102,10 +105,19 @@ pub struct GroupQueue {
     write: Credential,
     own_pk: [u8; 32],
     records: VecDeque<Stored>,
+    /// The sequence of each held record by the digest of its bytes. The
+    /// search for a second send of one record (`NET-239`) thus reads no
+    /// held record, whatever a writer filled the queue with.
+    by_digest: BTreeMap<[u8; 32], u32>,
     bytes: usize,
     next_seq: u32,
     posts: VecDeque<u64>,
     last_activity: u64,
+}
+
+/// The digest that names the bytes of one record in a queue.
+fn digest_of(record: &[u8]) -> [u8; 32] {
+    umbra_crypto::hash::sha3_256(&[record])
 }
 
 impl GroupQueue {
@@ -124,6 +136,7 @@ impl GroupQueue {
             write: Credential::new(write_pk, GROUP_WRITE_GRACE),
             own_pk,
             records: VecDeque::new(),
+            by_digest: BTreeMap::new(),
             bytes: 0,
             next_seq: 1,
             posts: VecDeque::new(),
@@ -180,14 +193,33 @@ impl GroupQueue {
         self.records.is_empty()
     }
 
+    /// The bytes of the held records.
+    pub const fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    /// Removes the oldest record with its digest.
+    fn pop_oldest(&mut self) -> Option<Stored> {
+        let old = self.records.pop_front()?;
+        self.bytes = self.bytes.saturating_sub(old.bytes.len());
+
+        // A digest that names a later copy of the same bytes stays.
+        let digest = digest_of(&old.bytes);
+        if self.by_digest.get(&digest) == Some(&old.seq) {
+            self.by_digest.remove(&digest);
+        }
+        Some(old)
+    }
+
     /// Accepts a `GPOST` and returns its `seq`. A record whose bytes the
     /// relay already holds returns the `seq` it holds (`NET-239`); a post
     /// above `GROUP_POST_RATE` is rejected with `LIMIT` (`NET-241`); the
     /// oldest record leaves at the quota (`NET-247`).
     pub fn post(&mut self, record: &[u8], now: u64) -> Result<Posted, Reject> {
-        if let Some(held) = self.records.iter().find(|r| r.bytes == record) {
+        let digest = digest_of(record);
+        if let Some(seq) = self.by_digest.get(&digest) {
             return Ok(Posted {
-                seq: held.seq,
+                seq: *seq,
                 fresh: false,
                 dropped_through: None,
             });
@@ -213,15 +245,13 @@ impl GroupQueue {
             accepted_at: now,
             bytes: record.to_vec(),
         });
+        self.by_digest.insert(digest, seq);
         self.bytes = self.bytes.saturating_add(record.len());
 
         let mut dropped_through = None;
         while self.bytes > GROUP_QUEUE_QUOTA {
-            match self.records.pop_front() {
-                Some(old) => {
-                    self.bytes = self.bytes.saturating_sub(old.bytes.len());
-                    dropped_through = Some(old.seq);
-                }
+            match self.pop_oldest() {
+                Some(old) => dropped_through = Some(old.seq),
                 None => break,
             }
         }
@@ -257,6 +287,7 @@ impl GroupQueue {
                 write: Credential::import(reader, GROUP_WRITE_GRACE)?,
                 own_pk: reader.array()?,
                 records: VecDeque::new(),
+                by_digest: BTreeMap::new(),
                 bytes: 0,
                 next_seq: reader.u32()?,
                 // The rate of a new run starts empty, and a restart is no
@@ -274,6 +305,10 @@ impl GroupQueue {
         }
 
         queue.bytes = bytes;
+        queue.by_digest = records
+            .iter()
+            .map(|record| (digest_of(&record.bytes), record.seq))
+            .collect();
         queue.records = records.into();
         Ok(queue)
     }
@@ -309,8 +344,7 @@ impl GroupQueue {
             .front()
             .is_some_and(|r| now.saturating_sub(r.accepted_at) >= GROUP_RETENTION)
         {
-            if let Some(old) = self.records.pop_front() {
-                self.bytes = self.bytes.saturating_sub(old.bytes.len());
+            if let Some(old) = self.pop_oldest() {
                 dropped_through = Some(old.seq);
             }
         }

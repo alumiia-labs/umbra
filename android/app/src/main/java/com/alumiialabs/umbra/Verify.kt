@@ -69,8 +69,8 @@ fun ContactDetailsScreen(chat: Chat, onBack: () -> Unit, onMessage: () -> Unit, 
     }
 
     Column(Modifier.fillMaxSize()) {
-        BackBar(stringResource(R.string.verify_contact_details), onBack = onBack)
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
+        BackBar(stringResource(R.string.common_contact_details), onBack = onBack)
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = PressInset)) {
             Spacer(Modifier.height(12.dp))
             Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
                 // Part 9 §9.8: the user gives the contact a picture.
@@ -138,7 +138,7 @@ fun ContactDetailsScreen(chat: Chat, onBack: () -> Unit, onMessage: () -> Unit, 
             // user. DEV-326: the limit of the policy shows while it is on.
             forward?.let { now ->
                 HorizontalDivider(color = Palette.Divider)
-                ToggleRow(stringResource(R.string.verify_no_forwarding), now.own, icon = "share-nodes") { on ->
+                ToggleRow(stringResource(R.string.common_no_forwarding), now.own, icon = "share-nodes") { on ->
                     forward = ForwardRules(on, now.peer)
                     Core.setForwardProhibited(chat.conversation, on)
                 }
@@ -196,18 +196,23 @@ fun ContactDetailsScreen(chat: Chat, onBack: () -> Unit, onMessage: () -> Unit, 
             note = stringResource(R.string.verify_speed_note),
             onDismiss = close,
         )
-        ContactSheet.Introduce -> ActionSheet(
-            stringResource(R.string.verify_introduce_title, chat.title),
-            Core.chats.filter { !it.isGroup && !it.conversation.id.contentEquals(chat.conversation.id) }
-                .map { other ->
+        ContactSheet.Introduce -> {
+            val others = Core.chats.filter { !it.isGroup && !it.conversation.id.contentEquals(chat.conversation.id) }
+
+            ActionSheet(
+                stringResource(R.string.verify_introduce_title, chat.title),
+                others.map { other ->
                     RowEntry("comment", other.title) {
                         Core.requestIntroduction(to = other, about = chat) {
                             introduced = UiText.get(R.string.verify_asked, other.title)
                         }
                     }
                 },
-            onDismiss = close,
-        )
+                // A sheet with a title and no row says why it is empty.
+                note = if (others.isEmpty()) stringResource(R.string.common_no_other_contacts) else null,
+                onDismiss = close,
+            )
+        }
         ContactSheet.Block -> BlockSheet(
             chat.title,
             isBlocked,
@@ -219,7 +224,7 @@ fun ContactDetailsScreen(chat: Chat, onBack: () -> Unit, onMessage: () -> Unit, 
         ContactSheet.Delete -> {
             val notTold = stringResource(R.string.umbra_ui_dev_342)
             ActionSheet(
-                stringResource(R.string.verify_delete_contact_q, chat.title),
+                stringResource(R.string.verify_delete_contact_question, chat.title),
                 listOf(
                     RowEntry("trash-can", stringResource(R.string.verify_delete_contact)) {
                         Core.removeContact(context, chat.conversation)
@@ -268,7 +273,7 @@ fun VerifyScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
 
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.verify_verify_contact), onBack = onBack)
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(PressInset)) {
             // The one fact that decides the worth of a comparison: its channel.
             Headline(stringResource(R.string.verify_compare_with, chat.title), stringResource(R.string.verify_trusted_channel))
             Spacer(Modifier.height(20.dp))
@@ -282,7 +287,7 @@ fun VerifyScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             // IDN-140: the scan is the first way, and the short code the
             // second. A device with no back camera has the second alone.
             if (canScan) {
-                PrimaryButton(stringResource(R.string.verify_scan_code_of, chat.title)) {
+                PrimaryButton(stringResource(R.string.common_scan_code_of, chat.title)) {
                     push(Screen.ScanSafetyNumber(chat.conversation))
                 }
                 Spacer(Modifier.height(8.dp))
@@ -324,21 +329,21 @@ fun VerifyCodeScreen(chat: Chat, starts: Boolean, onBack: () -> Unit) {
     val failure = Core.verifyFault?.takeIf { it.first == conversation }?.second
 
     Column(Modifier.fillMaxSize()) {
-        BackBar(stringResource(R.string.verify_title, chat.title), onBack = onBack)
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
+        BackBar(stringResource(R.string.common_verify_named, chat.title), onBack = onBack)
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(PressInset)) {
             HeroIcon(if (isMismatch) "triangle-exclamation" else "shield-check")
             Spacer(Modifier.height(20.dp))
             when {
                 isDone -> {
-                    Headline(stringResource(R.string.verify_done, chat.title))
+                    Headline(stringResource(R.string.common_you_verified, chat.title))
                     Spacer(Modifier.height(20.dp))
                     PrimaryButton(stringResource(R.string.common_done), onClick = onBack)
                 }
                 isMismatch -> {
                     // A user cannot know what a mismatch means.
                     Headline(
-                        stringResource(R.string.verify_mismatch),
-                        stringResource(R.string.verify_mismatch_body, chat.title),
+                        stringResource(R.string.common_codes_do_not_match),
+                        stringResource(R.string.common_another_party_between, chat.title),
                     )
                     Spacer(Modifier.height(20.dp))
                     PrimaryButton(stringResource(R.string.common_try_again), onClick = start)
@@ -346,18 +351,11 @@ fun VerifyCodeScreen(chat: Chat, starts: Boolean, onBack: () -> Unit) {
                 code != null -> {
                     Headline(stringResource(R.string.verify_codes_match_question))
                     Spacer(Modifier.height(20.dp))
-                    Text(
-                        "${code.take(3)} ${code.drop(3)}",
-                        fontSize = 40.sp,
-                        letterSpacing = 4.sp,
-                        color = Palette.Action,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+                    CodeDigits(code)
                     Spacer(Modifier.height(24.dp))
-                    PrimaryButton(stringResource(R.string.verify_codes_match)) { Core.confirmVerification(conversation) }
+                    PrimaryButton(stringResource(R.string.common_codes_match)) { Core.confirmVerification(conversation) }
                     Spacer(Modifier.height(8.dp))
-                    SecondaryButton(stringResource(R.string.verify_codes_differ)) {
+                    SecondaryButton(stringResource(R.string.common_codes_differ)) {
                         Core.endVerification()
                         isMismatch = true
                     }
@@ -373,11 +371,7 @@ fun VerifyCodeScreen(chat: Chat, starts: Boolean, onBack: () -> Unit) {
                     // The two devices make the code together.
                     Headline(stringResource(R.string.verify_waiting, chat.title))
                     Spacer(Modifier.height(20.dp))
-                    LinearProgressIndicator(
-                        Modifier.fillMaxWidth(),
-                        color = Palette.Action,
-                        trackColor = Palette.Container,
-                    )
+                    WaitBar()
                 }
             }
         }
@@ -393,20 +387,12 @@ fun SafetyNumberScreen(chat: Chat, onBack: () -> Unit) {
 
     Column(Modifier.fillMaxSize()) {
         BackBar(chat.title, onBack = onBack)
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(PressInset)) {
             Headline(stringResource(R.string.verify_safety_number))
             Spacer(Modifier.height(16.dp))
 
             val groups = number?.split(' ').orEmpty()
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .background(Palette.Raised, RoundedCornerShape(24.dp))
-                    .border(1.dp, Palette.Divider, RoundedCornerShape(24.dp))
-                    .padding(vertical = 20.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
+            DigitFrame(rowGap = 10.dp) {
                 groups.chunked(3).forEach { row ->
                     Text(row.joinToString("  "), fontFamily = Fonts.Mono, fontSize = 17.sp)
                 }
@@ -434,21 +420,14 @@ fun VerifyPrompt(push: (Screen) -> Unit) {
     val (conversation, _) = Core.verifyCode ?: return
     val chat = Core.chats.firstOrNull { it.conversation == conversation } ?: return
 
-    // The shape of the recovery line: both ask for one act of the user.
-    Row(
-        Modifier
-            .padding(horizontal = 20.dp, vertical = 8.dp)
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(Palette.Container)
-            .press(role = Role.Button) { push(Screen.VerifyCode(conversation, starts = false)) }
-            .padding(12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        FaIcon("shield-check", size = 18.dp, tint = Palette.Action)
-        Spacer(Modifier.width(12.dp))
-        Text(stringResource(R.string.verify_prompt, chat.title), Modifier.weight(1f))
-        FaIcon("chevron-right", size = 14.dp, tint = Palette.TextSecondary)
+    // The card of the recovery line: both ask for one act of the user.
+    PromptCard(onClick = { push(Screen.VerifyCode(conversation, starts = false)) }) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            FaIcon("shield-check", size = 18.dp, tint = Palette.Action)
+            Spacer(Modifier.width(12.dp))
+            Text(stringResource(R.string.verify_prompt, chat.title), Modifier.weight(1f))
+            FaIcon("chevron-right", size = 14.dp, tint = Palette.TextSecondary)
+        }
     }
 }
 
@@ -461,7 +440,7 @@ fun VerifyPrompt(push: (Screen) -> Unit) {
  */
 @Composable
 fun KeyChangePanel(chat: Chat, pending: uniffi.umbra_ffi.FfiKeyChange, onVerify: () -> Unit) {
-    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = PressInset, vertical = 12.dp)) {
         Text(stringResource(R.string.verify_new_key, chat.title), style = MaterialTheme.typography.titleMedium)
         Spacer(Modifier.height(6.dp))
         Text(
@@ -478,7 +457,9 @@ fun KeyChangePanel(chat: Chat, pending: uniffi.umbra_ffi.FfiKeyChange, onVerify:
         Spacer(Modifier.height(12.dp))
         SecondaryButton(stringResource(R.string.verify_verify_contact), onClick = onVerify)
         Spacer(Modifier.height(8.dp))
-        SecondaryButton(stringResource(R.string.verify_accept_new_key)) { Core.acceptKeyChange(chat.conversation) }
+        SecondaryButton(stringResource(R.string.verify_accept_new_key)) {
+            Core.acceptKeyChange(chat.conversation, pending.newSafetyNumber)
+        }
     }
 }
 
@@ -490,7 +471,7 @@ fun KeyChangePanel(chat: Chat, pending: uniffi.umbra_ffi.FfiKeyChange, onVerify:
  */
 @Composable
 fun RenewalPanel(chat: Chat) {
-    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = PressInset, vertical = 12.dp)) {
         Text(stringResource(R.string.verify_renewal, chat.title), style = MaterialTheme.typography.titleMedium)
         Spacer(Modifier.height(6.dp))
         Text(

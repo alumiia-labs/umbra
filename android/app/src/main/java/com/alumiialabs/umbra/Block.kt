@@ -23,7 +23,7 @@ import androidx.compose.ui.unit.dp
 @Composable
 fun BlockSheet(name: String, isBlocked: Boolean, onSet: (Boolean) -> Unit, onDismiss: () -> Unit) {
     ActionSheet(
-        stringResource(if (isBlocked) R.string.block_unblock_q else R.string.block_block_q, name),
+        stringResource(if (isBlocked) R.string.block_unblock_question else R.string.block_block_question, name),
         listOf(
             RowEntry("ban", stringResource(if (isBlocked) R.string.common_unblock else R.string.common_block)) {
                 onSet(!isBlocked)
@@ -59,7 +59,7 @@ fun BlockedLine(chat: Chat) {
     }
 
     val text = line ?: return
-    Box(Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 8.dp)) {
+    Box(Modifier.fillMaxWidth().padding(start = PressInset, end = PressInset, top = 8.dp)) {
         Text(
             text,
             style = MaterialTheme.typography.bodySmall,

@@ -44,6 +44,9 @@ enum Stage {
     Building { pending: Box<Pending>, since: u64 },
     /// Each hop answered.
     Ready,
+    /// A build answer did not verify. The last layer is no hop 3 layer,
+    /// thus the `DESTROY` of the chain goes as a build cell.
+    Failed,
 }
 
 /// One loop chain of this relay.
@@ -60,6 +63,19 @@ struct Chain {
     last_loop: u64,
     /// The cells sent and received, against `CIRCUIT_MAX_CELLS`.
     cells: (u32, u32),
+}
+
+/// A draw below `count` with no bias toward the low values. `count` is
+/// above 0.
+fn draw_below<R: CryptoRng + ?Sized>(count: u32, rng: &mut R) -> u32 {
+    // The draws at or above the last whole multiple of `count` go again.
+    let limit = u32::MAX - u32::MAX % count;
+    loop {
+        let draw = rng.next_u32();
+        if draw < limit {
+            return draw % count;
+        }
+    }
 }
 
 /// Wraps a forward body under the layers of `hops`, the last hop first,
@@ -303,7 +319,7 @@ impl Loops {
             // A relay of layer 2 extends to each relay of layer 3, thus the
             // exit is a draw among them.
             let count = u32::try_from(self.exits.len()).ok().filter(|n| *n > 0)?;
-            let at = usize::try_from(rng.next_u32() % count).ok()?;
+            let at = usize::try_from(draw_below(count, rng)).ok()?;
             let (exit_id, exit_s) = self.exits.iter().nth(at)?;
             path.push(RelayStatic {
                 s: *exit_s,
@@ -402,6 +418,18 @@ impl Loops {
         }
     }
 
+    /// One cell of a chain whose each hop answered.
+    fn step_ready(chain: &mut Chain, tag: &[u8; BLOCK], body: &mut [u8]) -> Option<Step> {
+        open(&mut chain.hops, tag, body, true)?;
+        let (command, _) = unpad_body(body).ok()?;
+
+        Some(if command == CellCommand::Loop {
+            Step::Loop
+        } else {
+            Step::Quiet
+        })
+    }
+
     fn step<R: CryptoRng + ?Sized>(
         chain: &mut Chain,
         layer: u8,
@@ -410,15 +438,13 @@ impl Loops {
         rng: &mut R,
     ) -> Option<Step> {
         chain.cells.1 = chain.cells.1.saturating_add(1);
-        let stage = core::mem::replace(&mut chain.stage, Stage::Ready);
-        let Stage::Building { pending, since } = stage else {
-            open(&mut chain.hops, tag, body, true)?;
-            let (command, _) = unpad_body(body).ok()?;
-            return Some(if command == CellCommand::Loop {
-                Step::Loop
-            } else {
-                Step::Quiet
-            });
+        let (pending, since) = match core::mem::replace(&mut chain.stage, Stage::Failed) {
+            Stage::Building { pending, since } => (pending, since),
+            Stage::Failed => return None,
+            Stage::Ready => {
+                chain.stage = Stage::Ready;
+                return Self::step_ready(chain, tag, body);
+            }
         };
 
         // NET-164, NET-199: the answer comes back under the layers of the
@@ -436,6 +462,7 @@ impl Loops {
         chain.hops.push(KeySet::derive(&ss_hop, hop_layer));
 
         let Some(next) = chain.path.get(chain.hops.len()) else {
+            chain.stage = Stage::Ready;
             chain.last_loop = chain.born;
             return Some(Step::Quiet);
         };

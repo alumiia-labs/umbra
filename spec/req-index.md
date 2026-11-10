@@ -70,11 +70,11 @@ column when a crate implements the requirement and a test covers it.
 | --- | --- | --- | --- | --- | --- | --- |
 | `SCP` | 12 | 5 | 0 | 0 | 4 | **21** |
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
-| `NET` | 264 | 93 | 1 | 0 | 9 | **367** |
-| `IDN` | 137 | 46 | 1 | 0 | 5 | **189** |
-| `CRY` | 121 | 27 | 0 | 0 | 1 | **149** |
+| `NET` | 262 | 93 | 1 | 0 | 11 | **367** |
+| `IDN` | 138 | 46 | 1 | 0 | 5 | **190** |
+| `CRY` | 120 | 27 | 0 | 0 | 2 | **149** |
 | `WIR` | 418 | 88 | 0 | 0 | 8 | **514** |
-| `DEV` | 224 | 95 | 0 | 0 | 15 | **334** |
+| `DEV` | 225 | 95 | 0 | 0 | 15 | **335** |
 | `NTF` | 92 | 30 | 0 | 0 | 3 | **125** |
 | `DIS` | 138 | 37 | 1 | 0 | 3 | **179** |
 | `REL` | 173 | 34 | 1 | 0 | 4 | **212** |
@@ -83,7 +83,7 @@ column when a crate implements the requirement and a test covers it.
 | `ABU` | 71 | 29 | 1 | 0 | 0 | **101** |
 | `IMP` | 120 | 41 | 1 | 0 | 2 | **164** |
 | `SEC` | 4 | 3 | 0 | 0 | 1 | **8** |
-| **All** | 2182 | 648 | 8 | 0 | 63 | **2901** |
+| **All** | 2181 | 648 | 8 | 0 | 66 | **2903** |
 
 ## SCP — Scope and Conventions
 
@@ -428,7 +428,7 @@ Source: `spec/03-network-architecture.md`
 | `NET-287` | §3.2.3 | MUST | (unstated) | For the rules `NET-122` and `NET-123`, and for each rule of Part 6 that names the transport session of a command, the session of a command that arrives over a circuit is that circuit. |  |  |
 | `NET-288` | §3.2.3 | MUST | A client | A client MUST reject an `IDS` whose `relay_session_pk` differs from the `er` of the circuit that carried it. |  |  |
 | `NET-289` | §3.4.3 | MUST | (unstated) | A relay of layer 1 or 2 whose circuit holds no next hop is the endpoint of a forward cell, and it makes the check of `NET-114`. |  |  |
-| `NET-290` | §3.4.3 | MUST | (unstated) | A relay reaches a relay of the next layer as a client of the session of Part 6 §6.2.3. |  |  |
+| `NET-290` | §3.4.3 | MAY | (unstated) | A relay reaches a relay of the next layer as a client of the session of Part 6 §6.2.3. |  |  |
 | `NET-291` | §3.5.2 | MUST | A relay | A relay MUST send each cell that it starts on a circuit that ends at it on a tick of that clock. |  |  |
 | `NET-292` | §3.2.6 | MUST | After flight 3, an initiator | After flight 3, an initiator MUST send a record of kind `0x33` as its first ratchet record, with the `QueueAddress` that `app_1` carried. |  |  |
 | `NET-293` | §3.2.6 | MUST | A responder | A responder MUST hold a record of its user that comes before that first record, and it MUST send it when the chain opens. |  |  |
@@ -488,7 +488,7 @@ Source: `spec/03-network-architecture.md`
 | `NET-347` | §3.4.3 | MUST NOT | (unstated) | While a record waits for a circuit to that queue relay, or an inbound queue of the client lives at it, the client MUST start a new build to it on a fresh chain, and it MUST NOT hold the record or the `SUB` of the queue for its next run. |  |  |
 | `NET-348` | §3.2.6 | MUST | (unstated) | While no record of the contact has arrived on the new queue, the owner MUST send that record again at the start of each run and after each `ADDRESS_RESEND` of 6 hours: a run that ends before the record leaves loses it. |  |  |
 | `NET-349` | §3.5.2 | MUST | The relay | The relay MUST send such a drain in steps of at most 256 KiB for each circuit at each tick of its own fixed clock. |  |  |
-| `NET-350` | §3.4.6 | MUST | (unstated) | Under the same state, a client MAY put hop 1 and hop 3 in one bloc, and after that it MAY put two hops in one autonomous system or one prefix, each only when no chain holds without it, in that order. |  |  |
+| `NET-350` | §3.4.6 | MAY | (unstated) | Under the same state, a client MAY put hop 1 and hop 3 in one bloc, and after that it MAY put two hops in one autonomous system or one prefix, each only when no chain holds without it, in that order. |  |  |
 | `NET-351` | §3.4.6 | MUST NOT | A client | A client MUST NOT put hop 1 and hop 3 on one IPv4 address while a chain holds without it, after each relaxation of `NET-350`. |  |  |
 | `NET-352` | §3.4.3 | MUST | A queue relay | A queue relay MUST hold at most one subscription for a queue. |  |  |
 | `NET-353` | §3.4.3 | MUST | A relay of layer 2 or 3 that holds a `DirectoryRoot` | A relay of layer 2 or 3 that holds a `DirectoryRoot` MUST answer a build cell on a link with no `RelayHello` as the build of a **measurement candidate**, under the limits of a client link and under Part 10 rule `REL-205`. |  |  |
@@ -704,6 +704,7 @@ Source: `spec/04-identity.md`
 | `IDN-194` | §4.7.2 | MUST | A backup object | A backup object MUST carry the renewal guard of each contact in the row of that contact: the `guard_seq` and the secret `R` of Part 3 rule `NET-354`. |  |  |
 | `IDN-195` | §4.6 | MUST | A client | A client MUST run that scan over the contact table and over each table that holds a handshake before the first record of a run leaves under a ratchet from the store. |  |  |
 | `IDN-200` | §4.6 | MUST | (unstated) | The commit that writes the root seed writes a table MAC too, thus each store with a row holds a table MAC. |  |  |
+| `IDN-201` | §4.5.1 | MUST | An acceptance | An acceptance MUST name the `new_x25519_pk` that the notice showed to the user. |  |  |
 
 ## CRY — Cryptographic Core
 
@@ -729,7 +730,7 @@ Source: `spec/05-cryptographic-core.md`
 | `CRY-016` | §5.4.7 | MUST | A client | A client MUST put an ephemeral contribution from the two parties in each key derivation. |  |  |
 | `CRY-017` | §5.5.1 | MUST | A client | A client MUST use the header-encrypted variant of the Double Ratchet. |  |  |
 | `CRY-018` | §5.5.2 | MUST | A client | A client MUST select the chunk width of an epoch when it starts that epoch, and it MUST send each chunk of the epoch at that width. |  |  |
-| `CRY-019` | §5.5.2 | MUST | (unstated) | If no bucket holds the record with that frame, the client MAY send the record with `pq_frame_len = 0`, except where `CRY-146` applies. |  |  |
+| `CRY-019` | §5.5.2 | MAY | (unstated) | If no bucket holds the record with that frame, the client MAY send the record with `pq_frame_len = 0`, except where `CRY-146` applies. |  |  |
 | `CRY-020` | §5.5.2 | MUST | The client | The client MUST then send the chunk on a later record. |  |  |
 | `CRY-021` | §5.5.2 | MUST NOT | UMBRA | UMBRA MUST NOT use the retransmit-until-acknowledged strategy of Apple PQ3. |  |  |
 | `CRY-022` | §5.5.2 | MUST NOT | UMBRA | UMBRA MUST NOT make future KEM keypairs in advance. |  |  |
@@ -1722,6 +1723,7 @@ Source: `spec/07-device-sets.md`
 | `DEV-347` | §7.7 | MUST | The device that owns the channels | The device that owns the channels MUST write the current rendezvous queue of each published entry to its store as a debt, before it writes an epoch with a new `revoked` entry. |  |  |
 | `DEV-357` | §7.7.1 | MUST | A full identity reset | A full identity reset MUST write the mark of a tombstone of Part 9 `DIS-205` for each entry that the device publishes, in the commit of the new root. |  |  |
 | `DEV-358` | §7.5.9 | MAY | A user | A user MAY mark a conversation **priority**. |  |  |
+| `DEV-359` | §7.5.9 | MUST | (unstated) | A locked client cannot read the mention list of a record. |  |  |
 
 ## NTF — Notifications
 

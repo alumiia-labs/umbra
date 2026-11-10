@@ -58,7 +58,12 @@ const RELINK_MAX: Duration = Duration::from_secs(30);
 /// The shortest delay of a session of a watch that runs apart, and the
 /// span of the random part above it (Part 9 `DIS-015`).
 const APART_WAIT_MIN: u64 = 20;
-const APART_WAIT_SPAN: u64 = 101;
+const APART_WAIT_SPAN: u8 = 101;
+
+/// The blobs that wait for the platform. A listener that stalls loses the
+/// arrivals above this count, and it stops no lane and holds no memory
+/// without a bound.
+const WAKE_BACKLOG: usize = 64;
 
 /// The form of the table. The form before it holds no mark of a watch
 /// that runs apart, and no delay of such a watch.
@@ -451,9 +456,25 @@ enum End {
 /// The delay before a session of a lane that runs apart: 20 s to 120 s,
 /// as the run delays its rendezvous circuits (Part 9 `DIS-015`).
 fn apart_wait(rng: &mut OsRng) -> Duration {
-    let mut draw = [0u8; 1];
-    let _ = rng.try_fill_bytes(&mut draw);
-    Duration::from_secs(APART_WAIT_MIN + u64::from(u8::from_be_bytes(draw)) % APART_WAIT_SPAN)
+    // A byte at or above the largest multiple of the span would make the
+    // low delays more frequent, thus the draw goes again. A source that
+    // fails gives the shortest delay: the draw is a time and no secret.
+    let bound = u8::MAX - u8::MAX % APART_WAIT_SPAN;
+    let mut extra = 0u8;
+    for _ in 0..16 {
+        let mut draw = [0u8; 1];
+        if rng.try_fill_bytes(&mut draw).is_err() {
+            break;
+        }
+
+        let [byte] = draw;
+        if byte < bound {
+            extra = byte % APART_WAIT_SPAN;
+            break;
+        }
+    }
+
+    Duration::from_secs(APART_WAIT_MIN + u64::from(extra))
 }
 
 /// The wait before the next session (`NTF-118`): it doubles from
@@ -478,10 +499,24 @@ async fn run_watch(
 ) {
     crate::devlog::format_line!("watch: start, {} queues", table.len());
     let (stop, lane_stop) = watch::channel(false);
+
+    // The platform takes each blob on a thread of its own. Each lane runs
+    // on the one thread of this runtime, thus a call into the platform from
+    // a lane would stop each link for as long as the platform holds it.
+    let (blobs, mut waiting) = mpsc::channel::<Vec<u8>>(WAKE_BACKLOG);
+    let waker = listener.clone();
+    let wakes = tokio::task::spawn_blocking(move || {
+        while let Some(blob) = waiting.blocking_recv() {
+            // A fault of the platform with one blob ends no watch.
+            let _ = waker.wake(blob);
+        }
+    });
+
     let mut lanes = tokio::task::JoinSet::new();
     for (lane, delayed) in table.lanes() {
-        lanes.spawn(run_lane(lane, delayed, listener.clone(), lane_stop.clone()));
+        lanes.spawn(run_lane(lane, delayed, blobs.clone(), lane_stop.clone()));
     }
+    drop(blobs);
 
     let mut is_down = false;
     loop {
@@ -500,6 +535,10 @@ async fn run_watch(
 
     let _ = stop.send(true);
     while lanes.join_next().await.is_some() {}
+
+    // Each sender ended with its lane, thus the thread ends after the last
+    // blob, and the platform hears of the end after each arrival.
+    let _ = wakes.await;
     if is_down {
         crate::devlog::line("watch: down".to_owned());
         let _ = listener.down();
@@ -515,7 +554,7 @@ async fn run_watch(
 async fn run_lane(
     table: WatchTable,
     delayed: bool,
-    listener: Arc<dyn WatchListener>,
+    blobs: mpsc::Sender<Vec<u8>>,
     mut stop: watch::Receiver<bool>,
 ) -> bool {
     let mut backoff = RELINK_FIRST;
@@ -527,7 +566,7 @@ async fn run_lane(
             }
         }
 
-        let (end, was_ready) = session(&table, listener.as_ref(), &mut stop).await;
+        let (end, was_ready) = session(&table, &blobs, &mut stop).await;
         match end {
             End::Lost => {}
             End::Closed => return false,
@@ -557,7 +596,7 @@ fn is_stopped(stop: &watch::Receiver<bool>) -> bool {
 /// whether a circuit was ready, for the backoff.
 async fn session(
     table: &WatchTable,
-    listener: &dyn WatchListener,
+    blobs: &mpsc::Sender<Vec<u8>>,
     stop: &mut watch::Receiver<bool>,
 ) -> (End, bool) {
     let mut rng = OsRng;
@@ -565,6 +604,8 @@ async fn session(
         return (End::Down, false);
     };
 
+    // The key and the mask of the upgrade are no secret under TLS, thus a
+    // draw that fails leaves zero and ends no dial.
     let mut key = [0u8; 16];
     let mut mask = [0u8; 4];
     let _ = rng.try_fill_bytes(&mut key);
@@ -599,7 +640,7 @@ async fn session(
             break 'run End::Closed;
         }
         for capsule in node.take_capsules() {
-            if link.send(&capsule).await.is_err() {
+            if !crate::runtime::sent_in_time(&mut link, &capsule).await {
                 break 'run End::Lost;
             }
         }
@@ -626,8 +667,9 @@ async fn session(
             }
         };
 
-        // The node of a watch holds no contact, thus it commits nothing.
-        let _ = node.take_changes();
+        // The node of a watch holds no contact, thus no change of it goes to
+        // a store. The call empties the list, which would grow with the run.
+        drop(node.take_changes());
         for event in events {
             match event {
                 ClientEvent::CircuitReady => {
@@ -637,9 +679,11 @@ async fn session(
                     is_ready = true;
                 }
                 ClientEvent::CircuitLost | ClientEvent::CircuitAged => break 'run End::Lost,
-                // A fault of the platform with one blob ends no watch.
+                // A platform that holds `WAKE_BACKLOG` blobs loses this one.
+                // The relay holds the record, and the next arrival or the
+                // unlock shows it.
                 ClientEvent::Wake { blob, .. } => {
-                    let _ = listener.wake(blob);
+                    let _ = blobs.try_send(blob);
                 }
                 _ => {}
             }
@@ -680,9 +724,12 @@ fn node_of(
     }
     .map_err(|_| FfiError::Storage)?;
 
-    let mut seed = [0u8; 32];
-    let _ = rng.try_fill_bytes(&mut seed);
-    let root = RootIdentity::new(Secret::new(seed));
+    // The seed keys each circuit of the watch. A source that fails gives no
+    // node: a seed of zero bytes would be a key that each party knows.
+    let mut seed = Secret::<32>::zeroed();
+    rng.try_fill_bytes(seed.expose_mut())
+        .map_err(|_| FfiError::Storage)?;
+    let root = RootIdentity::new(seed);
     let mut node = ClientNode::with_relays(ingress, candidates, root);
     node.set_bootstrap(table.bootstrap);
     Ok((node, dial, tls))

@@ -74,7 +74,13 @@
 mod isolation;
 mod stats;
 
-use std::{collections::BTreeMap, path::PathBuf, process::ExitCode, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    process::ExitCode,
+    sync::Arc,
+    time::Duration,
+};
 
 use tokio::sync::mpsc;
 use umbra_core::{
@@ -145,8 +151,8 @@ struct Settings {
     keyset: PathBuf,
     /// The root that the relays chain to, or none for the public roots.
     ca: Option<String>,
-    root_seed: [u8; 32],
-    report_seed: [u8; 32],
+    root_seed: Secret<32>,
+    report_seed: Secret<32>,
     state: PathBuf,
     queue: PathBuf,
     /// The aggregators of §10.8 that this program plays, by index.
@@ -156,16 +162,31 @@ struct Settings {
     host_alias: Option<[u8; 4]>,
 }
 
-fn hex32(text: &str) -> Option<[u8; 32]> {
-    if text.len() != 64 {
+/// Writes the 32 bytes of 64 hex characters to `out`. `from_str_radix`
+/// takes a sign, thus each character is checked first: `+f` is no byte.
+fn hex_into(text: &str, out: &mut [u8; 32]) -> Option<()> {
+    if text.len() != 64 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
 
-    let mut out = [0u8; 32];
     for (index, byte) in out.iter_mut().enumerate() {
         *byte = u8::from_str_radix(text.get(index * 2..index * 2 + 2)?, 16).ok()?;
     }
+    Some(())
+}
+
+fn hex32(text: &str) -> Option<[u8; 32]> {
+    let mut out = [0u8; 32];
+    hex_into(text, &mut out)?;
     Some(out)
+}
+
+/// A secret of 32 bytes from hex. The bytes go into the secret with no
+/// copy that stays.
+fn secret32(text: &str) -> Option<Secret<32>> {
+    let mut secret = Secret::<32>::zeroed();
+    hex_into(text, secret.expose_mut())?;
+    Some(secret)
 }
 
 fn to_hex(bytes: &[u8]) -> String {
@@ -173,32 +194,41 @@ fn to_hex(bytes: &[u8]) -> String {
 }
 
 /// Reads a secret of 32 bytes from its file in hex. On a Unix system a
-/// file that a group or each other user can read gives none.
-fn read_secret(path: &std::path::Path) -> Option<[u8; 32]> {
+/// file that a group or each other user can read gives none. The mode comes
+/// from the open file, thus no party puts another file at the path between
+/// the check and the read. A file of that mode that this process can read
+/// belongs to its user or to root, thus no separate owner check runs.
+fn read_secret(path: &std::path::Path) -> Option<Secret<32>> {
+    let mut file = std::fs::File::open(path).ok()?;
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(path).ok()?.permissions().mode();
+        let mode = file.metadata().ok()?.permissions().mode();
         if mode & 0o077 != 0 {
             eprintln!("{} is open to more than its owner", path.display());
             return None;
         }
     }
 
-    let text = zeroize::Zeroizing::new(std::fs::read_to_string(path).ok()?);
-    hex32(text.trim())
+    let mut text = zeroize::Zeroizing::new(String::new());
+    std::io::Read::read_to_string(&mut file, &mut text).ok()?;
+    secret32(text.trim())
 }
 
 /// Reads the secret at `path`, or makes it from the generator of the
 /// operating system, readable by its owner alone.
-fn secret_at(path: &std::path::Path) -> Option<[u8; 32]> {
+fn secret_at(path: &std::path::Path) -> Option<Secret<32>> {
     if path.exists() {
         return read_secret(path);
     }
 
-    let mut secret = [0u8; 32];
-    umbra_crypto::rand_core::TryRng::try_fill_bytes(&mut umbra_ffi::runtime::OsRng, &mut secret)
-        .ok()?;
+    let mut secret = Secret::<32>::zeroed();
+    umbra_crypto::rand_core::TryRng::try_fill_bytes(
+        &mut umbra_ffi::runtime::OsRng,
+        secret.expose_mut(),
+    )
+    .ok()?;
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -206,7 +236,7 @@ fn secret_at(path: &std::path::Path) -> Option<[u8; 32]> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let text = zeroize::Zeroizing::new(to_hex(&secret));
+    let text = zeroize::Zeroizing::new(to_hex(secret.expose()));
     let mut file = options.open(path).ok()?;
     std::io::Write::write_all(&mut file, text.as_bytes()).ok()?;
     file.sync_all().ok()?;
@@ -242,8 +272,8 @@ fn read_settings(path: &str) -> Option<Settings> {
         }
         (None, Some(seed)) => (
             KeySource::TestSeed(hex32(seed)?),
-            hex32(values.get("root_seed")?)?,
-            hex32(values.get("report_seed")?)?,
+            secret32(values.get("root_seed")?)?,
+            secret32(values.get("report_seed")?)?,
         ),
         _ => return None,
     };
@@ -296,6 +326,13 @@ impl Persist for QueueStore {
 /// Writes `bytes` to `path`, readable by its owner alone. The bytes go to a
 /// file beside it first, thus a crash leaves the old file or the new one.
 fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_whole(path, bytes, true)
+}
+
+/// Writes `bytes` to `path` through a file beside it. A private file is
+/// readable by its owner alone. Each other file takes the mode of the
+/// process, for a file that another program reads.
+fn write_whole(path: &std::path::Path, bytes: &[u8], is_private: bool) -> std::io::Result<()> {
     let mut part = path.as_os_str().to_owned();
     part.push(".part");
     let part = PathBuf::from(part);
@@ -310,10 +347,12 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
-    {
+    if is_private {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
+    #[cfg(not(unix))]
+    let _ = is_private;
 
     let mut file = options.open(&part)?;
     std::io::Write::write_all(&mut file, bytes)?;
@@ -333,10 +372,12 @@ fn unix_now() -> u64 {
 /// directory of the signer.
 fn authority_key(settings: &Settings, index: u8) -> Option<SigningKey> {
     let seed = match &settings.keys {
-        KeySource::TestSeed(seed) => sha3_256(&[b"umbra/test/authority", seed, &[index]]),
+        KeySource::TestSeed(seed) => {
+            Secret::new(sha3_256(&[b"umbra/test/authority", seed, &[index]]))
+        }
         KeySource::Directory(dir) => read_secret(&dir.join(format!("authority-{index}.seed")))?,
     };
-    Some(SigningKey::from_seed(Secret::new(seed)))
+    Some(SigningKey::from_seed(seed))
 }
 
 /// The TLS configuration of each dial: the root of a test network, or the
@@ -390,6 +431,8 @@ struct Network {
     chain: Vec<RelayInfo>,
     /// The removed links (`REL-184`).
     removed: Vec<LinkRemoval>,
+    /// Each relay of the verified set, for the count of a report.
+    listed: BTreeSet<[u8; 32]>,
 }
 
 /// The relays of the manifest that the key set verifies.
@@ -402,10 +445,16 @@ fn relays_of(settings: &Settings) -> Result<Network, &'static str> {
         .filter(|relay| !relay.candidate.ingress)
         .map(info)
         .collect();
+    let listed = set
+        .relays
+        .iter()
+        .map(|relay| relay.candidate.relay_id)
+        .collect();
     Ok(Network {
         guard: info(guard),
         dial: dial_of(guard, settings.host_alias),
         chain,
+        listed,
         removed: set.removed_links,
     })
 }
@@ -479,10 +528,29 @@ struct Tally {
 /// The reports of each relay in each epoch.
 type Counts = BTreeMap<(u64, [u8; 32]), Tally>;
 
-/// Counts one report under each relay that it names.
-fn count_report(counts: &mut Counts, report: &LinkFaultReport) {
-    let floor = (unix_now() / EPOCH_SECONDS).saturating_sub(2);
+/// Drops the counts of each epoch that no later check reads.
+fn prune_counts(counts: &mut Counts, now: u64) {
+    let floor = (now / EPOCH_SECONDS).saturating_sub(2);
     counts.retain(|(epoch, _), _| *epoch >= floor);
+}
+
+/// Counts one report under each relay that it names. The result is whether
+/// it counted.
+///
+/// A report whose chain names a relay outside the verified set counts
+/// under none: each client can seal a report, and a chain of random hops
+/// would add one key for each hop and one report against the one real
+/// relay in it. The keys are thus the relays of the set in the epochs
+/// that `REL-170` takes, which bounds the map.
+fn count_report(
+    counts: &mut Counts,
+    listed: &BTreeSet<[u8; 32]>,
+    report: &LinkFaultReport,
+) -> bool {
+    if !report.hops.iter().all(|relay| listed.contains(relay)) {
+        return false;
+    }
+
     for relay in report.hops {
         let held = counts.entry((report.epoch, relay)).or_insert(Tally {
             reports: 0,
@@ -492,6 +560,7 @@ fn count_report(counts: &mut Counts, report: &LinkFaultReport) {
         held.reports = held.reports.saturating_add(1);
         held.chain = report.hops;
     }
+    true
 }
 
 /// Runs the fault rate of each ended epoch once its shares exist
@@ -500,6 +569,8 @@ fn count_report(counts: &mut Counts, report: &LinkFaultReport) {
 /// isolation query (`REL-080`, `REL-112`).
 fn evaluate(settings: &Arc<Settings>, key: &Arc<SigningKey>, counts: &mut Counts) {
     let now = unix_now();
+    prune_counts(counts, now);
+
     for ((epoch, relay), tally) in counts.iter_mut() {
         let ended = epoch
             .saturating_add(1)
@@ -573,13 +644,14 @@ async fn run_once(
         dial,
         chain,
         removed,
+        listed,
     } = relays_of(settings)?;
     let tls = tls_of(settings)?;
 
     let mut node = ClientNode::with_relays(
         guard,
         chain,
-        RootIdentity::new(Secret::new(settings.root_seed)),
+        RootIdentity::new(Secret::new(*settings.root_seed.expose())),
     );
     node.set_bootstrap(is_provisional(settings)?);
 
@@ -655,8 +727,10 @@ async fn run_once(
         match update {
             Update::Online => println!("authority online, queue restored={restored}"),
             Update::ReportQueue { address } => {
+                // The signer reads this file, thus a crash must leave the
+                // old address or the new one, and no part of one.
                 let held = [address.as_slice(), &report_pk].concat();
-                std::fs::write(&settings.queue, held)
+                write_whole(&settings.queue, &held, false)
                     .map_err(|_| "the queue file does not write")?;
                 println!("report queue made, written to {}", settings.queue.display());
             }
@@ -675,8 +749,9 @@ async fn run_once(
                     // REL-170: a report of the current epoch or the one
                     // before it counts, and each other goes.
                     let epoch = unix_now() / EPOCH_SECONDS;
-                    if report.epoch == epoch || report.epoch.saturating_add(1) == epoch {
-                        count_report(counts, &report);
+                    let is_current =
+                        report.epoch == epoch || report.epoch.saturating_add(1) == epoch;
+                    if is_current && count_report(counts, &listed, &report) {
                         reports.counted += 1;
                     }
                 }
@@ -820,7 +895,7 @@ fn run_main() -> ExitCode {
         });
     }
 
-    let report_sk = Secret::new(settings.report_seed);
+    let report_sk = Secret::new(*settings.report_seed.expose());
     let mut counts = Counts::new();
     runtime.block_on(async {
         loop {
@@ -837,12 +912,52 @@ fn run_main() -> ExitCode {
 mod tests {
     use super::*;
 
+    fn report_of(epoch: u64, hops: [[u8; 32]; 3]) -> LinkFaultReport {
+        LinkFaultReport {
+            epoch,
+            hops,
+            loops_sent: 3,
+            loops_lost: 3,
+        }
+    }
+
     #[test]
     fn the_wait_for_the_next_new_grows_to_its_bound() {
         // REL-208: 30 s, then twice the wait before it, up to 15 minutes.
         let mut wait = QUEUE_RETRY;
         let seconds: Vec<u64> = (0..8).map(|_| next_wait(&mut wait).as_secs()).collect();
         assert_eq!(seconds, [30, 60, 120, 240, 480, 900, 900, 900]);
+    }
+
+    #[test]
+    fn a_report_counts_only_under_relays_of_the_set() {
+        let listed: BTreeSet<[u8; 32]> = [[1; 32], [2; 32], [3; 32]].into();
+        let mut counts = Counts::new();
+
+        // A chain with one hop outside the set adds no key and no report.
+        let outside = report_of(7, [[1; 32], [9; 32], [3; 32]]);
+        assert!(!count_report(&mut counts, &listed, &outside));
+        assert!(counts.is_empty());
+
+        let inside = report_of(7, [[1; 32], [2; 32], [3; 32]]);
+        assert!(count_report(&mut counts, &listed, &inside));
+        assert!(count_report(&mut counts, &listed, &inside));
+        assert_eq!(counts.len(), 3);
+        assert_eq!(
+            counts.get(&(7, [2; 32])).map(|tally| tally.reports),
+            Some(2)
+        );
+
+        // The counts of an epoch that no check reads leave at the prune.
+        prune_counts(&mut counts, 10 * EPOCH_SECONDS);
+        assert!(counts.is_empty());
+    }
+
+    #[test]
+    fn a_hex_value_with_a_sign_is_no_value() {
+        assert_eq!(hex32(&"0f".repeat(32)), Some([0x0f; 32]));
+        assert_eq!(hex32(&"+f".repeat(32)), None);
+        assert!(secret32(&"+f".repeat(32)).is_none());
     }
 
     #[test]

@@ -921,11 +921,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         next.verify_successor(&previous, &Roster::hash(&current))?;
         let before: Vec<DeviceId> = previous.devices.iter().map(|d| d.device_id).collect();
         if next.revokes(&identity.device_id) {
-            self.mark_removed_from_set(rng)?;
-
             // DEV-317: the epoch stays out of the store, and its claim
             // still ends the ownership of this device.
             self.fold_claims(&before, &next, rng)?;
+            self.mark_removed_from_set(rng)?;
             return Ok(false);
         }
 
@@ -952,8 +951,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             self.rotation_guarded.clear();
         }
 
-        self.put_roster(bytes, rng)?;
+        // DEV-317: the claims fold before the epoch is the head. A second
+        // delivery of a stored epoch returns early, thus a fault after the
+        // store of the epoch would leave this device as an owner for good.
+        // A fold that ran before a fault runs again and changes nothing.
         self.fold_claims(&before, &next, rng)?;
+        self.put_roster(bytes, rng)?;
         for device in gone {
             self.end_sync_channel(device, rng)?;
         }

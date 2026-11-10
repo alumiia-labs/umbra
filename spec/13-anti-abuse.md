@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 13: Anti-Abuse Without Identifiers
 
 **Status:** Draft
-**Version:** 0.52.1
+**Version:** 0.53.0
 **Date:** 2026-11-09
 
 ---
@@ -526,7 +526,9 @@ the third constraint above. Part 5 §5.11 holds the label `"umbra/v1/pow"`.
   the Equi-X verification or the `pass` test.
 - **[ABU-074]** A verifier MUST reject a `PowSolution` whose `nonce` it
   accepted before under the same `seed`. The set of accepted nonces has the
-  scope of the two live seeds, thus §13.7 holds.
+  scope of the two live seeds, thus §13.7 holds. The one exception is the
+  solution of an upload: a relay accepts that solution again on a `CNEW` and
+  on a `BNEW`, up to the allowance of `ABU-107`.
 - **[ABU-075]** A client MUST set `effort` in a `PowSolution` at or above the
   `effort` of the challenge that it holds.
 

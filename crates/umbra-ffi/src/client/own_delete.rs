@@ -15,7 +15,7 @@
 //! of scope `0x03` that asks the contact to delete each message of the
 //! conversation, on each of its devices (`DEV-335`, `DEV-336`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use umbra_core::{
     devset::{roster::Roster, DeviceId},
@@ -173,6 +173,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // record would carry the content after the act. A deletion for the
         // other party and a control record stay: they carry no content.
         let mut gone = messages;
+        let shown: BTreeSet<[u8; 16]> = gone.iter().map(|message| message.0).collect();
         let mut texts = Vec::new();
         let open = self.open_ref()?;
         for (row, plain) in open.store.list(TableId::MESSAGE, Some(&conversation.0))? {
@@ -187,7 +188,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 kind,
                 Some(AppKind::Edit | AppKind::Reaction | AppKind::PollVote)
             );
-            if is_content && !gone.contains(&MsgRef(row)) {
+            if is_content && !shown.contains(&row) {
                 gone.push(MsgRef(row));
             }
         }
@@ -243,8 +244,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
         }
 
+        // The request and its bound commit before the local deletion. With
+        // the other order, a fault between the two leaves no message for a
+        // bound, and a second call would ask the contact to delete nothing.
         let bound = self.newest_of_contact(conversation)?;
-        self.delete_conversation(conversation, now_ms, rng)?;
 
         let body = DeleteBody {
             scope: DeleteScope::Conversation,
@@ -291,7 +294,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         });
         self.auto_lock.touch(now);
 
-        Ok(())
+        // A deletion request is no message of the view, thus it stays.
+        self.delete_conversation(conversation, now_ms, rng)
     }
 
     /// The `msg_id` of the newest message of the contact that this device

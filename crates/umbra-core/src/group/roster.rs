@@ -1173,28 +1173,32 @@ impl Roster {
     }
 
     /// Records a successor of `predecessor` from `maker`, and notes a fork
-    /// when the same maker made a different one before (`GRP-070`).
+    /// when the same maker made a different one before (`GRP-070`). The
+    /// rate of `GRP-076` counts after the fork test, thus an object that the
+    /// roster refuses as a fork uses no rate.
     fn note_successor(
         &mut self,
         predecessor: [u8; 32],
         maker: u16,
         hash: [u8; 32],
         named: bool,
+        kind: RateKind,
+        slot: u32,
     ) -> Result<(), Error> {
-        match self.successors.get(&(predecessor, maker)) {
-            Some((held, _)) if *held != hash => {
-                self.forks.push(Fork {
-                    predecessor,
-                    named: named.then_some(maker),
-                });
-                Err(Error::Stale)
-            }
-            _ => {
-                let epoch = self.epoch_index.saturating_add(1);
-                self.successors.insert((predecessor, maker), (hash, epoch));
-                Ok(())
-            }
+        let is_fork = self
+            .successors
+            .get(&(predecessor, maker))
+            .is_some_and(|(held, _)| *held != hash);
+        if is_fork {
+            self.show_fork(predecessor, named.then_some(maker));
+            return Err(Error::Stale);
         }
+
+        self.rate(maker, kind, slot)?;
+
+        let epoch = self.epoch_index.saturating_add(1);
+        self.successors.insert((predecessor, maker), (hash, epoch));
+        Ok(())
     }
 
     fn commit(&mut self, hash: [u8; 32], now: u64) {
@@ -1334,8 +1338,14 @@ impl Roster {
                 }
                 Self::check_keys(&keys)?;
 
-                self.rate(sender, RateKind::Epoch, slot)?;
-                self.note_successor(epoch.chain.previous_epoch_hash, sender, hash, false)?;
+                self.note_successor(
+                    epoch.chain.previous_epoch_hash,
+                    sender,
+                    hash,
+                    false,
+                    RateKind::Epoch,
+                    slot,
+                )?;
                 self.insert_member(index, &keys, Role::Member)?;
                 Applied::Added(index)
             }
@@ -1352,8 +1362,14 @@ impl Roster {
                     return Err(Error::Unverified);
                 }
 
-                self.rate(sender, RateKind::Epoch, slot)?;
-                self.note_successor(epoch.chain.previous_epoch_hash, sender, hash, false)?;
+                self.note_successor(
+                    epoch.chain.previous_epoch_hash,
+                    sender,
+                    hash,
+                    false,
+                    RateKind::Epoch,
+                    slot,
+                )?;
                 if let Some(m) = self.members.get_mut(&index) {
                     m.active = false;
                 }
@@ -1363,8 +1379,14 @@ impl Roster {
                 })
             }
             PlainOp::SelfRemoval => {
-                self.rate(sender, RateKind::Epoch, slot)?;
-                self.note_successor(epoch.chain.previous_epoch_hash, sender, hash, false)?;
+                self.note_successor(
+                    epoch.chain.previous_epoch_hash,
+                    sender,
+                    hash,
+                    false,
+                    RateKind::Epoch,
+                    slot,
+                )?;
                 if let Some(m) = self.members.get_mut(&sender) {
                     m.active = false;
                 }
@@ -1434,8 +1456,14 @@ impl Roster {
         } else {
             RateKind::Demotion
         };
-        self.rate(sender, kind, slot)?;
-        self.note_successor(epoch.chain.previous_epoch_hash, sender, hash, true)?;
+        self.note_successor(
+            epoch.chain.previous_epoch_hash,
+            sender,
+            hash,
+            true,
+            kind,
+            slot,
+        )?;
 
         if let Some(m) = self.members.get_mut(&epoch.grantee_index) {
             m.role = epoch.role;
@@ -1476,8 +1504,14 @@ impl Roster {
         }
         epoch.verify(&actor.roster_pk_hash)?;
 
-        self.rate(sender, RateKind::Epoch, slot)?;
-        self.note_successor(epoch.chain.previous_epoch_hash, sender, hash, true)?;
+        self.note_successor(
+            epoch.chain.previous_epoch_hash,
+            sender,
+            hash,
+            true,
+            RateKind::Epoch,
+            slot,
+        )?;
         self.commit(hash, now);
         Ok(Applied::Moderated {
             actor_role: epoch.actor_role,
@@ -1543,17 +1577,19 @@ impl Roster {
             return Err(Error::Unverified);
         }
         Self::check_keys(&record.new_keys)?;
-        self.rate(
+
+        // Two re-keys for one old index and one predecessor: the
+        // lower hash wins, and the fork shows (GRP-369).
+        self.note_successor(
+            record.chain.previous_epoch_hash,
             sender,
+            hash,
+            true,
             RateKind::Rekey {
                 new_index: record.new_index,
             },
             slot,
         )?;
-
-        // Two re-keys for one old index and one predecessor: the
-        // lower hash wins, and the fork shows (GRP-369).
-        self.note_successor(record.chain.previous_epoch_hash, sender, hash, true)?;
 
         if let Some(m) = self.members.get_mut(&record.old_index) {
             m.active = false;
@@ -2466,17 +2502,25 @@ pub(crate) mod tests {
                 0,
                 GroupControl::parse(&first).unwrap().epoch_hash(),
                 false,
+                RateKind::Epoch,
+                1,
             )
             .unwrap();
-        assert_eq!(
-            again.note_successor(
-                [0; 32],
-                0,
-                GroupControl::parse(&second).unwrap().epoch_hash(),
-                false
-            ),
-            Err(Error::Stale)
-        );
+        for _ in 0..2 {
+            assert_eq!(
+                again.note_successor(
+                    [0; 32],
+                    0,
+                    GroupControl::parse(&second).unwrap().epoch_hash(),
+                    false,
+                    RateKind::Epoch,
+                    1,
+                ),
+                Err(Error::Stale)
+            );
+        }
+
+        // The same fork shows one time.
         assert_eq!(again.forks().len(), 1);
         assert_eq!(again.forks()[0].named, None);
     }

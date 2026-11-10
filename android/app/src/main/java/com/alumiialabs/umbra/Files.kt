@@ -72,6 +72,7 @@ import java.nio.ByteBuffer
 import uniffi.umbra_ffi.DraftHandle
 import uniffi.umbra_ffi.MediaSource
 import uniffi.umbra_ffi.MsgFile
+import androidx.compose.material3.CircularProgressIndicator
 
 /** The media classes of a descriptor (Part 12 §12.3). */
 const val CLASS_VIDEO: UByte = 2u
@@ -600,11 +601,11 @@ object Files {
 
     /** The name that a save of the file of a message suggests. */
     fun suggestedName(file: MsgFile): String = file.name ?: when (file.mimeClass) {
-        CLASS_IMAGE -> "Photo.jpg"
-        CLASS_VIDEO -> "Video.mp4"
-        CLASS_VOICE -> "Voice.ogg"
-        CLASS_AUDIO -> "Audio.m4a"
-        else -> "File"
+        CLASS_IMAGE -> UiText.get(R.string.common_photo) + ".jpg"
+        CLASS_VIDEO -> UiText.get(R.string.common_video) + ".mp4"
+        CLASS_VOICE -> UiText.get(R.string.files_name_voice) + ".ogg"
+        CLASS_AUDIO -> UiText.get(R.string.chat_audio) + ".m4a"
+        else -> UiText.get(R.string.common_file)
     }
 
     /** The type that a save of the file of a message gives the platform. */
@@ -774,7 +775,7 @@ fun TransferMark(file: MsgFile, lost: String? = null) {
             when {
                 state == FILE_FAILED -> FaIcon("rotate", label = stringResource(R.string.files_download_again), size = 18.dp, tint = Color.White)
                 state == FILE_WANTED && share != null ->
-                    Text(stringResource(R.string.files_percent, share), style = MaterialTheme.typography.labelSmall, color = Color.White)
+                    Text(stringResource(R.string.common_percent, share), style = MaterialTheme.typography.labelSmall, color = Color.White)
                 else -> FaIcon("download", label = stringResource(R.string.files_download), size = 18.dp, tint = Color.White)
             }
         }
@@ -1011,7 +1012,10 @@ fun VideoScreen(line: Line, onBack: () -> Unit) {
 
         if (failed) {
             Text(stringResource(R.string.files_video_not_playable), color = Color.White)
-        } else if (isReady && !isPlaying) {
+        } else if (!isReady) {
+            // The player reads the file first, and a dark screen alone says nothing.
+            CircularProgressIndicator(color = Color.White)
+        } else if (!isPlaying) {
             Box(
                 Modifier.size(64.dp).background(Color.Black.copy(alpha = 0.5f), CircleShape),
                 contentAlignment = Alignment.Center,
@@ -1026,13 +1030,7 @@ fun VideoScreen(line: Line, onBack: () -> Unit) {
                 .padding(start = 4.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(
-                Modifier
-                    .size(48.dp)
-                    .clip(CircleShape)
-                    .press(role = Role.Button, label = stringResource(R.string.common_back), onClick = onBack),
-                contentAlignment = Alignment.Center,
-            ) { FaIcon("arrow-left", label = stringResource(R.string.common_back), size = 20.dp, tint = Color.White) }
+            IconAction("arrow-left", stringResource(R.string.common_back), tint = Color.White, onClick = onBack)
         }
 
         if (isReady) {
@@ -1156,14 +1154,7 @@ fun MediaScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp),
         ) {
             if (lines != null && all.isEmpty()) {
-                item {
-                    Text(
-                        stringResource(R.string.files_nothing_shared),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = Palette.TextSecondary,
-                        modifier = Modifier.padding(20.dp),
-                    )
-                }
+                item { EmptyState(stringResource(R.string.files_nothing_shared)) }
             }
 
             items(media.chunked(3).size) { row ->
@@ -1193,12 +1184,7 @@ fun MediaScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
 
             if (files.isNotEmpty()) {
                 item {
-                    Text(
-                        stringResource(R.string.files_files),
-                        style = MaterialTheme.typography.titleSmall,
-                        color = Palette.TextSecondary,
-                        modifier = Modifier.padding(start = 20.dp, top = 20.dp, bottom = 8.dp),
-                    )
+                    Box(Modifier.padding(horizontal = PressInset)) { SectionLabel(stringResource(R.string.common_files)) }
                 }
             }
 
@@ -1216,7 +1202,7 @@ fun MediaScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
                                 else -> if (line.info.outgoing) save(line)
                             }
                         }
-                        .padding(horizontal = 20.dp, vertical = 10.dp),
+                        .padding(horizontal = PressInset, vertical = 10.dp),
                 ) { FileTile(line, file, Modifier.fillMaxWidth()) }
             }
         }

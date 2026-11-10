@@ -188,12 +188,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // that revokes it, and the user learns of it as on the successor
         // path.
         if rival.revokes(&own) {
-            self.mark_removed_from_set(rng)?;
-
             // DEV-317: a rival that takes the set over ends the ownership
             // of this device as a successor does.
             let before: Vec<DeviceId> = parent.signers.iter().map(|(id, _)| *id).collect();
             self.fold_claims(&before, &rival, rng)?;
+            self.mark_removed_from_set(rng)?;
             return Ok(false);
         }
 

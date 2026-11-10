@@ -23,7 +23,7 @@ impl QueueKey {
     pub fn derive(queue_secret: &Secret<32>, sender_id: &[u8; 32]) -> Self {
         let kdf = Hkdf::<Sha3_256>::new(None, queue_secret.expose());
         let mut key = Secret::<32>::zeroed();
-        let _ = kdf.expand_multi_info(&[labels::QUEUE_E2E, sender_id], key.expose_mut());
+        crate::kdf::expand_into(&kdf, &[labels::QUEUE_E2E, sender_id], &mut key);
         Self(key)
     }
 

@@ -220,10 +220,22 @@ impl ChunkStore {
             return Err(Reject::Rejected);
         }
 
+        // The quota test runs before the eviction. A holder past its quota
+        // would else erase the registration of another uploader with a
+        // request that the store then refuses.
+        let used = match self.quota.get(&holder) {
+            Some((start, used)) if now.saturating_sub(*start) < QUOTA_WINDOW => *used,
+            _ => 0,
+        };
+        if used.saturating_add(CHUNK_BYTES) > UPLOAD_QUOTA_DAY {
+            return Err(Reject::Limit);
+        }
+
         // ATT-200: registrations with no bytes that fill the store make
         // room for a new one, and no held chunk leaves for them. The new
         // one counts in the share: a store whose held chunks are at the
-        // trim target then still takes it.
+        // trim target then still takes it. One eviction makes room for one
+        // chunk, thus the registration then goes in.
         let pending_after = self.pending_bytes().saturating_add(CHUNK_BYTES);
         if self.free() < CHUNK_BYTES && pending_after > pending_share(self.capacity) {
             if let Some(&(_, oldest)) = self.pending_order.first() {
@@ -237,9 +249,6 @@ impl ChunkStore {
         let counter = self.quota.entry(holder).or_insert((now, 0));
         if now.saturating_sub(counter.0) >= QUOTA_WINDOW {
             *counter = (now, 0);
-        }
-        if counter.1.saturating_add(CHUNK_BYTES) > UPLOAD_QUOTA_DAY {
-            return Err(Reject::Limit);
         }
         counter.1 = counter.1.saturating_add(CHUNK_BYTES);
 

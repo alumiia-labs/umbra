@@ -3,6 +3,8 @@
 use alloc::vec::Vec;
 
 use argon2::{Algorithm, Argon2, Block, Params, Version};
+use hkdf::Hkdf;
+use sha3::Sha3_256;
 use zeroize::Zeroizing;
 
 use crate::{secret::Secret, Error};
@@ -11,6 +13,16 @@ use crate::{secret::Secret, Error};
 pub const RECOVERY_M_KIB: u32 = 64 * 1_024;
 /// The floor of `t` for the recovery code.
 pub const RECOVERY_T: u32 = 3;
+
+/// `HKDF-Expand(info, N)` into `out`.
+///
+/// The output length is the one cause of a failure of HKDF-Expand, and the
+/// compiler checks it here. Thus no caller gets a key of zero bytes.
+pub fn expand_into<const N: usize>(kdf: &Hkdf<Sha3_256>, info: &[&[u8]], out: &mut Secret<N>) {
+    const { assert!(N <= 255 * 32) };
+
+    let _ = kdf.expand_multi_info(info, out.expose_mut());
+}
 
 /// `Argon2id(password, salt, m, t)` into a 32-byte key. `m_kib` and `t`
 /// are the memory in KiB and the passes; a caller gives the calibrated
@@ -38,6 +50,18 @@ pub fn argon2id(password: &[u8], salt: &[u8], m_kib: u32, t: u32) -> Result<Secr
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expand_into_gives_the_output_of_hkdf_expand() {
+        let kdf = Hkdf::<Sha3_256>::new(Some(b"salt"), b"input key");
+        let mut expected = [0u8; 96];
+        kdf.expand_multi_info(&[b"one", b"two"], &mut expected)
+            .unwrap();
+
+        let mut out = Secret::<96>::zeroed();
+        expand_into(&kdf, &[b"one", b"two"], &mut out);
+        assert_eq!(out.expose(), &expected);
+    }
 
     #[test]
     fn the_kdf_is_deterministic_and_salted() {

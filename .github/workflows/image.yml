@@ -28,9 +28,11 @@ jobs:
       contents: read
       packages: write
     steps:
+      # The full history, for the ancestor test below.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       # The tag and the version of the workspace are one version (AGENTS.md).
       - name: version
@@ -42,6 +44,28 @@ jobs:
           }
           echo "VERSION=$version" >> "$GITHUB_ENV"
           echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/umbra-relay" >> "$GITHUB_ENV"
+
+      # A tag on a commit of another branch publishes no image: only a commit
+      # of main had its review and its checks.
+      - name: the commit is on main
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
+            echo "the commit of $GITHUB_REF_NAME is not on main" >&2
+            exit 1
+          }
+
+      # A published version keeps its image: a second tag push writes no
+      # other image under the same name.
+      - name: the version is new
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          if docker buildx imagetools inspect "$IMAGE:$VERSION" > /dev/null 2>&1; then
+            echo "$IMAGE:$VERSION exists already" >&2
+            exit 1
+          fi
 
       - name: build and push
         env:
@@ -70,3 +94,8 @@ jobs:
           echo "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           docker buildx imagetools create -t "$image:$version" -t "$image:latest" \
             "$image:$version-amd64" "$image:$version-arm64"
+
+          # The digest for `image.digest` of the chart and for UMBRA_IMAGE
+          # (deploy/relay/README.md). A tag can move, and a digest cannot.
+          digest=$(docker buildx imagetools inspect "$image:$version" --format '{{.Manifest.Digest}}')
+          echo "$image:$version@$digest" >> "$GITHUB_STEP_SUMMARY"

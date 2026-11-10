@@ -61,7 +61,7 @@ impl EpochSecret {
 
     /// Wraps a secret that an epoch-key slot delivered.
     pub const fn new(secret: Secret<32>) -> Self {
-        Self(secret)
+        Self::from_secret(secret)
     }
 
     /// The bytes, for the slot payload that carries them to a member.
@@ -73,14 +73,15 @@ impl EpochSecret {
     pub fn start(&self, group_id: &[u8; 32], epoch: u32, start_slot: u32) -> ChainState {
         let kdf = Hkdf::<Sha3_256>::new(None, self.0.expose());
         let mut key = Secret::<32>::zeroed();
-        let _ = kdf.expand_multi_info(
+        crate::kdf::expand_into(
+            &kdf,
             &[
                 labels::GROUP_SLOT,
                 group_id,
                 &epoch.to_be_bytes(),
                 &start_slot.to_be_bytes(),
             ],
-            key.expose_mut(),
+            &mut key,
         );
         ChainState {
             epoch,
@@ -94,8 +95,8 @@ impl EpochSecret {
         let kdf = Hkdf::<Sha3_256>::new(None, self.0.expose());
         let mut read = Secret::<32>::zeroed();
         let mut write = Secret::<32>::zeroed();
-        let _ = kdf.expand(labels::GROUP_READ, read.expose_mut());
-        let _ = kdf.expand(labels::GROUP_WRITE, write.expose_mut());
+        crate::kdf::expand_into(&kdf, &[labels::GROUP_READ], &mut read);
+        crate::kdf::expand_into(&kdf, &[labels::GROUP_WRITE], &mut write);
 
         // Part 11 §11.3.1 defines each key as the clamped bytes.
         // `StaticSecret` clamps at each use and holds the bytes as given,
@@ -152,16 +153,18 @@ impl Credentials {
 }
 
 fn next_slot_key(key: &Secret<32>) -> Secret<32> {
-    let kdf = Hkdf::<Sha3_256>::new(None, key.expose());
-    let mut next = Secret::<32>::zeroed();
-    let _ = kdf.expand(labels::GROUP_SLOT_NEXT, next.expose_mut());
-    next
+    derived(key, labels::GROUP_SLOT_NEXT)
 }
 
 fn record_key_of(key: &Secret<32>) -> Secret<32> {
+    derived(key, labels::GROUP_RECORD_KEY)
+}
+
+/// One expansion of a slot key under `label`.
+fn derived(key: &Secret<32>, label: &[u8]) -> Secret<32> {
     let kdf = Hkdf::<Sha3_256>::new(None, key.expose());
     let mut out = Secret::<32>::zeroed();
-    let _ = kdf.expand(labels::GROUP_RECORD_KEY, out.expose_mut());
+    crate::kdf::expand_into(&kdf, &[label], &mut out);
     out
 }
 
@@ -196,7 +199,7 @@ impl ChainState {
     pub fn slot_key(&self, slot: u32) -> Result<Secret<32>, Error> {
         self.steps_to(slot)?;
 
-        let mut key = Secret::new(*self.key.expose());
+        let mut key = self.key.duplicate();
         let mut at = self.slot;
         while at < slot {
             key = next_slot_key(&key);
@@ -226,7 +229,7 @@ impl ChainState {
     pub fn record_key(&self, slot: u32) -> Result<Secret<32>, Error> {
         self.steps_to(slot)?;
 
-        let mut key = Secret::new(*self.key.expose());
+        let mut key = self.key.duplicate();
         let mut at = self.slot;
         while at < slot {
             key = next_slot_key(&key);
