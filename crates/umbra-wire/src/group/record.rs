@@ -389,6 +389,10 @@ impl<'a> EpochKeyBody<'a> {
         let total = bucket.group_body();
         let out = out.get_mut(..total).ok_or(Error::Capacity)?;
         let mut w = Writer::new(out);
+        if self.slot_count == 0 {
+            return Err(Error::Malformed);
+        }
+
         w.u32(self.roster_epoch)?;
         match &self.carrier {
             Carrier::Inline(slots) => {
@@ -437,6 +441,10 @@ impl<'a> EpochKeyBody<'a> {
         let roster_epoch = r.u32()?;
         let carrier_byte = r.u8()?;
         let slot_count = r.u16()?;
+        // WIR-426: a record serves one member at least.
+        if slot_count == 0 {
+            return Err(Error::Malformed);
+        }
 
         let carrier = match carrier_byte {
             0x01 => {
@@ -776,6 +784,24 @@ mod tests {
         buf[7] = 0;
         buf[8] = 0;
         assert!(EpochKeyBody::parse(&buf, |_| None).is_err());
+
+        // WIR-426: a record with no slot is refused under each carrier.
+        let mut empty = vec![0u8; Bucket::B0.group_body()];
+        chunked.encode(Bucket::B0, &mut empty).unwrap();
+        empty[5] = 0;
+        empty[6] = 0;
+        assert!(EpochKeyBody::parse(&empty, |_| None).is_err());
+
+        let mut inline = vec![0u8; Bucket::B0.group_body()];
+        inline[4] = 0x01;
+        assert!(EpochKeyBody::parse(&inline, |_| None).is_err());
+
+        let none = EpochKeyBody {
+            roster_epoch: 1,
+            slot_count: 0,
+            carrier: Carrier::Inline(Vec::new()),
+        };
+        assert!(none.encode(Bucket::B0, &mut inline).is_err());
     }
 
     #[test]

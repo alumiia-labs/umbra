@@ -38,6 +38,8 @@ const GROUP_ID: [u8; 32] = [0x67; 32];
 const SEEDS: [[u8; 32]; 3] = [[0x61; 32], [0x62; 32], [0x63; 32]];
 const EPOCH_SECRET: [u8; 32] = [0x6b; 32];
 const EPOCH: u32 = 1;
+/// One slot for each of the three members.
+const SLOT_COUNT: u16 = 3;
 const START_SLOT: u32 = 497_000;
 const ROSTER_EPOCH: u32 = 1;
 
@@ -128,7 +130,9 @@ fn build() -> Value {
             epoch: EPOCH,
             start_slot: START_SLOT,
             roster_epoch: ROSTER_EPOCH,
+            slot_count: SLOT_COUNT,
             epoch_secret: secret.expose(),
+            own_sks: &[],
         });
     let mut payload = Vec::new();
     payload.extend_from_slice(&0u16.to_be_bytes());
@@ -172,7 +176,7 @@ fn build() -> Value {
             "ciphertext": hex(&body), "tag": hex(&tag),
         },
         "epoch_key_slot": {
-            "index": 1, "rotator": 0, "own_count": 0,
+            "index": 1, "rotator": 0, "own_count": 0, "slot_count": SLOT_COUNT,
             "ek_x": hex(&ek_x), "m": hex(&m),
             "epoch_tag": hex(&epoch_tag), "payload": hex(&payload),
             "sealed": hex(&sealed),

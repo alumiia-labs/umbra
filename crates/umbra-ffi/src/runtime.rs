@@ -25,7 +25,6 @@ use umbra_crypto::{
 use umbra_transport::{
     link::PAUSE_WAIT,
     native::{self, ClientConfig},
-    race::{Plan, Wire},
     Dial,
 };
 use zeroize::{Zeroize, Zeroizing};
@@ -1175,16 +1174,13 @@ pub(crate) async fn sent_in_time(link: &mut native::Link, capsule: &[u8]) -> boo
     )
 }
 
-/// Opens a connection to the guard.
+/// The time that a dial of the guard has for its connect, its TLS
+/// handshake, and its upgrade, over each address.
+pub(crate) const DIAL_WAIT: Duration = Duration::from_secs(10);
+
+/// Opens a connection to the guard. A generator that fails ends the dial.
 async fn dial(guard: &Dial, tls: &Arc<ClientConfig>, rng: &mut OsRng) -> Option<native::Link> {
-    // The key and the mask of the WebSocket upgrade are no secret under
-    // TLS, thus a draw that fails leaves zero and ends no dial.
-    let mut key = [0u8; 16];
-    let mut mask = [0u8; 4];
-    let _ = rng.try_fill_bytes(&mut key);
-    let _ = rng.try_fill_bytes(&mut mask);
-    let plan = Plan::Only(Wire::Tcp);
-    native::connect(guard, tls.clone(), plan, key, mask, Duration::from_secs(10))
+    native::dial_tcp(guard, tls.clone(), rng, DIAL_WAIT)
         .await
         .ok()
 }
@@ -1825,10 +1821,11 @@ pub async fn run_client(
                 ClientEvent::CircuitLost | ClientEvent::CircuitAged if pausing.is_some() => {
                     continue
                 }
-                // A circuit that still holds its three hops serves on, and
-                // `rebuild_lost` builds the lost one again at a tick. Thus
-                // one relay that ends one circuit ends no run.
-                ClientEvent::CircuitLost if node.is_ready() => continue,
+                // A circuit that still builds or serves keeps the run. The
+                // node builds its last circuit again at once, and
+                // `rebuild_lost` builds each other one at a tick. Thus one
+                // relay that ends one circuit ends no run.
+                ClientEvent::CircuitLost if node.has_circuit() => continue,
                 ClientEvent::CircuitLost => {
                     ending.get_or_insert(Ended::CircuitLost);
                     continue;

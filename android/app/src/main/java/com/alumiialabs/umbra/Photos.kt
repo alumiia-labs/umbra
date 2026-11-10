@@ -38,7 +38,6 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
-import java.io.ByteArrayOutputStream
 import kotlin.concurrent.thread
 import uniffi.umbra_ffi.DraftHandle
 import uniffi.umbra_ffi.FileSink
@@ -53,6 +52,13 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import android.text.format.DateUtils
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntSize
 
 /** The media class of an image in a descriptor (Part 12 §12.3). */
 const val CLASS_IMAGE: UByte = 1u
@@ -102,7 +108,7 @@ private const val PHOTO_SIDE_MAX = 2_048
 private const val PHOTO_BYTES_MAX = 2 * 1_024 * 1_024
 
 /** The longest side of a photo in a bubble. A larger decode wastes memory. */
-private const val SHOWN_SIDE_MAX = 1_280
+const val SHOWN_SIDE_MAX = 1_280
 
 object Photos {
     /** The side of the largest picture, in pixels (`DIS-195`). */
@@ -181,11 +187,19 @@ object Photos {
         } catch (fault: Throwable) {
             return null
         } finally {
-            for (bitmap in made.distinct()) {
-                if (bitmap.isMutable) bitmap.eraseColor(0)
-                bitmap.recycle()
-            }
+            for (bitmap in made.distinct()) wipe(bitmap)
         }
+    }
+
+    /**
+     * Erases the pixels of a bitmap and frees it. A scaled copy of the
+     * platform can be immutable, and it then takes no erase: the free
+     * alone stands for it.
+     */
+    private fun wipe(bitmap: Bitmap) {
+        if (bitmap.isRecycled) return
+        if (bitmap.isMutable) bitmap.eraseColor(0)
+        bitmap.recycle()
     }
 
     /** The highest JPEG quality at which [bitmap] fits `PICTURE_MAX`, and its bytes. */
@@ -193,20 +207,23 @@ object Photos {
         var low = PICTURE_QUALITY_MIN
         var high = PICTURE_QUALITY_TOP
         var best: Pair<Int, ByteArray>? = null
+        val out = WipingOutput()
 
-        while (low <= high) {
-            val quality = (low + high) / 2
-            val out = ByteArrayOutputStream()
-            bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
-            val bytes = out.toByteArray()
-            if (bytes.size <= PICTURE_MAX) {
-                best?.second?.fill(0)
-                best = quality to bytes
-                low = quality + 1
-            } else {
-                bytes.fill(0)
-                high = quality - 1
+        try {
+            while (low <= high) {
+                val quality = (low + high) / 2
+                out.wipe()
+                bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
+                if (out.size() <= PICTURE_MAX) {
+                    best?.second?.fill(0)
+                    best = quality to out.toByteArray()
+                    low = quality + 1
+                } else {
+                    high = quality - 1
+                }
             }
+        } finally {
+            out.wipe()
         }
 
         return best
@@ -223,6 +240,8 @@ object Photos {
         val bitmap = try {
             ImageDecoder.decodeBitmap(ImageDecoder.createSource(context.contentResolver, source)) { decoder, info, _ ->
                 decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                // The pixels are erased when the encode ends.
+                decoder.isMutableRequired = true
                 val longest = maxOf(info.size.width, info.size.height)
                 if (longest > PHOTO_SIDE_MAX) {
                     val scale = PHOTO_SIDE_MAX.toFloat() / longest
@@ -232,29 +251,49 @@ object Photos {
                     )
                 }
             }
-        } catch (unreadable: Exception) {
+        } catch (unreadable: Throwable) {
+            // `OutOfMemoryError` is no `Exception`.
             return false
         }
 
         var encoded = ByteArray(0)
-        for (quality in intArrayOf(85, 70, 55, 40)) {
+        val width: Int
+        val height: Int
+        val preview: ByteArray?
+        val out = WipingOutput(PHOTO_BYTES_MAX / 2)
+        try {
+            for (quality in intArrayOf(85, 70, 55, 40)) {
+                out.wipe()
+                bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
+                if (out.size() <= PHOTO_BYTES_MAX) {
+                    encoded = out.toByteArray()
+                    break
+                }
+            }
+
+            width = bitmap.width
+            height = bitmap.height
+            // ATT-194: the record carries a thumbnail of the re-encoded photo.
+            preview = if (encoded.isEmpty()) null else Files.thumbnail(bitmap)
+        } catch (fault: Throwable) {
+            // An encode with no memory sends nothing, and it ends no thread.
             encoded.fill(0)
-            val out = ByteArrayOutputStream()
-            bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
-            encoded = out.toByteArray()
-            if (encoded.size <= PHOTO_BYTES_MAX) break
+            return false
+        } finally {
+            // Each path, also a fault, leaves no pixel and no JPEG copy.
+            out.wipe()
+            wipe(bitmap)
         }
 
-        val (width, height) = bitmap.width to bitmap.height
-        // ATT-194: the record carries a thumbnail of the re-encoded photo.
-        val preview = Files.thumbnail(bitmap)
-        bitmap.recycle()
-        if (encoded.size > PHOTO_BYTES_MAX) {
+        if (encoded.isEmpty()) return false
+
+        val (read, write) = try {
+            ParcelFileDescriptor.createPipe()
+        } catch (refused: java.io.IOException) {
             encoded.fill(0)
             return false
         }
 
-        val (read, write) = ParcelFileDescriptor.createPipe()
         // The core reads to the end of the pipe, thus a second thread writes.
         val writer = thread {
             try {
@@ -298,7 +337,7 @@ object Photos {
         override fun put(bytes: ByteArray) {
             try {
                 image = bounded(bytes, sideMax)
-            } catch (fault: Exception) {
+            } catch (fault: Throwable) {
                 image = null
             } finally {
                 bytes.fill(0)
@@ -311,7 +350,8 @@ object Photos {
      * The header names the size before one pixel has memory, and the decode
      * takes each second, fourth, or eighth pixel of a larger image. A file
      * that does not decode, and a decode with no memory, give null: the
-     * bytes of a peer end no thread of the app.
+     * bytes of a peer end no thread of the app. The bitmap is mutable, thus
+     * a lock erases its pixels (`IMP-166`).
      */
     fun bounded(bytes: ByteArray, sideMax: Int): ImageBitmap? = try {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -321,16 +361,71 @@ object Photos {
         } else {
             var sample = 1
             while (maxOf(bounds.outWidth, bounds.outHeight) / sample > sideMax) sample *= 2
-            val options = BitmapFactory.Options().apply { inSampleSize = sample }
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
-                // A decoder that did not take the sample gives no bitmap
-                // above the bound to a draw.
-                ?.takeIf { maxOf(it.width, it.height) <= sideMax * 2 }
-                ?.asImageBitmap()
+            val options = BitmapFactory.Options().apply {
+                inSampleSize = sample
+                inMutable = true
+            }
+            val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+
+            // A decoder that did not take the sample gives no bitmap above
+            // the bound to a draw.
+            if (decoded != null && maxOf(decoded.width, decoded.height) > sideMax * 2) {
+                wipe(decoded)
+                null
+            } else {
+                decoded?.let { upright(it, bytes) }?.asImageBitmap()
+            }
         }
     } catch (fault: Throwable) {
         // `OutOfMemoryError` is no `Exception`.
         null
+    }
+
+    /**
+     * Turns a decoded image as its orientation field says. The decoder of
+     * the platform reads the pixels and not this field, and a client that
+     * sends the file of a camera as it is sets it.
+     */
+    private fun upright(bitmap: Bitmap, bytes: ByteArray): Bitmap {
+        val orientation = try {
+            android.media.ExifInterface(java.io.ByteArrayInputStream(bytes))
+                .getAttributeInt(android.media.ExifInterface.TAG_ORIENTATION, android.media.ExifInterface.ORIENTATION_NORMAL)
+        } catch (noField: Throwable) {
+            return bitmap
+        }
+
+        val turn = android.graphics.Matrix()
+        when (orientation) {
+            android.media.ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> turn.postScale(-1f, 1f)
+            android.media.ExifInterface.ORIENTATION_ROTATE_180 -> turn.postRotate(180f)
+            android.media.ExifInterface.ORIENTATION_FLIP_VERTICAL -> turn.postScale(1f, -1f)
+            android.media.ExifInterface.ORIENTATION_TRANSPOSE -> {
+                turn.postRotate(90f)
+                turn.postScale(-1f, 1f)
+            }
+            android.media.ExifInterface.ORIENTATION_ROTATE_90 -> turn.postRotate(90f)
+            android.media.ExifInterface.ORIENTATION_TRANSVERSE -> {
+                turn.postRotate(270f)
+                turn.postScale(-1f, 1f)
+            }
+            android.media.ExifInterface.ORIENTATION_ROTATE_270 -> turn.postRotate(270f)
+            else -> return bitmap
+        }
+
+        val turned = try {
+            Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, turn, true)
+        } catch (noMemory: Throwable) {
+            return bitmap
+        }
+        if (turned === bitmap) return bitmap
+
+        wipe(bitmap)
+        // The copy of the platform can be immutable, and a lock erases a
+        // mutable bitmap alone.
+        if (turned.isMutable) return turned
+        val mutable = turned.copy(Bitmap.Config.ARGB_8888, true) ?: return turned
+        turned.recycle()
+        return mutable
     }
 
     /**
@@ -391,7 +486,14 @@ fun PhotoTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
                 modifier = Modifier.matchParentSize().alpha(if (state == FILE_READY) 1f else 0.55f),
             )
             if (canRetry) {
-                FaIcon("rotate", label = stringResource(R.string.photo_send_again), size = 22.dp, tint = Palette.Text)
+                // The mark of `TransferMark`: a light icon on a dark ground
+                // reads on each photo.
+                Box(
+                    Modifier.size(48.dp).background(Color.Black.copy(alpha = 0.55f), CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    FaIcon("rotate", label = stringResource(R.string.photo_send_again), size = 18.dp, tint = Color.White)
+                }
             }
         } else if (preview != null) {
             Image(
@@ -408,9 +510,10 @@ fun PhotoTile(line: Line, file: MsgFile, modifier: Modifier = Modifier) {
                 FaIcon(if (canRetry) "rotate" else "image", size = 22.dp, tint = Palette.TextSecondary)
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    lostLabel(line) ?: when (state) {
-                        FILE_WANTED -> stringResource(R.string.common_receiving)
-                        FILE_FAILED -> stringResource(R.string.common_not_received)
+                    lostLabel(line) ?: when {
+                        state == FILE_WANTED -> stringResource(R.string.common_receiving)
+                        state == FILE_FAILED -> stringResource(R.string.common_not_received)
+                        isHeld && Core.imageFailed(line) -> stringResource(R.string.core_image_not_open)
                         else -> stringResource(R.string.common_photo)
                     },
                     style = MaterialTheme.typography.labelSmall,
@@ -438,34 +541,74 @@ fun PhotoScreen(line: Line, chat: Chat, onBack: () -> Unit) {
         onDispose { Viewer.isOpen = false }
     }
 
+    // A photo that a timer or a deletion took away leaves the screen.
+    LeavesWhenGone(line, onBack)
+
     var scale by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
     var showsBar by remember { mutableStateOf(true) }
-    val image = Core.image(line)
+    var size by remember { mutableStateOf(IntSize.Zero) }
+    // The decode of the bubble is too small for a zoom into the photo.
+    val image = Core.image(line, isFull = true)
+    val isFailed = image == null && Core.imageFailed(line, isFull = true)
+
+    // A screen reader finds no bar that a tap took away, thus the bar stays.
+    val context = LocalContext.current
+    val reads = remember {
+        val manager = context.getSystemService(android.view.accessibility.AccessibilityManager::class.java)
+        manager?.isTouchExplorationEnabled == true
+    }
+    val zoomLabel = stringResource(R.string.photo_zoom)
+
+    // The image stays on the screen: its middle moves by the part that the
+    // zoom put outside of the screen, and no more.
+    fun held(to: Offset, at: Float): Offset {
+        val reachX = size.width * (at - 1f) / 2f
+        val reachY = size.height * (at - 1f) / 2f
+        return Offset(to.x.coerceIn(-reachX, reachX), to.y.coerceIn(-reachY, reachY))
+    }
+
+    fun zoomAtTap() {
+        scale = if (scale > 1f) 1f else 2.5f
+        offset = Offset.Zero
+    }
 
     Box(
         Modifier
             .fillMaxSize()
             .background(Color.Black)
+            .onSizeChanged { size = it }
+            .semantics {
+                customActions = listOf(
+                    CustomAccessibilityAction(zoomLabel) {
+                        zoomAtTap()
+                        true
+                    },
+                )
+            }
             .pointerInput(Unit) {
                 detectTapGestures(
                     onTap = { showsBar = !showsBar },
-                    onDoubleTap = {
-                        scale = if (scale > 1f) 1f else 2.5f
-                        offset = Offset.Zero
-                    },
+                    onDoubleTap = { zoomAtTap() },
                 )
             }
             .pointerInput(Unit) {
                 detectTransformGestures { _, pan, zoom, _ ->
                     scale = (scale * zoom).coerceIn(1f, 5f)
                     // An image at its fit has no place to move to.
-                    offset = if (scale == 1f) Offset.Zero else offset + pan
+                    offset = if (scale == 1f) Offset.Zero else held(offset + pan, scale)
                 }
             },
         contentAlignment = Alignment.Center,
     ) {
-        if (image != null) {
+        if (isFailed) {
+            // A file that does not decode shows no wait without end.
+            Text(
+                stringResource(R.string.core_image_not_open),
+                style = MaterialTheme.typography.bodyMedium,
+                color = Color.White,
+            )
+        } else if (image != null) {
             Image(
                 image,
                 contentDescription = stringResource(R.string.common_photo),
@@ -482,7 +625,7 @@ fun PhotoScreen(line: Line, chat: Chat, onBack: () -> Unit) {
             CircularProgressIndicator(color = Color.White)
         }
 
-        if (showsBar) {
+        if (showsBar || reads) {
             Row(
                 Modifier
                     .align(Alignment.TopStart)
@@ -498,6 +641,8 @@ fun PhotoScreen(line: Line, chat: Chat, onBack: () -> Unit) {
                         if (line.info.outgoing) stringResource(R.string.common_you) else chat.title,
                         style = MaterialTheme.typography.titleMedium,
                         color = Color.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                     Text(
                         DateUtils.formatDateTime(
@@ -509,6 +654,30 @@ fun PhotoScreen(line: Line, chat: Chat, onBack: () -> Unit) {
                         color = Color.White.copy(alpha = 0.8f),
                     )
                 }
+            }
+        }
+    }
+}
+
+/**
+ * Leaves a viewer when its message left: a deletion, the end of a timer, or
+ * a removal by a moderator. Each change of the store asks the core again.
+ */
+@Composable
+fun LeavesWhenGone(line: Line, onBack: () -> Unit) {
+    // An answer of the core that comes after the viewer went, or a second
+    // one, takes no other screen away.
+    val isHere = remember { booleanArrayOf(true) }
+    DisposableEffect(Unit) {
+        onDispose { isHere[0] = false }
+    }
+
+    val revision = Core.revision
+    LaunchedEffect(line.key, revision) {
+        Core.stillShown(line) { isShown ->
+            if (!isShown && isHere[0]) {
+                isHere[0] = false
+                onBack()
             }
         }
     }

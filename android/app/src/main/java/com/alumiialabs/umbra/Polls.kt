@@ -98,7 +98,7 @@ fun NewPollScreen(chat: Chat, onBack: () -> Unit) {
                 onValueChange = { question = fit(it, QUESTION_BYTES) },
                 label = { Text(stringResource(R.string.poll_question)) },
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().tagged(TestTags.POLL_QUESTION),
             )
 
             Spacer(Modifier.height(12.dp))
@@ -110,7 +110,7 @@ fun NewPollScreen(chat: Chat, onBack: () -> Unit) {
                         label = { Text(stringResource(R.string.poll_option_number, index + 1)) },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.weight(1f).tagged(TestTags.POLL_OPTION),
                     )
                     // WIR-180: a poll holds two options at the least.
                     if (options.size > 2) {
@@ -119,7 +119,7 @@ fun NewPollScreen(chat: Chat, onBack: () -> Unit) {
                 }
             }
             if (options.size < OPTION_MAX) {
-                InlineButton(stringResource(R.string.poll_add_option)) { options.add("") }
+                InlineButton(stringResource(R.string.poll_add_option), tag = TestTags.POLL_ADD_OPTION) { options.add("") }
             }
 
             Spacer(Modifier.height(8.dp))
@@ -188,7 +188,7 @@ fun NewPollScreen(chat: Chat, onBack: () -> Unit) {
             }
 
             Spacer(Modifier.height(16.dp))
-            PrimaryButton(stringResource(R.string.common_send), enabled = isReady) {
+            PrimaryButton(stringResource(R.string.common_send), enabled = isReady, tag = TestTags.POLL_SEND) {
                 Core.sendPoll(chat.conversation, question.trim(), filled, multiple, hidden, openSeconds)
                 onBack()
             }
@@ -246,6 +246,7 @@ fun PollContent(line: Line, poll: FfiPoll, modifier: Modifier = Modifier, mayVot
             Column(
                 Modifier
                     .fillMaxWidth()
+                    .tagged(TestTags.POLL_CHOICE)
                     .then(
                         if (canVote) {
                             val choose = {

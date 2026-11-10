@@ -555,12 +555,11 @@ mod tests {
         );
 
         // NTF-134: a carrier that the NDR does not serve takes no push.
-        let n = encode_token(
-            TokenCarrier::UnifiedPush,
-            b"https://evil.example/x",
-            &mut plain,
-        )
-        .unwrap();
+        // No writer gives the reserved carrier, thus the bytes come by hand.
+        let target = b"https://evil.example/x";
+        plain[0] = TokenCarrier::UnifiedPush as u8;
+        plain[1..=target.len()].copy_from_slice(target);
+        let n = target.len() + 1;
         let other = group.registration(&plain[..n], [5; 24]).unwrap();
         let taken = ndr.handle(
             &request(&NdrRequest::Register {
@@ -781,12 +780,11 @@ mod tests {
     #[test]
     fn a_timer_takes_no_token_of_another_carrier() {
         let mut plain = [0u8; PUSH_TOKEN_MAX];
-        let n = encode_token(
-            TokenCarrier::UnifiedPush,
-            b"https://evil.example/x",
-            &mut plain,
-        )
-        .unwrap();
+        // No writer gives the reserved carrier, thus the bytes come by hand.
+        let target = b"https://evil.example/x";
+        plain[0] = TokenCarrier::UnifiedPush as u8;
+        plain[1..=target.len()].copy_from_slice(target);
+        let n = target.len() + 1;
         let mut ndr = Ndr::default();
         assert_eq!(
             ndr.handle(&timer([3; 16], &plain[..n], [9; 32], [0; 32]), NOW)

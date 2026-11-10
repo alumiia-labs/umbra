@@ -717,6 +717,17 @@ impl CircuitTable {
         self.budgets.get(&link).map_or(0, |budget| budget.circuits)
     }
 
+    /// The identifiers of the circuits that the table holds on the side of
+    /// the client of `link`, for a test.
+    #[doc(hidden)]
+    pub fn circuit_ids_on(&self, link: LinkId) -> Vec<[u8; 16]> {
+        self.held
+            .keys()
+            .filter(|key| key.link == link)
+            .map(|key| key.circ_id)
+            .collect()
+    }
+
     /// The count of the held circuits.
     pub fn len(&self) -> usize {
         self.held.len()

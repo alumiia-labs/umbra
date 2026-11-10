@@ -207,7 +207,7 @@ impl Fragment {
         let kdf =
             umbra_crypto::hkdf::Hkdf::<umbra_crypto::sha3::Sha3_256>::new(None, digest.as_slice());
         let mut key = Secret::<32>::zeroed();
-        let _ = kdf.expand(labels::INVITE_BLOB, key.expose_mut());
+        umbra_crypto::kdf::expand_into(&kdf, &[labels::INVITE_BLOB], &mut key);
         key
     }
 }

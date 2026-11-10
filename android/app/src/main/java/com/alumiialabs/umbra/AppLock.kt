@@ -143,16 +143,32 @@ fun ChangePassphraseScreen(onBack: () -> Unit) {
     Column(Modifier.fillMaxSize()) {
         BackBar(stringResource(R.string.common_change_passphrase), onBack = onBack)
         Column(Modifier.verticalScroll(rememberScrollState()).padding(PressInset)) {
-            FramedPlatformField(current, stringResource(R.string.lock_current_passphrase), isPassphrase = true)
+            FramedPlatformField(
+                current,
+                stringResource(R.string.lock_current_passphrase),
+                isPassphrase = true,
+                tag = TestTags.PASSPHRASE_CURRENT,
+            )
             Spacer(Modifier.height(14.dp))
-            FramedPlatformField(new, stringResource(R.string.common_new_passphrase), isPassphrase = true)
+            FramedPlatformField(
+                new,
+                stringResource(R.string.common_new_passphrase),
+                isPassphrase = true,
+                tag = TestTags.PASSPHRASE_NEW,
+            )
             Spacer(Modifier.height(14.dp))
-            FramedPlatformField(confirm, stringResource(R.string.lock_confirm_new_passphrase), isPassphrase = true)
+            FramedPlatformField(
+                confirm,
+                stringResource(R.string.lock_confirm_new_passphrase),
+                isPassphrase = true,
+                tag = TestTags.PASSPHRASE_CONFIRM,
+            )
 
             Spacer(Modifier.height(14.dp))
             PrimaryButton(
                 stringResource(if (isWorking) R.string.lock_changing else R.string.common_change_passphrase),
                 enabled = !isWorking,
+                tag = TestTags.PASSPHRASE_SAVE,
             ) {
                 val old = current.take()
                 val first = new.take()

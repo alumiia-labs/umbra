@@ -110,6 +110,46 @@ const val LARGE_FILE_WARN = 25L * 1_024 * 1_024
 /** `MAX_FILE_SIZE` of Part 12 §12.7, in bytes. */
 const val MAX_FILE_SIZE = 250L * 1_024 * 1_024
 
+/** A transcode that a lock, a size above the bound, or a stall ended. */
+const val MEDIA_TOO_LARGE = -2L
+
+/** A transcode of a form that the platform does not encode. */
+const val MEDIA_FORM = -3L
+
+/**
+ * An output stream in the memory that keeps no copy of its bytes. The
+ * stream of the platform leaves each buffer that it outgrew as it was.
+ * This one overwrites it, and [wipe] overwrites the last one (`IMP-039`).
+ */
+class WipingOutput(capacity: Int = 32 * 1_024) : java.io.ByteArrayOutputStream(capacity) {
+    override fun write(byte: Int) {
+        grow(1)
+        super.write(byte)
+    }
+
+    override fun write(bytes: ByteArray, offset: Int, length: Int) {
+        grow(length)
+        super.write(bytes, offset, length)
+    }
+
+    /** Makes room for `more` bytes, and overwrites the buffer that goes. */
+    private fun grow(more: Int) {
+        val needed = count.toLong() + more
+        if (needed <= buf.size) return
+
+        val old = buf
+        val size = maxOf(needed, old.size * 2L).coerceAtMost(Int.MAX_VALUE - 8L).toInt()
+        buf = old.copyOf(size)
+        old.fill(0)
+    }
+
+    /** Overwrites each byte that the stream holds, and empties it. */
+    fun wipe() {
+        buf.fill(0)
+        count = 0
+    }
+}
+
 /**
  * The uplink of an upload for each byte of the file: a chunk of 32 634 bytes
  * of segment travels in a cell of 32 860 bytes, and the commands of the
@@ -389,17 +429,31 @@ object Files {
     /**
      * Encodes a picked audio file again as AAC in a new MP4 in the memory,
      * and gives it to a draft with its length and its name (`ATT-155`,
-     * `ATT-069`). The result is the size of the new file, or -1.
+     * `ATT-069`). The result is the size of the new file, or a negative
+     * number: [MEDIA_TOO_LARGE], [MEDIA_FORM], or -1 for a file that does
+     * not open. A true result of `isCanceled` ends the work.
      */
     @RequiresApi(Build.VERSION_CODES.R)
-    fun attachAudio(context: Context, source: Uri, picked: Picked, draft: DraftHandle): Long {
-        val memory = Os.memfd_create("umbra-audio", 0)
+    fun attachAudio(
+        context: Context,
+        source: Uri,
+        picked: Picked,
+        draft: DraftHandle,
+        isCanceled: () -> Boolean = { false },
+    ): Long {
+        val memory = try {
+            Os.memfd_create("umbra-audio", 0)
+        } catch (refused: android.system.ErrnoException) {
+            return -1
+        }
+
         try {
-            val micros = transcodeAudio(context, source, memory)
-            if (micros < 0) return -1
+            val micros = transcodeAudio(context, source, memory, isCanceled)
+            if (micros < 0) return micros
 
             val bytes = Os.fstat(memory).st_size
-            if (bytes == 0L || bytes > MAX_FILE_SIZE) return -1
+            if (bytes == 0L) return -1
+            if (bytes > MAX_FILE_SIZE) return MEDIA_TOO_LARGE
 
             blankMoov(memory, bytes)
 
@@ -410,6 +464,8 @@ object Files {
             }
 
             return if (isGiven) bytes else -1
+        } catch (unreadable: android.system.ErrnoException) {
+            return -1
         } finally {
             // The stream of the pipe closed the memory file when it ended.
             try {
@@ -559,18 +615,21 @@ object Files {
             true,
         )
 
+        val out = WipingOutput()
         try {
             for (quality in intArrayOf(60, 45, 30, 20)) {
-                val out = java.io.ByteArrayOutputStream()
+                out.wipe()
                 small.compress(Bitmap.CompressFormat.JPEG, quality, out)
-                val bytes = out.toByteArray()
-                if (bytes.size <= PREVIEW_MAX) return bytes
-                bytes.fill(0)
+                if (out.size() <= PREVIEW_MAX) return out.toByteArray()
             }
 
             return null
         } finally {
-            if (small !== picture) small.recycle()
+            out.wipe()
+            if (small !== picture) {
+                if (small.isMutable) small.eraseColor(0)
+                small.recycle()
+            }
         }
     }
 
@@ -776,6 +835,9 @@ fun TransferMark(file: MsgFile, lost: String? = null) {
                 state == FILE_FAILED -> FaIcon("rotate", label = stringResource(R.string.files_download_again), size = 18.dp, tint = Color.White)
                 state == FILE_WANTED && share != null ->
                     Text(stringResource(R.string.common_percent, share), style = MaterialTheme.typography.labelSmall, color = Color.White)
+                // A transfer that runs is a state, and no action.
+                state == FILE_WANTED ->
+                    FaIcon("download", label = stringResource(R.string.common_receiving), size = 18.dp, tint = Color.White)
                 else -> FaIcon("download", label = stringResource(R.string.files_download), size = 18.dp, tint = Color.White)
             }
         }
@@ -917,6 +979,9 @@ fun VideoScreen(line: Line, onBack: () -> Unit) {
     var length by remember { mutableFloatStateOf(1f) }
     var ratio by remember { mutableFloatStateOf(16f / 9f) }
     var failed by remember { mutableStateOf(false) }
+
+    // A video that a timer or a deletion took away leaves the screen.
+    LeavesWhenGone(line, onBack)
 
     DisposableEffect(line.key) {
         var isGone = false

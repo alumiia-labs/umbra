@@ -149,7 +149,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 continue;
             }
 
-            if info.stored_at_ms < cutoff_ms {
+            if info.clock_at_ms < cutoff_ms {
                 due.push((conversation_of(&plain)?, MsgRef(row)));
             }
         }

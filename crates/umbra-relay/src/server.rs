@@ -39,7 +39,6 @@ use umbra_crypto::{
 use umbra_transport::{
     https, native,
     ndr::{self, NdrRoute},
-    race::{Plan, Wire},
     Dial,
 };
 use umbra_transport::{upgrade, websocket};
@@ -635,7 +634,11 @@ pub async fn run_node(
 
     let draw_wait = move |rng: &mut OsRng| {
         let mut draw = [0u8; 4];
-        let _ = rng.try_fill_bytes(&mut draw);
+        // A generator that fails gives the mean. A draw of zeros would
+        // give one fixed wait that an observer can learn.
+        if rng.try_fill_bytes(&mut draw).is_err() {
+            return Duration::from_millis(pacing_mean_ms.max(1));
+        }
         let wait = exponential(pacing_mean_ms, u32::from_le_bytes(draw));
         Duration::from_millis(wait.max(1))
     };
@@ -944,16 +947,9 @@ async fn connect_push(
     tls: Arc<rustls::ClientConfig>,
     time: Duration,
 ) -> Option<native::Link> {
-    let mut rng = OsRng;
-    let mut key = [0u8; 16];
-    let mut mask = [0u8; 4];
-    let _ = rng.try_fill_bytes(&mut key);
-    let _ = rng.try_fill_bytes(&mut mask);
-
-    let plan = Plan::Only(Wire::Tcp);
-    native::connect(target, tls, plan, key, mask, time)
-        .await
-        .ok()
+    // A generator that fails ends the dial: a key of zeros would be the
+    // same for each link.
+    native::dial_tcp(target, tls, &mut OsRng, time).await.ok()
 }
 
 /// Sends the deposits and the challenges that wait for one relay, up to
@@ -2351,6 +2347,9 @@ pub async fn accept_loop(
     }
 }
 
+/// The time that the dial of a relay of the next layer has.
+const NEXT_DIAL_WAIT: Duration = Duration::from_secs(10);
+
 /// Dials one relay of the next layer, and moves its capsules until the
 /// link closes.
 pub async fn dial_next(
@@ -2360,14 +2359,7 @@ pub async fn dial_next(
     tls: Arc<rustls::ClientConfig>,
     node: mpsc::Sender<Input>,
 ) {
-    let mut rng = OsRng;
-    let mut key = [0u8; 16];
-    let mut mask = [0u8; 4];
-    let _ = rng.try_fill_bytes(&mut key);
-    let _ = rng.try_fill_bytes(&mut mask);
-
-    let plan = Plan::Only(Wire::Tcp);
-    let dialed = native::connect(&target, tls, plan, key, mask, Duration::from_secs(10)).await;
+    let dialed = native::dial_tcp(&target, tls, &mut OsRng, NEXT_DIAL_WAIT).await;
     let Ok(native::Link::Tcp(connection)) = dialed else {
         // NET-319: the node dials again while a body waits for this relay.
         let _ = node.send(Input::DialFailed { relay_id }).await;

@@ -61,12 +61,13 @@ fun NewGroupScreen(onBack: () -> Unit, onMade: (Conversation) -> Unit) {
                 label = { Text(stringResource(R.string.group_name_label)) },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().tagged(TestTags.GROUP_NAME),
             )
             Spacer(Modifier.height(16.dp))
             PrimaryButton(
                 stringResource(R.string.group_create),
                 enabled = Core.online && name.isNotBlank() && !isMaking,
+                tag = TestTags.GROUP_CREATE,
             ) {
                 // A fault of an earlier act is no fault of this creation.
                 Core.fault = null
@@ -159,7 +160,11 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, onLeft: () -> Unit, push:
 
             SectionLabel(stringResource(R.string.group_members_title, members.size))
             if (chat.isMember && isAdmin && !chat.isClosed && owns) {
-                EntryRow(RowEntry("user-plus", stringResource(R.string.group_add_members)) { push(Screen.InviteToGroup(chat.conversation)) })
+                EntryRow(
+                    RowEntry("user-plus", stringResource(R.string.group_add_members), tag = TestTags.GROUP_ADD_MEMBERS) {
+                        push(Screen.InviteToGroup(chat.conversation))
+                    },
+                )
                 HorizontalDivider(color = Palette.Divider)
             }
             val waiting = Core.groupJoiners.filter { it.groupId.toList() == chat.groupId.toList() }
@@ -187,7 +192,12 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, onLeft: () -> Unit, push:
             // GRP-434: a closed group takes no self-removal until it opens.
             if (chat.isMember && owns && !chat.isClosed) {
                 Spacer(Modifier.height(20.dp))
-                EntryRow(RowEntry("xmark", stringResource(R.string.common_leave_group)) { sheet = GroupSheet.Leave }, leads = false)
+                EntryRow(
+                    RowEntry("xmark", stringResource(R.string.common_leave_group), tag = TestTags.GROUP_LEAVE) {
+                        sheet = GroupSheet.Leave
+                    },
+                    leads = false,
+                )
             }
 
             GroupStateNote(chat)
@@ -209,9 +219,22 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, onLeft: () -> Unit, push:
                 ActionSheet(
                     name,
                     buildList {
-                        add(RowEntry("user-group", stringResource(R.string.group_role), roleLabel(member.role)) { sheet = GroupSheet.Role(member) })
+                        add(
+                            RowEntry(
+                                "user-group",
+                                stringResource(R.string.group_role),
+                                roleLabel(member.role),
+                                TestTags.GROUP_MEMBER_ROLE,
+                            ) { sheet = GroupSheet.Role(member) },
+                        )
                         if (member.role <= FfiRole.MEMBER) {
-                            add(RowEntry("xmark", stringResource(R.string.group_remove_from_group)) { sheet = GroupSheet.Remove(member) })
+                            add(
+                                RowEntry(
+                                    "xmark",
+                                    stringResource(R.string.group_remove_from_group),
+                                    tag = TestTags.GROUP_MEMBER_REMOVE,
+                                ) { sheet = GroupSheet.Remove(member) },
+                            )
                         }
                         add(
                             RowEntry("ban", stringResource(if (isBlocked) R.string.common_unblock else R.string.common_block)) {
@@ -242,7 +265,7 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, onLeft: () -> Unit, push:
         is GroupSheet.Remove -> ActionSheet(
             stringResource(R.string.common_remove_named, memberName(open.member)),
             listOf(
-                RowEntry("xmark", stringResource(R.string.group_remove_member)) {
+                RowEntry("xmark", stringResource(R.string.group_remove_member), tag = TestTags.GROUP_REMOVE_CONFIRM) {
                     Core.removeFromGroup(chat.conversation, open.member.index) { reload++ }
                 },
             ),
@@ -267,7 +290,7 @@ fun GroupDetailsScreen(chat: Chat, onBack: () -> Unit, onLeft: () -> Unit, push:
                     emptyList()
                 } else {
                     listOf(
-                        RowEntry("xmark", stringResource(R.string.common_leave_group)) {
+                        RowEntry("xmark", stringResource(R.string.common_leave_group), tag = TestTags.GROUP_LEAVE_CONFIRM) {
                             Core.leaveGroup(chat.conversation) { onLeft() }
                         },
                     )
@@ -349,6 +372,7 @@ private fun JoinerRow(joiner: FfiGroupOffer, mayAdmit: Boolean) {
             Spacer(Modifier.width(12.dp))
             InlineButton(
                 if (isStuck) stringResource(R.string.common_try_again) else stringResource(R.string.group_let_in),
+                tag = TestTags.GROUP_LET_IN,
             ) { Core.admitJoiner(joiner) }
         }
     }
@@ -378,7 +402,7 @@ private fun memberName(member: FfiGroupMember): String {
 
 @Composable
 private fun MemberRow(member: FfiGroupMember, isPressable: Boolean, onPress: () -> Unit) {
-    val row = Modifier.fillMaxWidth().pressShadeInColumn()
+    val row = Modifier.fillMaxWidth().pressShadeInColumn().tagged(TestTags.GROUP_MEMBER_ROW)
     val pressable = if (isPressable) row.press(onClick = onPress) else row
 
     Row(
@@ -438,6 +462,7 @@ fun InviteToGroupScreen(chat: Chat, onBack: () -> Unit) {
                     Modifier
                         .fillMaxWidth()
                         .pressShadeInList()
+                        .tagged(TestTags.GROUP_INVITE_ROW)
                         .press {
                             if (!isInvited) {
                                 Core.offerGroup(chat.conversation, contact.conversation)
@@ -533,7 +558,7 @@ fun GroupOfferPrompt() {
             color = Palette.TextSecondary,
         )
         Spacer(Modifier.height(8.dp))
-        InlineButton(stringResource(R.string.group_join)) { Core.acceptGroupOffer(offer) }
+        InlineButton(stringResource(R.string.group_join), tag = TestTags.GROUP_OFFER_JOIN) { Core.acceptGroupOffer(offer) }
     }
 }
 

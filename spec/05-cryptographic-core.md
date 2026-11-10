@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 5: Cryptographic Core
 
 **Status:** Draft
-**Version:** 0.53.0
-**Date:** 2026-11-09
+**Version:** 0.54.0
+**Date:** 2026-11-10
 
 ---
 
@@ -1256,6 +1256,7 @@ can reach:
 | `MAX_SKIP` (per chain) | 1 000 |
 | `MAX_STORED` (per session) | 2 000 |
 | `MAX_BYTES` (per session) | 80 KiB, which is 1 077 keys of 76 bytes |
+| `MAX_CHAINS` (per session) | 32 |
 | `SKIP_TTL` | **45 days**, which equals `MSG_TTL` |
 | `MAX_STORED_DEVICE` (global) | 200 000 keys / 8 MiB |
 
@@ -1300,6 +1301,15 @@ raise `MSG_TTL` alone.
 each skip, and a skip that would pass `MAX_STORED` or `MAX_BYTES` MUST drop the
 oldest keys first. A session that refused a skip at the limit would open no
 later record of that peer, and the contact would end.
+
+**[CRY-155]** A session MUST hold the skipped keys of at most `MAX_CHAINS`
+chains. A skip that would pass that count MUST drop each key of the oldest
+chain first.
+
+> *Cause.* Each chain has one header key. A record that no current header
+> key opens costs one header open for each chain that left a key. Without
+> the bound, a peer that leaves one key at each of 1 077 ratchet steps sets
+> that cost for each later record of the session.
 
 `MAX_SKIP` bounds the keys that one chain leaves in two cases:
 

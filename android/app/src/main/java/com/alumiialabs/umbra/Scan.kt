@@ -79,7 +79,7 @@ fun ScanInvitationScreen(onBack: () -> Unit) {
                 onBack()
             }
             Spacer(Modifier.height(16.dp))
-            SecondaryButton(stringResource(R.string.scan_paste_link_instead), onClick = onBack)
+            SecondaryButton(stringResource(R.string.scan_paste_link_instead), tag = TestTags.SCAN_PASTE, onClick = onBack)
         }
     }
 }

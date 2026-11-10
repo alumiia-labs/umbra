@@ -336,7 +336,7 @@ fun styleAsApp(view: TextView, mono: Boolean = false) {
 
 /** A field of the platform inside an outlined frame. */
 @Composable
-fun FramedPlatformField(state: PlatformFieldState, label: String, isPassphrase: Boolean) {
+fun FramedPlatformField(state: PlatformFieldState, label: String, isPassphrase: Boolean, tag: String? = null) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -349,7 +349,7 @@ fun FramedPlatformField(state: PlatformFieldState, label: String, isPassphrase: 
                 .padding(start = 14.dp, end = if (isPassphrase) 0.dp else 14.dp, top = 8.dp, bottom = 8.dp),
         ) {
             Text(label, style = MaterialTheme.typography.labelSmall, color = Palette.TextSecondary)
-            PlatformInput(state, hint = "", isPassphrase = isPassphrase, modifier = Modifier.fillMaxWidth())
+            PlatformInput(state, hint = "", isPassphrase = isPassphrase, modifier = Modifier.fillMaxWidth().tagged(tag))
         }
         // A passphrase shows its characters at a tap, and hides them again.
         if (isPassphrase) {
@@ -539,20 +539,20 @@ private fun Modifier.outsetStart(by: Dp): Modifier = layout { measurable, constr
 fun Modifier.pressShadeInList(): Modifier = this
 
 @Composable
-fun PrimaryButton(label: String, enabled: Boolean = true, onClick: () -> Unit) {
+fun PrimaryButton(label: String, enabled: Boolean = true, tag: String? = null, onClick: () -> Unit) {
     Button(
         onClick = onClick,
         enabled = enabled,
-        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).tagged(tag),
     ) { Text(label, fontWeight = FontWeight.SemiBold) }
 }
 
 @Composable
-fun SecondaryButton(label: String, enabled: Boolean = true, onClick: () -> Unit) {
+fun SecondaryButton(label: String, enabled: Boolean = true, tag: String? = null, onClick: () -> Unit) {
     OutlinedButton(
         onClick = onClick,
         enabled = enabled,
-        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).tagged(tag),
         // The default outline is too faint on the warm ground.
         colors = ButtonDefaults.outlinedButtonColors(contentColor = Palette.Action),
         border = BorderStroke(1.dp, Palette.Outline),
@@ -561,21 +561,21 @@ fun SecondaryButton(label: String, enabled: Boolean = true, onClick: () -> Unit)
 
 /** The filled button of an action that takes something away. */
 @Composable
-fun DangerButton(label: String, enabled: Boolean = true, onClick: () -> Unit) {
+fun DangerButton(label: String, enabled: Boolean = true, tag: String? = null, onClick: () -> Unit) {
     Button(
         onClick = onClick,
         enabled = enabled,
-        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).tagged(tag),
         colors = ButtonDefaults.buttonColors(containerColor = Palette.Error),
     ) { Text(label, fontWeight = FontWeight.SemiBold) }
 }
 
 /** The plain label under a button, for the way back out of a decision. */
 @Composable
-fun QuietButton(label: String, onClick: () -> Unit) {
+fun QuietButton(label: String, tag: String? = null, onClick: () -> Unit) {
     TextButton(
         onClick = onClick,
-        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).tagged(tag),
         colors = ButtonDefaults.textButtonColors(contentColor = Palette.Action),
     ) { Text(label, fontWeight = FontWeight.SemiBold) }
 }
@@ -586,26 +586,32 @@ fun InlineButton(
     label: String,
     enabled: Boolean = true,
     modifier: Modifier = Modifier,
+    tag: String? = null,
     onClick: () -> Unit,
 ) {
     OutlinedButton(
         onClick = onClick,
         enabled = enabled,
-        modifier = modifier.heightIn(min = 40.dp),
+        modifier = modifier.heightIn(min = 40.dp).tagged(tag),
         colors = ButtonDefaults.outlinedButtonColors(contentColor = Palette.Action),
         border = BorderStroke(1.dp, Palette.Outline),
     ) { Text(label, fontWeight = FontWeight.SemiBold) }
 }
 
-/** The sage note with an icon, for a fact that the user needs at this point. */
+/**
+ * The sage note with an icon, for a fact that the user needs at this point.
+ * An error note has the tag of a fault, thus a test finds a failure on each
+ * view.
+ */
 @Composable
-fun Note(text: String, isError: Boolean = false) {
+fun Note(text: String, isError: Boolean = false, tag: String? = if (isError) TestTags.FAULT else null) {
     val ground = if (isError) Palette.ErrorGround else Palette.Incoming
     val ink = if (isError) Palette.Error else Palette.Text
 
     Row(
         Modifier
             .fillMaxWidth()
+            .tagged(tag)
             .background(ground, RoundedCornerShape(12.dp))
             .padding(12.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -785,6 +791,7 @@ fun BrandBar(onConnection: () -> Unit, onProfile: () -> Unit) {
             Box(
                 Modifier
                     .size(48.dp)
+                    .tagged(TestTags.TABS_PROFILE)
                     .press(role = Role.Button, label = stringResource(R.string.common_profile), onClick = onProfile),
                 contentAlignment = Alignment.Center,
             ) { ProfilePicture(Core.myPicture, Core.myName.ifEmpty { me }, 32) }
@@ -802,7 +809,7 @@ fun BrandBar(onConnection: () -> Unit, onProfile: () -> Unit) {
             )
         }
         ConnectionStatus(onConnection)
-        IconAction("lock", stringResource(R.string.widget_lock_now)) { Core.lock(context) }
+        IconAction("lock", stringResource(R.string.widget_lock_now), tag = TestTags.TABS_LOCK) { Core.lock(context) }
     }
 }
 
@@ -821,7 +828,7 @@ fun BackBar(
         Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp, top = 8.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        IconAction("arrow-left", stringResource(R.string.common_back), onClick = onBack)
+        IconAction("arrow-left", stringResource(R.string.common_back), tag = TestTags.BACK, onClick = onBack)
         // The shade of a title that leads somewhere fills the bar between
         // the back button and the actions, square as each other press shade.
         // It starts a little inside the empty side of the back button, thus
@@ -843,7 +850,7 @@ fun BackBar(
                         style = MaterialTheme.typography.titleLarge,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false),
+                        modifier = Modifier.weight(1f, fill = false).tagged(TestTags.BAR_TITLE),
                     )
                     if (isVerified) {
                         Spacer(Modifier.width(8.dp))
@@ -868,6 +875,7 @@ class RowEntry(
     val icon: String,
     val title: String,
     val detail: String? = null,
+    val tag: String? = null,
     val onClick: () -> Unit,
 )
 
@@ -900,6 +908,7 @@ class SheetChoice(
     val title: String,
     val isChosen: Boolean,
     val detail: String? = null,
+    val tag: String? = null,
     val onChoose: () -> Unit,
 )
 
@@ -913,7 +922,7 @@ fun ChoiceSheet(title: String, choices: List<SheetChoice>, note: String? = null,
     Sheet(title, note, onDismiss) {
         choices.forEachIndexed { index, choice ->
             if (index > 0) HorizontalDivider(color = Palette.Divider)
-            ChoiceRow(choice.title, choice.isChosen, choice.detail) {
+            ChoiceRow(choice.title, choice.isChosen, choice.detail, choice.tag) {
                 onDismiss()
                 choice.onChoose()
             }
@@ -927,11 +936,18 @@ fun ChoiceSheet(title: String, choices: List<SheetChoice>, note: String? = null,
  * each has one height and says its state to a screen reader.
  */
 @Composable
-fun ChoiceRow(title: String, isChosen: Boolean, detail: String? = null, onChoose: () -> Unit) {
+fun ChoiceRow(
+    title: String,
+    isChosen: Boolean,
+    detail: String? = null,
+    tag: String? = null,
+    onChoose: () -> Unit,
+) {
     Row(
         Modifier
             .fillMaxWidth()
             .pressShadeInColumn()
+            .tagged(tag)
             .pressChoice(isChosen, onChoose = onChoose)
             .padding(horizontal = PressInset, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -982,7 +998,14 @@ private fun Sheet(title: String, note: String?, onDismiss: () -> Unit, rows: @Co
     ) {
         // A long list of a sheet, such as the contacts of an introduction,
         // scrolls inside the sheet.
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(start = PressInset, end = PressInset, bottom = 24.dp)) {
+        // A sheet is a window of its own, thus it names its tags itself.
+        Column(
+            Modifier
+                .testRoot()
+                .tagged(TestTags.SHEET)
+                .verticalScroll(rememberScrollState())
+                .padding(start = PressInset, end = PressInset, bottom = 24.dp),
+        ) {
             Text(title, style = MaterialTheme.typography.headlineSmall)
             Spacer(Modifier.height(12.dp))
             rows()
@@ -1080,6 +1103,7 @@ fun EntryRow(entry: RowEntry, leads: Boolean = true, afterClick: () -> Unit = {}
         Modifier
             .fillMaxWidth()
             .pressShadeInColumn()
+            .tagged(entry.tag)
             .press(role = Role.Button) {
                 afterClick()
                 entry.onClick()
@@ -1113,12 +1137,14 @@ fun ToggleRow(
     isOn: Boolean,
     detail: String? = null,
     icon: String? = null,
+    tag: String? = null,
     onChange: (Boolean) -> Unit,
 ) {
     Row(
         Modifier
             .fillMaxWidth()
             .pressShadeInColumn()
+            .tagged(tag)
             .pressToggle(isOn, onChange = onChange)
             .padding(horizontal = PressInset, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -1178,13 +1204,20 @@ fun SwitchMark(isOn: Boolean, enabled: Boolean = true) {
 
 /** An icon that acts. The touch target is 48 dp, and the label is for a screen reader. */
 @Composable
-fun IconAction(icon: String, label: String, tint: Color = Palette.Text, onClick: () -> Unit) {
+fun IconAction(
+    icon: String,
+    label: String,
+    tint: Color = Palette.Text,
+    tag: String? = null,
+    onClick: () -> Unit,
+) {
     // The shade fills the square that the button holds, as a tab does. The
     // icon gives the label, thus the press gives none and a screen reader
     // says it one time.
     Box(
         Modifier
             .size(TouchTarget)
+            .tagged(tag)
             .press(role = Role.Button, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) { FaIcon(icon, label = label, size = 20.dp, tint = tint) }
@@ -1212,25 +1245,26 @@ fun WaitBar() {
 
 /** The six digits of a code that the user compares, as two groups of three. */
 @Composable
-fun CodeDigits(code: String) {
+fun CodeDigits(code: String, tag: String? = null) {
     Text(
         "${code.take(3)} ${code.drop(3)}",
         fontSize = 40.sp,
         letterSpacing = 4.sp,
         color = Palette.Action,
         textAlign = TextAlign.Center,
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().tagged(tag),
     )
 }
 
 /** The framed ground of digits that the user reads or writes down. */
 @Composable
-fun DigitFrame(rowGap: Dp = 0.dp, content: @Composable ColumnScope.() -> Unit) {
+fun DigitFrame(rowGap: Dp = 0.dp, tag: String? = null, content: @Composable ColumnScope.() -> Unit) {
     val shape = RoundedCornerShape(24.dp)
 
     Column(
         Modifier
             .fillMaxWidth()
+            .tagged(tag)
             .background(Palette.Raised, shape)
             .border(1.dp, Palette.Divider, shape)
             .padding(vertical = 20.dp),

@@ -610,17 +610,20 @@ impl RelayStore for SqliteStore {
 
 /// The schema of a receipt file. Each leaf of a receipt has a row in
 /// `receipt_leaves` under its epoch and its first 8 bytes, thus a query
-/// reads the receipts that may cover its cell and no other.
+/// reads the receipts that may cover its cell and no other. `peer` is the
+/// relay at the other end of the link, for the share of each peer.
 const RECEIPT_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS receipts (
         id     INTEGER PRIMARY KEY,
         issued INTEGER NOT NULL,
+        peer   BLOB NOT NULL,
         epoch  INTEGER NOT NULL,
         at     INTEGER NOT NULL,
         signed BLOB NOT NULL,
         leaves BLOB NOT NULL
     );
     CREATE INDEX IF NOT EXISTS receipts_by_time ON receipts (at);
+    CREATE INDEX IF NOT EXISTS receipts_by_peer ON receipts (peer, id);
     CREATE TABLE IF NOT EXISTS receipt_leaves (
         epoch   INTEGER NOT NULL,
         leaf    INTEGER NOT NULL,
@@ -629,6 +632,9 @@ const RECEIPT_SCHEMA: &str = "
     ) WITHOUT ROWID;
     CREATE INDEX IF NOT EXISTS receipt_leaves_by_receipt ON receipt_leaves (receipt);
 ";
+/// The version of `RECEIPT_SCHEMA`, in `user_version` of the file. Version
+/// 2 added the `peer` column.
+const RECEIPT_SCHEMA_VERSION: i64 = 2;
 
 /// The receipts of a relay in one SQLite file, apart from its queues. A
 /// busy relay closes more windows in `RECEIPT_RETENTION` than RAM holds,
@@ -677,7 +683,19 @@ impl SqliteShelf {
         fault(connection.pragma_update(None, "journal_mode", "WAL"))?;
         // A crash loses at most the last receipts, which no client needs.
         fault(connection.pragma_update(None, "synchronous", "NORMAL"))?;
+
+        // A file of another version has other columns, and each write to
+        // it would fault. Its receipts go: a receipt answers a query for
+        // `RECEIPT_RETENTION` alone, and no client needs one.
+        let version: i64 =
+            fault(connection.query_row("PRAGMA user_version", [], |row| row.get(0)))?;
+        if version != RECEIPT_SCHEMA_VERSION {
+            fault(connection.execute_batch(
+                "DROP TABLE IF EXISTS receipt_leaves; DROP TABLE IF EXISTS receipts;",
+            ))?;
+        }
         fault(connection.execute_batch(RECEIPT_SCHEMA))?;
+        fault(connection.pragma_update(None, "user_version", RECEIPT_SCHEMA_VERSION))?;
 
         Ok(SqliteShelf {
             connection,
@@ -705,40 +723,78 @@ impl SqliteShelf {
         Ok(pages.saturating_mul(read("PRAGMA page_size")?))
     }
 
-    /// Erases the oldest receipts while the file is above its bound, in at
-    /// most `TRIM_STEPS` transactions of `TRIM_BATCH` receipts.
+    /// The peer that holds the most receipts, and the oldest one on a tie.
+    fn largest_peer(&self) -> Result<Option<Vec<u8>>, StoreFault> {
+        fault(
+            self.connection
+                .query_row(
+                    "SELECT peer FROM receipts GROUP BY peer
+                     ORDER BY COUNT(*) DESC, MIN(id) LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional(),
+        )
+    }
+
+    /// Erases the receipts of `ids` and their leaves in one transaction.
+    fn remove(&mut self, ids: &[i64]) -> Result<(), StoreFault> {
+        let transaction = fault(self.connection.transaction())?;
+        {
+            let mut leaves =
+                fault(transaction.prepare("DELETE FROM receipt_leaves WHERE receipt = ?1"))?;
+            let mut receipt = fault(transaction.prepare("DELETE FROM receipts WHERE id = ?1"))?;
+            for id in ids {
+                fault(leaves.execute([id]))?;
+                fault(receipt.execute([id]))?;
+            }
+        }
+        fault(transaction.commit())
+    }
+
+    /// Erases receipts while the file is above its bound, in at most
+    /// `TRIM_STEPS` transactions of `TRIM_BATCH` receipts. The oldest
+    /// receipts of the peer that holds the most leave first. A peer sets
+    /// the rate of the receipts of its link, thus a peer that fills the
+    /// file pushes out its own receipts, and those of no other link.
     fn trim(&mut self) -> Result<(), StoreFault> {
         let mut trimmed = false;
+        let mut largest: Option<Vec<u8>> = None;
 
         for _ in 0..TRIM_STEPS {
             if self.used_bytes()? <= self.max_bytes {
                 break;
             }
 
-            // The last receipt of the batch, or each one when the file
-            // holds less than a batch.
-            let last: i64 = fault(
-                self.connection
-                    .query_row(
-                        "SELECT id FROM receipts ORDER BY id LIMIT 1 OFFSET ?1",
-                        [TRIM_BATCH - 1],
-                        |row| row.get(0),
-                    )
-                    .optional(),
-            )?
-            .unwrap_or(i64::MAX);
-
-            let transaction = fault(self.connection.transaction())?;
-            fault(transaction.execute("DELETE FROM receipt_leaves WHERE receipt <= ?1", [last]))?;
-            let gone = fault(transaction.execute("DELETE FROM receipts WHERE id <= ?1", [last]))?;
-            fault(transaction.commit())?;
-            trimmed = true;
+            // One read of the counts serves the steps of this trim.
+            if largest.is_none() {
+                largest = self.largest_peer()?;
+            }
 
             // A file that is above its bound with no receipt has nothing
             // more to give.
-            if gone == 0 {
+            let Some(peer) = largest.as_deref() else {
                 break;
+            };
+
+            let ids: Vec<i64> = {
+                let mut query = fault(
+                    self.connection
+                        .prepare("SELECT id FROM receipts WHERE peer = ?1 ORDER BY id LIMIT ?2"),
+                )?;
+                let rows = fault(query.query_map(params![peer, TRIM_BATCH], |row| row.get(0)))?;
+                fault(rows.collect())?
+            };
+
+            // The peer has no more receipts. The next step reads the
+            // counts again.
+            if ids.is_empty() {
+                largest = None;
+                continue;
             }
+
+            self.remove(&ids)?;
+            trimmed = true;
         }
         if trimmed {
             fault(
@@ -755,9 +811,11 @@ impl SqliteShelf {
         let epoch = signed(kept.epoch)?;
 
         fault(transaction.execute(
-            "INSERT INTO receipts (issued, epoch, at, signed, leaves) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO receipts (issued, peer, epoch, at, signed, leaves)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 i64::from(kept.issued),
+                kept.peer.as_slice(),
                 epoch,
                 signed(kept.at)?,
                 kept.signed,
@@ -798,17 +856,7 @@ impl SqliteShelf {
                 break;
             }
 
-            let transaction = fault(self.connection.transaction())?;
-            {
-                let mut leaves =
-                    fault(transaction.prepare("DELETE FROM receipt_leaves WHERE receipt = ?1"))?;
-                let mut receipt = fault(transaction.prepare("DELETE FROM receipts WHERE id = ?1"))?;
-                for id in &ids {
-                    fault(leaves.execute([id]))?;
-                    fault(receipt.execute([id]))?;
-                }
-            }
-            fault(transaction.commit())?;
+            self.remove(&ids)?;
             erased = true;
         }
 
@@ -823,7 +871,7 @@ impl SqliteShelf {
 
     fn read(&self, epoch: u64, leaf: &[u8; 32]) -> Result<Vec<KeptReceipt>, StoreFault> {
         let mut query = fault(self.connection.prepare(
-            "SELECT r.issued, r.epoch, r.at, r.signed, r.leaves
+            "SELECT r.issued, r.epoch, r.at, r.signed, r.leaves, r.peer
              FROM receipt_leaves l JOIN receipts r ON r.id = l.receipt
              WHERE l.epoch = ?1 AND l.leaf = ?2
              ORDER BY r.issued DESC, r.id",
@@ -837,13 +885,15 @@ impl SqliteShelf {
                     row.get::<_, i64>(2)?,
                     row.get::<_, Vec<u8>>(3)?,
                     row.get::<_, Vec<u8>>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
                 ))
             }),
         )?;
 
         let mut found = Vec::new();
         for row in rows {
-            let (issued, epoch, at, signed, leaves) = fault(row)?;
+            let (issued, epoch, at, signed, leaves, peer) = fault(row)?;
+            let peer: [u8; 32] = peer.try_into().map_err(|_| StoreFault)?;
             let (whole, rest) = leaves.as_chunks::<32>();
             if !rest.is_empty() {
                 return Err(StoreFault);
@@ -852,6 +902,7 @@ impl SqliteShelf {
             let leaves = whole.to_vec();
             found.push(KeptReceipt {
                 issued: issued != 0,
+                peer,
                 epoch: unsigned(epoch)?,
                 signed,
                 leaves,
@@ -917,6 +968,7 @@ mod tests {
 
         let kept = |index: u32| KeptReceipt {
             issued: true,
+            peer: [9; 32],
             epoch: 7,
             signed: vec![1; 3_400],
             leaves: (0..1_024u32)
@@ -952,10 +1004,83 @@ mod tests {
     }
 
     #[test]
+    fn a_peer_that_fills_a_receipt_file_pushes_out_its_own_receipts() {
+        let path = file("receipts-share.db");
+        let mut shelf = SqliteShelf::open(&path).unwrap();
+        shelf.set_max_bytes(1 << 20);
+
+        let leaf = |peer: u8, index: u32, leaf: u32| {
+            let mut bytes = [0u8; 32];
+            bytes[0] = peer;
+            bytes[1..5].copy_from_slice(&index.to_be_bytes());
+            bytes[5..9].copy_from_slice(&leaf.to_be_bytes());
+            bytes
+        };
+        let kept = |peer: u8, index: u32| KeptReceipt {
+            issued: false,
+            peer: [peer; 32],
+            epoch: 7,
+            signed: vec![1; 3_400],
+            leaves: (0..1_024u32).map(|at| leaf(peer, index, at)).collect(),
+            at: u64::from(index),
+        };
+
+        // Two receipts of a quiet peer come first, thus they are the
+        // oldest of the file.
+        shelf.keep(kept(1, 0)).unwrap();
+        shelf.keep(kept(1, 1)).unwrap();
+        for index in 0..256 {
+            shelf.keep(kept(2, index)).unwrap();
+        }
+
+        assert!(shelf.used_bytes().unwrap() <= 1 << 20);
+        assert_eq!(shelf.find(7, &leaf(1, 0, 0)).unwrap().len(), 1);
+        assert_eq!(shelf.find(7, &leaf(1, 1, 0)).unwrap().len(), 1);
+        assert!(shelf.find(7, &leaf(2, 0, 0)).unwrap().is_empty());
+        assert_eq!(shelf.find(7, &leaf(2, 255, 0)).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_receipt_file_of_an_earlier_version_starts_empty() {
+        let path = file("receipts-old.db");
+        {
+            let old = Connection::open(&path).unwrap();
+            old.execute_batch(
+                "CREATE TABLE receipts (
+                    id INTEGER PRIMARY KEY, issued INTEGER NOT NULL, epoch INTEGER NOT NULL,
+                    at INTEGER NOT NULL, signed BLOB NOT NULL, leaves BLOB NOT NULL
+                 );
+                 INSERT INTO receipts (issued, epoch, at, signed, leaves)
+                 VALUES (1, 7, 100, zeroblob(4), zeroblob(32));",
+            )
+            .unwrap();
+        }
+
+        let mut shelf = SqliteShelf::open(&path).unwrap();
+        assert_eq!(shelf.held(), (0, 0));
+        shelf
+            .keep(KeptReceipt {
+                issued: true,
+                peer: [3; 32],
+                epoch: 7,
+                signed: vec![1; 40],
+                leaves: vec![[4; 32]],
+                at: 100,
+            })
+            .unwrap();
+        assert_eq!(shelf.find(7, &[4; 32]).unwrap()[0].peer, [3; 32]);
+
+        // A second open keeps the rows of the current version.
+        drop(shelf);
+        assert_eq!(SqliteShelf::open(&path).unwrap().held(), (1, 0));
+    }
+
+    #[test]
     fn a_receipt_file_finds_a_leaf_and_erases_after_retention() {
         let path = file("receipts.db");
         let kept = |issued: bool, epoch: u64, fill: u8, at: u64| KeptReceipt {
             issued,
+            peer: [fill; 32],
             epoch,
             signed: vec![fill; 40],
             leaves: (0..4u8).map(|i| [fill.wrapping_add(i); 32]).collect(),

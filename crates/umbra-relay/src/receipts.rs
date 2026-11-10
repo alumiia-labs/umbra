@@ -39,6 +39,9 @@ struct Window {
 pub struct KeptReceipt {
     /// Whether this relay issued the receipt; else it took it.
     pub issued: bool,
+    /// The relay at the other end of the link of the receipt. A shelf
+    /// that is full takes its room from the peer that holds the most.
+    pub peer: [u8; 32],
     /// The epoch of the receipt.
     pub epoch: u64,
     /// The signed receipt.
@@ -65,6 +68,29 @@ pub trait ReceiptShelf: Send {
     fn held(&self) -> (usize, usize);
 }
 
+/// Removes the oldest receipt of the peer that holds the most of `list`.
+/// A peer sets the rate of the receipts of its link. With this rule, a
+/// peer that floods the shelf pushes out its own receipts, and no receipt
+/// of another link.
+fn evict(list: &mut VecDeque<KeptReceipt>) {
+    let mut held: BTreeMap<[u8; 32], usize> = BTreeMap::new();
+    for kept in list.iter() {
+        let count = held.entry(kept.peer).or_default();
+        *count = count.saturating_add(1);
+    }
+
+    let Some(most) = held.values().copied().max() else {
+        return;
+    };
+
+    let oldest = list
+        .iter()
+        .position(|kept| held.get(&kept.peer) == Some(&most));
+    if let Some(oldest) = oldest {
+        list.remove(oldest);
+    }
+}
+
 /// The shelf of a relay with no receipt file: the receipts sit in RAM, at
 /// most `HELD_MAX` of each kind.
 #[derive(Default)]
@@ -82,7 +108,7 @@ impl ReceiptShelf for MemoryShelf {
         };
 
         if list.len() >= HELD_MAX {
-            list.pop_front();
+            evict(list);
         }
 
         list.push_back(kept);
@@ -277,6 +303,7 @@ impl ReceiptBook {
         // all the same.
         let _ = self.shelf.0.keep(KeptReceipt {
             issued: true,
+            peer: from_relay,
             epoch: receipt.epoch,
             signed: signed.clone(),
             leaves: open.leaves,
@@ -412,6 +439,7 @@ impl ReceiptBook {
             .0
             .keep(KeptReceipt {
                 issued: false,
+                peer,
                 epoch: receipt.epoch,
                 signed: signed.to_vec(),
                 leaves,
@@ -750,6 +778,33 @@ mod tests {
         fn held(&self) -> (usize, usize) {
             (0, 0)
         }
+    }
+
+    #[test]
+    fn a_peer_that_fills_the_shelf_pushes_out_its_own_receipts() {
+        let kept = |peer: u8, at: u64| KeptReceipt {
+            issued: false,
+            peer: [peer; 32],
+            epoch: 7,
+            signed: Vec::new(),
+            leaves: vec![[peer; 32]],
+            at,
+        };
+        let mut shelf = MemoryShelf::default();
+
+        // The receipt of a quiet peer is the oldest one of the shelf.
+        shelf.keep(kept(1, 0)).unwrap();
+        for at in 0..2 * HELD_MAX as u64 {
+            shelf.keep(kept(2, at)).unwrap();
+        }
+
+        assert_eq!(shelf.held(), (0, HELD_MAX));
+        assert_eq!(shelf.find(7, &[1; 32]).unwrap().len(), 1);
+
+        // The oldest receipts of the peer that filled the shelf left.
+        let oldest = shelf.find(7, &[2; 32]).unwrap();
+        assert_eq!(oldest.len(), HELD_MAX - 1);
+        assert_eq!(oldest[0].at, HELD_MAX as u64 + 1);
     }
 
     #[test]

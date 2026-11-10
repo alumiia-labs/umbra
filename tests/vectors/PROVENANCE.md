@@ -77,11 +77,11 @@ the files, and run the script again.
 | File | Bytes | SHA-256 |
 | --- | --- | --- |
 | `umbra/braid.json` | 38645 | `ef8ef2cff55d994e508f147319ff458d4ea15aca8979b5319886fa01886bc17b` |
-| `umbra/group.json` | 24166 | `a3278f1af77f1e31ea030232c049bf66745584f7c3e4dcc1890f5957163d3aa1` |
+| `umbra/group.json` | 24187 | `4168c8f46d0200180b081d1f3df6e2749f8b977961906fdb9171e640d598c66f` |
 | `umbra/handshake.json` | 53987 | `abdf59b4e42e8ca686035ce27862adc9e603cba31ec61b60fa0f5bd421bc93a2` |
 | `umbra/hierarchy.json` | 13058 | `5f3417a0b4860a8db82186c261a5c6792a14678625af6a2096dbbf2ce7587f28` |
 | `umbra/kem.json` | 7553 | `378f33f22f375a7f29580e6d56bb4b88a4255f7592539f4015974f77b21d143c` |
 | `umbra/onion.json` | 10290 | `1d9e920760222d3cc39547fbe720408aa60a526d5c35d19829c76fa9f3eb4aa8` |
 | `umbra/schedule.json` | 88172 | `a6d3b1b5c4f8093294a5895715e79dbb077b87ac476b2e9200d78caf089c2b36` |
-| `umbra/wire.json` | 105088 | `b8c8afc12f658715146b4b32784d7fb16a8651f2f7160aa177aa90ded8674159` |
+| `umbra/wire.json` | 105088 | `e4bc9c6f7341c5ef3dc9b29b4526656932cebd46b2df1a21789ed7bde7039f1f` |
 

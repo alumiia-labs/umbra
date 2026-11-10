@@ -212,8 +212,9 @@ pub enum ClientEvent {
         /// The `GroupQueueRecord` bytes.
         record: Vec<u8>,
     },
-    /// The circuit failed its check or its build, and the runtime builds a
-    /// new one.
+    /// A circuit failed its check or its build, or a relay ended it. The
+    /// run lives on while [`ClientNode::has_circuit`] holds, and the
+    /// runtime starts a new run with no circuit left.
     CircuitLost,
     /// A notify queue of Part 8 §8.5.2 exists at its relay. The caller
     /// registers `address` with each replica of its group by `GNREG`.
@@ -5323,6 +5324,17 @@ impl ClientNode {
         !self.resuming && self.slots.iter().any(Slot::is_ready)
     }
 
+    /// Whether a circuit builds or serves. After a `CircuitLost` the run
+    /// lives on with such a circuit, and it ends with none. The circuits
+    /// of a resume that the relay did not confirm yet do not count.
+    pub fn has_circuit(&self) -> bool {
+        !self.resuming
+            && self
+                .slots
+                .iter()
+                .any(|slot| !matches!(slot.circuit, Circuit::None))
+    }
+
     /// Whether the node sent a `SessionResume` that no capsule of the
     /// relay confirmed yet. A connection that closes in this state is a
     /// failed resume (`WIR-547`).
@@ -6770,30 +6782,62 @@ impl ClientNode {
             (None, _) => None,
         };
         let Some((kind, body)) = paid else {
-            match keys.purpose {
-                Purpose::Rotate { contact, .. } => {
-                    self.rotating.remove(&contact);
-                    return Ok(Vec::new());
-                }
-                // NET-326, NET-327: the renewal runs again at a later check,
-                // or at the next bundle of the peer.
-                Purpose::Renew { contact } | Purpose::RenewAccept { contact, .. } => {
-                    self.renewal_ended(&contact);
-                    return Ok(Vec::new());
-                }
-                _ => {}
-            }
-
-            return Ok(alloc::vec![ClientEvent::Rejected {
-                handle,
-                reason: Reject::Admission,
-            }]);
+            return Ok(self.admission_failed(handle, &keys.purpose));
         };
 
+        // A `NEW` that does not reach the session leaves no keys. Its
+        // purpose then ends as one with no admission does, thus no rotation
+        // and no renewal waits for an answer that no relay gives.
+        let purpose = match &keys.purpose {
+            Purpose::Rotate { contact, now } => Purpose::Rotate {
+                contact: *contact,
+                now: *now,
+            },
+            Purpose::Renew { contact } => Purpose::Renew { contact: *contact },
+            Purpose::RenewAccept { contact, .. } => Purpose::Renew { contact: *contact },
+            // Each other purpose ends with a rejection, as an invitation.
+            _ => Purpose::Invite,
+        };
+        let queue_handle = keys.handle;
         keys.paid = true;
         self.current = keys.slot;
-        self.send_new(keys, Admission { kind, body: &body }, rng)?;
-        Ok(Vec::new())
+        if self
+            .send_new(keys, Admission { kind, body: &body }, rng)
+            .is_ok()
+        {
+            return Ok(Vec::new());
+        }
+
+        // A `NEW` that the session holds goes at a later pump.
+        let is_held = self
+            .waiting
+            .values()
+            .any(|waiting| matches!(waiting, Waiting::Queue(held) if held.handle == queue_handle));
+        if is_held {
+            return Ok(Vec::new());
+        }
+        Ok(self.admission_failed(handle, &purpose))
+    }
+
+    /// Ends the purpose of a queue that got no admission. A rotation and a
+    /// renewal run again at a later check (`NET-326`, `NET-327`), or at the
+    /// next bundle of the peer. Each other purpose has a caller that holds
+    /// `handle`, and it takes the rejection.
+    fn admission_failed(&mut self, handle: u64, purpose: &Purpose) -> Vec<ClientEvent> {
+        match purpose {
+            Purpose::Rotate { contact, .. } => {
+                self.rotating.remove(contact);
+                Vec::new()
+            }
+            Purpose::Renew { contact } | Purpose::RenewAccept { contact, .. } => {
+                self.renewal_ended(contact);
+                Vec::new()
+            }
+            _ => alloc::vec![ClientEvent::Rejected {
+                handle,
+                reason: Reject::Admission,
+            }],
+        }
     }
 
     /// A proof of work at the newest challenge of `relay` that this device
@@ -8946,7 +8990,7 @@ impl ClientNode {
         rng: &mut R,
     ) -> Result<Vec<ClientEvent>, Error> {
         if kind == capsule::CapsuleType::Session {
-            return Ok(self.on_control(value));
+            return Ok(self.on_control(value, now, rng));
         }
 
         let link = self.link.as_mut().ok_or(Error::NoPath)?;
@@ -8996,11 +9040,53 @@ impl ClientNode {
                             self.faults.forced_replacement(&chain, now);
                         }
                         self.slot_mut()?.circuit = Circuit::None;
+                        self.rebuild_last(index, now, rng);
                         Ok(alloc::vec![ClientEvent::CircuitLost])
                     }
                 }
             }
         }
+    }
+
+    /// A ready circuit of slot `index` ended: a relay sent its `DESTROY`,
+    /// or a cell failed its check. With no other circuit left the build
+    /// starts again here, and [`ClientNode::has_circuit`] tells the runtime
+    /// that the run lives on. Thus one relay that ends one circuit ends no
+    /// run. A build that ends again inside its back-off starts no build
+    /// (`NET-347`), and the run ends as before. Another circuit that still
+    /// builds or serves leaves the build to [`ClientNode::rebuild_lost`].
+    fn rebuild_last<R: CryptoRng + ?Sized>(&mut self, index: usize, now: u64, rng: &mut R) {
+        let is_left = self
+            .slots
+            .iter()
+            .any(|slot| !matches!(slot.circuit, Circuit::None));
+        if is_left || self.range != Range::Queue || self.link.is_none() || self.resuming {
+            return;
+        }
+
+        let Some(slot) = self.slots.get_mut(index) else {
+            return;
+        };
+        let Some(relay) = slot.chain.and_then(|chain| chain.last().copied()) else {
+            return;
+        };
+        if self.rebuilds.get(&relay).is_some_and(|(_, at)| now < *at) {
+            return;
+        }
+
+        // The queues of the slot live at the relay where the chain ended,
+        // thus the new chain ends there.
+        if !slot.queues.is_empty() {
+            slot.exit = Some(relay);
+        }
+        slot.born = None;
+        slot.building_since = None;
+
+        let current = self.current;
+        self.current = index;
+        let _ = self.build_current(rng);
+        self.backs_off(relay, now);
+        self.current = current;
     }
 
     /// A hop failed the build of the circuit of slot `index`. The build
@@ -9235,7 +9321,12 @@ impl ClientNode {
     /// its chain lost a link, or aged it out. The node holds it no more,
     /// and the runtime builds again. Any other session control from a
     /// relay names nothing that a client does.
-    fn on_control(&mut self, value: &[u8]) -> Vec<ClientEvent> {
+    fn on_control<R: CryptoRng + ?Sized>(
+        &mut self,
+        value: &[u8],
+        now: u64,
+        rng: &mut R,
+    ) -> Vec<ClientEvent> {
         let circ_id = match SessionControl::parse(value) {
             Ok(SessionControl::Destroy { circ_id }) => circ_id,
             // WIR-541: the relay parked the session.
@@ -9274,14 +9365,22 @@ impl ClientNode {
         }
 
         let of_circuit = |slot: &Slot| slot.circ_id() == Some(circ_id);
-        let Some(slot) = self.slots.iter_mut().find(|slot| of_circuit(slot)) else {
+        let Some(index) = self.slots.iter().position(of_circuit) else {
+            return Vec::new();
+        };
+        let Some(slot) = self.slots.get_mut(index) else {
             return Vec::new();
         };
 
+        let was_ready = slot.is_ready();
         slot.circuit = Circuit::None;
         // REL-171: a circuit that a relay ended is a forced replacement.
         if let Some(chain) = slot.chain {
             self.faults.forced_replacement(&chain, self.clock);
+        }
+
+        if was_ready {
+            self.rebuild_last(index, now, rng);
         }
         alloc::vec![ClientEvent::CircuitLost]
     }
@@ -12313,6 +12412,84 @@ mod tests {
         assert!(net.node(ALICE).contacts.contains_key(&alice.0));
         // The builds to one relay back off.
         assert!(net.node(ALICE).rebuilds.contains_key(&[3; 32]));
+    }
+
+    /// The `DESTROY` of the session control for each ready circuit of a
+    /// node, as the guard sends it (`NET-322`).
+    fn destroys_of(node: &ClientNode) -> Vec<Vec<u8>> {
+        node.slots
+            .iter()
+            .filter(|slot| slot.is_ready())
+            .filter_map(Slot::circ_id)
+            .map(|circ_id| {
+                let value = [&[0x04][..], &circ_id].concat();
+                let mut out = alloc::vec![0u8; value.len() + 8];
+                let used =
+                    capsule::encode(capsule::CapsuleType::Session, &value, &mut out).unwrap();
+                out.truncate(used);
+                out
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_relay_that_ends_the_last_circuit_ends_no_run() {
+        let mut net = Net::new();
+        let [_, bob] = contacts(&mut net);
+        net.take(ALICE);
+        let now = net.now;
+        let subs = net.count(ALICE, Cmd::Sub);
+
+        // Each circuit of Alice ends at its relays. The last one builds
+        // again in its slot, thus the run holds a circuit.
+        for capsule in destroys_of(net.node(ALICE)) {
+            let events = net
+                .node(ALICE)
+                .on_capsule(&capsule, now, &mut Rng(6))
+                .unwrap();
+            assert_eq!(events, [ClientEvent::CircuitLost]);
+        }
+        assert!(net.node(ALICE).has_circuit());
+        assert!(!net.node(ALICE).is_ready());
+
+        // The run serves again. The next tick builds the circuit of the
+        // queues, its `SUB` goes, and a record of Bob arrives.
+        net.run();
+        assert!(net.node(ALICE).is_ready());
+        net.node(ALICE).rebuild_lost(now, &mut Rng(5)).unwrap();
+        net.run();
+        assert!(net.count(ALICE, Cmd::Sub) > subs);
+        net.node(BOB)
+            .send(&bob, &text(1), now, &mut Rng(4))
+            .unwrap();
+        net.run();
+        assert_eq!(messages(&net.take(ALICE)), 1);
+    }
+
+    #[test]
+    fn a_last_circuit_that_ends_again_inside_its_back_off_ends_the_run() {
+        let mut net = Net::new();
+        contacts(&mut net);
+        let now = net.now;
+        for capsule in destroys_of(net.node(ALICE)) {
+            net.node(ALICE)
+                .on_capsule(&capsule, now, &mut Rng(6))
+                .unwrap();
+        }
+        net.run();
+        assert!(net.node(ALICE).is_ready());
+
+        // NET-347: the relay ends the new circuit at once. No build starts
+        // inside the back-off, thus a relay draws no build for each
+        // `DESTROY` that it sends.
+        for capsule in destroys_of(net.node(ALICE)) {
+            let events = net
+                .node(ALICE)
+                .on_capsule(&capsule, now, &mut Rng(7))
+                .unwrap();
+            assert_eq!(events, [ClientEvent::CircuitLost]);
+        }
+        assert!(!net.node(ALICE).has_circuit());
     }
 
     #[test]

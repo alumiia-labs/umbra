@@ -45,9 +45,10 @@ impl<'a> HelloBody<'a> {
         2 + self.bundle.len() + 2 + self.profile.len() + self.admission.len()
     }
 
-    /// Whether the profile is empty. Clippy asks for this beside `len`.
+    /// Whether the plaintext has no byte. It holds its two length fields
+    /// at least, thus this is false. Clippy asks for this beside `len`.
     pub fn is_empty(&self) -> bool {
-        self.profile.is_empty()
+        self.len() == 0
     }
 
     /// Writes the plaintext.
@@ -93,8 +94,7 @@ impl<'a> HelloBody<'a> {
 fn hello_key(ss: &Secret<32>, entry_pk: &[u8]) -> Secret<32> {
     let kdf = Hkdf::<Sha3_256>::new(None, ss.expose());
     let mut key = Secret::<32>::zeroed();
-    // A 32-byte output is inside the HKDF output bound, thus this cannot fail.
-    let _ = kdf.expand_multi_info(&[labels::HELLO, entry_pk], key.expose_mut());
+    umbra_crypto::kdf::expand_into(&kdf, &[labels::HELLO, entry_pk], &mut key);
     key
 }
 
@@ -186,7 +186,7 @@ impl HelloPow {
     pub fn accepted_seeds(entry_pk: &[u8], epoch: u32) -> [[u8; 32]; 2] {
         [
             Self::derive(entry_pk, epoch).seed,
-            Self::derive(entry_pk, epoch.wrapping_sub(1)).seed,
+            Self::derive(entry_pk, epoch.saturating_sub(1)).seed,
         ]
     }
 }

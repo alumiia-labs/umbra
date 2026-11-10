@@ -134,13 +134,16 @@ const ROOT_KEY: &[u8] = b"root";
 const OUTGOING: u8 = 1;
 const INCOMING: u8 = 2;
 /// The bytes of a stored message before its `AppMessage`: the direction,
-/// the delivery state, the conversation, and the time of this device at the
-/// store of the message, in milliseconds. The conversation sits in the
-/// plaintext, because the owner column of a row is outside the associated
-/// data (`IMP-121`). The store time orders a conversation view, because the
-/// send time is a value of the peer.
-const MESSAGE_PREFIX: usize = 2 + 16 + 8;
+/// the delivery state, the conversation, the insertion stamp, and the clock
+/// of this device at the store of the message, both in milliseconds. The
+/// conversation sits in the plaintext, because the owner column of a row is
+/// outside the associated data (`IMP-121`). The stamp orders a conversation
+/// view, because the send time is a value of the peer. The clock gives the
+/// age of the message: one clock jump moves the stamp of each later
+/// message, and it moves the clock of no later message.
+const MESSAGE_PREFIX: usize = 2 + 16 + 8 + 8;
 const STORED_AT: core::ops::Range<usize> = 18..26;
+const CLOCK_AT: core::ops::Range<usize> = 26..34;
 /// The place of the delivery state in a stored message.
 const ROW_DELIVERY: usize = 1;
 /// The table of the records that wait for the send path. A row holds the
@@ -427,9 +430,10 @@ struct Audit {
 /// The local insertion sequence of Part 7 §7.5.3 and Part 11 §11.7: a
 /// monotone stamp for each message that this device stores. It follows the
 /// clock in milliseconds and never goes back, thus a clock that moves back
-/// changes no order of a view (`DEV-031`, `GRP-042`), and the edit window
-/// and the read mark still read it as a time. The store keeps its floor
-/// across runs.
+/// changes no order of a view (`DEV-031`, `GRP-042`), and the read mark
+/// covers each message. The store keeps its floor across runs. The stamp
+/// is no time: a clock that jumped forward leaves it above the clock, thus
+/// each age reads [`StoredAt::clock_ms`].
 #[derive(Debug, Default, Clone, Copy)]
 struct Stamp {
     last: u64,
@@ -437,11 +441,23 @@ struct Stamp {
 }
 
 impl Stamp {
-    /// The stamp of the next message at `now_ms`.
-    fn next(&mut self, now_ms: u64) -> u64 {
+    /// The stamp of the next message at `now_ms`, with that clock.
+    fn next(&mut self, now_ms: u64) -> StoredAt {
         self.last = self.last.saturating_add(1).max(now_ms);
-        self.last
+        StoredAt {
+            order_ms: self.last,
+            clock_ms: now_ms,
+        }
     }
+}
+
+/// What a stored message holds of the moment of its store.
+#[derive(Debug, Clone, Copy)]
+struct StoredAt {
+    /// The insertion stamp, which orders a view.
+    order_ms: u64,
+    /// The clock of this device, which gives an age.
+    clock_ms: u64,
 }
 
 /// The setting that holds the floor of [`Stamp`].
@@ -564,6 +580,45 @@ fn passphrase_bytes(code_units: &[u16]) -> Result<Zeroizing<Vec<u8>>, Error> {
     }
 
     Ok(bytes)
+}
+
+/// What the derivation of an unlock key reads of a client.
+#[derive(Debug, Clone, Copy)]
+pub struct UnlockParams {
+    header: WrapHeader,
+}
+
+/// The key of an unlock, with the header that it opens. The key wipes at
+/// the drop.
+pub struct UnlockKey {
+    store_key: Secret<32>,
+    header: WrapHeader,
+}
+
+impl core::fmt::Debug for UnlockKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("UnlockKey(..)")
+    }
+}
+
+/// Derives the key of an unlock from the passphrase. This is the slow step
+/// of an unlock, and it reads no client, thus a caller holds no lock of
+/// the client across it. A wrong passphrase and another secure element
+/// give `WrongPassphrase`.
+pub fn derive_unlock<E: SecureElement>(
+    params: &UnlockParams,
+    passphrase: &[u16],
+    element: &E,
+) -> Result<UnlockKey, Error> {
+    let store_key = params
+        .header
+        .unwrap(&passphrase_bytes(passphrase)?, element)
+        .map_err(|_| Error::WrongPassphrase)?;
+
+    Ok(UnlockKey {
+        store_key,
+        header: params.header,
+    })
 }
 
 /// The row of a record that waits for the send path, before its first
@@ -821,14 +876,15 @@ fn stored_message(
     direction: u8,
     delivery: Delivery,
     conversation: ConversationId,
-    stored_at_ms: u64,
+    stored_at: StoredAt,
     app: &[u8],
 ) -> Zeroizing<Vec<u8>> {
     let mut plain = Zeroizing::new(Vec::with_capacity(MESSAGE_PREFIX.saturating_add(app.len())));
     plain.push(direction);
     plain.push(delivery as u8);
     plain.extend_from_slice(&conversation.0);
-    plain.extend_from_slice(&stored_at_ms.to_be_bytes());
+    plain.extend_from_slice(&stored_at.order_ms.to_be_bytes());
+    plain.extend_from_slice(&stored_at.clock_ms.to_be_bytes());
     plain.extend_from_slice(app);
     plain
 }
@@ -983,10 +1039,33 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// The result is success only when the client is unlocked after the
     /// call (`IMP-188`). An open client checks the passphrase too.
     pub fn unlock(&mut self, passphrase: &[u16], now: u64) -> Result<(), Error> {
-        let store_key = self
-            .header
-            .unwrap(&passphrase_bytes(passphrase)?, &self.element)
-            .map_err(|_| Error::WrongPassphrase)?;
+        let key = derive_unlock(&self.unlock_params()?, passphrase, &self.element)?;
+        self.unlock_with_key(key, now)
+    }
+
+    /// What [`derive_unlock`] needs of this client. The call is cheap, thus
+    /// a caller makes it under its lock and derives the key outside it. A
+    /// closed client gives `Closed` before the slow step.
+    pub fn unlock_params(&self) -> Result<UnlockParams, Error> {
+        if matches!(self.state, State::Closed) {
+            return Err(Error::Closed);
+        }
+
+        Ok(UnlockParams {
+            header: self.header,
+        })
+    }
+
+    /// Unlocks with the key of [`derive_unlock`], as [`Client::unlock`]
+    /// does with the passphrase. A header that changed after
+    /// [`Client::unlock_params`] gives `Busy` and leaves the state: the key
+    /// is of the earlier header, and the caller derives it again.
+    pub fn unlock_with_key(&mut self, key: UnlockKey, now: u64) -> Result<(), Error> {
+        if key.header != self.header {
+            return Err(Error::Busy);
+        }
+
+        let UnlockKey { store_key, .. } = key;
         match self.state {
             State::Locked(_) => {}
             State::Unlocked(_) => {
@@ -1133,6 +1212,14 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 Err(Error::Integrity)
             }
         }
+    }
+
+    /// Whether a move of the store in this run found a table that did not
+    /// match its MAC (`IDN-039`). The pass of the first write has no caller
+    /// that takes its result, thus the platform reads the sign here and
+    /// shows the fault. A locked client gives `Locked`.
+    pub fn migration_was_unsound(&self) -> Result<bool, Error> {
+        Ok(self.open_ref()?.store.migration_was_unsound())
     }
 
     /// Writes the floor of the insertion stamp when it moved, thus a later
@@ -2121,7 +2208,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                         // from a sync channel passed the checks of the
                         // device that took the revision. This device
                         // measures no window and no limit for it.
-                        let in_window = now_ms.saturating_sub(info.stored_at_ms) < EDIT_WINDOW_MS;
+                        let in_window = now_ms.saturating_sub(info.clock_at_ms) < EDIT_WINDOW_MS;
                         if info.outgoing != from_user
                             || info.deleted
                             || (!record.synced && (!in_window || count >= EDIT_MAX))
@@ -4143,7 +4230,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
 
         let (count, mark) = revision_of(open.store.get(REVISION, &message.0)?.as_deref())?;
-        if count >= EDIT_MAX || now_ms.saturating_sub(info.stored_at_ms) >= EDIT_WINDOW_MS {
+        if count >= EDIT_MAX || now_ms.saturating_sub(info.clock_at_ms) >= EDIT_WINDOW_MS {
             return Err(Error::TooLong);
         }
 
@@ -4904,19 +4991,37 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     /// Sends a draft: the client draws `msg_id`, stores the message in the
     /// queued state, and hands the record to the send path. The draft
     /// drops here, and its buffer is zero bytes after that, whether this
-    /// call succeeds or fails (`IMP-039`).
+    /// call succeeds or fails (`IMP-039`). A caller that keeps the text of
+    /// the user after a failure calls [`Client::send_draft_kept`].
     pub fn send_draft<R: CryptoRng + ?Sized>(
         &mut self,
         draft: Draft,
         now_ms: u64,
         rng: &mut R,
     ) -> Result<MsgRef, Error> {
+        self.send_draft_kept(&mut Some(draft), now_ms, rng)
+    }
+
+    /// Sends the draft of `held`, as [`Client::send_draft`] does. A send
+    /// that fails before the store took the message leaves the draft in
+    /// `held`, with its text and its file, thus the user loses nothing to a
+    /// lock, a full store, or a refusal. After the store took the message,
+    /// `held` is empty and the draft is zero bytes (`IMP-039`), also when a
+    /// later step gives an error. An empty `held` gives `NotFound`.
+    pub fn send_draft_kept<R: CryptoRng + ?Sized>(
+        &mut self,
+        held: &mut Option<Draft>,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<MsgRef, Error> {
+        let draft = held.as_mut().ok_or(Error::NotFound)?;
         if draft.is_empty() {
             return Err(Error::Malformed);
         }
 
         let conversation = draft.conversation();
         let message = self.send_checked(draft, now_ms, rng)?;
+        *held = None;
 
         // DEV-201: a send erases the draft from the set. A send that this
         // call refused sent nothing, thus the stored draft of each device
@@ -4926,17 +5031,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok(message)
     }
 
-    /// The send of [`Client::send_draft`], with each of its checks.
+    /// The send of [`Client::send_draft_kept`], with each of its checks. An
+    /// error leaves the draft as it was.
     fn send_checked<R: CryptoRng + ?Sized>(
         &mut self,
-        mut draft: Draft,
+        draft: &mut Draft,
         now_ms: u64,
         rng: &mut R,
     ) -> Result<MsgRef, Error> {
         let mut msg_id = [0u8; 16];
         rng.fill_bytes(&mut msg_id);
         let conversation = draft.conversation();
-        if let Some(file) = draft.take_file() {
+        if let Some(file) = draft.file() {
             // The record of a file answers nothing, and its text is a
             // caption of CAPTION_MAX at most (WIR-535).
             if draft.reply_to().is_some() {
@@ -4945,7 +5051,15 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             if draft.text().len() > umbra_wire::descriptor::CAPTION_MAX {
                 return Err(Error::TooLong);
             }
-            return self.send_file(conversation, msg_id, file, draft.text(), now_ms, rng);
+
+            let message = self.store_file(conversation, msg_id, file, draft.text(), now_ms, rng)?;
+
+            // The store holds the message, thus the file leaves the draft
+            // for the transfer task with no copy.
+            if let Some(file) = draft.take_file() {
+                self.queue_upload(message, file);
+            }
+            return Ok(message);
         }
 
         // A mention names a member of a group by its pair key (`GRP-334`).
@@ -5112,14 +5226,41 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     }
 
     /// Stores a message with a file, and gives the file to the transfer
-    /// task. The record has no descriptor before the relays hold each
-    /// chunk, thus it waits outside the send path until
-    /// [`Client::upload_done`].
+    /// task.
     fn send_file<R: CryptoRng + ?Sized>(
         &mut self,
         conversation: ConversationId,
         msg_id: [u8; 16],
         file: crate::draft::DraftFile,
+        caption: &[u8],
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<MsgRef, Error> {
+        let message = self.store_file(conversation, msg_id, &file, caption, now_ms, rng)?;
+        self.queue_upload(message, file);
+
+        Ok(message)
+    }
+
+    /// Gives the file of a stored message to the transfer task.
+    fn queue_upload(&mut self, message: MsgRef, file: crate::draft::DraftFile) {
+        self.files.uploads.push_back(UploadJob {
+            message,
+            plain: file.plain,
+            shape: file.shape,
+        });
+    }
+
+    /// Stores a message with a file. The caller gives the file to the
+    /// transfer task after this call. The record has no descriptor before
+    /// the relays hold each chunk, thus it waits outside the send path
+    /// until [`Client::upload_done`]. An error leaves the file with the
+    /// caller.
+    fn store_file<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        msg_id: [u8; 16],
+        file: &crate::draft::DraftFile,
         caption: &[u8],
         now_ms: u64,
         rng: &mut R,
@@ -5183,15 +5324,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
 
         batch.commit()?;
-        let message = MsgRef(row);
-        self.files.uploads.push_back(UploadJob {
-            message,
-            plain: file.plain,
-            shape: file.shape,
-        });
         self.auto_lock.touch(now_ms / 1_000);
 
-        Ok(message)
+        Ok(MsgRef(row))
     }
 
     /// Cancels a send that the send path did not take yet. The message
@@ -5797,10 +5932,15 @@ fn info_of(plain: &[u8]) -> Result<MessageInfo, Error> {
         .get(STORED_AT)
         .and_then(|bytes| bytes.try_into().ok())
         .ok_or(Error::Integrity)?;
+    let clock_at: [u8; 8] = plain
+        .get(CLOCK_AT)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or(Error::Integrity)?;
 
     Ok(MessageInfo {
         outgoing: direction == OUTGOING,
         stored_at_ms: u64::from_be_bytes(stored_at),
+        clock_at_ms: u64::from_be_bytes(clock_at),
         delivery: delivery.ok_or(Error::Integrity)?,
         sent_at_ms: parsed.sent_at,
         // The store resolves the target: see `Client::info`.
@@ -8225,7 +8365,10 @@ mod tests {
             super::OUTGOING,
             Delivery::Accepted,
             conversation,
-            T0 + 1,
+            super::StoredAt {
+                order_ms: T0 + 1,
+                clock_ms: T0 + 1,
+            },
             &[0xFF; 3],
         );
         let open = client.open_mut().unwrap();
@@ -8298,7 +8441,10 @@ mod tests {
             super::OUTGOING,
             Delivery::Accepted,
             other,
-            T0 + 2,
+            super::StoredAt {
+                order_ms: T0 + 2,
+                clock_ms: T0 + 2,
+            },
             &record(AppKind::Text, [0x22; 16], b"of another conversation"),
         );
         let open = client.open_mut().unwrap();
@@ -9839,5 +9985,111 @@ mod tests {
         batch.commit().unwrap();
         assert!(client.wake_table().is_ok());
         assert_eq!(client.ndr_calls_due(0, &mut rng).unwrap().len(), 1);
+    }
+
+    /// One clock that jumps forward and comes back moves the stamp of each
+    /// later message, and it moves the age of no later message.
+    #[test]
+    fn a_clock_jump_changes_no_age_of_a_later_message() {
+        let (mut client, _, _, conversation) = client_with_contact(410);
+        let year_ms = 365 * 86_400_000;
+        let jumped = send(&mut client, conversation, "from the future", T0 + year_ms);
+        let later = send(&mut client, conversation, "at the true time", T0 + 1_000);
+
+        // DEV-031: the stamp orders the view, thus it stays above the jump.
+        let first = client.info(&jumped).unwrap();
+        let second = client.info(&later).unwrap();
+        assert!(second.stored_at_ms > first.stored_at_ms);
+
+        // The age reads the clock of the store of the message.
+        assert_eq!(second.clock_at_ms, T0 + 1_000);
+        assert_eq!(first.clock_at_ms, T0 + year_ms);
+    }
+
+    /// The key of an unlock comes from a step that reads no client, and it
+    /// opens the header that it came from alone.
+    #[test]
+    fn an_unlock_key_opens_its_header_and_no_later_one() {
+        let (mut client, mut rng, _, _) = client_with_contact(411);
+        let element = client.element().clone();
+        client.lock();
+
+        let params = client.unlock_params().unwrap();
+        assert_eq!(
+            super::derive_unlock(&params, &units("wrong horse"), &element).err(),
+            Some(Error::WrongPassphrase)
+        );
+        let key = super::derive_unlock(&params, &units("correct horse"), &element).unwrap();
+
+        // The user changes the passphrase while the key derives.
+        let header = TestClient::rewrap(
+            client.header(),
+            &element,
+            &units("correct horse"),
+            &units("battery staple"),
+            Cost { m_kib: 64, t: 1 },
+            &mut rng,
+        )
+        .unwrap();
+        client.set_header(header);
+        assert_eq!(client.unlock_with_key(key, 2_000), Err(Error::Busy));
+        assert!(!client.is_unlocked());
+
+        let params = client.unlock_params().unwrap();
+        let key = super::derive_unlock(&params, &units("battery staple"), &element).unwrap();
+        client.unlock_with_key(key, 2_000).unwrap();
+        assert!(client.is_unlocked());
+    }
+
+    /// A send that fails before the store took the message keeps the draft.
+    #[test]
+    fn a_send_that_fails_keeps_the_draft_and_a_send_that_stores_takes_it() {
+        let (mut client, mut rng, _, conversation) = client_with_contact(412);
+        let mut draft = client.new_draft(conversation);
+        draft.set_text(&units("kept")).unwrap();
+        let mut held = Some(draft);
+
+        client.lock();
+        assert_eq!(
+            client.send_draft_kept(&mut held, T0, &mut rng),
+            Err(Error::Locked)
+        );
+        assert!(held.as_ref().is_some_and(|draft| !draft.is_empty()));
+
+        client.unlock(&units("correct horse"), 2_000).unwrap();
+        let message = client.send_draft_kept(&mut held, T0, &mut rng).unwrap();
+        assert!(held.is_none());
+        assert_eq!(text_of(&client, &message), "kept");
+        assert_eq!(
+            client.send_draft_kept(&mut held, T0, &mut rng),
+            Err(Error::NotFound)
+        );
+    }
+
+    /// IDN-107: a handle after a release starts above each `r` that the
+    /// handle before it used.
+    #[test]
+    fn a_handle_after_a_release_takes_no_rotation_again() {
+        let (mut client, mut rng, _, _) = client_with_contact(413);
+        assert_eq!(client.handle_rotation_floor(0).unwrap(), 0);
+
+        let handle = super::Published {
+            rotation: 3,
+            ..held_handle()
+        };
+        client.put_published(&handle, &mut rng).unwrap();
+        assert_eq!(client.handle_rotation_floor(handle.index).unwrap(), 4);
+
+        client.drop_published(&handle.id, &mut rng).unwrap();
+        assert_eq!(client.handle_rotation_floor(handle.index).unwrap(), 4);
+
+        // A write of an earlier `r` moves the floor to no lower value.
+        let stale = super::Published {
+            rotation: 1,
+            ..handle
+        };
+        client.put_published(&stale, &mut rng).unwrap();
+        assert_eq!(client.handle_rotation_floor(stale.index).unwrap(), 4);
+        client.audit().unwrap();
     }
 }

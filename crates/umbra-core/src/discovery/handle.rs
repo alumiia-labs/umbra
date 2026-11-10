@@ -176,10 +176,10 @@ impl Handle {
     pub fn blob_key(&self, fragment: &[u8; FRAGMENT_LEN]) -> Secret<32> {
         let kdf = Hkdf::<Sha3_256>::new(None, fragment);
         let mut key = Secret::<32>::zeroed();
-        // A 32-byte output is inside the HKDF output bound, thus this cannot fail.
-        let _ = kdf.expand_multi_info(
+        umbra_crypto::kdf::expand_into(
+            &kdf,
             &[labels::PROFILE_BLOB, self.canonical().as_bytes()],
-            key.expose_mut(),
+            &mut key,
         );
         key
     }

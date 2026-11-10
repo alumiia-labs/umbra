@@ -86,7 +86,7 @@ fun ContactDetailsScreen(chat: Chat, onBack: () -> Unit, onMessage: () -> Unit, 
                 }
             }
             Spacer(Modifier.height(16.dp))
-            PrimaryButton(stringResource(R.string.common_message), onClick = onMessage)
+            PrimaryButton(stringResource(R.string.common_message), tag = TestTags.CONTACT_MESSAGE, onClick = onMessage)
             Spacer(Modifier.height(8.dp))
 
             EntryRow(RowEntry("pen", stringResource(R.string.verify_edit_name)) { push(Screen.EditName(chat.conversation)) })
@@ -99,6 +99,7 @@ fun ContactDetailsScreen(chat: Chat, onBack: () -> Unit, onMessage: () -> Unit, 
                     } else {
                         stringResource(R.string.verify_verify_contact)
                     },
+                    tag = TestTags.CONTACT_VERIFY,
                 ) { push(Screen.Verify(chat.conversation)) },
             )
             HorizontalDivider(color = Palette.Divider)
@@ -169,14 +170,20 @@ fun ContactDetailsScreen(chat: Chat, onBack: () -> Unit, onMessage: () -> Unit, 
             }
             HorizontalDivider(color = Palette.Divider)
             EntryRow(
-                RowEntry("ban", stringResource(if (isBlocked) R.string.common_unblock else R.string.common_block)) {
+                RowEntry(
+                    "ban",
+                    stringResource(if (isBlocked) R.string.common_unblock else R.string.common_block),
+                    tag = TestTags.CONTACT_BLOCK,
+                ) {
                     sheet = ContactSheet.Block
                 },
                 leads = false,
             )
             HorizontalDivider(color = Palette.Divider)
             EntryRow(
-                RowEntry("trash-can", stringResource(R.string.verify_delete_contact)) { sheet = ContactSheet.Delete },
+                RowEntry("trash-can", stringResource(R.string.verify_delete_contact), tag = TestTags.CONTACT_DELETE) {
+                    sheet = ContactSheet.Delete
+                },
                 leads = false,
             )
             Spacer(Modifier.height(20.dp))
@@ -226,7 +233,7 @@ fun ContactDetailsScreen(chat: Chat, onBack: () -> Unit, onMessage: () -> Unit, 
             ActionSheet(
                 stringResource(R.string.verify_delete_contact_question, chat.title),
                 listOf(
-                    RowEntry("trash-can", stringResource(R.string.verify_delete_contact)) {
+                    RowEntry("trash-can", stringResource(R.string.verify_delete_contact), tag = TestTags.MESSAGE_DELETE_CONFIRM) {
                         Core.removeContact(context, chat.conversation)
                     },
                 ),
@@ -287,19 +294,19 @@ fun VerifyScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit) {
             // IDN-140: the scan is the first way, and the short code the
             // second. A device with no back camera has the second alone.
             if (canScan) {
-                PrimaryButton(stringResource(R.string.common_scan_code_of, chat.title)) {
+                PrimaryButton(stringResource(R.string.common_scan_code_of, chat.title), tag = TestTags.VERIFY_SCAN) {
                     push(Screen.ScanSafetyNumber(chat.conversation))
                 }
                 Spacer(Modifier.height(8.dp))
             }
             if (!isKeyWaiting) {
-                SecondaryButton(stringResource(R.string.verify_compare_short_code)) {
+                SecondaryButton(stringResource(R.string.verify_compare_short_code), tag = TestTags.VERIFY_SHORT_CODE) {
                     push(Screen.VerifyCode(chat.conversation, starts = true))
                 }
                 Spacer(Modifier.height(8.dp))
             }
             EntryRow(
-                RowEntry("key", stringResource(R.string.verify_full_safety_number)) {
+                RowEntry("key", stringResource(R.string.verify_full_safety_number), tag = TestTags.VERIFY_FULL_NUMBER) {
                     push(Screen.SafetyNumber(chat.conversation))
                 },
             )
@@ -337,7 +344,7 @@ fun VerifyCodeScreen(chat: Chat, starts: Boolean, onBack: () -> Unit) {
                 isDone -> {
                     Headline(stringResource(R.string.common_you_verified, chat.title))
                     Spacer(Modifier.height(20.dp))
-                    PrimaryButton(stringResource(R.string.common_done), onClick = onBack)
+                    PrimaryButton(stringResource(R.string.common_done), tag = TestTags.VERIFY_DONE, onClick = onBack)
                 }
                 isMismatch -> {
                     // A user cannot know what a mismatch means.
@@ -346,16 +353,18 @@ fun VerifyCodeScreen(chat: Chat, starts: Boolean, onBack: () -> Unit) {
                         stringResource(R.string.common_another_party_between, chat.title),
                     )
                     Spacer(Modifier.height(20.dp))
-                    PrimaryButton(stringResource(R.string.common_try_again), onClick = start)
+                    PrimaryButton(stringResource(R.string.common_try_again), tag = TestTags.VERIFY_AGAIN, onClick = start)
                 }
                 code != null -> {
                     Headline(stringResource(R.string.verify_codes_match_question))
                     Spacer(Modifier.height(20.dp))
-                    CodeDigits(code)
+                    CodeDigits(code, tag = TestTags.VERIFY_CODE)
                     Spacer(Modifier.height(24.dp))
-                    PrimaryButton(stringResource(R.string.common_codes_match)) { Core.confirmVerification(conversation) }
+                    PrimaryButton(stringResource(R.string.common_codes_match), tag = TestTags.VERIFY_CODES_MATCH) {
+                        Core.confirmVerification(conversation)
+                    }
                     Spacer(Modifier.height(8.dp))
-                    SecondaryButton(stringResource(R.string.common_codes_differ)) {
+                    SecondaryButton(stringResource(R.string.common_codes_differ), tag = TestTags.VERIFY_CODES_DIFFER) {
                         Core.endVerification()
                         isMismatch = true
                     }
@@ -365,7 +374,7 @@ fun VerifyCodeScreen(chat: Chat, starts: Boolean, onBack: () -> Unit) {
                     Spacer(Modifier.height(12.dp))
                     Note(failure, isError = true)
                     Spacer(Modifier.height(16.dp))
-                    PrimaryButton(stringResource(R.string.common_try_again), onClick = start)
+                    PrimaryButton(stringResource(R.string.common_try_again), tag = TestTags.VERIFY_AGAIN, onClick = start)
                 }
                 else -> {
                     // The two devices make the code together.
@@ -392,7 +401,7 @@ fun SafetyNumberScreen(chat: Chat, onBack: () -> Unit) {
             Spacer(Modifier.height(16.dp))
 
             val groups = number?.split(' ').orEmpty()
-            DigitFrame(rowGap = 10.dp) {
+            DigitFrame(rowGap = 10.dp, tag = TestTags.SAFETY_NUMBER) {
                 groups.chunked(3).forEach { row ->
                     Text(row.joinToString("  "), fontFamily = Fonts.Mono, fontSize = 17.sp)
                 }
@@ -401,7 +410,7 @@ fun SafetyNumberScreen(chat: Chat, onBack: () -> Unit) {
             Spacer(Modifier.height(16.dp))
             // The number is a public value of the two devices, thus it is
             // no sensitive clip.
-            SecondaryButton(stringResource(R.string.verify_copy), enabled = number != null) {
+            SecondaryButton(stringResource(R.string.verify_copy), enabled = number != null, tag = TestTags.SAFETY_COPY) {
                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 clipboard.setPrimaryClip(ClipData.newPlainText(UiText.get(R.string.verify_safety_number), number))
             }
@@ -453,11 +462,12 @@ fun KeyChangePanel(chat: Chat, pending: uniffi.umbra_ffi.FfiKeyChange, onVerify:
             pending.newSafetyNumber,
             style = MaterialTheme.typography.bodyLarge,
             fontFamily = Fonts.Mono,
+            modifier = Modifier.tagged(TestTags.KEY_CHANGE_NUMBER),
         )
         Spacer(Modifier.height(12.dp))
-        SecondaryButton(stringResource(R.string.verify_verify_contact), onClick = onVerify)
+        SecondaryButton(stringResource(R.string.verify_verify_contact), tag = TestTags.KEY_CHANGE_VERIFY, onClick = onVerify)
         Spacer(Modifier.height(8.dp))
-        SecondaryButton(stringResource(R.string.verify_accept_new_key)) {
+        SecondaryButton(stringResource(R.string.verify_accept_new_key), tag = TestTags.KEY_CHANGE_ACCEPT) {
             Core.acceptKeyChange(chat.conversation, pending.newSafetyNumber)
         }
     }

@@ -316,9 +316,11 @@ async fn open_socket(
     let first = socket
         .frame(CellCommand::MeasEcho, Bucket::B0, &[0u8; 8])
         .ok_or(MeasureError::Local)?;
-    writer
-        .send_all(&[open, first])
+    // `send_all` has no time bound of its own, and a relay that reads
+    // nothing would hold this write.
+    tokio::time::timeout(wait, writer.send_all(&[open, first]))
         .await
+        .map_err(|_| MeasureError::Connect)?
         .map_err(|_| MeasureError::Connect)?;
 
     let echoed = tokio::time::timeout(wait, async {
@@ -449,7 +451,11 @@ async fn run_socket(
     let _ = tokio::time::timeout(Duration::from_secs(2), batches.send(last)).await;
 
     drop(batches);
+    // A write that waits for a relay that reads no more ends here. A
+    // timeout alone would leave the task and its socket.
+    let stop = write.abort_handle();
     let _ = tokio::time::timeout(Duration::from_secs(2), write).await;
+    stop.abort();
     read.abort();
     (sent, echoed)
 }

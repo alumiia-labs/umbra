@@ -548,7 +548,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
         if table == TableId::MESSAGE {
             if let Ok(info) = super::info_of(plain) {
-                let age_ms = now.saturating_mul(1_000).saturating_sub(info.stored_at_ms);
+                let age_ms = now.saturating_mul(1_000).saturating_sub(info.clock_at_ms);
                 return Ok(age_ms > BACKUP_HISTORY_DAYS * 86_400 * 1_000);
             }
         }

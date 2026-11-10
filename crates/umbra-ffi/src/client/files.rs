@@ -137,6 +137,12 @@ pub struct FileInfo {
     pub size: u64,
 }
 
+/// The largest file of the image class that a read gives. The re-encode
+/// of a sender keeps a photo far below it. The bound of a file is
+/// `MAX_FILE_SIZE`, and a view that decodes an image holds the whole file
+/// in memory.
+pub const IMAGE_READ_MAX: u64 = 32 << 20;
+
 /// A file that waits for the transfer task.
 pub struct UploadJob {
     /// The message.
@@ -602,7 +608,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
     /// The file of a message, in the clear. The caller overwrites it after
     /// the use.
+    ///
+    /// An image above `IMAGE_READ_MAX` gives `TooLong` with no read. A view
+    /// decodes an image at once, and the peer sets the class and the size.
     pub fn file_bytes(&self, message: &MsgRef) -> Result<Zeroizing<Vec<u8>>, Error> {
+        let is_large_image = self.file_info(message)?.is_some_and(|info| {
+            info.shape.mime_class == umbra_wire::descriptor::class::IMAGE
+                && info.size > IMAGE_READ_MAX
+        });
+        if is_large_image {
+            return Err(Error::TooLong);
+        }
+
         let store = &self.open_ref()?.store;
         store
             .get(FILE_DATA, &message.0)?
@@ -1028,7 +1045,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 .get(TableId::MESSAGE, &message.0)?
                 .ok_or(Error::NotFound)?,
         );
-        let stored_at = info_of(&plain)?.stored_at_ms / 1_000;
+        let stored_at = info_of(&plain)?.clock_at_ms / 1_000;
 
         Ok(self.clock.saturating_sub(stored_at) >= umbra_core::attach::CHUNK_LIFE_MAX)
     }

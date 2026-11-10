@@ -116,10 +116,16 @@ fun RecoveryCodeScreen(onBack: () -> Unit, push: (Screen) -> Unit = {}) {
 
             Spacer(Modifier.height(16.dp))
             EntryRow(
-                RowEntry("user-group", stringResource(R.string.recovery_with_contacts)) { push(Screen.SocialRecovery) },
+                RowEntry("user-group", stringResource(R.string.recovery_with_contacts), tag = TestTags.RECOVERY_SOCIAL) {
+                    push(Screen.SocialRecovery)
+                },
             )
             HorizontalDivider(color = Palette.Divider)
-            EntryRow(RowEntry("key", stringResource(R.string.common_root_seed)) { push(Screen.RootSeed) })
+            EntryRow(
+                RowEntry("key", stringResource(R.string.common_root_seed), tag = TestTags.RECOVERY_ROOT_SEED) {
+                    push(Screen.RootSeed)
+                },
+            )
         }
     }
 }
@@ -249,6 +255,7 @@ private fun DigitRows(digits: CharArray) {
     val ink = Palette.Text.toArgb()
 
     AndroidView(
+        modifier = Modifier.tagged(TestTags.RECOVERY_DIGITS),
         factory = { context ->
             TextView(context).apply {
                 styleAsApp(this, mono = true)
@@ -296,7 +303,7 @@ fun RestoreForm(onCancel: () -> Unit) {
 
     Column(Modifier.fillMaxWidth()) {
         if (isRunning) {
-            Text(Core.restoreNote.orEmpty(), color = Palette.TextSecondary)
+            Text(Core.restoreNote.orEmpty(), color = Palette.TextSecondary, modifier = Modifier.tagged(TestTags.RESTORE_STATE))
             return@Column
         }
 
@@ -304,6 +311,7 @@ fun RestoreForm(onCancel: () -> Unit) {
             code,
             stringResource(if (withShares) R.string.recovery_user_half else R.string.common_recovery_code),
             isPassphrase = false,
+            tag = TestTags.RESTORE_CODE,
         )
         if (withShares) {
             for (index in 0 until shareCount) {
@@ -320,11 +328,21 @@ fun RestoreForm(onCancel: () -> Unit) {
         }
 
         Spacer(Modifier.height(12.dp))
-        FramedPlatformField(passphrase, stringResource(R.string.common_new_passphrase), isPassphrase = true)
+        FramedPlatformField(
+            passphrase,
+            stringResource(R.string.common_new_passphrase),
+            isPassphrase = true,
+            tag = TestTags.RESTORE_PASSPHRASE,
+        )
         Spacer(Modifier.height(14.dp))
-        FramedPlatformField(confirm, stringResource(R.string.lock_confirm_new_passphrase), isPassphrase = true)
+        FramedPlatformField(
+            confirm,
+            stringResource(R.string.lock_confirm_new_passphrase),
+            isPassphrase = true,
+            tag = TestTags.RESTORE_CONFIRM,
+        )
         Spacer(Modifier.height(14.dp))
-        PrimaryButton(stringResource(R.string.common_restore)) {
+        PrimaryButton(stringResource(R.string.common_restore), tag = TestTags.RESTORE_START) {
             // A mismatch keeps the code and the shares in their fields.
             val phrase = passphrase.take()
             val second = confirm.take()
@@ -357,7 +375,7 @@ fun RestoreForm(onCancel: () -> Unit) {
             withShares = !withShares
         }
         Spacer(Modifier.height(8.dp))
-        SecondaryButton(stringResource(R.string.common_back), onClick = onCancel)
+        SecondaryButton(stringResource(R.string.common_back), tag = TestTags.RESTORE_BACK, onClick = onCancel)
     }
 }
 

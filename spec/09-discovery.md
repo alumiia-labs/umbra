@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 9: Discovery, Handles, and Key Transparency
 
 **Status:** Draft
-**Version:** 0.53.0
-**Date:** 2026-11-09
+**Version:** 0.54.0
+**Date:** 2026-11-10
 
 ---
 
@@ -1027,6 +1027,11 @@ holder:      ss  <- UMBRA-KEM.Decap( HK_sk, HK_pub, ct )
   directory MUST NOT accept an `ans` for a `lease_epoch` that it did not issue.
   **[DIS-144]** A directory MUST NOT accept an `ans` for a `lease_epoch` that
   it issued before the current version of the label was published.
+  **[DIS-206]** A directory MUST NOT change the stored state of a label when
+  it issues a renewal challenge. It holds the issued `lease_epoch` with the
+  challenge, and the label takes it at the renewal. A handle is no secret,
+  thus a write at each challenge lets a party that knows many handles grow
+  the store at no cost.
 - **[DIS-042]** A directory MUST NOT retain `ss`, `k`, or `ans` after the
   renewal.
 

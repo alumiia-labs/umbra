@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 7: Device Sets, History Sync, and Revocation
 
 **Status:** Draft
-**Version:** 0.53.0
-**Date:** 2026-11-09
+**Version:** 0.54.0
+**Date:** 2026-11-10
 
 ---
 
@@ -1661,8 +1661,14 @@ Part 6 §6.6 as that target.
 | --- | --- |
 | `REF_ORPHAN_TTL` | 45 days, which equals `MSG_TTL` |
 | `REF_ORPHAN_MAX` | 4 096 entries for each conversation |
+| `REF_ORPHAN_MEMBER_MAX` | 256 entries for each member index of a group in each `REF_ORPHAN_TTL` |
 
 **[DEV-095]** A client MUST discard a pending entry above either limit.
+
+**[DEV-360]** A client MUST discard a new pending entry of a group from a member
+index that made `REF_ORPHAN_MEMBER_MAX` entries in the current period of
+`REF_ORPHAN_TTL`. One member then cannot fill the table of a group, and a
+deletion of another member keeps its place.
 
 **[DEV-096]** **A pending reference entry MUST NOT suppress or delay the
 missing-index recovery of Part 2 §2.4.** **[DEV-097]** A client MUST treat a
@@ -1786,6 +1792,7 @@ show a delivery failure to the user.
 | `SWEEP_SPREAD` | Exponential, mean 30 min |
 | `REF_ORPHAN_TTL` | 45 days |
 | `REF_ORPHAN_MAX` | 4 096 entries for each conversation |
+| `REF_ORPHAN_MEMBER_MAX` | 256 entries for each member index of a group in each `REF_ORPHAN_TTL` |
 
 ### 7.5.7 What the interface states about an edit and a deletion
 

@@ -699,7 +699,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             };
 
             let is_bound = info.stored_at_ms > receipted
-                && now_ms.saturating_sub(info.stored_at_ms) < ttl_ms
+                && now_ms.saturating_sub(info.clock_at_ms) < ttl_ms
                 && !info.deleted;
             if info.outgoing && info.delivery == Delivery::Accepted && is_bound {
                 let app = message.get(MESSAGE_PREFIX..).ok_or(Error::Integrity)?;

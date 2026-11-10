@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 4: Identity
 
 **Status:** Draft
-**Version:** 0.53.0
-**Date:** 2026-11-09
+**Version:** 0.54.0
+**Date:** 2026-11-10
 
 ---
 
@@ -218,6 +218,11 @@ label.
   pair `(j, r)`.
 - **[IDN-108]** A client MUST hold the current `r` of each `j` in the local
   identity table. §4.7.2 backs that table up.
+
+**The release.** The table holds the `r` of a `j` after the client released
+its handle. A later handle at that `j` starts at the next `r`. Thus a key that
+a rotation retired goes to no directory again, and the new handle shares no
+key with the old one.
 
 **The restore.** A restored client holds the `r` that the last backup wrote,
 and the user can have rotated the key after that write. The client finds the

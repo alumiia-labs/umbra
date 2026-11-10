@@ -43,6 +43,8 @@ use umbra_transport::{
     https::Url,
     native,
 };
+use zeroize::Zeroize;
+
 use umbra_wire::{
     address::{QueueAddress, LEN as QUEUE_ADDRESS_LEN},
     directory::{Kind, Status},
@@ -239,6 +241,19 @@ impl DirectoryLink {
         }
         keys.insert(input.to_vec(), key);
         Ok(key)
+    }
+
+    /// Drops each held search key, at a lock. The inputs name the labels of
+    /// this device.
+    pub(super) fn forget_search_keys(&self) {
+        let mut keys = self
+            .search_keys
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for key in keys.values_mut() {
+            key.zeroize();
+        }
+        keys.clear();
     }
 
     /// The newest entry of a label of this device under a fresh head, read
@@ -953,13 +968,22 @@ impl Handle {
             .try_fill_bytes(&mut id)
             .map_err(|_| FfiError::Storage)?;
 
+        // IDN-106, IDN-107: a new handle starts above each `r` that a
+        // handle of this device held. The key of an `r` that a rotation
+        // retired then goes to no directory again, and the new name shares
+        // no key with a released one.
+        let rotation = match kind {
+            EntryKind::Handle => locked(&self.inner).client.handle_rotation_floor(index)?,
+            EntryKind::Address => 0,
+        };
+
         let (queue, rendezvous) = self.new_rendezvous()?;
         let now = unix_now();
         let row = |version: u32, pending: Option<PendingWrite>| Published {
             id,
             kind,
             index,
-            rotation: 0,
+            rotation,
             label: label.clone(),
             name: name.clone(),
             queue,
@@ -992,7 +1016,7 @@ impl Handle {
                 &token,
                 &label,
                 &name,
-                self.entry_key_of(kind, index, 0),
+                self.entry_key_of(kind, index, rotation),
                 |key, version| entry_of(key, address, version),
                 lease,
                 keep,
@@ -1091,7 +1115,7 @@ impl Handle {
     /// the welcome text, sealed under the key of the fragment of its link
     /// (`DIS-141`, `DIS-176`). A device with no handle writes nothing.
     fn publish_profile_blob(&self, link: &DirectoryLink) -> Result<(), FfiError> {
-        let (entry, blob) = {
+        let (entry, blob, sealed) = {
             let mut inner = locked(&self.inner);
             if !inner.client.profile_blob_due()? {
                 return Ok(());
@@ -1130,14 +1154,25 @@ impl Handle {
             let blob = handle
                 .seal_blob(&fragment, nonce, &plain)
                 .map_err(|_| FfiError::Malformed)?;
-            (entry, blob)
+            (entry, blob, (name, welcome, picture))
         };
 
         let key_of = self.entry_key_of(EntryKind::Handle, entry.index, entry.rotation);
         link.put_blob(&entry.label, &entry.name, key_of, &blob)?;
-        Ok(locked(&self.inner)
-            .client
-            .set_profile_blob_due(false, &mut OsRng)?)
+
+        // A profile that changed during the write is not the one that the
+        // directory holds. The mark then stays, and the next upkeep writes
+        // the new profile.
+        let mut inner = locked(&self.inner);
+        let now_held = (
+            inner.client.profile_name()?,
+            inner.client.welcome()?,
+            inner.client.profile_picture()?,
+        );
+        if now_held != sealed {
+            return Ok(());
+        }
+        Ok(inner.client.set_profile_blob_due(false, &mut OsRng)?)
     }
 
     /// Writes the tombstone of an entry (`DIS-171`) and ends its queue. The
@@ -1395,28 +1430,42 @@ impl Handle {
             return Ok(());
         }
 
-        let (key, before) = {
+        // IMP-127: the keys leave RAM before the wait for the challenge.
+        // This block finds the rotation of the key that signs, and the
+        // loader below reads that key again after the challenge.
+        let (signing_rotation, bytes) = {
             let inner = locked(&self.inner);
             let key = inner
                 .client
                 .entry_key(entry.kind, entry.index, entry.rotation)?;
             let before = match (entry.kind, entry.rotation.checked_sub(1)) {
-                (EntryKind::Handle, Some(rotation)) => {
-                    Some(inner.client.entry_key(entry.kind, entry.index, rotation)?)
-                }
+                (EntryKind::Handle, Some(rotation)) => Some((
+                    rotation,
+                    inner.client.entry_key(entry.kind, entry.index, rotation)?,
+                )),
                 _ => None,
             };
-            (key, before)
-        };
-        let Some(signer) = signer_of(&shown.key, &key, before.as_ref()) else {
-            return Ok(());
+
+            let before_key = before.as_ref().map(|(_, key)| key);
+            let Some(signer) = signer_of(&shown.key, &key, before_key) else {
+                return Ok(());
+            };
+            let signing_rotation = match &before {
+                Some((rotation, key)) if core::ptr::eq(signer, key) => *rotation,
+                _ => entry.rotation,
+            };
+            (signing_rotation, entry_bytes(entry, &key)?)
         };
 
-        let bytes = entry_bytes(entry, &key)?;
+        let signer_of_write = || {
+            Ok(locked(&self.inner)
+                .client
+                .entry_key(entry.kind, entry.index, signing_rotation)?)
+        };
         match link.write_staged(
             &entry.label,
             &entry.name,
-            || Ok(signer),
+            signer_of_write,
             shown.version,
             &bytes,
         ) {
@@ -1623,7 +1672,6 @@ impl Handle {
             // DIS-137, DIS-138: the holder reads its own entry. IDN-109:
             // a restored handle finds its current key before it shows as
             // held by another party.
-            let mut is_staged = false;
             let read = self.entry_standing(&link, &entry);
 
             // DIS-205: a write that left with no answer settles first, and it
@@ -1645,9 +1693,14 @@ impl Handle {
                 }
             }
 
-            if let Ok((standing, shown)) = read {
-                is_staged = standing == Standing::Staged;
-
+            // A log that did not answer says nothing of a write that
+            // waits. The steps below would end the queue that the log
+            // still names, thus the entry waits for the next upkeep.
+            let Ok((standing, shown)) = read else {
+                continue;
+            };
+            let is_staged = standing == Standing::Staged;
+            {
                 // DEV-306: the log shows the held version under its key,
                 // thus the directory holds the key of the held rotation. An
                 // earlier identity root that served the rotation before it
@@ -1687,9 +1740,7 @@ impl Handle {
 
                 if own == entry.foreign {
                     entry.foreign = !own;
-                    locked(&self.inner)
-                        .client
-                        .put_published(&entry, &mut OsRng)?;
+                    self.put_upkeep(&entry)?;
                 }
             }
 
@@ -1704,10 +1755,11 @@ impl Handle {
             if let Some((previous, until)) = entry.previous.filter(|_| !is_staged) {
                 if now >= until {
                     self.end_rendezvous(previous);
-                    let mut inner = locked(&self.inner);
-                    let _ = inner.client.unbind_queue(&previous, &mut OsRng);
+                    let _ = locked(&self.inner)
+                        .client
+                        .unbind_queue(&previous, &mut OsRng);
                     entry.previous = None;
-                    inner.client.put_published(&entry, &mut OsRng)?;
+                    self.put_upkeep(&entry)?;
                 }
             }
 
@@ -1717,9 +1769,10 @@ impl Handle {
             if owed.contains(&entry.queue) && !is_staged {
                 if let Some((previous, _)) = entry.previous.take() {
                     self.end_rendezvous(previous);
-                    let mut inner = locked(&self.inner);
-                    let _ = inner.client.unbind_queue(&previous, &mut OsRng);
-                    inner.client.put_published(&entry, &mut OsRng)?;
+                    let _ = locked(&self.inner)
+                        .client
+                        .unbind_queue(&previous, &mut OsRng);
+                    self.put_upkeep(&entry)?;
                 }
                 if let Err(fault) = self.rotate_queue(&link, &entry, now) {
                     crate::devlog::format_line!("a rendezvous queue did not rotate: {fault:?}");
@@ -1756,10 +1809,25 @@ impl Handle {
                     renewed_at: now,
                     ..entry
                 };
-                locked(&self.inner)
-                    .client
-                    .put_published(&renewed, &mut OsRng)?;
+                self.put_upkeep(&renewed)?;
             }
+        }
+        Ok(())
+    }
+
+    /// Writes a row of the upkeep, when the store still holds the version
+    /// and the write mark that the upkeep read. The upkeep holds a copy of
+    /// the row across its calls to the network. A reset or a tap of the
+    /// user can change the row in that time, as with the mark of a
+    /// tombstone (`DEV-357`), and a write of the copy would remove that
+    /// change. The next upkeep reads the row again.
+    fn put_upkeep(&self, entry: &Published) -> Result<(), FfiError> {
+        let mut inner = locked(&self.inner);
+        let is_current = inner.client.published()?.iter().any(|held| {
+            held.id == entry.id && held.version == entry.version && held.pending == entry.pending
+        });
+        if is_current {
+            inner.client.put_published(entry, &mut OsRng)?;
         }
         Ok(())
     }
@@ -1841,6 +1909,19 @@ impl Handle {
             .find(|entry| via_text(entry) == label)
             .ok_or(FfiError::NotFound)?;
 
+        // A write that waits, and a version of another writer, take no
+        // rotation over them: the rotation would drop the mark of the
+        // write, or the queue that the log names (`DIS-139`, `DIS-205`).
+        if entry.pending.is_some() || entry.foreign {
+            return Err(FfiError::Busy);
+        }
+        if matches!(
+            self.entry_standing(&link, &entry),
+            Ok((Standing::Staged | Standing::Foreign, _))
+        ) {
+            return Err(FfiError::Busy);
+        }
+
         if let Some((previous, _)) = entry.previous.take() {
             self.end_rendezvous(previous);
             let _ = locked(&self.inner)
@@ -1886,6 +1967,13 @@ impl Handle {
     /// some seconds: the relay makes a queue, and the proof of work of a
     /// token runs (Part 13 §13.9).
     pub fn create_public_link(&self, valid_seconds: u64) -> Result<PublicLink, FfiError> {
+        // DIS-172: the lease of the directory is `HANDLE_LEASE` at most,
+        // and a timed link takes no renewal. A longer link would end early
+        // with no sign.
+        if valid_seconds > HANDLE_LEASE {
+            return Err(FfiError::TooLong);
+        }
+
         let link = self.directory_link()?;
         let index = locked(&self.inner).client.take_address_index(&mut OsRng)?;
         // The key drops here, and the publish loads it for each signature.
@@ -1961,10 +2049,35 @@ impl Handle {
     /// [`Handle::create_public_link`] does.
     pub fn claim_handle(&self, name: String) -> Result<String, FfiError> {
         let link = self.directory_link()?;
-        if self.my_handle()?.is_some() {
-            return Err(FfiError::Stale);
+
+        // One claim runs at a time. The check and the mark share one lock,
+        // thus two calls publish no two handles.
+        {
+            let mut inner = locked(&self.inner);
+            if inner.is_claiming {
+                return Err(FfiError::Busy);
+            }
+            let holds_handle = inner
+                .client
+                .published()?
+                .iter()
+                .any(|entry| entry.kind == EntryKind::Handle);
+            if holds_handle {
+                return Err(FfiError::Stale);
+            }
+            inner.is_claiming = true;
         }
 
+        let claimed = self.claim_free_handle(&link, &name);
+        locked(&self.inner).is_claiming = false;
+        claimed
+    }
+}
+
+impl Handle {
+    /// Publishes a handle of `name` under a discriminator that no party
+    /// holds. The caller holds the claim mark.
+    fn claim_free_handle(&self, link: &DirectoryLink, name: &str) -> Result<String, FfiError> {
         let name = name.trim().trim_start_matches("@");
         for _ in 0..CLAIM_TRIES {
             let mut draw = [0u8; 4];
@@ -1978,7 +2091,7 @@ impl Handle {
             let canonical = handle.label_input();
             let entry_name = canonical.clone();
             let published = self.publish(
-                &link,
+                link,
                 EntryKind::Handle,
                 0,
                 canonical.clone(),
@@ -2001,7 +2114,7 @@ impl Handle {
             match published {
                 Ok(entry) => {
                     // §9.3.1: the profile of the new handle goes beside it.
-                    let _ = self.publish_profile_blob(&link);
+                    let _ = self.publish_profile_blob(link);
                     return Ok(via_text(&entry));
                 }
                 // A held label: another discriminator.
@@ -2012,7 +2125,10 @@ impl Handle {
 
         Err(FfiError::Stale)
     }
+}
 
+#[uniffi::export]
+impl Handle {
     /// Moves the handle to the next key `HandleKey_{0,r+1}` and to a new
     /// rendezvous queue at one tap (Part 9 §9.3, §9.9): the old key answers
     /// the write challenge of the new version (`DIS-093`). The old queue
@@ -2168,7 +2284,7 @@ impl Handle {
             .encode(&mut encoded)
             .map_err(|_| FfiError::Malformed)?;
 
-        let inner = locked(&self.inner);
+        let mut inner = locked(&self.inner);
 
         // DIS-180: the hello carries the profile of the sender, with the
         // note in the place of the welcome text.
@@ -2181,11 +2297,9 @@ impl Handle {
         }
         .encode()
         .map_err(|_| FfiError::Malformed)?;
-        drop(inner);
 
         // DIS-132: a cross-relay token of this epoch, when the device holds
         // one, and else a proof of work.
-        let mut inner = locked(&self.inner);
 
         // ABU-076: a token leaves the store only for a hello that a run
         // takes, thus a client with no run spends none.
@@ -2204,10 +2318,13 @@ impl Handle {
             return Err(error.into());
         }
 
+        // The hello left. An error here would make the user send a second
+        // hello and spend a second token, thus a fault of the store goes
+        // to the log, and the next request holds the key.
         if let Some((input, resolved)) = to_hold {
-            inner
-                .client
-                .hold_handle_key(&input, &resolved, &mut OsRng)?;
+            if let Err(fault) = inner.client.hold_handle_key(&input, &resolved, &mut OsRng) {
+                crate::devlog::format_line!("a handle key was not held: {fault:?}");
+            }
         }
         Ok(())
     }
@@ -2325,6 +2442,7 @@ impl Handle {
             .client
             .contact_requests()?
             .into_iter()
+            .filter(|request| !inner.is_accepting(super::AcceptRow::Request(request.id)))
             .map(|request| ContactRequestInfo {
                 id: request.id.to_vec(),
                 name: request.name,
@@ -2349,9 +2467,18 @@ impl Handle {
             return Err(FfiError::Offline);
         }
 
-        let bundle = inner.client.take_request(&id)?;
+        let row = super::AcceptRow::Request(id);
+        if inner.is_accepting(row) {
+            return Ok(());
+        }
+
+        // The row stays until the accept settled: the command can be lost
+        // with its run, and the node can refuse it.
+        let bundle = inner.client.peek_request(&id)?;
         let bridge = inner.bridge.as_ref().ok_or(FfiError::Offline)?;
-        Ok(bridge.accept(bundle.to_vec())?)
+        bridge.accept(bundle.to_vec())?;
+        inner.note_accept(row);
+        Ok(())
     }
 
     /// Drops a contact request. The sender learns nothing.

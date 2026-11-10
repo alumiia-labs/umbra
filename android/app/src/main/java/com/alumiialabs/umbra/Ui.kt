@@ -118,10 +118,10 @@ sealed interface Screen {
         }
 }
 
-enum class Tab(val label: Int, val icon: String) {
-    Chats(R.string.main_tab_chats, "comment"),
-    Contacts(R.string.main_tab_contacts, "user-group"),
-    Settings(R.string.main_tab_settings, "gear"),
+enum class Tab(val label: Int, val icon: String, val tag: String) {
+    Chats(R.string.main_tab_chats, "comment", TestTags.TABS_CHATS),
+    Contacts(R.string.main_tab_contacts, "user-group", TestTags.TABS_CONTACTS),
+    Settings(R.string.main_tab_settings, "gear", TestTags.TABS_SETTINGS),
 }
 
 @Composable
@@ -129,7 +129,8 @@ fun UmbraApp() {
     UmbraTheme {
         // A photo on the whole screen has a dark ground under each bar.
         Surface(Modifier.fillMaxSize(), color = if (Viewer.isOpen) Color.Black else Palette.Surface) {
-            Box(Modifier.safeDrawingPadding().imePadding()) {
+            // The root names each test tag as a resource id.
+            Box(Modifier.testRoot().safeDrawingPadding().imePadding()) {
                 if (Core.phase != Core.Phase.Open) {
                     UnlockScreen()
                 } else {
@@ -365,13 +366,21 @@ private fun UnlockScreen() {
             // the client knows no part of it, thus the bar shows no amount.
             WaitBar()
         } else {
-            FramedPlatformField(field, stringResource(R.string.main_passphrase), isPassphrase = true)
+            FramedPlatformField(field, stringResource(R.string.main_passphrase), isPassphrase = true, tag = TestTags.UNLOCK_PASSPHRASE)
             if (isFirst) {
                 Spacer(Modifier.height(14.dp))
-                FramedPlatformField(confirm, stringResource(R.string.main_confirm_passphrase), isPassphrase = true)
+                FramedPlatformField(
+                    confirm,
+                    stringResource(R.string.main_confirm_passphrase),
+                    isPassphrase = true,
+                    tag = TestTags.UNLOCK_CONFIRM,
+                )
             }
             Spacer(Modifier.height(14.dp))
-            PrimaryButton(stringResource(if (isFirst) R.string.main_create_and_open else R.string.main_unlock)) {
+            PrimaryButton(
+                stringResource(if (isFirst) R.string.main_create_and_open else R.string.main_unlock),
+                tag = TestTags.UNLOCK_OPEN,
+            ) {
                 val first = field.take()
                 if (!isFirst) {
                     first?.let { Core.open(context, it) }
@@ -394,9 +403,9 @@ private fun UnlockScreen() {
             }
             if (isFirst) {
                 Spacer(Modifier.height(8.dp))
-                SecondaryButton(stringResource(R.string.main_restore_from_code)) { isRestoring = true }
+                SecondaryButton(stringResource(R.string.main_restore_from_code), tag = TestTags.UNLOCK_RESTORE) { isRestoring = true }
                 Spacer(Modifier.height(8.dp))
-                SecondaryButton(stringResource(R.string.main_link_to_another_device)) { isJoining = true }
+                SecondaryButton(stringResource(R.string.main_link_to_another_device), tag = TestTags.UNLOCK_LINK) { isJoining = true }
             }
         }
         Core.fault?.let {
@@ -428,6 +437,7 @@ private fun TabsScreen(tab: Tab, onTab: (Tab) -> Unit, push: (Screen) -> Unit) {
                         .size(56.dp)
                         .clip(RoundedCornerShape(16.dp))
                         .background(Palette.Container)
+                        .tagged(TestTags.TABS_ADD)
                         .press(role = Role.Button) { push(Screen.AddContact) },
                     contentAlignment = Alignment.Center,
                 ) { FaIcon("user-plus", label = addContact, tint = Palette.Action) }
@@ -442,6 +452,7 @@ private fun TabsScreen(tab: Tab, onTab: (Tab) -> Unit, push: (Screen) -> Unit) {
                     Modifier
                         .weight(1f)
                         .fillMaxHeight()
+                        .tagged(entry.tag)
                         .pressChoice(isSelected, role = Role.Tab) { onTab(entry) }
                         .padding(vertical = 12.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -539,7 +550,7 @@ private fun ChatsTab(push: (Screen) -> Unit) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.weight(1f)) { TabTitle(stringResource(R.string.main_tab_chats)) }
             Box(Modifier.padding(end = 8.dp, top = 8.dp)) {
-                IconAction("magnifying-glass", stringResource(R.string.common_search)) { push(Screen.Search(null)) }
+                IconAction("magnifying-glass", stringResource(R.string.common_search), tag = TestTags.TABS_SEARCH) { push(Screen.Search(null)) }
             }
         }
 
@@ -551,7 +562,7 @@ private fun ChatsTab(push: (Screen) -> Unit) {
             }
         }
         notice?.let {
-            Box(Modifier.padding(start = PressInset, end = PressInset, bottom = 8.dp)) { Note(it) }
+            Box(Modifier.padding(start = PressInset, end = PressInset, bottom = 8.dp)) { Note(it, tag = TestTags.CHATS_NOTICE) }
         }
 
         var acting by remember { mutableStateOf<Chat?>(null) }
@@ -570,8 +581,16 @@ private fun ChatsTab(push: (Screen) -> Unit) {
             ActionSheet(
                 stringResource(R.string.main_delete_chat_question),
                 listOf(
-                    RowEntry("trash-can", stringResource(R.string.common_delete_on_my_devices)) { deletingHere = chat },
-                    RowEntry("trash-can", stringResource(R.string.chat_delete_for_everyone)) { deletingAll = chat },
+                    RowEntry(
+                        "trash-can",
+                        stringResource(R.string.common_delete_on_my_devices),
+                        tag = TestTags.MESSAGE_DELETE_FOR_ME,
+                    ) { deletingHere = chat },
+                    RowEntry(
+                        "trash-can",
+                        stringResource(R.string.chat_delete_for_everyone),
+                        tag = TestTags.MESSAGE_DELETE_FOR_EVERYONE,
+                    ) { deletingAll = chat },
                 ),
                 onDismiss = { deleting = null },
             )
@@ -581,7 +600,11 @@ private fun ChatsTab(push: (Screen) -> Unit) {
             ActionSheet(
                 stringResource(R.string.common_delete_on_my_devices_question),
                 listOf(
-                    RowEntry("trash-can", stringResource(R.string.common_delete_on_my_devices)) {
+                    RowEntry(
+                        "trash-can",
+                        stringResource(R.string.common_delete_on_my_devices),
+                        tag = TestTags.MESSAGE_DELETE_CONFIRM,
+                    ) {
                         Core.deleteConversation(chat.conversation)
                         // DEV-129: the view says which deletion ran.
                         notice = UiText.get(R.string.common_deleted_on_your_devices)
@@ -601,7 +624,11 @@ private fun ChatsTab(push: (Screen) -> Unit) {
             ActionSheet(
                 stringResource(R.string.chat_delete_for_everyone_question),
                 listOf(
-                    RowEntry("trash-can", stringResource(R.string.chat_delete_for_everyone)) {
+                    RowEntry(
+                        "trash-can",
+                        stringResource(R.string.chat_delete_for_everyone),
+                        tag = TestTags.MESSAGE_DELETE_CONFIRM,
+                    ) {
                         // DEV-129: the view says which deletion ran, after
                         // the core took the request.
                         val asked = UiText.get(R.string.main_asked_contact_to_delete_chat, chat.title)
@@ -620,11 +647,11 @@ private fun ChatsTab(push: (Screen) -> Unit) {
         // creation is the act that put it here.
         val withMessages = Core.chats.filter { it.preview != null || it.isGroup }
         if (withMessages.isEmpty()) {
-            EmptyState(stringResource(R.string.main_no_chats))
+            EmptyState(stringResource(R.string.main_no_chats), tag = TestTags.CHATS_EMPTY)
             return
         }
 
-        LazyColumn {
+        LazyColumn(Modifier.tagged(TestTags.CHATS_LIST)) {
             items(withMessages, key = { it.conversation.key }) { chat ->
                 ChatRow(chat, onOpen = { push(Screen.Chat(chat.conversation)) }, onOptions = { acting = chat })
             }
@@ -663,11 +690,19 @@ private fun ChatOptions(
             add(RowEntry("check", stringResource(R.string.main_mark_as_read)) { Core.markRead(chat.conversation) })
         }
         if (chat.isGroup) {
-            add(RowEntry("circle-info", stringResource(R.string.common_group_details)) { push(Screen.GroupDetails(chat.conversation)) })
+            add(
+                RowEntry("circle-info", stringResource(R.string.common_group_details), tag = TestTags.CHATS_OPTION_DETAILS) {
+                    push(Screen.GroupDetails(chat.conversation))
+                },
+            )
         } else {
-            add(RowEntry("circle-info", stringResource(R.string.common_contact_details)) { push(Screen.ContactDetails(chat.conversation)) })
+            add(
+                RowEntry("circle-info", stringResource(R.string.common_contact_details), tag = TestTags.CHATS_OPTION_DETAILS) {
+                    push(Screen.ContactDetails(chat.conversation))
+                },
+            )
         }
-        add(RowEntry("trash-can", stringResource(R.string.main_delete_chat)) { onDelete(chat) })
+        add(RowEntry("trash-can", stringResource(R.string.main_delete_chat), tag = TestTags.CHATS_OPTION_DELETE) { onDelete(chat) })
     }
 
     ActionSheet(chat.title, entries, onDismiss = onDismiss)
@@ -711,7 +746,7 @@ private fun ChatRow(chat: Chat, onOpen: () -> Unit, onOptions: () -> Unit) {
     // The preview is a view of the platform, thus the press area lies above
     // the content.
     PressOver(
-        Modifier.fillMaxWidth().pressShadeInList(),
+        Modifier.fillMaxWidth().pressShadeInList().tagged(TestTags.CHATS_ROW),
         onClick = onOpen,
         longLabel = stringResource(R.string.main_chat_options),
         onLongClick = onOptions,
@@ -732,6 +767,7 @@ private fun ChatRowContent(chat: Chat) {
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.tagged(TestTags.CHATS_ROW_TITLE),
             )
             chat.preview?.let {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -779,6 +815,7 @@ private fun ChatRowContent(chat: Chat) {
                         "${chat.unread}",
                         color = Palette.OnAction,
                         style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.tagged(TestTags.CHATS_ROW_UNREAD),
                     )
                 }
             }
@@ -797,12 +834,13 @@ private fun ContactsTab(push: (Screen) -> Unit) {
             return
         }
 
-        LazyColumn {
+        LazyColumn(Modifier.tagged(TestTags.CONTACTS_LIST)) {
             items(byName, key = { it.conversation.key }) { chat ->
                 Row(
                     Modifier
                         .fillMaxWidth()
                         .pressShadeInList()
+                        .tagged(TestTags.CONTACTS_ROW)
                         .press { push(Screen.ContactDetails(chat.conversation)) }
                         .padding(horizontal = PressInset, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -821,12 +859,12 @@ private fun ContactsTab(push: (Screen) -> Unit) {
 }
 
 @Composable
-fun EmptyState(title: String) {
+fun EmptyState(title: String, tag: String? = null) {
     Text(
         title,
         style = MaterialTheme.typography.bodyLarge,
         color = Palette.TextSecondary,
-        modifier = Modifier.padding(horizontal = PressInset, vertical = 24.dp),
+        modifier = Modifier.padding(horizontal = PressInset, vertical = 24.dp).tagged(tag),
     )
 }
 
@@ -845,31 +883,63 @@ private fun SettingsTab(push: (Screen) -> Unit) {
         Column(Modifier.padding(horizontal = PressInset)) {
             SectionLabel(stringResource(R.string.settings_general))
             EntryRow(
-                RowEntry("circle-half-stroke", stringResource(R.string.main_appearance), Appearances.choice.label) {
+                RowEntry(
+                    "circle-half-stroke",
+                    stringResource(R.string.main_appearance),
+                    Appearances.choice.label,
+                    TestTags.SETTINGS_APPEARANCE,
+                ) {
                     sheet = SettingSheet.Appearance
                 },
                 leads = false,
             )
             HorizontalDivider(color = Palette.Divider)
-            EntryRow(RowEntry("bell", stringResource(R.string.common_notifications), Modes.mode(context).label) { push(Screen.Notifications) })
+            EntryRow(
+                RowEntry(
+                    "bell",
+                    stringResource(R.string.common_notifications),
+                    Modes.mode(context).label,
+                    TestTags.SETTINGS_NOTIFICATIONS,
+                ) { push(Screen.Notifications) },
+            )
             HorizontalDivider(color = Palette.Divider)
-            ToggleRow(stringResource(R.string.main_typing_indicators), Core.typingEnabled, icon = "comment") { Core.turnTyping(it) }
+            ToggleRow(
+                stringResource(R.string.main_typing_indicators),
+                Core.typingEnabled,
+                icon = "comment",
+                tag = TestTags.SETTINGS_TYPING,
+            ) { Core.turnTyping(it) }
             // DEV-202: a draft on the other devices is text that no one sent.
             if (Core.devices.size > 1) {
                 HorizontalDivider(color = Palette.Divider)
-                ToggleRow(stringResource(R.string.main_draft_sync), Core.draftSync, icon = "pen") { Core.turnDraftSync(it) }
+                ToggleRow(
+                    stringResource(R.string.main_draft_sync),
+                    Core.draftSync,
+                    icon = "pen",
+                    tag = TestTags.SETTINGS_DRAFT_SYNC,
+                ) { Core.turnDraftSync(it) }
             }
 
             SectionLabel(stringResource(R.string.settings_storage))
             EntryRow(
-                RowEntry("clock", stringResource(R.string.main_keep_history), historyLabel(Core.historyAge)) {
+                RowEntry(
+                    "clock",
+                    stringResource(R.string.main_keep_history),
+                    historyLabel(Core.historyAge),
+                    TestTags.SETTINGS_HISTORY,
+                ) {
                     sheet = SettingSheet.History
                 },
                 leads = false,
             )
             HorizontalDivider(color = Palette.Divider)
             EntryRow(
-                RowEntry("download", stringResource(R.string.common_automatic_download), downloadLimitLabel(Core.autoDownloadLimit)) {
+                RowEntry(
+                    "download",
+                    stringResource(R.string.common_automatic_download),
+                    downloadLimitLabel(Core.autoDownloadLimit),
+                    TestTags.SETTINGS_DOWNLOAD,
+                ) {
                     sheet = SettingSheet.Download
                 },
                 leads = false,
@@ -883,10 +953,19 @@ private fun SettingsTab(push: (Screen) -> Unit) {
             }
 
             SectionLabel(stringResource(R.string.settings_security))
-            EntryRow(RowEntry("key", stringResource(R.string.common_change_passphrase)) { push(Screen.ChangePassphrase) })
+            EntryRow(
+                RowEntry("key", stringResource(R.string.common_change_passphrase), tag = TestTags.SETTINGS_PASSPHRASE) {
+                    push(Screen.ChangePassphrase)
+                },
+            )
             HorizontalDivider(color = Palette.Divider)
             EntryRow(
-                RowEntry("lock", stringResource(R.string.lock_auto_lock), autoLockLabel(Core.autoLockSeconds)) {
+                RowEntry(
+                    "lock",
+                    stringResource(R.string.lock_auto_lock),
+                    autoLockLabel(Core.autoLockSeconds),
+                    TestTags.SETTINGS_AUTO_LOCK,
+                ) {
                     sheet = SettingSheet.AutoLock
                 },
                 leads = false,
@@ -903,14 +982,33 @@ private fun SettingsTab(push: (Screen) -> Unit) {
             // The recovery code and the backups belong to the device that
             // owns the channels (Part 7 §7.7).
             if (Core.ownsChannels) {
-                EntryRow(RowEntry("shield-halved", stringResource(R.string.common_recovery_code), backup) { push(Screen.RecoveryCode) })
+                EntryRow(
+                    RowEntry(
+                        "shield-halved",
+                        stringResource(R.string.common_recovery_code),
+                        backup,
+                        TestTags.SETTINGS_RECOVERY,
+                    ) { push(Screen.RecoveryCode) },
+                )
                 HorizontalDivider(color = Palette.Divider)
             }
-            EntryRow(RowEntry("laptop", stringResource(R.string.common_linked_devices), devicesLabel(Core.devices.size)) { push(Screen.Devices) })
+            EntryRow(
+                RowEntry(
+                    "laptop",
+                    stringResource(R.string.common_linked_devices),
+                    devicesLabel(Core.devices.size),
+                    TestTags.SETTINGS_DEVICES,
+                ) { push(Screen.Devices) },
+            )
             HorizontalDivider(color = Palette.Divider)
             if (Core.ownsChannels) {
                 EntryRow(
-                    RowEntry("rotate", stringResource(R.string.common_reset_identity), stringResource(R.string.main_reset_identity_detail)) {
+                    RowEntry(
+                        "rotate",
+                        stringResource(R.string.common_reset_identity),
+                        stringResource(R.string.main_reset_identity_detail),
+                        TestTags.SETTINGS_RESET,
+                    ) {
                         push(Screen.ResetIdentity)
                     },
                 )
@@ -918,7 +1016,12 @@ private fun SettingsTab(push: (Screen) -> Unit) {
             }
             // DEV-008: a device leaves each set by an explicit local wipe.
             EntryRow(
-                RowEntry("trash-can", stringResource(R.string.main_erase_this_device), stringResource(R.string.main_erase_detail)) {
+                RowEntry(
+                    "trash-can",
+                    stringResource(R.string.main_erase_this_device),
+                    stringResource(R.string.main_erase_detail),
+                    TestTags.SETTINGS_ERASE,
+                ) {
                     sheet = SettingSheet.Erase
                 },
                 leads = false,
@@ -957,7 +1060,11 @@ private fun SettingsTab(push: (Screen) -> Unit) {
         SettingSheet.AutoLock -> AutoLockSheet(close)
         SettingSheet.Erase -> ActionSheet(
             stringResource(R.string.main_erase_question),
-            listOf(RowEntry("trash-can", stringResource(R.string.main_erase_this_device)) { Core.eraseDevice(context) }),
+            listOf(
+                RowEntry("trash-can", stringResource(R.string.main_erase_this_device), tag = TestTags.SETTINGS_ERASE_CONFIRM) {
+                    Core.eraseDevice(context)
+                },
+            ),
             note = stringResource(R.string.main_erase_note),
             onDismiss = close,
         )

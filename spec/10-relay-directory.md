@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 10: Relay Directory, Measurement, and Selection
 
 **Status:** Draft
-**Version:** 0.53.0
-**Date:** 2026-11-09
+**Version:** 0.54.0
+**Date:** 2026-11-10
 
 ---
 
@@ -476,9 +476,10 @@ covers each field but `sig`, after the label.
 - **[REL-073]** A relay MUST retain each receipt that it issued and each receipt
   that it took, for `RECEIPT_RETENTION`. **[REL-074]** A relay MUST erase a
   receipt after that period. A relay bounds the file of its receipts at
-  8 GiB, and it erases the oldest receipts first when the file passes that
-  bound, before `RECEIPT_RETENTION`. Thus a flood of cells on one link fills no
-  disk. An isolation query of §10.4.2 for a batch that the bound erased gets no
+  8 GiB. When the file passes that bound, the relay erases receipts before
+  `RECEIPT_RETENTION`: the oldest receipts of the peer relay that holds the
+  most receipts go first. Thus a flood of cells on one link fills no disk,
+  and it erases no receipt of another link. An isolation query of §10.4.2 for a batch that the bound erased gets no
   receipt, as for a batch past the retention.
 - **[REL-075]** A relay MUST NOT put a client address, a queue identifier, or a
   payload byte in a receipt. The Merkle root covers the `tag` of each cell
@@ -1098,7 +1099,9 @@ fits one `B3` cell.
    of that highest epoch MUST also reject each other root of that epoch: it
    keeps the first one. A second root of one epoch that differs is a split
    view, and the digest of `REL-160` shows it to the gossip of `REL-008`.
-   The root test itself raises no alarm for it.
+   The root test names such a root a split view only when its signatures
+   verify under `REL-032`. The same root again, under these signers or
+   others, is stale and no split view.
 
    **The epoch names a start time.** §10.11 gives the epoch a length of 1 hour,
    and it gives the consensus a validity of 3 hours. Consensus epoch `E` starts
@@ -1310,8 +1313,12 @@ preimage, and Part 5 §5.11 holds the label:
 certificate of its co-tenant site names, in ASCII, with zero bytes after the
 name. **[REL-144]** A client MUST reject a descriptor whose `host` is empty,
 holds a byte outside the DNS name characters, or holds a non-zero byte after
-a zero byte. Part 3 rule `NET-282` verifies the certificate against that
-name.
+a zero byte. The DNS name characters are the ASCII letters, the digits, the
+hyphen, and the dot between two labels. A label is 1 to 63 characters, and
+it starts and ends with a letter or a digit. Part 3 rule `NET-282` verifies
+the certificate against that name. **[REL-224]** A client MUST reject a
+descriptor whose `port` is 0, and one whose `addr_v4` and `addr_v6` are both
+zero. No party reaches such a relay.
 
 > *Cause.* Part 3 §3.8 puts the relay behind the reverse proxy of a real site
 > under a public CA certificate, and a client that verifies that certificate
@@ -1442,6 +1449,8 @@ Part 12 §12.7 owns the three constants.
   level from the `chunk_store_gib` of the descriptor of the relay (Part 12
   `ATT-087`). No relay reports its free store to an authority, and a full
   relay refuses a registration under Part 12 rule `ATT-091`.
+- **[REL-225]** A client MUST reject a `RelaySetDiff` that names one
+  `relay_id` two times, in one list or across the two lists.
 - No signature covers the diff. The two lists are a hint, and `REL-057`
   verifies each entry against the signed root. A false store level costs a
   writer one failed `CNEW` or `BNEW` under Part 12, and it costs nothing else.

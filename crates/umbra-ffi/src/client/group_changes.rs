@@ -21,8 +21,8 @@ use umbra_wire::app::{
 use zeroize::Zeroizing;
 
 use super::{
-    info_of, msg_ref, row_with_text, Client, EDIT_MAX, EDIT_WINDOW_MS, PENDING, PENDING_ROW_LEN,
-    REF_ORPHAN_MAX, REF_ORPHAN_TTL, REVISION,
+    groups::GROUP_PRESENCE, info_of, msg_ref, row_with_text, Client, EDIT_MAX, EDIT_WINDOW_MS,
+    PENDING, PENDING_ROW_LEN, REF_ORPHAN_MAX, REF_ORPHAN_TTL, REVISION,
 };
 use crate::{ConversationId, Error, Event, MsgRef};
 
@@ -50,6 +50,35 @@ enum Target {
 /// index that sent the change (`DEV-094`).
 fn pending_group_key(natural: &[u8], sender: u16) -> Vec<u8> {
     [natural, b"member", &sender.to_be_bytes()].concat()
+}
+
+/// The pending entries that one member index of a group makes in each
+/// `REF_ORPHAN_TTL` (`DEV-360`). One member then fills no more than a
+/// sixteenth of `REF_ORPHAN_MAX`, and a deletion of another member finds
+/// its place.
+const REF_ORPHAN_MEMBER_MAX: u32 = 256;
+
+/// The key of the row that counts the pending entries of one member index,
+/// in `GROUP_PRESENCE`. The length differs from each clock key of that
+/// table.
+fn orphan_count_key(conversation: ConversationId, sender: u16) -> Vec<u8> {
+    [conversation.0.as_slice(), b"orphans", &sender.to_be_bytes()].concat()
+}
+
+/// The count row of one member index: the start of its period and the
+/// entries of that period. A row that does not parse, or a period above
+/// `REF_ORPHAN_TTL`, starts a new period.
+fn orphan_count(row: Option<&[u8]>, now: u64) -> (u64, u32) {
+    let parsed = row.and_then(|bytes| {
+        let start = u64::from_be_bytes(bytes.get(..8)?.try_into().ok()?);
+        let count = u32::from_be_bytes(bytes.get(8..12)?.try_into().ok()?);
+        (bytes.len() == 12).then_some((start, count))
+    });
+
+    match parsed {
+        Some((start, count)) if start <= now && now - start < REF_ORPHAN_TTL => (start, count),
+        _ => (now, 0),
+    }
 }
 
 /// The length of a sender row whose message waits for the steps after its
@@ -222,6 +251,18 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Ok(());
         }
 
+        // DEV-360: a pending row names no sender, thus a count row for each
+        // member index bounds what one member holds of the table.
+        let now = now_ms / 1_000;
+        let count_row = open
+            .store
+            .row_id(GROUP_PRESENCE, &orphan_count_key(conversation, sender));
+        let counted = open.store.get(GROUP_PRESENCE, &count_row)?;
+        let (start, count) = orphan_count(counted.as_deref(), now);
+        if held.is_none() && count >= REF_ORPHAN_MEMBER_MAX {
+            return Ok(());
+        }
+
         let entry = Zeroizing::new(
             [
                 conversation.0.as_slice(),
@@ -233,6 +274,20 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         );
         let mut batch = open.store.begin();
         batch.put(PENDING, row, Some(conversation.0), &entry, rng)?;
+        if held.is_none() {
+            let counted = [
+                start.to_be_bytes().as_slice(),
+                &count.saturating_add(1).to_be_bytes(),
+            ]
+            .concat();
+            batch.put(
+                GROUP_PRESENCE,
+                count_row,
+                Some(conversation.0),
+                &counted,
+                rng,
+            )?;
+        }
 
         Ok(batch.commit()?)
     }
@@ -362,7 +417,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             None => 0,
             Some(count) => *count.first().ok_or(Error::Integrity)?,
         };
-        let in_window = now_ms.saturating_sub(info.stored_at_ms) < EDIT_WINDOW_MS;
+        let in_window = now_ms.saturating_sub(info.clock_at_ms) < EDIT_WINDOW_MS;
         if info.deleted || !in_window || count >= EDIT_MAX {
             return Ok(());
         }
@@ -466,5 +521,24 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{orphan_count, REF_ORPHAN_TTL};
+
+    #[test]
+    fn the_count_of_a_member_starts_again_after_its_period_and_at_a_bad_row() {
+        let row = [100u64.to_be_bytes().as_slice(), &9u32.to_be_bytes()].concat();
+        assert_eq!(orphan_count(Some(&row), 100), (100, 9));
+        assert_eq!(orphan_count(Some(&row), 99 + REF_ORPHAN_TTL), (100, 9));
+
+        // The period ended, the clock went back, or the row is no count.
+        let later = 100 + REF_ORPHAN_TTL;
+        assert_eq!(orphan_count(Some(&row), later), (later, 0));
+        assert_eq!(orphan_count(Some(&row), 50), (50, 0));
+        assert_eq!(orphan_count(row.get(..8), 100), (100, 0));
+        assert_eq!(orphan_count(None, 100), (100, 0));
     }
 }

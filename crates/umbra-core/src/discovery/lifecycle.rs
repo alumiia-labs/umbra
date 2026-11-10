@@ -141,24 +141,29 @@ impl Label {
         self.tombstoned_at = None;
 
         // A lease epoch issued before this version was encapsulated to the
-        // key of an earlier version, thus it renews nothing now.
-        self.lease_epoch = 0;
+        // key of an earlier version, thus it renews nothing now. The count
+        // takes that epoch and never goes back, and a renewal needs the
+        // next one (`DIS-144`).
+        self.lease_epoch = self.next_lease_epoch();
         Ok(())
     }
 
-    /// Issues a lease epoch for a renewal challenge (`DIS-041`).
-    pub fn issue_lease_epoch(&mut self) -> u64 {
-        self.lease_epoch = self.lease_epoch.saturating_add(1);
-        self.lease_epoch
+    /// The lease epoch that a renewal challenge names (`DIS-041`). The
+    /// label takes it at the renewal and not at the challenge, thus a
+    /// challenge with no answer changes no stored state.
+    #[must_use]
+    pub fn next_lease_epoch(&self) -> u64 {
+        self.lease_epoch.saturating_add(1)
     }
 
     /// Renews the lease after the challenge for `lease_epoch` verified
     /// (`DIS-040`, `DIS-041`).
     pub fn renew(&mut self, lease_epoch: u64, now: u64) -> Result<(), Error> {
-        if self.is_tombstoned() || lease_epoch != self.lease_epoch {
+        if self.is_tombstoned() || lease_epoch != self.next_lease_epoch() {
             return Err(Error::Stale);
         }
 
+        self.lease_epoch = lease_epoch;
         self.lease_until = Some(self.lease_end(now));
         Ok(())
     }
@@ -174,7 +179,7 @@ impl Label {
         self.version = version_new;
         self.lease_until = None;
         self.tombstoned_at = Some(now);
-        self.lease_epoch = 0;
+        self.lease_epoch = self.next_lease_epoch();
         Ok(())
     }
 
@@ -257,9 +262,12 @@ mod tests {
         assert_eq!(label.publish(2, pk(2), 1), Err(Error::Stale));
         label.publish(1, pk(2), 1).unwrap();
 
-        let epoch = label.issue_lease_epoch();
+        let epoch = label.next_lease_epoch();
         assert_eq!(label.renew(epoch + 1, 2), Err(Error::Stale));
         label.renew(epoch, 2).unwrap();
+
+        // An answer for a lease epoch that a renewal used renews nothing.
+        assert_eq!(label.renew(epoch, 3), Err(Error::Stale));
 
         assert!(label.tombstone_if_lapsed(2 + HANDLE_LEASE - 1).is_none());
         assert_eq!(label.tombstone_if_lapsed(2 + HANDLE_LEASE), Some(2));

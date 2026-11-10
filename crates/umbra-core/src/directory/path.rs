@@ -157,7 +157,8 @@ impl Candidate {
             ingress: placed && entry.ingress() && entry.class >= INGRESS_CLASS_MIN,
             chain: placed && d.roles & roles::CHAIN != 0,
             queue: placed && d.roles & roles::QUEUE != 0,
-            layer: entry.layer(),
+            // Layer 0 is the layer of no hop.
+            layer: entry.placed_layer().unwrap_or(0),
             class: entry.class,
         }
     }

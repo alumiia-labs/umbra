@@ -66,11 +66,15 @@ fn above_rate_key(conversation: ConversationId) -> Vec<u8> {
 }
 
 /// The mark of a request whose supply came, beside its row. The row of the
-/// request keeps its time for the rate, and the mark is one byte, thus the
-/// rate does not count it.
+/// request keeps its time for the rate. The mark is `ANSWERED_LEN` bytes,
+/// thus the rate does not count it: the time of the supply, then two bytes.
+/// The time lets the mark leave the store with its request.
 fn answered_key(conversation: ConversationId, index: u16) -> Vec<u8> {
     [conversation.0.as_slice(), b"answered", &index.to_be_bytes()].concat()
 }
+
+/// The length of the mark of `answered_key`.
+const ANSWERED_LEN: usize = 10;
 
 /// The setting that counts the key requests of a peer that this device
 /// answered, before the conversation (`WIR-338`). The value is the start of
@@ -169,7 +173,9 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let request = Self::session_request(index);
         let mut body = vec![0u8; umbra_wire::app::keys::REQUEST_LEN];
         request.encode(&mut body)?;
-        self.send_key_record(conversation, AppKind::KeyRequest, &body, now_ms, rng)?;
+
+        // The store counts the request before it goes. A fault of the store
+        // then sends no request that the rate does not hold (`WIR-337`).
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
         batch.put(
@@ -181,6 +187,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         )?;
         batch.delete(KEY_ASKED, answered);
         batch.commit()?;
+        self.send_key_record(conversation, AppKind::KeyRequest, &body, now_ms, rng)?;
 
         Ok(true)
     }
@@ -218,24 +225,27 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
     }
 
     /// The key requests of this device to the peer of a conversation in the
-    /// 24 hours before `now`, of each scope. A mark of a supply is one byte,
-    /// thus it does not count. A request or a gap mark older than 24 hours
-    /// names nothing more, and it leaves the store here, thus the rows of a
-    /// peer stay near the rate.
+    /// 24 hours before `now`, of each scope. A mark of a supply or of a gap
+    /// has another length, thus it does not count. A request or a mark
+    /// older than 24 hours names nothing more, and it leaves the store
+    /// here, thus the rows of a peer stay near the rate.
     fn requests_to(&mut self, conversation: ConversationId, now: u64) -> Result<usize, Error> {
         let store = &self.open_ref()?.store;
         let mut count = 0usize;
         let mut old = Vec::new();
         for (row, value) in store.list(KEY_ASKED, Some(&conversation.0))? {
-            // The time of a gap mark is the first 8 of its 9 bytes.
+            // The time of a gap mark and of a supply mark is the first 8
+            // of its bytes. A row of another length holds no time, and it
+            // goes: nothing else would remove it.
             let at = match value.len() {
-                8 | 9 => value
+                8 | 9 | ANSWERED_LEN => value
                     .get(..8)
                     .and_then(|at| <[u8; 8]>::try_from(at).ok())
                     .map(u64::from_be_bytes),
                 _ => None,
             };
             let Some(at) = at else {
+                old.push(row);
                 continue;
             };
 
@@ -450,7 +460,8 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
         let open = self.open_mut()?;
         let mut batch = open.store.begin();
-        batch.put(KEY_ASKED, answered, Some(conversation.0), &[1], rng)?;
+        let mark = [(now_ms / 1_000).to_be_bytes().as_slice(), &[1, 1]].concat();
+        batch.put(KEY_ASKED, answered, Some(conversation.0), &mark, rng)?;
         batch.commit()?;
         if supply.status == SupplyStatus::NotHeld {
             self.put_roster_note(

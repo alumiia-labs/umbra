@@ -44,7 +44,7 @@ use umbra_transport::{
     Dial,
 };
 use umbra_wire::ndr::{NdrResponse, TokenCarrier};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 mod block;
 mod directory;
@@ -905,6 +905,15 @@ pub fn parse_network(text: String, root_ca_path: Option<String>) -> Result<Netwo
                 } else {
                     return Err(FfiError::Malformed);
                 }
+
+                // One relay has one line. A second line of a relay would
+                // put it into a chain two times.
+                if relays
+                    .iter()
+                    .any(|earlier: &RelayEndpoint| earlier.relay_id == relay.relay_id)
+                {
+                    return Err(FfiError::Malformed);
+                }
                 relays.push(relay);
             }
             ["invite", host] if invitation_host.is_none() => {
@@ -988,9 +997,6 @@ fn read_facts(relay: &mut RelayEndpoint, facts: &[&str]) -> Result<(), FfiError>
     }
 }
 
-/// The facts of a relay of the set, for the selection of a chain. The
-/// operator is its own family, because a descriptor holds no family
-/// certificate.
 /// Whether two hops of one circuit share a relation that `shares` tests.
 fn any_pair(hops: &[Candidate], shares: fn(&Candidate, &Candidate) -> bool) -> bool {
     hops.iter().enumerate().any(|(index, hop)| {
@@ -1012,6 +1018,9 @@ fn shares_bloc(hops: &[Candidate]) -> bool {
     any_pair(hops, |hop, other| hop.bloc == other.bloc)
 }
 
+/// The facts of a relay of the set, for the selection of a chain. The
+/// operator is its own family, because a descriptor holds no family
+/// certificate.
 pub(crate) fn relay_info(endpoint: &RelayEndpoint) -> Result<RelayInfo, FfiError> {
     let key = relay_static(endpoint)?;
     let operator =
@@ -1038,6 +1047,13 @@ pub(crate) fn relay_info(endpoint: &RelayEndpoint) -> Result<RelayInfo, FfiError
         None => None,
     };
 
+    // An address of another length is a fault of the entry. As "no
+    // address" it would hide two relays on one server (`NET-351`).
+    let v4 = match endpoint.ipv4.as_slice() {
+        [] => None,
+        address => Some(<[u8; 4]>::try_from(address).map_err(|_| FfiError::Malformed)?),
+    };
+
     // REL-158: the hops of a signed entry stand; a descriptor text gives
     // them by its layer.
     let roles = endpoint.roles.unwrap_or(HopRoles {
@@ -1055,9 +1071,7 @@ pub(crate) fn relay_info(endpoint: &RelayEndpoint) -> Result<RelayInfo, FfiError
             v4_prefix: Some(prefix.ok_or(FfiError::Malformed)?),
             v6_prefix,
             // NET-351: two relays of one address run on one server.
-            v4: <[u8; 4]>::try_from(endpoint.ipv4.as_slice())
-                .ok()
-                .filter(|address| *address != [0; 4]),
+            v4: v4.filter(|address| *address != [0; 4]),
             ingress: roles.ingress,
             chain: roles.chain,
             queue: roles.queue,
@@ -1546,6 +1560,10 @@ impl MsgHandle {
 #[derive(uniffi::Object)]
 pub struct DraftHandle(Mutex<Option<Draft>>);
 
+/// Locks `mutex`. The order of the locks of a [`Handle`] is: `runtime`,
+/// `inner`, then one of `run_done`, `parked`, or the lock of a draft, a
+/// restore, or a link. A call that takes two of them in another order can
+/// wait for a call that takes them in this one, and neither ends.
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     // A poisoned lock holds a state that a panic left. The release profile
     // aborts at a panic, thus the state behind the lock is whole.
@@ -1607,6 +1625,13 @@ impl DraftHandle {
         name: Option<String>,
         preview: Option<Vec<u8>>,
     ) -> Result<(), FfiError> {
+        // A draft that a send or a lock emptied takes no file, thus the
+        // read of up to `DRAFT_FILE_MAX` bytes does not start. The read
+        // holds no lock: a lock of the client waits for the lock of a draft.
+        if locked(&self.0).is_none() {
+            return Err(FfiError::NotFound);
+        }
+
         let plain = read_draft_file(&path, DRAFT_FILE_MAX)?;
         let shape = Shape {
             mime_class,
@@ -1851,6 +1876,12 @@ struct Inner {
     /// The introductions that the user allowed, each of which takes the
     /// next fresh invitation of the run (`WIR-199`).
     pending_grants: VecDeque<[u8; 16]>,
+    /// Whether a claim of a handle runs. A second claim beside it would
+    /// publish a second handle.
+    is_claiming: bool,
+    /// Each accept that this run took as a command, oldest first. The row
+    /// of its request stays in the store until the accept settled.
+    accepts_waiting: VecDeque<AcceptWaiting>,
     /// The handle groups whose NDR call runs.
     ndr_in_flight: NdrFlights,
     /// The time before which a call of a handle that the NDR did not take
@@ -1875,6 +1906,8 @@ struct Inner {
     is_foreground: bool,
     /// The restore that runs, from its first root to its rows.
     restore: Option<RestoreJob>,
+    /// The number of the last restore job.
+    restore_serial: u64,
     /// A lock ended the restore (`IMP-127`). Its status is `Failed` until
     /// the next start.
     restore_lost: bool,
@@ -1895,6 +1928,13 @@ struct Inner {
     /// (Part 13 `ABU-065`, `ABU-105`), and the time of the fetch.
     challenges: umbra_core::abuse::pow::ChallengeBook,
     challenges_at: u64,
+    /// The run whose fetch of the challenges is in flight. A fetch of a
+    /// run that ended counts for nothing, thus a task that its runtime
+    /// dropped holds no later fetch back.
+    challenges_fetching: Option<u64>,
+    /// The time before which no fetch starts again, after one that failed
+    /// or that gave no challenge of a relay of the manifest.
+    challenges_retry_at: u64,
     /// The link of a device that runs (Part 7 §7.4), and the number of the
     /// last one.
     link: Option<link::LinkState>,
@@ -1922,9 +1962,6 @@ struct Inner {
     /// ended with a lock or with its process (`DEV-003`). The first pump
     /// of an unlocked client with a run and with no link sends each one.
     link_erasures_due: bool,
-    /// Whether the connect that runs is the one of a push-wake session, for
-    /// the first flush of its bridge (`NET-097`).
-    wake_next: bool,
     /// The run that came online, and the moment of it. A take-over waits
     /// for a run that read the sync channel for `DRAIN_QUIET`
     /// (`DEV-315`).
@@ -1945,6 +1982,11 @@ const ERASURES_HELD_MAX: usize = 256;
 /// alone would leave a time with no solve.
 const CHALLENGE_FETCH_LEAD: u64 = 60;
 
+/// How long this device waits after a fetch of the challenges that failed,
+/// or that gave no challenge under the key of a relay, in seconds. A
+/// carrier that serves an empty bundle then costs one dial in this time.
+const CHALLENGE_RETRY: u64 = 60;
+
 /// Whether a fetch of the challenges is due at `now`, after the fetch at
 /// `fetched_at` (`ABU-057`, `ABU-069`).
 const fn challenges_due(now: u64, fetched_at: u64) -> bool {
@@ -1960,6 +2002,9 @@ const SYNC_RESEND_GAP: u64 = 20;
 /// A restore of Part 4 §4.7.2 while it runs: the root key of the entered
 /// code, the week whose root it reads, and the objects that it holds.
 struct RestoreJob {
+    /// The number of this job. A step of an earlier job names another
+    /// number, and this job takes none of it.
+    serial: u64,
     key: umbra_core::identity::recovery::BackupRootKey,
     first_week: u32,
     week: u32,
@@ -2014,18 +2059,66 @@ impl Restored {
     }
 }
 
-/// One step of a restore that a transfer gave.
+/// The row that an accept of the user answers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AcceptRow {
+    /// A contact request (Part 9 §9.6), by its identifier.
+    Request([u8; 16]),
+    /// The offer of an introduction (Part 6 §6.6.7), by its identifier.
+    Introduction([u8; 16]),
+}
+
+impl AcceptRow {
+    /// Removes the row. Its accept settled, thus it asks nothing of the
+    /// user. A fault of the store leaves the row, and the user can decline.
+    fn end(self, client: &mut Client<SqliteBackend, ForeignElement>) {
+        let _ = match self {
+            AcceptRow::Request(id) => client.end_request(&id),
+            AcceptRow::Introduction(id) => client.end_offer(&id),
+        };
+    }
+}
+
+/// An accept that the runtime took as a command. The node gives no answer
+/// to an accept that it took. It gives `Refused` to one that it did not
+/// take, in the same pass of its commands.
+struct AcceptWaiting {
+    row: AcceptRow,
+    /// The run that took the command.
+    run: u64,
+    asked: std::time::Instant,
+}
+
+/// How long an accept waits for a refusal of the node before its row goes.
+/// The node reads a command in its next pass, which is far below this.
+const ACCEPT_SETTLE: Duration = Duration::from_secs(5);
+
+/// One step of a restore that a transfer gave, with the number of its job.
 enum RestoreStep {
     Root {
+        job: u64,
         week: u32,
         chunks: Vec<Vec<u8>>,
         answered: bool,
     },
     Object {
+        job: u64,
         index: usize,
         plain: Zeroizing<Vec<u8>>,
     },
-    Failed,
+    Failed {
+        job: u64,
+    },
+}
+
+impl RestoreStep {
+    fn job(&self) -> u64 {
+        match self {
+            RestoreStep::Root { job, .. }
+            | RestoreStep::Object { job, .. }
+            | RestoreStep::Failed { job } => *job,
+        }
+    }
 }
 
 /// What one command of the transfer task belongs to.
@@ -2066,11 +2159,18 @@ enum TransferWork {
     },
     /// The backup root of one week, which a restore reads (`IDN-101`).
     RestoreRoot {
+        /// The number of the restore job.
+        job: u64,
         /// The week.
         week: u32,
     },
     /// One object that a restored root names, by its entry.
-    RestoreObject(usize),
+    RestoreObject {
+        /// The number of the restore job.
+        job: u64,
+        /// The entry of the root.
+        index: usize,
+    },
     /// A backup object of Part 4 §4.7.2, and what its upload commits.
     Backup(Box<crate::client::PendingBackup>),
     /// The backup root of the week, and the chunks that go after it
@@ -2440,6 +2540,9 @@ impl Inner {
             });
         }
 
+        // NET-271: a send counts against the ARQ of its replica when the
+        // group task took its command, and not before.
+        let mut counted = BTreeMap::new();
         let now = crate::runtime::unix_now();
         while let Some(job) = self.client.take_group_post() {
             // GRP-194: the same record goes to each replica, each under its
@@ -2451,11 +2554,6 @@ impl Inner {
                     continue;
                 }
 
-                if let Some(row) = job.unsent {
-                    let _ = self
-                        .client
-                        .group_post_sent(&row, &replica.relay, now, &mut OsRng);
-                }
                 let tag = self.next_group_tag(GroupWork::Post {
                     message: job.message,
                     conversation: job.conversation,
@@ -2463,6 +2561,9 @@ impl Inner {
                     is_rotation: job.is_rotation,
                     unsent: job.unsent,
                 });
+                if let Some(row) = job.unsent {
+                    counted.insert(tag, (row, replica.relay));
+                }
                 commands.push(GroupCommand::Post {
                     tag,
                     relay: replica.relay,
@@ -2477,10 +2578,16 @@ impl Inner {
         self.push_repairs(&mut commands);
 
         for command in commands {
-            if let Some(tag) = command.tag() {
+            let tag = command.tag();
+            if let Some(tag) = tag {
                 self.group_sent.insert(tag, command.copy());
             }
-            self.send_group(command);
+
+            let is_sent = self.send_group(command);
+            let post = tag.and_then(|tag| counted.remove(&tag));
+            if let Some((row, relay)) = post.filter(|_| is_sent) {
+                let _ = self.client.group_post_sent(&row, &relay, now, &mut OsRng);
+            }
         }
 
         // DEV-296: each record of the member goes to the other devices of
@@ -3433,6 +3540,65 @@ impl Inner {
         // The copies hold write keys of group queues.
         self.group_tags.clear();
         self.group_sent.clear();
+
+        // The refusals and the losses count for one session. A stopped
+        // run gives no `Reset` and no `Ended`, thus a count that stayed
+        // would close a group at one refusal of the next run.
+        self.group_refusals.clear();
+        self.group_lost.clear();
+    }
+
+    /// Ends the wait of each accept that settled. An accept of this run
+    /// that the node did not refuse in `ACCEPT_SETTLE` went, and its row
+    /// goes. An accept of a run that ended keeps its row: its command can
+    /// be lost, and the user accepts again.
+    fn settle_accepts(&mut self) {
+        if self.accepts_waiting.is_empty() {
+            return;
+        }
+
+        let run = self.run;
+        let is_running = self.bridge.is_some();
+        let waiting = core::mem::take(&mut self.accepts_waiting);
+        for accept in waiting {
+            if accept.run != run || !is_running {
+                continue;
+            }
+            if accept.asked.elapsed() < ACCEPT_SETTLE {
+                self.accepts_waiting.push_back(accept);
+                continue;
+            }
+            accept.row.end(&mut self.client);
+        }
+    }
+
+    /// Whether an accept of `row` waits for its end. The view shows no
+    /// such row, and a second accept sends no second command.
+    fn is_accepting(&self, row: AcceptRow) -> bool {
+        self.accepts_waiting
+            .iter()
+            .any(|accept| accept.row == row && accept.run == self.run)
+    }
+
+    /// Notes an accept of `row` that the runtime took as a command.
+    fn note_accept(&mut self, row: AcceptRow) {
+        self.accepts_waiting.push_back(AcceptWaiting {
+            row,
+            run: self.run,
+            asked: std::time::Instant::now(),
+        });
+    }
+
+    /// Gives the link of an inviter to the runtime as an accept.
+    fn accept_link(&self, link: &str) -> Result<(), FfiError> {
+        if !self.owns_channels {
+            return Err(FfiError::NotFound);
+        }
+
+        let bridge = self.bridge.as_ref().ok_or(FfiError::Offline)?;
+        let fragment =
+            Fragment::parse(link.trim(), &self.invitation_host).map_err(|_| FfiError::Malformed)?;
+        Ok(bridge.accept(fragment.to_bytes().to_vec())?)
     }
 
     /// Keeps an erasure that no transfer task took, for the next run.
@@ -3729,8 +3895,9 @@ impl Inner {
             } => {
                 // Each kind of work is one alone, thus the chunks move.
                 match transfer_tags.remove(&tag) {
-                    Some(TransferWork::RestoreRoot { week }) => {
+                    Some(TransferWork::RestoreRoot { job, week }) => {
                         restore_step = Some(RestoreStep::Root {
+                            job,
                             week,
                             chunks,
                             answered,
@@ -3774,123 +3941,138 @@ impl Inner {
                     _ => {}
                 }
             }
-            TransferUpdate::Uploaded { tag, uploaded } => match transfer_tags.remove(&tag) {
-                // IDN-098: the root of the week names the object.
-                Some(TransferWork::Backup(pending)) => match client.directory_epoch() {
-                    Ok(epoch) if epoch != 0 => {
-                        if let Ok(root) =
-                            client.backup_uploaded(*pending, &uploaded, epoch, &mut OsRng)
-                        {
-                            backup_root = Some(root);
+            TransferUpdate::Uploaded { tag, uploaded } => {
+                // ATT-204: chunks that no record names are abandoned, and a
+                // `CDEL` goes for each one. The result of each arm is
+                // whether the store now names the chunks.
+                let mut descriptor = vec![0u8; uploaded.descriptor.len()];
+                let is_encoded = uploaded.descriptor.encode(&mut descriptor).is_ok();
+                let is_named = match transfer_tags.remove(&tag) {
+                    // IDN-098: the root of the week names the object. A
+                    // root of week 0 names no week, and the schedule makes
+                    // the object again.
+                    Some(TransferWork::Backup(pending)) => match client.directory_epoch() {
+                        Ok(epoch) if epoch != 0 => {
+                            let root =
+                                client.backup_uploaded(*pending, &uploaded, epoch, &mut OsRng);
+                            let is_kept = root.is_ok();
+                            if let Ok(root) = root {
+                                backup_root = Some(root);
+                            }
+                            is_kept
                         }
-                    }
-                    // A root of week 0 names no week. The object goes at
-                    // its relays, and the schedule makes it again.
-                    _ => {
-                        let _ = client.keep_abandoned(&uploaded.credentials, &mut OsRng);
-                    }
-                },
-                Some(TransferWork::File { message, .. }) => {
-                    if client.upload_done(&message, &uploaded, &mut OsRng).is_ok() {
-                        // The record with the descriptor goes to the send path.
-                        if let Some(running) = bridge {
-                            flush_logged(running, client);
+                        _ => false,
+                    },
+                    Some(TransferWork::File { message, .. }) => {
+                        let is_done = client.upload_done(&message, &uploaded, &mut OsRng).is_ok();
+                        if is_done {
+                            // The record with the descriptor goes to the
+                            // send path.
+                            if let Some(running) = bridge {
+                                flush_logged(running, client);
+                            }
+                        } else {
+                            // The file shows its failure and not an upload
+                            // with no job.
+                            let _ = client.upload_failed(&message, &mut OsRng);
                         }
-                    } else {
-                        // The chunks are abandoned, thus the file shows its
-                        // failure and not an upload with no job.
-                        let _ = client.upload_failed(&message, &mut OsRng);
+
+                        // `upload_done` abandons the chunks of an upload
+                        // that it did not commit.
+                        true
                     }
-                }
-                Some(TransferWork::Snapshot {
-                    from,
-                    group_id,
-                    index,
-                }) => {
-                    // GRP-312: the admit names the snapshot that the chunk
-                    // path now holds.
-                    let mut descriptor = vec![0u8; uploaded.descriptor.len()];
-                    if uploaded.descriptor.encode(&mut descriptor).is_ok() {
+                    Some(TransferWork::Snapshot {
+                        from,
+                        group_id,
+                        index,
+                    }) => {
+                        // GRP-312: the admit names the snapshot that the
+                        // chunk path now holds.
                         let joiner = crate::client::GroupJoiner {
                             from,
                             group_id,
                             is_added: true,
                         };
-                        let _ = client.admit_joiner(
-                            &joiner,
-                            index,
-                            &descriptor,
-                            unix_now_ms(),
-                            &mut OsRng,
-                        );
+                        let is_admitted = is_encoded
+                            && client
+                                .admit_joiner(
+                                    &joiner,
+                                    index,
+                                    &descriptor,
+                                    unix_now_ms(),
+                                    &mut OsRng,
+                                )
+                                .is_ok();
                         if let Some(running) = bridge {
                             flush_logged(running, client);
                         }
+                        is_admitted
                     }
-                }
-                Some(TransferWork::RecoverySnapshot {
-                    conversation,
-                    roster_epoch,
-                    behind,
-                }) => {
-                    // GRP-330: the notice names the snapshot on the path.
-                    let mut descriptor = vec![0u8; uploaded.descriptor.len()];
-                    if uploaded.descriptor.encode(&mut descriptor).is_ok() {
-                        moved = client
-                            .post_snapshot_notice(
-                                conversation,
-                                roster_epoch,
-                                behind,
-                                &descriptor,
-                                unix_now_ms(),
-                                &mut OsRng,
-                            )
-                            .is_ok();
+                    Some(TransferWork::RecoverySnapshot {
+                        conversation,
+                        roster_epoch,
+                        behind,
+                    }) => {
+                        // GRP-330: the notice names the snapshot on the path.
+                        let is_posted = is_encoded
+                            && client
+                                .post_snapshot_notice(
+                                    conversation,
+                                    roster_epoch,
+                                    behind,
+                                    &descriptor,
+                                    unix_now_ms(),
+                                    &mut OsRng,
+                                )
+                                .is_ok();
+                        moved |= is_posted;
+                        is_posted
                     }
-                }
-                Some(TransferWork::CatchUpOut(channel)) => {
-                    // DEV-238: the descriptor goes on the sync channel.
-                    let mut descriptor = vec![0u8; uploaded.descriptor.len()];
-                    if uploaded.descriptor.encode(&mut descriptor).is_ok()
-                        && client
-                            .catch_up_uploaded(channel, &descriptor, &mut OsRng)
-                            .is_ok()
-                    {
-                        if let Some(running) = bridge {
-                            flush_logged(running, client);
+                    Some(TransferWork::CatchUpOut(channel)) => {
+                        // DEV-238: the descriptor goes on the sync channel.
+                        let is_sent = is_encoded
+                            && client
+                                .catch_up_uploaded(channel, &descriptor, &mut OsRng)
+                                .is_ok();
+                        if is_sent {
+                            if let Some(running) = bridge {
+                                flush_logged(running, client);
+                            }
                         }
+                        is_sent
                     }
-                }
-                Some(TransferWork::GroupState(conversation)) => {
-                    let mut descriptor = vec![0u8; uploaded.descriptor.len()];
-                    if uploaded.descriptor.encode(&mut descriptor).is_ok()
-                        && client
-                            .group_state_uploaded(conversation, &descriptor, &mut OsRng)
-                            .is_ok()
-                    {
-                        if let Some(running) = bridge {
-                            flush_logged(running, client);
+                    Some(TransferWork::GroupState(conversation)) => {
+                        let is_sent = is_encoded
+                            && client
+                                .group_state_uploaded(conversation, &descriptor, &mut OsRng)
+                                .is_ok();
+                        if is_sent {
+                            if let Some(running) = bridge {
+                                flush_logged(running, client);
+                            }
                         }
+                        is_sent
                     }
-                }
-                Some(TransferWork::EpochSlots(upload)) => {
-                    let mut descriptor = vec![0u8; uploaded.descriptor.len()];
-                    if uploaded.descriptor.encode(&mut descriptor).is_ok() {
-                        moved = client
-                            .post_chunked_epoch(&upload, &descriptor, unix_now_ms(), &mut OsRng)
-                            .is_ok();
+                    Some(TransferWork::EpochSlots(upload)) => {
+                        let is_posted = is_encoded
+                            && client
+                                .post_chunked_epoch(&upload, &descriptor, unix_now_ms(), &mut OsRng)
+                                .is_ok();
+                        moved |= is_posted;
+                        is_posted
                     }
-                }
-                // ATT-204: the work of the upload ended with its run, and no
-                // record names the chunks.
-                None => {
+                    // The work of the upload ended with its run.
+                    None => false,
+                    // Each other work uploads nothing.
+                    Some(_) => true,
+                };
+                if !is_named {
                     let _ = client.keep_abandoned(&uploaded.credentials, &mut OsRng);
                 }
-                _ => {}
-            },
+            }
             TransferUpdate::Downloaded { tag, plain } => match transfer_tags.remove(&tag) {
-                Some(TransferWork::RestoreObject(index)) => {
-                    restore_step = Some(RestoreStep::Object { index, plain });
+                Some(TransferWork::RestoreObject { job, index }) => {
+                    restore_step = Some(RestoreStep::Object { job, index, plain });
                 }
                 Some(TransferWork::File { message, .. }) => {
                     // A fault of the store marks the file failed, and the
@@ -3951,8 +4133,10 @@ impl Inner {
             | TransferUpdate::Erased { .. }
             | TransferUpdate::Chains(_) => {}
             TransferUpdate::Failed { tag } => match transfer_tags.remove(&tag) {
-                Some(TransferWork::RestoreRoot { .. } | TransferWork::RestoreObject(_)) => {
-                    restore_step = Some(RestoreStep::Failed);
+                Some(
+                    TransferWork::RestoreRoot { job, .. } | TransferWork::RestoreObject { job, .. },
+                ) => {
+                    restore_step = Some(RestoreStep::Failed { job });
                 }
                 Some(TransferWork::File {
                     message,
@@ -4028,7 +4212,8 @@ impl Inner {
         };
 
         let credentials = job.key.epoch(week);
-        let tag = self.next_tag(TransferWork::RestoreRoot { week });
+        let job = job.serial;
+        let tag = self.next_tag(TransferWork::RestoreRoot { job, week });
         self.send_transfer(TransferCommand::ReadHandle {
             tag,
             handle: credentials.handle,
@@ -4047,13 +4232,35 @@ impl Inner {
             return;
         };
 
+        // A step of an earlier job would fill a slot of this one, or start
+        // a second search.
+        if step.job() != job.serial {
+            return;
+        }
+        let serial = job.serial;
+
         match step {
-            RestoreStep::Failed => job.status = RestoreStatus::Failed,
+            RestoreStep::Failed { .. } => {
+                // A job that ended keeps its end. A late fault of one
+                // object changes no result that the view showed.
+                if matches!(
+                    job.status,
+                    RestoreStatus::Searching { .. } | RestoreStatus::Fetching { .. }
+                ) {
+                    job.status = RestoreStatus::Failed;
+                }
+            }
             RestoreStep::Root {
                 week,
                 chunks,
                 answered,
+                ..
             } => {
+                // One root is asked at a time. Another one is late.
+                if !matches!(job.status, RestoreStatus::Searching { .. }) || week != job.week {
+                    return;
+                }
+
                 // IDN-103, IDN-116: a root that does not open is an empty
                 // epoch, and the search goes back until one opens. Each
                 // chunk that a relay gave is tried, thus one relay that
@@ -4111,14 +4318,20 @@ impl Inner {
                         return;
                     };
 
-                    let tag = self.next_tag(TransferWork::RestoreObject(index));
+                    let tag = self.next_tag(TransferWork::RestoreObject { job: serial, index });
                     self.send_transfer(TransferCommand::DownloadBackup {
                         tag,
                         descriptor: Box::new(descriptor),
                     });
                 }
             }
-            RestoreStep::Object { index, plain } => {
+            RestoreStep::Object { index, plain, .. } => {
+                // After a fault the job has its end, and a later object
+                // must not show the restore as moving again.
+                if !matches!(job.status, RestoreStatus::Fetching { .. }) {
+                    return;
+                }
+
                 if let Some(slot) = job.objects.get_mut(index) {
                     *slot = Some(plain);
                 }
@@ -4341,7 +4554,7 @@ impl Inner {
                 work,
                 TransferWork::Link { .. }
                     | TransferWork::RestoreRoot { .. }
-                    | TransferWork::RestoreObject(_)
+                    | TransferWork::RestoreObject { .. }
             )
         });
         self.work_run = self.run;
@@ -4356,6 +4569,39 @@ impl Inner {
         // chunk. The store keeps each one (`ATT-161`), and the run after
         // the unlock takes it from there.
         self.held_erasures.clear();
+
+        // IMP-127: an invitation holds the keys of a queue, a device
+        // invitation holds a sync bundle, and a code is a value of one
+        // ceremony. The platform can stop its event loop at a lock, thus
+        // none of them waits in the queue. The store holds each invitation,
+        // and the next run gives it again.
+        for event in &mut self.net_events {
+            if let NetEvent::Invitation(bytes) | NetEvent::DeviceInvitation(bytes) = event {
+                bytes.zeroize();
+            }
+        }
+        self.net_events.retain(|event| {
+            !matches!(
+                event,
+                NetEvent::Invitation(_)
+                    | NetEvent::DeviceInvitation(_)
+                    | NetEvent::VerificationCode(..)
+            )
+        });
+
+        // The search keys name the labels of this device (`DIS-204`).
+        if let Some(directory) = &self.directory {
+            directory.forget_search_keys();
+        }
+
+        // A rendezvous queue that no call took holds its address. The
+        // runtime that made it is gone.
+        for (recipient_id, address) in self.rendezvous_ready.values_mut() {
+            recipient_id.zeroize();
+            address.zeroize();
+        }
+        self.rendezvous_ready.clear();
+        self.rendezvous_refused.clear();
 
         // IMP-127: a restore holds the backup root key, and at its end the
         // root seed and each row. The drop wipes them, and the user starts
@@ -4395,6 +4641,45 @@ pub struct Handle {
     /// The end of the run of the queues on that runtime, which a
     /// disconnect waits for.
     run_done: Mutex<Option<oneshot::Receiver<()>>>,
+    /// Each runtime that a disconnect took and that still parks its
+    /// session. A lock stops them, as it stops `runtime`.
+    parked: Mutex<Vec<Arc<Parked>>>,
+}
+
+/// A runtime that parks its session after a disconnect. Its tasks hold the
+/// keys of the run until the stop, thus a lock ends the wait (`IMP-127`).
+#[derive(Default)]
+struct Parked {
+    stop: tokio::sync::Notify,
+    is_stop_asked: std::sync::atomic::AtomicBool,
+    is_ended: Mutex<bool>,
+    ended: Condvar,
+}
+
+impl Parked {
+    /// Ends the wait for the park. The runtime then stops at once.
+    fn ask_stop(&self) {
+        self.is_stop_asked
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.stop.notify_one();
+    }
+
+    fn mark_ended(&self) {
+        *locked(&self.is_ended) = true;
+        self.ended.notify_all();
+    }
+
+    fn has_ended(&self) -> bool {
+        *locked(&self.is_ended)
+    }
+
+    /// Waits until the runtime stopped, for `wait` at most.
+    fn await_end(&self, wait: std::time::Duration) {
+        let ended = locked(&self.is_ended);
+        let _ = self
+            .ended
+            .wait_timeout_while(ended, wait, |is_ended| !*is_ended);
+    }
 }
 
 struct NoElement;
@@ -4451,6 +4736,10 @@ fn calibrated(floor_ms: u64) -> Cost {
     Cost::calibrate(floor)
 }
 
+/// How many times an unlock derives its key again after a change of the
+/// wrap header under it.
+const UNLOCK_TRIES: u8 = 2;
+
 /// How long a lock waits for the tasks of the runtime to end. A task ends
 /// at its next wait, and a write to the store in a task takes the longest.
 const LOCK_STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
@@ -4465,17 +4754,38 @@ const PARK_WAIT: std::time::Duration =
 /// (`WIR-539`). The run ends by itself when its bridge is gone. It asks its
 /// relay to keep each circuit, and it leaves the session for the next run.
 /// A stop before that would cost the next run each circuit build.
-fn stop_after_park(runtime: tokio::runtime::Runtime, done: Option<oneshot::Receiver<()>>) {
+///
+/// A lock asks `parked` for the stop. The wait then ends, and the tasks of
+/// the runtime end before `parked` has its end mark.
+fn stop_after_park(
+    runtime: tokio::runtime::Runtime,
+    done: Option<oneshot::Receiver<()>>,
+    parked: Arc<Parked>,
+) {
     let Some(done) = done else {
         runtime.shutdown_background();
+        parked.mark_ended();
         return;
     };
 
     let parks = move |runtime: tokio::runtime::Runtime| {
         runtime.block_on(async {
-            let _ = tokio::time::timeout(PARK_WAIT, done).await;
+            tokio::select! {
+                _ = tokio::time::timeout(PARK_WAIT, done) => {}
+                () = parked.stop.notified() => {}
+            }
         });
-        runtime.shutdown_background();
+
+        // This thread is no thread of a runtime, thus it can wait.
+        let is_stop_asked = parked
+            .is_stop_asked
+            .load(std::sync::atomic::Ordering::Acquire);
+        if is_stop_asked {
+            runtime.shutdown_timeout(LOCK_STOP_WAIT);
+        } else {
+            runtime.shutdown_background();
+        }
+        parked.mark_ended();
     };
 
     // A thread of a runtime cannot wait for a runtime, thus another thread
@@ -4496,18 +4806,51 @@ impl Handle {
     /// `LOCK_STOP_WAIT`. The caller holds no lock of the handle state: a
     /// task that waits for that lock would not end.
     fn stop_runtime(&self) {
-        let Some(runtime) = locked(&self.runtime).take() else {
-            return;
-        };
-
         // A thread of a runtime cannot wait for a runtime. No call of the
         // platform comes from one.
-        if tokio::runtime::Handle::try_current().is_ok() {
-            runtime.shutdown_background();
-        } else {
-            runtime.shutdown_timeout(LOCK_STOP_WAIT);
+        let on_runtime = tokio::runtime::Handle::try_current().is_ok();
+
+        // A disconnect took its runtime out of the slot, and that runtime
+        // parks its session. Its tasks hold the keys of the run too.
+        let parked = core::mem::take(&mut *locked(&self.parked));
+        for parking in &parked {
+            parking.ask_stop();
+        }
+
+        if let Some(runtime) = locked(&self.runtime).take() {
+            if on_runtime {
+                runtime.shutdown_background();
+            } else {
+                runtime.shutdown_timeout(LOCK_STOP_WAIT);
+            }
+        }
+
+        if on_runtime {
+            return;
+        }
+        for parking in &parked {
+            parking.await_end(LOCK_STOP_WAIT);
         }
     }
+
+    /// Whether a runtime of a disconnect still parks its session.
+    fn is_parking(&self) -> bool {
+        let mut parked = locked(&self.parked);
+        parked.retain(|parking| !parking.has_ended());
+        !parked.is_empty()
+    }
+}
+
+/// One removed link of a manifest (`REL-185`): the epoch, then the two
+/// relay identifiers.
+fn removed_link(link: &[u8]) -> Option<umbra_core::directory::removal::LinkRemoval> {
+    let (epoch, relays) = link.split_at_checked(8)?;
+    let (a, b) = relays.split_at_checked(32)?;
+    Some(umbra_core::directory::removal::LinkRemoval::of(
+        u64::from_be_bytes(epoch.try_into().ok()?),
+        a.try_into().ok()?,
+        b.try_into().ok()?,
+    ))
 }
 
 /// Gives each record that waits to the send path of a run. The records
@@ -4561,7 +4904,7 @@ impl Drop for Handle {
         // IMP-093: the hardening key is a key of the store, and a handle
         // that the platform drops unlocked takes it with it, as a lock
         // does. A locked handle leaves the key of another open store.
-        if locked(&self.inner).client.is_unlocked() {
+        if inner.client.is_unlocked() {
             crate::runtime::harden_clear();
         }
     }
@@ -4870,6 +5213,8 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             rendezvous_abandoned: BTreeSet::new(),
             next_rendezvous_tag: 0,
             pending_grants: VecDeque::new(),
+            is_claiming: false,
+            accepts_waiting: VecDeque::new(),
             ndr_in_flight: NdrFlights::default(),
             ndr_retry: BTreeMap::new(),
             notify_pending: BTreeMap::new(),
@@ -4881,6 +5226,7 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             dead_work: Vec::new(),
             is_foreground: false,
             restore: None,
+            restore_serial: 0,
             restore_lost: false,
             media: Vec::new(),
             drafts: Vec::new(),
@@ -4890,6 +5236,8 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             run: 0,
             challenges: umbra_core::abuse::pow::ChallengeBook::default(),
             challenges_at: 0,
+            challenges_fetching: None,
+            challenges_retry_at: 0,
             link: None,
             link_serial: 0,
             owns_channels,
@@ -4901,13 +5249,13 @@ fn handle_of(database_path: String, client: Client<SqliteBackend, ForeignElement
             // ended with that process.
             peer_drop_due: true,
             link_erasures_due: true,
-            wake_next: false,
             online_since: None,
             idle_watch: None,
         }),
         changed: Condvar::new(),
         runtime: Mutex::new(None),
         run_done: Mutex::new(None),
+        parked: Mutex::new(Vec::new()),
     })
 }
 
@@ -5039,6 +5387,11 @@ impl Persist for HandleStore {
         let handle = self.handle.upgrade()?;
         let mut inner = locked(&handle.inner);
 
+        // A replaced run takes no cover slot of the run after it.
+        if inner.run != self.run {
+            return None;
+        }
+
         // A locked client gives none, and its receipts wait in the store.
         let due = inner.client.due_receipt(now, &mut OsRng).ok()??;
         let contact = inner.bridge.as_ref()?.contact_for(&due.conversation)?;
@@ -5050,6 +5403,12 @@ impl Persist for HandleStore {
     fn admission_token(&mut self, now: u64) -> Option<Vec<u8>> {
         let handle = self.handle.upgrade()?;
         let mut inner = locked(&handle.inner);
+
+        // A replaced run sends nothing, thus it spends no token.
+        if inner.run != self.run {
+            return None;
+        }
+
         inner
             .client
             .take_token(umbra_core::abuse::epoch_number(now))
@@ -5059,6 +5418,9 @@ impl Persist for HandleStore {
     fn due_digest(&mut self, now: u64) -> Option<(ContactId, Vec<u8>)> {
         let handle = self.handle.upgrade()?;
         let inner = locked(&handle.inner);
+        if inner.run != self.run {
+            return None;
+        }
 
         // NET-065: a transparency digest comes after a receipt and a
         // report, to one contact at random (DIS-029, DIS-031, REL-008).
@@ -5086,6 +5448,13 @@ impl Persist for HandleStore {
         };
 
         let mut inner = locked(&handle.inner);
+
+        // A replaced run has no proof that a relay took the record. The
+        // rows stay, and the run after it sends them.
+        if inner.run != self.run {
+            return;
+        }
+
         let _ = match given {
             Given::Receipt(due) => inner.client.receipt_sent(&due),
             Given::Digest(source) => inner.client.digest_sent(source, unix_now(), &mut OsRng),
@@ -5197,6 +5566,7 @@ impl Handle {
             rendezvous_refused,
             rendezvous_abandoned,
             pending_grants,
+            accepts_waiting,
             invitation_host,
             pending_faults,
             online_since,
@@ -5457,7 +5827,30 @@ impl Handle {
                     // of its introduction waits for the user again.
                     NetEvent::Refused => {
                         pending_grants.clear();
+
+                        // The node gives no name of the command that it
+                        // refused. The oldest accept keeps its row, and the
+                        // user accepts it again.
+                        accepts_waiting.pop_front();
                         net_events.push_back(NetEvent::Refused);
+                    }
+                    // The relay holds no blob for a link. Only the offer
+                    // of an introduction is an accept by a link here, and
+                    // its row asks nothing of the user after this.
+                    NetEvent::InvitationGone => {
+                        let gone = accepts_waiting
+                            .iter()
+                            .position(|accept| matches!(accept.row, AcceptRow::Introduction(_)));
+                        if let Some(accept) = gone.and_then(|at| accepts_waiting.remove(at)) {
+                            accept.row.end(client);
+                        }
+                        net_events.push_back(NetEvent::InvitationGone);
+                    }
+                    NetEvent::Contact(conversation) => {
+                        if let Some(accept) = accepts_waiting.pop_front() {
+                            accept.row.end(client);
+                        }
+                        net_events.push_back(NetEvent::Contact(conversation));
                     }
                     other => net_events.push_back(other),
                 }
@@ -6020,6 +6413,18 @@ impl Handle {
     /// Starts the network of an unlocked client. A [`FfiEvent::Online`]
     /// follows the build of the circuit. A second call ends the first run.
     pub fn connect(self: Arc<Self>, network: Network) -> Result<(), FfiError> {
+        self.start_run(network, false)
+    }
+}
+
+// The steps of a start. No one of them is a call of the platform, thus the
+// surface does not export them.
+impl Handle {
+    /// Starts a run. A run with `is_wake` is a push-wake session, which
+    /// takes its state before the first flush of its bridge (`NET-097`).
+    /// The caller gives the kind of the run here. A mark in the state
+    /// could go to a start on another thread.
+    fn start_run(self: Arc<Self>, network: Network, is_wake: bool) -> Result<(), FfiError> {
         // The first two relays of layer 1 are the pinned ingress relays of
         // this client (Part 10 §10.6.1), and each relay of another layer is
         // a candidate of a chain. The run dials the first pin. After a dial
@@ -6066,6 +6471,15 @@ impl Handle {
         }
         .map_err(|_| FfiError::Malformed)?;
 
+        // REL-185: an item that does not parse fails the start. A dropped
+        // item would let a chain of this run hold a removed link.
+        let removed_links = network
+            .removed_links
+            .iter()
+            .map(|link| removed_link(link))
+            .collect::<Option<Vec<_>>>()
+            .ok_or(FfiError::Malformed)?;
+
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_stack_size(16 << 20)
@@ -6107,6 +6521,7 @@ impl Handle {
             inner.ndr = None;
             inner.directory = None;
             inner.pending_grants.clear();
+            inner.accepts_waiting.clear();
             inner.circuits.clear();
             inner.circuits_changed = true;
             inner.me = Arc::downgrade(&self);
@@ -6134,7 +6549,6 @@ impl Handle {
                 owns_channels,
                 faults: inner_faults,
                 pending_faults,
-                wake_next,
                 link,
                 ..
             } = &mut *inner;
@@ -6143,26 +6557,10 @@ impl Handle {
             // earlier runs. A linked device runs its sync channels alone:
             // the device that owns a channel reads its queue (`DEV-287`).
             let mut node = ClientNode::with_relays(ingress, candidates, client.root_identity()?);
-            inner_faults.absorb(core::mem::take(pending_faults));
-            node.set_faults(core::mem::take(inner_faults));
             node.set_bootstrap(network.is_provisional);
 
             // REL-185: no chain of this run holds a removed link.
-            node.set_removed_links(
-                network
-                    .removed_links
-                    .iter()
-                    .filter_map(|link| {
-                        let (epoch, relays) = link.split_at_checked(8)?;
-                        let (a, b) = relays.split_at_checked(32)?;
-                        Some(umbra_core::directory::removal::LinkRemoval::of(
-                            u64::from_be_bytes(epoch.try_into().ok()?),
-                            a.try_into().ok()?,
-                            b.try_into().ok()?,
-                        ))
-                    })
-                    .collect(),
-            );
+            node.set_removed_links(removed_links);
 
             // REL-169: the link-fault reports of this run go to these queues.
             node.set_report_queues(
@@ -6265,7 +6663,7 @@ impl Handle {
 
             // NET-097: a push-wake session takes its state before the first
             // flush of its bridge.
-            if core::mem::take(wake_next) {
+            if is_wake {
                 running.wake()?;
             }
 
@@ -6328,7 +6726,10 @@ impl Handle {
             }
 
             // No step below fails, thus a start that failed gave no event
-            // that the next start gives again.
+            // that the next start gives again. It also kept the history of
+            // the link faults and the reports that wait.
+            inner_faults.absorb(core::mem::take(pending_faults));
+            node.set_faults(core::mem::take(inner_faults));
             net_events.extend(invitations.drain(..).map(NetEvent::Invitation));
 
             *bridge = Some(running);
@@ -6403,8 +6804,14 @@ impl Handle {
     /// carrier of the manifest, on the path of the manifest fetch and on no
     /// session (`ABU-065`, `ABU-066`, `ABU-105`).
     fn fetch_challenges(self: &Arc<Self>) {
-        let (spawner, dial, tls) = {
+        let (spawner, dial, root_ca_path, run) = {
             let inner = locked(&self.inner);
+
+            // One fetch runs at a time. A slow carrier then gets no second
+            // dial at each tick.
+            if inner.challenges_fetching == Some(inner.run) {
+                return;
+            }
             let Some(spawner) = inner.spawner.clone() else {
                 return;
             };
@@ -6427,37 +6834,56 @@ impl Handle {
                 addr_v6: None,
                 port: guard.port,
             };
-            let tls = match &inner.root_ca_path {
-                Some(path) => native::tls_config_with_root_file(path),
-                None => native::tls_config(),
-            };
-            let Ok(tls) = tls else {
-                return;
-            };
-
-            (spawner, dial, tls)
+            (spawner, dial, inner.root_ca_path.clone(), inner.run)
         };
+
+        // The read of the roots is slow, thus it holds no lock.
+        let tls = match &root_ca_path {
+            Some(path) => native::tls_config_with_root_file(path),
+            None => native::tls_config(),
+        };
+        let Ok(tls) = tls else {
+            return;
+        };
+
+        {
+            let mut inner = locked(&self.inner);
+            if inner.run != run || inner.challenges_fetching == Some(run) {
+                return;
+            }
+            inner.challenges_fetching = Some(run);
+        }
 
         let me = Arc::downgrade(self);
         spawner.spawn(async move {
-            if let Ok(bundle) = native::fetch_challenges(&dial, tls).await {
-                if let Some(handle) = me.upgrade() {
-                    handle.take_challenges(&bundle);
-                }
+            let fetched = native::fetch_challenges(&dial, tls).await;
+            let Some(handle) = me.upgrade() else {
+                return;
+            };
+
+            let is_taken = fetched.is_ok_and(|bundle| handle.take_challenges(&bundle));
+            let mut inner = locked(&handle.inner);
+            if inner.challenges_fetching == Some(run) {
+                inner.challenges_fetching = None;
+            }
+            if !is_taken {
+                inner.challenges_retry_at = unix_now().saturating_add(CHALLENGE_RETRY);
             }
         });
     }
 
     /// Takes each challenge of a bundle under the identity key of its relay
-    /// (`ABU-068`). The carrier is trusted with nothing.
-    fn take_challenges(&self, bundle: &[u8]) {
+    /// (`ABU-068`). The carrier is trusted with nothing. The result is
+    /// whether one challenge or more verified.
+    fn take_challenges(&self, bundle: &[u8]) -> bool {
         let Ok(challenges) = umbra_core::abuse::pow::ChallengeBook::parse_bundle(bundle) else {
-            return;
+            return false;
         };
 
         let now = unix_now();
         let mut inner = locked(&self.inner);
         let was_surge = inner.challenges.is_surge(now);
+        let mut is_taken = false;
         for challenge in challenges {
             let identity = inner
                 .relays
@@ -6467,8 +6893,14 @@ impl Handle {
                     umbra_crypto::sign::VerifyingKey::from_bytes(&relay.identity_pk).ok()
                 });
             if let Some(identity) = identity {
-                let _ = inner.challenges.take(challenge, &identity, now);
+                is_taken |= inner.challenges.take(challenge, &identity, now).is_ok();
             }
+        }
+
+        // A bundle with no challenge of a relay is no fetch. A carrier
+        // that serves one must not hold the next fetch back for a period.
+        if !is_taken {
+            return false;
         }
 
         // The view of the connection reads the surge state again.
@@ -6496,8 +6928,12 @@ impl Handle {
                 now,
             });
         }
+        true
     }
+}
 
+#[uniffi::export]
+impl Handle {
     /// The count of the relays whose challenge this device holds.
     pub fn challenges_held(&self) -> u32 {
         let inner = locked(&self.inner);
@@ -6533,10 +6969,19 @@ impl Handle {
 
         let runtime = held.take();
         let done = locked(&self.run_done).take();
+
+        // A lock on another thread finds the parking runtime here, and it
+        // stops that runtime too.
+        let parked = Arc::new(Parked::default());
+        if runtime.is_some() {
+            let mut parking = locked(&self.parked);
+            parking.retain(|earlier| !earlier.has_ended());
+            parking.push(Arc::clone(&parked));
+        }
         drop(held);
 
         if let Some(runtime) = runtime {
-            stop_after_park(runtime, done);
+            stop_after_park(runtime, done, parked);
         }
     }
 
@@ -6568,17 +7013,19 @@ impl Handle {
         let Inner { client, bridge, .. } = &mut *inner;
         client.request_introduction(to, about, &about_name, &to_name, unix_now_ms(), &mut OsRng)?;
         if let Some(running) = bridge {
-            running.flush(client, &mut OsRng)?;
+            flush_logged(running, client);
         }
         Ok(())
     }
 
     /// Each request and each offer of a contact that waits for the user.
     pub fn introductions(&self) -> Result<Vec<FfiIntroduction>, FfiError> {
-        Ok(locked(&self.inner)
+        let inner = locked(&self.inner);
+        Ok(inner
             .client
             .introductions()?
             .into_iter()
+            .filter(|intro| !inner.is_accepting(AcceptRow::Introduction(intro.id)))
             .map(|intro| FfiIntroduction {
                 id: intro.id.to_vec(),
                 is_offer: intro.is_offer,
@@ -6607,12 +7054,20 @@ impl Handle {
     /// the result is the petname that the introducer uses (`WIR-358`).
     pub fn accept_introduction(&self, id: Vec<u8>) -> Result<String, FfiError> {
         let id: [u8; 16] = id.try_into().map_err(|_| FfiError::Malformed)?;
-        let (link, name) = locked(&self.inner).client.offer(&id)?;
-        let link = String::from_utf8(link.to_vec()).map_err(|_| FfiError::Malformed)?;
-        self.accept(link)?;
+        let mut inner = locked(&self.inner);
+        let (link, name) = inner.client.offer(&id)?;
+        let row = AcceptRow::Introduction(id);
+        if inner.is_accepting(row) {
+            return Ok(name);
+        }
 
-        // The accept went, thus a row that stays asks nothing of the user.
-        let _ = locked(&self.inner).client.decline_introduction(&id);
+        let link = core::str::from_utf8(&link).map_err(|_| FfiError::Malformed)?;
+        inner.accept_link(link)?;
+
+        // The command can be lost with its run, and the node can refuse
+        // it. The row thus stays until the accept settled, and the view
+        // does not show it in that time.
+        inner.note_accept(row);
         Ok(name)
     }
 
@@ -6627,15 +7082,7 @@ impl Handle {
     /// [`FfiEvent::Contact`] follows, or a [`FfiEvent::InvitationGone`]. A
     /// link that names another host or that does not parse is an error.
     pub fn accept(&self, link: String) -> Result<(), FfiError> {
-        let inner = locked(&self.inner);
-        if !inner.owns_channels {
-            return Err(FfiError::NotFound);
-        }
-
-        let bridge = inner.bridge.as_ref().ok_or(FfiError::Offline)?;
-        let fragment = Fragment::parse(link.trim(), &inner.invitation_host)
-            .map_err(|_| FfiError::Malformed)?;
-        Ok(bridge.accept(fragment.to_bytes().to_vec())?)
+        locked(&self.inner).accept_link(&link)
     }
 
     /// The conversations of the device, one for each contact. The list
@@ -6697,23 +7144,10 @@ impl Handle {
     /// ends after `WAKE_SESSION_MAX` unless the app enters the screen
     /// (`NET-097`, `NET-100`).
     pub fn connect_wake(self: Arc<Self>, network: Network) -> Result<(), FfiError> {
-        // NET-097: a connect that takes the mark sets the wake state before
-        // the first flush of its bridge. Thus no record of a sync channel
-        // leaves in this session.
-        locked(&self.inner).wake_next = true;
-        let connected = self.clone().connect(network);
-        let mut inner = locked(&self.inner);
-
-        // A mark that stayed is one that the connect did not take, and the
-        // wake state follows here.
-        let is_waiting = core::mem::take(&mut inner.wake_next);
-        connected?;
-        if is_waiting {
-            if let Some(running) = inner.bridge.as_mut() {
-                running.wake()?;
-            }
-        }
-        Ok(())
+        // NET-097: the start sets the wake state before the first flush of
+        // its bridge. Thus no record of a sync channel leaves in this
+        // session.
+        self.start_run(network, true)
     }
 
     /// The 60-digit safety number of a conversation, in groups of five. It
@@ -7028,7 +7462,7 @@ impl Handle {
         // DEV-197: the name goes to each device of the set.
         let Inner { client, bridge, .. } = &mut *inner;
         if let Some(running) = bridge.as_mut() {
-            running.flush(client, &mut OsRng)?;
+            flush_logged(running, client);
         }
         Ok(())
     }
@@ -7037,9 +7471,15 @@ impl Handle {
     pub fn mark_read(&self, conversation: Vec<u8>) -> Result<(), FfiError> {
         let conversation = conversation_of(&conversation)?;
         let mut inner = locked(&self.inner);
-        Ok(inner
-            .client
-            .mark_read(conversation, unix_now_ms(), &mut OsRng)?)
+        let Inner { client, bridge, .. } = &mut *inner;
+        client.mark_read(conversation, unix_now_ms(), &mut OsRng)?;
+
+        // DEV-296: the read state goes to the other devices of the set
+        // now, and not with the next record of another call.
+        if let Some(running) = bridge {
+            flush_logged(running, client);
+        }
+        Ok(())
     }
 
     /// An empty draft for one conversation.
@@ -7089,14 +7529,18 @@ impl Handle {
             }
         }
 
-        let draft = held.take().ok_or(FfiError::NotFound)?;
-        drop(held);
+        // A fault before the store took the message leaves the draft in
+        // its handle.
         let Inner { client, bridge, .. } = &mut *inner;
-        let message = client.send_draft(draft, unix_now_ms(), &mut OsRng)?;
+        let message = client.send_draft_kept(&mut held, unix_now_ms(), &mut OsRng)?;
+        drop(held);
 
-        // With no network the record waits in the store.
+        // With no network the record waits in the store. The store holds
+        // the message, thus a fault of the flush is no fault of this call:
+        // an error would hide the handle, and a second try would send the
+        // message two times.
         if let Some(running) = bridge {
-            running.flush(client, &mut OsRng)?;
+            flush_logged(running, client);
         }
 
         // A file goes to the relays first, and its record follows.
@@ -7203,6 +7647,11 @@ impl Handle {
         sink: Arc<dyn TextSink>,
     ) -> Result<ResetCounts, FfiError> {
         let mut held = HeldText::default();
+
+        // The lock order of `connect`: the runtime, then the state. A start
+        // on another thread then runs before this call or after it, and the
+        // stop below ends no runtime of a later run.
+        let mut runtime = locked(&self.runtime);
         let mut inner = locked(&self.inner);
         let summary = inner.client.reset_identity(unix_now_ms(), &mut OsRng)?;
 
@@ -7214,10 +7663,11 @@ impl Handle {
         inner.end_run_for_ownership();
         let rendered = inner.client.render_recovery_code(&mut held, &mut OsRng);
         drop(inner);
-        if let Some(runtime) = locked(&self.runtime).take() {
-            runtime.shutdown_background();
+        if let Some(stopped) = runtime.take() {
+            stopped.shutdown_background();
         }
         locked(&self.run_done).take();
+        drop(runtime);
         self.changed.notify_all();
 
         // The reset committed, thus an error here would leave the platform
@@ -7237,7 +7687,7 @@ impl Handle {
         let Inner { client, bridge, .. } = &mut *inner;
         client.send_again(&message.0, unix_now_ms(), &mut OsRng)?;
         if let Some(running) = bridge {
-            running.flush(client, &mut OsRng)?;
+            flush_logged(running, client);
         }
         inner.pump_groups();
         drop(inner);
@@ -7394,7 +7844,7 @@ impl Handle {
         let Inner { client, bridge, .. } = &mut *inner;
         client.split_social(&holders, threshold, unix_now_ms(), &mut OsRng)?;
         if let Some(running) = bridge {
-            running.flush(client, &mut OsRng)?;
+            flush_logged(running, client);
         }
         drop(inner);
         self.changed.notify_all();
@@ -7602,7 +8052,7 @@ impl Handle {
                 && !info.deleted
                 && info.has_text
                 && info.revisions < crate::client::EDIT_MAX
-                && unix_now_ms().saturating_sub(info.stored_at_ms) < crate::client::EDIT_WINDOW_MS,
+                && unix_now_ms().saturating_sub(info.clock_at_ms) < crate::client::EDIT_WINDOW_MS,
             is_reply: info.reply != crate::ReplyTarget::None,
             reply_to: match info.reply {
                 crate::ReplyTarget::Message(target) => Some(Arc::new(MsgHandle(target))),
@@ -7727,7 +8177,7 @@ impl Handle {
             &mut OsRng,
         )?;
         if let Some(running) = bridge {
-            running.flush(client, &mut OsRng)?;
+            flush_logged(running, client);
         }
         inner.pump_groups();
         drop(inner);
@@ -7741,7 +8191,7 @@ impl Handle {
         let Inner { client, bridge, .. } = &mut *inner;
         client.vote(&poll.0, &choices, unix_now_ms(), &mut OsRng)?;
         if let Some(running) = bridge {
-            running.flush(client, &mut OsRng)?;
+            flush_logged(running, client);
         }
         inner.pump_groups();
         drop(inner);
@@ -7771,7 +8221,7 @@ impl Handle {
         let Inner { client, bridge, .. } = &mut *inner;
         client.set_draft(conversation, &code_units, &mut OsRng)?;
         if let Some(running) = bridge {
-            running.flush(client, &mut OsRng)?;
+            flush_logged(running, client);
         }
         Ok(())
     }
@@ -7804,9 +8254,13 @@ impl Handle {
         let mut inner = locked(&self.inner);
         let Inner { client, bridge, .. } = &mut *inner;
         client.set_privacy_mode(conversation, class, &mut OsRng)?;
+
+        // The store holds the mode. A run that ended takes no command, and
+        // the next run reads the mode from the store, thus this is no fault
+        // of the call.
         if let Some(running) = bridge {
             if let Some(contact) = running.contact_for(&conversation) {
-                running.set_class(contact, class)?;
+                let _ = running.set_class(contact, class);
             }
         }
         Ok(())
@@ -7839,7 +8293,7 @@ impl Handle {
         let Inner { client, bridge, .. } = &mut *inner;
         if client.typing(conversation, started, unix_now_ms(), &mut OsRng)? {
             if let Some(running) = bridge {
-                running.flush(client, &mut OsRng)?;
+                flush_logged(running, client);
             }
         }
         Ok(())
@@ -7860,7 +8314,7 @@ impl Handle {
         let Inner { client, bridge, .. } = &mut *inner;
         client.set_alert_setting(conversation, value, &mut OsRng)?;
         if let Some(running) = bridge {
-            running.flush(client, &mut OsRng)?;
+            flush_logged(running, client);
         }
         Ok(())
     }
@@ -7881,7 +8335,7 @@ impl Handle {
         let Inner { client, bridge, .. } = &mut *inner;
         client.set_preview_setting(conversation, value, &mut OsRng)?;
         if let Some(running) = bridge {
-            running.flush(client, &mut OsRng)?;
+            flush_logged(running, client);
         }
         Ok(())
     }
@@ -7900,7 +8354,7 @@ impl Handle {
         let Inner { client, bridge, .. } = &mut *inner;
         client.set_priority(conversation, on, &mut OsRng)?;
         if let Some(running) = bridge {
-            running.flush(client, &mut OsRng)?;
+            flush_logged(running, client);
         }
         Ok(())
     }
@@ -7922,7 +8376,7 @@ impl Handle {
         let Inner { client, bridge, .. } = &mut *inner;
         client.set_muted_until(conversation, until_ms, &mut OsRng)?;
         if let Some(running) = bridge {
-            running.flush(client, &mut OsRng)?;
+            flush_logged(running, client);
         }
         Ok(())
     }
@@ -7935,7 +8389,7 @@ impl Handle {
         let Inner { client, bridge, .. } = &mut *inner;
         client.set_pinned(conversation, pinned, &mut OsRng)?;
         if let Some(running) = bridge {
-            running.flush(client, &mut OsRng)?;
+            flush_logged(running, client);
         }
         Ok(())
     }
@@ -7979,7 +8433,7 @@ impl Handle {
         let message =
             client.set_conversation_timer(conversation, seconds, unix_now_ms(), &mut OsRng)?;
         if let Some(running) = bridge {
-            running.flush(client, &mut OsRng)?;
+            flush_logged(running, client);
         }
         inner.pump_groups();
         drop(inner);
@@ -8019,26 +8473,49 @@ impl Handle {
 
         // With no network the reaction waits in the store.
         if let Some(running) = bridge {
-            running.flush(client, &mut OsRng)?;
+            flush_logged(running, client);
         }
         Ok(())
     }
 
     /// Changes the text of a message that this device sent, to the text of
-    /// a draft. The handle of the draft is empty after this call.
+    /// a draft. The handle of the draft is empty after an edit that the
+    /// client took. An edit that this call refuses before that keeps the
+    /// draft, thus the user loses no text to a lock.
     pub fn edit_message(
         &self,
         message: Arc<MsgHandle>,
         draft: Arc<DraftHandle>,
     ) -> Result<(), FfiError> {
-        let draft = locked(&draft.0).take().ok_or(FfiError::NotFound)?;
+        // The order is `inner`, then the draft, as in `send_draft`.
         let mut inner = locked(&self.inner);
+        let mut held = locked(&draft.0);
+        {
+            let waiting = held.as_ref().ok_or(FfiError::NotFound)?;
+            if !inner.client.is_unlocked() {
+                return Err(FfiError::Locked);
+            }
+            if waiting.is_empty() {
+                return Err(FfiError::Malformed);
+            }
+        }
+
+        // The client takes the draft by value. Thus the window of the
+        // edit is checked here first, and an edit after it keeps the text.
+        let info = inner.client.info(&message.0)?;
+        if unix_now_ms().saturating_sub(info.clock_at_ms) >= crate::client::EDIT_WINDOW_MS {
+            return Err(FfiError::TooLong);
+        }
+
+        let draft = held.take().ok_or(FfiError::NotFound)?;
+        drop(held);
         let Inner { client, bridge, .. } = &mut *inner;
         client.edit(&message.0, draft, unix_now_ms(), &mut OsRng)?;
 
-        // With no network the edit waits in the store.
+        // With no network the edit waits in the store. The store holds
+        // the edit, thus a fault of the flush is no fault of this call.
         if let Some(running) = bridge {
-            running.flush(client, &mut OsRng)?;
+            flush_logged(running, client);
         }
         Ok(())
     }
@@ -8067,7 +8544,7 @@ impl Handle {
         let Inner { client, bridge, .. } = &mut *inner;
         let message = client.set_forward_policy(conversation, is_on, unix_now_ms(), &mut OsRng)?;
         if let Some(running) = bridge {
-            running.flush(client, &mut OsRng)?;
+            flush_logged(running, client);
         }
         inner.pump_groups();
         drop(inner);
@@ -8096,7 +8573,7 @@ impl Handle {
         let Inner { client, bridge, .. } = &mut *inner;
         client.set_contact_picture(conversation, &picture, &mut OsRng)?;
         if let Some(running) = bridge {
-            running.flush(client, &mut OsRng)?;
+            flush_logged(running, client);
         }
         Ok(())
     }
@@ -8115,7 +8592,7 @@ impl Handle {
         let Inner { client, bridge, .. } = &mut *inner;
         let sent = client.forward(&message.0, to, unix_now_ms(), &mut OsRng)?;
         if let Some(running) = bridge {
-            running.flush(client, &mut OsRng)?;
+            flush_logged(running, client);
         }
         inner.pump_groups();
         drop(inner);
@@ -8138,10 +8615,14 @@ impl Handle {
             Ok(()) | Err(crate::Error::Malformed) => {}
             Err(error) => return Err(error.into()),
         }
-        client.delete_for_me(&message.0)?;
+        // The store holds the deletion record here. It goes to the other
+        // devices also when the local delete below fails, and a second
+        // call then deletes here.
+        let deleted = client.delete_for_me(&message.0);
         if let Some(running) = bridge {
-            running.flush(client, &mut OsRng)?;
+            flush_logged(running, client);
         }
+        deleted?;
 
         // ATT-161: the chunks of a file that this device uploaded go too.
         inner.pump_transfers();
@@ -8158,7 +8639,7 @@ impl Handle {
         let Inner { client, bridge, .. } = &mut *inner;
         client.delete_conversation(conversation, unix_now_ms(), &mut OsRng)?;
         if let Some(running) = bridge {
-            running.flush(client, &mut OsRng)?;
+            flush_logged(running, client);
         }
 
         // ATT-161: the chunks of a file that this device uploaded go too.
@@ -8179,7 +8660,7 @@ impl Handle {
 
         // With no network the request waits in the store.
         if let Some(running) = bridge {
-            running.flush(client, &mut OsRng)?;
+            flush_logged(running, client);
         }
 
         // ATT-161: the chunks of a file that this device uploaded go too.
@@ -8198,7 +8679,7 @@ impl Handle {
         client.remove_contact(conversation, &mut OsRng)?;
         if let Some(running) = bridge {
             running.forget(&conversation);
-            running.flush(client, &mut OsRng)?;
+            flush_logged(running, client);
         }
 
         // ATT-161: the chunks of a file that this device uploaded go too.
@@ -8218,7 +8699,7 @@ impl Handle {
 
         // With no network the request waits in the store.
         if let Some(running) = bridge {
-            running.flush(client, &mut OsRng)?;
+            flush_logged(running, client);
         }
 
         inner.pump_transfers();
@@ -8300,6 +8781,13 @@ impl Handle {
             .collect())
     }
 
+    /// Whether a move of the store in this run found a table that did not
+    /// match its MAC (`IDN-039`). The view shows the fault. A locked
+    /// client gives [`FfiError::Locked`].
+    pub fn migration_was_unsound(&self) -> Result<bool, FfiError> {
+        Ok(locked(&self.inner).client.migration_was_unsound()?)
+    }
+
     /// Removes the search index from the memory. A lock does the same.
     pub fn search_close(&self) {
         locked(&self.inner).client.search_end();
@@ -8313,20 +8801,41 @@ impl Handle {
     pub fn lock(&self) {
         let mut inner = locked(&self.inner);
         inner.client.lock();
-        let runs = inner.stop_network_if_locked();
+        inner.stop_network_if_locked();
         drop(inner);
-        if runs {
-            self.stop_runtime();
-        }
+
+        // A disconnect leaves no run in the state, and its runtime can
+        // still park. The stop thus runs after each lock.
+        self.stop_runtime();
         self.changed.notify_all();
     }
 
     /// Unlocks the client with the passphrase.
     pub fn unlock(&self, passphrase: Vec<u16>) -> Result<(), FfiError> {
         let passphrase = Zeroizing::new(passphrase);
-        let mut inner = locked(&self.inner);
-        let now = unix_now();
-        inner.client.unlock(&passphrase, now)?;
+
+        // The Argon2id work takes seconds. It runs with no lock of the
+        // state held, thus each other call and each task of the runtime
+        // continue. A header that changed in that time, as at a change of
+        // the passphrase, gives `Busy`, and the key comes again.
+        let mut tries = 0u8;
+        let mut inner = loop {
+            let (params, element) = {
+                let inner = locked(&self.inner);
+                (
+                    inner.client.unlock_params()?,
+                    inner.client.element().clone(),
+                )
+            };
+            let key = crate::client::derive_unlock(&params, &passphrase, &element)?;
+
+            let mut inner = locked(&self.inner);
+            match inner.client.unlock_with_key(key, unix_now()) {
+                Ok(()) => break inner,
+                Err(crate::Error::Busy) if tries < UNLOCK_TRIES => tries = tries.saturating_add(1),
+                Err(fault) => return Err(fault.into()),
+            }
+        };
         harden(&inner.client);
 
         // IMP-130: a store of an earlier build moves to the current form
@@ -8435,7 +8944,7 @@ impl Handle {
 
         inner.client.tick(now);
         let runs = inner.stop_network_if_locked();
-        if runs {
+        if runs || (!inner.client.is_unlocked() && self.is_parking()) {
             // The runtime stops with no lock of the state held, and the
             // rest of this tick is the work of a later one.
             drop(inner);
@@ -8445,6 +8954,7 @@ impl Handle {
         }
 
         inner.pump_link(now);
+        inner.settle_accepts();
 
         // DEV-317: an epoch that came outside a batch of the queues, as in
         // a catch-up object, took the channels from this device.
@@ -8474,7 +8984,9 @@ impl Handle {
             }
         }
 
-        let is_due = inner.bridge.is_some() && challenges_due(now, inner.challenges_at);
+        let is_due = inner.bridge.is_some()
+            && challenges_due(now, inner.challenges_at)
+            && now >= inner.challenges_retry_at;
         drop(inner);
         if is_due {
             self.fetch_challenges();
@@ -8498,7 +9010,9 @@ impl Handle {
 
         let week = week_of(epoch);
         inner.restore_lost = false;
+        inner.restore_serial = inner.restore_serial.wrapping_add(1);
         inner.restore = Some(RestoreJob {
+            serial: inner.restore_serial,
             key,
             first_week: week,
             week,
@@ -9291,6 +9805,7 @@ guard relay1.example.org"
             let mut inner = locked(&handle.inner);
             inner.media.push(Arc::downgrade(&source));
             inner.restore = Some(RestoreJob {
+                serial: 1,
                 key: umbra_core::identity::recovery::BackupRootKey::from_secret(
                     umbra_crypto::secret::Secret::new([6; 32]),
                 ),
@@ -9318,6 +9833,126 @@ guard relay1.example.org"
         assert_eq!(handle.restore_status(), RestoreStatus::Failed);
         drop(handle);
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_step_of_an_earlier_restore_job_changes_no_later_job() {
+        let (handle, directory) = open("restore-serial");
+        let job = |serial: u64| RestoreJob {
+            serial,
+            key: umbra_core::identity::recovery::BackupRootKey::from_secret(
+                umbra_crypto::secret::Secret::new([6; 32]),
+            ),
+            first_week: 3,
+            week: 3,
+            objects: vec![None, None],
+            status: RestoreStatus::Fetching { done: 0, total: 2 },
+            restored: None,
+        };
+        let mut inner = locked(&handle.inner);
+        inner.restore = Some(job(2));
+
+        // An object and a fault of the job before fill no slot and end
+        // nothing.
+        inner.restore_step(RestoreStep::Object {
+            job: 1,
+            index: 0,
+            plain: Zeroizing::new(vec![1]),
+        });
+        inner.restore_step(RestoreStep::Failed { job: 1 });
+        let held = inner.restore.as_ref().unwrap();
+        assert!(held.objects.iter().all(Option::is_none));
+        assert_eq!(held.status, RestoreStatus::Fetching { done: 0, total: 2 });
+
+        // A job that failed stays failed when a late object of it comes.
+        inner.restore_step(RestoreStep::Failed { job: 2 });
+        inner.restore_step(RestoreStep::Object {
+            job: 2,
+            index: 0,
+            plain: Zeroizing::new(vec![1]),
+        });
+        assert_eq!(
+            inner.restore.as_ref().unwrap().status,
+            RestoreStatus::Failed
+        );
+        drop(inner);
+        drop(handle);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_lock_leaves_no_secret_event_and_no_count_of_a_group() {
+        let (handle, directory) = open("lock-events");
+        {
+            let mut inner = locked(&handle.inner);
+            inner.net_events.push_back(NetEvent::Invitation(vec![7; 8]));
+            inner
+                .net_events
+                .push_back(NetEvent::DeviceInvitation(vec![7; 8]));
+            inner
+                .net_events
+                .push_back(NetEvent::VerificationCode(ConversationId([1; 16]), 7));
+            inner.net_events.push_back(NetEvent::Online);
+            inner.rendezvous_ready.insert(1, ([2; 32], vec![3; 8]));
+            inner
+                .group_refusals
+                .insert((ConversationId([1; 16]), [4; 32]));
+            inner.group_lost.insert(ConversationId([1; 16]));
+        }
+        handle.lock();
+
+        let inner = locked(&handle.inner);
+        assert_eq!(inner.net_events.len(), 1);
+        assert!(matches!(inner.net_events.front(), Some(NetEvent::Online)));
+        assert!(inner.rendezvous_ready.is_empty());
+        assert!(inner.group_refusals.is_empty());
+        assert!(inner.group_lost.is_empty());
+        drop(inner);
+        drop(handle);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_network_text_names_each_relay_one_time() {
+        assert!(parse_network(descriptor(), None).is_ok());
+
+        // The line of the first relay comes a second time.
+        let first = descriptor()
+            .lines()
+            .find(|line| line.starts_with("relay relay1"))
+            .unwrap()
+            .to_owned();
+        let twice = descriptor().replace("invite ", &format!("{first}\ninvite "));
+        assert_eq!(parse_network(twice, None).err(), Some(FfiError::Malformed));
+    }
+
+    #[test]
+    fn a_removed_link_of_a_wrong_length_does_not_parse() {
+        assert!(removed_link(&[1; 72]).is_some());
+        assert!(removed_link(&[1; 71]).is_none());
+        assert!(removed_link(&[1; 73]).is_none());
+        assert!(removed_link(&[]).is_none());
+    }
+
+    #[test]
+    fn a_parked_runtime_ends_at_the_stop_of_a_lock() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (_ended, done) = oneshot::channel::<()>();
+        let parked = Arc::new(Parked::default());
+        let waits = Arc::clone(&parked);
+        let parking = std::thread::spawn(move || stop_after_park(runtime, Some(done), waits));
+
+        // The park would wait for `PARK_WAIT`. The stop ends it before.
+        let started = std::time::Instant::now();
+        parked.ask_stop();
+        parked.await_end(PARK_WAIT);
+        assert!(parked.has_ended());
+        assert!(started.elapsed() < PARK_WAIT);
+        parking.join().unwrap();
     }
 
     /// IMP-188: the platform can show the lock view over an open handle.

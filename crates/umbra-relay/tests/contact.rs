@@ -33,6 +33,8 @@ use umbra_relay::{
 use umbra_wire::{
     address::QueueAddress,
     app::{AppKind, AppMessage, Channel},
+    capsule::{self, CapsuleType},
+    session::SessionControl,
 };
 
 struct Rng(u64);
@@ -2805,6 +2807,50 @@ fn a_backward_cell_for_a_parked_link_ends_its_circuit_alone() {
     assert!(!events.contains(&ClientEvent::CircuitLost));
     assert_eq!(held(&network), circuits);
     assert_eq!(paced(&network).len(), clocks.len());
+}
+
+#[test]
+fn a_circuit_pause_of_a_client_pauses_nothing() {
+    const ALICE: usize = 0;
+    const BOB: usize = 1;
+    let mut network = Network::new();
+    let (_, bob_contact) = contacts(&mut network);
+    let clocks = paced(&network);
+    let circuits = held(&network);
+
+    // WIR-545: Alice names each circuit of her link in a `CircuitPause` of
+    // her own, with no `SessionPause`. The guard drops each one.
+    let now = network.now;
+    let link = network.links[ALICE];
+    let circ_ids = network.relays[0].circuit_ids_on(link);
+    assert!(!circ_ids.is_empty());
+    for circ_id in circ_ids {
+        let mut control = [0u8; 17];
+        let used = SessionControl::CircuitPause { circ_id }
+            .encode(&mut control)
+            .unwrap();
+        let mut pause = vec![0u8; capsule::HEADER_LEN + used];
+        let len = capsule::encode(CapsuleType::Session, &control[..used], &mut pause).unwrap();
+        pause.truncate(len);
+
+        let outputs = network.relays[0].on_capsule(link, &pause, now, &mut Rng(9));
+        assert!(outputs.is_empty());
+    }
+    network.settle();
+
+    // No subscription ended, no clock stopped, and the link stays.
+    assert_eq!(paced(&network), clocks);
+    assert_eq!(held(&network), circuits);
+    assert_eq!(network.relays[0].sessions_parked(), 0);
+    network.clients[BOB]
+        .send(&bob_contact, &text(1, "still here"), now, &mut Rng(8))
+        .unwrap();
+    network.commit(BOB);
+    network.settle();
+    assert_eq!(
+        bodies(&network.take_events(ALICE)),
+        [b"still here".to_vec()]
+    );
 }
 
 #[test]

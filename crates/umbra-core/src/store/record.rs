@@ -63,8 +63,7 @@ impl RowKey {
     pub fn derive(store_key: &Secret<32>) -> Self {
         let kdf = Hkdf::<Sha3_256>::new(None, store_key.expose());
         let mut key = Secret::<32>::zeroed();
-        // 32 bytes is below the HKDF bound, thus expand cannot fail.
-        let _ = kdf.expand(labels::ROW_ID, key.expose_mut());
+        umbra_crypto::kdf::expand_into(&kdf, &[labels::ROW_ID], &mut key);
         RowKey(key)
     }
 
@@ -129,9 +128,10 @@ fn record_key(
     let kdf = Hkdf::<Sha3_256>::new(Some(salt), store_key.expose());
     let mut key = Secret::<32>::zeroed();
     // IMP-023: the label, the table, and the row, and no other input.
-    let _ = kdf.expand_multi_info(
+    umbra_crypto::kdf::expand_into(
+        &kdf,
         &[labels::RECORD_KEY, &associated_data(table, row_id)],
-        key.expose_mut(),
+        &mut key,
     );
     key
 }

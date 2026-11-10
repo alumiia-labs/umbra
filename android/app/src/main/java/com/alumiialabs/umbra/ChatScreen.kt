@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -255,6 +256,23 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
         }
     }
 
+    // The text of a send that has no result yet. A send that fails puts it
+    // back into an empty composer, thus the user loses no text.
+    val unsent = remember(conversation) { UnsentText() }
+    DisposableEffect(conversation) { onDispose { unsent.wipe() } }
+    LaunchedEffect(conversation) {
+        snapshotFlow { Core.revision to Core.fault }.collect { (revision, fault) ->
+            val failed = unsent.takeIfFailed(revision, fault) ?: return@collect
+
+            // A text that the user typed after the send stays.
+            if (composer.isEmpty && edited == null) {
+                putText(failed.text)
+                answered = failed.answered
+            }
+            failed.text.fill('\u0000')
+        }
+    }
+
     // The message that the user wants to delete.
     var deleting by remember(conversation) { mutableStateOf<Line?>(null) }
     // DEV-127: each of the two deletions has a confirmation of its own.
@@ -267,6 +285,8 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
     var ownRole by remember(conversation) { mutableStateOf<FfiRole?>(null) }
     // The name of each member, for the bubbles of a group.
     var memberNames by remember(conversation) { mutableStateOf(emptyMap<UShort, String>()) }
+    // The index of this member: a roster note about it says "You".
+    var ownIndex by remember(conversation) { mutableStateOf<UShort?>(null) }
     var modNotes by remember(conversation) { mutableStateOf(emptyList<FfiModNote>()) }
     var rosterNotes by remember(conversation) { mutableStateOf(emptyList<FfiRosterNote>()) }
     var removing by remember(conversation) { mutableStateOf<Line?>(null) }
@@ -293,6 +313,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
         if (chat.isGroup) {
             Core.groupMembers(conversation) { members ->
                 ownRole = members.firstOrNull { it.isSelf }?.role
+                ownIndex = members.firstOrNull { it.isSelf }?.index
                 memberNames = members.associate { member ->
                     val title = member.contact?.let { contact ->
                         Core.chats.firstOrNull { it.conversation.id.contentEquals(contact) }?.title
@@ -437,7 +458,11 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
     chosen?.let { line ->
         val entries = if (line.info.deleted) {
             // DEV-105: the user can clear a placeholder.
-            listOf(RowEntry("trash-can", stringResource(R.string.common_remove)) { Core.deleteForMe(line.handle) })
+            listOf(
+                RowEntry("trash-can", stringResource(R.string.common_remove), tag = TestTags.MESSAGE_DELETE) {
+                    Core.deleteForMe(line.handle)
+                },
+            )
         } else if (line.info.moderation == MOD_HIDE && line.key !in revealed) {
             // A hidden message that the user did not open gives no content.
             buildList {
@@ -445,16 +470,20 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                     add(RowEntry("eye", stringResource(R.string.chat_show_for_everyone)) { Core.moderate(line.handle, MOD_UNHIDE) })
                     add(RowEntry("ban", stringResource(R.string.common_remove_for_everyone)) { removing = line })
                 }
-                add(RowEntry("trash-can", stringResource(R.string.common_delete)) { deleting = line })
+                add(RowEntry("trash-can", stringResource(R.string.common_delete), tag = TestTags.MESSAGE_DELETE) { deleting = line })
             }
         } else {
             buildList {
                 // IMP-075: a failed text goes again at the action of the user.
                 if (line.info.outgoing && line.info.delivery.toInt() == FAILED && line.info.file == null && !isObserver) {
-                    add(RowEntry("rotate", stringResource(R.string.chat_send_again)) { Core.sendAgain(line.handle) })
+                    add(
+                        RowEntry("rotate", stringResource(R.string.chat_send_again), tag = TestTags.MESSAGE_SEND_AGAIN) {
+                            Core.sendAgain(line.handle)
+                        },
+                    )
                 }
                 add(
-                    RowEntry("reply", stringResource(R.string.common_reply)) {
+                    RowEntry("reply", stringResource(R.string.common_reply), tag = TestTags.MESSAGE_REPLY) {
                         endEdit()
                         answered = line
                     },
@@ -463,7 +492,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                 // device, inside 24 hours, below the limit of revisions.
                 if (line.info.editable && !isObserver) {
                     add(
-                        RowEntry("pen", stringResource(R.string.common_edit)) {
+                        RowEntry("pen", stringResource(R.string.common_edit), tag = TestTags.MESSAGE_EDIT) {
                             answered = null
                             // A second edit keeps the draft of the first one.
                             if (edited == null) heldDraft = composer.copy().takeIf { it.isNotEmpty() }
@@ -479,11 +508,19 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
 
                 val file = line.info.file
                 if (file == null) {
-                    add(RowEntry("copy", stringResource(R.string.chat_copy_text)) { copyMessage(context, line.text) })
+                    add(
+                        RowEntry("copy", stringResource(R.string.chat_copy_text), tag = TestTags.MESSAGE_COPY) {
+                            copyMessage(context, line.text)
+                        },
+                    )
                     // WIR-177: a text goes to another chat as a forward.
                     // DEV-322: the sender of the message can prohibit it.
                     if (line.poll == null && !line.info.noForward) {
-                        add(RowEntry("share-nodes", stringResource(R.string.chat_forward)) { forwarding = line })
+                        add(
+                            RowEntry("share-nodes", stringResource(R.string.chat_forward), tag = TestTags.MESSAGE_FORWARD) {
+                                forwarding = line
+                            },
+                        )
                     }
                 } else if (file.state.toInt() == FILE_READY || line.info.outgoing) {
                     // IMP-045: the user saves one file.
@@ -512,7 +549,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                     add(RowEntry("ban", stringResource(R.string.common_remove_for_everyone)) { removing = line })
                 }
 
-                add(RowEntry("trash-can", stringResource(R.string.common_delete)) { deleting = line })
+                add(RowEntry("trash-can", stringResource(R.string.common_delete), tag = TestTags.MESSAGE_DELETE) { deleting = line })
             }
         }
 
@@ -552,7 +589,11 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
             } else {
                 stringResource(R.string.chat_send_this_file_question)
             },
-            listOf(RowEntry("paper-plane", stringResource(R.string.common_send)) { Core.confirmSend(pending) }),
+            listOf(
+                RowEntry("paper-plane", stringResource(R.string.common_send), tag = TestTags.ATTACH_CONFIRM) {
+                    Core.confirmSend(pending)
+                },
+            ),
             note = notes.joinToString(" "),
             onDismiss = { Core.cancelSend() },
         )
@@ -571,9 +612,23 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
     deleting?.let { line ->
         // DEV-127, DEV-128: two labels, and neither looks the safer one.
         val entries = buildList {
-            add(RowEntry("trash-can", stringResource(R.string.common_delete_on_my_devices)) { deletingOwn = line })
+            add(
+                RowEntry(
+                    "trash-can",
+                    stringResource(R.string.common_delete_on_my_devices),
+                    tag = TestTags.MESSAGE_DELETE_FOR_ME,
+                ) { deletingOwn = line },
+            )
             // A contact takes a deletion for a message of this device alone.
-            if (line.info.outgoing) add(RowEntry("trash-can", stringResource(R.string.chat_delete_for_everyone)) { deletingAll = line })
+            if (line.info.outgoing) {
+                add(
+                    RowEntry(
+                        "trash-can",
+                        stringResource(R.string.chat_delete_for_everyone),
+                        tag = TestTags.MESSAGE_DELETE_FOR_EVERYONE,
+                    ) { deletingAll = line },
+                )
+            }
         }
 
         ActionSheet(stringResource(R.string.chat_delete_this_message_question), entries, onDismiss = { deleting = null })
@@ -583,7 +638,11 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
         ActionSheet(
             stringResource(R.string.common_delete_on_my_devices_question),
             listOf(
-                RowEntry("trash-can", stringResource(R.string.common_delete_on_my_devices)) {
+                RowEntry(
+                    "trash-can",
+                    stringResource(R.string.common_delete_on_my_devices),
+                    tag = TestTags.MESSAGE_DELETE_CONFIRM,
+                ) {
                     Core.deleteForMe(line.handle)
                     // DEV-129: the view says which deletion ran.
                     notice = UiText.get(R.string.common_deleted_on_your_devices)
@@ -598,7 +657,11 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
         ActionSheet(
             stringResource(R.string.chat_delete_for_everyone_question),
             listOf(
-                RowEntry("trash-can", stringResource(R.string.chat_delete_for_everyone)) {
+                RowEntry(
+                    "trash-can",
+                    stringResource(R.string.chat_delete_for_everyone),
+                    tag = TestTags.MESSAGE_DELETE_CONFIRM,
+                ) {
                     if (answered?.key == line.key) answered = null
                     // DEV-129: the view says which deletion ran, after the
                     // core took the request.
@@ -649,7 +712,11 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                     },
                 )
             },
-            actions = { IconAction("magnifying-glass", stringResource(R.string.common_search)) { push(Screen.Search(chat.conversation)) } },
+            actions = {
+                IconAction("magnifying-glass", stringResource(R.string.common_search), tag = TestTags.CHAT_SEARCH) {
+                    push(Screen.Search(chat.conversation))
+                }
+            },
         )
         BlockedLine(chat)
 
@@ -667,7 +734,9 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
         }
 
         // GRP-050, GRP-070, GRP-089: each change of a group shows at its time.
-        val notes = remember(modNotes, rosterNotes, memberNames) { chatNotes(modNotes, rosterNotes, memberNames) }
+        val notes = remember(modNotes, rosterNotes, memberNames, ownIndex) {
+            chatNotes(modNotes, rosterNotes, memberNames, self = ownIndex)
+        }
 
         // Part 11 §11.9.6: a hidden message shows no text until the user
         // opens it, and the quote of a reply to it shows none either.
@@ -675,7 +744,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
         val isStillHidden = { key: List<Byte> -> key in hiddenKeys && key !in revealed }
         LazyColumn(
             state = listState,
-            modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp),
+            modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp).tagged(TestTags.CHAT_LIST),
         ) {
             item {
                 // One line, and no more: the top of a conversation is for
@@ -698,6 +767,15 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                 }
             }
 
+            // GRP-050: a chat that shows no message shows each note also,
+            // as the join of a member of a new group. The notes below sit
+            // beside a line, thus they need one.
+            val thread = threadOf
+            val showsNoLine = lines.none { thread == null || it.key == thread || it.threadKey == thread }
+            if (showsNoLine) {
+                items(notes) { note -> TaggedNote(note) }
+            }
+
             // The key keeps the state of a bubble, as its slide, with its message.
             itemsIndexed(lines, key = { _, line -> line.key }) { index, line ->
                 // A thread shows its root and its replies alone.
@@ -711,7 +789,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
 
                 // GRP-089: each moderation epoch shows at its time.
                 if (index == 0) {
-                    for (note in notes.filter { it.atMs < line.info.storedAtMs }) NoteLine(note)
+                    for (note in notes.filter { it.atMs < line.info.storedAtMs }) TaggedNote(note)
                 }
 
                 // DEV-207: a timer change is a row of the conversation.
@@ -791,14 +869,14 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                 val next = lines.getOrNull(index + 1)
                 for (note in notes) {
                     if (note.atMs >= line.info.storedAtMs && (next == null || note.atMs < next.info.storedAtMs)) {
-                        NoteLine(note)
+                        TaggedNote(note)
                     }
                 }
             }
         }
 
         notice?.let {
-            Box(Modifier.padding(horizontal = PressInset)) { Note(it) }
+            Box(Modifier.padding(horizontal = PressInset)) { Note(it, tag = TestTags.CHAT_NOTICE) }
         }
 
         // DEV-126: the limits of an edit show while the user edits. They go
@@ -863,30 +941,34 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
             // and no access to the gallery or to the files.
             val entries = buildList {
                 add(
-                    RowEntry("image", stringResource(R.string.common_photo)) {
+                    RowEntry("image", stringResource(R.string.common_photo), tag = TestTags.ATTACH_PHOTO) {
                         Core.awaitsResult()
                         picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                     },
                 )
                 if (Files.canSendVideo) {
                     add(
-                        RowEntry("film", stringResource(R.string.common_video)) {
+                        RowEntry("film", stringResource(R.string.common_video), tag = TestTags.ATTACH_VIDEO) {
                             Core.awaitsResult()
                             videoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
                         },
                     )
-                    add(RowEntry("music", stringResource(R.string.chat_audio)) {
+                    add(RowEntry("music", stringResource(R.string.chat_audio), tag = TestTags.ATTACH_AUDIO) {
                         Core.awaitsResult()
                         audioPicker.launch(arrayOf("audio/*"))
                     })
                 }
-                add(RowEntry("file", stringResource(R.string.common_file)) {
+                add(RowEntry("file", stringResource(R.string.common_file), tag = TestTags.ATTACH_FILE) {
                     Core.awaitsResult()
                     filePicker.launch(arrayOf("*/*"))
                 })
                 // GRP-149: a group above POLL_GROUP_MAX members takes no poll.
                 if (!chat.isGroup || chat.members <= POLL_GROUP_MAX) {
-                    add(RowEntry("chart-bar", stringResource(R.string.chat_poll)) { push(Screen.NewPoll(conversation)) })
+                    add(
+                        RowEntry("chart-bar", stringResource(R.string.chat_poll), tag = TestTags.ATTACH_POLL) {
+                            push(Screen.NewPoll(conversation))
+                        },
+                    )
                 }
             }
 
@@ -915,7 +997,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
 
         if (stopped != null) {
             Column(Modifier.fillMaxWidth().padding(horizontal = PressInset, vertical = 12.dp)) {
-                Note(stopped)
+                Note(stopped, tag = TestTags.CHAT_STOPPED)
             }
             return@Column
         }
@@ -984,6 +1066,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                             .padding(start = 4.dp)
                             .size(48.dp)
                             .clip(CircleShape)
+                            .tagged(TestTags.CHAT_ATTACH)
                             .press(role = Role.Button, label = stringResource(R.string.common_attach)) { isAttaching = true },
                         contentAlignment = Alignment.Center,
                     ) { FaIcon("plus", label = stringResource(R.string.common_attach), size = 18.dp, tint = Palette.TextSecondary) }
@@ -1000,7 +1083,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                             composer,
                             hint = stringResource(R.string.common_message),
                             isPassphrase = false,
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier.fillMaxWidth().tagged(TestTags.CHAT_INPUT),
                             maxLines = 5,
                         )
                     }
@@ -1020,6 +1103,7 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                     .size(48.dp)
                     .clip(CircleShape)
                     .background(Palette.Action)
+                    .tagged(TestTags.CHAT_SEND)
                     .press(role = Role.Button, label = sendLabel) {
                         val active = recording
                         if (active != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -1044,6 +1128,9 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                             if (target != null) {
                                 Core.edit(conversation, target.handle, text)
                             } else {
+                                // The core wipes `text`, thus the view keeps
+                                // a copy until the send has a result.
+                                unsent.hold(text, answered)
                                 Core.send(conversation, text, answered?.handle)
                                 jumpsAtNextLoad = true
                             }
@@ -1065,6 +1152,59 @@ fun ChatScreen(chat: Chat, onBack: () -> Unit, push: (Screen) -> Unit, target: L
                 FaIcon(icon, label = sendLabel, size = 18.dp, tint = Palette.OnAction)
             }
         }
+    }
+}
+
+/** A note of the conversation, with the name that a test finds it by. */
+@Composable
+private fun TaggedNote(note: ChatNote) {
+    Box(Modifier.tagged(TestTags.CHAT_NOTE)) { NoteLine(note) }
+}
+
+/**
+ * The text of a send until the core gives its result. The core reports a
+ * result in two ways: a new revision when the store took the message, and a
+ * new fault when the call failed. The first of the two decides.
+ */
+private class UnsentText {
+    /** A text that did not go, with the message that it answered. */
+    class Failed(val text: CharArray, val answered: Line?)
+
+    private var text: CharArray? = null
+    private var answered: Line? = null
+    private var revisionAtSend = 0
+    private var faultAtSend: String? = null
+
+    fun hold(sent: CharArray, answers: Line?) {
+        wipe()
+        text = sent.copyOf()
+        answered = answers
+        revisionAtSend = Core.revision
+        faultAtSend = Core.fault
+    }
+
+    /** The text when the send failed. A send that went wipes the copy. */
+    fun takeIfFailed(revision: Int, fault: String?): Failed? {
+        val held = text ?: return null
+
+        if (revision != revisionAtSend) {
+            wipe()
+            return null
+        }
+
+        // Each fault is a new object, thus the same words twice are two faults.
+        if (fault == null || fault === faultAtSend) return null
+
+        val failed = Failed(held, answered)
+        text = null
+        answered = null
+        return failed
+    }
+
+    fun wipe() {
+        text?.fill('\u0000')
+        text = null
+        answered = null
     }
 }
 
@@ -1220,6 +1360,7 @@ private fun Bubble(
                 PressOver(
                     Modifier
                         .widthIn(max = 300.dp)
+                        .tagged(if (isOutgoing) TestTags.CHAT_BUBBLE_OUT else TestTags.CHAT_BUBBLE_IN)
                         .clip(RoundedCornerShape(16.dp))
                         .drawWithContent {
                             drawContent()
@@ -1251,6 +1392,7 @@ private fun QuickReactions(held: List<MsgReaction>, onPick: (String) -> Unit) {
                     .size(48.dp)
                     .clip(CircleShape)
                     .background(if (isMine) Palette.Container else Color.Transparent)
+                    .tagged(TestTags.MESSAGE_REACT)
                     .press(role = Role.Button, label = if (isMine) stringResource(R.string.chat_remove_reaction, emoji) else stringResource(R.string.chat_react, emoji)) {
                         onPick(emoji)
                     },
@@ -1279,6 +1421,7 @@ private fun ReactionPills(line: Line) {
                     .clip(shape)
                     .background(if (isMine) Palette.Container else Palette.Surface)
                     .border(1.dp, if (isMine) Palette.Action else Palette.Divider, shape)
+                    .tagged(TestTags.CHAT_REACTION)
                     .press(role = Role.Button, label = if (isMine) stringResource(R.string.chat_remove_reaction, emoji) else stringResource(R.string.chat_react, emoji)) {
                         Core.react(line.handle, emoji)
                     }
@@ -1352,7 +1495,10 @@ private fun BubbleContent(
         } else if (line.info.deleted) {
             // The placeholder of Part 7 §7.5.6. It names the party only
             // where this device held the message (DEV-102, DEV-103).
-            Row(Modifier.align(Alignment.Start), verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                Modifier.align(Alignment.Start).tagged(TestTags.CHAT_BUBBLE_GONE),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 FaIcon("ban", size = 13.dp, tint = Palette.TextSecondary)
                 Spacer(Modifier.width(8.dp))
                 Text(
@@ -1394,6 +1540,7 @@ private fun BubbleContent(
                     Palette.Text,
                     modifier = Modifier
                         .align(Alignment.Start)
+                        .tagged(TestTags.CHAT_BUBBLE_TEXT)
                         .padding(horizontal = if (isPhoto) 10.dp else 0.dp, vertical = 2.dp),
                 )
             }
@@ -1418,7 +1565,12 @@ private fun BubbleContent(
                     modifier = Modifier.align(Alignment.Start).padding(bottom = 2.dp),
                 )
             }
-            PlatformText(line.text, Palette.Text, modifier = Modifier.align(Alignment.Start), showsLinks = true)
+            PlatformText(
+                line.text,
+                Palette.Text,
+                modifier = Modifier.align(Alignment.Start).tagged(TestTags.CHAT_BUBBLE_TEXT),
+                showsLinks = true,
+            )
         }
 
         Spacer(Modifier.height(2.dp))
@@ -1458,7 +1610,8 @@ private fun BubbleContent(
             style = MaterialTheme.typography.labelSmall,
             color = if (state == FAILED) Palette.Error else Palette.TextSecondary,
             // The time of a photo keeps the place that the time of a text has.
-            modifier = if (isPhoto) Modifier.padding(end = 10.dp, bottom = 4.dp) else Modifier,
+            modifier = (if (isPhoto) Modifier.padding(end = 10.dp, bottom = 4.dp) else Modifier)
+                .tagged(TestTags.CHAT_BUBBLE_STATE),
         )
     }
 }

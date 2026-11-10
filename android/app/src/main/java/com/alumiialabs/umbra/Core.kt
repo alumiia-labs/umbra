@@ -1618,7 +1618,11 @@ object Core {
                 refreshChats()
             }
             // The file of a message arrived, left, or failed.
-            is FfiEvent.File -> revision++
+            is FfiEvent.File -> {
+                // A file that the store did not hold can be there now.
+                failedImages.entries.removeAll { !it.value }
+                revision++
+            }
             // The join flow of a group moved.
             is FfiEvent.GroupOffer, is FfiEvent.GroupJoiner, is FfiEvent.Introduction -> {
                 refreshJoinFlow()
@@ -1662,6 +1666,8 @@ object Core {
                 groupJoiners.clear()
                 images.clear()
                 decoding.clear()
+                failedImages.clear()
+                shownKeys.clear()
                 VoicePlayer.stop()
                 previews.clear()
                 // A picture of a contact is private data of the user.
@@ -2906,20 +2912,42 @@ object Core {
     fun sendAudio(context: Context, conversation: Conversation, source: android.net.Uri, caption: CharArray? = null) {
         val app = context.applicationContext
         on(mediaWorker) { client ->
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return@on
-
-            val picked = Files.describe(app, source)
-            val draft = client.newDraft(conversation.id)
-            val bytes = Files.attachAudio(app, source, picked, draft)
-            if (bytes < 0) {
-                draft.destroy()
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
                 caption?.fill('\u0000')
                 main.post { fault = UiText.get(R.string.core_audio_not_open) }
                 return@on
             }
 
-            putCaption(draft, caption)
-            offer(client, PendingSend(conversation, draft, bytes, isOriginal = false))
+            var draft: uniffi.umbra_ffi.DraftHandle? = null
+            var isOffered = false
+            try {
+                val picked = Files.describe(app, source)
+                val made = client.newDraft(conversation.id)
+                draft = made
+
+                // A lock ends the encode: the draft of a locked client sends nothing.
+                val bytes = Files.attachAudio(app, source, picked, made) { phase != Phase.Open }
+                if (bytes < 0) {
+                    val text = when (bytes) {
+                        MEDIA_TOO_LARGE -> R.string.core_audio_too_large
+                        MEDIA_FORM -> R.string.core_audio_form
+                        else -> R.string.core_audio_not_open
+                    }
+                    main.post { fault = UiText.get(text) }
+                    return@on
+                }
+
+                putCaption(made, caption)
+                offer(client, PendingSend(conversation, made, bytes, isOriginal = false))
+                isOffered = true
+            } finally {
+                // A fault of the provider or of the core leaves no draft and
+                // no caption in the memory.
+                if (!isOffered) {
+                    draft?.destroy()
+                    caption?.fill('\u0000')
+                }
+            }
         }
     }
 
@@ -3167,17 +3195,37 @@ object Core {
      * A cell of the grid of media takes a smaller decode. The images live
      * in the memory alone, and a lock drops them (`IMP-166`).
      */
-    fun image(line: Line, isCell: Boolean = false): androidx.compose.ui.graphics.ImageBitmap? {
-        val key = if (isCell) listOf<Byte>(0x63) + line.key else line.key
+    fun image(
+        line: Line,
+        isCell: Boolean = false,
+        isFull: Boolean = false,
+    ): androidx.compose.ui.graphics.ImageBitmap? {
+        val key = imageKey(line, isCell, isFull)
         images[key]?.let { return it }
+        if (key in failedImages) return null
+
+        // IMP-166: the file of a peer names its own size. A file above the
+        // bound gets no read, because the read copies each byte into the
+        // memory before the decode can refuse it.
+        val named = line.info.file?.size?.toLong() ?: 0L
+        if (named > IMAGE_BYTES_MAX) {
+            main.post { failedImages[key] = true }
+            return null
+        }
 
         if (decoding.add(key)) {
             call { client ->
-                val decoder = if (isCell) Photos.Decoder(CELL_SIDE_MAX) else Photos.Decoder()
+                val side = if (isCell) CELL_SIDE_MAX else if (isFull) FULL_SIDE_MAX else SHOWN_SIDE_MAX
+                val decoder = Photos.Decoder(side)
+                // A file that the store does not hold can come later, and a
+                // file that does not decode stays as it is until the lock.
+                var isUndecodable = true
                 try {
                     client.msgFile(line.handle, decoder)
                 } catch (absent: FfiException) {
-                    // The store holds no file yet. A later event asks again.
+                    isUndecodable = false
+                } catch (noMemory: OutOfMemoryError) {
+                    // The copy of the file had no memory. This ends no thread.
                 }
                 main.post {
                     decoding.remove(key)
@@ -3185,15 +3233,80 @@ object Core {
                         dropImage(decoder.image)
                         return@post
                     }
-                    decoder.image?.let { images[key] = it }
+
+                    val image = decoder.image
+                    if (image != null) {
+                        images[key] = image
+                    } else {
+                        // Without this mark each draw of the view starts the
+                        // read and the decode again.
+                        failedImages[key] = isUndecodable
+                    }
                 }
             }
         }
         return null
     }
 
+    /** Whether the photo of a message did not open, thus no decode runs for it. */
+    fun imageFailed(line: Line, isCell: Boolean = false, isFull: Boolean = false): Boolean =
+        imageKey(line, isCell, isFull) in failedImages
+
+    private fun imageKey(line: Line, isCell: Boolean, isFull: Boolean): List<Byte> = when {
+        isCell -> listOf<Byte>(0x63) + line.key
+        isFull -> listOf<Byte>(0x66) + line.key
+        else -> line.key
+    }
+
+    /**
+     * Drops each decoded image of a message that left: a deletion, the end
+     * of its timer, or a removal by a moderator. The pixels are erased, thus
+     * a view that still holds the image shows nothing of it.
+     */
+    private fun forget(key: List<Byte>) {
+        for (prefix in listOf<List<Byte>>(emptyList(), listOf(0x63), listOf(0x66))) {
+            images.remove(prefix + key)
+            failedImages.remove(prefix + key)
+        }
+        previews.remove(key)
+    }
+
+    /**
+     * Whether the message of a line is still there for a view of its file.
+     * A message that left loses its decoded images here.
+     */
+    fun stillShown(line: Line, onLoaded: (Boolean) -> Unit) = call { client ->
+        val isShown = try {
+            val info = client.msgInfo(line.handle)
+            !info.deleted && info.moderation != MOD_REMOVE && info.file != null
+        } catch (gone: FfiException.Locked) {
+            throw gone
+        } catch (gone: FfiException) {
+            false
+        }
+        main.post {
+            if (!isShown) forget(line.key)
+            onLoaded(isShown)
+        }
+    }
+
     /** The longest side of the decode of a cell of the grid of media. */
     private const val CELL_SIDE_MAX = 512
+
+    /** The longest side of the decode of a photo on the whole screen. */
+    private const val FULL_SIDE_MAX = 4_096
+
+    /** The largest file of the image class that the app reads for a decode. */
+    private const val IMAGE_BYTES_MAX = 32L * 1_024 * 1_024
+
+    /**
+     * The photos that did not open. The value is true for a file that does
+     * not decode, and false for a file that the store did not hold.
+     */
+    private val failedImages = mutableStateMapOf<List<Byte>, Boolean>()
+
+    /** The keys of the lines of the last load of each conversation. */
+    private val shownKeys = HashMap<Conversation, Set<List<Byte>>>()
 
     /** The longest side of the decode of a thumbnail: twice `PREVIEW_SIDE` of Part 12 §12.7. */
     private const val PREVIEW_SIDE_MAX = 256
@@ -3272,10 +3385,26 @@ object Core {
             }
         }
 
+        /** Drops one entry and erases its pixels. */
+        fun remove(key: List<Byte>) {
+            sizes.remove(key)?.let { held -= it }
+            shown.remove(key)?.let(::erase)
+        }
+
+        /** Drops each entry and erases its pixels (`IMP-166`). */
         fun clear() {
+            val gone = shown.values.toList()
             shown.clear()
             sizes.clear()
             held = 0L
+            gone.forEach(::erase)
+        }
+
+        // A view can still draw the image in this frame, thus the pixels
+        // go and the collector frees the bitmap. A recycle would end a draw.
+        private fun erase(image: androidx.compose.ui.graphics.ImageBitmap) {
+            val bitmap = image.asAndroidBitmap()
+            if (bitmap.isMutable && !bitmap.isRecycled) bitmap.eraseColor(0)
         }
     }
 
@@ -3375,6 +3504,12 @@ object Core {
                 }
                 return@post
             }
+
+            // A line that left since the last load, and a placeholder, keep
+            // no decoded image.
+            val keys = lines.mapTo(HashSet()) { it.key }
+            shownKeys.put(conversation, keys)?.forEach { if (it !in keys) forget(it) }
+            lines.forEach { if (it.info.deleted || it.info.moderation == MOD_REMOVE) forget(it.key) }
 
             onLoaded(lines)
         }
@@ -3668,6 +3803,13 @@ object Core {
                 // A fault of the platform, as a content provider that
                 // refuses a file, ends the call and not the app.
                 if (BuildConfig.DEBUG) android.util.Log.w("umbra-core", "a call failed", failure)
+                main.post {
+                    fault = UiText.get(R.string.core_did_not_work, failure.javaClass.simpleName)
+                    onFailed?.invoke()
+                }
+            } catch (failure: OutOfMemoryError) {
+                // A decode or a copy of a large file had no memory. It is no
+                // `Exception`, and it ends the call and not the app.
                 main.post {
                     fault = UiText.get(R.string.core_did_not_work, failure.javaClass.simpleName)
                     onFailed?.invoke()

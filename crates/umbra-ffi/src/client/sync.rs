@@ -1122,7 +1122,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
                 self.apply_converged_item(item, &subject, value, rng)?
             }
             ITEM_GROUP_REKEY => {
-                self.on_group_rekey_item(subject, value, unix_now() * 1_000, rng)?
+                self.on_group_rekey_item(subject, value, unix_now().saturating_mul(1_000), rng)?
             }
             // An item that this build does not apply changes nothing.
             _ => {}

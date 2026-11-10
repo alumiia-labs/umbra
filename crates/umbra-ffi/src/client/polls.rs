@@ -281,7 +281,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             0u8;
             8usize
                 .saturating_add(question.len())
-                .saturating_add(options.len() * 101)
+                .saturating_add(options.len().saturating_mul(101))
         ];
         let used = poll.encode(&mut body)?;
         body.truncate(used);

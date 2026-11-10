@@ -56,6 +56,10 @@ pub struct EpochState {
     /// same roster epoch. This one is then the second of that roster epoch
     /// here (`GRP-369`).
     repeat: bool,
+    /// Whether a member other than `rotator` wrote a record under this
+    /// secret, and its tag verified (`GRP-273`). The group then holds the
+    /// secret. The record of its rotator alone does not prove that.
+    confirmed: bool,
 }
 
 /// The epoch from which a member counts the checks of an epoch above it
@@ -85,7 +89,11 @@ const EPOCHS_VERSION_BASE: u8 = 0x03;
 
 /// Version `0x03` with the alternate secret of the previous epoch
 /// (`GRP-273`).
-const EPOCHS_VERSION: u8 = 0x04;
+const EPOCHS_VERSION_ALTERNATE: u8 = 0x04;
+
+/// Version `0x04` with the mark of a secret that a second member wrote
+/// under (`GRP-273`).
+const EPOCHS_VERSION: u8 = 0x05;
 
 /// One record key to try, with the epoch state that gave it.
 pub struct RecordKey {
@@ -153,7 +161,20 @@ impl EpochState {
             supplied: false,
             base: None,
             repeat: false,
+            confirmed: false,
         }
+    }
+
+    /// Marks the secret as one that the group holds (`GRP-273`).
+    #[must_use]
+    pub const fn confirmed(mut self) -> Self {
+        self.confirmed = true;
+        self
+    }
+
+    /// Whether a member other than the rotator wrote under this secret.
+    pub const fn is_confirmed(&self) -> bool {
+        self.confirmed
     }
 
     /// Sets the epoch from which the checks of this one counted, and
@@ -228,6 +249,7 @@ impl EpochState {
             supplied: false,
             base: None,
             repeat: false,
+            confirmed: false,
         }
     }
 
@@ -348,7 +370,19 @@ impl EpochState {
             supplied: false,
             base: None,
             repeat: false,
+            confirmed: false,
         })
+    }
+
+    /// Whether this secret takes a place before `other`, a second secret of
+    /// the same epoch (`GRP-273`): a secret that the group holds goes
+    /// first, and of two such secrets the one of the lower rotator index.
+    fn goes_before(&self, other: &EpochState) -> bool {
+        match (self.confirmed, other.confirmed) {
+            (true, false) => true,
+            (true, true) => self.rotator < other.rotator,
+            (false, _) => false,
+        }
     }
 
     /// Whether `GROUP_EPOCH_MAX_AGE` passed since `t_e` (`GRP-360`).
@@ -413,8 +447,10 @@ impl EpochStore {
     /// The caller checked the trigger, the rotator, and the tag.
     ///
     /// Two secrets can come from records that each served the whole group.
-    /// The one of the lower rotator index is then the current one, and the
-    /// other is the alternate. A supplied secret names no rotator, thus it
+    /// The second one is the alternate. It becomes the current one only
+    /// after a member other than its rotator wrote under it
+    /// ([`EpochStore::confirm`]). Of two such secrets, the one of the lower
+    /// rotator index is the current one. A supplied secret names no rotator, thus it
     /// takes no part in that order. It never takes the place of the current
     /// secret here, and [`EpochStore::confirm_alternate`] moves it there.
     /// The record of the rotator for a secret that a supply gave makes that
@@ -486,36 +522,43 @@ impl EpochStore {
             // member drops with its grace. A record of another member under
             // the supplied secret brings it back (`confirm_alternate`).
             let kept = match self.alternate.take() {
-                Some(held) if !held.supplied && held.rotator <= state.rotator => held,
+                Some(held) if !held.supplied && !state.goes_before(&held) => held,
                 _ => state,
             };
-            self.current = Some(kept);
-            self.alternate = Some(current);
+
+            // A supplied secret that the group writes under stays. The
+            // record of one rotator alone proves no second holder of its
+            // secret.
+            if current.confirmed && !kept.confirmed {
+                self.alternate = Some(kept);
+                self.current = Some(current);
+            } else {
+                self.current = Some(kept);
+                self.alternate = Some(current);
+            }
             return Ok(());
         }
 
-        if state.rotator == current.rotator {
+        // One rotator gives one secret of an epoch.
+        let held_rotator = |held: &EpochState| !held.supplied && held.rotator == state.rotator;
+        if held_rotator(&current) || self.alternate.as_ref().is_some_and(held_rotator) {
             self.current = Some(current);
             return Err(Error::Stale);
         }
 
-        // GRP-273 orders two rotators that did not read each other. A
-        // second record long after the first secret of the epoch is no such
-        // race. An active member of a lower index could else move the send
-        // key of this member at any time.
-        let first = self
+        // GRP-273: a second record of the epoch is the alternate. Its slot
+        // for this member proves no slot for another member. Thus a member
+        // of a lower index moves no send key with its record alone.
+        let takes_place = self
             .alternate
             .as_ref()
-            .map_or(current.installed_at, |held| {
-                held.installed_at.min(current.installed_at)
-            });
-        if state.installed_at.saturating_sub(first) >= GROUP_EPOCH_GRACE {
-            self.current = Some(current);
+            .is_none_or(|held| held.supplied || state.goes_before(held));
+        self.current = Some(current);
+        if !takes_place {
             return Err(Error::Stale);
         }
 
         self.alternate = Some(state);
-        self.current = Some(current);
         self.settle();
         Ok(())
     }
@@ -529,15 +572,16 @@ impl EpochStore {
         }
     }
 
-    /// GRP-273: of two secrets of known rotators, the one of the lower
-    /// index is the current one.
+    /// GRP-273: of two secrets of known rotators, the current one is a
+    /// secret that the group holds. Of two such secrets, it is the one of
+    /// the lower rotator index. With no such secret, the first one stays.
     fn settle(&mut self) {
         let swap = self
             .current
             .as_ref()
             .zip(self.alternate.as_ref())
             .is_some_and(|(current, alternate)| {
-                !current.supplied && !alternate.supplied && alternate.rotator < current.rotator
+                !current.supplied && !alternate.supplied && alternate.goes_before(current)
             });
 
         if swap {
@@ -545,23 +589,38 @@ impl EpochStore {
         }
     }
 
-    /// A record of `sender` opened under the alternate secret and its tag
-    /// verified. A supplied secret under which a member other than its
-    /// supplier writes is a secret that the group holds. Thus it takes the
-    /// place of the current one, which stays as the alternate (`GRP-273`).
-    /// The result says whether the two changed places.
-    pub fn confirm_alternate(&mut self, sender: u16) -> bool {
-        let confirmed = self
-            .alternate
-            .as_ref()
-            .is_some_and(|held| held.supplied && held.rotator != sender)
-            && self.current.as_ref().is_some_and(EpochState::holds_secret);
+    /// A record of the active member `sender` opened under a secret of the
+    /// current epoch, the alternate one or the current one, and its tag
+    /// verified (`GRP-273`). A member other than the rotator of a secret
+    /// then holds that secret, thus the record of its rotator served more
+    /// than this member. The result says whether the two secrets changed
+    /// places.
+    ///
+    /// A supplied secret under which a member other than its supplier
+    /// writes takes the place of the current one, which stays as the
+    /// alternate.
+    pub fn confirm(&mut self, sender: u16, under_alternate: bool) -> bool {
+        let held = if under_alternate {
+            self.alternate.as_mut()
+        } else {
+            self.current.as_mut()
+        };
+        let Some(held) = held.filter(|held| held.rotator != sender) else {
+            return false;
+        };
+        held.confirmed = true;
 
-        if confirmed {
+        if under_alternate
+            && held.supplied
+            && self.current.as_ref().is_some_and(EpochState::holds_secret)
+        {
             core::mem::swap(&mut self.current, &mut self.alternate);
+            return true;
         }
 
-        confirmed
+        let before = self.current.as_ref().map(|current| current.rotator);
+        self.settle();
+        before != self.current.as_ref().map(|current| current.rotator)
     }
 
     /// The lowest roster epoch that an epoch of this store names, from
@@ -670,6 +729,7 @@ impl EpochStore {
             if let Some(state) = state {
                 state.export(w)?;
                 w.flag(state.supplied);
+                w.flag(state.confirmed);
                 w.flag(state.repeat);
                 w.option(state.base.as_ref(), |w, base| {
                     w.u32(base.epoch);
@@ -688,6 +748,7 @@ impl EpochStore {
             STORED_VERSION,
             EPOCHS_VERSION_SUPPLIED,
             EPOCHS_VERSION_BASE,
+            EPOCHS_VERSION_ALTERNATE,
             EPOCHS_VERSION,
         ]
         .contains(&version)
@@ -696,13 +757,21 @@ impl EpochStore {
         }
 
         let mut states = [None, None, None, None];
-        // A form before `EPOCHS_VERSION` holds no previous alternate.
-        let held = if version >= EPOCHS_VERSION { 4 } else { 3 };
+        // A form before `EPOCHS_VERSION_ALTERNATE` holds no previous
+        // alternate.
+        let held = if version >= EPOCHS_VERSION_ALTERNATE {
+            4
+        } else {
+            3
+        };
         for slot in states.iter_mut().take(held) {
             if r.flag()? {
                 let mut state = EpochState::import(r)?;
                 if version >= EPOCHS_VERSION_SUPPLIED {
                     state.supplied = r.flag()?;
+                }
+                if version >= EPOCHS_VERSION {
+                    state.confirmed = r.flag()?;
                 }
                 if version >= EPOCHS_VERSION_BASE {
                     state.repeat = r.flag()?;
@@ -797,6 +866,7 @@ pub fn rotate<R: CryptoRng + TryCryptoRng + ?Sized>(
 ) -> Result<RotationOutput, Error> {
     let secret = EpochSecret::generate(rng)?;
     let start_slot = slot_of(now);
+    let slot_count = u16::try_from(included.len()).map_err(|_| Error::Malformed)?;
     let mut sealed_slots: Vec<(u16, Vec<u8>)> = Vec::with_capacity(included.len());
     let mut last: Option<u16> = None;
 
@@ -825,20 +895,20 @@ pub fn rotate<R: CryptoRng + TryCryptoRng + ?Sized>(
         }
         last = Some(member.index);
 
-        let tag = member.pair_key.epoch_tag(&EpochTag {
-            group_id,
-            epoch,
-            start_slot,
-            roster_epoch,
-            epoch_secret: secret.expose(),
-        });
-
         let admin = member.role >= Role::Admin && full.is_some();
         let payload = match full.as_mut().filter(|_| admin) {
             Some(full) => full,
             None => &mut bare,
         };
-        payload.tag = tag;
+        payload.tag = member.pair_key.epoch_tag(&EpochTag {
+            group_id,
+            epoch,
+            start_slot,
+            roster_epoch,
+            slot_count,
+            epoch_secret: secret.expose(),
+            own_sks: &payload.own_sks,
+        });
         plain.clear();
         plain.resize(payload.len(), 0);
         payload.encode(&mut plain)?;
@@ -862,8 +932,6 @@ pub fn rotate<R: CryptoRng + TryCryptoRng + ?Sized>(
     } else {
         INLINE_SLOTS_MAX
     };
-    let slot_count = u16::try_from(sealed_slots.len()).map_err(|_| Error::Malformed)?;
-
     if sealed_slots.len() <= inline_max {
         let slots: Vec<KemSlot<'_>> = sealed_slots
             .iter()
@@ -938,23 +1006,24 @@ pub fn one_slot<R: CryptoRng + ?Sized>(
     bucket: umbra_wire::bucket::Bucket,
     rng: &mut R,
 ) -> Result<Vec<u8>, Error> {
-    let tag = member.pair_key.epoch_tag(&EpochTag {
-        group_id,
-        epoch,
-        start_slot,
-        roster_epoch,
-        epoch_secret: secret,
-    });
-
     let own_count = if own_sks.is_some() { REPLICAS } else { 0 };
-    let payload = SlotPayload {
+    let mut payload = SlotPayload {
         rotator,
         epoch_secret: Secret::new(*secret.expose()),
-        tag,
+        tag: [0u8; TAG_LEN],
         own_sks: own_sks
             .map(|own| own.iter().map(|s| Secret::new(*s.expose())).collect())
             .unwrap_or_default(),
     };
+    payload.tag = member.pair_key.epoch_tag(&EpochTag {
+        group_id,
+        epoch,
+        start_slot,
+        roster_epoch,
+        slot_count: 1,
+        epoch_secret: secret,
+        own_sks: &payload.own_sks,
+    });
     let mut plain = Zeroizing::new(alloc::vec![0u8; payload.len()]);
     payload.encode(&mut plain)?;
 
@@ -991,10 +1060,12 @@ pub const fn chunk_of_rank(rank: usize, slots_per_chunk: u16) -> usize {
 /// slot `start_slot` of the record header under the pair key with the
 /// rotator, and checks the role of the rotator (`GRP-286`, `GRP-287`,
 /// `GRP-379`). A rotator below `admin` hands no owner credentials, thus the
-/// payload of its slot holds none.
+/// payload of its slot holds none. `slot_count` is the count of the record
+/// body, which the tag covers.
 #[allow(clippy::too_many_arguments)]
 pub fn open_own_slot(
     slots: &[KemSlot<'_>],
+    slot_count: u16,
     own_index: u16,
     own_keys: &MemberKeys,
     group_id: &[u8; 32],
@@ -1028,6 +1099,7 @@ pub fn open_own_slot(
         epoch,
         start_slot,
         roster_epoch,
+        slot_count,
         &payload,
     )?;
 
@@ -1042,13 +1114,15 @@ pub fn open_own_slot(
 }
 
 /// Verifies the tag of a slot at the start slot `start_slot`, which the
-/// record header carries (`GRP-287`, `GRP-383`).
+/// record header carries (`GRP-287`, `GRP-383`). The tag covers the slot
+/// count of the record and the owner credentials of the slot.
 pub fn verify_slot_tag(
     pair_key: &PairKey,
     group_id: &[u8; 32],
     epoch: u32,
     start_slot: u32,
     roster_epoch: u32,
+    slot_count: u16,
     payload: &SlotPayload,
 ) -> Result<(), Error> {
     pair_key.verify_epoch_tag(
@@ -1057,7 +1131,9 @@ pub fn verify_slot_tag(
             epoch,
             start_slot,
             roster_epoch,
+            slot_count,
             epoch_secret: &payload.epoch_secret,
+            own_sks: &payload.own_sks,
         },
         &payload.tag,
     )?;
@@ -1136,8 +1212,8 @@ mod tests {
             Err(Error::Stale)
         ));
 
-        // A second rotator for epoch 2 with a lower index takes over, and
-        // the first stays as the alternate.
+        // A second rotator for epoch 2 with a lower index is the alternate
+        // until a third member writes under its secret (GRP-273).
         let third = EpochSecret::generate(&mut Rng(3)).unwrap();
         store
             .install(EpochState::new(
@@ -1150,11 +1226,13 @@ mod tests {
                 later,
             ))
             .unwrap();
-        assert_eq!(store.current().unwrap().rotator(), 1);
+        assert_eq!(store.current().unwrap().rotator(), 3);
         assert_eq!(
             store.record_keys(2, slot_of(later), later).unwrap().len(),
             2
         );
+        assert!(store.confirm(4, true));
+        assert_eq!(store.current().unwrap().rotator(), 1);
 
         let stale = EpochSecret::generate(&mut Rng(4)).unwrap();
         assert_eq!(
@@ -1240,24 +1318,27 @@ mod tests {
         let t = out.start_slot;
         let with_admin =
             |i: u16| (i == 0).then(|| admin.pair_key(&rotator.pair_public(), &group).unwrap());
-        let payload = open_own_slot(&slots, 1, &admin, &group, 2, t, 4, roles, with_admin).unwrap();
+        let payload =
+            open_own_slot(&slots, 3, 1, &admin, &group, 2, t, 4, roles, with_admin).unwrap();
         assert_eq!(payload.own_sks.len(), 2);
         assert_eq!(payload.own_sks[1].expose(), &[9; 32]);
-        verify_slot_tag(&admin_pair, &group, 2, t, 4, &payload).unwrap();
-        assert!(verify_slot_tag(&admin_pair, &group, 2, t + 1, 4, &payload).is_err());
+        verify_slot_tag(&admin_pair, &group, 2, t, 4, 3, &payload).unwrap();
+        assert!(verify_slot_tag(&admin_pair, &group, 2, t + 1, 4, 3, &payload).is_err());
 
         // The open checks the tag at the start slot of the header itself.
-        assert!(open_own_slot(&slots, 1, &admin, &group, 2, t + 1, 4, roles, with_admin).is_err());
+        assert!(
+            open_own_slot(&slots, 3, 1, &admin, &group, 2, t + 1, 4, roles, with_admin).is_err()
+        );
 
         // GRP-379: a rotator that a demotion took below `admin` since its
         // rotation gives the secret, and no owner credentials.
         let demoted = |_: u16| Some(Role::Member);
         let payload =
-            open_own_slot(&slots, 1, &admin, &group, 2, t, 4, demoted, with_admin).unwrap();
+            open_own_slot(&slots, 3, 1, &admin, &group, 2, t, 4, demoted, with_admin).unwrap();
         assert!(payload.own_sks.is_empty());
         assert_eq!(payload.epoch_secret.expose(), out.secret.expose().expose());
 
-        let plain_payload = open_own_slot(&slots, 2, &plain, &group, 2, t, 4, roles, |i| {
+        let plain_payload = open_own_slot(&slots, 3, 2, &plain, &group, 2, t, 4, roles, |i| {
             (i == 0).then(|| plain.pair_key(&rotator.pair_public(), &group).unwrap())
         })
         .unwrap();
@@ -1267,10 +1348,19 @@ mod tests {
             out.secret.expose().expose()
         );
 
+        // The tag covers the slot count, thus the slot is no slot of a
+        // one-slot record.
+        assert!(
+            open_own_slot(&slots, 1, 2, &plain, &group, 2, t, 4, roles, |i| {
+                (i == 0).then(|| plain.pair_key(&rotator.pair_public(), &group).unwrap())
+            })
+            .is_err()
+        );
+
         // A member whose slot is absent finds none, and a wrong key opens
         // nothing.
-        assert!(open_own_slot(&slots, 9, &plain, &group, 2, t, 4, roles, |_| None).is_err());
-        assert!(open_own_slot(&slots, 1, &plain, &group, 2, t, 4, roles, |_| None).is_err());
+        assert!(open_own_slot(&slots, 3, 9, &plain, &group, 2, t, 4, roles, |_| None).is_err());
+        assert!(open_own_slot(&slots, 3, 1, &plain, &group, 2, t, 4, roles, |_| None).is_err());
 
         assert_eq!(chunk_of_rank(53, 27), 1);
         assert_eq!(chunk_of_rank(54, 27), 2);
@@ -1290,28 +1380,74 @@ mod tests {
     }
 
     #[test]
-    fn a_rival_secret_after_the_grace_of_the_first_one_is_refused() {
+    fn a_rival_secret_moves_no_send_key_before_a_third_member_writes_under_it() {
         let now = 1_000 * GROUP_SLOT;
         let mut store = EpochStore::default();
         store.install(state(1, 1, 0, now)).unwrap();
         store.install(state(2, 2, 5, now)).unwrap();
 
-        // GRP-273: inside the grace, the secret of the lower rotator index
-        // takes the place of the current one.
-        let mut raced = EpochStore::default();
-        raced.install(state(2, 2, 5, now)).unwrap();
-        raced
-            .install(state(2, 3, 1, now + GROUP_EPOCH_GRACE - 1))
-            .unwrap();
-        assert_eq!(raced.current().unwrap().rotator, 1);
-
-        // After the grace, a lower index moves no send key.
-        assert_eq!(
-            store.install(state(2, 3, 1, now + GROUP_EPOCH_GRACE)),
-            Err(Error::Stale)
-        );
+        // GRP-273: the record of a lower index gives the alternate, at any
+        // time. The send key stays.
+        store.install(state(2, 3, 1, now + 1)).unwrap();
         assert_eq!(store.current().unwrap().rotator, 5);
-        assert!(store.alternate.is_none());
+        assert_eq!(store.alternate.as_ref().unwrap().rotator, 1);
+
+        // A record of its own rotator proves no second holder.
+        assert!(!store.confirm(1, true));
+        assert_eq!(store.current().unwrap().rotator, 5);
+
+        // One rotator gives one secret of an epoch.
+        assert_eq!(store.install(state(2, 4, 1, now + 2)), Err(Error::Stale));
+        assert_eq!(store.install(state(2, 4, 5, now + 2)), Err(Error::Stale));
+
+        // A third rotator of a lower index takes no place of the first
+        // alternate: neither has a second holder.
+        assert_eq!(store.install(state(2, 6, 0, now + 3)), Err(Error::Stale));
+        assert_eq!(store.alternate.as_ref().unwrap().rotator, 1);
+
+        // A third member writes under the rival secret, and the group
+        // holds it. The send key moves, and the first secret stays as the
+        // alternate.
+        assert!(store.confirm(7, true));
+        assert_eq!(store.current().unwrap().rotator, 1);
+        assert_eq!(store.alternate.as_ref().unwrap().rotator, 5);
+
+        // The group holds the two secrets, and the lower index stands.
+        assert!(!store.confirm(7, true));
+        assert_eq!(store.current().unwrap().rotator, 1);
+    }
+
+    #[test]
+    fn of_two_secrets_that_the_group_holds_the_lower_index_stands() {
+        let now = 1_000 * GROUP_SLOT;
+
+        // This member took the secret of the lower index first. A third
+        // member under the other secret moves the send key there, and a
+        // third member under the first one moves it back.
+        let mut store = EpochStore::default();
+        store.install(state(2, 2, 1, now)).unwrap();
+        store.install(state(2, 3, 5, now)).unwrap();
+        assert!(store.confirm(7, true));
+        assert_eq!(store.current().unwrap().rotator, 5);
+        assert!(store.confirm(8, true));
+        assert_eq!(store.current().unwrap().rotator, 1);
+
+        // The stored form keeps the two marks.
+        let mut w = Writer::new();
+        store.export(&mut w).unwrap();
+        let bytes = w.finish();
+        let back = EpochStore::import(&mut Reader::new(&bytes)).unwrap();
+        assert!(back.current().unwrap().is_confirmed());
+        assert!(back.alternate.as_ref().unwrap().is_confirmed());
+
+        // A secret that the group holds takes the place of an alternate
+        // that it does not hold.
+        let mut held = EpochStore::default();
+        held.install(state(2, 2, 5, now)).unwrap();
+        held.install(state(2, 3, 1, now)).unwrap();
+        held.install(state(2, 4, 3, now).confirmed()).unwrap();
+        assert_eq!(held.current().unwrap().rotator, 3);
+        assert_eq!(held.alternate.as_ref().unwrap().rotator, 5);
     }
 
     #[test]
@@ -1330,11 +1466,11 @@ mod tests {
 
         // The supplier alone writes under it: nothing changes. A record of
         // another member under it makes it the secret of the group.
-        assert!(!store.confirm_alternate(1));
+        assert!(!store.confirm(1, true));
         assert_eq!(store.current().unwrap().rotator(), 5);
-        assert!(store.confirm_alternate(7));
+        assert!(store.confirm(7, true));
         assert!(store.current().unwrap().is_supplied());
-        assert!(!store.confirm_alternate(7));
+        assert!(!store.confirm(7, true));
 
         // The record of the rotator of that secret names its rotator, and
         // the index rule runs again: index 5 is below index 9.
@@ -1414,7 +1550,7 @@ mod tests {
         assert!(!late.current().unwrap().is_supplied());
         assert_eq!(late.record_keys(2, slot_of(now), now).unwrap().len(), 2);
 
-        assert!(late.confirm_alternate(7));
+        assert!(late.confirm(7, true));
         assert!(late.current().unwrap().is_supplied());
 
         // The same record again changes nothing.
@@ -1446,6 +1582,7 @@ mod tests {
         store.install(state(1, 1, 0, now)).unwrap();
         store.install(state_from(2, 2, 5, t - 6, now)).unwrap();
         store.install(state_from(2, 3, 1, t - 3, now)).unwrap();
+        assert!(store.confirm(7, true));
         assert_eq!(store.current().unwrap().rotator(), 1);
 
         let keys = store.record_keys(2, t - 4, now).unwrap();

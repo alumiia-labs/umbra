@@ -361,6 +361,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         Ok((row.link, row.name))
     }
 
+    /// Removes an offer whose accept made its contact. An offer that is
+    /// gone is no fault, and a row of another kind stays.
+    pub fn end_offer(&mut self, id: &[u8; 16]) -> Result<(), Error> {
+        match self.intro_row(id) {
+            Ok(row) if row.kind == OFFER_IN => self.drop_intro(id),
+            Ok(_) | Err(Error::NotFound) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     /// The user declined a request or an offer. No record answers it.
     pub fn decline_introduction(&mut self, id: &[u8; 16]) -> Result<(), Error> {
         let row = self.intro_row(id)?;

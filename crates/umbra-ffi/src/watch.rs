@@ -30,11 +30,7 @@ use umbra_crypto::{
     stored::{Reader, Writer},
     x25519::StaticSecret,
 };
-use umbra_transport::{
-    native,
-    race::{Plan, Wire},
-    Dial,
-};
+use umbra_transport::{native, Dial};
 use zeroize::Zeroizing;
 
 use crate::{
@@ -604,18 +600,11 @@ async fn session(
         return (End::Down, false);
     };
 
-    // The key and the mask of the upgrade are no secret under TLS, thus a
-    // draw that fails leaves zero and ends no dial.
-    let mut key = [0u8; 16];
-    let mut mask = [0u8; 4];
-    let _ = rng.try_fill_bytes(&mut key);
-    let _ = rng.try_fill_bytes(&mut mask);
-    let plan = Plan::Only(Wire::Tcp);
-
     // NTF-153: a stop ends a dial too, thus a brief watch holds the
     // network no longer than its bound.
+    let dialed = native::dial_tcp(&dial, tls, &mut rng, crate::runtime::DIAL_WAIT);
     let connected = tokio::select! {
-        connected = native::connect(&dial, tls, plan, key, mask, Duration::from_secs(10)) => connected,
+        connected = dialed => connected,
         () = stopped(stop) => return (End::Closed, false),
     };
     let Ok(mut link) = connected else {

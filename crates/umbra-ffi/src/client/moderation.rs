@@ -126,6 +126,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             });
         }
 
+        // An epoch that changed nothing leaves no note. A moderator then
+        // fills no view and no table with epochs that name no held message.
+        if note.hidden == 0 && note.removed == 0 && note.shown == 0 {
+            return Ok(());
+        }
+
         let value = [
             conversation.0.as_slice(),
             &note.at_ms.to_be_bytes(),

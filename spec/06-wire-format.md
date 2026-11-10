@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 6: Wire Format and Encoding
 
 **Status:** Draft
-**Version:** 0.53.0
-**Date:** 2026-11-09
+**Version:** 0.54.0
+**Date:** 2026-11-10
 
 ---
 
@@ -384,7 +384,10 @@ record that arrives takes its push (Part 8 rule `NTF-128`).
   that circuit that it holds for the per-hop delay of Part 3 §3.9. A relay
   MUST drop a `CircuitPause` that names no circuit of its link, and one that
   arrives from the side of the next hop, and it MUST NOT close the connection
-  for it.
+  for it. An ingress relay sends the `CircuitPause` of a circuit only when
+  it parks the session of the client under `WIR-541`. An ingress relay MUST
+  drop a `CircuitPause` that arrives on the link of a client, and it MUST
+  NOT close the connection for it.
 - **[WIR-546]** A queue relay that receives a `CircuitPause` for a circuit
   that ends at it MUST end each subscription of that circuit, as the end of a
   circuit ends it. It MUST stop the pacing clock of that circuit, and it MUST
@@ -466,6 +469,12 @@ measure two separate durations, and no rule compares their clocks.
 > counts. The `CircuitPause` stops the pacing clock at the queue relay. A
 > cell that left that relay before the `CircuitPause` arrived finds a parked
 > link, and it costs that one circuit under `WIR-543`.
+>
+> *Cause of the drop at the ingress relay in `WIR-545`.* A client that
+> could send a `CircuitPause` itself would pause a circuit whose session
+> stays open. It would then start and stop the subscriptions of that
+> circuit at the queue relay at no cost, outside the bounds of a session
+> pause.
 >
 > *Cause of the order in `WIR-545`.* A forward cell that reached the queue
 > relay after the `CircuitPause` of its circuit would start the pacing clock
@@ -1533,7 +1542,8 @@ SlotPayload {                     // 47 bytes at own_count 0; 111 bytes at own_c
     rotator         u16           // the member index of the rotator
     k_e             [32]u8        // the epoch secret K_e of Part 11 §11.3.1
     tag             [12]u8        // HMAC-SHA3-256( K_{rotator,index}, "umbra/v1/group-epoch-tag" || group_id
-                                  //   || BE32(e) || BE32(t_e) || BE32(roster_epoch) || k_e )[0..12]
+                                  //   || BE32(e) || BE32(t_e) || BE32(roster_epoch) || BE16(slot_count)
+                                  //   || k_e || own_count || own_sks )[0..12]
     own_count       u8            // 0 for a member below admin; GROUP_REPLICAS for a member at admin or above
     own_sks         [own_count][32]u8   // own_sk of each replica, in the order of the roster snapshot
 }
@@ -1564,8 +1574,9 @@ member downloads one `B3` chunk, which is 32 860 bytes on the wire (§6.9).
   **[WIR-424]** Otherwise a rotator MUST use the chunked carrier.
   **[WIR-425]** A rotator MUST set `slots_per_chunk` to the greatest value at
   which the slots of each segment fit `SEGMENT_SIZE`. **[WIR-426]** A parser
-  MUST reject a `slots_per_chunk` of 0. A member fetches the one segment that
-  holds its slot, and Part 11 §11.4.2 gives that rule.
+  MUST reject a `slots_per_chunk` of 0 and a `slot_count` of 0. A member
+  fetches the one segment that holds its slot, and Part 11 §11.4.2 gives that
+  rule.
 - **[WIR-427]** A parser MUST reject a `carrier` that is not `0x01` or
   `0x02`. **[WIR-428]** A parser MUST reject an inline body whose length
   before the fill does not equal 7 plus the sum of the slot sizes. The

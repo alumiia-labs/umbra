@@ -485,7 +485,7 @@ fun RequestsPrompt(push: (Screen) -> Unit) {
 
 /** A value in the mono face on a framed ground, as the invitation view shows its link. */
 @Composable
-fun MonoBox(text: String) {
+fun MonoBox(text: String, tag: String? = null) {
     Text(
         text,
         maxLines = 2,
@@ -494,6 +494,7 @@ fun MonoBox(text: String) {
         style = MaterialTheme.typography.bodySmall,
         modifier = Modifier
             .fillMaxWidth()
+            .tagged(tag)
             .background(Palette.Raised, RoundedCornerShape(16.dp))
             .border(1.dp, Palette.Divider, RoundedCornerShape(16.dp))
             .padding(16.dp),

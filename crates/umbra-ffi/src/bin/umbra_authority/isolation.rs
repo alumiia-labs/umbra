@@ -166,7 +166,10 @@ pub async fn isolate(
     let set = relay_set(settings)?;
     let (tags, epoch) = probe(settings, &set, &chain).await?;
     println!("probe sent in epoch {epoch}, the receipts follow its end");
-    let ready = (epoch + 1) * EPOCH_SECONDS + RECEIPT_SETTLE;
+    let ready = epoch
+        .saturating_add(1)
+        .saturating_mul(EPOCH_SECONDS)
+        .saturating_add(RECEIPT_SETTLE);
     tokio::time::sleep(Duration::from_secs(ready.saturating_sub(unix_now()))).await;
 
     // The link from hop k to hop k + 1 carries the tag of hop k + 1.

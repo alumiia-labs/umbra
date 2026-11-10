@@ -127,6 +127,12 @@ fn entry_name(kind: EntryKind, index: u32, rotation: u32) -> EntryName {
     name
 }
 
+/// The row of the local identity that holds the next `r` of the handle key
+/// at one index (`IDN-108`).
+fn rotation_floor_key(index: u32) -> Vec<u8> {
+    [b"handle-rotation/".as_slice(), &index.to_be_bytes()].concat()
+}
+
 fn parse_earlier_roots(bytes: &[u8]) -> Result<Vec<EarlierRoot>, Error> {
     let mut r = Cursor(bytes);
     let mut roots = Vec::new();
@@ -529,7 +535,46 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         rng: &mut R,
     ) -> Result<(), Error> {
         let plain = entry.encode()?;
-        self.put_row(PUBLISHED, &entry.id, &plain, rng)
+        if entry.kind != EntryKind::Handle {
+            return self.put_row(PUBLISHED, &entry.id, &plain, rng);
+        }
+
+        // IDN-108: the local identity table holds the next `r` of the index
+        // in the commit of the entry. The row stays when the entry goes,
+        // thus a later handle at this index takes no `r` again (`IDN-107`).
+        let next = entry.rotation.checked_add(1).ok_or(Error::TooLong)?;
+        let floor = self.handle_rotation_floor(entry.index)?.max(next);
+        let open = self.open_mut()?;
+        let entry_row = open.store.row_id(PUBLISHED, &entry.id);
+        let floor_row = open
+            .store
+            .row_id(TableId::LOCAL_IDENTITY, &rotation_floor_key(entry.index));
+        let mut batch = open.store.begin();
+        batch.put(PUBLISHED, entry_row, None, &plain, rng)?;
+        batch.put(
+            TableId::LOCAL_IDENTITY,
+            floor_row,
+            None,
+            &floor.to_be_bytes(),
+            rng,
+        )?;
+
+        Ok(batch.commit()?)
+    }
+
+    /// The `r` of a new handle at the index `index`: above each `r` that an
+    /// entry of this device held there, and 0 for a first handle. A handle
+    /// that the device released leaves its `r` here. The key of an `r`
+    /// that a rotation retired then goes to no directory again
+    /// (`IDN-106`, `IDN-107`), and the new name shares no key with the
+    /// old one.
+    pub fn handle_rotation_floor(&self, index: u32) -> Result<u32, Error> {
+        match self.get_row(TableId::LOCAL_IDENTITY, &rotation_floor_key(index))? {
+            Some(bytes) => Ok(u32::from_be_bytes(
+                bytes.as_slice().try_into().map_err(|_| Error::Integrity)?,
+            )),
+            None => Ok(0),
+        }
     }
 
     /// Takes each name of an earlier root that the entry `id` holds no more
@@ -1049,17 +1094,35 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             .collect())
     }
 
-    /// Takes a request from the store, and gives its bundle: the invitation
-    /// that the device accepts (`DIS-087`).
-    pub fn take_request(&mut self, id: &[u8; 16]) -> Result<Zeroizing<Vec<u8>>, Error> {
+    /// The bundle of a request: the invitation that the device accepts
+    /// (`DIS-087`). The request stays in the store. An accept is a command
+    /// to the run, and a run that ends before it leaves the request for a
+    /// later try. [`Client::end_request`] removes it when the contact is
+    /// there.
+    pub fn peek_request(&self, id: &[u8; 16]) -> Result<Zeroizing<Vec<u8>>, Error> {
         let (_, held) = self
             .stored_requests()?
             .into_iter()
             .find(|(request, _)| request.id == *id)
             .ok_or(Error::NotFound)?;
-        self.delete_row(REQUESTS, id)?;
 
         Ok(held.bundle)
+    }
+
+    /// Removes a request whose accept made its contact. A request that is
+    /// gone is no fault.
+    pub fn end_request(&mut self, id: &[u8; 16]) -> Result<(), Error> {
+        self.delete_row(REQUESTS, id)
+    }
+
+    /// Takes a request from the store, and gives its bundle. A caller that
+    /// can lose the accept uses [`Client::peek_request`] and
+    /// [`Client::end_request`].
+    pub fn take_request(&mut self, id: &[u8; 16]) -> Result<Zeroizing<Vec<u8>>, Error> {
+        let bundle = self.peek_request(id)?;
+        self.end_request(id)?;
+
+        Ok(bundle)
     }
 
     /// Drops a request.

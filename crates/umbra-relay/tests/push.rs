@@ -125,7 +125,10 @@ async fn a_token_under_the_reserved_carrier_reaches_no_endpoint() {
     let group = &set.groups()[0];
     let target = format!("https://localhost:{push_port}/up/device-1");
     let mut plain = [0u8; PUSH_TOKEN_MAX];
-    let n = encode_token(TokenCarrier::UnifiedPush, target.as_bytes(), &mut plain).unwrap();
+    // No writer gives the reserved carrier, thus the bytes come by hand.
+    plain[0] = TokenCarrier::UnifiedPush as u8;
+    plain[1..=target.len()].copy_from_slice(target.as_bytes());
+    let n = target.len() + 1;
     let registration = group.registration(&plain[..n], [4; 24]).unwrap();
 
     let register = encode(&NdrRequest::Register {

@@ -1393,6 +1393,12 @@ impl RelayNode {
         self.circuits.len()
     }
 
+    /// The identifiers of the circuits that `link` built here, for a test.
+    #[doc(hidden)]
+    pub fn circuit_ids_on(&self, link: LinkId) -> Vec<[u8; 16]> {
+        self.circuits.circuit_ids_on(link)
+    }
+
     /// Sets the circuits that this relay holds at most, for a test.
     #[doc(hidden)]
     pub fn set_circuits_max(&mut self, held_max: usize) {
@@ -2197,6 +2203,11 @@ impl RelayNode {
                 let actions = self.circuits.on_destroy(link, *circ_id);
                 self.finish(actions, now)
             }
+            // WIR-545: an ingress relay makes each `CircuitPause` of its
+            // circuits itself, at the `SessionPause` of the client. One
+            // from a client would end the subscriptions of a circuit whose
+            // session stays open, and it drops with no other effect.
+            SessionControl::CircuitPause { .. } if held && self.layer == 1 => Vec::new(),
             // WIR-545: the client of a circuit on this link paused.
             SessionControl::CircuitPause { circ_id } if held => {
                 self.circuits.set_clock_ms(clock_ms());

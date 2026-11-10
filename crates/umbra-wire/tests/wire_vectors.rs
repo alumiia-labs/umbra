@@ -675,6 +675,7 @@ fn group_records() -> Value {
     let mut sealed = Vec::new();
     for (index, member) in members.iter().enumerate() {
         let own = if index == 0 { 2 } else { 0 };
+        let own_sks: Vec<Secret<32>> = (0..own).map(|i| Secret::new([0x70 + i; 32])).collect();
         let tag = members[1]
             .pair_key(&member.pair_public(), &GROUP_ID)
             .map(|k| {
@@ -683,7 +684,9 @@ fn group_records() -> Value {
                     epoch: 2,
                     start_slot: 497_010,
                     roster_epoch: 1,
+                    slot_count: 3,
                     epoch_secret: epoch_secret.expose(),
+                    own_sks: &own_sks,
                 })
             })
             .unwrap_or([0; 12]);
@@ -692,7 +695,7 @@ fn group_records() -> Value {
             rotator: 1,
             epoch_secret: Secret::new(*epoch_secret.expose().expose()),
             tag,
-            own_sks: (0..own).map(|i| Secret::new([0x70 + i; 32])).collect(),
+            own_sks,
         };
 
         let mut payload_bytes = vec![0u8; payload.len()];

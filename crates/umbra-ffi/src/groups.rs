@@ -20,11 +20,10 @@ use std::{sync::Arc, time::Duration};
 
 use tokio::sync::mpsc;
 use umbra_core::session::node::{ClientEvent, ClientNode, GroupJob, GroupOutcome, Payment};
-use umbra_crypto::{rand_core::TryRng, secret::Secret, x25519::StaticSecret};
+use umbra_crypto::{secret::Secret, x25519::StaticSecret};
 use umbra_queue::Reject;
 use umbra_transport::{
     native::{self, ClientConfig},
-    race::{Plan, Wire},
     Dial,
 };
 
@@ -654,14 +653,7 @@ async fn session(
     let mut second: std::collections::BTreeMap<u64, GroupCommand> =
         std::collections::BTreeMap::new();
 
-    // The key and the mask of the upgrade are no secret under TLS, thus a
-    // draw that fails leaves zero and ends no dial.
-    let mut key = [0u8; 16];
-    let mut mask = [0u8; 4];
-    let _ = rng.try_fill_bytes(&mut key);
-    let _ = rng.try_fill_bytes(&mut mask);
-    let plan = Plan::Only(Wire::Tcp);
-    let connected = native::connect(guard, tls, plan, key, mask, Duration::from_secs(10)).await;
+    let connected = native::dial_tcp(guard, tls, &mut rng, crate::runtime::DIAL_WAIT).await;
     let Ok(mut link) = connected else {
         return (End::Lost, false);
     };

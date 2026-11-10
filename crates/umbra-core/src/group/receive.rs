@@ -526,10 +526,10 @@ impl Receiver {
             return Err(Error::Unverified);
         }
 
-        // GRP-273: a member other than its supplier writes under the
-        // supplied secret, thus the group holds that secret.
-        if under_alternate && !previous_epoch {
-            ctx.epochs.confirm_alternate(sender);
+        // GRP-273: an active member other than the rotator of a secret
+        // writes under it, thus the group holds that secret.
+        if is_active && !previous_epoch {
+            ctx.epochs.confirm(sender, under_alternate);
         }
 
         let epoch = record.epoch;

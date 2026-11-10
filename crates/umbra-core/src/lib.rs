@@ -46,6 +46,9 @@ pub enum Error {
     Storage,
     /// A wire structure did not parse.
     Wire(umbra_wire::Error),
+    /// Two objects that verify name one place and differ. The signers
+    /// showed two views.
+    SplitView,
 }
 
 impl From<umbra_wire::Error> for Error {
@@ -69,6 +72,7 @@ impl core::fmt::Display for Error {
             Error::NoPath => f.write_str("no conformant path"),
             Error::Storage => f.write_str("the platform store failed"),
             Error::Wire(inner) => write!(f, "{inner}"),
+            Error::SplitView => f.write_str("two views of one object"),
         }
     }
 }

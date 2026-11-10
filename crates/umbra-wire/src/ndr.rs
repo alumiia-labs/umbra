@@ -240,15 +240,14 @@ fn is_printable(target: &[u8]) -> bool {
 }
 
 /// Writes a plain push token: the carrier byte, then its target. The
-/// function refuses a target that [`parse_token`] refuses, thus no client
-/// registers such a token. It writes the reserved carrier, because a test
-/// of the refusal needs those bytes.
+/// function refuses each token that [`parse_token`] refuses, thus no client
+/// registers such a token. That includes the reserved carrier (`NTF-123`).
 pub fn encode_token(carrier: TokenCarrier, target: &[u8], out: &mut [u8]) -> Result<usize, Error> {
     if target.is_empty() || target.len() >= PUSH_TOKEN_MAX {
         return Err(Error::Capacity);
     }
 
-    if !is_printable(target) {
+    if carrier != TokenCarrier::Fcm || !is_printable(target) {
         return Err(Error::Malformed);
     }
 
@@ -422,14 +421,16 @@ mod tests {
         assert_eq!(carrier, TokenCarrier::Fcm);
         assert_eq!(target, b"fcm-token");
 
-        // NTF-123: the carrier `0x01` is reserved, with any target.
-        let n = encode_token(
-            TokenCarrier::UnifiedPush,
-            b"https://push.example/up/abc",
-            &mut out,
-        )
-        .unwrap();
-        assert!(parse_token(&out[..n]).is_err());
+        // NTF-123: the carrier `0x01` is reserved, with any target. No
+        // writer gives it, and no reader takes it.
+        let reserved = b"https://push.example/up/abc";
+        assert_eq!(
+            encode_token(TokenCarrier::UnifiedPush, reserved, &mut out),
+            Err(Error::Malformed)
+        );
+        out[0] = TokenCarrier::UnifiedPush as u8;
+        out[1..=reserved.len()].copy_from_slice(reserved);
+        assert!(parse_token(&out[..=reserved.len()]).is_err());
 
         // The writer refuses the target that the reader refuses.
         assert_eq!(

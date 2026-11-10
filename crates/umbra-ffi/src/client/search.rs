@@ -84,8 +84,8 @@ pub struct SearchOptions {
     pub from: SearchFrom,
     /// Whether a result is a message with a file.
     pub files_only: bool,
-    /// The oldest insertion stamp of a result, in milliseconds, or 0 for
-    /// each age.
+    /// The oldest store time of a result on the clock of this device, in
+    /// milliseconds, or 0 for each age.
     pub since_ms: u64,
 }
 
@@ -98,7 +98,7 @@ impl SearchOptions {
                 SearchFrom::Others => !entry.outgoing,
             }
             && (!self.files_only || entry.has_file)
-            && entry.stored_at_ms >= self.since_ms
+            && entry.clock_at_ms >= self.since_ms
     }
 }
 
@@ -108,6 +108,7 @@ struct Entry {
     message: MsgRef,
     conversation: ConversationId,
     stored_at_ms: u64,
+    clock_at_ms: u64,
     outgoing: bool,
     has_file: bool,
 }
@@ -723,6 +724,7 @@ fn entry_of(message: MsgRef, plain: &[u8]) -> Result<Entry, Error> {
         message,
         conversation: conversation_of(plain)?,
         stored_at_ms: info.stored_at_ms,
+        clock_at_ms: info.clock_at_ms,
         outgoing: info.outgoing,
         has_file: AppMessage::parse(app, Channel::Pairwise)?.kind == AppKind::Attachment,
     })
@@ -919,6 +921,7 @@ mod tests {
             message: MsgRef([id; 16]),
             conversation: ConversationId([conversation; 16]),
             stored_at_ms,
+            clock_at_ms: stored_at_ms,
             outgoing: id % 2 == 1,
             has_file: false,
         }

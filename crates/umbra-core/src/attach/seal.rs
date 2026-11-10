@@ -129,10 +129,10 @@ fn open_chunk_onto(
 pub fn read_secret(file_key: &Secret<32>, index: u32) -> StaticSecret {
     let kdf = Hkdf::<Sha3_256>::new(None, file_key.expose());
     let mut secret = Secret::<32>::zeroed();
-    // A 32-byte output is inside the HKDF output bound, thus this cannot fail.
-    let _ = kdf.expand_multi_info(
+    umbra_crypto::kdf::expand_into(
+        &kdf,
         &[labels::CHUNK_READ, &index.to_be_bytes()],
-        secret.expose_mut(),
+        &mut secret,
     );
     StaticSecret::from(*secret.expose())
 }
@@ -142,8 +142,7 @@ pub fn read_secret(file_key: &Secret<32>, index: u32) -> StaticSecret {
 pub fn manifest_key(file_key: &Secret<32>, file_nonce: &[u8; 24]) -> Secret<32> {
     let kdf = Hkdf::<Sha3_256>::new(None, file_key.expose());
     let mut key = Secret::<32>::zeroed();
-    // A 32-byte output is inside the HKDF output bound, thus this cannot fail.
-    let _ = kdf.expand_multi_info(&[labels::FILE_MANIFEST, file_nonce], key.expose_mut());
+    umbra_crypto::kdf::expand_into(&kdf, &[labels::FILE_MANIFEST, file_nonce], &mut key);
     key
 }
 

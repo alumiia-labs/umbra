@@ -169,7 +169,8 @@ private fun CropDialog(image: Bitmap, onDone: (Bitmap) -> Unit, onCancel: () -> 
         val width = image.width.toFloat()
         val height = image.height.toFloat()
 
-        BoxWithConstraints(Modifier.fillMaxSize().background(Color.Black)) {
+        // A dialog is a window of its own, thus it names its tags itself.
+        BoxWithConstraints(Modifier.testRoot().fillMaxSize().background(Color.Black)) {
             val frame = with(LocalDensity.current) { (minOf(maxWidth, maxHeight) - CROP_MARGIN * 2).toPx() }
 
             // The frame shows no pixel outside the image, and no zoom makes

@@ -83,9 +83,12 @@ pub struct Probe(Mutex<Trace>);
 impl Probe {
     /// A copy of the trace so far.
     pub fn trace(&self) -> Trace {
+        // A poisoned lock holds the trace that a panic left. An empty
+        // trace in its place would hide the steps before the fault.
         self.0
             .lock()
-            .map_or_else(|_| Trace::default(), |t| t.clone())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 }
 

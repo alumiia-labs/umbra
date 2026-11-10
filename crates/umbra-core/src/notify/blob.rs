@@ -76,7 +76,7 @@ impl Plain {
 pub fn epoch_key(root: &Secret<32>, epoch: u32) -> Secret<32> {
     let kdf = Hkdf::<Sha3_256>::new(Some(&epoch.to_be_bytes()), root.expose());
     let mut key = Secret::<32>::zeroed();
-    let _ = kdf.expand(labels::NTF, key.expose_mut());
+    umbra_crypto::kdf::expand_into(&kdf, &[labels::NTF], &mut key);
     key
 }
 

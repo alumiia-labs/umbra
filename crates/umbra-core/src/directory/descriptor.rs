@@ -69,17 +69,28 @@ pub struct RelayDescriptor<'a> {
     pub sig: &'a [u8],
 }
 
+/// Whether `host` is a DNS name with zero bytes after it (`REL-144`).
 fn host_ok(host: &[u8; HOST_LEN]) -> bool {
     let name_len = host.iter().position(|b| *b == 0).unwrap_or(HOST_LEN);
-    if name_len == 0 {
+    let (name, pad) = host.split_at(name_len);
+    if !pad.iter().all(|b| *b == 0) {
         return false;
     }
 
-    let (name, pad) = host.split_at(name_len);
-    pad.iter().all(|b| *b == 0)
-        && name
-            .iter()
-            .all(|b| b.is_ascii_alphanumeric() || *b == b'-' || *b == b'.')
+    // An empty name gives one empty label, and the test below refuses it.
+    name.split(|b| *b == b'.').all(label_ok)
+}
+
+/// Whether `label` is one label of a DNS name: letters, digits, and
+/// hyphens, with no hyphen at an end.
+fn label_ok(label: &[u8]) -> bool {
+    let is_inner = |b: &u8| b.is_ascii_alphanumeric() || *b == b'-';
+    let is_end = |b: &&u8| b.is_ascii_alphanumeric();
+
+    label.len() <= 63
+        && label.first().filter(is_end).is_some()
+        && label.last().filter(is_end).is_some()
+        && label.iter().all(is_inner)
 }
 
 impl<'a> RelayDescriptor<'a> {
@@ -155,6 +166,10 @@ impl<'a> RelayDescriptor<'a> {
             || !host_ok(&out.host)
             || out.capacity_class > 3
         {
+            return Err(Error::Malformed);
+        }
+        // REL-224: no client reaches a relay with no address or no port.
+        if out.port == 0 || (out.addr_v4 == [0; 4] && out.addr_v6 == [0; 16]) {
             return Err(Error::Malformed);
         }
         // REL-092: the code is two capital letters. The bloc of a code is a
@@ -251,7 +266,15 @@ impl<'a> RelayEntry<'a> {
         self.flags & flags::PENDING != 0
     }
 
-    /// The layer of the relay, from 1 to 3 (`REL-061`).
+    /// The layer of the relay, from 1 to 3 (`REL-061`), or none for a
+    /// pending entry, which has no layer yet (`REL-158`).
+    pub fn placed_layer(&self) -> Option<u8> {
+        (!self.pending()).then(|| self.layer())
+    }
+
+    /// The layer that the flags name, from 1 to 3 (`REL-061`). A pending
+    /// entry gives 2 here and has no layer: a caller that selects a hop
+    /// uses [`RelayEntry::placed_layer`].
     pub fn layer(&self) -> u8 {
         if self.ingress() {
             1

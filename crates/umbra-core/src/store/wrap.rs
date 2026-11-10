@@ -120,8 +120,7 @@ fn wrap_key(
 
     let kdf = Hkdf::<Sha3_256>::new(Some(a.expose()), s.expose());
     let mut key = Secret::<32>::zeroed();
-    // 32 bytes is below the HKDF bound, thus expand cannot fail.
-    let _ = kdf.expand(labels::AT_REST_WRAP, key.expose_mut());
+    umbra_crypto::kdf::expand_into(&kdf, &[labels::AT_REST_WRAP], &mut key);
     Ok(key)
 }
 

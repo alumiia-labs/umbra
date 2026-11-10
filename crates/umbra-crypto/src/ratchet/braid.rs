@@ -197,7 +197,10 @@ impl Braid {
                 _ => None,
             };
         }
-        (self.complete && self.limit_reached(now)).then_some(self.epoch + 1)
+        if !(self.complete && self.limit_reached(now)) {
+            return None;
+        }
+        self.epoch.checked_add(1)
     }
 
     /// The next chunk of the own epoch as a frame, written into `out`.

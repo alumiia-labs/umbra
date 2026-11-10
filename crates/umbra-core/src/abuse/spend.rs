@@ -16,7 +16,7 @@ impl SpendSet {
     /// a repeat or an epoch outside the two accepted (`ABU-080`,
     /// `ABU-081`).
     pub fn spend(&mut self, epoch: u32, token_epoch: u32, nonce: [u8; 32]) -> Result<(), Error> {
-        if token_epoch != epoch && token_epoch != epoch.wrapping_sub(1) {
+        if token_epoch != epoch && token_epoch != epoch.saturating_sub(1) {
             return Err(Error::Stale);
         }
 

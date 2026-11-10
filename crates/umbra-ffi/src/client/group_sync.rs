@@ -61,6 +61,9 @@ const GROUP_HELD_AGE: u64 = 30 * 86_400;
 /// app that ends before the upload sends it at its next run.
 const GROUP_STATE_DUE: TableId = TableId(0x2C);
 
+/// The group states that wait for their fetch at one time.
+const STATE_IN_MAX: usize = 256;
+
 /// The tables whose rows of one group go with its state. The owner column
 /// of each row names the group. The queue jobs of a group that a creator
 /// asked for stay with the creator, since a linked device writes no group
@@ -228,9 +231,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
 
         let descriptor = FileDescriptor::parse(value)?;
-        self.groups
-            .state_in
-            .push_back((subject, Box::new(descriptor)));
+
+        // A later state of one group replaces the one that waits, and the
+        // list holds `STATE_IN_MAX` groups at most. The oldest one goes
+        // first, and the owner of the channels publishes it again.
+        let waiting = &mut self.groups.state_in;
+        waiting.retain(|(held, _)| *held != subject);
+        if waiting.len() >= STATE_IN_MAX {
+            waiting.pop_front();
+        }
+        waiting.push_back((subject, Box::new(descriptor)));
 
         Ok(())
     }

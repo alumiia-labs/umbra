@@ -20,10 +20,9 @@ use umbra_core::{
     },
     session::node::{ChunkJob, ChunkOutcome, ClientEvent, ClientNode},
 };
-use umbra_crypto::{rand_core::TryRng, x25519::StaticSecret};
+use umbra_crypto::x25519::StaticSecret;
 use umbra_transport::{
     native::{self, ClientConfig},
-    race::{Plan, Wire},
     Dial,
 };
 use umbra_wire::descriptor::FileDescriptor;
@@ -433,14 +432,7 @@ pub async fn run_transfers(
     let known: std::collections::BTreeSet<[u8; 32]> =
         relays.iter().map(|relay| relay.relay_id).collect();
 
-    // The key and the mask of the upgrade are no secret under TLS, thus a
-    // draw that fails leaves zero and ends no dial.
-    let mut key = [0u8; 16];
-    let mut mask = [0u8; 4];
-    let _ = rng.try_fill_bytes(&mut key);
-    let _ = rng.try_fill_bytes(&mut mask);
-    let plan = Plan::Only(Wire::Tcp);
-    let connected = native::connect(&guard, tls, plan, key, mask, Duration::from_secs(10)).await;
+    let connected = native::dial_tcp(&guard, tls, &mut rng, crate::runtime::DIAL_WAIT).await;
 
     // Each exit closes the channel first and fails each command in it, thus
     // no command waits for an answer that no task gives.

@@ -65,7 +65,11 @@ fun AddContactScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             Spacer(Modifier.height(24.dp))
             Headline(stringResource(R.string.contacts_say_hello))
             Spacer(Modifier.height(20.dp))
-            PrimaryButton(stringResource(R.string.contacts_create_invitation), enabled = Core.online) {
+            PrimaryButton(
+                stringResource(R.string.contacts_create_invitation),
+                enabled = Core.online,
+                tag = TestTags.ADD_CREATE_INVITATION,
+            ) {
                 Core.invitation = null
                 Core.invite()
                 push(Screen.YourInvitation)
@@ -76,10 +80,20 @@ fun AddContactScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             }
 
             Spacer(Modifier.height(12.dp))
-            EntryRow(RowEntry("qrcode", stringResource(R.string.contacts_use_invitation_instead)) { push(Screen.UseInvitation) })
+            EntryRow(
+                RowEntry(
+                    "qrcode",
+                    stringResource(R.string.contacts_use_invitation_instead),
+                    tag = TestTags.ADD_USE_INVITATION,
+                ) { push(Screen.UseInvitation) },
+            )
             HorizontalDivider(color = Palette.Divider)
             // The group of Part 11 starts beside the contacts.
-            EntryRow(RowEntry("user-group", stringResource(R.string.common_new_private_group)) { push(Screen.NewGroup) })
+            EntryRow(
+                RowEntry("user-group", stringResource(R.string.common_new_private_group), tag = TestTags.ADD_NEW_GROUP) {
+                    push(Screen.NewGroup)
+                },
+            )
             // Part 9: a link for many people, and a name to look up.
             if (Core.ownsChannels) {
                 HorizontalDivider(color = Palette.Divider)
@@ -115,14 +129,14 @@ fun YourInvitationScreen(onBack: () -> Unit) {
 
             Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { QrCode(link) }
             Spacer(Modifier.height(16.dp))
-            MonoBox(link)
+            MonoBox(link, tag = TestTags.INVITE_LINK)
 
             Spacer(Modifier.height(12.dp))
-            PrimaryButton(stringResource(R.string.contacts_share_invitation)) {
+            PrimaryButton(stringResource(R.string.contacts_share_invitation), tag = TestTags.INVITE_SHARE) {
                 shareText(context, link, UiText.get(R.string.contacts_share_invitation))
             }
             Spacer(Modifier.height(8.dp))
-            SecondaryButton(stringResource(R.string.common_copy_link)) { copySensitive(context, link) }
+            SecondaryButton(stringResource(R.string.common_copy_link), tag = TestTags.INVITE_COPY) { copySensitive(context, link) }
             Spacer(Modifier.height(12.dp))
             Note(stringResource(R.string.contacts_first_person))
         }
@@ -220,7 +234,11 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
             Headline(stringResource(R.string.contacts_someone_invited_you))
             Spacer(Modifier.height(20.dp))
             if (!isWaiting && canScan) {
-                PrimaryButton(stringResource(R.string.contacts_scan_qr_code), enabled = Core.online) {
+                PrimaryButton(
+                    stringResource(R.string.contacts_scan_qr_code),
+                    enabled = Core.online,
+                    tag = TestTags.ACCEPT_SCAN,
+                ) {
                     push(Screen.ScanInvitation)
                 }
                 Spacer(Modifier.height(16.dp))
@@ -238,7 +256,7 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                     autoCorrectEnabled = false,
                 ),
                 maxLines = 4,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().tagged(TestTags.ACCEPT_LINK),
             )
             Spacer(Modifier.height(12.dp))
 
@@ -305,7 +323,11 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                         Core.sendRequest(pasted.trim(), name, note, confirmed = true)
                     }
                 } else {
-                    SecondaryButton(stringResource(R.string.contacts_send_request), enabled = Core.online) {
+                    SecondaryButton(
+                        stringResource(R.string.contacts_send_request),
+                        enabled = Core.online,
+                        tag = TestTags.ACCEPT_SEND_REQUEST,
+                    ) {
                         // The keyboard leaves, thus the result shows.
                         focus.clearFocus()
                         Core.sendRequest(pasted.trim(), name, note)
@@ -322,6 +344,7 @@ fun UseInvitationScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                 SecondaryButton(
                     stringResource(R.string.contacts_continue),
                     enabled = Core.online && pasted.isNotBlank(),
+                    tag = TestTags.ACCEPT_CONTINUE,
                 ) {
                     open(pasted)
                     pasted = ""
@@ -396,14 +419,14 @@ fun NameContactScreen(conversation: Conversation, onDone: () -> Unit) {
                 label = { Text(stringResource(R.string.common_name)) },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().tagged(TestTags.NAME_FIELD),
             )
             Spacer(Modifier.height(16.dp))
-            PrimaryButton(stringResource(R.string.contacts_save_and_open_chat)) {
+            PrimaryButton(stringResource(R.string.contacts_save_and_open_chat), tag = TestTags.NAME_SAVE) {
                 if (name.isNotBlank()) Core.setName(conversation, name)
                 onDone()
             }
-            QuietButton(stringResource(R.string.contacts_not_now), onClick = onDone)
+            QuietButton(stringResource(R.string.contacts_not_now), tag = TestTags.NAME_SKIP, onClick = onDone)
         }
     }
 }
@@ -423,10 +446,10 @@ fun RenameContactScreen(chat: Chat, onDone: () -> Unit) {
                 label = { Text(stringResource(R.string.common_name)) },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().tagged(TestTags.NAME_FIELD),
             )
             Spacer(Modifier.height(16.dp))
-            PrimaryButton(stringResource(R.string.common_save)) {
+            PrimaryButton(stringResource(R.string.common_save), tag = TestTags.NAME_SAVE) {
                 Core.setName(chat.conversation, name)
                 onDone()
             }

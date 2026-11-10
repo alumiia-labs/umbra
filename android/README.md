@@ -91,6 +91,26 @@ why the advisory does not apply to the app.
 A release ships the `arm64-v8a` library alone. The `x86_64` library is for
 the emulator, and the debug build alone holds it.
 
+## Dependency verification
+
+`gradle/verification-metadata.xml` holds the SHA-256 of each artifact that
+the build reads. Gradle stops the build when an artifact has another hash,
+or when the file does not list it.
+
+After a change of a dependency or of a plugin, write the file again:
+
+```sh
+cd android
+./gradlew --no-configuration-cache --write-verification-metadata sha256     :app:assembleDebug :app:assembleRelease :app:lintRelease
+```
+
+Read the difference of the file before the commit. A new line is a new
+artifact, and a changed hash of an old version is a fault.
+
+The file comes from a build on Windows. `aapt2` has one artifact for each
+host system, thus a first build on Linux or macOS adds its line with the
+same command.
+
 ## Icons
 
 The app reads its icons at run time from SVG files of Font Awesome. The

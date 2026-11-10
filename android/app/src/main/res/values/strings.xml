@@ -1137,4 +1137,12 @@
     <string name="setup_recovery_body">On a new device, it restores your backup.</string>
     <string name="setup_recovery_show">Show the code</string>
     <string name="setup_battery_title">Let UMBRA run in the background.</string>
+
+    <!-- R2-8a -->
+    <string name="photo_zoom">Zoom</string>
+    <string name="core_audio_too_large">That audio file is too long. An audio file can be 250 MB at most.</string>
+    <string name="core_audio_form">That audio file has a form that UMBRA does not send as audio. Send it as a file.</string>
+    <string name="mod_you_removed_silence">You are no longer in the group after 30 days of silence</string>
+    <string name="mod_you_two_changes">Your devices made two different changes to the group</string>
+    <string name="mod_warning">Warning</string>
 </resources>

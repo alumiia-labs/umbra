@@ -206,7 +206,9 @@ pub(super) const GROUP_MEMBER: TableId = TableId(0x15);
 /// The activity clocks of §11.9.7: for each member that an admin of this
 /// device watches, the time of its last record or presence record, and for
 /// each group, the time of the last record of this device. A row holds a
-/// `BE64` of seconds, and its owner column names the group.
+/// `BE64` of seconds, and its owner column names the group. The table also
+/// holds the count of the pending entries of each member index
+/// (`DEV-360`), in a row of another length.
 pub(super) const GROUP_PRESENCE: TableId = TableId(0x16);
 /// For each group, the member indices that held the owner credentials of
 /// this device when it last took or drew them (`GRP-401`). A member that
@@ -311,8 +313,11 @@ impl AddSeq {
         })
     }
 }
-/// The version of a `GkeyRow` (`IMP-130`).
-const GKEY_ROW_VERSION: u8 = 0x01;
+/// The version of a `GkeyRow` (`IMP-130`). Version 2 adds the owner
+/// deliveries that this device owes.
+const GKEY_ROW_VERSION: u8 = 0x02;
+/// The version of a `GkeyRow` with no owed deliveries.
+const GKEY_ROW_VERSION_V1: u8 = 0x01;
 
 /// What this device knows of the `GKEY` commands of one group, in a row of
 /// `GROUP_OWNERS` beside the admins of that group. A `GKEY` has no answer,
@@ -327,6 +332,11 @@ struct GkeyRow {
     /// replica holds the `own_pk` of one of them, or of the current one
     /// (`GRP-401`, `WIR-522`).
     replaced: [Vec<Secret<32>>; GROUP_REPLICAS],
+    /// Each member that this device owes the owner credentials: it gave
+    /// the member an admin role, or it drew new credentials, and the
+    /// delivery is not in the store yet (`GRP-298`, `GRP-401`). A stop
+    /// between the two steps then leaves no admin without credentials.
+    owed: Vec<u16>,
 }
 
 impl GkeyRow {
@@ -341,12 +351,25 @@ impl GkeyRow {
             }
         }
 
+        out.push(u8::try_from(self.owed.len()).unwrap_or(u8::MAX));
+        for index in self.owed.iter().take(usize::from(u8::MAX)) {
+            out.extend_from_slice(&index.to_be_bytes());
+        }
+
         out
+    }
+
+    /// Adds a member to the owed deliveries, one time.
+    fn owe(&mut self, index: u16) {
+        if !self.owed.contains(&index) {
+            self.owed.push(index);
+        }
     }
 
     fn parse(bytes: &[u8]) -> Option<Self> {
         let mut r = umbra_wire::codec::Reader::new(bytes);
-        if r.u8().ok()? != GKEY_ROW_VERSION {
+        let version = r.u8().ok()?;
+        if version != GKEY_ROW_VERSION && version != GKEY_ROW_VERSION_V1 {
             return None;
         }
 
@@ -357,6 +380,13 @@ impl GkeyRow {
             *taken = is_taken.then_some(write_pk);
             for _ in 0..r.u8().ok()? {
                 replaced.push(secret_of(r.take(32).ok()?).ok()?);
+            }
+        }
+
+        if version == GKEY_ROW_VERSION {
+            for _ in 0..r.u8().ok()? {
+                let index: [u8; 2] = r.take(2).ok()?.try_into().ok()?;
+                held.owe(u16::from_be_bytes(index));
             }
         }
 
@@ -2604,6 +2634,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let Some(old) = group.roster().member(record.old_index) else {
             return Ok(());
         };
+        // WIR-478, GRP-348: the key of the index before the re-key signs the
+        // record, because the roster holds no key of the device that lost.
+        // The rival holds that key too. The fork check below and the
+        // admission of `GRP-413` thus decide, and the signature alone
+        // admits nobody.
         if old.active || record.verify(&old.roster_pk_hash).is_err() {
             return Ok(());
         }
@@ -4287,13 +4322,21 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             return Err(Error::Malformed);
         }
 
+        // The grant and the delivery of the owner credentials are two
+        // writes. The store names the delivery first, thus a stop or a
+        // fault between them leaves it owed, and `groups_owing_owners`
+        // sends it (`GRP-298`).
+        let is_rise = held < Role::Admin && role >= Role::Admin;
+        if is_rise {
+            let mut owed = self.gkey_row(conversation)?;
+            owed.owe(index);
+            self.put_gkey_row(conversation, &owed, rng)?;
+        }
+
         self.post_own_object(conversation, &object, now_ms, rng)?;
-        if held < Role::Admin && role >= Role::Admin {
+        if is_rise {
+            self.deliver_owed_owners(conversation, now_ms, rng)?;
             let group = self.group_of(conversation)?;
-            let record = group
-                .owner_delivery(index, rng)
-                .map_err(|_| Error::Malformed)?;
-            self.queue_group_record(conversation, &group, record, now_ms, rng)?;
             self.note_owners(conversation, &group, rng)?;
         } else if held >= Role::Admin && role < Role::Admin {
             self.rotate_owners(conversation, now_ms, rng)?;
@@ -4373,23 +4416,62 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             replaced.drain(..excess);
         }
 
+        // The row names each admin before the group row takes the new
+        // credentials. A fault after that leaves each delivery owed, and
+        // no admin stays with credentials that the replicas take no more.
+        for member in group.roster().active() {
+            if member.role >= Role::Admin && member.index != group.own_index() {
+                held.owe(member.index);
+            }
+        }
+
         self.put_gkey_row(conversation, &held, rng)?;
         self.save_group(conversation, &group, rng)?;
         self.queue_gkeys(conversation, &group, true)?;
-        let admins: Vec<u16> = group
-            .roster()
-            .active()
-            .filter(|member| member.role >= Role::Admin && member.index != group.own_index())
-            .map(|member| member.index)
-            .collect();
-        for index in admins {
-            let record = group
-                .owner_delivery(index, rng)
-                .map_err(|_| Error::Malformed)?;
-            self.queue_group_record(conversation, &group, record, now_ms, rng)?;
-        }
+        self.deliver_owed_owners(conversation, now_ms, rng)?;
 
         self.note_owners(conversation, &group, rng)
+    }
+
+    /// Queues the owner credentials for each member that the store names
+    /// as owed, and removes each name after its record is in the store
+    /// (`GRP-298`, `GRP-401`). A named member that is no active admin gets
+    /// nothing: its grant did not apply, or a later object took the role.
+    fn deliver_owed_owners<R: CryptoRng + ?Sized>(
+        &mut self,
+        conversation: ConversationId,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(), Error> {
+        let owed = self.gkey_row(conversation)?.owed;
+        if owed.is_empty() {
+            return Ok(());
+        }
+
+        let group = self.group_of(conversation)?;
+        if group.owner(0).is_none() {
+            return Ok(());
+        }
+
+        for index in owed {
+            let is_admin = group
+                .roster()
+                .member(index)
+                .is_some_and(|member| member.active && member.role >= Role::Admin);
+            if is_admin && index != group.own_index() {
+                let record = group
+                    .owner_delivery(index, rng)
+                    .map_err(|_| Error::Malformed)?;
+                self.queue_group_record(conversation, &group, record, now_ms, rng)?;
+            }
+
+            // The row is read again: the queue step can write it.
+            let mut held = self.gkey_row(conversation)?;
+            held.owed.retain(|other| *other != index);
+            self.put_gkey_row(conversation, &held, rng)?;
+        }
+
+        Ok(())
     }
 
     /// Whether this device is an owner and an owner stayed silent for
@@ -4705,6 +4787,16 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
 
             if group.owner(0).is_none() || group.own_role().is_none_or(|role| role < Role::Admin) {
                 continue;
+            }
+
+            // A delivery that an earlier call left owed goes now. A row
+            // that does not parse stops no scan of the other groups.
+            if self.owns_channels()? {
+                match self.deliver_owed_owners(conversation, now_ms, rng) {
+                    Ok(()) => {}
+                    Err(Error::Integrity) => self.note_integrity_fault(),
+                    Err(error) => return Err(error),
+                }
             }
 
             let row = {
@@ -7227,7 +7319,17 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // credentials that it holds no more.
         let owners_moved = owners_pk(&group) != before.owners;
         if owners_moved && before.owners.is_some() {
-            self.put_gkey_row(conversation, &GkeyRow::default(), rng)?;
+            // An owed delivery stays owed: it then carries the credentials
+            // that this device holds now.
+            let owed = self
+                .gkey_row(conversation)
+                .map(|held| held.owed)
+                .unwrap_or_default();
+            let fresh = GkeyRow {
+                owed,
+                ..GkeyRow::default()
+            };
+            self.put_gkey_row(conversation, &fresh, rng)?;
             self.groups
                 .gkey_sent
                 .retain(|(held, _), _| *held != conversation);
@@ -7259,8 +7361,11 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         // group left on its way. A `GKEY` of one would move a replica back
         // to it (§11.4.1). Thus the `GKEY` waits for the end of the
         // backlog, where `Client::watches` sends the one of the epoch that
-        // stands.
-        if installed && (group.epoch() != before.epoch || group.epoch_rotator() != before.rotator) {
+        // stands. GRP-364: a content record under the alternate secret can
+        // change the rotator with no install, and the replicas follow that
+        // change too.
+        let epoch_moved = installed && group.epoch() != before.epoch;
+        if epoch_moved || group.epoch_rotator() != before.rotator {
             let read_backlog = !self.groups.driven
                 || self
                     .groups
@@ -8913,6 +9018,40 @@ mod tests {
         batch.commit().unwrap();
 
         assert!(matches!(client.gkey_row(group), Err(Error::Integrity)));
+    }
+
+    #[test]
+    fn a_gkey_row_keeps_each_owed_delivery_one_time_and_reads_a_row_of_version_1() {
+        let mut held = GkeyRow::default();
+        held.owe(7);
+        held.owe(3);
+        held.owe(7);
+        let parsed = GkeyRow::parse(&held.encode()).unwrap();
+        assert_eq!(parsed.owed, [7, 3]);
+
+        // A row of version 1 ends after the replicas, and it owes nothing.
+        let mut old = held.encode();
+        old[0] = GKEY_ROW_VERSION_V1;
+        let end = old.len() - 1 - 2 * held.owed.len();
+        let parsed = GkeyRow::parse(&old[..end]).unwrap();
+        assert!(parsed.owed.is_empty());
+    }
+
+    #[test]
+    fn an_owed_delivery_of_a_member_that_is_no_admin_goes_and_sends_nothing() {
+        let mut rng = Rng(337);
+        let mut client = new_client(&mut rng);
+        let group = new_group(&mut client, &mut rng);
+        let mut held = client.gkey_row(group).unwrap();
+        held.owe(41);
+        client.put_gkey_row(group, &held, &mut rng).unwrap();
+
+        let posts = client.groups.posts.len();
+        client
+            .deliver_owed_owners(group, T0 * 1_000, &mut rng)
+            .unwrap();
+        assert!(client.gkey_row(group).unwrap().owed.is_empty());
+        assert_eq!(client.groups.posts.len(), posts);
     }
 
     #[test]

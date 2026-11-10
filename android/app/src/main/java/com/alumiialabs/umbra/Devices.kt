@@ -126,7 +126,9 @@ fun DevicesScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                 stringResource(R.string.common_remove_named, device.label)
             },
             entries = listOf(
-                RowEntry("trash-can", stringResource(R.string.common_remove)) { Core.removeDevice(device.deviceId) },
+                RowEntry("trash-can", stringResource(R.string.common_remove), tag = TestTags.DEVICES_REMOVE) {
+                    Core.removeDevice(device.deviceId)
+                },
             ),
             note = UiText.get(R.string.umbra_ui_dev_137) +
                 " " + stringResource(R.string.devices_hostile_hands) + removed,
@@ -143,6 +145,7 @@ fun DevicesScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                 Row(
                     Modifier
                         .fillMaxWidth()
+                        .tagged(TestTags.DEVICES_ROW)
                         .then(if (canRemove) Modifier.press(role = Role.Button) { removing = device } else Modifier)
                         .padding(horizontal = PressInset, vertical = 14.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -176,7 +179,7 @@ fun DevicesScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
 
             Column(Modifier.padding(PressInset)) {
                 if (Core.ownsChannels) {
-                    PrimaryButton(stringResource(R.string.devices_link_a_device)) { push(Screen.LinkDevice) }
+                    PrimaryButton(stringResource(R.string.devices_link_a_device), tag = TestTags.DEVICES_LINK) { push(Screen.LinkDevice) }
                 }
             }
         }
@@ -296,9 +299,9 @@ fun LinkDeviceScreen(onBack: () -> Unit) {
                         QrCode(status.text, stringResource(R.string.devices_link_qr))
                     }
                     Spacer(Modifier.height(16.dp))
-                    MonoBox(status.text)
+                    MonoBox(status.text, tag = TestTags.LINK_TICKET)
                     Spacer(Modifier.height(12.dp))
-                    SecondaryButton(stringResource(R.string.devices_copy_the_code)) {
+                    SecondaryButton(stringResource(R.string.devices_copy_the_code), tag = TestTags.LINK_COPY) {
                         copySensitive(context, status.text, UiText.get(R.string.common_umbra_link))
                     }
                     Spacer(Modifier.height(12.dp))
@@ -307,11 +310,11 @@ fun LinkDeviceScreen(onBack: () -> Unit) {
                 is LinkStatus.Code -> {
                     Headline(stringResource(R.string.devices_codes_match_question))
                     Spacer(Modifier.height(20.dp))
-                    CodeDigits(status.code)
+                    CodeDigits(status.code, tag = TestTags.LINK_CODE)
                     Spacer(Modifier.height(24.dp))
-                    PrimaryButton(stringResource(R.string.common_codes_match)) { Core.confirmLink() }
+                    PrimaryButton(stringResource(R.string.common_codes_match), tag = TestTags.LINK_CODES_MATCH) { Core.confirmLink() }
                     Spacer(Modifier.height(8.dp))
-                    SecondaryButton(stringResource(R.string.common_codes_differ)) {
+                    SecondaryButton(stringResource(R.string.common_codes_differ), tag = TestTags.LINK_CODES_DIFFER) {
                         Core.cancelLink()
                         onBack()
                     }
@@ -326,7 +329,7 @@ fun LinkDeviceScreen(onBack: () -> Unit) {
                     Spacer(Modifier.height(20.dp))
                     Headline(stringResource(R.string.devices_linked))
                     Spacer(Modifier.height(20.dp))
-                    PrimaryButton(stringResource(R.string.common_done), onClick = onBack)
+                    PrimaryButton(stringResource(R.string.common_done), tag = TestTags.LINK_DONE, onClick = onBack)
                 }
                 is LinkStatus.Expired, is LinkStatus.Failed -> {
                     HeroIcon("triangle-exclamation")
@@ -339,11 +342,11 @@ fun LinkDeviceScreen(onBack: () -> Unit) {
                         },
                     )
                     Spacer(Modifier.height(20.dp))
-                    PrimaryButton(stringResource(R.string.common_try_again)) { attempt++ }
+                    PrimaryButton(stringResource(R.string.common_try_again), tag = TestTags.LINK_AGAIN) { attempt++ }
                 }
                 // A refused start (DEV-302) shows its fault below, and no
                 // wait that never ends.
-                is LinkStatus.Idle -> PrimaryButton(stringResource(R.string.common_try_again)) { attempt++ }
+                is LinkStatus.Idle -> PrimaryButton(stringResource(R.string.common_try_again), tag = TestTags.LINK_AGAIN) { attempt++ }
                 else -> {
                     // The offer goes up to a relay before the code exists.
                     Headline(stringResource(R.string.devices_preparing_code))
@@ -387,7 +390,7 @@ fun JoinForm(onCancel: () -> Unit) {
     Column(Modifier.fillMaxWidth()) {
         when {
             code != null -> {
-                CodeDigits(code)
+                CodeDigits(code, tag = TestTags.JOIN_CODE)
                 Spacer(Modifier.height(16.dp))
                 Text(
                     stringResource(R.string.devices_confirm_on_other),
@@ -413,10 +416,14 @@ fun JoinForm(onCancel: () -> Unit) {
                         autoCorrectEnabled = false,
                     ),
                     maxLines = 3,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().tagged(TestTags.JOIN_TICKET),
                 )
                 Spacer(Modifier.height(12.dp))
-                PrimaryButton(stringResource(R.string.devices_link), enabled = pasted.isNotBlank()) {
+                PrimaryButton(
+                    stringResource(R.string.devices_link),
+                    enabled = pasted.isNotBlank(),
+                    tag = TestTags.JOIN_LINK,
+                ) {
                     val phrase = held ?: return@PrimaryButton
                     held = null
                     Core.join(context, phrase, pasted.trim())
@@ -438,7 +445,9 @@ fun JoinForm(onCancel: () -> Unit) {
                     Core.join(context, phrase, text)
                 }
                 Spacer(Modifier.height(8.dp))
-                SecondaryButton(stringResource(R.string.devices_paste_code_instead)) { isPasting = true }
+                SecondaryButton(stringResource(R.string.devices_paste_code_instead), tag = TestTags.JOIN_PASTE_INSTEAD) {
+                    isPasting = true
+                }
                 Spacer(Modifier.height(8.dp))
                 SecondaryButton(stringResource(R.string.common_back)) {
                     held?.fill('\u0000')
@@ -446,11 +455,24 @@ fun JoinForm(onCancel: () -> Unit) {
                 }
             }
             else -> {
-                FramedPlatformField(passphrase, stringResource(R.string.common_new_passphrase), isPassphrase = true)
+                FramedPlatformField(
+                    passphrase,
+                    stringResource(R.string.common_new_passphrase),
+                    isPassphrase = true,
+                    tag = TestTags.JOIN_PASSPHRASE,
+                )
                 Spacer(Modifier.height(14.dp))
-                FramedPlatformField(confirm, stringResource(R.string.lock_confirm_new_passphrase), isPassphrase = true)
+                FramedPlatformField(
+                    confirm,
+                    stringResource(R.string.lock_confirm_new_passphrase),
+                    isPassphrase = true,
+                    tag = TestTags.JOIN_CONFIRM,
+                )
                 Spacer(Modifier.height(14.dp))
-                PrimaryButton(stringResource(if (canScan) R.string.devices_scan_the_code else R.string.devices_paste_the_code)) {
+                PrimaryButton(
+                    stringResource(if (canScan) R.string.devices_scan_the_code else R.string.devices_paste_the_code),
+                    tag = TestTags.JOIN_NEXT,
+                ) {
                     val first = passphrase.take()
                     val second = confirm.take()
                     mismatch = first == null || second == null || !first.contentEquals(second)
@@ -467,7 +489,7 @@ fun JoinForm(onCancel: () -> Unit) {
                     Note(stringResource(R.string.lock_passphrases_differ), isError = true)
                 }
                 Spacer(Modifier.height(8.dp))
-                SecondaryButton(stringResource(R.string.common_back), onClick = onCancel)
+                SecondaryButton(stringResource(R.string.common_back), tag = TestTags.JOIN_BACK, onClick = onCancel)
             }
         }
     }

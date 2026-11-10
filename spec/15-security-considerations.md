@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 15: Security Considerations and Known Limitations
 
 **Status:** Draft
-**Version:** 0.53.0
-**Date:** 2026-11-09
+**Version:** 0.54.0
+**Date:** 2026-11-10
 
 ---
 
@@ -146,9 +146,11 @@ does not detect that behavior in v1 (Part 11 §11.7).
 **Key equivocation by a rotator.** The same limit holds for the group key. An
 epoch-key record of Part 11 §11.4.2 holds no commitment to one `K_e`, and a
 member verifies its own slot alone. A member that rotates can thus give two
-members two keys. A member with a low index wins the race of `GRP-273` against
-an honest rotator. The group then splits into sets that cannot read each other
-until an honest member rotates. The insider reads nothing that it did not read
+members two keys. The group then splits into sets that cannot read each other
+until an honest member rotates. A second record for an epoch moves no member
+before a third member writes under its secret (`GRP-273`). Thus one member
+alone does this only with the first record of an epoch, and two members that
+work together do it with a second record. The insider reads nothing that it did not read
 before, and no party outside the group gains a key. A commitment to `K_e` in
 the clear part of `EpochKeyBody` is a planned wire change of a later
 version, and §15.3 holds the row until then.
@@ -322,7 +324,7 @@ browser. UMBRA accepts this residual, and §15.3 holds the row.
 | A member on a roster head that no other member builds on. A member can post a roster epoch above a limit of `GRP-076` deliberately. Each member that knows the window of that limit discards that epoch. A member whose roster came from a snapshot inside that window applies it | A current member of the group, against the availability of a member that joined, or took a snapshot under `GRP-329`, at most 24 slots before. An honest member that paces a grant or a re-key to a count that started at its snapshot can do the same to itself | Part 11 §11.9.4. The snapshot carries no count of the limits. A count that starts inside a window can pass a limit that the count of the group did not pass. Thus that member discards nothing for the window. The limits bind at the sender and at each member that knows the window. The split ends when the order of `GRP-117` displaces that head or the member takes a snapshot. The sender gains no key and no role. A count in the snapshot is a wire change of a later version. UMBRA accepts this residual |
 | The group of a member whose device left its set stays readable to that device while the member cannot build its `RekeyRecord`. In one case its roster came from a snapshot under `GRP-329`, and no add or `RekeyRecord` of another member gave it the index of the group yet. In the other case `REKEY_RATE` holds the record back | A6 against the device that left the set | Part 11 §11.9.8 and §11.12. A record under an index that the member only bounds would stand at that member alone. The client keeps the re-key and posts it when it knows the index or the rate takes it. A self-removal ends the reading at once. UMBRA accepts this residual |
 | A group that admits no member and in which no member recovers its roster from a snapshot. An owner of it re-keyed under a client of an earlier build that kept no `RekeyRecord`, no device keeps that record, and no other owner has a path | Each member of that group, and each party that the group would admit, as availability. No party learns more from it | Part 11 `GRP-427`, `GRP-441` and `GRP-443`. Before each add, an admin gives each role holder that its path does not back the role that it holds. That grant repairs a role holder when the path backs its granter. Only an owner gives `owner`, thus no grant repairs that owner. Its members still read and post. A new group is the repair. UMBRA accepts this residual |
-| Different group keys at different members after one rotation, from a rotator that seals a different `k_e` in each slot | A member that rotates, against the availability and the consistency of its group | Part 11 §11.7 and §15.2.4. An epoch-key record holds no commitment to one `K_e`, and `GRP-273` prefers the lower member index. The group does not converge before an honest member rotates. No key leaves the group. A commitment in `EpochKeyBody` is a planned wire change of a later version. UMBRA accepts this residual |
+| Different group keys at different members after one rotation, from a rotator that seals a different `k_e` in each slot | A member that rotates, against the availability and the consistency of its group | Part 11 §11.7 and §15.2.4. An epoch-key record holds no commitment to one `K_e`. `GRP-273` gives a second record of an epoch no effect before a third member writes under its secret, thus the first rotator of an epoch, or two members together, cause this. The group does not converge before an honest member rotates. No key leaves the group. A commitment in `EpochKeyBody` is a planned wire change of a later version. UMBRA accepts this residual |
 | Owner credentials that the relay no longer takes, at an admin, after two admins drew new ones for two departures at once | The admin whose `GKEY` came second | Part 11 `GRP-402`. That admin cannot send `GKEY` or `GDEL` until an admin of the first draw delivers the credentials again. It is an availability loss and no confidentiality loss |
 | No queue credential that the relay holds, at a member, after two rotations inside one `GROUP_EPOCH_GRACE` with no `GKEY` | Each member that installed the second epoch | Part 11 `GRP-398`. The member cannot post until an admin sends `GKEY`, and its client shows the group closed under `GRP-210`. It is an availability loss and no confidentiality loss |
 | A forged tag between two members, by an insider that holds a quantum computer | A quantum insider | The posture of Part 5 §5.4.4, and the agility of `sig_id` |

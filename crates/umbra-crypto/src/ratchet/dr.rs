@@ -43,6 +43,10 @@ pub const MAX_SKIP: u32 = 1000;
 pub const MAX_STORED: usize = 2000;
 /// `SKIP_TTL` in seconds: 45 days, equal to `MSG_TTL`.
 pub const SKIP_TTL: u64 = 45 * 86_400;
+/// `MAX_CHAINS`, the chains whose skipped keys one session holds. Each
+/// chain has one header key, and each header key costs one header open for
+/// a record that no current key opens.
+pub const MAX_CHAINS: usize = 32;
 /// `MAX_BYTES`, the bytes of the skipped keys of one session.
 pub const MAX_BYTES: usize = 80 * 1_024;
 /// The bytes of one skipped key as a session holds it: the header key, the
@@ -114,6 +118,27 @@ impl Skipped {
             stored_at: self.stored_at,
         }
     }
+}
+
+/// The count of the oldest keys that leave, thus the keys that stay belong
+/// to `MAX_CHAINS` chains at most (`CRY-155`). The keys of one chain sit
+/// side by side, thus a change of the header key starts a chain.
+fn keys_above_chains(skipped: &[Skipped]) -> usize {
+    let mut chains = 0usize;
+    let mut newer: Option<&[u8; 32]> = None;
+
+    for (index, key) in skipped.iter().enumerate().rev() {
+        if newer.is_some_and(|hk| crate::ct_eq(hk, &key.hk)) {
+            continue;
+        }
+        newer = Some(&key.hk);
+        chains = chains.saturating_add(1);
+        if chains > MAX_CHAINS {
+            return index.saturating_add(1);
+        }
+    }
+
+    0
 }
 
 /// One party's state of one pairwise session.
@@ -412,6 +437,8 @@ impl Session {
         // CRY-153: a restored session holds no more keys than a live one,
         // thus the oldest keys above `SKIPPED_CAP` go, as at a skip.
         let excess = skipped.len().saturating_sub(SKIPPED_CAP);
+        skipped.drain(..excess);
+        let excess = keys_above_chains(&skipped);
         skipped.drain(..excess);
         skipped.spare_capacity_mut().zeroize();
 
@@ -898,6 +925,13 @@ impl Session {
             self.n_r += 1;
         }
 
+        // CRY-155: the keys of the oldest chains go.
+        let excess = keys_above_chains(&self.skipped);
+        if excess > 0 {
+            self.skipped.drain(..excess);
+            self.wipe_spare();
+        }
+
         self.ck_r = Some(ck);
         Ok(())
     }
@@ -1078,6 +1112,30 @@ mod tests {
         assert_eq!(back.skipped_len(), SKIPPED_CAP);
         // The oldest keys went.
         assert_eq!(back.skipped_ages().next(), Some(1_500 - SKIPPED_CAP as u64));
+    }
+
+    #[test]
+    fn a_session_holds_the_skipped_keys_of_a_bounded_count_of_chains() {
+        let (mut a, mut b, mut rng) = pair(b"chain bound");
+        let rounds = MAX_CHAINS + 8;
+        let mut late = Vec::new();
+        for round in 0..rounds {
+            let mark = [u8::try_from(round).unwrap()];
+            late.push(send(&mut a, &mut rng, &mark));
+            let m = send(&mut a, &mut rng, b"read");
+            assert_eq!(recv(&mut b, &mut rng, &m).unwrap(), b"read");
+            let r = send(&mut b, &mut rng, b"turn");
+            assert_eq!(recv(&mut a, &mut rng, &r).unwrap(), b"turn");
+        }
+
+        // CRY-155: each chain left one key, and the oldest chains went.
+        assert_eq!(b.skipped_len(), MAX_CHAINS);
+        assert!(recv(&mut b, &mut rng, &late[0]).is_err());
+        let newest = late.last().unwrap();
+        assert_eq!(
+            recv(&mut b, &mut rng, newest).unwrap(),
+            [u8::try_from(rounds - 1).unwrap()]
+        );
     }
 
     #[test]

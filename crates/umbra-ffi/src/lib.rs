@@ -182,8 +182,12 @@ pub struct MessageInfo {
     /// The send time that the sender wrote, in milliseconds.
     pub sent_at_ms: u64,
     /// The time of this device at the store of the message, in
-    /// milliseconds. A conversation view orders by it.
+    /// milliseconds. A conversation view orders by it. It never goes back,
+    /// thus it can be above the clock.
     pub stored_at_ms: u64,
+    /// The clock of this device at the store of the message, in
+    /// milliseconds. Each age of the message reads it.
+    pub clock_at_ms: u64,
     /// The message that this message answers.
     pub reply: ReplyTarget,
     /// Whether a deletion took the content, and the row is its placeholder

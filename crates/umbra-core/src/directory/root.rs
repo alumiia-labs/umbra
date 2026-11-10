@@ -486,16 +486,29 @@ impl<'a> Consensus<'a> {
         if root.keyset_hash != self.keyset_hash {
             return Err(Error::Unverified);
         }
-        if root.epoch < self.highest_epoch
-            || (self.accepted.is_some() && root.epoch == self.highest_epoch)
-        {
+        if root.epoch < self.highest_epoch {
+            return Err(Error::Stale);
+        }
+
+        // REL-034: the client keeps the first root of an epoch. The same
+        // root again is stale, with other signers or the same ones.
+        let preimage = root.preimage();
+        let rival_of = self
+            .accepted
+            .as_ref()
+            .filter(|_| root.epoch == self.highest_epoch);
+        if rival_of.is_some_and(|held| held.preimage() == preimage) {
             return Err(Error::Stale);
         }
 
         self.keyset
-            .verify_multi_by(&root.preimage(), &root.sigs, |index| {
-                self.verifying_key(index)
-            })?;
+            .verify_multi_by(&preimage, &root.sigs, |index| self.verifying_key(index))?;
+
+        // A second root of the epoch that differs and verifies is a proof
+        // that the authorities signed two views.
+        if rival_of.is_some() {
+            return Err(Error::SplitView);
+        }
 
         // REL-035: not older than the validity plus the skew.
         let is_stale = self.client_clock(device_clock).is_some_and(|clock| {
@@ -643,6 +656,20 @@ pub(crate) mod tests {
             consensus.accept(DirectoryRoot::parse(&again).unwrap(), 0),
             Err(Error::Stale)
         );
+        // Another root of that epoch that verifies is a split view, and
+        // one that does not verify is not.
+        let rival = signed_root(&keys, &[0, 1, 2, 3, 4], 101, hash, [8; 32]);
+        assert_eq!(
+            consensus.accept(DirectoryRoot::parse(&rival).unwrap(), 0),
+            Err(Error::SplitView)
+        );
+        let mut forged_rival = rival.clone();
+        forged_rival[200] ^= 1;
+        assert!(matches!(
+            consensus.accept(DirectoryRoot::parse(&forged_rival).unwrap(), 0),
+            Err(Error::Unverified | Error::Malformed)
+        ));
+        assert_eq!(consensus.accepted().unwrap().epoch, 101);
         let old = signed_root(&keys, &[0, 1, 2, 3, 4], 99, hash, [9; 32]);
         assert_eq!(
             consensus.accept(DirectoryRoot::parse(&old).unwrap(), 0),

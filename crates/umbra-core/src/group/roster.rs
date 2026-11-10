@@ -408,6 +408,41 @@ impl Roster {
         Ok(roster)
     }
 
+    /// Joins this roster of a snapshot to `before`, the roster that the
+    /// member held until then (`GRP-330`). The history and the admission
+    /// epoch of `before` stay. Each member of the head of `before` that
+    /// the snapshot does not hold left in between. Its removal counts at
+    /// the roster epoch after that head, which is the lowest one that its
+    /// rotation can name (`GRP-356`, `GRP-357`).
+    pub fn continue_from(&mut self, before: &Roster) {
+        let head = before.epoch_index;
+        if head >= self.epoch_index {
+            return;
+        }
+
+        for (epoch, entry) in before.history.range(..=head) {
+            self.history.entry(*epoch).or_insert_with(|| entry.clone());
+        }
+        self.admission_epoch = self.admission_epoch.min(before.admission_epoch);
+
+        let after_head = head.saturating_add(1);
+        let sets = before
+            .history
+            .get(&head)
+            .zip(self.history.get(&self.epoch_index));
+        if let Some(((held, _), (current, at))) = sets {
+            if after_head < self.epoch_index {
+                let stayed: Vec<u16> = held
+                    .iter()
+                    .filter(|index| current.binary_search(index).is_ok())
+                    .copied()
+                    .collect();
+                let at = *at;
+                self.history.insert(after_head, (stayed, at));
+            }
+        }
+    }
+
     /// Whether a roster object that does not chain here shows that the
     /// snapshot of this roster gave a false `chain_hash` (`GRP-440`). The
     /// roster still stands at that snapshot, and the object is the next

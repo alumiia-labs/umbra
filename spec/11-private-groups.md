@@ -1,8 +1,8 @@
 # UMBRA Protocol Specification — Part 11: Private Groups (2–500)
 
 **Status:** Draft
-**Version:** 0.53.0
-**Date:** 2026-11-09
+**Version:** 0.54.0
+**Date:** 2026-11-10
 
 ---
 
@@ -888,17 +888,42 @@ receiver rejects under §11.3.5. Part 15 §15.3 records that residual.
 epoch `e + 1` before either reads the other.
 
 **[GRP-273]** A member that verifies two epoch-key records for one epoch MUST
-install the secret of the record whose rotator has the lower member index, and
-it MUST keep the other secret as an alternate for `GROUP_EPOCH_GRACE`. That
-rule orders two records that each hold a slot for every member of their
-`roster_epoch`. A member MUST reject a record of a second rotator for the
-current epoch when `GROUP_EPOCH_GRACE` passed since that member installed its
-first secret of that epoch.
+keep the secret of the second record as an alternate. That rule applies to two
+records that each hold a slot for every member of their `roster_epoch`. The
+member MUST select the secret that it sends under as follows:
 
-> *Cause.* The rule orders a race of two rotators. Without the bound, an
-> active member of a lower index can give one member a new secret for the
-> current epoch at any time, and that member then sends under a secret that
-> no other member holds.
+- The group *holds* a secret at a member when a record of an active member
+  other than the rotator of that secret opens under it, and its tag verifies.
+- When the group holds one of the two secrets, the member MUST send under
+  that secret.
+- When the group holds the two secrets, the member MUST send under the secret
+  of the rotator with the lower member index.
+- When the group holds neither secret, the member MUST send under the secret
+  that it installed first.
+- In a group of two active members, each secret counts as one that the group
+  holds.
+
+A member MUST NOT install a second secret of one rotator for one epoch. A
+member that holds an alternate MUST replace it only with a secret that the
+rule above puts before it.
+
+> *Cause.* A member verifies its own slot alone. The record of a second
+> rotator proves a slot for that member and for no other member. With a rule
+> on the index alone, an active member of a lower index can give one member a
+> new secret for the current epoch at any time. That member then sends under
+> a secret that no other member holds. A `GKEY` of that secret then moves each
+> replica away from the credentials of the group.
+>
+> A record of a third member under a secret proves a second holder of it. In
+> a race of two honest rotators, each member sends under the secret that it
+> read first. Each record under one secret moves the members that hold the
+> other one, and the lower index stands when the group writes under the two.
+> Each member holds the two secrets, thus each member reads each record
+> before the group ends on one secret.
+>
+> Two members that work together can still move a third member: one makes
+> the record, and the other writes under its secret. Part 15 §15.2.4 holds
+> that residual.
 
 A one-slot record of §11.4.3 names the member that made it and not the rotator
 of its secret. Thus a member that holds a secret of the epoch MUST keep the
@@ -908,15 +933,17 @@ one when one of two conditions holds:
 
 1. A record of a member other than the maker of the one-slot record opens
    under that secret, and its tag verifies.
-2. The record of the rotator of that secret arrives, and the index rule
-   selects it.
+2. The record of the rotator of that secret arrives, and the rule of
+   `GRP-273` selects it.
 
 A member can hold, as its one secret of the epoch, the secret of a one-slot
 record. That occurs when no other record of that epoch opened before that
 record. That member MUST make the secret of a record that holds a slot for
 every member the current one when that record arrives. That member MUST keep
 the secret of the one-slot record as the alternate under the same two
-conditions.
+conditions. When the first condition held for the secret of the one-slot
+record before that record arrived, that secret MUST stay the current one
+until the group holds the other secret.
 
 A member MUST keep the alternate of an epoch for the `GROUP_EPOCH_GRACE` of
 that epoch, also after the next epoch installs. **[GRP-274]** A receiver MUST
@@ -926,9 +953,9 @@ also try the alternate when the other secret gives no key for the slot of the
 record.
 
 **[GRP-364]** A rotator that reads an epoch-key record for the epoch it
-posted, from a lower member index, MUST switch to that secret, and if it holds
-`own_sk` it MUST send `GKEY` with the credentials of that secret to each
-replica.
+posted MUST apply `GRP-273` as each other member does. A member that holds
+`own_sk` MUST send `GKEY` with the credentials of a secret to each replica
+when `GRP-273` makes that secret the one that it sends under.
 
 > *Cause.* A rotation that only an admin can make puts the exclusion of a
 > leaver, and of a device in hostile hands, behind the presence of one role
@@ -977,11 +1004,15 @@ K_slot = HKDF-SHA3-256( salt = "", ikm = ss, info = "umbra/v1/group-epoch-slot" 
 ad     = "umbra/v1/group-epoch-slot" || group_id || BE32(e) || BE16(index)
 ct     = ChaCha20-Poly1305( K_slot, 0^12, SlotPayload, ad )
 tag    = HMAC-SHA3-256( K_{rotator,index}, "umbra/v1/group-epoch-tag" || group_id
-                        || BE32(e) || BE32(t_e) || BE32(roster_epoch) || k_e )[0..12]
+                        || BE32(e) || BE32(t_e) || BE32(roster_epoch) || BE16(slot_count)
+                        || k_e || own_count || own_sks )[0..12]
 ```
 
 `ss` is the `UMBRA-KEM` shared secret of that slot, and `K_{rotator,index}` is
-the pair key of §11.3.3 between the rotator and the member the slot serves. A
+the pair key of §11.3.3 between the rotator and the member the slot serves.
+`slot_count` is the field of the record body, and `own_count` and `own_sks`
+are the fields of the `SlotPayload`. Thus no party moves a slot into a record
+of another `slot_count`, and no party changes the owner secrets of a slot. A
 slot is 1 185 bytes at a plain member (`own_count` 0) and 1 249 bytes at a
 member of role `admin` or above (`own_count` = `GROUP_REPLICAS`).
 
@@ -1033,8 +1064,8 @@ thus the reader cannot take the rotator's role from the record.
 > and loses one parse.
 
 **Reading the record.** **[GRP-286]** A member that reads an epoch-key record
-MUST decapsulate its slot, verify `tag` under `K_{rotator,self}`, verify the
-rotator's role, install `(e + 1, t_{e+1}, K_{e+1,t_{e+1}})`, derive the queue
+MUST decapsulate its slot, verify `tag` under `K_{rotator,self}` and the
+`slot_count` of the record body, verify the rotator's role, install `(e + 1, t_{e+1}, K_{e+1,t_{e+1}})`, derive the queue
 credentials of `e + 1`, and keep the state of epoch `e` for
 `GROUP_EPOCH_GRACE`.
 
@@ -1273,9 +1304,9 @@ take `own_sks`, from any slot, that equal a set that it held and replaced.
 It MUST keep a hash of each of the last 8 sets that it replaced for that
 check.
 
-> *Cause of `GRP-429`.* The `tag` of a slot binds no `own_sks`, and an
-> epoch-key record has no AEAD over its body. Thus any member can post an old
-> delivery again, in a larger bucket that gives new bytes. A receiver that
+> *Cause of `GRP-429`.* The `tag` of a slot names no time, and an epoch-key
+> record has no AEAD over its body. Thus any member can post an old delivery
+> again, in a larger bucket that gives new bytes. A receiver that
 > takes the older set fails each `GKEY` and `GDEL`, and its next rotation
 > hands that set to each admin. Then no admin can move the relay credentials
 > after a removal. Each replacement of `GRP-401` and `GRP-402` follows a roster
@@ -1509,11 +1540,12 @@ group record. The states of Part 14 §14.9.1 that a group record reaches are
   record of §11.4.2 seals `k_e` to each member in a slot of its own, and a
   member verifies its own slot alone. The record holds no commitment to one
   `K_e`. Thus a member that rotates can give each member, or each half of
-  the group, a different key, and each tag verifies. `GRP-273` installs the
-  record of the rotator with the lower member index, thus a member with a
-  low index wins that race. The members then seal under different keys, and
-  the key supply of §11.4.3 answers with different keys. The group does not
-  converge before the next rotation by an honest member.
+  the group, a different key, and each tag verifies. The members then seal
+  under different keys, and the key supply of §11.4.3 answers with different
+  keys. The group does not converge before the next rotation by an honest
+  member. `GRP-273` bounds one case: a second record for an epoch moves no
+  member before a third member writes under its secret. Thus one member
+  alone splits the group only with the first record of an epoch.
 
   This is a loss of availability and of consistency, and no loss of
   confidentiality against a party outside the group. v1 does not close this

@@ -1032,9 +1032,12 @@ fn a_group_record_wakes_a_member_that_went_away_through_its_notify_queue() {
 
 #[test]
 fn a_descriptor_names_the_facts_of_each_relay_and_the_first_version_reads() {
+    // One relay has one line, thus each line names its own identifier.
     let key = "ab".repeat(32);
-    let line =
-        |port: u16, facts: &str| format!("relay localhost 127.0.0.1 {port} {key} {key} {facts}");
+    let line = |port: u16, facts: &str| {
+        let relay_id = format!("{:02x}", port % 256).repeat(32);
+        format!("relay localhost 127.0.0.1 {port} {key} {relay_id} {facts}")
+    };
     let facts = |layer: u8, place: &str| {
         format!("layer={layer} operator=op-{place} country={place} asn=6450{layer}")
     };

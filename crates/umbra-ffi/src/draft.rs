@@ -175,6 +175,11 @@ impl Draft {
     }
 
     /// The file of the draft, which leaves the draft with this call.
+    /// The file of the draft, which stays in it.
+    pub(crate) fn file(&self) -> Option<&DraftFile> {
+        self.file.as_ref()
+    }
+
     pub(crate) fn take_file(&mut self) -> Option<DraftFile> {
         self.file.take()
     }

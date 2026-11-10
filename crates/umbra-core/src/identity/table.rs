@@ -21,7 +21,7 @@ impl TableKey {
     pub fn derive(store_key: &Secret<32>) -> Self {
         let kdf = Hkdf::<Sha3_256>::new(None, store_key.expose());
         let mut key = Secret::<32>::zeroed();
-        let _ = kdf.expand(labels::TABLE_MAC, key.expose_mut());
+        umbra_crypto::kdf::expand_into(&kdf, &[labels::TABLE_MAC], &mut key);
         TableKey(key)
     }
 

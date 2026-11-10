@@ -72,18 +72,18 @@ column when a crate implements the requirement and a test covers it.
 | `THR` | 11 | 4 | 0 | 0 | 0 | **15** |
 | `NET` | 262 | 93 | 1 | 0 | 11 | **367** |
 | `IDN` | 138 | 46 | 1 | 0 | 5 | **190** |
-| `CRY` | 120 | 27 | 0 | 0 | 2 | **149** |
+| `CRY` | 121 | 27 | 0 | 0 | 2 | **150** |
 | `WIR` | 418 | 88 | 0 | 0 | 8 | **514** |
-| `DEV` | 225 | 95 | 0 | 0 | 15 | **335** |
+| `DEV` | 226 | 95 | 0 | 0 | 15 | **336** |
 | `NTF` | 92 | 30 | 0 | 0 | 3 | **125** |
-| `DIS` | 138 | 37 | 1 | 0 | 3 | **179** |
-| `REL` | 173 | 34 | 1 | 0 | 4 | **212** |
+| `DIS` | 138 | 38 | 1 | 0 | 3 | **180** |
+| `REL` | 175 | 34 | 1 | 0 | 4 | **214** |
 | `GRP` | 244 | 69 | 0 | 0 | 5 | **318** |
 | `ATT` | 153 | 47 | 2 | 0 | 3 | **205** |
 | `ABU` | 71 | 29 | 1 | 0 | 0 | **101** |
 | `IMP` | 120 | 41 | 1 | 0 | 2 | **164** |
 | `SEC` | 4 | 3 | 0 | 0 | 1 | **8** |
-| **All** | 2181 | 648 | 8 | 0 | 66 | **2903** |
+| **All** | 2185 | 649 | 8 | 0 | 66 | **2908** |
 
 ## SCP — Scope and Conventions
 
@@ -861,6 +861,7 @@ Source: `spec/05-cryptographic-core.md`
 | `CRY-152` | §5.4.8 | MUST | (unstated) | The relay handshake of §5.4.9 has one exception of the same kind: the last hop of a circuit MUST keep its `er_sk` as `RelaySession_sk` under Part 3 rule `NET-285`, and it MUST erase it when the circuit ends. |  |  |
 | `CRY-153` | §5.5.4 | MUST | A session | A session MUST drop each skipped key older than `SKIP_TTL` at each skip, and a skip that would pass `MAX_STORED` or `MAX_BYTES` MUST drop the oldest keys first. |  |  |
 | `CRY-154` | §5.5.2 | MUST | A receiver | A receiver MUST take the width of a peer epoch from the first chunk of that epoch that it absorbs. |  |  |
+| `CRY-155` | §5.5.4 | MUST | A session | A session MUST hold the skipped keys of at most `MAX_CHAINS` chains. |  |  |
 
 ## WIR — Wire Format
 
@@ -1724,6 +1725,7 @@ Source: `spec/07-device-sets.md`
 | `DEV-357` | §7.7.1 | MUST | A full identity reset | A full identity reset MUST write the mark of a tombstone of Part 9 `DIS-205` for each entry that the device publishes, in the commit of the new root. |  |  |
 | `DEV-358` | §7.5.9 | MAY | A user | A user MAY mark a conversation **priority**. |  |  |
 | `DEV-359` | §7.5.9 | MUST | (unstated) | A locked client cannot read the mention list of a record. |  |  |
+| `DEV-360` | §7.5.6 | MUST | A client | A client MUST discard a new pending entry of a group from a member index that made `REF_ORPHAN_MEMBER_MAX` entries in the current period of `REF_ORPHAN_TTL`. |  |  |
 
 ## NTF — Notifications
 
@@ -2042,6 +2044,7 @@ Source: `spec/09-discovery.md`
 | `DIS-203` | §9.9.3 | MUST | A client | A client MUST put the token of a registration in its `Challenge` request of purpose `0x04`. |  |  |
 | `DIS-204` | §9.5.2 | SHOULD | A client | A client SHOULD hold the search key of each label that it publishes, for as long as it holds the VOPRF key of the directory. |  |  |
 | `DIS-205` | §9.5.2 | MUST | A client | A client MUST keep a registration or a tombstone of its own in its store, with a mark, before the request leaves. |  |  |
+| `DIS-206` | §9.9.1 | MUST NOT | A directory | A directory MUST NOT change the stored state of a label when it issues a renewal challenge. |  |  |
 
 ## REL — Relay Directory
 
@@ -2261,6 +2264,8 @@ Source: `spec/10-relay-directory.md`
 | `REL-210` | §10.2 | MUST | Under the provisional directory, an authority | Under the provisional directory, an authority MUST list a relay of another operator only at a class that a passed class test verified, at or below the declared class. |  |  |
 | `REL-211` | §10.6 | MAY | Under the provisional directory of `REL-126`, an authority | Under the provisional directory of `REL-126`, an authority MAY list relays above the two ceilings. |  |  |
 | `REL-223` | §10.2 | MUST | A relay with no passed class test inside `MEASURE_STALE` | A relay with no passed class test inside `MEASURE_STALE` MUST be listed at C0 while another relay of its own operator at the same place has such a test and keeps that place in the root. |  |  |
+| `REL-224` | §10.5.3 | MUST | A client | A client MUST reject a descriptor whose `port` is 0, and one whose `addr_v4` and `addr_v6` are both zero. |  |  |
+| `REL-225` | §10.5.3 | MUST | A client | A client MUST reject a `RelaySetDiff` that names one `relay_id` two times, in one list or across the two lists. |  |  |
 
 ## GRP — Private Groups
 
@@ -2431,7 +2436,7 @@ Source: `spec/11-private-groups.md`
 | `GRP-264` | §11.4.1 | MUST | An admin that removes a member | An admin that removes a member MUST rotate in the same action, directly after the roster record that removes it. |  |  |
 | `GRP-267` | §11.4.1 | MUST NOT | A member | A member MUST NOT rotate at a join. |  |  |
 | `GRP-268` | §11.4.1 | MUST NOT | A member | A member MUST NOT rotate at a promotion. |  |  |
-| `GRP-273` | §11.4.1 | MUST | A member that verifies two epoch-key records for one epoch | A member that verifies two epoch-key records for one epoch MUST install the secret of the record whose rotator has the lower member index, and it MUST keep the other secret as an alternate for `GROUP_EPOCH_GRACE`. |  |  |
+| `GRP-273` | §11.4.1 | MUST | A member that verifies two epoch-key records for one epoch | A member that verifies two epoch-key records for one epoch MUST keep the secret of the second record as an alternate. |  |  |
 | `GRP-274` | §11.4.1 | MUST | A receiver | A receiver MUST try the alternate secret of an epoch when the record key of that epoch fails to open a record. |  |  |
 | `GRP-276` | §11.4.2 | MUST | A rotator | A rotator MUST build one slot for each member the new roster holds, in index order, and no slot for a member it removes. |  |  |
 | `GRP-277` | §11.4.2 | MUST | A rotator | A rotator of role `admin` or above MUST set `own_count` to `GROUP_REPLICAS` for a member of role `admin` or above and to 0 for each other member. |  |  |
@@ -2443,7 +2448,7 @@ Source: `spec/11-private-groups.md`
 | `GRP-283` | §11.4.2 | MUST | A rotator | A rotator MUST write that object on the chunk path of Part 12 §12.3.3 under `CNEW`, and Part 12 §12.4 makes the replicas. |  |  |
 | `GRP-284` | §11.4.2 | MUST | A member | A member MUST fetch the one chunk that holds its slot, which is chunk `floor(p / slots_per_chunk)` for its rank `p` among the included members. |  |  |
 | `GRP-285` | §11.4.2 | MUST NOT | A member | A member MUST NOT fetch another chunk of that object. |  |  |
-| `GRP-286` | §11.4.2 | MUST | A member that reads an epoch-key record | A member that reads an epoch-key record MUST decapsulate its slot, verify `tag` under `K_{rotator,self}`, verify the rotator's role, install `(e + 1, t_{e+1}, K_{e+1,t_{e+1}})`, derive the queue credentials of `e + 1`, and keep the state of epoch `e` for `GROUP_EPOCH_GRACE`. |  |  |
+| `GRP-286` | §11.4.2 | MUST | A member that reads an epoch-key record | A member that reads an epoch-key record MUST decapsulate its slot, verify `tag` under `K_{rotator,self}` and the `slot_count` of the record body, verify the rotator's role, install `(e + 1, t_{e+1}, K_{e+1,t_{e+1}})`, derive the queue credentials of `e + 1`, and keep the state of epoch `e` for `GROUP_EPOCH_GRACE`. |  |  |
 | `GRP-287` | §11.4.2 | MUST NOT | A member | A member MUST NOT install an epoch secret whose `tag` fails. |  |  |
 | `GRP-288` | §11.4.2 | MUST NOT | A member | A member MUST NOT install an epoch secret from an epoch-key record whose `epoch` is below its current epoch, or equal to it other than under the two-rotator rule of §11.4.1 and the one-slot record of §11.4.3. |  |  |
 | `GRP-289` | §11.4.3 | MUST | A member that lacks the current epoch secret | A member that lacks the current epoch secret MUST send a `KeyRequest` of scope `0x02` as a group record under the previous epoch, while `GROUP_WRITE_GRACE` and `GROUP_EPOCH_GRACE` hold. |  |  |
@@ -2510,7 +2515,7 @@ Source: `spec/11-private-groups.md`
 | `GRP-361` | §11.4.1 | MUST | A rotator that holds `own_sk` | A rotator that holds `own_sk` MUST send `GKEY` with `read_pk_{e+1}` and `write_pk_{e+1}` to each replica after that replica returned `GSEQ` for the epoch-key record. |  |  |
 | `GRP-362` | §11.4.1 | MUST NOT | A rotator | A rotator MUST NOT send `GKEY` to a replica before that replica accepted the epoch-key record. |  |  |
 | `GRP-363` | §11.4.1 | MUST | (unstated) | A member of role `admin` or above that installs an epoch it did not credential MUST send `GKEY` for that epoch to each replica at once. |  |  |
-| `GRP-364` | §11.4.1 | MUST | (unstated) | A rotator that reads an epoch-key record for the epoch it posted, from a lower member index, MUST switch to that secret, and if it holds `own_sk` it MUST send `GKEY` with the credentials of that secret to each replica. |  |  |
+| `GRP-364` | §11.4.1 | MUST | (unstated) | A rotator that reads an epoch-key record for the epoch it posted MUST apply `GRP-273` as each other member does. |  |  |
 | `GRP-365` | §11.12 | MUST | For each such group, that device | For each such group, that device MUST post a `RekeyRecord` of Part 6 §6.6.3 as a group record. |  |  |
 | `GRP-366` | §11.12 | MUST | A receiver | A receiver MUST verify a `RekeyRecord` under Part 6 rule `WIR-478`. |  |  |
 | `GRP-367` | §11.12 | MUST | A receiver | A receiver MUST then apply the record as a roster record: `old_index` leaves the active set, and `new_index` enters it with the new keys and the role of `old_index`. |  |  |

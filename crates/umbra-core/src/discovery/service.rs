@@ -138,9 +138,15 @@ struct LabelRecord {
 }
 
 impl LabelRecord {
-    fn encode(&self) -> Vec<u8> {
+    /// A field that is too long for its length fails here. A length of
+    /// zero in its place would store a record that parses as another one.
+    fn encode(&self) -> Result<Vec<u8>, Error> {
+        let input_len = u16::try_from(self.input.len()).map_err(|_| Error::Malformed)?;
+        let blob = self.blob.as_deref().unwrap_or(&[]);
+        let blob_len = u16::try_from(blob.len()).map_err(|_| Error::Malformed)?;
+
         let mut out = Vec::new();
-        out.extend_from_slice(&u16::try_from(self.input.len()).unwrap_or(0).to_be_bytes());
+        out.extend_from_slice(&input_len.to_be_bytes());
         out.extend_from_slice(&self.input);
         out.extend_from_slice(&self.label.version.to_be_bytes());
         out.extend_from_slice(&self.label.hk_pub);
@@ -148,11 +154,9 @@ impl LabelRecord {
         out.extend_from_slice(&self.label.tombstoned_at.unwrap_or(u64::MAX).to_be_bytes());
         out.extend_from_slice(&self.label.lease_epoch.to_be_bytes());
         out.extend_from_slice(&self.label.ends_at.unwrap_or(0).to_be_bytes());
-
-        let blob = self.blob.as_deref().unwrap_or(&[]);
-        out.extend_from_slice(&u16::try_from(blob.len()).unwrap_or(0).to_be_bytes());
+        out.extend_from_slice(&blob_len.to_be_bytes());
         out.extend_from_slice(blob);
-        out
+        Ok(out)
     }
 
     fn parse(bytes: &[u8]) -> Result<Self, Error> {
@@ -307,6 +311,11 @@ const KEYSET_CHAIN_ANSWER: usize = 4;
 /// one mebibyte.
 const SIGNED_HELD_MAX: usize = 4_096;
 
+/// The answers of the first-party issuer that the directory holds for a
+/// second request (Part 13 rule `ABU-110`). Each one is 577 bytes at most, thus
+/// the set stays below one mebibyte.
+const ISSUED_HELD_MAX: usize = 1_024;
+
 /// The directory and the issuer.
 pub struct Directory {
     voprf: ServerKey,
@@ -343,6 +352,14 @@ pub struct Directory {
     signed_order: VecDeque<(u32, [u8; 32])>,
     /// The epoch below which the directory holds no such signature.
     signed_from: u32,
+    /// The answer of the first-party issuer to each batch. The key is the
+    /// epoch and the hash of the request, and `issued_order` holds the
+    /// order in which they came. A batch that comes again takes its answer
+    /// from here, and costs no proof check and no evaluation more.
+    issued: BTreeMap<(u32, [u8; 32]), Vec<u8>>,
+    issued_order: VecDeque<(u32, [u8; 32])>,
+    /// The epoch below which the directory holds no such answer.
+    issued_from: u32,
     /// Each issuer key in the log: its token type and its epoch.
     published_issuers: BTreeSet<(u16, u32)>,
     profile: fn(&str) -> Option<String>,
@@ -412,6 +429,9 @@ impl Directory {
             signed: BTreeMap::new(),
             signed_order: VecDeque::new(),
             signed_from: 0,
+            issued: BTreeMap::new(),
+            issued_order: VecDeque::new(),
+            issued_from: 0,
             issuers: BTreeMap::new(),
             published_issuers: BTreeSet::new(),
             profile,
@@ -569,17 +589,22 @@ impl Directory {
         Ok(version)
     }
 
-    fn keep_label(&mut self, search_key: &[u8], mut record: LabelRecord) {
+    fn keep_label(&mut self, search_key: &[u8], mut record: LabelRecord) -> Result<(), Status> {
         // DIS-178: a tombstone takes the blob with it.
         if record.label.is_tombstoned() {
             record.blob = None;
         }
 
+        // The record stays in the set also when its encoding fails, thus a
+        // caller that moved it out loses no label.
+        let state = record.encode();
+        self.labels.insert(search_key.to_vec(), record);
+
         self.events.push(DirEvent::Label {
             search_key: search_key.to_vec(),
-            state: record.encode(),
+            state: state.map_err(|_| Status::Busy)?,
         });
-        self.labels.insert(search_key.to_vec(), record);
+        Ok(())
     }
 
     /// Puts `label` in the record of `search_key` and keeps the record. The
@@ -587,8 +612,7 @@ impl Directory {
     fn replace_label(&mut self, search_key: &[u8], label: Label) -> Result<(), Status> {
         let mut record = self.labels.remove(search_key).ok_or(Status::NotFound)?;
         record.label = label;
-        self.keep_label(search_key, record);
-        Ok(())
+        self.keep_label(search_key, record)
     }
 
     /// Closes the epoch, and the two auditors check it. The log moves only
@@ -674,6 +698,12 @@ impl Directory {
         now: u64,
         rng: &mut R,
     ) -> Result<(), Error> {
+        // A close whose signature failed has no head. The signature goes
+        // again here, and no second epoch closes for it.
+        if let (None, Some(closed_at)) = (&self.head, self.last_close) {
+            self.sign_head(closed_at, rng)?;
+        }
+
         if self
             .last_close
             .is_some_and(|last| now < last.saturating_add(self.epoch_seconds))
@@ -759,7 +789,12 @@ impl Directory {
         rng.fill_bytes(&mut nonce);
 
         self.advance(nonce, now)?;
-        self.sign_head(now, rng)?;
+
+        // The store takes the close before the signature, which can fail.
+        // A close with no event would put two epochs of staged versions
+        // under one `Closed` at a replay. The old head names the old tree,
+        // thus it goes with the close.
+        self.head = None;
         self.events.push(DirEvent::Closed {
             nonce,
             at: now,
@@ -768,7 +803,7 @@ impl Directory {
 
         self.challenges
             .retain(|_, pending| now.saturating_sub(pending.at) < CHALLENGE_TTL);
-        Ok(())
+        self.sign_head(now, rng)
     }
 
     /// Answers one request.
@@ -817,9 +852,14 @@ impl Directory {
         let blinded: [u8; 32] = r.array().map_err(|_| Status::Malformed)?;
         r.finish().map_err(|_| Status::Malformed)?;
 
+        // The admission is checked here and spent after the evaluation. An
+        // evaluation that fails then costs the sender no token and no
+        // proof of work.
+        let mut token_checked = None;
+        let mut seed_checked = None;
         match admission.kind {
             // DIS-164: a first-party token or a proof of work.
-            AdmissionKind::Token => self.spend_token(admission.body, now)?,
+            AdmissionKind::Token => token_checked = Some(self.check_token(admission.body, now)?),
             AdmissionKind::Pow => {
                 let solution = PowSolution::parse(admission.body).map_err(|_| Status::Malformed)?;
                 let epoch = epoch_number(now);
@@ -847,10 +887,7 @@ impl Directory {
                 )
                 .map_err(|_| Status::Refused)?;
 
-                // DIS-202: a full set drops a random seed. A refusal here
-                // would stop each lookup until the epoch ends (§9.4.1).
-                self.lookup_seeds
-                    .hold(epoch, seed_epoch, solution.seed, rng);
+                seed_checked = Some((epoch, seed_epoch, solution.seed));
             }
             AdmissionKind::None => return Err(Status::Refused),
         }
@@ -859,14 +896,17 @@ impl Directory {
             .voprf
             .evaluate(&blinded, rng)
             .map_err(|_| Status::Malformed)?;
-        Ok([&evaluation.element[..], &evaluation.proof].concat())
-    }
 
-    /// Verifies and spends one first-party token of this epoch or the one
-    /// before it (`ABU-094`, `ABU-095`).
-    fn spend_token(&mut self, bytes: &[u8], now: u64) -> Result<(), Status> {
-        let (token_epoch, nonce) = self.check_token(bytes, now)?;
-        self.commit_spend(token_epoch, nonce, now)
+        if let Some((token_epoch, nonce)) = token_checked {
+            self.commit_spend(token_epoch, nonce, now)?;
+        }
+        if let Some((epoch, seed_epoch, seed)) = seed_checked {
+            // DIS-202: a full set drops a random seed. A refusal here
+            // would stop each lookup until the epoch ends (§9.4.1).
+            self.lookup_seeds.hold(epoch, seed_epoch, seed, rng);
+        }
+
+        Ok([&evaluation.element[..], &evaluation.proof].concat())
     }
 
     /// Spends the nonce of a token that [`Directory::check_token`] passed.
@@ -1016,7 +1056,7 @@ impl Directory {
             .remove(search_key.as_slice())
             .ok_or(Status::NotFound)?;
         record.blob = (!blob.is_empty()).then_some(blob);
-        self.keep_label(&search_key, record);
+        self.keep_label(&search_key, record)?;
         Ok(Vec::new())
     }
 
@@ -1206,7 +1246,7 @@ impl Directory {
                 label,
                 blob: None,
             },
-        );
+        )?;
         Ok(Vec::new())
     }
 
@@ -1369,7 +1409,9 @@ impl Directory {
         if let Some(pending) = self.challenges.get(&slot) {
             let current = pending.version == record.label.version
                 && match pending.issued.purpose() {
-                    Purpose::Renew { lease_epoch } => lease_epoch == record.label.lease_epoch,
+                    Purpose::Renew { lease_epoch } => {
+                        lease_epoch == record.label.next_lease_epoch()
+                    }
                     Purpose::Write { .. } | Purpose::Blob => true,
                 };
             if current && now.saturating_sub(pending.at) < CHALLENGE_TTL {
@@ -1377,14 +1419,14 @@ impl Directory {
             }
         }
 
-        // Only a renewal changes the label, and only its lease epoch. Thus
-        // only the label of a renewal is a copy, and the blob stays.
-        let mut renewed = None;
+        // A challenge changes no label. Each party that knows a handle can
+        // ask for one, and a write here would cost it nothing. The label
+        // takes the lease epoch at the renewal.
+        let mut issued_epoch = None;
         let purpose = match purpose {
             RENEW => {
-                let mut label = record.label.clone();
-                let lease_epoch = label.issue_lease_epoch();
-                renewed = Some((label, lease_epoch));
+                let lease_epoch = record.label.next_lease_epoch();
+                issued_epoch = Some(lease_epoch);
                 Purpose::Renew { lease_epoch }
             }
             WRITE => Purpose::Write {
@@ -1398,9 +1440,8 @@ impl Directory {
         let mut out = issued.bytes().to_vec();
         let version = record.label.version;
 
-        if let Some((label, lease_epoch)) = renewed {
+        if let Some(lease_epoch) = issued_epoch {
             out.extend_from_slice(&lease_epoch.to_be_bytes());
-            self.replace_label(&search_key, label)?;
         }
 
         self.challenges.insert(
@@ -1694,6 +1735,18 @@ impl Directory {
             return self.issue_cross_relay(&mut r, epoch, current, count);
         }
 
+        // A stored batch with its proofs would else cost the directory
+        // each check and each evaluation again, for the whole epoch.
+        if self.issued_from < current {
+            self.issued.retain(|(held, _), _| *held >= current);
+            self.issued_order.retain(|(held, _)| *held >= current);
+            self.issued_from = current;
+        }
+        let batch_name = (epoch, sha3_256(&[body]));
+        if let Some(answer) = self.issued.get(&batch_name) {
+            return Ok(answer.clone());
+        }
+
         let issuer_pk = *self.issuer(epoch).map_err(|_| Status::Busy)?.public();
         let verifier = issue_verifier(&issuer_pk);
         let mut blinded = Vec::with_capacity(count);
@@ -1734,6 +1787,15 @@ impl Directory {
             out.extend_from_slice(element);
         }
         out.extend_from_slice(&batch.proof);
+
+        while self.issued_order.len() >= ISSUED_HELD_MAX {
+            let Some(oldest) = self.issued_order.pop_front() else {
+                break;
+            };
+            self.issued.remove(&oldest);
+        }
+        self.issued.insert(batch_name, out.clone());
+        self.issued_order.push_back(batch_name);
         Ok(out)
     }
 }
@@ -2185,8 +2247,11 @@ mod tests {
         let held = read(&mut dir, &keyset, input, now, &mut rng).unwrap();
         assert_eq!(held, handle_entry(input, &hk, 0));
 
-        // A renewal, which a replay of its answer does not repeat.
+        // A renewal, which a replay of its answer does not repeat. The
+        // challenge alone writes nothing to the store.
+        let stored = dir.events.len();
         let (bytes, purpose) = challenge(&mut dir, true, input, now, &mut rng).unwrap();
+        assert_eq!(dir.events.len(), stored);
         let ans = answer(purpose, &hk, input, &bytes, None).unwrap();
         let renew = dirclient::renew_body(input, &ans).unwrap();
         call(&mut dir, Kind::Renew, &renew, now + 1, &mut rng).unwrap();
@@ -2311,7 +2376,8 @@ mod tests {
                     label: Label::register(hk.public().to_bytes(), at),
                     blob: None,
                 },
-            );
+            )
+            .unwrap();
             let now = at + DIRECTORY_EPOCH;
             dir.tick(now, &mut rng).unwrap();
             assert_eq!(
@@ -2649,6 +2715,15 @@ mod tests {
 
         // ABU-110: the next epoch is in the log after the first tick.
         assert_eq!(tokens(&mut dir, epoch + 1, 1, T0, &mut rng).len(), 1);
+
+        // A batch that comes again takes the answer of the first time.
+        let pk = dir.issuer_public(epoch).unwrap();
+        let (_, body) = dirclient::issue_request(epoch, &pk, 2, &mut rng).unwrap();
+        let held = dir.issued.len();
+        let first = call(&mut dir, Kind::Issue, &body, T0, &mut rng).unwrap();
+        let second = call(&mut dir, Kind::Issue, &body, T0 + 1, &mut rng).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(dir.issued.len(), held + 1);
 
         let pk = dir.issuer_public(epoch).unwrap();
         let (_, mut body) = dirclient::issue_request(epoch, &pk, 1, &mut rng).unwrap();

@@ -46,8 +46,13 @@ pub struct EpochTag<'a> {
     pub start_slot: u32,
     /// The roster epoch of the epoch-key record.
     pub roster_epoch: u32,
+    /// `slot_count` of the record. It says whether the record serves the
+    /// group, thus no party moves a slot into a record of another count.
+    pub slot_count: u16,
     /// `k_e`, the epoch secret inside the slot.
     pub epoch_secret: &'a Secret<32>,
+    /// The owner credentials inside the slot.
+    pub own_sks: &'a [Secret<32>],
 }
 
 /// `SHA3-256(app)`, the digest of the application record that a tag covers.
@@ -127,7 +132,13 @@ impl PairKey {
         mac.update(&fields.epoch.to_be_bytes());
         mac.update(&fields.start_slot.to_be_bytes());
         mac.update(&fields.roster_epoch.to_be_bytes());
+        mac.update(&fields.slot_count.to_be_bytes());
         mac.update(fields.epoch_secret.expose());
+        // A slot holds at most `u8::MAX` credentials (Part 6 §6.4.6).
+        mac.update(&[u8::try_from(fields.own_sks.len()).unwrap_or(u8::MAX)]);
+        for own_sk in fields.own_sks {
+            mac.update(own_sk.expose());
+        }
         Self::truncate(mac)
     }
 
@@ -248,7 +259,7 @@ mod tests {
     }
 
     #[test]
-    fn the_epoch_tag_binds_the_secret() {
+    fn the_epoch_tag_binds_the_secret_the_count_and_the_credentials() {
         let (ab, ba) = pair();
         let k = Secret::new([5; 32]);
         let f = EpochTag {
@@ -256,7 +267,9 @@ mod tests {
             epoch: 2,
             start_slot: 497_001,
             roster_epoch: 1,
+            slot_count: 3,
             epoch_secret: &k,
+            own_sks: &[],
         };
         let tag = ab.epoch_tag(&f);
         assert!(ba.verify_epoch_tag(&f, &tag).is_ok());
@@ -267,5 +280,20 @@ mod tests {
             ..f
         };
         assert!(ba.verify_epoch_tag(&g, &tag).is_err());
+
+        // A slot of a record for the group is no slot of a one-slot record.
+        let one = EpochTag { slot_count: 1, ..f };
+        assert!(ba.verify_epoch_tag(&one, &tag).is_err());
+
+        let own = [Secret::new([7; 32]), Secret::new([8; 32])];
+        let with_own = EpochTag { own_sks: &own, ..f };
+        assert!(ba.verify_epoch_tag(&with_own, &tag).is_err());
+        let own_tag = ab.epoch_tag(&with_own);
+        let swapped = [Secret::new([8; 32]), Secret::new([7; 32])];
+        let other_own = EpochTag {
+            own_sks: &swapped,
+            ..f
+        };
+        assert!(ba.verify_epoch_tag(&other_own, &own_tag).is_err());
     }
 }

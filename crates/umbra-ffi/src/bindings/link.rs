@@ -1290,7 +1290,7 @@ impl Handle {
 
         let Inner { client, bridge, .. } = &mut *inner;
         if let Some(running) = bridge.as_mut() {
-            running.flush(client, &mut OsRng)?;
+            super::flush_logged(running, client);
         }
         inner.pump_groups();
         Ok(())
@@ -1323,6 +1323,11 @@ impl Handle {
     /// call on the device that owns the channels gives `NotFound`.
     pub fn take_over(&self, sink: Arc<dyn super::TextSink>) -> Result<(), FfiError> {
         let mut held = super::HeldText::default();
+
+        // The lock order of `connect`: the runtime, then the state. A start
+        // on another thread then runs before this call or after it, and the
+        // stop below ends no runtime of a later run.
+        let mut runtime = locked(&self.runtime);
         let rendered = {
             let mut inner = locked(&self.inner);
             let now = unix_now();
@@ -1347,10 +1352,11 @@ impl Handle {
             inner.client.render_recovery_code(&mut held, &mut OsRng)
         };
 
-        if let Some(runtime) = locked(&self.runtime).take() {
-            runtime.shutdown_background();
+        if let Some(stopped) = runtime.take() {
+            stopped.shutdown_background();
         }
         locked(&self.run_done).take();
+        drop(runtime);
         self.changed.notify_all();
         rendered?;
         held.give(sink.as_ref())

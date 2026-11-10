@@ -2,7 +2,7 @@
 //! two-bit store level of each leaf. No signature covers it; the entries
 //! it names verify against the signed root.
 
-use alloc::vec::Vec;
+use alloc::{collections::BTreeSet, vec::Vec};
 
 use umbra_wire::codec::{Reader, Writer};
 
@@ -101,6 +101,13 @@ impl RelaySetDiff {
             added.push(r.array()?);
         }
 
+        // REL-225: one identifier, one place. A second one would let the
+        // reader choose which of the two the diff means.
+        let mut named = BTreeSet::new();
+        if !removed.iter().chain(&added).all(|id| named.insert(id)) {
+            return Err(Error::Malformed);
+        }
+
         let leaf_count = usize::from(r.u16()?);
         let packed = r.take(leaf_count.div_ceil(4))?;
         r.finish()?;
@@ -161,5 +168,27 @@ mod tests {
         assert_eq!(RelaySetDiff::parse(&out[..n]).unwrap(), diff);
         out[n - 1] |= 0x04;
         assert!(RelaySetDiff::parse(&out[..n]).is_err());
+    }
+
+    #[test]
+    fn a_diff_names_an_identifier_one_time() {
+        let diff_of = |removed: Vec<[u8; 32]>, added: Vec<[u8; 32]>| {
+            let diff = RelaySetDiff {
+                epoch: 10,
+                base_epoch: 9,
+                removed,
+                added,
+                levels: Vec::new(),
+            };
+            let mut out = vec![0u8; 200];
+            let n = diff.encode(&mut out).unwrap();
+            out.truncate(n);
+            out
+        };
+
+        assert!(RelaySetDiff::parse(&diff_of(vec![[1; 32]], vec![[2; 32]])).is_ok());
+        assert!(RelaySetDiff::parse(&diff_of(vec![[1; 32], [1; 32]], vec![])).is_err());
+        assert!(RelaySetDiff::parse(&diff_of(vec![], vec![[2; 32], [2; 32]])).is_err());
+        assert!(RelaySetDiff::parse(&diff_of(vec![[1; 32]], vec![[1; 32]])).is_err());
     }
 }
