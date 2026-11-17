@@ -3744,6 +3744,10 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         let members = self.group_of(conversation)?.roster().active_count();
         self.start_group_alert(conversation, members, rng)?;
 
+        // The snapshot came on the chunk path, where no record raises an
+        // event. Without this one, the list shows the group after a restart.
+        self.events.push_back(Event::Conversations);
+
         Ok(conversation)
     }
 
@@ -11650,11 +11654,16 @@ mod tests {
             T0 * 1_000 + 600,
             &mut rng,
         );
+        while joiner.next_event().is_some() {}
         let member = joiner
             .accept_group_admit(at_joiner, &group_id, &admission.snapshot, T0 + 1, &mut rng)
             .unwrap();
         assert!(joiner.group_info(member).unwrap().is_member);
         assert!(joiner.group_admits().unwrap().is_empty());
+
+        // The view lists the group with no restart.
+        let mut events = std::iter::from_fn(|| joiner.next_event());
+        assert!(events.any(|event| event == Event::Conversations));
     }
 
     #[test]

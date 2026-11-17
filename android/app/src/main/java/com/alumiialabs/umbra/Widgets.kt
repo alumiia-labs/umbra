@@ -97,7 +97,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import androidx.compose.foundation.selection.selectable
@@ -251,7 +250,7 @@ fun PlatformInput(
     val textColor = Palette.Text.toArgb()
     val hintColor = Palette.TextSecondary.toArgb()
 
-    AndroidView(
+    PlatformView(
         modifier = modifier,
         factory = { context ->
             EditText(context).apply {
@@ -375,7 +374,7 @@ fun PlatformText(
     val argb = color.toArgb()
     val linkArgb = Palette.Action.toArgb()
 
-    AndroidView(
+    PlatformView(
         modifier = modifier,
         factory = { context ->
             TextView(context).apply {

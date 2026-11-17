@@ -4200,9 +4200,15 @@ impl Inner {
                 }
                 Some(TransferWork::Admit { from, group_id }) => {
                     // GRP-326: the snapshot verifies, and the joiner holds
-                    // the group from here.
-                    let _ =
+                    // the group from here. The pump then reads its queue.
+                    let accepted =
                         client.accept_group_admit(from, &group_id, &plain, unix_now(), &mut OsRng);
+                    match accepted {
+                        Ok(_) => moved = true,
+                        Err(error) => {
+                            crate::devlog::format_line!("transfer {tag}: no admit, {error:?}");
+                        }
+                    }
                 }
                 Some(TransferWork::EpochChunk {
                     conversation,

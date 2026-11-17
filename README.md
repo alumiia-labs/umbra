@@ -23,7 +23,7 @@ protocol or the code. Do not use UMBRA where a failure puts a person at risk.
 | `site/` | The web site of the invitation links. |
 | `brand/` | The logo files. |
 | `scripts/` | The build scripts and the check scripts. |
-| `tests/` | The test vectors and the fixtures. |
+| `tests/` | The test vectors, the fixtures, and the end-to-end tests on emulators (`tests/e2e`). |
 
 Start with `spec/01-scope-and-conventions.md` and `spec/02-threat-model.md`.
 Part 15 lists what UMBRA does not protect against.

@@ -1,10 +1,15 @@
 package com.alumiialabs.umbra
 
+import android.content.Context
+import android.view.View
+import androidx.compose.foundation.layout.Box
+import androidx.compose.runtime.Composable
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
+import androidx.compose.ui.viewinterop.AndroidView
 
 /**
  * The names that an end-to-end test finds a control by. UI Automator reads
@@ -284,3 +289,18 @@ fun Modifier.tagged(tag: String?): Modifier = if (tag == null) this else testTag
  */
 @OptIn(ExperimentalComposeUiApi::class)
 fun Modifier.testRoot(): Modifier = semantics { testTagsAsResourceId = true }
+
+/**
+ * A view of the platform under a node of Compose. A test name on the view
+ * itself reaches no UI Automator, thus the node around it holds the name.
+ */
+@Composable
+fun <T : View> PlatformView(
+    modifier: Modifier = Modifier,
+    factory: (Context) -> T,
+    update: (T) -> Unit = {},
+) {
+    Box(modifier, propagateMinConstraints = true) {
+        AndroidView(factory = factory, update = update)
+    }
+}

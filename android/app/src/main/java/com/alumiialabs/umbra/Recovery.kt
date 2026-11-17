@@ -40,7 +40,6 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
 
 /**
  * The prompts of Part 4 §4.7.6: the user can dismiss the one that asks for
@@ -258,7 +257,7 @@ private fun backupLine(context: Context, atSeconds: Long?): String =
 private fun DigitRows(digits: CharArray) {
     val ink = Palette.Text.toArgb()
 
-    AndroidView(
+    PlatformView(
         modifier = Modifier.tagged(TestTags.RECOVERY_DIGITS),
         factory = { context ->
             TextView(context).apply {

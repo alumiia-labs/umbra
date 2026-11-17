@@ -43,7 +43,6 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.delay
 import java.nio.CharBuffer
 import androidx.compose.material3.minimumInteractiveComponentSize
@@ -299,7 +298,7 @@ private fun Snippet(result: Core.Found, prefix: String, modifier: Modifier = Mod
     val color = Palette.TextSecondary.toArgb()
     val markColor = Palette.Action.toArgb()
 
-    AndroidView(
+    PlatformView(
         modifier = modifier,
         factory = { context ->
             TextView(context).apply {

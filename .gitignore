@@ -13,3 +13,6 @@ deploy/ansible/build/
 # The settings and the state of the relay of compose.yaml: its keys.
 /.env
 /data/
+
+# The screenshots of a failed end-to-end scenario.
+tests/e2e/fail-*.png
