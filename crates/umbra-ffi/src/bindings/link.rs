@@ -204,40 +204,8 @@ struct Join {
 #[derive(uniffi::Object)]
 pub struct Linked(pub(super) Mutex<LinkedHold>);
 
-/// What a [`Linked`] holds, and whether a lock emptied it.
-pub(super) struct LinkedHold {
-    value: Option<(RestoredBackup, DeviceIdentity)>,
-    is_wiped: bool,
-}
-
-impl LinkedHold {
-    fn new(value: (RestoredBackup, DeviceIdentity)) -> Self {
-        LinkedHold {
-            value: Some(value),
-            is_wiped: false,
-        }
-    }
-
-    /// Empties the holder for good, as a lock does (`IMP-127`). A call of
-    /// [`init_linked`] that fails after this puts nothing back.
-    pub(super) fn take(&mut self) -> Option<(RestoredBackup, DeviceIdentity)> {
-        self.is_wiped = true;
-        self.value.take()
-    }
-
-    /// Takes the value for the long steps of [`init_linked`].
-    fn lend(&mut self) -> Option<(RestoredBackup, DeviceIdentity)> {
-        self.value.take()
-    }
-
-    /// Puts the value back for the next try. After a lock no handle refers
-    /// to the holder, thus the value drops here and wipes.
-    fn give_back(&mut self, value: (RestoredBackup, DeviceIdentity)) {
-        if !self.is_wiped {
-            self.value = Some(value);
-        }
-    }
-}
+/// What a [`Linked`] holds: the snapshot and the keys of the device.
+pub(super) type LinkedHold = super::Held<(RestoredBackup, DeviceIdentity)>;
 
 /// What a pump of the link does next.
 enum Next {
@@ -1107,14 +1075,17 @@ impl Inner {
     /// the link holds from here, and the provision and the snapshot go
     /// (`DEV-003`). A roster that does not commit names no new device, thus
     /// its channel ends (`DEV-290`).
-    pub(super) fn link_opened(&mut self, conversation: crate::ConversationId) {
+    ///
+    /// The result is whether the channel stays. A channel whose roster did
+    /// not commit ends here, and the view gets no event of it.
+    pub(super) fn link_opened(&mut self, conversation: crate::ConversationId) -> bool {
         let Some(LinkState {
             job: LinkJob::Offer(offer),
             status: LinkStatus::Sending | LinkStatus::Waiting,
             ..
         }) = self.link.as_ref()
         else {
-            return;
+            return true;
         };
 
         // DEV-290: a sync channel that opened before the provision left is
@@ -1122,7 +1093,7 @@ impl Inner {
         // provision before that link ended. Such a channel commits no
         // roster of this link.
         if !offer.provision_sent {
-            return;
+            return true;
         }
 
         let committed = offer
@@ -1155,6 +1126,7 @@ impl Inner {
         } else {
             LinkStatus::Failed
         });
+        committed
     }
 
     /// The offer is there: it checks against the ticket (`DEV-281`), and
@@ -1665,6 +1637,18 @@ impl Handle {
     pub fn owes_rotation(&self, conversation: Vec<u8>) -> Result<bool, FfiError> {
         let conversation = super::conversation_of(&conversation)?;
         Ok(locked(&self.inner).client.owes_rotation(conversation)?)
+    }
+
+    /// Sends each key-change notice of a reset now, as a wait of its delay
+    /// does (`IDN-063`). For a test over real sockets alone.
+    pub fn end_notice_delays(&self) -> Result<(), FfiError> {
+        let mut inner = locked(&self.inner);
+        inner.client.send_due_notices(u64::MAX, &mut OsRng)?;
+        let super::Inner { client, bridge, .. } = &mut *inner;
+        if let Some(running) = bridge {
+            super::flush_logged(running, client);
+        }
+        Ok(())
     }
 }
 
@@ -2217,8 +2201,13 @@ mod tests {
         inner.client.commit_roster(&other, &mut OsRng).unwrap();
 
         // The link fails, and the channel of a device that no roster names
-        // ends with it (`DEV-290`).
-        inner.link_opened(conversation);
+        // ends with it (`DEV-290`). The view gets no event of a linked
+        // device.
+        inner
+            .net_events
+            .push_back(crate::bridge::NetEvent::DeviceLinked(conversation));
+        inner.take_link_events();
+        assert!(inner.net_events.is_empty());
         assert_eq!(status(&inner), LinkStatus::Failed);
         assert!(!inner.client.is_device_peer(conversation).unwrap());
 

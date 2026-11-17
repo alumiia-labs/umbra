@@ -93,6 +93,48 @@ impl TextSink for View {
     }
 }
 
+/// The directory of one test. It goes at the end of the test, also after
+/// an assert that failed. Its name holds a count and the clock, thus no
+/// test finds the files of an earlier run under a process identifier that
+/// the system gave again.
+struct TestDir(std::path::PathBuf);
+
+impl TestDir {
+    fn new(name: &str) -> Self {
+        static COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let count = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.subsec_nanos());
+        let directory = std::env::temp_dir().join(format!(
+            "umbra-{name}-{}-{count}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        TestDir(directory)
+    }
+}
+
+impl std::ops::Deref for TestDir {
+    type Target = std::path::Path;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl AsRef<std::path::Path> for TestDir {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 fn units(text: &str) -> Vec<u16> {
     text.encode_utf16().collect()
 }
@@ -183,10 +225,7 @@ fn start_relays_with(
     let mut listeners = Vec::new();
     for index in 0..LAYERS.len() {
         let port = ports.map_or(0, |ports| ports[index]);
-        let listener = relays
-            .block_on(TcpListener::bind(("127.0.0.1", port)))
-            .unwrap();
-        listeners.push(listener);
+        listeners.push(network::bind_at(&relays, [127, 0, 0, 1], port));
     }
 
     let ports: Vec<u16> = listeners
@@ -306,9 +345,7 @@ fn wait_past_faults<T>(handle: &Handle, mut pick: impl FnMut(FfiEvent) -> Option
 
 #[test]
 fn the_relay_processes_end_and_the_contact_continues() {
-    let directory = std::env::temp_dir().join(format!("umbra-relays-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir_all(&directory).unwrap();
+    let directory = TestDir::new("relays");
     let (relays, ports) = start_relays(Some(&directory), None);
     let network = network_of(&ports);
 
@@ -341,11 +378,12 @@ fn the_relay_processes_end_and_the_contact_continues() {
         _ => None,
     });
 
-    // Each relay process ends, and three new ones take the same ports and
-    // the same files.
+    // Each relay process ends, and new ones take the same files. They take
+    // new ports: a test that runs beside this one can hold a port that this
+    // test released.
     drop(relays);
-    let (_relays, again) = start_relays(Some(&directory), Some(&ports));
-    assert_eq!(again, ports);
+    let (_relays, again) = start_relays(Some(&directory), None);
+    let network = network_of(&again);
     alice.clone().connect(network.clone()).unwrap();
     bob.clone().connect(network.clone()).unwrap();
 
@@ -371,8 +409,7 @@ fn two_apps_meet_and_talk_through_the_exported_surface() {
     let (_relays, ports) = start_relays(None, None);
     let network = network_of(&ports);
 
-    let directory = std::env::temp_dir().join(format!("umbra-app-{}", std::process::id()));
-    std::fs::create_dir_all(&directory).unwrap();
+    let directory = TestDir::new("app");
     let launch = |name: &str, key: u8, is_first: bool| {
         let path = directory.join(name);
         if is_first {
@@ -600,7 +637,7 @@ fn fake_fcm(
     services: &tokio::runtime::Runtime,
 ) -> (
     umbra_relay::fcm::Fcm,
-    tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    tokio::sync::mpsc::UnboundedReceiver<(String, Vec<u8>)>,
 ) {
     use umbra_relay::fcm::{Fcm, ServiceAccount};
     let google = services
@@ -631,7 +668,8 @@ fn fake_fcm(
                 .and_then(|rest| rest.split('"').next())
                 .map(decode_base64url)
                 .unwrap_or_default();
-            let _ = pushed.send(blob);
+            let token = umbra_relay::fcm::json_string(&body, "token").unwrap_or_default();
+            let _ = pushed.send((token, blob));
             let _ = https::respond(&mut stream, 200, "application/json", b"{}").await;
         }
     });
@@ -714,9 +752,7 @@ fn a_message_to_an_app_that_went_away_reaches_its_fcm_token() {
     network.ndr_relay_url = Some(format!("https://localhost:{}/ohttp", ports[0]));
     network.ndr_key_config = Some(config.to_vec());
 
-    let directory = std::env::temp_dir().join(format!("umbra-push-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir_all(&directory).unwrap();
+    let directory = TestDir::new("push");
 
     let alice = launch(&directory, "alice.db", 1);
     let bob = launch(&directory, "bob.db", 2);
@@ -748,10 +784,11 @@ fn a_message_to_an_app_that_went_away_reaches_its_fcm_token() {
     let draft = bob.new_draft(bob_conversation).unwrap();
     draft.set_text(units("while you are away")).unwrap();
     bob.send_draft(draft).unwrap();
-    let blob = services
+    let (token, blob) = services
         .block_on(async { tokio::time::timeout(STEP, posts.recv()).await })
         .unwrap()
         .unwrap();
+    assert_eq!(token, "fcm-alice");
     assert_eq!(blob.len(), umbra_wire::ndr::BLOB_LEN);
     bob.disconnect();
 }
@@ -774,9 +811,7 @@ impl umbra_ffi::watch::WatchListener for Wakes {
 fn a_message_to_a_locked_app_in_direct_mode_wakes_its_watch() {
     let (_relays, ports) = start_relays(None, None);
     let network = network_of(&ports);
-    let directory = std::env::temp_dir().join(format!("umbra-watch-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir_all(&directory).unwrap();
+    let directory = TestDir::new("watch");
 
     let alice = launch(&directory, "alice.db", 1);
     let bob = launch(&directory, "bob.db", 2);
@@ -873,9 +908,7 @@ fn a_group_record_wakes_a_member_that_went_away_through_its_notify_queue() {
     let relays = tokio::runtime::Runtime::new().unwrap();
     let network = start_signed_network_with(&relays, None, Some(&ndr), None, false);
 
-    let directory = std::env::temp_dir().join(format!("umbra-gpush-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir_all(&directory).unwrap();
+    let directory = TestDir::new("gpush");
 
     let alice = launch(&directory, "alice.db", 1);
     let bob = launch(&directory, "bob.db", 2);
@@ -992,10 +1025,11 @@ fn a_group_record_wakes_a_member_that_went_away_through_its_notify_queue() {
     let start = Instant::now();
     let woken = loop {
         let left = Duration::from_secs(30).saturating_sub(start.elapsed());
-        let blob = services
+        let (token, blob) = services
             .block_on(async { tokio::time::timeout(left, posts.recv()).await })
             .expect("no push for the group reached the endpoint of Bob")
             .unwrap();
+        assert_eq!(token, "fcm-bob");
         assert_eq!(blob.len(), umbra_wire::ndr::BLOB_LEN);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1092,7 +1126,10 @@ fn a_descriptor_names_the_facts_of_each_relay_and_the_first_version_reads() {
             .collect::<Vec<_>>(),
         [1, 2, 3]
     );
-    assert!(parse_network(first.replace("umbra-network 1", "umbra-network 3"), None).is_err());
+    assert_eq!(
+        parse_network(first.replace("umbra-network 1", "umbra-network 3"), None).err(),
+        Some(FfiError::Malformed)
+    );
 }
 
 /// A directory of Part 9 with its issuer, on loopback, with an epoch of one
@@ -1193,8 +1230,7 @@ fn two_apps_take_their_network_from_a_signed_manifest() {
     );
     assert_eq!(absent, Err(FfiError::Offline));
 
-    let directory = std::env::temp_dir().join(format!("umbra-manifest-{}", std::process::id()));
-    std::fs::create_dir_all(&directory).unwrap();
+    let directory = TestDir::new("manifest");
     for name in ["alice.db", "bob.db", "carol.db", "dave.db"] {
         let _ = std::fs::remove_file(directory.join(name));
     }
@@ -1284,13 +1320,11 @@ fn two_apps_take_their_network_from_a_signed_manifest() {
     // pin, and the client comes online (Part 10 §10.6.1).
     let dave = launch(&directory, "dave.db", 4);
     let mut lame = network_of(&dave, &manifest, 0).unwrap().network;
-    let closed = relays
-        .block_on(TcpListener::bind(("127.0.0.1", 0)))
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    lame.relays[0].port = closed;
+    // The socket holds its port for the test and listens on none, thus the
+    // dial is refused and no test beside this one takes the port.
+    let closed = tokio::net::TcpSocket::new_v4().unwrap();
+    closed.bind(([127, 0, 0, 1], 0).into()).unwrap();
+    lame.relays[0].port = closed.local_addr().unwrap().port();
     dave.clone().connect(lame.clone()).unwrap();
     wait_past_faults(&dave, |event| match event {
         FfiEvent::Offline { .. } => Some(()),
@@ -1377,9 +1411,7 @@ fn a_network_of_one_operator_carries_a_contact_while_the_directory_is_provisiona
         epoch,
         ..
     } = start_signed_network_with(&relays, None, None, None, true);
-    let directory = std::env::temp_dir().join(format!("umbra-bootstrap-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir_all(&directory).unwrap();
+    let directory = TestDir::new("bootstrap");
 
     let alice = launch(&directory, "alice.db", 1);
     let bob = launch(&directory, "bob.db", 2);
@@ -1529,9 +1561,7 @@ fn the_authority_tool_holds_its_report_queue_in_a_network_of_one_operator() {
         epoch,
         ..
     } = start_signed_network_with(&relays, None, None, None, true);
-    let directory = std::env::temp_dir().join(format!("umbra-authority-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir_all(&directory).unwrap();
+    let directory = TestDir::new("authority");
     let path = |name: &str| directory.join(name).to_str().unwrap().to_owned();
 
     // The settings of a test network: each seed is in the file.
@@ -1627,10 +1657,12 @@ fn the_authority_tool_holds_its_report_queue_in_a_network_of_one_operator() {
 fn transfer_end(
     updates: &mut tokio::sync::mpsc::UnboundedReceiver<TransferUpdate>,
 ) -> TransferUpdate {
-    let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(60) {
+    // The bound is a time with no progress, as in `wait_for_file`.
+    let mut since = Instant::now();
+    while since.elapsed() < Duration::from_secs(60) {
         match updates.try_recv() {
-            Ok(TransferUpdate::Progress { .. } | TransferUpdate::Chains(_)) => {}
+            Ok(TransferUpdate::Progress { .. }) => since = Instant::now(),
+            Ok(TransferUpdate::Chains(_)) => {}
             Ok(end) => return end,
             Err(_) => std::thread::sleep(Duration::from_millis(20)),
         }
@@ -1719,14 +1751,22 @@ fn a_file_goes_through_the_relays_of_a_signed_network() {
 
 /// Waits until the file of a message has the state `state`.
 fn wait_for_file(handle: &Handle, message: &Arc<MsgHandle>, state: u8) {
-    let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(60) {
+    // The bound is a time with no chunk moved, and not the time of the
+    // whole transfer: a machine under load moves each chunk late, and a
+    // transfer that stands still moves none.
+    let mut moved = (0, 0);
+    let mut since = Instant::now();
+    while since.elapsed() < Duration::from_secs(60) {
         let file = handle.msg_info(message.clone()).unwrap().file.unwrap();
         if file.state == state {
             return;
         }
 
         assert_ne!(file.state, 4, "the transfer failed");
+        if (file.state, file.done) != moved {
+            moved = (file.state, file.done);
+            since = Instant::now();
+        }
         let _ = handle.wait_event(200);
     }
     panic!("the file did not reach the state {state} in time");
@@ -1736,8 +1776,7 @@ fn wait_for_file(handle: &Handle, message: &Arc<MsgHandle>, state: u8) {
 fn one_app_sends_a_file_and_the_other_app_gets_it() {
     let relays = tokio::runtime::Runtime::new().unwrap();
     let network = start_signed_network(&relays);
-    let directory = std::env::temp_dir().join(format!("umbra-files-{}", std::process::id()));
-    std::fs::create_dir_all(&directory).unwrap();
+    let directory = TestDir::new("files");
     for name in ["alice.db", "bob.db", "photo.bin"] {
         let _ = std::fs::remove_file(directory.join(name));
     }
@@ -1874,8 +1913,7 @@ fn group_update(updates: &mut tokio::sync::mpsc::UnboundedReceiver<GroupUpdate>)
 fn a_contact_introduces_two_of_its_contacts_with_the_consent_of_each() {
     let relays = tokio::runtime::Runtime::new().unwrap();
     let network = start_signed_network(&relays);
-    let directory = std::env::temp_dir().join(format!("umbra-intro-{}", std::process::id()));
-    std::fs::create_dir_all(&directory).unwrap();
+    let directory = TestDir::new("intro");
     for name in ["alice.db", "bob.db", "carol.db"] {
         let _ = std::fs::remove_file(directory.join(name));
     }
@@ -1943,9 +1981,20 @@ fn a_contact_introduces_two_of_its_contacts_with_the_consent_of_each() {
         carol.accept_introduction(offered[0].id.clone()).unwrap(),
         "Bob"
     );
-    wait_for_contact(&carol);
+    let bob_at_carol = wait_for_contact(&carol);
+    let carol_at_bob = wait_for_contact(&bob);
 
-    wait_for_contact(&bob);
+    // The two new conversations are with each other: a record of Carol in
+    // hers comes to Bob in his, and Alice reads none of it.
+    let draft = carol.new_draft(bob_at_carol).unwrap();
+    draft.set_text(units("hello Bob, from Carol")).unwrap();
+    carol.send_draft(draft).unwrap();
+    let (conversation, message) = wait_for_message(&bob);
+    assert_eq!(conversation, carol_at_bob);
+    assert_eq!(rendered(&bob, message), "hello Bob, from Carol");
+    assert_eq!(bob.conversations().unwrap().len(), 2);
+    assert_eq!(carol.conversations().unwrap().len(), 2);
+    assert_eq!(alice.conversations().unwrap().len(), 2);
 
     assert!(carol.introductions().unwrap().is_empty());
     for handle in [&alice, &bob, &carol] {
@@ -1958,8 +2007,7 @@ fn a_contact_introduces_two_of_its_contacts_with_the_consent_of_each() {
 fn a_push_wake_session_ends_after_six_seconds_unless_the_app_comes_to_the_screen() {
     let relays = tokio::runtime::Runtime::new().unwrap();
     let network = start_signed_network(&relays);
-    let directory = std::env::temp_dir().join(format!("umbra-wake-{}", std::process::id()));
-    std::fs::create_dir_all(&directory).unwrap();
+    let directory = TestDir::new("wake");
     let _ = std::fs::remove_file(directory.join("alice.db"));
 
     let alice = launch(&directory, "alice.db", 1);
@@ -2007,8 +2055,7 @@ fn a_push_wake_session_ends_after_six_seconds_unless_the_app_comes_to_the_screen
 fn a_contact_that_reset_its_identity_joins_a_group_and_reads_it() {
     let relays = tokio::runtime::Runtime::new().unwrap();
     let network = start_signed_network(&relays);
-    let directory = std::env::temp_dir().join(format!("umbra-reset-join-{}", std::process::id()));
-    std::fs::create_dir_all(&directory).unwrap();
+    let directory = TestDir::new("reset-join");
     for name in ["alice.db", "bob.db"] {
         let _ = std::fs::remove_file(directory.join(name));
     }
@@ -2118,6 +2165,65 @@ fn a_contact_that_reset_its_identity_joins_a_group_and_reads_it() {
     assert_eq!(conversation, joined);
     assert_eq!(rendered(&bob, message), "seen it");
 
+    // IDN-062: a reset of Bob left a key-change notice at Alice. An answer
+    // that names another number than the one of the notice applies nothing.
+    // The notice goes at a delay that a test cannot wait for.
+    bob.end_notice_delays().unwrap();
+    let notice = || {
+        let start = Instant::now();
+        loop {
+            if let Some(pending) = alice.key_change(alice_conversation.clone()).unwrap() {
+                return pending;
+            }
+
+            assert!(
+                start.elapsed() < Duration::from_secs(60),
+                "no key-change notice"
+            );
+            alice.clone().tick();
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    };
+    let shown = notice().new_safety_number;
+    let other: String = shown
+        .chars()
+        .map(|c| {
+            if c == '1' {
+                '2'
+            } else if c.is_ascii_digit() {
+                '1'
+            } else {
+                c
+            }
+        })
+        .collect();
+    assert_ne!(other, shown);
+    assert_eq!(
+        alice.accept_key_change(alice_conversation.clone(), other),
+        Err(FfiError::Stale)
+    );
+    assert!(alice
+        .key_change(alice_conversation.clone())
+        .unwrap()
+        .is_some());
+
+    // The answer to the number that the notice shows applies. The notice
+    // of the second reset can take the place of the first one between the
+    // read and the answer, thus a stale answer reads the notice again.
+    let mut is_accepted = false;
+    for _ in 0..3 {
+        let shown = notice().new_safety_number;
+        match alice.accept_key_change(alice_conversation.clone(), shown) {
+            Ok(()) => {
+                is_accepted = true;
+                break;
+            }
+            Err(FfiError::Stale) => {}
+            Err(other) => panic!("{other:?}"),
+        }
+    }
+    assert!(is_accepted);
+
     alice.disconnect();
     bob.disconnect();
     let _ = std::fs::remove_dir_all(&directory);
@@ -2127,8 +2233,7 @@ fn a_contact_that_reset_its_identity_joins_a_group_and_reads_it() {
 fn one_app_offers_a_group_and_the_other_app_joins_it() {
     let relays = tokio::runtime::Runtime::new().unwrap();
     let network = start_signed_network(&relays);
-    let directory = std::env::temp_dir().join(format!("umbra-join-{}", std::process::id()));
-    std::fs::create_dir_all(&directory).unwrap();
+    let directory = TestDir::new("join");
     for name in ["alice.db", "bob.db"] {
         let _ = std::fs::remove_file(directory.join(name));
     }
@@ -2919,9 +3024,7 @@ fn the_group_run_outlives_its_relays_and_carries_its_commands_on() {
 fn an_app_in_the_foreground_writes_its_backup_to_the_relays() {
     let relays = tokio::runtime::Runtime::new().unwrap();
     let network = start_signed_network(&relays);
-    let directory = std::env::temp_dir().join(format!("umbra-backup-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir_all(&directory).unwrap();
+    let directory = TestDir::new("backup");
 
     let alice = launch(&directory, "alice.db", 1);
     let verified = alice
@@ -2960,9 +3063,7 @@ fn an_app_in_the_foreground_writes_its_backup_to_the_relays() {
 fn a_lost_phone_comes_back_from_its_backup_and_its_contact_talks_again() {
     let relays = tokio::runtime::Runtime::new().unwrap();
     let network = start_signed_network(&relays);
-    let directory = std::env::temp_dir().join(format!("umbra-restore-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir_all(&directory).unwrap();
+    let directory = TestDir::new("restore");
 
     let network_for = |handle: &Handle| {
         handle
@@ -3055,6 +3156,7 @@ fn a_lost_phone_comes_back_from_its_backup_and_its_contact_talks_again() {
         .unwrap()
         .iter()
         .any(|summary| summary.conversation == alice_conversation));
+    assert!(holds_text(&back, &alice_conversation, "see you soon"));
     back.clone().connect(network_for(&back)).unwrap();
 
     // NET-325 to NET-329: the stale channel renews, and the two talk again.
@@ -3095,9 +3197,7 @@ fn a_new_device_links_from_the_code_of_the_existing_one() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let relays = tokio::runtime::Runtime::new().unwrap();
     let network = start_signed_network(&relays);
-    let directory = std::env::temp_dir().join(format!("umbra-link-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir_all(&directory).unwrap();
+    let directory = TestDir::new("link");
 
     let network_for = |handle: &Handle| {
         handle
@@ -3652,9 +3752,7 @@ fn a_linked_device_reads_and_writes_a_group() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let relays = tokio::runtime::Runtime::new().unwrap();
     let network = start_signed_network(&relays);
-    let directory = std::env::temp_dir().join(format!("umbra-link-group-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir_all(&directory).unwrap();
+    let directory = TestDir::new("link-group");
 
     let network_for = |handle: &Handle| {
         handle
@@ -3765,7 +3863,10 @@ fn a_linked_device_reads_and_writes_a_group() {
     }
 
     // GRP-338: the tablet makes no group of its own.
-    assert!(tablet.create_group("Other".into()).is_err());
+    assert_eq!(
+        tablet.create_group("Other".into()).err(),
+        Some(FfiError::NotFound)
+    );
 
     // DEV-126: a delete for me removes the message on each device of the
     // set, and Bob keeps his copy.
@@ -3822,9 +3923,7 @@ fn a_linked_device_takes_over_the_set_of_a_lost_phone_and_its_contact_talks_on()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let relays = tokio::runtime::Runtime::new().unwrap();
     let network = start_signed_network(&relays);
-    let directory = std::env::temp_dir().join(format!("umbra-takeover-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir_all(&directory).unwrap();
+    let directory = TestDir::new("takeover");
 
     let network_for = |handle: &Handle| {
         handle
@@ -4050,9 +4149,7 @@ fn a_removed_device_that_offers_a_renewal_gives_the_contact_a_question_and_no_ch
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let relays = tokio::runtime::Runtime::new().unwrap();
     let network = start_signed_network(&relays);
-    let directory = std::env::temp_dir().join(format!("umbra-guard-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir_all(&directory).unwrap();
+    let directory = TestDir::new("guard");
 
     let network_for = |handle: &Handle| {
         handle
@@ -4120,6 +4217,10 @@ fn a_removed_device_that_offers_a_renewal_gives_the_contact_a_question_and_no_ch
     alice.remove_device(laptop_id).unwrap();
     assert_eq!(alice.devices().unwrap().len(), 1);
 
+    // Part 7 §7.7 step 2c: the contact owes a new queue from here on. No
+    // run does the rotation yet, thus this read is no race with it.
+    assert!(alice.owes_rotation(alice_conversation.clone()).unwrap());
+
     // The laptop is in hostile hands. It takes the set over, as such a
     // device can (Part 7 §7.7), with the store from before the removal.
     laptop.age_owner_absence().unwrap();
@@ -4143,7 +4244,6 @@ fn a_removed_device_that_offers_a_renewal_gives_the_contact_a_question_and_no_ch
     // 2c: the rotation is what keeps the laptop from the queue that it
     // knew. Until Bob writes to the new queue, a device with the store of
     // the laptop can take the subscription of the old one (Part 15 §15.3).
-    assert!(alice.owes_rotation(alice_conversation.clone()).unwrap());
     let start = Instant::now();
     while alice.owes_rotation(alice_conversation.clone()).unwrap() {
         assert!(
@@ -4228,9 +4328,7 @@ fn a_group_made_after_the_link_reaches_each_linked_device() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let relays = tokio::runtime::Runtime::new().unwrap();
     let network = start_signed_network(&relays);
-    let directory = std::env::temp_dir().join(format!("umbra-late-group-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir_all(&directory).unwrap();
+    let directory = TestDir::new("late-group");
 
     let network_for = |handle: &Handle| {
         handle
@@ -4485,9 +4583,7 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
     let relays = tokio::runtime::Runtime::new().unwrap();
     let (directory_port, pins) = start_test_directory(&relays);
     let network = start_signed_network_with(&relays, None, None, Some(directory_port), false);
-    let directory = std::env::temp_dir().join(format!("umbra-dir-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir_all(&directory).unwrap();
+    let directory = TestDir::new("dir");
     let ingress = network.ports[0];
     let network_for = |handle: &Handle| Network {
         directory_relay_url: Some(format!("https://localhost:{ingress}/directory")),
@@ -4714,6 +4810,8 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
     loop {
         match bob.send_contact_request(link.link.clone(), String::new(), false) {
             Err(FfiError::NotFound) => break,
+            // The log shows the retirement at the next epoch. A hello before
+            // that goes to a queue that Alice ended.
             Ok(()) | Err(FfiError::Busy) => {
                 assert!(
                     start.elapsed() < Duration::from_secs(40),
@@ -4729,9 +4827,31 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
     // keeps, and it takes requests before its end.
     let timed = alice.create_public_link(3_600).unwrap();
     assert!(timed.expires_at > 0);
-    std::thread::sleep(Duration::from_secs(6));
     request_until_listed(&carol, &timed.link);
-    wait_for_requests(&alice, 4);
+
+    // The request of Carol comes through the timed link. No hello of Bob to
+    // the retired link shows: a count of the requests alone would take such
+    // a hello for the request of Carol.
+    let start = Instant::now();
+    loop {
+        let requests = alice.contact_requests().unwrap();
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.via != link.link || request.note == "We met at the summit."),
+            "a request came through the retired link"
+        );
+        if requests.iter().any(|request| request.via == timed.link) {
+            break;
+        }
+
+        assert!(
+            start.elapsed() < Duration::from_secs(90),
+            "no request through the timed link"
+        );
+        alice.clone().tick();
+        std::thread::sleep(Duration::from_millis(200));
+    }
     for handle in [&alice, &bob, &carol] {
         handle.disconnect();
     }
@@ -4745,9 +4865,7 @@ fn a_link_and_a_handle_take_requests_and_the_link_moves_to_a_new_queue() {
 fn a_blocked_contact_sends_and_nothing_shows() {
     let relays = tokio::runtime::Runtime::new().unwrap();
     let network = start_signed_network(&relays);
-    let directory = std::env::temp_dir().join(format!("umbra-block-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir_all(&directory).unwrap();
+    let directory = TestDir::new("block");
 
     let network_for = |handle: &Handle| {
         handle
@@ -4802,6 +4920,10 @@ fn a_blocked_contact_sends_and_nothing_shows() {
         || bob.msg_info(sent.clone()).unwrap().delivery == 1,
         "the relay did not take the record",
     );
+    // The surface shows no read of a record that a block discards, thus
+    // this wait is a time. The check that can fail is the one after the
+    // record "after": the queue gives its records in order, thus the device
+    // of Alice read "while blocked" before it.
     std::thread::sleep(Duration::from_secs(5));
     assert!(!holds_text(&alice, &alice_bob, "while blocked"));
 
@@ -4823,9 +4945,7 @@ fn a_blocked_contact_sends_and_nothing_shows() {
 fn a_party_prohibits_the_forward_of_its_messages_and_the_other_app_obeys() {
     let (_relays, ports) = start_relays(None, None);
     let network = network_of(&ports);
-    let directory = std::env::temp_dir().join(format!("umbra-forward-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir_all(&directory).unwrap();
+    let directory = TestDir::new("forward");
 
     let alice = launch(&directory, "alice.db", 1);
     let bob = launch(&directory, "bob.db", 2);
@@ -4977,9 +5097,7 @@ fn a_party_prohibits_the_forward_of_its_messages_and_the_other_app_obeys() {
 fn a_connect_that_replaces_a_run_keeps_the_new_run() {
     let relays = tokio::runtime::Runtime::new().unwrap();
     let network = start_signed_network(&relays);
-    let directory = std::env::temp_dir().join(format!("umbra-reconnect-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir_all(&directory).unwrap();
+    let directory = TestDir::new("reconnect");
 
     let alice = launch(&directory, "alice.db", 1);
     let verified = alice
@@ -5003,8 +5121,17 @@ fn a_connect_that_replaces_a_run_keeps_the_new_run() {
         FfiEvent::Online => Some(()),
         _ => None,
     });
-    std::thread::sleep(Duration::from_secs(2));
+    alice.invite().unwrap();
+    wait_for(&alice, |event| match event {
+        FfiEvent::Invitation { .. } => Some(()),
+        _ => None,
+    });
 
+    // The runtime of a replaced run ends some seconds after its start was
+    // replaced. The run that stands serves a second command after each of
+    // those ends.
+    std::thread::sleep(Duration::from_secs(6));
+    assert!(alice.connection().unwrap().is_running);
     alice.invite().unwrap();
     wait_for(&alice, |event| match event {
         FfiEvent::Invitation { .. } => Some(()),
@@ -5021,9 +5148,7 @@ fn a_client_takes_the_signed_challenge_of_each_relay_from_the_carrier() {
     // ABU-057, ABU-102: each relay signs its challenge at its start and
     // hands it to the carriers of the manifest.
     std::thread::sleep(Duration::from_secs(3));
-    let directory = std::env::temp_dir().join(format!("umbra-challenges-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir_all(&directory).unwrap();
+    let directory = TestDir::new("challenges");
 
     let alice = launch(&directory, "alice.db", 1);
     let verified = alice

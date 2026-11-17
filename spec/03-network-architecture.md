@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 3: Network Architecture
 
 **Status:** Draft
-**Version:** 0.55.0
+**Version:** 0.56.0
 **Date:** 2026-11-10
 
 ---
@@ -558,11 +558,15 @@ rule and of `NET-182` before a rotation of §3.2.4. A contact for which no relay
 can take a queue at that moment MUST NOT hold back the rotation of another
 contact.
 
-A `NACK` with reason `LIMIT` or `BUSY` for a `SUB` leaves no subscription
-at the relay, thus the queue gives no record in that run. The client MUST
-send that `SUB` again, with the `ACK` at its cursor, after a wait of 2
-seconds. Each such refusal of the same queue doubles the wait, up to
-30 seconds. The client sends one `SUB` again at most 8 times in a run.
+A `NACK` with a reason other than `REJECTED` for a `SUB` leaves no
+subscription at the relay, thus the queue gives no record in that run. The
+client MUST send that `SUB` again, with the `ACK` at its cursor, after a wait
+of 2 seconds. Each such refusal of the same queue doubles the wait, up to
+30 seconds. The client sends one `SUB` again at most 8 times in a run. A
+`SUB` takes no admission and one version, thus a relay that answers
+`ADMISSION` or `VERSION` gets the same steps as one that answers `LIMIT`. A
+replaced queue with no subscription shows nothing of what it holds, and its
+`DEL` waits for a `SUB` that passes (`NET-178`).
 
 > *Cause of `NET-324`.* Two contacts that lapse past `QUEUE_IDLE_TTL` lose both
 > queues. Each finds its channel dead at its next `SEND`, and each reads the

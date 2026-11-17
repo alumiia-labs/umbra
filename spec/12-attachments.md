@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 12: Attachments and Large Objects
 
 **Status:** Draft
-**Version:** 0.55.0
+**Version:** 0.56.0
 **Date:** 2026-11-10
 
 ---
@@ -886,7 +886,9 @@ list holds. Part 5 §5.11 holds the label.
 
 1. **[ATT-133]** A writer MUST select the first `BACKUP_REPLICAS` relays of the
    placement list of `h`. **[ATT-134]** If a `BNEW` at a selected relay fails,
-   the writer MUST replace that relay with the next of the list. **[ATT-135]**
+   the writer MUST replace that relay with the next of the list, and it MUST
+   select no relay after the first `PLACE_PROBE` of the list. A write that
+   finds fewer than `BACKUP_REPLICAS` relays there fails. **[ATT-135]**
    A writer MUST send `CPUT` to the selected relay of the lowest rank and
    `CREP` for the others, under §12.4.1.
 2. **[ATT-136]** A reader MUST send `CGET` to the relays of the placement list
@@ -937,6 +939,14 @@ holds. Thus the three properties of §12.2.2 hold under the same argument.
 > at most two places at the list head. `PLACE_PROBE` of 4 covers that drift for
 > `BACKUP_REPLICAS` of 2. A `CGET` of a missing chunk costs one `B0` command
 > and one `NACK`.
+>
+> The bound of `ATT-134` keeps each copy where a reader asks. Without it, a
+> party that knows `h` registers other bytes at the first `PLACE_PROBE`
+> relays under `ATT-058`, the write goes to later relays with no fault, and
+> each reader finds nothing until its time ends. With the bound the write
+> fails, and the writer knows it. That party stops a write of `h` in each
+> case: it holds the secret of the handle, and a relay cannot tell it from
+> the writer. A relay needs no new step for this bound.
 
 ## 12.5 Post-quantum protection
 

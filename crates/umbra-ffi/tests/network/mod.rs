@@ -149,6 +149,24 @@ pub fn start_signed_network(relays: &tokio::runtime::Runtime) -> SignedNetwork {
 /// The same network on given ports, for a test that ends each relay
 /// process and starts it again. The keys come from fixed seeds, thus a
 /// client of the first network knows each relay of the second.
+/// A listener at `address`. Port 0 takes a free port. A named port is the
+/// one of relays that just ended: the system can take a moment to free it,
+/// thus the bind tries again for a short time.
+pub fn bind_at(relays: &tokio::runtime::Runtime, address: [u8; 4], port: u16) -> TcpListener {
+    let start = std::time::Instant::now();
+    loop {
+        let bound = relays.block_on(TcpListener::bind((std::net::Ipv4Addr::from(address), port)));
+        match bound {
+            Ok(listener) => return listener,
+            Err(fault) if port != 0 && start.elapsed() < std::time::Duration::from_secs(5) => {
+                let _ = fault;
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(fault) => panic!("no listener at port {port}: {fault}"),
+        }
+    }
+}
+
 pub fn start_signed_network_at(
     relays: &tokio::runtime::Runtime,
     at: Option<&[u16]>,
@@ -196,9 +214,7 @@ pub fn start_signed_network_tuned(
         let number = index as u8 + 1;
         let address = [127, number, 0, 1];
         let port = at.and_then(|ports| ports.get(index).copied()).unwrap_or(0);
-        let listener = relays
-            .block_on(TcpListener::bind((std::net::Ipv4Addr::from(address), port)))
-            .unwrap();
+        let listener = bind_at(relays, address, port);
         let (relay, static_secret) = relay_static(number);
         let mut host = [0u8; HOST_LEN];
         host[..9].copy_from_slice(b"localhost");

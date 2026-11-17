@@ -1,7 +1,7 @@
 # UMBRA Protocol Specification — Part 7: Device Sets, History Sync, and Revocation
 
 **Status:** Draft
-**Version:** 0.55.0
+**Version:** 0.56.0
 **Date:** 2026-11-10
 
 ---
@@ -731,8 +731,8 @@ Provision {                      // sealed under the seal key, XChaCha20-Poly130
 > writes. The link then gives no code on the new device, or it ends under
 > `DEV-362`, and it ends at its time. That party stops a link, and it gets no
 > provision. A writer of Part 12 §12.4.2 that finds its first relays taken
-> goes to later relays of the placement list, and a reader asks `PLACE_PROBE`
-> relays. Part 12 states the two bounds.
+> selects no relay that a reader does not ask (`ATT-134`), thus its write
+> fails, and the link fails at once and not at its end time.
 
 > *Cause.* A browser has no camera that a user trusts for a scan, and a phone
 > has one. A QR code that the new device shows moves the scan to the phone.

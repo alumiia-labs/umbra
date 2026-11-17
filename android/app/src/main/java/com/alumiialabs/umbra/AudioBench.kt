@@ -381,7 +381,7 @@ fun AudioBenchScreen(onBack: () -> Unit) {
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = PressInset)) {
             Text(stringResource(R.string.bench_about), style = MaterialTheme.typography.bodyMedium, color = Palette.TextSecondary)
             Spacer(Modifier.height(16.dp))
-            PrimaryButton(stringResource(R.string.bench_start), enabled = !isRunning) {
+            PrimaryButton(stringResource(R.string.bench_start), enabled = !isRunning, tag = TestTags.BENCH_START) {
                 val state = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
                 if (state == PackageManager.PERMISSION_GRANTED) start() else askMicrophone.launch(Manifest.permission.RECORD_AUDIO)
             }
@@ -392,7 +392,7 @@ fun AudioBenchScreen(onBack: () -> Unit) {
             }
             if (!isRunning && lines.isNotEmpty()) {
                 Spacer(Modifier.height(8.dp))
-                PrimaryButton(stringResource(R.string.bench_copy)) {
+                PrimaryButton(stringResource(R.string.bench_copy), tag = TestTags.BENCH_COPY) {
                     val clipboard = context.getSystemService(ClipboardManager::class.java)
                     clipboard?.setPrimaryClip(ClipData.newPlainText("UMBRA audio bench", lines.joinToString("\n")))
                 }

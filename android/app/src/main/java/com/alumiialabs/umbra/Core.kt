@@ -934,7 +934,13 @@ object Core {
 
     /** Removes a device from the set (Part 7 §7.7). */
     fun removeDevice(deviceId: ByteArray) = call { client ->
-        client.removeDevice(deviceId)
+        try {
+            client.removeDevice(deviceId)
+        } catch (busy: FfiException.Busy) {
+            // The snapshot of a link goes, and a removal would move its roster.
+            main.post { fault = UiText.get(R.string.core_remove_waits_for_link) }
+            return@call
+        }
         val list = client.devices()
         main.post {
             devices.clear()
@@ -1106,6 +1112,11 @@ object Core {
             } catch (malformed: FfiException.Malformed) {
                 opened?.let { dropStore(app, it) }
                 joinFailed(UiText.get(R.string.core_not_link_code))
+            } catch (refused: FfiException.Refused) {
+                // DEV-007: this store holds an identity or a conversation.
+                // It stays, and the link does not start.
+                opened?.close()
+                joinFailed(UiText.get(R.string.core_link_needs_new_device))
             } catch (other: FfiException) {
                 opened?.let { dropStore(app, it) }
                 joinFailed(UiText.get(R.string.core_link_failed_kind, other.javaClass.simpleName))

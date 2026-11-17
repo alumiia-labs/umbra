@@ -259,6 +259,14 @@ object TestTags {
     const val HISTORY_CHOICE = "history_choice"
     const val SPEED_CHOICE = "speed_choice"
 
+    // The steps after the setup, and the audio bench.
+    const val SETUP_RECOVERY_SHOW = "setup_recovery_show"
+    const val SETUP_RECOVERY_SKIP = "setup_recovery_skip"
+    const val SETUP_BATTERY_ALLOW = "setup_battery_allow"
+    const val SETUP_BATTERY_SKIP = "setup_battery_skip"
+    const val BENCH_START = "bench_start"
+    const val BENCH_COPY = "bench_copy"
+
     /**
      * The name of one choice of a group: the name of the group, then the
      * value that the choice sets. The value is one of a fixed list of the

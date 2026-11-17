@@ -4102,6 +4102,12 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             Vec::new()
         };
         let row = Self::group_row(&group, OPEN)?;
+
+        // The conversation keeps its read mark over a new membership. The
+        // name goes in the batch of the group, thus no stop leaves a group
+        // with no name.
+        let (read_up_to, _) = self.conversation_meta(conversation)?;
+        let (meta_row, meta) = self.conversation_meta_row(conversation, read_up_to, name)?;
         let open = self.open_mut()?;
         let seed_row = open.store.row_id(TableId::LOCAL_IDENTITY, &group_id);
         let lost_row = open
@@ -4116,6 +4122,7 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         }
 
         batch.put(GROUP, conversation.0, None, &row, rng)?;
+        batch.put(super::CONVERSATION, meta_row, None, &meta, rng)?;
         batch.put(TableId::LOCAL_IDENTITY, seed_row, None, seed.expose(), rng)?;
         batch.delete(TableId::LOCAL_IDENTITY, lost_row);
         batch.delete(TableId::LOCAL_IDENTITY, previous_row);
@@ -4128,10 +4135,6 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
             }
         }
         batch.commit()?;
-
-        // The conversation keeps its read mark over a new membership.
-        let (read_up_to, _) = self.conversation_meta(conversation)?;
-        self.put_conversation_meta(conversation, read_up_to, name, rng)?;
 
         Ok(conversation)
     }

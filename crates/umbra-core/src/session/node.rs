@@ -2751,13 +2751,15 @@ impl ClientNode {
     }
 
     /// Holds a queue end that owes its `DEL`, and gives the store its form.
+    /// A form that does not encode leaves the queue end in this run, thus
+    /// its `DEL` still goes, and the fault goes to the caller.
     fn hold_ending(&mut self, ending: Ending) -> Result<(), Error> {
         let queue = *ending.inbound.recipient_id();
-        self.changes.push(StateChange::Invitation {
-            queue,
-            state: ending_state(&ending)?,
-        });
+        let stored = ending_state(&ending);
         self.ending.insert(queue, ending);
+
+        let state = stored?;
+        self.changes.push(StateChange::Invitation { queue, state });
         Ok(())
     }
 
@@ -4545,7 +4547,10 @@ impl ClientNode {
         let relay = core::mem::replace(&mut held.previous_relay, ANY_RELAY);
         self.moved.insert(contact);
         let queue = *previous.recipient_id();
-        self.read_until_del(previous, relay, contact, now, del_delay(rng))?;
+        // The channel dropped the queue already. A stored form that fails
+        // keeps the queue end for this run, and the store still learns the
+        // end of the queue.
+        let _ = self.read_until_del(previous, relay, contact, now, del_delay(rng));
         Ok(alloc::vec![ClientEvent::QueueEnded { queue }])
     }
 
@@ -5067,7 +5072,8 @@ impl ClientNode {
         })
     }
 
-    /// A relay refused the `SUB` of `queue` with `LIMIT` or `BUSY`. It
+    /// A relay refused the `SUB` of `queue` with a reason other than
+    /// `REJECTED`. It
     /// keeps no subscription after such a refusal, thus the queue gives no
     /// record in this run until a `SUB` passes. The `SUB` goes again after
     /// [`SUB_AGAIN_FIRST`], and each later refusal doubles that wait up to
@@ -6120,7 +6126,7 @@ impl ClientNode {
             // The circuit of the slot ended first, and its own build
             // serves it. The spare ends.
             if let Ok(cell) = new.destroy_cell() {
-                self.send_cell(&cell)?;
+                let _ = self.send_cell(&cell);
             }
             return Ok(());
         }
@@ -6132,9 +6138,13 @@ impl ClientNode {
         slot.building_since = None;
         if let (Circuit::Ready(mut session), Some(chain)) = (old, old_chain) {
             // A command that waited for a cell of the old circuit leaves
-            // on it, and its answer comes back on it.
-            while let Some(cell) = session.next_cell()? {
-                self.send_cell(&cell)?;
+            // on it, and its answer comes back on it. A cell that does not
+            // leave stops no retirement: the old circuit still owes its
+            // `DESTROY`.
+            while let Ok(Some(cell)) = session.next_cell() {
+                if self.send_cell(&cell).is_err() {
+                    break;
+                }
             }
             self.retiring.push(Retiring {
                 session,
@@ -6148,7 +6158,21 @@ impl ClientNode {
         self.current = of;
         let subscribed = self.subscribe_stored(now, rng);
         self.current = current;
-        subscribed
+
+        // The slot holds the new circuit from here on, thus a fault ends no
+        // run. A `SUB` that did not leave goes again under the bound of a
+        // refused one, while the old circuit still holds the subscription.
+        if subscribed.is_err() {
+            let queues: Vec<[u8; 32]> = self
+                .slots
+                .get(of)
+                .map(|slot| slot.queues.iter().copied().collect())
+                .unwrap_or_default();
+            for queue in queues {
+                self.subscribe_later(queue, now);
+            }
+        }
+        Ok(())
     }
 
     /// A cell of a circuit that is no circuit of a slot: a spare under
@@ -7632,6 +7656,10 @@ impl ClientNode {
         self.unsolved_chunks = others;
 
         let is_apart = self.chunk_admissions.is_apart(upload);
+        // A registration that does not go stops no other one of the upload:
+        // each of them has a caller that waits. The first fault goes to the
+        // caller after the last one.
+        let mut result = Ok(());
         for mut held in mine {
             match self.chunk_admissions.made(upload, &held.relay) {
                 Made::Solution(solution) => held.solution = Some(solution),
@@ -7641,10 +7669,11 @@ impl ClientNode {
                 }
                 Made::Due(..) | Made::None => {}
             }
-            self.place_chunk(held, rng)?;
+            let placed = self.place_chunk(held, rng);
+            result = result.and(placed);
         }
 
-        Ok(())
+        result
     }
 
     /// The registrations of `upload` that wait for a solution at each relay.
@@ -8181,11 +8210,28 @@ impl ClientNode {
             ceremony.peer_committed(value);
             // IDN-143: the reveal goes after the commit of the peer is here.
             let reveal = ceremony.reveal_to_send()?;
-            if let Some(commit) = own_commit {
-                let body = [commit, value].concat();
-                self.send_control(contact, AppKind::VerifyCommit, &body, now, rng)?;
+            let committed = match own_commit {
+                Some(commit) => {
+                    let body = [commit, value].concat();
+                    self.send_control(contact, AppKind::VerifyCommit, &body, now, rng)
+                }
+                None => Ok(()),
+            };
+            let sent = committed.and_then(|()| {
+                self.send_control(contact, AppKind::VerifyReveal, &reveal, now, rng)
+            });
+
+            // The ceremony moved already. One whose record did not go gives
+            // no code at the peer, thus it ends here, and the user learns it
+            // and starts again.
+            if sent.is_err() {
+                if let Some(held) = self.contacts.get_mut(&contact) {
+                    held.ceremony = None;
+                }
+                return Ok(alloc::vec![ClientEvent::VerificationEnded {
+                    contact: ContactId(contact),
+                }]);
             }
-            self.send_control(contact, AppKind::VerifyReveal, &reveal, now, rng)?;
             return Ok(Vec::new());
         }
 
@@ -9145,7 +9191,14 @@ impl ClientNode {
 
     /// Sends what waited for a circuit to the relay at the end of the
     /// current one: the handshake records, and the records of the user.
-    fn flush_to_exit<R: CryptoRng + ?Sized>(&mut self, now: u64, rng: &mut R) -> Result<(), Error> {
+    /// The result holds the end of each group command that no circuit can
+    /// reach.
+    fn flush_to_exit<R: CryptoRng + ?Sized>(
+        &mut self,
+        now: u64,
+        rng: &mut R,
+    ) -> Result<Vec<ClientEvent>, Error> {
+        let mut events = Vec::new();
         let exit = self.exit_of(self.current)?;
         let ready = self.current;
         let ready_class = self
@@ -9197,8 +9250,10 @@ impl ClientNode {
             .filter(|(_, held)| held.opens && *held.channel.outbound().relay_id() == exit)
             .map(|(id, _)| *id)
             .collect();
+        // A record of one contact that does not go stops no other contact
+        // and ends no run. It stays owed, and a later slot sends it.
         for contact in opening {
-            self.send_opening(contact, now, rng)?;
+            let _ = self.send_opening(contact, now, rng);
         }
 
         let guards: Vec<[u8; 32]> = self
@@ -9208,7 +9263,7 @@ impl ClientNode {
             .map(|(id, _)| *id)
             .collect();
         for contact in guards {
-            self.send_guard(contact, now, rng)?;
+            let _ = self.send_guard(contact, now, rng);
         }
 
         let (due, held): (Vec<HeldChunk>, Vec<HeldChunk>) = core::mem::take(&mut self.held_chunks)
@@ -9246,13 +9301,23 @@ impl ClientNode {
 
         self.held_groups = waits;
         sent?;
-        for relay in self
-            .held_groups
-            .iter()
-            .map(|held| held.relay)
-            .collect::<Vec<_>>()
-        {
-            self.circuit_for_group(relay, rng)?;
+        let relays: BTreeSet<[u8; 32]> = self.held_groups.iter().map(|held| held.relay).collect();
+        for relay in relays {
+            if self.circuit_for_group(relay, rng).is_ok() {
+                continue;
+            }
+
+            // A member names the relay of a group queue. One that no
+            // circuit reaches fails its commands, and it ends no run.
+            let (gone, kept): (Vec<HeldGroup>, Vec<HeldGroup>) =
+                core::mem::take(&mut self.held_groups)
+                    .into_iter()
+                    .partition(|held| held.relay == relay);
+            self.held_groups = kept;
+            events.extend(gone.into_iter().map(|held| ClientEvent::Group {
+                handle: held.handle,
+                outcome: GroupOutcome::Unreachable,
+            }));
         }
 
         // NET-022: one circuit takes at most `MAX_QUEUES_PER_SESSION`
@@ -9272,8 +9337,9 @@ impl ClientNode {
 
         self.held_watches = waits;
         sent?;
+        // A watch that waits has no caller. `retry_watches` builds again.
         if self.held_watches.iter().any(|held| held.relay == exit) {
-            self.circuit_for_watch(exit, rng)?;
+            let _ = self.circuit_for_watch(exit, rng);
         }
 
         self.current = ready;
@@ -9291,7 +9357,7 @@ impl ClientNode {
             self.send_waiting(contact, now, rng)?;
         }
 
-        Ok(())
+        Ok(events)
     }
 
     /// Sends each record that waits for a contact, in its order, when the
@@ -9532,7 +9598,7 @@ impl ClientNode {
         }
 
         self.current = ready;
-        self.flush_to_exit(now, rng)?;
+        let mut events = self.flush_to_exit(now, rng)?;
 
         // The runtime learns of the first circuit, which takes its commands.
         let is_first = !self
@@ -9540,11 +9606,10 @@ impl ClientNode {
             .iter()
             .enumerate()
             .any(|(index, slot)| index != ready && slot.is_ready());
-        Ok(if is_first {
-            alloc::vec![ClientEvent::CircuitReady]
-        } else {
-            Vec::new()
-        })
+        if is_first {
+            events.push(ClientEvent::CircuitReady);
+        }
+        Ok(events)
     }
 
     /// Takes the events of one cell of the ready circuit of the current
@@ -9972,8 +10037,12 @@ impl ClientNode {
             Some(Waiting::Subscribe(queue)) => {
                 match reason {
                     Reject::Rejected => self.queue_lost(queue),
-                    Reject::Limit | Reject::Busy => self.subscribe_later(queue, now),
-                    Reject::Admission | Reject::Version => {}
+                    // A `SUB` takes no admission and one version. A relay
+                    // that answers so holds no subscription either, thus
+                    // the `SUB` goes again under the same bound.
+                    Reject::Limit | Reject::Busy | Reject::Admission | Reject::Version => {
+                        self.subscribe_later(queue, now);
+                    }
                 }
                 return Ok(out);
             }
@@ -10127,7 +10196,18 @@ impl ClientNode {
         rng: &mut R,
     ) -> Result<Vec<ClientEvent>, Error> {
         let handle = keys.handle;
+        let slot = keys.slot;
         let purpose = keys.purpose.ending();
+        let is_rendezvous = matches!(keys.purpose, Purpose::Rendezvous);
+        // The receiving end of the queue, for the `DEL` of a queue that no
+        // part of the node took.
+        let spare = Inbound::new(
+            ids.recipient_id,
+            ids.sender_id,
+            keys.qr_auth.clone(),
+            &keys.queue_secret,
+            0,
+        );
         let fault = match self.on_ids(keys, ids, rng) {
             Ok(events) => return Ok(events),
             Err(fault) => fault,
@@ -10142,6 +10222,14 @@ impl ClientNode {
             || self.contact_of(queue).is_some();
         if fault == Error::Storage || is_held {
             return Err(fault);
+        }
+
+        // The relay holds the queue, and no part of the node does. Without
+        // a `DEL` it stays there until `QUEUE_IDLE_TTL`.
+        if !self.ending.contains_key(queue) {
+            if let Ok(relay) = self.exit_of(slot) {
+                let _ = self.owe_del(spare, relay, is_rendezvous, self.clock, 0);
+            }
         }
         Ok(self.queue_ended(handle, &purpose, Reject::Rejected))
     }
@@ -11296,6 +11384,8 @@ mod tests {
         /// The `SUB` commands that the relays refuse with `LIMIT` from
         /// here on. A relay keeps no subscription after such a refusal.
         sub_limits: u32,
+        /// The reason of those refusals.
+        sub_reason: Reason,
         /// The circuit of each loop cell that a relay took.
         loops: Vec<[u8; 16]>,
         /// The circuits whose forward cells wait at their hops, as for a
@@ -11367,6 +11457,7 @@ mod tests {
                 wrong_ids: false,
                 admissions: 0,
                 sub_limits: 0,
+                sub_reason: Reason::Limit,
                 loops: Vec::new(),
                 slow: BTreeSet::new(),
                 held_cells: Vec::new(),
@@ -11765,7 +11856,7 @@ mod tests {
                 }
                 Cmd::Sub if self.sub_limits > 0 => {
                     self.sub_limits -= 1;
-                    self.nack(party, circ_id, corr_id, queue_id, Reason::Limit);
+                    self.nack(party, circ_id, corr_id, queue_id, self.sub_reason);
                 }
                 Cmd::Sub => {
                     let held = self
@@ -12217,6 +12308,34 @@ mod tests {
             .unwrap();
         net.run();
         assert_eq!(net.count(ALICE, Cmd::Sub), subs + 2);
+    }
+
+    #[test]
+    fn a_sub_that_a_relay_refuses_with_another_reason_goes_again_too() {
+        for reason in [Reason::Version, Reason::Admission] {
+            let mut net = Net::new();
+            let [_, bob] = contacts(&mut net);
+            net.sub_limits = 1;
+            net.sub_reason = reason;
+            net.restart(ALICE);
+            net.run();
+            let subs = net.count(ALICE, Cmd::Sub);
+            let start = net.now;
+            net.node(BOB)
+                .send(&bob, &text(1), start, &mut Rng(3))
+                .unwrap();
+            net.run();
+            assert_eq!(messages(&net.take(ALICE)), 0);
+
+            // The relay holds no subscription, thus the `SUB` goes again
+            // after its wait, and the queue gives its record.
+            net.now = start + SUB_AGAIN_FIRST;
+            let now = net.now;
+            net.node(ALICE).subscribe_due(now, &mut Rng(5)).unwrap();
+            net.run();
+            assert_eq!(net.count(ALICE, Cmd::Sub), subs + 1);
+            assert_eq!(messages(&net.take(ALICE)), 1);
+        }
     }
 
     /// The renewal record of `bundle` as `party` seals it for `contact`:

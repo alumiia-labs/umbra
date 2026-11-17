@@ -2073,7 +2073,10 @@ mod tests {
         let mut bare = one.clone();
         let last = bare.len() - 1;
         bare[last] ^= 1;
-        assert!(call(&mut dir, Kind::Issue, &bare, now, &mut rng).is_err());
+        assert_eq!(
+            call(&mut dir, Kind::Issue, &bare, now, &mut rng),
+            Err(DirError::Status(Status::Refused))
+        );
 
         // The signatures of an epoch go when it ends.
         let next = now + crate::abuse::EPOCH_SECONDS;
@@ -2727,19 +2730,23 @@ mod tests {
 
         // DIS-173: a lease below LEASE_MIN or above HANDLE_LEASE is no
         // lease, and the token stays unspent.
-        assert_eq!(
-            register(
-                &mut dir,
-                &spent[0],
-                &input,
-                &live,
-                &key,
-                Some(60),
-                T0,
-                &mut rng
-            ),
-            Err(DirError::Status(Status::Malformed))
-        );
+        let below = u32::try_from(crate::discovery::LEASE_MIN - 1).unwrap();
+        let above = u32::try_from(HANDLE_LEASE + 1).unwrap();
+        for lease in [60, below, above] {
+            assert_eq!(
+                register(
+                    &mut dir,
+                    &spent[0],
+                    &input,
+                    &live,
+                    &key,
+                    Some(lease),
+                    T0,
+                    &mut rng
+                ),
+                Err(DirError::Status(Status::Malformed))
+            );
+        }
         register(
             &mut dir,
             &spent[0],
@@ -2804,13 +2811,170 @@ mod tests {
         let pk = dir.issuer_public(epoch).unwrap();
         let (_, mut body) = dirclient::issue_request(epoch, &pk, 1, &mut rng).unwrap();
 
-        // The effort of the one solution: after the type, the epoch, the
-        // count, the element, the version byte, the seed, and the nonce.
-        let at = 7 + 32 + 1 + 32 + 16;
-        body[at..at + 4].copy_from_slice(&20u32.to_be_bytes());
+        // ABU-077: a correct solution below the effort of an issuance. The
+        // element comes after the type, the epoch, and the count, and the
+        // solution comes after it.
+        let element: [u8; 32] = body[7..39].try_into().unwrap();
+        let verifier = issue_verifier(&pk);
+        let low = PowSolution::solve(
+            &verifier,
+            &issue_seed(epoch, &element),
+            POW_EFFORT_MAX - 1,
+            &mut rng,
+        )
+        .unwrap();
+        pow::verify(&verifier, &low.seed, &low.nonce, low.effort, &low.solution).unwrap();
+        low.encode(&mut body[39..]).unwrap();
         assert_eq!(
             call(&mut dir, Kind::Issue, &body, T0, &mut rng),
             Err(DirError::Status(Status::Refused))
+        );
+    }
+
+    #[test]
+    fn a_correct_solution_below_the_lookup_floor_pays_for_no_evaluation() {
+        let mut rng = Rng(53);
+        let (mut dir, _) = directory();
+        dir.tick(T0, &mut rng).unwrap();
+        let pk = *dir.voprf_public();
+        let epoch = epoch_number(T0);
+        let (_, body) = dirclient::evaluate_request(b"@kai#1", &pk, epoch, None, &mut rng).unwrap();
+        let blinded: [u8; 32] = body[body.len() - 32..].try_into().unwrap();
+
+        let verifier = lookup_verifier(&pk);
+        let low = PowSolution::solve(
+            &verifier,
+            &lookup_seed(epoch, &blinded),
+            POW_LOOKUP_FLOOR - 1,
+            &mut rng,
+        )
+        .unwrap();
+        pow::verify(&verifier, &low.seed, &low.nonce, low.effort, &low.solution).unwrap();
+        let mut encoded = [0u8; crate::abuse::pow::SOLUTION_LEN];
+        low.encode(&mut encoded).unwrap();
+        let admission = Admission {
+            kind: AdmissionKind::Pow,
+            body: &encoded,
+        };
+        let mut low_body = vec![0u8; admission.len() + 32];
+        let used = admission.encode(&mut low_body).unwrap();
+        low_body.truncate(used);
+        low_body.extend_from_slice(&blinded);
+
+        // DIS-164: the work is real, and it is below the floor.
+        assert_eq!(
+            call(&mut dir, Kind::Evaluate, &low_body, T0, &mut rng),
+            Err(DirError::Status(Status::Refused))
+        );
+        assert_eq!(dir.lookup_seeds.len(), 0);
+
+        // The solution at the floor pays for the same element.
+        call(&mut dir, Kind::Evaluate, &body, T0, &mut rng).unwrap();
+        assert_eq!(dir.lookup_seeds.len(), 1);
+    }
+
+    #[test]
+    fn a_token_with_a_bad_signature_or_of_an_old_epoch_pays_for_nothing() {
+        let mut rng = Rng(54);
+        let (mut dir, _) = directory();
+        dir.tick(T0, &mut rng).unwrap();
+        let pk = *dir.voprf_public();
+        let epoch = epoch_number(T0);
+        let paid = tokens(&mut dir, epoch, 2, T0, &mut rng);
+        let nonce = |token: &[u8]| Token::parse(token).unwrap().nonce;
+        let evaluate = |dir: &mut Directory, token: &[u8], now: u64, rng: &mut Rng| {
+            let (_, body) =
+                dirclient::evaluate_request(b"@lea#1", &pk, epoch_number(now), Some(token), rng)
+                    .unwrap();
+            call(dir, Kind::Evaluate, &body, now, rng)
+        };
+
+        // The authenticator covers each byte of the token.
+        let mut forged = paid[0].clone();
+        let last = forged.len() - 1;
+        forged[last] ^= 1;
+        assert_eq!(
+            evaluate(&mut dir, &forged, T0, &mut rng),
+            Err(DirError::Status(Status::Refused))
+        );
+
+        // A token under another nonce is no second token.
+        let mut renamed = paid[0].clone();
+        renamed[2] ^= 1;
+        assert_ne!(nonce(&renamed), nonce(&paid[0]));
+        assert_eq!(
+            evaluate(&mut dir, &renamed, T0, &mut rng),
+            Err(DirError::Status(Status::Refused))
+        );
+        assert!(!dir.spent.is_spent(epoch, &nonce(&paid[0])));
+
+        // ABU-081: a token pays in its epoch and in the one after it.
+        let next = T0 + crate::abuse::EPOCH_SECONDS;
+        assert_eq!(epoch_number(next), epoch + 1);
+        evaluate(&mut dir, &paid[0], next, &mut rng).unwrap();
+        assert!(dir.spent.is_spent(epoch, &nonce(&paid[0])));
+
+        // It pays no more two epochs later, and it stays unspent.
+        let late = T0 + 2 * crate::abuse::EPOCH_SECONDS;
+        assert_eq!(
+            evaluate(&mut dir, &paid[1], late, &mut rng),
+            Err(DirError::Status(Status::Refused))
+        );
+        assert!(!dir.spent.is_spent(epoch, &nonce(&paid[1])));
+    }
+
+    #[test]
+    fn two_keys_with_a_challenge_for_one_label_register_one_entry() {
+        let mut rng = Rng(55);
+        let (mut dir, keyset) = directory();
+        dir.tick(T0, &mut rng).unwrap();
+        let epoch = epoch_number(T0);
+        let paid = tokens(&mut dir, epoch, 2, T0, &mut rng);
+        let nonce = |token: &[u8]| Token::parse(token).unwrap().nonce;
+        let input = b"@mona#4242";
+        let keys = [
+            RootIdentity::new(Secret::new([55; 32])).handle_key(0, 0),
+            RootIdentity::new(Secret::new([56; 32])).handle_key(0, 0),
+        ];
+
+        // Each party takes its challenge while the label is free.
+        let mut requests = Vec::new();
+        for key in &keys {
+            let body =
+                dirclient::register_challenge_body(input, &key.public().to_bytes(), None).unwrap();
+            let bytes = call(&mut dir, Kind::Challenge, &body, T0 + 1, &mut rng).unwrap();
+            let (challenge, purpose) = dirclient::parse_register_challenge(&bytes).unwrap();
+            let entry = handle_entry(input, key, 0);
+            let ans = answer(purpose, key, input, &challenge, Some(&entry)).unwrap();
+            requests.push((entry, ans));
+        }
+
+        // The first registration takes the label. The second one holds a
+        // live challenge and a correct answer under its own key, thus the
+        // check of the registration itself refuses it (DIS-170).
+        let first = dirclient::register_body(&paid[0], input, &requests[0].0, &requests[0].1, None)
+            .unwrap();
+        call(&mut dir, Kind::Register, &first, T0 + 2, &mut rng).unwrap();
+        let second =
+            dirclient::register_body(&paid[1], input, &requests[1].0, &requests[1].1, None)
+                .unwrap();
+        assert_eq!(
+            call(&mut dir, Kind::Register, &second, T0 + 3, &mut rng),
+            Err(DirError::Status(Status::Stale))
+        );
+        assert!(!dir.spent.is_spent(epoch, &nonce(&paid[1])));
+
+        // The close changes nothing for it.
+        let now = T0 + DIRECTORY_EPOCH;
+        dir.tick(now, &mut rng).unwrap();
+        assert_eq!(
+            call(&mut dir, Kind::Register, &second, now, &mut rng),
+            Err(DirError::Status(Status::Stale))
+        );
+        assert!(!dir.spent.is_spent(epoch, &nonce(&paid[1])));
+        assert_eq!(
+            read(&mut dir, &keyset, input, now, &mut rng).unwrap(),
+            requests[0].0
         );
     }
 
@@ -2905,7 +3069,7 @@ mod tests {
         dir.signers
             .push(SigningKey::from_seed(Secret::new([50; 32])));
         let now = T0 + DIRECTORY_EPOCH;
-        assert!(dir.tick(now, &mut rng).is_err());
+        assert!(matches!(dir.tick(now, &mut rng), Err(Error::Wire(_))));
         assert_eq!(closes(&dir.take_events()), 1);
         assert!(dir.head.is_none());
 
@@ -3020,7 +3184,9 @@ mod tests {
             }
             assert_eq!(dir.lookup_seeds.len(), 2);
         }
-        assert!(passed < 30, "{passed} replays passed");
+        // A drop of the oldest seed gives 30 here. The random drop of this
+        // generator gives 18.
+        assert!(passed < 25, "{passed} replays passed");
 
         // A seed of an epoch before the one before the clock goes.
         let later = T0 + 2 * crate::abuse::EPOCH_SECONDS;
@@ -3101,11 +3267,14 @@ mod tests {
         let mut rng = Rng(39);
         let (mut dir, keyset) = directory();
         dir.tick(T0, &mut rng).unwrap();
-        dir.register_max = (1, 1);
-        let paid = tokens(&mut dir, epoch_number(T0), 2, T0, &mut rng);
+        dir.register_max = (1, 2);
+        let paid = tokens(&mut dir, epoch_number(T0), 3, T0, &mut rng);
         let root = RootIdentity::new(Secret::new([39; 32]));
         let mut claims = Vec::new();
-        for (i, input) in [b"@jade#1001", b"@jade#1002"].into_iter().enumerate() {
+        for (i, input) in [b"@jade#1001", b"@jade#1002", b"@jade#1003"]
+            .into_iter()
+            .enumerate()
+        {
             let hk = root.handle_key(0, u32::try_from(i).unwrap());
             let body =
                 dirclient::register_challenge_body(input, &hk.public().to_bytes(), Some(&paid[i]))
@@ -3115,14 +3284,15 @@ mod tests {
             claims.push((input, hk, bytes));
         }
 
-        // DIS-203: the second paid challenge took the place of the first one,
-        // and the registration under the first one ends.
+        // DIS-203: the third paid challenge took the place of the oldest
+        // one, and the registration under that one ends. The second one
+        // stays.
         for (i, (input, hk, bytes)) in claims.iter().enumerate() {
             let entry = handle_entry(*input, hk, 0);
             let (challenge, purpose) = dirclient::parse_register_challenge(bytes).unwrap();
             let ans = answer(purpose, hk, *input, &challenge, Some(&entry)).unwrap();
             let body = dirclient::register_body(&paid[i], *input, &entry, &ans, None).unwrap();
-            let result = call(&mut dir, Kind::Register, &body, T0 + 2, &mut rng);
+            let result = call(&mut dir, Kind::Register, &body, T0 + 3, &mut rng);
             let expected = if i == 0 {
                 Err(DirError::Status(Status::Stale))
             } else {
@@ -3135,6 +3305,7 @@ mod tests {
         dir.tick(now, &mut rng).unwrap();
         assert!(read(&mut dir, &keyset, b"@jade#1001", now, &mut rng).is_none());
         assert!(read(&mut dir, &keyset, b"@jade#1002", now, &mut rng).is_some());
+        assert!(read(&mut dir, &keyset, b"@jade#1003", now, &mut rng).is_some());
     }
 
     #[test]
@@ -3213,7 +3384,7 @@ mod tests {
         {
             *root = Some([9; 32]);
         }
-        assert!(replay(&broken, &mut rng).is_err());
+        assert_eq!(replay(&broken, &mut rng).err(), Some(Error::Unverified));
     }
 
     #[test]
@@ -3234,7 +3405,7 @@ mod tests {
         let size = dir.operator.head().unwrap().0;
         dir.auditors[1] = Auditor::default();
         let now = T0 + DIRECTORY_EPOCH;
-        assert!(dir.tick(now, &mut rng).is_err());
+        assert_eq!(dir.tick(now, &mut rng), Err(Error::Unverified));
         assert_eq!(dir.operator.head().unwrap().0, size);
         assert_eq!(dir.auditors[0], held[0]);
         let search_key = dir.voprf.evaluate_direct(input).to_vec();
@@ -3367,7 +3538,10 @@ mod tests {
         let mut dir = Directory::new(keys, DIRECTORY_EPOCH, ascii_profile).unwrap();
 
         // DIS-198: the chain ends at the set of the signers.
-        assert!(dir.set_keyset_chain(vec![genesis.clone()]).is_err());
+        assert_eq!(
+            dir.set_keyset_chain(vec![genesis.clone()]),
+            Err(Error::Malformed)
+        );
         dir.set_keyset_chain(vec![signed]).unwrap();
         dir.tick(T0, &mut rng).unwrap();
         let pins = dirclient::DirectoryPins {

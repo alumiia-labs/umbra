@@ -3652,16 +3652,28 @@ impl<B: Backend, E: SecureElement> Client<B, E> {
         name: &str,
         rng: &mut R,
     ) -> Result<(), Error> {
-        let open = self.open_mut()?;
-        let row = open.store.row_id(CONVERSATION, &conversation.0);
+        let (row, plain) = self.conversation_meta_row(conversation, read_up_to, name)?;
+        let mut batch = self.open_mut()?.store.begin();
+        batch.put(CONVERSATION, row, None, &plain, rng)?;
+
+        Ok(batch.commit()?)
+    }
+
+    /// The row of a conversation with its read mark and its name, for a
+    /// batch that writes more than this row.
+    fn conversation_meta_row(
+        &self,
+        conversation: ConversationId,
+        read_up_to: u64,
+        name: &str,
+    ) -> Result<(RowId, Vec<u8>), Error> {
+        let row = self.open_ref()?.store.row_id(CONVERSATION, &conversation.0);
         let mut plain = Vec::with_capacity(CONVERSATION_PREFIX.saturating_add(name.len()));
         plain.extend_from_slice(&conversation.0);
         plain.extend_from_slice(&read_up_to.to_be_bytes());
         plain.extend_from_slice(name.as_bytes());
-        let mut batch = open.store.begin();
-        batch.put(CONVERSATION, row, None, &plain, rng)?;
 
-        Ok(batch.commit()?)
+        Ok((row, plain))
     }
 
     /// Gives a contact a name on this device. No peer and no relay learns

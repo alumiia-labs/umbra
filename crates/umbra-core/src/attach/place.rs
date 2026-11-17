@@ -49,9 +49,11 @@ pub fn placement_list(handle: &[u8; 32], relays: &[AttachmentRelay]) -> Vec<[u8;
 }
 
 /// The relays a writer selects: the first `BACKUP_REPLICAS` of the list
-/// that did not fail, in list order (`ATT-133`, `ATT-134`).
+/// that did not fail, in list order (`ATT-133`, `ATT-134`). The writer
+/// goes no further than a reader asks (`ATT-137`): a copy past that bound
+/// is one that no reader finds, and the write then fails in the open.
 pub fn writer_targets(list: &[[u8; 32]], failed: &[[u8; 32]]) -> Result<Vec<[u8; 32]>, Error> {
-    let targets: Vec<[u8; 32]> = list
+    let targets: Vec<[u8; 32]> = reader_probes(list)
         .iter()
         .filter(|r| !failed.contains(r))
         .take(BACKUP_REPLICAS)
@@ -222,6 +224,24 @@ mod tests {
         let replaced = writer_targets(&list, &[list[0]]).unwrap();
         assert_eq!(replaced, list[1..3]);
         assert!(writer_targets(&list, &list[..3]).is_err());
+    }
+
+    #[test]
+    fn a_writer_places_no_copy_where_no_reader_asks() {
+        let relays: Vec<AttachmentRelay> = (1..=8).map(|id| relay(id, id)).collect();
+        let list = placement_list(&[7; 32], &relays);
+        assert_eq!(list.len(), 8);
+
+        // Two relays of the first four refuse: the write takes the other
+        // two, and a reader asks both.
+        let targets = writer_targets(&list, &list[..2]).unwrap();
+        assert_eq!(targets, list[2..4]);
+        assert!(targets.iter().all(|t| reader_probes(&list).contains(t)));
+
+        // A party that holds each of the first four leaves no place. The
+        // write fails, and it puts no copy at the fifth relay.
+        assert_eq!(writer_targets(&list, &list[..3]), Err(Error::NoPath));
+        assert_eq!(writer_targets(&list, &list[..4]), Err(Error::NoPath));
 
         assert_eq!(reader_probes(&list), &list[..4]);
         assert_eq!(reader_probes(&list[..2]), &list[..2]);

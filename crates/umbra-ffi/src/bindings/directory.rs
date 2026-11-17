@@ -776,6 +776,9 @@ const TOKEN_BATCH: usize = 4;
 
 /// The wait for the relay to make a rendezvous queue.
 const QUEUE_WAIT: Duration = Duration::from_secs(60);
+/// The wait for a fetch of the challenges that is in flight, before the
+/// `NEW` of a rendezvous queue. The fetch has its own end time.
+const CHALLENGE_WAIT: Duration = Duration::from_secs(25);
 /// The interval of the lease renewals of Part 9 §9.9.1. The lease is
 /// `HANDLE_LEASE`, thus a renewal in each interval keeps it far from its end.
 const RENEW_EVERY: u64 = 30 * 86_400;
@@ -882,8 +885,34 @@ impl Handle {
         }
     }
 
+    /// Waits for a fetch of the challenges of this run that is in flight.
+    /// A relay can ask an admission for the `NEW` of a queue, and with no
+    /// token the device pays with a proof of work at the challenge of that
+    /// relay (`ABU-014`). The fetch starts at the connect. A queue that
+    /// went before its end got no admission, and the call gave `Busy` to a
+    /// user who did nothing wrong.
+    fn await_challenge_fetch(&self) {
+        let start = Instant::now();
+        loop {
+            let inner = locked(&self.inner);
+            let is_fetching = inner.challenges_fetching == Some(inner.run);
+            let waits = is_fetching
+                && inner.bridge.is_some()
+                && inner.client.is_unlocked()
+                && start.elapsed() < CHALLENGE_WAIT;
+            if !waits {
+                return;
+            }
+
+            drop(inner);
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
     /// Makes a rendezvous queue and waits for its address.
     fn new_rendezvous(&self) -> Result<([u8; 32], Vec<u8>), FfiError> {
+        self.await_challenge_fetch();
+
         let (tag, run) = {
             let mut inner = locked(&self.inner);
             let tag = inner.next_rendezvous_tag;

@@ -1038,6 +1038,8 @@
     <string name="core_no_network">No network.</string>
     <string name="core_copying">Copying from the other device…</string>
     <string name="core_link_waits">Waiting for the other device…</string>
+    <string name="core_link_needs_new_device">This device holds an identity. A link needs a device with no identity.</string>
+    <string name="core_remove_waits_for_link">A device link is in progress. Remove the device after the link ends.</string>
     <string name="core_code_ran_out">The code ran out.</string>
     <string name="core_not_link_code">This is not the code of a link.</string>
     <!-- %1$s holds the technical name of the fault. -->

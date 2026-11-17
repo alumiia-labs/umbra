@@ -86,7 +86,9 @@ fn listed(manifest: &Path, keyset: &Path) -> Result<Vec<Target>, Failure> {
     let mut targets = Vec::with_capacity(parsed.entries.len());
     for proven in &parsed.entries {
         let entry = RelayEntry::parse(proven.entry).map_err(|_| "an entry does not parse")?;
-        let layer = if entry.ingress() { 1 } else { entry.layer() };
+        // A pending relay has no layer yet (`REL-158`). The test builds
+        // through it as through a relay of layer 2.
+        let layer = entry.placed_layer().unwrap_or(2);
         targets.push(Target::of_descriptor(&entry.descriptor, layer));
     }
     Ok(targets)

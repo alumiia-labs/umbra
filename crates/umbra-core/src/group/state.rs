@@ -2872,9 +2872,16 @@ mod tests {
     };
 
     fn text(body: &str) -> Vec<u8> {
+        // Each body takes its own identifier, thus two records are two
+        // messages for a check that reads `msg_id`.
+        let mut msg_id = [7; 16];
+        for (slot, byte) in msg_id.iter_mut().zip(body.bytes()) {
+            *slot ^= byte;
+        }
+
         let message = AppMessage {
             kind: AppKind::Text,
-            msg_id: [7; 16],
+            msg_id,
             sent_at: 1_700_000_000_000,
             body: body.as_bytes(),
         };
@@ -2984,7 +2991,10 @@ mod tests {
         );
 
         // The sender reads no record of its own: its own tag is zero bytes.
-        assert!(creator.receive(&record, now).is_err());
+        assert!(matches!(
+            creator.receive(&record, now),
+            Err(Error::Unverified)
+        ));
 
         // GRP-259, GRP-206: the same record again carries the mark of a
         // repeated counter, and the store drops it by its `msg_id`.
@@ -3004,7 +3014,10 @@ mod tests {
         // nothing, thus the epoch key and not the group id opens a record.
         let mut other =
             Group::create(*creator.group_id(), &Secret::new([0x99; 32]), now, &mut rng).unwrap();
-        assert!(other.receive(&record, now).is_err());
+        assert!(matches!(
+            other.receive(&record, now),
+            Err(Error::Unverified)
+        ));
     }
 
     #[test]
@@ -3081,10 +3094,16 @@ mod tests {
         // trailing byte.
         let mut wrong = creator_bytes.to_vec();
         wrong[0] = 0x02;
-        assert!(Group::restore(&wrong, &Secret::new([0x21; 32])).is_err());
+        assert!(matches!(
+            Group::restore(&wrong, &Secret::new([0x21; 32])),
+            Err(Error::Stale)
+        ));
         let mut long = creator_bytes.to_vec();
         long.push(0);
-        assert!(Group::restore(&long, &Secret::new([0x21; 32])).is_err());
+        assert!(matches!(
+            Group::restore(&long, &Secret::new([0x21; 32])),
+            Err(Error::Unverified)
+        ));
     }
 
     /// The creator, the member of [`pair`], and a third member that the
@@ -3258,12 +3277,14 @@ mod tests {
         // roster epoch before the removal, installs nowhere.
         let next_epoch = third.epoch() + 1;
         let removed_at = third.roster().epoch_index();
-        assert!(third
-            .check_rotator(next_epoch, removed_at, 1, false)
-            .is_err());
-        assert!(third
-            .check_rotator(next_epoch, removed_at - 1, 0, false)
-            .is_err());
+        assert!(matches!(
+            third.check_rotator(next_epoch, removed_at, 1, false),
+            Err(Error::Unverified)
+        ));
+        assert!(matches!(
+            third.check_rotator(next_epoch, removed_at - 1, 0, false),
+            Err(Error::Unverified)
+        ));
         assert!(third
             .check_rotator(next_epoch, removed_at, 0, false)
             .is_ok());
@@ -3284,9 +3305,10 @@ mod tests {
         assert_eq!(third.epoch(), first_epoch + 1);
 
         // GRP-276: the removed member holds no slot in the record.
-        assert!(member
-            .install_epoch_key(record.epoch, record.slot, record.body, now)
-            .is_err());
+        assert!(matches!(
+            member.install_epoch_key(record.epoch, record.slot, record.body, now),
+            Err(Error::NoPath)
+        ));
 
         // The two that stayed still read each other in the new epoch.
         let next = creator
@@ -3679,7 +3701,10 @@ mod tests {
         assert!(member.roster().member(2).unwrap().kem_pk.is_some());
 
         // A snapshot at the epoch it holds already changes nothing.
-        assert!(member.recover_roster(&snapshot, now).is_err());
+        assert!(matches!(
+            member.recover_roster(&snapshot, now),
+            Err(Error::Unverified)
+        ));
     }
 
     /// Three members that read each other, after a removal of a fourth
@@ -3822,14 +3847,16 @@ mod tests {
 
         // The same record again, and a second secret of that rotator,
         // change nothing.
-        assert!(creator
-            .install_epoch_key(record.epoch, record.slot, record.body, later)
-            .is_err());
+        assert!(matches!(
+            creator.install_epoch_key(record.epoch, record.slot, record.body, later),
+            Err(Error::Stale)
+        ));
         let again = forged_rotation(&member, rotation.epoch, now, &mut rng);
         let record = parse_record(&again);
-        assert!(creator
-            .install_epoch_key(record.epoch, record.slot, record.body, later)
-            .is_err());
+        assert!(matches!(
+            creator.install_epoch_key(record.epoch, record.slot, record.body, later),
+            Err(Error::Stale)
+        ));
         assert_eq!(creator.epoch_rotator(), Some(2));
     }
 
@@ -3860,7 +3887,10 @@ mod tests {
 
         // Before the snapshot the record names a roster that the member
         // does not hold, and it waits.
-        assert!(install(&mut member, &next, now).is_err());
+        assert!(matches!(
+            install(&mut member, &next, now),
+            Err(Error::NoPath)
+        ));
         assert_eq!(member.epoch(), held);
 
         // GRP-330: the snapshot holds no removal. The member that left is
@@ -3872,12 +3902,9 @@ mod tests {
         assert_eq!(trigger.excluded, Some(2));
         assert!(member.withholds());
 
-        // The epoch that answered the removal installs, from the slot that
-        // waited or from the record.
+        // The epoch that answered the removal installs from the slot that
+        // waited, with no second read of the record.
         member.retry_held(now);
-        if member.epoch() == held {
-            install(&mut member, &next, now).unwrap();
-        }
         assert_eq!(member.epoch(), next.epoch);
         assert!(!member.withholds());
 
@@ -3906,6 +3933,7 @@ mod tests {
         assert_eq!(creator.roster().active_count(), 2);
 
         assert!(member.owner(0).is_none());
+        let held = *creator.owner(0).unwrap().expose();
         let rotation = member.rotate(now, &mut rng).unwrap();
         let record = parse_record(inline(&rotation));
 
@@ -3918,7 +3946,8 @@ mod tests {
 
         // GRP-379: the rotation of a plain member hands no owner
         // credential, and the owner keeps the one it already holds.
-        assert!(creator.owner(0).is_some());
+        assert_eq!(creator.owner(0).unwrap().expose(), &held);
+        assert!(member.owner(0).is_none());
 
         let next = member
             .post(&text("from the plain member"), now, &mut rng)
@@ -3969,8 +3998,16 @@ mod tests {
             Err(Error::Stale)
         );
 
-        // The backoff of a role holder is shorter than that of a member.
-        assert!(creator.rotation_delay(&mut Rng(3)) <= member.rotation_delay(&mut Rng(3)));
+        // The backoff of a role holder is shorter than that of a member:
+        // never longer for one draw, and shorter for one draw or more.
+        let delays = |seed: u64| {
+            (
+                creator.rotation_delay(&mut Rng(seed)),
+                member.rotation_delay(&mut Rng(seed)),
+            )
+        };
+        assert!((0..16).all(|seed| delays(seed).0 <= delays(seed).1));
+        assert!((0..16).any(|seed| delays(seed).0 < delays(seed).1));
     }
 
     #[test]
@@ -4044,9 +4081,10 @@ mod tests {
         // nothing, and the member that left holds no slot.
         let add_epoch = joiner.roster().admission_epoch();
         assert!(!joiner.first_since_admission(add_epoch - 1));
-        assert!(member
-            .install_epoch_key(record.epoch, record.slot, record.body, now)
-            .is_err());
+        assert!(matches!(
+            member.install_epoch_key(record.epoch, record.slot, record.body, now),
+            Err(Error::Malformed)
+        ));
         joiner
             .install_epoch_key(record.epoch, record.slot, record.body, now)
             .unwrap();
@@ -4090,7 +4128,10 @@ mod tests {
         );
 
         // GRP-322: a plain member finds no entry and discards the record.
-        assert!(third.receive(&presence, now).is_err());
+        assert!(matches!(
+            third.receive(&presence, now),
+            Err(Error::Unverified)
+        ));
 
         // GRP-395: the presence took no step of the counter, thus the next
         // record of the member is its first, and no reader sees a gap.
@@ -4152,6 +4193,148 @@ mod tests {
     }
 
     #[test]
+    fn a_receiver_refuses_a_control_of_a_wrong_sender_or_of_a_member_below_its_role() {
+        let now = 1_700_000_000;
+        let (mut creator, mut member, mut third) = trio(now);
+        let mut rng = Rng(91);
+        let head = *member.roster().chain_hash();
+
+        // The grant of the creator in a record of another sender.
+        let grant = creator.grant(2, Role::Moderator, &mut rng).unwrap();
+        let control = GroupControl::parse(&grant).unwrap();
+        assert_eq!(
+            member.apply_control(&control, 1, now),
+            Err(Error::Unverified)
+        );
+        assert_eq!(member.roster().chain_hash(), &head);
+        for group in [&mut creator, &mut member, &mut third] {
+            group.apply_control(&control, 0, now).unwrap();
+        }
+
+        // The moderation of the new moderator in a record of another
+        // sender, and then in its own record.
+        let act = third.moderate(&[(0x01, [5; 16])], &mut rng).unwrap();
+        let control = GroupControl::parse(&act).unwrap();
+        let head = *member.roster().chain_hash();
+        assert_eq!(
+            member.apply_control(&control, 0, now),
+            Err(Error::Unverified)
+        );
+        assert_eq!(member.roster().chain_hash(), &head);
+        for group in [&mut creator, &mut member, &mut third] {
+            group.apply_control(&control, 2, now).unwrap();
+        }
+
+        // GRP-063: a grant by a member that the receiver holds below
+        // `admin`. The maker holds a roster in which it is an admin. No
+        // other member holds that roster, thus the grant names a head that
+        // the receiver does not hold, and it changes nothing.
+        let mut forger = Group::restore(&member.export().unwrap(), &JOINER_SEED).unwrap();
+        let lift = creator.grant(1, Role::Admin, &mut rng).unwrap();
+        forger
+            .apply_control(&GroupControl::parse(&lift).unwrap(), 0, now)
+            .unwrap();
+        let forged = forger.grant(2, Role::Admin, &mut rng).unwrap();
+        let control = GroupControl::parse(&forged).unwrap();
+        let head = *third.roster().chain_hash();
+        assert_eq!(third.apply_control(&control, 1, now), Err(Error::NoPath));
+        assert_eq!(third.roster().chain_hash(), &head);
+        assert_eq!(third.own_role(), Some(Role::Moderator));
+
+        // GRP-081: a moderator that lost its role and left the roster
+        // moderates no more. An admin removes a plain member alone, thus
+        // the demotion comes first. The own roster of that member gives
+        // it no role, and a moderation that it made before builds on a
+        // head that the others left.
+        let late = third.moderate(&[(0x01, [6; 16])], &mut rng).unwrap();
+        let demote = creator.grant(2, Role::Member, &mut rng).unwrap();
+        let control = GroupControl::parse(&demote).unwrap();
+        for group in [&mut creator, &mut member, &mut third] {
+            group.apply_control(&control, 0, now).unwrap();
+        }
+        let removal = creator.remove_object(2).unwrap();
+        let control = GroupControl::parse(&removal).unwrap();
+        for group in [&mut creator, &mut member, &mut third] {
+            group.apply_control(&control, 0, now).unwrap();
+        }
+        assert_eq!(
+            third.moderate(&[(0x01, [7; 16])], &mut rng),
+            Err(Error::Unverified)
+        );
+        let control = GroupControl::parse(&late).unwrap();
+        let head = *member.roster().chain_hash();
+        assert_eq!(member.apply_control(&control, 2, now), Err(Error::Stale));
+        assert_eq!(member.roster().chain_hash(), &head);
+    }
+
+    #[test]
+    fn an_epoch_key_record_of_a_removed_rotator_installs_nowhere() {
+        let now = 1_700_000_000;
+        let (mut creator, mut member, mut third) = trio(now);
+        let mut rng = Rng(92);
+
+        // The member at index 1 does not read its removal, and it rotates.
+        let removal = creator.remove_object(1).unwrap();
+        let control = GroupControl::parse(&removal).unwrap();
+        creator.apply_control(&control, 0, now).unwrap();
+        third.apply_control(&control, 0, now).unwrap();
+        let held = third.epoch();
+        let rotation = member.rotate(now, &mut rng).unwrap();
+        let record = parse_record(inline(&rotation));
+
+        // GRP-356: the record goes through the receive path of each member
+        // that stays, and it installs at none.
+        for group in [&mut creator, &mut third] {
+            assert_eq!(
+                group.install_epoch_key(record.epoch, record.slot, record.body, now),
+                Err(Error::Unverified)
+            );
+            group.retry_held(now);
+            assert_eq!(group.epoch(), held);
+        }
+
+        // The rotation of the admin that removed still installs.
+        let rotation = creator.rotate(now, &mut rng).unwrap();
+        install(&mut third, &rotation, now).unwrap();
+        assert_eq!(third.epoch(), rotation.epoch);
+    }
+
+    #[test]
+    fn a_stored_form_that_is_cut_or_changed_never_panics_at_a_restore() {
+        let now = 1_700_000_000;
+        let (mut creator, mut member, _) = trio(now);
+        let mut rng = Rng(93);
+
+        // The form holds an epoch, a slot that waits, and a previous epoch.
+        let rotation = creator.rotate(now, &mut rng).unwrap();
+        install(&mut member, &rotation, now).unwrap();
+        let stored = member.export().unwrap();
+        Group::restore(&stored, &JOINER_SEED).unwrap();
+
+        // A form with no byte, with the version alone, and with half of
+        // its bytes is no group.
+        for cut in [0, 1, 3, stored.len() / 2] {
+            assert!(Group::restore(&stored[..cut], &JOINER_SEED).is_err());
+        }
+
+        // Each other cut and each changed byte gives a group or an error.
+        let step = (stored.len() / 97).max(1);
+        for at in (0..stored.len()).step_by(step) {
+            let _ = Group::restore(&stored[..at], &JOINER_SEED);
+            let mut changed = stored.to_vec();
+            changed[at] ^= 0xFF;
+            let _ = Group::restore(&changed, &JOINER_SEED);
+            let _ = Group::restore_with_previous(&changed, &JOINER_SEED, Some(&JOINER_SEED));
+        }
+
+        // Bytes after the form that give a long count and no item give an
+        // error or a group.
+        let mut long = stored.to_vec();
+        long.extend_from_slice(&[0xFF; 8]);
+        let _ = Group::restore(&long, &JOINER_SEED);
+    }
+
+    #[test]
     fn a_new_admin_takes_the_owner_credentials_and_no_epoch_secret() {
         let now = 1_700_000_000;
         let (mut creator, mut member, mut third) = trio(now);
@@ -4180,12 +4363,16 @@ mod tests {
         assert_eq!(third.credentials().unwrap().read_public(), before);
 
         // A member that the record does not serve finds no slot in it.
-        assert!(member
-            .install_epoch_key(record.epoch, record.slot, record.body, now)
-            .is_err());
+        assert!(matches!(
+            member.install_epoch_key(record.epoch, record.slot, record.body, now),
+            Err(Error::NoPath)
+        ));
 
         // A member below `admin` hands out nothing.
-        assert!(member.owner_delivery(2, &mut rng).is_err());
+        assert!(matches!(
+            member.owner_delivery(2, &mut rng),
+            Err(Error::Unverified)
+        ));
 
         // WIR-522: new owner credentials reach the admin the same way, and
         // the replaced ones authorize the `GKEY` that moves the relay.
@@ -4258,7 +4445,10 @@ mod tests {
         // nothing, and the snapshot fails.
         let bare = creator.snapshot(&[]).unwrap();
         let bare = RosterSnapshot::parse(&bare).unwrap();
-        assert!(crate::group::join::accept_admit(&invitation, &bare, &creator_pk, now).is_err());
+        assert!(matches!(
+            crate::group::join::accept_admit(&invitation, &bare, &creator_pk, now),
+            Err(Error::Unverified)
+        ));
     }
 
     #[test]
@@ -4319,7 +4509,10 @@ mod tests {
             panic!("the add added nobody");
         };
         assert!(!creator.may_supply(index, creator.epoch()));
-        assert!(creator.key_supply(index, &mut rng).is_err());
+        assert!(matches!(
+            creator.key_supply(index, &mut rng),
+            Err(Error::Unverified)
+        ));
         assert!(!creator.may_supply(1, creator.epoch() + 1));
     }
 
@@ -4408,9 +4601,10 @@ mod tests {
         let segment = crate::attach::SEGMENT_SIZE;
 
         // Block 0 holds the slots of rank 0 to 26 and none of this member.
-        assert!(member
-            .install_chunk(&wanted, &chunked.object[..segment], now)
-            .is_err());
+        assert!(matches!(
+            member.install_chunk(&wanted, &chunked.object[..segment], now),
+            Err(Error::NoPath)
+        ));
         assert_eq!(member.epoch(), 1);
         let block = &chunked.object[segment..2 * segment];
         member.install_chunk(&wanted, block, now).unwrap();
@@ -4634,8 +4828,14 @@ mod tests {
 
         // The member that the removal took out rotates nothing, under any
         // number of an epoch.
-        assert!(reader.check_rotator(3, base + 2, 3, false).is_err());
-        assert!(reader.check_rotator(9, base + 2, 3, false).is_err());
+        assert!(matches!(
+            reader.check_rotator(3, base + 2, 3, false),
+            Err(Error::Unverified)
+        ));
+        assert!(matches!(
+            reader.check_rotator(9, base + 2, 3, false),
+            Err(Error::Unverified)
+        ));
         assert!(reader.check_rotator(9, base + 2, 1, false).is_ok());
 
         // GRP-375: a key supply of that epoch names the roster epoch of its
@@ -5062,6 +5262,9 @@ mod tests {
         // The reader below the two records holds one base in each order.
         assert_eq!(ends[0], ends[1]);
         assert_eq!(ends[2].1, ends[3].1);
+        // The later record answers the trigger from the epoch that stands,
+        // thus each reader takes it.
+        assert!(ends.iter().all(|end| end.1 == Ok(())));
 
         // The rotator of the lower number follows, and the one of the
         // higher number stays.
@@ -5367,7 +5570,10 @@ mod tests {
         let (bare, _) = member.roster().authority_path(&grants).unwrap();
         let snapshot = member.snapshot(&bare).unwrap();
         let snapshot = RosterSnapshot::parse(&snapshot).unwrap();
-        assert!(Roster::from_snapshot(&snapshot, &creator_pk, now).is_err());
+        assert!(matches!(
+            Roster::from_snapshot(&snapshot, &creator_pk, now),
+            Err(Error::Unverified)
+        ));
 
         // GRP-427: the re-key goes on the path, and a fourth member that
         // the admin admits verifies each role.
@@ -5937,9 +6143,10 @@ mod tests {
         // The first epoch of a group has no base and no epoch before it.
         let (creator, _, _) = pair(now);
         let body = chunked(creator.roster().epoch_index(), 1);
-        assert!(creator
-            .wanted_chunk(creator.epoch(), t, &body, now)
-            .is_err());
+        assert!(matches!(
+            creator.wanted_chunk(creator.epoch(), t, &body, now),
+            Err(Error::Unverified)
+        ));
 
         // An epoch that answered a trigger has a base. A second rotator can
         // answer the same trigger, thus its record gets the fetch.

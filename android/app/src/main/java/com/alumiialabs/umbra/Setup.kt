@@ -99,19 +99,19 @@ fun SetupScreen(onBack: () -> Unit, push: (Screen) -> Unit) {
                         stringResource(R.string.setup_recovery_body),
                     )
                     Spacer(Modifier.height(20.dp))
-                    PrimaryButton(stringResource(R.string.setup_recovery_show)) { push(Screen.RecoveryCode) }
-                    QuietButton(stringResource(R.string.setup_skip)) { RecoveryPrompt.dismiss(context) }
+                    PrimaryButton(stringResource(R.string.setup_recovery_show), tag = TestTags.SETUP_RECOVERY_SHOW) { push(Screen.RecoveryCode) }
+                    QuietButton(stringResource(R.string.setup_skip), tag = TestTags.SETUP_RECOVERY_SKIP) { RecoveryPrompt.dismiss(context) }
                 }
                 SetupStep.Battery -> {
                     HeroIcon("bell")
                     Spacer(Modifier.height(24.dp))
                     Headline(stringResource(R.string.setup_battery_title), batteryLine())
                     Spacer(Modifier.height(20.dp))
-                    PrimaryButton(stringResource(R.string.common_allow)) {
+                    PrimaryButton(stringResource(R.string.common_allow), tag = TestTags.SETUP_BATTERY_ALLOW) {
                         Battery.note(context)
                         Battery.open(context)
                     }
-                    QuietButton(stringResource(R.string.setup_skip)) { Battery.note(context) }
+                    QuietButton(stringResource(R.string.setup_skip), tag = TestTags.SETUP_BATTERY_SKIP) { Battery.note(context) }
                 }
             }
         }

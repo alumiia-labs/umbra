@@ -2072,13 +2072,49 @@ pub enum RestoreStatus {
 /// The rows of a restore, which [`init_restored`] writes into a new store.
 /// The platform holds this object and never reads it.
 #[derive(uniffi::Object)]
-pub struct Restored(Mutex<Option<crate::client::RestoredBackup>>);
+pub struct Restored(Mutex<Held<crate::client::RestoredBackup>>);
+
+/// What a [`Restored`] or a link holder holds, and whether a lock emptied
+/// it. The value is a root seed and the rows of a store.
+pub(crate) struct Held<T> {
+    value: Option<T>,
+    is_wiped: bool,
+}
+
+impl<T> Held<T> {
+    fn new(value: T) -> Self {
+        Held {
+            value: Some(value),
+            is_wiped: false,
+        }
+    }
+
+    /// Empties the holder for good, as a lock does (`IMP-127`). An init
+    /// call that fails after this puts nothing back.
+    fn take(&mut self) -> Option<T> {
+        self.is_wiped = true;
+        self.value.take()
+    }
+
+    /// Takes the value for the long steps of an init call.
+    fn lend(&mut self) -> Option<T> {
+        self.value.take()
+    }
+
+    /// Puts the value back for the next try. After a lock no handle refers
+    /// to the holder, thus the value drops here and wipes.
+    fn give_back(&mut self, value: T) {
+        if !self.is_wiped {
+            self.value = Some(value);
+        }
+    }
+}
 
 #[uniffi::export]
 impl Restored {
     /// The count of the contacts that the backup holds.
     pub fn contact_count(&self) -> u32 {
-        locked(&self.0).as_ref().map_or(0, |restored| {
+        locked(&self.0).value.as_ref().map_or(0, |restored| {
             u32::try_from(restored.contact_count()).unwrap_or(u32::MAX)
         })
     }
@@ -3400,10 +3436,11 @@ impl Inner {
                 NetEvent::DeviceLinked(conversation) => {
                     // The event stays for the view, and each pump sees it
                     // again, thus the link takes it once.
-                    if self.links_opened.insert(conversation) {
-                        self.link_opened(conversation);
+                    let stays =
+                        !self.links_opened.insert(conversation) || self.link_opened(conversation);
+                    if stays {
+                        kept.push_back(NetEvent::DeviceLinked(conversation));
                     }
-                    kept.push_back(NetEvent::DeviceLinked(conversation));
                 }
                 other => kept.push_back(other),
             }
@@ -5038,14 +5075,15 @@ pub fn init_restored(
 ) -> Result<Arc<Handle>, FfiError> {
     // The holder stays free during the long steps, thus a lock of the old
     // handle never waits for them (`IMP-127`).
-    let backup = locked(&restored.0).take().ok_or(FfiError::NotFound)?;
+    let backup = locked(&restored.0).lend().ok_or(FfiError::NotFound)?;
     let made = init_store_from(config, element, passphrase, &backup, |client| {
         Ok(client.apply_restore(&backup, &mut OsRng)?)
     });
 
     // A call that fails keeps the root seed and the rows for the next try.
+    // After a lock of the old handle the holder takes nothing back.
     if made.is_err() {
-        *locked(&restored.0) = Some(backup);
+        locked(&restored.0).give_back(backup);
     }
     made
 }
@@ -7884,7 +7922,7 @@ impl Handle {
             .and_then(|job| job.restored.take())
             .ok_or(FfiError::NotFound)?;
         inner.restore = None;
-        let restored = Arc::new(Restored(Mutex::new(Some(restored))));
+        let restored = Arc::new(Restored(Mutex::new(Held::new(restored))));
         inner.restored = Arc::downgrade(&restored);
         Ok(restored)
     }
@@ -9137,6 +9175,18 @@ mod tests {
         }
         assert!(locked(&draft.0).is_some());
 
+        // A draft with text that the client refuses: it names a member, and
+        // its conversation is no group. The text stays in the draft.
+        let text: Vec<u16> = "kept".encode_utf16().collect();
+        draft.set_text(text).unwrap();
+        draft.set_mentions(vec![1]).unwrap();
+        for _ in 0..2 {
+            assert!(handle.send_draft(Arc::clone(&draft)).is_err());
+        }
+        assert!(locked(&draft.0)
+            .as_ref()
+            .is_some_and(|held| !held.is_empty()));
+
         drop(handle);
         let _ = std::fs::remove_dir_all(&directory);
     }
@@ -9302,6 +9352,12 @@ mod tests {
         // A country of no bloc is a bloc of its own.
         assert!(!shares_bloc(&hops([b"JP", b"CH", b"BR"])));
         assert!(!shares_operator(&hops([b"DE", b"US", b"JP"])));
+
+        // Two hops of one operator in two countries.
+        let mut one_operator = hops([b"DE", b"US", b"JP"]);
+        one_operator[2].operator_id = one_operator[0].operator_id;
+        assert!(shares_operator(&one_operator));
+        assert!(!shares_bloc(&one_operator));
     }
 
     #[test]
@@ -9420,6 +9476,49 @@ guard relay1.example.org"
         }
     }
 
+    /// The directory of one test. It goes at the end of the test, also
+    /// after an assert that failed.
+    pub(super) struct TestDir(std::path::PathBuf);
+
+    impl TestDir {
+        /// A new directory. Its name holds a count and the clock, thus a
+        /// process identifier that the system gives again finds no store
+        /// of an earlier run.
+        fn new(name: &str) -> Self {
+            static COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let count = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.subsec_nanos());
+            let directory = std::env::temp_dir().join(format!(
+                "umbra-bindings-{name}-{}-{count}-{nanos}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&directory).unwrap();
+            TestDir(directory)
+        }
+    }
+
+    impl std::ops::Deref for TestDir {
+        type Target = std::path::PathBuf;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    impl AsRef<std::path::Path> for TestDir {
+        fn as_ref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     /// The passphrase of each store of these tests.
     pub(super) fn passphrase() -> Vec<u16> {
         "correct horse".encode_utf16().collect()
@@ -9427,11 +9526,8 @@ guard relay1.example.org"
 
     /// An unlocked client over a new SQLite file, and the directory of
     /// that file.
-    pub(super) fn open(name: &str) -> (Arc<Handle>, std::path::PathBuf) {
-        let directory =
-            std::env::temp_dir().join(format!("umbra-bindings-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&directory);
-        std::fs::create_dir_all(&directory).unwrap();
+    pub(super) fn open(name: &str) -> (Arc<Handle>, TestDir) {
+        let directory = TestDir::new(name);
         let config = Config {
             database_path: directory.join("client.db").to_str().unwrap().to_owned(),
             // A slow device keeps the floor cost, which keeps a test short.
@@ -9439,6 +9535,20 @@ guard relay1.example.org"
         };
         let handle = init(config, Arc::new(Keystore), passphrase()).unwrap();
         (handle, directory)
+    }
+
+    #[test]
+    fn a_device_in_the_background_has_no_backup_due() {
+        let (handle, directory) = open("backup-background");
+        let mut inner = locked(&handle.inner);
+        let now = unix_now();
+
+        // IDN-080: the first object is due, and the background writes none.
+        assert!(inner.client.backup_due(now, false).unwrap().is_none());
+        assert!(inner.client.backup_due(now, true).unwrap().is_some());
+        drop(inner);
+        drop(handle);
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -9450,7 +9560,7 @@ guard relay1.example.org"
             .unwrap()
             .unwrap();
         let backup = crate::client::RestoredBackup::assemble(&[upload.plain]).unwrap();
-        let restored = Arc::new(Restored(Mutex::new(Some(backup))));
+        let restored = Arc::new(Restored(Mutex::new(Held::new(backup))));
         drop(handle);
         let config = |file: &str| Config {
             database_path: directory.join(file).to_str().unwrap().to_owned(),
@@ -9465,7 +9575,7 @@ guard relay1.example.org"
             Arc::clone(&restored),
         );
         assert_eq!(failed.err(), Some(FfiError::Storage));
-        assert!(locked(&restored.0).is_some());
+        assert!(locked(&restored.0).value.is_some());
 
         // The next try makes the store, and the rows leave the holder.
         let made = init_restored(
@@ -9475,7 +9585,7 @@ guard relay1.example.org"
             Arc::clone(&restored),
         )
         .unwrap();
-        assert!(locked(&restored.0).is_none());
+        assert!(locked(&restored.0).value.is_none());
         drop(made);
 
         let again = init_restored(
@@ -9497,12 +9607,30 @@ guard relay1.example.org"
             .unwrap()
             .unwrap();
         let backup = crate::client::RestoredBackup::assemble(&[upload.plain]).unwrap();
-        let restored = Arc::new(Restored(Mutex::new(Some(backup))));
+        let restored = Arc::new(Restored(Mutex::new(Held::new(backup))));
         locked(&handle.inner).restored = Arc::downgrade(&restored);
 
         // IMP-127: the root seed leaves RAM with the keys of the store.
         handle.lock();
-        assert!(locked(&restored.0).is_none());
+        assert!(locked(&restored.0).value.is_none());
+
+        // A call of `init_restored` that held the rows across that lock
+        // puts nothing back at its failure.
+        let (other, other_directory) = open("restore-lock-lent");
+        let upload = locked(&other.inner)
+            .client
+            .backup_due(unix_now(), true)
+            .unwrap()
+            .unwrap();
+        let backup = crate::client::RestoredBackup::assemble(&[upload.plain]).unwrap();
+        let lent_from = Arc::new(Restored(Mutex::new(Held::new(backup))));
+        locked(&other.inner).restored = Arc::downgrade(&lent_from);
+        let lent = locked(&lent_from.0).lend().unwrap();
+        other.lock();
+        locked(&lent_from.0).give_back(lent);
+        assert!(locked(&lent_from.0).value.is_none());
+        drop(other);
+        let _ = std::fs::remove_dir_all(&other_directory);
 
         drop(handle);
         let _ = std::fs::remove_dir_all(&directory);
@@ -9603,11 +9731,29 @@ guard relay1.example.org"
     #[test]
     fn a_large_draft_file_from_a_pipe_reads_in_a_time_in_line_with_its_size() {
         let file = vec![0x5a; 8 << 20];
-        let started = std::time::Instant::now();
-        let read = read_bounded(Pipe::new(&file, 4 * 1024), 0, DRAFT_FILE_MAX).unwrap();
-        let took = started.elapsed();
-        assert!(read.as_slice() == file.as_slice());
-        assert!(took < std::time::Duration::from_secs(4), "{took:?}");
+        let fastest = |part: usize| {
+            (0..3)
+                .map(|_| {
+                    let started = std::time::Instant::now();
+                    let read = read_bounded(Pipe::new(&file, part), 0, DRAFT_FILE_MAX).unwrap();
+                    let took = started.elapsed();
+                    assert!(read.as_slice() == file.as_slice());
+                    took
+                })
+                .min()
+                .unwrap()
+        };
+
+        // The same file in parts of 4 KiB and in one part. A load of the
+        // machine slows the two alike. A zero fill at each read costs the
+        // 2,048 reads some GiB of writes, which is hundreds of times the
+        // read in one part.
+        let in_one_part = fastest(file.len()).max(std::time::Duration::from_micros(500));
+        let in_small_parts = fastest(4 * 1024);
+        assert!(
+            in_small_parts < in_one_part * 60,
+            "{in_small_parts:?} against {in_one_part:?}"
+        );
     }
 
     #[test]
@@ -9664,15 +9810,25 @@ guard relay1.example.org"
             is_timer: false,
             at: 0,
         };
+        let entered = std::sync::atomic::AtomicBool::new(false);
         let waits = std::thread::scope(|scope| {
             let inner = locked(&handle.inner);
-            let (client, call) = (&handle, &call);
-            let answered =
-                scope.spawn(move || client.on_ndr_answer(call, Err(NativeError::Timeout), flight));
+            let (client, call, entered) = (&handle, &call, &entered);
+            let answered = scope.spawn(move || {
+                entered.store(true, std::sync::atomic::Ordering::SeqCst);
+                client.on_ndr_answer(call, Err(NativeError::Timeout), flight)
+            });
 
-            // The answer waits for the lock, and the group stays taken.
-            std::thread::sleep(Duration::from_millis(200));
-            let waits = !answered.is_finished() && NdrFlight::start(&flights, [1; 16]).is_none();
+            // The thread of the answer runs. An answer that freed the group
+            // before it took the lock would free it in the time below.
+            while !entered.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::yield_now();
+            }
+            let mut waits = true;
+            for _ in 0..30 {
+                std::thread::sleep(Duration::from_millis(10));
+                waits &= !answered.is_finished() && NdrFlight::start(&flights, [1; 16]).is_none();
+            }
             drop(inner);
             answered.join().unwrap();
             waits
@@ -9736,11 +9892,22 @@ guard relay1.example.org"
         assert_eq!(inner.transfer_tags.len(), 2);
         assert!(inner.transfer_tags.contains_key(&after));
 
-        // The oldest erasure leaves at the bound.
+        // The oldest erasure leaves at the bound, and the newest one stays.
         for chunk in 0..=u8::MAX {
             inner.send_transfer(erasure(chunk));
         }
         assert_eq!(inner.held_erasures.len(), ERASURES_HELD_MAX);
+        let held: Vec<u8> = inner
+            .held_erasures
+            .iter()
+            .filter_map(|held| match held {
+                TransferCommand::Erase { chunk_id, .. } => Some(chunk_id[0]),
+                _ => None,
+            })
+            .collect();
+        let sent: Vec<u8> = core::iter::once(1).chain(0..=u8::MAX).collect();
+        let newest = &sent[sent.len() - ERASURES_HELD_MAX..];
+        assert_eq!(held, newest);
 
         // IMP-161: a lock takes each credential that waits out of RAM.
         inner.client.lock();
@@ -9832,13 +9999,26 @@ guard relay1.example.org"
         // an update to the handle.
         let late = Arc::clone(&handle);
         drop(handle);
+
+        // A connection that stays ends the wait with no removal.
+        assert!(!SqliteBackend::await_closed(
+            &path,
+            Duration::from_millis(50)
+        ));
+        assert!(std::path::Path::new(&path).exists());
+
+        // The worker starts its wait when the removal is about to start,
+        // thus the removal finds the connection open and waits for it.
         let ends = Arc::new(AtomicBool::new(false));
         let ends_late = Arc::clone(&ends);
+        let (starts, started) = std::sync::mpsc::channel::<()>();
         let worker = std::thread::spawn(move || {
+            started.recv().unwrap();
             std::thread::sleep(Duration::from_millis(300));
             ends_late.store(true, Ordering::SeqCst);
             drop(late);
         });
+        starts.send(()).unwrap();
         remove_store_files(&path).unwrap();
         assert!(
             ends.load(Ordering::SeqCst),
@@ -10014,12 +10194,21 @@ guard relay1.example.org"
         let waits = Arc::clone(&parked);
         let parking = std::thread::spawn(move || stop_after_park(runtime, Some(done), waits));
 
-        // The park would wait for `PARK_WAIT`. The stop ends it before.
+        // The park waits for `PARK_WAIT`, and no stop came yet.
+        parked.await_end(Duration::from_millis(100));
+        assert!(!parked.has_ended());
+
+        // The stop ends it. The wait below is far longer than the park,
+        // thus the time alone tells a stop from a park that ran to its end.
         let started = std::time::Instant::now();
         parked.ask_stop();
-        parked.await_end(PARK_WAIT);
+        parked.await_end(PARK_WAIT * 20);
         assert!(parked.has_ended());
-        assert!(started.elapsed() < PARK_WAIT);
+        let stopped_after = started.elapsed();
+        assert!(
+            stopped_after + Duration::from_millis(500) < PARK_WAIT,
+            "{stopped_after:?}"
+        );
         parking.join().unwrap();
     }
 
@@ -10046,20 +10235,229 @@ guard relay1.example.org"
     }
 
     #[test]
-    fn a_connect_that_fails_leaves_no_runtime_of_its_own() {
-        let (handle, directory) = open("connect-fails");
+    fn a_connect_of_a_locked_client_builds_no_runtime() {
+        let (handle, directory) = open("connect-locked");
         let network = parse_network(descriptor(), None).unwrap();
+        let run = locked(&handle.inner).run;
 
-        // A locked client fails after the runtime of the run exists.
         handle.lock();
-        assert!(Arc::clone(&handle).connect(network).is_err());
+        assert_eq!(Arc::clone(&handle).connect(network), Err(FfiError::Locked));
         {
             let inner = locked(&handle.inner);
+            assert_eq!(inner.run, run);
             assert!(inner.spawner.is_none());
-            assert!(inner.guard.is_none());
-            assert!(inner.relays.is_empty());
             assert!(inner.bridge.is_none());
         }
+        assert!(locked(&handle.runtime).is_none());
+        drop(handle);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// A run over relays that no machine of the test answers. The start
+    /// needs no network: the runtime dials after it.
+    fn connect_far(handle: &Arc<Handle>) {
+        let network = parse_network(descriptor(), None).unwrap();
+        Arc::clone(handle).connect(network).unwrap();
+        assert!(locked(&handle.inner).bridge.is_some());
+        assert!(locked(&handle.runtime).is_some());
+    }
+
+    #[test]
+    fn a_connect_that_fails_over_an_earlier_run_stops_that_run_and_keeps_no_runtime() {
+        let (handle, directory) = open("connect-fails");
+        connect_far(&handle);
+
+        // The second start passes its first check and builds its runtime.
+        // It then waits for the lock of the runtime, which this thread
+        // holds. The client locks in that time, thus the start fails after
+        // its runtime exists. A start that was late for its first check
+        // fails there and moves no run. The test then tries again with a
+        // longer wait.
+        let mut failed_late = false;
+        for wait in [200, 1_000, 5_000] {
+            let run = locked(&handle.inner).run;
+            let held = locked(&handle.runtime);
+            let second = {
+                let handle = Arc::clone(&handle);
+                std::thread::spawn(move || {
+                    handle.connect(parse_network(descriptor(), None).unwrap())
+                })
+            };
+            std::thread::sleep(Duration::from_millis(wait));
+            locked(&handle.inner).client.lock();
+            drop(held);
+            assert!(second.join().unwrap().is_err());
+
+            if locked(&handle.inner).run != run {
+                failed_late = true;
+                break;
+            }
+
+            handle.lock();
+            handle.unlock(passphrase()).unwrap();
+            connect_far(&handle);
+        }
+        assert!(failed_late, "no start failed after its runtime");
+
+        // The run before ended with the start, and its runtime went. No
+        // runtime of the failed start stays.
+        {
+            let inner = locked(&handle.inner);
+            assert!(inner.bridge.is_none());
+            assert!(inner.spawner.is_none());
+            assert!(inner.groups.is_none());
+            assert!(inner.transfers.is_none());
+        }
+        assert!(locked(&handle.runtime).is_none());
+
+        // The next start works.
+        handle.lock();
+        handle.unlock(passphrase()).unwrap();
+        connect_far(&handle);
+        handle.disconnect();
+        drop(handle);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_tick_locks_a_client_that_is_idle_for_its_auto_lock_time() {
+        let (handle, directory) = open("auto-lock");
+        handle.set_auto_lock(1).unwrap();
+        let draft = handle.new_draft(vec![9; 16]).unwrap();
+        draft.set_text("held".encode_utf16().collect()).unwrap();
+        connect_far(&handle);
+        while handle.next_event().is_some() {}
+
+        // IMP-119: an action of the user starts the idle time again, and a
+        // tick inside that time locks nothing.
+        handle.touch();
+        Arc::clone(&handle).tick();
+        assert!(locked(&handle.inner).client.is_unlocked());
+
+        // The idle time passes with no action, and a tick locks the client.
+        let start = std::time::Instant::now();
+        while locked(&handle.inner).client.is_unlocked() {
+            assert!(start.elapsed() < Duration::from_secs(30), "no auto-lock");
+            std::thread::sleep(Duration::from_millis(100));
+            Arc::clone(&handle).tick();
+        }
+        assert!(start.elapsed() >= Duration::from_millis(900));
+
+        // The lock of a tick is a full lock: the run ends, the draft holds
+        // nothing, and the platform reads the event.
+        {
+            let inner = locked(&handle.inner);
+            assert!(inner.bridge.is_none());
+            assert!(inner.spawner.is_none());
+        }
+        assert!(locked(&draft.0).is_none());
+        let mut is_told = false;
+        while let Some(event) = handle.next_event() {
+            is_told |= matches!(event, FfiEvent::Locked);
+        }
+        assert!(is_told);
+        drop(handle);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_notify_registration_is_marked_when_its_relay_settled_it() {
+        const RELAYS: [[u8; 32]; 2] = [[0xA1; 32], [0xB2; 32]];
+        const QUEUES: [[u8; 32]; 2] = [[0xC3; 32], [0xD4; 32]];
+        let (handle, directory) = open("notify-settled");
+        connect_far(&handle);
+        let mut inner = locked(&handle.inner);
+        let now = unix_now();
+
+        // A group with its two replicas and a notify queue.
+        let group = inner
+            .client
+            .create_group("Summit", RELAYS, now, &mut OsRng)
+            .unwrap();
+        let group_id = inner.client.group_info(group).unwrap().group_id;
+        for (replica, (relay, queue)) in RELAYS.into_iter().zip(QUEUES).enumerate() {
+            inner
+                .client
+                .group_queue_made(&group_id, replica as u8, relay, queue, &mut OsRng)
+                .unwrap();
+        }
+        while inner.client.take_group_creation().is_some() {}
+        inner
+            .client
+            .set_group_notify(
+                group,
+                [9; 32],
+                &[7; umbra_wire::address::LEN],
+                now,
+                &mut OsRng,
+            )
+            .unwrap();
+
+        // The task of this test takes the commands of the group run.
+        let (commands, mut taken) = mpsc::unbounded_channel();
+        inner.groups = Some(commands);
+        fn registrations(
+            inner: &mut Inner,
+            taken: &mut mpsc::UnboundedReceiver<GroupCommand>,
+        ) -> Vec<([u8; 32], [u8; 32])> {
+            inner.pump_groups();
+            let mut sent = Vec::new();
+            while let Ok(command) = taken.try_recv() {
+                if let GroupCommand::Notify {
+                    relay,
+                    group_queue_id,
+                    ..
+                } = command
+                {
+                    sent.push((relay, group_queue_id));
+                }
+            }
+            sent
+        }
+
+        // NTF-093: the registration of each replica that is due goes one
+        // time. It stays due in the store, and no second one goes while
+        // the first waits for its relay.
+        let first = registrations(&mut inner, &mut taken);
+        assert!(!first.is_empty());
+        let due_before = inner.client.notify_registrations_due(now).unwrap().len();
+        assert!(due_before >= first.len());
+        assert!(registrations(&mut inner, &mut taken).is_empty());
+
+        // A settle of another queue marks nothing.
+        inner.end_group(GroupUpdate::NotifySettled {
+            relay: first[0].0,
+            group_queue_id: [0xEE; 32],
+        });
+        assert_eq!(
+            inner.client.notify_registrations_due(now).unwrap().len(),
+            due_before
+        );
+
+        // The relay settled the first one: the store marks it, and it is
+        // due no more.
+        inner.end_group(GroupUpdate::NotifySettled {
+            relay: first[0].0,
+            group_queue_id: first[0].1,
+        });
+        let due_after = inner.client.notify_registrations_due(now).unwrap();
+        assert_eq!(due_after.len(), due_before - 1);
+        assert!(due_after
+            .iter()
+            .all(|due| (due.relay, due.group_queue_id) != first[0]));
+
+        // A task that ends with a registration that did not settle leaves
+        // it due, and the next task sends it again.
+        if first.len() > 1 {
+            inner.end_group(GroupUpdate::Ended);
+            let (commands, mut again) = mpsc::unbounded_channel();
+            inner.groups = Some(commands);
+            // The replica of the new `GSUB` takes a registration too.
+            assert!(registrations(&mut inner, &mut again).contains(&first[1]));
+        }
+
+        drop(inner);
+        handle.disconnect();
         drop(handle);
         let _ = std::fs::remove_dir_all(&directory);
     }
@@ -10076,6 +10474,7 @@ guard relay1.example.org"
         }
 
         let (handle, directory) = open("reset-run");
+        connect_far(&handle);
         let run = locked(&handle.inner).run;
         let before = Arc::new(View::default());
         handle.recovery_code(before.clone()).unwrap();
@@ -10088,6 +10487,7 @@ guard relay1.example.org"
         assert!(inner.bridge.is_none());
         assert!(inner.spawner.is_none());
         drop(inner);
+        assert!(locked(&handle.runtime).is_none());
 
         // DEV-346: the view gets the new recovery code, which the store now
         // holds.
@@ -10123,13 +10523,21 @@ guard relay1.example.org"
         }
 
         let (handle, directory) = open("reset-refused");
+        connect_far(&handle);
+
+        // One group of this member takes a re-key at the reset.
+        locked(&handle.inner)
+            .client
+            .create_group("Summit", [[0xA1; 32], [0xB2; 32]], unix_now(), &mut OsRng)
+            .unwrap();
         let before = Arc::new(View::default());
         handle.recovery_code(before.clone()).unwrap();
         let counts = Arc::clone(&handle)
             .reset_identity(Arc::new(Refused))
             .unwrap();
-        assert_eq!((counts.contacts, counts.groups), (0, 0));
+        assert_eq!((counts.contacts, counts.groups), (0, 1));
         assert!(locked(&handle.inner).bridge.is_none());
+        assert!(locked(&handle.runtime).is_none());
 
         let after = Arc::new(View::default());
         handle.recovery_code(after.clone()).unwrap();
